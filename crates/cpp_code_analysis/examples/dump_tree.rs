@@ -66,5 +66,4 @@ fn main() {
     }
 
     walk(&root, 0, &focus);
-
 }

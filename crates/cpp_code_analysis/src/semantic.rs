@@ -247,7 +247,11 @@ pub fn classified_names(index: &ProjectIndex, view: &FileView) -> Vec<Name> {
 
         // 1. The declaration's own name. One hash lookup, and it is asked of every identifier in the file.
         if let Some(binding) = declared.get(&at)
-            && let Some(kind) = kind_of_binding(binding, view, parameters.contains(&binding.name_range.start_offset))
+            && let Some(kind) = kind_of_binding(
+                binding,
+                view,
+                parameters.contains(&binding.name_range.start_offset),
+            )
         {
             out.push(Name {
                 range,
@@ -571,10 +575,11 @@ fn held_at(view: &FileView, offset: usize) -> Held {
 
 /// Is this scope inside a class?
 fn in_a_class(scope: ScopeId, scopes: &ScopeTree) -> bool {
-    scopes
-        .scope_chain(scope)
-        .into_iter()
-        .any(|id| scopes.scope(id).is_some_and(|scope| scope.kind == ScopeKind::Class))
+    scopes.scope_chain(scope).into_iter().any(|id| {
+        scopes
+            .scope(id)
+            .is_some_and(|scope| scope.kind == ScopeKind::Class)
+    })
 }
 
 /// The offsets of every **parameter's name** in the file.
@@ -591,7 +596,8 @@ fn parameter_offsets(view: &FileView) -> HashSet<usize> {
     let mut offsets = HashSet::new();
 
     for list in view.root.descendants() {
-        if cpp_parser::CppSyntaxKind::from(list.kind()) != cpp_parser::CppSyntaxKind::ParameterList {
+        if cpp_parser::CppSyntaxKind::from(list.kind()) != cpp_parser::CppSyntaxKind::ParameterList
+        {
             continue;
         }
 
@@ -660,7 +666,12 @@ fn qualified_names(view: &FileView) -> HashMap<usize, String> {
 
     let mut map = HashMap::new();
 
-    for node in view.root.descendants().filter(is_a_name_node).filter(writes_a_qualifier) {
+    for node in view
+        .root
+        .descendants()
+        .filter(is_a_name_node)
+        .filter(writes_a_qualifier)
+    {
         // One walk of the node's tokens, as `qualified_name_at` does it: the identifiers in order, joined with
         // `::`, stopping the spelling at the identifier the offset is on — which is what makes a cursor on a
         // *qualifier* mean the qualifier (`a::b::c` asked about `b` is `a::b`).
@@ -763,12 +774,3 @@ fn kind_of_index(found: IndexedKind) -> Option<NameKind> {
         DeclKind::Other => return None,
     })
 }
-
-
-
-
-
-
-
-
-

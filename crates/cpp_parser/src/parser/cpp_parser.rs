@@ -45,7 +45,8 @@ pub struct Checkpoint {
     /// The one piece of bookkeeping that is neither an event nor a token: a rollback has to forget the markers
     /// closed since, and this is what names them — see the journal's own note for the measurement that made the
     /// difference between a linear parse and a quadratic one.
-    closed_marks_journal_len: usize,    /// How many diagnostics had been reported when the checkpoint was taken.
+    closed_marks_journal_len: usize,
+    /// How many diagnostics had been reported when the checkpoint was taken.
     ///
     /// The fourth piece of state that is not in the event stream, and the one that is easiest to miss because it
     /// is not *parse* state at all: a reading that is tried and rewound reported its problems on the way, and a
@@ -69,7 +70,6 @@ pub struct Checkpoint {
     bracket_depth: usize,
     innermost_template_argument_list: Option<usize>,
 }
-
 
 /// A position in the parse, for a question asked later about the tokens around it.
 ///
@@ -481,8 +481,8 @@ impl<'a> CppParser<'a> {
             previous_declaration_type_name: None,
             declaration_type_is_qualified: false,
             open_bodies: Vec::new(),
-        open_class_names: Vec::new(),
-        class_head_name: None,
+            open_class_names: Vec::new(),
+            class_head_name: None,
             declaration_ended_inside_specifiers: false,
             terminator_came_from_a_branch: false,
             open_conditionals: 0,
@@ -723,7 +723,6 @@ impl<'a> CppParser<'a> {
         }
     }
 
-
     /// Try to consume a header name at the cursor, folding the `<`, name and `>` tokens the ordinary
     /// sweep produced into a single [`CppTokenKind::HeaderName`].
     ///
@@ -779,7 +778,9 @@ impl<'a> CppParser<'a> {
                 // included one then resolved its includes to nothing and was never cached. See
                 // A whitelist here is a rule about the lexer's token kinds pretending to
                 // be a rule about header names.
-                CppTokenKind::Newline | CppTokenKind::LineContinuation | CppTokenKind::Eof => return false,
+                CppTokenKind::Newline | CppTokenKind::LineContinuation | CppTokenKind::Eof => {
+                    return false;
+                }
                 _ => {}
             }
 
@@ -802,8 +803,10 @@ impl<'a> CppParser<'a> {
 
         // Replace the whole run with the single header-name token and advance past it.
         self.follower_memo.get_mut().clear();
-        self.tokens
-            .splice(self.token_index..self.token_index + (end_index - self.token_index + 1), [whole]);
+        self.tokens.splice(
+            self.token_index..self.token_index + (end_index - self.token_index + 1),
+            [whole],
+        );
         self.current_token = CppTokenKind::HeaderName;
         self.bump();
         true
@@ -1188,7 +1191,8 @@ impl<'a> CppParser<'a> {
                     // Only the tokens *directly* inside that `NameExpr`: a nested one — a default argument, a
                     // parameter's own name — is deeper and must not overwrite the answer.
                     if name_depth == Some(depth - 1) && *kind == CppTokenKind::Identifier {
-                        spelled = self.origin_text()[range.start_offset..range.end_offset()].to_string();
+                        spelled =
+                            self.origin_text()[range.start_offset..range.end_offset()].to_string();
                     }
                 }
                 MarkEvent::Trivia => {}
@@ -2131,10 +2135,7 @@ mod tests {
     ///
     /// Both halves are held here because the borrow checker is what makes them impossible to hold from outside:
     /// `errors` is borrowed by the parser for as long as it lives.
-    fn parser_and_errors<'a>(
-        text: &'a str,
-        errors: &'a mut Vec<CppParseError>,
-    ) -> CppParser<'a> {
+    fn parser_and_errors<'a>(text: &'a str, errors: &'a mut Vec<CppParseError>) -> CppParser<'a> {
         CppParser::with_text(text, ParserConfig::default(), errors)
     }
 
@@ -2213,7 +2214,10 @@ mod tests {
 
         parser.rollback(checkpoint);
 
-        assert!(parser.declaration_type_name().is_none(), "the type name came back");
+        assert!(
+            parser.declaration_type_name().is_none(),
+            "the type name came back"
+        );
         assert!(
             !parser.has_qualified_declaration_type_name(),
             "and so did the qualified flag"
@@ -2222,7 +2226,3 @@ mod tests {
         assert_eq!(parser.current_token_index(), 0, "and so did the cursor");
     }
 }
-
-
-
-

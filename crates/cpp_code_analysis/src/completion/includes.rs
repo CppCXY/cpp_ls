@@ -46,7 +46,8 @@ const MAX_HEADERS: usize = 12_000;
 /// spellings (`.cppm`, `.ixx`). A file without one of these is not offered: a `#include <README>` is legal and
 /// pointless, and a list that contained every file in the directory would be mostly things nobody includes.
 const HEADER_EXTENSIONS: &[&str] = &[
-    "h", "hh", "hpp", "hxx", "h++", "inl", "ipp", "tcc", "tpp", "inc", "def", "cppm", "ixx", "mpp", "cuh",
+    "h", "hh", "hpp", "hxx", "h++", "inl", "ipp", "tcc", "tpp", "inc", "def", "cppm", "ixx", "mpp",
+    "cuh",
 ];
 
 /// One header the search path can name.
@@ -246,7 +247,10 @@ impl HeaderIndex {
     /// Called again whenever the file list grows, which is why the index a session holds is behind a lock: see
     /// [`crate::Session::add_project_files`].
     pub fn with_project(mut self, files: impl IntoIterator<Item = PathBuf>) -> HeaderIndex {
-        self.project = files.into_iter().filter(|file| is_a_header(&file_name_of(file))).collect();
+        self.project = files
+            .into_iter()
+            .filter(|file| is_a_header(&file_name_of(file)))
+            .collect();
 
         // Sorted and deduplicated for the same reason the search path is: the walk's order is the filesystem's,
         // and an answer whose order depends on which directory entry the OS returned first cannot be compared
@@ -294,9 +298,8 @@ impl HeaderIndex {
 
             // `0` for a C++ standard header and `1` for everything else; see the second rule above. It is a
             // tie-break **within** a kind, so a project's `config.h` is not pushed below a system `<vector>`.
-            let is_a_cxx_name = u8::from(!(
-                kind == HeaderKind::StandardLibrary && is_a_cxx_header(&name)
-            ));
+            let is_a_cxx_name =
+                u8::from(!(kind == HeaderKind::StandardLibrary && is_a_cxx_header(&name)));
 
             let depth = if kind == HeaderKind::Project {
                 // A project header has no depth under a search directory: `config/version.h` is written from the
@@ -345,9 +348,11 @@ impl HeaderIndex {
             })
             .collect();
 
-        found.extend(self.headers.iter().map(|header| {
-            (header.name.clone(), header.directory, header.kind)
-        }));
+        found.extend(
+            self.headers
+                .iter()
+                .map(|header| (header.name.clone(), header.directory, header.kind)),
+        );
 
         found
     }
@@ -414,10 +419,7 @@ fn match_rank(name: &str, prefix: &str) -> Option<u8> {
         return Some(1);
     }
 
-    if lowered
-        .split('/')
-        .any(|segment| segment.contains(&prefix))
-    {
+    if lowered.split('/').any(|segment| segment.contains(&prefix)) {
         return Some(2);
     }
 
@@ -438,7 +440,9 @@ fn is_a_header(file_name: &str) -> bool {
         return false;
     }
 
-    HEADER_EXTENSIONS.iter().any(|known| extension.eq_ignore_ascii_case(known))
+    HEADER_EXTENSIONS
+        .iter()
+        .any(|known| extension.eq_ignore_ascii_case(known))
 }
 
 /// Is this the spelling of a **C++** standard header, rather than one of the C headers that sit beside it?
@@ -518,14 +522,19 @@ mod tests {
             .into_iter()
             .map(|header| header.name)
             .collect();
-        assert_eq!(found, vec!["vector", "bits/stl_vector.h"], "measured on a real toolchain");
+        assert_eq!(
+            found,
+            vec!["vector", "bits/stl_vector.h"],
+            "measured on a real toolchain"
+        );
     }
 
     /// The kind decides **before** the match quality, and that is a decision rather than an accident: a reader
     /// writing `#include <str` means `<cstring>` far more often than `STRALIGN.H`, so a standard header that merely
     /// contains the letters still beats a system header named exactly that.
     #[test]
-    fn a_standard_header_that_merely_contains_the_letters_beats_a_system_one_that_is_named_for_it() {
+    fn a_standard_header_that_merely_contains_the_letters_beats_a_system_one_that_is_named_for_it()
+    {
         let mut index = index_of_kind(&["STRALIGN.H"], HeaderKind::System);
         index.headers.push(Header {
             name: "string_view".to_string(),
@@ -625,7 +634,10 @@ mod tests {
     /// it safe to put behind a keystroke on a directory nobody meant to point `-I` at.
     #[test]
     fn a_directory_that_cannot_be_read_is_counted_rather_than_ignored() {
-        let index = HeaderIndex::read([PathBuf::from("/no/such/directory/exists/here")], Path::new("/p"));
+        let index = HeaderIndex::read(
+            [PathBuf::from("/no/such/directory/exists/here")],
+            Path::new("/p"),
+        );
         assert!(index.is_empty());
         assert_eq!(index.unread(), 1, "the gap is recorded");
         assert!(!index.truncated());

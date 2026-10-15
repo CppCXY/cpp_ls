@@ -139,6 +139,3 @@ fn return_type_of(function: &CppSyntaxNode) -> Option<String> {
     }
     Some(head.to_string())
 }
-
-
-

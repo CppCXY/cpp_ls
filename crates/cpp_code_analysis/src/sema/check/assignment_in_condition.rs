@@ -119,7 +119,3 @@ fn is_an_assignment(condition: &cpp_parser::CppSyntaxNode) -> bool {
     }
     assigns
 }
-
-
-
-

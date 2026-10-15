@@ -159,10 +159,7 @@ impl Msvc {
 ///
 /// `None` when there is no Visual Studio at all — which on a machine with a MinGW toolchain is the ordinary case,
 /// not a failure.
-pub fn discover(
-    runner: &impl CommandRunner,
-    layout: &WindowsLayout,
-) -> Option<Msvc> {
+pub fn discover(runner: &impl CommandRunner, layout: &WindowsLayout) -> Option<Msvc> {
     if !cfg!(windows) {
         return None;
     }
@@ -303,11 +300,7 @@ fn cl_for_this_host(toolset: &Path) -> Option<PathBuf> {
     ];
 
     PAIRS.iter().find_map(|(host, target)| {
-        let candidate = toolset
-            .join("bin")
-            .join(host)
-            .join(target)
-            .join("cl.exe");
+        let candidate = toolset.join("bin").join(host).join(target).join("cl.exe");
         candidate.is_file().then_some(candidate)
     })
 }
@@ -478,7 +471,13 @@ pub fn predefined_macros_with(
     let requested = standard.map(|standard| format!("/std:{standard}"));
     let object = scratch.path.join("predefined.obj");
 
-    let mut arguments: Vec<&str> = vec!["/nologo", "/Zc:preprocessor", "/Zc:__cplusplus", "/PD", "/c"];
+    let mut arguments: Vec<&str> = vec![
+        "/nologo",
+        "/Zc:preprocessor",
+        "/Zc:__cplusplus",
+        "/PD",
+        "/c",
+    ];
     if let Some(requested) = &requested {
         arguments.push(requested);
     }
@@ -704,7 +703,10 @@ mod tests {
         ) -> Option<Output> {
             self.asked.lock().expect("not poisoned").push((
                 program.to_path_buf(),
-                arguments.iter().map(|argument| argument.to_string()).collect(),
+                arguments
+                    .iter()
+                    .map(|argument| argument.to_string())
+                    .collect(),
                 environment.to_vec(),
             ));
 
@@ -825,9 +827,7 @@ mod tests {
         for directory in [
             toolset_root.join("include"),
             toolset_root.join("ATLMFC/include"),
-            installation
-                .installation
-                .join("VC/Auxiliary/VS/include"),
+            installation.installation.join("VC/Auxiliary/VS/include"),
             sdk_root.join("Include/10.0.22621.0/ucrt"),
             sdk_root.join("Include/10.0.22621.0/um"),
             sdk_root.join("Include/10.0.22621.0/shared"),
@@ -894,7 +894,8 @@ mod tests {
         let runner = Scripted::new(vec![(
             "cl.exe",
             Output {
-                stdout: "#define _MSC_VER 1935\n#define _WIN32 1\n#define _MSC_VER 1935\n".to_string(),
+                stdout: "#define _MSC_VER 1935\n#define _WIN32 1\n#define _MSC_VER 1935\n"
+                    .to_string(),
                 stderr: String::new(),
                 status: Some(0),
                 succeeded: true,
@@ -906,8 +907,17 @@ mod tests {
         let asked = runner.asked.lock().expect("not poisoned").clone();
         let (program, arguments, environment) = asked.first().expect("cl was asked");
         assert!(program.ends_with("cl.exe"));
-        for required in ["/nologo", "/Zc:preprocessor", "/Zc:__cplusplus", "/PD", "/c"] {
-            assert!(arguments.iter().any(|argument| argument == required), "{required} is missing: {arguments:?}");
+        for required in [
+            "/nologo",
+            "/Zc:preprocessor",
+            "/Zc:__cplusplus",
+            "/PD",
+            "/c",
+        ] {
+            assert!(
+                arguments.iter().any(|argument| argument == required),
+                "{required} is missing: {arguments:?}"
+            );
         }
         assert!(
             arguments.iter().any(|argument| argument == "/std:c++20"),
@@ -918,7 +928,9 @@ mod tests {
             "the object file does not go next to whatever directory the server was started in: {arguments:?}"
         );
         assert!(
-            arguments.last().is_some_and(|argument| argument.ends_with("predefined.cpp")),
+            arguments
+                .last()
+                .is_some_and(|argument| argument.ends_with("predefined.cpp")),
             "cl needs a real file: {arguments:?}"
         );
         assert_eq!(

@@ -36,7 +36,6 @@
 //! runs — while `if (true) { … }` is a claim about the **condition**, which is a decision already made. The two
 //! messages say which one the reader is looking at.
 
-
 use cpp_parser::CppAstNode;
 
 use super::{Check, CheckContext, DiagnosticCode};
@@ -96,7 +95,3 @@ impl Check for UnnecessaryBranch {
         }
     }
 }
-
-
-
-

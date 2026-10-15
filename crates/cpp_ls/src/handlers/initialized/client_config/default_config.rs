@@ -50,7 +50,10 @@ pub async fn get_client_config_default(
         };
 
         let cancel_token = time_cancel_token(Duration::from_secs(5));
-        let Some(fetched) = client.get_configuration::<Value>(params, cancel_token).await else {
+        let Some(fetched) = client
+            .get_configuration::<Value>(params, cancel_token)
+            .await
+        else {
             warn!("the client did not answer for the {scope:?} section");
             continue;
         };
@@ -85,5 +88,3 @@ pub async fn get_client_config_default(
 
     None
 }
-
-

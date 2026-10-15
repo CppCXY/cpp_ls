@@ -131,7 +131,10 @@ impl Branch {
         // condition of every guard, tens of millions of times in one index, and reading the environment here was a
         // lock of the process per branch: **40 s** of a real project's index, measured.
         if let Some(wanted) = crate::probes::guard_name() {
-            let mentions = self.tokens.iter().any(|token| token.text().contains(wanted));
+            let mentions = self
+                .tokens
+                .iter()
+                .any(|token| token.text().contains(wanted));
             if mentions {
                 let answer = match self.kind {
                     DirectiveKind::If | DirectiveKind::Elif => {
@@ -159,7 +162,9 @@ impl Branch {
         match self.kind {
             DirectiveKind::If | DirectiveKind::Elif => self.an_expression_holds(macros),
             DirectiveKind::Ifdef => is_defined(self.name.as_deref(), macros),
-            DirectiveKind::Ifndef => is_defined(self.name.as_deref(), macros).map(|defined| !defined),
+            DirectiveKind::Ifndef => {
+                is_defined(self.name.as_deref(), macros).map(|defined| !defined)
+            }
             DirectiveKind::Else => Some(true),
             _ => None,
         }
@@ -257,7 +262,10 @@ impl Branch {
 /// matter at all.
 fn a_replacement_can_change_the_parse(tokens: &[Token]) -> bool {
     use crate::token::is_trivia;
-    let significant: Vec<&Token> = tokens.iter().filter(|token| !is_trivia(token.kind)).collect();
+    let significant: Vec<&Token> = tokens
+        .iter()
+        .filter(|token| !is_trivia(token.kind))
+        .collect();
 
     for (index, token) in significant.iter().enumerate() {
         if token.kind != cpp_parser::CppTokenKind::Identifier {
@@ -270,7 +278,9 @@ fn a_replacement_can_change_the_parse(tokens: &[Token]) -> bool {
             continue;
         }
         // The two forms whose `(` introduces an operand rather than a call.
-        if token.text() == "defined" || crate::preprocess::condition::is_a_builtin_operator(token.text()) {
+        if token.text() == "defined"
+            || crate::preprocess::condition::is_a_builtin_operator(token.text())
+        {
             continue;
         }
         return true;

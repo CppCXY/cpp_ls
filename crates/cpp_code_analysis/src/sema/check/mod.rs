@@ -98,8 +98,8 @@ use crate::{FileSummary, ProjectIndex};
 
 pub mod access_invisible;
 pub mod argument_count;
-pub mod assignment_in_condition;
 pub mod assign_type_check;
+pub mod assignment_in_condition;
 // pub mod assign_type_check;
 pub mod config;
 pub mod diagnostic_code;
@@ -477,7 +477,12 @@ impl<'a> CheckContext<'a> {
     /// The kinds are still used as a cheap filter before the shape is read, so the cost is one kind test per node
     /// rather than a child list per node — `CppIndexExpr`/`CppMemberExpr` would be two casts per node, and this is
     /// the hot path of four checks.
-    pub fn member_accesses(&self) -> Vec<(cpp_parser::CppSyntaxNode, crate::sema::resolve::MemberAccess)> {
+    pub fn member_accesses(
+        &self,
+    ) -> Vec<(
+        cpp_parser::CppSyntaxNode,
+        crate::sema::resolve::MemberAccess,
+    )> {
         use cpp_parser::CppSyntaxKind;
         self.own_syntax_nodes()
             .filter(|node| {
@@ -630,7 +635,12 @@ pub fn is_a_function_definition(node: &cpp_parser::CppSyntaxNode) -> bool {
     let Some(parameters) = declaration
         .get_init_declarator()
         .and_then(|declarator| declarator.get_declarator())
-        .and_then(|declarator| declarator.syntax().descendants().find_map(CppParamList::cast))
+        .and_then(|declarator| {
+            declarator
+                .syntax()
+                .descendants()
+                .find_map(CppParamList::cast)
+        })
         .map(|parameters| span_of(parameters.syntax()))
     else {
         return false;
@@ -780,29 +790,40 @@ pub fn function_head(function: &cpp_parser::CppSyntaxNode) -> Option<FunctionHea
     // An `operator` is spelled `operator` plus a symbol and is not an identifier at all; a destructor is `~` plus the
     // class name; everything else ends at its last identifier. In all three the name **begins** at the token this
     // finds, and the head the return type is read from is what comes before that.
-    let (name, name_range, name_starts_at) = match head.iter().position(|token| token.text() == "operator") {
-        Some(at) => {
-            let last = head.last()?;
-            (
-                head[at..].iter().map(|token| token.text().to_string()).collect::<String>(),
-                cpp_parser::source_range(head[at].text_range().cover(last.text_range())),
-                at,
-            )
-        }
-        None => {
-            let at = head
-                .iter()
-                .rposition(|token| token.kind() == cpp_parser::CppTokenKind::Identifier.into())?;
-            // A leading `~` belongs to the name: `~S` is a destructor, and a caller comparing the name with the
-            // enclosing class has to see the same spelling the reader wrote.
-            let start = if at > 0 && head[at - 1].text() == "~" { at - 1 } else { at };
-            (
-                head[start..=at].iter().map(|token| token.text().to_string()).collect::<String>(),
-                cpp_parser::source_range(head[start].text_range().cover(head[at].text_range())),
-                start,
-            )
-        }
-    };
+    let (name, name_range, name_starts_at) =
+        match head.iter().position(|token| token.text() == "operator") {
+            Some(at) => {
+                let last = head.last()?;
+                (
+                    head[at..]
+                        .iter()
+                        .map(|token| token.text().to_string())
+                        .collect::<String>(),
+                    cpp_parser::source_range(head[at].text_range().cover(last.text_range())),
+                    at,
+                )
+            }
+            None => {
+                let at = head.iter().rposition(|token| {
+                    token.kind() == cpp_parser::CppTokenKind::Identifier.into()
+                })?;
+                // A leading `~` belongs to the name: `~S` is a destructor, and a caller comparing the name with the
+                // enclosing class has to see the same spelling the reader wrote.
+                let start = if at > 0 && head[at - 1].text() == "~" {
+                    at - 1
+                } else {
+                    at
+                };
+                (
+                    head[start..=at]
+                        .iter()
+                        .map(|token| token.text().to_string())
+                        .collect::<String>(),
+                    cpp_parser::source_range(head[start].text_range().cover(head[at].text_range())),
+                    start,
+                )
+            }
+        };
     let before_the_name = &head[..name_starts_at];
 
     // What is left before the name, minus the specifiers that are not a type.
@@ -939,8 +960,12 @@ fn declares_the_enclosing_class_named(function: &cpp_parser::CppSyntaxNode, name
                         ancestor
                             .descendants_with_tokens()
                             .filter_map(|element| element.into_token())
-                            .take_while(|token| token.text_range().end() <= body.text_range().start())
-                            .filter(|token| token.kind() == cpp_parser::CppTokenKind::Identifier.into())
+                            .take_while(|token| {
+                                token.text_range().end() <= body.text_range().start()
+                            })
+                            .filter(|token| {
+                                token.kind() == cpp_parser::CppTokenKind::Identifier.into()
+                            })
                             .last()
                             .map(|token| token.text().to_string())
                     });
@@ -1115,10 +1140,7 @@ pub fn a_class_can_be_built_from(
 
 /// **Whether one written parameter list holds a parameter that could accept this value** — see
 /// [`a_class_can_be_built_from`] for the rule and why it is this narrow.
-fn parameters_that_could_accept(
-    written: &str,
-    value: &crate::sema::types::Type,
-) -> Option<bool> {
+fn parameters_that_could_accept(written: &str, value: &crate::sema::types::Type) -> Option<bool> {
     // The value has to be something this can classify. A class-to-class conversion is a question about two
     // declarations, and this is asked with one of them in hand.
     if !value.is_arithmetic() {
@@ -1248,7 +1270,6 @@ fn could_take_an_arithmetic_value(parameter: &str) -> Option<bool> {
     Some(false)
 }
 
-
 /// **Run every check, in the order a consumer should show them**, and answer what they found.
 ///
 /// The list is the registry: a check that is not here does not run. See the module documentation for why these are
@@ -1272,36 +1293,3 @@ pub fn run(context: CheckContext<'_>) -> Vec<Finding> {
 
     context.into_findings()
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

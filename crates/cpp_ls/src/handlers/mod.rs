@@ -27,23 +27,23 @@ mod diagnostic;
 mod document_symbol;
 mod folding_range;
 mod hover;
-mod inlay_hint;
 mod initialized;
+mod inlay_hint;
 mod notification_handler;
 mod references;
 mod rename;
-mod selection_range;
-mod signature_help;
-mod semantic_token;
 mod request_handler;
 mod response_handler;
+mod selection_range;
+mod semantic_token;
+mod signature_help;
 mod text_document;
 mod workspace_symbol;
 
 pub use diagnostic::diagnose_file;
 
-pub use initialized::{ClientConfig, initialized_handler, start_analysis};
 use crate::context::ServerContextSnapshot;
+pub use initialized::{ClientConfig, initialized_handler, start_analysis};
 use lsp_types::{ClientCapabilities, ServerCapabilities};
 pub use notification_handler::on_notification_handler;
 pub use request_handler::on_request_handler;
@@ -80,7 +80,11 @@ pub use text_document::{
 ///
 /// [`Analysis::prepare`]: crate::context::AnalysisState::prepare
 /// [`Session::catch_up`]: cpp_code_analysis::Session::catch_up
-pub async fn read_the_modules(context: &ServerContextSnapshot, path: &std::path::Path, caught_up: bool) {
+pub async fn read_the_modules(
+    context: &ServerContextSnapshot,
+    path: &std::path::Path,
+    caught_up: bool,
+) {
     // **Nothing to read, so no lock to take.** Both halves of this call are conditional and both are asked here
     // first: the summary is current (`caught_up` says the caller already did it, `needs_catching_up` asks the
     // session), and no module in view is one the index cannot point at a file for — which is the ordinary answer for
@@ -166,6 +170,3 @@ semantic_token => SemanticTokenCapabilities,
     diagnostic => DiagnosticCapabilities,
     configuration => ConfigurationCapabilities,
 });
-
-
-

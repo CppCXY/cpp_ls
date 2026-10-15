@@ -47,7 +47,7 @@ impl ClientConfig {
     }
 }
 
-    /// Ask the client for its configuration, as far as its capabilities allow.
+/// Ask the client for its configuration, as far as its capabilities allow.
 pub async fn get_client_config(
     context: &ServerContextSnapshot,
     client_id: ClientId,
@@ -112,4 +112,3 @@ mod tests {
         );
     }
 }
-

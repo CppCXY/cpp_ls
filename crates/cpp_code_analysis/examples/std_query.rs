@@ -29,7 +29,8 @@
 use std::path::Path;
 
 use cpp_code_analysis::{
-    CompilerConfig, DiskCommands, DiskFiles, Environment, IncludeBudget, Known, SummaryStore, discover,
+    CompilerConfig, DiskCommands, DiskFiles, Environment, IncludeBudget, Known, SummaryStore,
+    discover,
 };
 
 /// The probe's own text. Each member access in it is one query, and the includes are what the closure is.
@@ -82,7 +83,8 @@ fn main() {
     let toolchain = discover(
         &files,
         &DiskCommands,
-        cpp_code_analysis::BuildStatement::default(),        &probe,
+        cpp_code_analysis::BuildStatement::default(),
+        &probe,
         &Environment::current(),
         &cpp_code_analysis::include::msvc::WindowsLayout::current(),
     );
@@ -92,13 +94,18 @@ fn main() {
             println!(
                 "toolchain: {} ({})\n  {} system include directories",
                 toolchain.compiler_name(),
-                toolchain.version.as_deref().unwrap_or("version not reported"),
+                toolchain
+                    .version
+                    .as_deref()
+                    .unwrap_or("version not reported"),
                 toolchain.system_include_paths.len()
             );
             toolchain.config(&CompilerConfig::new())
         }
         None => {
-            println!("no compiler was found, so `<string>` will not resolve and every query below must fail");
+            println!(
+                "no compiler was found, so `<string>` will not resolve and every query below must fail"
+            );
             CompilerConfig::new()
         }
     };
@@ -175,7 +182,13 @@ disk, {} not stored, {} unresolved includes)",
     //                    index has no way to tell them apart. The queries are unaffected: `v.push_back`
     //                    goes through the object's type and `member_fact`, which takes the members of both facts.
     // ```
-    for name in ["std::string", "std::basic_string", "std::vector", "std::map", "std::map::find"] {
+    for name in [
+        "std::string",
+        "std::basic_string",
+        "std::vector",
+        "std::map",
+        "std::map::find",
+    ] {
         match store.index().definition(name, &probe) {
             Known::Yes(found) => println!(
                 "  [have] {name} -> {} kind {:?} type_of {:?} scope {:?} bases {:?}",
@@ -241,11 +254,16 @@ disk, {} not stored, {} unresolved includes)",
         .iter()
         .filter(|member| member.fact.kind == cpp_code_analysis::DeclKind::Variable)
         .count();
-    println!("  [have] by kind -> {functions} functions, {types} types, {variables} variables, {} other",
-        members.len() - functions - types - variables);
+    println!(
+        "  [have] by kind -> {functions} functions, {types} types, {variables} variables, {} other",
+        members.len() - functions - types - variables
+    );
     println!(
         "  [have] every name -> {:?}",
-        members.iter().map(|member| member.fact.name.as_str()).collect::<Vec<_>>()
+        members
+            .iter()
+            .map(|member| member.fact.name.as_str())
+            .collect::<Vec<_>>()
     );
 
     // Where in the file the members went.
@@ -289,7 +307,8 @@ disk, {} not stored, {} unresolved includes)",
             continue;
         }
         {
-            let text = String::from_utf8_lossy(&std::fs::read(&summary.path).unwrap_or_default()).to_string();
+            let text = String::from_utf8_lossy(&std::fs::read(&summary.path).unwrap_or_default())
+                .to_string();
             let line_of = |offset: usize| text[..offset.min(text.len())].lines().count();
 
             println!(
@@ -298,17 +317,31 @@ disk, {} not stored, {} unresolved includes)",
                 summary.declarations.len()
             );
 
-            let mut by_scope: std::collections::BTreeMap<String, Vec<&cpp_code_analysis::DeclFact>> =
-                std::collections::BTreeMap::new();
+            let mut by_scope: std::collections::BTreeMap<
+                String,
+                Vec<&cpp_code_analysis::DeclFact>,
+            > = std::collections::BTreeMap::new();
             for fact in &summary.declarations {
                 by_scope
-                    .entry(fact.scope.clone().unwrap_or_else(|| "<file scope>".to_string()))
+                    .entry(
+                        fact.scope
+                            .clone()
+                            .unwrap_or_else(|| "<file scope>".to_string()),
+                    )
                     .or_default()
                     .push(fact);
             }
             for (scope, facts) in &by_scope {
-                let first = facts.iter().map(|fact| fact.range.start_offset).min().unwrap_or(0);
-                let last = facts.iter().map(|fact| fact.range.end_offset()).max().unwrap_or(0);
+                let first = facts
+                    .iter()
+                    .map(|fact| fact.range.start_offset)
+                    .min()
+                    .unwrap_or(0);
+                let last = facts
+                    .iter()
+                    .map(|fact| fact.range.end_offset())
+                    .max()
+                    .unwrap_or(0);
                 println!(
                     "    {:>5} facts  lines {:>5}..{:<5}  {scope}",
                     facts.len(),
@@ -382,4 +415,3 @@ fn short(path: &Path) -> String {
         .map(|name| name.to_string_lossy().to_string())
         .unwrap_or_else(|| path.display().to_string())
 }
-

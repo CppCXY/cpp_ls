@@ -71,32 +71,33 @@ pub mod summary_codec;
 // * `project`  — what the project says about itself: `.cppls.toml`, the build system, the toolchain
 // * `sema`     — names, scopes, the index's declaration facts, and C++20 modules
 pub use cache::{
-    CACHE_BUDGET_BYTES, CACHE_DIRECTORY, FORMAT_VERSION, PruneReport, READING_FINGERPRINT, SummaryKey,
-    content_hash, fnv1a64, prune,
+    CACHE_BUDGET_BYTES, CACHE_DIRECTORY, FORMAT_VERSION, PruneReport, READING_FINGERPRINT,
+    SummaryKey, content_hash, fnv1a64, prune,
 };
 // The alignment layer, flattened like the rest: a consumer that wants to check a reading against a compiler needs
 // `Report::of` and `tokenize_preprocessed`, and reaching them through the module hop says nothing a reader benefits
 // from. `MAX_EDIT_DISTANCE` is here because a caller has to be able to say how far a comparison was allowed to go
 // before it reports a `truncated` one.
 pub use align::{
-    Alignment, Difference, DiskTexts, MAX_EDIT_DISTANCE, Reason, Report, Side, StreamToken, UnitTexts, align,
-    files_of, normalized, shared, tokenize_preprocessed, unit_tokens, without_pragmas,
+    Alignment, Difference, DiskTexts, MAX_EDIT_DISTANCE, Reason, Report, Side, StreamToken,
+    UnitTexts, align, files_of, normalized, shared, tokenize_preprocessed, unit_tokens,
+    without_pragmas,
 };
 // The *completion* layer is the one place where the answer to a cursor is assembled rather than queried: the two
 // name queries below it answer "what is visible" and "what does this type have", and this decides which of those
 // questions the cursor is asking and in what order the answer is shown. See `completion`'s module documentation.
 pub use completion::{
     BUILTIN_TYPES, CompletionContext, CompletionItem, CompletionSet, DIRECTIVES, DirectiveName,
-    Header, HeaderIndex, HeaderKind, ItemKind, KEYWORDS, Keyword, KeywordUse, SNIPPETS, SharedHeaders, Snippet,
-    completion_at, context_at, detail_of, header_index, why_no_members,
+    Header, HeaderIndex, HeaderKind, ItemKind, KEYWORDS, Keyword, KeywordUse, SNIPPETS,
+    SharedHeaders, Snippet, completion_at, context_at, detail_of, header_index, why_no_members,
 };
+pub use cooked::{FileMacros, Over, ParsedDefinitions, configuration_from_environment_and};
 pub use file::token;
 pub use include::{config, graph, msvc, paths, system_headers, toolchain};
-pub use preprocess::{condition, cooked, directive, expand, guards, macros};
-pub use cooked::{FileMacros, Over, ParsedDefinitions, configuration_from_environment_and};
 pub use macros::{MacroBindings, UnitSources};
-pub use sema::declarations::{build_facts, by_name, declared_type_of, scope_of};
+pub use preprocess::{condition, cooked, directive, expand, guards, macros};
 pub use sema::check::{CheckConfig, CheckContext, DiagnosticCode, Finding};
+pub use sema::declarations::{build_facts, by_name, declared_type_of, scope_of};
 pub use sema::{check, module_info, modules, parser_symbols, scopes, symbol};
 mod tu_cache;
 
@@ -104,13 +105,12 @@ pub use tu_cache::{RootKey, TRANSLATION_UNITS_DIRECTORY, TranslationUnitCache};
 
 pub use summary::ConditionalBody;
 pub use summary::{
-    ConditionAt, ConditionalRegion, CookedDiagnostic, DeclFact, DeclKind, FactGuard, FileSummary,
-    GuardBranch, IncludeFact, IndexedRendering, IndexedUnit, UnitReading, MacroAt, MacroFact, MacroKind, MacroView,
-    MapReport,
-    OutlineSymbol,
-    SummaryGuards, TranslationUnit, UnitDefinitions, macros_from_direct_includes,
-    macros_from_direct_includes_with_bodies, macros_from_the_closure_with_bodies, ClosureEvidence,
-    macros_in_force_before_the_include, MacroDefinitions, RenderedUnit, UnitSpan, outline_of,
+    ClosureEvidence, ConditionAt, ConditionalRegion, CookedDiagnostic, DeclFact, DeclKind,
+    FactGuard, FileSummary, GuardBranch, IncludeFact, IndexedRendering, IndexedUnit, MacroAt,
+    MacroDefinitions, MacroFact, MacroKind, MacroView, MapReport, OutlineSymbol, RenderedUnit,
+    SummaryGuards, TranslationUnit, UnitDefinitions, UnitReading, UnitSpan,
+    macros_from_direct_includes, macros_from_direct_includes_with_bodies,
+    macros_from_the_closure_with_bodies, macros_in_force_before_the_include, outline_of,
 };
 // `guard` is the exception: `preprocess::guard` and `preprocess::guards` differ by one letter, which is exactly
 // the hazard the folders are meant to remove, so the *analysis* keeps the plural name and the types are reached
@@ -125,7 +125,6 @@ pub use config::{
     config_from_arguments, parse_compile_commands, predefined_macros_of, project_config_from_flags,
     split_command_line,
 };
-pub use include::toolchain::BuildStatement;
 pub use directive::{
     Define, Directive, DirectiveKind, Include, IncludeForm, SpannedDirective,
     parse_directive_tokens, scan_directives,
@@ -141,6 +140,7 @@ pub use graph::{
 };
 pub use guard::{Branch, Guard, GuardStack, Region, Visibility};
 pub use guards::{FileGuard, GuardAnalysis, analyse_guards, detect_guard};
+pub use include::toolchain::BuildStatement;
 pub use include::{FoundIn, IncludeResolver, Resolution, Resolved, Unresolved};
 pub use toolchain::{
     CommandRunner, DiskCommands, Environment, Output, Toolchain, ToolchainSource, discover,
@@ -150,22 +150,23 @@ pub use toolchain::{
 // needs `SummaryStore` and `definition_across_files`, and reaching them through two module hops says nothing a
 // reader benefits from. `index::summary` is not here — the *shape* of a summary is `summary`, and one type with
 // two paths is worse than a longer import.
+pub use cooked::{
+    Configuration, CookedStream, RenderedCooked, RenderedSpan, configuration_from_environment,
+    configuration_from_environment_with, cook, cook_with,
+};
 pub use index::{
-    ChangeBatch, CookedFile, EventKind, FileEvent, FileIndexer, FileReferences, IncludeBudget,
-    HeaderTarget, IncludeIndex, IncludeVisibility, MacroReferences, MemberCompletions, MemberList, NameCompletions,
-    NameProvenance, NotIndexed, NotIndexedReason, OfferedName, PathPattern, Priority, ProjectDefinition,
-    ProjectDefinitions,
-    ProjectIndex, ProjectMacro, ProjectMember, ProjectSymbol, Reference, ReferenceBudget, ReferenceKind,
-    Rename, Response, Step, StepOutcome, StoreStats, SummaryReadError, SummaryStore,
-    SymbolReferences, SymbolToFind, UnlistedBase,
-    UnresolvedEdge, VisibleDeclaration, WatchFilter, Worklist, definition_across_files,
+    ChangeBatch, CookedFile, EventKind, FileEvent, FileIndexer, FileReferences, HeaderTarget,
+    IncludeBudget, IncludeIndex, IncludeVisibility, MacroReferences, MemberCompletions, MemberList,
+    NameCompletions, NameProvenance, NotIndexed, NotIndexedReason, OfferedName, PathPattern,
+    Priority, ProjectDefinition, ProjectDefinitions, ProjectIndex, ProjectMacro, ProjectMember,
+    ProjectSymbol, Reference, ReferenceBudget, ReferenceKind, Rename, Response, Step, StepOutcome,
+    StoreStats, SummaryReadError, SummaryStore, SymbolReferences, SymbolToFind, UnlistedBase,
+    UnresolvedEdge, VisibleDeclaration, WatchFilter, Worklist, definition_across_files, header_at,
     macro_across_files, macro_references, member_across_files, member_completions_at, members_of,
-    symbol_references,
-    header_at, name_completions_at, outcome_of, read_summary, summarize, write_summary,
+    name_completions_at, outcome_of, read_summary, summarize, symbol_references, write_summary,
 };
 pub use macros::{MacroBody, MacroDef, MacroTable, Parameter, ParameterKind};
 pub use module_info::{ImportDeclaration, ImportTarget, ModuleInfo, ModuleUnit};
-pub use summary::ModuleReading;
 pub use modules::{
     ImportEdge, ImportOutcome, MAX_IMPORT_DEPTH, ModuleGraph, ModuleScanner, ModuleUnitEntry,
     scan_imports,
@@ -175,16 +176,13 @@ pub use paths::{
     join_normalized, normalize_path, parent_normalized,
 };
 pub use preprocess::{FilePreprocessing, PositionalMacros, preprocess};
-pub use cooked::{
-    Configuration, CookedStream, RenderedCooked, RenderedSpan, configuration_from_environment,
-    configuration_from_environment_with, cook, cook_with,
-};
 pub use project::{
     CONFIGURATION_FILE_NAMES, CompileSection, ConfigProblem, ConfigReport, Database,
     DatabaseOrigin, DiagnosticsSection, DiscoveryProblem, HoverSection, IndexSection,
     PROJECT_CONFIG_FILE, ProjectConfig, ProjectDiscovery, Severity, WorkspaceSection,
     find_database, load_config, parse_config,
 };
+pub use summary::ModuleReading;
 // `MacroBodies` is the parser's trait, re-exported here because this crate's public API names it: the seam between
 // "a file's tokens" and "what its includes say the macros mean" is one trait, and a consumer should not have to
 // know which crate defined it.
@@ -201,16 +199,10 @@ pub use session::{
 // The *file* layer's two public faces: a view is one file parsed (what a cursor query is answered against), and a
 // VFS is the set of files being held (their text, and the line index of that text). They live in `file` rather
 // than next to the session because they are about files, not about a project.
-pub use file::view::FileView;
 pub use file::vfs::{Vfs, VfsFile};
+pub use file::view::FileView;
 pub use symbol::{
     Binding, BindingKind, BindingOrigin, DeclName, HeaderName, Known, MaybeName, Name, NameKind,
     QualifiedName, Scope, ScopeId, ScopeKind, ScopeTree, UnknownReason,
 };
 pub use token::Token;
-
-
-
-
-
-

@@ -47,7 +47,12 @@ fn project() -> std::path::PathBuf {
 fn entry(project: &std::path::Path) -> std::path::PathBuf {
     std::env::var("CPPLS_REAL_ENTRY")
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| project.join("CodeFormatServer").join("src").join("main.cpp"))
+        .unwrap_or_else(|_| {
+            project
+                .join("CodeFormatServer")
+                .join("src")
+                .join("main.cpp")
+        })
 }
 
 struct Server {
@@ -236,7 +241,11 @@ fn the_first_completion_on_a_real_project_says_where_its_time_went() {
     let items = answer["result"]
         .as_array()
         .map(|items| items.len())
-        .or_else(|| answer["result"]["items"].as_array().map(|items| items.len()))
+        .or_else(|| {
+            answer["result"]["items"]
+                .as_array()
+                .map(|items| items.len())
+        })
         .unwrap_or(0);
     println!("\nthe first completion: {wall:?}, {items} item(s)");
 
@@ -253,9 +262,16 @@ fn the_first_completion_on_a_real_project_says_where_its_time_went() {
     let items = answer["result"]
         .as_array()
         .map(|items| items.len())
-        .or_else(|| answer["result"]["items"].as_array().map(|items| items.len()))
+        .or_else(|| {
+            answer["result"]["items"]
+                .as_array()
+                .map(|items| items.len())
+        })
         .unwrap_or(0);
-    println!("the second completion: {:?}, {items} item(s)", started.elapsed());
+    println!(
+        "the second completion: {:?}, {items} item(s)",
+        started.elapsed()
+    );
 
     // The pump is still running; let it write what it has before the log is read.
     std::thread::sleep(Duration::from_millis(1500));

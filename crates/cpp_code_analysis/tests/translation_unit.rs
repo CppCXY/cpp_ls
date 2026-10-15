@@ -24,8 +24,8 @@ use std::path::{Path, PathBuf};
 
 use cpp_code_analysis::graph::Marked;
 use cpp_code_analysis::{
-    CompilerConfig, FileIndexer, FileSummary, MacroBindings, MacroDefinitions, MemoryFiles, RootKey,
-    SummaryKey, TranslationUnit, TranslationUnitCache,
+    CompilerConfig, FileIndexer, FileSummary, MacroBindings, MacroDefinitions, MemoryFiles,
+    RootKey, SummaryKey, TranslationUnit, TranslationUnitCache,
 };
 use cpp_parser::MacroFacts;
 
@@ -87,7 +87,11 @@ impl Unit {
     }
 
     /// The per-file reading: walk this file's own include closure.
-    fn per_file(&self, path: &str, definitions: &mut MacroDefinitions) -> cpp_parser::MacroEnvironment {
+    fn per_file(
+        &self,
+        path: &str,
+        definitions: &mut MacroDefinitions,
+    ) -> cpp_parser::MacroEnvironment {
         let path = PathBuf::from(path);
         let summary = self.summaries.get(&path).expect("indexed");
         let evidence = cpp_code_analysis::macros_from_the_closure_with_bodies(
@@ -102,11 +106,7 @@ impl Unit {
     }
 
     /// The one-walk reading: the unit's timeline, and the file's view of it.
-    fn timeline_of(
-        &self,
-        root: &str,
-        definitions: &mut MacroDefinitions,
-    ) -> TranslationUnit {
+    fn timeline_of(&self, root: &str, definitions: &mut MacroDefinitions) -> TranslationUnit {
         let root = PathBuf::from(root);
         TranslationUnit::walk(
             self.summaries.get(&root).expect("indexed"),
@@ -126,12 +126,21 @@ fn answers(
     environment: &dyn cpp_parser::MacroFacts,
     name: &str,
     offset: usize,
-) -> (Option<String>, Option<String>, Option<String>, Option<String>) {
-    let kind = environment.kind_of(name, offset).map(|kind| format!("{kind:?}"));
+) -> (
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+) {
+    let kind = environment
+        .kind_of(name, offset)
+        .map(|kind| format!("{kind:?}"));
     (
         kind,
         environment.body_text_of(name, offset).map(str::to_string),
-        environment.parameters_of(name, offset).map(|list| list.to_string()),
+        environment
+            .parameters_of(name, offset)
+            .map(|list| list.to_string()),
         environment.body_text_in_force(name).map(str::to_string),
     )
 }
@@ -184,7 +193,15 @@ fn the_timeline_answers_what_the_per_file_walk_answered() {
     // Every name the unit mentions, at every offset the file has — the question set is the file's own length, so
     // a difference cannot hide in an offset the test forgot to ask about.
     let source = unit.sources.get(Path::new("/p/api.h")).expect("read");
-    let names = ["SA", "REPEATABLE", "API_CALL", "WINDOWS", "_CONFIG_H_", "f", "value"];
+    let names = [
+        "SA",
+        "REPEATABLE",
+        "API_CALL",
+        "WINDOWS",
+        "_CONFIG_H_",
+        "f",
+        "value",
+    ];
     for name in names {
         for offset in (0..source.len()).step_by(7) {
             assert_eq!(
@@ -293,7 +310,8 @@ fn an_included_definition_is_in_force_from_the_include() {
     let view = timeline.root_environment();
 
     let source = unit.sources.get(Path::new("/p/user.h")).expect("read");
-    let include_end = source.find("#include \"late.h\"").expect("the include") + "#include \"late.h\"".len();
+    let include_end =
+        source.find("#include \"late.h\"").expect("the include") + "#include \"late.h\"".len();
 
     assert_eq!(
         view.kind_of("LATE", include_end - 2),
@@ -325,7 +343,9 @@ fn a_file_outside_the_unit_has_no_environment() {
 
     assert!(timeline.environment_of(Path::new("/p/api.h")).is_some());
     assert!(
-        timeline.environment_of(Path::new("/p/unrelated.h")).is_none(),
+        timeline
+            .environment_of(Path::new("/p/unrelated.h"))
+            .is_none(),
         "nothing includes it, so nothing here says what it sees"
     );
     assert_eq!(
@@ -345,7 +365,10 @@ fn the_unit_walks_its_files_once() {
     let files = [
         ("/p/a.h", "#define A 1\n"),
         ("/p/b.h", "#include \"a.h\"\n#define B 1\n"),
-        ("/p/c.h", "#include \"a.h\"\n#include \"b.h\"\n#define C 1\n"),
+        (
+            "/p/c.h",
+            "#include \"a.h\"\n#include \"b.h\"\n#define C 1\n",
+        ),
         ("/p/main.cpp", "#include \"c.h\"\n"),
     ];
 
@@ -407,9 +430,18 @@ fn the_unit_walks_its_files_once() {
 #[test]
 fn a_walked_unit_can_be_kept_and_read_back() {
     let files = [
-        ("/p/config.h", "#ifndef _CONFIG_H_\n#define _CONFIG_H_\n#define SA(id) id\n#endif\n"),
-        ("/p/api.h", "#include \"config.h\"\n#define API_CALL __cdecl\nAPI_CALL void f(SA(int) value);\n"),
-        ("/p/main.cpp", "#include \"api.h\"\nint before = API_CALL;\n"),
+        (
+            "/p/config.h",
+            "#ifndef _CONFIG_H_\n#define _CONFIG_H_\n#define SA(id) id\n#endif\n",
+        ),
+        (
+            "/p/api.h",
+            "#include \"config.h\"\n#define API_CALL __cdecl\nAPI_CALL void f(SA(int) value);\n",
+        ),
+        (
+            "/p/main.cpp",
+            "#include \"api.h\"\nint before = API_CALL;\n",
+        ),
     ];
 
     let unit = Unit::new(&files);
@@ -531,7 +563,10 @@ fn the_unit_cooks_as_one_stream_in_include_order() {
     let shared = timeline.definitions();
 
     let stitched = timeline.cook_the_unit(&unit.sources, &shared, None, true, None);
-    assert_eq!(stitched.missing, 0, "every file the unit reached has text here");
+    assert_eq!(
+        stitched.missing, 0,
+        "every file the unit reached has text here"
+    );
     assert_eq!(
         stitched.files_with_tokens(),
         3,
@@ -594,7 +629,10 @@ fn the_unit_cooks_as_one_stream_in_include_order() {
     // spacing stops being part of the contract.
     let main = Path::new("/p/main.cpp");
     let main_text = unit.sources.get(main).expect("read");
-    let four = stitched.text.find('4').expect("the expansion is in the stream");
+    let four = stitched
+        .text
+        .find('4')
+        .expect("the expansion is in the stream");
     let (file, written) = stitched.written_at(four).expect("a token is there");
     assert_eq!(
         stitched.file_of(file),
@@ -664,7 +702,9 @@ fn a_declaration_starts_in_the_file_it_stands_in() {
     let widget = tree
         .get_red_root()
         .descendants()
-        .find(|node| cpp_parser::CppSyntaxKind::from(node.kind()) == cpp_parser::CppSyntaxKind::StructDef)
+        .find(|node| {
+            cpp_parser::CppSyntaxKind::from(node.kind()) == cpp_parser::CppSyntaxKind::StructDef
+        })
         .expect("the struct is in the stream");
     let range = cpp_parser::source_range(widget.text_range());
 
@@ -773,7 +813,9 @@ fn taking_a_file_out_of_the_stream_keeps_the_offsets() {
     );
     assert_eq!(
         written.start_offset,
-        "struct Third { int c; };\n".find("Third").expect("its own text"),
+        "struct Third { int c; };\n"
+            .find("Third")
+            .expect("its own text"),
         "and to its own offset in that file, not to where it stands in the stream"
     );
 
@@ -814,7 +856,10 @@ fn a_file_that_does_not_balance_still_contributes_its_tokens() {
             "namespace vc_attributes {\nstruct First { int a; };\n",
         ),
         ("/p/second.h", "struct Second { int b; };\n"),
-        ("/p/main.cpp", "#include \"leaky.h\"\n#include \"second.h\"\n"),
+        (
+            "/p/main.cpp",
+            "#include \"leaky.h\"\n#include \"second.h\"\n",
+        ),
     ];
 
     let unit = Unit::new(&files);
@@ -867,7 +912,9 @@ fn a_file_that_does_not_balance_still_contributes_its_tokens() {
     );
     assert_eq!(
         written.start_offset,
-        "struct Second { int b; };\n".find("Second").expect("its own text"),
+        "struct Second { int b; };\n"
+            .find("Second")
+            .expect("its own text"),
         "and to its own offset in that file"
     );
 }
@@ -951,7 +998,9 @@ fn a_macro_that_declares_a_type_declares_it_in_the_cooked_reading() {
     // **The cooked reading**: the program a compiler sees, indexed and mapped back into the file.
     let (tokens, _) = cpp_parser::lex(source, &cpp_parser::LexerConfig::default());
     let macros = cpp_code_analysis::FileMacros::new(
-        timeline.environment_of(api).expect("the unit reaches api.h"),
+        timeline
+            .environment_of(api)
+            .expect("the unit reaches api.h"),
         &shared,
         None,
         true,
@@ -1024,7 +1073,9 @@ fn a_definition_says_which_file_it_was_written_in() {
     let text = unit.sources.get(main).expect("read");
     let (tokens, _) = cpp_parser::lex(text, &cpp_parser::LexerConfig::default());
     let macros = cpp_code_analysis::FileMacros::new(
-        timeline.environment_of(main).expect("the unit reaches main.cpp"),
+        timeline
+            .environment_of(main)
+            .expect("the unit reaches main.cpp"),
         &shared,
         None,
         true,
@@ -1085,9 +1136,7 @@ fn a_definition_says_which_file_it_was_written_in() {
 
     // **A macro the file itself wrote is in the file itself**: the other side of the same question, on one
     // fixture, so that "the map says another file" cannot pass by saying it everywhere.
-    let local = [
-        ("/p/local.cpp", "#define HERE 7\nint v = HERE;\n"),
-    ];
+    let local = [("/p/local.cpp", "#define HERE 7\nint v = HERE;\n")];
     let unit = Unit::new(&local);
     let mut definitions = MacroDefinitions::default();
     let timeline = unit.timeline_of("/p/local.cpp", &mut definitions);
@@ -1108,10 +1157,7 @@ fn a_definition_says_which_file_it_was_written_in() {
         .iter()
         .find(|token| token.text() == "7")
         .expect("the expansion");
-    let at = rendered
-        .text
-        .find('7')
-        .expect("in the rendering");
+    let at = rendered.text.find('7').expect("in the rendering");
     let written = rendered.written_at(at).expect("written in this file");
     assert_eq!(
         &text[written.start_offset..written.end_offset()],
@@ -1186,8 +1232,11 @@ fn a_file_cooks_the_same_through_the_unit_as_through_a_table_of_its_own() {
 
         // The reading that builds a table for this file…
         let mut per_file_definitions = cpp_code_analysis::ParsedDefinitions::new();
-        let configuration =
-            cpp_code_analysis::configuration_from_environment_and(&view, true, &mut per_file_definitions);
+        let configuration = cpp_code_analysis::configuration_from_environment_and(
+            &view,
+            true,
+            &mut per_file_definitions,
+        );
 
         // …and the reading that reads the unit once and answers positionally.
         let file_macros = cpp_code_analysis::FileMacros::new(view, &shared, None, true);
@@ -1199,7 +1248,8 @@ fn a_file_cooks_the_same_through_the_unit_as_through_a_table_of_its_own() {
         // The precondition of the comparison, asserted rather than assumed: this file really does expand
         // something from outside itself, so "they agree" is not "both rendered an empty stream". (A header of
         // nothing but directives renders to nothing, and that is correct — `config.h` is exactly that.)
-        rendered_something_the_reading_can_be_told_apart_by |= !from_the_table.render().text.trim().is_empty();
+        rendered_something_the_reading_can_be_told_apart_by |=
+            !from_the_table.render().text.trim().is_empty();
 
         assert_eq!(
             from_the_unit.render().text,
@@ -1234,7 +1284,8 @@ fn a_file_cooks_the_same_through_the_unit_as_through_a_table_of_its_own() {
             .map(|token| token.text().to_string())
             .collect()
     };
-    let with_seed = cpp_code_analysis::FileMacros::new(timeline.root_environment(), &shared, Some(&seed), true);
+    let with_seed =
+        cpp_code_analysis::FileMacros::new(timeline.root_environment(), &shared, Some(&seed), true);
 
     assert_eq!(
         with_seed.definition("LATE").map(&body_of),

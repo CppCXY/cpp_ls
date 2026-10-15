@@ -1304,7 +1304,8 @@ fn a_scope_a_macro_body_opens_holds_the_declarations_behind_it() {
     std::fs::create_dir_all(&root).expect("the test directory");
 
     let mut store = SummaryStore::with_provider(&root, CompilerConfig::default(), files);
-    let indexed = store.index_includes_from(std::path::Path::new("/p/main.cpp"), Default::default());
+    let indexed =
+        store.index_includes_from(std::path::Path::new("/p/main.cpp"), Default::default());
 
     assert_eq!(
         indexed.re_read, 2,
@@ -1363,10 +1364,7 @@ fn a_scope_a_macro_body_opens_holds_the_declarations_behind_it() {
     // where `std` was written. The scope exists (that is what makes `std::vector` a qualified name) and there is
     // no fact for `std` — which is what keeps a rename from rewriting `_STD_BEGIN`.
     assert!(
-        summary
-            .declarations
-            .iter()
-            .all(|fact| fact.name != "std"),
+        summary.declarations.iter().all(|fact| fact.name != "std"),
         "no fact is invented for a name the file does not write: {:?}",
         summary
             .declarations
@@ -1589,7 +1587,9 @@ fn a_function_behind_an_export_macro_is_in_the_namespace_the_macro_opened() {
         .definition("std::format", std::path::Path::new("/q/main.cpp"))
     {
         Known::Yes(found) => assert_eq!(found.fact.qualified_name(), "std::format"),
-        other => panic!("`std::format` must resolve for the same reason `std::vector` does: {other:?}"),
+        other => {
+            panic!("`std::format` must resolve for the same reason `std::vector` does: {other:?}")
+        }
     }
 }
 
@@ -1648,11 +1648,7 @@ fn an_inline_namespace_is_transparent_to_a_qualified_name() {
             "#pragma once\n#define NSB namespace deepns {\n#define NSE }\n",
             "std::deepns::Deep",
         ),
-        (
-            "written out, inline",
-            "#pragma once\n",
-            "std::Deep",
-        ),
+        ("written out, inline", "#pragma once\n", "std::Deep"),
     ];
 
     // The last fixture spells the namespace instead of using the macro, which is the path a **rendering** takes:
@@ -1672,7 +1668,10 @@ fn an_inline_namespace_is_transparent_to_a_qualified_name() {
             .with_file("/q/pair.h", header)
             .with_file("/q/main.cpp", source);
 
-        let root = std::env::temp_dir().join(format!("cppls-inline-namespace-{}", label.replace(' ', "-")));
+        let root = std::env::temp_dir().join(format!(
+            "cppls-inline-namespace-{}",
+            label.replace(' ', "-")
+        ));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).expect("the test directory");
 
@@ -1881,7 +1880,10 @@ int at_file_scope;
                 .scopes()
                 .iter()
                 .position(|scope| {
-                    scope.bindings.iter().any(|binding| binding.name.text() == wanted)
+                    scope
+                        .bindings
+                        .iter()
+                        .any(|binding| binding.name.text() == wanted)
                 })
                 .unwrap_or_else(|| panic!("`{wanted}` was not declared at all")),
         )
@@ -2314,9 +2316,5 @@ fn a_local_declared_with_a_qualified_type_is_bound() {
         body.contains("length"),
         "the declaration is the declarator's, wherever its type came from: {body}"
     );
-    assert!(
-        body.contains("line"),
-        "and so is the next one: {body}"
-    );
+    assert!(body.contains("line"), "and so is the next one: {body}");
 }
-

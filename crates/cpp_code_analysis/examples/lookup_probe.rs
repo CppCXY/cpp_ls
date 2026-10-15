@@ -35,7 +35,10 @@ fn main() {
     }
 
     let path = std::path::PathBuf::from(&path);
-    let root = path.parent().unwrap_or(std::path::Path::new(".")).to_path_buf();
+    let root = path
+        .parent()
+        .unwrap_or(std::path::Path::new("."))
+        .to_path_buf();
     let mut session = cpp_code_analysis::Session::open(
         root,
         cpp_code_analysis::SessionFiles::new(
@@ -65,7 +68,12 @@ fn main() {
     // distinction the whole probe exists for.
     let last = name.rsplit("::").next().unwrap_or(&name);
     let mut facts = 0;
-    for fact in session.index().summary(&path).map(|summary| summary.declarations.as_slice()).unwrap_or(&[]) {
+    for fact in session
+        .index()
+        .summary(&path)
+        .map(|summary| summary.declarations.as_slice())
+        .unwrap_or(&[])
+    {
         if fact.name == last {
             facts += 1;
             println!(
@@ -95,20 +103,31 @@ fn main() {
         // **All the declarations the bare name finds**, in order — the step that refuses takes only the first, so
         // what the rest of the list holds is the question.
         let declaring = session.index().files_declaring("_Locked_pointer", &path);
-        println!("  files_declaring(_Locked_pointer) -> {} candidate(s)", declaring.len());
+        println!(
+            "  files_declaring(_Locked_pointer) -> {} candidate(s)",
+            declaring.len()
+        );
         for found in declaring.iter().take(4) {
             println!(
                 "    scope={:<28} qual={:<32} kind={:?} in {}",
                 found.fact.scope.as_deref().unwrap_or("<none>"),
                 found.fact.qualified_name(),
                 found.fact.kind,
-                found.file.file_name().map(|name| name.to_string_lossy().to_string()).unwrap_or_default()
+                found
+                    .file
+                    .file_name()
+                    .map(|name| name.to_string_lossy().to_string())
+                    .unwrap_or_default()
             );
         }
 
         // **Which spelling of the class the query actually carries.** The object's type is `_Locked_pointer<_Ty>`,
         // not `_Locked_pointer`, and that difference decides whether a retry keyed on the class can even happen.
-        for spelling in ["_Locked_pointer", "_Locked_pointer<_Ty>", "std::_Locked_pointer"] {
+        for spelling in [
+            "_Locked_pointer",
+            "_Locked_pointer<_Ty>",
+            "std::_Locked_pointer",
+        ] {
             let members = session.index().declarations_in(spelling, &path).len();
             let resolves = match session.index().definition(spelling, &path) {
                 cpp_code_analysis::Known::Yes(found) => {

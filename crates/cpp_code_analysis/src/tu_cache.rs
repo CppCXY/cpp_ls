@@ -107,7 +107,9 @@ impl RootKey {
                 // The three conditions of the type's documentation, in the order that fails fastest: the file has
                 // not been truncated, nothing below the bound could be a directive, and the bytes above it are the
                 // ones the entry was built from.
-                (text.len() >= end && !text[end..].contains('#') && crate::content_hash(&text[..end]) == hash)
+                (text.len() >= end
+                    && !text[end..].contains('#')
+                    && crate::content_hash(&text[..end]) == hash)
                     .then_some(hash)
             }
         }
@@ -295,7 +297,9 @@ mod tests {
         // A unit with no frames has an empty closure, so this entry is *vacuously* valid: the test is about the
         // check, and an empty closure is the one case where there is nothing to check.
         let key = RootKey::WholeText;
-        cache.put(root, 7, &unit, &files, key).expect("the entry writes");
+        cache
+            .put(root, 7, &unit, &files, key)
+            .expect("the entry writes");
         assert!(
             cache.get(root, 7, &files, key).is_some(),
             "an entry with nothing to verify is served"
@@ -305,7 +309,8 @@ mod tests {
         assert!(cache.get(root, 8, &files, key).is_none());
 
         // …and a corrupt entry is refused rather than half-read.
-        std::fs::write(cache.entry_path(root, 7), b"not a timeline at all").expect("the file writes");
+        std::fs::write(cache.entry_path(root, 7), b"not a timeline at all")
+            .expect("the file writes");
         assert!(cache.get(root, 7, &files, key).is_none());
 
         let _ = std::fs::remove_dir_all(&directory);
@@ -332,7 +337,9 @@ mod tests {
         let unit = a_unit_over(&["/p/main.cpp", "/p/a.h"]);
 
         let key = RootKey::of(body);
-        cache.put(root, 7, &unit, &files, key).expect("the entry writes");
+        cache
+            .put(root, 7, &unit, &files, key)
+            .expect("the entry writes");
         assert!(
             cache.get(root, 7, &files, key).is_some(),
             "the entry that was just written is served"
@@ -352,7 +359,9 @@ mod tests {
         let with_a_directive = "#include \"a.h\"\nint main() { return ZERO; }\n#define LATE 2\n";
         files.insert("/p/main.cpp", with_a_directive);
         assert!(
-            cache.get(root, 7, &files, RootKey::of(with_a_directive)).is_none(),
+            cache
+                .get(root, 7, &files, RootKey::of(with_a_directive))
+                .is_none(),
             "a `#define` below the bound is a directive the walk would have read"
         );
 
@@ -361,7 +370,9 @@ mod tests {
         let a_hash_in_the_body = "#include \"a.h\"\nint main() { return ZERO; } // #\n";
         files.insert("/p/main.cpp", a_hash_in_the_body);
         assert!(
-            cache.get(root, 7, &files, RootKey::of(a_hash_in_the_body)).is_none(),
+            cache
+                .get(root, 7, &files, RootKey::of(a_hash_in_the_body))
+                .is_none(),
             "a `#` the scan cannot prove is not a directive refuses the entry"
         );
 
@@ -369,7 +380,9 @@ mod tests {
         let moved_include = "#include \"a.h\"\n#include \"b.h\"\nint main() { return ZERO; }\n";
         files.insert("/p/main.cpp", moved_include);
         assert!(
-            cache.get(root, 7, &files, RootKey::of(moved_include)).is_none(),
+            cache
+                .get(root, 7, &files, RootKey::of(moved_include))
+                .is_none(),
             "an edit above the bound is an edit to the preamble"
         );
 

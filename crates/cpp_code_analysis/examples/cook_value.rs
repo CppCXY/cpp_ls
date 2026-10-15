@@ -57,9 +57,7 @@ fn main() {
     // moment where the raw reading can be built **with** the closure's macro bodies — see `Session::advance`. A cold
     // reading is built without them, which is why a header's two readings differ far more than a translation unit's:
     // the numbers below are the *sum* of the environment and the rendering, and only the second is step 4's subject.
-    let typed = format!(
-        "{text}\nnamespace app {{ int extra() {{ return 1; }} }}\n"
-    );
+    let typed = format!("{text}\nnamespace app {{ int extra() {{ return 1; }} }}\n");
     session.did_change(&root, &typed);
     session.want_cooked_reading(&root);
     session.index_everything();
@@ -88,7 +86,10 @@ fn main() {
     }
 
     if rows.is_empty() {
-        println!("nothing was cooked — is {} inside a project?", root.display());
+        println!(
+            "nothing was cooked — is {} inside a project?",
+            root.display()
+        );
         return;
     }
 
@@ -99,20 +100,37 @@ fn main() {
 
     rows.sort_by_key(|row| std::cmp::Reverse(row.3));
     println!("{} file(s) cooked\n", rows.len());
-    println!("  {:<9} {:>8} {:>8} {:>12} {:>10}", "file", "raw", "cooked", "only cooked", "only raw");
+    println!(
+        "  {:<9} {:>8} {:>8} {:>12} {:>10}",
+        "file", "raw", "cooked", "only cooked", "only raw"
+    );
     for (path, raw, cooked, only_cooked, only_raw) in rows.iter().take(15) {
-        let name = path.file_name().map(|name| name.to_string_lossy().to_string()).unwrap_or_default();
-        let mark = if *path == root { " ← the file being edited" } else { "" };
+        let name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let mark = if *path == root {
+            " ← the file being edited"
+        } else {
+            ""
+        };
         println!("  {name:<9} {raw:>8} {cooked:>8} {only_cooked:>12} {only_raw:>10}{mark}");
     }
 
     println!("\ntotal raw {total_raw} | cooked {total_cooked}");
-    println!("only in the cooked reading {total_only_cooked}  ← what skipping the render would lose");
+    println!(
+        "only in the cooked reading {total_only_cooked}  ← what skipping the render would lose"
+    );
     println!("only in the raw reading    {total_only_raw}");
     println!(
         "\nthe edited file itself: {} raw declarations, {} of which the cooked reading does not have",
-        rows.iter().find(|row| row.0 == root).map(|row| row.1).unwrap_or(0),
-        rows.iter().find(|row| row.0 == root).map(|row| row.3).unwrap_or(0),
+        rows.iter()
+            .find(|row| row.0 == root)
+            .map(|row| row.1)
+            .unwrap_or(0),
+        rows.iter()
+            .find(|row| row.0 == root)
+            .map(|row| row.3)
+            .unwrap_or(0),
     );
 }
-

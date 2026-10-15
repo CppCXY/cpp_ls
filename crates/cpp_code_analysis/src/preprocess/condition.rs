@@ -130,10 +130,7 @@ pub enum ConditionExpr {
     /// The operand keeps its **original spelling** — angle brackets and quotes included — because the question
     /// `__has_include` asks is about a file name, and `vector` without its brackets is not a name any search path can
     /// be asked about.
-    Builtin {
-        name: Box<str>,
-        operand: Box<str>,
-    },
+    Builtin { name: Box<str>, operand: Box<str> },
     Unary {
         op: UnaryOp,
         operand: Box<ConditionExpr>,
@@ -466,9 +463,9 @@ pub fn eval(expr: &ConditionExpr, macros: &impl MacroValues) -> Value {
         // a search path nobody has — is `Unknown`, never `false`: `__has_include(<vector>)` answering `false` on a
         // machine that simply did not look is the confident-wrong answer that reads the wrong branch, and the whole
         // point of the operator is to tell those two apart.
-        ConditionExpr::Builtin { name, operand } => {
-            macros.builtin_operator(name, operand).unwrap_or(Value::Unknown)
-        }
+        ConditionExpr::Builtin { name, operand } => macros
+            .builtin_operator(name, operand)
+            .unwrap_or(Value::Unknown),
         ConditionExpr::Unary { op, operand } => {
             let Some(value) = eval(operand, macros).known() else {
                 return Value::Unknown;
@@ -608,9 +605,10 @@ fn macro_value(definition: &MacroDef, macros: &impl MacroValues) -> Value {
         .map(|expanded| expanded.token)
         .collect();
 
-    if tokens.iter().any(|token| {
-        token.kind == CppTokenKind::Identifier && token.text() == &*definition.name
-    }) {
+    if tokens
+        .iter()
+        .any(|token| token.kind == CppTokenKind::Identifier && token.text() == &*definition.name)
+    {
         return Value::Unknown;
     }
 
@@ -741,7 +739,8 @@ impl<'a> Parser<'a> {
             return (Some(first.kind), 1);
         }
 
-        let touches = |left: &Token, right: &Token| left.range.end_offset() == right.range.start_offset;
+        let touches =
+            |left: &Token, right: &Token| left.range.end_offset() == right.range.start_offset;
         let second = self.tokens.get(self.index + 1);
         let third = self.tokens.get(self.index + 2);
 

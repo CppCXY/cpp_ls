@@ -110,7 +110,9 @@ fn main() {
     println!("\n--- the flags the project's build states ---");
     let flags = session.discovery().flags();
     if flags.is_empty() {
-        println!("flags          none (the compiler's own defaults are what this project builds with)");
+        println!(
+            "flags          none (the compiler's own defaults are what this project builds with)"
+        );
     } else {
         println!("flags          {}", flags.join(" "));
     }
@@ -161,7 +163,9 @@ fn main() {
                 );
             }
         }
-        None => println!("compiler       none — nothing could be asked, so no system headers are known"),
+        None => {
+            println!("compiler       none — nothing could be asked, so no system headers are known")
+        }
     }
 
     println!("\n--- the configuration queries are keyed on ---");
@@ -216,5 +220,3 @@ fn short(path: &Path, root: &Path) -> String {
         .map(|relative| relative.to_string_lossy().into_owned())
         .unwrap_or_else(|_| path.display().to_string())
 }
-
-

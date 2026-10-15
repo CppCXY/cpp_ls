@@ -24,15 +24,15 @@
 
 use std::path::PathBuf;
 
-use cpp_parser::{MacroBody, SourceRange};
 use cpp_parser::SymbolKind;
+use cpp_parser::{MacroBody, SourceRange};
 
 use crate::cache::SummaryKey;
 use crate::preprocess::directive::IncludeForm;
 use crate::summary::{
-    Access, ConditionalRegion, DeclFact, DeclKind, FactGuard, FileSummary, GuardBranch, IncludeFact,
-    MacroFact, MacroKind, MacroScopeReading, ModuleReading, SummaryGuards, TranslationUnit, TuEvent,
-    TuFrame,
+    Access, ConditionalRegion, DeclFact, DeclKind, FactGuard, FileSummary, GuardBranch,
+    IncludeFact, MacroFact, MacroKind, MacroScopeReading, ModuleReading, SummaryGuards,
+    TranslationUnit, TuEvent, TuFrame,
 };
 
 /// The eight bytes a summary file starts with.
@@ -386,7 +386,10 @@ pub fn encode(summary: &FileSummary) -> Vec<u8> {
 ///
 /// A caller does not encode a timeline it has not validated: see [`crate::index::store`], where the entry carries
 /// the closure's content hashes and is refused when one of them moved.
-pub fn encode_translation_unit(unit: &TranslationUnit, closure: &[(std::path::PathBuf, u64)]) -> Vec<u8> {
+pub fn encode_translation_unit(
+    unit: &TranslationUnit,
+    closure: &[(std::path::PathBuf, u64)],
+) -> Vec<u8> {
     let mut out = Vec::with_capacity(64 + unit.events.len() * 24);
 
     out.extend_from_slice(MAGIC);
@@ -1185,9 +1188,9 @@ fn symbol_kind_code(kind: SymbolKind) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::{CODEC_VERSION, DecodeError, MAGIC, decl_kind_code, decode, encode};
-    use crate::summary::MacroKind;
     use crate::cache::SummaryKey;
     use crate::preprocess::directive::IncludeForm;
+    use crate::summary::MacroKind;
     use crate::summary::{
         ConditionalRegion, DeclFact, DeclKind, FactGuard, FileSummary, GuardBranch, IncludeFact,
         MacroFact, MacroScopeReading, SummaryGuards,
@@ -1328,7 +1331,12 @@ mod tests {
             ],
             guards: SummaryGuards {
                 visit_once: false,
-                regions: vec![range(200, 12), range(240, 20), range(260, 9), range(300, 11)],
+                regions: vec![
+                    range(200, 12),
+                    range(240, 20),
+                    range(260, 9),
+                    range(300, 11),
+                ],
                 conditionals: vec![
                     ConditionalRegion {
                         branches: vec![
@@ -1415,7 +1423,10 @@ mod tests {
     #[test]
     fn bytes_that_are_not_a_summary_are_rejected() {
         assert_eq!(decode(b"").unwrap_err(), DecodeError::Truncated);
-        assert_eq!(decode(b"not a summary at all").unwrap_err(), DecodeError::NotASummary);
+        assert_eq!(
+            decode(b"not a summary at all").unwrap_err(),
+            DecodeError::NotASummary
+        );
     }
 
     #[test]
@@ -1511,4 +1522,3 @@ mod tests {
         at
     }
 }
-

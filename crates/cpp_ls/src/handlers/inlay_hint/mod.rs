@@ -123,13 +123,14 @@ pub async fn on_inlay_hint(
 /// about the end of a file is asking about whatever is there. An end that cannot be placed is the end of the file,
 /// and a start that cannot be placed is the end of the file too — so nothing is selected, which is the true answer
 /// for a range that begins past what the file holds.
-fn visible_range(
-    view: &FileView,
-    range: lsp_types::Range,
-) -> Option<cpp_parser::SourceRange> {
+fn visible_range(view: &FileView, range: lsp_types::Range) -> Option<cpp_parser::SourceRange> {
     let len = view.source.len();
-    let start = offset_at_position(view, range.start).unwrap_or(cpp_code_analysis::file::coordinates::ReadingOffset::new(len));
-    let end = offset_at_position(view, range.end).unwrap_or(cpp_code_analysis::file::coordinates::ReadingOffset::new(len));
+    let start = offset_at_position(view, range.start).unwrap_or(
+        cpp_code_analysis::file::coordinates::ReadingOffset::new(len),
+    );
+    let end = offset_at_position(view, range.end).unwrap_or(
+        cpp_code_analysis::file::coordinates::ReadingOffset::new(len),
+    );
 
     (start <= end).then(|| cpp_parser::SourceRange::new(start.get(), end.get() - start.get()))
 }
@@ -220,7 +221,11 @@ mod tests {
             other => panic!("a plain label was expected, not label parts: {other:?}"),
         }
         assert_eq!(hint.kind, Some(lsp_types::InlayHintKind::PARAMETER));
-        assert_eq!(hint.padding_right, Some(true), "the space goes after the colon");
+        assert_eq!(
+            hint.padding_right,
+            Some(true),
+            "the space goes after the colon"
+        );
 
         // A hint past the end of the file is dropped rather than placed at the end: a name drawn in the wrong
         // place is worse than no name.
@@ -236,6 +241,3 @@ mod tests {
         );
     }
 }
-
-
-

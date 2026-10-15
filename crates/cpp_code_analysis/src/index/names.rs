@@ -47,7 +47,10 @@ pub(super) struct Posting {
 
 impl Posting {
     fn new(file: u32, index: usize, cooked: bool) -> Self {
-        debug_assert!(index < COOKED as usize, "a file with two billion declarations");
+        debug_assert!(
+            index < COOKED as usize,
+            "a file with two billion declarations"
+        );
         let slot = index as u32 | if cooked { COOKED } else { 0 };
         Posting { file, slot }
     }
@@ -98,7 +101,10 @@ impl NameIndex {
         insert_sorted(&mut self.by_name, name, posting);
 
         if is_new {
-            self.sorted.entry(lowercase(name).into_boxed_str()).or_default().push(Box::from(name));
+            self.sorted
+                .entry(lowercase(name).into_boxed_str())
+                .or_default()
+                .push(Box::from(name));
         }
     }
 
@@ -147,7 +153,10 @@ impl NameIndex {
         for fact in macros.iter().filter(|fact| fact.kind.is_definition()) {
             let files = match self.definers.get_mut(fact.name.as_str()) {
                 Some(files) => files,
-                None => self.definers.entry(Box::from(fact.name.as_str())).or_default(),
+                None => self
+                    .definers
+                    .entry(Box::from(fact.name.as_str()))
+                    .or_default(),
             };
 
             match files.binary_search(&file) {
@@ -232,7 +241,12 @@ fn insert_sorted(map: &mut HashMap<Box<str>, Vec<Posting>>, key: &str, posting: 
 /// Drop one file's postings of one reading from `key`'s list — they are contiguous, so this is one `drain`.
 ///
 /// Answers whether the list is now empty and was dropped.
-fn remove_range(map: &mut HashMap<Box<str>, Vec<Posting>>, key: &str, file: u32, cooked: bool) -> bool {
+fn remove_range(
+    map: &mut HashMap<Box<str>, Vec<Posting>>,
+    key: &str,
+    file: u32,
+    cooked: bool,
+) -> bool {
     let Some(list) = map.get_mut(key) else {
         return false;
     };
@@ -290,7 +304,10 @@ mod tests {
         index.add_declarations(2, true, &facts);
         index.add_declarations(2, false, &facts);
 
-        assert_eq!(held(&index, "x"), vec![(1, false), (2, false), (2, true), (3, false)]);
+        assert_eq!(
+            held(&index, "x"),
+            vec![(1, false), (2, false), (2, true), (3, false)]
+        );
     }
 
     #[test]
@@ -311,13 +328,20 @@ mod tests {
         index.remove_declarations(2, false, &facts);
         assert!(index.named("x").is_empty());
         assert!(index.scoped("ns").is_empty());
-        assert_eq!(index.distinct_names(), 0, "an emptied list is dropped, not kept as an empty entry");
+        assert_eq!(
+            index.distinct_names(),
+            0,
+            "an emptied list is dropped, not kept as an empty entry"
+        );
     }
 
     #[test]
     fn a_local_has_no_name_entry() {
         let facts = facts_of("void f() { int inner; }\n");
-        assert!(facts.iter().any(|fact| fact.name == "inner" && fact.local), "the fixture has a local");
+        assert!(
+            facts.iter().any(|fact| fact.name == "inner" && fact.local),
+            "the fixture has a local"
+        );
 
         let mut index = NameIndex::default();
         index.add_declarations(1, false, &facts);
@@ -354,7 +378,12 @@ mod tests {
                 .map(|held| held.iter().map(|spelling| spelling.to_string()).collect())
                 .unwrap_or_default()
         };
-        assert_eq!(spellings(&index).len(), 2, "two spellings, one lowercase key: {:?}", spellings(&index));
+        assert_eq!(
+            spellings(&index).len(),
+            2,
+            "two spellings, one lowercase key: {:?}",
+            spellings(&index)
+        );
 
         index.remove_declarations(2, false, &lower);
         assert_eq!(spellings(&index).len(), 2, "file 3 still declares `size`");
@@ -370,7 +399,15 @@ mod tests {
     #[test]
     fn a_walk_from_a_key_is_in_lowercase_order() {
         let mut index = NameIndex::default();
-        for (file, source) in ["int banana;\n", "int Apple;\n", "int cherry;\n", "int apple2;\n"].iter().enumerate() {
+        for (file, source) in [
+            "int banana;\n",
+            "int Apple;\n",
+            "int cherry;\n",
+            "int apple2;\n",
+        ]
+        .iter()
+        .enumerate()
+        {
             index.add_declarations(file as u32, false, &facts_of(source));
         }
 
@@ -380,14 +417,26 @@ mod tests {
 
     #[test]
     fn the_definers_of_a_macro_are_the_files_that_define_it() {
-        let define = summarize(Path::new("/p/a.h"), "#define M 1\n#define M 2\n", SummaryKey::new(0, 0));
-        let use_only = summarize(Path::new("/p/b.h"), "#ifdef M\n#endif\n", SummaryKey::new(0, 0));
+        let define = summarize(
+            Path::new("/p/a.h"),
+            "#define M 1\n#define M 2\n",
+            SummaryKey::new(0, 0),
+        );
+        let use_only = summarize(
+            Path::new("/p/b.h"),
+            "#ifdef M\n#endif\n",
+            SummaryKey::new(0, 0),
+        );
 
         let mut index = NameIndex::default();
         index.add_macros(5, &define.macros);
         index.add_macros(2, &define.macros);
         index.add_macros(9, &use_only.macros);
-        assert_eq!(index.definers_of("M"), &[2, 5], "sorted, once per file, and a use is not a definition");
+        assert_eq!(
+            index.definers_of("M"),
+            &[2, 5],
+            "sorted, once per file, and a use is not a definition"
+        );
 
         index.remove_macros(5, &define.macros);
         assert_eq!(index.definers_of("M"), &[2]);

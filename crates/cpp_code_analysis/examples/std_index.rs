@@ -56,8 +56,7 @@ fn main() {
     let mut bytes = 0usize;
     let mut encoded = Vec::new();
     for summary in &summaries {
-        let file =
-            cpp_code_analysis::write_summary(summary, &cache).expect("the summary writes");
+        let file = cpp_code_analysis::write_summary(summary, &cache).expect("the summary writes");
         bytes += std::fs::metadata(&file)
             .map(|meta| meta.len() as usize)
             .unwrap_or(0);
@@ -86,4 +85,3 @@ fn main() {
         bytes / 1024,
     );
 }
-

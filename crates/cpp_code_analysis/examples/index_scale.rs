@@ -31,7 +31,9 @@ fn source_of(number: usize) -> String {
         ));
     }
     text.push_str("}\n");
-    text.push_str(&format!("int global{number};\nvoid helper{number}(int a, int b) {{ int local; }}\n"));
+    text.push_str(&format!(
+        "int global{number};\nvoid helper{number}(int a, int b) {{ int local; }}\n"
+    ));
     text
 }
 
@@ -47,7 +49,10 @@ fn timed<T>(label: &str, repeat: usize, mut work: impl FnMut() -> T) -> T {
 }
 
 fn main() {
-    let files: usize = std::env::args().nth(1).and_then(|n| n.parse().ok()).unwrap_or(5000);
+    let files: usize = std::env::args()
+        .nth(1)
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(5000);
 
     let started = Instant::now();
     let mut index = ProjectIndex::new();
@@ -59,7 +64,10 @@ fn main() {
         }
         index.insert(summary);
     }
-    let declarations: usize = index.summaries().map(|summary| summary.declarations.len()).sum();
+    let declarations: usize = index
+        .summaries()
+        .map(|summary| summary.declarations.len())
+        .sum();
     println!(
         "{files} files, {declarations} declarations, {} distinct names, built in {:.2?}",
         index.distinct_names(),
@@ -70,10 +78,14 @@ fn main() {
 
     println!("\nworkspace symbol (limit 100)");
     for query in ["widget7_1", "wid", "run", "ns7::Widget7_1", "e"] {
-        let found = timed(&format!("index   {query:?}"), 20, || index.symbols_matching(query, 100));
+        let found = timed(&format!("index   {query:?}"), 20, || {
+            index.symbols_matching(query, 100)
+        });
         // The scan's *cost* is the point; its matching is cruder (substring of the qualified name), so only the
         // index's answer is checked, by the unit test that compares it with the real scan.
-        let _ = timed(&format!("scan    {query:?}"), 3, || scan_symbols(&index, query, 100));
+        let _ = timed(&format!("scan    {query:?}"), 3, || {
+            scan_symbols(&index, query, 100)
+        });
         assert!(!found.is_empty() || query == "zzz");
     }
 
@@ -81,16 +93,24 @@ fn main() {
     let found = timed("index   files_declaring(\"Widget7_1\")", 20, || {
         index.files_declaring("Widget7_1", &from).len()
     });
-    let scanned = timed("scan    files_declaring(\"Widget7_1\")", 3, || scan_named(&index, "Widget7_1", &from));
+    let scanned = timed("scan    files_declaring(\"Widget7_1\")", 3, || {
+        scan_named(&index, "Widget7_1", &from)
+    });
     assert_eq!(found, scanned);
 
     println!("\nmember list");
-    let found = timed("index   declarations_in(\"ns7\")", 20, || index.declarations_in("ns7", &from).len());
-    let scanned = timed("scan    declarations_in(\"ns7\")", 3, || scan_scope(&index, "ns7", &from));
+    let found = timed("index   declarations_in(\"ns7\")", 20, || {
+        index.declarations_in("ns7", &from).len()
+    });
+    let scanned = timed("scan    declarations_in(\"ns7\")", 3, || {
+        scan_scope(&index, "ns7", &from)
+    });
     assert_eq!(found, scanned);
 
     println!("\nmacro definers");
-    timed("index   files_defining_macro(\"NOPE\")", 1000, || index.files_defining_macro("NOPE").len());
+    timed("index   files_defining_macro(\"NOPE\")", 1000, || {
+        index.files_defining_macro("NOPE").len()
+    });
 
     println!("\none edit (forget + insert of one file)");
     let source = source_of(files / 2);
@@ -124,8 +144,11 @@ fn scan_symbols(index: &ProjectIndex, query: &str, limit: usize) -> usize {
 }
 
 fn scan_named(index: &ProjectIndex, name: &str, from: &Path) -> usize {
-    let visible: std::collections::HashSet<String> =
-        index.visible_files(from).into_iter().map(|(key, _)| key).collect();
+    let visible: std::collections::HashSet<String> = index
+        .visible_files(from)
+        .into_iter()
+        .map(|(key, _)| key)
+        .collect();
 
     index
         .summaries()
@@ -136,8 +159,11 @@ fn scan_named(index: &ProjectIndex, name: &str, from: &Path) -> usize {
 }
 
 fn scan_scope(index: &ProjectIndex, scope: &str, from: &Path) -> usize {
-    let visible: std::collections::HashSet<String> =
-        index.visible_files(from).into_iter().map(|(key, _)| key).collect();
+    let visible: std::collections::HashSet<String> = index
+        .visible_files(from)
+        .into_iter()
+        .map(|(key, _)| key)
+        .collect();
 
     index
         .summaries()

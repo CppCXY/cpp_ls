@@ -125,7 +125,9 @@ fn main() {
     );
 
     for (name, occurrences, defined_in) in &names {
-        println!("  {name:<36} {occurrences:>7} identifier occurrences, {defined_in} defining file(s)");
+        println!(
+            "  {name:<36} {occurrences:>7} identifier occurrences, {defined_in} defining file(s)"
+        );
     }
 
     // --- the ladder -------------------------------------------------------------------------------
@@ -272,7 +274,10 @@ fn main() {
     let view = session.view(&main_file).expect("the buffer is the text");
     let at = view.source.find("WIDGET_API").expect("the use is there");
 
-    match session.macro_references(&view, cpp_code_analysis::file::coordinates::ReadingOffset::new(at)) {
+    match session.macro_references(
+        &view,
+        cpp_code_analysis::file::coordinates::ReadingOffset::new(at),
+    ) {
         Known::Yes(found) => println!(
             "\ncursor on `WIDGET_API` — the project's own macro, in a buffer that was never saved:\n  {} \
              references in {} files: {} defines, {} uses, {} uncertain; a rename edits {} places\n  {}",
@@ -287,12 +292,20 @@ fn main() {
         other => println!("\ncursor on `WIDGET_API`: {other:?}"),
     }
 
-    let header = session.view(root.join("widget.h")).expect("the header reads");
-    let definition = header.source.find("WIDGET_API").expect("the definition is there");
+    let header = session
+        .view(root.join("widget.h"))
+        .expect("the header reads");
+    let definition = header
+        .source
+        .find("WIDGET_API")
+        .expect("the definition is there");
 
     println!(
         "  the same question with the cursor on the `#define` in widget.h: {}",
-        match session.macro_references(&header, cpp_code_analysis::file::coordinates::ReadingOffset::new(definition)) {
+        match session.macro_references(
+            &header,
+            cpp_code_analysis::file::coordinates::ReadingOffset::new(definition)
+        ) {
             Known::Yes(found) => format!("{} references", found.total()),
             other => format!("{other:?}"),
         }
@@ -478,7 +491,11 @@ fn places(found: &MacroReferences) -> String {
     found
         .files
         .iter()
-        .flat_map(|file| file.references.iter().map(move |reference| (file, reference)))
+        .flat_map(|file| {
+            file.references
+                .iter()
+                .map(move |reference| (file, reference))
+        })
         .map(|(file, reference)| {
             format!(
                 "{}:{}",

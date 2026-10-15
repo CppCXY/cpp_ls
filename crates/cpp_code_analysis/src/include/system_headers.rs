@@ -147,7 +147,8 @@ fn cxx_header_roots() -> Vec<PathBuf> {
             .flatten()
             .filter_map(|entry| {
                 let name = entry.file_name().to_string_lossy().to_string();
-                name.starts_with("llvm").then(|| entry.path())?
+                name.starts_with("llvm")
+                    .then(|| entry.path())?
                     .join("lib")
                     .join("clang")
                     .exists()
@@ -185,7 +186,11 @@ fn newest_versions(root: &Path, take: usize) -> Vec<PathBuf> {
         .filter(|path| {
             path.file_name()
                 .and_then(|name| name.to_str())
-                .is_some_and(|name| name.chars().next().is_some_and(|first| first.is_ascii_digit()))
+                .is_some_and(|name| {
+                    name.chars()
+                        .next()
+                        .is_some_and(|first| first.is_ascii_digit())
+                })
         })
         .collect();
 

@@ -172,7 +172,9 @@ impl MacroReferences {
             for reference in &file.references {
                 let certain = matches!(
                     reference.kind,
-                    ReferenceKind::Definition | ReferenceKind::Undefinition | ReferenceKind::Use { .. }
+                    ReferenceKind::Definition
+                        | ReferenceKind::Undefinition
+                        | ReferenceKind::Use { .. }
                 );
 
                 if certain {
@@ -270,12 +272,7 @@ pub fn macro_references<F: FileProvider>(
             let claimed: HashSet<(usize, usize)> = references
                 .iter()
                 .filter(|reference| reference.kind == ReferenceKind::Definition)
-                .map(|reference| {
-                    (
-                        reference.range.start_offset,
-                        reference.range.end_offset(),
-                    )
-                })
+                .map(|reference| (reference.range.start_offset, reference.range.end_offset()))
                 .collect();
 
             // An `#undef`'s fact carries the **whole directive**, because the directive reader does not track where
@@ -497,7 +494,8 @@ pub fn symbol_references<F: FileProvider>(
         let references: Vec<Reference> = here
             .into_iter()
             .map(|range| Reference {
-                kind: if normalize_path(&path, cfg!(windows)) == normalize_path(&symbol.declared_in, cfg!(windows))
+                kind: if normalize_path(&path, cfg!(windows))
+                    == normalize_path(&symbol.declared_in, cfg!(windows))
                     && range.start_offset == symbol.name_at
                 {
                     ReferenceKind::Definition
@@ -516,7 +514,9 @@ pub fn symbol_references<F: FileProvider>(
         });
     }
 
-    answer.files.sort_by(|left, right| left.file.cmp(&right.file));
+    answer
+        .files
+        .sort_by(|left, right| left.file.cmp(&right.file));
     Known::Yes(answer)
 }
 
@@ -584,17 +584,16 @@ pub struct SymbolReferences {
 impl SymbolReferences {
     /// Every reference, in file order.
     pub fn all(&self) -> impl Iterator<Item = (&PathBuf, &Reference)> {
-        self.files
-            .iter()
-            .flat_map(|file| file.references.iter().map(move |reference| (&file.file, reference)))
+        self.files.iter().flat_map(|file| {
+            file.references
+                .iter()
+                .map(move |reference| (&file.file, reference))
+        })
     }
 
     /// How many places the name is written.
     pub fn count(&self) -> usize {
-        self.files
-            .iter()
-            .map(|file| file.references.len())
-            .sum()
+        self.files.iter().map(|file| file.references.len()).sum()
     }
 }
 
@@ -646,9 +645,9 @@ mod tests {
         ReferenceBudget, ReferenceKind, SymbolToFind, macro_references, symbol_references,
     };
     use crate::cache::SummaryKey;
+    use crate::file::paths::{FileProvider, MemoryFiles};
     use crate::include::config::CompilerConfig;
     use crate::include::graph::Marked;
-    use crate::file::paths::{FileProvider, MemoryFiles};
     use crate::index::{FileIndexer, ProjectIndex};
     use crate::symbol::{Known, UnknownReason};
     use std::path::Path;
@@ -751,7 +750,8 @@ mod tests {
                     format!(
                         "{}:{line}:{}",
                         file.file_name().unwrap().to_string_lossy(),
-                        text[reference.range.start_offset..reference.range.end_offset()].to_string()
+                        text[reference.range.start_offset..reference.range.end_offset()]
+                            .to_string()
                     )
                 })
                 .collect(),
@@ -815,10 +815,7 @@ mod tests {
 
         assert_eq!(
             symbol_shown(&files, &index, &object),
-            vec![
-                "main.cpp:1:sux".to_string(),
-                "main.cpp:4:sux".to_string(),
-            ],
+            vec!["main.cpp:1:sux".to_string(), "main.cpp:4:sux".to_string(),],
             "an object declared at file scope is used in the function below it"
         );
     }
@@ -847,7 +844,10 @@ mod tests {
             );
         let index = index_of(&files, &["/p/api.h", "/p/main.cpp"]);
 
-        assert_eq!(shown(&files, &index, "API"), ["api.h:define:API", "main.cpp:use:API"]);
+        assert_eq!(
+            shown(&files, &index, "API"),
+            ["api.h:define:API", "main.cpp:use:API"]
+        );
 
         match macro_references(&index, &files, "API", ReferenceBudget::default()) {
             Known::Yes(found) => assert_eq!(
@@ -901,7 +901,10 @@ mod tests {
             )
             .with_file("/p/modern.h", "#define MODERN int\n")
             .with_file("/p/feature.h", "#define FEATURE_ONLY int\n")
-            .with_file("/p/main.cpp", "#include \"widget.h\"\nMODERN a;\nFEATURE_ONLY b;\n");
+            .with_file(
+                "/p/main.cpp",
+                "#include \"widget.h\"\nMODERN a;\nFEATURE_ONLY b;\n",
+            );
 
         let index = index_of(
             &files,
@@ -1026,7 +1029,8 @@ mod tests {
 
         // `Marked::default()` is a *complete* environment with nothing in it: the compiler predefines nothing and
         // the command line said nothing, which is the whole of what this compilation defines.
-        let index = index_of(&files, &["/p/winnt.h", "/p/windef.cpp"]).with_macros(Marked::default());
+        let index =
+            index_of(&files, &["/p/winnt.h", "/p/windef.cpp"]).with_macros(Marked::default());
 
         assert_eq!(
             shown(&files, &index, "WIN_ONLY"),
@@ -1049,7 +1053,8 @@ mod tests {
             )
             .with_file("/p/winnt.h", "#define WIN_ONLY int\n");
 
-        let index = index_of(&files, &["/p/winnt.h", "/p/windef.cpp"]).with_macros(Marked::default());
+        let index =
+            index_of(&files, &["/p/winnt.h", "/p/windef.cpp"]).with_macros(Marked::default());
 
         assert_eq!(
             shown(&files, &index, "WIN_ONLY"),
@@ -1172,10 +1177,19 @@ mod tests {
         let files = fixture().with_file("/p/other.cpp", "API f() { return 0; }\n");
         let index = index_of(
             &files,
-            &["/p/api.h", "/p/main.cpp", "/p/other.cpp", "/p/guarded.h", "/p/cond.cpp"],
+            &[
+                "/p/api.h",
+                "/p/main.cpp",
+                "/p/other.cpp",
+                "/p/guarded.h",
+                "/p/cond.cpp",
+            ],
         );
 
-        assert_eq!(shown(&files, &index, "API"), ["api.h:define:API", "main.cpp:use:API"]);
+        assert_eq!(
+            shown(&files, &index, "API"),
+            ["api.h:define:API", "main.cpp:use:API"]
+        );
         assert_eq!(
             files.reads_of("/p/other.cpp"),
             1,
@@ -1190,8 +1204,14 @@ mod tests {
 
         match macro_references(&index, &files, "API", ReferenceBudget::default()) {
             Known::Yes(found) => {
-                assert_eq!(found.looked_at, 3, "three candidates: both files and the definition");
-                assert_eq!(found.without_the_name, 1, "and one of them has no `API` in it");
+                assert_eq!(
+                    found.looked_at, 3,
+                    "three candidates: both files and the definition"
+                );
+                assert_eq!(
+                    found.without_the_name, 1,
+                    "and one of them has no `API` in it"
+                );
             }
             other => panic!("the macro is indexed, got {other:?}"),
         }
@@ -1246,7 +1266,11 @@ mod tests {
             panic!("the macro is indexed");
         };
 
-        assert_eq!(found.candidates(), 3, "the definer and the two files that include it");
+        assert_eq!(
+            found.candidates(),
+            3,
+            "the definer and the two files that include it"
+        );
         assert_eq!(found.looked_at, 3, "all three were read");
         assert_eq!(found.without_the_name, 1, "one of them has no `API` in it");
         assert_eq!(found.lexed(), 2, "so two were lexed");
@@ -1263,7 +1287,11 @@ mod tests {
             Known::Yes(found) => {
                 assert_eq!(found.looked_at, 1);
                 assert_eq!(found.not_looked_at, 1, "one candidate was left unread");
-                assert_eq!(found.candidates(), 2, "and it is still counted as a candidate");
+                assert_eq!(
+                    found.candidates(),
+                    2,
+                    "and it is still counted as a candidate"
+                );
                 assert!(
                     found.total() < 2,
                     "the answer is short because of it: {} references",
@@ -1290,8 +1318,13 @@ mod tests {
         let edits = found.rename("INT_TYPE");
         assert_eq!(edits.len(), 2, "the definition and the one use");
 
-        let mut text = files.read(Path::new("/p/main.cpp")).expect("the file reads");
-        for edit in edits.iter().filter(|edit| edit.file == Path::new("/p/main.cpp")) {
+        let mut text = files
+            .read(Path::new("/p/main.cpp"))
+            .expect("the file reads");
+        for edit in edits
+            .iter()
+            .filter(|edit| edit.file == Path::new("/p/main.cpp"))
+        {
             text.replace_range(
                 edit.range.start_offset..edit.range.end_offset(),
                 &edit.replacement,

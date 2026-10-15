@@ -34,7 +34,11 @@ fn namespaces_and_classes_nest_in_source_order() {
          int after;\n",
     );
 
-    assert_eq!(names(&outline), vec!["ns", "after"], "two roots, in the file's order");
+    assert_eq!(
+        names(&outline),
+        vec!["ns", "after"],
+        "two roots, in the file's order"
+    );
 
     let ns = &outline[0];
     assert_eq!(ns.fact.kind, DeclKind::Namespace);

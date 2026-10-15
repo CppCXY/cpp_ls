@@ -180,7 +180,9 @@ fn main() {
 
             for name in &has {
                 let in_raw = raw_names.iter().any(|found| found.contains(name.as_str()));
-                let in_cooked = cooked_names.iter().any(|found| found.contains(name.as_str()));
+                let in_cooked = cooked_names
+                    .iter()
+                    .any(|found| found.contains(name.as_str()));
                 let found_in_cooked = cooked_names
                     .iter()
                     .find(|found| found.contains(name.as_str()))
@@ -227,8 +229,14 @@ fn main() {
                 .map(String::as_str)
                 .collect();
 
-            println!("    the rendering alone has ({}): {only_rendered:?}", rendered_names.len());
-            println!("    the raw reading alone has ({}): {only_raw:?}", raw_names.len());
+            println!(
+                "    the rendering alone has ({}): {only_rendered:?}",
+                rendered_names.len()
+            );
+            println!(
+                "    the raw reading alone has ({}): {only_raw:?}",
+                raw_names.len()
+            );
 
             // **The same comparison by the LAST segment**, which is the one that separates a lost declaration from
             // a differently-qualified one. A file whose macro never opened its namespace has every declaration at

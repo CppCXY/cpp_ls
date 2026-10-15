@@ -167,10 +167,7 @@ pub fn header_name_at(root: &CppSyntaxNode, offset: usize) -> Option<(String, So
 /// Strictly inside rather than at its edge: a cursor at the end of `#include <vector>|` is past the name, and a
 /// completion there is not asking about the header that was just written — see
 /// [`crate::completion::context`], which is the other consumer of that boundary.
-fn header_name_token_at(
-    root: &CppSyntaxNode,
-    offset: usize,
-) -> Option<cpp_parser::CppSyntaxToken> {
+fn header_name_token_at(root: &CppSyntaxNode, offset: usize) -> Option<cpp_parser::CppSyntaxToken> {
     root.descendants_with_tokens()
         .filter_map(|element| element.into_token())
         .find(|token| {
@@ -226,7 +223,10 @@ pub fn operator_in(root: &CppSyntaxNode, position: usize) -> Option<cpp_parser::
 /// does know, and measured on `full.` at the end of a line it produces a name node whose text is `"full.\n"` — the
 /// operator and the line break included. Handing that to the type layer asks what type `full.\n` has, which is a
 /// question with no answer rather than a wrong one, so it is skipped and the walk goes on to the identifier inside.
-pub fn name_ending_before_an_operator(root: &CppSyntaxNode, offset: usize) -> Option<CppSyntaxNode> {
+pub fn name_ending_before_an_operator(
+    root: &CppSyntaxNode,
+    offset: usize,
+) -> Option<CppSyntaxNode> {
     let mut at = offset;
 
     while at > 0 {
@@ -259,7 +259,8 @@ pub fn name_ending_before_an_operator(root: &CppSyntaxNode, offset: usize) -> Op
             return token
                 .parent_ancestors()
                 .find(|node| {
-                    cpp_parser::CppSyntaxKind::from(node.kind()) == cpp_parser::CppSyntaxKind::ThisExpr
+                    cpp_parser::CppSyntaxKind::from(node.kind())
+                        == cpp_parser::CppSyntaxKind::ThisExpr
                 })
                 .or_else(|| token.parent_ancestors().next());
         }
@@ -321,13 +322,14 @@ pub fn name_at_including_directives(
         .filter_map(|element| element.into_token())
         .find(|token| contains_token(token, offset))?;
 
-    (cpp_parser::CppTokenKind::from(token.kind()) == cpp_parser::CppTokenKind::Identifier)
-        .then(|| {
+    (cpp_parser::CppTokenKind::from(token.kind()) == cpp_parser::CppTokenKind::Identifier).then(
+        || {
             (
                 token.text().to_string(),
                 cpp_parser::source_range(token.text_range()),
             )
-        })
+        },
+    )
 }
 
 /// The name the cursor is on as the file **writes** it, which is what a lookup has to be given: `ns::Widget` for
@@ -479,7 +481,10 @@ pub fn name_position_at(root: &CppSyntaxNode, offset: usize) -> Option<NamePosit
     // The chain is written as flat tokens of one node — see [`identifier_written_at`] — so this walks them in
     // order and stops at the cursor. Trivia is stepped over rather than treated as an end: `ns :: Wid` is the same
     // name as `ns::Wid`, and the grammar is what said so when it built one node out of them.
-    for token in node.children_with_tokens().filter_map(|child| child.into_token()) {
+    for token in node
+        .children_with_tokens()
+        .filter_map(|child| child.into_token())
+    {
         let token_range = cpp_parser::source_range(token.text_range());
 
         if cpp_parser::is_trivia(cpp_parser::CppTokenKind::from(token.kind())) {
@@ -687,11 +692,11 @@ fn name_node_around(root: &CppSyntaxNode, offset: usize) -> Option<CppSyntaxNode
         // Skipping tokens is the fix and not a workaround: this function's contract is to find a **node** (a
         // `NameExpr` or an `IdentifierExpr`), the two predicates are about containment, and a token can never be one.
         // A token that ends at the cursor is not a candidate at all, so it must not be able to win the search.
-        let next = node
-            .children_with_tokens()
-            .find_map(|element| (contains_element(&element, offset) || ends_at(&element, offset))
+        let next = node.children_with_tokens().find_map(|element| {
+            (contains_element(&element, offset) || ends_at(&element, offset))
                 .then(|| element.into_node())
-                .flatten());
+                .flatten()
+        });
 
         match next {
             Some(child) => node = child,
@@ -1217,7 +1222,11 @@ mod tests {
 
     fn tree(source: &str) -> cpp_parser::CppSyntaxTree {
         let tree = CppParser::parse(source, ParserConfig::default());
-        assert_eq!(tree.get_errors(), [], "the input must parse cleanly: {source:?}");
+        assert_eq!(
+            tree.get_errors(),
+            [],
+            "the input must parse cleanly: {source:?}"
+        );
         tree
     }
 
@@ -1272,7 +1281,10 @@ mod tests {
         let access = super::member_access_at(&root, dot + 1).unwrap_or_else(|| {
             panic!(
                 "the offset after the `.` must read as a member access; the parser said {:?}",
-                errors.iter().map(|error| &error.message).collect::<Vec<_>>()
+                errors
+                    .iter()
+                    .map(|error| &error.message)
+                    .collect::<Vec<_>>()
             )
         });
         assert_eq!(access.object.text().to_string(), "full");
@@ -1310,7 +1322,10 @@ mod tests {
         );
 
         // The `#` and the word `include` are part of the directive, not of the name.
-        assert!(header_name_at(&root, 0).is_none(), "the `#` is not the name");
+        assert!(
+            header_name_at(&root, 0).is_none(),
+            "the `#` is not the name"
+        );
         assert!(
             header_name_at(&root, source.find("include").expect("the fixture") + 2).is_none(),
             "and neither is `include`"
@@ -1353,7 +1368,10 @@ mod tests {
         let root = parsed.get_red_root();
 
         let widget = name_node_at(&root, at(source, "Widget")).expect("a name node");
-        assert_eq!(identifier_written_at(&widget, at(source, "Widget")).as_deref(), Some("Widget"));
+        assert_eq!(
+            identifier_written_at(&widget, at(source, "Widget")).as_deref(),
+            Some("Widget")
+        );
     }
 
     #[test]
@@ -1562,7 +1580,8 @@ mod tests {
     fn an_out_of_line_definition_resolves_to_the_declaration_in_the_class() {
         // The everyday C++ pair: the declaration in the class, the definition in a `.cpp`. Both are `C::value`,
         // and the jump a user wants is from either to the declaration.
-        let source = "struct C {\n  int value() const;\n};\nint C::value() const {\n  return 0;\n}\n";
+        let source =
+            "struct C {\n  int value() const;\n};\nint C::value() const {\n  return 0;\n}\n";
         let found = definition_of(source, "value() const {");
 
         let Known::Yes(binding) = found else {
@@ -1590,7 +1609,8 @@ mod tests {
     fn a_name_declared_nowhere_in_the_file_is_unknown_rather_than_absent() {
         // The honest answer: within one file the name is not here, and it is almost certainly in a header that
         // has not been read. `No` would say it is nowhere, which this layer cannot know.
-        let source = "#include <vector>\nstd::vector<int> values;\nvoid f() {\n  values.push_back(1);\n}\n";
+        let source =
+            "#include <vector>\nstd::vector<int> values;\nvoid f() {\n  values.push_back(1);\n}\n";
         let found = definition_of(source, "push_back");
 
         assert!(

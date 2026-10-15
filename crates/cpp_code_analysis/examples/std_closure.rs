@@ -75,13 +75,18 @@ fn main() {
             println!(
                 "toolchain: {} ({})\n  {} system include directories",
                 toolchain.compiler_name(),
-                toolchain.version.as_deref().unwrap_or("version not reported"),
+                toolchain
+                    .version
+                    .as_deref()
+                    .unwrap_or("version not reported"),
                 toolchain.system_include_paths.len()
             );
             toolchain.config(&CompilerConfig::new())
         }
         None => {
-            println!("no compiler was found: the closure will be the project's own files and nothing else");
+            println!(
+                "no compiler was found: the closure will be the project's own files and nothing else"
+            );
             CompilerConfig::new()
         }
     };
@@ -113,7 +118,10 @@ fn main() {
     if index.not_indexed.is_empty() {
         println!("  every file the walk reached was opened");
     } else {
-        println!("  {} files were reached and not opened:", index.not_indexed.len());
+        println!(
+            "  {} files were reached and not opened:",
+            index.not_indexed.len()
+        );
         for stopped in &index.not_indexed {
             println!("    {} :: {:?}", stopped.path.display(), stopped.reason);
         }
@@ -126,7 +134,10 @@ fn main() {
             text.push('\n');
         }
         std::fs::write(&list, text).expect("the list writes");
-        println!("\nwrote {} paths to {}", index.indexed.len(), list.display());
+        println!(
+            "\nwrote {} paths to {}",
+            index.indexed.len(),
+            list.display()
+        );
     }
 }
-

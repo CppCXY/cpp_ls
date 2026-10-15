@@ -11,7 +11,7 @@
 use std::path::{Path, PathBuf};
 
 use lsp_types::Uri;
-use percent_encoding::{percent_decode_str, utf8_percent_encode, NON_ALPHANUMERIC};
+use percent_encoding::{NON_ALPHANUMERIC, percent_decode_str, utf8_percent_encode};
 
 /// The path a `file:` URI names, or `None` for a URI this server has no business reading.
 ///
@@ -44,7 +44,9 @@ pub fn uri_to_file_path(uri: &Uri) -> Option<PathBuf> {
         _ => decoded.as_ref(),
     };
 
-    Some(PathBuf::from(trimmed.replace('/', std::path::MAIN_SEPARATOR_STR)))
+    Some(PathBuf::from(
+        trimmed.replace('/', std::path::MAIN_SEPARATOR_STR),
+    ))
 }
 
 /// The `file:` URI for a path. The inverse of [`uri_to_file_path`] for everything this server produces: the

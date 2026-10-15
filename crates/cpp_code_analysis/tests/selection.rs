@@ -62,10 +62,7 @@ fn a_selection_chain_widens_one_step_at_a_time() {
     // Trimmed, because a node's range carries the trivia that follows it — the newline after a statement is part of
     // the statement's own tokens, not of the next one. What a client selects is the same text either way, and
     // asserting on the trimmed form keeps this test about the **rungs** rather than about rowan's trivia rule.
-    let texts: Vec<&str> = chain
-        .iter()
-        .map(|(_, text)| text.trim_end())
-        .collect();
+    let texts: Vec<&str> = chain.iter().map(|(_, text)| text.trim_end()).collect();
 
     assert_eq!(
         texts.first().copied(),
@@ -153,7 +150,3 @@ fn a_cursor_in_whitespace_starts_at_the_enclosing_construct() {
         "it is the declaration the blank line is between or the class that holds them: {chain:?}"
     );
 }
-
-
-
-

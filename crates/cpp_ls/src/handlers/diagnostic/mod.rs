@@ -33,8 +33,8 @@ use lsp_types::{
 };
 
 use super::RegisterCapabilities;
-pub use document_diagnostic::on_pull_document_diagnostic;
 use crate::util::{path_to_uri, position_in_file};
+pub use document_diagnostic::on_pull_document_diagnostic;
 use log::debug;
 
 /// The diagnostics for one file, and the URI to publish them under.
@@ -148,7 +148,9 @@ fn severity_of(code: cpp_code_analysis::DiagnosticCode) -> DiagnosticSeverity {
         cpp_code_analysis::sema::check::RuleSeverity::Error => DiagnosticSeverity::ERROR,
         cpp_code_analysis::sema::check::RuleSeverity::Warning => DiagnosticSeverity::WARNING,
         cpp_code_analysis::sema::check::RuleSeverity::Hint => DiagnosticSeverity::HINT,
-        cpp_code_analysis::sema::check::RuleSeverity::Information => DiagnosticSeverity::INFORMATION,
+        cpp_code_analysis::sema::check::RuleSeverity::Information => {
+            DiagnosticSeverity::INFORMATION
+        }
     }
 }
 
@@ -268,8 +270,8 @@ mod tests {
         // **The rendering is asked for before the pump**, because Session::view answers None until it has been:
         // this fixture indexed the file and then asked diagnose_file for a view, which is the same missing step
         // the rest of this workspace's tests had. Measured: 	he file is held panicked here.
-        
-session.want_cooked_reading(&file);
+
+        session.want_cooked_reading(&file);
         session.index_everything();
 
         (session, file)
@@ -287,7 +289,11 @@ session.want_cooked_reading(&file);
 
         let (_, diagnostics) = diagnose_file(&session, &path).expect("the file is held");
 
-        assert_eq!(diagnostics.len(), 1, "one import, one diagnostic: {diagnostics:?}");
+        assert_eq!(
+            diagnostics.len(),
+            1,
+            "one import, one diagnostic: {diagnostics:?}"
+        );
         let note = &diagnostics[0];
 
         assert_eq!(
@@ -295,7 +301,10 @@ session.want_cooked_reading(&file);
             Some(DiagnosticSeverity::INFORMATION),
             "the file is not wrong — the module is outside the project"
         );
-        assert_eq!(note.range.start.line, 0, "on the line that wrote the import");
+        assert_eq!(
+            note.range.start.line, 0,
+            "on the line that wrote the import"
+        );
         assert_eq!(note.range.start.character, 0, "and at the declaration");
         assert!(
             note.message.contains("mylib"),
@@ -305,7 +314,8 @@ session.want_cooked_reading(&file);
 
         // A file with no imports gets no notes at all, which is the ordinary case and the one a regression would
         // turn into a diagnostic on every file in a project.
-        let (session, path) = a_project_importing_a_module_nobody_declares("int main() { return 0; }\n");
+        let (session, path) =
+            a_project_importing_a_module_nobody_declares("int main() { return 0; }\n");
         let (_, diagnostics) = diagnose_file(&session, &path).expect("the file is held");
         assert!(
             diagnostics.is_empty(),
@@ -317,8 +327,3 @@ session.want_cooked_reading(&file);
         let _ = std::fs::remove_dir_all(path.parent().expect("the scratch root"));
     }
 }
-
-
-
-
-

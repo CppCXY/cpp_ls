@@ -143,7 +143,9 @@ fn main() {
         None if our_words.len() == their_words.len() => {
             println!("\nthe token sequences agree.");
         }
-        None => println!("\nthe shorter sequence is a prefix of the other — one side stopped early."),
+        None => {
+            println!("\nthe shorter sequence is a prefix of the other — one side stopped early.")
+        }
         Some(index) => {
             println!("\nthe first difference is at token {index}:");
             for offset in 0..3 {

@@ -326,7 +326,9 @@ pub fn completion_with(
             replace: SourceRange::new(offset, 0),
             ..CompletionSet::default()
         },
-        CompletionContext::Member(access) => members(index, scopes, root, path, &access, offset).set,
+        CompletionContext::Member(access) => {
+            members(index, scopes, root, path, &access, offset).set
+        }
         CompletionContext::Qualified(position) => {
             names(index, scopes, root, path, &position, offset, false)
         }
@@ -386,7 +388,9 @@ pub fn why_no_members(
 ) -> String {
     let offset = offset.get();
     match context_at(root, offset) {
-        CompletionContext::Member(access) => members(index, scopes, root, path, &access, offset).why,
+        CompletionContext::Member(access) => {
+            members(index, scopes, root, path, &access, offset).why
+        }
         other => format!("the cursor is not a member access at all: {other:?}"),
     }
 }
@@ -434,7 +438,15 @@ fn members(
         why,
     };
 
-    let written = match crate::index::project::type_of_expression(index, &mut |_: &Path| None, scopes, root, path, &access.object, 0) {
+    let written = match crate::index::project::type_of_expression(
+        index,
+        &mut |_: &Path| None,
+        scopes,
+        root,
+        path,
+        &access.object,
+        0,
+    ) {
         Known::Yes((written, _)) => written,
         // The object's type could not be worked out — a call, a dereference, a subscript: each needs a type
         // *computed* rather than read off a declaration. **Nothing is offered**, and that is the answer rather than
@@ -498,8 +510,14 @@ fn members(
     // against the classes the cursor is in.
     let members = {
         let mut members = found;
-        let hidden =
-            crate::index::project::offerable_members(index, scopes, root, path, offset, &mut members);
+        let hidden = crate::index::project::offerable_members(
+            index,
+            scopes,
+            root,
+            path,
+            offset,
+            &mut members,
+        );
         (members, hidden)
     };
     let (members, hidden_by_access) = members;
@@ -735,7 +753,8 @@ fn directives(written: &str, range: SourceRange) -> CompletionSet {
         .iter()
         .filter(|directive| matching::quality(directive.name, written) != matching::NONE)
         .map(|directive| {
-            let mut item = CompletionItem::word(directive.name, ItemKind::Keyword, directive.detail);
+            let mut item =
+                CompletionItem::word(directive.name, ItemKind::Keyword, directive.detail);
             item.replace = range;
             item
         })
@@ -861,7 +880,10 @@ fn ordered(mut scored: Vec<Scored>) -> (Vec<CompletionItem>, bool) {
     let truncated = scored.len() > ITEM_BUDGET;
     scored.truncate(ITEM_BUDGET);
 
-    (scored.into_iter().map(|scored| scored.item).collect(), truncated)
+    (
+        scored.into_iter().map(|scored| scored.item).collect(),
+        truncated,
+    )
 }
 
 /// **How near a declaration is to the cursor**, which is the whole of the ranking.
@@ -933,7 +955,11 @@ fn name_score(offered: &crate::OfferedName) -> Score {
     // A destructor is spelled `~D` and a conversion function is not reachable by its spelling either. Both are
     // listed — they are real declarations — but after everything a reader could be typing the start of.
     let penalty = Score::kind_penalty(offered.fact.kind)
-        + if offered.fact.name.starts_with('~') { 20 } else { 0 };
+        + if offered.fact.name.starts_with('~') {
+            20
+        } else {
+            0
+        };
 
     Score::new(tier, penalty)
 }
@@ -946,7 +972,11 @@ fn member_score(member: &ProjectMember, class: &str) -> Score {
 
     let penalty = Score::kind_penalty(member.fact.kind)
         + if member.fact.name == class { 6 } else { 0 }
-        + if member.fact.name.starts_with('~') { 20 } else { 0 };
+        + if member.fact.name.starts_with('~') {
+            20
+        } else {
+            0
+        };
 
     Score::new(tier, penalty)
 }
@@ -996,7 +1026,11 @@ mod tests {
         use crate::completion::matching::{NONE, PREFIX, SUBSEQUENCE, WORD_START, quality};
 
         assert_eq!(quality("Widget", "wid"), PREFIX);
-        assert_eq!(quality("Widget", ""), quality("Widget", ""), "the empty prefix matches everything");
+        assert_eq!(
+            quality("Widget", ""),
+            quality("Widget", ""),
+            "the empty prefix matches everything"
+        );
         // The fuzzy tiers are why this is not `starts_with` any more: `bsc` is nowhere in `basic_string` as a
         // prefix, and the analysis still offers it. Which *tier* it earns is the matching module's business — what
         // this test is about is that a candidate the rule rejects is dropped and one it accepts is not.
@@ -1076,6 +1110,3 @@ mod tests {
         assert_eq!(detail_of(&fact(None, None)), None, "nothing to say");
     }
 }
-
-
-

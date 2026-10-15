@@ -60,10 +60,15 @@ fn main() {
             config.defines.len(),
             session
                 .toolchain()
-                .and_then(|toolchain| toolchain.compiler.as_ref()).map(|path| path.display().to_string()),
+                .and_then(|toolchain| toolchain.compiler.as_ref())
+                .map(|path| path.display().to_string()),
         );
         for path in config.include_paths.iter().take(12) {
-            println!("    {}{}", path.directory.display(), if path.is_system { "  (system)" } else { "" });
+            println!(
+                "    {}{}",
+                path.directory.display(),
+                if path.is_system { "  (system)" } else { "" }
+            );
         }
         let discovery = session.discovery();
         println!(
@@ -108,9 +113,15 @@ fn main() {
     // one root walked two hundred times or two hundred roots walked once, and those want opposite fixes.
     let walked = session.walks_by_root();
     let total: u64 = walked.iter().map(|(_, count)| count).sum();
-    println!("\ntimelines walked: {} root(s), {total} walk(s)", walked.len());
+    println!(
+        "\ntimelines walked: {} root(s), {total} walk(s)",
+        walked.len()
+    );
     for (path, count) in walked.iter().take(12) {
-        let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
         println!("  {count:>5}  {name}");
     }
 }

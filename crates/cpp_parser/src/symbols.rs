@@ -142,7 +142,12 @@ pub struct IncludedMacro {
 
 impl IncludedMacro {
     /// A macro that becomes visible at `from_offset`.
-    pub fn defined_at(from_offset: usize, name: &str, function_like: bool, body: MacroBody) -> Self {
+    pub fn defined_at(
+        from_offset: usize,
+        name: &str,
+        function_like: bool,
+        body: MacroBody,
+    ) -> Self {
         Self {
             from_offset,
             name: std::sync::Arc::from(name),
@@ -422,10 +427,7 @@ pub trait MacroFacts {
 
     /// Is `name` a macro at `offset`? The question almost every caller asks.
     fn is_a_macro_at(&self, name: &str, offset: usize) -> bool {
-        matches!(
-            self.kind_of(name, offset),
-            Some(SymbolKind::Macro { .. })
-        )
+        matches!(self.kind_of(name, offset), Some(SymbolKind::Macro { .. }))
     }
 
     /// What `name`'s replacement list says **at `at`** — the positional answer first, and the in-force one when
@@ -563,15 +565,12 @@ impl MacroEnvironment {
         let mut by_name: std::collections::HashMap<std::sync::Arc<str>, Vec<Binding>> =
             std::collections::HashMap::new();
         for entry in entries {
-            by_name
-                .entry(entry.name)
-                .or_default()
-                .push(Binding {
-                    at: entry.from_offset,
-                    definition: entry.definition,
-                    body: entry.body_text,
-                    parameters: entry.parameters,
-                });
+            by_name.entry(entry.name).or_default().push(Binding {
+                at: entry.from_offset,
+                definition: entry.definition,
+                body: entry.body_text,
+                parameters: entry.parameters,
+            });
         }
         for history in by_name.values_mut() {
             history.sort_by_key(|binding| binding.at);
@@ -589,13 +588,12 @@ impl MacroEnvironment {
         mut self,
         bodies: impl IntoIterator<Item = I>,
     ) -> Self {
-        self.bodies_in_force
-            .extend(bodies.into_iter().map(Into::into).map(|body| {
-                (
-                    body.name,
-                    (body.function_like, body.parameters, body.body),
-                )
-            }));
+        self.bodies_in_force.extend(
+            bodies
+                .into_iter()
+                .map(Into::into)
+                .map(|body| (body.name, (body.function_like, body.parameters, body.body))),
+        );
         self
     }
 
@@ -627,7 +625,9 @@ impl MacroFacts for MacroEnvironment {
     }
 
     fn parameters_in_force(&self, name: &str) -> Option<&str> {
-        self.bodies_in_force.get(name).and_then(|(_, list, _)| list.as_deref())
+        self.bodies_in_force
+            .get(name)
+            .and_then(|(_, list, _)| list.as_deref())
     }
 
     fn body_in_force_is_object_like(&self, name: &str) -> bool {
@@ -1046,7 +1046,11 @@ pub fn a_body_opens_an_inline_namespace(text: &str) -> bool {
 /// `at` is where the **invocation** is written in the file being read, not an offset into `text`: the body's own
 /// offsets mean nothing to the environment, which indexes definitions by where they were written in *their* file.
 /// It is what makes `_EXTERN_CXX_WORKAROUND` answerable in both arms of its `#if`.
-pub fn shape_of_a_body_at(text: &str, bodies: &(impl MacroBodies + ?Sized), at: usize) -> BodyShape {
+pub fn shape_of_a_body_at(
+    text: &str,
+    bodies: &(impl MacroBodies + ?Sized),
+    at: usize,
+) -> BodyShape {
     // **Not cached, and measured rather than assumed.** This lexes its argument from scratch and is called once per
     // macro definition whose body matters, which looks like a cache waiting to happen — a counter was put here to find
     // out, and the answer was **6 ms over 5 000 calls in an index of a real project**. The surrounding stage timer
@@ -1395,11 +1399,19 @@ mod tests {
     /// namespace name, and an alias is a declaration rather than an opening brace.
     #[test]
     fn only_two_body_shapes_are_structural() {
-        let segments = |text: &str| shape_of_a_body(text).namespace_segments().map(<[String]>::to_vec);
+        let segments = |text: &str| {
+            shape_of_a_body(text)
+                .namespace_segments()
+                .map(<[String]>::to_vec)
+        };
 
         // The hits. Whitespace, comments and a `\`-splice are not part of the answer: this is lexed, not matched.
         assert_eq!(segments("namespace std {"), Some(vec!["std".to_string()]));
-        assert_eq!(segments("namespace {"), Some(Vec::new()), "unnamed, and still a scope");
+        assert_eq!(
+            segments("namespace {"),
+            Some(Vec::new()),
+            "unnamed, and still a scope"
+        );
         assert_eq!(
             segments("namespace a :: b {"),
             Some(vec!["a".to_string(), "b".to_string()]),
@@ -1416,7 +1428,10 @@ mod tests {
             "and neither is a line continuation"
         );
         assert!(shape_of_a_body("}").closes_a_block());
-        assert!(shape_of_a_body(" } ").closes_a_block(), "trivia is dropped first");
+        assert!(
+            shape_of_a_body(" } ").closes_a_block(),
+            "trivia is dropped first"
+        );
 
         // **An inline namespace is a hit**, and it was on the miss list until the reason it was there stopped
         // being true. The note above said "`inline namespace _V2 {` is a head the parser's own rule does not claim
@@ -1463,23 +1478,39 @@ mod tests {
         // **A statement-level opener is a third shape**: it names nothing, and it braces something. Read
         // from the same list of block heads, so the two vocabularies (`symbols.rs` here and the parser's
         // `body_shapes_the_braces`) cannot disagree about which bodies are openers.
-        for opener in ["try {", "do {", "switch (x) {", "if (a) {", "extern \"C\" {"] {
+        for opener in [
+            "try {",
+            "do {",
+            "switch (x) {",
+            "if (a) {",
+            "extern \"C\" {",
+        ] {
             assert_eq!(
                 shape_of_a_body(opener),
                 BodyShape::OpensABlock,
                 "{opener:?} opens a brace and names nothing"
             );
             assert!(shape_of_a_body(opener).opens_a_brace());
-            assert!(!shape_of_a_body(opener).is_structural(), "…and opens no scope");
+            assert!(
+                !shape_of_a_body(opener).is_structural(),
+                "…and opens no scope"
+            );
             assert!(shape_of_a_body(opener).namespace_segments().is_none());
         }
 
         // And the questions are not the same question: an unnamed namespace opens a *scope* and has no segment.
-        assert_eq!(shape_of_a_body("namespace {").namespace_segments(), Some(&[][..]));
+        assert_eq!(
+            shape_of_a_body("namespace {").namespace_segments(),
+            Some(&[][..])
+        );
         assert!(shape_of_a_body("namespace {").is_structural());
         assert!(shape_of_a_body("namespace {").opens_a_brace());
         assert!(!shape_of_a_body("namespace std").is_structural());
-        assert!(shape_of_a_body("namespace std").namespace_segments().is_none());
+        assert!(
+            shape_of_a_body("namespace std")
+                .namespace_segments()
+                .is_none()
+        );
     }
 
     /// **A body that is another macro's name is followed**, because one hop is what a header writes and one
@@ -1494,15 +1525,24 @@ mod tests {
     #[test]
     fn a_body_that_is_another_macros_name_is_followed() {
         let environment = MacroEnvironment::from_included_macros([]).with_bodies_in_force([
-            (Box::from("_TRY_IO_BEGIN"), Box::from("_TRY_BEGIN // begin try block")),
+            (
+                Box::from("_TRY_IO_BEGIN"),
+                Box::from("_TRY_BEGIN // begin try block"),
+            ),
             (Box::from("_TRY_BEGIN"), Box::from("try {")),
             (Box::from("_A"), Box::from("_B")),
             (Box::from("_B"), Box::from("_A")),
             (Box::from("_CALL"), Box::from("_CATCH_ALL _CATCH_END")),
         ]);
 
-        assert_eq!(environment.body_text_resolved("_TRY_IO_BEGIN", 0), Some("try {"));
-        assert_eq!(environment.body_text_resolved("_TRY_BEGIN", 0), Some("try {"));
+        assert_eq!(
+            environment.body_text_resolved("_TRY_IO_BEGIN", 0),
+            Some("try {")
+        );
+        assert_eq!(
+            environment.body_text_resolved("_TRY_BEGIN", 0),
+            Some("try {")
+        );
 
         // A body with more than the name is a replacement list in its own right, not an alias.
         assert_eq!(
@@ -1528,12 +1568,18 @@ mod tests {
         ]);
 
         assert_eq!(environment.len(), 1, "one name, one history");
-        assert!(!environment.is_a_macro_at("BOOL_OPTION", 99), "not yet included");
+        assert!(
+            !environment.is_a_macro_at("BOOL_OPTION", 99),
+            "not yet included"
+        );
         assert!(
             environment.is_a_macro_at("BOOL_OPTION", 100),
             "the offset it becomes visible at is its own"
         );
-        assert!(environment.is_a_macro_at("BOOL_OPTION", 299), "still in force");
+        assert!(
+            environment.is_a_macro_at("BOOL_OPTION", 299),
+            "still in force"
+        );
         assert!(
             !environment.is_a_macro_at("BOOL_OPTION", 300),
             "an `#undef` takes it away again"
@@ -1542,7 +1588,10 @@ mod tests {
             environment.knows("BOOL_OPTION"),
             "…and 'not a macro here' is an answer, not an absence"
         );
-        assert!(!environment.knows("SOMETHING_ELSE"), "a name it never heard of");
+        assert!(
+            !environment.knows("SOMETHING_ELSE"),
+            "a name it never heard of"
+        );
     }
 
     /// Entries may arrive in any order — the index walks the include graph, not the offsets — and the answer must

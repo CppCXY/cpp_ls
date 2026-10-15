@@ -95,14 +95,16 @@ pub struct CompilerConfig {
     /// entry is another target's compilation. That is not a simplification but a wrong answer — a header reachable
     /// only from another target's directory resolves, and an include of `"Config.h"` takes whichever `Config.h` the
     /// search order reaches first. [`CompilerConfig::for_file`] is where it is consulted.
-    pub database: Option<std::sync::Arc<CompileCommands>>,    /// Flags `[compile].remove_args` drops, and `[compile].extra_args` adds — kept here because they apply to
+    pub database: Option<std::sync::Arc<CompileCommands>>,
+    /// Flags `[compile].remove_args` drops, and `[compile].extra_args` adds — kept here because they apply to
     /// **whichever set won**, and with a compilation database there is no single winning set: each file's own
     /// command is filtered by these in [`CompilerConfig::for_file`], in the documented order (removing first,
     /// then appending), so that "drop the database's `-std=c++17`, add `-std=c++20`" means what it says for every
     /// file rather than only for a project-wide answer that no longer exists.
     pub remove_args: Vec<String>,
     /// See [`CompilerConfig::remove_args`].
-    pub extra_args: Vec<String>,    /// **The project's compilation targets**, when its own file describes them — see
+    pub extra_args: Vec<String>,
+    /// **The project's compilation targets**, when its own file describes them — see
     /// [`TargetSection`](crate::project::TargetSection), and [`CompilerConfig::for_file`] for what they decide.
     ///
     /// Carried on the configuration rather than looked up where it is needed, because the places that need it hold
@@ -236,7 +238,11 @@ impl CompilerConfig {
         // that would disagree. Patterns of different targets usually exclude each other (`Server/**` and `Core/**`),
         // and where they do not, the nearer one's directories come first, which is what "nearest first" means for a
         // search path.
-        let mut describing: Vec<(usize, std::cmp::Reverse<usize>, &crate::project::TargetSection)> = self
+        let mut describing: Vec<(
+            usize,
+            std::cmp::Reverse<usize>,
+            &crate::project::TargetSection,
+        )> = self
             .targets
             .iter()
             .enumerate()
@@ -251,27 +257,29 @@ impl CompilerConfig {
         for (_, _, target) in describing {
             for directory in &target.includes {
                 let joined = root.join(directory);
-                if !config.include_paths.iter().any(|held| held.directory == joined)
+                if !config
+                    .include_paths
+                    .iter()
+                    .any(|held| held.directory == joined)
                     && !ahead.iter().any(|held| held.directory == joined)
                 {
                     ahead.push(IncludePath::user(&joined));
                 }
             }
             for definition in &target.defines {
-                if !config
-                    .defines
-                    .iter()
-                    .any(|held| held.name.as_ref() == definition.split('=').next().unwrap_or("").trim())
-                {
+                if !config.defines.iter().any(|held| {
+                    held.name.as_ref() == definition.split('=').next().unwrap_or("").trim()
+                }) {
                     config.defines.push(define_from_a_config_file(definition));
                 }
             }
             // The nearest target that states a standard is the one that decides it.
-            if config.standard.is_none() && let Some(standard) = &target.standard {
+            if config.standard.is_none()
+                && let Some(standard) = &target.standard
+            {
                 config.standard = Some(standard.as_str().into());
             }
         }
-
 
         ahead.extend(config.include_paths);
         config.include_paths = ahead;
@@ -1016,23 +1024,25 @@ fn target_macros(target: &str) -> Vec<CommandLineMacro> {
     // 64- and 32-bit are marked by the **architecture** name, which is why the answer is a pair: `_WIN64` is about
     // the target being a 64-bit one, and `x86_64-w64-mingw32`'s `w64` is the *vendor's* spelling — a `i686-w64-…`
     // target is 32-bit with the same vendor string, which is how a `contains("64")` test gets it wrong.
-    let architecture = if lowered.contains("x86_64") || lowered.contains("amd64") || lowered == "-m64" {
-        Some(("__x86_64__", true))
-    } else if lowered.contains("i686")
-        || lowered.contains("i386")
-        || lowered.contains("x86")
-        || lowered == "-m32"
-    {
-        Some(("__i386__", false))
-    } else if lowered.contains("aarch64") || lowered.contains("arm64") {
-        Some(("__aarch64__", true))
-    } else if lowered.contains("arm") {
-        Some(("__arm__", false))
-    } else {
-        None
-    };
+    let architecture =
+        if lowered.contains("x86_64") || lowered.contains("amd64") || lowered == "-m64" {
+            Some(("__x86_64__", true))
+        } else if lowered.contains("i686")
+            || lowered.contains("i386")
+            || lowered.contains("x86")
+            || lowered == "-m32"
+        {
+            Some(("__i386__", false))
+        } else if lowered.contains("aarch64") || lowered.contains("arm64") {
+            Some(("__aarch64__", true))
+        } else if lowered.contains("arm") {
+            Some(("__arm__", false))
+        } else {
+            None
+        };
 
-    let is_windows = lowered.contains("windows") || lowered.contains("mingw") || lowered.contains("msvc");
+    let is_windows =
+        lowered.contains("windows") || lowered.contains("mingw") || lowered.contains("msvc");
 
     if let Some((name, _)) = architecture {
         macros.push(CommandLineMacro::with_value(name, "1"));
@@ -1174,8 +1184,3 @@ fn define_from_a_config_file(written: &str) -> CommandLineMacro {
         None => CommandLineMacro::defined(written.trim()),
     }
 }
-
-
-
-
-

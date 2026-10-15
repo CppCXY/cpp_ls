@@ -22,13 +22,18 @@ fn session_with(files: &[(&str, &str)]) -> Session<MemoryFiles> {
         WatchFilter::new("/p"),
         CompilerConfig::default(),
     );
-    session.add_project_files(files.iter().map(|(path, _)| std::path::PathBuf::from(*path)));
+    session.add_project_files(
+        files
+            .iter()
+            .map(|(path, _)| std::path::PathBuf::from(*path)),
+    );
 
     // **The ask, and then the pump** - see `tests/completion.rs`'s `cooked_view`. A view is of the file's *cooked
     // reading*, and a rendering is built because something asked for it.
     for (path, _) in files {
         session.want_cooked_reading(std::path::Path::new(path));
-    }    session.index_everything();
+    }
+    session.index_everything();
 
     session
 }
@@ -54,7 +59,9 @@ fn signature_where_marked(source: &str) -> (String, Option<CallSignature>) {
         // which put the cursor in the middle of the *declaration* and made every signature answer `None`. Measured:
         // this one helper is the reason all five of this suite's failures were about a call that resolves.
         let in_the_reading = view
-            .reading_offset_of(cpp_code_analysis::file::coordinates::FileOffset::new(offset))
+            .reading_offset_of(cpp_code_analysis::file::coordinates::FileOffset::new(
+                offset,
+            ))
             .expect("the cursor is in the rendering");
         session
             .signatures_at(&view, in_the_reading)
@@ -107,7 +114,9 @@ int main() {
 }
 ";
     let (_, signature) = signature_where_marked(source);
-    let label = signature.map(|signature| signature.label).unwrap_or_default();
+    let label = signature
+        .map(|signature| signature.label)
+        .unwrap_or_default();
     assert!(
         label.contains("size"),
         "the constructor's own parameters, or nothing: {label:?}"
@@ -135,7 +144,10 @@ fn a_call_reports_the_declarations_own_signature() {
     let (label, spans, active) = label_where_marked(SCALE);
 
     assert_eq!(label, "scale(int count, double factor)");
-    assert_eq!(spans, vec!["int count".to_string(), "double factor".to_string()]);
+    assert_eq!(
+        spans,
+        vec!["int count".to_string(), "double factor".to_string()]
+    );
     assert_eq!(active, Some(0), "the cursor is in the first parameter");
 }
 
@@ -154,7 +166,8 @@ fn the_active_parameter_follows_the_arguments() {
     ];
 
     for (call, expected) in cases {
-        let source = format!("double scale(int count, double factor);\ndouble f() {{ return {call}; }}\n");
+        let source =
+            format!("double scale(int count, double factor);\ndouble f() {{ return {call}; }}\n");
         let (_, _, active) = label_where_marked(&source);
         assert_eq!(active, Some(expected), "in `{call}`");
     }
@@ -165,9 +178,8 @@ fn the_active_parameter_follows_the_arguments() {
 /// function.
 #[test]
 fn a_cursor_on_the_callee_has_no_signature() {
-    let (_, signature) = signature_where_marked(
-        "double scale(int count);\ndouble f() { return sca|le(1); }\n",
-    );
+    let (_, signature) =
+        signature_where_marked("double scale(int count);\ndouble f() { return sca|le(1); }\n");
 
     assert!(signature.is_none());
 }
@@ -205,7 +217,9 @@ fn a_callee_in_another_file_reports_its_signature() {
     let session = session_with(&[("/p/a.cpp", &without_marker), ("/p/b.h", header)]);
     let view = session.view("/p/a.cpp").expect("the file is held");
     let in_the_reading = view
-        .reading_offset_of(cpp_code_analysis::file::coordinates::FileOffset::new(offset))
+        .reading_offset_of(cpp_code_analysis::file::coordinates::FileOffset::new(
+            offset,
+        ))
         .expect("the cursor is in the rendering");
     let signature = session
         .signatures_at(&view, in_the_reading)
@@ -239,11 +253,16 @@ int f() { return scale(1, |); }
     // **The fixture's cursor is the file's; `signatures_at` reads the rendering** — see `signature_where_marked`:
     // a comment is removed before the parse, so the two offsets differ by everything the cook deleted.
     let in_the_reading = view
-        .reading_offset_of(cpp_code_analysis::file::coordinates::FileOffset::new(offset))
+        .reading_offset_of(cpp_code_analysis::file::coordinates::FileOffset::new(
+            offset,
+        ))
         .expect("the cursor is in the rendering");
     let signatures = session.signatures_at(&view, in_the_reading);
 
-    let labels: Vec<&str> = signatures.iter().map(|found| found.label.as_str()).collect();
+    let labels: Vec<&str> = signatures
+        .iter()
+        .map(|found| found.label.as_str())
+        .collect();
     assert_eq!(
         labels,
         ["scale(int count)", "scale(double factor, int places)"],
@@ -284,11 +303,16 @@ int f(Widget& w) { return w.scaled(|); }
     // **The fixture's cursor is the file's; `signatures_at` reads the rendering** — see `signature_where_marked`:
     // a comment is removed before the parse, so the two offsets differ by everything the cook deleted.
     let in_the_reading = view
-        .reading_offset_of(cpp_code_analysis::file::coordinates::FileOffset::new(offset))
+        .reading_offset_of(cpp_code_analysis::file::coordinates::FileOffset::new(
+            offset,
+        ))
         .expect("the cursor is in the rendering");
     let signatures = session.signatures_at(&view, in_the_reading);
 
-    let labels: Vec<&str> = signatures.iter().map(|found| found.label.as_str()).collect();
+    let labels: Vec<&str> = signatures
+        .iter()
+        .map(|found| found.label.as_str())
+        .collect();
     assert_eq!(
         labels,
         ["scaled(int factor)", "scaled(double factor, int places)"],
@@ -312,12 +336,17 @@ int f(Widget& w) { return w.scaled(|); }
     // **The fixture's cursor is the file's; `signatures_at` reads the rendering** — see `signature_where_marked`:
     // a comment is removed before the parse, so the two offsets differ by everything the cook deleted.
     let in_the_reading = view
-        .reading_offset_of(cpp_code_analysis::file::coordinates::FileOffset::new(offset))
+        .reading_offset_of(cpp_code_analysis::file::coordinates::FileOffset::new(
+            offset,
+        ))
         .expect("the cursor is in the rendering");
     let signatures = session.signatures_at(&view, in_the_reading);
 
     assert_eq!(
-        signatures.iter().map(|found| found.label.as_str()).collect::<Vec<_>>(),
+        signatures
+            .iter()
+            .map(|found| found.label.as_str())
+            .collect::<Vec<_>>(),
         ["scaled(int factor)"],
         "the base declares it, and the derived class inherits it"
     );
@@ -337,7 +366,10 @@ fn a_wrapped_parameter_list_is_one_line_and_the_spans_follow_it() {
         label, "scale(int count, double factor)",
         "the declaration's newline and indentation are the file's layout, not the signature"
     );
-    assert_eq!(spans, vec!["int count".to_string(), "double factor".to_string()]);
+    assert_eq!(
+        spans,
+        vec!["int count".to_string(), "double factor".to_string()]
+    );
     assert_eq!(active, Some(0));
 }
 
@@ -355,7 +387,9 @@ fn overloads_in_one_header_are_read_from_it_once() {
     // **The fixture's cursor is the file's; `signatures_at` reads the rendering** — see `signature_where_marked`:
     // a comment is removed before the parse, so the two offsets differ by everything the cook deleted.
     let in_the_reading = view
-        .reading_offset_of(cpp_code_analysis::file::coordinates::FileOffset::new(offset))
+        .reading_offset_of(cpp_code_analysis::file::coordinates::FileOffset::new(
+            offset,
+        ))
         .expect("the cursor is in the rendering");
     let signatures = session.signatures_at(&view, in_the_reading);
 
@@ -401,11 +435,16 @@ Widget f() { return Widget(|); }
     let session = session_with(&[("/p/a.cpp", &without_marker)]);
     let view = session.view("/p/a.cpp").expect("the file is held");
     let in_the_reading = view
-        .reading_offset_of(cpp_code_analysis::file::coordinates::FileOffset::new(offset))
+        .reading_offset_of(cpp_code_analysis::file::coordinates::FileOffset::new(
+            offset,
+        ))
         .expect("the cursor is in the rendering");
     let signatures = session.signatures_at(&view, in_the_reading);
 
-    let labels: Vec<&str> = signatures.iter().map(|found| found.label.as_str()).collect();
+    let labels: Vec<&str> = signatures
+        .iter()
+        .map(|found| found.label.as_str())
+        .collect();
     assert_eq!(
         labels,
         ["Widget()", "Widget(int width, int height)"],

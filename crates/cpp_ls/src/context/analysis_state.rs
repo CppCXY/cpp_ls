@@ -244,7 +244,9 @@ impl AnalysisState {
     /// permit, so a wake that arrives before this call is not lost — but a stall would leave the index empty for
     /// the rest of the session, and one lock acquisition a second is a cheap way never to find out.
     pub async fn wait_for_work(&self, timeout: Duration) -> bool {
-        tokio::time::timeout(timeout, self.work.notified()).await.is_ok()
+        tokio::time::timeout(timeout, self.work.notified())
+            .await
+            .is_ok()
     }
 
     /// Run `f` against the live session, or answer `None` when no workspace has been opened.
@@ -457,7 +459,8 @@ impl AnalysisState {
     /// completion took a second — if this is small and the request was slow, the wait was inside the request's own
     /// work rather than in the queue.
     pub fn worst_write_hold(&self) -> u64 {
-        self.worst_write_hold.load(std::sync::atomic::Ordering::Relaxed)
+        self.worst_write_hold
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     fn read(&self) -> RwLockReadGuard<'_, Option<Session<DiskFiles>>> {
@@ -533,11 +536,16 @@ mod tests {
         assert!(state.prepare(std::path::Path::new("/p/main.cpp")).await);
 
         let text = state
-        // **The text the analysis reads, asked of the file table rather than of the rendering.** `Session::view` is a
-        // request for the *cooked* reading and answers `None` until that work has run — a different claim ("the
-        // rendering is ready") from this test's ("the buffer is the text the session holds"). Measured: the assertion
-        // read `None` against `Some("int from_the_handle;\n")`.
-            .with_snapshot(|session| session.files().held("/p/main.cpp").map(|file| file.text.clone()))
+            // **The text the analysis reads, asked of the file table rather than of the rendering.** `Session::view` is a
+            // request for the *cooked* reading and answers `None` until that work has run — a different claim ("the
+            // rendering is ready") from this test's ("the buffer is the text the session holds"). Measured: the assertion
+            // read `None` against `Some("int from_the_handle;\n")`.
+            .with_snapshot(|session| {
+                session
+                    .files()
+                    .held("/p/main.cpp")
+                    .map(|file| file.text.clone())
+            })
             .flatten();
         assert_eq!(text.as_deref(), Some(buffer));
     }
@@ -557,11 +565,16 @@ mod tests {
         assert!(state.prepare(std::path::Path::new("/p/main.cpp")).await);
 
         let text = state
-        // **The text the analysis reads, asked of the file table rather than of the rendering.** `Session::view` is a
-        // request for the *cooked* reading and answers `None` until that work has run — a different claim ("the
-        // rendering is ready") from this test's ("the buffer is the text the session holds"). Measured: the assertion
-        // read `None` against `Some("int from_the_handle;\n")`.
-            .with_snapshot(|session| session.files().held("/p/main.cpp").map(|file| file.text.clone()))
+            // **The text the analysis reads, asked of the file table rather than of the rendering.** `Session::view` is a
+            // request for the *cooked* reading and answers `None` until that work has run — a different claim ("the
+            // rendering is ready") from this test's ("the buffer is the text the session holds"). Measured: the assertion
+            // read `None` against `Some("int from_the_handle;\n")`.
+            .with_snapshot(|session| {
+                session
+                    .files()
+                    .held("/p/main.cpp")
+                    .map(|file| file.text.clone())
+            })
             .flatten();
         assert_eq!(
             text.as_deref(),
@@ -601,4 +614,3 @@ mod tests {
         assert_eq!(write.await.unwrap(), 2);
     }
 }
-

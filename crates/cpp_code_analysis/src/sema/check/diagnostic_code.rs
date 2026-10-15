@@ -133,7 +133,9 @@ impl DiagnosticCode {
     /// uses this so that a misspelled rule is *reported* — treating an unknown name as "no rules" turns a typo into
     /// a silently disabled analysis, which is the failure mode this layer's contract is written against.
     pub fn from_name(name: &str) -> Option<DiagnosticCode> {
-        DiagnosticCode::ALL.into_iter().find(|code| code.name() == name)
+        DiagnosticCode::ALL
+            .into_iter()
+            .find(|code| code.name() == name)
     }
 
     /// **How a client should draw it.**
@@ -216,7 +218,3 @@ pub enum RuleSeverity {
     /// Not a complaint at all — a fact about where a file is.
     Information,
 }
-
-
-
-

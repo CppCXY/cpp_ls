@@ -697,7 +697,9 @@ mod tests {
     /// happened.
     #[test]
     fn a_content_cache_reads_each_file_once() {
-        let inner = MemoryFiles::new().with_file("a.h", "contents").with_file("b.h", "other");
+        let inner = MemoryFiles::new()
+            .with_file("a.h", "contents")
+            .with_file("b.h", "other");
         let files = CachedFiles::new(inner);
 
         let first = files.text(Path::new("a.h")).expect("read");
@@ -753,7 +755,10 @@ mod tests {
 
         assert!(files.exists(Path::new("a.h")));
         assert!(!files.exists(Path::new("b.h")));
-        assert_eq!(files.reads(), 0, "existence is the provider's question, not the cache's");
+        assert_eq!(
+            files.reads(),
+            0,
+            "existence is the provider's question, not the cache's"
+        );
     }
 }
-

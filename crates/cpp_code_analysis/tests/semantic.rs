@@ -5,8 +5,8 @@
 //! in the C++ tree at all). Each of them is pinned here, and so is the refusal: a name this analysis cannot place
 //! gets **no** classification rather than a plausible one.
 
-use cpp_code_analysis::semantic::{Name, NameKind, Provenance};
 use cpp_code_analysis::Known;
+use cpp_code_analysis::semantic::{Name, NameKind, Provenance};
 use cpp_code_analysis::{
     CompilerConfig, MemoryFiles, OpenDocuments, Session, SessionFiles, WatchFilter,
 };
@@ -24,13 +24,18 @@ fn session_with(files: &[(&str, &str)]) -> Session<MemoryFiles> {
         WatchFilter::new("/p"),
         CompilerConfig::default(),
     );
-    session.add_project_files(files.iter().map(|(path, _)| std::path::PathBuf::from(*path)));
+    session.add_project_files(
+        files
+            .iter()
+            .map(|(path, _)| std::path::PathBuf::from(*path)),
+    );
 
     // **The ask, and then the pump** - see `tests/completion.rs`'s `cooked_view`. A view is of the file's *cooked
     // reading*, and a rendering is built because something asked for it.
     for (path, _) in files {
         session.want_cooked_reading(std::path::Path::new(path));
-    }    session.index_everything();
+    }
+    session.index_everything();
 
     session
 }
@@ -356,14 +361,16 @@ int measure(Widget& w) { return w.size; }
         session
             .classified_names(&view)
             .into_iter()
-            .filter(|name| {
-                &source[name.range.start_offset..name.range.end_offset()] == spelling
-            })
+            .filter(|name| &source[name.range.start_offset..name.range.end_offset()] == spelling)
             .map(|name| name.provenance)
             .collect()
     };
 
-    assert_eq!(provenance("scale"), vec![Provenance::DeclaredHere], "written here");
+    assert_eq!(
+        provenance("scale"),
+        vec![Provenance::DeclaredHere],
+        "written here"
+    );
     assert_eq!(
         provenance("factor"),
         vec![Provenance::DeclaredHere, Provenance::Held],
@@ -374,8 +381,16 @@ int measure(Widget& w) { return w.size; }
         vec![Provenance::Found],
         "a member of a class in another file is the index's answer"
     );
-    assert_eq!(provenance("Widget"), vec![Provenance::Found], "and so is the class itself");
-    assert_eq!(provenance("LIMIT"), vec![Provenance::Macro, Provenance::Macro], "a #define, not a declaration");
+    assert_eq!(
+        provenance("Widget"),
+        vec![Provenance::Found],
+        "and so is the class itself"
+    );
+    assert_eq!(
+        provenance("LIMIT"),
+        vec![Provenance::Macro, Provenance::Macro],
+        "a #define, not a declaration"
+    );
 }
 
 /// A client asked for a colour on a name it cannot have one on: `int`, `return` and a literal are not identifiers,
@@ -419,12 +434,19 @@ fn a_written_type_resolves_a_member_the_class_inherits() {
 
     match session.definition_of_a_written_type(&view, "std::allocator_traits::pointer", None, 0) {
         Known::Yes(found) => assert_eq!(found.fact.name, "pointer"),
-        other => panic!("`pointer` is inherited from `_Normal` and has to be found through it: {other:?}"),
+        other => panic!(
+            "`pointer` is inherited from `_Normal` and has to be found through it: {other:?}"
+        ),
     }
 
     assert!(
         matches!(
-            session.definition_of_a_written_type(&view, "std::allocator_traits::nothing_here", None, 0),
+            session.definition_of_a_written_type(
+                &view,
+                "std::allocator_traits::nothing_here",
+                None,
+                0
+            ),
             Known::Unknown(_)
         ),
         "the walk reads the chain; it does not invent a member: {:?}",
@@ -639,15 +661,13 @@ fn a_stray_identifier_in_a_template_argument_drops_the_declarations_after_it() {
     // rather than that one is missing. Traced, for the two lines above: `UsingDecl`'s `NodeEnd` is emitted at
     // event 20, right after `decltype` fails at token 10, and yet the node the tree builds from that stream
     // covers all 53 bytes of the file.
-    let events: Vec<String> = cpp_parser::CppParser::parse_with_events(
-        source,
-        cpp_parser::ParserConfig::default(),
-    )
-    .1
-    .iter()
-    .enumerate()
-    .map(|(at, event)| format!("{at}: {event:?}"))
-    .collect();
+    let events: Vec<String> =
+        cpp_parser::CppParser::parse_with_events(source, cpp_parser::ParserConfig::default())
+            .1
+            .iter()
+            .enumerate()
+            .map(|(at, event)| format!("{at}: {event:?}"))
+            .collect();
     eprintln!("EVENTS {events:#?}");
 
     assert!(
@@ -959,7 +979,10 @@ fn a_template_parameter_takes_the_type_of_the_argument() {
             .find(|fact| fact.name == name && fact.type_of.as_deref() == Some("auto"))
             .unwrap_or_else(|| panic!("`{name}` is an `auto` the file writes"));
         let offset = fact.name_range.start_offset;
-        match session.type_at(&view, cpp_code_analysis::file::coordinates::ReadingOffset::new(offset)) {
+        match session.type_at(
+            &view,
+            cpp_code_analysis::file::coordinates::ReadingOffset::new(offset),
+        ) {
             cpp_code_analysis::Known::Yes(type_of) => type_of.type_of.clone(),
             other => panic!("`{name}` has a type the file gives: {other:?}"),
         }
@@ -1009,7 +1032,15 @@ fn an_auto_is_deduced_from_its_initializer() {
         let fact = facts
             .iter()
             .find(|fact| fact.name == name && fact.type_of.as_deref() == Some("auto"))
-            .unwrap_or_else(|| panic!("`{name}` is declared `auto`: {:?}", facts.iter().map(|f| (&f.name, &f.type_of)).collect::<Vec<_>>()));
+            .unwrap_or_else(|| {
+                panic!(
+                    "`{name}` is declared `auto`: {:?}",
+                    facts
+                        .iter()
+                        .map(|f| (&f.name, &f.type_of))
+                        .collect::<Vec<_>>()
+                )
+            });
 
         match cpp_code_analysis::sema::deduce::deduced_type_of(
             session.index(),
@@ -1251,7 +1282,14 @@ fn an_auto_written_through_a_macro_is_still_deduced() {
         .collect();
 
     let mut seen: Vec<String> = Vec::new();
-    for (name, expected) in [("plain_a", "int"), ("plain_b", "long"), ("plain_c", "int"), ("a", "int"), ("b", "long"), ("c", "int")] {
+    for (name, expected) in [
+        ("plain_a", "int"),
+        ("plain_b", "long"),
+        ("plain_c", "int"),
+        ("a", "int"),
+        ("b", "long"),
+        ("c", "int"),
+    ] {
         let fact = facts
             .iter()
             .find(|fact| fact.name == name && fact.type_of.as_deref() == Some("auto"))
@@ -1370,7 +1408,9 @@ fn a_view_of_the_rendering_has_no_macros_left_to_guess_about() {
         .find("struct thing")
         .expect("the rendering has the declaration");
     let in_the_file = view
-        .file_offset_of(cpp_code_analysis::file::coordinates::ReadingOffset::new(at_struct))
+        .file_offset_of(cpp_code_analysis::file::coordinates::ReadingOffset::new(
+            at_struct,
+        ))
         .expect("a position in the rendering is a position in the file");
 
     let written = view
@@ -1504,7 +1544,10 @@ fn a_conditional_has_the_type_its_arms_agree_on() {
             .iter()
             .find(|fact| fact.name == name && fact.type_of.as_deref() == Some("auto"))
             .unwrap_or_else(|| panic!("`{name}` is an `auto` the file writes"));
-        match session.type_at(&view, cpp_code_analysis::file::coordinates::ReadingOffset::new(fact.name_range.start_offset)) {
+        match session.type_at(
+            &view,
+            cpp_code_analysis::file::coordinates::ReadingOffset::new(fact.name_range.start_offset),
+        ) {
             cpp_code_analysis::Known::Yes(type_of) => type_of.type_of.clone(),
             other => panic!("`{name}` has a type the file gives: {other:?}"),
         }
@@ -1519,7 +1562,12 @@ fn a_conditional_has_the_type_its_arms_agree_on() {
         .expect("`from_mixed` is an `auto` the file writes");
     assert!(
         !matches!(
-            session.type_at(&view, cpp_code_analysis::file::coordinates::ReadingOffset::new(mixed.name_range.start_offset)),
+            session.type_at(
+                &view,
+                cpp_code_analysis::file::coordinates::ReadingOffset::new(
+                    mixed.name_range.start_offset
+                )
+            ),
             cpp_code_analysis::Known::Yes(_)
         ),
         "the arms disagree, so the conversion decides — and this layer does not rank conversions"
@@ -1555,22 +1603,25 @@ fn a_modifier_is_read_from_the_declarations_own_specifiers() {
     let modifiers_of = |spelling: &str| -> Vec<NameModifier> {
         names
             .iter()
-            .filter(|name| {
-                &source[name.range.start_offset..name.range.end_offset()] == spelling
-            })
+            .filter(|name| &source[name.range.start_offset..name.range.end_offset()] == spelling)
             .flat_map(|name| name.modifiers.clone())
             .collect()
     };
 
-    assert!(modifiers_of("limit").contains(&NameModifier::ReadOnly), "`const int limit` is readonly");
-    assert!(modifiers_of("file_scope").contains(&NameModifier::Static), "`static int file_scope` is static");
-    assert!(modifiers_of("plain").is_empty(), "a plain `int` carries nothing");
+    assert!(
+        modifiers_of("limit").contains(&NameModifier::ReadOnly),
+        "`const int limit` is readonly"
+    );
+    assert!(
+        modifiers_of("file_scope").contains(&NameModifier::Static),
+        "`static int file_scope` is static"
+    );
+    assert!(
+        modifiers_of("plain").is_empty(),
+        "a plain `int` carries nothing"
+    );
     assert!(
         modifiers_of("Widget").is_empty(),
         "a type is not readonly and not static — a modifier that cannot be true is a visible wrong claim"
     );
 }
-
-
-
-

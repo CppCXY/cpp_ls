@@ -146,7 +146,9 @@ impl CppGreenNodeBuilder<'_> {
             }
             // **A comment keeps its interior.** `/// The y.` is text a reader reads, and a pass that trimmed inside it
             // would be rewriting what a hover shows. Only the whitespace at its two ends is given back.
-            CppSyntaxKind::DocComment | CppSyntaxKind::LineComment | CppSyntaxKind::BlockComment => {
+            CppSyntaxKind::DocComment
+            | CppSyntaxKind::LineComment
+            | CppSyntaxKind::BlockComment => {
                 while child_start < child_count && self.is_layout(self.children[child_start]) {
                     child_start += 1;
                 }
@@ -477,12 +479,13 @@ mod tests {
         match element {
             CppGreenElement::Node { kind, .. } => matches!(
                 kind,
-                CppSyntaxKind::DocComment | CppSyntaxKind::LineComment | CppSyntaxKind::BlockComment
+                CppSyntaxKind::DocComment
+                    | CppSyntaxKind::LineComment
+                    | CppSyntaxKind::BlockComment
             ),
-            CppGreenElement::Token { kind, .. } => matches!(
-                kind,
-                CppTokenKind::LineComment | CppTokenKind::BlockComment
-            ),
+            CppGreenElement::Token { kind, .. } => {
+                matches!(kind, CppTokenKind::LineComment | CppTokenKind::BlockComment)
+            }
             CppGreenElement::Gap => false,
         }
     }

@@ -328,10 +328,7 @@ impl MacroTable {
     /// Remember where a name's newest binding is.
     fn index(&mut self, name: &str) {
         let index = (self.bindings.len() - 1) as u32;
-        self.by_name
-            .entry(Box::from(name))
-            .or_default()
-            .push(index);
+        self.by_name.entry(Box::from(name)).or_default().push(index);
     }
 
     /// Record a definition, effective from the offset it was written at.
@@ -383,11 +380,12 @@ impl MacroTable {
     /// doing it, one deep clone per definition per file.
     pub fn extend_from(&mut self, other: &MacroTable) {
         let first = self.bindings.len() as u32;
-        self.bindings.extend(other.bindings.iter().map(|binding| Binding {
-            name: binding.name.clone(),
-            definition: binding.definition.clone(),
-            at: binding.at,
-        }));
+        self.bindings
+            .extend(other.bindings.iter().map(|binding| Binding {
+                name: binding.name.clone(),
+                definition: binding.definition.clone(),
+                at: binding.at,
+            }));
 
         // The names come along, shifted: `other`'s indices are its own, and a binding's index is what the lookup
         // uses. A rebuild would also be correct and would throw away the names already in the map.

@@ -108,8 +108,10 @@ fn main() {
         // it walks the scope chain — so this is the number that decides whether the per-file table is affordable
         // and what it is worth, both at once.
         {
-            let scopes =
-                cpp_code_analysis::sema::scopes::build_scopes(&root, &cpp_code_analysis::sema::scopes::NoMacroBodies);
+            let scopes = cpp_code_analysis::sema::scopes::build_scopes(
+                &root,
+                &cpp_code_analysis::sema::scopes::NoMacroBodies,
+            );
             let started = std::time::Instant::now();
             let locals = cpp_code_analysis::sema::declarations::local_references_of(&scopes, &root);
             local_micros += started.elapsed().as_micros() as usize;
@@ -133,7 +135,8 @@ fn main() {
             let Some(token) = element.as_token() else {
                 continue;
             };
-            if cpp_parser::CppTokenKind::from(token.kind()) != cpp_parser::CppTokenKind::Identifier {
+            if cpp_parser::CppTokenKind::from(token.kind()) != cpp_parser::CppTokenKind::Identifier
+            {
                 continue;
             }
             let at = usize::from(token.text_range().start());
@@ -162,10 +165,19 @@ fn main() {
         "    …inside a statement block         {uses_in_bodies:>12}   {:>5.1}%  (a per-file fact can answer these)",
         share(uses_in_bodies, uses)
     );
-    println!("    …outside                          {:>12}", uses - uses_in_bodies);
-    println!("  distinct names                        {:>12}", names.len());
+    println!(
+        "    …outside                          {:>12}",
+        uses - uses_in_bodies
+    );
+    println!(
+        "  distinct names                        {:>12}",
+        names.len()
+    );
     println!();
-    println!("  projected use index                 {projected:>12} bytes  ({} per use, names separate)", BYTES_PER_USE);
+    println!(
+        "  projected use index                 {projected:>12} bytes  ({} per use, names separate)",
+        BYTES_PER_USE
+    );
     println!("  the summaries on disk               {on_disk:>12} bytes");
     println!(
         "  ratio                               {:>12}",
@@ -187,7 +199,11 @@ fn main() {
     );
     println!(
         "  …as a per-file table                {local_bytes:>12} bytes   {:>5.1}% of the summaries",
-        if on_disk == 0 { 0.0 } else { local_bytes as f64 * 100.0 / on_disk as f64 }
+        if on_disk == 0 {
+            0.0
+        } else {
+            local_bytes as f64 * 100.0 / on_disk as f64
+        }
     );
     println!(
         "  resolving them cost                 {:>12}   ({:.1} µs per file, {:.1} µs per identifier use)",
@@ -216,7 +232,10 @@ fn directory_bytes(dir: &Path) -> usize {
         .filter_map(Result::ok)
         .map(|entry| match entry.file_type() {
             Ok(kind) if kind.is_dir() => directory_bytes(&entry.path()),
-            _ => entry.metadata().map(|data| data.len() as usize).unwrap_or(0),
+            _ => entry
+                .metadata()
+                .map(|data| data.len() as usize)
+                .unwrap_or(0),
         })
         .sum()
 }

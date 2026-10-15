@@ -34,8 +34,12 @@ fn session_with_the_project() -> Session<MemoryFiles> {
         .with_file("/p/a.cpp", SOURCE)
         .with_file("/p/b.h", HEADER);
     let providers = SessionFiles::new(OpenDocuments::new(), memory);
-    let mut session =
-        Session::with_config("/p", providers, WatchFilter::new("/p"), CompilerConfig::default());
+    let mut session = Session::with_config(
+        "/p",
+        providers,
+        WatchFilter::new("/p"),
+        CompilerConfig::default(),
+    );
     session.add_project_files([
         std::path::PathBuf::from("/p/a.cpp"),
         std::path::PathBuf::from("/p/b.h"),
@@ -92,7 +96,10 @@ fn offered_at(offset: usize) -> Option<Vec<String>> {
     let mut session = session_with_the_project();
     let view = cooked_view(&mut session, "/p/a.cpp");
 
-    match session.name_completions(&view, cpp_code_analysis::file::coordinates::FileOffset::new(offset)) {
+    match session.name_completions(
+        &view,
+        cpp_code_analysis::file::coordinates::FileOffset::new(offset),
+    ) {
         Known::Yes(found) => Some(
             found
                 .names
@@ -143,7 +150,11 @@ fn a_local_is_offered_while_it_is_being_typed() {
     let view = cooked_view(&mut session, "/p/a.cpp");
 
     if std::env::var_os("CPPLS_TRACE_COORDINATES").is_some() {
-        let reading = view.reading_offset_of(cpp_code_analysis::file::coordinates::FileOffset::new(offset)).expect("the cursor is in the rendering");
+        let reading = view
+            .reading_offset_of(cpp_code_analysis::file::coordinates::FileOffset::new(
+                offset,
+            ))
+            .expect("the cursor is in the rendering");
         // **The token's own start in each text**, which is the anchor that settles this. The file's cursor sits on
         // the `_` of `local_variable`; if the rendering's offset for that same cursor lands on the *start* of the
         // token, then the two rulers differ by more than the whitespace the rendering collapsed — and the number to
@@ -162,7 +173,10 @@ fn a_local_is_offered_while_it_is_being_typed() {
         );
     }
 
-    let Known::Yes(found) = session.name_completions(&view, cpp_code_analysis::file::coordinates::FileOffset::new(offset)) else {
+    let Known::Yes(found) = session.name_completions(
+        &view,
+        cpp_code_analysis::file::coordinates::FileOffset::new(offset),
+    ) else {
         panic!("a half-written name is answerable");
     };
 
@@ -181,15 +195,22 @@ fn a_comment_and_a_literal_offer_nothing() {
     let commented = "int f() { // a note\n    return 0;\n}\n";
     let memory = MemoryFiles::new().with_file("/p/a.cpp", commented);
     let providers = SessionFiles::new(OpenDocuments::new(), memory);
-    let mut session =
-        Session::with_config("/p", providers, WatchFilter::new("/p"), CompilerConfig::default());
+    let mut session = Session::with_config(
+        "/p",
+        providers,
+        WatchFilter::new("/p"),
+        CompilerConfig::default(),
+    );
     session.load("/p/a.cpp");
     let view = cooked_view(&mut session, "/p/a.cpp");
 
     let inside_the_comment = commented.find("// a").expect("the fixture") + "// a".len();
     assert!(
         !matches!(
-            session.name_completions(&view, cpp_code_analysis::file::coordinates::FileOffset::new(inside_the_comment)),
+            session.name_completions(
+                &view,
+                cpp_code_analysis::file::coordinates::FileOffset::new(inside_the_comment)
+            ),
             Known::Yes(_)
         ),
         "a name in a comment is not code"
@@ -205,11 +226,20 @@ fn a_member_position_is_not_a_name_position() {
     let view = cooked_view(&mut session, "/p/a.cpp");
 
     assert!(
-        !matches!(session.name_completions(&view, cpp_code_analysis::file::coordinates::FileOffset::new(offset)), Known::Yes(_)),
+        !matches!(
+            session.name_completions(
+                &view,
+                cpp_code_analysis::file::coordinates::FileOffset::new(offset)
+            ),
+            Known::Yes(_)
+        ),
         "the member query owns this position"
     );
 
-    let Known::Yes(members) = session.member_completions(&view, cpp_code_analysis::file::coordinates::FileOffset::new(offset)) else {
+    let Known::Yes(members) = session.member_completions(
+        &view,
+        cpp_code_analysis::file::coordinates::FileOffset::new(offset),
+    ) else {
         panic!("the member query answers it");
     };
     assert!(
@@ -306,13 +336,22 @@ int f() {
 ";
     let memory = MemoryFiles::new().with_file("/p/a.cpp", FIXTURE);
     let providers = SessionFiles::new(OpenDocuments::new(), memory);
-    let mut session =
-        Session::with_config("/p", providers, WatchFilter::new("/p"), CompilerConfig::default());
+    let mut session = Session::with_config(
+        "/p",
+        providers,
+        WatchFilter::new("/p"),
+        CompilerConfig::default(),
+    );
     session.load("/p/a.cpp");
     let view = cooked_view(&mut session, "/p/a.cpp");
 
     // The **name** list, asked inside the body: the user's local is there, the reserved globals are not.
-    let known = match session.name_completions(&view, cpp_code_analysis::file::coordinates::FileOffset::new(FIXTURE.find("w.").expect("the fixture"))) {
+    let known = match session.name_completions(
+        &view,
+        cpp_code_analysis::file::coordinates::FileOffset::new(
+            FIXTURE.find("w.").expect("the fixture"),
+        ),
+    ) {
         Known::Yes(found) => found
             .names
             .iter()
@@ -336,7 +375,9 @@ int f() {
     // rule still takes MSVC's `_Alty`/`_ALLOC_MASK` off a `std::string`.
     let Known::Yes(members) = session.member_completions(
         &view,
-        cpp_code_analysis::file::coordinates::FileOffset::new(FIXTURE.find("w.").expect("the fixture") + 2),
+        cpp_code_analysis::file::coordinates::FileOffset::new(
+            FIXTURE.find("w.").expect("the fixture") + 2,
+        ),
     ) else {
         panic!("a member access is answerable");
     };
@@ -383,8 +424,12 @@ fn ranked_session() -> Session<MemoryFiles> {
         .with_file("/p/near.h", NEAR_H)
         .with_file("/p/far.h", FAR_H);
     let providers = SessionFiles::new(OpenDocuments::new(), memory);
-    let mut session =
-        Session::with_config("/p", providers, WatchFilter::new("/p"), CompilerConfig::default());
+    let mut session = Session::with_config(
+        "/p",
+        providers,
+        WatchFilter::new("/p"),
+        CompilerConfig::default(),
+    );
     session.add_project_files([
         std::path::PathBuf::from("/p/a.cpp"),
         std::path::PathBuf::from("/p/near.h"),
@@ -404,7 +449,10 @@ fn labels_at(session: &mut Session<MemoryFiles>, path: &str, offset: usize) -> V
     let view = cooked_view(session, path);
 
     session
-        .completions(&view, cpp_code_analysis::file::coordinates::FileOffset::new(offset))
+        .completions(
+            &view,
+            cpp_code_analysis::file::coordinates::FileOffset::new(offset),
+        )
         .items
         .iter()
         .map(|item| item.label.clone())
@@ -441,7 +489,10 @@ fn the_nearest_declaration_comes_first() {
     // The provenance is quoted in the message rather than asserted on directly: it is *why* the order is what it
     // is, and a failure of the order is the thing worth reading.
     let view = cooked_view(&mut session, "/p/a.cpp");
-    let provenance: Vec<String> = match session.name_completions(&view, cpp_code_analysis::file::coordinates::FileOffset::new(cursor)) {
+    let provenance: Vec<String> = match session.name_completions(
+        &view,
+        cpp_code_analysis::file::coordinates::FileOffset::new(cursor),
+    ) {
         Known::Yes(found) => found
             .names
             .iter()
@@ -491,7 +542,10 @@ fn a_blank_line_in_a_body_offers_the_keywords_and_the_snippets() {
 
     let labels = labels_at(&mut session, "/p/a.cpp", cursor);
     let view = cooked_view(&mut session, "/p/a.cpp");
-    let offered = session.completions(&view, cpp_code_analysis::file::coordinates::FileOffset::new(cursor));
+    let offered = session.completions(
+        &view,
+        cpp_code_analysis::file::coordinates::FileOffset::new(cursor),
+    );
 
     assert!(labels.contains(&"while".to_string()), "{labels:?}");
     assert!(labels.contains(&"if".to_string()), "{labels:?}");
@@ -546,13 +600,20 @@ fn after_a_hash_the_directives_are_offered() {
     const FIXTURE: &str = "#inc\nint x;\n";
     let memory = MemoryFiles::new().with_file("/p/a.cpp", FIXTURE);
     let providers = SessionFiles::new(OpenDocuments::new(), memory);
-    let mut session =
-        Session::with_config("/p", providers, WatchFilter::new("/p"), CompilerConfig::default());
+    let mut session = Session::with_config(
+        "/p",
+        providers,
+        WatchFilter::new("/p"),
+        CompilerConfig::default(),
+    );
     session.load("/p/a.cpp");
 
     let view = cooked_view(&mut session, "/p/a.cpp");
     let cursor = FIXTURE.find("inc").expect("the fixture") + "inc".len();
-    let found = session.completions(&view, cpp_code_analysis::file::coordinates::FileOffset::new(cursor));
+    let found = session.completions(
+        &view,
+        cpp_code_analysis::file::coordinates::FileOffset::new(cursor),
+    );
 
     let include = found
         .items
@@ -561,8 +622,7 @@ fn after_a_hash_the_directives_are_offered() {
         .unwrap_or_else(|| panic!("`include` is offered: {:?}", found.items));
 
     assert_eq!(
-        include.replace.start_offset,
-        1,
+        include.replace.start_offset, 1,
         "the edit starts at the `i` of `inc`"
     );
     assert_eq!(include.replace.length, 3, "and covers all of it");
@@ -580,15 +640,25 @@ fn a_directive_that_takes_no_argument_offers_nothing() {
     const FIXTURE: &str = "#if 0\n#endif \nint x;\n";
     let memory = MemoryFiles::new().with_file("/p/a.cpp", FIXTURE);
     let providers = SessionFiles::new(OpenDocuments::new(), memory);
-    let mut session =
-        Session::with_config("/p", providers, WatchFilter::new("/p"), CompilerConfig::default());
+    let mut session = Session::with_config(
+        "/p",
+        providers,
+        WatchFilter::new("/p"),
+        CompilerConfig::default(),
+    );
     session.load("/p/a.cpp");
 
     let view = cooked_view(&mut session, "/p/a.cpp");
     let cursor = FIXTURE.find("#endif ").expect("the fixture") + "#endif ".len();
 
     assert!(
-        session.completions(&view, cpp_code_analysis::file::coordinates::FileOffset::new(cursor)).items.is_empty(),
+        session
+            .completions(
+                &view,
+                cpp_code_analysis::file::coordinates::FileOffset::new(cursor)
+            )
+            .items
+            .is_empty(),
         "nothing may follow `#endif`"
     );
 }
@@ -600,8 +670,12 @@ fn a_defines_argument_offers_names_rather_than_keywords() {
     const FIXTURE: &str = "int already_a_name;\n#define \n";
     let memory = MemoryFiles::new().with_file("/p/a.cpp", FIXTURE);
     let providers = SessionFiles::new(OpenDocuments::new(), memory);
-    let mut session =
-        Session::with_config("/p", providers, WatchFilter::new("/p"), CompilerConfig::default());
+    let mut session = Session::with_config(
+        "/p",
+        providers,
+        WatchFilter::new("/p"),
+        CompilerConfig::default(),
+    );
     session.load("/p/a.cpp");
 
     let view = cooked_view(&mut session, "/p/a.cpp");
@@ -609,7 +683,12 @@ fn a_defines_argument_offers_names_rather_than_keywords() {
     let labels = labels_at(&mut session, "/p/a.cpp", cursor);
 
     assert_eq!(
-        session.completions(&view, cpp_code_analysis::file::coordinates::FileOffset::new(cursor)).prefix,
+        session
+            .completions(
+                &view,
+                cpp_code_analysis::file::coordinates::FileOffset::new(cursor)
+            )
+            .prefix,
         "",
         "nothing is written after `#define ` yet"
     );
@@ -643,7 +722,10 @@ fn an_include_offers_the_projects_headers() {
 
     let view = cooked_view(&mut session, "/p/a.cpp");
     let cursor = typed.find("near").expect("the fixture") + "near".len();
-    let found = session.completions(&view, cpp_code_analysis::file::coordinates::FileOffset::new(cursor));
+    let found = session.completions(
+        &view,
+        cpp_code_analysis::file::coordinates::FileOffset::new(cursor),
+    );
 
     let near = found
         .items
@@ -657,7 +739,10 @@ fn an_include_offers_the_projects_headers() {
         });
 
     assert_eq!(near.kind, ItemKind::Header);
-    assert_eq!(near.replace.start_offset, typed.find("near").expect("the fixture"));
+    assert_eq!(
+        near.replace.start_offset,
+        typed.find("near").expect("the fixture")
+    );
     assert_eq!(near.replace.length, 4, "the whole half-written name");
 }
 
@@ -668,20 +753,35 @@ fn a_comment_is_not_code() {
     const FIXTURE: &str = "int x; // a note here\n";
     let memory = MemoryFiles::new().with_file("/p/a.cpp", FIXTURE);
     let providers = SessionFiles::new(OpenDocuments::new(), memory);
-    let mut session =
-        Session::with_config("/p", providers, WatchFilter::new("/p"), CompilerConfig::default());
+    let mut session = Session::with_config(
+        "/p",
+        providers,
+        WatchFilter::new("/p"),
+        CompilerConfig::default(),
+    );
     session.load("/p/a.cpp");
 
     let view = cooked_view(&mut session, "/p/a.cpp");
     let inside = FIXTURE.find("note").expect("the fixture");
 
     assert!(
-        session.completions(&view, cpp_code_analysis::file::coordinates::FileOffset::new(inside)).items.is_empty(),
+        session
+            .completions(
+                &view,
+                cpp_code_analysis::file::coordinates::FileOffset::new(inside)
+            )
+            .items
+            .is_empty(),
         "a name in a comment is not code"
     );
     assert!(
         !session
-            .completions(&view, cpp_code_analysis::file::coordinates::FileOffset::new(FIXTURE.find('x').expect("the fixture") + 1))
+            .completions(
+                &view,
+                cpp_code_analysis::file::coordinates::FileOffset::new(
+                    FIXTURE.find('x').expect("the fixture") + 1
+                )
+            )
             .items
             .is_empty(),
         "and the declaration beside it is"
@@ -703,13 +803,20 @@ int f() {
 ";
     let memory = MemoryFiles::new().with_file("/p/a.cpp", FIXTURE);
     let providers = SessionFiles::new(OpenDocuments::new(), memory);
-    let mut session =
-        Session::with_config("/p", providers, WatchFilter::new("/p"), CompilerConfig::default());
+    let mut session = Session::with_config(
+        "/p",
+        providers,
+        WatchFilter::new("/p"),
+        CompilerConfig::default(),
+    );
     session.load("/p/a.cpp");
 
     let view = cooked_view(&mut session, "/p/a.cpp");
     let cursor = FIXTURE.find("w.").expect("the fixture") + 2;
-    let found = session.completions(&view, cpp_code_analysis::file::coordinates::FileOffset::new(cursor));
+    let found = session.completions(
+        &view,
+        cpp_code_analysis::file::coordinates::FileOffset::new(cursor),
+    );
 
     let labels: Vec<&str> = found.items.iter().map(|item| item.label.as_str()).collect();
     assert!(labels.contains(&"size"), "{labels:?}");
@@ -720,7 +827,10 @@ int f() {
         "and not the names in scope, which cannot follow the operator: {labels:?}"
     );
 
-    let size = position(&labels.iter().map(|it| it.to_string()).collect::<Vec<_>>(), "size");
+    let size = position(
+        &labels.iter().map(|it| it.to_string()).collect::<Vec<_>>(),
+        "size",
+    );
     let inherited = position(
         &labels.iter().map(|it| it.to_string()).collect::<Vec<_>>(),
         "inherited",
@@ -761,13 +871,20 @@ one::
 ";
     let memory = MemoryFiles::new().with_file("/p/a.cpp", FIXTURE);
     let providers = SessionFiles::new(OpenDocuments::new(), memory);
-    let mut session =
-        Session::with_config("/p", providers, WatchFilter::new("/p"), CompilerConfig::default());
+    let mut session = Session::with_config(
+        "/p",
+        providers,
+        WatchFilter::new("/p"),
+        CompilerConfig::default(),
+    );
     session.load("/p/a.cpp");
 
     let view = cooked_view(&mut session, "/p/a.cpp");
     let cursor = FIXTURE.find("one::").expect("the fixture") + "one::".len();
-    let found = session.completions(&view, cpp_code_analysis::file::coordinates::FileOffset::new(cursor));
+    let found = session.completions(
+        &view,
+        cpp_code_analysis::file::coordinates::FileOffset::new(cursor),
+    );
 
     assert_eq!(found.scope, "one");
     let labels: Vec<&str> = found.items.iter().map(|item| item.label.as_str()).collect();
@@ -792,16 +909,26 @@ int f() { Widget w; w.size; }
 ";
     let memory = MemoryFiles::new().with_file("/p/a.cpp", FIXTURE);
     let providers = SessionFiles::new(OpenDocuments::new(), memory);
-    let mut session =
-        Session::with_config("/p", providers, WatchFilter::new("/p"), CompilerConfig::default());
+    let mut session = Session::with_config(
+        "/p",
+        providers,
+        WatchFilter::new("/p"),
+        CompilerConfig::default(),
+    );
     session.load("/p/a.cpp");
 
     let view = cooked_view(&mut session, "/p/a.cpp");
     let at_the_member = FIXTURE.find("w.size").expect("the fixture");
     let cursor = at_the_member + 2 + "si".len();
-    let found = session.completions(&view, cpp_code_analysis::file::coordinates::FileOffset::new(cursor));
+    let found = session.completions(
+        &view,
+        cpp_code_analysis::file::coordinates::FileOffset::new(cursor),
+    );
 
-    assert_eq!(found.prefix, "si", "what filters is the part before the cursor");
+    assert_eq!(
+        found.prefix, "si",
+        "what filters is the part before the cursor"
+    );
     assert_eq!(
         found.replace.start_offset,
         at_the_member + 2,
@@ -823,7 +950,12 @@ fn a_short_list_is_not_marked_truncated() {
     let view = cooked_view(&mut session, "/p/a.cpp");
 
     assert!(
-        !session.completions(&view, cpp_code_analysis::file::coordinates::FileOffset::new(cursor)).truncated,
+        !session
+            .completions(
+                &view,
+                cpp_code_analysis::file::coordinates::FileOffset::new(cursor)
+            )
+            .truncated,
         "three headers do not fill a budget of two hundred"
     );
 }
@@ -838,7 +970,10 @@ fn an_include_points_at_the_header_it_names() {
 
     // Inside the spelling: `#include "near.h"` — character 12 is the `e` of `near`.
     let cursor = RANKED_CPP.find("near.h").expect("the fixture");
-    let Known::Yes(found) = session.header_at(&view, cpp_code_analysis::file::coordinates::FileOffset::new(cursor)) else {
+    let Known::Yes(found) = session.header_at(
+        &view,
+        cpp_code_analysis::file::coordinates::FileOffset::new(cursor),
+    ) else {
         panic!("the cursor is on a header name");
     };
 
@@ -857,7 +992,12 @@ fn an_include_points_at_the_header_it_names() {
     // the boundary being where it is documented to be rather than about a user-visible difference.
     assert!(
         !matches!(
-            session.header_at(&view, cpp_code_analysis::file::coordinates::FileOffset::new(RANKED_CPP.find("#include").expect("the fixture"))),
+            session.header_at(
+                &view,
+                cpp_code_analysis::file::coordinates::FileOffset::new(
+                    RANKED_CPP.find("#include").expect("the fixture")
+                )
+            ),
             Known::Yes(_)
         ),
         "the `#` is not the header's name"
@@ -866,7 +1006,10 @@ fn an_include_points_at_the_header_it_names() {
     // A name that is not a header is **not** this query's business — and the answer says so rather than saying
     // "nothing found", which is what keeps it from swallowing a jump that has a real declaration behind it.
     let on_a_declaration = RANKED_CPP.find("at_file_scope").expect("the fixture");
-    match session.header_at(&view, cpp_code_analysis::file::coordinates::FileOffset::new(on_a_declaration)) {
+    match session.header_at(
+        &view,
+        cpp_code_analysis::file::coordinates::FileOffset::new(on_a_declaration),
+    ) {
         Known::Unknown(reason) => assert_eq!(
             reason.describe(),
             UnknownReason::UnparsableName.describe(),
@@ -884,15 +1027,22 @@ fn an_include_that_resolves_to_nothing_says_so() {
     const FIXTURE: &str = "#include \"nowhere.h\"\nint x;\n";
     let memory = MemoryFiles::new().with_file("/p/a.cpp", FIXTURE);
     let providers = SessionFiles::new(OpenDocuments::new(), memory);
-    let mut session =
-        Session::with_config("/p", providers, WatchFilter::new("/p"), CompilerConfig::default());
+    let mut session = Session::with_config(
+        "/p",
+        providers,
+        WatchFilter::new("/p"),
+        CompilerConfig::default(),
+    );
     session.add_project_files([std::path::PathBuf::from("/p/a.cpp")]);
     session.index_everything();
 
     let view = cooked_view(&mut session, "/p/a.cpp");
     let cursor = FIXTURE.find("nowhere").expect("the fixture");
 
-    match session.header_at(&view, cpp_code_analysis::file::coordinates::FileOffset::new(cursor)) {
+    match session.header_at(
+        &view,
+        cpp_code_analysis::file::coordinates::FileOffset::new(cursor),
+    ) {
         Known::Unknown(reason) => assert!(
             reason.describe().contains("nowhere.h"),
             "the reason names the header nobody could find: {}",
@@ -934,8 +1084,12 @@ fn a_completion_after_an_edit_is_about_the_file_the_edit_wrote() {
         .with_file("/p/a.cpp", FRESHNESS_USES_HEADER)
         .with_file("/p/widget.h", FRESHNESS_HEADER);
     let providers = SessionFiles::new(OpenDocuments::new(), memory);
-    let mut session =
-        Session::with_config("/p", providers, WatchFilter::new("/p"), CompilerConfig::default());
+    let mut session = Session::with_config(
+        "/p",
+        providers,
+        WatchFilter::new("/p"),
+        CompilerConfig::default(),
+    );
     session.add_project_files([
         std::path::PathBuf::from("/p/a.cpp"),
         std::path::PathBuf::from("/p/widget.h"),
@@ -963,7 +1117,10 @@ fn a_completion_after_an_edit_is_about_the_file_the_edit_wrote() {
         cpp_code_analysis::FileView::parse_with(&held, &cpp_parser::MacroEnvironment::default());
 
     // **Without the catch-up**: the header's summary is the old one, so `Widget` still has only `size`.
-    let stale = session.completions(&view, cpp_code_analysis::file::coordinates::FileOffset::new(cursor));
+    let stale = session.completions(
+        &view,
+        cpp_code_analysis::file::coordinates::FileOffset::new(cursor),
+    );
     let stale_labels: Vec<&str> = stale.items.iter().map(|item| item.label.as_str()).collect();
     assert!(
         !stale_labels.contains(&"extra"),
@@ -972,7 +1129,10 @@ fn a_completion_after_an_edit_is_about_the_file_the_edit_wrote() {
 
     // **With it**: one parse of one file, and the answer is about the text the user is looking at.
     session.catch_up(std::path::Path::new("/p/widget.h"));
-    let fresh = session.completions(&view, cpp_code_analysis::file::coordinates::FileOffset::new(cursor));
+    let fresh = session.completions(
+        &view,
+        cpp_code_analysis::file::coordinates::FileOffset::new(cursor),
+    );
     let labels: Vec<&str> = fresh.items.iter().map(|item| item.label.as_str()).collect();
 
     assert!(
@@ -1011,8 +1171,12 @@ int f() {
 ";
     let memory = MemoryFiles::new().with_file("/p/a.cpp", FIXTURE);
     let providers = SessionFiles::new(OpenDocuments::new(), memory);
-    let mut session =
-        Session::with_config("/p", providers, WatchFilter::new("/p"), CompilerConfig::default());
+    let mut session = Session::with_config(
+        "/p",
+        providers,
+        WatchFilter::new("/p"),
+        CompilerConfig::default(),
+    );
     session.add_project_files([std::path::PathBuf::from("/p/a.cpp")]);
     session.index_everything();
 
@@ -1057,8 +1221,12 @@ fn the_first_completion_of_a_session_finds_the_type_in_an_included_header() {
         .with_file("/p/main.cpp", FRESHNESS_USES_HEADER)
         .with_file("/p/widget.h", FRESHNESS_HEADER);
     let providers = SessionFiles::new(OpenDocuments::new(), memory);
-    let mut session =
-        Session::with_config("/p", providers, WatchFilter::new("/p"), CompilerConfig::default());
+    let mut session = Session::with_config(
+        "/p",
+        providers,
+        WatchFilter::new("/p"),
+        CompilerConfig::default(),
+    );
     session.add_project_files([
         std::path::PathBuf::from("/p/main.cpp"),
         std::path::PathBuf::from("/p/widget.h"),
@@ -1070,7 +1238,10 @@ fn the_first_completion_of_a_session_finds_the_type_in_an_included_header() {
 
     let cursor = FRESHNESS_USES_HEADER.find("w.").expect("the fixture") + 2;
     let view = cooked_view(&mut session, "/p/main.cpp");
-    let found = session.completions(&view, cpp_code_analysis::file::coordinates::FileOffset::new(cursor));
+    let found = session.completions(
+        &view,
+        cpp_code_analysis::file::coordinates::FileOffset::new(cursor),
+    );
 
     let labels: Vec<&str> = found.items.iter().map(|item| item.label.as_str()).collect();
     assert!(
@@ -1089,8 +1260,12 @@ fn a_file_that_is_not_stale_is_not_read_again() {
         .with_file("/p/a.cpp", FRESHNESS_USES_HEADER)
         .with_file("/p/widget.h", FRESHNESS_HEADER);
     let providers = SessionFiles::new(OpenDocuments::new(), memory);
-    let mut session =
-        Session::with_config("/p", providers, WatchFilter::new("/p"), CompilerConfig::default());
+    let mut session = Session::with_config(
+        "/p",
+        providers,
+        WatchFilter::new("/p"),
+        CompilerConfig::default(),
+    );
     session.add_project_files([
         std::path::PathBuf::from("/p/a.cpp"),
         std::path::PathBuf::from("/p/widget.h"),
@@ -1137,8 +1312,12 @@ int main() {
         .with_file("/p/a.cpp", FIXTURE)
         .with_file("/p/widget.h", FRESHNESS_HEADER);
     let providers = SessionFiles::new(OpenDocuments::new(), memory);
-    let mut session =
-        Session::with_config("/p", providers, WatchFilter::new("/p"), CompilerConfig::default());
+    let mut session = Session::with_config(
+        "/p",
+        providers,
+        WatchFilter::new("/p"),
+        CompilerConfig::default(),
+    );
     session.add_project_files([
         std::path::PathBuf::from("/p/a.cpp"),
         std::path::PathBuf::from("/p/widget.h"),
@@ -1150,7 +1329,10 @@ int main() {
     assert_eq!(&FIXTURE[dot..dot + 1], ".", "the fixture's operator");
 
     for offset in [dot, dot + 1] {
-        let found = session.completions(&view, cpp_code_analysis::file::coordinates::FileOffset::new(offset));
+        let found = session.completions(
+            &view,
+            cpp_code_analysis::file::coordinates::FileOffset::new(offset),
+        );
         let labels: Vec<&str> = found.items.iter().map(|item| item.label.as_str()).collect();
 
         assert!(
@@ -1167,7 +1349,9 @@ int main() {
         // the rendering's. Passing the fixture's own offset here was `Bad offset: range 0..27 offset 52` inside
         // `rowan`: the file is 52 bytes and its rendering (the header inlined, the directive gone) is 27.
         let in_the_reading = view
-            .reading_offset_of(cpp_code_analysis::file::coordinates::FileOffset::new(offset))
+            .reading_offset_of(cpp_code_analysis::file::coordinates::FileOffset::new(
+                offset,
+            ))
             .expect("the cursor is in the rendering");
         let why = cpp_code_analysis::why_no_members(
             session.index(),
@@ -1182,17 +1366,6 @@ int main() {
         );
     }
 }
-
-
-
-
-
-
-
-
-
-
-
 
 /// **A constructor's parameters are in scope in its body and in its member-initializer list.**
 ///
@@ -1239,7 +1412,9 @@ fn a_constructors_parameters_are_in_scope() {
         CompilerConfig::default(),
     );
     session.load("/p/ctor.cpp");
-    let view = session.view_of_the_file(std::path::Path::new("/p/ctor.cpp")).expect("a view");
+    let view = session
+        .view_of_the_file(std::path::Path::new("/p/ctor.cpp"))
+        .expect("a view");
 
     for scope in view.scopes.scopes() {
         println!(
@@ -1254,13 +1429,20 @@ fn a_constructors_parameters_are_in_scope() {
         );
     }
 
-    for (what, needle) in [("the member-initializer list", ": first("), ("the body", "int here = ")] {
+    for (what, needle) in [
+        ("the member-initializer list", ": first("),
+        ("the body", "int here = "),
+    ] {
         let at = source.find(needle).expect("the fixture writes it") + needle.len();
         let names = match session.name_completions(
             &view,
             cpp_code_analysis::file::coordinates::FileOffset::new(at),
         ) {
-            Known::Yes(found) => found.names.iter().map(|offered| offered.fact.name.clone()).collect::<Vec<_>>(),
+            Known::Yes(found) => found
+                .names
+                .iter()
+                .map(|offered| offered.fact.name.clone())
+                .collect::<Vec<_>>(),
             other => panic!("{what} should be answerable, got {other:?}"),
         };
         assert!(

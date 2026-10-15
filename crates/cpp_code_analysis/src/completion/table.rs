@@ -93,81 +93,365 @@ pub struct DirectiveName {
 /// one consumer that has to *order* them rather than parse them.
 pub const KEYWORDS: &[Keyword] = &[
     // Statements and control flow.
-    Keyword { spelling: "break", use_kind: KeywordUse::Statement, detail: "leave the enclosing loop or switch" },
-    Keyword { spelling: "case", use_kind: KeywordUse::Statement, detail: "a label in a switch" },
-    Keyword { spelling: "catch", use_kind: KeywordUse::Statement, detail: "handle an exception" },
-    Keyword { spelling: "continue", use_kind: KeywordUse::Statement, detail: "next iteration of the enclosing loop" },
-    Keyword { spelling: "default", use_kind: KeywordUse::Statement, detail: "the fallback label in a switch" },
-    Keyword { spelling: "do", use_kind: KeywordUse::Statement, detail: "a loop whose condition is checked last" },
-    Keyword { spelling: "else", use_kind: KeywordUse::Statement, detail: "the branch taken when an `if` is false" },
-    Keyword { spelling: "for", use_kind: KeywordUse::Statement, detail: "a counted or ranged loop" },
-    Keyword { spelling: "goto", use_kind: KeywordUse::Statement, detail: "jump to a label" },
-    Keyword { spelling: "if", use_kind: KeywordUse::Statement, detail: "a conditional statement" },
-    Keyword { spelling: "return", use_kind: KeywordUse::Statement, detail: "leave the function, with a value" },
-    Keyword { spelling: "switch", use_kind: KeywordUse::Statement, detail: "select a branch by value" },
-    Keyword { spelling: "throw", use_kind: KeywordUse::Statement, detail: "raise an exception" },
-    Keyword { spelling: "try", use_kind: KeywordUse::Statement, detail: "a block whose exceptions are handled" },
-    Keyword { spelling: "while", use_kind: KeywordUse::Statement, detail: "a loop whose condition is checked first" },
-    Keyword { spelling: "co_await", use_kind: KeywordUse::Statement, detail: "suspend a coroutine until a value is ready" },
-    Keyword { spelling: "co_return", use_kind: KeywordUse::Statement, detail: "return from a coroutine" },
-    Keyword { spelling: "co_yield", use_kind: KeywordUse::Statement, detail: "produce a value from a coroutine" },
+    Keyword {
+        spelling: "break",
+        use_kind: KeywordUse::Statement,
+        detail: "leave the enclosing loop or switch",
+    },
+    Keyword {
+        spelling: "case",
+        use_kind: KeywordUse::Statement,
+        detail: "a label in a switch",
+    },
+    Keyword {
+        spelling: "catch",
+        use_kind: KeywordUse::Statement,
+        detail: "handle an exception",
+    },
+    Keyword {
+        spelling: "continue",
+        use_kind: KeywordUse::Statement,
+        detail: "next iteration of the enclosing loop",
+    },
+    Keyword {
+        spelling: "default",
+        use_kind: KeywordUse::Statement,
+        detail: "the fallback label in a switch",
+    },
+    Keyword {
+        spelling: "do",
+        use_kind: KeywordUse::Statement,
+        detail: "a loop whose condition is checked last",
+    },
+    Keyword {
+        spelling: "else",
+        use_kind: KeywordUse::Statement,
+        detail: "the branch taken when an `if` is false",
+    },
+    Keyword {
+        spelling: "for",
+        use_kind: KeywordUse::Statement,
+        detail: "a counted or ranged loop",
+    },
+    Keyword {
+        spelling: "goto",
+        use_kind: KeywordUse::Statement,
+        detail: "jump to a label",
+    },
+    Keyword {
+        spelling: "if",
+        use_kind: KeywordUse::Statement,
+        detail: "a conditional statement",
+    },
+    Keyword {
+        spelling: "return",
+        use_kind: KeywordUse::Statement,
+        detail: "leave the function, with a value",
+    },
+    Keyword {
+        spelling: "switch",
+        use_kind: KeywordUse::Statement,
+        detail: "select a branch by value",
+    },
+    Keyword {
+        spelling: "throw",
+        use_kind: KeywordUse::Statement,
+        detail: "raise an exception",
+    },
+    Keyword {
+        spelling: "try",
+        use_kind: KeywordUse::Statement,
+        detail: "a block whose exceptions are handled",
+    },
+    Keyword {
+        spelling: "while",
+        use_kind: KeywordUse::Statement,
+        detail: "a loop whose condition is checked first",
+    },
+    Keyword {
+        spelling: "co_await",
+        use_kind: KeywordUse::Statement,
+        detail: "suspend a coroutine until a value is ready",
+    },
+    Keyword {
+        spelling: "co_return",
+        use_kind: KeywordUse::Statement,
+        detail: "return from a coroutine",
+    },
+    Keyword {
+        spelling: "co_yield",
+        use_kind: KeywordUse::Statement,
+        detail: "produce a value from a coroutine",
+    },
     // Types.
-    Keyword { spelling: "auto", use_kind: KeywordUse::Type, detail: "deduce the type from the initializer" },
-    Keyword { spelling: "bool", use_kind: KeywordUse::Type, detail: "a boolean type" },
-    Keyword { spelling: "char", use_kind: KeywordUse::Type, detail: "a character type" },
-    Keyword { spelling: "decltype", use_kind: KeywordUse::Type, detail: "the type of an expression" },
-    Keyword { spelling: "double", use_kind: KeywordUse::Type, detail: "a double-precision floating-point type" },
-    Keyword { spelling: "float", use_kind: KeywordUse::Type, detail: "a single-precision floating-point type" },
-    Keyword { spelling: "int", use_kind: KeywordUse::Type, detail: "an integer type" },
-    Keyword { spelling: "long", use_kind: KeywordUse::Type, detail: "a wider integer type" },
-    Keyword { spelling: "short", use_kind: KeywordUse::Type, detail: "a narrower integer type" },
-    Keyword { spelling: "signed", use_kind: KeywordUse::Type, detail: "a signed integer type" },
-    Keyword { spelling: "unsigned", use_kind: KeywordUse::Type, detail: "an unsigned integer type" },
-    Keyword { spelling: "void", use_kind: KeywordUse::Type, detail: "no value" },
-    Keyword { spelling: "wchar_t", use_kind: KeywordUse::Type, detail: "a wide character type (a keyword in C++, a built-in in this parser)" },
-    Keyword { spelling: "typename", use_kind: KeywordUse::Type, detail: "a dependent name that is a type" },
+    Keyword {
+        spelling: "auto",
+        use_kind: KeywordUse::Type,
+        detail: "deduce the type from the initializer",
+    },
+    Keyword {
+        spelling: "bool",
+        use_kind: KeywordUse::Type,
+        detail: "a boolean type",
+    },
+    Keyword {
+        spelling: "char",
+        use_kind: KeywordUse::Type,
+        detail: "a character type",
+    },
+    Keyword {
+        spelling: "decltype",
+        use_kind: KeywordUse::Type,
+        detail: "the type of an expression",
+    },
+    Keyword {
+        spelling: "double",
+        use_kind: KeywordUse::Type,
+        detail: "a double-precision floating-point type",
+    },
+    Keyword {
+        spelling: "float",
+        use_kind: KeywordUse::Type,
+        detail: "a single-precision floating-point type",
+    },
+    Keyword {
+        spelling: "int",
+        use_kind: KeywordUse::Type,
+        detail: "an integer type",
+    },
+    Keyword {
+        spelling: "long",
+        use_kind: KeywordUse::Type,
+        detail: "a wider integer type",
+    },
+    Keyword {
+        spelling: "short",
+        use_kind: KeywordUse::Type,
+        detail: "a narrower integer type",
+    },
+    Keyword {
+        spelling: "signed",
+        use_kind: KeywordUse::Type,
+        detail: "a signed integer type",
+    },
+    Keyword {
+        spelling: "unsigned",
+        use_kind: KeywordUse::Type,
+        detail: "an unsigned integer type",
+    },
+    Keyword {
+        spelling: "void",
+        use_kind: KeywordUse::Type,
+        detail: "no value",
+    },
+    Keyword {
+        spelling: "wchar_t",
+        use_kind: KeywordUse::Type,
+        detail: "a wide character type (a keyword in C++, a built-in in this parser)",
+    },
+    Keyword {
+        spelling: "typename",
+        use_kind: KeywordUse::Type,
+        detail: "a dependent name that is a type",
+    },
     // Declaration specifiers.
-    Keyword { spelling: "class", use_kind: KeywordUse::Specifier, detail: "declare a class" },
-    Keyword { spelling: "const", use_kind: KeywordUse::Specifier, detail: "not modifiable" },
-    Keyword { spelling: "consteval", use_kind: KeywordUse::Specifier, detail: "evaluated at compile time, always" },
-    Keyword { spelling: "constexpr", use_kind: KeywordUse::Specifier, detail: "usable in a constant expression" },
-    Keyword { spelling: "constinit", use_kind: KeywordUse::Specifier, detail: "initialized at compile time" },
-    Keyword { spelling: "enum", use_kind: KeywordUse::Specifier, detail: "declare an enumeration" },
-    Keyword { spelling: "extern", use_kind: KeywordUse::Specifier, detail: "a declaration with external linkage" },
-    Keyword { spelling: "inline", use_kind: KeywordUse::Specifier, detail: "defined in every translation unit that uses it" },
-    Keyword { spelling: "namespace", use_kind: KeywordUse::Specifier, detail: "declare a namespace" },
-    Keyword { spelling: "noexcept", use_kind: KeywordUse::Specifier, detail: "does not throw" },
-    Keyword { spelling: "register", use_kind: KeywordUse::Specifier, detail: "a storage hint (removed in C++17)" },
-    Keyword { spelling: "static", use_kind: KeywordUse::Specifier, detail: "internal linkage, or one shared instance" },
-    Keyword { spelling: "static_assert", use_kind: KeywordUse::Specifier, detail: "a compile-time assertion" },
-    Keyword { spelling: "struct", use_kind: KeywordUse::Specifier, detail: "declare a struct" },
-    Keyword { spelling: "template", use_kind: KeywordUse::Specifier, detail: "declare a template" },
-    Keyword { spelling: "thread_local", use_kind: KeywordUse::Specifier, detail: "one instance per thread" },
-    Keyword { spelling: "typedef", use_kind: KeywordUse::Specifier, detail: "name an existing type" },
-    Keyword { spelling: "union", use_kind: KeywordUse::Specifier, detail: "declare a union" },
-    Keyword { spelling: "using", use_kind: KeywordUse::Specifier, detail: "a using-declaration, -directive or alias" },
-    Keyword { spelling: "volatile", use_kind: KeywordUse::Specifier, detail: "not to be optimized away" },
-    Keyword { spelling: "alignas", use_kind: KeywordUse::Specifier, detail: "the alignment of an object" },
-    Keyword { spelling: "export", use_kind: KeywordUse::Specifier, detail: "a module's exported declaration" },
+    Keyword {
+        spelling: "class",
+        use_kind: KeywordUse::Specifier,
+        detail: "declare a class",
+    },
+    Keyword {
+        spelling: "const",
+        use_kind: KeywordUse::Specifier,
+        detail: "not modifiable",
+    },
+    Keyword {
+        spelling: "consteval",
+        use_kind: KeywordUse::Specifier,
+        detail: "evaluated at compile time, always",
+    },
+    Keyword {
+        spelling: "constexpr",
+        use_kind: KeywordUse::Specifier,
+        detail: "usable in a constant expression",
+    },
+    Keyword {
+        spelling: "constinit",
+        use_kind: KeywordUse::Specifier,
+        detail: "initialized at compile time",
+    },
+    Keyword {
+        spelling: "enum",
+        use_kind: KeywordUse::Specifier,
+        detail: "declare an enumeration",
+    },
+    Keyword {
+        spelling: "extern",
+        use_kind: KeywordUse::Specifier,
+        detail: "a declaration with external linkage",
+    },
+    Keyword {
+        spelling: "inline",
+        use_kind: KeywordUse::Specifier,
+        detail: "defined in every translation unit that uses it",
+    },
+    Keyword {
+        spelling: "namespace",
+        use_kind: KeywordUse::Specifier,
+        detail: "declare a namespace",
+    },
+    Keyword {
+        spelling: "noexcept",
+        use_kind: KeywordUse::Specifier,
+        detail: "does not throw",
+    },
+    Keyword {
+        spelling: "register",
+        use_kind: KeywordUse::Specifier,
+        detail: "a storage hint (removed in C++17)",
+    },
+    Keyword {
+        spelling: "static",
+        use_kind: KeywordUse::Specifier,
+        detail: "internal linkage, or one shared instance",
+    },
+    Keyword {
+        spelling: "static_assert",
+        use_kind: KeywordUse::Specifier,
+        detail: "a compile-time assertion",
+    },
+    Keyword {
+        spelling: "struct",
+        use_kind: KeywordUse::Specifier,
+        detail: "declare a struct",
+    },
+    Keyword {
+        spelling: "template",
+        use_kind: KeywordUse::Specifier,
+        detail: "declare a template",
+    },
+    Keyword {
+        spelling: "thread_local",
+        use_kind: KeywordUse::Specifier,
+        detail: "one instance per thread",
+    },
+    Keyword {
+        spelling: "typedef",
+        use_kind: KeywordUse::Specifier,
+        detail: "name an existing type",
+    },
+    Keyword {
+        spelling: "union",
+        use_kind: KeywordUse::Specifier,
+        detail: "declare a union",
+    },
+    Keyword {
+        spelling: "using",
+        use_kind: KeywordUse::Specifier,
+        detail: "a using-declaration, -directive or alias",
+    },
+    Keyword {
+        spelling: "volatile",
+        use_kind: KeywordUse::Specifier,
+        detail: "not to be optimized away",
+    },
+    Keyword {
+        spelling: "alignas",
+        use_kind: KeywordUse::Specifier,
+        detail: "the alignment of an object",
+    },
+    Keyword {
+        spelling: "export",
+        use_kind: KeywordUse::Specifier,
+        detail: "a module's exported declaration",
+    },
     // Expressions.
-    Keyword { spelling: "delete", use_kind: KeywordUse::Expression, detail: "release what `new` allocated" },
-    Keyword { spelling: "false", use_kind: KeywordUse::Expression, detail: "the boolean false" },
-    Keyword { spelling: "new", use_kind: KeywordUse::Expression, detail: "allocate and construct" },
-    Keyword { spelling: "nullptr", use_kind: KeywordUse::Expression, detail: "a null pointer" },
-    Keyword { spelling: "operator", use_kind: KeywordUse::Expression, detail: "declare an overloaded operator" },
-    Keyword { spelling: "sizeof", use_kind: KeywordUse::Expression, detail: "the size of a type or object" },
-    Keyword { spelling: "alignof", use_kind: KeywordUse::Expression, detail: "the alignment of a type" },
-    Keyword { spelling: "this", use_kind: KeywordUse::Expression, detail: "the object a member function was called on" },
-    Keyword { spelling: "true", use_kind: KeywordUse::Expression, detail: "the boolean true" },
-    Keyword { spelling: "typeid", use_kind: KeywordUse::Expression, detail: "the type of an expression" },
+    Keyword {
+        spelling: "delete",
+        use_kind: KeywordUse::Expression,
+        detail: "release what `new` allocated",
+    },
+    Keyword {
+        spelling: "false",
+        use_kind: KeywordUse::Expression,
+        detail: "the boolean false",
+    },
+    Keyword {
+        spelling: "new",
+        use_kind: KeywordUse::Expression,
+        detail: "allocate and construct",
+    },
+    Keyword {
+        spelling: "nullptr",
+        use_kind: KeywordUse::Expression,
+        detail: "a null pointer",
+    },
+    Keyword {
+        spelling: "operator",
+        use_kind: KeywordUse::Expression,
+        detail: "declare an overloaded operator",
+    },
+    Keyword {
+        spelling: "sizeof",
+        use_kind: KeywordUse::Expression,
+        detail: "the size of a type or object",
+    },
+    Keyword {
+        spelling: "alignof",
+        use_kind: KeywordUse::Expression,
+        detail: "the alignment of a type",
+    },
+    Keyword {
+        spelling: "this",
+        use_kind: KeywordUse::Expression,
+        detail: "the object a member function was called on",
+    },
+    Keyword {
+        spelling: "true",
+        use_kind: KeywordUse::Expression,
+        detail: "the boolean true",
+    },
+    Keyword {
+        spelling: "typeid",
+        use_kind: KeywordUse::Expression,
+        detail: "the type of an expression",
+    },
     // Class bodies and class heads.
-    Keyword { spelling: "explicit", use_kind: KeywordUse::Member, detail: "not usable as an implicit conversion" },
-    Keyword { spelling: "friend", use_kind: KeywordUse::Member, detail: "give a function or class access" },
-    Keyword { spelling: "mutable", use_kind: KeywordUse::Member, detail: "modifiable in a const member function" },
-    Keyword { spelling: "private", use_kind: KeywordUse::Member, detail: "members only this class can reach" },
-    Keyword { spelling: "protected", use_kind: KeywordUse::Member, detail: "members derived classes can reach" },
-    Keyword { spelling: "public", use_kind: KeywordUse::Member, detail: "members anyone can reach" },
-    Keyword { spelling: "virtual", use_kind: KeywordUse::Member, detail: "a member a derived class may replace" },
+    Keyword {
+        spelling: "explicit",
+        use_kind: KeywordUse::Member,
+        detail: "not usable as an implicit conversion",
+    },
+    Keyword {
+        spelling: "friend",
+        use_kind: KeywordUse::Member,
+        detail: "give a function or class access",
+    },
+    Keyword {
+        spelling: "mutable",
+        use_kind: KeywordUse::Member,
+        detail: "modifiable in a const member function",
+    },
+    Keyword {
+        spelling: "private",
+        use_kind: KeywordUse::Member,
+        detail: "members only this class can reach",
+    },
+    Keyword {
+        spelling: "protected",
+        use_kind: KeywordUse::Member,
+        detail: "members derived classes can reach",
+    },
+    Keyword {
+        spelling: "public",
+        use_kind: KeywordUse::Member,
+        detail: "members anyone can reach",
+    },
+    Keyword {
+        spelling: "virtual",
+        use_kind: KeywordUse::Member,
+        detail: "a member a derived class may replace",
+    },
 ];
 
 /// **The snippets**, in the order a reader is most likely to want them.
@@ -176,26 +460,126 @@ pub const KEYWORDS: &[Keyword] = &[
 /// have to remember the order of. `${1:condition}` is a **placeholder** and not a text to insert: a client that
 /// supports snippets selects it, so typing replaces it.
 pub const SNIPPETS: &[Snippet] = &[
-    Snippet { trigger: "if", detail: "if statement", body: "if (${1:condition}) {\n\t$0\n}", starts_a_statement: true },
-    Snippet { trigger: "ifelse", detail: "if / else", body: "if (${1:condition}) {\n\t${2}\n} else {\n\t$0\n}", starts_a_statement: true },
-    Snippet { trigger: "else", detail: "else branch", body: "else {\n\t$0\n}", starts_a_statement: false },
-    Snippet { trigger: "while", detail: "while loop", body: "while (${1:condition}) {\n\t$0\n}", starts_a_statement: true },
-    Snippet { trigger: "dowhile", detail: "do / while loop", body: "do {\n\t${1}\n} while (${2:condition});\n$0", starts_a_statement: true },
-    Snippet { trigger: "for", detail: "for loop", body: "for (int ${1:i} = 0; ${1:i} < ${2:count}; ++${1:i}) {\n\t$0\n}", starts_a_statement: true },
-    Snippet { trigger: "forr", detail: "range-based for loop", body: "for (const auto& ${1:item} : ${2:container}) {\n\t$0\n}", starts_a_statement: true },
-    Snippet { trigger: "switch", detail: "switch statement", body: "switch (${1:value}) {\ncase ${2:value}:\n\t$0\n\tbreak;\ndefault:\n\tbreak;\n}", starts_a_statement: true },
-    Snippet { trigger: "case", detail: "case label", body: "case ${1:value}:\n\t$0\n\tbreak;", starts_a_statement: false },
-    Snippet { trigger: "try", detail: "try / catch", body: "try {\n\t${1}\n} catch (const ${2:std::exception}& ${3:e}) {\n\t$0\n}", starts_a_statement: true },
-    Snippet { trigger: "catch", detail: "catch clause", body: "catch (const ${1:std::exception}& ${2:e}) {\n\t$0\n}", starts_a_statement: false },
-    Snippet { trigger: "return", detail: "return a value", body: "return ${1:value};$0", starts_a_statement: true },
-    Snippet { trigger: "class", detail: "class definition", body: "class ${1:Name} {\npublic:\n\t${2:${1:Name}}();\n\t~${2:${1:Name}}();\n\nprivate:\n\t$0\n};", starts_a_statement: true },
-    Snippet { trigger: "struct", detail: "struct definition", body: "struct ${1:Name} {\n\t$0\n};", starts_a_statement: true },
-    Snippet { trigger: "enum", detail: "enumeration", body: "enum class ${1:Name} {\n\t$0\n};", starts_a_statement: true },
-    Snippet { trigger: "namespace", detail: "namespace", body: "namespace ${1:name} {\n\t$0\n}", starts_a_statement: true },
-    Snippet { trigger: "function", detail: "function definition", body: "${1:void} ${2:name}(${3}) {\n\t$0\n}", starts_a_statement: true },
-    Snippet { trigger: "template", detail: "template declaration", body: "template <typename ${1:T}>\n${2:void} ${3:name}(${4}) {\n\t$0\n}", starts_a_statement: true },
-    Snippet { trigger: "main", detail: "the program's entry point", body: "int main(int argc, char** argv) {\n\t$0\n\treturn 0;\n}", starts_a_statement: true },
-    Snippet { trigger: "include", detail: "a header guard", body: "#ifndef ${1:HEADER}_H\n#define ${1:HEADER}_H\n\n$0\n\n#endif  // ${1:HEADER}_H", starts_a_statement: true },
+    Snippet {
+        trigger: "if",
+        detail: "if statement",
+        body: "if (${1:condition}) {\n\t$0\n}",
+        starts_a_statement: true,
+    },
+    Snippet {
+        trigger: "ifelse",
+        detail: "if / else",
+        body: "if (${1:condition}) {\n\t${2}\n} else {\n\t$0\n}",
+        starts_a_statement: true,
+    },
+    Snippet {
+        trigger: "else",
+        detail: "else branch",
+        body: "else {\n\t$0\n}",
+        starts_a_statement: false,
+    },
+    Snippet {
+        trigger: "while",
+        detail: "while loop",
+        body: "while (${1:condition}) {\n\t$0\n}",
+        starts_a_statement: true,
+    },
+    Snippet {
+        trigger: "dowhile",
+        detail: "do / while loop",
+        body: "do {\n\t${1}\n} while (${2:condition});\n$0",
+        starts_a_statement: true,
+    },
+    Snippet {
+        trigger: "for",
+        detail: "for loop",
+        body: "for (int ${1:i} = 0; ${1:i} < ${2:count}; ++${1:i}) {\n\t$0\n}",
+        starts_a_statement: true,
+    },
+    Snippet {
+        trigger: "forr",
+        detail: "range-based for loop",
+        body: "for (const auto& ${1:item} : ${2:container}) {\n\t$0\n}",
+        starts_a_statement: true,
+    },
+    Snippet {
+        trigger: "switch",
+        detail: "switch statement",
+        body: "switch (${1:value}) {\ncase ${2:value}:\n\t$0\n\tbreak;\ndefault:\n\tbreak;\n}",
+        starts_a_statement: true,
+    },
+    Snippet {
+        trigger: "case",
+        detail: "case label",
+        body: "case ${1:value}:\n\t$0\n\tbreak;",
+        starts_a_statement: false,
+    },
+    Snippet {
+        trigger: "try",
+        detail: "try / catch",
+        body: "try {\n\t${1}\n} catch (const ${2:std::exception}& ${3:e}) {\n\t$0\n}",
+        starts_a_statement: true,
+    },
+    Snippet {
+        trigger: "catch",
+        detail: "catch clause",
+        body: "catch (const ${1:std::exception}& ${2:e}) {\n\t$0\n}",
+        starts_a_statement: false,
+    },
+    Snippet {
+        trigger: "return",
+        detail: "return a value",
+        body: "return ${1:value};$0",
+        starts_a_statement: true,
+    },
+    Snippet {
+        trigger: "class",
+        detail: "class definition",
+        body: "class ${1:Name} {\npublic:\n\t${2:${1:Name}}();\n\t~${2:${1:Name}}();\n\nprivate:\n\t$0\n};",
+        starts_a_statement: true,
+    },
+    Snippet {
+        trigger: "struct",
+        detail: "struct definition",
+        body: "struct ${1:Name} {\n\t$0\n};",
+        starts_a_statement: true,
+    },
+    Snippet {
+        trigger: "enum",
+        detail: "enumeration",
+        body: "enum class ${1:Name} {\n\t$0\n};",
+        starts_a_statement: true,
+    },
+    Snippet {
+        trigger: "namespace",
+        detail: "namespace",
+        body: "namespace ${1:name} {\n\t$0\n}",
+        starts_a_statement: true,
+    },
+    Snippet {
+        trigger: "function",
+        detail: "function definition",
+        body: "${1:void} ${2:name}(${3}) {\n\t$0\n}",
+        starts_a_statement: true,
+    },
+    Snippet {
+        trigger: "template",
+        detail: "template declaration",
+        body: "template <typename ${1:T}>\n${2:void} ${3:name}(${4}) {\n\t$0\n}",
+        starts_a_statement: true,
+    },
+    Snippet {
+        trigger: "main",
+        detail: "the program's entry point",
+        body: "int main(int argc, char** argv) {\n\t$0\n\treturn 0;\n}",
+        starts_a_statement: true,
+    },
+    Snippet {
+        trigger: "include",
+        detail: "a header guard",
+        body: "#ifndef ${1:HEADER}_H\n#define ${1:HEADER}_H\n\n$0\n\n#endif  // ${1:HEADER}_H",
+        starts_a_statement: true,
+    },
 ];
 
 /// **The built-in type names that are not keywords.**
@@ -234,20 +618,62 @@ pub const BUILTIN_TYPES: &[(&str, &str)] = &[
 /// A directive that is not here is not offered, which is the right direction: a list of every directive any
 /// preprocessor accepts would include spellings that only one compiler takes.
 pub const DIRECTIVES: &[DirectiveName] = &[
-    DirectiveName { name: "include", detail: "paste a header into this file" },
-    DirectiveName { name: "define", detail: "define a macro" },
-    DirectiveName { name: "undef", detail: "remove a macro definition" },
-    DirectiveName { name: "if", detail: "compile the block when a condition holds" },
-    DirectiveName { name: "ifdef", detail: "compile the block when a macro is defined" },
-    DirectiveName { name: "ifndef", detail: "compile the block when a macro is not defined" },
-    DirectiveName { name: "elif", detail: "another condition for the same `#if`" },
-    DirectiveName { name: "else", detail: "the block taken when no condition held" },
-    DirectiveName { name: "endif", detail: "end a conditional block" },
-    DirectiveName { name: "pragma", detail: "an implementation-defined instruction" },
-    DirectiveName { name: "error", detail: "stop the compilation with a message" },
-    DirectiveName { name: "warning", detail: "report a message and continue" },
-    DirectiveName { name: "line", detail: "set the line number the compiler reports" },
-    DirectiveName { name: "include_next", detail: "paste the next header of this name on the search path" },
+    DirectiveName {
+        name: "include",
+        detail: "paste a header into this file",
+    },
+    DirectiveName {
+        name: "define",
+        detail: "define a macro",
+    },
+    DirectiveName {
+        name: "undef",
+        detail: "remove a macro definition",
+    },
+    DirectiveName {
+        name: "if",
+        detail: "compile the block when a condition holds",
+    },
+    DirectiveName {
+        name: "ifdef",
+        detail: "compile the block when a macro is defined",
+    },
+    DirectiveName {
+        name: "ifndef",
+        detail: "compile the block when a macro is not defined",
+    },
+    DirectiveName {
+        name: "elif",
+        detail: "another condition for the same `#if`",
+    },
+    DirectiveName {
+        name: "else",
+        detail: "the block taken when no condition held",
+    },
+    DirectiveName {
+        name: "endif",
+        detail: "end a conditional block",
+    },
+    DirectiveName {
+        name: "pragma",
+        detail: "an implementation-defined instruction",
+    },
+    DirectiveName {
+        name: "error",
+        detail: "stop the compilation with a message",
+    },
+    DirectiveName {
+        name: "warning",
+        detail: "report a message and continue",
+    },
+    DirectiveName {
+        name: "line",
+        detail: "set the line number the compiler reports",
+    },
+    DirectiveName {
+        name: "include_next",
+        detail: "paste the next header of this name on the search path",
+    },
 ];
 
 /// **The keywords a cursor in this shape may be writing**, in table order.
@@ -256,11 +682,13 @@ pub const DIRECTIVES: &[DirectiveName] = &[
 /// body — the two positions that change which of the four vocabularies applies. Everything else is a specifier or
 /// a type, which can begin any declaration and therefore any statement.
 pub fn keywords_for(statement: bool, member: bool) -> impl Iterator<Item = &'static Keyword> {
-    KEYWORDS.iter().filter(move |keyword| match keyword.use_kind {
-        KeywordUse::Statement | KeywordUse::Expression => statement,
-        KeywordUse::Type | KeywordUse::Specifier => true,
-        KeywordUse::Member => member,
-    })
+    KEYWORDS
+        .iter()
+        .filter(move |keyword| match keyword.use_kind {
+            KeywordUse::Statement | KeywordUse::Expression => statement,
+            KeywordUse::Type | KeywordUse::Specifier => true,
+            KeywordUse::Member => member,
+        })
 }
 
 /// **The snippets a cursor may be writing.** See [`Snippet::starts_a_statement`].

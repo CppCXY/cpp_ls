@@ -52,7 +52,9 @@ use tokio_util::sync::CancellationToken;
 
 use super::RegisterCapabilities;
 use crate::context::{RequestOutcome, ServerContextSnapshot, snapshot_query};
-use crate::util::{file_offset_at_position, offset_at_position, path_to_uri, position_in_file, uri_to_file_path};
+use crate::util::{
+    file_offset_at_position, offset_at_position, path_to_uri, position_in_file, uri_to_file_path,
+};
 
 pub async fn on_goto_definition_handler(
     context: ServerContextSnapshot,
@@ -132,7 +134,8 @@ pub async fn on_goto_definition_handler(
             let Some(uri) = path_to_uri(&declaration.file) else {
                 continue;
             };
-            let range = name_range(session, &declaration.file, &declaration.fact).unwrap_or_default();
+            let range =
+                name_range(session, &declaration.file, &declaration.fact).unwrap_or_default();
             locations.push(Location { uri, range });
         }
 
@@ -196,9 +199,3 @@ impl RegisterCapabilities for DefinitionCapabilities {
         server_capabilities.definition_provider = Some(OneOf::Left(true));
     }
 }
-
-
-
-
-
-

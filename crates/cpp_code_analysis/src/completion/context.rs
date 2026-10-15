@@ -143,8 +143,11 @@ fn member_access_from_the_text(
     // The operator, asked of the two offsets a cursor on it can be: the reader has just typed it (`full2.|`) or the
     // caret is drawn **on** its column (`full2|.`). One function rather than two branches, because both are
     // "the operator next to this cursor" and neither is special.
-    let operator = resolve::operator_in(root, offset)
-        .or_else(|| offset.checked_sub(1).and_then(|before| resolve::operator_in(root, before)))?;
+    let operator = resolve::operator_in(root, offset).or_else(|| {
+        offset
+            .checked_sub(1)
+            .and_then(|before| resolve::operator_in(root, before))
+    })?;
     let at = usize::from(operator.text_range().end());
 
     // **The object: the name before the operator.** Asked of the *tree* so that a qualified spelling comes back as
@@ -185,7 +188,9 @@ fn member_access_from_the_text(
 /// not on a line whose first non-space character is a `#`, which is what keeps this from claiming ordinary code.
 fn directive_line(root: &CppSyntaxNode, offset: usize) -> Option<(String, usize, usize)> {
     let text = root.text().to_string();
-    let line_start = text[..offset.min(text.len())].rfind('\n').map_or(0, |at| at + 1);
+    let line_start = text[..offset.min(text.len())]
+        .rfind('\n')
+        .map_or(0, |at| at + 1);
     let line_end = text[line_start..]
         .find('\n')
         .map_or(text.len(), |at| line_start + at);
@@ -200,17 +205,18 @@ fn directive_line(root: &CppSyntaxNode, offset: usize) -> Option<(String, usize,
     }
 }
 fn directive_at(root: &CppSyntaxNode, offset: usize) -> Option<CompletionContext> {
-    let (text, start, end) = match node_ancestor_of_kind(root, offset, CppSyntaxKind::PreprocessorDirective) {
-        Some(node) => {
-            let range = node.text_range();
-            (
-                node.text().to_string(),
-                usize::from(range.start()),
-                usize::from(range.end()),
-            )
-        }
-        None => directive_line(root, offset)?,
-    };
+    let (text, start, end) =
+        match node_ancestor_of_kind(root, offset, CppSyntaxKind::PreprocessorDirective) {
+            Some(node) => {
+                let range = node.text_range();
+                (
+                    node.text().to_string(),
+                    usize::from(range.start()),
+                    usize::from(range.end()),
+                )
+            }
+            None => directive_line(root, offset)?,
+        };
 
     // The text from the `#` to the cursor. `get` rather than a slice, so a cursor that is not on a character
     // boundary (possible in a directive holding a non-ASCII identifier) answers `Nothing` instead of panicking.
@@ -254,8 +260,8 @@ fn directive_at(root: &CppSyntaxNode, offset: usize) -> Option<CompletionContext
     };
 
     match name {
-        "include" | "include_next" | "if" | "elif" | "ifdef" | "ifndef" | "undef" | "define" | "pragma"
-        | "line" | "error" | "warning" | "assert" | "unassert" => {
+        "include" | "include_next" | "if" | "elif" | "ifdef" | "ifndef" | "undef" | "define"
+        | "pragma" | "line" | "error" | "warning" | "assert" | "unassert" => {
             Some(header_or_name(name, rest, start, before.len(), offset))
         }
         // Every other directive — `#else`, `#endif`, the null directive — takes no argument, and a list there is
@@ -285,7 +291,10 @@ fn header_or_name(
         return CompletionContext::DirectiveArgument { written, range };
     }
 
-    let delimiter = rest.chars().next().filter(|first| *first == '<' || *first == '"');
+    let delimiter = rest
+        .chars()
+        .next()
+        .filter(|first| *first == '<' || *first == '"');
 
     if delimiter.is_none() {
         let (written, range) = segment_written(rest, argument_at, offset);
@@ -324,7 +333,10 @@ fn segment_written(rest: &str, at: usize, offset: usize) -> (String, SourceRange
     // The token the cursor is in: up to the first character that cannot be part of a name.
     let end_of_token = rest
         .find(|character: char| {
-            !(character.is_alphanumeric() || character == '_' || character == '.' || character == '/'
+            !(character.is_alphanumeric()
+                || character == '_'
+                || character == '.'
+                || character == '/'
                 || character == '-')
         })
         .unwrap_or(rest.len());
@@ -399,8 +411,8 @@ mod tests {
     fn context_in(source: &str) -> (CompletionContext, usize, String) {
         let offset = source.find('|').expect("the fixture marks the cursor");
         let text = source.replace('|', "");
-        let root = cpp_parser::CppParser::parse(&text, cpp_parser::ParserConfig::default())
-            .get_red_root();
+        let root =
+            cpp_parser::CppParser::parse(&text, cpp_parser::ParserConfig::default()).get_red_root();
 
         (context_at(&root, offset), offset, text)
     }
@@ -595,4 +607,3 @@ mod tests {
         }
     }
 }
-

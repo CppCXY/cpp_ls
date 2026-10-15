@@ -130,7 +130,9 @@ impl FuzzyIndex {
             };
             for entry in entries.flatten() {
                 let path = entry.path();
-                let Ok(kind) = entry.file_type() else { continue };
+                let Ok(kind) = entry.file_type() else {
+                    continue;
+                };
                 if kind.is_dir() {
                     // **Build trees are skipped by name.** A generated directory holds copies of the project's own
                     // headers — `build/.../foo.h` beside `include/foo.h` — and indexing them would make every fuzzy
@@ -140,7 +142,9 @@ impl FuzzyIndex {
                     }
                     stack.push((path, depth + 1));
                 } else if kind.is_file() {
-                    let Some(name) = path.file_name().map(|name| name.to_string_lossy().to_lowercase())
+                    let Some(name) = path
+                        .file_name()
+                        .map(|name| name.to_string_lossy().to_lowercase())
                     else {
                         continue;
                     };
@@ -186,12 +190,10 @@ impl FuzzyIndex {
         // **Shallowest first**, because the shortest path that matches is the one closest to the root the project
         // named, and a deep match is more likely to be a vendored copy of the same header. The count is of
         // components and not of bytes, so a long directory name does not outrank a short one.
-        found.sort_unstable_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(right.1)));
-
         found
-            .into_iter()
-            .map(|(_, path)| path.clone())
-            .collect()
+            .sort_unstable_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(right.1)));
+
+        found.into_iter().map(|(_, path)| path.clone()).collect()
     }
 
     /// The root this index describes.
@@ -279,7 +281,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         for file in files {
             let path = root.join(file);
-            std::fs::create_dir_all(path.parent().expect("a file has a parent")).expect("a directory");
+            std::fs::create_dir_all(path.parent().expect("a file has a parent"))
+                .expect("a directory");
             std::fs::write(&path, "// a header\n").expect("a file");
         }
         root
@@ -316,7 +319,11 @@ mod tests {
         // Three files end with those two components; the fourth does not, and a match that only compared the file
         // name would have returned it.
         assert_eq!(found.len(), 3);
-        assert!(found.iter().all(|path| path.ends_with("Session/StandardIOSession.h")));
+        assert!(
+            found
+                .iter()
+                .all(|path| path.ends_with("Session/StandardIOSession.h"))
+        );
     }
 
     #[test]
@@ -325,7 +332,10 @@ mod tests {
         // vendored copy of the same header.
         let root = root_with(
             "shallow",
-            &["deep/nested/very/far/down/detail/config.h", "detail/config.h"],
+            &[
+                "deep/nested/very/far/down/detail/config.h",
+                "detail/config.h",
+            ],
         );
         let index = index_for(&root).expect("an index");
 
@@ -355,12 +365,20 @@ mod tests {
         // ambiguous between the file a person wrote and the one a compiler copied.
         let root = root_with(
             "generated",
-            &["include/Widget.h", "build/include/Widget.h", "out/include/Widget.h"],
+            &[
+                "include/Widget.h",
+                "build/include/Widget.h",
+                "out/include/Widget.h",
+            ],
         );
         let index = index_for(&root).expect("an index");
 
         let found = index.matching("include/Widget.h");
-        assert_eq!(found.len(), 1, "expected only the written header, got {found:?}");
+        assert_eq!(
+            found.len(),
+            1,
+            "expected only the written header, got {found:?}"
+        );
         assert!(!found[0].to_string_lossy().contains("build"));
         assert!(!found[0].to_string_lossy().contains("out"));
     }

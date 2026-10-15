@@ -73,14 +73,24 @@ pub fn deduced_type_of(
     let Some(initializer) = initializer_of(root, fact.range) else {
         // `auto x;` with nothing after the name. The type is not in the file at all, and no walk of it would find
         // one — the declaration is incomplete rather than deducible.
-        return Known::Unknown(UnknownReason::UnknownType(Box::from("auto without an initializer")));
+        return Known::Unknown(UnknownReason::UnknownType(Box::from(
+            "auto without an initializer",
+        )));
     };
 
     let Some(expression) = the_expression_in(&initializer) else {
         return Known::Unknown(UnknownReason::UnknownType(Box::from("auto{}")));
     };
 
-    match crate::index::project::type_of_expression(index, &mut |_: &Path| None, scopes, root, path, &expression, 0) {
+    match crate::index::project::type_of_expression(
+        index,
+        &mut |_: &Path| None,
+        scopes,
+        root,
+        path,
+        &expression,
+        0,
+    ) {
         Known::Yes((type_of, _)) => Known::Yes(type_of.to_string()),
         Known::Unknown(reason) => Known::Unknown(reason),
         // The expression engine says the question does not apply to what it was handed — which for an initializer
@@ -97,12 +107,16 @@ pub fn deduced_type_of(
 /// the declaration's own subtree rather than a scan for an `=` token: the `=` of a default template argument, of
 /// a `requires` clause or of an operator name is not this declaration's initializer, and a node cannot be
 /// confused with one.
-fn initializer_of(root: &CppSyntaxNode, declaration: cpp_parser::SourceRange) -> Option<CppSyntaxNode> {
+fn initializer_of(
+    root: &CppSyntaxNode,
+    declaration: cpp_parser::SourceRange,
+) -> Option<CppSyntaxNode> {
     root.descendants()
         .filter(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::Initializer)
         .find(|node| {
             let range = cpp_parser::source_range(node.text_range());
-            range.start_offset >= declaration.start_offset && range.end_offset() <= declaration.end_offset()
+            range.start_offset >= declaration.start_offset
+                && range.end_offset() <= declaration.end_offset()
         })
 }
 

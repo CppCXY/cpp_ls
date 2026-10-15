@@ -30,8 +30,8 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::preprocess::directive::{Directive, DirectiveKind, SpannedDirective};
 use crate::preprocess::FilePreprocessing;
+use crate::preprocess::directive::{Directive, DirectiveKind, SpannedDirective};
 use crate::sema::symbol::{Binding, BindingKind, ScopeId, ScopeKind, ScopeTree};
 use crate::summary::{
     Access, ConditionalRegion, DeclFact, DeclKind, FactGuard, GuardBranch, MacroFact, MacroKind,
@@ -431,10 +431,7 @@ impl DeclarationShapes {
             // The default before any label is the class key's: `class` is private, `struct` and `union` are public.
             // Read from the *parent* node, which is the class definition this body belongs to.
             if kind == CppSyntaxKind::ClassBody {
-                let default = match node
-                    .parent()
-                    .map(|owner| CppSyntaxKind::from(owner.kind()))
-                {
+                let default = match node.parent().map(|owner| CppSyntaxKind::from(owner.kind())) {
                     Some(CppSyntaxKind::StructDef | CppSyntaxKind::UnionDef) => Access::Public,
                     // A `class` — and anything else this walk does not recognise, which is the conservative
                     // direction for a *member*: the private reading hides a name rather than offering one the
@@ -456,9 +453,9 @@ impl DeclarationShapes {
             // the specifier sequence covers. Recorded *before* the shape test below, because a `TemplateDecl` is
             // not a shape — nothing in this module is answered at one.
             if kind == CppSyntaxKind::TemplateDecl
-                && let Some(list) = node
-                    .children()
-                    .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::TemplateParameterList)
+                && let Some(list) = node.children().find(|child| {
+                    CppSyntaxKind::from(child.kind()) == CppSyntaxKind::TemplateParameterList
+                })
                 && let Some(owner) = node.parent()
             {
                 // **The range is the declaration the template heads, not just its specifier sequence.**
@@ -555,9 +552,9 @@ impl DeclarationShapes {
         let Some(token) = cpp_parser::token_at(&self.root, offset) else {
             return false;
         };
-        token.parent_ancestors().any(|node| {
-            CppSyntaxKind::from(node.kind()) == CppSyntaxKind::ParameterList
-        })
+        token
+            .parent_ancestors()
+            .any(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::ParameterList)
     }
 
     /// How many shapes the file has — what a caller prints when it wants to know whether the walk was worth it.
@@ -630,8 +627,8 @@ impl DeclarationShapes {
             let candidates = &self.children[run.0 as usize..(run.0 + run.1) as usize];
             // Siblings are ordered and do not overlap, so the last one starting at or before the offset is the
             // only one that can contain it.
-            let position =
-                candidates.partition_point(|index| self.shapes[*index as usize].at.start_offset <= offset);
+            let position = candidates
+                .partition_point(|index| self.shapes[*index as usize].at.start_offset <= offset);
             let Some(&child) = position.checked_sub(1).and_then(|at| candidates.get(at)) else {
                 return;
             };
@@ -682,8 +679,12 @@ fn children_a_question_reads(node: &CppSyntaxNode) -> ShapeChildren {
 
     for child in node.children() {
         match CppSyntaxKind::from(child.kind()) {
-            CppSyntaxKind::DeclSpecifierSeq if read.specifiers.is_none() => read.specifiers = Some(child),
-            CppSyntaxKind::TrailingReturnType if read.trailing.is_none() => read.trailing = Some(child),
+            CppSyntaxKind::DeclSpecifierSeq if read.specifiers.is_none() => {
+                read.specifiers = Some(child)
+            }
+            CppSyntaxKind::TrailingReturnType if read.trailing.is_none() => {
+                read.trailing = Some(child)
+            }
             CppSyntaxKind::Declarator if read.declarator.is_none() => read.declarator = Some(child),
             CppSyntaxKind::TypeId if read.type_id.is_none() => read.type_id = Some(child),
             // A base's *name*, not the whole specifier: taking the specifier's text would read the access keyword
@@ -794,7 +795,11 @@ fn declared_alias_target_with(shapes: &DeclarationShapes, binding: &Binding) -> 
     let spelling = format!(
         "{} {}",
         strip_declaration_specifiers(&specifiers.text().to_string()),
-        without(&declarator.text().to_string(), declarator, binding.name_range)
+        without(
+            &declarator.text().to_string(),
+            declarator,
+            binding.name_range
+        )
     );
     let spelling = spelling.split_whitespace().collect::<Vec<_>>().join(" ");
 
@@ -1058,9 +1063,24 @@ fn evaluate_a_trait(
         "is_pointer_v" => Some(first.ends_with('*')),
         "is_integral_v" => Some(matches!(
             first.as_str(),
-            "bool" | "char" | "signed char" | "unsigned char" | "short" | "unsigned short" | "int"
-                | "unsigned int" | "long" | "unsigned long" | "long long" | "unsigned long long"
-                | "wchar_t" | "char8_t" | "char16_t" | "char32_t" | "size_t" | "ptrdiff_t"
+            "bool"
+                | "char"
+                | "signed char"
+                | "unsigned char"
+                | "short"
+                | "unsigned short"
+                | "int"
+                | "unsigned int"
+                | "long"
+                | "unsigned long"
+                | "long long"
+                | "unsigned long long"
+                | "wchar_t"
+                | "char8_t"
+                | "char16_t"
+                | "char32_t"
+                | "size_t"
+                | "ptrdiff_t"
         )),
         "is_same_v" => {
             let second = substituted_spelling(second?, substitutions);
@@ -1180,7 +1200,6 @@ fn declaration_of(root: &CppSyntaxNode, binding: &Binding) -> Option<CppSyntaxNo
         .last()
 }
 
-
 /// Every expression a `return` statement in this body returns, in document order.
 ///
 /// Nested functions and lambdas are **skipped**: their `return`s belong to them, and counting one here would make a
@@ -1249,7 +1268,10 @@ fn type_a_return_states_with(
                 .children_with_tokens()
                 .filter_map(|element| element.into_token())
                 .any(|token| {
-                    matches!(token.text(), "==" | "!=" | "<" | ">" | "<=" | ">=" | "&&" | "||")
+                    matches!(
+                        token.text(),
+                        "==" | "!=" | "<" | ">" | "<=" | ">=" | "&&" | "||"
+                    )
                 });
             if comparison {
                 return Some("bool".to_string());
@@ -1299,7 +1321,9 @@ fn type_a_return_states(expression: &CppSyntaxNode, declaration: &CppSyntaxNode)
         // **A literal's type is its own**, and the four C++ gives are `int`, `double`, `bool` and a pointer. Read
         // by the shape of the text rather than by a table: `1` and `1'000` and `0x10` are one type, and `1.5f` is
         // not `1.5`.
-        CppSyntaxKind::LiteralExpr => Some(literal_type(&expression.text().to_string()).to_string()),
+        CppSyntaxKind::LiteralExpr => {
+            Some(literal_type(&expression.text().to_string()).to_string())
+        }
         CppSyntaxKind::NameExpr | CppSyntaxKind::IdentifierExpr => {
             parameter_type(expression, declaration)
         }
@@ -1443,7 +1467,6 @@ fn parameter_type(name: &CppSyntaxNode, declaration: &CppSyntaxNode) -> Option<S
     (!the_type.is_empty()).then(|| the_type.to_string())
 }
 
-
 /// [`declared_returns_of`] for a caller that has the file's shapes already.
 fn declared_returns_of_with(shapes: &DeclarationShapes, binding: &Binding) -> Option<String> {
     if binding.kind != BindingKind::Function {
@@ -1497,8 +1520,18 @@ fn declared_returns_of_with(shapes: &DeclarationShapes, binding: &Binding) -> Op
     // of returning something that is not a type.
     let before_the_name = declarator
         .as_ref()
-        .map(|declarator| before(&declarator.text().to_string(), declarator, binding.name_range))
-        .filter(|operators| operators.chars().all(|c| c == '*' || c == '&' || c.is_whitespace()))
+        .map(|declarator| {
+            before(
+                &declarator.text().to_string(),
+                declarator,
+                binding.name_range,
+            )
+        })
+        .filter(|operators| {
+            operators
+                .chars()
+                .all(|c| c == '*' || c == '&' || c.is_whitespace())
+        })
         .unwrap_or_default();
 
     // **The specifiers are read as syntax, not as text**, which is the rule [`crate::sema::types::read_specifiers`]
@@ -1609,7 +1642,9 @@ pub fn declared_exported_at(root: &CppSyntaxNode, offset: usize) -> bool {
         return false;
     };
 
-    token.parent_ancestors().any(|node| begins_an_exported_region(&node))
+    token
+        .parent_ancestors()
+        .any(|node| begins_an_exported_region(&node))
 }
 
 /// **Does `export` govern what is written inside this node?**
@@ -1916,12 +1951,8 @@ fn fact_for(
     // **The four type questions, timed apart.** Together they are 98% of the index's sweep on a real project
     // (138 files of MSVC's standard library), and each one is a different traversal of the same tree — so which of
     // them dominates is the difference between four different fixes. See `crate::stages`.
-    let type_of = {
-        declared_type_of_with(shapes, binding)
-    }
-    .or_else(|| {
-        declared_alias_target_with(shapes, binding)
-    });
+    let type_of = { declared_type_of_with(shapes, binding) }
+        .or_else(|| declared_alias_target_with(shapes, binding));
     let returns = {
         // **The written return type, and the deduced one when there is none to write.** `declared_returns_of_with`
         // answers `None` for `auto`, by design and for a reason that has not changed — `auto` is not a class
@@ -1930,15 +1961,11 @@ fn fact_for(
         // that is provable at this layer, and why the rest is refused rather than approximated.
         declared_returns_of_with(shapes, binding).or_else(|| deduced_returns_of(root, binding))
     };
-    let bases = {
-        declared_bases_of_with(shapes, binding)
-    };
+    let bases = { declared_bases_of_with(shapes, binding) };
     // The class template's parameter names, for the members whose types are written with them. Answered from the
     // shapes like the four questions above it, and on a unit read it is the reason they are all asked of a table
     // rather than of the tree — see [`declared_template_parameters_of`].
-    let parameters = {
-        declared_template_parameters_with(shapes, binding)
-    };
+    let parameters = { declared_template_parameters_with(shapes, binding) };
     // **Who may name it.** Recorded on the shape the binding's name sits in, which the pass that built this table
     // already knows — see [`Shape::access`]. `None` for a name no class body contains.
     let access = shapes.access_at(the_offset_to_descend_by(binding));
@@ -2015,7 +2042,6 @@ fn fact_for(
     })
 }
 
-
 /// **A class declaration's own text, up to its body** — read child by child instead of from the node.
 ///
 /// # What this replaces, and what it cost
@@ -2056,10 +2082,7 @@ fn class_head_of(declaration: &CppSyntaxNode) -> String {
         if let Some(token) = child.as_token() {
             head.push_str(token.text());
         } else if let Some(node) = child.as_node() {
-            if node
-                .first_token()
-                .is_some_and(|token| token.text() == "{")
-            {
+            if node.first_token().is_some_and(|token| token.text() == "{") {
                 break;
             }
             head.push_str(&node.text().to_string());
@@ -2474,10 +2497,7 @@ impl<'a> Declarations<'a> {
             .find(|declared| contains(declared.range, name_range))
         {
             Some(declared) => !declared.touched,
-            None => !self
-                .errors
-                .iter()
-                .any(|error| overlaps(*error, own_range)),
+            None => !self.errors.iter().any(|error| overlaps(*error, own_range)),
         }
     }
 }
@@ -2522,9 +2542,7 @@ impl<'a> DeclarationFacts<'a> {
             scopes,
             preprocessing,
             root,
-            shapes: {
-                DeclarationShapes::of(root)
-            },
+            shapes: { DeclarationShapes::of(root) },
             declarations: Declarations::of(root, errors),
             guards: SummaryGuards::default(),
             facts: Vec::new(),
@@ -2569,9 +2587,7 @@ impl<'a> DeclarationFacts<'a> {
             // **And the namespaces, once per scope rather than once per binding.** Every binding of one scope sits
             // in the same namespaces, and asking per binding was a scan of every scope in the file each time — see
             // [`enclosing_namespaces_of`]. `local` is already known here for the same reason.
-            let in_namespace = local
-                .then(|| enclosing_namespaces_of(scopes, id))
-                .flatten();
+            let in_namespace = local.then(|| enclosing_namespaces_of(scopes, id)).flatten();
 
             for binding in &scope.bindings {
                 if let Some(fact) = fact_for(
@@ -2737,8 +2753,12 @@ enum BranchCondition {
 /// [`named_condition`], which reads tokens; `#ifdef`/`#ifndef` name their macro directly, so they need none.
 fn branch_condition(branch: &GuardBranch) -> BranchCondition {
     match branch.kind {
-        DirectiveKind::Ifndef => BranchCondition::NotDefined(branch.condition.clone().unwrap_or_default()),
-        DirectiveKind::Ifdef => BranchCondition::Defined(branch.condition.clone().unwrap_or_default()),
+        DirectiveKind::Ifndef => {
+            BranchCondition::NotDefined(branch.condition.clone().unwrap_or_default())
+        }
+        DirectiveKind::Ifdef => {
+            BranchCondition::Defined(branch.condition.clone().unwrap_or_default())
+        }
         DirectiveKind::Else => BranchCondition::Otherwise,
         // `#if` and `#elif`, which is the only pair left: a condition is an expression there, and the two
         // spellings that name a macro are the four `defined` forms `named_condition` recognises.
@@ -2812,7 +2832,12 @@ fn conditionals(preprocessing: &FilePreprocessing) -> Conditionals {
                     observed_by: spanned.range.end_offset(),
                 });
             } else {
-                open_branch(&mut found.conditionals, index, &spanned.directive, &spanned.range);
+                open_branch(
+                    &mut found.conditionals,
+                    index,
+                    &spanned.directive,
+                    &spanned.range,
+                );
             }
         }
     }
@@ -2913,7 +2938,10 @@ fn named_condition(tokens: &[crate::token::Token]) -> BranchCondition {
     };
 
     // `defined` is an ordinary identifier in the token stream — the lexer has no reason to know it.
-    let Some((defined, rest)) = rest.split_first().filter(|(token, _)| token.text() == "defined") else {
+    let Some((defined, rest)) = rest
+        .split_first()
+        .filter(|(token, _)| token.text() == "defined")
+    else {
         return BranchCondition::Other;
     };
     let _ = defined;
@@ -2923,7 +2951,10 @@ fn named_condition(tokens: &[crate::token::Token]) -> BranchCondition {
         .is_some_and(|token| token.kind == cpp_parser::CppTokenKind::LeftParen);
     let rest = if parenthesised { &rest[1..] } else { rest };
 
-    let Some((name, rest)) = rest.split_first().filter(|(token, _)| token.is_identifier()) else {
+    let Some((name, rest)) = rest
+        .split_first()
+        .filter(|(token, _)| token.is_identifier())
+    else {
         return BranchCondition::Other;
     };
 
@@ -3109,7 +3140,10 @@ pub fn mark_settling_macro_facts(
 
             let inherited = shape.parent.is_none_or(|parent| {
                 Some(parent as usize) == own_guard
-                    || settles.get(&(parent as usize, name)).copied().unwrap_or(false)
+                    || settles
+                        .get(&(parent as usize, name))
+                        .copied()
+                        .unwrap_or(false)
             });
 
             settles.insert((region, name), inherited);
@@ -3176,18 +3210,22 @@ pub fn by_name(facts: &[DeclFact]) -> HashMap<&str, Vec<&DeclFact>> {
 pub fn scope_of<'a>(scopes: &'a ScopeTree, fact: &DeclFact) -> Option<(ScopeId, &'a Binding)> {
     let wanted = fact.scope.as_deref();
 
-    scopes.scopes().iter().enumerate().find_map(|(index, scope)| {
-        if scope.name.as_deref() != wanted {
-            return None;
-        }
+    scopes
+        .scopes()
+        .iter()
+        .enumerate()
+        .find_map(|(index, scope)| {
+            if scope.name.as_deref() != wanted {
+                return None;
+            }
 
-        let binding = scope
-            .bindings
-            .iter()
-            .find(|binding| binding.name_range == fact.name_range)?;
+            let binding = scope
+                .bindings
+                .iter()
+                .find(|binding| binding.name_range == fact.name_range)?;
 
-        Some((ScopeId(index), binding))
-    })
+            Some((ScopeId(index), binding))
+        })
 }
 
 /// **The template parameters a declaration can name** — what keeps "not known yet" apart from "not here".
@@ -3243,9 +3281,9 @@ pub fn template_parameters_for<'a>(scopes: &'a ScopeTree, fact: &DeclFact) -> Ve
 #[cfg(test)]
 mod tests {
     use super::{build_facts, by_name, template_parameters_for};
-    use crate::summary::DeclFact;
     use crate::preprocess::preprocess;
     use crate::sema::scopes::build_scopes;
+    use crate::summary::DeclFact;
     use crate::summary::{DeclKind, FactGuard};
     use cpp_parser::{CppParser, ParserConfig};
 
@@ -3281,7 +3319,10 @@ mod tests {
             "the second namespace has no `export`, so a declaration in it is not exported"
         );
         assert!(exported("alone"), "`export int alone();`");
-        assert!(!exported("plain"), "and a declaration with no `export` above it");
+        assert!(
+            !exported("plain"),
+            "and a declaration with no `export` above it"
+        );
     }
 
     /// **A parameter of an enclosing template is visible to everything inside it, and to nothing outside.**
@@ -3487,7 +3528,10 @@ mod tests {
             bases_of("Exported"),
             vec!["conditional_t<true, Other<_Alloc>, Base>".to_string()],
             "a macro before `template` does not stop the class from being declared: {:?}",
-            facts.iter().map(|fact| fact.qualified_name()).collect::<Vec<_>>()
+            facts
+                .iter()
+                .map(|fact| fact.qualified_name())
+                .collect::<Vec<_>>()
         );
         // **The attribute as the rendering actually spells it.** `_NO_SPECIALIZATIONS_CITING(...)` is
         // `_NO_SPECIALIZATIONS_MSG(...)`, which is `[[msvc::no_specializations(_Msg)]]` in one arm of its `#if`
@@ -3501,14 +3545,20 @@ mod tests {
             bases_of("Attributed"),
             vec!["conditional_t<true, Other<_Alloc>, Base>".to_string()],
             "an attribute between `struct` and the name does not stop the class from being declared: {:?}",
-            facts.iter().map(|fact| fact.qualified_name()).collect::<Vec<_>>()
+            facts
+                .iter()
+                .map(|fact| fact.qualified_name())
+                .collect::<Vec<_>>()
         );
         // …and the attribute's **argument as the header writes it**: a string containing `[`, `]` and `/`.
         assert_eq!(
             bases_of("Bracketed"),
             vec!["conditional_t<true, Other<_Alloc>, Base>".to_string()],
             "the text inside the attribute's string does not change how the declaration is read: {:?}",
-            facts.iter().map(|fact| fact.qualified_name()).collect::<Vec<_>>()
+            facts
+                .iter()
+                .map(|fact| fact.qualified_name())
+                .collect::<Vec<_>>()
         );
         // …and the same declaration **inside a namespace**, which is where every one of the standard library's
         // is written. Measured on `<vector>`'s closure, `xmemory:755` declares `allocator_traits` inside
@@ -3518,7 +3568,10 @@ mod tests {
             bases_of("Nested"),
             vec!["conditional_t<true, Other<_Alloc>, Base>".to_string()],
             "a namespace around the declaration changes nothing about it: {:?}",
-            facts.iter().map(|fact| fact.qualified_name()).collect::<Vec<_>>()
+            facts
+                .iter()
+                .map(|fact| fact.qualified_name())
+                .collect::<Vec<_>>()
         );
         // **And the attribute as the rendering spells it — with a space between the brackets.**
         //
@@ -3534,7 +3587,10 @@ mod tests {
             bases_of("Spaced"),
             vec!["conditional_t<true, Other<_Alloc>, Base>".to_string()],
             "a space between the attribute's brackets does not change what the declaration is: {:?}",
-            facts.iter().map(|fact| fact.qualified_name()).collect::<Vec<_>>()
+            facts
+                .iter()
+                .map(|fact| fact.qualified_name())
+                .collect::<Vec<_>>()
         );
     }
 
@@ -3591,7 +3647,8 @@ mod tests {
             "the member is named by its declarator: {names:?}"
         );
         assert!(
-            !names.contains(&"size_type") || names.iter().filter(|name| **name == "size_type").count() == 1,
+            !names.contains(&"size_type")
+                || names.iter().filter(|name| **name == "size_type").count() == 1,
             "and no member is named after the type: {names:?}"
         );
 
@@ -3600,7 +3657,10 @@ mod tests {
         let defined = "struct S {\n#if FEATURE\n  int a;\n#endif\n  _GLIBCXX_NODISCARD _GLIBCXX20_CONSTEXPR\n  size_type\n  size() const noexcept\n  { return 0; }\n};\n";
         let (defined_facts, _) = facts(defined);
 
-        let names: Vec<&str> = defined_facts.iter().map(|fact| fact.name.as_str()).collect();
+        let names: Vec<&str> = defined_facts
+            .iter()
+            .map(|fact| fact.name.as_str())
+            .collect();
         assert!(
             names.contains(&"size"),
             "an inline definition is named the same way as a declaration: {names:?}"
@@ -3699,7 +3759,12 @@ int Box<int>::Inner::deep = 0;
         assert_eq!(tree.get_errors(), [], "the input must parse cleanly");
 
         let root = tree.get_red_root();
-        build_facts(&build_scopes(&root, &crate::NoMacroBodies), &preprocess(source, tree.get_tokens()), &root, &[])
+        build_facts(
+            &build_scopes(&root, &crate::NoMacroBodies),
+            &preprocess(source, tree.get_tokens()),
+            &root,
+            &[],
+        )
     }
 
     /// The facts of a file that **does not** parse cleanly, with the diagnostics that say so.
@@ -3721,7 +3786,13 @@ int Box<int>::Inner::deep = 0;
             .collect();
 
         (
-            build_facts(&build_scopes(&root, &crate::NoMacroBodies), &preprocess(source, tree.get_tokens()), &root, &errors).0,
+            build_facts(
+                &build_scopes(&root, &crate::NoMacroBodies),
+                &preprocess(source, tree.get_tokens()),
+                &root,
+                &errors,
+            )
+            .0,
             errors,
         )
     }
@@ -3914,7 +3985,8 @@ int Box<int>::Inner::deep = 0;
     }
 
     /// The names of the facts of a file that does not parse cleanly whose declaration was touched.
-    fn unclean(source: &str) -> Vec<String> {        let (facts, errors) = facts_of_a_broken_file(source);
+    fn unclean(source: &str) -> Vec<String> {
+        let (facts, errors) = facts_of_a_broken_file(source);
         assert!(!errors.is_empty(), "the fixture must have diagnostics");
 
         facts
@@ -3925,7 +3997,8 @@ int Box<int>::Inner::deep = 0;
     }
 
     #[test]
-    fn a_file_that_parses_cleanly_is_clean() {        let (facts, _) = facts("struct S { int a; };\nint count;\nvoid f() { int local; }\n");
+    fn a_file_that_parses_cleanly_is_clean() {
+        let (facts, _) = facts("struct S { int a; };\nint count;\nvoid f() { int local; }\n");
 
         assert!(!facts.is_empty(), "the fixture declares something");
         assert!(
@@ -3948,7 +4021,10 @@ int Box<int>::Inner::deep = 0;
 
         assert_eq!(errors.len(), 1, "one error, in the second declaration");
         assert_eq!(
-            facts.iter().map(|fact| fact.name.as_str()).collect::<Vec<_>>(),
+            facts
+                .iter()
+                .map(|fact| fact.name.as_str())
+                .collect::<Vec<_>>(),
             ["S", "a"],
             "no fact for the declaration that failed"
         );
@@ -3981,7 +4057,8 @@ int Box<int>::Inner::deep = 0;
     }
 
     #[test]
-    fn a_declaration_inside_a_function_body_is_local() {        // The field `scope` cannot carry: `None` is both "at file scope", which every including file can name, and
+    fn a_declaration_inside_a_function_body_is_local() {
+        // The field `scope` cannot carry: `None` is both "at file scope", which every including file can name, and
         // "inside a function body", which nothing outside it can. Every kind of place a declaration can be written
         // is here, because the answer comes from the *scope chain* rather than from the declaration's shape.
         let (facts, _) = facts(
@@ -4013,7 +4090,10 @@ int Box<int>::Inner::deep = 0;
             !local_of("method"),
             "and a member function's *declaration* is not its body"
         );
-        assert!(local_of("parameter"), "a parameter is local to the function");
+        assert!(
+            local_of("parameter"),
+            "a parameter is local to the function"
+        );
         assert!(local_of("local"), "the case the field exists for");
         assert!(local_of("in_a_block"), "a nested block is still inside it");
         assert!(
@@ -4044,7 +4124,11 @@ int Box<int>::Inner::deep = 0;
         };
 
         assert_eq!(of("make").returns.as_deref(), Some("Widget"));
-        assert_eq!(of("make").type_of, None, "a function has no type of its own");
+        assert_eq!(
+            of("make").type_of,
+            None,
+            "a function has no type of its own"
+        );
         assert_eq!(
             of("w").type_of.as_deref(),
             Some("Widget"),
@@ -4069,8 +4153,3 @@ int Box<int>::Inner::deep = 0;
         assert_eq!(of("plain").returns.as_deref(), Some("void"));
     }
 }
-
-
-
-
-

@@ -49,9 +49,10 @@ fn is_deliberately_unused(name: &str) -> bool {
 /// A name that is not worth asking about: a keyword-shaped spelling, or nothing at all.
 fn is_a_candidate(name: &str) -> bool {
     !name.is_empty()
-        && name.chars().next().is_some_and(|first| {
-            first.is_ascii_alphabetic() || first == '_' || first == '$'
-        })
+        && name
+            .chars()
+            .next()
+            .is_some_and(|first| first.is_ascii_alphabetic() || first == '_' || first == '$')
         && name.chars().all(|character| {
             character.is_ascii_alphanumeric() || character == '_' || character == '$'
         })
@@ -109,9 +110,12 @@ impl Check for Unused {
             // places: `fact.range` is the file's — see `CheckContext::written` — while a body's range is the tree's,
             // which is the rendering. Asking without the crossing is how this guard first went wrong: a fixture whose
             // comment the cook removes shifted every offset by 28 bytes, and a local inside `main` read as outside it.
-            let Some(at) = context
-                .view
-                .reading_offset_of(crate::file::coordinates::FileOffset::new(fact.range.start_offset))
+            let Some(at) =
+                context
+                    .view
+                    .reading_offset_of(crate::file::coordinates::FileOffset::new(
+                        fact.range.start_offset,
+                    ))
             else {
                 continue;
             };
@@ -152,5 +156,3 @@ impl Check for Unused {
         }
     }
 }
-
-

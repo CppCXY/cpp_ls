@@ -14,11 +14,8 @@ fn main() {
         eprintln!("usage: checks_timing <include-dir> <root file> [--limit N]");
         std::process::exit(2);
     };
-    let root = std::path::PathBuf::from(dir).join(
-        args.get(1)
-            .cloned()
-            .unwrap_or_else(|| "memory".to_string()),
-    );
+    let root = std::path::PathBuf::from(dir)
+        .join(args.get(1).cloned().unwrap_or_else(|| "memory".to_string()));
     let limit: usize = args
         .iter()
         .position(|arg| arg == "--limit")
@@ -46,7 +43,9 @@ fn main() {
     let indexed = indexing.elapsed();
     println!(
         "  `{}` and its closure indexed in {} ms ({} file(s) in the index)",
-        root.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
+        root.file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default(),
         indexed.as_millis(),
         session.index().len()
     );

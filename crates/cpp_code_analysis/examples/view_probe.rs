@@ -109,7 +109,6 @@ fn main() {
     let with_macros_count = with_macros.as_ref().map(count);
     let with_macros_errors = with_macros.as_ref().map(|view| view.errors().len());
 
-
     // **The errors themselves, not just how many.** A count says a reading stopped; the line and the token say
     // what it stopped on, and that is the whole of the difference between a diagnosis and a number.
     for view in [plain.as_ref(), with_macros.as_ref()].into_iter().flatten() {
@@ -123,7 +122,9 @@ fn main() {
             // **The column as well as the line**, because a line of a header is ninety characters of template
             // arguments and "line 500" is not a location. The text around the token is printed with it: the
             // question a reader has is which `>` of the eight on that line the parser objected to.
-            let line_start = view.source[..at.min(view.source.len())].rfind('\n').map_or(0, |nl| nl + 1);
+            let line_start = view.source[..at.min(view.source.len())]
+                .rfind('\n')
+                .map_or(0, |nl| nl + 1);
             let column = at - line_start + 1;
             let from = line_start.max(at.saturating_sub(34));
             let to = (at + 34).min(view.source.len());
@@ -135,9 +136,13 @@ fn main() {
         }
     }
 
-    let show = |label: &str, seen: Option<(usize, usize)>, errors: Option<usize>| match (seen, errors) {
+    let show = |label: &str, seen: Option<(usize, usize)>, errors: Option<usize>| match (
+        seen, errors,
+    ) {
         (Some((all, named)), Some(errors)) => {
-            println!("{label:<12} {all:6} bindings, {named:6} inside a namespace, {errors:4} parse errors")
+            println!(
+                "{label:<12} {all:6} bindings, {named:6} inside a namespace, {errors:4} parse errors"
+            )
         }
         _ => println!("{label:<12} (not held)"),
     };

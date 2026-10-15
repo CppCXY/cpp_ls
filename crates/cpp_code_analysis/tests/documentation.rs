@@ -216,7 +216,10 @@ fn the_check_never_rejects_a_comment_the_parser_finds() {
         ("/* Doc.\n   More. */\nint x;\n", "int x"),
         ("/// Doc.\n#define N 3\nint x;\n", "int x"),
         ("/// Doc.\n#define N 3\n\n#define M 4\nint x;\n", "int x"),
-        ("struct S {\n    int a;\n    /// Doc.\n    int b;\n};\n", "int b"),
+        (
+            "struct S {\n    int a;\n    /// Doc.\n    int b;\n};\n",
+            "int b",
+        ),
         ("namespace ns {\n/// Doc.\nint x;\n}\n", "int x"),
     ];
 
@@ -241,10 +244,16 @@ fn the_check_never_rejects_a_comment_the_parser_finds() {
 #[test]
 fn a_declaration_with_code_above_it_is_not_worth_a_parse() {
     let source = "int a;\nint b;\n";
-    assert!(!might_be_documented(source, source.find("int b").expect("the fixture")));
+    assert!(!might_be_documented(
+        source,
+        source.find("int b").expect("the fixture")
+    ));
 
     let source = "struct S {\n    int a;\n    int b;\n};\n";
-    assert!(!might_be_documented(source, source.find("int b").expect("the fixture")));
+    assert!(!might_be_documented(
+        source,
+        source.find("int b").expect("the fixture")
+    ));
 
     // Nothing above it at all.
     assert!(!might_be_documented("int x;\n", 0));
@@ -260,5 +269,3 @@ fn a_directive_above_a_declaration_does_not_hide_a_comment() {
         source.find("int x").expect("the fixture")
     ));
 }
-
-

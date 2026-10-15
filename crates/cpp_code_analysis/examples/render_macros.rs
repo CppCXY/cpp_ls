@@ -15,13 +15,20 @@ fn main() {
     let (tokens, _) = cpp_parser::lex(&source, &cpp_parser::LexerConfig::default());
     let rendered = cpp_code_analysis::preprocess::cooked::cook(&source, &tokens).render();
 
-    println!("  the file is {} bytes, the rendering {} bytes", source.len(), rendered.text.len());
+    println!(
+        "  the file is {} bytes, the rendering {} bytes",
+        source.len(),
+        rendered.text.len()
+    );
 
     let (rendered_tokens, _) = cpp_parser::lex(&rendered.text, &cpp_parser::LexerConfig::default());
     let pre = cpp_code_analysis::preprocess::preprocess(&rendered.text, &rendered_tokens);
 
     println!("  the rendering has {} directive(s)", pre.directives.len());
-    println!("  the rendering's macro table holds {} binding(s)", pre.macros.iter().count());
+    println!(
+        "  the rendering's macro table holds {} binding(s)",
+        pre.macros.iter().count()
+    );
 
     for definition in pre.macros.iter().take(8) {
         println!("    {}", definition.name);
@@ -29,5 +36,8 @@ fn main() {
 
     // What the file itself says, for the comparison.
     let own = cpp_code_analysis::preprocess::preprocess(&source, &tokens);
-    println!("  the file itself holds {} binding(s)", own.macros.iter().count());
+    println!(
+        "  the file itself holds {} binding(s)",
+        own.macros.iter().count()
+    );
 }

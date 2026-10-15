@@ -37,17 +37,24 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::Instant;
 
-use cpp_code_analysis::{
-    DiskFiles, FileProvider, Known, OpenDocuments, Session, SessionFiles, SymbolToFind, WatchFilter,
-    symbol_references,
-};
 use cpp_code_analysis::index::references::ReferenceBudget;
+use cpp_code_analysis::{
+    DiskFiles, FileProvider, Known, OpenDocuments, Session, SessionFiles, SymbolToFind,
+    WatchFilter, symbol_references,
+};
 
 /// The names asked about. Chosen for being declared in headers that a standard-library closure includes widely, so
 /// that the candidate set is large — which is the case an index has to pay for. They are not picked by taste: the
 /// probe prints how many files declare each one and how many candidates it produced, and a name with a small
 /// candidate set answers nothing.
-const NAMES: &[&str] = &["size", "begin", "push_back", "value_type", "operator=", "data"];
+const NAMES: &[&str] = &[
+    "size",
+    "begin",
+    "push_back",
+    "value_type",
+    "operator=",
+    "data",
+];
 
 fn main() {
     let Some(dir) = std::env::args().nth(1) else {
@@ -92,7 +99,8 @@ fn main() {
 
         let symbol = SymbolToFind::of(&fact, declared_in.clone());
         let started = Instant::now();
-        let answer = symbol_references(session.index(), &files, &symbol, ReferenceBudget::default());
+        let answer =
+            symbol_references(session.index(), &files, &symbol, ReferenceBudget::default());
         let query = started.elapsed();
 
         let Known::Yes(found) = &answer else {
@@ -133,7 +141,10 @@ fn main() {
         let read = started.elapsed();
 
         println!("\n{name}   (declared in {})", declared_in.display());
-        println!("  1. candidates                 {}", found.looked_at + found.without_the_name);
+        println!(
+            "  1. candidates                 {}",
+            found.looked_at + found.without_the_name
+        );
         println!("  2a. rejected by the filter    {rejected_by_the_filter}");
         println!(
             "  2b. read                      {} file(s), {} KB in {read:?}",
@@ -141,6 +152,9 @@ fn main() {
             read_bytes / 1024
         );
         println!("  2c. without the name          {}", found.without_the_name);
-        println!("  3+4. the whole query          {query:?} — {} file(s) in the answer", found.files.len());
+        println!(
+            "  3+4. the whole query          {query:?} — {} file(s) in the answer",
+            found.files.len()
+        );
     }
 }

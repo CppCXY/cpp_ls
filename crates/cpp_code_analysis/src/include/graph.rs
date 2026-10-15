@@ -1113,7 +1113,7 @@ impl Marked {
 
         for name in &config.undefines {
             marked.bindings.push((name.clone(), false));
-        marked.mentioned.insert(name.clone());
+            marked.mentioned.insert(name.clone());
         }
 
         marked
@@ -1221,7 +1221,7 @@ impl Marked {
                         range: fact.range,
                         name_range: fact.range,
                         written_in: Some(crate::macros::MacroFile::Here),
-                    value: std::sync::OnceLock::new(),
+                        value: std::sync::OnceLock::new(),
                     }),
                     None => self.define_name(&fact.name),
                 },
@@ -1469,4 +1469,3 @@ mod tests {
         }
     }
 }
-

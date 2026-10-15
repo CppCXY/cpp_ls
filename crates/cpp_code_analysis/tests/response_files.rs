@@ -23,10 +23,15 @@ fn a_response_file_is_read_for_the_arguments_it_names() {
         "includes_CXX.rsp",
         "-I/p/LuaParser/include -I/p/LuaParser/src\n-I/p/Util/include",
     )]);
-    let arguments: Vec<String> = ["g++", "-DNDEBUG", "@CMakeFiles/LuaParser.dir/includes_CXX.rsp", "-O3"]
-        .into_iter()
-        .map(String::from)
-        .collect();
+    let arguments: Vec<String> = [
+        "g++",
+        "-DNDEBUG",
+        "@CMakeFiles/LuaParser.dir/includes_CXX.rsp",
+        "-O3",
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect();
 
     // Looked up by **file name**, because a path built with `Path::join` is spelled with the platform's
     // separator and this test runs on Windows as well as on Unix. What the lookup proves is the *resolution*:
@@ -52,8 +57,10 @@ fn a_response_file_is_read_for_the_arguments_it_names() {
         "the file's own arguments, in its own order, where the `@` stood"
     );
     assert!(
-        asked.iter().any(|path| path.ends_with("CMakeFiles/LuaParser.dir/includes_CXX.rsp")
-            || path.ends_with(r"CMakeFiles\LuaParser.dir\includes_CXX.rsp")),
+        asked.iter().any(
+            |path| path.ends_with("CMakeFiles/LuaParser.dir/includes_CXX.rsp")
+                || path.ends_with(r"CMakeFiles\LuaParser.dir\includes_CXX.rsp")
+        ),
         "the relative name is resolved against the command's working directory: {asked:?}"
     );
 }
@@ -62,7 +69,10 @@ fn a_response_file_is_read_for_the_arguments_it_names() {
 /// may delete, and a compiler given a missing response file says so itself.
 #[test]
 fn an_unreadable_response_file_is_left_alone() {
-    let arguments: Vec<String> = ["g++", "@nowhere.rsp", "-O2"].into_iter().map(String::from).collect();
+    let arguments: Vec<String> = ["g++", "@nowhere.rsp", "-O2"]
+        .into_iter()
+        .map(String::from)
+        .collect();
 
     let expanded = expand_response_files(&arguments, Some(Path::new("/p")), &mut |_| None);
 
@@ -81,7 +91,12 @@ fn a_response_file_that_names_itself_terminates() {
             .map(|text| text.to_string())
     });
 
-    assert!(expanded.iter().any(|argument| argument == "-DA"), "{expanded:?}");
-    assert!(expanded.len() < 40, "bounded rather than endless: {expanded:?}");
+    assert!(
+        expanded.iter().any(|argument| argument == "-DA"),
+        "{expanded:?}"
+    );
+    assert!(
+        expanded.len() < 40,
+        "bounded rather than endless: {expanded:?}"
+    );
 }
-

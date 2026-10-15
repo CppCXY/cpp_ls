@@ -402,8 +402,9 @@ fn parse_type_id_inner(
     // ``expected `;` `` at the `>` of `unique_ptr<wchar_t[]>` and ``expected primary expression`` at the same
     // `[]` in the definition below it. The same spelling with `int` is read, because `int` has a token kind.
     let the_type_is_known = p.events_contain_any(specifiers_from, &[CppSyntaxKind::BuiltinType])
-        || p.declaration_type_name()
-            .is_some_and(|name| p.is_a_known_type_name(name) || a_builtin_type_spelled_as_a_name(name));
+        || p.declaration_type_name().is_some_and(|name| {
+            p.is_a_known_type_name(name) || a_builtin_type_spelled_as_a_name(name)
+        });
 
     // An abstract declarator: pointers, references and cv-qualifiers, but no name.
     //
@@ -701,16 +702,16 @@ fn a_specifier_follows_the_group_reading_ahead(p: &CppParser, name_offset: usize
                         // while anything else there means the sequence has not reached its declarator yet.
                         Some(CppTokenKind::Identifier) => {
                             match p.peek_token_kind_at(after + 1..after + 2).first().copied() {
-                                    // A **name with a group of its own** after the group: either the next
-                                    // annotation of the same run or the declarator's head. Asking the same
-                                    // question from there is what tells them apart — see
-                                    // [`a_specifier_follows_the_group_at`].
-                                    Some(CppTokenKind::LeftParen) => {
-                                        a_specifier_follows_the_group_at(p, after)
-                                    }
-                                    // Anything else means the sequence has not reached its declarator yet.
-                                    _ => true,
+                                // A **name with a group of its own** after the group: either the next
+                                // annotation of the same run or the declarator's head. Asking the same
+                                // question from there is what tells them apart — see
+                                // [`a_specifier_follows_the_group_at`].
+                                Some(CppTokenKind::LeftParen) => {
+                                    a_specifier_follows_the_group_at(p, after)
                                 }
+                                // Anything else means the sequence has not reached its declarator yet.
+                                _ => true,
+                            }
                         }
                         _ => false,
                     };
@@ -1224,8 +1225,10 @@ fn parse_decl_specifier_seq_with(
         // above `a_further_name_may_join` in [`name_joins_the_type`]), and `MY_API Widget *p` still joins
         // `Widget` — an ordinary name — through the second condition.
         let a_further_name_may_join = allow_second_name
-            && (p.events_contain_any(specifiers_from, &[CppSyntaxKind::TemplateType, CppSyntaxKind::NamedType])
-                || (has_type_specifier && written_like_a_macro(p.current_token_text())));
+            && (p.events_contain_any(
+                specifiers_from,
+                &[CppSyntaxKind::TemplateType, CppSyntaxKind::NamedType],
+            ) || (has_type_specifier && written_like_a_macro(p.current_token_text())));
         // …and the same question one context along, where there is **no declarator at all**: a **type-id**.
         //
         // ```cpp
@@ -2313,7 +2316,10 @@ pub(super) fn a_declarator_still_follows_the_name(p: &CppParser) -> bool {
 /// declarations whose type is not finished at the name.
 fn is_a_declaration_specifier(kind: CppTokenKind) -> bool {
     storage_or_function_specifier(kind).is_some()
-        || matches!(kind, CppTokenKind::ConstKeyword | CppTokenKind::VolatileKeyword)
+        || matches!(
+            kind,
+            CppTokenKind::ConstKeyword | CppTokenKind::VolatileKeyword
+        )
 }
 
 /// Is the identifier at the cursor immediately followed by a `(`?
@@ -2889,7 +2895,8 @@ fn a_declaration_cannot_follow_here(p: &CppParser) -> bool {
 
     matches!(
         p.current_token(),
-        RightBrace | None
+        RightBrace
+            | None
             | StructKeyword
             | ClassKeyword
             | UnionKeyword
@@ -3514,7 +3521,8 @@ fn a_matching_angle_bracket_follows(p: &CppParser) -> bool {
                 // template-id was not one, the type ended at `_Maximum`, and the base clause was reported as
                 // ``expected `;` `` at the `<`. Angles inside a matched group are **balanced within it** in any
                 // valid argument, so ignoring the whole family there cannot lose a `>` that closes this list.
-                CppTokenKind::Less | CppTokenKind::Greater | CppTokenKind::RightShift if parens > 0 => {}
+                CppTokenKind::Less | CppTokenKind::Greater | CppTokenKind::RightShift
+                    if parens > 0 => {}
                 CppTokenKind::Less if can_end_a_template_name(previous) => depth += 1,
                 CppTokenKind::Question => open_questions += 1,
                 CppTokenKind::Colon if open_questions > 0 => open_questions -= 1,
@@ -3972,7 +3980,10 @@ pub fn parse_abstract_declarator_with(
             // A directive is what it looks like; a *name written like a macro* is the only thing this accepts,
             // so `(x *)` keeps the reading it had.
             CppTokenKind::Identifier
-                if matches!(an_implementation_keyword(p), Some(ImplementationKeyword::Bare)) =>
+                if matches!(
+                    an_implementation_keyword(p),
+                    Some(ImplementationKeyword::Bare)
+                ) =>
             {
                 let _ = container!();
                 p.bump();
@@ -4278,7 +4289,9 @@ fn a_parameter_list_is_the_type(p: &CppParser) -> bool {
         }
 
         match kind {
-            CppTokenKind::LeftParen | CppTokenKind::LeftBracket | CppTokenKind::LeftBrace => depth += 1,
+            CppTokenKind::LeftParen | CppTokenKind::LeftBracket | CppTokenKind::LeftBrace => {
+                depth += 1
+            }
             CppTokenKind::RightParen => {
                 depth -= 1;
 
@@ -4732,13 +4745,11 @@ fn a_parenthesised_declarator_with_a_name_follows(p: &CppParser) -> bool {
 /// Exposed for the alias rule, which needs it for the same reason the type-id does: `using Arr = int[4];`
 /// writes a type whose array part has nothing enclosing it to attach to.
 pub fn parse_declarator_suffixes(p: &mut CppParser) -> ParseResult {
-
     loop {
         match p.current_token() {
             CppTokenKind::LeftParen => {
                 let _ = super::decls::parse_parameter_list(p)?;
                 eat_function_qualifiers(p);
-
             }
             CppTokenKind::LeftBracket => {
                 let array = p.mark(CppSyntaxKind::ArrayType);
@@ -4854,7 +4865,8 @@ pub fn parse_declarator_with(p: &mut CppParser, allow_structured_binding: bool) 
     let clause_ahead = p.current_token() == CppTokenKind::Identifier
         && !named_inside_parentheses
         && super::at_requires(p)
-        && (p.last_declarator_is_function() || p.last_consumed_token_kind() == Some(CppTokenKind::RightParen))
+        && (p.last_declarator_is_function()
+            || p.last_consumed_token_kind() == Some(CppTokenKind::RightParen))
         && super::decls::starts_a_requires_clause(p);
     if !clause_ahead && a_bare_template_id_is_here(p) {
         p.close_marks_above(base);
@@ -4872,7 +4884,8 @@ pub fn parse_declarator_with(p: &mut CppParser, allow_structured_binding: bool) 
     let begins_a_clause = p.current_token() == CppTokenKind::Identifier
         && !named_inside_parentheses
         && super::at_requires(p)
-        && (p.last_declarator_is_function() || p.last_consumed_token_kind() == Some(CppTokenKind::RightParen))
+        && (p.last_declarator_is_function()
+            || p.last_consumed_token_kind() == Some(CppTokenKind::RightParen))
         && super::decls::starts_a_requires_clause(p);
     let named = named_inside_parentheses
         || (!begins_a_clause
@@ -5343,7 +5356,6 @@ fn parse_template_argument_list_inner(p: &mut CppParser) -> ParseResult {
         // braced initialiser and between the members of a class: a `#` here cannot be anything else, because an
         // argument begins with a type, an expression — or a directive.
         if p.current_token() == CppTokenKind::Hash {
-
             if let Err(err) = super::stats::parse_preprocessor_directive(p) {
                 p.close_marks_above(base);
                 return Err(err);
@@ -5390,7 +5402,6 @@ fn parse_template_argument_list_inner(p: &mut CppParser) -> ParseResult {
         // (the one above) never sees it: the loop came back around to a comma check, not to an argument. Both
         // sides of the comma need the seam, exactly as in the enumerator list.
         while p.current_token() == CppTokenKind::Hash {
-
             if let Err(err) = super::stats::parse_preprocessor_directive(p) {
                 p.close_marks_above(base);
                 return Err(err);
@@ -5796,8 +5807,10 @@ fn an_implementation_keyword(p: &CppParser) -> Option<ImplementationKeyword> {
     Some(match p.current_token_text() {
         "__restrict" | "__restrict__" => ImplementationKeyword::Qualifier,
         "__forceinline" => ImplementationKeyword::Means(CppSyntaxKind::InlineSpec),
-        "__cdecl" | "__stdcall" | "__fastcall" | "__thiscall" | "__vectorcall" | "__extension__"
-        | "__unaligned" | "__ptr64" | "__ptr32" | "__w64" => ImplementationKeyword::Bare,
+        "__cdecl" | "__stdcall" | "__fastcall" | "__thiscall" | "__vectorcall"
+        | "__extension__" | "__unaligned" | "__ptr64" | "__ptr32" | "__w64" => {
+            ImplementationKeyword::Bare
+        }
         _ => return None,
     })
 }
@@ -5996,9 +6009,9 @@ pub fn at_a_single_bracket_attribute(p: &CppParser) -> bool {
                 }
                 // A bracket inside the arguments ends the reading: it is either a nested attribute (not this
                 // spelling) or an index, and neither is a shape this reader claims.
-                Some(CppTokenKind::LeftBracket)
-                | Some(CppTokenKind::RightBracket)
-                | None => return false,
+                Some(CppTokenKind::LeftBracket) | Some(CppTokenKind::RightBracket) | None => {
+                    return false;
+                }
                 Some(_) => {}
             }
             at += 1;
@@ -6149,5 +6162,3 @@ pub(super) fn parse_an_implementation_keyword(p: &mut CppParser) -> CompleteMark
         }
     }
 }
-
-

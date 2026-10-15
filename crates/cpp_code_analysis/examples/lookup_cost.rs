@@ -78,9 +78,15 @@ fn per_lookup(marked: &Marked, name: &str, iterations: u32) -> u64 {
 fn main() {
     const ITERATIONS: u32 = 2_000_000;
 
-    println!("lookup cost against table size, {} iterations each, ns per lookup", ITERATIONS);
+    println!(
+        "lookup cost against table size, {} iterations each, ns per lookup",
+        ITERATIONS
+    );
     println!();
-    println!("{:>8}  {:>18}  {:>18}", "bindings", "present (first)", "absent (scans all)");
+    println!(
+        "{:>8}  {:>18}  {:>18}",
+        "bindings", "present (first)", "absent (scans all)"
+    );
 
     for count in [5usize, 50, 200, 500] {
         let marked = seed(count);
@@ -98,9 +104,16 @@ fn main() {
     }
 
     println!();
-    println!("A probe of one name, for context: is the *shape* of the answer what the walk's own state gives?");
+    println!(
+        "A probe of one name, for context: is the *shape* of the answer what the walk's own state gives?"
+    );
     let marked = seed(500);
-    for name in ["_WIN32", "_MSC_VER", "__cplusplus", "__CPPLS_NEVER_DEFINED__"] {
+    for name in [
+        "_WIN32",
+        "_MSC_VER",
+        "__cplusplus",
+        "__CPPLS_NEVER_DEFINED__",
+    ] {
         let answer = match marked.lookup(name) {
             Lookup::Defined(_) => "Defined",
             Lookup::DefinedWithoutAValue => "DefinedWithoutAValue",

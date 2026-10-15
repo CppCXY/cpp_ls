@@ -127,7 +127,10 @@ fn main() {
         Some(toolchain) => println!(
             "  toolchain: {} ({}) — {} system include directories",
             toolchain.compiler_name(),
-            toolchain.version.as_deref().unwrap_or("version not reported"),
+            toolchain
+                .version
+                .as_deref()
+                .unwrap_or("version not reported"),
             toolchain.system_include_paths.len()
         ),
         None => println!("  toolchain: none found — `<string>` will not resolve"),
@@ -173,12 +176,14 @@ fn main() {
         // therefore an upper bound: the answer arrived somewhere inside the chunk that found it.
         read += session.advance(16).len();
 
-        if let Known::Yes(found) = session.member_completions(&view, cpp_code_analysis::file::coordinates::FileOffset::new(cursor))
-            && let Some(member) = found
-                .members
-                .members
-                .iter()
-                .find(|member| member.fact.name == "size")
+        if let Known::Yes(found) = session.member_completions(
+            &view,
+            cpp_code_analysis::file::coordinates::FileOffset::new(cursor),
+        ) && let Some(member) = found
+            .members
+            .members
+            .iter()
+            .find(|member| member.fact.name == "size")
         {
             first_answer = Some((read, member.file.clone()));
             break;
@@ -197,7 +202,10 @@ fn main() {
             // "unknown" from a member completion can mean either.
             println!(
                 "  never (the whole project was read) — at the cursor: {}",
-                match session.member_completions(&view, cpp_code_analysis::file::coordinates::FileOffset::new(cursor)) {
+                match session.member_completions(
+                    &view,
+                    cpp_code_analysis::file::coordinates::FileOffset::new(cursor)
+                ) {
                     Known::Yes(found) => format!("the type is `{}`, with no `size`", found.class),
                     Known::Unknown(reason) => format!("unknown: {}", reason.describe()),
                     Known::No => "no".to_string(),
@@ -248,8 +256,10 @@ fn main() {
     while !warm.is_idle() {
         warm_read += warm.advance(16).len();
 
-        if let Known::Yes(found) = warm.member_completions(&view, cpp_code_analysis::file::coordinates::FileOffset::new(cursor))
-            && found.members.own().any(|member| member.fact.name == "size")
+        if let Known::Yes(found) = warm.member_completions(
+            &view,
+            cpp_code_analysis::file::coordinates::FileOffset::new(cursor),
+        ) && found.members.own().any(|member| member.fact.name == "size")
         {
             warm_answer = Some(warm_read);
             break;
@@ -281,7 +291,12 @@ fn main() {
     let view = session.view(&main).expect("the buffer is the text");
     println!("\nthe buffer, not the disk:");
 
-    match session.definition(&view, cpp_code_analysis::file::coordinates::ReadingOffset::new(view.source.find("Widget w").expect("the use is there") + 2)) {
+    match session.definition(
+        &view,
+        cpp_code_analysis::file::coordinates::ReadingOffset::new(
+            view.source.find("Widget w").expect("the use is there") + 2,
+        ),
+    ) {
         Known::Yes(found) => println!(
             "  Widget            -> {} line {} (the file is on disk too)",
             short(&found.file),
@@ -314,18 +329,20 @@ fn main() {
             continue;
         };
 
-        match session.member_completions(&view, cpp_code_analysis::file::coordinates::FileOffset::new(offset)) {
+        match session.member_completions(
+            &view,
+            cpp_code_analysis::file::coordinates::FileOffset::new(offset),
+        ) {
             Known::Yes(found) => {
                 // **Every** member the query offers, not only the ones written in the class itself: what a
                 // completion after `m.` must list includes the inherited ones, and on MSVC's STL that is the
                 // difference between 7 and 9 here — `std::map` declares none of `find`/`begin`, `std::_Tree` does
                 // (the base walk). Filtering on `own()` is what a reader of this probe
                 // sees as "the type has no such member" while the type does.
-                let hit = found
-                    .members
-                    .members
-                    .iter()
-                    .find(|member| member.fact.name == query.rsplit('.').next().unwrap_or(query));
+                let hit =
+                    found.members.members.iter().find(|member| {
+                        member.fact.name == query.rsplit('.').next().unwrap_or(query)
+                    });
                 match hit {
                     Some(member) => {
                         answered += 1;
@@ -421,5 +438,3 @@ fn names(paths: &[PathBuf]) -> String {
         .collect::<Vec<_>>()
         .join(", ")
 }
-
-

@@ -106,7 +106,8 @@ impl<'a> SemanticModel<'a> {
             scopes,
             source,
             path,
-            resolver: RefCell::new(resolver),            types: RefCell::new(BTreeMap::new()),
+            resolver: RefCell::new(resolver),
+            types: RefCell::new(BTreeMap::new()),
             inferred: std::cell::Cell::new(0),
             reused: std::cell::Cell::new(0),
         }

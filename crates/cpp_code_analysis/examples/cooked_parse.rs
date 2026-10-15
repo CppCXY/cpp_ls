@@ -22,8 +22,16 @@ fn error_nodes(source: &str) -> Vec<String> {
 }
 
 fn main() {
-    let root = PathBuf::from(std::env::args().nth(1).expect("usage: cooked_parse <dir> <file>"));
-    let file = PathBuf::from(std::env::args().nth(2).expect("usage: cooked_parse <dir> <file>"));
+    let root = PathBuf::from(
+        std::env::args()
+            .nth(1)
+            .expect("usage: cooked_parse <dir> <file>"),
+    );
+    let file = PathBuf::from(
+        std::env::args()
+            .nth(2)
+            .expect("usage: cooked_parse <dir> <file>"),
+    );
 
     let mut session = Session::open(
         root.clone(),
@@ -35,13 +43,22 @@ fn main() {
     // The raw reading, for comparison.
     if let Some(source) = session.text(&file) {
         let errors = error_nodes(&source);
-        println!("raw reading  ({} bytes): {:>4} error node(s)", source.len(), errors.len());
+        println!(
+            "raw reading  ({} bytes): {:>4} error node(s)",
+            source.len(),
+            errors.len()
+        );
         let mut grouped: std::collections::BTreeMap<&str, usize> = Default::default();
-        for e in &errors { *grouped.entry(e.trim()).or_default() += 1; }
+        for e in &errors {
+            *grouped.entry(e.trim()).or_default() += 1;
+        }
         let mut rows: Vec<_> = grouped.into_iter().collect();
         rows.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
         for (text, count) in rows.into_iter().take(6) {
-            println!("    {count:>4}x {:?}", text.chars().take(40).collect::<String>());
+            println!(
+                "    {count:>4}x {:?}",
+                text.chars().take(40).collect::<String>()
+            );
         }
     }
 
@@ -59,10 +76,15 @@ fn main() {
         errors.len()
     );
     let mut grouped: std::collections::BTreeMap<&str, usize> = Default::default();
-    for e in &errors { *grouped.entry(e.trim()).or_default() += 1; }
+    for e in &errors {
+        *grouped.entry(e.trim()).or_default() += 1;
+    }
     let mut rows: Vec<_> = grouped.into_iter().collect();
     rows.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
     for (message, count) in rows.into_iter().take(10) {
-        println!("    {count:>4}x {}", message.chars().take(70).collect::<String>());
+        println!(
+            "    {count:>4}x {}",
+            message.chars().take(70).collect::<String>()
+        );
     }
 }

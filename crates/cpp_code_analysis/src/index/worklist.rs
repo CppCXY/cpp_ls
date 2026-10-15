@@ -273,8 +273,8 @@ impl<F: FileProvider> SummaryStore<F> {
 #[cfg(test)]
 mod tests {
     use super::{Priority, StepOutcome, Worklist};
-    use crate::include::config::CompilerConfig;
     use crate::file::paths::MemoryFiles;
+    use crate::include::config::CompilerConfig;
     use crate::index::store::SummaryStore;
     use std::path::{Path, PathBuf};
 
@@ -370,7 +370,8 @@ mod tests {
             .expect("the project half is worked");
 
         assert_eq!(
-            first_rest, 3,
+            first_rest,
+            3,
             "all three files of the closure are done before the first project file: {:?}",
             steps
                 .iter()
@@ -491,7 +492,8 @@ mod tests {
             [StepOutcome::Built, StepOutcome::Built]
         );
 
-        let mut again = SummaryStore::with_provider(&root, CompilerConfig::default(), files.clone());
+        let mut again =
+            SummaryStore::with_provider(&root, CompilerConfig::default(), files.clone());
         let second = run(&mut again.worklist(paths(&["/p/main.cpp"]), paths(&[])));
 
         assert_eq!(
@@ -532,8 +534,8 @@ mod tests {
     fn a_file_whose_include_does_not_resolve_is_still_a_step() {
         // The include resolves to nothing, so there is no file to queue — and the file itself is summarised and
         // deliberately not stored, which the step reports rather than hiding.
-        let files = MemoryFiles::new()
-            .with_file("/p/main.cpp", "#include \"nope.h\"\nvoid f() { }\n");
+        let files =
+            MemoryFiles::new().with_file("/p/main.cpp", "#include \"nope.h\"\nvoid f() { }\n");
         let (mut store, root) = store("unresolved", &files);
 
         let mut list = store.worklist(paths(&["/p/main.cpp"]), paths(&[]));
@@ -569,7 +571,11 @@ mod tests {
         assert_eq!(list.reached(), 3, "and a.h is now known");
 
         list.step().expect("a.h is worked");
-        assert_eq!(list.pending(), 2, "b.h was discovered, z.cpp is still there");
+        assert_eq!(
+            list.pending(),
+            2,
+            "b.h was discovered, z.cpp is still there"
+        );
 
         run(&mut list);
         assert_eq!(list.pending(), 0);
@@ -579,4 +585,3 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 }
-

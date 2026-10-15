@@ -5,8 +5,8 @@
 //! both depend on the tokens the parser produced.
 
 use cpp_code_analysis::{
-    Directive, DirectiveKind, FilePreprocessing, Include, IncludeForm, Lookup, MacroValues, NoMacros, Token,
-    Value, Visibility,
+    Directive, DirectiveKind, FilePreprocessing, Include, IncludeForm, Lookup, MacroValues,
+    NoMacros, Token, Value, Visibility,
     directive::parse_directive_tokens,
     guard::{Branch, GuardStack},
     macros::MacroTable,
@@ -230,7 +230,10 @@ fn an_unfolded_angle_include_names_the_file_between_its_delimiters() {
             ..
         }) => {
             assert_eq!(form, IncludeForm::Angle);
-            assert_eq!(&*target, "bits/c++config.h", "the delimiters are not part of the name");
+            assert_eq!(
+                &*target, "bits/c++config.h",
+                "the delimiters are not part of the name"
+            );
             assert!(!is_next);
         }
         other => panic!("expected an include, got {other:?}"),
@@ -1221,11 +1224,17 @@ fn a_condition_expands_a_name_whose_body_names_another() {
     // The plain nesting first: `A` is `B`, and `B` is `3`.
     let table = table_of("#define B 3\n#define A B\n");
     assert_eq!(evaluate("A", &table), Value::Known(3), "`A` is `B` is `3`");
-    assert_eq!(evaluate("A + 1", &table), Value::Known(4), "and it is a value");
+    assert_eq!(
+        evaluate("A + 1", &table),
+        Value::Known(4),
+        "and it is a value"
+    );
 
     // Then the splice, which is how `WINAPI_FAMILY_DESKTOP_APP` is written: the definition is one line to the
     // preprocessor, and the tokens after the splice are part of the same body.
-    let table = table_of("#define PART_DESKTOP 0x1\n#define PART_APP 0x2\n#define DESKTOP (PART_DESKTOP \\\n | PART_APP)\n");
+    let table = table_of(
+        "#define PART_DESKTOP 0x1\n#define PART_APP 0x2\n#define DESKTOP (PART_DESKTOP \\\n | PART_APP)\n",
+    );
     assert_eq!(
         evaluate("DESKTOP", &table),
         Value::Known(3),
@@ -1345,13 +1354,28 @@ fn a_header_operand_keeps_the_form_it_was_written_in() {
     use cpp_code_analysis::preprocess::cooked::split_a_header_operand as split;
 
     assert_eq!(split("<vector>"), Some(("vector", false)), "the angle form");
-    assert_eq!(split("\"local.h\""), Some(("local.h", true)), "the quoted form");
-    assert_eq!(split("<sys/types.h>"), Some(("sys/types.h", false)), "a path is still a name");
+    assert_eq!(
+        split("\"local.h\""),
+        Some(("local.h", true)),
+        "the quoted form"
+    );
+    assert_eq!(
+        split("<sys/types.h>"),
+        Some(("sys/types.h", false)),
+        "a path is still a name"
+    );
 
     // Not header names: a macro operand, nothing at all, and a half-written one.
     assert_eq!(split("HEADER"), None, "a macro operand is not a file name");
-    assert_eq!(split("<>"), None, "an empty angle name is nothing to search for");
+    assert_eq!(
+        split("<>"),
+        None,
+        "an empty angle name is nothing to search for"
+    );
     assert_eq!(split(""), None, "and neither is nothing");
-    assert_eq!(split("<vector"), None, "an unterminated form is a file being typed");
+    assert_eq!(
+        split("<vector"),
+        None,
+        "an unterminated form is a file being typed"
+    );
 }
-

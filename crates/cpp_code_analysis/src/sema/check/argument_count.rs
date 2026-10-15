@@ -164,18 +164,18 @@ fn callees_in_this_file(context: &CheckContext<'_>) -> std::collections::HashMap
             }
         }
 
-        callees.insert(name, Callee {
-            required,
-            written,
-            variadic,
-        });
+        callees.insert(
+            name,
+            Callee {
+                required,
+                written,
+                variadic,
+            },
+        );
     }
 
     callees
 }
-
-
-
 
 fn at_most(name: &str, written: usize) -> String {
     format!("`{name}` takes {written} argument(s) and this call passes more")
@@ -211,7 +211,10 @@ fn callee_from_the_index(context: &CheckContext<'_>, name: &str) -> Option<Calle
     let parameters = only.parameter_list.as_deref()?;
     // **The parameters, split where the language splits them**: a comma at depth zero. `std::pair<int, int>` is one
     // parameter, and splitting on every comma would count it as two.
-    let inner = parameters.trim().trim_start_matches('(').trim_end_matches(')');
+    let inner = parameters
+        .trim()
+        .trim_start_matches('(')
+        .trim_end_matches(')');
     let mut depth = 0i32;
     let mut written = 0usize;
     let mut required = 0usize;
@@ -257,12 +260,3 @@ fn callee_from_the_index(context: &CheckContext<'_>, name: &str) -> Option<Calle
 fn at_least(name: &str, required: usize) -> String {
     format!("`{name}` needs {required} argument(s) and this call passes fewer")
 }
-
-
-
-
-
-
-
-
-

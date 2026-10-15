@@ -101,7 +101,11 @@ impl WorkspaceManager {
     }
 
     /// Schedule a reload because a configuration file changed, replacing any reload already pending.
-    pub async fn add_update_config_task(&self, context: ServerContextSnapshot, config_path: PathBuf) {
+    pub async fn add_update_config_task(
+        &self,
+        context: ServerContextSnapshot,
+        config_path: PathBuf,
+    ) {
         if !self.is_configuration_file(&config_path) {
             return;
         }
@@ -313,10 +317,10 @@ mod tests {
             had_existing,
             "the newer token was still pending, so replacing it found one"
         );
-        assert!(second.is_cancelled(), "and it is the one that got cancelled");
+        assert!(
+            second.is_cancelled(),
+            "and it is the one that got cancelled"
+        );
         assert!(!third.is_cancelled());
     }
 }
-
-
-

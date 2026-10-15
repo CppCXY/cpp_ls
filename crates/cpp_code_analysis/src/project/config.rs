@@ -151,7 +151,8 @@ pub struct CompileSection {
     /// states and nearly every target restates, and writing `-std=c++20` into a list of flags hides it among the
     /// `-W`/`-O` noise. See [`TargetSection::standard`] for the per-target form.
     #[serde(default)]
-    pub standard: Option<String>,    /// The flags to compile with, **instead of** the compile database's.
+    pub standard: Option<String>,
+    /// The flags to compile with, **instead of** the compile database's.
     ///
     /// # What this costs, and why it is still the right default
     ///
@@ -460,12 +461,8 @@ impl CompileSection {
             .collect();
 
         // The specific directories first, then `*`; longest prefix first among the specific ones.
-        chosen.sort_by_key(|(directory, _)| {
-            (
-                directory == &"*",
-                std::cmp::Reverse(directory.len()),
-            )
-        });
+        chosen
+            .sort_by_key(|(directory, _)| (directory == &"*", std::cmp::Reverse(directory.len())));
 
         chosen
             .into_iter()
@@ -703,11 +700,10 @@ fn validate(report: &mut ConfigReport) {
     }
 
     if report.config.index.max_files == Some(0) {
-        report
-            .problems
-            .push(ConfigProblem::warning(
-                "index.max_files = 0 would mean \"index nothing\", so the default is used instead".to_string(),
-            ));
+        report.problems.push(ConfigProblem::warning(
+            "index.max_files = 0 would mean \"index nothing\", so the default is used instead"
+                .to_string(),
+        ));
         report.config.index.max_files = None;
     }
 
@@ -741,13 +737,20 @@ fn validate(report: &mut ConfigReport) {
         }
     }
 
-    if report.config.compile.database.as_ref().is_some_and(|database| {
-        Path::new(database)
-            .components()
-            .any(|component| matches!(component, std::path::Component::ParentDir))
-    }) {
+    if report
+        .config
+        .compile
+        .database
+        .as_ref()
+        .is_some_and(|database| {
+            Path::new(database)
+                .components()
+                .any(|component| matches!(component, std::path::Component::ParentDir))
+        })
+    {
         report.problems.push(ConfigProblem::warning(
-            "compile.database walks out of the project with `..`; it is used as written".to_string(),
+            "compile.database walks out of the project with `..`; it is used as written"
+                .to_string(),
         ));
     }
 }
@@ -842,12 +845,17 @@ mod tests {
     #[test]
     fn an_unknown_section_does_not_take_the_others_with_it() {
         // The typo that would otherwise be the most silent of all: a misspelled section header.
-        let report = parse("[workspace]\nexclude = [\"build/**\"]\n\n[compilee]\ncompiler = \"clang++\"\n");
+        let report =
+            parse("[workspace]\nexclude = [\"build/**\"]\n\n[compilee]\ncompiler = \"clang++\"\n");
 
         assert_eq!(report.config.workspace.exclude, ["build/**"]);
         assert_eq!(report.config.compile.named_compiler(), None);
         assert_eq!(report.problems.len(), 1);
-        assert!(report.problems[0].message.contains("[compilee]"), "{:?}", problems(&report));
+        assert!(
+            report.problems[0].message.contains("[compilee]"),
+            "{:?}",
+            problems(&report)
+        );
         assert_eq!(report.problems[0].severity, Severity::Error);
     }
 
@@ -958,23 +966,11 @@ mod tests {
 
     #[test]
     fn a_configuration_is_read_from_a_provider() {
-        let files = crate::MemoryFiles::new().with_file(
-            "/p/.cppls.toml",
-            "[workspace]\nexclude = [\"build/**\"]\n",
-        );
+        let files = crate::MemoryFiles::new()
+            .with_file("/p/.cppls.toml", "[workspace]\nexclude = [\"build/**\"]\n");
         let report = load_config(&files, Path::new("/p"), None);
 
-        assert_eq!(
-            report.path.as_deref(),
-            Some(Path::new("/p/.cppls.toml"))
-        );
+        assert_eq!(report.path.as_deref(), Some(Path::new("/p/.cppls.toml")));
         assert_eq!(report.config.workspace.exclude, ["build/**"]);
     }
 }
-
-
-
-
-
-
-

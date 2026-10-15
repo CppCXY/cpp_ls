@@ -44,11 +44,11 @@ pub mod worklist;
 pub use environment::{MacrosHere, visibility_at};
 
 pub use project::{
-    CookedFile, HeaderTarget, IncludeVisibility, MemberCompletions, MemberList, NameCompletions, NameProvenance,
-    OfferedName, ProjectDefinition, ProjectDefinitions, ProjectIndex, ProjectMacro, ProjectMember,
-    ProjectSymbol, UnlistedBase, VisibleDeclaration, definition_across_files,
-    definitions_across_files, macro_across_files, member_across_files, member_completions_at,
-    header_at, member_definitions_across_files, members_of, name_completions_at,
+    CookedFile, HeaderTarget, IncludeVisibility, MemberCompletions, MemberList, NameCompletions,
+    NameProvenance, OfferedName, ProjectDefinition, ProjectDefinitions, ProjectIndex, ProjectMacro,
+    ProjectMember, ProjectSymbol, UnlistedBase, VisibleDeclaration, definition_across_files,
+    definitions_across_files, header_at, macro_across_files, member_across_files,
+    member_completions_at, member_definitions_across_files, members_of, name_completions_at,
 };
 pub use references::{
     FileReferences, MacroReferences, Reference, ReferenceBudget, ReferenceKind, Rename,
@@ -61,11 +61,10 @@ pub use store::{
 pub use watch::{ChangeBatch, EventKind, FileEvent, PathPattern, Response, WatchFilter};
 pub use worklist::{Priority, Step, StepOutcome, Worklist, outcome_of};
 
-
 use crate::cache::{SummaryKey, content_hash};
-use crate::include::config::CompilerConfig;
 use crate::file::paths::{FileProvider, PathInterner};
 use crate::include::IncludeResolver;
+use crate::include::config::CompilerConfig;
 use crate::preprocess::directive::{Directive, SpannedDirective};
 use crate::sema::declarations::{assign_guards, build_facts, mark_settling_macro_facts};
 use crate::sema::scopes::build_scopes;
@@ -118,7 +117,15 @@ pub struct ScannedIncludes {
     /// By the offset the directive starts at. The directive itself is kept too, so that an answer is only reused
     /// for the same include: a scan that read a line differently from the parser would find its answer refused, not
     /// wrongly used.
-    found: std::collections::HashMap<usize, (crate::preprocess::directive::IncludeForm, Box<str>, bool, Option<PathBuf>)>,
+    found: std::collections::HashMap<
+        usize,
+        (
+            crate::preprocess::directive::IncludeForm,
+            Box<str>,
+            bool,
+            Option<PathBuf>,
+        ),
+    >,
     order: Vec<usize>,
 }
 
@@ -131,7 +138,11 @@ impl ScannedIncludes {
             .collect()
     }
 
-    fn resolved(&self, at: usize, include: &crate::preprocess::directive::Include) -> Option<Option<PathBuf>> {
+    fn resolved(
+        &self,
+        at: usize,
+        include: &crate::preprocess::directive::Include,
+    ) -> Option<Option<PathBuf>> {
         let (form, target, is_next, resolved) = self.found.get(&at)?;
         (*form == include.form && **target == *include.target && *is_next == include.is_next)
             .then(|| resolved.clone())
@@ -208,7 +219,10 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
     /// may or may not have an environment for each file of it.
     pub fn with_a_macro_environment(
         self,
-        environment: Option<(&'a dyn cpp_parser::MacroBodies, &'a dyn cpp_parser::MacroFacts)>,
+        environment: Option<(
+            &'a dyn cpp_parser::MacroBodies,
+            &'a dyn cpp_parser::MacroFacts,
+        )>,
     ) -> Self {
         match environment {
             Some((bodies, facts)) => self.with_macro_body_readers(bodies, facts),
@@ -290,12 +304,8 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
         // should be in front of them. `ParserConfig::skip_bodies` carries the same figures.
         let config = ParserConfig::default().with_dialect(self.config.dialect());
 
-        let tree = {
-            CppParser::parse(source, config)
-        };
-        let summary = {
-            self.index_tree(path, source, &tree, key)
-        };
+        let tree = { CppParser::parse(source, config) };
+        let summary = { self.index_tree(path, source, &tree, key) };
         // **Destroying the tree is work**, and it is timed because it is not free and not obvious: a file's tree is
         // tens of thousands of green nodes held by `Arc`s, and dropping it walks every one of them. On the 138-file
         // project this was the missing third of the cold index after the shape walk was fixed — the stages summed to
@@ -339,14 +349,27 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
             let Directive::Include(include) = &spanned.directive else {
                 continue;
             };
-            let Some(fact) = include_fact(&spanned.directive, spanned.range, directory, &resolver, &mut interner, None) else {
+            let Some(fact) = include_fact(
+                &spanned.directive,
+                spanned.range,
+                directory,
+                &resolver,
+                &mut interner,
+                None,
+            ) else {
                 continue;
             };
 
             let at = spanned.range.start_offset;
-            scanned
-                .found
-                .insert(at, (include.form, include.target.clone(), include.is_next, fact.resolved));
+            scanned.found.insert(
+                at,
+                (
+                    include.form,
+                    include.target.clone(),
+                    include.is_next,
+                    fact.resolved,
+                ),
+            );
             scanned.order.push(at);
         }
         scanned
@@ -390,15 +413,9 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
         // rendering's. See the same note in [`FileIndexer::index`].
         let config = ParserConfig::default().with_dialect(self.config.dialect());
 
-        let tree = {
-            CppParser::parse(&rendered.text, config)
-        };
-        let mut summary = {
-            self.index_tree(path, &rendered.text, &tree, key)
-        };
-        let report = {
-            summary.map_into_the_file(rendered)
-        };
+        let tree = { CppParser::parse(&rendered.text, config) };
+        let mut summary = { self.index_tree(path, &rendered.text, &tree, key) };
+        let report = { summary.map_into_the_file(rendered) };
 
         // The tree's errors, each asked of the map. `reported_span` answers for a node's whole range — from the first
         // token it covers to the last — and `reported_at` for the span an offset falls in, which is the fallback for
@@ -564,9 +581,7 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
             )
         };
 
-        let summary = {
-            self.index_tree(root, &stream.text, &tree, key)
-        };
+        let summary = { self.index_tree(root, &stream.text, &tree, key) };
 
         let mut files: Vec<(std::path::PathBuf, crate::CookedFile)> = stream
             .files
@@ -622,12 +637,11 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
             // [`preprocess_with`], which is where the rule and its cost are stated.
             match self.seed {
                 Some(seed) => {
-                    let started = crate::preprocess::preprocess_with_a_seed(source, tree.get_tokens(), seed);
+                    let started =
+                        crate::preprocess::preprocess_with_a_seed(source, tree.get_tokens(), seed);
                     started
                 }
-                None => {
-                    crate::preprocess::preprocess(source, tree.get_tokens())
-                }
+                None => crate::preprocess::preprocess(source, tree.get_tokens()),
             }
         };
         // The same evidence object for both readers — see the field's note. The cast is the point: the scope walk
@@ -636,9 +650,7 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
             Some(bodies) => bodies,
             None => &crate::sema::scopes::NoMacroBodies,
         };
-        let scopes = {
-            build_scopes(&root, evidence)
-        };
+        let scopes = { build_scopes(&root, evidence) };
         // The diagnostics, as ranges, for the one field a fact takes from them rather than from the tree — see
         // [`DeclFact::clean`]. Collected once for the whole file: the parser reports a handful per file, and
         // asking per declaration would be a scan of the list per fact.
@@ -648,9 +660,8 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
             .map(|error| cpp_parser::source_range(error.range))
             .collect();
 
-        let (mut declarations, mut guards) = {
-            build_facts(&scopes, &preprocessing, &root, &errors)
-        };
+        let (mut declarations, mut guards) =
+            { build_facts(&scopes, &preprocessing, &root, &errors) };
 
         let mut interner = PathInterner::new(cfg!(windows));
         let resolver = IncludeResolver::new(self.files, self.config);
@@ -660,7 +671,6 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
         // the one step here that is not proportional to the text but to the search path. Measured on the 138-file
         // project, this is where most of the sweep goes.
         let (mut macros, mut includes) = {
-
             let macros: Vec<MacroFact> = preprocessing
                 .directives
                 .iter()
@@ -708,7 +718,6 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
         guarded.sort_by_key(|(_, at)| *at);
 
         let own_guard = {
-
             assign_guards(&mut guarded, &preprocessing, &mut guards);
 
             // The file's **own include guard is not a condition**, and this is the step that makes the standard
@@ -757,9 +766,7 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
         // **Header units are resolved in the same stage as includes**, because they are the same filesystem search:
         // `import <vector>;` names a header, and the answer to "which vector" has to be the compiler's answer. See
         // [`modules_of`].
-        let modules = {
-            modules_of(&root, directory, &resolver, &mut interner)
-        };
+        let modules = { modules_of(&root, directory, &resolver, &mut interner) };
 
         FileSummary {
             path: path.to_path_buf(),
@@ -1099,16 +1106,21 @@ fn deguard_the_files_own_guard(facts: &mut [&mut FactGuard], region: usize) {
 ///
 /// Derived from the body's own tokens, never searched for: each token carries the range it was lexed at, so the
 /// span from the first to the last *is* the body, whatever spelling the directive used around it.
-fn body_range_of(definition: &crate::preprocess::macros::MacroDef) -> Option<cpp_parser::SourceRange> {
+fn body_range_of(
+    definition: &crate::preprocess::macros::MacroDef,
+) -> Option<cpp_parser::SourceRange> {
     let first = definition.body.tokens.first()?;
     let last = definition.body.tokens.last()?;
     let start = first.range.start_offset;
     let end = last.range.start_offset + last.range.length;
-    Some(cpp_parser::SourceRange::new(start, end.saturating_sub(start)))
+    Some(cpp_parser::SourceRange::new(
+        start,
+        end.saturating_sub(start),
+    ))
 }
 fn macro_body_shape(definition: &crate::preprocess::macros::MacroDef) -> cpp_parser::MacroBody {
-    use cpp_parser::MacroBody;
     use cpp_parser::CppTokenKind;
+    use cpp_parser::MacroBody;
 
     let tokens: Vec<CppTokenKind> = definition
         .body
@@ -1123,7 +1135,8 @@ fn macro_body_shape(definition: &crate::preprocess::macros::MacroDef) -> cpp_par
     };
 
     // A body that is only a brace is the gtest shape: the invocation is always followed by the block it wrote.
-    if first == CppTokenKind::LeftBrace && tokens.last().copied() == Some(CppTokenKind::RightBrace) {
+    if first == CppTokenKind::LeftBrace && tokens.last().copied() == Some(CppTokenKind::RightBrace)
+    {
         return MacroBody::Block;
     }
 
@@ -1150,7 +1163,9 @@ fn macro_body_shape(definition: &crate::preprocess::macros::MacroDef) -> cpp_par
     // * the specifier *keywords* — `static`, `extern`, `inline` — which no other construct can begin with;
     // * the compiler's own attribute spelling — `__declspec(dllexport)`, `__attribute__((…))` — which is an
     //   identifier followed by a parenthesised group, and therefore shaped exactly like `MAX(a, b)`.
-    if is_specifier_like(tokens[0]) || is_compiler_specifier_macro(&tokens, first_spelling(definition)) {
+    if is_specifier_like(tokens[0])
+        || is_compiler_specifier_macro(&tokens, first_spelling(definition))
+    {
         return MacroBody::Specifier;
     }
 
@@ -1249,7 +1264,9 @@ fn first_spelling(definition: &crate::preprocess::macros::MacroDef) -> &str {
 fn is_one_parenthesised_group(tokens: &[cpp_parser::CppTokenKind]) -> bool {
     use cpp_parser::CppTokenKind as K;
 
-    if tokens.first().copied() != Some(K::LeftParen) || tokens.last().copied() != Some(K::RightParen) {
+    if tokens.first().copied() != Some(K::LeftParen)
+        || tokens.last().copied() != Some(K::RightParen)
+    {
         return false;
     }
 
@@ -1339,7 +1356,6 @@ fn file_what_was_found(
     }
 }
 
-
 /// Give `#include "local.h"` the token the parser gives it: a header name.
 ///
 /// The parser folds the name after `#include` into one `HeaderName` token while it parses, because only the parser
@@ -1396,13 +1412,14 @@ fn include_fact<F: FileProvider>(
 
     // A search of the include path is a filesystem search: a scan that already made it is believed, but only for
     // the very same directive.
-    let resolved: Option<PathBuf> = match scanned.and_then(|scanned| scanned.resolved(range.start_offset, include)) {
-        Some(resolved) => resolved,
-        None => resolver
-            .resolve(include, including, None, interner)
-            .resolved()
-            .map(|resolved| resolved.path.clone()),
-    };
+    let resolved: Option<PathBuf> =
+        match scanned.and_then(|scanned| scanned.resolved(range.start_offset, include)) {
+            Some(resolved) => resolved,
+            None => resolver
+                .resolve(include, including, None, interner)
+                .resolved()
+                .map(|resolved| resolved.path.clone()),
+        };
 
     Some(IncludeFact {
         form: include.form,
@@ -1478,9 +1495,9 @@ impl std::error::Error for SummaryReadError {}
 mod tests {
     use super::{FileIndexer, include_fact, macro_body_shape, summarize, write_summary};
     use crate::cache::SummaryKey;
-    use crate::include::config::CompilerConfig;
     use crate::file::paths::{FileProvider, MemoryFiles, PathInterner};
     use crate::include::IncludeResolver;
+    use crate::include::config::CompilerConfig;
     use crate::preprocess::directive::{Directive, IncludeForm};
     use crate::preprocess::macros::MacroTable;
     use crate::summary::{DeclKind, FactGuard, MacroKind};
@@ -1649,18 +1666,18 @@ mod tests {
             "innermost first"
         );
         assert!(
-            chain
-                .iter()
-                .all(|at| at.condition_at < x),
+            chain.iter().all(|at| at.condition_at < x),
             "and each condition is evaluated at its *own* offset, which is above the code: {chain:?}"
         );
 
         // Code outside every conditional is in no region at all — the common case, and the cheap one.
         let source = "int x;\n#ifdef A\nint y;\n#endif\n";
-        assert!(summary
-            .guards
-            .conditions_at(source.find("int x;").expect("the declaration"))
-            .is_empty());
+        assert!(
+            summary
+                .guards
+                .conditions_at(source.find("int x;").expect("the declaration"))
+                .is_empty()
+        );
     }
 
     #[test]
@@ -1883,7 +1900,8 @@ mod tests {
     }
 
     #[test]
-    fn a_file_with_declarations_and_macros_summarizes_both() {        let summary = summary(
+    fn a_file_with_declarations_and_macros_summarizes_both() {
+        let summary = summary(
             "#define MY_API\n#define MAX(a, b) ((a) > (b) ? (a) : (b))\nstruct Widget { int size; };\n",
         );
 
@@ -1917,8 +1935,9 @@ mod tests {
         // not a condition anybody has to decide, because *including the file* is what defines `H`. Measured on the
         // closure of `<string>`, without this rule every cross-file answer about the standard library is
         // `ConditionalCompilation` — the headers guard their bodies, so every `#include` inside one is "guarded".
-        let summary =
-            summary("#ifndef H\n#define H\nstruct Widget { int size; };\n#include \"other.h\"\n#endif\n");
+        let summary = summary(
+            "#ifndef H\n#define H\nstruct Widget { int size; };\n#include \"other.h\"\n#endif\n",
+        );
 
         let widget = summary
             .declarations
@@ -2139,8 +2158,14 @@ mod tests {
 
     #[test]
     fn an_unresolved_include_does_not_stop_the_other_facts() {
-        let tree = CppParser::parse("#include <nonexistent_xyz>\nstruct W { int a; };\n", ParserConfig::default());
-        let preprocessing = crate::preprocess::preprocess("#include <nonexistent_xyz>\nstruct W { int a; };\n", tree.get_tokens());
+        let tree = CppParser::parse(
+            "#include <nonexistent_xyz>\nstruct W { int a; };\n",
+            ParserConfig::default(),
+        );
+        let preprocessing = crate::preprocess::preprocess(
+            "#include <nonexistent_xyz>\nstruct W { int a; };\n",
+            tree.get_tokens(),
+        );
 
         let files = MemoryFiles::new();
         let config = CompilerConfig::default();
@@ -2225,9 +2250,10 @@ mod tests {
         let table = MacroTable::new();
         let _ = table;
 
-        assert_eq!(files.read(Path::new("/p/only.h")).as_deref(), Some("int x;\n"));
+        assert_eq!(
+            files.read(Path::new("/p/only.h")).as_deref(),
+            Some("int x;\n")
+        );
         assert_eq!(files.read(Path::new("/p/other.h")), None);
     }
 }
-
-

@@ -40,5 +40,3 @@ impl Check for SyntaxError {
         }
     }
 }
-
-

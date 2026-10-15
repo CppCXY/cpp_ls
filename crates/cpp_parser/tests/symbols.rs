@@ -16,8 +16,8 @@
 //!   through `ParserConfig`.
 
 use cpp_parser::{
-    CppParser, CppSyntaxKind, CppSyntaxTree, NoSymbols,
-    ParserConfig, SymbolKind, SymbolMap, SymbolTable,
+    CppParser, CppSyntaxKind, CppSyntaxTree, NoSymbols, ParserConfig, SymbolKind, SymbolMap,
+    SymbolTable,
 };
 
 /// A parse, reduced to what a test can compare: the node kinds with their ranges, the diagnostics, and the text.
@@ -214,8 +214,6 @@ fn a_table_described_type_settles_the_declaration_question() {
     );
 }
 
-
-
 #[test]
 fn a_table_can_be_built_and_shared_from_outside_the_crate() {
     // The interface's shape, exercised the way a caller would: an index wrapped in a map, handed to the parser as
@@ -255,7 +253,7 @@ fn a_table_can_be_built_and_shared_from_outside_the_crate() {
 /// scope.
 #[test]
 fn a_namespace_behind_a_linkage_specification_opens_it() {
-    use cpp_parser::{shape_of_a_body, BodyShape, NothingAtAll};
+    use cpp_parser::{BodyShape, NothingAtAll, shape_of_a_body};
 
     // The plain spellings still work, and are asserted first so that a change which broke them would be caught
     // here rather than in the one below.
@@ -303,7 +301,7 @@ fn a_namespace_behind_a_linkage_specification_opens_it() {
 /// be reached from the tokens it has.
 #[test]
 fn an_unexpanded_word_in_a_body_keeps_the_shape_out_of_reach() {
-    use cpp_parser::{shape_of_a_body, BodyShape};
+    use cpp_parser::{BodyShape, shape_of_a_body};
 
     // What the reader is handed for a body whose leading word is another macro.
     assert_eq!(

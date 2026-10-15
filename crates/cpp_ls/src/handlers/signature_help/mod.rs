@@ -91,7 +91,9 @@ pub async fn on_signature_help(
 /// A function of its own rather than a closure in the handler, because the four decisions worth testing directly
 /// are here: which span each parameter occupies **inside the label** (a client bolds it), which one is active, which
 /// signature is active, and that the documentation is rendered the same way the hover renders it.
-pub fn signature_help_of(signatures: &[cpp_code_analysis::signature::CallSignature]) -> SignatureHelp {
+pub fn signature_help_of(
+    signatures: &[cpp_code_analysis::signature::CallSignature],
+) -> SignatureHelp {
     let rendered: Vec<SignatureInformation> = signatures
         .iter()
         .map(|signature| SignatureInformation {
@@ -233,7 +235,10 @@ mod tests {
             "the signature's own count, not the popup's"
         );
         assert_eq!(help.signatures[1].active_parameter, None);
-        assert_eq!(help.active_parameter, Some(1), "and the first is the active one");
+        assert_eq!(
+            help.active_parameter,
+            Some(1),
+            "and the first is the active one"
+        );
     }
 }
-

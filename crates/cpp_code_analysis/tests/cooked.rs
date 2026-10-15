@@ -81,7 +81,10 @@ fn the_instructions_to_the_processor_are_gone() {
     // Including the `#include`: a file's stream stops at its own tokens, and the included file is its own stream.
     // `#define`, `#if`/`#endif` and `#include` are instructions *to* the processor, so none of them survives into
     // what the processor produces.
-    assert_eq!(text("#include <vector>\n#define A 1\nint x = A;\n"), "int x = 1 ;");
+    assert_eq!(
+        text("#include <vector>\n#define A 1\nint x = A;\n"),
+        "int x = 1 ;"
+    );
 
     // **`#pragma` is the exception, and it is not a special case** — it is the one directive that is a statement
     // about the program rather than an instruction about the text. Every compiler keeps it in `-E` output, and
@@ -93,13 +96,20 @@ fn the_instructions_to_the_processor_are_gone() {
 
 #[test]
 fn only_the_compiled_branch_survives() {
-    assert_eq!(text("#if 0\nint no;\n#else\nint yes;\n#endif\n"), "int yes ;");
-    assert_eq!(text("#if 1\nint yes;\n#else\nint no;\n#endif\n"), "int yes ;");
+    assert_eq!(
+        text("#if 0\nint no;\n#else\nint yes;\n#endif\n"),
+        "int yes ;"
+    );
+    assert_eq!(
+        text("#if 1\nint yes;\n#else\nint no;\n#endif\n"),
+        "int yes ;"
+    );
 }
 
 #[test]
 fn an_elif_chain_takes_the_first_branch_that_holds() {
-    let source = "#define B 2\n#if B == 1\nint one;\n#elif B == 2\nint two;\n#else\nint other;\n#endif\n";
+    let source =
+        "#define B 2\n#if B == 1\nint one;\n#elif B == 2\nint two;\n#else\nint other;\n#endif\n";
     assert_eq!(text(source), "int two ;");
 }
 
@@ -108,13 +118,15 @@ fn a_define_in_a_branch_nobody_compiles_does_not_take_effect() {
     // The whole reason the walk keeps its own table: `preprocess` records every definition — a consumer
     // asking "where is this name defined" wants to see the ones that are not compiled too — but a cooked
     // stream is one configuration, and in that configuration this `#define` never ran.
-    let source = "#if 0\n#define NOPE 1\n#endif\n#ifdef NOPE\nint wrong;\n#else\nint right;\n#endif\n";
+    let source =
+        "#if 0\n#define NOPE 1\n#endif\n#ifdef NOPE\nint wrong;\n#else\nint right;\n#endif\n";
     assert_eq!(text(source), "int right ;");
 }
 
 #[test]
 fn a_define_in_a_compiled_branch_does_take_effect() {
-    let source = "#if 1\n#define YES 1\n#endif\n#ifdef YES\nint right;\n#else\nint wrong;\n#endif\n";
+    let source =
+        "#if 1\n#define YES 1\n#endif\n#ifdef YES\nint right;\n#else\nint wrong;\n#endif\n";
     assert_eq!(text(source), "int right ;");
 }
 
@@ -156,8 +168,14 @@ fn a_definition_later_in_the_file_does_not_apply_earlier() {
 
 #[test]
 fn stringize_and_paste_are_the_operators_and_not_text() {
-    assert_eq!(text("#define S(x) #x\nchar* s = S(a b);\n"), "char * s = \"a b\" ;");
-    assert_eq!(text("#define P(a, b) a##b\nint xy = P(x, y);\n"), "int xy = xy ;");
+    assert_eq!(
+        text("#define S(x) #x\nchar* s = S(a b);\n"),
+        "char * s = \"a b\" ;"
+    );
+    assert_eq!(
+        text("#define P(a, b) a##b\nint xy = P(x, y);\n"),
+        "int xy = xy ;"
+    );
 }
 
 #[test]
@@ -274,7 +292,8 @@ fn the_raw_reading_reads_every_branch_and_the_cooked_one_reads_the_compiled_bran
     // answer is in the macro table, not in the grammar. The cooked stream answers it before the parser runs,
     // so the tree describes one configuration, which is what a compiler's tree describes and what every
     // query above it is really asking about.
-    let source = "struct S {\n#if FEATURE\n  int only_when_on;\n#else\n  int only_when_off;\n#endif\n};\n";
+    let source =
+        "struct S {\n#if FEATURE\n  int only_when_on;\n#else\n  int only_when_off;\n#endif\n};\n";
 
     let raw = cpp_parser::CppParser::parse(source, cpp_parser::ParserConfig::default());
     assert_eq!(raw.get_errors(), [], "both branches are readable as text");
@@ -296,11 +315,8 @@ fn the_raw_reading_reads_every_branch_and_the_cooked_one_reads_the_compiled_bran
     // and not as an empty body on purpose: `#if FEATURE` after a replacement that leaves nothing is an
     // expression with no expression in it, which C does not define — GCC rejects it, we treat it as
     // not-taken, and neither is a fact about *this* file.
-    let cooked = cpp_code_analysis::cook_with(
-        source,
-        tokens.as_slice(),
-        &defines("#define FEATURE 1\n"),
-    );
+    let cooked =
+        cpp_code_analysis::cook_with(source, tokens.as_slice(), &defines("#define FEATURE 1\n"));
     let tree = parse_rendered(&cooked.render());
     assert_eq!(count_of(&tree, "only_when_on"), 1);
     assert_eq!(count_of(&tree, "only_when_off"), 0);
@@ -439,8 +455,7 @@ fn an_empty_body_leaves_nothing_behind_and_the_declaration_still_reads() {
     // name. Cooked, it is simply not there — and nothing downstream has to know it ever was.
     let source = "_NODISCARD int f(void);\n";
     let (tokens, _) = cpp_parser::lex(source, &cpp_parser::LexerConfig::default());
-    let cooked =
-        cpp_code_analysis::cook_with(source, &tokens, &defines("#define _NODISCARD\n"));
+    let cooked = cpp_code_analysis::cook_with(source, &tokens, &defines("#define _NODISCARD\n"));
 
     assert_eq!(cooked.spellings(), "int f ( void ) ;");
     assert_eq!(parse_rendered(&cooked.render()).get_errors(), []);
@@ -458,7 +473,9 @@ fn a_token_out_of_a_body_maps_back_to_the_define() {
         .text
         .find("__declspec")
         .expect("it is in the rendering");
-    let written = rendered.written_at(offset).expect("it was written somewhere");
+    let written = rendered
+        .written_at(offset)
+        .expect("it was written somewhere");
     assert_eq!(
         &source[written.start_offset..written.end_offset()],
         "__declspec"
@@ -470,7 +487,9 @@ fn a_token_out_of_a_body_maps_back_to_the_define() {
 
     // …and a token the file wrote maps to itself.
     let offset = rendered.text.find("int").expect("it is in the rendering");
-    let written = rendered.written_at(offset).expect("it was written somewhere");
+    let written = rendered
+        .written_at(offset)
+        .expect("it was written somewhere");
     assert_eq!(&source[written.start_offset..written.end_offset()], "int");
 }
 
@@ -507,7 +526,9 @@ fn a_node_maps_to_the_span_its_tokens_cover() {
         .expect("a declaration is in the rendered tree");
 
     let range = cpp_parser::source_range(declaration.text_range());
-    let written = rendered.written_span(range).expect("it came from somewhere");
+    let written = rendered
+        .written_span(range)
+        .expect("it came from somewhere");
     assert!(
         &source[written.start_offset..written.end_offset()].contains("int a"),
         "the node's span covers its own tokens: {:?}",
@@ -551,7 +572,11 @@ fn a_macro_from_an_included_header_is_expanded_by_the_cooked_stream() {
 
     let rendered = cpp_code_analysis::cook_with(source, &tokens, &configuration.table).render();
     assert!(
-        spelled(&rendered.text).starts_with(&["namespace".to_string(), "std".to_string(), "{".to_string()]),
+        spelled(&rendered.text).starts_with(&[
+            "namespace".to_string(),
+            "std".to_string(),
+            "{".to_string()
+        ]),
         "the body of the included macro is what the parser sees: {:?}",
         rendered.text
     );
@@ -599,8 +624,8 @@ fn an_object_like_body_in_force_is_used_by_default_and_can_be_turned_off() {
     // region), so a body there is unusable only because nobody said whether the macro takes parameters. A caller
     // that knows — the index does, from `MacroFact::function_like` — can hand it over as object-like, and then
     // the declaration reads.
-    let environment = cpp_parser::MacroEnvironment::from_included_macros([])
-        .with_bodies_in_force([
+    let environment =
+        cpp_parser::MacroEnvironment::from_included_macros([]).with_bodies_in_force([
             (
                 Box::from("_ACRTIMP"),
                 Some(false),
@@ -684,7 +709,11 @@ fn a_fact_that_cannot_be_placed_is_dropped_and_counted() {
         source,
         cpp_code_analysis::SummaryKey::new(0, 0),
     );
-    assert_eq!(summary.declarations.len(), 1, "the fixture declares one thing");
+    assert_eq!(
+        summary.declarations.len(),
+        1,
+        "the fixture declares one thing"
+    );
 
     // A rendering with **no tokens at all**: every range in the summary is unplaceable, which is what a rendering
     // whose stream is empty looks like from the map's side.

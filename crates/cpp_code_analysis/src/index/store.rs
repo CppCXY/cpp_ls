@@ -61,8 +61,8 @@ use std::path::{Path, PathBuf};
 use cpp_parser::Dialect;
 
 use crate::cache::{SummaryKey, content_hash, fnv1a64};
-use crate::include::config::CompilerConfig;
 use crate::file::paths::{DiskFiles, FileProvider, normalize_path};
+use crate::include::config::CompilerConfig;
 use crate::index::project::ProjectIndex;
 use crate::index::{FileIndexer, read_summary, write_summary};
 use crate::summary::{FileSummary, IncludeFact};
@@ -158,7 +158,8 @@ where
     }
 
     let next = std::sync::atomic::AtomicUsize::new(0);
-    let slots: Vec<std::sync::Mutex<Option<R>>> = items.iter().map(|_| std::sync::Mutex::new(None)).collect();
+    let slots: Vec<std::sync::Mutex<Option<R>>> =
+        items.iter().map(|_| std::sync::Mutex::new(None)).collect();
 
     std::thread::scope(|scope| {
         for _ in 0..workers {
@@ -169,7 +170,9 @@ where
                         break;
                     };
                     let made = work(item);
-                    *slots[at].lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(made);
+                    *slots[at]
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(made);
                 }
             };
 
@@ -519,14 +522,10 @@ impl<F: FileProvider> SummaryStore<F> {
         mut includes: Option<&mut dyn FnMut(&[PathBuf])>,
         environment: Option<(&dyn cpp_parser::MacroBodies, &dyn cpp_parser::MacroFacts)>,
     ) -> Prepared {
-        let Some(source) = ({
-            self.files.read(path)
-        }) else {
+        let Some(source) = ({ self.files.read(path) }) else {
             return Prepared(PreparedOutcome::Unreadable);
         };
-        let key = {
-            SummaryKey::new(content_hash(&source), self.context_hash(path))
-        };
+        let key = { SummaryKey::new(content_hash(&source), self.context_hash(path)) };
 
         {
             if let Ok(stored) = read_summary(&key.path_under(&self.cache))
@@ -674,7 +673,12 @@ impl<F: FileProvider> SummaryStore<F> {
         let budget = budget.max(frontier.waiting.len());
 
         let shared = (Mutex::new(frontier), Condvar::new());
-        let lock = || shared.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let lock = || {
+            shared
+                .0
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+        };
 
         let work = || {
             loop {
@@ -691,7 +695,10 @@ impl<F: FileProvider> SummaryStore<F> {
                         if frontier.in_flight == 0 {
                             break None;
                         }
-                        frontier = shared.1.wait(frontier).unwrap_or_else(|poisoned| poisoned.into_inner());
+                        frontier = shared
+                            .1
+                            .wait(frontier)
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
                     }
                 };
                 let Some(path) = path else {
@@ -707,7 +714,9 @@ impl<F: FileProvider> SummaryStore<F> {
                             if frontier.seen.len() >= budget {
                                 break;
                             }
-                            if !wanted(target) || !frontier.seen.insert(normalize_path(target, cfg!(windows))) {
+                            if !wanted(target)
+                                || !frontier.seen.insert(normalize_path(target, cfg!(windows)))
+                            {
                                 continue;
                             }
                             frontier.waiting.push_back(target.clone());
@@ -750,7 +759,10 @@ impl<F: FileProvider> SummaryStore<F> {
             });
         }
 
-        let mut frontier = shared.0.into_inner().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut frontier = shared
+            .0
+            .into_inner()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(payload) = frontier.panic.take() {
             std::panic::resume_unwind(payload);
         }
@@ -1003,7 +1015,8 @@ impl<F: FileProvider> SummaryStore<F> {
         }
 
         // and copy all of them, on every drain.
-        let mut sources: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        let mut sources: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
         let eager = units.is_empty();
         {
             if eager {
@@ -1026,8 +1039,10 @@ impl<F: FileProvider> SummaryStore<F> {
         let seed = crate::macros::MacroTable::from_marked(self.index.macros());
         let unit_definitions: Vec<crate::UnitDefinitions> =
             units.iter().map(|unit| unit.definitions()).collect();
-        let environments: Vec<(&std::sync::Arc<crate::TranslationUnit>, crate::UnitDefinitions)> =
-            units.iter().zip(unit_definitions).collect();
+        let environments: Vec<(
+            &std::sync::Arc<crate::TranslationUnit>,
+            crate::UnitDefinitions,
+        )> = units.iter().zip(unit_definitions).collect();
 
         // **The names the files being re-read could possibly need** — the filter's own filter, and the one that
         // decides whether this pass costs anything on a warm start.
@@ -1061,7 +1076,6 @@ impl<F: FileProvider> SummaryStore<F> {
         };
 
         if !eager {
-
             // A file no unit covers has no timeline to be read through, so its reading falls back to walking its own
             // closure — and that walk asks for the text of every file in it. Rare (a project file outside every
             // unit), and the answer is the old one: read everything, once.
@@ -1155,9 +1169,7 @@ impl<F: FileProvider> SummaryStore<F> {
 
                 // The plain shape first — it is free (9.7 ms for every body in the project) and it settles most
                 // bodies; an environment is only asked for the ones it cannot read.
-                let plain = {
-                    cpp_parser::shape_of_a_body(body).a_reading_uses_this()
-                };
+                let plain = { cpp_parser::shape_of_a_body(body).a_reading_uses_this() };
                 let used = if plain {
                     true
                 } else {
@@ -1236,9 +1248,7 @@ impl<F: FileProvider> SummaryStore<F> {
             let Some(source) = sources.get(&normalize_path(path, cfg!(windows))) else {
                 continue;
             };
-            let mentioned = {
-                mentions_one_of(source, &bodied_names)
-            };
+            let mentioned = { mentions_one_of(source, &bodied_names) };
             // **And a file whose `#define`s the walk decided about, whether or not it mentions a bodied macro.**
             //
             // `mentions_one_of` is a filter about *macro bodies*: parsing a file that expands nothing cannot change
@@ -1261,15 +1271,19 @@ impl<F: FileProvider> SummaryStore<F> {
             }
 
             let key = SummaryKey::new(content_hash(source), self.context_hash(path));
-            let indexer = FileIndexer::new(&self.files, &self.config).with_seed(self.index.macros());
+            let indexer =
+                FileIndexer::new(&self.files, &self.config).with_seed(self.index.macros());
             // **A caller with no timeline** — a probe indexing a closure from an entry point, a test — keeps
             // the reading this pass has always had: the file's own closure, walked once for it. The session
             // passes units and never comes here; dropping this arm would silently unscope every declaration
             // behind a namespace-opening macro for those callers (`tests/scopes.rs` is one).
-            let Some(environment) = self.closure_environment(path, &sources, &mut definitions) else {
+            let Some(environment) = self.closure_environment(path, &sources, &mut definitions)
+            else {
                 continue;
             };
-            let made = indexer.with_macro_bodies(&environment).index(path, source, key);
+            let made = indexer
+                .with_macro_bodies(&environment)
+                .index(path, source, key);
 
             let stored = !truncated && !has_unresolved_includes(&made);
             if stored {
@@ -1340,7 +1354,6 @@ impl<F: FileProvider> SummaryStore<F> {
             .map(|(_, offsets)| offsets.clone())
             .unwrap_or_default()
     }
-
 
     fn read_into(&self, sources: &mut std::collections::HashMap<String, String>, path: &Path) {
         let key = normalize_path(path, cfg!(windows));
@@ -1573,7 +1586,10 @@ impl<F: FileProvider> SummaryStore<F> {
 /// `None` when no unit in `environments` reads the file, which the caller answers with the plain shape: a file
 /// outside every unit is one nobody compiled, and there is no environment to read its bodies in.
 fn bodies_of<'pass>(
-    environments: &'pass [(&std::sync::Arc<crate::TranslationUnit>, crate::UnitDefinitions)],
+    environments: &'pass [(
+        &std::sync::Arc<crate::TranslationUnit>,
+        crate::UnitDefinitions,
+    )],
     seed: &'pass crate::macros::MacroTable,
     path: &Path,
 ) -> Option<crate::preprocess::cooked::FileMacros<'pass>> {
@@ -1670,15 +1686,16 @@ fn words_mentioned_by(
 /// is let through.
 fn has_unresolved_includes(summary: &FileSummary) -> bool {
     summary.includes.iter().any(|include| {
-        include.resolved.is_none() && matches!(include.guard, crate::summary::FactGuard::Unconditional)
+        include.resolved.is_none()
+            && matches!(include.guard, crate::summary::FactGuard::Unconditional)
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::SummaryStore;
-    use crate::include::config::CompilerConfig;
     use crate::file::paths::MemoryFiles;
+    use crate::include::config::CompilerConfig;
     use cpp_parser::Dialect;
     use std::path::Path;
 
@@ -1711,8 +1728,11 @@ mod tests {
         assert_eq!(store.stats().reused, 0);
 
         // A second store over the same root and the same text: the summary is on disk, so nothing is rebuilt.
-        let mut reopened = SummaryStore::with_provider(&root, CompilerConfig::default(), files.clone());
-        let second = reopened.get(Path::new("/p/widget.h")).expect("the file reads");
+        let mut reopened =
+            SummaryStore::with_provider(&root, CompilerConfig::default(), files.clone());
+        let second = reopened
+            .get(Path::new("/p/widget.h"))
+            .expect("the file reads");
 
         assert_eq!(second.declarations, first.declarations);
         assert_eq!(
@@ -1742,7 +1762,10 @@ mod tests {
                 0 => "struct Same { int v; };\n".to_string(),
                 // A search that fails, so the answer is not stored.
                 1 => format!("#include \"missing{number}.h\"\nint one{number};\n"),
-                _ => format!("#include \"f{}.h\"\nstruct S{number} {{ int v; }};\n", number.max(2) - 1),
+                _ => format!(
+                    "#include \"f{}.h\"\nstruct S{number} {{ int v; }};\n",
+                    number.max(2) - 1
+                ),
             };
             let path = format!("/p/f{number}.h");
             files.insert(&path, &text);
@@ -1763,16 +1786,27 @@ mod tests {
         // Files that share a text may be parsed twice when their workers reach them together (neither has written
         // the entry yet), so the split between `reused` and `rebuilt` can differ; the totals and the answers cannot.
         let (a, b) = (together.stats(), one_by_one.stats());
-        assert_eq!((a.reused + a.rebuilt, a.unstored), (b.reused + b.rebuilt, b.unstored));
+        assert_eq!(
+            (a.reused + a.rebuilt, a.unstored),
+            (b.reused + b.rebuilt, b.unstored)
+        );
         assert_eq!(together.index().len(), one_by_one.index().len());
         for summary in one_by_one.index().summaries() {
-            let other = together.index().summary(&summary.path).expect("the same files are indexed");
-            assert_eq!(other.declarations, summary.declarations, "{:?}", summary.path);
+            let other = together
+                .index()
+                .summary(&summary.path)
+                .expect("the same files are indexed");
+            assert_eq!(
+                other.declarations, summary.declarations,
+                "{:?}",
+                summary.path
+            );
             assert_eq!(other.includes, summary.includes, "{:?}", summary.path);
         }
 
         // What the workers wrote is what a later run reads back: every stored entry decodes, and none is torn.
-        let mut reopened = SummaryStore::with_provider(&root_together, CompilerConfig::default(), files.clone());
+        let mut reopened =
+            SummaryStore::with_provider(&root_together, CompilerConfig::default(), files.clone());
         for path in &paths {
             let _ = reopened.get(path);
         }
@@ -1801,9 +1835,11 @@ mod tests {
             .with_file("/p/c.h", "int c;\n");
         let (mut store, root) = store("include-scan", &files);
         let config = CompilerConfig::default();
-        let source = crate::FileProvider::read(&files, Path::new("/p/a.h")).expect("the fixture is there");
+        let source =
+            crate::FileProvider::read(&files, Path::new("/p/a.h")).expect("the fixture is there");
 
-        let scanned = crate::FileIndexer::new(&files, &config).includes_of(Path::new("/p/a.h"), &source);
+        let scanned =
+            crate::FileIndexer::new(&files, &config).includes_of(Path::new("/p/a.h"), &source);
         let recorded: Vec<std::path::PathBuf> = store
             .get(Path::new("/p/a.h"))
             .expect("reads")
@@ -1813,7 +1849,11 @@ mod tests {
             .collect();
 
         assert_eq!(scanned, recorded);
-        assert_eq!(scanned.len(), 2, "b.h and the one behind `#if 0`; the missing one is not resolved: {scanned:?}");
+        assert_eq!(
+            scanned.len(),
+            2,
+            "b.h and the one behind `#if 0`; the missing one is not resolved: {scanned:?}"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -1821,7 +1861,10 @@ mod tests {
     /// more than the budget — and what it prepared commits to the index a one-by-one walk builds.
     #[test]
     fn preparing_a_closure_reaches_every_file_it_includes_within_its_limits() {
-        let mut files = MemoryFiles::new().with_file("/p/main.cpp", "#include \"h0.h\"\n#include \"h1.h\"\nint main;\n");
+        let mut files = MemoryFiles::new().with_file(
+            "/p/main.cpp",
+            "#include \"h0.h\"\n#include \"h1.h\"\nint main;\n",
+        );
         for number in 0..30 {
             // A diamond-ridden graph with a cycle (h29 includes h0): each header includes the next two.
             files.insert(
@@ -1837,18 +1880,41 @@ mod tests {
         let main = std::path::PathBuf::from("/p/main.cpp");
 
         let everything = store.prepare_closure(std::slice::from_ref(&main), |_| true, 1000);
-        let mut reached: Vec<String> = everything.iter().map(|(path, _)| path.to_string_lossy().into_owned()).collect();
+        let mut reached: Vec<String> = everything
+            .iter()
+            .map(|(path, _)| path.to_string_lossy().into_owned())
+            .collect();
         reached.sort();
         reached.dedup();
-        assert_eq!(reached.len(), 31, "main and thirty headers, each once: {}", everything.len());
+        assert_eq!(
+            reached.len(),
+            31,
+            "main and thirty headers, each once: {}",
+            everything.len()
+        );
         assert_eq!(everything.len(), 31, "and no file was prepared twice");
 
         let limited = store.prepare_closure(std::slice::from_ref(&main), |_| true, 10);
-        assert!(limited.len() <= 10, "the budget bounds the call: {}", limited.len());
-        assert!(limited.iter().any(|(path, _)| path == &main), "the root is always prepared");
+        assert!(
+            limited.len() <= 10,
+            "the budget bounds the call: {}",
+            limited.len()
+        );
+        assert!(
+            limited.iter().any(|(path, _)| path == &main),
+            "the root is always prepared"
+        );
 
-        let refusing = store.prepare_closure(std::slice::from_ref(&main), |path| !path.ends_with("h1.h"), 1000);
-        assert!(refusing.iter().all(|(path, _)| !path.ends_with("h1.h") || path == &main));
+        let refusing = store.prepare_closure(
+            std::slice::from_ref(&main),
+            |path| !path.ends_with("h1.h"),
+            1000,
+        );
+        assert!(
+            refusing
+                .iter()
+                .all(|(path, _)| !path.ends_with("h1.h") || path == &main)
+        );
 
         // Committing what was prepared, in any order, gives the index of reading the same files one at a time.
         let (mut together, root_together) = store_named("prepare-closure-commit", &files);
@@ -1871,7 +1937,10 @@ mod tests {
         }
     }
 
-    fn store_named(name: &str, files: &MemoryFiles) -> (SummaryStore<MemoryFiles>, std::path::PathBuf) {
+    fn store_named(
+        name: &str,
+        files: &MemoryFiles,
+    ) -> (SummaryStore<MemoryFiles>, std::path::PathBuf) {
         store(name, files)
     }
 
@@ -1880,7 +1949,9 @@ mod tests {
         // The branch-switch property, in miniature: two texts, then back to the first. The third lookup is a hit
         // because the key names the *text* — the entry for the first one was never overwritten, and nothing had to
         // remember which texts have been seen. sets a hit rate of >90% for this case.
-        let root = std::env::temp_dir().join("cppls-store-tests").join("branch-switch");
+        let root = std::env::temp_dir()
+            .join("cppls-store-tests")
+            .join("branch-switch");
         let _ = std::fs::remove_dir_all(&root);
 
         let one = MemoryFiles::new().with_file("/p/a.cpp", "int x;\n");
@@ -1913,8 +1984,10 @@ mod tests {
 
         // The same path with different text. The key changes, so the stored entry no longer names it and there is
         // nothing to reuse.
-        let edited = MemoryFiles::new().with_file("/p/widget.h", "struct Widget { int a; int b; };\n");
-        let mut second = SummaryStore::with_provider(&root, CompilerConfig::default(), edited.clone());
+        let edited =
+            MemoryFiles::new().with_file("/p/widget.h", "struct Widget { int a; int b; };\n");
+        let mut second =
+            SummaryStore::with_provider(&root, CompilerConfig::default(), edited.clone());
         let summary = second
             .get(Path::new("/p/widget.h"))
             .expect("the file reads")
@@ -1925,7 +1998,11 @@ mod tests {
             3,
             "the class and both of its members — the edited text, not the stored one"
         );
-        assert_eq!(second.stats().reused, 0, "the stored entry names other text");
+        assert_eq!(
+            second.stats().reused,
+            0,
+            "the stored entry names other text"
+        );
         assert_eq!(second.stats().rebuilt, 1);
         assert_eq!(second.stats().unstored, 0, "nothing was declined");
         assert_eq!(
@@ -2123,7 +2200,8 @@ mod tests {
         let with_header = MemoryFiles::new()
             .with_file("/p/main.cpp", "#include \"missing.h\"\nint x;\n")
             .with_file("/p/missing.h", "struct Now { int here; };\n");
-        let mut second = SummaryStore::with_provider(&root, CompilerConfig::default(), with_header.clone());
+        let mut second =
+            SummaryStore::with_provider(&root, CompilerConfig::default(), with_header.clone());
         let rebuilt = second
             .get(Path::new("/p/main.cpp"))
             .expect("the file reads")
@@ -2148,14 +2226,20 @@ mod tests {
         // it heals the moment something asks for `widget.h` — so there is nothing to prevent caching.
         let files = MemoryFiles::new()
             .with_file("/p/widget.h", "struct Widget { int size; };\n")
-            .with_file("/p/main.cpp", "#include \"widget.h\"\nvoid f() { Widget w; }\n");
+            .with_file(
+                "/p/main.cpp",
+                "#include \"widget.h\"\nvoid f() { Widget w; }\n",
+            );
         let (mut store, root) = store("unindexed-include", &files);
 
         store.get(Path::new("/p/main.cpp")).expect("the file reads");
         assert_eq!(store.stats().unstored, 0);
 
-        let mut reopened = SummaryStore::with_provider(&root, CompilerConfig::default(), files.clone());
-        reopened.get(Path::new("/p/main.cpp")).expect("the file reads");
+        let mut reopened =
+            SummaryStore::with_provider(&root, CompilerConfig::default(), files.clone());
+        reopened
+            .get(Path::new("/p/main.cpp"))
+            .expect("the file reads");
         assert_eq!(reopened.stats().reused, 1, "the entry is usable");
         assert_eq!(reopened.stats().rebuilt, 0);
 
@@ -2217,7 +2301,10 @@ mod tests {
         let (mut store, root) = store("directory-context", &files);
 
         for path in ["/p/shared.h", "/p/sub/shared.h", "/p/a.h", "/p/sub/b.h"] {
-            assert!(store.get(Path::new(path)).is_some(), "the file reads: {path}");
+            assert!(
+                store.get(Path::new(path)).is_some(),
+                "the file reads: {path}"
+            );
         }
 
         let outside = store
@@ -2288,8 +2375,11 @@ mod tests {
         let after_build = files.exists_of("/p/widget.h");
         assert_eq!(after_build, 1, "one candidate, probed once while resolving");
 
-        let mut reopened = SummaryStore::with_provider(&root, CompilerConfig::default(), files.clone());
-        reopened.get(Path::new("/p/main.cpp")).expect("the file reads");
+        let mut reopened =
+            SummaryStore::with_provider(&root, CompilerConfig::default(), files.clone());
+        reopened
+            .get(Path::new("/p/main.cpp"))
+            .expect("the file reads");
 
         assert_eq!(reopened.stats().reused, 1);
         assert_eq!(reopened.stats().rebuilt, 0, "the parser was not asked");
@@ -2323,7 +2413,10 @@ mod tests {
             .get(Path::new("/p/main.cpp"))
             .expect("the file reads")
             .clone();
-        assert_eq!(built.includes[0].resolved.as_deref(), Some(Path::new("/p/widget.h")));
+        assert_eq!(
+            built.includes[0].resolved.as_deref(),
+            Some(Path::new("/p/widget.h"))
+        );
 
         // The header is gone, and nothing tells the store so: no event, no invalidation, no forget. The entry is
         // still there, under a key that has not moved.
@@ -2331,7 +2424,8 @@ mod tests {
             "/p/main.cpp",
             "#include \"widget.h\"\nvoid f() { Widget w; }\n",
         );
-        let mut reopened = SummaryStore::with_provider(&root, CompilerConfig::default(), without.clone());
+        let mut reopened =
+            SummaryStore::with_provider(&root, CompilerConfig::default(), without.clone());
         let rebuilt = reopened
             .get(Path::new("/p/main.cpp"))
             .expect("the file reads")
@@ -2398,7 +2492,10 @@ mod tests {
             "/invalidate-a/main.cpp",
             "/invalidate-a/unrelated.cpp",
         ] {
-            assert!(store.get(Path::new(path)).is_some(), "the file reads: {path}");
+            assert!(
+                store.get(Path::new(path)).is_some(),
+                "the file reads: {path}"
+            );
         }
 
         let mut work = store.invalidate(Path::new("/invalidate-a/widget.h"));
@@ -2481,7 +2578,8 @@ mod tests {
             "the class is visible through the include: {found:?}"
         );
 
-        let mut reopened = SummaryStore::with_provider(&root, CompilerConfig::default(), files.clone());
+        let mut reopened =
+            SummaryStore::with_provider(&root, CompilerConfig::default(), files.clone());
         for path in ["/p/config.h", "/p/widget.h", "/p/main.cpp"] {
             reopened.get(Path::new(path)).expect("the file reads");
         }
@@ -2525,7 +2623,10 @@ mod tests {
         );
         assert_eq!(store.stats().rebuilt, 1);
         assert_eq!(
-            store.index().summary(Path::new("/p/a.cpp")).map(|held| held.key),
+            store
+                .index()
+                .summary(Path::new("/p/a.cpp"))
+                .map(|held| held.key),
             Some(key),
             "and the entry is replaced by one that does agree"
         );
@@ -2541,16 +2642,20 @@ mod tests {
     // *reached* and what it said about where it stopped.
     // -------------------------------------------------------------------------------------------
 
-    use super::{
-        IncludeBudget, NotIndexedReason, StoreStats,
-    };
+    use super::{IncludeBudget, NotIndexedReason, StoreStats};
 
     /// A translation unit with a two-level include chain, and nothing missing.
     fn chain() -> MemoryFiles {
         MemoryFiles::new()
             .with_case_insensitive(false)
-            .with_file("/p/main.cpp", "#include \"middle.h\"\nint main() { return 0; }\n")
-            .with_file("/p/middle.h", "#include \"deep.h\"\nstruct Middle { Deep d; };\n")
+            .with_file(
+                "/p/main.cpp",
+                "#include \"middle.h\"\nint main() { return 0; }\n",
+            )
+            .with_file(
+                "/p/middle.h",
+                "#include \"deep.h\"\nstruct Middle { Deep d; };\n",
+            )
             .with_file("/p/deep.h", "struct Deep { int x; };\n")
     }
 
@@ -2608,7 +2713,10 @@ mod tests {
 
         assert_eq!(indexed(&index).len(), 4, "{:?}", indexed(&index));
         assert_eq!(
-            indexed(&index).iter().filter(|path| *path == "/p/shared.h").count(),
+            indexed(&index)
+                .iter()
+                .filter(|path| *path == "/p/shared.h")
+                .count(),
             1
         );
         assert_eq!(
@@ -2636,8 +2744,14 @@ mod tests {
         let index = store.index_includes_from(Path::new("/p/main.cpp"), IncludeBudget::default());
 
         assert_eq!(indexed(&index).len(), 3, "three files");
-        assert_eq!(index.stats.rebuilt, 2, "and two parses, because two of them are the same text");
-        assert_eq!(index.stats.reused, 1, "the twin was answered by the entry the first one wrote");
+        assert_eq!(
+            index.stats.rebuilt, 2,
+            "and two parses, because two of them are the same text"
+        );
+        assert_eq!(
+            index.stats.reused, 1,
+            "the twin was answered by the entry the first one wrote"
+        );
 
         // And the one entry is filed under **each** path that asked for it — see `ProjectIndex::insert_at` — so a
         // query about either header finds what it declares. Asked as a list rather than as a definition because
@@ -2691,7 +2805,11 @@ mod tests {
 
         let index = store.index_includes_from(Path::new("/p/main.cpp"), IncludeBudget::default());
 
-        assert_eq!(indexed(&index).len(), 3, "the rest of the closure was still indexed");
+        assert_eq!(
+            indexed(&index).len(),
+            3,
+            "the rest of the closure was still indexed"
+        );
         assert_eq!(index.unresolved.len(), 1, "{:?}", index.unresolved);
         assert_eq!(index.unresolved[0].from, Path::new("/p/main.cpp"));
         assert_eq!(index.unresolved[0].spelling, "gone.h");
@@ -2789,19 +2907,27 @@ mod tests {
         // project cheap the second time, and it is the number measures at 11 ms for 185
         // files against a second and a half of parsing.
         let files = chain();
-        let root = std::env::temp_dir().join("cppls-store-tests").join("closure-warm");
+        let root = std::env::temp_dir()
+            .join("cppls-store-tests")
+            .join("closure-warm");
         let _ = std::fs::remove_dir_all(&root);
 
         let cold = {
-            let mut store = SummaryStore::with_provider(&root, CompilerConfig::default(), files.clone());
+            let mut store =
+                SummaryStore::with_provider(&root, CompilerConfig::default(), files.clone());
             store.index_includes_from(Path::new("/p/main.cpp"), IncludeBudget::default())
         };
         assert_eq!(cold.stats.rebuilt, 3);
 
-        let mut reopened = SummaryStore::with_provider(&root, CompilerConfig::default(), files.clone());
+        let mut reopened =
+            SummaryStore::with_provider(&root, CompilerConfig::default(), files.clone());
         let warm = reopened.index_includes_from(Path::new("/p/main.cpp"), IncludeBudget::default());
 
-        assert_eq!(indexed(&warm), indexed(&cold), "the same files, in the same order");
+        assert_eq!(
+            indexed(&warm),
+            indexed(&cold),
+            "the same files, in the same order"
+        );
         assert_eq!(warm.stats.rebuilt, 0, "the parser was not asked");
         assert_eq!(warm.stats.reused, 3);
         assert_eq!(warm.stats.hit_rate(), Some(1.0));
@@ -2872,7 +2998,3 @@ mod tests {
         );
     }
 }
-
-
-
-

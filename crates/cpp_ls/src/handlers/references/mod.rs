@@ -24,9 +24,7 @@
 //! caveat, so the list carries the occurrences and the rename carries the caution.
 
 use cpp_code_analysis::{Known, ReferenceKind, Session};
-use lsp_types::{
-    ClientCapabilities, Location, ReferenceParams, ServerCapabilities,
-};
+use lsp_types::{ClientCapabilities, Location, ReferenceParams, ServerCapabilities};
 use tokio_util::sync::CancellationToken;
 
 use super::RegisterCapabilities;
@@ -286,13 +284,26 @@ mod tests {
         // rendering that answers `None` until that work is done ("a caller that needs meaning waits"). Asking it here
         // was the test contradicting itself: the fixture is "unread on purpose" and the view needs a read.
         // `FileView::parse_with` is the constructor for exactly this: the file's own text, parsed, no cooking.
-        let held = session.files().held("/p/items.cpp").expect("the file is held");
-        let view = cpp_code_analysis::FileView::parse_with(&held, &cpp_parser::MacroEnvironment::default());
-        let on_the_use = ITEMS_CPP.find("MAX_ITEMS").expect("the fixture uses the macro");
+        let held = session
+            .files()
+            .held("/p/items.cpp")
+            .expect("the file is held");
+        let view = cpp_code_analysis::FileView::parse_with(
+            &held,
+            &cpp_parser::MacroEnvironment::default(),
+        );
+        let on_the_use = ITEMS_CPP
+            .find("MAX_ITEMS")
+            .expect("the fixture uses the macro");
 
         assert!(session.pending() > 0, "the fixture is the refused state");
         assert_eq!(
-            locations(&session, &view, cpp_code_analysis::file::coordinates::ReadingOffset::new(on_the_use), true),
+            locations(
+                &session,
+                &view,
+                cpp_code_analysis::file::coordinates::ReadingOffset::new(on_the_use),
+                true
+            ),
             None,
             "an answer now would be missing whatever the queued files use"
         );
@@ -306,14 +317,22 @@ mod tests {
         // rendering that answers `None` until that work is done ("a caller that needs meaning waits"). Asking it here
         // was the test contradicting itself: the fixture is "unread on purpose" and the view needs a read.
         // `FileView::parse_with` is the constructor for exactly this: the file's own text, parsed, no cooking.
-        let held = session.files().held("/p/items.cpp").expect("the file is held");
-        let view = cpp_code_analysis::FileView::parse_with(&held, &cpp_parser::MacroEnvironment::default());
-        let found = locations(&session, &view, cpp_code_analysis::file::coordinates::ReadingOffset::new(on_the_use), true).expect("the index is complete now");
-        assert_eq!(
-            found.len(),
-            2,
-            "the `#define` and the one use: {found:?}"
+        let held = session
+            .files()
+            .held("/p/items.cpp")
+            .expect("the file is held");
+        let view = cpp_code_analysis::FileView::parse_with(
+            &held,
+            &cpp_parser::MacroEnvironment::default(),
         );
+        let found = locations(
+            &session,
+            &view,
+            cpp_code_analysis::file::coordinates::ReadingOffset::new(on_the_use),
+            true,
+        )
+        .expect("the index is complete now");
+        assert_eq!(found.len(), 2, "the `#define` and the one use: {found:?}");
         assert!(
             found
                 .iter()
@@ -321,20 +340,16 @@ mod tests {
             "including the file that defines it: {found:?}"
         );
         assert_eq!(
-            locations(&session, &view, cpp_code_analysis::file::coordinates::ReadingOffset::new(on_the_use), false)
-                .expect("complete")
-                .len(),
+            locations(
+                &session,
+                &view,
+                cpp_code_analysis::file::coordinates::ReadingOffset::new(on_the_use),
+                false
+            )
+            .expect("complete")
+            .len(),
             1,
             "and `includeDeclaration: false` leaves the `#define` out"
         );
     }
 }
-
-
-
-
-
-
-
-
-

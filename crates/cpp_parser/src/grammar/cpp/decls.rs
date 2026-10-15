@@ -17,7 +17,7 @@
 //! There is no symbol table in a parser that must work on a file being edited, so the question is answered
 //! *speculatively*: [`parse_declaration`] tries the declaration reading, and if it does not land on a
 //! plausible end (a `;`, a `{`, or an initializer), the caller rewinds and treats the tokens as an
-//! expression. [`super::stats::parse_declaration_or_expression_statement`] is that caller.
+//! expression. [`stats::parse_declaration_or_expression_statement`] is that caller.
 //!
 //! # What breaks the tie inside the declaration reading
 //!
@@ -43,7 +43,10 @@
 //! readings given up — `tests/gaps.rs` lists them, and `tests/direct_init.rs` pins the rules themselves.
 
 use crate::{
-    grammar::ParseResult,
+    grammar::{
+        ParseResult,
+        cpp::{exprs, modules, stats, types},
+    },
     kind::{CppSyntaxKind, CppTokenKind},
     parser::{CompleteMarker, CppParser, Marker, MarkerEventContainer, ParseAnchor},
     parser_error::CppParseError,
@@ -67,7 +70,7 @@ use super::{
 ///
 /// Visible to the specifier sequence, which is the other rule that can meet a head: a declaration whose two
 /// conditional branches each write one puts the second head in the middle of that sequence. See the note in
-/// [`super::types::parse_decl_specifier_seq_with`].
+/// [`types::parse_decl_specifier_seq_with`].
 pub(super) fn parse_template_head(p: &mut CppParser) -> ParseResult {
     // A template parameter list has the same `>`-closes-the-list property an argument list has:
     // `template <int N = 3>` must not read the `>` as "greater than". Restored on every exit path.
@@ -151,7 +154,7 @@ fn parse_concept_declaration(p: &mut CppParser) -> ParseResult {
     //
     // The definition is read **once per branch** (`#if A = X; #else = Y; #endif`), which is how libstdc++ writes
     // `__is_signed_int128` and its neighbours; see [`parse_a_definition_per_branch`].
-    let ended = parse_a_definition_per_branch(p, super::exprs::parse_constraint_expr);
+    let ended = parse_a_definition_per_branch(p, exprs::parse_constraint_expr);
 
     match ended {
         Err(err) => {
@@ -230,8 +233,8 @@ pub fn parse_requires_clause(p: &mut CppParser) -> ParseResult {
     expect_contextual_keyword(p, "requires")?;
 
     // The constraint, read with the braced-initialiser reading refused: the `{` after it opens the *body* of
-    // whatever the clause constrains. See [`super::exprs::parse_constraint_expr`].
-    if let Err(err) = super::exprs::parse_constraint_expr(p) {
+    // whatever the clause constrains. See [`exprs::parse_constraint_expr`].
+    if let Err(err) = exprs::parse_constraint_expr(p) {
         p.close_marks_above(base);
         return Err(err);
     }
@@ -273,7 +276,7 @@ pub fn parse_template_parameter_list(p: &mut CppParser) -> ParseResult {
         //         >
         // ```
         if p.current_token() == CppTokenKind::Hash {
-            if let Err(err) = super::stats::parse_preprocessor_directive(p) {
+            if let Err(err) = stats::parse_preprocessor_directive(p) {
                 p.close_marks_above(base);
                 return Err(err);
             }
@@ -303,7 +306,7 @@ pub fn parse_template_parameter_list(p: &mut CppParser) -> ParseResult {
         // round would ask for another *parameter* and report a missing type specifier at the `>`.
         let mut terminator = p.current_token();
         while terminator == CppTokenKind::Hash {
-            if let Err(err) = super::stats::parse_preprocessor_directive(p) {
+            if let Err(err) = stats::parse_preprocessor_directive(p) {
                 p.close_marks_above(base);
                 return Err(err);
             }
@@ -335,7 +338,7 @@ pub fn parse_template_parameter_list(p: &mut CppParser) -> ParseResult {
             // was just read nor close the list, so the file is already wrong unless this name is a macro standing
             // where the separator goes. Read as an invocation, then let the loop continue: the body may supply
             // `, more`, and a body that is empty leaves the next token to close the list.
-            CppTokenKind::Identifier if super::types::written_like_a_macro(p.current_token_text()) => {
+            CppTokenKind::Identifier if types::written_like_a_macro(p.current_token_text()) => {
                 let m = p.mark(CppSyntaxKind::MacroCall);
                 let name = p.mark(CppSyntaxKind::NameExpr);
                 p.bump();
@@ -443,7 +446,7 @@ fn parse_template_parameter(p: &mut CppParser) -> ParseResult {
     //
     // `class... Ts` and `int... Ns` do not need this: there the marker follows a type that is one keyword, and
     // the specifier loop claims the pair through the pack branch in
-    // [`super::types::parse_one_decl_specifier_inner`].
+    // [`types::parse_one_decl_specifier_inner`].
     if p.current_token() == CppTokenKind::TypenameKeyword
         && p.peek_next_token() == CppTokenKind::Ellipsis
     {
@@ -525,7 +528,7 @@ fn parse_template_parameter(p: &mut CppParser) -> ParseResult {
         // A `#` after the `=` cannot be anything else: a default argument begins with a type, an expression — or
         // a directive.
         while p.current_token() == CppTokenKind::Hash {
-            if let Err(err) = super::stats::parse_preprocessor_directive(p) {
+            if let Err(err) = stats::parse_preprocessor_directive(p) {
                 p.close_marks_above(base);
                 return Err(err);
             }
@@ -555,7 +558,7 @@ fn parse_template_parameter(p: &mut CppParser) -> ParseResult {
                 break;
             }
 
-            if let Err(err) = super::stats::parse_preprocessor_directive(p) {
+            if let Err(err) = stats::parse_preprocessor_directive(p) {
                 p.close_marks_above(base);
                 return Err(err);
             }
@@ -596,7 +599,7 @@ fn parse_a_default_value(p: &mut CppParser, base: usize) -> ParseResult {
     // Read **below the comma operator**: the comma after a default argument separates the next parameter.
     // `template <typename T, int N = 3, typename... Rest>` is three parameters, and a reader that took the comma
     // swallowed the third — which is how this rule was found.
-    if let Err(err) = super::exprs::parse_assignment_expr(p) {
+    if let Err(err) = exprs::parse_assignment_expr(p) {
         p.close_marks_above(base);
         return Err(err);
     }
@@ -636,7 +639,6 @@ pub fn parse_declaration(p: &mut CppParser) -> ParseResult {
     let parameters_before = p.template_parameter_count();
 
     let result = parse_declaration_here(p);
-
 
     p.truncate_template_parameters(parameters_before);
     p.set_a_template_id_may_be_the_name(outer);
@@ -697,7 +699,12 @@ fn parse_declaration_here(p: &mut CppParser) -> ParseResult {
             if p.peek_next_token() == CppTokenKind::Tilde
                 && matches!(
                     p.current_token_text(),
-                    "__thiscall" | "__cdecl" | "__stdcall" | "__fastcall" | "__vectorcall" | "__clrcall"
+                    "__thiscall"
+                        | "__cdecl"
+                        | "__stdcall"
+                        | "__fastcall"
+                        | "__vectorcall"
+                        | "__clrcall"
                 ) =>
         {
             return parse_destructor_declaration(p);
@@ -759,7 +766,7 @@ fn parse_declaration_here(p: &mut CppParser) -> ParseResult {
         // `export` heads a module declaration, an export block, or one exported declaration.
         CppTokenKind::ExportKeyword => {
             if p.peek_token_kind_at(1..2)[0] == CppTokenKind::LeftBrace {
-                return super::modules::parse_export_block(p);
+                return modules::parse_export_block(p);
             }
 
             // Everything else is `export declaration`, and the declaration is parsed by the ordinary rule —
@@ -770,9 +777,9 @@ fn parse_declaration_here(p: &mut CppParser) -> ParseResult {
             //
             // `module` and `import` are contextual keywords — they arrive as identifiers — so the word after
             // `export` is what says whether this is a module declaration or a re-export. Recognised by
-            // spelling, which is what [`super::modules::parse_exported_declaration`] does.
+            // spelling, which is what [`modules::parse_exported_declaration`] does.
             if matches!(p.peek_token_text_at(1), "module" | "import") {
-                return super::modules::parse_exported_declaration(p);
+                return modules::parse_exported_declaration(p);
             }
 
             // `using`, `namespace`, `typedef` and `static_assert` have rules of their own, and the general
@@ -805,17 +812,17 @@ fn parse_declaration_here(p: &mut CppParser) -> ParseResult {
 
     // C++20 modules. `module` and `import` are contextual keywords, so this is a text check at the
     // start of a declaration rather than a token kind.
-    if super::modules::starts_global_module_fragment(p) {
-        return super::modules::parse_global_module_fragment(p);
+    if modules::starts_global_module_fragment(p) {
+        return modules::parse_global_module_fragment(p);
     }
-    if super::modules::starts_private_module_fragment(p) {
-        return super::modules::parse_private_module_fragment(p);
+    if modules::starts_private_module_fragment(p) {
+        return modules::parse_private_module_fragment(p);
     }
-    if super::modules::starts_module_declaration(p) {
-        return super::modules::parse_module_declaration(p);
+    if modules::starts_module_declaration(p) {
+        return modules::parse_module_declaration(p);
     }
-    if super::modules::starts_import_declaration(p) {
-        return super::modules::parse_import_declaration(p);
+    if modules::starts_import_declaration(p) {
+        return modules::parse_import_declaration(p);
     }
 
     let m = p.mark(CppSyntaxKind::Declaration);
@@ -937,7 +944,7 @@ fn parse_declaration_here(p: &mut CppParser) -> ParseResult {
         // `#if __cpp_deduction_guides … template<…> #endif`. Read as the node it is, and go round again: the next
         // token is either another head or the declaration itself, and both are answers this loop already has.
         if seen_a_template_head && p.current_token() == CppTokenKind::Hash {
-            if let Err(err) = super::stats::parse_preprocessor_directive(p) {
+            if let Err(err) = stats::parse_preprocessor_directive(p) {
                 p.rollback(checkpoint);
                 return Err(err);
             }
@@ -1051,11 +1058,11 @@ fn parse_declaration_here(p: &mut CppParser) -> ParseResult {
             let before = p.current_token_index();
 
             if p.current_token() == CppTokenKind::Hash {
-                if let Err(err) = super::stats::parse_preprocessor_directive(p) {
+                if let Err(err) = stats::parse_preprocessor_directive(p) {
                     p.rollback(checkpoint);
                     return Err(err);
                 }
-            } else if let Err(err) = super::types::parse_attribute_specifiers(p) {
+            } else if let Err(err) = types::parse_attribute_specifiers(p) {
                 p.rollback(checkpoint);
                 return Err(err);
             }
@@ -1488,7 +1495,7 @@ pub fn parse_init_declarator(p: &mut CppParser) -> ParseResult {
             // continues on `(` and `[`, and `noexcept` is neither. Leaving them to the caller is how
             // `C() noexcept : x(0)` ended up with the `noexcept` unread and the member initializer list
             // unrecognised — the two mistakes are the same one.
-            super::types::eat_function_qualifiers(p);
+            types::eat_function_qualifiers(p);
 
             if let Err(err) = finish_declarator_suffixes(p, declarator_from) {
                 p.close_marks_above(base);
@@ -1551,7 +1558,7 @@ fn finish_init_declarator(p: &mut CppParser, m: Marker, declarator_from: usize) 
     // Consumed before the `declarator_is_function` answer is used rather than after, because the token after
     // the attributes is what decides — `void f() [[noreturn]] { }` has a body, and the brace is one token
     // further along than the match below would look.
-    if let Err(err) = super::types::parse_attribute_specifiers(p) {
+    if let Err(err) = types::parse_attribute_specifiers(p) {
         m.undo(p);
         return Err(err);
     }
@@ -1629,7 +1636,7 @@ fn finish_init_declarator(p: &mut CppParser, m: Marker, declarator_from: usize) 
     loop {
         let mut consumed = false;
         while declarator_is_function && p.current_token() == CppTokenKind::Hash {
-            if let Err(err) = super::stats::parse_preprocessor_directive(p) {
+            if let Err(err) = stats::parse_preprocessor_directive(p) {
                 m.undo(p);
                 return Err(err);
             }
@@ -1656,7 +1663,7 @@ fn finish_init_declarator(p: &mut CppParser, m: Marker, declarator_from: usize) 
             // finally appeared, 27 lines later, on a member that was not the one at fault. Asking for the
             // qualifiers again after each directive is the whole fix, and it is the same edit as the macro arm
             // below: what a conditional decides may be any part of the suffix.
-            super::types::eat_function_qualifiers(p);
+            types::eat_function_qualifiers(p);
         }
         consumed |= eat_a_macro_suffix(p);
         if !consumed {
@@ -1745,7 +1752,7 @@ fn finish_init_declarator(p: &mut CppParser, m: Marker, declarator_from: usize) 
             // written, exactly as they are part of how an enumerator's value is written, and a consumer asking for
             // the initializer's tokens should get all of them.
             while p.current_token() == CppTokenKind::Hash {
-                if let Err(err) = super::stats::parse_preprocessor_directive(p) {
+                if let Err(err) = stats::parse_preprocessor_directive(p) {
                     init.undo(p);
                     return Err(err);
                 }
@@ -1801,9 +1808,8 @@ fn finish_init_declarator(p: &mut CppParser, m: Marker, declarator_from: usize) 
                 let mut read_another_branch = false;
 
                 while p.current_token() == CppTokenKind::Hash {
-                    let opens_another_branch =
-                        matches!(p.peek_token_text_at(1), "else" | "elif");
-                    if let Err(err) = super::stats::parse_preprocessor_directive(p) {
+                    let opens_another_branch = matches!(p.peek_token_text_at(1), "else" | "elif");
+                    if let Err(err) = stats::parse_preprocessor_directive(p) {
                         init.undo(p);
                         return Err(err);
                     }
@@ -1928,7 +1934,8 @@ fn finish_init_declarator(p: &mut CppParser, m: Marker, declarator_from: usize) 
         // nothing, which is the same test the class-head refusal above relies on.
         CppTokenKind::Identifier
             if at_requires(p)
-                && (declarator_is_function || p.last_consumed_token_kind() == Some(CppTokenKind::RightParen))
+                && (declarator_is_function
+                    || p.last_consumed_token_kind() == Some(CppTokenKind::RightParen))
                 && starts_a_requires_clause(p) =>
         {
             // Asked **before** the clause is parsed, because the constraint is an expression: an expression may
@@ -1939,7 +1946,7 @@ fn finish_init_declarator(p: &mut CppParser, m: Marker, declarator_from: usize) 
 
             // A directive between the clause and what follows it, for the reason the loop before the match gives.
             while p.current_token() == CppTokenKind::Hash {
-                if let Err(err) = super::stats::parse_preprocessor_directive(p) {
+                if let Err(err) = stats::parse_preprocessor_directive(p) {
                     m.undo(p);
                     return Err(err);
                 }
@@ -1990,7 +1997,7 @@ fn finish_init_declarator(p: &mut CppParser, m: Marker, declarator_from: usize) 
             // `unsigned flags : 1, spare : 7;` is two fields, and a width reader that took the comma would
             // swallow the second one. This is one of the rules the maintenance convention is about — a rule that
             // spells a comma itself has to opt out of the operator that spells commas.
-            if let Err(err) = super::exprs::parse_assignment_expr(p) {
+            if let Err(err) = exprs::parse_assignment_expr(p) {
                 width.undo(p);
                 return Err(err);
             }
@@ -2071,7 +2078,7 @@ fn starts_an_old_style_parameter_list(p: &mut CppParser) -> bool {
         return false;
     }
 
-    super::types::is_type_specifier_keyword(p.current_token())
+    types::is_type_specifier_keyword(p.current_token())
         || starts_declaration(p)
         || (p.current_token() == CppTokenKind::Identifier
             && p.is_a_known_type_name(p.current_token_text()))
@@ -2222,7 +2229,7 @@ fn parse_initializer_clause(p: &mut CppParser) -> ParseResult {
 
     // An **element** of whatever list holds this clause, so it is read below the comma operator — the commas
     // between elements are the list's. `int v[] = {1, 2}` is two elements for exactly this reason.
-    super::exprs::parse_assignment_expr(p)
+    exprs::parse_assignment_expr(p)
 }
 
 /// A `(` after a declared name: a parameter list, or the parentheses of a direct-initialised variable.
@@ -2301,7 +2308,7 @@ pub fn parse_function_suffix_or_initializer(
         let before_the_parameters = p.checkpoint();
         if parse_parameter_list(p).is_ok() {
             p.set_last_declarator_is_function(true);
-            super::types::eat_function_qualifiers(p);
+            types::eat_function_qualifiers(p);
             return Ok(CompleteMarker::empty());
         }
         p.rollback(before_the_parameters);
@@ -2381,7 +2388,7 @@ pub fn parse_function_suffix_or_initializer(
             // declarator* and to nothing else, so a reader that consumed one has just been told what this is.
             //
             // Asked as "did the reader move?" rather than as a list of the tokens it may take, because that list
-            // is exactly [`super::types::eat_function_qualifiers`] and a second copy of it here is where the next
+            // is exactly [`types::eat_function_qualifiers`] and a second copy of it here is where the next
             // spelling would be forgotten. The shape that needs it is a **pointer-to-member-function parameter**:
             //
             // ```cpp
@@ -2396,7 +2403,7 @@ pub fn parse_function_suffix_or_initializer(
             // initialiser, so that shape reached the parameter-list path — while `void g(R (C::*p)(A) const);` was
             // rubble, one name away.
             let qualifiers_after_the_parameter_list = p.current_token_index();
-            super::types::eat_function_qualifiers(p);
+            types::eat_function_qualifiers(p);
             let qualifiers_follow_the_parameter_list =
                 p.current_token_index() > qualifiers_after_the_parameter_list;
 
@@ -2429,7 +2436,7 @@ pub fn parse_function_suffix_or_initializer(
         // A parameter list is what makes a declarator a function declarator. Recorded here because an *empty*
         // one leaves no node for a later event-stream check to find.
         p.set_last_declarator_is_function(true);
-        super::types::eat_function_qualifiers(p);
+        types::eat_function_qualifiers(p);
         return Ok(CompleteMarker::empty());
     }
 
@@ -2471,7 +2478,7 @@ pub fn parse_function_suffix_or_initializer(
 ///
 /// The suffix is not read here and nothing is consumed: the caller only asks whether the initialiser reading is
 /// still the one to take, and the parameter reading that wins instead consumes `throw(…)` through
-/// [`super::types::eat_function_qualifiers`].
+/// [`types::eat_function_qualifiers`].
 fn a_dynamic_exception_specification_follows(p: &CppParser) -> bool {
     let Some(after) = index_after_the_group(p, p.current_token_index()) else {
         return false;
@@ -2834,11 +2841,13 @@ fn the_declaration_has_a_type(p: &CppParser, declarator_from: usize) -> bool {
             // A `[` or `(` with nothing open closes the group the walk started inside, and the type is what
             // comes before it — so the *next* token back is the one to ask about.
             CppTokenKind::LeftBracket | CppTokenKind::LeftParen if inside > 0 => inside -= 1,
-            CppTokenKind::Semicolon | CppTokenKind::LeftBrace | CppTokenKind::RightBrace if inside == 0 => {
+            CppTokenKind::Semicolon | CppTokenKind::LeftBrace | CppTokenKind::RightBrace
+                if inside == 0 =>
+            {
                 return false;
             }
             _ if inside > 0 => {}
-            _ => return super::types::is_type_specifier_keyword(kind),
+            _ => return types::is_type_specifier_keyword(kind),
         }
     }
 
@@ -3113,7 +3122,7 @@ fn can_begin_a_type(kind: CppTokenKind) -> bool {
 /// being looked at has to step over trivia by index. `peek_token_kind_at` cannot answer it: it counts
 /// significant tokens from the cursor, and the cursor is not where these scans are.
 ///
-/// Exposed to `super::types`, which asks the same question about the name a specifier sequence is looking at.
+/// Exposed to `types`, which asks the same question about the name a specifier sequence is looking at.
 pub(super) fn next_significant_index(p: &CppParser, index: usize) -> usize {
     significant_index_at(p, index + 1)
 }
@@ -3225,7 +3234,7 @@ fn declarator_starts_with_a_known_type_name(p: &CppParser) -> bool {
 /// The name a type whose last segment starts at `from` would be looked up under.
 ///
 /// The specifier loop that reaches this is called once per *segment* of a qualified name, because
-/// [`parse_name`](super::types::parse_name) stops after each one and the loop walks the `::`. So the answer is
+/// [`parse_name`](types::parse_name) stops after each one and the loop walks the `::`. So the answer is
 /// the **last** identifier of the whole thing: `std::string` is the type `string` seen through `std`, and a
 /// lookup that started from `std` would be asking whether a *namespace* is a type.
 ///
@@ -3367,12 +3376,12 @@ fn declarator_starts_with_a_type_keyword(p: &CppParser) -> bool {
     }
 
     // `auto` and `decltype` are deliberately left out of the answer even though they are in
-    // [`super::types::is_type_specifier_keyword`]: both can begin an expression, so `auto(1)` is as readable as
+    // [`types::is_type_specifier_keyword`]: both can begin an expression, so `auto(1)` is as readable as
     // a call as it is as a declaration. Of the two readings, the expression is the one to prefer — reading a
     // call as a declaration loses its callee *and* its arguments, while reading a declaration as a call merely
     // leaves a variable unbound.
     first.is_some_and(|kind| {
-        super::types::is_type_specifier_keyword(kind)
+        types::is_type_specifier_keyword(kind)
             && !matches!(
                 kind,
                 CppTokenKind::AutoKeyword | CppTokenKind::DecltypeKeyword
@@ -3428,7 +3437,7 @@ fn a_type_keyword_precedes_the_declarator_name(p: &CppParser) -> bool {
             // The token in front of the name — `auto` and `decltype` are left out for the reason
             // [`declarator_starts_with_a_type_keyword`] gives: both can begin an expression as readily.
             _ if seen_an_identifier => {
-                return super::types::is_type_specifier_keyword(kind)
+                return types::is_type_specifier_keyword(kind)
                     && !matches!(
                         kind,
                         CppTokenKind::AutoKeyword | CppTokenKind::DecltypeKeyword
@@ -3442,7 +3451,8 @@ fn a_type_keyword_precedes_the_declarator_name(p: &CppParser) -> bool {
 }
 
 /// Does a declarator begin where the cursor stands?
-fn starts_a_declarator(p: &CppParser) -> bool {    matches!(
+fn starts_a_declarator(p: &CppParser) -> bool {
+    matches!(
         p.current_token(),
         CppTokenKind::Star
             | CppTokenKind::Ampersand
@@ -3697,7 +3707,7 @@ pub fn parse_braced_initializer(p: &mut CppParser) -> ParseResult {
         // rather than reported as a missing element. Only *here* is the directive claimed: in an expression proper
         // a `#` is still an error, so nothing that used to be reported stops being reported.
         if p.current_token() == CppTokenKind::Hash {
-            if let Err(err) = super::stats::parse_preprocessor_directive(p) {
+            if let Err(err) = stats::parse_preprocessor_directive(p) {
                 p.close_marks_above(base);
                 return Err(err);
             }
@@ -3807,7 +3817,7 @@ fn parse_further_member_initializer_lists(p: &mut CppParser) -> ParseResult {
     loop {
         let mut saw_a_directive = false;
         while p.current_token() == CppTokenKind::Hash {
-            super::stats::parse_preprocessor_directive(p)?;
+            stats::parse_preprocessor_directive(p)?;
             saw_a_directive = true;
         }
 
@@ -3860,11 +3870,11 @@ pub fn parse_expression_list(p: &mut CppParser, closing: CppTokenKind) -> ParseR
 
     while p.current_token() != closing && !p.is_eof() {
         // One **element** of the list, read below the comma operator: the commas between elements belong to the
-        // list, not to an expression. See [`super::exprs::parse_assignment_expr`].
+        // list, not to an expression. See [`exprs::parse_assignment_expr`].
         let element = if p.current_token() == CppTokenKind::LeftBrace {
             parse_braced_initializer(p)
         } else {
-            super::exprs::parse_assignment_expr(p)
+            exprs::parse_assignment_expr(p)
         };
         if let Err(err) = element {
             p.close_marks_above(base);
@@ -3945,7 +3955,7 @@ pub fn parse_parameter_list(p: &mut CppParser) -> ParseResult {
         //
         // A `#` at a parameter position cannot be anything else: a parameter begins with a type — or a directive.
         while p.current_token() == CppTokenKind::Hash {
-            if let Err(err) = super::stats::parse_preprocessor_directive(p) {
+            if let Err(err) = stats::parse_preprocessor_directive(p) {
                 p.close_marks_above(base);
                 return Err(err);
             }
@@ -3980,7 +3990,7 @@ pub fn parse_parameter_list(p: &mut CppParser) -> ParseResult {
             let another_spelling_of_this_parameter =
                 matches!(p.peek_token_text_at(1), "else" | "elif");
 
-            if let Err(err) = super::stats::parse_preprocessor_directive(p) {
+            if let Err(err) = stats::parse_preprocessor_directive(p) {
                 p.close_marks_above(base);
                 return Err(err);
             }
@@ -4045,7 +4055,7 @@ pub fn parse_parameter_list(p: &mut CppParser) -> ParseResult {
         }
 
         while p.current_token() == CppTokenKind::Hash {
-            if let Err(err) = super::stats::parse_preprocessor_directive(p) {
+            if let Err(err) = stats::parse_preprocessor_directive(p) {
                 p.close_marks_above(base);
                 return Err(err);
             }
@@ -4179,7 +4189,7 @@ fn parse_parameter(p: &mut CppParser) -> ParseResult {
         // type-id, which is exactly what is written here — and its refusal is what makes the guard above
         // unnecessary: `this` followed by something that is not a type does not parse as one, so the caller
         // rewinds and the expression reading gets `f(this)`.
-        if let Err(err) = super::types::parse_type_id(p) {
+        if let Err(err) = types::parse_type_id(p) {
             p.close_marks_above(base);
             return Err(err);
         }
@@ -4195,7 +4205,7 @@ fn parse_parameter(p: &mut CppParser) -> ParseResult {
         // A default argument, read exactly as any other parameter's.
         if p.current_token() == CppTokenKind::Assign {
             p.bump();
-            if let Err(err) = super::exprs::parse_assignment_expr(p) {
+            if let Err(err) = exprs::parse_assignment_expr(p) {
                 p.close_marks_above(base);
                 return Err(err);
             }
@@ -4240,7 +4250,7 @@ fn parse_parameter(p: &mut CppParser) -> ParseResult {
     // after the declarator and before the default argument, which is the order C++ writes them in — and only
     // here, so the `[[` of an attribute written *before* the type goes on being read by the specifier sequence,
     // which is where it belongs.
-    if let Err(err) = super::types::parse_attribute_specifiers(p) {
+    if let Err(err) = types::parse_attribute_specifiers(p) {
         p.close_marks_above(base);
         return Err(err);
     }
@@ -4404,7 +4414,7 @@ fn parse_class_body_members(p: &mut CppParser) -> ParseResult {
         // Read as the node it is, then go round the loop again: the next token is a member, an access specifier, or
         // the closing brace, and each of those is a case the loop already handles.
         if p.current_token() == CppTokenKind::Hash {
-            super::stats::parse_preprocessor_directive(p)?;
+            stats::parse_preprocessor_directive(p)?;
             continue;
         }
 
@@ -4605,7 +4615,7 @@ pub fn expect_semicolon(p: &mut CppParser) -> ParseResult {
 /// needed only for the shapes a type *can* be followed by and a declaration cannot, which is the `::` above.
 fn a_decltype_here_is_a_type(p: &mut CppParser) -> bool {
     let checkpoint = p.checkpoint();
-    let parsed = super::types::parse_type_id(p).is_ok();
+    let parsed = types::parse_type_id(p).is_ok();
     let followed_by_a_declarator = parsed && starts_a_declarator(p);
     p.rollback(checkpoint);
     followed_by_a_declarator
@@ -4685,7 +4695,7 @@ fn index_after_the_group(p: &CppParser, index: usize) -> Option<usize> {
 /// Can a declaration begin with this token kind?///
 /// Factored out of [`starts_declaration`] because there are two starting points and one question:
 /// `starts_declaration` asks it at the **cursor**, where a statement could also begin, and
-/// [`super::stats::at_a_macro_that_stands_for_a_declaration`] asks it at the token **after a name**, where the
+/// [`stats::at_a_macro_that_stands_for_a_declaration`] asks it at the token **after a name**, where the
 /// other reading is an expression that continues. Two copies of this list would be free to disagree about what
 /// begins a declaration, and the list is a closed grammatical set — every entry says "a declaration may start
 /// with this", which is a different kind of claim from the "which token kinds may be inside a header name" list
@@ -4768,7 +4778,7 @@ fn parse_destructor_declaration(p: &mut CppParser) -> ParseResult {
         if p.current_token() == CppTokenKind::Identifier {
             p.bump();
         }
-        super::types::parse_declarator(p)
+        types::parse_declarator(p)
     })
 }
 
@@ -4798,7 +4808,7 @@ fn parse_conversion_operator_declaration(p: &mut CppParser) -> ParseResult {
             return Err(err);
         }
         name.complete(p);
-        super::types::parse_declarator_function_suffixes(p, p.current_event_count())
+        types::parse_declarator_function_suffixes(p, p.current_event_count())
     })
 }
 
@@ -4824,7 +4834,7 @@ fn parse_constructor_declaration(p: &mut CppParser) -> ParseResult {
         // list as the declarator's *sibling*, and `parameter_list_of` (token → innermost `Declarator` → its
         // `ParameterList` child) then answered `None` for every constructor. Measured: `SOURCE at 23: None`, with the
         // constructor's own name at 23.
-        let declarator = super::types::parse_declarator_function_suffixes(p, p.current_event_count());
+        let declarator = types::parse_declarator_function_suffixes(p, p.current_event_count());
         name.complete(p);
 
         // **A member-initializer list belongs to the constructor**, and nothing else may see a `:` here: it comes
@@ -4987,7 +4997,7 @@ pub fn parse_using_declaration(p: &mut CppParser) -> ParseResult {
         // wrapping the tail directly would report the first segment as the name and the qualifier as
         // everything else. `using ns::f;` introduces `f`, and this is what makes the tree say so.
         let rest = p.mark(CppSyntaxKind::NameExpr);
-        if let Err(err) = super::types::parse_name(p) {
+        if let Err(err) = types::parse_name(p) {
             rest.undo(p);
             name.undo(p);
             p.close_marks_above(base);
@@ -5011,7 +5021,7 @@ pub fn parse_using_declaration(p: &mut CppParser) -> ParseResult {
     // An attribute on the alias's name: `using T [[deprecated]] = int;`. Between the name and the `=`, which is
     // the same position an attribute takes on any other declarator — see `finish_init_declarator` — and the one
     // this rule does not share with it, because an alias has no declarator node of its own.
-    if let Err(err) = super::types::parse_attribute_specifiers(p) {
+    if let Err(err) = types::parse_attribute_specifiers(p) {
         p.close_marks_above(base);
         return Err(err);
     }
@@ -5097,17 +5107,21 @@ pub fn parse_using_declaration(p: &mut CppParser) -> ParseResult {
         // `unsigned int` and `_Ty*` — the shapes the narrow test was written for — have nothing of the sort. It
         // is what keeps this from re-introducing the fault that cost `<vector>` 442 declarations.
         let a_convention_follows = p.current_token() == CppTokenKind::Identifier
-            && p.peek_token_kind_at(1..4)
-                .first()
-                .is_some_and(|_| (1..4).any(|at| p.token_kind_at(p.current_token_index() + at) == CppTokenKind::LeftParen));
+            && p.peek_token_kind_at(1..4).first().is_some_and(|_| {
+                (1..4).any(|at| {
+                    p.token_kind_at(p.current_token_index() + at) == CppTokenKind::LeftParen
+                })
+            });
 
-        if (the_target_was_one_name || a_convention_follows) && p.current_token() == CppTokenKind::Identifier {
+        if (the_target_was_one_name || a_convention_follows)
+            && p.current_token() == CppTokenKind::Identifier
+        {
             parse_type_id(p)?;
         }
 
         if (p.current_token() == CppTokenKind::LeftBracket
             || p.current_token() == CppTokenKind::LeftParen)
-            && let Err(err) = super::types::parse_declarator_suffixes(p)
+            && let Err(err) = types::parse_declarator_suffixes(p)
         {
             return Err(err);
         }
@@ -5169,7 +5183,7 @@ fn parse_a_definition_per_branch(
     loop {
         // A directive **before** the `=`, and the one that closes a branch and opens the next.
         while p.current_token() == CppTokenKind::Hash {
-            super::stats::parse_preprocessor_directive(p)?;
+            stats::parse_preprocessor_directive(p)?;
         }
 
         if p.current_token() != CppTokenKind::Assign {
@@ -5217,7 +5231,7 @@ pub fn parse_typedef_declaration(p: &mut CppParser) -> ParseResult {
     expect_token(p, CppTokenKind::TypedefKeyword)?;
 
     // The rest is a declaration without the keyword, so reuse the same machinery.
-    if let Err(err) = super::types::parse_decl_specifier_seq(p) {
+    if let Err(err) = types::parse_decl_specifier_seq(p) {
         p.close_marks_above(base);
         return Err(err);
     }
@@ -5229,7 +5243,7 @@ pub fn parse_typedef_declaration(p: &mut CppParser) -> ParseResult {
         // `*PWCHAR` puts it after a `*`, `(*F)(int)` inside parentheses.
         let declarator_from = p.current_event_count();
 
-        if let Err(err) = super::types::parse_declarator(p) {
+        if let Err(err) = types::parse_declarator(p) {
             p.close_marks_above(base);
             return Err(err);
         }
@@ -5249,11 +5263,11 @@ pub fn parse_typedef_declaration(p: &mut CppParser) -> ParseResult {
         // typedef int v4 [[deprecated]];                       // the standard spelling fails the same way
         // ```
         //
-        // Both spellings go through [`super::types::parse_attribute_specifiers`], which is the point of that
+        // Both spellings go through [`types::parse_attribute_specifiers`], which is the point of that
         // rule reading all three spellings into one node: the position is the same, so this is one line rather
         // than one per compiler. Without it the `;` was never reached — the attribute was rubble and the
         // declaration reported `expected ;` against its own name.
-        if let Err(err) = super::types::parse_attribute_specifiers(p) {
+        if let Err(err) = types::parse_attribute_specifiers(p) {
             p.close_marks_above(base);
             return Err(err);
         }
@@ -5340,7 +5354,7 @@ pub fn parse_namespace_declaration(p: &mut CppParser) -> ParseResult {
     // `at_an_attribute` is the guard that makes this safe: an ordinary name is not an attribute, so the name and
     // the `_GLIBCXX_VISIBILITY(default)` head below are untouched by it — only `[[…]]`, `__attribute__((…))` and
     // `__declspec(…)` are read, and all three are attributes at exactly this position.
-    let _ = super::types::parse_attribute_specifiers(p);
+    let _ = types::parse_attribute_specifiers(p);
 
     // A namespace alias: `namespace fs = std::filesystem;`
     if p.current_token() == CppTokenKind::Identifier && p.peek_next_token() == CppTokenKind::Assign
@@ -5449,7 +5463,7 @@ fn parse_stats_block(p: &mut CppParser) -> ParseResult {
 /// Parse the block of a linkage specification: `extern "C" { void f(); }`.
 ///
 /// The linkage itself — the `extern` and its string — has already been consumed as a decl-specifier by
-/// [`super::types::parse_decl_specifier_seq`], so what is left is the block. It is a namespace-shaped
+/// [`types::parse_decl_specifier_seq`], so what is left is the block. It is a namespace-shaped
 /// construct rather than a statement block: everything inside is a declaration, and the names it introduces
 /// are visible afterwards, which is why it is parsed by the declaration rule rather than
 /// [`parse_stats_block`].
@@ -5523,7 +5537,7 @@ pub fn parse_linkage_block(p: &mut CppParser) -> ParseResult {
         if p.current_token() == CppTokenKind::Hash {
             // A directive that does not read is not a reason to lose the block.
             let directive_base = p.open_marks();
-            if let Err(err) = super::stats::parse_preprocessor_directive(p) {
+            if let Err(err) = stats::parse_preprocessor_directive(p) {
                 p.end_marks_to(directive_base);
                 p.push_error(err);
             }
@@ -5622,8 +5636,3 @@ fn parse_linkage_specification(p: &mut CppParser) -> ParseResult {
 
     Ok(m.complete(p))
 }
-
-
-
-
-

@@ -154,7 +154,10 @@ impl crate::condition::MacroValues for PositionalMacros<'_> {
             let msvc = self.is_msvc();
             let answer = crate::preprocess::cooked::attribute_support_in(operand, msvc);
             if crate::probes::attributes() {
-                eprintln!("cppls-trace: __has_cpp_attribute({operand:?}) at {} -> {answer:?}", self.offset);
+                eprintln!(
+                    "cppls-trace: __has_cpp_attribute({operand:?}) at {} -> {answer:?}",
+                    self.offset
+                );
             }
             return answer.map(crate::condition::Value::Known);
         }

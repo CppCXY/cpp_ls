@@ -62,8 +62,8 @@ use std::path::{Path, PathBuf};
 
 use cpp_parser::Dialect;
 
-use crate::include::config::{CommandLineMacro, CompileCommands, CompilerConfig, IncludePath};
 use crate::file::paths::{FileProvider, normalize_path};
+use crate::include::config::{CommandLineMacro, CompileCommands, CompilerConfig, IncludePath};
 
 /// What a program wrote to its two streams.
 ///
@@ -550,9 +550,7 @@ fn search_paths_with(
         standard: standard.map(str::to_string),
         // Overwritten by the caller that knows which step of the order found this compiler.
         source: ToolchainSource::Path,
-        note: assumed
-            .then(|| assumed_standard_note(standard))
-            .flatten(),
+        note: assumed.then(|| assumed_standard_note(standard)).flatten(),
     })
 }
 
@@ -777,9 +775,10 @@ pub fn discover_with(
     // 4. Whatever this machine has: the names where an installer put them, then the names only `PATH` knows, and
     // each name once — a `clang++` on `PATH` and the one in `C:\Program Files\LLVM\bin` are the same installation
     // found twice, and asking a second time is another process for an answer already in hand.
-    let mut candidates: Vec<PathBuf> = find_compiler_among(files, None, for_file, environment, &layout.program_files)
-        .into_iter()
-        .collect();
+    let mut candidates: Vec<PathBuf> =
+        find_compiler_among(files, None, for_file, environment, &layout.program_files)
+            .into_iter()
+            .collect();
 
     for name in COMPILER_NAMES {
         if let Some(on_path) = locate(files, Path::new(name), environment)
@@ -1226,7 +1225,11 @@ impl Toolchain {
         }
 
         // Nothing on disk: the conventional location, so that the sentence names a directory rather than nothing.
-        match self.system_include_paths.first().and_then(|first| first.parent()) {
+        match self
+            .system_include_paths
+            .first()
+            .and_then(|first| first.parent())
+        {
             Some(parent) => parent.join("modules").join(format!("{module}.ixx")),
             None => PathBuf::from("modules").join(format!("{module}.ixx")),
         }
@@ -1285,12 +1288,15 @@ impl Toolchain {
         for directory in &self.system_include_paths {
             let wanted = normalize_path(directory, cfg!(windows));
 
-            let known = config.include_paths.iter().any(|path| {
-                normalize_path(&path.directory, cfg!(windows)) == wanted
-            });
+            let known = config
+                .include_paths
+                .iter()
+                .any(|path| normalize_path(&path.directory, cfg!(windows)) == wanted);
 
             if !known {
-                config.include_paths.push(IncludePath::system(directory.clone()));
+                config
+                    .include_paths
+                    .push(IncludePath::system(directory.clone()));
             }
         }
 
@@ -1345,7 +1351,9 @@ pub fn parse_search_list(output: &str) -> Vec<PathBuf> {
             continue;
         }
 
-        let without_note = trimmed.strip_suffix(" (framework directory)").unwrap_or(trimmed);
+        let without_note = trimmed
+            .strip_suffix(" (framework directory)")
+            .unwrap_or(trimmed);
         let directory = PathBuf::from(normalize_path(Path::new(without_note), false));
 
         if directory.as_os_str().is_empty() {
@@ -1419,7 +1427,11 @@ End of search list.
         let gcc = parse_search_list(GCC);
         let clang = parse_search_list(CLANG);
 
-        assert_eq!(gcc.len(), 3, "three entries, and nothing from the quoted block");
+        assert_eq!(
+            gcc.len(),
+            3,
+            "three entries, and nothing from the quoted block"
+        );
         assert_eq!(clang.len(), 2);
 
         // Normalized, which folds the `..` GCC prints and the separators Clang prints.
@@ -1488,11 +1500,17 @@ End of search list.
             parse_version(GCC).as_deref(),
             Some("gcc version 15.1.0 (x86_64-win32-seh-rev0, Built by MinGW-Builds project)")
         );
-        assert_eq!(parse_version(CLANG).as_deref(), Some("clang version 18.1.8"));
+        assert_eq!(
+            parse_version(CLANG).as_deref(),
+            Some("clang version 18.1.8")
+        );
 
         // The line a looser rule would answer with — `Configured with:` mentions a version, and it is not the
         // compiler's. A wrong version string is worse than none, because it is used to explain wrong analyses.
-        assert_eq!(parse_version(&GCC.replace("gcc version", "Configured with gcc version")), None);
+        assert_eq!(
+            parse_version(&GCC.replace("gcc version", "Configured with gcc version")),
+            None
+        );
     }
 
     #[test]
@@ -1532,11 +1550,11 @@ End of search list.
 
     use super::{
         COMPILER_NAMES, CommandRunner, CompilerConfig, IncludePath, Path, PathBuf, Toolchain,
-        ToolchainSource, discover, find_compiler, find_compiler_among, installed_compilers, is_msvc,
-        parse_builtin_macros, search_paths,
+        ToolchainSource, discover, find_compiler, find_compiler_among, installed_compilers,
+        is_msvc, parse_builtin_macros, search_paths,
     };
-    use crate::include::config::{CompileCommand, CompileCommands};
     use crate::file::paths::{MemoryFiles, normalize_path};
+    use crate::include::config::{CompileCommand, CompileCommands};
 
     /// The environment a test names explicitly, with no extensions so that a `PATH` entry is a whole file name.
     fn environment() -> Environment {
@@ -1578,15 +1596,13 @@ End of search list.
                 "the predefined macros and the search list come from one call: {arguments:?}"
             );
             assert!(
-                arguments
-                    .iter()
-                    .all(|argument| *argument == "-dM"
-                        || *argument == "-E"
-                        || *argument == "-v"
-                        || *argument == "-x"
-                        || *argument == "c++"
-                        || *argument == "-"
-                        || argument.starts_with("-std=")),
+                arguments.iter().all(|argument| *argument == "-dM"
+                    || *argument == "-E"
+                    || *argument == "-v"
+                    || *argument == "-x"
+                    || *argument == "c++"
+                    || *argument == "-"
+                    || argument.starts_with("-std=")),
                 "and nothing else is asked for: {arguments:?}"
             );
 
@@ -1627,9 +1643,17 @@ End of search list.
             .with_file("/opt/clang/bin/clang++", "");
         let commands = command_line("/opt/clang/bin/clang++");
 
-        let found = find_compiler(&files, Some(&commands), Path::new("/p/main.cpp"), &environment());
+        let found = find_compiler(
+            &files,
+            Some(&commands),
+            Path::new("/p/main.cpp"),
+            &environment(),
+        );
 
-        assert_eq!(found, Some(Path::new("/opt/clang/bin/clang++").to_path_buf()));
+        assert_eq!(
+            found,
+            Some(Path::new("/opt/clang/bin/clang++").to_path_buf())
+        );
     }
 
     #[test]
@@ -1643,7 +1667,12 @@ End of search list.
         let mut environment = environment();
         environment.cxx = Some(Path::new("/usr/bin/clang++").into());
 
-        let found = find_compiler(&files, Some(&commands), Path::new("/p/main.cpp"), &environment);
+        let found = find_compiler(
+            &files,
+            Some(&commands),
+            Path::new("/p/main.cpp"),
+            &environment,
+        );
         assert_eq!(found, Some(Path::new("/usr/bin/clang++").to_path_buf()));
     }
 
@@ -1707,7 +1736,10 @@ End of search list.
             "the first name on the list that exists, not the first directory that has any of them"
         );
 
-        assert!(COMPILER_NAMES.contains(&"c++"), "the one name POSIX guarantees");
+        assert!(
+            COMPILER_NAMES.contains(&"c++"),
+            "the one name POSIX guarantees"
+        );
     }
 
     #[test]
@@ -1766,11 +1798,8 @@ End of search list.
         nothing_on_path.path = Vec::new();
         nothing_on_path.path_extensions = vec![".exe".to_string()];
 
-        let found = installed_compilers(
-            &files,
-            &nothing_on_path,
-            &[PathBuf::from("/nothing/there")],
-        );
+        let found =
+            installed_compilers(&files, &nothing_on_path, &[PathBuf::from("/nothing/there")]);
 
         assert!(
             found.iter().any(|path| path.ends_with("clang++.exe")),
@@ -1825,8 +1854,13 @@ End of search list.
     /// that matched both would send one of them down the other's path.
     #[test]
     fn clang_cl_is_not_mistaken_for_microsofts_compiler() {
-        assert!(is_msvc(Path::new("/VS/VC/Tools/MSVC/14.51.36231/bin/Hostx64/x64/cl.exe")));
-        assert!(is_msvc(Path::new("cl.exe")), "the name is matched, not the path");
+        assert!(is_msvc(Path::new(
+            "/VS/VC/Tools/MSVC/14.51.36231/bin/Hostx64/x64/cl.exe"
+        )));
+        assert!(
+            is_msvc(Path::new("cl.exe")),
+            "the name is matched, not the path"
+        );
 
         assert!(
             !is_msvc(Path::new("C:/Program Files/LLVM/bin/clang-cl.exe")),
@@ -1872,12 +1906,17 @@ End of search list.
         let toolchain =
             search_paths(&runner, Path::new("/usr/bin/g++"), None).expect("the fixture answers");
 
-        assert_eq!(toolchain.compiler.as_deref(), Some(Path::new("/usr/bin/g++")));
+        assert_eq!(
+            toolchain.compiler.as_deref(),
+            Some(Path::new("/usr/bin/g++"))
+        );
         assert_eq!(toolchain.system_include_paths.len(), 3);
-        assert!(toolchain
-            .version
-            .as_deref()
-            .is_some_and(|version| version.starts_with("gcc version")));
+        assert!(
+            toolchain
+                .version
+                .as_deref()
+                .is_some_and(|version| version.starts_with("gcc version"))
+        );
         assert!(
             toolchain.include_paths().iter().all(|path| path.is_system),
             "a toolchain's own directories are what `-isystem` would name, which is what decides whether a \
@@ -1946,7 +1985,10 @@ End of search list.
         // The fixture's `run` asserts the arguments, so reaching this line at all means `-std=c++20` was passed.
         let toolchain = search_paths(&runner, Path::new("/usr/bin/g++"), Some("c++20"))
             .expect("the fixture answers");
-        assert_eq!(toolchain.compiler.as_deref(), Some(Path::new("/usr/bin/g++")));
+        assert_eq!(
+            toolchain.compiler.as_deref(),
+            Some(Path::new("/usr/bin/g++"))
+        );
     }
 
     #[test]
@@ -1960,13 +2002,17 @@ End of search list.
         let toolchain = discover(
             &files,
             &runner,
-            super::BuildStatement::default(),            Path::new("/p/main.cpp"),
+            super::BuildStatement::default(),
+            Path::new("/p/main.cpp"),
             &environment(),
             &crate::include::msvc::WindowsLayout::default(),
         )
         .expect("the compiler is on the path and answers");
 
-        assert_eq!(toolchain.compiler.as_deref(), Some(Path::new("/usr/bin/g++")));
+        assert_eq!(
+            toolchain.compiler.as_deref(),
+            Some(Path::new("/usr/bin/g++"))
+        );
         assert_eq!(toolchain.source, ToolchainSource::Path);
         assert_eq!(
             toolchain.standard.as_deref(),
@@ -2001,7 +2047,8 @@ End of search list.
         let toolchain = discover(
             &files,
             &runner,
-            super::BuildStatement::default(),            Path::new("/p/main.cpp"),
+            super::BuildStatement::default(),
+            Path::new("/p/main.cpp"),
             &environment(),
             &crate::include::msvc::WindowsLayout::default(),
         )
@@ -2014,8 +2061,10 @@ End of search list.
         assert_eq!(config.standard.as_deref(), Some("c++23"));
         let stated = crate::include::config::predefined_macros_of(&config);
         assert!(
-            stated.iter().any(|define| define.name.as_ref() == "__cplusplus"
-                && define.value.as_deref() == Some("202302L")),
+            stated
+                .iter()
+                .any(|define| define.name.as_ref() == "__cplusplus"
+                    && define.value.as_deref() == Some("202302L")),
             "`__cplusplus` is what every `#if __cplusplus >= …` in every header asks: {stated:?}"
         );
     }
@@ -2113,7 +2162,8 @@ End of search list.
         let found = discover(
             &files,
             &runner,
-            super::BuildStatement::default(),            Path::new("/p/main.cpp"),
+            super::BuildStatement::default(),
+            Path::new("/p/main.cpp"),
             &environment,
             &crate::include::msvc::WindowsLayout::default(),
         );
@@ -2192,7 +2242,11 @@ End of search list.
         let twice = toolchain.config(&once);
 
         assert_eq!(once, twice);
-        assert_eq!(once.include_paths.len(), 1, "and the duplicate inside is folded too");
+        assert_eq!(
+            once.include_paths.len(),
+            1,
+            "and the duplicate inside is folded too"
+        );
 
         let already_there = CompilerConfig::new().with_system_include_path("/gcc/include");
         assert_eq!(
@@ -2304,12 +2358,16 @@ End of search list.
         );
         assert!(note.contains("unknown rather than absent"));
 
-        let gnu = toolchain_of(Some(Dialect::Gnu), &["/usr/include/c++/15"]).partition_note("shapes", "area");
+        let gnu = toolchain_of(Some(Dialect::Gnu), &["/usr/include/c++/15"])
+            .partition_note("shapes", "area");
         assert!(
             !gnu.contains("/reference"),
             "MSVC's switch is not offered to a compiler that would reject it: {gnu}"
         );
-        assert!(gnu.contains("gcm.cache/shapes.gcm"), "GCC builds it into the module file: {gnu}");
+        assert!(
+            gnu.contains("gcm.cache/shapes.gcm"),
+            "GCC builds it into the module file: {gnu}"
+        );
     }
 
     /// **Where a standard module's source is, when the toolchain ships one.** Found by asking the filesystem for
@@ -2322,10 +2380,16 @@ End of search list.
     #[test]
     fn a_standard_modules_source_is_looked_for_beside_the_include_directories() {
         let scratch = std::env::temp_dir().join(format!("cppls-toolchain-{}", std::process::id()));
-        let include = scratch.join("VC").join("Tools").join("MSVC").join("14.35").join("include");
+        let include = scratch
+            .join("VC")
+            .join("Tools")
+            .join("MSVC")
+            .join("14.35")
+            .join("include");
         let modules = include.parent().expect("a parent").join("modules");
         std::fs::create_dir_all(&modules).expect("a scratch tree");
-        std::fs::write(modules.join("std.ixx"), "export module std;\n").expect("the shipped source");
+        std::fs::write(modules.join("std.ixx"), "export module std;\n")
+            .expect("the shipped source");
 
         let toolchain = toolchain_of(Some(Dialect::Msvc), &[include.to_string_lossy().as_ref()]);
 
@@ -2343,6 +2407,3 @@ End of search list.
         let _ = std::fs::remove_dir_all(&scratch);
     }
 }
-
-
-

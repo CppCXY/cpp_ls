@@ -72,10 +72,10 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use crate::include::config::CompilerConfig;
 use crate::file::paths::{FileProvider, join_normalized, normalize_path};
-use crate::index::store::SummaryStore;
+use crate::include::config::CompilerConfig;
 use crate::index::ProjectIndex;
+use crate::index::store::SummaryStore;
 use crate::preprocess::directive::IncludeForm;
 use crate::summary::{FileSummary, IncludeFact};
 
@@ -218,9 +218,7 @@ impl WatchFilter {
     /// under. The module documentation gives the reason the cache is inside the checkout at all.
     pub fn with_cache_directory(mut self, name: &str) -> Self {
         if !name.is_empty() {
-            self.cache = self
-                .root
-                .join(name);
+            self.cache = self.root.join(name);
         }
         self
     }
@@ -255,7 +253,9 @@ impl WatchFilter {
         // and `build/*.h` names one from the project root. Matching only the whole path would silently ignore
         // nothing for the second, which is the failure mode nobody notices.
         let root = normalize(&self.root);
-        let relative = path.strip_prefix(&root).map(|rest| rest.trim_start_matches('/'));
+        let relative = path
+            .strip_prefix(&root)
+            .map(|rest| rest.trim_start_matches('/'));
 
         self.ignored_patterns.iter().any(|pattern| {
             pattern.matches(Path::new(&path))
@@ -581,7 +581,11 @@ impl<F: FileProvider> SummaryStore<F> {
 }
 
 /// Add a path to the work list if it is not already there.
-fn push_once(work: &mut Vec<PathBuf>, queued: &mut std::collections::HashSet<String>, path: PathBuf) {
+fn push_once(
+    work: &mut Vec<PathBuf>,
+    queued: &mut std::collections::HashSet<String>,
+    path: PathBuf,
+) {
     if queued.insert(normalize(&path)) {
         work.push(path);
     }
@@ -637,9 +641,9 @@ fn names_one_of(
                         // A resolution whose directory cannot be ranked at all — which no search the resolver
                         // performs can produce — counts as "the new file wins", because an extra rebuild is the
                         // cheap mistake and a missed one is the expensive mistake.
-                        let held = resolved
-                            .parent()
-                            .and_then(|directory| rank_of(directory, including, include.form, config));
+                        let held = resolved.parent().and_then(|directory| {
+                            rank_of(directory, including, include.form, config)
+                        });
 
                         held.is_none_or(|held| rank < held)
                     }
@@ -667,7 +671,10 @@ fn candidates_of(
 
     // An absolute spelling skips the search entirely, so there is one candidate and it is the spelling.
     if spelling.is_absolute() {
-        return vec![(normalize(&join_normalized(Path::new(""), spelling, false)), 0)];
+        return vec![(
+            normalize(&join_normalized(Path::new(""), spelling, false)),
+            0,
+        )];
     }
 
     let mut candidates = Vec::new();
@@ -751,8 +758,8 @@ fn normalize(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::{ChangeBatch, EventKind, FileEvent, PathPattern, WatchFilter};
-    use crate::include::config::CompilerConfig;
     use crate::file::paths::{DiskFiles, MemoryFiles};
+    use crate::include::config::CompilerConfig;
     use crate::index::store::SummaryStore;
     use std::path::{Path, PathBuf};
 
@@ -821,9 +828,8 @@ mod tests {
     fn a_pattern_the_caller_names_is_ignored() {
         // An editor's exclusion list is globs, not directories: `**/build/**` is how a client says "every build
         // tree, wherever it is", and a filter that only understood directories would index them all.
-        let mut batch = ChangeBatch::new(
-            WatchFilter::new("/p").ignore_pattern(pattern("**/build/**")),
-        );
+        let mut batch =
+            ChangeBatch::new(WatchFilter::new("/p").ignore_pattern(pattern("**/build/**")));
 
         assert!(!batch.push(FileEvent::modified("/p/build/generated.h")));
         assert!(!batch.push(FileEvent::created("/p/sub/deep/build/generated.cpp")));
@@ -854,7 +860,8 @@ mod tests {
     fn a_pattern_that_is_not_one_says_so() {
         // The typo in a client's settings is reported where the user can see it, which is why parsing is the
         // caller's step rather than something a builder swallows.
-        let error = PathPattern::new("**/[unclosed").expect_err("an unclosed class is not a pattern");
+        let error =
+            PathPattern::new("**/[unclosed").expect_err("an unclosed class is not a pattern");
         assert!(
             error.contains("Pattern syntax error"),
             "the error should say what is wrong with the pattern, got {error:?}"
@@ -939,7 +946,10 @@ mod tests {
         batch.push(FileEvent::created("/p/new.h"));
         batch.push(FileEvent::modified("/p/new.h"));
 
-        assert_eq!(kinds(&batch), [("/p/new.h".to_string(), EventKind::Created)]);
+        assert_eq!(
+            kinds(&batch),
+            [("/p/new.h".to_string(), EventKind::Created)]
+        );
     }
 
     #[test]
@@ -1019,7 +1029,9 @@ mod tests {
         // newly written `.cpp` is picked up by the file list, which is the caller's business.
         let files = MemoryFiles::new().with_file("/p/known.cpp", "int x;\n");
         let (mut store, root) = memory_store("unknown-path", &files);
-        store.get(Path::new("/p/known.cpp")).expect("the file reads");
+        store
+            .get(Path::new("/p/known.cpp"))
+            .expect("the file reads");
 
         let mut events = batch("/p");
         events.push(FileEvent::modified("/p/README.md"));
@@ -1035,7 +1047,10 @@ mod tests {
     fn a_removed_file_is_forgotten_and_its_includers_are_read_again() {
         let files = MemoryFiles::new()
             .with_file("/p/widget.h", "struct Widget { int size; };\n")
-            .with_file("/p/main.cpp", "#include \"widget.h\"\nvoid f() { Widget w; }\n");
+            .with_file(
+                "/p/main.cpp",
+                "#include \"widget.h\"\nvoid f() { Widget w; }\n",
+            );
         let (mut store, root) = memory_store("removed", &files);
 
         for path in ["/p/widget.h", "/p/main.cpp"] {
@@ -1071,7 +1086,9 @@ mod tests {
     fn a_removed_file_nothing_included_is_only_forgotten() {
         let files = MemoryFiles::new().with_file("/p/alone.cpp", "int x;\n");
         let (mut store, root) = memory_store("removed-alone", &files);
-        store.get(Path::new("/p/alone.cpp")).expect("the file reads");
+        store
+            .get(Path::new("/p/alone.cpp"))
+            .expect("the file reads");
 
         let mut events = batch("/p");
         events.push(FileEvent::removed("/p/alone.cpp"));
@@ -1112,7 +1129,10 @@ mod tests {
     #[test]
     fn a_created_file_repairs_the_include_that_was_waiting_for_it() {
         let files = MemoryFiles::new()
-            .with_file("/p/main.cpp", "#include \"local/generated.h\"\nvoid f() { }\n")
+            .with_file(
+                "/p/main.cpp",
+                "#include \"local/generated.h\"\nvoid f() { }\n",
+            )
             .with_file("/p/local/other.h", "int other;\n");
         let (mut store, root) = memory_store("created-relevant", &files);
 
@@ -1145,11 +1165,16 @@ mod tests {
             .with_file("/inc/x.h", "struct FromInclude { int x; };\n")
             .with_file("/p/a.cpp", "#include \"x.h\"\nvoid f() { }\n");
         let config = CompilerConfig::default().with_include_path("/inc");
-        let root = std::env::temp_dir().join("cppls-watch-tests").join("outranks");
+        let root = std::env::temp_dir()
+            .join("cppls-watch-tests")
+            .join("outranks");
         let _ = std::fs::remove_dir_all(&root);
 
         let mut store = SummaryStore::with_provider(&root, config, files.clone());
-        let held = store.get(Path::new("/p/a.cpp")).expect("the file reads").clone();
+        let held = store
+            .get(Path::new("/p/a.cpp"))
+            .expect("the file reads")
+            .clone();
         assert_eq!(
             held.includes[0].resolved.as_deref(),
             Some(Path::new("/inc/x.h"))
@@ -1234,10 +1259,7 @@ mod tests {
         events.push(FileEvent::removed("/p/main.cpp"));
         let response = store.respond(&events);
 
-        assert_eq!(
-            names(&response.forgotten),
-            ["/p/widget.h", "/p/main.cpp"]
-        );
+        assert_eq!(names(&response.forgotten), ["/p/widget.h", "/p/main.cpp"]);
         assert!(response.reindex.is_empty(), "{response:?}");
 
         let _ = std::fs::remove_dir_all(&root);
@@ -1476,10 +1498,15 @@ mod tests {
     fn a_header_that_is_deleted_stops_being_found() {
         let project = Project::new("deleted");
         project.write("widget.h", "struct Widget { int size; };\n");
-        let main = project.write("main.cpp", "#include \"widget.h\"\nvoid f() { Widget w; }\n");
+        let main = project.write(
+            "main.cpp",
+            "#include \"widget.h\"\nvoid f() { Widget w; }\n",
+        );
 
         let mut store = project.store(CompilerConfig::default());
-        store.get(&project.path("widget.h")).expect("the file reads");
+        store
+            .get(&project.path("widget.h"))
+            .expect("the file reads");
         store.get(&main).expect("the file reads");
         assert!(matches!(
             store.index().definition("Widget", &main),
@@ -1562,5 +1589,3 @@ mod tests {
         );
     }
 }
-
-

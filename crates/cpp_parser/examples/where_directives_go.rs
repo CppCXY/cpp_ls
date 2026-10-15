@@ -41,7 +41,9 @@ fn main() {
     let Some(path) = std::env::args().nth(1) else {
         eprintln!("usage: where_directives_go <file> [offset]");
         eprintln!();
-        eprintln!("  A system header is the usual subject, and where it is depends on the machine:");
+        eprintln!(
+            "  A system header is the usual subject, and where it is depends on the machine:"
+        );
         eprintln!("    where_directives_go $(g++ -print-file-name=include)/../include/winnt.h");
         std::process::exit(2);
     };
@@ -93,7 +95,11 @@ fn main() {
     );
     println!(
         "  the first missing ones: {:?}",
-        missing.iter().take(20).map(|(_, line)| *line).collect::<Vec<_>>()
+        missing
+            .iter()
+            .take(20)
+            .map(|(_, line)| *line)
+            .collect::<Vec<_>>()
     );
 
     // What swallowed the first few?
@@ -122,7 +128,10 @@ fn main() {
             }
         }
 
-        println!("\nline {line}: {}", source.lines().nth(line - 1).unwrap_or("").trim());
+        println!(
+            "\nline {line}: {}",
+            source.lines().nth(line - 1).unwrap_or("").trim()
+        );
         println!(
             "  token {:?}  inside: {}",
             token.as_ref().map(|token| token.text().to_string()),
@@ -146,15 +155,15 @@ fn main() {
     }
 
     // The children of a node, three levels deep, to see what a runaway declaration swallowed.
-    if let Some(offset) = std::env::args().nth(2).and_then(|value| value.parse::<usize>().ok()) {
+    if let Some(offset) = std::env::args()
+        .nth(2)
+        .and_then(|value| value.parse::<usize>().ok())
+    {
         println!("\nchildren of the node at {offset}:");
-        let node = tree
-            .get_red_root()
-            .descendants()
-            .find(|node| {
-                let range = source_range(node.text_range());
-                range.start_offset == offset
-            });
+        let node = tree.get_red_root().descendants().find(|node| {
+            let range = source_range(node.text_range());
+            range.start_offset == offset
+        });
 
         if let Some(node) = node {
             dump(&node, &source, &line_of, 0, &mut 60);

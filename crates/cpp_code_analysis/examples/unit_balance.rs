@@ -35,7 +35,10 @@ fn main() {
         std::process::exit(1);
     };
 
-    println!("  the unit is {} file(s), {} with tokens", reading.files, reading.files_with_tokens);
+    println!(
+        "  the unit is {} file(s), {} with tokens",
+        reading.files, reading.files_with_tokens
+    );
     println!("  the stream's own balance: {}", reading.braces);
     println!("  **unbalanced: {}**", reading.unbalanced.len());
 

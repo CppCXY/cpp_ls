@@ -63,17 +63,18 @@ fn declares_the_enclosing_class(function: &cpp_parser::CppSyntaxNode) -> bool {
                 let declared = ancestor
                     .children()
                     .find(|child| {
-                        matches!(
-                            CppSyntaxKind::from(child.kind()),
-                            CppSyntaxKind::ClassBody 
-                        )
+                        matches!(CppSyntaxKind::from(child.kind()), CppSyntaxKind::ClassBody)
                     })
                     .map(|body| {
                         ancestor
                             .descendants_with_tokens()
                             .filter_map(|element| element.into_token())
-                            .take_while(|token| token.text_range().end() <= body.text_range().start())
-                            .filter(|token| token.kind() == cpp_parser::CppTokenKind::Identifier.into())
+                            .take_while(|token| {
+                                token.text_range().end() <= body.text_range().start()
+                            })
+                            .filter(|token| {
+                                token.kind() == cpp_parser::CppTokenKind::Identifier.into()
+                            })
                             .last()
                             .map(|token| token.text().to_string())
                     })
@@ -178,7 +179,8 @@ impl Check for MissingReturn {
             // losing the finding: a squiggle that is too wide is a worse answer than none, but a finding that
             // disappears because this layer could not locate one word is worse than both.
             let name = super::name_declared_by(&function).unwrap_or_default();
-            let at = range_of_the_name(&function).unwrap_or_else(|| cpp_parser::source_range(function.text_range()));
+            let at = range_of_the_name(&function)
+                .unwrap_or_else(|| cpp_parser::source_range(function.text_range()));
 
             context.add(
                 DiagnosticCode::MissingReturn,
@@ -191,11 +193,3 @@ impl Check for MissingReturn {
         }
     }
 }
-
-
-
-
-
-
-
-

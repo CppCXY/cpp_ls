@@ -87,14 +87,20 @@ mod tests {
     fn the_predefined_macros_say_which_compiler_it_is() {
         let gnu = [("__GNUC__", Some("15")), ("__cplusplus", Some("202002L"))];
         let clang = [("__clang__", Some("1")), ("__GNUC__", Some("4"))];
-        let msvc = [("_MSC_VER", Some("1941")), ("_MSC_FULL_VER", Some("194134120"))];
+        let msvc = [
+            ("_MSC_VER", Some("1941")),
+            ("_MSC_FULL_VER", Some("194134120")),
+        ];
         // `clang-cl` defines both: it is MSVC's *language* on Clang's back end, so its spellings are MSVC's.
         let clang_cl = [("__clang__", Some("1")), ("_MSC_VER", Some("1941"))];
 
         assert_eq!(Dialect::from_predefined_macros(gnu), Some(Dialect::Gnu));
         assert_eq!(Dialect::from_predefined_macros(clang), Some(Dialect::Gnu));
         assert_eq!(Dialect::from_predefined_macros(msvc), Some(Dialect::Msvc));
-        assert_eq!(Dialect::from_predefined_macros(clang_cl), Some(Dialect::Msvc));
+        assert_eq!(
+            Dialect::from_predefined_macros(clang_cl),
+            Some(Dialect::Msvc)
+        );
 
         // Nothing to go on is **not** an answer: the caller keeps what it had rather than being told "neither".
         let unknown = [("__STDC__", Some("1"))];

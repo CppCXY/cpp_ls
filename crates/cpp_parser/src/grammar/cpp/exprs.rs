@@ -692,8 +692,9 @@ fn parse_binary_expr_with_precedence(p: &mut CppParser, min_prec: u8) -> ParseRe
                 super::stats::parse_preprocessor_directive(p)?;
             }
 
-            let an_operator_follows = get_operator_precedence(p, p.joined_operator_at_the_cursor().0)
-                .is_some_and(|prec| prec >= min_prec);
+            let an_operator_follows =
+                get_operator_precedence(p, p.joined_operator_at_the_cursor().0)
+                    .is_some_and(|prec| prec >= min_prec);
             if !an_operator_follows {
                 if opens_another_branch {
                     p.rollback(checkpoint);
@@ -1227,9 +1228,9 @@ fn a_template_id_here_is_called(p: &CppParser) -> bool {
                 }
             }
             // Not a template argument list at all: a statement or a block boundary cannot appear inside one.
-            CppTokenKind::Semicolon
-            | CppTokenKind::LeftBrace
-            | CppTokenKind::RightBrace => return false,
+            CppTokenKind::Semicolon | CppTokenKind::LeftBrace | CppTokenKind::RightBrace => {
+                return false;
+            }
             // A `(` before the list closed: this `<` was a comparison inside a call.
             CppTokenKind::LeftParen if depth == 0 => return false,
             _ => {}
@@ -1720,7 +1721,7 @@ fn parse_postfix_suffixes(
                     && p.peek_next_token() == CppTokenKind::LeftBracket
                     && p.peek_token_kind_at(1..3).last() == Some(&CppTokenKind::Identifier) =>
             {
-                break
+                break;
             }
             CppTokenKind::LeftBracket => {
                 // 数组访问

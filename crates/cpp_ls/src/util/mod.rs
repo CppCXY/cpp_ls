@@ -27,6 +27,3 @@ pub use position::{
 // from, and what a handler with a view's own text and line index uses.
 pub use time_cancel_token::time_cancel_token;
 pub use uri::{path_to_uri, uri_to_file_path};
-
-
-

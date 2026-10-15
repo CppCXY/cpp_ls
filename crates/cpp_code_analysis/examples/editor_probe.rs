@@ -74,10 +74,11 @@ fn declared_out_of_sight<F: cpp_code_analysis::FileProvider + Clone>(
     spellings.push(name.to_string());
 
     session.index().summaries().any(|summary| {
-        let held = summary
-            .declarations
-            .iter()
-            .any(|fact| spellings.iter().any(|wanted| *wanted == fact.qualified_name()));
+        let held = summary.declarations.iter().any(|fact| {
+            spellings
+                .iter()
+                .any(|wanted| *wanted == fact.qualified_name())
+        });
         if !held {
             return false;
         }
@@ -190,7 +191,9 @@ fn main() {
 
         println!("\n--- the open file's own scopes, before anything is cooked ---");
         let show = |label: &str, seen: Option<(usize, usize)>| match seen {
-            Some((all, named)) => println!("   {label:<8} {all:4} bindings, {named:4} inside a namespace"),
+            Some((all, named)) => {
+                println!("   {label:<8} {all:4} bindings, {named:4} inside a namespace")
+            }
             None => println!("   {label:<8} (not held)"),
         };
         show("asked", asked);
@@ -305,7 +308,9 @@ fn main() {
     println!(
         "standard = {:?} | toolchain {:?} | note {:?}",
         session.config().standard.as_deref(),
-        session.toolchain().and_then(|found| found.standard.as_deref()),
+        session
+            .toolchain()
+            .and_then(|found| found.standard.as_deref()),
         session.toolchain().and_then(|found| found.note.as_deref()),
     );
     println!(
@@ -353,26 +358,29 @@ fn main() {
                     .declarations
                     .iter()
                     .filter(|fact| fact.name.contains("format"))
-                    .map(|fact| format!("{}::{}", fact.scope.clone().unwrap_or_default(), fact.name))
+                    .map(|fact| {
+                        format!("{}::{}", fact.scope.clone().unwrap_or_default(), fact.name)
+                    })
                     .take(6)
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        let cooked = session
-            .index()
-            .cooked_declarations(path)
-            .map(|facts| {
-                facts
-                    .iter()
-                    .filter(|fact| fact.name.contains("format"))
-                    .map(|fact| format!("{}::{}", fact.scope.clone().unwrap_or_default(), fact.name))
-                    .take(6)
-                    .collect::<Vec<_>>()
-            });
+        let cooked = session.index().cooked_declarations(path).map(|facts| {
+            facts
+                .iter()
+                .filter(|fact| fact.name.contains("format"))
+                .map(|fact| format!("{}::{}", fact.scope.clone().unwrap_or_default(), fact.name))
+                .take(6)
+                .collect::<Vec<_>>()
+        });
         println!(
             "   {} | raw {} declarations, `format`-ish {:?} | cooked {:?}",
             path.file_name().unwrap_or_default().to_string_lossy(),
-            session.index().summary(path).map(|summary| summary.declarations.len()).unwrap_or(0),
+            session
+                .index()
+                .summary(path)
+                .map(|summary| summary.declarations.len())
+                .unwrap_or(0),
             raw,
             cooked.as_ref().map(|facts| facts.len())
         );
@@ -381,7 +389,13 @@ fn main() {
         // is a mistake this probe made for several rounds (`std::format` was reported absent when the question
         // being answered was "is it in the first six").
         for (label, facts) in [
-            ("raw", session.index().summary(path).map(|summary| summary.declarations.as_slice())),
+            (
+                "raw",
+                session
+                    .index()
+                    .summary(path)
+                    .map(|summary| summary.declarations.as_slice()),
+            ),
             ("cooked", session.index().cooked_declarations(path)),
         ] {
             let Some(facts) = facts else { continue };
@@ -393,7 +407,9 @@ fn main() {
             println!(
                 "      {label}: {} `format`-ish in all — `std::format` present: {} — {all:?}",
                 all.len(),
-                facts.iter().any(|fact| fact.qualified_name() == "std::format"),
+                facts
+                    .iter()
+                    .any(|fact| fact.qualified_name() == "std::format"),
             );
         }
     }
@@ -438,11 +454,13 @@ fn main() {
         "std::to_wstring",
         "std::to_chars",
         "std::pmr::map",
-        "std::pmr::multimap",        "std::array",
+        "std::pmr::multimap",
+        "std::array",
         "std::array::at",
         "std::array::front",
         "std::to_array",
-        "std::get",        "std::_Choice_t",
+        "std::get",
+        "std::_Choice_t",
         "std::ranges::_Begin::_Cpo::_Choice_t",
         "std::vector::_Alvbase_traits",
         "std::vector::_Alvbase_traits::size_type",
@@ -489,23 +507,35 @@ fn main() {
     //  171              with the name resolved where it was written, not where the reader stands
     //   75              with namespace-scope alias templates declaring facts
     // ```
-    let (mut considered, mut parameters, mut resolved, mut fallback) = (0usize, 0usize, 0usize, 0usize);
+    let (mut considered, mut parameters, mut resolved, mut fallback) =
+        (0usize, 0usize, 0usize, 0usize);
     let mut placeholders = 0usize;
     let mut real: Vec<String> = Vec::new();
     let mut detail: Vec<String> = Vec::new();
     let mut out_of_sight: Vec<String> = Vec::new();
-    for path in session.index().summaries().map(|summary| summary.path.clone()).collect::<Vec<_>>() {
+    for path in session
+        .index()
+        .summaries()
+        .map(|summary| summary.path.clone())
+        .collect::<Vec<_>>()
+    {
         let Some(facts) = session.index().cooked_declarations(&path) else {
             continue;
         };
-        let Some(view) = session.view(&path) else { continue };
+        let Some(view) = session.view(&path) else {
+            continue;
+        };
         for fact in facts {
-            let Some(spelled) = &fact.type_of else { continue };
+            let Some(spelled) = &fact.type_of else {
+                continue;
+            };
             let ty = cpp_code_analysis::sema::types::parse_type_spelling(spelled);
             if ty.depends_on_a_parameter() {
                 continue;
             }
-            let Some(name) = ty.class_name() else { continue };
+            let Some(name) = ty.class_name() else {
+                continue;
+            };
             considered += 1;
 
             let in_scope: Vec<String> = fact
@@ -538,7 +568,9 @@ fn main() {
                     fact.range.start_offset
                 ),
                 cpp_code_analysis::Known::Yes(_)
-                    | cpp_code_analysis::Known::Unknown(cpp_code_analysis::UnknownReason::Ambiguous(_))
+                    | cpp_code_analysis::Known::Unknown(
+                        cpp_code_analysis::UnknownReason::Ambiguous(_)
+                    )
             ) {
                 resolved += 1;
                 continue;
@@ -616,7 +648,11 @@ fn main() {
                         .declarations
                         .iter()
                         .chain(cooked.iter())
-                        .any(|fact| spellings.iter().any(|wanted| *wanted == fact.qualified_name()));
+                        .any(|fact| {
+                            spellings
+                                .iter()
+                                .any(|wanted| *wanted == fact.qualified_name())
+                        });
                     if held {
                         holders.push(summary.path.clone());
                     }
@@ -629,19 +665,20 @@ fn main() {
                 // `concepts`, and the lookup still refuses it.
                 let visible_here = session
                     .index()
-                    .visible_declarations_where(
-                        &view.path,
-                        |fact: &cpp_code_analysis::DeclFact| {
-                            spellings
-                                .iter()
-                                .any(|wanted| *wanted == fact.qualified_name())
-                        },
-                    )
+                    .visible_declarations_where(&view.path, |fact: &cpp_code_analysis::DeclFact| {
+                        spellings
+                            .iter()
+                            .any(|wanted| *wanted == fact.qualified_name())
+                    })
                     .len();
 
                 detail.push(format!(
                     "{name}{}  [scope={:?} in_namespace={:?} local={} holders={} visible={}]",
-                    if dependent { "  ← 模板形参的成员" } else { "" },
+                    if dependent {
+                        "  ← 模板形参的成员"
+                    } else {
+                        ""
+                    },
                     fact.scope,
                     fact.in_namespace,
                     fact.local,
@@ -657,11 +694,18 @@ fn main() {
     // for the deduction engine and it is kept beside the others for the same reason they are.
     let (mut deducible, mut refused) = (0usize, 0usize);
     let mut why: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
-    for path in session.index().summaries().map(|summary| summary.path.clone()).collect::<Vec<_>>() {
+    for path in session
+        .index()
+        .summaries()
+        .map(|summary| summary.path.clone())
+        .collect::<Vec<_>>()
+    {
         let Some(facts) = session.index().cooked_declarations(&path) else {
             continue;
         };
-        let Some(view) = session.view(&path) else { continue };
+        let Some(view) = session.view(&path) else {
+            continue;
+        };
         for fact in facts {
             if fact.type_of.as_deref() != Some("auto") {
                 continue;
@@ -823,7 +867,11 @@ fn main() {
     ] {
         match session.members_of(&view, written) {
             cpp_code_analysis::Known::Yes(list) => {
-                let names: Vec<&str> = list.members.iter().map(|member| member.fact.name.as_str()).collect();
+                let names: Vec<&str> = list
+                    .members
+                    .iter()
+                    .map(|member| member.fact.name.as_str())
+                    .collect();
                 println!(
                     "   members_of({written:?}) = {} member(s) | pointer? {} difference_type? {}",
                     names.len(),
@@ -839,19 +887,25 @@ fn main() {
     // Completion after `std::`, and after `std::string::`.
     // ---------------------------------------------------------------------------------------------
     println!("\n--- completion ---");
-    let after = |needle: &str, skip: usize| -> Option<usize> {
-        text.find(needle).map(|at| at + skip)
-    };
+    let after =
+        |needle: &str, skip: usize| -> Option<usize> { text.find(needle).map(|at| at + skip) };
 
     for (what, needle, skip) in [
         ("std::", "std::format", "std::".len()),
-        ("std::string::", "std::string::iterator", "std::string::".len()),
+        (
+            "std::string::",
+            "std::string::iterator",
+            "std::string::".len(),
+        ),
     ] {
         let Some(offset) = after(needle, skip) else {
             println!("{what:<14} (the probe's own line is not in the file)");
             continue;
         };
-        let found = session.completions(&view, cpp_code_analysis::file::coordinates::FileOffset::new(offset));
+        let found = session.completions(
+            &view,
+            cpp_code_analysis::file::coordinates::FileOffset::new(offset),
+        );
         let labels: Vec<&str> = found.items.iter().map(|item| item.label.as_str()).collect();
         println!(
             "{what:<14} scope {:?} | {} item(s), truncated {}",
@@ -860,7 +914,15 @@ fn main() {
             found.truncated
         );
         let wanted: Vec<&str> = match what {
-            "std::" => vec!["format", "vformat", "string", "cout", "getline", "basic_string", "size_t"],
+            "std::" => vec![
+                "format",
+                "vformat",
+                "string",
+                "cout",
+                "getline",
+                "basic_string",
+                "size_t",
+            ],
             _ => vec!["size", "length", "data", "begin", "push_back", "iterator"],
         };
         for name in wanted {
@@ -900,7 +962,10 @@ fn main() {
     if let Some(view) = prefixed.view(&file)
         && let Some(offset) = typed.find("std::str").map(|at| at + "std::str".len())
     {
-        let found = prefixed.completions(&view, cpp_code_analysis::file::coordinates::FileOffset::new(offset));
+        let found = prefixed.completions(
+            &view,
+            cpp_code_analysis::file::coordinates::FileOffset::new(offset),
+        );
         let labels: Vec<&str> = found.items.iter().map(|item| item.label.as_str()).collect();
         println!(
             "std::str      scope {:?} prefix {:?} | {} item(s), truncated {}",
@@ -932,10 +997,19 @@ fn main() {
         ("the `y` of `auto y`", "auto y", "auto ".len()),
         ("the `x` of `x.back()`", "auto y = x.", "auto y = ".len()),
         ("`back` in the call", "auto y = x.back", "auto y = x.".len()),
-        ("`size_type` in `std::string::size_type`", "std::string::size_type", "std::string::".len()),
+        (
+            "`size_type` in `std::string::size_type`",
+            "std::string::size_type",
+            "std::string::".len(),
+        ),
     ] {
-        let Some(offset) = after(needle, skip) else { continue };
-        let answer = session.type_at(&view, cpp_code_analysis::file::coordinates::ReadingOffset::new(offset));
+        let Some(offset) = after(needle, skip) else {
+            continue;
+        };
+        let answer = session.type_at(
+            &view,
+            cpp_code_analysis::file::coordinates::ReadingOffset::new(offset),
+        );
         println!("{what:<40} {answer:?}");
     }
 
@@ -950,7 +1024,10 @@ fn main() {
     // the work.
     // ---------------------------------------------------------------------------------------------
     if let Some(back) = after("auto y = x.back", "auto y = x.".len())
-        && let Known::Yes(declaring) = session.type_at(&view, cpp_code_analysis::file::coordinates::ReadingOffset::new(back))
+        && let Known::Yes(declaring) = session.type_at(
+            &view,
+            cpp_code_analysis::file::coordinates::ReadingOffset::new(back),
+        )
     {
         println!("\n--- after cooking {} ---", declaring.file.display());
         session.want_cooked_reading(&declaring.file);
@@ -961,17 +1038,32 @@ fn main() {
         }
 
         if let Some(y) = after("auto y", "auto ".len()) {
-            println!("the `y` of `auto y`   {:?}", session.type_at(&view, cpp_code_analysis::file::coordinates::ReadingOffset::new(y)));
+            println!(
+                "the `y` of `auto y`   {:?}",
+                session.type_at(
+                    &view,
+                    cpp_code_analysis::file::coordinates::ReadingOffset::new(y)
+                )
+            );
         }
-        println!("`back` in the call    {:?}", session.type_at(&view, cpp_code_analysis::file::coordinates::ReadingOffset::new(back)));
+        println!(
+            "`back` in the call    {:?}",
+            session.type_at(
+                &view,
+                cpp_code_analysis::file::coordinates::ReadingOffset::new(back)
+            )
+        );
 
         // **What the two readings of that header say about `back`**, because "the cook did not change the answer"
         // has two causes: the cooked reading does not exist (the cook did not run), or it exists and spells the
         // return type the same way. Only the second one means the macros are not the problem.
-        let raw = session
-            .index()
-            .summary(&declaring.file)
-            .map(|summary| summary.declarations.iter().filter(|fact| fact.name == "back").count());
+        let raw = session.index().summary(&declaring.file).map(|summary| {
+            summary
+                .declarations
+                .iter()
+                .filter(|fact| fact.name == "back")
+                .count()
+        });
         let cooked = session
             .index()
             .cooked_declarations(&declaring.file)
@@ -980,12 +1072,18 @@ fn main() {
         if let Some(facts) = session.index().cooked_declarations(&declaring.file)
             && let Some(fact) = facts.iter().find(|fact| fact.name == "back")
         {
-            println!("the cooked fact: returns {:?} type_of {:?}", fact.returns, fact.type_of);
+            println!(
+                "the cooked fact: returns {:?} type_of {:?}",
+                fact.returns, fact.type_of
+            );
         }
         if let Some(summary) = session.index().summary(&declaring.file)
             && let Some(fact) = summary.declarations.iter().find(|fact| fact.name == "back")
         {
-            println!("the raw fact:    returns {:?} type_of {:?}", fact.returns, fact.type_of);
+            println!(
+                "the raw fact:    returns {:?} type_of {:?}",
+                fact.returns, fact.type_of
+            );
         }
     }
 
@@ -997,9 +1095,18 @@ fn main() {
     if let Some(offset) = after("std::format(\"{}\"", "std::".len()) {
         println!(
             "definition(std::format) = {:?}",
-            session.definition(&view, cpp_code_analysis::file::coordinates::ReadingOffset::new(offset)).value().map(|found| found.fact.qualified_name())
+            session
+                .definition(
+                    &view,
+                    cpp_code_analysis::file::coordinates::ReadingOffset::new(offset)
+                )
+                .value()
+                .map(|found| found.fact.qualified_name())
         );
-        match session.definitions(&view, cpp_code_analysis::file::coordinates::ReadingOffset::new(offset)) {
+        match session.definitions(
+            &view,
+            cpp_code_analysis::file::coordinates::ReadingOffset::new(offset),
+        ) {
             Known::Yes(found) => {
                 println!("definitions: {} declaration(s)", found.found.len());
                 for declaration in &found.found {
@@ -1007,7 +1114,11 @@ fn main() {
                         "   {} {}{}",
                         declaration.fact.returns.clone().unwrap_or_default(),
                         declaration.fact.name,
-                        declaration.fact.parameter_list.clone().unwrap_or_else(|| "(…)".to_string()),
+                        declaration
+                            .fact
+                            .parameter_list
+                            .clone()
+                            .unwrap_or_else(|| "(…)".to_string()),
                     );
                 }
             }
@@ -1022,7 +1133,10 @@ fn main() {
     // ---------------------------------------------------------------------------------------------
     println!("\n--- signature ---");
     if let Some(offset) = after("std::format(\"{}\"", "std::format(".len() + 1) {
-        let signatures = session.signatures_at(&view, cpp_code_analysis::file::coordinates::ReadingOffset::new(offset));
+        let signatures = session.signatures_at(
+            &view,
+            cpp_code_analysis::file::coordinates::ReadingOffset::new(offset),
+        );
         if signatures.is_empty() {
             println!("**no signature** for a call inside `std::format(...)`");
         }
@@ -1030,7 +1144,11 @@ fn main() {
             println!("label: {}", signature.label);
             println!(
                 "  parameters: {:?} | active {:?} | declared in {}",
-                signature.parameters.iter().map(|(_, text)| text.as_str()).collect::<Vec<_>>(),
+                signature
+                    .parameters
+                    .iter()
+                    .map(|(_, text)| text.as_str())
+                    .collect::<Vec<_>>(),
                 signature.active_parameter,
                 signature.declared_in.display()
             );
@@ -1040,16 +1158,13 @@ fn main() {
     // …and the same question about a **member** call: `s.append(` is where an overload set is the difference between
     // a popup that lists what the reader can write and one that shows whichever overload happened to be picked.
     if let Some(offset) = after("s.append(\"x\"", "s.append(".len() + 1) {
-        let signatures = session.signatures_at(&view, cpp_code_analysis::file::coordinates::ReadingOffset::new(offset));
+        let signatures = session.signatures_at(
+            &view,
+            cpp_code_analysis::file::coordinates::ReadingOffset::new(offset),
+        );
         println!("s.append( → {} signature(s)", signatures.len());
         for signature in signatures.iter().take(12) {
             println!("   {}", signature.label);
         }
     }
 }
-
-
-
-
-
-

@@ -45,9 +45,9 @@ use cpp_code_analysis::semantic::{Name, NameKind};
 
 use cpp_code_analysis::{FileView, VfsFile};
 use lsp_types::{
-    ClientCapabilities, SemanticToken, SemanticTokens, SemanticTokensFullOptions,
-    SemanticTokensLegend, SemanticTokensOptions, SemanticTokensParams, SemanticTokensResult,
-    SemanticTokensServerCapabilities, SemanticTokenType, ServerCapabilities,
+    ClientCapabilities, SemanticToken, SemanticTokenType, SemanticTokens,
+    SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensOptions, SemanticTokensParams,
+    SemanticTokensResult, SemanticTokensServerCapabilities, ServerCapabilities,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -452,7 +452,10 @@ fn legend_entry(kind: NameKind) -> Option<&'static Legend> {
 pub struct SemanticTokenCapabilities;
 
 impl RegisterCapabilities for SemanticTokenCapabilities {
-    fn register_capabilities(server_capabilities: &mut ServerCapabilities, client: &ClientCapabilities) {
+    fn register_capabilities(
+        server_capabilities: &mut ServerCapabilities,
+        client: &ClientCapabilities,
+    ) {
         // **Only if the client asks for the whole file, in the format this server speaks.** The protocol has a
         // second shape (a range at a time, and a `relative`/`delta` encoding) and this server implements neither:
         // advertising a provider for a request nobody will send, or in a format the client cannot read, is a
@@ -469,17 +472,16 @@ impl RegisterCapabilities for SemanticTokenCapabilities {
             return;
         }
 
-        server_capabilities.semantic_tokens_provider =
-            Some(SemanticTokensServerCapabilities::SemanticTokensOptions(
-                SemanticTokensOptions {
-                    work_done_progress_options: Default::default(),
-                    legend: legend(),
-                    // No `range` provider: a range request would be the same walk over a slice, and the clients
-                    // that use it are also the ones that ask for the whole file.
-                    range: Some(false),
-                    full: Some(SemanticTokensFullOptions::Bool(true)),
-                },
-            ));
+        server_capabilities.semantic_tokens_provider = Some(
+            SemanticTokensServerCapabilities::SemanticTokensOptions(SemanticTokensOptions {
+                work_done_progress_options: Default::default(),
+                legend: legend(),
+                // No `range` provider: a range request would be the same walk over a slice, and the clients
+                // that use it are also the ones that ask for the whole file.
+                range: Some(false),
+                full: Some(SemanticTokensFullOptions::Bool(true)),
+            }),
+        );
     }
 }
 
@@ -557,7 +559,9 @@ mod tests {
             "the client's own reconstruction: {tokens:?}"
         );
         assert!(
-            tokens.iter().all(|token| token.token_type == index_of(NameKind::Variable)),
+            tokens
+                .iter()
+                .all(|token| token.token_type == index_of(NameKind::Variable)),
             "every one is a variable"
         );
         assert!(
@@ -723,7 +727,10 @@ mod tests {
             Some(&a_type),
             "and so does the class it names"
         );
-        assert_ne!(keyword, a_type, "the two are different colours, which is the point");
+        assert_ne!(
+            keyword, a_type,
+            "the two are different colours, which is the point"
+        );
 
         // Every span, rebuilt from the deltas — which is what a client does, and the only way to see a length that
         // disagrees with the text.
@@ -782,4 +789,3 @@ mod tests {
         legend_entry(kind).expect("the kind is in the legend").index
     }
 }
-

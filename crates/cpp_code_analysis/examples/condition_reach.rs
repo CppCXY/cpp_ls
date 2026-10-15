@@ -36,7 +36,9 @@
 
 use std::collections::{HashMap, HashSet};
 
-use cpp_code_analysis::{DiskFiles, FileProvider, OpenDocuments, Session, SessionFiles, WatchFilter};
+use cpp_code_analysis::{
+    DiskFiles, FileProvider, OpenDocuments, Session, SessionFiles, WatchFilter,
+};
 
 const MAIN: &str = "\
 #include \"widget.h\"\n\
@@ -52,7 +54,8 @@ fn main() {
 
     let main_file = root.join("main.cpp");
     std::fs::write(&main_file, MAIN).expect("the fixture writes");
-    std::fs::write(root.join("widget.h"), "#define WIDGET_API\nint w;\n").expect("the fixture writes");
+    std::fs::write(root.join("widget.h"), "#define WIDGET_API\nint w;\n")
+        .expect("the fixture writes");
     std::fs::write(
         root.join("other.cpp"),
         "#include \"widget.h\"\nWIDGET_API int other() { return 0; }\n",
@@ -148,7 +151,11 @@ fn main() {
                     shape,
                     format!(
                         "{}:{line}  {condition}",
-                        summary.path.file_name().unwrap_or_default().to_string_lossy()
+                        summary
+                            .path
+                            .file_name()
+                            .unwrap_or_default()
+                            .to_string_lossy()
                     ),
                 );
             }
@@ -162,7 +169,12 @@ fn main() {
                 //   …and `CompilerConfig::defines` is the `-D` half, which this probe reports separately.
                 if defined.contains(&name) {
                     decidable_in_the_closure += 1;
-                } else if session.config().defines.iter().any(|define| define.name.as_ref() == name) {
+                } else if session
+                    .config()
+                    .defines
+                    .iter()
+                    .any(|define| define.name.as_ref() == name)
+                {
                     from_the_command_line += 1;
                 } else {
                     no_evidence += 1;
@@ -241,14 +253,15 @@ fn main() {
         );
         println!("    a name the closure defines                       {from_the_closure:>5}");
         println!("    a name the compiler predefines                   {from_the_compiler:>5}");
-        println!(
-            "    **neither — answerable only as 'nothing defines it'** {from_neither:>5}"
-        );
+        println!("    **neither — answerable only as 'nothing defines it'** {from_neither:>5}");
 
         println!(
             "\n  and the shapes that do not test a name at all:\n    a version test over `__cplusplus`                {:>5}  \
              — the toolchain prints its value too",
-            shapes.get("a version test (__cplusplus)").copied().unwrap_or(0)
+            shapes
+                .get("a version test (__cplusplus)")
+                .copied()
+                .unwrap_or(0)
         );
         println!(
             "    `__has_include(…)`                              {:>5}  — a *file* question: the resolver answers it",
@@ -256,8 +269,14 @@ fn main() {
         );
         println!(
             "    expressions over names and numbers              {:>5}  — `condition::evaluate` is already written",
-            shapes.get("an expression with a number").copied().unwrap_or(0)
-                + shapes.get("an expression mentioning defined(…)").copied().unwrap_or(0)
+            shapes
+                .get("an expression with a number")
+                .copied()
+                .unwrap_or(0)
+                + shapes
+                    .get("an expression mentioning defined(…)")
+                    .copied()
+                    .unwrap_or(0)
         );
         println!(
             "\n  so **every shape in this corpus is decidable** from (closure facts + the compiler's own table + the \
@@ -331,7 +350,11 @@ fn main() {
                     verdict,
                     format!(
                         "{}:{line}  {}",
-                        summary.path.file_name().unwrap_or_default().to_string_lossy(),
+                        summary
+                            .path
+                            .file_name()
+                            .unwrap_or_default()
+                            .to_string_lossy(),
                         text[span.start_offset..span.end_offset().min(text.len())]
                             .lines()
                             .next()
@@ -439,7 +462,11 @@ fn main() {
                     verdict,
                     format!(
                         "{}:{line}  {}",
-                        summary.path.file_name().unwrap_or_default().to_string_lossy(),
+                        summary
+                            .path
+                            .file_name()
+                            .unwrap_or_default()
+                            .to_string_lossy(),
                         text[span.start_offset..span.end_offset().min(text.len())]
                             .lines()
                             .next()
@@ -458,7 +485,10 @@ fn main() {
     );
     println!(
         "    every name is one the closure defines          {names_all_known:>5}   e.g. {}",
-        example.get("names known, value missing").cloned().unwrap_or_default()
+        example
+            .get("names known, value missing")
+            .cloned()
+            .unwrap_or_default()
     );
     println!(
         "    …and every value a one-token body carries     {values_all_readable:>5}   → so this many would be \
@@ -470,12 +500,17 @@ fn main() {
          answer:\n                                                   a header outside the index or a `-D` nobody \
          told us could define it.\n                                                   e.g. {}",
         guarded_includes - decided_includes - names_all_known,
-        example.get("a name nothing defines").cloned().unwrap_or_default()
+        example
+            .get("a name nothing defines")
+            .cloned()
+            .unwrap_or_default()
     );
 
     let mut by_count: Vec<_> = missing_names.iter().collect();
     by_count.sort_by(|one, other| other.1.cmp(one.1).then(one.0.cmp(other.0)));
-    println!("\n  the names that keep a condition undecided, by how many conditions ask about them:");
+    println!(
+        "\n  the names that keep a condition undecided, by how many conditions ask about them:"
+    );
     for (name, count) in by_count.iter().take(8) {
         println!("    {name:<34} {count:>4}");
     }
@@ -517,8 +552,11 @@ fn names_asked(
             }
 
             let mut errors = Vec::new();
-            let mut lexer =
-                cpp_parser::CppLexer::new(condition, cpp_parser::LexerConfig::default(), &mut errors);
+            let mut lexer = cpp_parser::CppLexer::new(
+                condition,
+                cpp_parser::LexerConfig::default(),
+                &mut errors,
+            );
             let tokens: Vec<cpp_parser::CppTokenData> = lexer
                 .tokenize()
                 .into_iter()
@@ -537,7 +575,9 @@ fn names_asked(
                 if spelled(condition, token) == "defined" {
                     // The name after `defined` is asked about, not read: `defined(NAME)` needs no value.
                     index += 1;
-                    if tokens.get(index).is_some_and(|next| next.kind == cpp_parser::CppTokenKind::LeftParen)
+                    if tokens
+                        .get(index)
+                        .is_some_and(|next| next.kind == cpp_parser::CppTokenKind::LeftParen)
                     {
                         index += 1;
                     }
@@ -698,13 +738,9 @@ fn tested_name(condition: &str) -> Option<String> {
         .strip_prefix("defined")?
         .trim_start();
 
-    let name = rest
-        .trim_start_matches('(')
-        .trim_end_matches(')')
-        .trim();
+    let name = rest.trim_start_matches('(').trim_end_matches(')').trim();
 
-    (!name.is_empty() && !name.contains(|character: char| !character.is_alphanumeric() && character != '_'))
-        .then(|| name.to_string())
+    (!name.is_empty()
+        && !name.contains(|character: char| !character.is_alphanumeric() && character != '_'))
+    .then(|| name.to_string())
 }
-
-

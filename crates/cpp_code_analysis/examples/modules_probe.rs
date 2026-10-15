@@ -56,14 +56,22 @@ fn main() {
             path.file_name().unwrap_or_default().to_string_lossy(),
             info.module_name.as_deref().unwrap_or("-"),
             info.partition_name.as_deref(),
-            if info.has_global_fragment { " (global fragment)" } else { "" },
+            if info.has_global_fragment {
+                " (global fragment)"
+            } else {
+                ""
+            },
         );
 
         for import in &info.imports {
             println!(
                 "       import {:<16} {}",
                 import.target.describe(),
-                if import.is_reexport { "re-exported" } else { "" }
+                if import.is_reexport {
+                    "re-exported"
+                } else {
+                    ""
+                }
             );
         }
 
@@ -108,7 +116,11 @@ fn main() {
             "   {} --{}{}--> {}",
             interner
                 .path(edge.from)
-                .map(|path| path.file_name().unwrap_or_default().to_string_lossy().into_owned())
+                .map(|path| path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned())
                 .unwrap_or_else(|| "?".to_string()),
             if edge.is_reexport { "export " } else { "" },
             edge.target.describe(),
@@ -127,7 +139,10 @@ fn main() {
     );
     session.index_everything();
 
-    println!("   project files the scan found: {}", session.project_files().len());
+    println!(
+        "   project files the scan found: {}",
+        session.project_files().len()
+    );
     for path in session.project_files() {
         println!("      {}", path.display());
     }
@@ -143,8 +158,7 @@ fn main() {
     if let Some(reading) = session.index().summary(&file) {
         println!(
             "   this file's own reading: imports {:?}, header units {:?}",
-            reading.modules.imports,
-            reading.modules.header_units,
+            reading.modules.imports, reading.modules.header_units,
         );
     }
 
@@ -154,10 +168,16 @@ fn main() {
         .nth(3)
         .map(|list| list.split_whitespace().map(str::to_string).collect())
         .unwrap_or_else(|| {
-            ["mathlib::add", "mathlib::multiply", "Point", "manhattan", "area_of"]
-                .iter()
-                .map(|name| name.to_string())
-                .collect()
+            [
+                "mathlib::add",
+                "mathlib::multiply",
+                "Point",
+                "manhattan",
+                "area_of",
+            ]
+            .iter()
+            .map(|name| name.to_string())
+            .collect()
         });
 
     // **What a reader is told when a module cannot be read at all.** Asked *before* the read below, because the
@@ -166,7 +186,9 @@ fn main() {
     // this one. Empty for the ordinary project, whose modules are its own files.
     let notes = session.notes_about_the_modules(&view);
     if notes.is_empty() {
-        println!("   nothing to be told about this file's imports: every module it names is in the project");
+        println!(
+            "   nothing to be told about this file's imports: every module it names is in the project"
+        );
     } else {
         for note in &notes {
             println!("   note at byte {}: {}", note.start, note.message);
@@ -217,7 +239,13 @@ fn main() {
     // **Why a name that is in the library answers nothing** — the candidates the index actually holds, which is the
     // only way to tell "not declared" from "declared, and the answer came out plural" from "declared under a name I
     // did not think of". `definition` collapses those three into `None`/`Unknown`, and this prints the list instead.
-    for name in ["std::string", "std::vector", "std::basic_string", "std::basic_string_view", "std::char_traits"] {
+    for name in [
+        "std::string",
+        "std::vector",
+        "std::basic_string",
+        "std::basic_string_view",
+        "std::char_traits",
+    ] {
         match session.index().definitions(name, &file) {
             cpp_code_analysis::Known::Yes(definitions) => {
                 println!("   {name:<26} → {} declaration(s)", definitions.found.len());
@@ -257,11 +285,18 @@ fn main() {
             continue;
         };
 
-        let found = session.completions(&view, cpp_code_analysis::file::coordinates::FileOffset::new(at));
+        let found = session.completions(
+            &view,
+            cpp_code_analysis::file::coordinates::FileOffset::new(at),
+        );
         println!(
             "   completion after `{scope}` → {} item(s){}{}",
             found.items.len(),
-            if found.scope.is_empty() { String::new() } else { format!(", scope {:?}", found.scope) },
+            if found.scope.is_empty() {
+                String::new()
+            } else {
+                format!(", scope {:?}", found.scope)
+            },
             if found.truncated { ", truncated" } else { "" },
         );
         for item in found.items.iter().take(8) {
@@ -279,24 +314,40 @@ fn main() {
     //    scratch session read 393 files and then answered `None` for `std::string`, which is a cold number for the
     //    wrong program.
     // ---------------------------------------------------------------------------------------------
-    let std_interface = std::env::var_os("CPPLS_STD_IXC").map(PathBuf::from).or_else(|| {
-        // Found the way the session found it: the toolchain's `modules` directory beside the include paths.
-        session.config().include_paths.iter().find_map(|directory| {
-            let candidate = directory.directory.parent()?.join("modules").join("std.ixx");
-            candidate.is_file().then_some(candidate)
-        })
-    });
+    let std_interface = std::env::var_os("CPPLS_STD_IXC")
+        .map(PathBuf::from)
+        .or_else(|| {
+            // Found the way the session found it: the toolchain's `modules` directory beside the include paths.
+            session.config().include_paths.iter().find_map(|directory| {
+                let candidate = directory
+                    .directory
+                    .parent()?
+                    .join("modules")
+                    .join("std.ixx");
+                candidate.is_file().then_some(candidate)
+            })
+        });
 
     match std_interface.as_deref() {
-        None => println!("\n--- what `import std;` costs ---\n   no `modules/std.ixx` found; skipped"),
+        None => {
+            println!("\n--- what `import std;` costs ---\n   no `modules/std.ixx` found; skipped")
+        }
         Some(std_interface) => {
-            println!("\n--- what `import std;` costs to read ({}) ---", std_interface.display());
-            let bytes = std::fs::read_to_string(std_interface).map(|text| text.len()).unwrap_or(0);
+            println!(
+                "\n--- what `import std;` costs to read ({}) ---",
+                std_interface.display()
+            );
+            let bytes = std::fs::read_to_string(std_interface)
+                .map(|text| text.len())
+                .unwrap_or(0);
             println!("   the interface unit is {bytes} bytes");
 
             let cache = session.cache_directory().to_path_buf();
             let _ = std::fs::remove_dir_all(&cache);
-            println!("   the summaries under {} deleted, so the read below is the first one", cache.display());
+            println!(
+                "   the summaries under {} deleted, so the read below is the first one",
+                cache.display()
+            );
 
             // **The same root and the same discovery, one more time**: the compiler is asked again exactly as the
             // first session asked it, so the macros in force while reading the standard library are the same. What is
@@ -380,4 +431,3 @@ fn describe<F: cpp_code_analysis::FileProvider + Clone>(
         other => format!("{other:?}"),
     }
 }
-

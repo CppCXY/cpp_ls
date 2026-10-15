@@ -186,11 +186,8 @@ impl FileAnalysis {
 // provider chain and the file id); `vfs` is the set of files an analysis is *holding*, each with its line index
 // kept in step with its text; `view` is one of those files parsed, which is what a cursor query asks for; and
 // `token` is the token of the *expanded* stream — the one that knows which macro produced it.
+pub mod coordinates;
 pub mod paths;
 pub mod token;
-pub mod coordinates;
-pub mod view;
 pub mod vfs;
-
-
-
+pub mod view;

@@ -91,7 +91,10 @@ fn main() {
         // the trigger is the parser's state from an *earlier* construct. With the whole rendering on disk the bisect
         // is mechanical: truncate it, parse, keep the half that still fails.
         if let Ok(dumped) = std::env::var("CPPLS_DUMP_RENDERING") {
-            let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
             let _ = std::fs::write(std::path::Path::new(&dumped).join(name), &*view.source);
         }
         let described: Vec<String> = errors
@@ -144,4 +147,3 @@ fn main() {
         }
     }
 }
-

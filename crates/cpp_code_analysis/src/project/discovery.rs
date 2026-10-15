@@ -226,11 +226,8 @@ pub fn discover(
     let config = load_config(files, root, config_file);
     let mut problems: Vec<DiscoveryProblem> = Vec::new();
 
-    let (database, database_problems) = build::find_database(
-        files,
-        root,
-        config.config.compile.database.as_deref(),
-    );
+    let (database, database_problems) =
+        build::find_database(files, root, config.config.compile.database.as_deref());
     problems.extend(database_problems.into_iter().map(DiscoveryProblem::warning));
 
     // **The one thing worth telling a person**: no database and no `[compile].args` means the analysis is about the
@@ -269,10 +266,8 @@ mod tests {
 
     #[test]
     fn the_files_flags_win_and_nothing_else_is_consulted() {
-        let files = MemoryFiles::new().with_file(
-            "/p/.cppls.toml",
-            "[compile]\nargs = [\"-DFROM_CONFIG\"]\n",
-        );
+        let files = MemoryFiles::new()
+            .with_file("/p/.cppls.toml", "[compile]\nargs = [\"-DFROM_CONFIG\"]\n");
 
         let found = discover(&files, Path::new("/p"), None);
         assert_eq!(found.flags(), ["-DFROM_CONFIG"]);
@@ -309,9 +304,18 @@ mod tests {
     #[test]
     fn the_standard_is_read_out_of_the_builds_own_command_line() {
         // Every spelling a compiler accepts, since the database is whatever the build wrote.
-        assert_eq!(standard_in(&["g++".into(), "-std=c++20".into()]), Some("c++20".into()));
-        assert_eq!(standard_in(&["clang++".into(), "-std".into(), "c++17".into()]), Some("c++17".into()));
-        assert_eq!(standard_in(&["cl.exe".into(), "/std:c++latest".into()]), Some("c++latest".into()));
+        assert_eq!(
+            standard_in(&["g++".into(), "-std=c++20".into()]),
+            Some("c++20".into())
+        );
+        assert_eq!(
+            standard_in(&["clang++".into(), "-std".into(), "c++17".into()]),
+            Some("c++17".into())
+        );
+        assert_eq!(
+            standard_in(&["cl.exe".into(), "/std:c++latest".into()]),
+            Some("c++latest".into())
+        );
         assert_eq!(standard_in(&["g++".into(), "-O2".into()]), None);
     }
 

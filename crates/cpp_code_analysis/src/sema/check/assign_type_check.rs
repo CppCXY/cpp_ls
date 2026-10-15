@@ -131,7 +131,10 @@ impl Check for AssignTypeCheck {
         // The version before this one took the operands from `children()` and came out with **none**: measured, for
         // `count = "four"` the probe printed `equals=true sides=[]`, because a simple operand is a *token* in this
         // tree rather than a node. A hand-rolled shape reader was wrong again; the accessor was right all along.
-        for assignment in context.own::<cpp_parser::CppBinaryExpr>().collect::<Vec<_>>() {
+        for assignment in context
+            .own::<cpp_parser::CppBinaryExpr>()
+            .collect::<Vec<_>>()
+        {
             if assignment.get_operator_text().as_deref() != Some("=") {
                 continue;
             }
@@ -196,7 +199,9 @@ fn report_if_it_does_not_convert(
     // query holds one file and the parameters are written in another — so the answer is a fact the cook already
     // produced rather than a walk over a rendered header. A class from `<string>` is as answerable as one written two
     // lines up, which is the point: **the finding is about this file, the knowledge is the project's.**
-    if super::a_class_can_be_built_from(context, &target.class_name().unwrap_or_default(), &from) == Some(false) {
+    if super::a_class_can_be_built_from(context, &target.class_name().unwrap_or_default(), &from)
+        == Some(false)
+    {
         report(context, expression, name, how, written);
     }
 }
@@ -216,4 +221,3 @@ fn report(
         format!("`{name}` is {how} with a value that does not convert to `{written}`"),
     );
 }
-

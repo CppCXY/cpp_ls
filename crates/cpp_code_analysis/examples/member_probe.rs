@@ -22,9 +22,9 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Instant;
 
-use cpp_code_analysis::sema::resolve::{member_access_at, member_access_of};
-use cpp_code_analysis::sema::types::{type_of_declaration, Type};
 use cpp_code_analysis::Known;
+use cpp_code_analysis::sema::resolve::{member_access_at, member_access_of};
+use cpp_code_analysis::sema::types::{Type, type_of_declaration};
 
 /// The declared type of every variable-like declaration in a file, read **from the syntax** rather than from the
 /// spelling the summary recorded.
@@ -42,13 +42,10 @@ fn declarations_of(root: &cpp_parser::CppSyntaxNode) -> Vec<(cpp_parser::SourceR
             continue;
         }
 
-        let Some(specifiers) = declaration
-            .children()
-            .find(|child| {
-                cpp_parser::CppSyntaxKind::from(child.kind())
-                    == cpp_parser::CppSyntaxKind::DeclSpecifierSeq
-            })
-        else {
+        let Some(specifiers) = declaration.children().find(|child| {
+            cpp_parser::CppSyntaxKind::from(child.kind())
+                == cpp_parser::CppSyntaxKind::DeclSpecifierSeq
+        }) else {
             continue;
         };
 
@@ -59,7 +56,8 @@ fn declarations_of(root: &cpp_parser::CppSyntaxNode) -> Vec<(cpp_parser::SourceR
             .filter(|child| {
                 matches!(
                     cpp_parser::CppSyntaxKind::from(child.kind()),
-                    cpp_parser::CppSyntaxKind::InitDeclarator | cpp_parser::CppSyntaxKind::Declarator
+                    cpp_parser::CppSyntaxKind::InitDeclarator
+                        | cpp_parser::CppSyntaxKind::Declarator
                 )
             })
             .flat_map(|child| {
@@ -264,12 +262,17 @@ fn main() {
             let inside_the_object = usize::from(access.object.text_range().end()).saturating_sub(1);
 
             // **The shipping path**: the type query the hover and the member query both stand on.
-            match session.type_at(&view, cpp_code_analysis::file::coordinates::ReadingOffset::new(inside_the_object)) {
+            match session.type_at(
+                &view,
+                cpp_code_analysis::file::coordinates::ReadingOffset::new(inside_the_object),
+            ) {
                 Known::Yes(found) => {
                     typed += 1;
                     let class = class_of(&found.type_of);
                     if class.is_empty() {
-                        *refusals.entry("members: no class in the type".to_string()).or_default() += 1;
+                        *refusals
+                            .entry("members: no class in the type".to_string())
+                            .or_default() += 1;
                         continue;
                     }
 
@@ -378,14 +381,21 @@ fn main() {
 /// through: the query is about a *class*, and `std::map<std::string, int>` is not a class name.
 fn class_of(written: &str) -> String {
     let mut text = written.trim().trim_start_matches("const ").trim();
-    text = text.trim_start_matches("struct ").trim_start_matches("class ").trim();
+    text = text
+        .trim_start_matches("struct ")
+        .trim_start_matches("class ")
+        .trim();
 
     let base = match text.find('<') {
         Some(at) => &text[..at],
         None => text,
     };
 
-    base.trim().trim_end_matches('*').trim_end_matches('&').trim().to_string()
+    base.trim()
+        .trim_end_matches('*')
+        .trim_end_matches('&')
+        .trim()
+        .to_string()
 }
 
 fn ratio(part: usize, whole: usize) -> f64 {

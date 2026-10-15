@@ -46,7 +46,9 @@ fn main() {
 
     println!(
         "opened in {opening:?} | toolchain {:?} | {} include paths | {} project files | indexed {} files in {indexed_for:?} + cooked {cooked_for:?} (pending {} | stats {:?})",
-        session.toolchain().and_then(|toolchain| toolchain.version.clone()),
+        session
+            .toolchain()
+            .and_then(|toolchain| toolchain.version.clone()),
         session.config().include_paths.len(),
         session.project_files().len(),
         session.index().len(),
@@ -54,15 +56,27 @@ fn main() {
         session.stats()
     );
 
-
     // **What the index actually holds**, asked directly: whether the facts are there at all (an alias or a
     // template may never become one) or whether the lookup is keyed differently.
     let index = session.index();
     for name in [
-        "std::string", "string", "std::optional", "optional", "std::cin", "std::getline",
-        "std::size_t", "size_t", "std::cout",
+        "std::string",
+        "string",
+        "std::optional",
+        "optional",
+        "std::cin",
+        "std::getline",
+        "std::size_t",
+        "size_t",
+        "std::cout",
     ] {
-        println!("index.definition({name:?}) = {:?}", index.definition(name, &file).value().map(|found| (found.fact.qualified_name(), found.fact.kind)));
+        println!(
+            "index.definition({name:?}) = {:?}",
+            index
+                .definition(name, &file)
+                .value()
+                .map(|found| (found.fact.qualified_name(), found.fact.kind))
+        );
     }
     println!(
         "declarations_in(\"std\", main.cpp) = {}, project files {}",
@@ -81,7 +95,9 @@ fn main() {
         println!("the standard library's directory: {}", directory.display());
     }
 
-    for header in ["string", "optional", "iostream", "istream", "ostream", "xstring"] {
+    for header in [
+        "string", "optional", "iostream", "istream", "ostream", "xstring",
+    ] {
         let Some(path) = standard_library.as_ref().map(|root| root.join(header)) else {
             continue;
         };
@@ -89,7 +105,10 @@ fn main() {
             "  {header}: indexed {} | cooked {} | summary declarations {:?}",
             session.view(&path).is_some(),
             session.is_indexed(&path),
-            session.index().summary(&path).map(|summary| summary.declarations.len())
+            session
+                .index()
+                .summary(&path)
+                .map(|summary| summary.declarations.len())
         );
     }
     // **Is anything cooked at all?** A session cooks the *open* files' closures, and a probe that never opened
@@ -127,25 +146,45 @@ fn main() {
     // **What the cooked reading added**, which is the question the raw summary cannot answer: if the scope of a
     // declaration inside a macro-opened namespace is visible anywhere, it is here.
     let in_std = session.index().declarations_in("std", &file);
-    println!("after draining, declarations_in(\"std\") = {}", in_std.len());
+    println!(
+        "after draining, declarations_in(\"std\") = {}",
+        in_std.len()
+    );
     for declaration in in_std.iter().take(10) {
         println!(
             "   {} | scope={:?} kind={:?} file={}",
             declaration.fact.qualified_name(),
             declaration.fact.scope,
             declaration.fact.kind,
-            declaration.file.file_name().unwrap_or_default().to_string_lossy()
+            declaration
+                .file
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
         );
     }
-    for name in ["std::basic_string", "basic_string", "std::char_traits", "std::allocator"] {
+    for name in [
+        "std::basic_string",
+        "basic_string",
+        "std::char_traits",
+        "std::allocator",
+    ] {
         println!(
             "   definition({name:?}) = {:?}",
-            session.index().definition(name, &file).value().map(|found| found.fact.qualified_name())
+            session
+                .index()
+                .definition(name, &file)
+                .value()
+                .map(|found| found.fact.qualified_name())
         );
     }
     // **The classes a member access needs**, and the members themselves: a name whose *type* resolves is only half
     // the answer — `std::cin.read` also needs `read` to be in the class the type names.
-    for class in ["std::basic_istream", "std::basic_ostream", "std::basic_string"] {
+    for class in [
+        "std::basic_istream",
+        "std::basic_ostream",
+        "std::basic_string",
+    ] {
         let members = session.index().declarations_in(class, &file);
         println!(
             "   members of {class} = {} (has `read`: {} | has `size`: {})",
@@ -161,12 +200,23 @@ fn main() {
         "std::basic_istream",
         "basic_istream",
         "std::basic_ostream",
-    ] {        println!(
+    ] {
+        println!(
             "   definition({name:?}) = {:?}",
-            session.index().definition(name, &file).value().map(|found| (found.fact.qualified_name(), found.fact.type_of.clone()))
+            session
+                .index()
+                .definition(name, &file)
+                .value()
+                .map(|found| (found.fact.qualified_name(), found.fact.type_of.clone()))
         );
     }
-    for name in ["std::string", "string", "std::optional", "std::cin", "std::getline"] {
+    for name in [
+        "std::string",
+        "string",
+        "std::optional",
+        "std::cin",
+        "std::getline",
+    ] {
         println!(
             "  after cooking: index.definition({name:?}) = {:?}",
             session
@@ -230,14 +280,33 @@ fn main() {
         .map(|root| root.join("xstring"))
         .unwrap_or_default();
     if let Some(summary) = session.index().summary(&string_header) {
-        println!("--- what <string>'s {} declarations are called ---", summary.declarations.len());
+        println!(
+            "--- what <string>'s {} declarations are called ---",
+            summary.declarations.len()
+        );
         for fact in summary.declarations.iter().take(400) {
-            if matches!(fact.name.as_str(), "string" | "basic_string" | "allocator" | "char_traits" | "size_t") {
-                println!("   name={:<16} qualified={:<28} scope={:?} kind={:?}", fact.name, fact.qualified_name(), fact.scope, fact.kind);
+            if matches!(
+                fact.name.as_str(),
+                "string" | "basic_string" | "allocator" | "char_traits" | "size_t"
+            ) {
+                println!(
+                    "   name={:<16} qualified={:<28} scope={:?} kind={:?}",
+                    fact.name,
+                    fact.qualified_name(),
+                    fact.scope,
+                    fact.kind
+                );
             }
         }
-        let scoped = summary.declarations.iter().filter(|fact| fact.scope.is_some()).count();
-        println!("   of {} declarations, {scoped} carry a scope", summary.declarations.len());
+        let scoped = summary
+            .declarations
+            .iter()
+            .filter(|fact| fact.scope.is_some())
+            .count();
+        println!(
+            "   of {} declarations, {scoped} carry a scope",
+            summary.declarations.len()
+        );
     }
 
     // **A header whose class never arrived.** `<istream>` is indexed and its `basic_istream` is asked for by name
@@ -250,7 +319,11 @@ fn main() {
     if let Some(summary) = session.index().summary(&istream_header) {
         let text = std::fs::read_to_string(&istream_header).unwrap_or_default();
         let line_of = |offset: usize| text[..offset.min(text.len())].matches('\n').count() + 1;
-        let scoped = summary.declarations.iter().filter(|fact| fact.scope.is_some()).count();
+        let scoped = summary
+            .declarations
+            .iter()
+            .filter(|fact| fact.scope.is_some())
+            .count();
         println!(
             "\n--- <istream>: {} declarations, {scoped} of them scoped ---",
             summary.declarations.len()
@@ -283,7 +356,12 @@ fn main() {
     println!(
         "   and the index now finds {} declarations in `std`, {} of them from the cooked reading",
         session.index().declarations_in("std", &file).len(),
-        session.index().declarations_in("std", &file).iter().filter(|found| found.file == string_header).count()
+        session
+            .index()
+            .declarations_in("std", &file)
+            .iter()
+            .filter(|found| found.file == string_header)
+            .count()
     );
     let Some(view) = session.view(&file) else {
         println!("{} is not held", file.display());
@@ -312,16 +390,33 @@ fn main() {
         let offset = token.range.start_offset;
         let name = &source[token.range.start_offset..token.range.end_offset()];
         let line = line_of(offset) + 1;
-        let text = source.lines().nth(line - 1).unwrap_or_default().trim_end().to_string();
+        let text = source
+            .lines()
+            .nth(line - 1)
+            .unwrap_or_default()
+            .trim_end()
+            .to_string();
 
-        match session.definition(&view, cpp_code_analysis::file::coordinates::ReadingOffset::new(offset)) {
+        match session.definition(
+            &view,
+            cpp_code_analysis::file::coordinates::ReadingOffset::new(offset),
+        ) {
             Known::Yes(found) => {
-                let where_from = if found.file == file { "resolved here" } else { "resolved in a header" };
+                let where_from = if found.file == file {
+                    "resolved here"
+                } else {
+                    "resolved in a header"
+                };
                 *outcomes.entry(where_from.to_string()).or_default() += 1;
             }
             Known::Unknown(UnknownReason::NotDeclaredHere(_)) => {
-                *outcomes.entry("the index has no such name".to_string()).or_default() += 1;
-                failures.push(format!("{line:>4}  {name:<26} the index has no such name  | {}", &text[..text.len().min(50)]));
+                *outcomes
+                    .entry("the index has no such name".to_string())
+                    .or_default() += 1;
+                failures.push(format!(
+                    "{line:>4}  {name:<26} the index has no such name  | {}",
+                    &text[..text.len().min(50)]
+                ));
             }
             Known::Unknown(reason) => {
                 if let UnknownReason::Ambiguous(name) = &reason {
@@ -337,16 +432,23 @@ fn main() {
                 *outcomes.entry(format!("unknown: {reason:?}")).or_default() += 1;
             }
             Known::No => {
-                *outcomes.entry("no name at this offset".to_string()).or_default() += 1;
+                *outcomes
+                    .entry("no name at this offset".to_string())
+                    .or_default() += 1;
             }
         }
 
         // **The same cursor through the plural query**, which is what a client that can show a list asks. This is
         // the measurement the list answer is judged by: a list of two is a redeclaration, seventeen is an overload
         // set, and the question is whether they are usable.
-        match session.definitions(&view, cpp_code_analysis::file::coordinates::ReadingOffset::new(offset)) {
+        match session.definitions(
+            &view,
+            cpp_code_analysis::file::coordinates::ReadingOffset::new(offset),
+        ) {
             Known::Yes(found) if found.is_one() => {
-                *list_outcomes.entry("one declaration".to_string()).or_default() += 1;
+                *list_outcomes
+                    .entry("one declaration".to_string())
+                    .or_default() += 1;
             }
             Known::Yes(found) => {
                 *list_outcomes
@@ -376,7 +478,10 @@ fn main() {
         // **The type of the name**, which is what a hover on a variable needs — and the half that was missing
         // while the standard library was unreachable: `std::string line;` has a type only if `std::string` is in
         // the index to be read.
-        match session.type_at(&view, cpp_code_analysis::file::coordinates::ReadingOffset::new(offset)) {
+        match session.type_at(
+            &view,
+            cpp_code_analysis::file::coordinates::ReadingOffset::new(offset),
+        ) {
             Known::Yes(found) => {
                 *type_outcomes.entry("a type".to_string()).or_default() += 1;
                 let entry = format!("{name} : {}", found.type_of);
@@ -385,7 +490,9 @@ fn main() {
                 }
             }
             Known::Unknown(reason) => {
-                *type_outcomes.entry(format!("unknown: {reason:?}")).or_default() += 1;
+                *type_outcomes
+                    .entry(format!("unknown: {reason:?}"))
+                    .or_default() += 1;
             }
             Known::No => {
                 *type_outcomes.entry("no type here".to_string()).or_default() += 1;
@@ -415,7 +522,10 @@ fn main() {
         }
         let mut ranked: Vec<(&str, (usize, usize, usize))> = by_name.into_iter().collect();
         ranked.sort_by_key(|(_, (asked, all, _))| (std::cmp::Reverse(*asked), *all));
-        println!("\n--- the candidate lists behind `Ambiguous` ({} identifiers) ---", candidate_sizes.len());
+        println!(
+            "\n--- the candidate lists behind `Ambiguous` ({} identifiers) ---",
+            candidate_sizes.len()
+        );
         for (name, (asked, all, certain)) in ranked.iter().take(24) {
             println!("{asked:6} × {name:<28} {all} declaration(s), {certain} unconditional");
         }
@@ -500,7 +610,8 @@ fn main() {
         }
     }
 
-    println!("\n--- the type of every identifier, deduplicated (what a hover has to show) ---");    let mut ranked: Vec<(String, usize)> = type_outcomes.into_iter().collect();
+    println!("\n--- the type of every identifier, deduplicated (what a hover has to show) ---");
+    let mut ranked: Vec<(String, usize)> = type_outcomes.into_iter().collect();
     ranked.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
     for (outcome, count) in &ranked {
         println!("{count:6}  {outcome}");
@@ -519,14 +630,12 @@ fn main() {
             members
                 .as_ref()
                 .is_some_and(|list| list.members.iter().any(|member| member.fact.name == "eof")),
-            members
-                .as_ref()
-                .map(|list| {
-                    list.unlisted
-                        .iter()
-                        .map(|base| base.spelling.clone())
-                        .collect::<Vec<_>>()
-                })
+            members.as_ref().map(|list| {
+                list.unlisted
+                    .iter()
+                    .map(|base| base.spelling.clone())
+                    .collect::<Vec<_>>()
+            })
         );
     }
 
@@ -536,7 +645,9 @@ fn main() {
     let visible = session.index().visible_files(&file);
     let unconditional = visible
         .iter()
-        .filter(|(_, visibility)| *visibility == cpp_code_analysis::IncludeVisibility::Unconditional)
+        .filter(|(_, visibility)| {
+            *visibility == cpp_code_analysis::IncludeVisibility::Unconditional
+        })
         .count();
     println!(
         "\n--- what the cursor's file can see: {} files, {unconditional} unconditionally ---",
@@ -563,7 +674,9 @@ fn main() {
     }
     let mut by_name: HashMap<&str, (usize, usize, usize)> = HashMap::new();
     for (name, all, conditional, _) in &lists {
-        let entry = by_name.entry(name.as_str()).or_insert((0, *all, *conditional));
+        let entry = by_name
+            .entry(name.as_str())
+            .or_insert((0, *all, *conditional));
         entry.0 += 1;
     }
     let mut ranked: Vec<(&str, (usize, usize, usize))> = by_name.into_iter().collect();
@@ -579,10 +692,22 @@ fn main() {
     while let Some(found) = source[at..].find("::") {
         let after = at + found + 2;
         at = after;
-        let cursor = after + source[after..].bytes().take_while(|byte| *byte == b' ').count();
+        let cursor = after
+            + source[after..]
+                .bytes()
+                .take_while(|byte| *byte == b' ')
+                .count();
         let line = line_of(cursor) + 1;
-        let text = source.lines().nth(line - 1).unwrap_or_default().trim_end().to_string();
-        match session.name_completions(&view, cpp_code_analysis::file::coordinates::FileOffset::new(cursor)) {
+        let text = source
+            .lines()
+            .nth(line - 1)
+            .unwrap_or_default()
+            .trim_end()
+            .to_string();
+        match session.name_completions(
+            &view,
+            cpp_code_analysis::file::coordinates::FileOffset::new(cursor),
+        ) {
             Known::Yes(completions) => println!(
                 "{:>4}:{:<4} scope {:<28} {} names, e.g. {:?}",
                 line,
@@ -609,10 +734,20 @@ fn main() {
     let mut refused: Vec<usize> = Vec::new();
     let mut offered_at_all = 0usize;
     for offset in 0..source.len() {
-        match session.name_completions(&view, cpp_code_analysis::file::coordinates::FileOffset::new(offset)) {
+        match session.name_completions(
+            &view,
+            cpp_code_analysis::file::coordinates::FileOffset::new(offset),
+        ) {
             Known::Yes(_) => offered_at_all += 1,
             _ => {
-                if session.member_completions(&view, cpp_code_analysis::file::coordinates::FileOffset::new(offset)).value().is_none() {
+                if session
+                    .member_completions(
+                        &view,
+                        cpp_code_analysis::file::coordinates::FileOffset::new(offset),
+                    )
+                    .value()
+                    .is_none()
+                {
                     refused.push(offset);
                 }
             }
@@ -628,7 +763,11 @@ fn main() {
     for offset in refused
         .iter()
         .filter(|offset| {
-            let line = source[..**offset].lines().last().unwrap_or_default().trim_start();
+            let line = source[..**offset]
+                .lines()
+                .last()
+                .unwrap_or_default()
+                .trim_start();
             !line.starts_with("//") && !line.starts_with("R\"")
         })
         .take(24)
@@ -636,7 +775,12 @@ fn main() {
         let line = line_of(*offset);
         let text = source.lines().nth(line).unwrap_or_default();
         let column = offset - source[..*offset].rfind('\n').map_or(0, |at| at + 1);
-        println!("{:>4}:{:<3} | {}", line + 1, column, &text[..text.len().min(60)]);
+        println!(
+            "{:>4}:{:<3} | {}",
+            line + 1,
+            column,
+            &text[..text.len().min(60)]
+        );
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -650,9 +794,7 @@ fn main() {
     // ---------------------------------------------------------------------------------------------
     println!("\n--- a unit read, before and after ---");
 
-    fn std_by_file(
-        session: &cpp_code_analysis::Session,
-    ) -> Vec<(String, usize, usize, bool)> {
+    fn std_by_file(session: &cpp_code_analysis::Session) -> Vec<(String, usize, usize, bool)> {
         let mut rows = Vec::new();
         for summary in session.index().summaries() {
             let raw = summary
@@ -781,7 +923,10 @@ fn main() {
                 facts.len()
             );
             for fact in facts.iter().take(8) {
-                println!("      {:<18} scope={:?} kind={:?}", fact.name, fact.scope, fact.kind);
+                println!(
+                    "      {:<18} scope={:?} kind={:?}",
+                    fact.name, fact.scope, fact.kind
+                );
             }
         }
 
@@ -814,4 +959,3 @@ fn main() {
         }
     }
 }
-

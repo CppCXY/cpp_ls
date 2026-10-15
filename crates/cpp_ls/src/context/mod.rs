@@ -52,9 +52,8 @@ impl ServerContext {
             status_bar.clone(),
             client.clone(),
         ));
-        let workspace_manager = Arc::new(Mutex::new(WorkspaceManager::new(
-            file_diagnostic.clone(),
-        )));
+        let workspace_manager =
+            Arc::new(Mutex::new(WorkspaceManager::new(file_diagnostic.clone())));
 
         let inner = Arc::new(ServerContextInner {
             analysis,

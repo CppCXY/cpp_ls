@@ -56,7 +56,10 @@ fn main() {
     match session.view(&path) {
         Some(view) => {
             let nodes = view.tree.get_red_root().descendants().count();
-            let written = view.written_text().map(str::len).unwrap_or(view.source.len());
+            let written = view
+                .written_text()
+                .map(str::len)
+                .unwrap_or(view.source.len());
             println!();
             println!("what a CHECK is handed - Session::view");
             println!("  text                {} bytes", view.source.len());
@@ -71,8 +74,13 @@ fn main() {
             println!();
             println!("what a COMPILER's parser would read - Session::rendering_of");
             println!("  text                {} bytes", rendered.len());
-            println!("  ratio               {}x the file", rendered.len() / source.len().max(1));
-            println!("  (not parsed here: a header's rendering is megabytes, and parsing it to count nodes is the");
+            println!(
+                "  ratio               {}x the file",
+                rendered.len() / source.len().max(1)
+            );
+            println!(
+                "  (not parsed here: a header's rendering is megabytes, and parsing it to count nodes is the"
+            );
             println!("   cost this example exists to keep out of the check path)");
         }
         None => println!("no rendering for {file}: its closure has not been read"),

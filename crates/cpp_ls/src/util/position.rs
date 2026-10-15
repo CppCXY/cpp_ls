@@ -53,7 +53,6 @@ pub fn offset_at_position(view: &FileView, position: Position) -> Option<Reading
     view.reading_offset_of(in_the_file)
 }
 
-
 /// **A client's position as a byte offset in the file it is showing** - [offset_at_position] stopped on the near
 /// side of the seam, and the one the completion pair wants because those two queries cross it themselves.
 pub fn file_offset_at_position(view: &FileView, position: Position) -> Option<FileOffset> {
@@ -201,7 +200,8 @@ mod tests {
             CompilerConfig, MemoryFiles, OpenDocuments, Session, SessionFiles, WatchFilter,
         };
 
-        let files = MemoryFiles::new().with_file("/p/a.cpp", "int x = 1;\n// 😀 emoji\nint y = 2;\n");
+        let files =
+            MemoryFiles::new().with_file("/p/a.cpp", "int x = 1;\n// 😀 emoji\nint y = 2;\n");
         let documents = OpenDocuments::new();
         let providers = SessionFiles::new(documents, files);
         let mut session = Session::with_config(
@@ -238,7 +238,9 @@ mod tests {
         assert_eq!(
             offset_at_position(&view, position),
             Some(ReadingOffset::new(
-                view.source.find("y = 2").expect("the statement is in the reading")
+                view.source
+                    .find("y = 2")
+                    .expect("the statement is in the reading")
             ))
         );
 
@@ -253,11 +255,10 @@ mod tests {
         assert_eq!(
             offset_at_position(&view, Position::new(1, 5)),
             Some(ReadingOffset::new(
-                view.source.find("int y").expect("the statement follows the comment in the reading")
+                view.source
+                    .find("int y")
+                    .expect("the statement follows the comment in the reading")
             ))
         );
     }
 }
-
-
-

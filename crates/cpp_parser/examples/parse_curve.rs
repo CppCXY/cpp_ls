@@ -155,9 +155,7 @@ fn main() {
             "\nVERDICT super-linear from {bytes} bytes: that step cost {growth:.2}x per token, \
              at {per_byte:.3} us/byte and {per_event:.3} us/event."
         ),
-        None => println!(
-            "\nVERDICT linear: no step cost more than {FLAT_CEILING:.2}x per token."
-        ),
+        None => println!("\nVERDICT linear: no step cost more than {FLAT_CEILING:.2}x per token."),
     }
 }
 

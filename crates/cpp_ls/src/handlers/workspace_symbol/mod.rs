@@ -27,8 +27,8 @@
 
 use cpp_code_analysis::Session;
 use lsp_types::{
-    ClientCapabilities, Location, OneOf, ServerCapabilities, WorkspaceSymbol, WorkspaceSymbolParams,
-    WorkspaceSymbolResponse,
+    ClientCapabilities, Location, OneOf, ServerCapabilities, WorkspaceSymbol,
+    WorkspaceSymbolParams, WorkspaceSymbolResponse,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -78,7 +78,9 @@ pub fn symbols<F: cpp_code_analysis::FileProvider + Clone>(
     let mut found = session.index().symbols_matching(query, SYMBOL_LIMIT + 1);
     if found.len() > SYMBOL_LIMIT {
         found.truncate(SYMBOL_LIMIT);
-        log::info!("`{query}` matches more than {SYMBOL_LIMIT} symbols; the client was given the first ones");
+        log::info!(
+            "`{query}` matches more than {SYMBOL_LIMIT} symbols; the client was given the first ones"
+        );
     }
 
     let mut symbols = Vec::new();
@@ -155,7 +157,11 @@ mod tests {
 
         session.add_project_files([PathBuf::from("/p/widget.h")]);
         assert!(session.pending() > 0, "the fixture is the refused state");
-        assert_eq!(symbols(&session, "Widget"), None, "an answer now would be missing symbols");
+        assert_eq!(
+            symbols(&session, "Widget"),
+            None,
+            "an answer now would be missing symbols"
+        );
 
         session.index_everything();
         let found = symbols(&session, "widget").expect("the index is complete now");

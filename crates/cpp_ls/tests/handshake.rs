@@ -389,7 +389,10 @@ impl Drop for Project {
 fn uri_of(path: &Path) -> String {
     // A client's own conversion, deliberately not the server's: a test that reused `util::uri` would agree with a
     // bug in it. Only what a temp path can hold is escaped (a space, which `%TEMP%` on Windows may have).
-    let text = path.to_string_lossy().replace('\\', "/").replace(' ', "%20");
+    let text = path
+        .to_string_lossy()
+        .replace('\\', "/")
+        .replace(' ', "%20");
     format!("file:///{}", text.trim_start_matches('/'))
 }
 
@@ -434,9 +437,9 @@ impl Server {
         // there: the trace line exists in the handler and the level dropped it. Run this suite with
         // `CPPLS_TEST_LOG_LEVEL=debug` and `CPPLS_TEST_LOG_PATH=<file>` when a request has to be watched.
         let mut command = Command::new(env!("CARGO_BIN_EXE_cpp_ls"));
-        command.arg("--log-path").arg(
-            std::env::var("CPPLS_TEST_LOG_PATH").unwrap_or_else(|_| "none".to_string()),
-        );
+        command
+            .arg("--log-path")
+            .arg(std::env::var("CPPLS_TEST_LOG_PATH").unwrap_or_else(|_| "none".to_string()));
         if let Ok(level) = std::env::var("CPPLS_TEST_LOG_LEVEL") {
             command.arg("--log-level").arg(level);
         }
@@ -463,7 +466,9 @@ impl Server {
             let mut reader = BufReader::new(stderr);
             let mut line = String::new();
             while reader.read_line(&mut line).unwrap_or(0) > 0 {
-                sink.lock().expect("the log is not poisoned").push_str(&line);
+                sink.lock()
+                    .expect("the log is not poisoned")
+                    .push_str(&line);
                 line.clear();
             }
         });
@@ -478,7 +483,8 @@ impl Server {
 
     fn send(&mut self, message: Value) {
         let body = serde_json::to_string(&message).expect("the message serializes");
-        write!(self.stdin, "Content-Length: {}\r\n\r\n{body}", body.len()).expect("the message is written");
+        write!(self.stdin, "Content-Length: {}\r\n\r\n{body}", body.len())
+            .expect("the message is written");
         self.stdin.flush().expect("the message is flushed");
     }
 
@@ -570,7 +576,9 @@ impl Server {
             }
 
             if Instant::now() >= deadline {
-                panic!("no answer the test accepts within {within:?}; the last one was: {response}");
+                panic!(
+                    "no answer the test accepts within {within:?}; the last one was: {response}"
+                );
             }
 
             id += 1;
@@ -579,7 +587,8 @@ impl Server {
     }
 
     /// Wait for a message the closure accepts, answering the server's own requests while waiting.
-    fn wait_for(&mut self, accept: impl Fn(&Value) -> bool) -> Value {        let deadline = Instant::now() + TIMEOUT;
+    fn wait_for(&mut self, accept: impl Fn(&Value) -> bool) -> Value {
+        let deadline = Instant::now() + TIMEOUT;
 
         loop {
             let remaining = deadline
@@ -588,7 +597,9 @@ impl Server {
 
             let message = match self.messages.recv_timeout(remaining) {
                 Ok(message) => message,
-                Err(RecvTimeoutError::Timeout) => panic!("the server did not answer within {TIMEOUT:?}"),
+                Err(RecvTimeoutError::Timeout) => {
+                    panic!("the server did not answer within {TIMEOUT:?}")
+                }
                 Err(RecvTimeoutError::Disconnected) => panic!("the server closed its stdout"),
             };
 
@@ -844,7 +855,8 @@ fn a_branch_nobody_takes_is_published_as_clean_once_the_file_is_cooked() {
 /// an indexer given the closure's macro bodies reads `BEGIN_NS` as `namespace one {`, which is what the shape rules
 /// exist for — so this fixture is about the member question rather than about the second reading.
 const NAMESPACE_H: &str = "#define BEGIN_NS namespace one {\n#define END_NS }\n";
-const NAMESPACED_WIDGET_H: &str = "#include \"namespace.h\"\nBEGIN_NS struct Widget { int size; }; END_NS\n";
+const NAMESPACED_WIDGET_H: &str =
+    "#include \"namespace.h\"\nBEGIN_NS struct Widget { int size; }; END_NS\n";
 
 /// The fixture that **needs** the second reading: a macro that declares something. `api.h`'s own text has a call
 /// where the struct and the typedef are, and no shape rule invents a declaration out of a call.
@@ -942,7 +954,11 @@ fn a_name_only_the_cooked_reading_declares_is_offered_over_the_wire() {
         json!({ "line": 2, "character": 8 }),
         "…to where the cursor is: {generated}"
     );
-    assert_eq!(generated["textEdit"]["newText"], json!("HWND__"), "{generated}");
+    assert_eq!(
+        generated["textEdit"]["newText"],
+        json!("HWND__"),
+        "{generated}"
+    );
 
     server.request(999, "shutdown", Value::Null);
     server.notify("exit", Value::Null);
@@ -1502,7 +1518,8 @@ fn a_completion_right_after_a_change_sees_the_change() {
     const ROUNDS: usize = 24;
 
     let text = |round: usize, dot: bool| {
-        let mut text = String::from("struct Widget { int size; int weight; };\nvoid f() {\n    Widget w;\n");
+        let mut text =
+            String::from("struct Widget { int size; int weight; };\nvoid f() {\n    Widget w;\n");
         for index in 0..LINES {
             text.push_str(&format!("    w.size = {};\n", index + round));
         }
@@ -1622,7 +1639,11 @@ fn a_macro_is_renamed_everywhere_and_an_ordinary_name_is_refused() {
         }),
     );
     let capabilities = &capabilities["result"]["capabilities"];
-    assert_eq!(capabilities["referencesProvider"], json!(true), "{capabilities}");
+    assert_eq!(
+        capabilities["referencesProvider"],
+        json!(true),
+        "{capabilities}"
+    );
     assert_eq!(
         capabilities["renameProvider"]["prepareProvider"],
         json!(true),
@@ -1698,7 +1719,11 @@ fn a_macro_is_renamed_everywhere_and_an_ordinary_name_is_refused() {
         json!({ "line": 2, "character": 13 }),
         "the box starts around the name itself: {prepared}"
     );
-    assert_eq!(prepared["result"]["end"], json!({ "line": 2, "character": 22 }), "{prepared}");
+    assert_eq!(
+        prepared["result"]["end"],
+        json!({ "line": 2, "character": 22 }),
+        "{prepared}"
+    );
 
     let renamed = server.request(
         300,
@@ -1720,7 +1745,9 @@ fn a_macro_is_renamed_everywhere_and_an_ordinary_name_is_refused() {
         .collect();
     assert_eq!(edits.len(), 3, "and one edit in each: {renamed}");
     assert!(
-        edits.iter().all(|edit| edit["newText"] == json!("MAX_ENTRIES")),
+        edits
+            .iter()
+            .all(|edit| edit["newText"] == json!("MAX_ENTRIES")),
         "every edit writes the new name: {renamed}"
     );
     let definition_edit = changes
@@ -1852,9 +1879,13 @@ fn a_selection_expands_one_rung_at_a_time() {
     while let Some(range) = current {
         rungs.push((
             range["range"]["start"]["line"].as_u64().unwrap_or_default(),
-            range["range"]["start"]["character"].as_u64().unwrap_or_default(),
+            range["range"]["start"]["character"]
+                .as_u64()
+                .unwrap_or_default(),
             range["range"]["end"]["line"].as_u64().unwrap_or_default(),
-            range["range"]["end"]["character"].as_u64().unwrap_or_default(),
+            range["range"]["end"]["character"]
+                .as_u64()
+                .unwrap_or_default(),
         ));
         current = range.get("parent").filter(|parent| !parent.is_null());
     }
@@ -1886,7 +1917,8 @@ fn a_selection_expands_one_rung_at_a_time() {
 }
 
 /// The workspace-symbol fixture: a class in a namespace, in a header — and the client opens only the `.cpp`.
-const SEARCH_H: &str = "namespace ns {\nstruct Widget { int size; };\n}\nstruct WidgetRegistry { int count; };\n";
+const SEARCH_H: &str =
+    "namespace ns {\nstruct Widget { int size; };\n}\nstruct WidgetRegistry { int count; };\n";
 const SEARCH_CPP: &str = "#include \"search.h\"\nvoid f() { ns::Widget w; }\n";
 
 /// **A symbol in a file nobody opened is found by a project search.**
@@ -1970,20 +2002,26 @@ fn a_workspace_search_finds_a_symbol_in_a_file_nobody_opened() {
     assert_eq!(widget["kind"], json!(5), "a class: {widget}");
 
     // The **qualified** query finds the same class, and the member only when it is asked for by its owner.
-    let qualified = server.ask_until(200, |id| {
-        json!({ "id": id, "method": "workspace/symbol", "params": { "query": "Widget::si" } })
-    });
+    let qualified = server.ask_until(
+        200,
+        |id| json!({ "id": id, "method": "workspace/symbol", "params": { "query": "Widget::si" } }),
+    );
     let names: Vec<&str> = qualified["result"]
         .as_array()
         .into_iter()
         .flatten()
         .filter_map(|symbol| symbol["name"].as_str())
         .collect();
-    assert_eq!(names, vec!["size"], "`Widget::si` asks for the member: {qualified}");
+    assert_eq!(
+        names,
+        vec!["size"],
+        "`Widget::si` asks for the member: {qualified}"
+    );
 
-    let class_only = server.ask_until(300, |id| {
-        json!({ "id": id, "method": "workspace/symbol", "params": { "query": "ns::widget" } })
-    });
+    let class_only = server.ask_until(
+        300,
+        |id| json!({ "id": id, "method": "workspace/symbol", "params": { "query": "ns::widget" } }),
+    );
     let names: Vec<&str> = class_only["result"]
         .as_array()
         .into_iter()
@@ -2649,7 +2687,13 @@ fn hover_shows_the_documentation_and_refuses_a_plain_comment() {
         "with the declaration itself: {text}"
     );
 
-    let plain = hover_over(&mut server, 200, &main_uri, HOVER_CPP, "undocumented(int c);");
+    let plain = hover_over(
+        &mut server,
+        200,
+        &main_uri,
+        HOVER_CPP,
+        "undocumented(int c);",
+    );
     let text = plain["result"]["contents"]["value"]
         .as_str()
         .unwrap_or_else(|| panic!("a markdown answer was expected, got {plain}"));
@@ -2676,13 +2720,7 @@ fn hover_shows_the_documentation_and_refuses_a_plain_comment() {
 }
 
 /// A hover whose position is the first character of the line containing `needle`.
-fn hover_over(
-    server: &mut Server,
-    first_id: i64,
-    uri: &str,
-    fixture: &str,
-    needle: &str,
-) -> Value {
+fn hover_over(server: &mut Server, first_id: i64, uri: &str, fixture: &str, needle: &str) -> Value {
     let line = line_of(fixture, needle);
     let character = fixture
         .lines()
@@ -2822,10 +2860,16 @@ fn the_hints_survive_the_edit_that_asks_for_them() {
                 "params": { "textDocument": { "uri": main_uri }, "range": whole },
             })
         },
-        |answer| answer["result"].as_array().is_some_and(|hints| !hints.is_empty()),
+        |answer| {
+            answer["result"]
+                .as_array()
+                .is_some_and(|hints| !hints.is_empty())
+        },
     );
     assert!(
-        settled["result"].as_array().is_some_and(|hints| hints.len() == 1),
+        settled["result"]
+            .as_array()
+            .is_some_and(|hints| hints.len() == 1),
         "one argument that does not spell its parameter: {settled}"
     );
 
@@ -2846,9 +2890,9 @@ fn the_hints_survive_the_edit_that_asks_for_them() {
         "textDocument/inlayHint",
         json!({ "textDocument": { "uri": main_uri }, "range": whole }),
     );
-    let hints = after["result"].as_array().unwrap_or_else(|| {
-        panic!("**the hints were refused outright after an edit**: {after}")
-    });
+    let hints = after["result"]
+        .as_array()
+        .unwrap_or_else(|| panic!("**the hints were refused outright after an edit**: {after}"));
     assert_eq!(
         hints.len(),
         1,
@@ -2962,7 +3006,8 @@ fn parameter_names_are_drawn_at_the_arguments() {
 /// mistake: a name with one declaration still answers `Scalar`, so nothing about the common case changes.
 #[test]
 fn an_overload_set_answers_with_every_location() {
-    const OVERLOADS_H: &str = "int parse(int value);\nint parse(const char* text);\nint parse(double value);\n";
+    const OVERLOADS_H: &str =
+        "int parse(int value);\nint parse(const char* text);\nint parse(double value);\n";
     const OVERLOADS_CPP: &str = "#include \"overloads.h\"\nint f() { return parse(1); }\n";
 
     let project = Project::new("definition-overloads");
@@ -3282,8 +3327,16 @@ fn what_the_popups_look_like() {
 
     // (line, character, what is being hovered) — 0-based, as a client sends them.
     let asked: [(u64, u64, &str); 5] = [
-        (3, 9, "the local `n`, whose type is an `auto` the file wrote"),
-        (4, 4, "`Box` in `Box<int> b;` — a class template from a header"),
+        (
+            3,
+            9,
+            "the local `n`, whose type is an `auto` the file wrote",
+        ),
+        (
+            4,
+            4,
+            "`Box` in `Box<int> b;` — a class template from a header",
+        ),
         (5, 6, "the member `v` of that class template"),
         (4, 13, "the variable `b`, whose type is that class template"),
         (1, 4, "`main` itself, a function this file defines"),
@@ -3502,10 +3555,9 @@ fn what_the_completion_answers_here() {
         let line = line.trim_end();
         for (column, _) in line.char_indices() {
             let at = &line[..column];
-            let ends = at
-                .chars()
-                .last()
-                .is_some_and(|last| last.is_alphanumeric() || last == '_' || last == ':' || last == '.');
+            let ends = at.chars().last().is_some_and(|last| {
+                last.is_alphanumeric() || last == '_' || last == ':' || last == '.'
+            });
             if ends {
                 asked.push((number as u64, column as u64));
             }
@@ -3528,8 +3580,27 @@ fn what_the_completion_answers_here() {
             Value::Object(object) => object["items"].as_array().map(Vec::len).unwrap_or(0),
             _ => 0,
         };
-        let first: Vec<&str> = match &answer["result"] { serde_json::Value::Array(items) => items.iter().filter_map(|i| i["label"].as_str()).take(8).collect(), serde_json::Value::Object(o) => o["items"].as_array().map(|a| a.iter().filter_map(|i| i["label"].as_str()).take(8).collect()).unwrap_or_default(), _ => Vec::new() };
-        println!("{number:>3}: {:<40} -> {items} item(s): {first:?}", body.trim());
+        let first: Vec<&str> = match &answer["result"] {
+            serde_json::Value::Array(items) => items
+                .iter()
+                .filter_map(|i| i["label"].as_str())
+                .take(8)
+                .collect(),
+            serde_json::Value::Object(o) => o["items"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|i| i["label"].as_str())
+                        .take(8)
+                        .collect()
+                })
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        };
+        println!(
+            "{number:>3}: {:<40} -> {items} item(s): {first:?}",
+            body.trim()
+        );
     }
 }
 /// **A probe, not a test: what does the real project's server do to the CPU after it has settled?**
@@ -3597,7 +3668,11 @@ fn probe_the_cpu_shape_of_the_real_project() {
 
     let mut repeated: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
     for line in &lines {
-        let shape = line.split_whitespace().take(8).collect::<Vec<_>>().join(" ");
+        let shape = line
+            .split_whitespace()
+            .take(8)
+            .collect::<Vec<_>>()
+            .join(" ");
         *repeated.entry(shape).or_insert(0) += 1;
     }
     let mut worst: Vec<(String, usize)> = repeated.into_iter().collect();
@@ -3607,5 +3682,3 @@ fn probe_the_cpu_shape_of_the_real_project() {
         println!("  {count:>7} x {shape}");
     }
 }
-
-

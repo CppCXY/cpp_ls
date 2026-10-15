@@ -30,12 +30,12 @@
 
 use std::path::Path;
 
+use crate::ProjectIndex;
 use crate::condition::{Lookup, MacroValues};
 use crate::guard::Visibility;
 use crate::include::config::CompilerConfig;
 use crate::include::graph::Marked;
 use crate::summary::{FactGuard, FileSummary, MacroFact, MacroKind};
-use crate::ProjectIndex;
 
 /// The macros in force at one point in one file, as far as a query can know.
 ///
@@ -582,7 +582,10 @@ mod tests {
         let summary = index
             .summary(Path::new("/p/widget.h"))
             .expect("the file is indexed");
-        let include = summary.includes.first().expect("the fixture includes a file");
+        let include = summary
+            .includes
+            .first()
+            .expect("the fixture includes a file");
 
         (include.guard, include.range.start_offset)
     }
@@ -643,7 +646,10 @@ mod tests {
         let path = Path::new("/p/widget.h");
 
         let (index, guard, offset) = guard_of(source, &["X"], "INNER");
-        assert_eq!(visibility_at(&index, path, guard, offset), Visibility::Active);
+        assert_eq!(
+            visibility_at(&index, path, guard, offset),
+            Visibility::Active
+        );
 
         let (index, guard, offset) = guard_of(source, &[], "INNER");
         assert_eq!(
@@ -719,4 +725,3 @@ mod tests {
         );
     }
 }
-

@@ -33,20 +33,19 @@
 //! rest of the crate follows, and the reason [`IncludeFact`](crate::summary::IncludeFact) carries a guard at all.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
-use std::sync::Arc;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use cpp_parser::CppSyntaxKind;
 
 use super::names::{NameIndex, Posting};
+use crate::file::paths::normalize_path;
 use crate::guard::Visibility;
 use crate::include::graph::Marked;
-use crate::file::paths::normalize_path;
+use crate::preprocess::directive::IncludeForm;
 use crate::sema::types::{Type, TypeBindings, parse_type_spelling, type_of_declaration};
 use crate::summary::{DeclFact, DeclKind, FactGuard, FileSummary, MacroFact};
-use crate::preprocess::directive::IncludeForm;
 use crate::symbol::{Known, UnknownReason};
-
 
 /// How many files a visibility walk will cross before giving up.
 ///
@@ -240,7 +239,8 @@ pub fn member_definitions_across_files(
         return Known::Unknown(UnknownReason::UnparsableName);
     }
 
-    let Known::Yes((object_type, _)) = type_of_expression(index, declaring, scopes, root, path, &access.object, 0)
+    let Known::Yes((object_type, _)) =
+        type_of_expression(index, declaring, scopes, root, path, &access.object, 0)
     else {
         let Known::Unknown(reason) =
             type_of_expression(index, declaring, scopes, root, path, &access.object, 0)
@@ -256,14 +256,18 @@ pub fn member_definitions_across_files(
     // (a member of a `Widget&` is a member of `Widget`); a pointer is **not**, because reaching the pointee is a `*`
     // the caller writes and this query cannot take for it.
     let Some(class) = member_access_class(&object_type) else {
-        return Known::Unknown(UnknownReason::UnknownType(Box::from(object_type.to_string())));
+        return Known::Unknown(UnknownReason::UnknownType(Box::from(
+            object_type.to_string(),
+        )));
     };
 
     let members = match members_of(index, scopes, root, path, &class) {
         Known::Yes(members) => members,
         Known::Unknown(reason) => return Known::Unknown(reason),
         Known::No => {
-            return Known::Unknown(UnknownReason::UnknownType(Box::from(object_type.to_string())))
+            return Known::Unknown(UnknownReason::UnknownType(Box::from(
+                object_type.to_string(),
+            )));
         }
     };
 
@@ -351,12 +355,13 @@ pub fn definitions_across_files(
         Known::Yes(binding) => {
             // The scope the answer was reached *through*, when the cursor wrote one: `ns` for `ns::Widget`. A bare
             // name has none, and a leading `::` means the global name space, which is no scope at all.
-            let scope = crate::sema::resolve::qualified_name_at(root, offset).and_then(|(written, _)| {
-                written
-                    .rsplit_once("::")
-                    .map(|(scope, _)| scope.trim_start_matches("::").to_string())
-                    .filter(|scope| !scope.is_empty())
-            });
+            let scope =
+                crate::sema::resolve::qualified_name_at(root, offset).and_then(|(written, _)| {
+                    written
+                        .rsplit_once("::")
+                        .map(|(scope, _)| scope.trim_start_matches("::").to_string())
+                        .filter(|scope| !scope.is_empty())
+                });
 
             // A definition answer can be a *local*: the cursor is inside the same body the name was declared in,
             // which is exactly when `definition_at` resolves it here rather than sending it to the index. Saying
@@ -594,7 +599,7 @@ pub struct ProjectIndex {
     visibility_answers: std::sync::Mutex<HashMap<(String, u32), crate::Visibility>>,
 }
 
-    /// Which member a `obj.member` or `ptr->member` at `offset` names.
+/// Which member a `obj.member` or `ptr->member` at `offset` names.
 ///
 /// The first query in this crate that needs a **type**: `size` in `widget.size` is not looked up among the names
 /// in scope, it is looked up *in the type of `widget`*. So the answer is built in three steps, each of which
@@ -641,7 +646,8 @@ pub fn member_across_files(
     }
 
     // The type of the object, which is what decides which class the member is looked for in.
-    let Known::Yes((written, _)) = type_of_expression(index, declaring, scopes, root, path, &access.object, 0)
+    let Known::Yes((written, _)) =
+        type_of_expression(index, declaring, scopes, root, path, &access.object, 0)
     else {
         let Known::Unknown(reason) =
             type_of_expression(index, declaring, scopes, root, path, &access.object, 0)
@@ -817,9 +823,9 @@ pub(crate) fn classes_the_cursor_is_in(
         .scope_chain(innermost)
         .into_iter()
         .filter(|scope| {
-            scopes
-                .scope(*scope)
-                .is_some_and(|data| matches!(data.kind, crate::ScopeKind::Class | crate::ScopeKind::Enum))
+            scopes.scope(*scope).is_some_and(|data| {
+                matches!(data.kind, crate::ScopeKind::Class | crate::ScopeKind::Enum)
+            })
         })
         .filter_map(|scope| scopes.qualification_prefix_of(scope))
         .collect();
@@ -833,7 +839,10 @@ pub(crate) fn classes_the_cursor_is_in(
         let mut next: Vec<String> = Vec::new();
 
         for class in &level {
-            for base in bases_of(index, scopes, root, path, class).value().unwrap_or_default() {
+            for base in bases_of(index, scopes, root, path, class)
+                .value()
+                .unwrap_or_default()
+            {
                 if !classes.contains(&base) {
                     classes.push(base.clone());
                     next.push(base);
@@ -1040,9 +1049,11 @@ fn members_of_inner(
             }));
 
             match bases_of(index, scopes, root, path, &base) {
-                Known::Yes(further) => {
-                    next.extend(further.into_iter().map(|base_of_base| (base_of_base, base.clone())))
-                }
+                Known::Yes(further) => next.extend(
+                    further
+                        .into_iter()
+                        .map(|base_of_base| (base_of_base, base.clone())),
+                ),
                 Known::Unknown(reason) => list.unlisted.push(UnlistedBase {
                     spelling: base,
                     reason,
@@ -1297,11 +1308,14 @@ pub fn member_completions_at(
     //
     // Two readers of one fact is the shape of every bug in this area; the completion layer owns this question, and
     // every consumer of it — this query, `Session::member_completions`, the log line — goes through it.
-    let crate::completion::CompletionContext::Member(access) = crate::completion::context_at(root, offset) else {
+    let crate::completion::CompletionContext::Member(access) =
+        crate::completion::context_at(root, offset)
+    else {
         return Known::Unknown(UnknownReason::UnparsableName);
     };
 
-    let written = match type_of_expression(index, declaring, scopes, root, path, &access.object, 0) {
+    let written = match type_of_expression(index, declaring, scopes, root, path, &access.object, 0)
+    {
         Known::Yes((written, _)) => written,
         Known::Unknown(reason) => return Known::Unknown(reason),
         // The only `No` the type layer produces is "nothing says what this is", which is the same answer as an
@@ -1319,7 +1333,8 @@ pub fn member_completions_at(
 
     match members_of(index, scopes, root, path, &class) {
         Known::Yes(mut members) => {
-            let hidden_by_access = offerable_members(index, scopes, root, path, offset, &mut members);
+            let hidden_by_access =
+                offerable_members(index, scopes, root, path, offset, &mut members);
 
             Known::Yes(MemberCompletions {
                 class: class.to_string(),
@@ -1481,7 +1496,6 @@ pub fn name_completions_at(
     path: &Path,
     offset: usize,
 ) -> Known<NameCompletions> {
-
     let Some(position) = crate::sema::resolve::name_position_at(root, offset) else {
         return Known::Unknown(UnknownReason::UnparsableName);
     };
@@ -1502,7 +1516,14 @@ pub fn name_completions_at(
             Known::No => return Known::Unknown(UnknownReason::UnparsableName),
         }
     } else {
-        match names_in_a_scope(index, scopes, root, path, &position.scope, &position.written) {
+        match names_in_a_scope(
+            index,
+            scopes,
+            root,
+            path,
+            &position.scope,
+            &position.written,
+        ) {
             Known::Yes(names) => names,
             Known::Unknown(reason) => return Known::Unknown(reason),
             Known::No => return Known::Unknown(UnknownReason::UnparsableName),
@@ -1622,7 +1643,14 @@ fn visible_names(
     // The global name space: the buffer's own file scope, and every file it includes. One step past the chain, so
     // that the depth stays an ordinary count of how far the lookup walked — the file scope is a scope like any
     // other, it is just not one the chain walked through.
-    names.extend(global_offers(index, scopes, root, path, chain.len(), written));
+    names.extend(global_offers(
+        index,
+        scopes,
+        root,
+        path,
+        chain.len(),
+        written,
+    ));
 
     sort_and_hide(&mut names);
     Known::Yes(names)
@@ -1666,7 +1694,9 @@ fn names_in_a_scope(
     let spelling = scope.trim_start_matches("::");
 
     let in_the_tree = scopes.scope_with_qualified_name(spelling);
-    let kind = in_the_tree.and_then(|id| scopes.scope(id)).map(|scope| scope.kind);
+    let kind = in_the_tree
+        .and_then(|id| scopes.scope(id))
+        .map(|scope| scope.kind);
 
     let mut names: Vec<OfferedName> = Vec::new();
 
@@ -1692,10 +1722,7 @@ fn names_in_a_scope(
                     0,
                 ));
             }
-            names.extend(offered(
-                declarations_in(spelling, index, path, written),
-                0,
-            ));
+            names.extend(offered(declarations_in(spelling, index, path, written), 0));
         }
         // Not in the buffer at all: the project's answer, or nothing.
         None => {
@@ -1829,7 +1856,8 @@ fn names_in_a_scope(
                 let named = named.as_ref();
                 if crate::probes::members() {
                     eprintln!("    names_a_type({spelling}) -> alias resolved to {named:?}");
-                }                match names_of_a_class(index, scopes, root, path, named) {
+                }
+                match names_of_a_class(index, scopes, root, path, named) {
                     Known::Yes(members) => names.extend(offered(members, 0)),
                     Known::Unknown(reason) => return Known::Unknown(reason),
                     Known::No => {}
@@ -1840,7 +1868,9 @@ fn names_in_a_scope(
                     // Empty is either "declared and empty" or "no such scope", and the difference is the *name* —
                     // the same distinction `direct_members` makes, for the same reason.
                     return match index.definition(spelling, path) {
-                        Known::Yes(found) if found.fact.qualified_name() == spelling => Known::Yes(Vec::new()),
+                        Known::Yes(found) if found.fact.qualified_name() == spelling => {
+                            Known::Yes(Vec::new())
+                        }
                         Known::Unknown(reason) => Known::Unknown(reason),
                         _ => Known::Unknown(UnknownReason::NotDeclaredHere(Box::from(spelling))),
                     };
@@ -1877,7 +1907,8 @@ fn names_in_a_scope(
 /// In practice every binding here is the buffer's own — `build_scopes` walks one file's tree, and a name reached
 /// through an include is a [`NameProvenance::DirectInclude`] fact from the index rather than a binding — so this is
 /// the guard that keeps the rule from being wrong if that ever changes.
-fn declared_above(candidate: &Candidate, offset: usize, in_this_file: &str) -> bool {    if candidate.file != Path::new(in_this_file) {
+fn declared_above(candidate: &Candidate, offset: usize, in_this_file: &str) -> bool {
+    if candidate.file != Path::new(in_this_file) {
         return true;
     }
 
@@ -2046,7 +2077,12 @@ fn declarations_in_scope(
             Candidate::new(
                 declaration.file.clone(),
                 declaration.fact.clone(),
-                provenance_of(index, visible_from, declaration.visibility, &declaration.file),
+                provenance_of(
+                    index,
+                    visible_from,
+                    declaration.visibility,
+                    &declaration.file,
+                ),
             )
         })
         .collect()
@@ -2140,7 +2176,8 @@ fn names_of_a_class(
                     // A class's own members are reachable from a cursor inside the class without a qualifier, and
                     // they are ranked as what they are — the nearest thing there is, beside a local. Which is why
                     // the provenance is `Scope` and the *depth* carries the inheritance: see `Score::LOCAL`.
-                    let mut candidate = Candidate::new(member.file, member.fact, NameProvenance::Scope);
+                    let mut candidate =
+                        Candidate::new(member.file, member.fact, NameProvenance::Scope);
                     candidate.steps = member.depth;
                     candidate
                 })
@@ -2295,8 +2332,8 @@ fn new_expression_allocates(expression: &cpp_parser::CppSyntaxNode) -> Option<St
 /// than read off a declaration, which is a different and much larger problem — and answering `Unknown` is what
 /// keeps this layer from being wrong in a way a consumer cannot see.
 pub(crate) fn type_of_expression(
-      index: &ProjectIndex,
-      declaring: &mut dyn FnMut(&Path) -> Option<crate::FileView>,
+    index: &ProjectIndex,
+    declaring: &mut dyn FnMut(&Path) -> Option<crate::FileView>,
     scopes: &crate::ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
@@ -2330,16 +2367,26 @@ pub(crate) fn type_of_expression(
         .children_with_tokens()
         .filter_map(|element| element.into_token())
         .map(|token| cpp_parser::CppTokenKind::from(token.kind()))
-        .find(|kind| !matches!(kind, cpp_parser::CppTokenKind::Whitespace | cpp_parser::CppTokenKind::Newline))
+        .find(|kind| {
+            !matches!(
+                kind,
+                cpp_parser::CppTokenKind::Whitespace | cpp_parser::CppTokenKind::Newline
+            )
+        })
     {
-        let literal = match kind {
-            cpp_parser::CppTokenKind::IntegerLiteral | cpp_parser::CppTokenKind::CharLiteral => Some("int"),
-            cpp_parser::CppTokenKind::FloatingLiteral => Some("double"),
-            cpp_parser::CppTokenKind::BoolLiteral | cpp_parser::CppTokenKind::TrueKeyword | cpp_parser::CppTokenKind::FalseKeyword => Some("bool"),
-            cpp_parser::CppTokenKind::StringLiteral => Some("const char*"),
-            cpp_parser::CppTokenKind::NullptrLiteral | cpp_parser::CppTokenKind::NullptrKeyword => Some("nullptr_t"),
-            _ => None,
-        };
+        let literal =
+            match kind {
+                cpp_parser::CppTokenKind::IntegerLiteral
+                | cpp_parser::CppTokenKind::CharLiteral => Some("int"),
+                cpp_parser::CppTokenKind::FloatingLiteral => Some("double"),
+                cpp_parser::CppTokenKind::BoolLiteral
+                | cpp_parser::CppTokenKind::TrueKeyword
+                | cpp_parser::CppTokenKind::FalseKeyword => Some("bool"),
+                cpp_parser::CppTokenKind::StringLiteral => Some("const char*"),
+                cpp_parser::CppTokenKind::NullptrLiteral
+                | cpp_parser::CppTokenKind::NullptrKeyword => Some("nullptr_t"),
+                _ => None,
+            };
         if let Some(spelled) = literal {
             // **Parsed, not named.** `Type::named("int")` is a type whose *name* is `int` — a class as far as every
             // later question is concerned — and the same for `const char*`. Measured: a string literal came back as
@@ -2349,7 +2396,10 @@ pub(crate) fn type_of_expression(
             // `parse_type_spelling` is the crate's own reader for a written type: it knows the builtins, the
             // qualifiers and the declarators, and it is the same function a declaration's own spelling goes through
             // — so a literal's type and a declared type are built by one implementation.
-            return Known::Yes((crate::sema::types::parse_type_spelling(spelled), path.to_path_buf()));
+            return Known::Yes((
+                crate::sema::types::parse_type_spelling(spelled),
+                path.to_path_buf(),
+            ));
         }
     }
 
@@ -2376,7 +2426,9 @@ pub(crate) fn type_of_expression(
     // answer into an uncertain one.
     if cpp_parser::CppSyntaxKind::from(expression.kind()) == cpp_parser::CppSyntaxKind::NewExpr {
         return match new_expression_allocates(expression) {
-            Some(allocated) => Known::Yes((Type::named(format!("{allocated}*")), path.to_path_buf())),
+            Some(allocated) => {
+                Known::Yes((Type::named(format!("{allocated}*")), path.to_path_buf()))
+            }
             None => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
         };
     }
@@ -2390,13 +2442,15 @@ pub(crate) fn type_of_expression(
     // `std::cin`, `ns::make()` — measured, `a_qualified_name_in_this_file_has_the_type_its_declaration_wrote`.
     if writes_a_name(written) {
         return match declaration_of_expression(index, scopes, root, path, expression) {
-            Known::Yes(named) => match declared_type(index, declaring, scopes, root, path, &named, depth) {
-                Known::Yes(type_of) => Known::Yes((type_of, named.file(path))),
-                Known::Unknown(reason) => Known::Unknown(reason),
-                // The declaration is a function, a class or an alias: none of them has a type *as a name*, which
-                // is the distinction `DeclFact::returns` exists for.
-                Known::No => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
-            },
+            Known::Yes(named) => {
+                match declared_type(index, declaring, scopes, root, path, &named, depth) {
+                    Known::Yes(type_of) => Known::Yes((type_of, named.file(path))),
+                    Known::Unknown(reason) => Known::Unknown(reason),
+                    // The declaration is a function, a class or an alias: none of them has a type *as a name*, which
+                    // is the distinction `DeclFact::returns` exists for.
+                    Known::No => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
+                }
+            }
             Known::Unknown(reason) => Known::Unknown(reason),
             Known::No => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
         };
@@ -2406,7 +2460,8 @@ pub(crate) fn type_of_expression(
     // `auto w = Widget{}` a declaration of a `Widget`. Only the first child is read, and only when it *names* a
     // type: `{1, 2}` names nothing, and a braced list of values is a different thing that this layer does not
     // deduce (C++ deduces it as `std::initializer_list`, which is a library type, not a language one).
-    if cpp_parser::CppSyntaxKind::from(expression.kind()) == cpp_parser::CppSyntaxKind::InitListExpr {
+    if cpp_parser::CppSyntaxKind::from(expression.kind()) == cpp_parser::CppSyntaxKind::InitListExpr
+    {
         let Some(first) = expression.children().next() else {
             return Known::Unknown(UnknownReason::UnknownType(Box::from(written)));
         };
@@ -2425,7 +2480,6 @@ pub(crate) fn type_of_expression(
         };
     }
 
-
     // A **call**: what the callee returns, or a temporary of the class it names.
     if cpp_parser::CppSyntaxKind::from(expression.kind()) == cpp_parser::CppSyntaxKind::CallExpr {
         return type_of_a_call(index, declaring, scopes, root, path, expression);
@@ -2440,9 +2494,9 @@ pub(crate) fn type_of_expression(
     // of them a cast — `UnknownType("static_cast<size_t>")`, `UnknownType("const_cast<char*>")` — with the cast
     // expression already in the tree and nothing asking it.
     if cpp_parser::CppSyntaxKind::from(expression.kind()) == cpp_parser::CppSyntaxKind::CastExpr {
-        let target = expression.children().find(|child| {
-            CppSyntaxKind::from(child.kind()) == CppSyntaxKind::TypeId
-        });
+        let target = expression
+            .children()
+            .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::TypeId);
         return match target {
             Some(target) => {
                 let written = target.text().to_string();
@@ -2463,7 +2517,9 @@ pub(crate) fn type_of_expression(
     // stop one level above the answer — which is exactly where it used to stop.
     if cpp_parser::CppSyntaxKind::from(expression.kind()) == cpp_parser::CppSyntaxKind::ParenExpr {
         return match expression.children().next() {
-            Some(inner) => type_of_expression(index, declaring, scopes, root, path, &inner, depth + 1),
+            Some(inner) => {
+                type_of_expression(index, declaring, scopes, root, path, &inner, depth + 1)
+            }
             None => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
         };
     }
@@ -2492,8 +2548,10 @@ pub(crate) fn type_of_expression(
         }
 
         let left_type = type_of_expression(index, declaring, scopes, root, path, &left, depth + 1);
-        if matches!(operator.as_str(), "=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>=")
-        {
+        if matches!(
+            operator.as_str(),
+            "=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>="
+        ) {
             return left_type;
         }
 
@@ -2540,7 +2598,8 @@ pub(crate) fn type_of_expression(
     // A **dereference**: `*p` has the type `p` points at. Nothing is looked up — the pointer's own declaration
     // already spells the pointee, and the `*` is arithmetic on that spelling.
     if let Some(operand) = unary_operand_with(expression, "*") {
-        let operand_type = type_of_expression(index, declaring, scopes, root, path, &operand, depth + 1);
+        let operand_type =
+            type_of_expression(index, declaring, scopes, root, path, &operand, depth + 1);
         return match operand_type {
             // **A `*` is the type model's own operation.** `Widget**` gives `Widget*`, an array gives its
             // element, and a class with an `operator*` gives nothing — that one needs the class's members and
@@ -2560,7 +2619,8 @@ pub(crate) fn type_of_expression(
     // so that the two operators are one rule rather than one rule and one hole: `(&r)->size` is a member access
     // whose object is this, and the `->` already knows what to do with a pointer.
     if let Some(operand) = unary_operand_with(expression, "&") {
-        let operand_type = type_of_expression(index, declaring, scopes, root, path, &operand, depth + 1);
+        let operand_type =
+            type_of_expression(index, declaring, scopes, root, path, &operand, depth + 1);
         return match operand_type {
             Known::Yes((type_of, file)) => {
                 // `&x` is a pointer to `x`, and the decay first is what makes `&arr` a pointer to the array's
@@ -2593,11 +2653,15 @@ pub(crate) fn type_of_expression(
         let (Some(then_arm), Some(else_arm)) = (arms.get(1), arms.get(2)) else {
             return Known::Unknown(UnknownReason::UnknownType(Box::from(written)));
         };
-        let then_type = type_of_expression(index, declaring, scopes, root, path, then_arm, depth + 1);
-        let else_type = type_of_expression(index, declaring, scopes, root, path, else_arm, depth + 1);
+        let then_type =
+            type_of_expression(index, declaring, scopes, root, path, then_arm, depth + 1);
+        let else_type =
+            type_of_expression(index, declaring, scopes, root, path, else_arm, depth + 1);
 
         return match (then_type, else_type) {
-            (Known::Yes((then_type, file)), Known::Yes((else_type, _))) if then_type == else_type => {
+            (Known::Yes((then_type, file)), Known::Yes((else_type, _)))
+                if then_type == else_type =>
+            {
                 Known::Yes((then_type, file))
             }
             (Known::Yes(_), Known::Yes(_)) => {
@@ -2633,19 +2697,33 @@ pub(crate) fn type_of_expression(
 
     // A member access: the type of the member, which is a fact on its declaration.
     if let Some(inner) = crate::sema::resolve::member_access_of(expression) {
-        let Known::Yes((inner_type, declared_in)) =
-            type_of_expression(index, declaring, scopes, root, path, &inner.object, depth + 1)
-        else {
-            let Known::Unknown(reason) =
-                type_of_expression(index, declaring, scopes, root, path, &inner.object, depth + 1)
-            else {
+        let Known::Yes((inner_type, declared_in)) = type_of_expression(
+            index,
+            declaring,
+            scopes,
+            root,
+            path,
+            &inner.object,
+            depth + 1,
+        ) else {
+            let Known::Unknown(reason) = type_of_expression(
+                index,
+                declaring,
+                scopes,
+                root,
+                path,
+                &inner.object,
+                depth + 1,
+            ) else {
                 unreachable!("the first match established that this is an `Unknown`")
             };
             return Known::Unknown(reason);
         };
 
         let Some(class) = member_access_class(&inner_type) else {
-            return Known::Unknown(UnknownReason::UnknownType(Box::from(inner_type.to_string())));
+            return Known::Unknown(UnknownReason::UnknownType(Box::from(
+                inner_type.to_string(),
+            )));
         };
 
         // **The class as the declaration spelled it, and then as the name that spelling resolves to.** A type
@@ -2670,8 +2748,10 @@ pub(crate) fn type_of_expression(
         // The arguments as **spellings**, which is what a pattern comparison is: a pattern is what the other
         // declaration wrote, and two spellings of one type would not compare equal. The direction this rule fails in
         // is "no match", which keeps an answer rather than removing one.
-        let written_arguments: Vec<String> =
-            arguments.iter().map(|argument| argument.to_string()).collect();
+        let written_arguments: Vec<String> = arguments
+            .iter()
+            .map(|argument| argument.to_string())
+            .collect();
         let found = member_fact(
             index,
             scopes,
@@ -2765,9 +2845,7 @@ pub(crate) fn type_of_expression(
 
         // No `type_of`: the declaration is a function (or a class). For a function being **called**, the answer is
         // what the call has; for one merely named, there is no type and saying so is the honest answer.
-        if being_called
-            && let Some(returns) = what_a_call_has_in(&fact)
-        {
+        if being_called && let Some(returns) = what_a_call_has_in(&fact) {
             return Known::Yes(finish_a_nested_name(
                 index,
                 scopes,
@@ -2797,11 +2875,7 @@ pub(crate) fn type_of_expression(
 /// `None` when there is nothing visible, when any candidate is a function or a class (neither has a type *as a
 /// name* — see [`DeclFact::returns`]), or when two candidates spell the type differently. A disagreement is
 /// exactly what `Ambiguous` was about, so it is not resolved here.
-fn agreeing_type(
-    index: &ProjectIndex,
-    path: &Path,
-    name: &str,
-) -> Option<(DeclFact, PathBuf)> {
+fn agreeing_type(index: &ProjectIndex, path: &Path, name: &str) -> Option<(DeclFact, PathBuf)> {
     let candidates = index.files_declaring(name, path);
     let mut agreeing: Option<(DeclFact, PathBuf)> = None;
 
@@ -2826,7 +2900,8 @@ fn agreeing_type(
         match &agreeing {
             None => agreeing = Some((found.fact.clone(), found.file.clone())),
             Some((first, _)) if first.type_of.as_deref() == Some(type_of.as_str()) => {}
-            Some((first, _)) if first.kind == crate::DeclKind::Type && first.qualified_name() == type_of => {}
+            Some((first, _))
+                if first.kind == crate::DeclKind::Type && first.qualified_name() == type_of => {}
             Some(_) => return None,
         }
     }
@@ -2932,11 +3007,9 @@ fn subscript_base(node: &cpp_parser::CppSyntaxNode) -> Option<cpp_parser::CppSyn
         return None;
     }
 
-    let has_brackets = node.children_with_tokens().any(|element| {
-        element
-            .as_token()
-            .is_some_and(|token| token.text() == "[")
-    });
+    let has_brackets = node
+        .children_with_tokens()
+        .any(|element| element.as_token().is_some_and(|token| token.text() == "["));
     if !has_brackets {
         return None;
     }
@@ -3025,7 +3098,8 @@ impl NamedDeclaration {
             // file that is the better source by a wide margin — `const Widget* const p` is a shape with two
             // qualifier positions, and no parser of the *spelling* can put them back where the file had them.
             NamedDeclaration::Here(binding) => {
-                let declarator = crate::sema::types::declarator_declaring(root, binding.name_range)?;
+                let declarator =
+                    crate::sema::types::declarator_declaring(root, binding.name_range)?;
                 let specifiers = declarator.ancestors().find_map(|node| {
                     node.children().find(|child| {
                         CppSyntaxKind::from(child.kind()) == CppSyntaxKind::DeclSpecifierSeq
@@ -3096,10 +3170,7 @@ impl NamedDeclaration {
         match self {
             NamedDeclaration::Here(binding) => {
                 if binding.kind == crate::BindingKind::Class {
-                    return binding
-                        .name
-                        .identifier_text()
-                        .map(Type::named);
+                    return binding.name.identifier_text().map(Type::named);
                 }
                 // **A body that `if constexpr` decides, read again with what the call site knows.**
                 //
@@ -3108,12 +3179,15 @@ impl NamedDeclaration {
                 // template parameter has no single answer when the index is made. Here both halves exist, and the
                 // body is in this very tree, so no other file has to be read: the branch whose condition holds under
                 // the substitutions is the only one instantiated, and `_It + 0` becomes `int* + 0`.
-                let names_for_the_call = crate::sema::declarations::declared_template_parameters_of(root, binding);
+                let names_for_the_call =
+                    crate::sema::declarations::declared_template_parameters_of(root, binding);
                 let returns = match crate::sema::declarations::declared_returns_of(root, binding) {
                     Some(returns) => parse_type_spelling(&returns),
                     None => {
-                        let substitutions =
-                            crate::sema::types::TypeSubstitutions::new(&names_for_the_call, written_arguments);
+                        let substitutions = crate::sema::types::TypeSubstitutions::new(
+                            &names_for_the_call,
+                            written_arguments,
+                        );
                         let written = crate::sema::declarations::deduced_returns_of_substituted(
                             root,
                             binding.clone(),
@@ -3131,7 +3205,8 @@ impl NamedDeclaration {
                 // `size_type`. One question, two answers, and the difference was which of the two arms the lookup
                 // happened to land in. Measured on a fixture with both: the same-file call refused and the
                 // header's call deduced.
-                let names = crate::sema::declarations::declared_template_parameters_of(root, binding);
+                let names =
+                    crate::sema::declarations::declared_template_parameters_of(root, binding);
                 if names.is_empty() || written_arguments.is_empty() {
                     return Some(returns);
                 }
@@ -3157,7 +3232,10 @@ impl NamedDeclaration {
                 let returns = match what_a_call_has_in(fact) {
                     Some(returns) => returns,
                     None => {
-                        let substitutions = crate::sema::types::TypeSubstitutions::new(&fact.parameters, written_arguments);
+                        let substitutions = crate::sema::types::TypeSubstitutions::new(
+                            &fact.parameters,
+                            written_arguments,
+                        );
                         let Some(declared_in) = declaring(file.as_path()) else {
                             return None;
                         };
@@ -3191,8 +3269,10 @@ impl NamedDeclaration {
                     // same positional substitution a member's type already goes through. Measured on
                     // <vector>/<xutility>: 11 uto refusals were exactly this call, every one of them a return
                     // type that had been read and left unpaired.
-                    let substitutions =
-                        crate::sema::types::TypeSubstitutions::new(&fact.parameters, written_arguments);
+                    let substitutions = crate::sema::types::TypeSubstitutions::new(
+                        &fact.parameters,
+                        written_arguments,
+                    );
                     started.substituted(&substitutions)
                 };
 
@@ -3256,8 +3336,6 @@ impl NamedDeclaration {
     }
 }
 
-
-
 /// **A type that is still a member's name is followed to what that member declares** — one step at a time, with
 /// the class's own template pairing applied at each one.
 ///
@@ -3309,7 +3387,8 @@ fn finish_a_nested_name(
         }
         asked.push(nested.clone());
 
-        let Known::Yes((inner, inner_file)) = member_fact(index, scopes, root, path, class, &nested, None)
+        let Known::Yes((inner, inner_file)) =
+            member_fact(index, scopes, root, path, class, &nested, None)
         else {
             break;
         };
@@ -3626,7 +3705,6 @@ fn auto_substituted(written: &str, deduced: &Type) -> Option<String> {
     Some(type_of)
 }
 
-
 fn what_a_call_has_in(fact: &DeclFact) -> Option<Type> {
     match fact.kind {
         // `Widget()` is a temporary of `Widget`, so a call of a class has the class. `DeclKind::Type` is exactly
@@ -3654,7 +3732,6 @@ fn written_like_a_macro(word: &str) -> bool {
                 .chars()
                 .all(|character| !character.is_alphabetic() || character.is_uppercase()))
 }
-
 
 ///
 /// The test the type layer asks before it treats an expression as a name, and it is deliberately about the
@@ -3758,7 +3835,11 @@ fn deduce_the_parameters(
         let written_type = match words.len() {
             0 => continue,
             1 => words[0],
-            _ => &parameter[..parameter.rfind(words[words.len() - 1]).unwrap_or(parameter.len())],
+            _ => {
+                &parameter[..parameter
+                    .rfind(words[words.len() - 1])
+                    .unwrap_or(parameter.len())]
+            }
         };
         let written_type = written_type.trim();
         if written_type.is_empty() {
@@ -3929,21 +4010,22 @@ fn declaration_of_expression(
             }
 
             for candidate in candidates {
-                let found: Option<(crate::DeclFact, PathBuf)> = match index.definition(candidate, path) {
-                    Known::Yes(found) => Some((found.fact, found.file)),
-                    // **Several declarations of one name, and one type between them.** A name query answers
-                    // `Ambiguous` when more than one declaration is visible, and that is right for "where is this
-                    // declared" — but the question here is *what type it has*, and a type is not ambiguous when
-                    // every declaration spells it the same way. MSVC's `<iostream>` declares `cin` twice (once
-                    // plain, once as `_EXPORT_STD extern "C++" … istream cin;`), so `std::cin` was `Ambiguous` and
-                    // every use of it lost its type: `std::cin.read(…)`, `std::cin.eof()`, a completion after
-                    // `std::cin.` — measured, 8 offsets in one file. Candidates that **disagree**, and functions
-                    // (which have no type as a name), keep the `Unknown` that the name query gave.
-                    Known::Unknown(UnknownReason::Ambiguous(_)) => {
-                        agreeing_type(index, path, candidate)
-                    }
-                    Known::Unknown(_) | Known::No => None,
-                };
+                let found: Option<(crate::DeclFact, PathBuf)> =
+                    match index.definition(candidate, path) {
+                        Known::Yes(found) => Some((found.fact, found.file)),
+                        // **Several declarations of one name, and one type between them.** A name query answers
+                        // `Ambiguous` when more than one declaration is visible, and that is right for "where is this
+                        // declared" — but the question here is *what type it has*, and a type is not ambiguous when
+                        // every declaration spells it the same way. MSVC's `<iostream>` declares `cin` twice (once
+                        // plain, once as `_EXPORT_STD extern "C++" … istream cin;`), so `std::cin` was `Ambiguous` and
+                        // every use of it lost its type: `std::cin.read(…)`, `std::cin.eof()`, a completion after
+                        // `std::cin.` — measured, 8 offsets in one file. Candidates that **disagree**, and functions
+                        // (which have no type as a name), keep the `Unknown` that the name query gave.
+                        Known::Unknown(UnknownReason::Ambiguous(_)) => {
+                            agreeing_type(index, path, candidate)
+                        }
+                        Known::Unknown(_) | Known::No => None,
+                    };
 
                 if let Some((fact, file)) = found {
                     return Known::Yes(NamedDeclaration::Indexed(
@@ -4013,9 +4095,11 @@ fn type_of_a_call(
         crate::inlay::arguments_of(call)
             .unwrap_or_default()
             .iter()
-            .filter_map(|argument| match type_of_expression(index, declaring, scopes, root, path, argument, 0) {
-                Known::Yes((type_of, _)) => Some(type_of),
-                _ => None,
+            .filter_map(|argument| {
+                match type_of_expression(index, declaring, scopes, root, path, argument, 0) {
+                    Known::Yes((type_of, _)) => Some(type_of),
+                    _ => None,
+                }
             })
             .collect()
     } else {
@@ -4023,7 +4107,15 @@ fn type_of_a_call(
     };
 
     match declaration_of_a_callee(index, declaring, scopes, root, path, &callee, written) {
-        Known::Yes(named) => match named.what_a_call_has(index, declaring, scopes, root, path, &written_arguments, &argument_types) {
+        Known::Yes(named) => match named.what_a_call_has(
+            index,
+            declaring,
+            scopes,
+            root,
+            path,
+            &written_arguments,
+            &argument_types,
+        ) {
             Some(type_of) => Known::Yes((type_of, named.file(path))),
             None => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
         },
@@ -4084,11 +4176,12 @@ fn declaration_of_a_callee(
 ) -> Known<NamedDeclaration> {
     // A member call: the object's type, then the member's declaration.
     if let Some(access) = crate::sema::resolve::member_access_of(callee) {
-        let object = match type_of_expression(index, declaring, scopes, root, path, &access.object, 0) {
-            Known::Yes((type_of, _)) => type_of,
-            Known::Unknown(reason) => return Known::Unknown(reason),
-            Known::No => return Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
-        };
+        let object =
+            match type_of_expression(index, declaring, scopes, root, path, &access.object, 0) {
+                Known::Yes((type_of, _)) => type_of,
+                Known::Unknown(reason) => return Known::Unknown(reason),
+                Known::No => return Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
+            };
 
         let Some(class) = member_access_class(&object) else {
             return Known::Unknown(UnknownReason::UnknownType(Box::from(object.to_string())));
@@ -4102,8 +4195,10 @@ fn declaration_of_a_callee(
         let bindings = member_bindings(index, scopes, root, path, &class, &arguments);
 
         // The arguments as **spellings**, for the pattern rule — see [`direct_member`].
-        let written_arguments: Vec<String> =
-            arguments.iter().map(|argument| argument.to_string()).collect();
+        let written_arguments: Vec<String> = arguments
+            .iter()
+            .map(|argument| argument.to_string())
+            .collect();
         return match member_fact(
             index,
             scopes,
@@ -4380,7 +4475,9 @@ fn member_fact(
     if !class.contains("::") {
         let bare = without_arguments(class);
         if let Some(declared_in) = qualified_from_the_index(index, path, bare) {
-            if let Some(found) = direct_member(index, scopes, root, path, &declared_in, member, arguments) {
+            if let Some(found) =
+                direct_member(index, scopes, root, path, &declared_in, member, arguments)
+            {
                 return Known::Yes(found);
             }
         }
@@ -4414,7 +4511,9 @@ fn member_fact(
 
             // A base that cannot be resolved contributes nothing *and* stops nothing: whatever it might inherit
             // from is unknown, not absent, and the levels below it are still worth asking.
-            if let Some(member_found) = direct_member(index, scopes, root, path, &base, member, arguments) {
+            if let Some(member_found) =
+                direct_member(index, scopes, root, path, &base, member, arguments)
+            {
                 found.push(member_found);
             }
             next.extend(
@@ -4511,9 +4610,12 @@ fn class_template_parameters(
     class: &str,
 ) -> Vec<String> {
     if let Some(scope) = scopes.scope_with_qualified_name(class)
-        && let Some(binding) = scopes
-            .scope(scope)
-            .and_then(|scope| scope.bindings.iter().find(|binding| binding.kind == crate::BindingKind::Class))
+        && let Some(binding) = scopes.scope(scope).and_then(|scope| {
+            scope
+                .bindings
+                .iter()
+                .find(|binding| binding.kind == crate::BindingKind::Class)
+        })
     {
         let found = crate::sema::declarations::declared_template_parameters_of(root, binding);
         if !found.is_empty() {
@@ -4901,7 +5003,11 @@ fn direct_member(
 /// `true`: a class with no pattern is an ordinary class and matches any use of its name, and a use whose arguments
 /// could not be read is not evidence against the declaration. That direction is deliberate — this rule removes a
 /// **wrong** answer, and a spelling it could not read must not remove a right one.
-fn a_pattern_matches(pattern: Option<&str>, parameters: &[String], written: Option<&[String]>) -> bool {
+fn a_pattern_matches(
+    pattern: Option<&str>,
+    parameters: &[String],
+    written: Option<&[String]>,
+) -> bool {
     let (Some(pattern), Some(written)) = (pattern, written) else {
         return true;
     };
@@ -4982,7 +5088,11 @@ fn arguments_in_a_spelling(written: &str) -> Option<Vec<String>> {
 /// and a consumer showing a member list has nothing to gain from either, which is why neither was worth
 /// threading the tree through every query for. The same applies to the facts [`member_across_files`] returns
 /// from this path.
-fn fact_from_binding(root: &cpp_parser::CppSyntaxNode, class: &str, binding: &crate::Binding) -> DeclFact {
+fn fact_from_binding(
+    root: &cpp_parser::CppSyntaxNode,
+    class: &str,
+    binding: &crate::Binding,
+) -> DeclFact {
     DeclFact {
         name: binding
             .name
@@ -5035,10 +5145,16 @@ fn fact_from_binding(root: &cpp_parser::CppSyntaxNode, class: &str, binding: &cr
         },
         // **Who may name it**, read the same way and for the same reason: a member list built from the buffer is
         // what a completion after `.` offers, and a `private:` member must not be in it. See [DeclFact::access].
-        access: crate::sema::declarations::declared_access_at(root, binding.name_range.start_offset),
+        access: crate::sema::declarations::declared_access_at(
+            root,
+            binding.name_range.start_offset,
+        ),
         // …and whether an importer may, which is the same kind of question about the same position — see
         // [DeclFact::exported]. A buffer's file is very often the module interface unit being edited.
-        exported: crate::sema::declarations::declared_exported_at(root, binding.name_range.start_offset),
+        exported: crate::sema::declarations::declared_exported_at(
+            root,
+            binding.name_range.start_offset,
+        ),
         range: binding.range,
         name_range: binding.name_range,
         clean: true,
@@ -5087,14 +5203,12 @@ fn bases_of_inner(
         && let Some(data) = scopes.scope(scope)
         && let Some(parent) = data.parent
         && let Some(name) = class.rsplit("::").next()
-        && let Some(binding) = scopes
-            .scope(parent)
-            .and_then(|scope| {
-                scope
-                    .bindings
-                    .iter()
-                    .find(|binding| binding.name.identifier_text() == Some(name))
-            })
+        && let Some(binding) = scopes.scope(parent).and_then(|scope| {
+            scope
+                .bindings
+                .iter()
+                .find(|binding| binding.name.identifier_text() == Some(name))
+        })
     {
         return Known::Yes(lookup_names(&crate::sema::declarations::declared_bases_of(
             root, binding,
@@ -5259,17 +5373,14 @@ fn resolved_in_the_enclosing_scopes(
 fn enclosing_class(scopes: &crate::ScopeTree, offset: usize) -> Option<String> {
     let innermost = scopes.scope_at(offset)?;
 
-    scopes
-        .scope_chain(innermost)
-        .into_iter()
-        .find_map(|scope| {
-            let data = scopes.scope(scope)?;
-            // One variant for class, struct and union: the difference is access, which is a member's property
-            // rather than the scope's. See `ScopeKind`.
-            (data.kind == crate::ScopeKind::Class)
-                .then(|| scopes.qualified_name_of(scope))
-                .flatten()
-        })
+    scopes.scope_chain(innermost).into_iter().find_map(|scope| {
+        let data = scopes.scope(scope)?;
+        // One variant for class, struct and union: the difference is access, which is a member's property
+        // rather than the scope's. See `ScopeKind`.
+        (data.kind == crate::ScopeKind::Class)
+            .then(|| scopes.qualified_name_of(scope))
+            .flatten()
+    })
 }
 
 /// **The class a member function's body belongs to**, whether or not that class is declared in this file.
@@ -5340,7 +5451,6 @@ pub(crate) fn base_type_name(written: &str) -> &str {
     name
 }
 
-
 impl ProjectIndex {
     pub fn new() -> Self {
         ProjectIndex {
@@ -5349,7 +5459,7 @@ impl ProjectIndex {
             // claims nothing: `Marked::default()` on its own would decide every `#ifdef` in every file as false.
             macros: Marked::default().incomplete(),
             visibility_answers: std::sync::Mutex::new(HashMap::new()),
-        visibility: std::sync::Mutex::new(HashMap::new()),
+            visibility: std::sync::Mutex::new(HashMap::new()),
             ..ProjectIndex::default()
         }
     }
@@ -5439,7 +5549,8 @@ impl ProjectIndex {
             }
 
             // The names the previous text declared and the macros it defined stop being findable under this file.
-            self.names.remove_declarations(sequence, false, &previous.declarations);
+            self.names
+                .remove_declarations(sequence, false, &previous.declarations);
             self.names.remove_macros(sequence, &previous.macros);
 
             // **The cooked reading describes the file *under the key it was built with***, so a summary filed under
@@ -5453,9 +5564,11 @@ impl ProjectIndex {
             // `compile_commands.json` causes. Leaving the reading there would answer for a file nobody has any more,
             // at offsets into words that are gone — a wrong answer rather than a missing one.
             if previous.key != summary.key
-                && let Some(cooked) = self.cooked.remove(&path) {
-                    self.names.remove_declarations(sequence, true, &cooked.declarations);
-                }
+                && let Some(cooked) = self.cooked.remove(&path)
+            {
+                self.names
+                    .remove_declarations(sequence, true, &cooked.declarations);
+            }
 
             sequence
         } else {
@@ -5467,7 +5580,8 @@ impl ProjectIndex {
             // A reading filed before its summary (the contract says it should not be, but `insert_cooked` does not
             // refuse) is findable from the moment the file has a number to be found under.
             if let Some(cooked) = self.cooked.get(&path) {
-                self.names.add_declarations(sequence, true, &cooked.declarations);
+                self.names
+                    .add_declarations(sequence, true, &cooked.declarations);
             }
 
             sequence
@@ -5500,7 +5614,8 @@ impl ProjectIndex {
                 .insert(module.to_string(), path.clone());
         }
 
-        self.names.add_declarations(sequence, false, &summary.declarations);
+        self.names
+            .add_declarations(sequence, false, &summary.declarations);
         self.names.add_macros(sequence, &summary.macros);
         self.summaries.insert(path, summary);
     }
@@ -5529,16 +5644,19 @@ impl ProjectIndex {
         let sequence = self.sequence.remove(&path);
         if let Some(sequence) = sequence {
             self.order.remove(&sequence);
-            self.names.remove_declarations(sequence, false, &summary.declarations);
+            self.names
+                .remove_declarations(sequence, false, &summary.declarations);
             self.names.remove_macros(sequence, &summary.macros);
         }
         // **The cooked reading goes with it.** A file that is no longer indexed must not keep answering
         // declaration queries out of a rendering nobody has any more — the same rule as the summary, for the
         // same reason: an answer about a file that is gone is worse than no answer.
         if let Some(cooked) = self.cooked.remove(&path)
-            && let Some(sequence) = sequence {
-                self.names.remove_declarations(sequence, true, &cooked.declarations);
-            }
+            && let Some(sequence) = sequence
+        {
+            self.names
+                .remove_declarations(sequence, true, &cooked.declarations);
+        }
 
         true
     }
@@ -5568,7 +5686,9 @@ impl ProjectIndex {
 
     /// Every summary, in insertion order.
     pub fn summaries(&self) -> impl Iterator<Item = &FileSummary> {
-        self.order.values().filter_map(|path| self.summaries.get(path))
+        self.order
+            .values()
+            .filter_map(|path| self.summaries.get(path))
     }
 
     /// The files that include `path`, directly.
@@ -5603,9 +5723,11 @@ impl ProjectIndex {
 
         if let Some(&sequence) = self.sequence.get(&path) {
             if let Some(previous) = self.cooked.get(&path) {
-                self.names.remove_declarations(sequence, true, &previous.declarations);
+                self.names
+                    .remove_declarations(sequence, true, &previous.declarations);
             }
-            self.names.add_declarations(sequence, true, &reading.declarations);
+            self.names
+                .add_declarations(sequence, true, &reading.declarations);
         }
         self.cooked.insert(path, reading);
     }
@@ -5638,9 +5760,11 @@ impl ProjectIndex {
     pub fn forget_cooked(&mut self, path: &Path) {
         let path = normalize(path);
         if let Some(cooked) = self.cooked.remove(&path)
-            && let Some(&sequence) = self.sequence.get(&path) {
-                self.names.remove_declarations(sequence, true, &cooked.declarations);
-            }
+            && let Some(&sequence) = self.sequence.get(&path)
+        {
+            self.names
+                .remove_declarations(sequence, true, &cooked.declarations);
+        }
     }
 
     /// **The project's symbols matching `query`**, best first — what a `workspace/symbol` search shows.
@@ -5825,7 +5949,11 @@ impl ProjectIndex {
             // What the fact is called for ordering: its name, or — with none — the last segment of its scope.
             let name = match fact.name.is_empty() {
                 false => crate::index::names::lowercase(&fact.name),
-                true => qualified.rsplit("::").next().unwrap_or_default().to_string(),
+                true => qualified
+                    .rsplit("::")
+                    .next()
+                    .unwrap_or_default()
+                    .to_string(),
             };
 
             into.push(Hit {
@@ -5867,7 +5995,10 @@ impl ProjectIndex {
     ///
     /// The set form of [`ProjectIndex::files_defining_macro`], for a caller that holds a whole vocabulary — the
     /// words a file mentions — and wants the files that could matter to it, without visiting the ones that cannot.
-    pub fn files_defining_any_macro<'a>(&self, names: impl IntoIterator<Item = &'a str>) -> Vec<&FileSummary> {
+    pub fn files_defining_any_macro<'a>(
+        &self,
+        names: impl IntoIterator<Item = &'a str>,
+    ) -> Vec<&FileSummary> {
         let mut sequences: BTreeSet<u32> = BTreeSet::new();
         for name in names {
             sequences.extend(self.names.definers_of(name).iter().copied());
@@ -5936,7 +6067,11 @@ impl ProjectIndex {
         // last segment (`ns::Widget` is `Widget` declared in `ns`). `matches` then decides between them.
         let bare = name.strip_prefix("::").unwrap_or(name);
         let last = bare.rsplit("::").next().unwrap_or(bare);
-        self.visible_declarations(visible_from, |fact| matches(fact, name), Narrow::Named(&[bare, last]))
+        self.visible_declarations(
+            visible_from,
+            |fact| matches(fact, name),
+            Narrow::Named(&[bare, last]),
+        )
     }
 
     /// Every declaration written **directly in** the scope `scope`, visible from `visible_from`.
@@ -6160,28 +6295,29 @@ impl ProjectIndex {
                 break;
             }
 
-            let (file, visibility, group): (u32, IncludeVisibility, Option<&[Posting]>) = match &postings {
-                None => {
-                    let Some(&(file, visibility)) = visible.next() else {
-                        break;
-                    };
-                    (file, visibility, None)
-                }
-                Some(postings) => {
-                    let Some(first) = postings.get(next) else {
-                        break;
-                    };
-                    let file = first.file;
-                    let end = next + postings[next..].partition_point(|held| held.file == file);
-                    let group = &postings[next..end];
-                    next = end;
+            let (file, visibility, group): (u32, IncludeVisibility, Option<&[Posting]>) =
+                match &postings {
+                    None => {
+                        let Some(&(file, visibility)) = visible.next() else {
+                            break;
+                        };
+                        (file, visibility, None)
+                    }
+                    Some(postings) => {
+                        let Some(first) = postings.get(next) else {
+                            break;
+                        };
+                        let file = first.file;
+                        let end = next + postings[next..].partition_point(|held| held.file == file);
+                        let group = &postings[next..end];
+                        next = end;
 
-                    let Ok(at) = files.binary_search_by_key(&file, |visible| visible.0) else {
-                        continue;
-                    };
-                    (file, files[at].1, Some(group))
-                }
-            };
+                        let Ok(at) = files.binary_search_by_key(&file, |visible| visible.0) else {
+                            continue;
+                        };
+                        (file, files[at].1, Some(group))
+                    }
+                };
 
             let Some(key) = self.order.get(&file) else {
                 continue;
@@ -6203,7 +6339,8 @@ impl ProjectIndex {
             // the walk never asks a file like that this question because it cannot be in `through_an_import` — only
             // a module *interface unit* is.
             let only_what_is_exported = through_an_import.contains(key);
-            let contributes = |fact: &DeclFact| accepts(fact) && (!only_what_is_exported || fact.exported);
+            let contributes =
+                |fact: &DeclFact| accepts(fact) && (!only_what_is_exported || fact.exported);
 
             let mut raw: Vec<&DeclFact> = Vec::new();
 
@@ -6425,7 +6562,12 @@ impl ProjectIndex {
             }
 
             let mut state = self.macros.clone();
-            self.walk_the_module_edges(Path::new(&reached), &mut seen, &mut state, &mut module_seen);
+            self.walk_the_module_edges(
+                Path::new(&reached),
+                &mut seen,
+                &mut state,
+                &mut module_seen,
+            );
         }
 
         // The order the per-edge version produced: the root first, then the walk's crossing order. Rebuilt from the
@@ -6581,41 +6723,41 @@ impl ProjectIndex {
             };
 
             // **Header units are followed exactly like `#include`s** — `import <vector>;` names a header, and a header
-        // unit exports what the header declares, so nothing about the declarations it brings in is restricted. The
-        // path was resolved when the file was read (the walk can search nothing), and one that could not be resolved
-        // is simply absent.
-        for unit in &summary.modules.header_units {
-            let next = normalize(unit);
+            // unit exports what the header declares, so nothing about the declarations it brings in is restricted. The
+            // path was resolved when the file was read (the walk can search nothing), and one that could not be resolved
+            // is simply absent.
+            for unit in &summary.modules.header_units {
+                let next = normalize(unit);
 
-            if let std::collections::hash_map::Entry::Vacant(slot) = best.entry(next.clone()) {
-                slot.insert(IncludeVisibility::Unconditional);
-                order.push(next.clone());
-                pending.push((next, IncludeVisibility::Unconditional, depth + 1));
+                if let std::collections::hash_map::Entry::Vacant(slot) = best.entry(next.clone()) {
+                    slot.insert(IncludeVisibility::Unconditional);
+                    order.push(next.clone());
+                    pending.push((next, IncludeVisibility::Unconditional, depth + 1));
+                }
             }
-        }
 
-        // **…and so is a partition of this file's own module.** `export import :area;` makes the partition's
-        // declarations part of *this* module's interface, so a file that imports the module has to see them — and
-        // the file that declares them is reached by exactly the same kind of resolved path. Not following it is a
-        // false negative, which is the direction this project refuses everywhere else: measured on the partition
-        // fixture (`target/build_partitions.bat`), `definition("perimeter")` resolved to the interface unit while
-        // `rectangle` and `square`, declared in the partition it re-exports, answered "nothing declares it".
-        //
-        // `Unconditional`, and for a reason that is *not* the same as the import note below: a partition import is
-        // not conditional in practice — the grammar does not allow `import :part;` inside a conditional region of a
-        // module unit, because the module's interface has to be known in full before anything is compiled against
-        // it.
-        for unit in &summary.modules.partitions {
-            let next = normalize(unit);
+            // **…and so is a partition of this file's own module.** `export import :area;` makes the partition's
+            // declarations part of *this* module's interface, so a file that imports the module has to see them — and
+            // the file that declares them is reached by exactly the same kind of resolved path. Not following it is a
+            // false negative, which is the direction this project refuses everywhere else: measured on the partition
+            // fixture (`target/build_partitions.bat`), `definition("perimeter")` resolved to the interface unit while
+            // `rectangle` and `square`, declared in the partition it re-exports, answered "nothing declares it".
+            //
+            // `Unconditional`, and for a reason that is *not* the same as the import note below: a partition import is
+            // not conditional in practice — the grammar does not allow `import :part;` inside a conditional region of a
+            // module unit, because the module's interface has to be known in full before anything is compiled against
+            // it.
+            for unit in &summary.modules.partitions {
+                let next = normalize(unit);
 
-            if let std::collections::hash_map::Entry::Vacant(slot) = best.entry(next.clone()) {
-                slot.insert(IncludeVisibility::Unconditional);
-                order.push(next.clone());
-                pending.push((next, IncludeVisibility::Unconditional, depth + 1));
+                if let std::collections::hash_map::Entry::Vacant(slot) = best.entry(next.clone()) {
+                    slot.insert(IncludeVisibility::Unconditional);
+                    order.push(next.clone());
+                    pending.push((next, IncludeVisibility::Unconditional, depth + 1));
+                }
             }
-        }
 
-        // **A module import is the other visibility edge**, and it is not an `#include` with another spelling:
+            // **A module import is the other visibility edge**, and it is not an `#include` with another spelling:
             // an import is not textual (no macro travels along it) and it names a *module* rather than a file, so
             // the file behind it is found through the module the project declares. That is what makes
             // `import mathlib;` bring `mathlib::add` into view — measured on the module fixture, where the answer
@@ -6641,7 +6783,11 @@ impl ProjectIndex {
                 best.insert(interface.clone(), IncludeVisibility::Unconditional);
                 order.push(interface.clone());
                 through_an_import.insert(interface.clone());
-                pending.push((interface.clone(), IncludeVisibility::Unconditional, depth + 1));
+                pending.push((
+                    interface.clone(),
+                    IncludeVisibility::Unconditional,
+                    depth + 1,
+                ));
             }
 
             for include in &summary.includes {
@@ -6681,9 +6827,7 @@ impl ProjectIndex {
                             .ok()
                             .and_then(|answers| answers.get(&key).copied())
                         {
-                            Some(answer) => {
-                                answer
-                            }
+                            Some(answer) => answer,
                             None => {
                                 let answer = crate::index::environment::visibility_at(
                                     self,
@@ -6739,7 +6883,10 @@ impl ProjectIndex {
 
         let files = order
             .into_iter()
-            .filter_map(|path| best.get(&path).map(|visibility| (path.clone(), *visibility)))
+            .filter_map(|path| {
+                best.get(&path)
+                    .map(|visibility| (path.clone(), *visibility))
+            })
             .collect();
 
         files
@@ -6842,7 +6989,8 @@ impl ProjectIndex {
                 continue;
             }
 
-            let through_the_scope = self.definition(&format!("{enclosing}::{written}"), visible_from);
+            let through_the_scope =
+                self.definition(&format!("{enclosing}::{written}"), visible_from);
             if !matches!(
                 through_the_scope,
                 Known::Unknown(UnknownReason::NotDeclaredHere(_))
@@ -7002,10 +7150,7 @@ impl ProjectIndex {
         // header's `Widget` and this file's `Widget` are different entities, and C++ resolves to the local one.
         // Overloads of one name written *here* are still several declarations, and they are all answers.
         let own = normalize(visible_from);
-        if candidates
-            .iter()
-            .any(|found| normalize(&found.file) == own)
-        {
+        if candidates.iter().any(|found| normalize(&found.file) == own) {
             candidates.retain(|found| normalize(&found.file) == own);
         }
 
@@ -7074,7 +7219,8 @@ impl ProjectIndex {
                 if alias.fact.kind != DeclKind::Type {
                     return None;
                 }
-                let target = crate::sema::types::parse_type_spelling(alias.fact.type_of.as_deref()?);
+                let target =
+                    crate::sema::types::parse_type_spelling(alias.fact.type_of.as_deref()?);
                 let class = target.class_name()?;
 
                 let qualified = if class.contains("::") {
@@ -7140,7 +7286,12 @@ impl ProjectIndex {
     /// answer a question that has an answer. Only when nothing unconditional is in the running does the answer
     /// become `Unknown` — and the residual uncertainty is stated rather than hidden: a guarded `#undef` *after* an
     /// unconditional `#define` is treated as not having happened.
-    pub fn macro_definition(&self, name: &str, visible_from: &Path, offset: usize) -> Known<ProjectMacro> {
+    pub fn macro_definition(
+        &self,
+        name: &str,
+        visible_from: &Path,
+        offset: usize,
+    ) -> Known<ProjectMacro> {
         match self.macro_environment(name, visible_from).at(offset) {
             Known::Yes(found) => Known::Yes(ProjectMacro {
                 file: found.file.clone(),
@@ -7400,8 +7551,14 @@ impl ProjectIndex {
 
             if take_fact {
                 let fact = facts.next().expect("peeked");
-                let reach =
-                    self.fact_reach(summary, &mut verdicts, state, &mut *collecting, fact.guard, at);
+                let reach = self.fact_reach(
+                    summary,
+                    &mut verdicts,
+                    state,
+                    &mut *collecting,
+                    fact.guard,
+                    at,
+                );
                 if reach == FactReach::Inactive {
                     continue;
                 }
@@ -7493,7 +7650,6 @@ impl ProjectIndex {
         }
     }
 
-
     /// Was the code the guard names compiled, with the state the walk has built and the verdicts it has recorded?
     fn include_visibility(
         &self,
@@ -7554,12 +7710,17 @@ impl ProjectIndex {
                         offset,
                     ) {
                         Some(verdict) => verdict,
-                        None => summary.guards.region_at(at.region, offset).and_then(|region| {
-                            region.visibility(&crate::index::environment::MacrosHere::from_walk(
-                                state,
-                                at.condition_at,
-                            ))
-                        }),
+                        None => summary
+                            .guards
+                            .region_at(at.region, offset)
+                            .and_then(|region| {
+                                region.visibility(
+                                    &crate::index::environment::MacrosHere::from_walk(
+                                        state,
+                                        at.condition_at,
+                                    ),
+                                )
+                            }),
                     };
 
                     verdicts.insert((at.region, branch), decided);
@@ -7709,12 +7870,7 @@ impl Collecting<'_> {
     /// `enter`, and a file reached by a guarded include first and an unguarded one second would be filed
     /// `Conditional` for the rest of the walk. The better of the two wins, which is what the per-edge version
     /// computed and is the only reading that is true.
-    fn crossed(
-        &mut self,
-        target: &str,
-        visibility: IncludeVisibility,
-        through_an_import: bool,
-    ) {
+    fn crossed(&mut self, target: &str, visibility: IncludeVisibility, through_an_import: bool) {
         let Collecting::Visibility(seen) = self else {
             return;
         };
@@ -7802,10 +7958,12 @@ impl Collecting<'_> {
         }
 
         let asked = summary.guards.region_at(region, offset)?;
-        Some(asked.visibility(&crate::index::environment::MacrosHere::from_walk(
-            state,
-            condition_at,
-        )))
+        Some(
+            asked.visibility(&crate::index::environment::MacrosHere::from_walk(
+                state,
+                condition_at,
+            )),
+        )
     }
 }
 
@@ -7886,11 +8044,18 @@ impl MacroEnvironment {
     pub fn at(&self, offset: usize) -> Known<&MacroCandidate> {
         let in_force: Vec<&MacroCandidate> = self.in_force(offset).collect();
 
-        let best = last(in_force.iter().copied().filter(|candidate| !candidate.is_conditional()))
-            .or_else(|| last(in_force.iter().copied()));
+        let best = last(
+            in_force
+                .iter()
+                .copied()
+                .filter(|candidate| !candidate.is_conditional()),
+        )
+        .or_else(|| last(in_force.iter().copied()));
 
         let Some(best) = best else {
-            return Known::Unknown(UnknownReason::NotDeclaredHere(Box::from(self.name.as_str())));
+            return Known::Unknown(UnknownReason::NotDeclaredHere(Box::from(
+                self.name.as_str(),
+            )));
         };
 
         if best.is_conditional() {
@@ -7922,7 +8087,9 @@ impl MacroEnvironment {
             // Nothing that reaches this offset settles it. Either there is nothing at all — the name is not a
             // macro here — or everything there is depends on a condition.
             return if in_force.is_empty() {
-                Known::Unknown(UnknownReason::NotDeclaredHere(Box::from(self.name.as_str())))
+                Known::Unknown(UnknownReason::NotDeclaredHere(Box::from(
+                    self.name.as_str(),
+                )))
             } else {
                 Known::Unknown(UnknownReason::ConditionalCompilation)
             };
@@ -7969,9 +8136,7 @@ impl MacroEnvironment {
 }
 
 /// The last of a run of candidates in translation order.
-fn last<'a>(
-    candidates: impl Iterator<Item = &'a MacroCandidate>,
-) -> Option<&'a MacroCandidate> {
+fn last<'a>(candidates: impl Iterator<Item = &'a MacroCandidate>) -> Option<&'a MacroCandidate> {
     candidates.max_by(|one, other| one.position.cmp(&other.position))
 }
 
@@ -8025,8 +8190,7 @@ impl MacroCandidate {
     /// nothing. The fact's own region is settled when the environment decides it *is* taken, and otherwise by
     /// [`MacroFact::settles_the_name`] — which is exactly the case the two questions differ in.
     pub fn is_certain_about_the_name(&self) -> bool {
-        !self.path_conditional
-            && (self.fact.settles_the_name || self.region == FactReach::Active)
+        !self.path_conditional && (self.fact.settles_the_name || self.region == FactReach::Active)
     }
 }
 
@@ -8162,7 +8326,9 @@ impl MemberList {
 
     /// The members reached `depth` base steps away: `0` for the type's own, `1` for a direct base's.
     pub fn at_depth(&self, depth: usize) -> impl Iterator<Item = &ProjectMember> {
-        self.members.iter().filter(move |member| member.depth == depth)
+        self.members
+            .iter()
+            .filter(move |member| member.depth == depth)
     }
 }
 
@@ -8550,7 +8716,8 @@ mod tests {
             // tests are about is the graph that results — not the search that produced it.
             let mut summary = summarize(Path::new(path), source, SummaryKey::new(0, 0));
             for include in &mut summary.includes {
-                include.resolved = Some(std::path::PathBuf::from(format!("/p/{}", include.spelling)));
+                include.resolved =
+                    Some(std::path::PathBuf::from(format!("/p/{}", include.spelling)));
             }
             index.insert(summary);
         }
@@ -8562,7 +8729,10 @@ mod tests {
     fn a_declaration_in_an_included_header_is_found() {
         let index = index(&[
             ("/p/widget.h", "struct Widget { int size; };\n"),
-            ("/p/main.cpp", "#include \"widget.h\"\nvoid f() { Widget w; }\n"),
+            (
+                "/p/main.cpp",
+                "#include \"widget.h\"\nvoid f() { Widget w; }\n",
+            ),
         ]);
 
         let found = index.definition("Widget", Path::new("/p/main.cpp"));
@@ -8596,7 +8766,8 @@ mod tests {
         for (path, source) in files {
             let mut summary = summarize(Path::new(path), source, SummaryKey::new(0, 0));
             for include in &mut summary.includes {
-                include.resolved = Some(std::path::PathBuf::from(format!("/p/{}", include.spelling)));
+                include.resolved =
+                    Some(std::path::PathBuf::from(format!("/p/{}", include.spelling)));
             }
             let _ = source;
             index.insert(summary);
@@ -8652,7 +8823,8 @@ mod tests {
             panic!("the cooked reading declares it: {after:?}");
         };
         assert_eq!(definition.file, api);
-        let written = &source[definition.fact.range.start_offset..definition.fact.range.end_offset()];
+        let written =
+            &source[definition.fact.range.start_offset..definition.fact.range.end_offset()];
         assert!(
             written.contains("DECLARE_HANDLE"),
             "the declaration is reported at the invocation: {written:?}"
@@ -8676,7 +8848,8 @@ mod tests {
         let provider = crate::MemoryFiles::new();
         let config = crate::CompilerConfig::default();
         let indexer = crate::FileIndexer::new(&provider, &config);
-        let indexed = indexer.index_rendering(Path::new("/p/a.h"), &rendered, SummaryKey::new(0, 0));
+        let indexed =
+            indexer.index_rendering(Path::new("/p/a.h"), &rendered, SummaryKey::new(0, 0));
         assert_eq!(indexed.mapped.dropped, 0);
         index.insert_cooked(Path::new("/p/a.h"), indexed.into());
 
@@ -8704,21 +8877,34 @@ mod tests {
     #[test]
     fn a_workspace_search_finds_symbols_across_the_project() {
         let mut index = index(&[
-            ("/p/widget.h", "namespace ns {\nstruct Widget { int size; };\n}\n"),
+            (
+                "/p/widget.h",
+                "namespace ns {\nstruct Widget { int size; };\n}\n",
+            ),
             (
                 "/p/other.cpp",
                 "void f() {\n    int widget_local;\n}\nstruct Widest { int y; };\n",
             ),
-            ("/p/handle.h", "#define DECLARE_HANDLE(name) struct name##__ { int unused; };\nDECLARE_HANDLE(HWND);\n"),
+            (
+                "/p/handle.h",
+                "#define DECLARE_HANDLE(name) struct name##__ { int unused; };\nDECLARE_HANDLE(HWND);\n",
+            ),
         ]);
 
         let names = |found: &[super::ProjectSymbol]| -> Vec<String> {
-            found.iter().map(|symbol| symbol.fact.name.clone()).collect()
+            found
+                .iter()
+                .map(|symbol| symbol.fact.name.clone())
+                .collect()
         };
 
         // Case-insensitive; both names begin with the query, so they share a rank and are ordered by name.
         let found = index.symbols_matching("wid", 100);
-        assert_eq!(names(&found), vec!["Widest", "Widget"], "one rank, alphabetical by name: {found:?}");
+        assert_eq!(
+            names(&found),
+            vec!["Widest", "Widget"],
+            "one rank, alphabetical by name: {found:?}"
+        );
         assert_eq!(
             found[1].fact.scope.as_deref(),
             Some("ns"),
@@ -8729,7 +8915,11 @@ mod tests {
         let found = index.symbols_matching("widget", 100);
         assert_eq!(names(&found), vec!["Widget"], "{found:?}");
         let found = index.symbols_matching("idg", 100);
-        assert_eq!(names(&found), vec!["Widget"], "a substring finds the name it is inside: {found:?}");
+        assert_eq!(
+            names(&found),
+            vec!["Widget"],
+            "a substring finds the name it is inside: {found:?}"
+        );
 
         // A local is not a project symbol, even though its name matches.
         assert_eq!(
@@ -8739,7 +8929,10 @@ mod tests {
         );
 
         // A qualified query finds it too — and finds a **member**, which is the one query that should.
-        assert_eq!(names(&index.symbols_matching("ns::widget", 100)), vec!["Widget"]);
+        assert_eq!(
+            names(&index.symbols_matching("ns::widget", 100)),
+            vec!["Widget"]
+        );
         assert_eq!(
             names(&index.symbols_matching("Widget::si", 100)),
             vec!["size"],
@@ -8822,7 +9015,10 @@ mod tests {
         let index = index(&[
             ("/p/deep.h", "struct Deep { int x; };\n"),
             ("/p/middle.h", "#include \"deep.h\"\n"),
-            ("/p/main.cpp", "#include \"middle.h\"\nvoid f() { Deep d; }\n"),
+            (
+                "/p/main.cpp",
+                "#include \"middle.h\"\nvoid f() { Deep d; }\n",
+            ),
         ]);
 
         let found = index.definition("Deep", Path::new("/p/main.cpp"));
@@ -9046,16 +9242,14 @@ mod tests {
 
         let found = index.definition("arm_intrinsic", Path::new("/p/main.cpp"));
         assert!(
-            matches!(
-                found,
-                Known::Unknown(UnknownReason::NotDeclaredHere(_))
-            ),
+            matches!(found, Known::Unknown(UnknownReason::NotDeclaredHere(_))),
             "the branch was not taken, so the file is not in this translation unit at all: {found:?}"
         );
     }
 
     #[test]
-    fn a_qualified_name_prefers_the_declaration_that_matches_it() {        let index = index(&[
+    fn a_qualified_name_prefers_the_declaration_that_matches_it() {
+        let index = index(&[
             ("/p/a.h", "namespace a {\n  struct Widget { int x; };\n}\n"),
             ("/p/b.h", "namespace b {\n  struct Widget { int y; };\n}\n"),
             (
@@ -9114,10 +9308,7 @@ mod tests {
 
     #[test]
     fn a_file_that_includes_nothing_sees_only_itself() {
-        let index = index(&[
-            ("/p/a.cpp", "int count;\n"),
-            ("/p/b.cpp", "int count;\n"),
-        ]);
+        let index = index(&[("/p/a.cpp", "int count;\n"), ("/p/b.cpp", "int count;\n")]);
 
         for path in ["/p/a.cpp", "/p/b.cpp"] {
             let found = index.definition("count", Path::new(path));
@@ -9166,12 +9357,19 @@ mod tests {
         // longer includes it — a stale conclusion with nothing on disk to contradict it.
         let mut index = index(&[
             ("/p/widget.h", "struct Widget { int size; };\n"),
-            ("/p/main.cpp", "#include \"widget.h\"\nvoid f() { Widget w; }\n"),
+            (
+                "/p/main.cpp",
+                "#include \"widget.h\"\nvoid f() { Widget w; }\n",
+            ),
         ]);
 
         assert!(index.includers_of(Path::new("/p/widget.h")).len() == 1);
 
-        let mut edited = summarize(Path::new("/p/main.cpp"), "void f() { }\n", SummaryKey::new(1, 0));
+        let mut edited = summarize(
+            Path::new("/p/main.cpp"),
+            "void f() { }\n",
+            SummaryKey::new(1, 0),
+        );
         for include in &mut edited.includes {
             include.resolved = Some(std::path::PathBuf::from(format!("/p/{}", include.spelling)));
         }
@@ -9393,7 +9591,8 @@ mod tests {
     }
 
     #[test]
-    fn a_name_only_a_header_declares_is_found_through_the_index() {        let source = "#include \"widget.h\"\nvoid f() {\n  Widget w;\n}\n";
+    fn a_name_only_a_header_declares_is_found_through_the_index() {
+        let source = "#include \"widget.h\"\nvoid f() {\n  Widget w;\n}\n";
         let (index, tree) = analysed(
             &[("/p/widget.h", "struct Widget { int size; };\n")],
             "/p/main.cpp",
@@ -9529,7 +9728,14 @@ mod tests {
         let root = tree.get_red_root();
         let scopes = crate::build_scopes(&root, &crate::NoMacroBodies);
 
-        super::member_across_files(&index, &mut |_: &Path| None, &scopes, &root, Path::new(from), at(source, needle))
+        super::member_across_files(
+            &index,
+            &mut |_: &Path| None,
+            &scopes,
+            &root,
+            Path::new(from),
+            at(source, needle),
+        )
     }
 
     // -------------------------------------------------------------------------------------------
@@ -9714,7 +9920,9 @@ mod tests {
     }
 
     #[test]
-    fn a_member_access_resolves_through_the_objects_type() {        let source = "struct Widget {\n  int size;\n};\nvoid f() {\n  Widget w;\n  w.size = 1;\n}\n";
+    fn a_member_access_resolves_through_the_objects_type() {
+        let source =
+            "struct Widget {\n  int size;\n};\nvoid f() {\n  Widget w;\n  w.size = 1;\n}\n";
         let found = member_of(&[], "/p/a.cpp", source, "size = 1;");
 
         let Known::Yes(member) = found else {
@@ -9750,7 +9958,8 @@ mod tests {
     fn a_member_access_reads_a_pointer_the_same_way() {
         // `ptr->member` names a member of the pointee. The type spelling of `Widget* p` is `Widget*`, and the
         // pointer is a fact about the declarator rather than about which class the name refers to.
-        let source = "struct Widget {\n  int size;\n};\nvoid f() {\n  Widget* p;\n  p->size = 1;\n}\n";
+        let source =
+            "struct Widget {\n  int size;\n};\nvoid f() {\n  Widget* p;\n  p->size = 1;\n}\n";
         let found = member_of(&[], "/p/a.cpp", source, "size = 1;");
 
         let Known::Yes(member) = found else {
@@ -9804,7 +10013,8 @@ mod tests {
 
     #[test]
     fn a_member_of_a_class_that_does_not_have_it_is_not_declared_here() {
-        let source = "struct Widget {\n  int size;\n};\nvoid f() {\n  Widget w;\n  w.nope = 1;\n}\n";
+        let source =
+            "struct Widget {\n  int size;\n};\nvoid f() {\n  Widget w;\n  w.nope = 1;\n}\n";
         let found = member_of(&[], "/p/a.cpp", source, "nope = 1;");
 
         assert!(
@@ -9862,7 +10072,9 @@ mod tests {
             "size = 1;",
         );
         let Known::Yes(found) = through_a_call else {
-            panic!("`make()` returns a `Widget*`, so `(*make())` is a `Widget`: {through_a_call:?}");
+            panic!(
+                "`make()` returns a `Widget*`, so `(*make())` is a `Widget`: {through_a_call:?}"
+            );
         };
         assert_eq!(found.fact.name, "size");
 
@@ -9912,7 +10124,8 @@ mod tests {
         // type it was that had no members. It used to say "not declared here" (the lookup went looking for a class
         // called `int`), which reads like a missing file rather than a wrong question. What must not happen, either
         // way, is an invented type.
-        let source = "struct Widget {\n  int size;\n};\nvoid f() {\n  int* q;\n  (*q).size = 1;\n}\n";
+        let source =
+            "struct Widget {\n  int size;\n};\nvoid f() {\n  int* q;\n  (*q).size = 1;\n}\n";
         let found = member_of(&[], "/p/a.cpp", source, "size = 1;");
 
         assert!(
@@ -9991,7 +10204,8 @@ mod tests {
 
     #[test]
     fn a_cursor_that_is_not_on_a_member_access_has_nothing_to_look_up() {
-        let source = "struct Widget {\n  int size;\n};\nvoid f() {\n  Widget w;\n  w.size = 1;\n}\n";
+        let source =
+            "struct Widget {\n  int size;\n};\nvoid f() {\n  Widget w;\n  w.size = 1;\n}\n";
         let found = member_of(&[], "/p/a.cpp", source, "= 1;");
 
         assert!(
@@ -10039,7 +10253,8 @@ mod tests {
     fn this_resolves_to_the_enclosing_class() {
         // `this` needs no inference at all: the scope chain already knows which class it is, which is why it is
         // the cheapest case in the type layer and the first one to handle.
-        let source = "struct Widget {\n  int size;\n  void grow() {\n    this->size = 1;\n  }\n};\n";
+        let source =
+            "struct Widget {\n  int size;\n  void grow() {\n    this->size = 1;\n  }\n};\n";
         let found = member_of(&[], "/p/a.cpp", source, "size = 1;");
 
         let Known::Yes(member) = found else {
@@ -10217,7 +10432,11 @@ mod tests {
         // `count` is declared both here and in the header. The answer is this file's, and it is reached without
         // the index — which is the resolution order, not an optimisation.
         let source = "#include \"widget.h\"\nint count = 0;\nvoid f() {\n  count = 1;\n}\n";
-        let (index, tree) = analysed(&[("/p/widget.h", "int count = 7;\n")], "/p/main.cpp", source);
+        let (index, tree) = analysed(
+            &[("/p/widget.h", "int count = 7;\n")],
+            "/p/main.cpp",
+            source,
+        );
 
         let root = tree.get_red_root();
         let scopes = crate::build_scopes(&root, &crate::NoMacroBodies);
@@ -10335,7 +10554,11 @@ mod tests {
             Some("int"),
             "the type a completion shows beside the name"
         );
-        assert_eq!(list.own().count(), 2, "every member here is the class's own");
+        assert_eq!(
+            list.own().count(),
+            2,
+            "every member here is the class's own"
+        );
     }
 
     #[test]
@@ -10383,7 +10606,11 @@ mod tests {
             panic!("`Derived` is declared in this file: {found:?}");
         };
 
-        assert_eq!(names(&list), ["size"], "one `size`, and it is the derived class's");
+        assert_eq!(
+            names(&list),
+            ["size"],
+            "one `size`, and it is the derived class's"
+        );
         assert_eq!(list.members[0].declared_in, "Derived");
         assert_eq!(list.members[0].fact.type_of.as_deref(), Some("double"));
     }
@@ -10674,7 +10901,8 @@ mod tests {
         assert_eq!(names(&list), ["d"], "what could be listed is listed");
         assert_eq!(list.unlisted.len(), 1, "and what could not is named");
         assert_eq!(list.unlisted[0].spelling, "Base");
-        assert!(matches!(list.unlisted[0].reason, UnknownReason::NotDeclaredHere(_)),
+        assert!(
+            matches!(list.unlisted[0].reason, UnknownReason::NotDeclaredHere(_)),
             "the reason has to say that the base is not here, not that the list ended: {:?}",
             list.unlisted[0].reason
         );
@@ -10769,15 +10997,19 @@ mod tests {
         let root = tree.get_red_root();
         let scopes = crate::build_scopes(&root, &crate::NoMacroBodies);
 
-        let listed = |index: &ProjectIndex| {
-            match super::members_of(index, &scopes, &root, Path::new("/p/main.cpp"), "A") {
-                Known::Yes(list) => list
-                    .members
-                    .iter()
-                    .map(|member| member.fact.name.clone())
-                    .collect::<Vec<_>>(),
-                other => panic!("`A` is declared in an included header: {other:?}"),
-            }
+        let listed = |index: &ProjectIndex| match super::members_of(
+            index,
+            &scopes,
+            &root,
+            Path::new("/p/main.cpp"),
+            "A",
+        ) {
+            Known::Yes(list) => list
+                .members
+                .iter()
+                .map(|member| member.fact.name.clone())
+                .collect::<Vec<_>>(),
+            other => panic!("`A` is declared in an included header: {other:?}"),
         };
 
         assert_eq!(listed(&index), ["a_member", "old_member"]);
@@ -10799,7 +11031,9 @@ mod tests {
         // And why that worked, asserted rather than implied: `A`'s own summary holds its own member and nothing it
         // inherits. The day something starts writing inherited members into a derived class's summary, this is
         // where it shows up — before the stale answers do.
-        let a = index.summary(Path::new("/p/a.h")).expect("`a.h` is indexed");
+        let a = index
+            .summary(Path::new("/p/a.h"))
+            .expect("`a.h` is indexed");
         let a_members: Vec<&str> = a
             .declarations
             .iter()
@@ -10873,9 +11107,21 @@ void f() {
         let Known::Yes(found) = completions_at(&[], "/p/a.cpp", outside, "w.") else {
             panic!("`w` is a `Widget`");
         };
-        let offered: Vec<&str> = found.members.members.iter().map(|m| m.fact.name.as_str()).collect();
-        assert_eq!(offered, ["shown"], "`hidden` is private and the cursor is not in `Widget`");
-        assert_eq!(found.hidden_by_access, 1, "and the answer says how many it kept out");
+        let offered: Vec<&str> = found
+            .members
+            .members
+            .iter()
+            .map(|m| m.fact.name.as_str())
+            .collect();
+        assert_eq!(
+            offered,
+            ["shown"],
+            "`hidden` is private and the cursor is not in `Widget`"
+        );
+        assert_eq!(
+            found.hidden_by_access, 1,
+            "and the answer says how many it kept out"
+        );
 
         let inside = "\
 class Widget {
@@ -10890,7 +11136,12 @@ public:
         let Known::Yes(found) = completions_at(&[], "/p/a.cpp", inside, "other.") else {
             panic!("`other` is a `Widget`");
         };
-        let offered: Vec<&str> = found.members.members.iter().map(|m| m.fact.name.as_str()).collect();
+        let offered: Vec<&str> = found
+            .members
+            .members
+            .iter()
+            .map(|m| m.fact.name.as_str())
+            .collect();
         assert_eq!(
             offered,
             ["grow", "hidden", "shown"],
@@ -10931,7 +11182,12 @@ void f(Widget& w) {
         let Known::Yes(found) = completions_at(&[], "/p/a.cpp", source, "other.") else {
             panic!("`other` is a `Widget`");
         };
-        let offered: Vec<&str> = found.members.members.iter().map(|m| m.fact.name.as_str()).collect();
+        let offered: Vec<&str> = found
+            .members
+            .members
+            .iter()
+            .map(|m| m.fact.name.as_str())
+            .collect();
         assert!(
             offered.contains(&"hidden"),
             "the cursor is inside a member of `Widget`, so `hidden` is nameable there: {offered:?}"
@@ -10944,7 +11200,12 @@ void f(Widget& w) {
         let Known::Yes(found) = completions_at(&[], "/p/a.cpp", source, "w.") else {
             panic!("`w` is a `Widget`");
         };
-        let offered: Vec<&str> = found.members.members.iter().map(|m| m.fact.name.as_str()).collect();
+        let offered: Vec<&str> = found
+            .members
+            .members
+            .iter()
+            .map(|m| m.fact.name.as_str())
+            .collect();
         assert!(
             !offered.contains(&"hidden"),
             "and from outside the class the same member is not: {offered:?}"
@@ -10977,7 +11238,12 @@ void f(Derived& d) {
         let Known::Yes(found) = completions_at(&[], "/p/a.cpp", source, "other.") else {
             panic!("`other` is a `Derived`");
         };
-        let offered: Vec<&str> = found.members.members.iter().map(|m| m.fact.name.as_str()).collect();
+        let offered: Vec<&str> = found
+            .members
+            .members
+            .iter()
+            .map(|m| m.fact.name.as_str())
+            .collect();
         assert_eq!(
             offered,
             ["grow", "guarded", "open"],
@@ -10987,7 +11253,12 @@ void f(Derived& d) {
         let Known::Yes(found) = completions_at(&[], "/p/a.cpp", source, "d.") else {
             panic!("`d` is a `Derived`");
         };
-        let offered: Vec<&str> = found.members.members.iter().map(|m| m.fact.name.as_str()).collect();
+        let offered: Vec<&str> = found
+            .members
+            .members
+            .iter()
+            .map(|m| m.fact.name.as_str())
+            .collect();
         assert_eq!(
             offered,
             ["open"],
@@ -10996,7 +11267,8 @@ void f(Derived& d) {
     }
 
     #[test]
-    fn a_member_access_with_nothing_typed_offers_the_types_members() {        // The keystroke that asks the question. `w.` is not a program and does not parse, which is exactly why
+    fn a_member_access_with_nothing_typed_offers_the_types_members() {
+        // The keystroke that asks the question. `w.` is not a program and does not parse, which is exactly why
         // this is a query over a damaged tree rather than over a compiled one.
         let source = "struct Widget {\n  int size;\n  void grow();\n};\n\
                       void f() {\n  Widget w;\n  w.\n}\n";
@@ -11130,7 +11402,10 @@ void f(Derived& d) {
             panic!("the class is in the included header: {found:?}");
         };
         assert_eq!(completions.class, "Widget");
-        assert_eq!(completions.members.members[0].file, Path::new("/p/widget.h"));
+        assert_eq!(
+            completions.members.members[0].file,
+            Path::new("/p/widget.h")
+        );
     }
 
     #[test]
@@ -11181,7 +11456,8 @@ void f(Derived& d) {
         // An **arithmetic expression** is the case that is still out of reach, and it is the honest one: `a + b`
         // has a type the language computes from conversions this layer does not model, so there is nothing to
         // read off a declaration.
-        let source = "struct Widget {\n  int size;\n};\nvoid f() {\n  Widget a;\n  (a.size + a.size).\n}\n";
+        let source =
+            "struct Widget {\n  int size;\n};\nvoid f() {\n  Widget a;\n  (a.size + a.size).\n}\n";
         let found = completions_at(&[], "/p/a.cpp", source, "(a.size + a.size).");
 
         assert!(
@@ -11205,7 +11481,10 @@ void f(Derived& d) {
         let Known::Unknown(UnknownReason::NotDeclaredHere(name)) = found else {
             unreachable!("just checked")
         };
-        assert_eq!(&*name, "Nowhere", "and the reason names the type, not the object");
+        assert_eq!(
+            &*name, "Nowhere",
+            "and the reason names the type, not the object"
+        );
     }
 
     #[test]
@@ -11256,8 +11535,14 @@ void f(Derived& d) {
         // Two characters into `size`.
         let cursor = at(source, "w.size") + 2 + 2;
 
-        let found =
-            super::member_completions_at(&index, &mut |_: &Path| None, &scopes, &root, Path::new("/p/a.cpp"), cursor);
+        let found = super::member_completions_at(
+            &index,
+            &mut |_: &Path| None,
+            &scopes,
+            &root,
+            Path::new("/p/a.cpp"),
+            cursor,
+        );
         let Known::Yes(completions) = found else {
             panic!("the cursor is inside the member's name: {found:?}");
         };
@@ -11447,10 +11732,16 @@ void f(Derived& d) {
     }
 
     #[test]
-    fn a_qualified_scope_offers_the_names_written_in_it() {        let source = "namespace ns {\n  struct Widget { };\n  int helper();\n}\nvoid f() {\n  ns::\n}\n";
+    fn a_qualified_scope_offers_the_names_written_in_it() {
+        let source =
+            "namespace ns {\n  struct Widget { };\n  int helper();\n}\nvoid f() {\n  ns::\n}\n";
         let found = names_at(&[], "/p/a.cpp", source, "ns::");
 
-        assert_eq!(offered(&found), ["Widget", "helper"], "sorted within the scope");
+        assert_eq!(
+            offered(&found),
+            ["Widget", "helper"],
+            "sorted within the scope"
+        );
         let Known::Yes(completions) = found else {
             unreachable!("asserted above")
         };
@@ -11517,7 +11808,8 @@ void f(Derived& d) {
         // `::` is a scope and not an empty qualifier: it asks about the global name space, so a namespace member
         // and a local are both *not* in the answer, while the file-scope declarations are — the enclosing function
         // and namespace included, because those are written there.
-        let source = "int global;\nnamespace ns {\n  int inner;\n}\nvoid f() {\n  int local;\n  ::\n}\n";
+        let source =
+            "int global;\nnamespace ns {\n  int inner;\n}\nvoid f() {\n  int local;\n  ::\n}\n";
         let found = names_at(&[], "/p/a.cpp", source, "::");
 
         assert_eq!(offered(&found), ["f", "global", "ns"]);
@@ -11610,7 +11902,8 @@ void f(Derived& d) {
     fn a_namespace_is_merged_across_the_buffer_and_the_header() {
         // A namespace can be reopened by every file that mentions it, so the buffer's names are never the whole
         // answer — the difference from a class, which is defined once and listed from one place.
-        let source = "#include \"ns.h\"\nnamespace ns {\n  int in_the_buffer;\n}\nvoid f() {\n  ns::\n}\n";
+        let source =
+            "#include \"ns.h\"\nnamespace ns {\n  int in_the_buffer;\n}\nvoid f() {\n  ns::\n}\n";
         let found = names_at(
             &[("/p/ns.h", "namespace ns {\n  int in_the_header;\n}\n")],
             "/p/main.cpp",
@@ -11689,7 +11982,8 @@ void f(Derived& d) {
         let (index, tree) = analysed(&[], "/p/a.cpp", source);
         let root = tree.get_red_root();
 
-        let found = super::macro_across_files(&index, &root, Path::new("/p/a.cpp"), at(source, "MAX;"));
+        let found =
+            super::macro_across_files(&index, &root, Path::new("/p/a.cpp"), at(source, "MAX;"));
 
         let Known::Yes(found) = found else {
             panic!("the define above the use is the answer: {found:?}");
@@ -11712,7 +12006,8 @@ void f(Derived& d) {
         let (index, tree) = analysed(&[], "/p/a.cpp", source);
         let root = tree.get_red_root();
 
-        let found = super::macro_across_files(&index, &root, Path::new("/p/a.cpp"), at(source, "MAX;"));
+        let found =
+            super::macro_across_files(&index, &root, Path::new("/p/a.cpp"), at(source, "MAX;"));
         assert!(
             matches!(found, Known::Unknown(UnknownReason::NotDeclaredHere(_))),
             "nothing above the use defines it: {found:?}"
@@ -11726,7 +12021,12 @@ void f(Derived& d) {
         let (index, tree) = analysed(&[("/p/config.h", header)], "/p/main.cpp", source);
         let root = tree.get_red_root();
 
-        let found = super::macro_across_files(&index, &root, Path::new("/p/main.cpp"), at(source, "FEATURE;"));
+        let found = super::macro_across_files(
+            &index,
+            &root,
+            Path::new("/p/main.cpp"),
+            at(source, "FEATURE;"),
+        );
 
         let Known::Yes(found) = found else {
             panic!("the header's define must be found: {found:?}");
@@ -11738,10 +12038,19 @@ void f(Derived& d) {
     #[test]
     fn a_header_included_after_the_use_does_not_define_it_yet() {
         let source = "int x = FEATURE;\n#include \"config.h\"\n";
-        let (index, tree) = analysed(&[("/p/config.h", "#define FEATURE 1\n")], "/p/main.cpp", source);
+        let (index, tree) = analysed(
+            &[("/p/config.h", "#define FEATURE 1\n")],
+            "/p/main.cpp",
+            source,
+        );
         let root = tree.get_red_root();
 
-        let found = super::macro_across_files(&index, &root, Path::new("/p/main.cpp"), at(source, "FEATURE;"));
+        let found = super::macro_across_files(
+            &index,
+            &root,
+            Path::new("/p/main.cpp"),
+            at(source, "FEATURE;"),
+        );
         assert!(
             matches!(found, Known::Unknown(UnknownReason::NotDeclaredHere(_))),
             "the include is below the use: {found:?}"
@@ -11755,10 +12064,15 @@ void f(Derived& d) {
         let source = "#include \"one.h\"\n#include \"two.h\"\nint x = FLAG;\n";
         let one = "#define FLAG 1\n";
         let two = "#define FLAG 2\n";
-        let (index, tree) = analysed(&[("/p/one.h", one), ("/p/two.h", two)], "/p/main.cpp", source);
+        let (index, tree) = analysed(
+            &[("/p/one.h", one), ("/p/two.h", two)],
+            "/p/main.cpp",
+            source,
+        );
         let root = tree.get_red_root();
 
-        let found = super::macro_across_files(&index, &root, Path::new("/p/main.cpp"), at(source, "FLAG;"));
+        let found =
+            super::macro_across_files(&index, &root, Path::new("/p/main.cpp"), at(source, "FLAG;"));
 
         let Known::Yes(found) = found else {
             panic!("the last define gone past is the answer: {found:?}");
@@ -11771,10 +12085,15 @@ void f(Derived& d) {
         let source = "#include \"two.h\"\n#include \"one.h\"\nint x = FLAG;\n";
         let one = "#define FLAG 1\n";
         let two = "#define FLAG 2\n";
-        let (index, tree) = analysed(&[("/p/one.h", one), ("/p/two.h", two)], "/p/main.cpp", source);
+        let (index, tree) = analysed(
+            &[("/p/one.h", one), ("/p/two.h", two)],
+            "/p/main.cpp",
+            source,
+        );
         let root = tree.get_red_root();
 
-        let found = super::macro_across_files(&index, &root, Path::new("/p/main.cpp"), at(source, "FLAG;"));
+        let found =
+            super::macro_across_files(&index, &root, Path::new("/p/main.cpp"), at(source, "FLAG;"));
 
         let Known::Yes(found) = found else {
             panic!("order is the whole answer: {found:?}");
@@ -11792,7 +12111,12 @@ void f(Derived& d) {
         );
         let root = tree.get_red_root();
 
-        let found = super::macro_across_files(&index, &root, Path::new("/p/main.cpp"), at(source, "FEATURE;"));
+        let found = super::macro_across_files(
+            &index,
+            &root,
+            Path::new("/p/main.cpp"),
+            at(source, "FEATURE;"),
+        );
         let Known::Yes(found) = found else {
             panic!("the file's own later define is what is in force: {found:?}");
         };
@@ -11811,7 +12135,12 @@ void f(Derived& d) {
         );
         let root = tree.get_red_root();
 
-        let found = super::macro_across_files(&index, &root, Path::new("/p/main.cpp"), at(source, "FEATURE;"));
+        let found = super::macro_across_files(
+            &index,
+            &root,
+            Path::new("/p/main.cpp"),
+            at(source, "FEATURE;"),
+        );
         let Known::Yes(found) = found else {
             panic!("the header was pasted after the local define: {found:?}");
         };
@@ -11831,7 +12160,8 @@ void f(Derived& d) {
         );
         let root = tree.get_red_root();
 
-        let found = super::macro_across_files(&index, &root, Path::new("/p/main.cpp"), at(source, "DEEP;"));
+        let found =
+            super::macro_across_files(&index, &root, Path::new("/p/main.cpp"), at(source, "DEEP;"));
 
         let Known::Yes(found) = found else {
             panic!("a define two includes down is still in force: {found:?}");
@@ -11847,7 +12177,8 @@ void f(Derived& d) {
         let (index, tree) = analysed(&[], "/p/a.cpp", source);
         let root = tree.get_red_root();
 
-        let found = super::macro_across_files(&index, &root, Path::new("/p/a.cpp"), at(source, "MAX;"));
+        let found =
+            super::macro_across_files(&index, &root, Path::new("/p/a.cpp"), at(source, "MAX;"));
 
         assert!(
             matches!(found, Known::Unknown(UnknownReason::UndefinedHere(_))),
@@ -11867,7 +12198,12 @@ void f(Derived& d) {
         );
         let root = tree.get_red_root();
 
-        let found = super::macro_across_files(&index, &root, Path::new("/p/main.cpp"), at(source, "FEATURE;"));
+        let found = super::macro_across_files(
+            &index,
+            &root,
+            Path::new("/p/main.cpp"),
+            at(source, "FEATURE;"),
+        );
         assert!(
             matches!(found, Known::Unknown(UnknownReason::UndefinedHere(_))),
             "the header's define is ended by the file's own `#undef`: {found:?}"
@@ -11880,7 +12216,8 @@ void f(Derived& d) {
         let (index, tree) = analysed(&[], "/p/a.cpp", source);
         let root = tree.get_red_root();
 
-        let found = super::macro_across_files(&index, &root, Path::new("/p/a.cpp"), at(source, "MAX;"));
+        let found =
+            super::macro_across_files(&index, &root, Path::new("/p/a.cpp"), at(source, "MAX;"));
         let Known::Yes(found) = found else {
             panic!("the last fact is a define: {found:?}");
         };
@@ -11893,7 +12230,8 @@ void f(Derived& d) {
         let (index, tree) = analysed(&[], "/p/a.cpp", source);
         let root = tree.get_red_root();
 
-        let found = super::macro_across_files(&index, &root, Path::new("/p/a.cpp"), at(source, "MAX;"));
+        let found =
+            super::macro_across_files(&index, &root, Path::new("/p/a.cpp"), at(source, "MAX;"));
         assert!(
             matches!(found, Known::Unknown(UnknownReason::ConditionalCompilation)),
             "whether that branch was taken is not knowable here: {found:?}"
@@ -11909,7 +12247,8 @@ void f(Derived& d) {
         let (index, tree) = analysed(&[], "/p/a.cpp", source);
         let root = tree.get_red_root();
 
-        let found = super::macro_across_files(&index, &root, Path::new("/p/a.cpp"), at(source, "MAX;"));
+        let found =
+            super::macro_across_files(&index, &root, Path::new("/p/a.cpp"), at(source, "MAX;"));
         let Known::Yes(found) = found else {
             panic!("the unconditional define is what is certain: {found:?}");
         };
@@ -11926,7 +12265,12 @@ void f(Derived& d) {
         );
         let root = tree.get_red_root();
 
-        let found = super::macro_across_files(&index, &root, Path::new("/p/main.cpp"), at(source, "FEATURE;"));
+        let found = super::macro_across_files(
+            &index,
+            &root,
+            Path::new("/p/main.cpp"),
+            at(source, "FEATURE;"),
+        );
         assert!(
             matches!(found, Known::Unknown(UnknownReason::ConditionalCompilation)),
             "the only path to the define goes through an `#if`: {found:?}"
@@ -11939,7 +12283,12 @@ void f(Derived& d) {
         let (index, tree) = analysed(&[], "/p/a.cpp", source);
         let root = tree.get_red_root();
 
-        let found = super::macro_across_files(&index, &root, Path::new("/p/a.cpp"), at(source, "NOT_A_MACRO;"));
+        let found = super::macro_across_files(
+            &index,
+            &root,
+            Path::new("/p/a.cpp"),
+            at(source, "NOT_A_MACRO;"),
+        );
         assert!(
             matches!(found, Known::Unknown(UnknownReason::NotDeclaredHere(_))),
             "the index is a subset of the translation unit, so this is not a definite no: {found:?}"
@@ -11952,7 +12301,8 @@ void f(Derived& d) {
         let (index, tree) = analysed(&[], "/p/a.cpp", source);
         let root = tree.get_red_root();
 
-        let found = super::macro_across_files(&index, &root, Path::new("/p/a.cpp"), at(source, "+ 1;"));
+        let found =
+            super::macro_across_files(&index, &root, Path::new("/p/a.cpp"), at(source, "+ 1;"));
         assert!(
             matches!(found, Known::Unknown(UnknownReason::UnparsableName)),
             "the cursor is on an operator: {found:?}"
@@ -11974,7 +12324,12 @@ void f(Derived& d) {
         );
         let root = tree.get_red_root();
 
-        let found = super::macro_across_files(&index, &root, Path::new("/p/main.cpp"), at(source, "SHARED;"));
+        let found = super::macro_across_files(
+            &index,
+            &root,
+            Path::new("/p/main.cpp"),
+            at(source, "SHARED;"),
+        );
         let Known::Yes(found) = found else {
             panic!("a cycle must not stop the define being found: {found:?}");
         };
@@ -11996,16 +12351,18 @@ void f(Derived& d) {
         );
         let root = tree.get_red_root();
 
-        let found = super::macro_across_files(&index, &root, Path::new("/p/main.cpp"), at(source, "FEATURE;"));
+        let found = super::macro_across_files(
+            &index,
+            &root,
+            Path::new("/p/main.cpp"),
+            at(source, "FEATURE;"),
+        );
         assert!(
             matches!(found, Known::Unknown(UnknownReason::UndefinedHere(_))),
             "the later header undefines it: {found:?}"
         );
     }
 }
-
-
-
 
 /// The name index against the scan it replaced: the same questions, asked of the same index, answered both ways.
 ///
@@ -12027,7 +12384,10 @@ mod name_index_agrees_with_the_scan {
 
     impl Lcg {
         fn next(&mut self, below: usize) -> usize {
-            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             ((self.0 >> 33) as usize) % below
         }
     }
@@ -12035,7 +12395,10 @@ mod name_index_agrees_with_the_scan {
     fn source_of(number: usize, generator: &mut Lcg) -> String {
         let mut text = String::new();
         for _ in 0..generator.next(3) {
-            text.push_str(&format!("#include \"f{}.h\"\n", generator.next(number.max(1))));
+            text.push_str(&format!(
+                "#include \"f{}.h\"\n",
+                generator.next(number.max(1))
+            ));
         }
         text.push_str(&format!("#define DECL{number}(n) struct n {{ int v; }};\n"));
         text.push_str(&format!("DECL{number}(Made{})\n", generator.next(4)));
@@ -12043,11 +12406,16 @@ mod name_index_agrees_with_the_scan {
         for _ in 0..1 + generator.next(3) {
             let class = WORDS[generator.next(WORDS.len())];
             let member = WORDS[generator.next(WORDS.len())];
-            text.push_str(&format!("struct {class} {{ int {member}; void {member}2(); }};\n"));
+            text.push_str(&format!(
+                "struct {class} {{ int {member}; void {member}2(); }};\n"
+            ));
         }
         text.push_str("}\n");
         text.push_str(&format!("int {};\n", WORDS[generator.next(WORDS.len())]));
-        text.push_str(&format!("void fn{number}() {{ int {}; }}\n", WORDS[generator.next(WORDS.len())]));
+        text.push_str(&format!(
+            "void fn{number}() {{ int {}; }}\n",
+            WORDS[generator.next(WORDS.len())]
+        ));
         text
     }
 
@@ -12077,23 +12445,30 @@ mod name_index_agrees_with_the_scan {
     type Row = (PathBuf, String, Option<String>, usize, IncludeVisibility);
 
     fn row(file: &Path, fact: &DeclFact, visibility: IncludeVisibility) -> Row {
-        (file.to_path_buf(), fact.name.clone(), fact.scope.clone(), fact.range.start_offset, visibility)
+        (
+            file.to_path_buf(),
+            fact.name.clone(),
+            fact.scope.clone(),
+            fact.range.start_offset,
+            visibility,
+        )
     }
 
     /// Every fact a query can see, with the raw-then-cooked deduplication, the way the per-file scan did it.
-    fn scanned(
-        index: &ProjectIndex,
-        from: &Path,
-        accepts: impl Fn(&DeclFact) -> bool,
-    ) -> Vec<Row> {
-        let visible: HashMap<String, IncludeVisibility> = index.visible_files(from).into_iter().collect();
+    fn scanned(index: &ProjectIndex, from: &Path, accepts: impl Fn(&DeclFact) -> bool) -> Vec<Row> {
+        let visible: HashMap<String, IncludeVisibility> =
+            index.visible_files(from).into_iter().collect();
         let mut rows = Vec::new();
 
         for summary in index.summaries() {
             let Some(visibility) = visible.get(&normalize(&summary.path)).copied() else {
                 continue;
             };
-            let raw: Vec<&DeclFact> = summary.declarations.iter().filter(|fact| accepts(fact)).collect();
+            let raw: Vec<&DeclFact> = summary
+                .declarations
+                .iter()
+                .filter(|fact| accepts(fact))
+                .collect();
             rows.extend(raw.iter().map(|fact| row(&summary.path, fact, visibility)));
 
             for fact in index
@@ -12102,7 +12477,10 @@ mod name_index_agrees_with_the_scan {
                 .flatten()
                 .filter(|fact| accepts(fact))
             {
-                if !raw.iter().any(|known| known.name == fact.name && known.kind == fact.kind) {
+                if !raw
+                    .iter()
+                    .any(|known| known.name == fact.name && known.kind == fact.kind)
+                {
                     rows.push(row(&summary.path, fact, visibility));
                 }
             }
@@ -12112,22 +12490,36 @@ mod name_index_agrees_with_the_scan {
     }
 
     fn rows(found: &[VisibleDeclaration<'_>]) -> Vec<Row> {
-        found.iter().map(|found| row(&found.file, found.fact, found.visibility)).collect()
+        found
+            .iter()
+            .map(|found| row(&found.file, found.fact, found.visibility))
+            .collect()
     }
 
     /// The workspace search as it was written before the index: every declaration of every file.
-    fn symbols_by_scanning(index: &ProjectIndex, query: &str, limit: usize) -> Vec<(PathBuf, String, Option<String>, usize)> {
+    fn symbols_by_scanning(
+        index: &ProjectIndex,
+        query: &str,
+        limit: usize,
+    ) -> Vec<(PathBuf, String, Option<String>, usize)> {
         let wanted = query.trim().to_lowercase();
         let mut matches: Vec<(usize, String, String, PathBuf, &DeclFact)> = Vec::new();
 
         for summary in index.summaries() {
-            let raw: Vec<&DeclFact> = summary.declarations.iter().filter(|fact| !fact.local).collect();
+            let raw: Vec<&DeclFact> = summary
+                .declarations
+                .iter()
+                .filter(|fact| !fact.local)
+                .collect();
             let fresh: Vec<&DeclFact> = index
                 .cooked_declarations(&summary.path)
                 .into_iter()
                 .flatten()
                 .filter(|fact| {
-                    !fact.local && !raw.iter().any(|known| known.name == fact.name && known.kind == fact.kind)
+                    !fact.local
+                        && !raw
+                            .iter()
+                            .any(|known| known.name == fact.name && known.kind == fact.kind)
                 })
                 .collect();
 
@@ -12139,7 +12531,11 @@ mod name_index_agrees_with_the_scan {
                 let qualified = qualified.to_lowercase();
                 let name = match fact.name.is_empty() {
                     false => fact.name.to_lowercase(),
-                    true => qualified.rsplit("::").next().unwrap_or_default().to_string(),
+                    true => qualified
+                        .rsplit("::")
+                        .next()
+                        .unwrap_or_default()
+                        .to_string(),
                 };
                 matches.push((rank, name, qualified, summary.path.clone(), fact));
             }
@@ -12155,22 +12551,47 @@ mod name_index_agrees_with_the_scan {
         matches
             .into_iter()
             .take(limit)
-            .map(|(_, _, _, file, fact)| (file, fact.name.clone(), fact.scope.clone(), fact.range.start_offset))
+            .map(|(_, _, _, file, fact)| {
+                (
+                    file,
+                    fact.name.clone(),
+                    fact.scope.clone(),
+                    fact.range.start_offset,
+                )
+            })
             .collect()
     }
 
     fn check(index: &ProjectIndex, files: usize, step: &str) {
-        let asked_from: Vec<PathBuf> = (0..files).step_by(3).map(|n| PathBuf::from(format!("/p/f{n}.h"))).collect();
+        let asked_from: Vec<PathBuf> = (0..files)
+            .step_by(3)
+            .map(|n| PathBuf::from(format!("/p/f{n}.h")))
+            .collect();
 
         for from in &asked_from {
-            for word in WORDS.iter().copied().chain(["Made0", "Made3", "nothing", "ns0::Widget", "::size", "ns1::Gadget"]) {
+            for word in WORDS.iter().copied().chain([
+                "Made0",
+                "Made3",
+                "nothing",
+                "ns0::Widget",
+                "::size",
+                "ns1::Gadget",
+            ]) {
                 assert_eq!(
                     rows(&index.files_declaring(word, from)),
                     scanned(index, from, |fact| matches(fact, word)),
                     "{step}: files_declaring({word:?}) from {from:?}"
                 );
             }
-            for scope in ["ns0", "ns1", "ns2", "ns0::Widget", "ns1::Gadget", "ns2::size", "nowhere"] {
+            for scope in [
+                "ns0",
+                "ns1",
+                "ns2",
+                "ns0::Widget",
+                "ns1::Gadget",
+                "ns2::size",
+                "nowhere",
+            ] {
                 assert_eq!(
                     rows(&index.declarations_in(scope, from)),
                     scanned(index, from, |fact| fact.scope.as_deref() == Some(scope)),
@@ -12180,25 +12601,58 @@ mod name_index_agrees_with_the_scan {
         }
 
         for query in [
-            "w", "wid", "Widget", "size", "ma", "made", "run2", "ns0::wid", "ns1::Gadget::si", "Widget::", "::widget", "ns0::",
-            "zzz", "  count ", "e",
+            "w",
+            "wid",
+            "Widget",
+            "size",
+            "ma",
+            "made",
+            "run2",
+            "ns0::wid",
+            "ns1::Gadget::si",
+            "Widget::",
+            "::widget",
+            "ns0::",
+            "zzz",
+            "  count ",
+            "e",
         ] {
             for limit in [1, 4, 1000] {
                 let found: Vec<_> = index
                     .symbols_matching(query, limit)
                     .into_iter()
-                    .map(|symbol| (symbol.file, symbol.fact.name, symbol.fact.scope, symbol.fact.range.start_offset))
+                    .map(|symbol| {
+                        (
+                            symbol.file,
+                            symbol.fact.name,
+                            symbol.fact.scope,
+                            symbol.fact.range.start_offset,
+                        )
+                    })
                     .collect();
-                assert_eq!(found, symbols_by_scanning(index, query, limit), "{step}: symbols_matching({query:?}, {limit})");
+                assert_eq!(
+                    found,
+                    symbols_by_scanning(index, query, limit),
+                    "{step}: symbols_matching({query:?}, {limit})"
+                );
             }
         }
 
         let defining: Vec<PathBuf> = index
             .summaries()
-            .filter(|summary| summary.macros.iter().any(|fact| fact.name == "DECL3" && fact.kind.is_definition()))
+            .filter(|summary| {
+                summary
+                    .macros
+                    .iter()
+                    .any(|fact| fact.name == "DECL3" && fact.kind.is_definition())
+            })
             .map(|summary| summary.path.clone())
             .collect();
-        assert_eq!(index.files_defining_macro("DECL3"), defining, "{step}: files_defining_macro");
+        assert_eq!(
+            index.files_defining_macro("DECL3"),
+            defining,
+            "{step}: files_defining_macro"
+        );
     }
 
     /// A name declared thousands of times is cut at the limit rather than ordered — and the cut is deterministic.
@@ -12206,15 +12660,26 @@ mod name_index_agrees_with_the_scan {
     fn a_name_declared_everywhere_answers_the_first_hits_in_file_order() {
         let mut index = ProjectIndex::new();
         for number in 0..POPULAR_NAME + 50 {
-            file(&mut index, number, &format!("struct C{number} {{ void run(); }};\n"));
+            file(
+                &mut index,
+                number,
+                &format!("struct C{number} {{ void run(); }};\n"),
+            );
         }
 
         let found = index.symbols_matching("run", 10);
         assert_eq!(found.len(), 10);
-        assert_eq!(found, index.symbols_matching("run", 10), "the same answer twice");
+        assert_eq!(
+            found,
+            index.symbols_matching("run", 10),
+            "the same answer twice"
+        );
         assert!(
             found.iter().all(|symbol| {
-                let number: usize = symbol.file.to_string_lossy()[4..].trim_end_matches(".h").parse().unwrap();
+                let number: usize = symbol.file.to_string_lossy()[4..]
+                    .trim_end_matches(".h")
+                    .parse()
+                    .unwrap();
                 number < 10
             }),
             "the cut takes the files in the order the index saw them: {found:?}"
@@ -12239,12 +12704,22 @@ mod name_index_agrees_with_the_scan {
         }
         check(&index, FILES, "after cooking half of them");
         // The corpus is not vacuous: the collisions the checks are about are really there.
-        assert!(index.symbols_matching("widget", 1000).len() > 10, "one name, many files and scopes");
         assert!(
-            index.symbols_matching("made", 1000).iter().any(|symbol| symbol.fact.name.starts_with("Made")),
+            index.symbols_matching("widget", 1000).len() > 10,
+            "one name, many files and scopes"
+        );
+        assert!(
+            index
+                .symbols_matching("made", 1000)
+                .iter()
+                .any(|symbol| symbol.fact.name.starts_with("Made")),
             "a name only the cooked reading declares"
         );
-        assert!(!index.declarations_in("ns0", Path::new("/p/f21.h")).is_empty());
+        assert!(
+            !index
+                .declarations_in("ns0", Path::new("/p/f21.h"))
+                .is_empty()
+        );
 
         // An edit, as a session does one: the summary is replaced under the same key and the reading is dropped.
         for number in [3, 4, 11] {
@@ -12256,14 +12731,19 @@ mod name_index_agrees_with_the_scan {
 
         // A replacement under a *different* key (the key is made from the text) drops the reading with it.
         let path = Path::new("/p/f6.h");
-        sources[6].push_str("int rekeyed;
-");
+        sources[6].push_str(
+            "int rekeyed;
+",
+        );
         let mut summary = summarize(path, &sources[6], SummaryKey::new(999, 0));
         for include in &mut summary.includes {
             include.resolved = Some(PathBuf::from(format!("/p/{}", include.spelling)));
         }
         index.insert(summary);
-        assert!(index.cooked_declarations(path).is_none(), "the reading described a different key");
+        assert!(
+            index.cooked_declarations(path).is_none(),
+            "the reading described a different key"
+        );
         check(&index, FILES, "after a re-key");
 
         for number in [0, 2, 8] {
@@ -12278,10 +12758,11 @@ mod name_index_agrees_with_the_scan {
         for number in 0..FILES {
             index.forget(Path::new(&format!("/p/f{number}.h")));
         }
-        assert_eq!(index.distinct_names(), 0, "an index with no files has no names");
+        assert_eq!(
+            index.distinct_names(),
+            0,
+            "an index with no files has no names"
+        );
         assert!(index.symbols_matching("w", 10).is_empty());
     }
 }
-
-
-

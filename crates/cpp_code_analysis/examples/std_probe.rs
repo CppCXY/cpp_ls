@@ -91,7 +91,8 @@ fn main() {
     // in-force channel — see `configuration_from_environment`. The flag used to be the other way round, and that
     // is worth a sentence: after the library's default changed, the probe kept pinning the *old* side of the
     // switch, so every census went on measuring a mode the product no longer used.
-    let without_in_force_bodies = std::env::args().any(|argument| argument == "--no-in-force-bodies");
+    let without_in_force_bodies =
+        std::env::args().any(|argument| argument == "--no-in-force-bodies");
     // `--cooked-index`: also **index** the cooked reading of every file and map it back into the file, then report
     // what the two readings declare — the number that says what indexing the cooked stream is worth (a symbol a
     // macro declares exists only there, and a symbol in a branch nobody takes exists only in the raw reading).
@@ -194,7 +195,8 @@ fn main() {
                 cpp_code_analysis::discover(
                     &files,
                     &cpp_code_analysis::DiskCommands,
-                    cpp_code_analysis::BuildStatement::default(),                    first,
+                    cpp_code_analysis::BuildStatement::default(),
+                    first,
                     &cpp_code_analysis::Environment::current(),
                     &cpp_code_analysis::include::msvc::WindowsLayout::current(),
                 )
@@ -212,7 +214,11 @@ fn main() {
             marked.define_on_the_command_line(&definition.name, definition.value.as_deref());
         }
 
-        if found_a_toolchain { marked } else { marked.incomplete() }
+        if found_a_toolchain {
+            marked
+        } else {
+            marked.incomplete()
+        }
     } else {
         // Not seeding at all: an empty, incomplete state, so that nothing here pretends to know anything.
         cpp_code_analysis::graph::Marked::default().incomplete()
@@ -232,7 +238,9 @@ standard {}",
             seed.lookup("__cplusplus").is_defined(),
             seed.lookup("_WIN32").is_defined(),
             seed.is_uncertain("__cplusplus"),
-            standard.as_deref().unwrap_or("(none — the configuration decides nothing)"),
+            standard
+                .as_deref()
+                .unwrap_or("(none — the configuration decides nothing)"),
         );
     }
 
@@ -436,10 +444,18 @@ standard {}",
         }
 
         let unit = cpp_code_analysis::TranslationUnit::walk(
-            summaries.get(&root).expect("the list's first file was indexed"),
+            summaries
+                .get(&root)
+                .expect("the list's first file was indexed"),
             |wanted| {
                 summaries.get(wanted).map(|summary| {
-                    (summary, definition_sources.get(wanted).map(|text| &**text).unwrap_or(""))
+                    (
+                        summary,
+                        definition_sources
+                            .get(wanted)
+                            .map(|text| &**text)
+                            .unwrap_or(""),
+                    )
                 })
             },
             &seed,
@@ -537,20 +553,31 @@ standard {}",
                 .is_some_and(|view| watched.iter().any(|name| view.knows(name)));
         }
 
-        let owned_environment: Option<cpp_parser::MacroEnvironment> =
-            if seeded && timeline.is_none() {
-                // Building the evidence is itself a measurement: the closure version reads the whole include graph
-                // of every direct include, so its cost is the thing that decides whether this layer can be
-                // per-file.
-                let started = std::time::Instant::now();
-                let (seeds, bodies) = if closure {
+        let owned_environment: Option<cpp_parser::MacroEnvironment> = if seeded
+            && timeline.is_none()
+        {
+            // Building the evidence is itself a measurement: the closure version reads the whole include graph
+            // of every direct include, so its cost is the thing that decides whether this layer can be
+            // per-file.
+            let started = std::time::Instant::now();
+            let (seeds, bodies) = if closure {
                 let look_up = |wanted: &std::path::Path| {
                     summaries.get(wanted).map(|summary| {
-                        (summary, definition_sources.get(wanted).map(|text| &**text).unwrap_or(""))
+                        (
+                            summary,
+                            definition_sources
+                                .get(wanted)
+                                .map(|text| &**text)
+                                .unwrap_or(""),
+                        )
                     })
                 };
-                let evidence =
-                    cpp_code_analysis::macros_from_the_closure_with_bodies(summary, look_up, &seed, &mut macro_definitions);
+                let evidence = cpp_code_analysis::macros_from_the_closure_with_bodies(
+                    summary,
+                    look_up,
+                    &seed,
+                    &mut macro_definitions,
+                );
                 conditional_asked += evidence.conditional_facts;
                 conditional_taken += evidence.facts_in_force;
 
@@ -560,7 +587,13 @@ standard {}",
                 // `STDMETHOD`, whose definition is in a file its own include list does not mention.
                 let context = includers.get(path).map(|(includer, at)| {
                     let summary = summaries.get(includer).expect("an includer is indexed");
-                    cpp_code_analysis::macros_in_force_before_the_include(summary, *at, look_up, &seed, &mut macro_definitions)
+                    cpp_code_analysis::macros_in_force_before_the_include(
+                        summary,
+                        *at,
+                        look_up,
+                        &seed,
+                        &mut macro_definitions,
+                    )
                 });
                 if context.is_some() {
                     files_with_context += 1;
@@ -589,7 +622,13 @@ standard {}",
                 (
                     cpp_code_analysis::macros_from_direct_includes_with_bodies(summary, |wanted| {
                         summaries.get(wanted).map(|summary| {
-                            (summary, definition_sources.get(wanted).map(|text| &**text).unwrap_or(""))
+                            (
+                                summary,
+                                definition_sources
+                                    .get(wanted)
+                                    .map(|text| &**text)
+                                    .unwrap_or(""),
+                            )
                         })
                     }),
                     Vec::new(),
@@ -600,7 +639,11 @@ standard {}",
             total_seeds += seeds.len();
             bodies_with_text += seeds
                 .iter()
-                .filter(|seed| seed.body_text.as_deref().is_some_and(|text| !text.trim().is_empty()))
+                .filter(|seed| {
+                    seed.body_text
+                        .as_deref()
+                        .is_some_and(|text| !text.trim().is_empty())
+                })
                 .count();
             if !seeds.is_empty() {
                 files_with_seeds += 1;
@@ -618,7 +661,10 @@ standard {}",
                     *seeds_by_shape.entry(shape).or_default() += 1;
                 }
             }
-            Some(cpp_parser::MacroEnvironment::from_included_macros(seeds).with_bodies_in_force(bodies))
+            Some(
+                cpp_parser::MacroEnvironment::from_included_macros(seeds)
+                    .with_bodies_in_force(bodies),
+            )
         } else {
             None
         };
@@ -633,9 +679,7 @@ standard {}",
 
         // Both parses take the **same** lexical reading — see `lexer_config`. A probe whose two arms read
         // differently cannot compare them, and the failure mode is silent: the numbers still print.
-        let parser_config = || {
-            cpp_parser::ParserConfig::default().with_lexer_config(lexer_config)
-        };
+        let parser_config = || cpp_parser::ParserConfig::default().with_lexer_config(lexer_config);
         // **The environment is not handed to the parse.** The grammar reads a cooked stream and makes no reading
         // turn on a name's being a macro; see `FileIndexer::index`, which records the coordinate mismatch that made
         // the old wiring wrong rather than merely useless.
@@ -820,7 +864,8 @@ standard {}",
                                     name,
                                     fact.kind,
                                     match &fact.guard {
-                                        cpp_code_analysis::FactGuard::Unconditional => "unconditional",
+                                        cpp_code_analysis::FactGuard::Unconditional =>
+                                            "unconditional",
                                         cpp_code_analysis::FactGuard::Region(_) => "conditional",
                                     },
                                     path.display(),
@@ -913,7 +958,9 @@ standard {}",
                 let written = rendered.written_at(at);
                 // The file position, as line and column — counted here rather than through the line index
                 // because the offset came from the map and not from the file.
-                let offset = reported.map_or(0, |range| range.start_offset).min(source.len());
+                let offset = reported
+                    .map_or(0, |range| range.start_offset)
+                    .min(source.len());
                 let before = &source[..offset];
                 let line = before.lines().count();
                 let column = before.len() - before.rfind('\n').map_or(0, |at| at + 1);
@@ -946,8 +993,11 @@ standard {}",
                         Some((line, column)) => (line, column, false),
                         None => (source.lines().count(), 0, true),
                     };
-                let window: Vec<&str> =
-                    source.lines().skip(line.saturating_sub(2)).take(3).collect();
+                let window: Vec<&str> = source
+                    .lines()
+                    .skip(line.saturating_sub(2))
+                    .take(3)
+                    .collect();
                 let joined = window.join(" ");
                 (
                     line,
@@ -967,11 +1017,11 @@ standard {}",
         };
         let window = [window.as_str()];
 
-
         let mentions = |names: &HashSet<String>| {
-            window.join(" ").split(|c: char| !(c.is_alphanumeric() || c == '_')).any(
-                |word| word.len() > 2 && names.contains(word),
-            )
+            window
+                .join(" ")
+                .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+                .any(|word| word.len() > 2 && names.contains(word))
         };
 
         if own_macros.get(path).is_some_and(&mentions) {
@@ -1013,7 +1063,13 @@ standard {}",
             line + 1,
             column,
             errors[0].message,
-            window.last().unwrap_or(&"").trim().chars().take(70).collect::<String>(),
+            window
+                .last()
+                .unwrap_or(&"")
+                .trim()
+                .chars()
+                .take(70)
+                .collect::<String>(),
             path.display(),
             readable,
         ));
@@ -1124,7 +1180,8 @@ standard {}",
             },
         );
     } else {
-        unit_stream = "the unit as one stream: no unit — see `--seeds --closure`\n         ".to_string();
+        unit_stream =
+            "the unit as one stream: no unit — see `--seeds --closure`\n         ".to_string();
     }
 
     // Which experiment this run is, stated in the output: "the evidence arrived and changed nothing" and "the
@@ -1140,7 +1197,6 @@ standard {}",
             }
         );
     }
-
 
     // The **lexical** reading, on its own line, because it is a reading a run can be wrong about: with `$` refused
     // the MSVC SAL headers lose every `__$allowed_*` definition, and the numbers below then describe the lexer
@@ -1239,7 +1295,8 @@ standard {}",
         let root = std::env::temp_dir().join("stdprobe-session-root");
         let _ = std::fs::create_dir_all(&root);
         let documents = cpp_code_analysis::OpenDocuments::new();
-        let providers = cpp_code_analysis::SessionFiles::new(documents, cpp_code_analysis::DiskFiles);
+        let providers =
+            cpp_code_analysis::SessionFiles::new(documents, cpp_code_analysis::DiskFiles);
         let filter = cpp_code_analysis::WatchFilter::new(&root);
         let mut session = cpp_code_analysis::Session::with_config(
             &root,
@@ -1331,7 +1388,8 @@ definitions {unusable_unreadable}\n\
             ""
         },
         {
-            let mut pairs: Vec<(&str, usize)> = seeds_by_shape.iter().map(|(k, v)| (*k, *v)).collect();
+            let mut pairs: Vec<(&str, usize)> =
+                seeds_by_shape.iter().map(|(k, v)| (*k, *v)).collect();
             pairs.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
             pairs
                 .into_iter()
@@ -1365,7 +1423,8 @@ definitions {unusable_unreadable}\n\
         );
     }
 
-    let mut ranked: Vec<(&String, &usize)> = by_message.iter().collect();    ranked.sort_by(|one, other| other.1.cmp(one.1));
+    let mut ranked: Vec<(&String, &usize)> = by_message.iter().collect();
+    ranked.sort_by(|one, other| other.1.cmp(one.1));
     // **The total is printed, not just the top of the list**: the list is truncated, so "add up what you see" is
     // not the number — and every number in `docs/` that came from this probe is a total. (Found the hard way:
     // 15 lines summed to 920 while the file really had 941 messages, because the tail beyond the top 15 is real.)
@@ -1397,9 +1456,10 @@ definitions {unusable_unreadable}\n\
         histogram[0], histogram[1], histogram[2], histogram[3]
     );
 
-    println!("\n--- the first error of every failing file, which is the one nothing above explains ---");
+    println!(
+        "\n--- the first error of every failing file, which is the one nothing above explains ---"
+    );
     for detail in &details {
         println!("{detail}");
     }
 }
-

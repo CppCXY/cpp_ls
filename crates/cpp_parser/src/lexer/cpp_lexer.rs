@@ -570,16 +570,15 @@ impl<'a> CppLexer<'a> {
         }
     }
 
-/// Is this a character the lexer reads as **trivia whitespace** — run together into one token?
-///
-/// One predicate for the two places that have to agree: the dispatch arm that *starts* a whitespace token and
-/// `lex_whitespace`, which *extends* it. The standard's whitespace is five characters (`space`, horizontal tab,
-/// newline, vertical tab, form feed); newline has its own token, and a byte-order mark is here because a BOM is
-/// the file's own text rather than an unrecognised character — see `lex_whitespace`.
-fn is_trivia_whitespace(ch: char) -> bool {
-    matches!(ch, ' ' | '\t' | '\u{b}' | '\u{c}' | '\u{feff}')
-}
-
+    /// Is this a character the lexer reads as **trivia whitespace** — run together into one token?
+    ///
+    /// One predicate for the two places that have to agree: the dispatch arm that *starts* a whitespace token and
+    /// `lex_whitespace`, which *extends* it. The standard's whitespace is five characters (`space`, horizontal tab,
+    /// newline, vertical tab, form feed); newline has its own token, and a byte-order mark is here because a BOM is
+    /// the file's own text rather than an unrecognised character — see `lex_whitespace`.
+    fn is_trivia_whitespace(ch: char) -> bool {
+        matches!(ch, ' ' | '\t' | '\u{b}' | '\u{c}' | '\u{feff}')
+    }
 
     /// A **byte-order mark** is whitespace here. `\u{feff}` at the start of a file is the BOM that Visual Studio
     /// and a good many Windows editors write, and the standard has the implementation drop it in translation

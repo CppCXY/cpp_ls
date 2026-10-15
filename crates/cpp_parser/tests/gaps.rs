@@ -21,7 +21,8 @@
 //! second list to the first. That is the whole mechanism, and it is deliberately the cheapest one available.
 
 use cpp_parser::{
-    CppLexer, CppParser, CppSyntaxKind, CppSyntaxTree, CppTokenKind, Dialect, LexerConfig, ParserConfig,
+    CppLexer, CppParser, CppSyntaxKind, CppSyntaxTree, CppTokenKind, Dialect, LexerConfig,
+    ParserConfig,
 };
 
 /// The three places a construct can be written, because the same tokens are read differently in each.
@@ -179,7 +180,11 @@ fn an_allocation_initialiser_is_not_a_parameter_list() {
     // The group is the **initialiser**: a `FunctionType` in the allocation would be the old misreading.
     assert_statement_kind(&[
         forbidding(
-            shape("auto p = new T(a, *q);", Where::Body, CppSyntaxKind::Declaration),
+            shape(
+                "auto p = new T(a, *q);",
+                Where::Body,
+                CppSyntaxKind::Declaration,
+            ),
             CppSyntaxKind::FunctionType,
         ),
         forbidding(
@@ -193,22 +198,23 @@ fn an_allocation_initialiser_is_not_a_parameter_list() {
         // The shape that used to be claimed as a parenthesised declarator: the group is the initialiser here
         // too, and `q` inside it is an operand rather than a declarator that has nowhere to put it.
         forbidding(
-            shape("auto p = new T(*q);", Where::Body, CppSyntaxKind::Declaration),
+            shape(
+                "auto p = new T(*q);",
+                Where::Body,
+                CppSyntaxKind::Declaration,
+            ),
             CppSyntaxKind::FunctionType,
         ),
     ]);
 
     assert_does_not_read_yet(
         Where::Body,
-        &[
-
-            (
-                "auto p = new (Widget)(1);",
-                "an allocation of a **parenthesised** type used as an initialiser: the note on \
+        &[(
+            "auto p = new (Widget)(1);",
+            "an allocation of a **parenthesised** type used as an initialiser: the note on \
                  `parse_a_type_here` says this shape is why the placement/type split exists, and it reads \
                  cleanly as a *statement* (`new (Widget)(1);`) but not here. Found while writing this test",
-            ),
-        ],
+        )],
     );
 }
 
@@ -485,7 +491,11 @@ fn a_functional_conversion_may_have_no_arguments() {
         )
     };
 
-    assert_eq!(kinds("return int();"), (true, false), "`int()` is a conversion");
+    assert_eq!(
+        kinds("return int();"),
+        (true, false),
+        "`int()` is a conversion"
+    );
     assert_eq!(
         kinds("return typename A::type();"),
         (true, false),
@@ -547,7 +557,11 @@ fn a_template_argument_read_as_an_expression_stops_at_the_comma() {
             .count()
     };
     assert_eq!(arguments("S<3, 4> x;"), 2, "two arguments, not one");
-    assert_eq!(arguments("S<3, long> x;"), 2, "and the same when the second is a type");
+    assert_eq!(
+        arguments("S<3, long> x;"),
+        2,
+        "and the same when the second is a type"
+    );
     assert_eq!(
         arguments("S<(a, b)> x;"),
         1,
@@ -620,7 +634,8 @@ fn a_conditional_may_decide_a_functions_qualifier() {
         .find(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::CompoundStat)
         .expect("the `{ }` is the function's body");
     assert_eq!(
-        body.parent().map(|parent| CppSyntaxKind::from(parent.kind())),
+        body.parent()
+            .map(|parent| CppSyntaxKind::from(parent.kind())),
         Some(CppSyntaxKind::Declaration),
         "the body belongs to the declaration rather than being an initialiser"
     );
@@ -630,11 +645,10 @@ fn a_conditional_may_decide_a_functions_qualifier() {
         "the qualifier and the body are one member, not two"
     );
     assert_eq!(
-        body.parent()
-            .map(|member| member
-                .children()
-                .filter(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::DeclSpecifierSeq)
-                .count()),
+        body.parent().map(|member| member
+            .children()
+            .filter(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::DeclSpecifierSeq)
+            .count()),
         Some(1),
         "`noexcept(true)` is not a type: the member has one specifier sequence, the one holding `void`"
     );
@@ -855,14 +869,20 @@ fn a_conditional_may_decide_a_requirement() {
             .filter(|node| CppSyntaxKind::from(node.kind()) == kind)
             .count()
     };
-    assert_eq!(inside(CppSyntaxKind::Requirement), 2, "one requirement per branch");
+    assert_eq!(
+        inside(CppSyntaxKind::Requirement),
+        2,
+        "one requirement per branch"
+    );
     assert_eq!(
         inside(CppSyntaxKind::PreprocessorDirective),
         3,
         "the `#if`, `#else` and `#endif` are the expression's own children"
     );
     assert_eq!(
-        direct_members("struct Probe { static constexpr bool ok = requires (T t) {\n#if X\n  t.f();\n#else\n  t.g();\n#endif\n  };\n  int after;\n};"),
+        direct_members(
+            "struct Probe { static constexpr bool ok = requires (T t) {\n#if X\n  t.f();\n#else\n  t.g();\n#endif\n  };\n  int after;\n};"
+        ),
         2,
         "the member with the conditional in it is a member, and so is the one after it"
     );
@@ -1126,10 +1146,7 @@ fn a_type_may_be_spelled_by_the_compiler() {
     // **MSVC**: `__int64` and friends are types there, and `__int128` is not — which is how a header that
     // typedefs it reads.
     let msvc = |source: &str| {
-        CppParser::parse(
-            source,
-            ParserConfig::default().with_dialect(Dialect::Msvc),
-        )
+        CppParser::parse(source, ParserConfig::default().with_dialect(Dialect::Msvc))
     };
     assert!(
         msvc("__int64 big;").get_errors().is_empty(),
@@ -1299,20 +1316,34 @@ fn a_cast_of_a_cast_is_still_a_cast() {
     // **The shape**, because both readings parse: a cast of a cast is two `CastExpr`s, a call through
     // parentheses is a `CallExpr` over a `ParenExpr`, and a chain is two `CallExpr`s.
     let counts = |source: &str| {
-        let tree = CppParser::parse(&format!("void probe() {{ {source} }}"), ParserConfig::default());
+        let tree = CppParser::parse(
+            &format!("void probe() {{ {source} }}"),
+            ParserConfig::default(),
+        );
         let root = tree.get_red_root();
         let count = |kind| {
             root.descendants()
                 .filter(|node| CppSyntaxKind::from(node.kind()) == kind)
                 .count()
         };
-        (count(CppSyntaxKind::CastExpr), count(CppSyntaxKind::CallExpr))
+        (
+            count(CppSyntaxKind::CastExpr),
+            count(CppSyntaxKind::CallExpr),
+        )
     };
 
     assert_eq!(counts("(T)(U) 1;"), (2, 0), "two casts, no call");
     assert_eq!(counts("(T)(U)(V) 1;"), (3, 0), "…and the run can be longer");
-    assert_eq!(counts("(f)(a);"), (0, 1), "a call through parentheses stays a call");
-    assert_eq!(counts("(f)(a)(b);"), (0, 2), "and a chain of calls stays a chain");
+    assert_eq!(
+        counts("(f)(a);"),
+        (0, 1),
+        "a call through parentheses stays a call"
+    );
+    assert_eq!(
+        counts("(f)(a)(b);"),
+        (0, 2),
+        "and a chain of calls stays a chain"
+    );
     assert_eq!(
         counts("(f)(a) + 1;"),
         (0, 1),
@@ -1569,9 +1600,9 @@ fn an_asm_statement_keeps_its_payload_as_tokens() {
         "and every operand is still in it, as text: {text:?}"
     );
     assert!(
-        !root.descendants().any(|node| {
-            CppSyntaxKind::from(node.kind()) == CppSyntaxKind::ErrorNode
-        }),
+        !root
+            .descendants()
+            .any(|node| { CppSyntaxKind::from(node.kind()) == CppSyntaxKind::ErrorNode }),
         "nothing in an asm statement is rubble"
     );
 
@@ -1644,13 +1675,19 @@ fn a_group_holding_a_call_is_an_expression_not_a_cast() {
 
     // **Which of the two readings came out**, and that the failed attempt left nothing behind.
     let kinds = |source: &str| {
-        let tree = CppParser::parse(&format!("void probe() {{ {source} }}"), ParserConfig::default());
+        let tree = CppParser::parse(
+            &format!("void probe() {{ {source} }}"),
+            ParserConfig::default(),
+        );
         let root = tree.get_red_root();
         let found = |kind| {
             root.descendants()
                 .any(|node| CppSyntaxKind::from(node.kind()) == kind)
         };
-        (found(CppSyntaxKind::CastExpr), found(CppSyntaxKind::CallExpr))
+        (
+            found(CppSyntaxKind::CastExpr),
+            found(CppSyntaxKind::CallExpr),
+        )
     };
 
     assert_eq!(kinds("auto r = (T)x;"), (true, false), "`(T)x` is a cast");
@@ -1765,8 +1802,10 @@ fn a_directive_may_decide_a_parameter_or_stand_between_two() {
     // every spelling of every parameter in it.
     assert_reads(
         Where::File,
-        &["void random_shuffle(_RAIter, _RAIter,\n#if X\n  _RandomNumberGenerator&&);\n#else\n  \
-           _RandomNumberGenerator&);\n#endif"],
+        &[
+            "void random_shuffle(_RAIter, _RAIter,\n#if X\n  _RandomNumberGenerator&&);\n#else\n  \
+           _RandomNumberGenerator&);\n#endif",
+        ],
     );
     assert_eq!(
         parameters(
@@ -1853,16 +1892,17 @@ fn a_macros_arguments_that_are_not_expressions_stay_tokens() {
         assert!(
             tree.get_errors().is_empty(),
             "`{statement}` is reported: {:?}",
-            tree.get_errors().iter().map(|e| &e.message).collect::<Vec<_>>()
+            tree.get_errors()
+                .iter()
+                .map(|e| &e.message)
+                .collect::<Vec<_>>()
         );
 
         tree.get_red_root().descendants().any(|node| {
-            matches!(
-                CppSyntaxKind::from(node.kind()),
-                CppSyntaxKind::CallExpr
-            ) && node.children().any(|child| {
-                CppSyntaxKind::from(child.kind()) == CppSyntaxKind::ArgumentList
-            })
+            matches!(CppSyntaxKind::from(node.kind()), CppSyntaxKind::CallExpr)
+                && node
+                    .children()
+                    .any(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::ArgumentList)
         })
     };
 
@@ -1916,10 +1956,7 @@ fn a_using_enum_declaration_and_the_register_specifier_read() {
             "enum class E { a };\ntemplate<class T> void f() { using enum E; }",
         ],
     );
-    assert_reads(
-        Where::Body,
-        &["using enum E;", "using enum ns::E;"],
-    );
+    assert_reads(Where::Body, &["using enum E;", "using enum ns::E;"]);
     assert_reads(Where::Class, &["using enum E;"]);
 
     // `register` where a declaration may stand, alone and among other specifiers.
@@ -1946,7 +1983,10 @@ fn a_using_enum_declaration_and_the_register_specifier_read() {
         assert!(
             tree.get_errors().is_empty(),
             "`{source}` is reported: {:?}",
-            tree.get_errors().iter().map(|e| &e.message).collect::<Vec<_>>()
+            tree.get_errors()
+                .iter()
+                .map(|e| &e.message)
+                .collect::<Vec<_>>()
         );
         tree.get_red_root()
             .descendants()
@@ -1954,15 +1994,24 @@ fn a_using_enum_declaration_and_the_register_specifier_read() {
     };
 
     assert!(
-        specifier("void probe() { register int x = 0; }", CppSyntaxKind::RegisterSpec),
+        specifier(
+            "void probe() { register int x = 0; }",
+            CppSyntaxKind::RegisterSpec
+        ),
         "`register` is a storage-class specifier, so it gets a specifier node"
     );
     assert!(
-        specifier("enum class E { a };\nusing enum E;", CppSyntaxKind::UsingDecl),
+        specifier(
+            "enum class E { a };\nusing enum E;",
+            CppSyntaxKind::UsingDecl
+        ),
         "`using enum E;` is a using-declaration"
     );
     assert!(
-        !specifier("enum class E { a };\nusing enum E;", CppSyntaxKind::MissingNode),
+        !specifier(
+            "enum class E { a };\nusing enum E;",
+            CppSyntaxKind::MissingNode
+        ),
         "and nothing in it is missing"
     );
 
@@ -1974,12 +2023,17 @@ fn a_using_enum_declaration_and_the_register_specifier_read() {
     assert!(
         label.get_errors().is_empty(),
         "the asm label on a declarator is not an error: {:?}",
-        label.get_errors().iter().map(|e| &e.message).collect::<Vec<_>>()
+        label
+            .get_errors()
+            .iter()
+            .map(|e| &e.message)
+            .collect::<Vec<_>>()
     );
     assert!(
-        label.get_red_root().descendants().any(|node| {
-            CppSyntaxKind::from(node.kind()) == CppSyntaxKind::MacroCall
-        }),
+        label
+            .get_red_root()
+            .descendants()
+            .any(|node| { CppSyntaxKind::from(node.kind()) == CppSyntaxKind::MacroCall }),
         "…and its tokens are kept, under the macro reading, with nothing interpreted"
     );
 }
@@ -2060,7 +2114,10 @@ fn a_macro_may_stand_between_the_type_and_the_declarator() {
         assert!(
             tree.get_errors().is_empty(),
             "`{source}` is reported: {:?}",
-            tree.get_errors().iter().map(|e| &e.message).collect::<Vec<_>>()
+            tree.get_errors()
+                .iter()
+                .map(|e| &e.message)
+                .collect::<Vec<_>>()
         );
         let root = tree.get_red_root();
         let specifiers = root
@@ -2106,7 +2163,10 @@ fn a_macro_may_stand_between_the_type_and_the_declarator() {
         assert!(
             tree.get_errors().is_empty(),
             "`{source}` is reported: {:?}",
-            tree.get_errors().iter().map(|e| &e.message).collect::<Vec<_>>()
+            tree.get_errors()
+                .iter()
+                .map(|e| &e.message)
+                .collect::<Vec<_>>()
         );
         tree.get_red_root()
             .descendants()
@@ -2186,7 +2246,10 @@ fn a_macro_shaped_name_inside_a_type_id_and_a_parenthesised_declarator() {
         assert!(
             tree.get_errors().is_empty(),
             "`{source}` is reported: {:?}",
-            tree.get_errors().iter().map(|e| &e.message).collect::<Vec<_>>()
+            tree.get_errors()
+                .iter()
+                .map(|e| &e.message)
+                .collect::<Vec<_>>()
         );
         let root = tree.get_red_root();
         let parameters = root
@@ -2225,7 +2288,10 @@ fn a_macro_shaped_name_inside_a_type_id_and_a_parenthesised_declarator() {
         assert!(
             tree.get_errors().is_empty(),
             "`{source}` is reported: {:?}",
-            tree.get_errors().iter().map(|e| &e.message).collect::<Vec<_>>()
+            tree.get_errors()
+                .iter()
+                .map(|e| &e.message)
+                .collect::<Vec<_>>()
         );
         let root = tree.get_red_root();
         let macros = root
@@ -2304,7 +2370,10 @@ fn a_name_after_an_anonymous_class_definition_is_the_declarator() {
         assert!(
             tree.get_errors().is_empty(),
             "`{source}` is reported: {:?}",
-            tree.get_errors().iter().map(|e| &e.message).collect::<Vec<_>>()
+            tree.get_errors()
+                .iter()
+                .map(|e| &e.message)
+                .collect::<Vec<_>>()
         );
         let root = tree.get_red_root();
         // The **last** one: the first is the enclosing function's own declarator (`probe()`), and the one this
@@ -2418,14 +2487,18 @@ fn a_macro_from_a_header_can_be_a_statement_of_its_own() {
         "WINOLEAPI_(void) CoFreeLibrary (HINSTANCE hInst);",
         ParserConfig::default(),
     );
-    assert!(tree.get_errors().is_empty(), "the macro-headed declaration still reads");
     assert!(
-        tree.get_red_root().descendants().any(|node| {
-            CppSyntaxKind::from(node.kind()) == CppSyntaxKind::Declaration
-        }) && !tree
-            .get_red_root()
-            .children()
-            .any(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::MacroCall),
+        tree.get_errors().is_empty(),
+        "the macro-headed declaration still reads"
+    );
+    assert!(
+        tree.get_red_root()
+            .descendants()
+            .any(|node| { CppSyntaxKind::from(node.kind()) == CppSyntaxKind::Declaration })
+            && !tree
+                .get_red_root()
+                .children()
+                .any(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::MacroCall),
         "it is one declaration whose specifiers hold the macro — not a macro statement and a second declaration"
     );
 }
@@ -2462,7 +2535,10 @@ fn a_directive_may_stand_between_enumerators() {
         assert!(
             tree.get_errors().is_empty(),
             "`{source}` is reported: {:?}",
-            tree.get_errors().iter().map(|e| &e.message).collect::<Vec<_>>()
+            tree.get_errors()
+                .iter()
+                .map(|e| &e.message)
+                .collect::<Vec<_>>()
         );
         tree.get_red_root()
             .descendants()
@@ -2473,7 +2549,11 @@ fn a_directive_may_stand_between_enumerators() {
 
     assert_eq!(
         enumerators("enum E {\n  a = 1,\n#ifdef X\n  b = 2,\n#endif\n  c = 3\n};"),
-        vec!["a = 1".to_string(), "b = 2".to_string(), "c = 3".to_string()],
+        vec![
+            "a = 1".to_string(),
+            "b = 2".to_string(),
+            "c = 3".to_string()
+        ],
         "all three, with the directive between the second and the third"
     );
 }
@@ -2520,8 +2600,14 @@ fn a_compound_requirement_may_hold_a_braced_temporary() {
         .descendants()
         .map(|node| CppSyntaxKind::from(node.kind()))
         .collect();
-    assert!(kinds.contains(&CppSyntaxKind::InitListExpr), "`_Begin{{}}` is a list-initialised temporary");
-    assert!(kinds.contains(&CppSyntaxKind::Requirement), "…inside the requirement");
+    assert!(
+        kinds.contains(&CppSyntaxKind::InitListExpr),
+        "`_Begin{{}}` is a list-initialised temporary"
+    );
+    assert!(
+        kinds.contains(&CppSyntaxKind::Requirement),
+        "…inside the requirement"
+    );
 
     let constrained = CppParser::parse(
         "template<class T> concept C = true;\ntemplate<class T> void f(T t) requires C<T> { }",
@@ -2754,7 +2840,9 @@ fn a_construct_the_grammar_refuses_does_not_take_the_rest_with_it() {
     ];
 
     for shape in shapes {
-        let source = format!("namespace outer {{\n{shape}\n}}\nnamespace inner {{\nstruct Inside {{ int y; }};\n}}\n");
+        let source = format!(
+            "namespace outer {{\n{shape}\n}}\nnamespace inner {{\nstruct Inside {{ int y; }};\n}}\n"
+        );
         let tree = CppParser::parse(&source, ParserConfig::default());
         let errors = tree.get_errors().len();
 
@@ -2937,7 +3025,8 @@ fn count_of(source: &str, kind: CppSyntaxKind) -> usize {
 #[test]
 fn a_macro_from_a_header_can_stand_where_a_declaration_goes() {
     // The namespace head, which is the shape in every standard header.
-    let header = "namespace std _GLIBCXX_VISIBILITY(default)\n{\n  struct Widget { int size; };\n}\n";
+    let header =
+        "namespace std _GLIBCXX_VISIBILITY(default)\n{\n  struct Widget { int size; };\n}\n";
     assert!(
         contains(header, CppSyntaxKind::NamespaceDecl),
         "the namespace is still a namespace"
@@ -3007,7 +3096,6 @@ fn a_macro_from_a_header_can_stand_where_a_declaration_goes() {
     );
 }
 
-
 /// The top level of a parse, as `Kind:first-token` — the shape a reading is judged by.
 ///
 /// Losslessness and a clean parse are asserted here rather than at each call site, so that a shape assertion
@@ -3038,9 +3126,6 @@ fn shape_body_of_the_file_reads(source: &str) -> Vec<String> {
         .collect()
 }
 
-
-
-
 /// The compiler's own attribute spellings are attributes, in every position the standard spelling works in.
 ///
 /// `__attribute__((…))` and `__declspec(…)` mean what `[[…]]` means, and they are the *compiler's* extension
@@ -3057,16 +3142,14 @@ fn shape_body_of_the_file_reads(source: &str) -> Vec<String> {
 fn the_compilers_attribute_spellings_are_attributes() {
     let parses = |source: &str| {
         let tree = CppParser::parse(source, ParserConfig::default());
-        assert_eq!(
-            tree.get_errors(),
-            [],
-            "this must parse cleanly: {source:?}"
-        );
+        assert_eq!(tree.get_errors(), [], "this must parse cleanly: {source:?}");
         tree
     };
 
     // Between the template head and the declaration it wraps — `bits/move.h`.
-    let wrapped = parses("template <typename T>\n__attribute__((__always_inline__))\ninline T* addressof(T& r);\n");
+    let wrapped = parses(
+        "template <typename T>\n__attribute__((__always_inline__))\ninline T* addressof(T& r);\n",
+    );
     assert!(
         wrapped
             .get_red_root()
@@ -3076,7 +3159,9 @@ fn the_compilers_attribute_spellings_are_attributes() {
     );
 
     // In the specifier sequence, after a linkage specification — `bits/c++config.h`.
-    parses("extern \"C++\" __attribute__ ((__noreturn__, __always_inline__))\ninline void f() noexcept { }\n");
+    parses(
+        "extern \"C++\" __attribute__ ((__noreturn__, __always_inline__))\ninline void f() noexcept { }\n",
+    );
 
     // After a parameter list, where the standard spelling already worked.
     parses("void f() __attribute__ ((__noreturn__));\n");
@@ -3086,7 +3171,9 @@ fn the_compilers_attribute_spellings_are_attributes() {
 
     // And the run: two and three macro names before the declaration they decorate, which is how libstdc++ opens
     // a nested namespace and then a versioned one.
-    parses("namespace n { }\n_GLIBCXX_BEGIN_NAMESPACE_VERSION\n_GLIBCXX_BEGIN_NAMESPACE_CONTAINER\ntemplate <typename> struct S;\n");
+    parses(
+        "namespace n { }\n_GLIBCXX_BEGIN_NAMESPACE_VERSION\n_GLIBCXX_BEGIN_NAMESPACE_CONTAINER\ntemplate <typename> struct S;\n",
+    );
 
     // What the run must **not** swallow: a declaration whose type and name are both plain identifiers, and whose
     // declarator happens to carry a parameter list. The first version of the run scanner stepped one token too
@@ -3379,7 +3466,8 @@ fn class_body(source: &str) -> Option<cpp_parser::CppSyntaxNode> {
 /// if the members after it were lost, which is what the test below is for.
 #[test]
 fn a_declarator_takes_only_one_initializer() {
-    let source = "struct S {\n  int a;\n  _GLIBCXX20_CONSTEXPR void f(size_type) { }\n  int after;\n};\n";
+    let source =
+        "struct S {\n  int a;\n  _GLIBCXX20_CONSTEXPR void f(size_type) { }\n  int after;\n};\n";
 
     assert_eq!(
         direct_members(source),
@@ -3601,12 +3689,10 @@ fn a_member_access_without_a_name_keeps_the_block_after_it() {
 
     // …and the block ends where its `}` is, so `int after;` is at file scope rather than inside `f`.
     assert!(
-        tree.get_red_root()
-            .descendants()
-            .any(|node| {
-                CppSyntaxKind::from(node.kind()) == CppSyntaxKind::Declaration
-                    && node.text().to_string().starts_with("int after;")
-            }),
+        tree.get_red_root().descendants().any(|node| {
+            CppSyntaxKind::from(node.kind()) == CppSyntaxKind::Declaration
+                && node.text().to_string().starts_with("int after;")
+        }),
         "`int after;` is still a declaration: {}",
         tree.to_source_text()
     );
@@ -3794,15 +3880,16 @@ int after;
         .filter(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::PreprocessorDirective)
         .count();
     assert_eq!(
-        directives, 2,
+        directives,
+        2,
         "both directives written inside the block are directives, not error nodes: {}",
         block.text()
     );
 
     assert!(
-        !block.descendants().any(|node| {
-            CppSyntaxKind::from(node.kind()) == CppSyntaxKind::ErrorNode
-        }),
+        !block
+            .descendants()
+            .any(|node| { CppSyntaxKind::from(node.kind()) == CppSyntaxKind::ErrorNode }),
         "and nothing in it is rubble: {}",
         block.text()
     );
@@ -3937,10 +4024,14 @@ fn an_operator_name_is_a_name_in_an_expression_too() {
 
     // The bare callee, in the position that has no declaration reading: a requirement's braced expression.
     parses("template <typename T>\nconcept C = requires(T a) { operator<(a, a); };\n");
-    parses("template <typename T, typename U>\nconcept D = requires(T t, U u) { operator<=>(t, u); };\n");
+    parses(
+        "template <typename T, typename U>\nconcept D = requires(T t, U u) { operator<=>(t, u); };\n",
+    );
 
     // The member call and the pseudo-destructor, which are the same question one level down.
-    parses("template <typename T, typename U>\nconcept E = requires(T t, U u) { t.operator<(u); };\n");
+    parses(
+        "template <typename T, typename U>\nconcept E = requires(T t, U u) { t.operator<(u); };\n",
+    );
     parses("template <typename T>\nvoid f(T* p) { p->~T(); }\n");
     parses("struct S { ~S(); };\nvoid g(S s) { s.~S(); }\n");
     parses("void h() { operator~(); operator new(1); }\n");
@@ -5061,7 +5152,11 @@ fn constructs_are_read_as_the_right_node() {
         // *no* node: `::` sent the tokens to the name branch, which reported a missing name at `new` and left the
         // whole allocation as one flat `IdentifierExpr`.
         requiring(
-            shape("::new (buf) Widget();", Where::Body, CppSyntaxKind::ExpressionStat),
+            shape(
+                "::new (buf) Widget();",
+                Where::Body,
+                CppSyntaxKind::ExpressionStat,
+            ),
             CppSyntaxKind::NewExpr,
         ),
         // An **alternative spelling** is the operator, so the node is the one the punctuation would produce.
@@ -5130,7 +5225,8 @@ fn constructs_are_read_as_the_right_node() {
 
 /// A construct that must contain a node of `kind`, with the statement kind it must have.
 #[track_caller]
-fn assert_fragment_contains(fragments: &[(&str, CppSyntaxKind)]) {    let missing: Vec<String> = fragments
+fn assert_fragment_contains(fragments: &[(&str, CppSyntaxKind)]) {
+    let missing: Vec<String> = fragments
         .iter()
         .filter(|(fragment, kind)| !contains(&format!("void probe() {{ {fragment} }}"), *kind))
         .map(|(fragment, kind)| format!("  {fragment}\n      no {kind:?} in it"))
@@ -5180,7 +5276,10 @@ fn a_header_name_is_one_token_whatever_is_in_it() {
         "`++` splits the name into three tokens, and a header name is not limited to the tokens a whitelist \
          happened to list"
     );
-    assert!(folds("#include <sys/a-b.h>\n"), "`-` is a token of its own too");
+    assert!(
+        folds("#include <sys/a-b.h>\n"),
+        "`-` is a token of its own too"
+    );
     assert!(folds("#include <a/b/c.hpp>\n"));
 
     // What really ends a header name — and the assertion that the widening did not swallow the line.
@@ -5254,7 +5353,10 @@ fn modern_constructs_produce_the_right_nodes() {
         // `_MSVC_CONSTEXPR return ::new (…) _Ty[1]();` inside an `if constexpr` branch. No statement rule can
         // begin at attribute — the declaration reading finds no type and the expression reading finds no
         // operand — and the recovery cost a scope, which is what made it worth reading rather than reporting.
-        ("[[msvc::constexpr]] return 1;", CppSyntaxKind::AttributeList),
+        (
+            "[[msvc::constexpr]] return 1;",
+            CppSyntaxKind::AttributeList,
+        ),
         ("[[msvc::constexpr]] return 1;", CppSyntaxKind::ReturnStat),
         ("[[likely]] if (n) { return 1; }", CppSyntaxKind::IfStat),
         (
@@ -5360,8 +5462,14 @@ fn modern_constructs_produce_the_right_nodes() {
         // A macro between `if` and its condition: the condition keeps its parentheses, so there is a `ParenExpr`.
         // The wrong reading takes the macro for a call and leaves an `ArgumentList` in its place — the two are
         // well formed either way, and only the node says which happened.
-        ("void f() { if _GLIBCXX17_CONSTEXPR (x) { } }", CppSyntaxKind::ParenExpr),
-        ("void f() { if (x) [[likely]] { } }", CppSyntaxKind::AttributeList),
+        (
+            "void f() { if _GLIBCXX17_CONSTEXPR (x) { } }",
+            CppSyntaxKind::ParenExpr,
+        ),
+        (
+            "void f() { if (x) [[likely]] { } }",
+            CppSyntaxKind::AttributeList,
+        ),
         // The compiler's own keywords, and the assertion is the **parameter list**: the wrong reading made
         // `__cdecl` the declarator's name and `g(void)` a macro suffix, so there was no parameter list anywhere —
         // well formed, lossless, no diagnostic, and every name in it wrong.
@@ -5372,7 +5480,10 @@ fn modern_constructs_produce_the_right_nodes() {
             CppSyntaxKind::ParameterList,
         ),
         // `__restrict` is the qualifier the kind table names and nothing produced.
-        ("int f(const char * __restrict__ _Src);", CppSyntaxKind::RestrictQual),
+        (
+            "int f(const char * __restrict__ _Src);",
+            CppSyntaxKind::RestrictQual,
+        ),
         // …and a keyword that *means* a standard specifier produces that specifier's node, so a consumer does not
         // have to know which compiler's spelling the file used.
         (
@@ -5557,7 +5668,6 @@ fn modern_constructs_produce_the_right_nodes() {
         );
     }
 }
-
 
 #[test]
 fn a_template_parameter_may_default_to_a_conditional_expression() {
@@ -5775,7 +5885,11 @@ fn a_template_argument_may_be_a_comparison_in_parentheses() {
     // "this `<` is a less-than". g++ reads all three of these as arguments.
     let source = "template<bool B> struct C { };\n\
                   template<typename T> struct S : public C<T(0) < T(0)> { };\n";
-    assert_eq!(reads(source, Where::File), Ok(()), "a comparison in a base clause reads");
+    assert_eq!(
+        reads(source, Where::File),
+        Ok(()),
+        "a comparison in a base clause reads"
+    );
     assert_eq!(
         count_of(source, CppSyntaxKind::BaseSpecifier),
         1,
@@ -5836,11 +5950,7 @@ fn a_condition_declaration_ends_at_the_paren_that_closes_the_condition() {
 
     // The control is every condition that **is** a declaration: one variable, initialised, and the `)` right
     // after it. Each of these has to keep the declaration reading — the rule exists for them.
-    for condition in [
-        "Foo* p = get()",
-        "const auto n = g()",
-        "Foo p = get()",
-    ] {
+    for condition in ["Foo* p = get()", "const auto n = g()", "Foo p = get()"] {
         let source = format!(
             "struct Foo {{ }};\n\
              Foo* get();\n\
@@ -5954,7 +6064,11 @@ fn a_conditional_may_be_written_with_a_directive_before_its_colon() {
     // once per branch, and the initializer's own seam can only see the `#else` if the expression gave it back.
     // Both values being in the tree is the claim.
     let source = "int x =\n#if 1\n  1\n#else\n  2\n#endif\n  ;\n";
-    assert_eq!(reads(source, Where::File), Ok(()), "a value per branch reads");
+    assert_eq!(
+        reads(source, Where::File),
+        Ok(()),
+        "a value per branch reads"
+    );
     assert_eq!(
         count_of(source, CppSyntaxKind::LiteralExpr),
         2,
@@ -6005,7 +6119,11 @@ fn a_macro_invocation_at_the_head_of_a_declaration_is_a_specifier() {
     // tree. The declaration reading is still tried first (a `;` after a group is a plain function declaration in
     // C++), and it fails here because `1` is not a parameter — so the statement is the call it looks like.
     let source = "int main() { CHECK(1); return 0; }\n";
-    assert_eq!(reads(source, Where::File), Ok(()), "`CHECK(1);` still reads");
+    assert_eq!(
+        reads(source, Where::File),
+        Ok(()),
+        "`CHECK(1);` still reads"
+    );
     assert_eq!(
         count_of(source, CppSyntaxKind::MacroCall),
         0,
@@ -6141,7 +6259,11 @@ fn an_attribute_may_stand_between_a_declarator_ids_operators() {
     // The **other** position is the control: an attribute after the parameters belongs to the declaration, and
     // the parameter list is already there.
     let source = "int x [[maybe_unused]] = 1;\n";
-    assert_eq!(reads(source, Where::File), Ok(()), "the other position reads");
+    assert_eq!(
+        reads(source, Where::File),
+        Ok(()),
+        "the other position reads"
+    );
     assert_eq!(
         count_of(source, CppSyntaxKind::AttributeList),
         1,
@@ -6153,7 +6275,6 @@ fn an_attribute_may_stand_between_a_declarator_ids_operators() {
         "and no parameter list was invented for a variable"
     );
 }
-
 
 #[test]
 fn a_conditional_inside_template_arguments_keeps_its_colon() {
@@ -6291,7 +6412,11 @@ fn a_declarations_tail_may_be_written_once_per_branch() {
     // The control is a **declaration** written per branch, which looks the same from the `;` and must not be read
     // as a per-branch tail: the `#if` there belongs to the statement, not to the list.
     let source = "#if X\nvoid f(int a);\n#else\nvoid g(long a);\n#endif";
-    assert_eq!(reads(source, Where::File), Ok(()), "a declaration per branch reads");
+    assert_eq!(
+        reads(source, Where::File),
+        Ok(()),
+        "a declaration per branch reads"
+    );
     assert_eq!(
         count_of(source, CppSyntaxKind::ParameterList),
         2,
@@ -6324,11 +6449,7 @@ fn an_implementation_keyword_may_stand_where_an_operand_goes() {
     // The control is an ordinary name in the same position, which keeps its reading as the operand.
     let source = "int g(int);\nvoid f(int a) { int r = g(a); }\n";
     assert_eq!(reads(source, Where::File), Ok(()), "an ordinary call reads");
-    assert_eq!(
-        count_of(source, CppSyntaxKind::CallExpr),
-        1,
-        "as one call"
-    );
+    assert_eq!(count_of(source, CppSyntaxKind::CallExpr), 1, "as one call");
 }
 
 #[test]
@@ -6516,7 +6637,11 @@ fn a_function_may_be_spelled_with_its_name_in_parentheses_behind_an_operator() {
 
     // The controls, each of which the whole-shape test has to keep out. `a * (b);` is the one that decided the
     // shape: a product has no `(` after its `)`, so it stays an expression even inside a body.
-    assert_eq!(reads("Max(a);\n", Where::Body), Ok(()), "a call is still a call");
+    assert_eq!(
+        reads("Max(a);\n", Where::Body),
+        Ok(()),
+        "a call is still a call"
+    );
     assert_eq!(
         count_of("void g() { a * (b); }\n", CppSyntaxKind::ExpressionStat),
         1,
@@ -6597,7 +6722,11 @@ fn a_form_feed_is_whitespace_and_not_a_character_error() {
     ] {
         let tree = CppParser::parse(source, ParserConfig::default());
         assert_eq!(tree.to_source_text(), source, "losslessness: {source:?}");
-        assert_eq!(tree.get_errors(), [], "a form feed is whitespace: {source:?}");
+        assert_eq!(
+            tree.get_errors(),
+            [],
+            "a form feed is whitespace: {source:?}"
+        );
     }
 }
 
@@ -6680,7 +6809,11 @@ fn a_requires_expression_may_be_a_template_argument() {
     // The control is the boundary the stop set is *for*: a `;` at depth zero still ends the scan, so a class head
     // with no body in front of it is not read as one.
     assert!(
-        reads("template<bool B> struct C { };\nstruct S : C<true>;\n", Where::File).is_err(),
+        reads(
+            "template<bool B> struct C { };\nstruct S : C<true>;\n",
+            Where::File
+        )
+        .is_err(),
         "a class head with no body is still an error"
     );
 }
@@ -6736,7 +6869,8 @@ fn a_macro_may_supply_the_rest_of_a_template_parameter_list() {
     // parameter live in a header, so nothing among this file's tokens says the list continues. What carries the
     // answer is the position — an identifier there can neither continue the parameter that was just read nor close
     // the list, so the file is already wrong unless the name is a macro standing where the separator goes.
-    let source = "template<typename _Res, typename... _ArgTypes _GLIBCXX_NOEXCEPT_PARM>\nstruct S;\n";
+    let source =
+        "template<typename _Res, typename... _ArgTypes _GLIBCXX_NOEXCEPT_PARM>\nstruct S;\n";
     assert_eq!(
         reads(source, Where::File),
         Ok(()),
@@ -6810,7 +6944,10 @@ fn a_literal_operator_may_be_spelled_with_a_space_before_its_suffix() {
     // A class member is the same name in the same position (this one was already clean, and it is the control that
     // says the fix is about the spelling rather than about literal operators in general).
     assert_eq!(
-        reads("int operator\"\" _km(double) noexcept { return 0; }", Where::Class),
+        reads(
+            "int operator\"\" _km(double) noexcept { return 0; }",
+            Where::Class
+        ),
         Ok(())
     );
 }
@@ -7182,7 +7319,6 @@ fn a_calling_convention_may_precede_a_pointer_to_members_class_name() {
             "using m = void (__cdecl A::*)(int) const;\n",
         ],
     );
-
 
     // **A note on how this was found**, because the record is the useful part: the shape was invisible until the
     // evidence improved. In the per-file reading a macro chain kept the calling convention unexpanded, so the

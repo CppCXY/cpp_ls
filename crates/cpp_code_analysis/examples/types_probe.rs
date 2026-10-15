@@ -147,20 +147,30 @@ fn main() {
                 }
 
                 written_with_auto += 1;
-                let answer = session.type_at(&view, cpp_code_analysis::file::coordinates::ReadingOffset::new(binding.name_range.start_offset));
+                let answer = session.type_at(
+                    &view,
+                    cpp_code_analysis::file::coordinates::ReadingOffset::new(
+                        binding.name_range.start_offset,
+                    ),
+                );
                 let shown = match &answer {
                     cpp_code_analysis::Known::Yes(found) => {
                         let type_of = found.type_of.clone();
                         if type_of == "auto" {
                             still_auto += 1;
-                            *refusals.entry("the placeholder again".to_string()).or_default() += 1;
+                            *refusals
+                                .entry("the placeholder again".to_string())
+                                .or_default() += 1;
                         } else {
                             deduced += 1;
                             if examples.len() < 12 {
                                 examples.push((
                                     binding.name.text(),
                                     type_of.clone(),
-                                    path.file_name().unwrap_or_default().to_string_lossy().to_string(),
+                                    path.file_name()
+                                        .unwrap_or_default()
+                                        .to_string_lossy()
+                                        .to_string(),
                                 ));
                             }
                         }
@@ -182,14 +192,20 @@ fn main() {
                             refused_examples.push((
                                 binding.name.text(),
                                 written.to_string(),
-                                path.file_name().unwrap_or_default().to_string_lossy().to_string(),
+                                path.file_name()
+                                    .unwrap_or_default()
+                                    .to_string_lossy()
+                                    .to_string(),
                             ));
                         }
                         // **The shape of the initializer**, because that is what a work list is divided by: a
                         // member access and a cast reach their types by different routes through this analysis, and
                         // a total of 500 across both says nothing about which route to build.
                         *refusal_shapes
-                            .entry(initializer_shape(&view.root, binding.name_range.start_offset))
+                            .entry(initializer_shape(
+                                &view.root,
+                                binding.name_range.start_offset,
+                            ))
                             .or_default() += 1;
                         String::new()
                     }
@@ -222,8 +238,10 @@ fn main() {
     for (name, type_of, file) in examples {
         println!("   {name} = {type_of}   ({file})");
     }
-    println!("
---- what was refused, as written ---");
+    println!(
+        "
+--- what was refused, as written ---"
+    );
     for (name, written, file) in refused_examples {
         println!("   {name}: {written}   ({file})");
     }

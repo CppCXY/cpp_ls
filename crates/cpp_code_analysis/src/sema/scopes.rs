@@ -318,7 +318,8 @@ impl ScopeWalker<'_> {
             // **A directive is read before it is asked about**, so a `#define` this file writes is in force for
             // everything below it and not for what stands above. See [`ScopeWalker::own`].
             if let Some((name, body)) = a_define_at(&child) {
-                self.own.insert(name.into_boxed_str(), body.into_boxed_str());
+                self.own
+                    .insert(name.into_boxed_str(), body.into_boxed_str());
             }
             match self.opened_by_a_body(&child) {
                 Some(OpenedByBody::Opens {
@@ -548,7 +549,8 @@ impl ScopeWalker<'_> {
     }
 
     /// `namespace ns { ... }`, the nested spelling `namespace a::b { ... }`, and the anonymous form.
-    fn namespace(&mut self, node: &CppSyntaxNode, parent: ScopeId) {        let range = cpp_parser::source_range(node.text_range());
+    fn namespace(&mut self, node: &CppSyntaxNode, parent: ScopeId) {
+        let range = cpp_parser::source_range(node.text_range());
 
         // The body, found before anything is created, because the scope chain below has to know whether the
         // declaration has one at all.
@@ -574,7 +576,9 @@ impl ScopeWalker<'_> {
 
         let scope = match (segments.as_slice(), body) {
             // Anonymous. Nothing to name and nothing to make reachable.
-            ([], _) => self.table.create_scope(ScopeKind::Namespace, Some(parent), Some(range)),
+            ([], _) => self
+                .table
+                .create_scope(ScopeKind::Namespace, Some(parent), Some(range)),
             (segments, Some(_)) => self.open_namespace_chain(segments, parent, range, inline),
             // A namespace declaration with no body — `namespace ns;` is not legal C++, but the grammar can
             // produce one from malformed input, and naming a scope that has nothing in it is better than
@@ -781,9 +785,10 @@ impl ScopeWalker<'_> {
         // left the others undeclared — so `LPWCH q;` in the same file was a declaration of a type nothing knew,
         // and a consumer asking for the alias `LPWCH` found nothing. The parser reads the list (one loop); this is
         // the other half of the same fact.
-        for declarator in node.children().filter(|child| {
-            CppSyntaxKind::from(child.kind()) == CppSyntaxKind::Declarator
-        }) {
+        for declarator in node
+            .children()
+            .filter(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::Declarator)
+        {
             if let Some((name, name_range)) = declared_name(&declarator) {
                 self.bind(scope, name, BindingKind::Typedef, node, name_range);
             }
@@ -1392,8 +1397,8 @@ impl ScopeWalker<'_> {
         // When it names no scope this file has built — a class from a header, a spelling this file only declares —
         // the answer is the scope the declaration was written in, which is where a declaration that qualifies
         // nothing belongs: the honest fallback rather than a failure.
-        let qualified = qualified_declarator_name(declarator)
-            .or_else(|| qualified_specifier_name(declarator));
+        let qualified =
+            qualified_declarator_name(declarator).or_else(|| qualified_specifier_name(declarator));
 
         let (enclosing, name, name_range) = match qualified {
             Some((qualifier, name)) => (
@@ -1427,7 +1432,13 @@ impl ScopeWalker<'_> {
             // a scope of its own: `int x = x;` refers to an earlier `x`, so the name being declared and the
             // name being read live in the same scope, and a scope around the initialiser would put the read
             // outside the scope of the declaration it reads.
-            self.bind(enclosing, name, BindingKind::Variable, declarator, name_range);
+            self.bind(
+                enclosing,
+                name,
+                BindingKind::Variable,
+                declarator,
+                name_range,
+            );
             return None;
         }
 
@@ -1618,7 +1629,12 @@ impl ScopeWalker<'_> {
 fn without_trailing_trivia(node: &CppSyntaxNode) -> cpp_parser::SourceRange {
     let range = cpp_parser::source_range(node.text_range());
     let mut end = range.end_offset();
-    for element in node.children_with_tokens().collect::<Vec<_>>().into_iter().rev() {
+    for element in node
+        .children_with_tokens()
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+    {
         // A **node** is trivia only if everything in it is; the case that matters is a comment, which is a leaf, and
         // anything holding a real token is part of the declaration. `rowan` is not a dependency of this crate, so the
         // two are told apart by asking for the token — the idiom the walks above use.
@@ -1628,11 +1644,14 @@ fn without_trailing_trivia(node: &CppSyntaxNode) -> cpp_parser::SourceRange {
                 cpp_parser::is_trivia(cpp_parser::CppTokenKind::from(token.kind())),
             ),
             None => {
-                let node = element.into_node().expect("a node-or-token is one of the two");
+                let node = element
+                    .into_node()
+                    .expect("a node-or-token is one of the two");
                 (
                     cpp_parser::source_range(node.text_range()).start_offset,
-                    node.descendants_with_tokens()
-                        .all(|inner| cpp_parser::is_trivia(cpp_parser::CppTokenKind::from(inner.kind()))),
+                    node.descendants_with_tokens().all(|inner| {
+                        cpp_parser::is_trivia(cpp_parser::CppTokenKind::from(inner.kind()))
+                    }),
                 )
             }
         };
@@ -1874,9 +1893,7 @@ fn declaration_is_qualified(node: &CppSyntaxNode) -> bool {
 
     // A declarator that names something is the declaration's name; what is left is a declaration whose name was
     // written where a type goes.
-    !declarators(node)
-        .iter()
-        .any(named_in_a_declarator)
+    !declarators(node).iter().any(named_in_a_declarator)
 }
 
 /// Does anything written **outside a declarator** in this subtree spell a `::`-qualified name?

@@ -22,9 +22,7 @@ fn compile_section(text: &str) -> cpp_code_analysis::project::CompileSection {
         report.problems
     );
 
-    report
-        .config
-        .compile
+    report.config.compile
 }
 
 /// The configuration one file is analysed with — what the session builds and the resolver asks for.
@@ -81,7 +79,6 @@ defines  = ["CORE_BUILD"]
 #[test]
 fn a_file_is_compiled_as_its_own_target() {
     let section = compile_section(TWO_TARGETS);
-
 
     let server = config_for(&section, "/p/CodeFormatServer/src/Server.cpp");
     assert_eq!(
@@ -184,16 +181,20 @@ fn patterns_mean_what_the_documentation_says() {
     };
     let root = Path::new("/p");
 
-    assert!(target.describes(root, Path::new("/p/Util/src/Only.cpp")).is_some());
     assert!(
-        target.describes(root, Path::new("/p/Util/src/deeper/Only.cpp")).is_none(),
+        target
+            .describes(root, Path::new("/p/Util/src/Only.cpp"))
+            .is_some()
+    );
+    assert!(
+        target
+            .describes(root, Path::new("/p/Util/src/deeper/Only.cpp"))
+            .is_none(),
         "`*` does not cross a separator"
     );
-    assert!(target.describes(root, Path::new("/p/NotUtil/Only.cpp")).is_none());
+    assert!(
+        target
+            .describes(root, Path::new("/p/NotUtil/Only.cpp"))
+            .is_none()
+    );
 }
-
-
-
-
-
-

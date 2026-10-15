@@ -38,7 +38,9 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use cpp_parser::{CppLexer, CppParser, CppTokenKind, LexerConfig, LineIndex, MacroBody, ParserConfig};
+use cpp_parser::{
+    CppLexer, CppParser, CppTokenKind, LexerConfig, LineIndex, MacroBody, ParserConfig,
+};
 
 fn main() {
     let list = std::env::args().nth(1).expect("a file list");
@@ -69,7 +71,11 @@ fn main() {
         let summary = cpp_code_analysis::summarize(path, &source, key);
         let mut mine: HashMap<String, (bool, MacroBody)> = HashMap::new();
 
-        for fact in summary.macros.iter().filter(|fact| fact.kind.is_definition()) {
+        for fact in summary
+            .macros
+            .iter()
+            .filter(|fact| fact.kind.is_definition())
+        {
             let shape = (fact.function_like, fact.body);
             mine.insert(fact.name.clone(), shape);
 
@@ -137,7 +143,9 @@ fn main() {
 
         failing += 1;
 
-        let Some((line, _)) = LineIndex::parse(source).get_line_col(errors[0].range.start(), source) else {
+        let Some((line, _)) =
+            LineIndex::parse(source).get_line_col(errors[0].range.start(), source)
+        else {
             continue;
         };
 
@@ -150,23 +158,31 @@ fn main() {
         let mut errors_ = Vec::new();
         let mut lexer = CppLexer::new(source, LexerConfig::default(), &mut errors_);
         let tokens = lexer.tokenize();
-        let spelled = |range: &cpp_parser::SourceRange| source[range.start_offset..range.end_offset()].to_string();
-        let names_in = |from: usize, to: usize, spelled: &dyn Fn(&cpp_parser::SourceRange) -> String| {
-            let mut names: Vec<String> = tokens
-                .iter()
-                .filter(|token| token.kind == CppTokenKind::Identifier)
-                .filter(|token| token.range.start_offset >= from && token.range.start_offset < to)
-                .map(|token| spelled(&token.range))
-                .collect();
-            names.sort();
-            names.dedup();
-            names
+        let spelled = |range: &cpp_parser::SourceRange| {
+            source[range.start_offset..range.end_offset()].to_string()
         };
+        let names_in =
+            |from: usize, to: usize, spelled: &dyn Fn(&cpp_parser::SourceRange) -> String| {
+                let mut names: Vec<String> = tokens
+                    .iter()
+                    .filter(|token| token.kind == CppTokenKind::Identifier)
+                    .filter(|token| {
+                        token.range.start_offset >= from && token.range.start_offset < to
+                    })
+                    .map(|token| spelled(&token.range))
+                    .collect();
+                names.sort();
+                names.dedup();
+                names
+            };
 
         let on_the_line = names_in(line_start, line_end, &spelled);
 
         let mine = own.get(path);
-        let is_a_macro = |name: &String| mine.and_then(|mine| mine.get(name)).or_else(|| closure.get(name));
+        let is_a_macro = |name: &String| {
+            mine.and_then(|mine| mine.get(name))
+                .or_else(|| closure.get(name))
+        };
 
         if names_in(window_from, line_end, &spelled)
             .iter()
@@ -181,7 +197,9 @@ fn main() {
         let mut shape_unknown = false;
 
         for name in &on_the_line {
-            let known = mine.and_then(|mine| mine.get(name)).or_else(|| closure.get(name));
+            let known = mine
+                .and_then(|mine| mine.get(name))
+                .or_else(|| closure.get(name));
             let Some((_, shape)) = known else {
                 continue;
             };
@@ -196,7 +214,11 @@ fn main() {
             }
         }
 
-        let family = match (saw_a_macro, shape_unknown, shape_here || shape_in_the_closure) {
+        let family = match (
+            saw_a_macro,
+            shape_unknown,
+            shape_here || shape_in_the_closure,
+        ) {
             (false, _, _) => "no macro on the line",
             (true, true, _) => "a macro whose shape is Unknown",
             (true, false, true) => "a macro whose shape is known",
@@ -282,7 +304,10 @@ fn main() {
         }
     }
 
-    for (label, symbols) in [("every name", &all), ("only unambiguous names", &unambiguous)] {
+    for (label, symbols) in [
+        ("every name", &all),
+        ("only unambiguous names", &unambiguous),
+    ] {
         let mut clean_fed = 0usize;
         let mut became_clean: Vec<String> = Vec::new();
         let mut became_dirty: Vec<(String, String)> = Vec::new();
@@ -307,7 +332,11 @@ fn main() {
                 clean_fed += 1;
             }
 
-            let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+            let name = path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
             match (plain.is_empty(), fed.is_empty()) {
                 (false, true) => became_clean.push(name),
                 (true, false) => {
@@ -368,7 +397,10 @@ fn main() {
         let first_dirty = became_dirty.first().and_then(|(dirty, _)| {
             paths
                 .iter()
-                .find(|path| path.file_name().is_some_and(|held| held.to_string_lossy() == *dirty))
+                .find(|path| {
+                    path.file_name()
+                        .is_some_and(|held| held.to_string_lossy() == *dirty)
+                })
                 .and_then(|path| texts.get(path).map(|source| (dirty, source)))
         });
 
@@ -379,7 +411,11 @@ fn main() {
                 .map(|(name, (function_like, body))| {
                     format!(
                         "{name}({}{body:?})",
-                        if *function_like { "function-like, " } else { "" }
+                        if *function_like {
+                            "function-like, "
+                        } else {
+                            ""
+                        }
                     )
                 })
                 .collect();

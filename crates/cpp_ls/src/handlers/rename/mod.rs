@@ -34,8 +34,8 @@ use std::collections::HashMap;
 
 use cpp_code_analysis::{Known, Session};
 use lsp_types::{
-    ClientCapabilities, OneOf, PrepareRenameResponse, RenameOptions, RenameParams, ServerCapabilities,
-    TextDocumentPositionParams, TextEdit, WorkspaceEdit,
+    ClientCapabilities, OneOf, PrepareRenameResponse, RenameOptions, RenameParams,
+    ServerCapabilities, TextDocumentPositionParams, TextEdit, WorkspaceEdit,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -241,7 +241,14 @@ mod tests {
     /// part of it.
     #[test]
     fn a_new_name_is_one_identifier_and_nothing_else() {
-        for name in ["Widget", "_STD_BEGIN", "MAX_ENTRIES", "x", "Widget ", " Widget"] {
+        for name in [
+            "Widget",
+            "_STD_BEGIN",
+            "MAX_ENTRIES",
+            "x",
+            "Widget ",
+            " Widget",
+        ] {
             assert!(is_one_identifier(name), "{name:?} is a name");
         }
 
@@ -287,13 +294,27 @@ mod tests {
         // rendering that answers `None` until that work is done ("a caller that needs meaning waits"). Asking it here
         // was the test contradicting itself: the fixture is "unread on purpose" and the view needs a read.
         // `FileView::parse_with` is the constructor for exactly this: the file's own text, parsed, no cooking.
-        let held = session.files().held("/p/items.cpp").expect("the file is held");
-        let view = cpp_code_analysis::FileView::parse_with(&held, &cpp_parser::MacroEnvironment::default());
-        let on_the_use = ITEMS_CPP.find("MAX_ITEMS").expect("the fixture uses the macro");
+        let held = session
+            .files()
+            .held("/p/items.cpp")
+            .expect("the file is held");
+        let view = cpp_code_analysis::FileView::parse_with(
+            &held,
+            &cpp_parser::MacroEnvironment::default(),
+        );
+        let on_the_use = ITEMS_CPP
+            .find("MAX_ITEMS")
+            .expect("the fixture uses the macro");
 
         assert!(session.pending() > 0, "the fixture is the refused state");
         assert!(
-            workspace_edit_of_renaming_a_macro(&session, &view, cpp_code_analysis::file::coordinates::ReadingOffset::new(on_the_use), "MAX_ENTRIES").is_none(),
+            workspace_edit_of_renaming_a_macro(
+                &session,
+                &view,
+                cpp_code_analysis::file::coordinates::ReadingOffset::new(on_the_use),
+                "MAX_ENTRIES"
+            )
+            .is_none(),
             "a rename now would edit the uses the index knows and skip the ones it has not read"
         );
 
@@ -303,10 +324,21 @@ mod tests {
         // rendering that answers `None` until that work is done ("a caller that needs meaning waits"). Asking it here
         // was the test contradicting itself: the fixture is "unread on purpose" and the view needs a read.
         // `FileView::parse_with` is the constructor for exactly this: the file's own text, parsed, no cooking.
-        let held = session.files().held("/p/items.cpp").expect("the file is held");
-        let view = cpp_code_analysis::FileView::parse_with(&held, &cpp_parser::MacroEnvironment::default());
-        let edit = workspace_edit_of_renaming_a_macro(&session, &view, cpp_code_analysis::file::coordinates::ReadingOffset::new(on_the_use), "MAX_ENTRIES")
-            .expect("the index is complete now");
+        let held = session
+            .files()
+            .held("/p/items.cpp")
+            .expect("the file is held");
+        let view = cpp_code_analysis::FileView::parse_with(
+            &held,
+            &cpp_parser::MacroEnvironment::default(),
+        );
+        let edit = workspace_edit_of_renaming_a_macro(
+            &session,
+            &view,
+            cpp_code_analysis::file::coordinates::ReadingOffset::new(on_the_use),
+            "MAX_ENTRIES",
+        )
+        .expect("the index is complete now");
         let changes = edit.changes.expect("a change map");
         assert_eq!(changes.len(), 2, "the definer and the user: {changes:?}");
         assert!(
@@ -317,8 +349,3 @@ mod tests {
         );
     }
 }
-
-
-
-
-

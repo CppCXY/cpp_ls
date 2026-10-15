@@ -55,7 +55,9 @@ fn main() {
             Known::Yes(found) => format!("in {}", found.file.display()),
             other => format!("{other:?}").chars().take(40).collect(),
         };
-        println!("{label:<10} declarations_in(\"std\") = {in_std:>5} | std::size_t {size_t} | std::string {string}");
+        println!(
+            "{label:<10} declarations_in(\"std\") = {in_std:>5} | std::size_t {size_t} | std::string {string}"
+        );
     };
 
     // **Every identifier of the file, by what `definition` answers for it.** `Ambiguous` is listed by name because
@@ -73,10 +75,15 @@ fn main() {
                 continue;
             }
             let offset = token.range.start_offset;
-            let reason = match session.definition(&view, cpp_code_analysis::file::coordinates::ReadingOffset::new(offset)) {
+            let reason = match session.definition(
+                &view,
+                cpp_code_analysis::file::coordinates::ReadingOffset::new(offset),
+            ) {
                 Known::Yes(found) if found.file == file => "resolved here".to_string(),
                 Known::Yes(_) => "resolved in a header".to_string(),
-                Known::Unknown(UnknownReason::NotDeclaredHere(_)) => "the index has no such name".to_string(),
+                Known::Unknown(UnknownReason::NotDeclaredHere(_)) => {
+                    "the index has no such name".to_string()
+                }
                 Known::Unknown(reason) => {
                     if let UnknownReason::Ambiguous(name) = &reason {
                         *ambiguous.entry(name.to_string()).or_default() += 1;
@@ -97,7 +104,10 @@ fn main() {
         if !ambiguous.is_empty() {
             let mut names: Vec<(String, usize)> = ambiguous.into_iter().collect();
             names.sort_by(|one, other| other.1.cmp(&one.1).then_with(|| one.0.cmp(&other.0)));
-            let listed: Vec<String> = names.iter().map(|(name, count)| format!("{name}×{count}")).collect();
+            let listed: Vec<String> = names
+                .iter()
+                .map(|(name, count)| format!("{name}×{count}"))
+                .collect();
             println!("             still ambiguous: {}", listed.join(", "));
         }
     };
@@ -113,14 +123,21 @@ fn main() {
         Some(reading) => {
             println!(
                 "unit read in {elapsed:.2?}: {} files filed, {} tokens ({} files with tokens), {} missing, {} unplaced",
-                reading.files, reading.tokens, reading.files_with_tokens, reading.missing, reading.unplaced
+                reading.files,
+                reading.tokens,
+                reading.files_with_tokens,
+                reading.missing,
+                reading.unplaced
             );
             println!(
                 "  errors {} | unbalanced {:?} | braces {}",
                 reading.errors, reading.unbalanced, reading.braces
             );
         }
-        None => println!("the unit could not be read (no summary for {})", file.display()),
+        None => println!(
+            "the unit could not be read (no summary for {})",
+            file.display()
+        ),
     }
 
     readings(&session, "with unit");

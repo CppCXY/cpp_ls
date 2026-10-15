@@ -99,12 +99,16 @@ where
         return Vec::new();
     };
 
-    let Known::Yes(candidates) =
-        callees_of_a_call(index, &mut view_of, &view.scopes, &view.root, &view.path, &call)
-    else {
+    let Known::Yes(candidates) = callees_of_a_call(
+        index,
+        &mut view_of,
+        &view.scopes,
+        &view.root,
+        &view.path,
+        &call,
+    ) else {
         return Vec::new();
     };
-
 
     // **The callee's spelling, not the whole call**: a reader who wrote `w.scaled(` already knows the object, and
     // the popup is about which function and which parameter. A `::`-qualified name is kept whole, because there the
@@ -120,7 +124,8 @@ where
     let spelling = member.map_or(callee_text, |at| &callee_text[at..]);
 
     let active = active_parameter(&call, offset);
-    let mut parsed: std::collections::HashMap<PathBuf, Option<FileView>> = std::collections::HashMap::new();
+    let mut parsed: std::collections::HashMap<PathBuf, Option<FileView>> =
+        std::collections::HashMap::new();
     let mut signatures = Vec::new();
 
     for candidate in candidates {
@@ -155,37 +160,35 @@ where
                 continue;
             };
 
+            // **The label is one line, and the spans follow it.** The declaration's list is laid out for a reader of the
+            // file (MSVC wraps three of `basic_string::append`'s nine overloads), and a popup label with a newline in it
+            // is a popup with a broken signature — so the same tidying the fact's `parameter_list` gets is applied here,
+            // *with its byte map*, because the spans a client bolds are offsets into this label.
+            let list_text = list.text().to_string();
+            let list_text = list_text.trim_end();
+            let list_begin = usize::from(list.text_range().start());
+            let raw: Vec<(Range<usize>, String)> = parameters_of(&list)
+                .into_iter()
+                .map(|(parameter, _)| {
+                    let text = parameter.text().to_string();
+                    let text = text.trim_end();
+                    let start = usize::from(parameter.text_range().start()) - list_begin;
+                    (start..start + text.len(), text.to_string())
+                })
+                .collect();
 
-
-        // **The label is one line, and the spans follow it.** The declaration's list is laid out for a reader of the
-        // file (MSVC wraps three of `basic_string::append`'s nine overloads), and a popup label with a newline in it
-        // is a popup with a broken signature — so the same tidying the fact's `parameter_list` gets is applied here,
-        // *with its byte map*, because the spans a client bolds are offsets into this label.
-        let list_text = list.text().to_string();
-        let list_text = list_text.trim_end();
-        let list_begin = usize::from(list.text_range().start());
-        let raw: Vec<(Range<usize>, String)> = parameters_of(&list)
-            .into_iter()
-            .map(|(parameter, _)| {
-                let text = parameter.text().to_string();
-                let text = text.trim_end();
-                let start = usize::from(parameter.text_range().start()) - list_begin;
-                (start..start + text.len(), text.to_string())
-            })
-            .collect();
-
-        let (tidy, moved) = crate::inlay::tidy_list_text(list_text);
-        let list_start = spelling.len();
-        let label = format!("{spelling}{tidy}");
-        let parameters: Vec<(Range<usize>, String)> = raw
-            .into_iter()
-            .map(|(range, text)| {
-                (
-                    list_start + moved[range.start]..list_start + moved[range.end],
-                    text,
-                )
-            })
-            .collect();
+            let (tidy, moved) = crate::inlay::tidy_list_text(list_text);
+            let list_start = spelling.len();
+            let label = format!("{spelling}{tidy}");
+            let parameters: Vec<(Range<usize>, String)> = raw
+                .into_iter()
+                .map(|(range, text)| {
+                    (
+                        list_start + moved[range.start]..list_start + moved[range.end],
+                        text,
+                    )
+                })
+                .collect();
 
             signatures.push(CallSignature {
                 label,
@@ -394,21 +397,21 @@ fn active_parameter(call: &CppSyntaxNode, offset: usize) -> Option<usize> {
 /// The ends are read out here rather than taken as a range because the range type is rowan's, and this crate does
 /// not depend on rowan — the same reason `cpp_parser::token_at` exists.
 fn node_contains(node: &CppSyntaxNode, offset: usize) -> bool {
-    within(node.text_range().start().into(), node.text_range().end().into(), offset)
+    within(
+        node.text_range().start().into(),
+        node.text_range().end().into(),
+        offset,
+    )
 }
 
 fn element_contains(element: &CppSyntaxElement, offset: usize) -> bool {
-    within(element.text_range().start().into(), element.text_range().end().into(), offset)
+    within(
+        element.text_range().start().into(),
+        element.text_range().end().into(),
+        offset,
+    )
 }
 
 fn within(start: usize, end: usize, offset: usize) -> bool {
     offset >= start && offset <= end
 }
-
-
-
-
-
-
-
-

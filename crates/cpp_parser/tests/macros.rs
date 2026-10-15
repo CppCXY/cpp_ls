@@ -150,7 +150,11 @@ fn a_macros_arguments_are_raw_tokens() {
     }
 
     assert_eq!(
-        text_of("TEST(FormatPerformance, 1k_row) { }", CppSyntaxKind::ArgumentList).trim_end(),
+        text_of(
+            "TEST(FormatPerformance, 1k_row) { }",
+            CppSyntaxKind::ArgumentList
+        )
+        .trim_end(),
         "(FormatPerformance, 1k_row)",
         "…and the trivia the group swallowed is the only thing trimmed"
     );
@@ -181,7 +185,11 @@ fn a_defined_name_is_still_just_a_name() {
         "the directive makes no difference to the reading"
     );
     assert_eq!(
-        text_of("#define asm(x) g(x)\nvoid f() { asm(1); }\n", CppSyntaxKind::AsmStat).trim_end(),
+        text_of(
+            "#define asm(x) g(x)\nvoid f() { asm(1); }\n",
+            CppSyntaxKind::AsmStat
+        )
+        .trim_end(),
         "asm(1);",
         "the trivia after the `;` belongs to the enclosing node, so a node's text may end in it"
     );

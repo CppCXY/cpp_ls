@@ -251,7 +251,9 @@ impl Reason {
             Reason::MissingHeader => {
                 "the compiler read a header this reading never entered: the include resolver could not find it"
             }
-            Reason::Unknown => "the shape of the pair does not identify a mechanism; read the quoted tokens",
+            Reason::Unknown => {
+                "the shape of the pair does not identify a mechanism; read the quoted tokens"
+            }
         }
     }
 }
@@ -374,16 +376,15 @@ impl Alignment {
     /// order their differences happened to appear in the stream. That is what makes the line a report records —    /// `UnexpandedMacro=14 ConditionDisagreement=3` —comparable between two runs, which is the plan's §5.2
     /// requirement that the difference count only ever go down.
     pub fn by_reason(&self, our_files: &std::collections::HashSet<&Path>) -> Vec<(Reason, usize)> {
-        let mut counts: std::collections::BTreeMap<Reason, usize> = std::collections::BTreeMap::new();
+        let mut counts: std::collections::BTreeMap<Reason, usize> =
+            std::collections::BTreeMap::new();
         for difference in &self.differences {
             *counts.entry(difference.reason(our_files)).or_default() += 1;
         }
 
         let mut counted: Vec<(Reason, usize)> = counts.into_iter().collect();
         counted.sort_by(|(left_reason, left), (right_reason, right)| {
-            right
-                .cmp(left)
-                .then_with(|| left_reason.cmp(right_reason))
+            right.cmp(left).then_with(|| left_reason.cmp(right_reason))
         });
         counted
     }
@@ -450,7 +451,10 @@ pub fn align(ours: &[StreamToken], theirs: &[StreamToken]) -> Alignment {
     // the bound in `MAX_EDIT_DISTANCE` irrelevant for the ordinary case. Two readings of one file agree for
     // thousands of tokens at a time, and the diff only ever has to run over the region between two disagreements.
     let mut prefix = 0usize;
-    while prefix < ours.len() && prefix < theirs.len() && ours[prefix].spelling == theirs[prefix].spelling {
+    while prefix < ours.len()
+        && prefix < theirs.len()
+        && ours[prefix].spelling == theirs[prefix].spelling
+    {
         prefix += 1;
     }
 
@@ -499,7 +503,7 @@ pub fn align(ours: &[StreamToken], theirs: &[StreamToken]) -> Alignment {
             .filter(|difference| difference.ours.is_some())
             .count();
 
-        // **Group the edits into runs**, which is what the three `run*` fields mean: every edit that sits one slot after
+    // **Group the edits into runs**, which is what the three `run*` fields mean: every edit that sits one slot after
     // the one before it belongs to the same movement of tokens. Now that the list is ordered, one forward pass is
     // enough.
     group_into_runs(&mut alignment.differences);
@@ -562,7 +566,8 @@ fn anchored_edit_script(
     theirs: &[StreamToken],
     width_index: usize,
 ) -> (Vec<(usize, Option<usize>, Option<usize>)>, bool) {
-    if ours.len().saturating_mul(theirs.len()) <= MAX_DP_CELLS || width_index >= ANCHOR_WIDTHS.len() {
+    if ours.len().saturating_mul(theirs.len()) <= MAX_DP_CELLS || width_index >= ANCHOR_WIDTHS.len()
+    {
         return shortest_edit_script(ours, theirs);
     }
 
@@ -614,7 +619,11 @@ fn anchored_edit_script(
 
 /// The windows of `width` tokens that occur **exactly once** in each stream, as `(ours, theirs)` start positions in
 /// our order, restricted to the longest chain that is also increasing in theirs.
-fn unique_anchors(ours: &[StreamToken], theirs: &[StreamToken], width: usize) -> Vec<(usize, usize)> {
+fn unique_anchors(
+    ours: &[StreamToken],
+    theirs: &[StreamToken],
+    width: usize,
+) -> Vec<(usize, usize)> {
     use std::collections::HashMap;
 
     if ours.len() < width || theirs.len() < width {
@@ -888,13 +897,16 @@ pub fn without_pragmas(tokens: &[StreamToken]) -> Vec<StreamToken> {
     let mut kept = Vec::with_capacity(tokens.len());
     let mut index = 0usize;
 
-    let same_line = |one: &StreamToken, other: &StreamToken| one.file == other.file && one.line == other.line;
+    let same_line =
+        |one: &StreamToken, other: &StreamToken| one.file == other.file && one.line == other.line;
 
     while index < tokens.len() {
         let token = &tokens[index];
 
         if &*token.spelling == "#"
-            && tokens.get(index + 1).is_some_and(|next| &*next.spelling == "pragma" && same_line(token, next))
+            && tokens
+                .get(index + 1)
+                .is_some_and(|next| &*next.spelling == "pragma" && same_line(token, next))
         {
             index += 2;
             while index < tokens.len() && same_line(token, &tokens[index]) {
@@ -904,7 +916,9 @@ pub fn without_pragmas(tokens: &[StreamToken]) -> Vec<StreamToken> {
         }
 
         if matches!(&*token.spelling, "_Pragma" | "__pragma")
-            && tokens.get(index + 1).is_some_and(|next| &*next.spelling == "(")
+            && tokens
+                .get(index + 1)
+                .is_some_and(|next| &*next.spelling == "(")
         {
             let mut depth = 0usize;
             let mut end = index + 1;
@@ -1055,7 +1069,8 @@ fn read_a_line_marker(
         tokens: &[cpp_parser::CppTokenData],
         from: usize,
     ) -> Option<usize> {
-        (from..tokens.len()).find(|at| !cpp_parser::is_trivia(tokens[*at].kind))
+        (from..tokens.len())
+            .find(|at| !cpp_parser::is_trivia(tokens[*at].kind))
             .filter(|at| !text.is_empty() && *at < tokens.len())
     }
 
@@ -1101,7 +1116,11 @@ fn read_a_line_marker(
         .find('\n')
         .map_or(text.len(), |at| line_begin + at);
 
-    Some(LineMarker { file, line: number, end })
+    Some(LineMarker {
+        file,
+        line: number,
+        end,
+    })
 }
 
 /// The contents of a C string literal, when it is one this reader can unquote.
@@ -1235,7 +1254,10 @@ impl Report {
             self.ours,
             self.theirs,
             self.matched,
-            self.by_reason.iter().map(|(_, count)| *count).sum::<usize>(),
+            self.by_reason
+                .iter()
+                .map(|(_, count)| *count)
+                .sum::<usize>(),
             if self.truncated {
                 " (the comparison stopped early, so this is a lower bound)"
             } else {
@@ -1256,15 +1278,18 @@ impl Report {
 
         out.push_str("first differences:\n");
         for difference in &self.differences {
-            let ours = difference
-                .ours
-                .as_ref()
-                .map_or_else(|| "-".to_string(), |token| format!("{} @ {}", token.spelling, token.origin()));
-            let theirs = difference
-                .theirs
-                .as_ref()
-                .map_or_else(|| "-".to_string(), |token| format!("{} @ {}", token.spelling, token.origin()));
-            out.push_str(&format!("  #{}  ours: {ours}   theirs: {theirs}\n", difference.at));
+            let ours = difference.ours.as_ref().map_or_else(
+                || "-".to_string(),
+                |token| format!("{} @ {}", token.spelling, token.origin()),
+            );
+            let theirs = difference.theirs.as_ref().map_or_else(
+                || "-".to_string(),
+                |token| format!("{} @ {}", token.spelling, token.origin()),
+            );
+            out.push_str(&format!(
+                "  #{}  ours: {ours}   theirs: {theirs}\n",
+                difference.at
+            ));
         }
         if !self.truncated {
             let total: usize = self.by_reason.iter().map(|(_, count)| *count).sum();
@@ -1463,8 +1488,16 @@ mod tests {
     /// that invents a missing header where there is only a missing separator.
     #[test]
     fn two_spellings_of_one_path_are_one_file() {
-        let ours = vec![StreamToken::new("x", Some(shared(Path::new("/p//a.h"))), Some(1))];
-        let theirs = vec![StreamToken::new("x", Some(shared(Path::new("/p/a.h"))), Some(1))];
+        let ours = vec![StreamToken::new(
+            "x",
+            Some(shared(Path::new("/p//a.h"))),
+            Some(1),
+        )];
+        let theirs = vec![StreamToken::new(
+            "x",
+            Some(shared(Path::new("/p/a.h"))),
+            Some(1),
+        )];
 
         let our_files = files_of(&ours);
         assert_eq!(
@@ -1478,7 +1511,10 @@ mod tests {
         );
 
         // The comparison therefore agrees, rather than reporting a missing header for the same file.
-        assert!(align(&ours, &theirs).agrees(), "the same file on both sides");
+        assert!(
+            align(&ours, &theirs).agrees(),
+            "the same file on both sides"
+        );
     }
 
     /// The ordinary case, and the one the plan requires to be reportable as zero: two readings of one file agree.
@@ -1509,11 +1545,25 @@ mod tests {
         let alignment = align(&ours, &theirs);
 
         assert_eq!(alignment.matched, 3, "everything but the last token agreed");
-        assert_eq!(alignment.differences.len(), 1, "{:?}", alignment.differences);
+        assert_eq!(
+            alignment.differences.len(),
+            1,
+            "{:?}",
+            alignment.differences
+        );
         let difference = &alignment.differences[0];
-        assert_eq!(difference.ours.as_ref().map(|it| &*it.spelling), Some("VALUE"));
-        assert_eq!(difference.theirs.as_ref().map(|it| &*it.spelling), Some("42"));
-        assert_eq!(difference.at, 3, "and it is reported where it is in the stream");
+        assert_eq!(
+            difference.ours.as_ref().map(|it| &*it.spelling),
+            Some("VALUE")
+        );
+        assert_eq!(
+            difference.theirs.as_ref().map(|it| &*it.spelling),
+            Some("42")
+        );
+        assert_eq!(
+            difference.at, 3,
+            "and it is reported where it is in the stream"
+        );
         assert!(difference.is_isolated(), "{difference:?}");
         assert_eq!((difference.run_ours, difference.run_theirs), (1, 1));
         assert_eq!(
@@ -1545,7 +1595,12 @@ mod tests {
 
         let alignment = align(&ours, &theirs);
 
-        assert_eq!(alignment.differences.len(), 6, "six edits: {:?}", alignment.differences);
+        assert_eq!(
+            alignment.differences.len(),
+            6,
+            "six edits: {:?}",
+            alignment.differences
+        );
         assert_eq!(movements(&alignment), 1, "and one movement");
         assert_eq!(reason_at(&alignment, 3), Reason::BranchDisagreement);
     }
@@ -1568,7 +1623,11 @@ mod tests {
             .map(|difference| difference.at)
             .collect();
         assert_eq!(positions, vec![0, 1, 2, 3], "{:?}", alignment.differences);
-        assert_eq!(movements(&alignment), 1, "one region left, not four movements");
+        assert_eq!(
+            movements(&alignment),
+            1,
+            "one region left, not four movements"
+        );
     }
 
     /// **A macro that expands to several tokens is one movement, not two work items.** This is the misclassification
@@ -1581,9 +1640,17 @@ mod tests {
 
         let alignment = align(&ours, &theirs);
 
-        assert_eq!(movements(&alignment), 1, "one macro moved: {:#?}", alignment.differences);
+        assert_eq!(
+            movements(&alignment),
+            1,
+            "one macro moved: {:#?}",
+            alignment.differences
+        );
         assert!(
-            alignment.differences.iter().all(|difference| difference.run > 1),
+            alignment
+                .differences
+                .iter()
+                .all(|difference| difference.run > 1),
             "and every edit of it knows it is part of a run: {:?}",
             alignment.differences
         );
@@ -1622,7 +1689,12 @@ mod tests {
         let alignment = align(&ours, &theirs);
 
         assert_eq!(alignment.matched, 3);
-        assert_eq!(alignment.differences.len(), 3, "{:?}", alignment.differences);
+        assert_eq!(
+            alignment.differences.len(),
+            3,
+            "{:?}",
+            alignment.differences
+        );
         assert!(
             alignment
                 .differences
@@ -1639,8 +1711,15 @@ mod tests {
     fn a_substitution_is_one_difference_with_both_halves() {
         let alignment = align(&plain(&["a", "OLD", "b"]), &plain(&["a", "NEW", "b"]));
 
-        assert_eq!(alignment.differences.len(), 1, "{:?}", alignment.differences);
-        assert!(alignment.differences[0].ours.is_some() && alignment.differences[0].theirs.is_some());
+        assert_eq!(
+            alignment.differences.len(),
+            1,
+            "{:?}",
+            alignment.differences
+        );
+        assert!(
+            alignment.differences[0].ours.is_some() && alignment.differences[0].theirs.is_some()
+        );
     }
 
     /// An identifier against a number is the fingerprint of `#if` disagreement, and it is the reason
@@ -1707,7 +1786,21 @@ mod tests {
 
         assert_eq!(
             spelled(&tokens),
-            ["int", "main", "(", ")", "{", "}", "namespace", "std", "{", "}", "return", "0", ";"],
+            [
+                "int",
+                "main",
+                "(",
+                ")",
+                "{",
+                "}",
+                "namespace",
+                "std",
+                "{",
+                "}",
+                "return",
+                "0",
+                ";"
+            ],
             "the markers are not tokens: {tokens:?}"
         );
         assert_eq!(tokens[0].origin(), "c:/src/main.cpp:1");
@@ -1802,8 +1895,14 @@ mod tests {
 
         let alignment = align(&ours, &theirs);
 
-        assert!(alignment.truncated, "an unbounded diff must report that it stopped");
-        assert!(!alignment.agrees(), "and must not be mistaken for agreement");
+        assert!(
+            alignment.truncated,
+            "an unbounded diff must report that it stopped"
+        );
+        assert!(
+            !alignment.agrees(),
+            "and must not be mistaken for agreement"
+        );
     }
 
     /// **The report's counts are the numbers the plan requires to be monotone**, so they are what a test asserts
@@ -1844,7 +1943,11 @@ mod tests {
             ],
             "one movement each, counted where it belongs: {report:?}"
         );
-        assert!(report.render().contains("by mechanism"), "{}", report.render());
+        assert!(
+            report.render().contains("by mechanism"),
+            "{}",
+            report.render()
+        );
     }
 
     /// A report of two streams that agree says so, and carries no differences at all —the state §5.2 requires to be
@@ -1885,12 +1988,19 @@ mod tests {
         unit.push("c", 0, SourceRange::new(19, 1));
 
         let texts: std::collections::HashMap<PathBuf, String> =
-            [(PathBuf::from(file), text.to_string())].into_iter().collect();
+            [(PathBuf::from(file), text.to_string())]
+                .into_iter()
+                .collect();
         let tokens = unit_tokens(&unit, &texts);
 
         let placed: Vec<(&str, u32)> = tokens
             .iter()
-            .map(|token| (&*token.spelling, token.line.expect("the file's text was given")))
+            .map(|token| {
+                (
+                    &*token.spelling,
+                    token.line.expect("the file's text was given"),
+                )
+            })
             .collect();
         assert_eq!(
             placed,
@@ -1920,6 +2030,10 @@ mod tests {
         assert_eq!(tokens.len(), 1);
         assert!(tokens[0].file.is_none(), "{tokens:?}");
         assert!(tokens[0].line.is_none(), "{tokens:?}");
-        assert_eq!(tokens[0].origin(), "?", "and the report says so rather than guessing");
+        assert_eq!(
+            tokens[0].origin(),
+            "?",
+            "and the report says so rather than guessing"
+        );
     }
 }

@@ -81,7 +81,9 @@ impl Check for AccessInvisible {
             let crate::Known::Yes((object, _)) = context.type_of(&access.object) else {
                 continue;
             };
-            let crate::Known::Yes(members) = context.model.members_of(&object.class_name().unwrap_or_default())
+            let crate::Known::Yes(members) = context
+                .model
+                .members_of(&object.class_name().unwrap_or_default())
             else {
                 continue;
             };
@@ -97,10 +99,9 @@ impl Check for AccessInvisible {
             // **The declaration of that member, in this file** — found by the range the member list reports, which
             // is the name's. A member declared in another file is not here, and this check does not judge it, so the
             // search runs over this file's own nodes rather than over the whole rendering.
-            let Some(declaration) = context
-                .own_syntax_nodes()
-                .find(|node| usize::from(node.text_range().start()) == member.fact.range.start_offset)
-            else {
+            let Some(declaration) = context.own_syntax_nodes().find(|node| {
+                usize::from(node.text_range().start()) == member.fact.range.start_offset
+            }) else {
                 continue;
             };
             let Some(class) = enclosing_definition(&declaration) else {
@@ -131,8 +132,6 @@ impl Check for AccessInvisible {
         }
     }
 }
-
-
 
 /// The nearest ancestor that is a **class definition** — `class`, `struct`, `union`.
 ///
@@ -190,10 +189,9 @@ fn visibility_of(class: &CppSyntaxNode, offset: usize) -> Access {
             // A member or anything else: the label in force is unchanged.
             continue;
         };
-        in_force = match specifier
-            .get_keyword()
-            .map(|keyword| cpp_parser::CppTokenKind::from(cpp_parser::CppKind::from(keyword.syntax().kind())))
-        {
+        in_force = match specifier.get_keyword().map(|keyword| {
+            cpp_parser::CppTokenKind::from(cpp_parser::CppKind::from(keyword.syntax().kind()))
+        }) {
             Some(cpp_parser::CppTokenKind::PublicKeyword) => Access::Public,
             Some(cpp_parser::CppTokenKind::ProtectedKeyword) => Access::Protected,
             Some(cpp_parser::CppTokenKind::PrivateKeyword) => Access::Private,
@@ -234,13 +232,3 @@ fn default_access_of(class: &CppSyntaxNode) -> Access {
         _ => Access::Public,
     }
 }
-
-
-
-
-
-
-
-
-
-

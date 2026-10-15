@@ -8,7 +8,9 @@
 //! The type is always the **written** spelling — `const int&` is those three tokens — which is the same boundary
 //! every other query in this crate has; what is new here is that the spelling is *computed* rather than copied.
 
-use cpp_code_analysis::{CompilerConfig, MemoryFiles, OpenDocuments, Session, SessionFiles, WatchFilter};
+use cpp_code_analysis::{
+    CompilerConfig, MemoryFiles, OpenDocuments, Session, SessionFiles, WatchFilter,
+};
 
 fn session_with(files: &[(&str, &str)]) -> Session<MemoryFiles> {
     let mut memory = MemoryFiles::new();
@@ -23,13 +25,18 @@ fn session_with(files: &[(&str, &str)]) -> Session<MemoryFiles> {
         WatchFilter::new("/p"),
         CompilerConfig::default(),
     );
-    session.add_project_files(files.iter().map(|(path, _)| std::path::PathBuf::from(*path)));
+    session.add_project_files(
+        files
+            .iter()
+            .map(|(path, _)| std::path::PathBuf::from(*path)),
+    );
 
     // **The ask, and then the pump** - see `tests/completion.rs`'s `cooked_view`. A view is of the file's *cooked
     // reading*, and a rendering is built because something asked for it.
     for (path, _) in files {
         session.want_cooked_reading(std::path::Path::new(path));
-    }    session.index_everything();
+    }
+    session.index_everything();
 
     session
 }
@@ -60,8 +67,10 @@ fn as_reading(
     view: &cpp_code_analysis::FileView,
     offset: usize,
 ) -> cpp_code_analysis::file::coordinates::ReadingOffset {
-    view.reading_offset_of(cpp_code_analysis::file::coordinates::FileOffset::new(offset))
-        .expect("the cursor is in the rendering")
+    view.reading_offset_of(cpp_code_analysis::file::coordinates::FileOffset::new(
+        offset,
+    ))
+    .expect("the cursor is in the rendering")
 }
 /// The offset of the last **whole-word** occurrence of a spelling.
 fn last_word(source: &str, spelling: &str) -> usize {
@@ -325,7 +334,10 @@ int f() {
     let view = session.view("/p/a.cpp").expect("the file is held");
     let offset = source.rfind("w.").expect("the fixture writes the access") + 2;
 
-    match session.member_completions(&view, cpp_code_analysis::file::coordinates::FileOffset::new(offset)) {
+    match session.member_completions(
+        &view,
+        cpp_code_analysis::file::coordinates::FileOffset::new(offset),
+    ) {
         cpp_code_analysis::Known::Yes(found) => {
             let names: Vec<String> = found
                 .members
@@ -409,7 +421,8 @@ fn a_name_declared_twice_with_one_type_still_has_that_type() {
 /// about, and picking one of them would be a guess.
 #[test]
 fn two_declarations_that_disagree_about_the_type_are_still_unknown() {
-    let header = "struct One { int a; };\nstruct Two { int b; };\nextern One shared;\nextern Two shared;\n";
+    let header =
+        "struct One { int a; };\nstruct Two { int b; };\nextern One shared;\nextern Two shared;\n";
     let source = "#include \"lib.h\"\nint f() { return shared.a; }\n";
     let session = session_with(&[("/p/a.cpp", source), ("/p/lib.h", header)]);
 
@@ -423,7 +436,12 @@ fn two_declarations_that_disagree_about_the_type_are_still_unknown() {
 /// between it and whatever precedes it — where a `*`, a `(`, or a `.` decides what the expression is. Measured,
 /// `v.data()` asked at the offset of `data` answers about `v.data` (an uncalled member function, which has no type)
 /// while the same name asked one byte later answers `int*`, which is what a reader pointing at the name sees.
-fn type_of_use_in(session: &Session<MemoryFiles>, path: &str, source: &str, spelling: &str) -> Option<String> {
+fn type_of_use_in(
+    session: &Session<MemoryFiles>,
+    path: &str,
+    source: &str,
+    spelling: &str,
+) -> Option<String> {
     let view = session.view(path).expect("the file is held");
     let offset = last_word(source, spelling) + spelling.len() - 1;
 
@@ -583,7 +601,6 @@ int f() {
     );
 }
 
-
 /// **A member reached through an *alias* is finished with the arguments the alias carried.**
 ///
 /// `std::string` is one name with no arguments of its own, and the class it names was written with three:
@@ -724,12 +741,12 @@ int f() {
     );
 }
 
-
 /// **A class template written without arguments keeps its parameters**, which is the answer that must not become a
 /// guess: `std::vector` with no argument has no `_Ty` to pair, so a member's type stays `_Ty&` — a name a caller can
 /// see is unfinished rather than a type that happens to be wrong.
 #[test]
-fn a_template_without_arguments_keeps_its_parameters() {    let source = "\
+fn a_template_without_arguments_keeps_its_parameters() {
+    let source = "\
 namespace std {
 template <class _Ty>
 struct vector { typedef _Ty& reference; };
@@ -780,6 +797,3 @@ int f() { return 0; }
         "the innermost template is the one that introduces the class"
     );
 }
-
-
-

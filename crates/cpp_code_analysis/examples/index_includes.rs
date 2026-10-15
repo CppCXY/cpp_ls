@@ -53,7 +53,10 @@ fn main() {
             println!(
                 "toolchain: {} ({})\n  {} system include directories",
                 toolchain.compiler_name(),
-                toolchain.version.as_deref().unwrap_or("version not reported"),
+                toolchain
+                    .version
+                    .as_deref()
+                    .unwrap_or("version not reported"),
                 toolchain.system_include_paths.len()
             );
             toolchain.config(&CompilerConfig::new())
@@ -89,7 +92,10 @@ fn main() {
         println!("    {} :: {}", edge.from.display(), edge.spelling);
     }
     if !cold.not_indexed.is_empty() {
-        println!("  {} files were reached and not opened:", cold.not_indexed.len());
+        println!(
+            "  {} files were reached and not opened:",
+            cold.not_indexed.len()
+        );
         for stopped in cold.not_indexed.iter().take(5) {
             println!("    {} :: {:?}", stopped.path.display(), stopped.reason);
         }
@@ -155,4 +161,3 @@ fn directory_size(directory: &Path) -> u64 {
         })
         .sum()
 }
-

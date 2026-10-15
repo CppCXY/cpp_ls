@@ -35,7 +35,10 @@ fn main() {
         ),
         cpp_code_analysis::WatchFilter::new(std::path::Path::new(".")),
     );
-    session.did_open(&root_path, &std::fs::read_to_string(&root_path).unwrap_or_default());
+    session.did_open(
+        &root_path,
+        &std::fs::read_to_string(&root_path).unwrap_or_default(),
+    );
 
     // **The ask, and then the pump** - the same pair every test in this workspace uses, and the one this probe was
     // missing: `Session::diagnostics` answers from the **cooked reading**, and a rendering is built because
@@ -81,18 +84,29 @@ fn main() {
         let Some(found) = session.diagnostics(path) else {
             continue;
         };
-        for finding in found.checks.iter().filter(|finding| finding.code.name() == check) {
+        for finding in found
+            .checks
+            .iter()
+            .filter(|finding| finding.code.name() == check)
+        {
             total += 1;
             let name = path
                 .file_name()
                 .map(|name| name.to_string_lossy().to_string())
                 .unwrap_or_default();
-            println!("  {name}:{}  {}", finding.range.start_offset, finding.message);
+            println!(
+                "  {name}:{}  {}",
+                finding.range.start_offset, finding.message
+            );
 
             // **The facts that mention this name**, which is where a reading defect shows: the check was handed a
             // fact, and what that fact says about kind, type and parameters is the whole of what it could know.
             if let Some(summary) = session.index().summary(path) {
-                for fact in summary.declarations.iter().filter(|fact| fact.name == finding.name) {
+                for fact in summary
+                    .declarations
+                    .iter()
+                    .filter(|fact| fact.name == finding.name)
+                {
                     println!(
                         "      fact: kind={:?} type={:?} returns={:?} params={:?} range={:?}..{:?}",
                         fact.kind,
@@ -107,19 +121,22 @@ fn main() {
 
             // And the line of the file it is about, which is what a person reads to judge it.
             if let Some(text) = std::fs::read_to_string(path).ok() {
-                let line = text[..finding.range.start_offset.min(text.len())].matches('\n').count() + 1;
+                let line = text[..finding.range.start_offset.min(text.len())]
+                    .matches('\n')
+                    .count()
+                    + 1;
                 if let Some(source) = text.lines().nth(line.saturating_sub(1)) {
-                    println!("      source: {}", source.trim().chars().take(100).collect::<String>());
+                    println!(
+                        "      source: {}",
+                        source.trim().chars().take(100).collect::<String>()
+                    );
                 }
             }
         }
     }
 
-    println!("\n  {total} finding(s) from `{check}` over {} file(s)", paths.len());
+    println!(
+        "\n  {total} finding(s) from `{check}` over {} file(s)",
+        paths.len()
+    );
 }
-
-
-
-
-
-

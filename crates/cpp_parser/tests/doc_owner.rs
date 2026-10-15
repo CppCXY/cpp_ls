@@ -400,7 +400,11 @@ fn every_form_of_declaration_finds_its_comment() {
         ("/// Doc.\nint f();\n", "f", "Doc."),
         ("/// Doc.\nint x = 1;\n", "x", "Doc."),
         ("/// Doc.\nvoid f() { }\n", "f", "Doc."),
-        ("/// A grid.\nclass Grid {\n    int n;\n};\n", "Grid", "A grid."),
+        (
+            "/// A grid.\nclass Grid {\n    int n;\n};\n",
+            "Grid",
+            "A grid.",
+        ),
     ];
 
     for (source, name, expected) in cases {
@@ -427,10 +431,7 @@ fn the_reverse_walk_steps_over_a_directive() {
 fn a_member_finds_the_comment_above_it() {
     let source = "struct S {\n    /// The n.\n    int n;\n    int m;\n};\n";
 
-    assert_eq!(
-        documentation_above(source, "n"),
-        Some("The n.".to_string())
-    );
+    assert_eq!(documentation_above(source, "n"), Some("The n.".to_string()));
     assert_eq!(
         documentation_above(source, "m"),
         None,
@@ -447,7 +448,10 @@ fn a_member_finds_the_comment_above_it() {
 #[test]
 fn a_member_finds_a_comment_nested_in_the_member_before_it() {
     assert_eq!(
-        documentation_above("struct S {\n    int x;\n    /// The y.\n    int y;\n};\n", "y"),
+        documentation_above(
+            "struct S {\n    int x;\n    /// The y.\n    int y;\n};\n",
+            "y"
+        ),
         Some("The y.".to_string())
     );
 }
@@ -475,10 +479,7 @@ fn a_trailing_comment_does_not_document_what_follows() {
 fn a_comment_is_not_borrowed_by_the_second_declaration_after_it() {
     let source = "/// First.\nint a;\nint b;\n";
 
-    assert_eq!(
-        documentation_above(source, "a"),
-        Some("First.".to_string())
-    );
+    assert_eq!(documentation_above(source, "a"), Some("First.".to_string()));
     assert_eq!(documentation_above(source, "b"), None);
 }
 
@@ -543,10 +544,7 @@ double dist(const Point& a, const Point& b);
             ("Point".to_string(), Some("A point.".to_string())),
             ("x".to_string(), Some("The x.".to_string())),
             ("y".to_string(), Some("The y.".to_string())),
-            (
-                "dist".to_string(),
-                Some("Distance.".to_string())
-            ),
+            ("dist".to_string(), Some("Distance.".to_string())),
         ]
     );
 }

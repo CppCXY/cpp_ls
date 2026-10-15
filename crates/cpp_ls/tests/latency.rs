@@ -187,12 +187,18 @@ fn a_completion_asked_while_the_index_fills_comes_back_within_the_budget() {
             "  completion #{attempt}: {} ms, {items} item(s)",
             took.as_millis()
         );
-        every.push(format!("#{attempt}: {} ms, {items} item(s)", took.as_millis()));
+        every.push(format!(
+            "#{attempt}: {} ms, {items} item(s)",
+            took.as_millis()
+        ));
         if attempt as usize >= STEADY_FROM {
             steady.push(took);
         }
         if took > COMPLETION_BUDGET {
-            over.push(format!("  #{attempt}: {} ms, {items} item(s)", took.as_millis()));
+            over.push(format!(
+                "  #{attempt}: {} ms, {items} item(s)",
+                took.as_millis()
+            ));
         }
     }
 
@@ -306,7 +312,11 @@ fn position_of(source: &str, needle: &str) -> (u32, u32) {
     let at = source.find(needle).expect("the needle is in the fixture");
     let before = &source[..at];
     let line = before.matches('\n').count() as u32;
-    let character = before.rsplit('\n').next().map(|last| last.len()).unwrap_or(0) as u32;
+    let character = before
+        .rsplit('\n')
+        .next()
+        .map(|last| last.len())
+        .unwrap_or(0) as u32;
     (line, character)
 }
 
@@ -388,7 +398,8 @@ impl Server {
 
     fn send(&mut self, message: Value) {
         let body = serde_json::to_string(&message).expect("a message serializes");
-        write!(self.stdin, "Content-Length: {}\r\n\r\n{body}", body.len()).expect("the message is written");
+        write!(self.stdin, "Content-Length: {}\r\n\r\n{body}", body.len())
+            .expect("the message is written");
         self.stdin.flush().expect("the message is flushed");
     }
 
@@ -458,4 +469,3 @@ fn read_messages(stdout: ChildStdout, tx: Sender<Value>) {
 /// `Read` is needed by `read_exact` above and is not otherwise named.
 #[allow(unused_imports)]
 use std::io::Read as _;
-

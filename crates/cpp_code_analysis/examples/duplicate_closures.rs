@@ -93,13 +93,7 @@ fn main() {
     let mut hashes: HashMap<PathBuf, u64> = HashMap::new();
     let mut in_progress: Vec<PathBuf> = Vec::new();
     for path in includes.keys() {
-        closure_hash(
-            path,
-            &includes,
-            &content,
-            &mut hashes,
-            &mut in_progress,
-        );
+        closure_hash(path, &includes, &content, &mut hashes, &mut in_progress);
     }
 
     // **The group key is what a root reads underneath itself, not the root.** A file is part of its own closure, so
@@ -136,7 +130,8 @@ fn main() {
     }
 
     let roots = hashes.len();
-    let shared: Vec<(&u64, &Vec<PathBuf>)> = groups.iter().filter(|(_, files)| files.len() > 1).collect();
+    let shared: Vec<(&u64, &Vec<PathBuf>)> =
+        groups.iter().filter(|(_, files)| files.len() > 1).collect();
     let shareable: usize = shared.iter().map(|(_, files)| files.len() - 1).sum();
 
     println!("\n--- one closure, how many roots ---");
@@ -169,7 +164,10 @@ fn main() {
             .iter()
             .filter(|include| {
                 include.resolved.is_none()
-                    && matches!(include.guard, cpp_code_analysis::summary::FactGuard::Unconditional)
+                    && matches!(
+                        include.guard,
+                        cpp_code_analysis::summary::FactGuard::Unconditional
+                    )
             })
             .map(|include| include.spelling.as_str())
             .collect();

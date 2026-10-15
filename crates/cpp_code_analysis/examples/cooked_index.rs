@@ -65,12 +65,17 @@ fn main() {
         files += 1;
         let path = Path::new(path);
 
-        let raw = cpp_code_analysis::summarize(path, &source, cpp_code_analysis::SummaryKey::new(0, 0));
+        let raw =
+            cpp_code_analysis::summarize(path, &source, cpp_code_analysis::SummaryKey::new(0, 0));
 
         let (tokens, _) = cpp_parser::lex(&source, &cpp_parser::LexerConfig::default());
         let cooked = cpp_code_analysis::cook(&source, &tokens);
         let rendered = cooked.render();
-        let from_cooked = cpp_code_analysis::summarize(path, &rendered.text, cpp_code_analysis::SummaryKey::new(0, 0));
+        let from_cooked = cpp_code_analysis::summarize(
+            path,
+            &rendered.text,
+            cpp_code_analysis::SummaryKey::new(0, 0),
+        );
 
         let names = |summary: &cpp_code_analysis::FileSummary| -> BTreeSet<String> {
             summary

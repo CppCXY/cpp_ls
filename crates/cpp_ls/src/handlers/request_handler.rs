@@ -37,9 +37,10 @@ use std::error::Error;
 use log::error;
 use lsp_server::{Request, Response};
 use lsp_types::request::{
-    Completion, DocumentDiagnosticRequest, DocumentSymbolRequest, FoldingRangeRequest, GotoDefinition, HoverRequest, InlayHintRequest, PrepareRenameRequest,
-    References, Rename, Request as LspRequest, ResolveCompletionItem, SelectionRangeRequest,
-    SemanticTokensFullRequest, SignatureHelpRequest, WorkspaceSymbolRequest,
+    Completion, DocumentDiagnosticRequest, DocumentSymbolRequest, FoldingRangeRequest,
+    GotoDefinition, HoverRequest, InlayHintRequest, PrepareRenameRequest, References, Rename,
+    Request as LspRequest, ResolveCompletionItem, SelectionRangeRequest, SemanticTokensFullRequest,
+    SignatureHelpRequest, WorkspaceSymbolRequest,
 };
 
 use crate::context::ServerContext;
@@ -53,10 +54,10 @@ use super::{
     hover::on_hover,
     inlay_hint::on_inlay_hint,
     references::on_references,
+    rename::{on_prepare_rename, on_rename},
     selection_range::on_selection_range,
     semantic_token::on_semantic_tokens,
     signature_help::on_signature_help,
-    rename::{on_prepare_rename, on_rename},
     workspace_symbol::on_workspace_symbol,
 };
 
@@ -101,29 +102,27 @@ pub async fn on_request_handler(
     server_context: &mut ServerContext,
 ) -> Result<(), Box<dyn Error + Sync + Send>> {
     dispatch_request!(req, server_context, {
-        // The first four are the ones the C++ analysis answers today: a location, a type, the names that can be
-        // written at a cursor, and a file's diagnostics. The rest of the table is a one-line row each
-        GotoDefinition => on_goto_definition_handler,
-        HoverRequest => on_hover,
-        Completion => on_completion,
-        ResolveCompletionItem => on_completion_resolve,
-        DocumentSymbolRequest => on_document_symbol,
-        FoldingRangeRequest => on_folding_range,
-        InlayHintRequest => on_inlay_hint,
-        References => on_references,
-        SelectionRangeRequest => on_selection_range,
-        SemanticTokensFullRequest => on_semantic_tokens,
-        SignatureHelpRequest => on_signature_help,
-        PrepareRenameRequest => on_prepare_rename,
-        Rename => on_rename,
-        WorkspaceSymbolRequest => on_workspace_symbol,
-        DocumentDiagnosticRequest => on_pull_document_diagnostic,
-        // **The one command this server offers.** A client invokes it to have the CMake configure that would write a
-        // compile database run — see the module for why it is a command rather than something the server does on its
-        // own, and why it is not shaped per client.
-        });
+    // The first four are the ones the C++ analysis answers today: a location, a type, the names that can be
+    // written at a cursor, and a file's diagnostics. The rest of the table is a one-line row each
+    GotoDefinition => on_goto_definition_handler,
+    HoverRequest => on_hover,
+    Completion => on_completion,
+    ResolveCompletionItem => on_completion_resolve,
+    DocumentSymbolRequest => on_document_symbol,
+    FoldingRangeRequest => on_folding_range,
+    InlayHintRequest => on_inlay_hint,
+    References => on_references,
+    SelectionRangeRequest => on_selection_range,
+    SemanticTokensFullRequest => on_semantic_tokens,
+    SignatureHelpRequest => on_signature_help,
+    PrepareRenameRequest => on_prepare_rename,
+    Rename => on_rename,
+    WorkspaceSymbolRequest => on_workspace_symbol,
+    DocumentDiagnosticRequest => on_pull_document_diagnostic,
+    // **The one command this server offers.** A client invokes it to have the CMake configure that would write a
+    // compile database run — see the module for why it is a command rather than something the server does on its
+    // own, and why it is not shaped per client.
+    });
 
     Ok(())
 }
-
-

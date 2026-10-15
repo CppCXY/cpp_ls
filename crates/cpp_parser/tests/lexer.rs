@@ -345,10 +345,7 @@ fn dollar_is_read_unless_the_caller_refuses_it() {
             (CppTokenKind::Identifier, "allowed_on_return"),
         ]
     );
-    assert_ne!(
-        tokens_without_dollar("$foo")[0].0,
-        CppTokenKind::Identifier
-    );
+    assert_ne!(tokens_without_dollar("$foo")[0].0, CppTokenKind::Identifier);
 }
 
 #[test]

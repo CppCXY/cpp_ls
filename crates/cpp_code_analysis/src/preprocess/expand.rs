@@ -221,9 +221,7 @@ impl ExpandedToken {
     pub fn navigation_at(&self) -> Option<(crate::macros::MacroFile, SourceRange)> {
         match &self.origin {
             Origin::Expanded { invocations } => invocations.iter().rev().find_map(|invocation| {
-                invocation
-                    .written_in
-                    .map(|file| (file, invocation.name_at))
+                invocation.written_in.map(|file| (file, invocation.name_at))
             }),
             // A token the file wrote: its own name is where a reader would look, in the file they are reading.
             _ => Some((crate::macros::MacroFile::Here, self.token.range)),
@@ -574,7 +572,8 @@ impl<M: MacroValues + ?Sized> Expander<'_, M> {
                         .iter()
                         .position(|marked| !is_trivia(marked.token.kind))
                     {
-                        Some(offset) => (tokens[index + 1 + offset].token.kind == CppTokenKind::LeftParen)
+                        Some(offset) => (tokens[index + 1 + offset].token.kind
+                            == CppTokenKind::LeftParen)
                             .then_some(index + 1 + offset),
                         None => None,
                     };
@@ -665,8 +664,13 @@ impl<M: MacroValues + ?Sized> Expander<'_, M> {
                             tokens: &source[arguments.next_index..],
                             outer: tail,
                         };
-                        let used =
-                            self.expand_body(&definition, &arguments.groups, source, invocation, Some(&after));
+                        let used = self.expand_body(
+                            &definition,
+                            &arguments.groups,
+                            source,
+                            invocation,
+                            Some(&after),
+                        );
                         index = arguments.next_index;
                         self.advance_past(tokens.len(), &mut index, used, &mut consumed);
                     } else {
@@ -677,8 +681,13 @@ impl<M: MacroValues + ?Sized> Expander<'_, M> {
                             tokens: &source[arguments.next_index..],
                             outer: None,
                         };
-                        let used =
-                            self.expand_body(&definition, &arguments.groups, source, invocation, Some(&after));
+                        let used = self.expand_body(
+                            &definition,
+                            &arguments.groups,
+                            source,
+                            invocation,
+                            Some(&after),
+                        );
                         consumed = arguments.next_index - own + used;
                         index = tokens.len();
                     }
@@ -708,7 +717,8 @@ impl<M: MacroValues + ?Sized> Expander<'_, M> {
         for param in params {
             let raw = trim_trivia(argument_range_for(params, arguments, plain, &param.name));
             let has_a_macro = raw.iter().any(|token| {
-                could_be_a_macro_name(token.kind) && self.macros.lookup(token.text()).definition().is_some()
+                could_be_a_macro_name(token.kind)
+                    && self.macros.lookup(token.text()).definition().is_some()
             });
             if !has_a_macro {
                 expanded.push(None);
@@ -727,7 +737,10 @@ impl<M: MacroValues + ?Sized> Expander<'_, M> {
                     origin: token.origin,
                 })
                 .collect();
-            while tokens.last().is_some_and(|marked| is_trivia(marked.token.kind)) {
+            while tokens
+                .last()
+                .is_some_and(|marked| is_trivia(marked.token.kind))
+            {
                 tokens.pop();
             }
             let leading = tokens
@@ -833,7 +846,11 @@ impl Tail<'_> {
     fn starts_a_call(&self) -> bool {
         let mut at = Some(self);
         while let Some(run) = at {
-            if let Some(next) = run.tokens.iter().find(|marked| !is_trivia(marked.token.kind)) {
+            if let Some(next) = run
+                .tokens
+                .iter()
+                .find(|marked| !is_trivia(marked.token.kind))
+            {
                 return next.token.kind == CppTokenKind::LeftParen;
             }
             at = run.outer;

@@ -913,7 +913,10 @@ fn an_unterminated_attribute_list_is_reported_and_consumes_the_rest() {
 fn a_function_definition_holds_its_body() {
     for (what, source) in [
         ("a plain function", "int g() { return 1; }\n"),
-        ("a member function", "struct A {\n    void g() { return; }\n};\n"),
+        (
+            "a member function",
+            "struct A {\n    void g() { return; }\n};\n",
+        ),
         (
             "a constructor with an initializer list",
             "struct A {\n    A(int f) : x(f) { int q = f; }\n    int x;\n};\n",
@@ -925,13 +928,15 @@ fn a_function_definition_holds_its_body() {
             .descendants()
             .filter(|node| {
                 CppSyntaxKind::from(node.kind()) == CppSyntaxKind::Declaration
-                    && node
-                        .descendants()
-                        .any(|inner| CppSyntaxKind::from(inner.kind()) == CppSyntaxKind::CompoundStat)
+                    && node.descendants().any(|inner| {
+                        CppSyntaxKind::from(inner.kind()) == CppSyntaxKind::CompoundStat
+                    })
             })
             // The **innermost** holder: a member function's body is also inside the class's own declaration, and
             // the question here is about the function's, not the class's.
-            .min_by_key(|node| usize::from(node.text_range().end()) - usize::from(node.text_range().start()))
+            .min_by_key(|node| {
+                usize::from(node.text_range().end()) - usize::from(node.text_range().start())
+            })
             .unwrap_or_else(|| panic!("{what}: no declaration holds a body in {source:?}"));
 
         let body = declaration

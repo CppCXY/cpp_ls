@@ -16,7 +16,13 @@ fn main() {
     println!("  the index holds {} file(s)", index.len());
 
     let atomic = std::path::PathBuf::from(&inc).join("atomic");
-    println!("  atomic: summary={} declaration(s)", index.summary(&atomic).map(|s| s.declarations.len()).unwrap_or(0));
+    println!(
+        "  atomic: summary={} declaration(s)",
+        index
+            .summary(&atomic)
+            .map(|s| s.declarations.len())
+            .unwrap_or(0)
+    );
 
     match index.summary(&atomic) {
         Some(summary) => {
@@ -27,7 +33,12 @@ fn main() {
                 .collect();
             println!("  `_Locked_pointer` facts in atomic: {}", found.len());
             for fact in found.iter().take(3) {
-                println!("    scope={:?} qual={} kind={:?}", fact.scope, fact.qualified_name(), fact.kind);
+                println!(
+                    "    scope={:?} qual={} kind={:?}",
+                    fact.scope,
+                    fact.qualified_name(),
+                    fact.kind
+                );
             }
         }
         None => println!("  atomic has NO summary"),
@@ -36,13 +47,24 @@ fn main() {
     let includers = index.includers_of(&atomic);
     println!("  includers_of(atomic): {}", includers.len());
     for path in includers.iter() {
-        let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-        let mark = if name == "memory" { "  <-- memory IS an includer" } else { "" };
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let mark = if name == "memory" {
+            "  <-- memory IS an includer"
+        } else {
+            ""
+        };
         println!("    {name}{mark}");
     }
     println!(
         "  memory itself is an includer of atomic: {}",
-        includers.iter().any(|path| path.file_name().map(|n| n.to_string_lossy().to_string()).as_deref() == Some("memory"))
+        includers.iter().any(|path| path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .as_deref()
+            == Some("memory"))
     );
 
     // **How many hops the reverse walk needs.** `memory` writes `#include <atomic>` directly, so if the edge were
@@ -85,7 +107,10 @@ fn main() {
     println!("    (any entry whose path mentions atomic, above)");
     // The reverse edge again, with the exact spelling the graph holds.
     for path in index.includers_of(&atomic) {
-        let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
         if name == "memory" {
             println!("    the reverse edge spells it: {}", path.display());
         }

@@ -243,7 +243,8 @@ fn a_file_that_includes_a_standard_header_becomes_cacheable() {
     std::fs::create_dir_all(&root).expect("a project directory");
 
     let source = root.join("main.cpp");
-    std::fs::write(&source, "#include <vector>\nint main() { return 0; }\n").expect("the fixture writes");
+    std::fs::write(&source, "#include <vector>\nint main() { return 0; }\n")
+        .expect("the fixture writes");
 
     let config = toolchain.config(&CompilerConfig::new());
 
@@ -329,7 +330,9 @@ fn a_project_with_no_build_system_is_read_with_the_compilers_environment() {
     );
 
     if session.toolchain().is_none() {
-        println!("no toolchain was discovered for the project directory, so nothing can be claimed about it");
+        println!(
+            "no toolchain was discovered for the project directory, so nothing can be claimed about it"
+        );
         let _ = std::fs::remove_dir_all(&root);
         return;
     }
@@ -364,4 +367,3 @@ fn a_project_with_no_build_system_is_read_with_the_compilers_environment() {
 
     let _ = std::fs::remove_dir_all(&root);
 }
-

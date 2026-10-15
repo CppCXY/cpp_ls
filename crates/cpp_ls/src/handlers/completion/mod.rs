@@ -56,8 +56,8 @@ use lsp_types::{
 use tokio_util::sync::CancellationToken;
 
 use super::RegisterCapabilities;
-use crate::handlers::hover::documentation_text;
 use crate::context::{RequestOutcome, ServerContextSnapshot, snapshot_query};
+use crate::handlers::hover::documentation_text;
 use crate::util::{file_offset_at_position, position_at_offset, uri_to_file_path};
 
 pub async fn on_completion(
@@ -299,7 +299,11 @@ pub enum Snippets {
 
 /// A client's answer, as the enum above.
 fn snippets_of(supported: bool) -> Snippets {
-    if supported { Snippets::Yes } else { Snippets::No }
+    if supported {
+        Snippets::Yes
+    } else {
+        Snippets::No
+    }
 }
 
 /// One analysis item, as the protocol's item.
@@ -377,8 +381,14 @@ fn text_edit(
 
     Some(CompletionTextEdit::Edit(TextEdit {
         range: lsp_types::Range::new(
-            position_at_offset(view, cpp_code_analysis::file::coordinates::ReadingOffset::new(replace.start_offset))?,
-            position_at_offset(view, cpp_code_analysis::file::coordinates::ReadingOffset::new(replace.end_offset()))?,
+            position_at_offset(
+                view,
+                cpp_code_analysis::file::coordinates::ReadingOffset::new(replace.start_offset),
+            )?,
+            position_at_offset(
+                view,
+                cpp_code_analysis::file::coordinates::ReadingOffset::new(replace.end_offset()),
+            )?,
         ),
         new_text: new_text.to_string(),
     }))
@@ -566,7 +576,8 @@ mod tests {
     /// client shows, rather than for every name in the list.
     #[test]
     fn an_item_carries_where_its_declaration_is() {
-        let identity = identity_of(std::path::Path::new("/p/widget.h"), 120).expect("a path spells");
+        let identity =
+            identity_of(std::path::Path::new("/p/widget.h"), 120).expect("a path spells");
 
         assert_eq!(identity["file"], serde_json::json!("/p/widget.h"));
         assert_eq!(identity["offset"], serde_json::json!(120));
@@ -577,26 +588,45 @@ mod tests {
     /// icon.
     #[test]
     fn every_item_kind_has_an_icon() {
-        assert_eq!(completion_kind(ItemKind::Variable), CompletionItemKind::VARIABLE);
-        assert_eq!(completion_kind(ItemKind::Function), CompletionItemKind::FUNCTION);
-        assert_eq!(completion_kind(ItemKind::Method), CompletionItemKind::METHOD);
+        assert_eq!(
+            completion_kind(ItemKind::Variable),
+            CompletionItemKind::VARIABLE
+        );
+        assert_eq!(
+            completion_kind(ItemKind::Function),
+            CompletionItemKind::FUNCTION
+        );
+        assert_eq!(
+            completion_kind(ItemKind::Method),
+            CompletionItemKind::METHOD
+        );
         assert_eq!(completion_kind(ItemKind::Field), CompletionItemKind::FIELD);
         assert_eq!(completion_kind(ItemKind::Class), CompletionItemKind::CLASS);
         assert_eq!(completion_kind(ItemKind::Enum), CompletionItemKind::ENUM);
-        assert_eq!(completion_kind(ItemKind::EnumMember), CompletionItemKind::ENUM_MEMBER);
-        assert_eq!(completion_kind(ItemKind::Namespace), CompletionItemKind::MODULE);
-        assert_eq!(completion_kind(ItemKind::Macro), CompletionItemKind::CONSTANT);
-        assert_eq!(completion_kind(ItemKind::TypeParameter), CompletionItemKind::TYPE_PARAMETER);
-        assert_eq!(completion_kind(ItemKind::Keyword), CompletionItemKind::KEYWORD);
-        assert_eq!(completion_kind(ItemKind::Snippet), CompletionItemKind::SNIPPET);
+        assert_eq!(
+            completion_kind(ItemKind::EnumMember),
+            CompletionItemKind::ENUM_MEMBER
+        );
+        assert_eq!(
+            completion_kind(ItemKind::Namespace),
+            CompletionItemKind::MODULE
+        );
+        assert_eq!(
+            completion_kind(ItemKind::Macro),
+            CompletionItemKind::CONSTANT
+        );
+        assert_eq!(
+            completion_kind(ItemKind::TypeParameter),
+            CompletionItemKind::TYPE_PARAMETER
+        );
+        assert_eq!(
+            completion_kind(ItemKind::Keyword),
+            CompletionItemKind::KEYWORD
+        );
+        assert_eq!(
+            completion_kind(ItemKind::Snippet),
+            CompletionItemKind::SNIPPET
+        );
         assert_eq!(completion_kind(ItemKind::Header), CompletionItemKind::FILE);
     }
 }
-
-
-
-
-
-
-
-

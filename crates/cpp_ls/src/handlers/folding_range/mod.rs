@@ -22,8 +22,8 @@
 
 use cpp_code_analysis::folding::FoldKind;
 use lsp_types::{
-    ClientCapabilities, FoldingRange, FoldingRangeKind, FoldingRangeParams, FoldingRangeProviderCapability,
-    ServerCapabilities,
+    ClientCapabilities, FoldingRange, FoldingRangeKind, FoldingRangeParams,
+    FoldingRangeProviderCapability, ServerCapabilities,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -153,7 +153,10 @@ mod tests {
         };
         let converted = folding_range_of(file, fold).expect("three lines are worth folding");
         assert_eq!(converted.start_line, 1);
-        assert_eq!(converted.end_line, 3, "not 4, which would hide nothing of `four`");
+        assert_eq!(
+            converted.end_line, 3,
+            "not 4, which would hide nothing of `four`"
+        );
 
         // One line is not a fold: the protocol says a client may ignore such a range, and a server that sent one
         // would be asking it to decide.

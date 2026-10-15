@@ -73,34 +73,33 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
-use crate::include::config::{
-    CompileCommands, CompilerConfig, project_config_from_flags,
-};
+use crate::PathInterner;
+use crate::cache::SummaryKey;
 use crate::file::coordinates::{FileOffset, ReadingOffset};
 use crate::file::paths::{DiskFiles, FileProvider, OverlayFiles, normalize_path};
-use crate::include::toolchain::{self, DiskCommands, Environment, Toolchain};
+use crate::file::vfs::Vfs;
 use crate::file::view::{FileView, TokensOf};
+use crate::include::config::{CompileCommands, CompilerConfig, project_config_from_flags};
+use crate::include::toolchain::{self, DiskCommands, Environment, Toolchain};
 use crate::index::project::{
     MemberCompletions, MemberList, NameCompletions, ProjectDefinition, ProjectDefinitions,
     ProjectIndex, ProjectMacro,
 };
 use crate::index::references::{MacroReferences, ReferenceBudget, macro_references};
-use crate::inlay::ParameterHint;
 use crate::index::store::{StoreStats, SummaryStore};
-use crate::index::worklist::StepOutcome;
-use crate::summary::{OutlineSymbol, UnitReading};
 use crate::index::watch::{ChangeBatch, FileEvent, Response, WatchFilter};
-use crate::index::worklist::{Priority, Step, outcome_of};use crate::index::{
+use crate::index::worklist::StepOutcome;
+use crate::index::worklist::{Priority, Step, outcome_of};
+use crate::index::{
     FileIndexer, definition_across_files, definitions_across_files, macro_across_files,
     member_completions_at, members_of,
 };
+use crate::inlay::ParameterHint;
 use crate::macros::MacroTable;
-use crate::cache::SummaryKey;
 use crate::project::{ConfigReport, ProjectDiscovery};
-use crate::file::vfs::Vfs;
 use crate::sema::modules::{ImportOutcome, ModuleScanner};
+use crate::summary::{OutlineSymbol, UnitReading};
 use crate::symbol::{Known, UnknownReason};
-use crate::PathInterner;
 
 /// How many files one drain **cooks**.
 ///
@@ -124,16 +123,17 @@ pub struct DiagTrace(Option<(&'static str, std::time::Instant)>);
 
 impl DiagTrace {
     pub fn new(what: &'static str) -> DiagTrace {
-        DiagTrace(
-            crate::probes::diagnostics().then(|| (what, std::time::Instant::now())),
-        )
+        DiagTrace(crate::probes::diagnostics().then(|| (what, std::time::Instant::now())))
     }
 }
 
 impl Drop for DiagTrace {
     fn drop(&mut self) {
         if let Some((what, started)) = self.0 {
-            eprintln!("      [diagnostics] {what:<28} {:>7} ms", started.elapsed().as_millis());
+            eprintln!(
+                "      [diagnostics] {what:<28} {:>7} ms",
+                started.elapsed().as_millis()
+            );
         }
     }
 }
@@ -201,7 +201,8 @@ const MAX_PROJECT_FILES: usize = 10_000;
 /// A header with no extension is still indexed: it arrives through an include, which is how a compiler finds it
 /// too.
 const SOURCE_EXTENSIONS: &[&str] = &[
-    "c", "cc", "cpp", "cxx", "c++", "h", "hh", "hpp", "hxx", "h++", "ipp", "inl", "tpp", "tcc", "cppm", "ixx",
+    "c", "cc", "cpp", "cxx", "c++", "h", "hh", "hpp", "hxx", "h++", "ipp", "inl", "tpp", "tcc",
+    "cppm", "ixx",
 ];
 
 /// The files a session reads through: the editor's buffers in front of a fallback provider.
@@ -383,7 +384,7 @@ pub struct Session<F: FileProvider = DiskFiles> {
     /// case that makes that concrete: it is not project source and it is not an event anybody wants.
     filter: WatchFilter,
 
-/// What the project scan found, so that a configuration change can re-seed from it.
+    /// What the project scan found, so that a configuration change can re-seed from it.
     project: Vec<PathBuf>,
     queue: Work,
     /// The files this session has **parsed** since the last body pass — the candidates for
@@ -467,7 +468,8 @@ pub struct Session<F: FileProvider = DiskFiles> {
     /// The comparison an edit is judged by: an edit that leaves a file's directives where and what they were cannot
     /// have changed the environment any file reads it in, or the timeline of any unit it is part of — so it drops
     /// neither. See [`crate::preprocess::directive::DirectiveSignature`].
-    directive_signatures: std::collections::HashMap<String, crate::preprocess::directive::DirectiveSignature>,
+    directive_signatures:
+        std::collections::HashMap<String, crate::preprocess::directive::DirectiveSignature>,
     /// **Files already read and parsed, waiting for the queue to reach them** — see [`Session::advance`].
     ///
     /// Bounded by what one `advance` asked for, and emptied by anything that could make a prepared answer describe a
@@ -541,10 +543,7 @@ pub struct Session<F: FileProvider = DiskFiles> {
     /// Behind a lock because the queries that want it hold a read on the session, and an environment is only ever
     /// added (§[`Session::view_with_macros`] takes `&self`).
     macro_environments: std::sync::Mutex<
-        std::collections::HashMap<
-            (PathBuf, u64),
-            std::sync::Arc<cpp_parser::MacroEnvironment>,
-        >,
+        std::collections::HashMap<(PathBuf, u64), std::sync::Arc<cpp_parser::MacroEnvironment>>,
     >,
     /// **Files whose macros something has asked for and not yet got.**
     ///
@@ -738,19 +737,11 @@ impl Session<DiskFiles> {
             None => config,
         };
 
-        let session = Session::assemble(
-            root,
-            files,
-            filter,
-            config,
-            toolchain,
-            discovery,
-        );
+        let session = Session::assemble(root, files, filter, config, toolchain, discovery);
         session.sweep_the_cache_in_the_background();
         session
     }
 }
-
 
 /// **Everything a cook needs, gathered under the write lock and then used without it.**
 ///
@@ -824,7 +815,10 @@ pub struct PreparedDrain {
     re_read: Option<crate::index::store::ReRead>,
     /// The rendered environments, keyed the way [`Session::known_rendering_of`] looks them up: the file, and the
     /// hash of the text it was rendered from.
-    rendered: Vec<((PathBuf, u64), std::sync::Arc<crate::preprocess::cooked::RenderedCooked>)>,
+    rendered: Vec<(
+        (PathBuf, u64),
+        std::sync::Arc<crate::preprocess::cooked::RenderedCooked>,
+    )>,
 }
 
 impl<F: FileProvider + Clone> Session<F> {
@@ -870,7 +864,10 @@ impl<F: FileProvider + Clone> Session<F> {
         discovery: ProjectDiscovery,
     ) -> Session<F> {
         let project_config = discovery.config.clone();
-        let database = discovery.database.as_ref().map(|database| &database.commands);
+        let database = discovery
+            .database
+            .as_ref()
+            .map(|database| &database.commands);
         let documents = files.overlay.clone();
         let project = project_files(
             &files,
@@ -1113,7 +1110,9 @@ impl<F: FileProvider + Clone> Session<F> {
         // and "which files are the project" is exactly the list that just grew — so the half of the header index
         // that is derived from it is derived again. The search-path half is *not* re-read: that is a filesystem
         // walk, and nothing that happened here can have changed it.
-        if added > 0 && let Ok(mut headers) = self.headers.write() {
+        if added > 0
+            && let Ok(mut headers) = self.headers.write()
+        {
             *headers = headers.clone().with_project(self.project.clone());
         }
 
@@ -1195,7 +1194,10 @@ impl<F: FileProvider + Clone> Session<F> {
         self.store.forget(path);
         self.prefetched.clear();
         self.directive_signatures.remove(&queue_key(path));
-        self.units.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clear();
+        self.units
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
         self.units_read.clear();
         self.queue.again(path.to_path_buf(), Priority::Rest, 0);
     }
@@ -1242,7 +1244,10 @@ impl<F: FileProvider + Clone> Session<F> {
             // something inside it move" is "assume so", and the disk entry checks file by file when it is asked
             // again. A change that left every directive where it was leaves the timeline as it was.
             if moved.layout {
-                self.units.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clear();
+                self.units
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .clear();
                 self.units_read.clear();
             }
         }
@@ -1288,10 +1293,11 @@ impl<F: FileProvider + Clone> Session<F> {
         // **Judged before the old text is replaced**: the first edit of a file has no signature on record, and the
         // text the VFS is holding is what it said until this moment.
         if !self.directive_signatures.contains_key(&queue_key(path))
-            && let Some(held) = self.vfs.held(path) {
-                let before = crate::preprocess::directive::directive_signature(&held.text);
-                self.directive_signatures.insert(queue_key(path), before);
-            }
+            && let Some(held) = self.vfs.held(path)
+        {
+            let before = crate::preprocess::directive::directive_signature(&held.text);
+            self.directive_signatures.insert(queue_key(path), before);
+        }
         let moved = self.directives_moved(path, Some(text));
         self.prefetched.clear();
 
@@ -1338,7 +1344,10 @@ impl<F: FileProvider + Clone> Session<F> {
 
         let Some(text) = text else {
             self.directive_signatures.remove(&key);
-            return DirectivesMoved { environment: true, layout: true };
+            return DirectivesMoved {
+                environment: true,
+                layout: true,
+            };
         };
 
         let now = crate::preprocess::directive::directive_signature(text);
@@ -1347,7 +1356,10 @@ impl<F: FileProvider + Clone> Session<F> {
                 environment: before.environment != now.environment,
                 layout: before.layout != now.layout,
             },
-            None => DirectivesMoved { environment: true, layout: true },
+            None => DirectivesMoved {
+                environment: true,
+                layout: true,
+            },
         }
     }
 
@@ -1443,9 +1455,8 @@ impl<F: FileProvider + Clone> Session<F> {
     /// a minute in `a_file_nobody_looked_at_is_not_cooked_and_one_a_request_names_is`, and every request behind it
     /// waited.)
     fn want_the_closure_cooked(&mut self, root: &Path) {
-        let already_read = |session: &Self, path: &Path| {
-            session.store.index().cooked_declarations(path).is_some()
-        };
+        let already_read =
+            |session: &Self, path: &Path| session.store.index().cooked_declarations(path).is_some();
 
         let direct = self.direct_includes_of(root);
         for included in &direct {
@@ -1573,7 +1584,12 @@ impl<F: FileProvider + Clone> Session<F> {
             .store
             .index()
             .summaries()
-            .filter(|summary| self.store.index().cooked_declarations(&summary.path).is_none())
+            .filter(|summary| {
+                self.store
+                    .index()
+                    .cooked_declarations(&summary.path)
+                    .is_none()
+            })
             .map(|summary| summary.path.clone())
             .collect();
 
@@ -1683,12 +1699,19 @@ impl<F: FileProvider + Clone> Session<F> {
         //
         // It is `&self` work, so it is allowed here — what it is not allowed to be is *inside the writer* on the
         // pump's path, which is what [`Session::prepare_a_wave`] exists for.
-        let units = self.units_for_the_pass(&done.iter().map(|step| step.path.clone()).collect::<Vec<_>>());
+        let units = self.units_for_the_pass(
+            &done
+                .iter()
+                .map(|step| step.path.clone())
+                .collect::<Vec<_>>(),
+        );
         if crate::probes::units() {
             eprintln!(
                 "ADVANCE steps={} done={:?} closure(api.h)={:?}",
                 steps,
-                done.iter().map(|step| step.path.clone()).collect::<Vec<_>>(),
+                done.iter()
+                    .map(|step| step.path.clone())
+                    .collect::<Vec<_>>(),
                 self.closure_with_text(Path::new("/p/api.h"))
                     .0
                     .iter()
@@ -1780,7 +1803,9 @@ impl<F: FileProvider + Clone> Session<F> {
             .collect();
         let units = self.units_for_the_pass(&slice);
 
-        let room = (steps * 4).saturating_sub(self.prefetched.len()).max(wave.len());
+        let room = (steps * 4)
+            .saturating_sub(self.prefetched.len())
+            .max(wave.len());
         let queue = &self.queue;
         let prefetched = &self.prefetched;
         PreparedWave {
@@ -2057,10 +2082,8 @@ impl<F: FileProvider + Clone> Session<F> {
             environments,
         } = drain;
 
-        let re_read = (!files.is_empty()).then(|| {
-            self.store
-                .prepare_the_re_read(&files, &units, false)
-        });
+        let re_read =
+            (!files.is_empty()).then(|| self.store.prepare_the_re_read(&files, &units, false));
 
         // **Remembered under the text it was read from**, which is what the next `view` looks up. The text is taken
         // from the VFS rather than from the rendering: the key is the *file's* content, because that is what a
@@ -2111,10 +2134,7 @@ impl<F: FileProvider + Clone> Session<F> {
     /// A candidate that a unit already built reads is skipped — the question is "which timeline holds this file's
     /// environment", and the first unit that answers `environment_of` is that timeline. On the 138-file project
     /// this returns **one** unit, where the second pass used to walk a closure per file.
-    fn units_for_the_pass(
-        &self,
-        files: &[PathBuf],
-    ) -> Vec<std::sync::Arc<crate::TranslationUnit>> {
+    fn units_for_the_pass(&self, files: &[PathBuf]) -> Vec<std::sync::Arc<crate::TranslationUnit>> {
         // **The slice, and not the project.** This used to chain `self.project` in front of `files`, on the argument
         // that a project file is a root whose closure is the whole program and therefore covers the most — and the
         // argument was right about coverage and wrong about cost, because the units built here are a **local** vector
@@ -2257,7 +2277,9 @@ impl<F: FileProvider + Clone> Session<F> {
         // defines — so reading a file with it and marking the result would suppress the repair for a reading that
         // needs it. A provisional timeline is a reading of most of the program, which is worth having for a *cook*
         // and is not worth asserting anything about. See [`HeldUnit`].
-        let unit = held.filter(|(provisional, _)| !*provisional).map(|(_, unit)| unit);
+        let unit = held
+            .filter(|(provisional, _)| !*provisional)
+            .map(|(_, unit)| unit);
         let view = unit.as_ref().and_then(|unit| unit.environment_of(&spelled));
         // Read before the wave's work is moved into the store, because the flag below is about which arm ran.
         let read_here = ready.is_none();
@@ -2798,11 +2820,7 @@ impl<F: FileProvider + Clone> Session<F> {
         text: &str,
     ) -> Option<std::sync::Arc<cpp_parser::MacroEnvironment>> {
         let key = (path.to_path_buf(), crate::cache::content_hash(text));
-        self.macro_environments
-            .lock()
-            .ok()?
-            .get(&key)
-            .cloned()
+        self.macro_environments.lock().ok()?.get(&key).cloned()
     }
 
     /// The macros `path`'s own includes define, as both readers of a body want them.
@@ -2841,7 +2859,10 @@ impl<F: FileProvider + Clone> Session<F> {
         );
 
         if let Ok(mut known) = self.macro_environments.lock() {
-            known.insert((path.to_path_buf(), crate::cache::content_hash(text)), made.clone());
+            known.insert(
+                (path.to_path_buf(), crate::cache::content_hash(text)),
+                made.clone(),
+            );
         }
         Some(made)
     }
@@ -3173,7 +3194,8 @@ impl<F: FileProvider + Clone> Session<F> {
         // mutation of the analysis), so it does not conflict with the index reference taken beside it.
         let session: &'s Session<F> = self;
         let index: &'s crate::ProjectIndex = session.store.index();
-        let resolver = Box::new(move |path: &Path| -> Option<FileView> { session.view_of_the_file(path) });
+        let resolver =
+            Box::new(move |path: &Path| -> Option<FileView> { session.view_of_the_file(path) });
 
         crate::sema::model::SemanticModel::new(
             index,
@@ -3254,7 +3276,10 @@ impl<F: FileProvider + Clone> Session<F> {
     /// The flag is needed by the one caller that must not use a provisional timeline at all:
     /// [`Session::cooking_materials`], because a rendering is filed and never revisited, where a timeline is
     /// re-walked the moment the queue drains.
-    fn unit_and_state_of(&self, path: &Path) -> Option<(std::sync::Arc<crate::TranslationUnit>, bool)> {
+    fn unit_and_state_of(
+        &self,
+        path: &Path,
+    ) -> Option<(std::sync::Arc<crate::TranslationUnit>, bool)> {
         let key = queue_key(path);
 
         // **The guard is bound and dropped before the body**, not held across it: `held_units()` is a `Mutex`, and
@@ -3280,9 +3305,7 @@ impl<F: FileProvider + Clone> Session<F> {
 
         // Read out of the cache under a timer, then matched: a stage timer inside a `match` scrutinee is a block
         // clippy asks to hoist, and hoisting it is what the timer wants anyway — it should cover the read only.
-        let cached = {
-            cache.get(path, context, &self.files, root_key)
-        };
+        let cached = { cache.get(path, context, &self.files, root_key) };
 
         let (unit, provisional) = match cached {
             Some(unit) => {
@@ -3294,9 +3317,7 @@ impl<F: FileProvider + Clone> Session<F> {
                 (std::sync::Arc::new(unit), false)
             }
             None => {
-                let (closure, closure_by_key) = {
-                    self.closure_with_text(path)
-                };
+                let (closure, closure_by_key) = { self.closure_with_text(path) };
 
                 // **The session's own definition cache**, not a fresh one: the walk reads back every `#define` a
                 // file sees, and the same definition reaches hundreds of files — `<vector>` and `<string>` both see
@@ -3627,9 +3648,8 @@ impl<F: FileProvider + Clone> Session<F> {
         // cook that cannot answer it reads a branch on no evidence. The resolver's own search is what an `#include`
         // would use, which is what makes the two agree.
         let search = crate::preprocess::cooked::Search::new(&self.files, &self.config);
-        let stream = {
-            unit.cook_the_unit(&sources, &definitions, Some(&seed), true, Some(&search))
-        };
+        let stream =
+            { unit.cook_the_unit(&sources, &definitions, Some(&seed), true, Some(&search)) };
 
         self.rendered_unit = Some((key, stream.clone()));
         Some(stream)
@@ -3892,7 +3912,8 @@ impl<F: FileProvider + Clone> Session<F> {
         let mut scanner = ModuleScanner::new(&self.files, &self.config);
 
         for module in wanted {
-            if let ImportOutcome::Resolved(unit) = scanner.resolve_module(module, importing, &mut interner)
+            if let ImportOutcome::Resolved(unit) =
+                scanner.resolve_module(module, importing, &mut interner)
                 && let Some(entry) = scanner.units().iter().find(|entry| entry.file == unit)
             {
                 found.push(entry.path.clone());
@@ -4062,9 +4083,7 @@ impl<F: FileProvider + Clone> Session<F> {
             already_declared,
         } = materials;
 
-        let (tokens, _) = {
-            cpp_parser::lex(text, &cpp_parser::LexerConfig::default())
-        };
+        let (tokens, _) = { cpp_parser::lex(text, &cpp_parser::LexerConfig::default()) };
         let unit_definitions = unit.definitions();
         let macros = {
             crate::preprocess::cooked::FileMacros::new(
@@ -4074,9 +4093,7 @@ impl<F: FileProvider + Clone> Session<F> {
                 true,
             )
         };
-        let rendered = {
-            crate::preprocess::cooked::cook_with(text, &tokens, &macros).render()
-        };
+        let rendered = { crate::preprocess::cooked::cook_with(text, &tokens, &macros).render() };
         let indexer = FileIndexer::new(&self.files, &self.config);
         let indexed = indexer.index_rendering(path, &rendered, *key);
         let reading = CookedReading {
@@ -4095,7 +4112,10 @@ impl<F: FileProvider + Clone> Session<F> {
     }
 
     /// **Put a rendered reading into the index** — one insert, and it is the whole of what needs `&mut self`.
-    pub fn commit_a_cooked(&mut self, reading: (crate::IndexedRendering, CookedReading)) -> CookedReading {
+    pub fn commit_a_cooked(
+        &mut self,
+        reading: (crate::IndexedRendering, CookedReading),
+    ) -> CookedReading {
         let (indexed, reading) = reading;
         let path = indexed.summary.path.clone();
         // **The rendering is remembered, not dropped.** This is the half that was missing, and its absence is why
@@ -4479,11 +4499,17 @@ impl<F: FileProvider + Clone> Session<F> {
     /// A cursor on an ordinary identifier — a variable, a function — answers `Unknown(NotDeclaredHere)`, which says
     /// exactly what is true: nothing defines that name as a macro. This query is about macros, and references of a
     /// *name* need the scope of every candidate file, which is a parse per candidate rather than a lex.
-    pub fn macro_references(&self, view: &FileView, offset: ReadingOffset) -> Known<MacroReferences> {
+    pub fn macro_references(
+        &self,
+        view: &FileView,
+        offset: ReadingOffset,
+    ) -> Known<MacroReferences> {
         // `name_at_including_directives` rather than `name_at`: the place a user asks this question is the name
         // itself, and half the time that name is written in a `#define` — which is tokens in a directive, not a
         // name node the scope walker sees.
-        let Some((name, _)) = crate::sema::resolve::name_at_including_directives(&view.root, offset.get()) else {
+        let Some((name, _)) =
+            crate::sema::resolve::name_at_including_directives(&view.root, offset.get())
+        else {
             return Known::Unknown(UnknownReason::UnparsableName);
         };
 
@@ -4499,7 +4525,11 @@ impl<F: FileProvider + Clone> Session<F> {
     /// **The cursor is a FILE offset**, as it is for `Session::completions` and `Session::name_completions`: the three
     /// completion queries speak the coordinates a client sends and each crosses the seam itself. This one did not, and
     /// the cost was a panic rather than a wrong list — `rowan` was handed a file offset for a rendering tree.
-    pub fn member_completions(&self, view: &FileView, offset: FileOffset) -> Known<MemberCompletions> {
+    pub fn member_completions(
+        &self,
+        view: &FileView,
+        offset: FileOffset,
+    ) -> Known<MemberCompletions> {
         let Some(offset) = view.reading_offset_of(offset) else {
             // A cursor the rendering does not have - in a region a macro replaced, or past its end.
             return Known::Unknown(UnknownReason::NotDeclaredHere(Box::from("")));
@@ -4621,7 +4651,11 @@ impl<F: FileProvider + Clone> Session<F> {
                         &view.root,
                         &view.path,
                         in_the_reading,
-                        &self.headers.read().map(|headers| headers.clone()).unwrap_or_default(),
+                        &self
+                            .headers
+                            .read()
+                            .map(|headers| headers.clone())
+                            .unwrap_or_default(),
                         context,
                     );
                 }
@@ -4633,7 +4667,11 @@ impl<F: FileProvider + Clone> Session<F> {
                         &view.root,
                         &view.path,
                         offset.get(),
-                        &self.headers.read().map(|headers| headers.clone()).unwrap_or_default(),
+                        &self
+                            .headers
+                            .read()
+                            .map(|headers| headers.clone())
+                            .unwrap_or_default(),
                         context,
                     );
                 }
@@ -4799,7 +4837,11 @@ impl<F: FileProvider + Clone> Session<F> {
     /// later the pump had rebuilt the rendering, the same call resolved to the same declaration with the same offset,
     /// and the parameter list could no longer be read. The refresh the pump sends then asks the client to ask again —
     /// and the second answer was the same broken one, which is why the hints did not come back.
-    pub fn inlay_hints(&self, view: &FileView, range: cpp_parser::SourceRange) -> Vec<ParameterHint> {
+    pub fn inlay_hints(
+        &self,
+        view: &FileView,
+        range: cpp_parser::SourceRange,
+    ) -> Vec<ParameterHint> {
         let mut hints = crate::inlay::parameter_hints(self.store.index(), view, range, |path| {
             self.view_of_the_file(path)
         });
@@ -4855,13 +4897,15 @@ impl<F: FileProvider + Clone> Session<F> {
         // macro — has no file position at all, and keeping it would put a token at an offset that means something else.
         let mut placed = Vec::with_capacity(names.len());
         for mut name in names {
-            let Some(start) = view.file_offset_of(ReadingOffset::new(name.range.start_offset)) else {
+            let Some(start) = view.file_offset_of(ReadingOffset::new(name.range.start_offset))
+            else {
                 continue;
             };
             let end = view
                 .file_offset_of(ReadingOffset::new(name.range.end_offset()))
                 .map_or(start, |end| end);
-            name.range = cpp_parser::SourceRange::new(start.get(), end.get().saturating_sub(start.get()));
+            name.range =
+                cpp_parser::SourceRange::new(start.get(), end.get().saturating_sub(start.get()));
             placed.push(name);
         }
         names = placed;
@@ -4881,7 +4925,9 @@ impl<F: FileProvider + Clone> Session<F> {
         // The guard is "the two readings differ", because a file the cook did not change needs no second pass — and
         // the cost when they do differ is a second walk, which the `Classify` stage timer in
         // `examples/semantic_probe.rs` measures.
-        if view.written_text().is_some_and(|written| written != &*view.source)
+        if view
+            .written_text()
+            .is_some_and(|written| written != &*view.source)
             && let Some(own) = self.view_of_the_file(&view.path)
         {
             // **Where the two passes disagree about one name, the file's own text wins.** Measured both ways: keeping
@@ -4927,7 +4973,11 @@ impl<F: FileProvider + Clone> Session<F> {
     /// Folding answers the same question the same way for the same reason, and so does documentation for comments.
     /// **Three facts, one rule**: a selection, a fold and a doc comment are things the reader sees in their buffer,
     /// so they are asked of the buffer.
-    pub fn selection_chain(&self, view: &FileView, offset: FileOffset) -> Vec<cpp_parser::SourceRange> {
+    pub fn selection_chain(
+        &self,
+        view: &FileView,
+        offset: FileOffset,
+    ) -> Vec<cpp_parser::SourceRange> {
         let Some(written) = view.written_text() else {
             // No rendering: this view *is* a parse of the file's own text, so its offsets are already the file's.
             return view.selection_chain(ReadingOffset::new(offset.get()));
@@ -4982,12 +5032,10 @@ impl<F: FileProvider + Clone> Session<F> {
         view: &FileView,
         offset: ReadingOffset,
     ) -> Vec<crate::signature::CallSignature> {
-        let mut signatures = crate::signature::signatures_at(
-            self.store.index(),
-            view,
-            offset.get(),
-            |path| self.view(path),
-        );
+        let mut signatures =
+            crate::signature::signatures_at(self.store.index(), view, offset.get(), |path| {
+                self.view(path)
+            });
 
         for signature in &mut signatures {
             // **The declaration's offset is the *index's*, and the index reads the cooked rendering.** So
@@ -5095,7 +5143,8 @@ impl<F: FileProvider + Clone> Session<F> {
         // `_Mybase::_Mycont` at `std::_Vb_const_iterator`: unresolved with the bare spelling tried first, and
         // `Yes` when the same name is asked in full.
         let mut tried: Vec<String> = Vec::new();
-        if let Some(scope) = in_scope.filter(|_| !class.starts_with("::") && !class.contains("::")) {
+        if let Some(scope) = in_scope.filter(|_| !class.starts_with("::") && !class.contains("::"))
+        {
             tried.push(format!("{scope}::{class}"));
         }
         tried.push(class.to_string());
@@ -5112,7 +5161,10 @@ impl<F: FileProvider + Clone> Session<F> {
             return direct;
         };
 
-        let mut found = list.members.iter().filter(|found| found.fact.name == member);
+        let mut found = list
+            .members
+            .iter()
+            .filter(|found| found.fact.name == member);
 
         let Some(only) = found.next() else {
             // Nothing in the chain declares it, and the honest answer is the one the direct lookup gave: the
@@ -5165,7 +5217,8 @@ impl<F: FileProvider + Clone> Session<F> {
             .iter()
             .map(|error| cpp_parser::source_range(error.range))
             .collect();
-        let (facts, _guards) = crate::build_facts(&view.scopes, &preprocessing, &view.root, &errors);
+        let (facts, _guards) =
+            crate::build_facts(&view.scopes, &preprocessing, &view.root, &errors);
 
         crate::outline_of(&facts)
     }
@@ -5321,7 +5374,12 @@ impl UnitTable {
         Some((held.provisional, held.unit.clone()))
     }
 
-    fn insert(&mut self, key: String, unit: std::sync::Arc<crate::TranslationUnit>, provisional: bool) {
+    fn insert(
+        &mut self,
+        key: String,
+        unit: std::sync::Arc<crate::TranslationUnit>,
+        provisional: bool,
+    ) {
         self.clock += 1;
 
         if !self.held.contains_key(&key) && self.held.len() >= MAX_UNITS {
@@ -5580,7 +5638,10 @@ impl Work {
     /// [`Session::needs_catching_up`] decides whether to take the write lock with it. A second spelling of "is this
     /// file queued" is exactly the shape of defect `docs/status.md` §2 records twice.
     fn is_queued(&self, path: &Path) -> bool {
-        matches!(self.standing.get(&queue_key(path)), Some(Standing::Queued(_)))
+        matches!(
+            self.standing.get(&queue_key(path)),
+            Some(Standing::Queued(_))
+        )
     }
 
     /// The next file to work, and the half it came from.
@@ -5864,10 +5925,10 @@ fn is_a_source_file(path: &Path, extra: &[String]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{OpenDocuments, Session, SessionFiles, queue_key};
+    use crate::file::coordinates::ReadingOffset;
+    use crate::file::paths::{DiskFiles, FileProvider, MemoryFiles};
     use crate::include::config::{CommandLineMacro, CompilerConfig};
     use crate::include::toolchain::{Toolchain, ToolchainSource};
-    use crate::file::coordinates::ReadingOffset;
-use crate::file::paths::{DiskFiles, FileProvider, MemoryFiles};
     use crate::index::watch::{FileEvent, WatchFilter};
     use crate::index::{Priority, StepOutcome};
     use crate::symbol::Known;
@@ -6042,7 +6103,9 @@ use crate::file::paths::{DiskFiles, FileProvider, MemoryFiles};
         // **The open file, and the files its own text names.** `api.h` is one of them, so the declaration the macro
         // writes in it is `api.h`'s declaration and a question about `HWND` is answered with a jump into it — the
         // capability that the closure used to buy, bought for the price of one direct include instead of 138 files.
-        let after = session.index().definition("HWND__", Path::new("/p/main.cpp"));
+        let after = session
+            .index()
+            .definition("HWND__", Path::new("/p/main.cpp"));
         let Known::Yes(found) = after else {
             panic!("`api.h`'s cooked reading declares it: {after:?}");
         };
@@ -6127,7 +6190,10 @@ use crate::file::paths::{DiskFiles, FileProvider, MemoryFiles};
         let fixture = Memory::new("a-unit-that-does-not-balance", &files);
         let mut session = fixture.session();
 
-        session.did_open("/p/main.cpp", "#include \"broken.h\"\n#include \"good.h\"\nInside i;\n");
+        session.did_open(
+            "/p/main.cpp",
+            "#include \"broken.h\"\n#include \"good.h\"\nInside i;\n",
+        );
         session.index_everything();
 
         let reading = session
@@ -6199,11 +6265,15 @@ use crate::file::paths::{DiskFiles, FileProvider, MemoryFiles};
     /// still does.
     #[test]
     fn a_single_bracket_attribute_no_longer_props_the_program_open() {
-        let leaky = "REPEATABLE\n[source_annotation_attribute( 1 )]\nstruct Pre\n{\n int Deref;\n};\n";
+        let leaky =
+            "REPEATABLE\n[source_annotation_attribute( 1 )]\nstruct Pre\n{\n int Deref;\n};\n";
         let main = "#include \"broken.h\"\n#include \"good.h\"\nInside i;\n";
         let files = MemoryFiles::new()
             .with_file("/p/broken.h", leaky)
-            .with_file("/p/good.h", "namespace good {\nstruct Inside { int y; };\n}\n")
+            .with_file(
+                "/p/good.h",
+                "namespace good {\nstruct Inside { int y; };\n}\n",
+            )
             .with_file("/p/main.cpp", main);
         let fixture = Memory::new("a-scope-that-used-to-leak", &files);
         let mut session = fixture.session();
@@ -6231,7 +6301,10 @@ use crate::file::paths::{DiskFiles, FileProvider, MemoryFiles};
             .iter()
             .find(|fact| fact.name == "Pre")
             .expect("the struct the attribute precedes is declared there");
-        assert_eq!(pre.scope, None, "and it is at file scope, not inside anything");
+        assert_eq!(
+            pre.scope, None,
+            "and it is at file scope, not inside anything"
+        );
 
         let inside = session
             .index()
@@ -6242,7 +6315,11 @@ use crate::file::paths::{DiskFiles, FileProvider, MemoryFiles};
             .expect("the class is declared there")
             .scope
             .clone();
-        assert_eq!(inside.as_deref(), Some("good"), "the file after it is read as itself");
+        assert_eq!(
+            inside.as_deref(),
+            Some("good"),
+            "the file after it is read as itself"
+        );
     }
 
     /// **A file that really leaks no longer costs anything, because there is no fence to invoke.**
@@ -6329,7 +6406,9 @@ use crate::file::paths::{DiskFiles, FileProvider, MemoryFiles};
 
         session.did_open("/p/main.cpp", main);
         session.index_everything();
-        let reading = session.read_the_unit(Path::new("/p/main.cpp")).expect("the unit reads");
+        let reading = session
+            .read_the_unit(Path::new("/p/main.cpp"))
+            .expect("the unit reads");
 
         assert!(
             reading.unbalanced.is_empty(),
@@ -6344,7 +6423,11 @@ use crate::file::paths::{DiskFiles, FileProvider, MemoryFiles};
             .expect("declared")
             .scope
             .clone();
-        assert_eq!(c.as_deref(), Some("b"), "the namespace `b.h` opens around its include still holds `C`");
+        assert_eq!(
+            c.as_deref(),
+            Some("b"),
+            "the namespace `b.h` opens around its include still holds `C`"
+        );
     }
 
     /// **A unit read puts the whole program in the index, once** — [`Session::read_the_unit`].
@@ -6417,7 +6500,10 @@ use crate::file::paths::{DiskFiles, FileProvider, MemoryFiles};
         // **The program's files**, including the header nobody opened, the level the per-file policy stopped short
         // of, and the macro's declaration in the file that invoked it.
         for (file, why) in [
-            ("/p/handle.h", "a file the program is made of is read with it"),
+            (
+                "/p/handle.h",
+                "a file the program is made of is read with it",
+            ),
             ("/p/deep.h", "including the one the per-file bound left out"),
         ] {
             assert!(
@@ -6428,7 +6514,9 @@ use crate::file::paths::{DiskFiles, FileProvider, MemoryFiles};
                 "{why}"
             );
         }
-        let after = session.index().definition("HWND__", Path::new("/p/main.cpp"));
+        let after = session
+            .index()
+            .definition("HWND__", Path::new("/p/main.cpp"));
         let Known::Yes(found) = after else {
             panic!("`api.h`'s cooked reading declares it: {after:?}");
         };
@@ -6483,7 +6571,10 @@ use crate::file::paths::{DiskFiles, FileProvider, MemoryFiles};
             cooked.errors.is_empty(),
             "and the branch it complained about is not in it: {cooked:?}"
         );
-        assert_eq!(cooked.unplaced, 0, "nothing was hidden from the reader either");
+        assert_eq!(
+            cooked.unplaced, 0,
+            "nothing was hidden from the reader either"
+        );
     }
 
     /// **A cooked error's offsets are offsets in the file**, not in the rendering it was found in.
@@ -6514,7 +6605,10 @@ use crate::file::paths::{DiskFiles, FileProvider, MemoryFiles};
         assert!(
             declarations.iter().any(|fact| fact.name == "HWND__"),
             "the rendering is not the file's text: the macro declared a struct this file never wrote: {:?}",
-            declarations.iter().map(|fact| &fact.name).collect::<Vec<_>>()
+            declarations
+                .iter()
+                .map(|fact| &fact.name)
+                .collect::<Vec<_>>()
         );
 
         let found = session.diagnostics("/p/main.cpp").expect("the file reads");
@@ -6637,11 +6731,15 @@ use crate::file::paths::{DiskFiles, FileProvider, MemoryFiles};
         session.index_everything();
         assert!(
             matches!(
-                session.index().definition("two::Widget", Path::new("/p/other.cpp")),
+                session
+                    .index()
+                    .definition("two::Widget", Path::new("/p/other.cpp")),
                 Known::Yes(_)
             ),
             "and it is read again, as the new macro says: {:?}",
-            session.index().definition("two::Widget", Path::new("/p/other.cpp"))
+            session
+                .index()
+                .definition("two::Widget", Path::new("/p/other.cpp"))
         );
     }
 
@@ -6705,14 +6803,23 @@ use crate::file::paths::{DiskFiles, FileProvider, MemoryFiles};
         session.want_cooked_reading(Path::new("/p/other.cpp"));
         session.index_everything();
         assert!(
-            session.index().cooked_declarations(Path::new("/p/other.cpp")).is_some(),
+            session
+                .index()
+                .cooked_declarations(Path::new("/p/other.cpp"))
+                .is_some(),
             "the fixture starts with the dependent cooked"
         );
 
-        session.did_open("/p/ns.h", "#define BEGIN_NS namespace one {\n#define END_NS }\n");
+        session.did_open(
+            "/p/ns.h",
+            "#define BEGIN_NS namespace one {\n#define END_NS }\n",
+        );
 
         assert!(
-            session.index().cooked_declarations(Path::new("/p/other.cpp")).is_none(),
+            session
+                .index()
+                .cooked_declarations(Path::new("/p/other.cpp"))
+                .is_none(),
             "the reading was built when `BEGIN_NS` meant nothing"
         );
     }
@@ -6737,7 +6844,10 @@ use crate::file::paths::{DiskFiles, FileProvider, MemoryFiles};
         let main = "#include \"b.h\"\nint main() { return A; }\n";
         let files = MemoryFiles::new()
             .with_file("/p/a.h", "#pragma once\n#define A 1\n")
-            .with_file("/p/b.h", "#pragma once\n#include \"a.h\"\nstruct B { int b; };\n")
+            .with_file(
+                "/p/b.h",
+                "#pragma once\n#include \"a.h\"\nstruct B { int b; };\n",
+            )
             .with_file("/p/main.cpp", main);
         let fixture = Memory::new("a-body-edit-is-not-a-walk", &files);
 
@@ -6749,7 +6859,10 @@ use crate::file::paths::{DiskFiles, FileProvider, MemoryFiles};
         first.did_open("/p/main.cpp", main);
         first.index_everything();
         assert!(
-            first.index().cooked_declarations(Path::new("/p/main.cpp")).is_some(),
+            first
+                .index()
+                .cooked_declarations(Path::new("/p/main.cpp"))
+                .is_some(),
             "the fixture cooked the file, which is what walks its unit"
         );
         assert!(
@@ -6861,7 +6974,9 @@ use crate::file::paths::{DiskFiles, FileProvider, MemoryFiles};
         let ns = "#define BEGIN_NS namespace one {\n#define END_NS }\n";
         let api = "#include \"ns.h\"\nBEGIN_NS struct Widget { int size; }; END_NS\n";
         let typed = format!("{api}void body() {{ int inside; }}\n");
-        let files = MemoryFiles::new().with_file("/p/ns.h", ns).with_file("/p/api.h", api);
+        let files = MemoryFiles::new()
+            .with_file("/p/ns.h", ns)
+            .with_file("/p/api.h", api);
         let fixture = Memory::new("a-file-is-read-with-its-environment", &files);
 
         let second_pass_has = |session: &Session<MemoryFiles>| {
@@ -6925,12 +7040,20 @@ use crate::file::paths::{DiskFiles, FileProvider, MemoryFiles};
         session.add_project_files([PathBuf::from("/p/other.cpp")]);
         session.want_cooked_reading(Path::new("/p/other.cpp"));
         session.index_everything();
-        assert!(session.index().cooked_declarations(Path::new("/p/other.cpp")).is_some());
+        assert!(
+            session
+                .index()
+                .cooked_declarations(Path::new("/p/other.cpp"))
+                .is_some()
+        );
 
         session.did_open("/p/api.h", "#include \"macros.h\"\nint declared;\n");
 
         assert!(
-            session.index().cooked_declarations(Path::new("/p/other.cpp")).is_none(),
+            session
+                .index()
+                .cooked_declarations(Path::new("/p/other.cpp"))
+                .is_none(),
             "`ANSWER` is now in force where it was not"
         );
     }
@@ -6950,7 +7073,9 @@ use crate::file::paths::{DiskFiles, FileProvider, MemoryFiles};
     fn a_unit_survives_typing_in_a_body_and_not_a_change_to_a_directive() {
         let ns = "#define BEGIN_NS namespace one {\n#define END_NS }\n";
         let api = "#include \"ns.h\"\nBEGIN_NS struct Widget { int size; }; END_NS\n";
-        let files = MemoryFiles::new().with_file("/p/ns.h", ns).with_file("/p/api.h", api);
+        let files = MemoryFiles::new()
+            .with_file("/p/ns.h", ns)
+            .with_file("/p/api.h", api);
         let fixture = Memory::new("a-unit-survives-a-body", &files);
         let mut session = fixture.session();
 
@@ -6976,7 +7101,10 @@ use crate::file::paths::{DiskFiles, FileProvider, MemoryFiles};
         session.did_change("/p/api.h", &typed_more);
         assert!(holds_a_unit_for(&session, "/p/api.h"), "and again");
 
-        session.did_change("/p/api.h", &format!("#include \"ns.h\"\n#define EXTRA 1\n{typed_more}"));
+        session.did_change(
+            "/p/api.h",
+            &format!("#include \"ns.h\"\n#define EXTRA 1\n{typed_more}"),
+        );
         assert!(
             !holds_a_unit_for(&session, "/p/api.h"),
             "a directive appeared, so `api.h`'s timeline is out of date"
@@ -7010,7 +7138,10 @@ use crate::file::paths::{DiskFiles, FileProvider, MemoryFiles};
     #[test]
     fn editing_a_header_stales_the_cooked_reading_of_a_file_that_includes_it() {
         let files = MemoryFiles::new()
-            .with_file("/p/ns.h", "#define BEGIN_NS namespace one {\n#define END_NS }\n")
+            .with_file(
+                "/p/ns.h",
+                "#define BEGIN_NS namespace one {\n#define END_NS }\n",
+            )
             .with_file(
                 "/p/api.h",
                 "#include \"ns.h\"\nBEGIN_NS struct Widget { int size; }; END_NS\n",
@@ -7018,20 +7149,30 @@ use crate::file::paths::{DiskFiles, FileProvider, MemoryFiles};
         let fixture = Memory::new("a-header-edit-stales-readings", &files);
         let mut session = fixture.session();
 
-        session.did_open("/p/api.h", "#include \"ns.h\"\nBEGIN_NS struct Widget { int size; }; END_NS\n");
+        session.did_open(
+            "/p/api.h",
+            "#include \"ns.h\"\nBEGIN_NS struct Widget { int size; }; END_NS\n",
+        );
         session.index_everything();
         assert!(
             matches!(
-                session.index().definition("one::Widget", Path::new("/p/api.h")),
+                session
+                    .index()
+                    .definition("one::Widget", Path::new("/p/api.h")),
                 Known::Yes(_)
             ),
             "the fixture reads as the header says: {:?}",
-            session.index().definition("one::Widget", Path::new("/p/api.h"))
+            session
+                .index()
+                .definition("one::Widget", Path::new("/p/api.h"))
         );
 
         // The header changes the namespace it opens. `api.h`'s text does not change at all — what changes is what
         // its environment says, which is exactly the dependency a per-file invalidation would miss.
-        session.did_change("/p/ns.h", "#define BEGIN_NS namespace two {\n#define END_NS }\n");
+        session.did_change(
+            "/p/ns.h",
+            "#define BEGIN_NS namespace two {\n#define END_NS }\n",
+        );
         assert!(
             session.pending_cooking() > 0,
             "the open file that includes it is marked for cooking again"
@@ -7040,11 +7181,15 @@ use crate::file::paths::{DiskFiles, FileProvider, MemoryFiles};
 
         assert!(
             matches!(
-                session.index().definition("two::Widget", Path::new("/p/api.h")),
+                session
+                    .index()
+                    .definition("two::Widget", Path::new("/p/api.h")),
                 Known::Yes(_)
             ),
             "and the new reading is the one in the index: {:?}",
-            session.index().definition("two::Widget", Path::new("/p/api.h"))
+            session
+                .index()
+                .definition("two::Widget", Path::new("/p/api.h"))
         );
         assert!(
             session
@@ -7063,16 +7208,25 @@ use crate::file::paths::{DiskFiles, FileProvider, MemoryFiles};
         // an analysis that answered about the disk would answer about code that no longer exists.
         let files = MemoryFiles::new()
             .with_file("/p/widget.h", "struct Widget { int old; };\n")
-            .with_file("/p/main.cpp", "#include \"widget.h\"\nvoid f() { Widget w; }\n");
+            .with_file(
+                "/p/main.cpp",
+                "#include \"widget.h\"\nvoid f() { Widget w; }\n",
+            );
         let fixture = Memory::new("buffer-is-the-text", &files);
         let mut session = fixture.session();
 
         session.did_open("/p/widget.h", "struct Widget { int fresh; };\n");
-        session.did_open("/p/main.cpp", "#include \"widget.h\"\nvoid f() { Widget w; }\n");
+        session.did_open(
+            "/p/main.cpp",
+            "#include \"widget.h\"\nvoid f() { Widget w; }\n",
+        );
         session.index_everything();
 
         let view = session.view("/p/main.cpp").expect("the file reads");
-        let at = view.source.find("Widget w").expect("the use is in the text");
+        let at = view
+            .source
+            .find("Widget w")
+            .expect("the use is in the text");
 
         match session.definition(&view, ReadingOffset::new(at)) {
             Known::Yes(found) => {
@@ -7085,8 +7239,15 @@ use crate::file::paths::{DiskFiles, FileProvider, MemoryFiles};
         // And the members are the buffer's, which is the half a definition jump cannot show.
         match session.members_of(&view, "Widget") {
             Known::Yes(members) => {
-                let names: Vec<&str> = members.own().map(|member| member.fact.name.as_str()).collect();
-                assert_eq!(names, ["fresh"], "the disk says `old` and the disk is not the text");
+                let names: Vec<&str> = members
+                    .own()
+                    .map(|member| member.fact.name.as_str())
+                    .collect();
+                assert_eq!(
+                    names,
+                    ["fresh"],
+                    "the disk says `old` and the disk is not the text"
+                );
             }
             other => panic!("the buffer's class should have members, got {other:?}"),
         }
@@ -7113,10 +7274,16 @@ use crate::file::paths::{DiskFiles, FileProvider, MemoryFiles};
             "/p/main.cpp",
             "#include \"widget.h\"\nvoid f() { Widget w; }\n",
         );
-        assert!(session.index_everything() >= 2, "both the buffer and its includer");
+        assert!(
+            session.index_everything() >= 2,
+            "both the buffer and its includer"
+        );
 
         let view = session.view("/p/main.cpp").expect("the file reads");
-        let at = view.source.find("Widget w").expect("the use is in the text");
+        let at = view
+            .source
+            .find("Widget w")
+            .expect("the use is in the text");
         assert!(
             matches!(session.definition(&view, ReadingOffset::new(at)), Known::Yes(found) if found.file == Path::new("/p/widget.h")),
             "a buffer no file has answers as the declaration's file"
@@ -7161,7 +7328,10 @@ use crate::file::paths::{DiskFiles, FileProvider, MemoryFiles};
         let view = session.view("/p/widget.h").expect("the file reads");
         match session.members_of(&view, "Widget") {
             Known::Yes(members) => {
-                let names: Vec<&str> = members.own().map(|member| member.fact.name.as_str()).collect();
+                let names: Vec<&str> = members
+                    .own()
+                    .map(|member| member.fact.name.as_str())
+                    .collect();
                 assert_eq!(names, ["after"]);
             }
             other => panic!("the edited buffer's class should have members, got {other:?}"),
@@ -7172,7 +7342,8 @@ use crate::file::paths::{DiskFiles, FileProvider, MemoryFiles};
     fn closing_a_document_goes_back_to_the_file() {
         // An unsaved buffer defines a name the disk does not have. Closing is the client saying "this path is the
         // filesystem's again", and an analysis that kept the buffer would report a declaration that exists nowhere.
-        let files = MemoryFiles::new().with_file("/p/widget.h", "struct Widget { int on_disk; };\n");
+        let files =
+            MemoryFiles::new().with_file("/p/widget.h", "struct Widget { int on_disk; };\n");
         let fixture = Memory::new("close", &files);
         let mut session = fixture.session();
 
@@ -7205,10 +7376,15 @@ use crate::file::paths::{DiskFiles, FileProvider, MemoryFiles};
         // Ask again after the work the close queued, and the reading is the disk's — which is the point of the
         // test: a closed document is the filesystem's again, and the analysis must agree.
         session.index_everything();
-        let view = session.view("/p/widget.h").expect("the file has been read again");
+        let view = session
+            .view("/p/widget.h")
+            .expect("the file has been read again");
         match session.members_of(&view, "Widget") {
             Known::Yes(members) => {
-                let names: Vec<&str> = members.own().map(|member| member.fact.name.as_str()).collect();
+                let names: Vec<&str> = members
+                    .own()
+                    .map(|member| member.fact.name.as_str())
+                    .collect();
                 assert_eq!(names, ["on_disk"]);
             }
             other => panic!("the file's own class should have members, got {other:?}"),
@@ -7308,13 +7484,19 @@ use crate::file::paths::{DiskFiles, FileProvider, MemoryFiles};
         // one is forgotten together with the files whose includes resolved to it.
         let files = MemoryFiles::new()
             .with_file("/p/widget.h", "struct Widget { int size; };\n")
-            .with_file("/p/main.cpp", "#include \"widget.h\"\nvoid f() { Widget w; }\n");
+            .with_file(
+                "/p/main.cpp",
+                "#include \"widget.h\"\nvoid f() { Widget w; }\n",
+            );
         let fixture = Memory::new("client-events", &files);
         let mut session = fixture.session();
 
         session.add_project_files([PathBuf::from("/p/main.cpp")]);
         session.index_everything();
-        assert!(session.is_indexed("/p/widget.h"), "the closure was followed");
+        assert!(
+            session.is_indexed("/p/widget.h"),
+            "the closure was followed"
+        );
 
         let modified = session.changed([FileEvent::modified("/p/widget.h")]);
         assert_eq!(modified.reindex, [PathBuf::from("/p/widget.h")]);
@@ -7363,7 +7545,8 @@ use crate::file::paths::{DiskFiles, FileProvider, MemoryFiles};
         assert!(quiet.is_empty(), "{quiet:?}");
         assert!(session.is_idle());
 
-        let configuration = session.changed([FileEvent::modified(root.join("compile_commands.json"))]);
+        let configuration =
+            session.changed([FileEvent::modified(root.join("compile_commands.json"))]);
         assert!(configuration.everything);
     }
 
@@ -7438,7 +7621,10 @@ use crate::file::paths::{DiskFiles, FileProvider, MemoryFiles};
         // name as an error has to ask.
         let files = MemoryFiles::new()
             .with_file("/p/widget.h", "struct Widget { int size; };\n")
-            .with_file("/p/main.cpp", "#include \"widget.h\"\nvoid f() { Widget w; }\n");
+            .with_file(
+                "/p/main.cpp",
+                "#include \"widget.h\"\nvoid f() { Widget w; }\n",
+            );
         let fixture = Memory::new("not-read-yet", &files);
         let mut session = fixture.session();
 
@@ -7459,7 +7645,10 @@ use crate::file::paths::{DiskFiles, FileProvider, MemoryFiles};
 
         session.index_everything();
         let view = session.view("/p/main.cpp").expect("the pump has read it");
-        let at = view.source.find("Widget w").expect("the use is in the text");
+        let at = view
+            .source
+            .find("Widget w")
+            .expect("the use is in the text");
 
         assert!(session.is_idle());
         assert!(
@@ -7473,7 +7662,8 @@ use crate::file::paths::{DiskFiles, FileProvider, MemoryFiles};
         // **Two questions that used to share one answer, and no longer do.** A position is a question about bytes
         // and a definition is a question about meaning; the first is available as soon as the file is held, and the
         // second needs the file read the way a compiler reads it. This test is the pair, side by side.
-        let files = MemoryFiles::new().with_file("/p/a.cpp", "int on_disk;\nvoid f() { on_disk = 1; }\n");
+        let files =
+            MemoryFiles::new().with_file("/p/a.cpp", "int on_disk;\nvoid f() { on_disk = 1; }\n");
         let fixture = Memory::new("view", &files);
         let mut session = fixture.session();
 
@@ -7482,7 +7672,10 @@ use crate::file::paths::{DiskFiles, FileProvider, MemoryFiles};
         // **The position, with no reading at all.** `tokens_of` is of the buffer — `load` was not needed and no cook
         // was waited for — and it says which of the two texts it read, which is what a client's offsets are in.
         let tokens = session.tokens_of("/p/a.cpp").expect("the buffer is held");
-        assert!(tokens.open, "the reading says which of the two texts it read");
+        assert!(
+            tokens.open,
+            "the reading says which of the two texts it read"
+        );
         let at = tokens
             .source
             .find("in_buffer = 1")
@@ -7492,14 +7685,24 @@ use crate::file::paths::{DiskFiles, FileProvider, MemoryFiles};
             Some(ReadingOffset::new(at)),
             "line 1, column 11 is where `in_buffer` is written on the second line"
         );
-        assert_eq!(tokens.offset_at(99, 0), None, "a line past the end is not an offset");
+        assert_eq!(
+            tokens.offset_at(99, 0),
+            None,
+            "a line past the end is not an offset"
+        );
 
         // **The meaning, after a cook, and it is the buffer's.** The file's own scope answers the query with no index
         // involved at all — and it answers about `in_buffer`, which exists only in the buffer.
         session.index_everything();
         let view = session.view("/p/a.cpp").expect("the pump has read it");
-        assert!(view.source.contains("in_buffer"), "the reading is the buffer's");
-        let at = view.source.find("in_buffer = 1").expect("the use is in the text");
+        assert!(
+            view.source.contains("in_buffer"),
+            "the reading is the buffer's"
+        );
+        let at = view
+            .source
+            .find("in_buffer = 1")
+            .expect("the use is in the text");
 
         // And the file's own scope answers the query, with no index involved at all.
         assert!(
@@ -7531,7 +7734,10 @@ use crate::file::paths::{DiskFiles, FileProvider, MemoryFiles};
         // held, which is what a fold, a selection and a diagnostic span all rely on. Asking `view` here would now
         // mean asking a semantic question to get an answer about bytes.
         let view = session.tokens_of("/p/a.cpp").expect("the file reads");
-        let at = view.source.find("x = 1").expect("the statement is in the text");
+        let at = view
+            .source
+            .find("x = 1")
+            .expect("the statement is in the text");
         assert_eq!(
             view.position_at(ReadingOffset::new(at)),
             Some((1, 4)),
@@ -7539,7 +7745,9 @@ use crate::file::paths::{DiskFiles, FileProvider, MemoryFiles};
         );
 
         // The round trip in both directions, on the line with the two-byte character.
-        let (line, column) = view.position_at(ReadingOffset::new(at)).expect("the offset is in the file");
+        let (line, column) = view
+            .position_at(ReadingOffset::new(at))
+            .expect("the offset is in the file");
         assert_eq!(view.offset_at(line, column), Some(ReadingOffset::new(at)));
 
         let comment = view.source.find('é').expect("the character is in the text");
@@ -7551,7 +7759,10 @@ use crate::file::paths::{DiskFiles, FileProvider, MemoryFiles};
 
         // And a CRLF file is one line break, not two: the `\r` is part of line 0, so line 1 starts after it.
         let crlf = session.tokens_of("/p/crlf.cpp").expect("the file reads");
-        let second = crlf.source.find("int b").expect("the second line is in the text");
+        let second = crlf
+            .source
+            .find("int b")
+            .expect("the second line is in the text");
         assert_eq!(crlf.position_at(ReadingOffset::new(second)), Some((1, 0)));
         assert_eq!(
             crlf.position_at(ReadingOffset::new(crlf.source.len())),
@@ -7798,7 +8009,13 @@ use crate::file::paths::{DiskFiles, FileProvider, MemoryFiles};
         let providers = SessionFiles::new(documents, DiskFiles);
         let session = Session::open(&project.root, providers, WatchFilter::new(&project.root));
 
-        assert_eq!(session.config_for(&project.root.join("main.cpp")).standard.as_deref(), Some("c++20"));
+        assert_eq!(
+            session
+                .config_for(&project.root.join("main.cpp"))
+                .standard
+                .as_deref(),
+            Some("c++20")
+        );
         let per_file = session.config_for(&project.root.join("main.cpp"));
         let defines: Vec<&str> = per_file
             .defines
@@ -7928,7 +8145,11 @@ use crate::file::paths::{DiskFiles, FileProvider, MemoryFiles};
             "the exclusions are in effect"
         );
         assert_eq!(session.project_config().problems.len(), 1);
-        assert!(session.project_config().problems[0].message.contains("[index]"));
+        assert!(
+            session.project_config().problems[0]
+                .message
+                .contains("[index]")
+        );
         assert_eq!(session.project_config().errors().count(), 1);
     }
 
@@ -7975,7 +8196,13 @@ use crate::file::paths::{DiskFiles, FileProvider, MemoryFiles};
             .map(|define| define.name.as_ref())
             .collect();
         assert_eq!(defines, ["FROM_THE_BUILD_DIRECTORY"]);
-        assert_eq!(session.config_for(&project.root.join("main.cpp")).standard.as_deref(), Some("c++20"));
+        assert_eq!(
+            session
+                .config_for(&project.root.join("main.cpp"))
+                .standard
+                .as_deref(),
+            Some("c++20")
+        );
         assert!(
             session
                 .discovery()
@@ -8035,7 +8262,11 @@ use crate::file::paths::{DiskFiles, FileProvider, MemoryFiles};
 
         let documents = OpenDocuments::new();
         let providers = SessionFiles::new(documents, DiskFiles);
-        let session = Session::open(&project.root, providers.clone(), WatchFilter::new(&project.root));
+        let session = Session::open(
+            &project.root,
+            providers.clone(),
+            WatchFilter::new(&project.root),
+        );
 
         let database = session.compile_database().expect("the database is read");
         assert_eq!(database.len(), 2);
@@ -8047,7 +8278,13 @@ use crate::file::paths::{DiskFiles, FileProvider, MemoryFiles};
             .map(|define| define.name.as_ref())
             .collect();
         assert_eq!(defines, ["FROM_THE_DATABASE"]);
-        assert_eq!(session.config_for(&project.root.join("main.cpp")).standard.as_deref(), Some("c++20"));
+        assert_eq!(
+            session
+                .config_for(&project.root.join("main.cpp"))
+                .standard
+                .as_deref(),
+            Some("c++20")
+        );
 
         assert_eq!(project.relative(session.project_files()), ["main.cpp"]);
         assert_eq!(
@@ -8082,7 +8319,11 @@ use crate::file::paths::{DiskFiles, FileProvider, MemoryFiles};
 
         let documents = OpenDocuments::new();
         let providers = SessionFiles::new(documents, DiskFiles);
-        let mut session = Session::open(&project.root, providers.clone(), WatchFilter::new(&project.root));
+        let mut session = Session::open(
+            &project.root,
+            providers.clone(),
+            WatchFilter::new(&project.root),
+        );
 
         // **Both files, because the closure of `main.cpp` is what the query walks.**
         session.advance(64);
@@ -8103,7 +8344,9 @@ use crate::file::paths::{DiskFiles, FileProvider, MemoryFiles};
         );
         session.index_everything();
 
-        let view = session.view(&path).expect("the ask queued it and the pump cooked it");
+        let view = session
+            .view(&path)
+            .expect("the ask queued it and the pump cooked it");
 
         // **The rendering is the proof, and it is a stronger one than the reference list was.**
         //
@@ -8180,40 +8423,3 @@ use crate::file::paths::{DiskFiles, FileProvider, MemoryFiles};
         );
     }
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

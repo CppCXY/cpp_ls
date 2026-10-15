@@ -173,7 +173,8 @@ mod tests {
         // The bound is the **last** variant, whatever it happens to be — that is the invariant, and this test is
         // how the next person finds out that adding a kind means moving the bound (`syntax_from_raw` names it).
         assert!(
-            CppKind::try_from_raw(CppSyntaxKind::RegisterSpec as u16 + 1 + SYNTAX_KIND_TAG).is_none()
+            CppKind::try_from_raw(CppSyntaxKind::RegisterSpec as u16 + 1 + SYNTAX_KIND_TAG)
+                .is_none()
         );
         assert!(CppKind::try_from_raw(CppTokenKind::Error as u16 + 1).is_none());
         assert!(CppKind::try_from_raw(0xFFFF).is_none());

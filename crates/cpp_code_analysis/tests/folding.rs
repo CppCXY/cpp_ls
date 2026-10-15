@@ -133,7 +133,10 @@ fn comment_runs_fold_and_a_blank_line_ends_one() {
 fn conditionals_and_include_runs_fold() {
     let source = "#include <string>\n#include <vector>\nint after;\n";
     assert_eq!(kinds_of(source), vec![FoldKind::Imports]);
-    assert_eq!(folds_of(source)[0].2, "#include <string>\n#include <vector>");
+    assert_eq!(
+        folds_of(source)[0].2,
+        "#include <string>\n#include <vector>"
+    );
 
     let one_include = "#include <string>\n\n#include <vector>\n";
     assert_eq!(

@@ -185,7 +185,9 @@ impl UpdateInbox {
 
     /// Wait until there is something to apply, or `timeout` passes.
     pub async fn wait_for_work(&self, timeout: Duration) -> bool {
-        tokio::time::timeout(timeout, self.work.notified()).await.is_ok()
+        tokio::time::timeout(timeout, self.work.notified())
+            .await
+            .is_ok()
     }
 
     /// Apply every queued event up to `upto`, in order, calling `apply` for each one.
@@ -333,7 +335,11 @@ mod tests {
 
         for version in 1..=24 {
             inbox
-                .push(changed("file:///a.cpp", version, &format!("text {version}")))
+                .push(changed(
+                    "file:///a.cpp",
+                    version,
+                    &format!("text {version}"),
+                ))
                 .await;
         }
 
@@ -377,7 +383,10 @@ mod tests {
 
         assert_eq!(count, 5, "five messages, five applications: {applied:?}");
         assert_eq!(
-            applied.iter().filter_map(|text| text.as_deref()).collect::<Vec<_>>(),
+            applied
+                .iter()
+                .filter_map(|text| text.as_deref())
+                .collect::<Vec<_>>(),
             ["a1", "b1", "a2"],
             "in the order the client sent them"
         );
@@ -404,7 +413,11 @@ mod tests {
             .await;
 
         assert_eq!(count, 1);
-        assert_eq!(applied, [true], "the `Closed` is not this request's business");
+        assert_eq!(
+            applied,
+            [true],
+            "the `Closed` is not this request's business"
+        );
 
         // …and the next caller — the idle worker, or the next request — gets it.
         let count = inbox
@@ -458,11 +471,10 @@ mod tests {
             applied += task.await.expect("the task ran");
         }
 
-        assert_eq!(applied, 2, "each event is applied exactly once, by one of the two");
         assert_eq!(
-            most.load(Ordering::SeqCst),
-            1,
-            "and never by both at once"
+            applied, 2,
+            "each event is applied exactly once, by one of the two"
         );
+        assert_eq!(most.load(Ordering::SeqCst), 1, "and never by both at once");
     }
 }

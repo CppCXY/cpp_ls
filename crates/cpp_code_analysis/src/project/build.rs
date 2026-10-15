@@ -227,7 +227,9 @@ fn search_for_database(root: &Path) -> (Vec<PathBuf>, bool) {
 
             if kind.is_dir()
                 && depth < MAX_DEPTH
-                && !NEVER_SEARCHED.iter().any(|skip| skip.eq_ignore_ascii_case(name))
+                && !NEVER_SEARCHED
+                    .iter()
+                    .any(|skip| skip.eq_ignore_ascii_case(name))
             {
                 children.insert(path);
             }
@@ -276,8 +278,11 @@ mod tests {
         };
 
         // Two build directories, and the walk has to pick one deterministically.
-        std::fs::write(root.join("build/deep/compile_commands.json"), entry("/p/deep.cpp"))
-            .expect("the fixture writes");
+        std::fs::write(
+            root.join("build/deep/compile_commands.json"),
+            entry("/p/deep.cpp"),
+        )
+        .expect("the fixture writes");
         std::fs::write(
             root.join("cmake-build-debug/compile_commands.json"),
             entry("/p/cmake.cpp"),
@@ -315,15 +320,19 @@ mod tests {
             "[\n  {\"directory\": \"/p\", \"file\": \"/p/a.cpp\", \"arguments\": [\"g++\", \"-c\", \"/p/a.cpp\"]}\n]\n",
         );
 
-        let (found, problems) = find_database(&files, Path::new("/p"), Some(Path::new("build/compile_commands.json")));
+        let (found, problems) = find_database(
+            &files,
+            Path::new("/p"),
+            Some(Path::new("build/compile_commands.json")),
+        );
         let found = found.expect("the named database is read");
         assert_eq!(found.origin, DatabaseOrigin::Configured);
         assert!(problems.is_empty());
 
-        let (none, problems) = find_database(&files, Path::new("/p"), Some(Path::new("elsewhere.json")));
+        let (none, problems) =
+            find_database(&files, Path::new("/p"), Some(Path::new("elsewhere.json")));
         assert!(none.is_none());
         assert_eq!(problems.len(), 1);
         assert!(problems[0].contains("elsewhere.json"));
     }
-
 }

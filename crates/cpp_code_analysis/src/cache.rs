@@ -215,7 +215,9 @@ pub fn prune(cache_directory: &Path, budget_bytes: u64) -> PruneReport {
 
             match path.extension().and_then(|extension| extension.to_str()) {
                 Some("tmp") => {
-                    if now.duration_since(modified).is_ok_and(|age| age > ABANDONED_AFTER)
+                    if now
+                        .duration_since(modified)
+                        .is_ok_and(|age| age > ABANDONED_AFTER)
                         && std::fs::remove_file(&path).is_ok()
                     {
                         report.leftovers += 1;
@@ -225,11 +227,10 @@ pub fn prune(cache_directory: &Path, budget_bytes: u64) -> PruneReport {
                     report.examined += 1;
                     report.bytes_before += length;
 
-                    if !servable(&path)
-                        && std::fs::remove_file(&path).is_ok() {
-                            report.unreachable += 1;
-                            continue;
-                        }
+                    if !servable(&path) && std::fs::remove_file(&path).is_ok() {
+                        report.unreachable += 1;
+                        continue;
+                    }
                     kept.push((modified, length, path));
                 }
                 _ => {}
@@ -378,7 +379,11 @@ mod tests {
     #[test]
     fn every_part_of_the_key_changes_the_key() {
         let base = SummaryKey::new(1, 2);
-        assert_eq!(base, SummaryKey::new(1, 2), "the same inputs are the same key");
+        assert_eq!(
+            base,
+            SummaryKey::new(1, 2),
+            "the same inputs are the same key"
+        );
 
         let variants = [
             SummaryKey::new(9, 2),
@@ -408,7 +413,8 @@ mod tests {
         // summary contains (`build.rs`). A zero here would mean the build script found nothing to hash — which is
         // the one way this could silently stop working, since a constant component invalidates nothing.
         assert_ne!(
-            super::READING_FINGERPRINT, 0,
+            super::READING_FINGERPRINT,
+            0,
             "the fingerprint is the hash of the grammar and of this crate's semantic layer"
         );
         assert_eq!(
@@ -437,13 +443,15 @@ mod tests {
     }
 
     fn scratch(name: &str) -> PathBuf {
-        let directory = std::env::temp_dir().join(format!("cppls-cache-prune-{}-{name}", std::process::id()));
+        let directory =
+            std::env::temp_dir().join(format!("cppls-cache-prune-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&directory);
         directory
     }
 
     fn write(directory: &Path, source: &str, fingerprint_shift: u64) -> PathBuf {
-        let mut summary = crate::index::summarize(Path::new("/p/a.h"), source, SummaryKey::new(0, 0));
+        let mut summary =
+            crate::index::summarize(Path::new("/p/a.h"), source, SummaryKey::new(0, 0));
         summary.key.reading_fingerprint ^= fingerprint_shift;
         crate::index::write_summary(&summary, directory).expect("the summary is written")
     }
@@ -461,8 +469,14 @@ mod tests {
 
         assert!(mine.exists(), "a summary this binary wrote is kept");
         assert!(!theirs.exists(), "one another reader wrote is not");
-        assert!(!torn.exists(), "and neither is something that is not a summary");
-        assert_eq!((report.examined, report.unreachable, report.over_budget), (3, 2, 0));
+        assert!(
+            !torn.exists(),
+            "and neither is something that is not a summary"
+        );
+        assert_eq!(
+            (report.examined, report.unreachable, report.over_budget),
+            (3, 2, 0)
+        );
         let _ = std::fs::remove_dir_all(&directory);
     }
 
@@ -478,8 +492,12 @@ mod tests {
 
         let now = std::time::SystemTime::now();
         for (age, path) in [(3u64, &paths[0]), (2, &paths[1]), (1, &paths[2])] {
-            let file = std::fs::File::options().write(true).open(path).expect("opens");
-            file.set_modified(now - std::time::Duration::from_secs(age * 100)).expect("sets");
+            let file = std::fs::File::options()
+                .write(true)
+                .open(path)
+                .expect("opens");
+            file.set_modified(now - std::time::Duration::from_secs(age * 100))
+                .expect("sets");
         }
 
         let report = prune(&directory, size * 2 + size / 2);

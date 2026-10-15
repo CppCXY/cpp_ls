@@ -127,9 +127,9 @@ impl CookedStream {
         // See the note on the separator below: two tokens that touched are one spelling, and rendering them apart
         // is how a `>>` becomes something the parser cannot put back together.
         let mut previous_source_end: Option<usize> = None;
-    // The previous token's spelling, whatever it came from: the join test below needs it for a pair the cook
-    // produced, which has no source offsets to compare.
-    let mut previous_cooked: Option<String> = None;
+        // The previous token's spelling, whatever it came from: the join test below needs it for a pair the cook
+        // produced, which has no source offsets to compare.
+        let mut previous_cooked: Option<String> = None;
 
         for (index, cooked) in self.tokens.iter().enumerate() {
             while lines.next_if(|line| line.end <= index).is_some() {}
@@ -486,13 +486,12 @@ pub struct ParsedDefinitions {
     /// Keyed by what identifies a definition: its name, its parameter list and its body. `Arc<str>` hashes by
     /// its contents, so the key is the text — the same thing [`definition_text`] would have built, without
     /// building it to find out whether it is already known.
-    parsed: std::collections::HashMap<DefinitionKey, Option<std::sync::Arc<crate::macros::MacroDef>>>,
+    parsed:
+        std::collections::HashMap<DefinitionKey, Option<std::sync::Arc<crate::macros::MacroDef>>>,
 }
 
 /// What identifies a definition: exactly what [`definition_text`] writes, in the three pieces it writes it from.
 type DefinitionKey = (Box<str>, Option<std::sync::Arc<str>>, std::sync::Arc<str>);
-
-
 
 impl ParsedDefinitions {
     pub fn new() -> Self {
@@ -523,18 +522,19 @@ impl ParsedDefinitions {
         parameters: Option<&std::sync::Arc<str>>,
         body: &std::sync::Arc<str>,
     ) -> Option<std::sync::Arc<crate::macros::MacroDef>> {
-        let key: DefinitionKey = (Box::from(name), parameters.cloned(), std::sync::Arc::clone(body));
+        let key: DefinitionKey = (
+            Box::from(name),
+            parameters.cloned(),
+            std::sync::Arc::clone(body),
+        );
 
         if let Some(known) = self.parsed.get(&key) {
             return known.clone();
         }
 
-        let definition = parse_a_definition(&definition_text(
-            name,
-            parameters.map(|list| &**list),
-            body,
-        ))
-        .map(std::sync::Arc::new);
+        let definition =
+            parse_a_definition(&definition_text(name, parameters.map(|list| &**list), body))
+                .map(std::sync::Arc::new);
 
         self.parsed.insert(key, definition.clone());
         definition
@@ -635,11 +635,13 @@ pub fn configuration_from_environment_and(
     // **Usable** means: object-like, or function-like *with* its parameter list — a body that takes arguments can
     // be expanded only when the arguments have names to be substituted into, and a body nobody classified cannot
     // be expanded at all. What is left is counted, not guessed at.
-    let usable = |function_like: Option<bool>, parameters: Option<&std::sync::Arc<str>>| match function_like {
-        Some(false) => true,
-        Some(true) => parameters.is_some(),
-        None => false,
-    };
+    let usable =
+        |function_like: Option<bool>, parameters: Option<&std::sync::Arc<str>>| match function_like
+        {
+            Some(false) => true,
+            Some(true) => parameters.is_some(),
+            None => false,
+        };
     // **Both channels in one pass each**: the visitor hands over the facts, and what it hands over is what the
     // two answers below are counted from — the bodies this run may use, and the ones it may not.
     let mut in_force: Vec<InForceDefinition<'_>> = Vec::new();
@@ -648,7 +650,11 @@ pub fn configuration_from_environment_and(
         bodies_in_force += 1;
         if use_in_force_bodies && usable(facts.function_like, facts.parameters) {
             // Cloned `Arc`s rather than fresh copies of the text — see the note on the other channel below.
-            in_force.push((facts.name, facts.parameters.cloned(), std::sync::Arc::clone(facts.body)));
+            in_force.push((
+                facts.name,
+                facts.parameters.cloned(),
+                std::sync::Arc::clone(facts.body),
+            ));
         }
     });
 
@@ -772,7 +778,10 @@ impl<'unit> FileMacros<'unit> {
     /// `None` rather than searching further back: the last entry is what a name *is* there, and that is what the
     /// name's collapse meant before this type existed. `None` is therefore "the unit says nothing usable", which
     /// leaves the seed underneath.
-    fn positional(&self, name: &str) -> Option<(usize, &'unit std::sync::Arc<crate::macros::MacroDef>)> {
+    fn positional(
+        &self,
+        name: &str,
+    ) -> Option<(usize, &'unit std::sync::Arc<crate::macros::MacroDef>)> {
         let (at, index) = self.view.visible_binding(name)?;
         Some((at, self.definitions.of(index)?))
     }
@@ -800,19 +809,24 @@ impl crate::macros::MacroBindings for FileMacros<'_> {
             match &found {
                 None => {
                     // Which layer missed, and why — the three answers are the whole diagnosis.
-                    let in_force = self
-                        .in_force(name)
-                        .map(|_| "yes")
-                        .unwrap_or("no");
+                    let in_force = self.in_force(name).map(|_| "yes").unwrap_or("no");
                     let positional = match self.view.visible_binding(name) {
                         None => "no-binding".to_string(),
                         Some((at, index)) => format!(
                             "binding@{} definition={}",
                             at,
-                            if self.definitions.of(index).is_some() { "yes" } else { "NO" }
+                            if self.definitions.of(index).is_some() {
+                                "yes"
+                            } else {
+                                "NO"
+                            }
                         ),
                     };
-                    let seed = self.seed.and_then(|seed| seed.definition(name)).map(|_| "yes").unwrap_or("no");
+                    let seed = self
+                        .seed
+                        .and_then(|seed| seed.definition(name))
+                        .map(|_| "yes")
+                        .unwrap_or("no");
                     eprintln!(
                         "cppls-macro: {name} at {offset} -> not defined (in_force={in_force} positional={positional} seed={seed})"
                     );
@@ -860,7 +874,6 @@ impl FileMacros<'_> {
         }
         self.seed?.definition_at(name, offset)
     }
-
 }
 
 /// **[`FileMacros`] as the shape reader's one question** — "what does this name stand for at this offset".
@@ -1086,7 +1099,9 @@ pub fn attribute_support_in(spelling: &str, msvc: bool) -> Option<i128> {
 
     match bare {
         // **MSVC's own attributes, which its preprocessor reports as supported.**
-        "no_specializations" | "lifetimebound" | "intrinsic" | "known_semantics" | "noop_dtor" => Some(1),
+        "no_specializations" | "lifetimebound" | "intrinsic" | "known_semantics" | "noop_dtor" => {
+            Some(1)
+        }
         // MSVC spells this one `[[msvc::maybe_unused]]`, so the **plain** spelling is not supported.
         "maybe_unused" => Some(0),
         // A clang attribute is not an MSVC one.
@@ -1104,7 +1119,10 @@ fn msvc_attribute_value(name: &str) -> i128 {
         "likely" | "unlikely" => 201803,
         "nodiscard" => 201907,
         "assume" => 202207,
-        "msvc::no_unique_address" | "msvc::forceinline" | "msvc::forceinline_calls" | "msvc::noinline" => 201803,
+        "msvc::no_unique_address"
+        | "msvc::forceinline"
+        | "msvc::forceinline_calls"
+        | "msvc::noinline" => 201803,
         "msvc::noop_dtor" | "msvc::maybe_unused" | "msvc::no_tls_guard" => 201603,
         "msvc::lifetimebound" => 202302,
         "msvc::intrinsic" => 202210,
@@ -1149,7 +1167,10 @@ pub trait HeaderSearch {
 /// `"local.h"` is the quoted one. So this reads the delimiters rather than removing them, and a name that has
 /// neither is refused rather than guessed at.
 pub fn split_a_header_operand(operand: &str) -> Option<(&str, bool)> {
-    if let Some(inner) = operand.strip_prefix('<').and_then(|rest| rest.strip_suffix('>')) {
+    if let Some(inner) = operand
+        .strip_prefix('<')
+        .and_then(|rest| rest.strip_suffix('>'))
+    {
         return (!inner.is_empty()).then_some((inner, false));
     }
 
@@ -1193,7 +1214,11 @@ impl<F: crate::file::paths::FileProvider> HeaderSearch for Search<'_, F> {
         }
 
         // The quoted form looks beside the file first. This is the one place the two forms differ.
-        if quoted && self.files.exists(&join_normalized(directory, wanted, case_insensitive)) {
+        if quoted
+            && self
+                .files
+                .exists(&join_normalized(directory, wanted, case_insensitive))
+        {
             return true;
         }
 
@@ -1282,25 +1307,41 @@ pub fn cook_with_search(
         let kind = spanned.directive.kind();
         match kind {
             DirectiveKind::If | DirectiveKind::Ifdef | DirectiveKind::Ifndef => {
-                let holds = decide(&spanned.directive, spanned.range, &live, tokens, token_index);
+                let holds = decide(
+                    &spanned.directive,
+                    spanned.range,
+                    &live,
+                    tokens,
+                    token_index,
+                );
                 regions.push(Region {
                     outer_is_live: was_live,
                     taken: holds == Some(true),
                     live: was_live && holds == Some(true),
                 });
-                if holds.is_none() || rests_on_an_undefined_name(&spanned.directive, &live, token_index, tokens) {
+                if holds.is_none()
+                    || rests_on_an_undefined_name(&spanned.directive, &live, token_index, tokens)
+                {
                     out.assumed_undefined += 1;
                 }
             }
             DirectiveKind::Elif => {
-                let holds = decide(&spanned.directive, spanned.range, &live, tokens, token_index);
+                let holds = decide(
+                    &spanned.directive,
+                    spanned.range,
+                    &live,
+                    tokens,
+                    token_index,
+                );
                 if let Some(region) = regions.last_mut() {
                     region.live = region.outer_is_live && !region.taken && holds == Some(true);
                     if holds == Some(true) {
                         region.taken = true;
                     }
                 }
-                if holds.is_none() || rests_on_an_undefined_name(&spanned.directive, &live, token_index, tokens) {
+                if holds.is_none()
+                    || rests_on_an_undefined_name(&spanned.directive, &live, token_index, tokens)
+                {
                     out.assumed_undefined += 1;
                 }
             }
@@ -1322,9 +1363,7 @@ pub fn cook_with_search(
                 }
             }
             DirectiveKind::Undef => {
-                if was_live
-                    && let Directive::Undef { name: Some(name) } = &spanned.directive
-                {
+                if was_live && let Directive::Undef { name: Some(name) } = &spanned.directive {
                     live.own.undefine(name, spanned.range.start_offset);
                 }
             }
@@ -1363,9 +1402,7 @@ pub fn cook_with_search(
             // it — a message is not program text — so this is the only channel by which it survives the cook, and a
             // caller asking "did this line fire" has nowhere else to look.
             DirectiveKind::Error | DirectiveKind::Warning => {
-                if was_live
-                    && let Directive::Diagnostic { kind, message } = &spanned.directive
-                {
+                if was_live && let Directive::Diagnostic { kind, message } = &spanned.directive {
                     out.messages
                         .push((*kind, message.clone(), spanned.range.start_offset));
                 }
@@ -1424,7 +1461,6 @@ pub fn cook_with_search(
 fn is_live(regions: &[Region]) -> bool {
     regions.last().is_none_or(|region| region.live)
 }
-
 
 /// **Handle `#pragma push_macro("x")` / `#pragma pop_macro("x")` against the macro table.**
 ///
@@ -1544,7 +1580,6 @@ fn unquote_a_pragma_name(spelling: &str) -> String {
         .to_string()
 }
 
-
 /// The first token index at or after `offset`.
 fn token_index_after(tokens: &[CppTokenData], offset: usize) -> usize {
     tokens.partition_point(|token| token.range.start_offset < offset)
@@ -1562,7 +1597,9 @@ fn span_of(tokens: &[CppTokenData], from: usize, to: usize) -> SourceRange {
     match (tokens.get(from), tokens.get(to.saturating_sub(1))) {
         (Some(first), Some(last)) => SourceRange::new(
             first.range.start_offset,
-            last.range.end_offset().saturating_sub(first.range.start_offset),
+            last.range
+                .end_offset()
+                .saturating_sub(first.range.start_offset),
         ),
         _ => SourceRange::new(0, 0),
     }
@@ -1618,7 +1655,9 @@ fn rests_on_an_undefined_name(
     match directive {
         Directive::Ifdef { name, .. } => unknown(name),
         Directive::Conditional { condition, .. } => condition.iter().any(|token| {
-            token.is_identifier() && !matches!(token.text(), "defined" | "true" | "false") && unknown(token.text())
+            token.is_identifier()
+                && !matches!(token.text(), "defined" | "true" | "false")
+                && unknown(token.text())
         }),
         _ => false,
     }

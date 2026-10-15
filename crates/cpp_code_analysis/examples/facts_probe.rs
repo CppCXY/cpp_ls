@@ -53,14 +53,18 @@ fn main() {
             .map(|fact| fact.range.end_offset())
             .max()
             .unwrap_or(0);
-        println!("   highest declaration offset: {highest} of {} bytes", source.len());
+        println!(
+            "   highest declaration offset: {highest} of {} bytes",
+            source.len()
+        );
 
         // **What the `auto`s are written with.** Deduction is the next piece of work and its shape decides how
         // much of a type system it needs: a declaration whose initializer is a call needs the callee's return
         // type, one whose initializer is a literal needs nothing at all, and one whose initializer is another
         // `auto` needs that one resolved first. Counted by **what follows the name**, which is the question,
         // rather than by total, which is not.
-        let mut by_shape: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+        let mut by_shape: std::collections::BTreeMap<&str, usize> =
+            std::collections::BTreeMap::new();
         for fact in &summary.declarations {
             if fact.type_of.as_deref() != Some("auto") {
                 continue;

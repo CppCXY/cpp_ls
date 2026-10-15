@@ -93,9 +93,7 @@ fn main() {
         let mut by_kind: HashMap<String, usize> = HashMap::new();
         let mut by_provenance: HashMap<&str, usize> = HashMap::new();
         for name in &names {
-            *by_kind
-                .entry(format!("{:?}", name.kind))
-                .or_default() += 1;
+            *by_kind.entry(format!("{:?}", name.kind)).or_default() += 1;
             *by_provenance
                 .entry(match name.provenance {
                     Provenance::DeclaredHere => "declared-here",
@@ -167,10 +165,15 @@ fn main() {
                 }
                 let text = &view.source[token.range.start_offset..token.range.end_offset()];
                 match classified.get(&token.range.start_offset) {
-                    Some(kind) => println!("  {:>5}  {text:<32} {kind:?}", token.range.start_offset),
+                    Some(kind) => {
+                        println!("  {:>5}  {text:<32} {kind:?}", token.range.start_offset)
+                    }
                     // **The interesting line.** `unclassified` is what a reader sees as "no colour", and the word
                     // printed beside it is what they will report.
-                    None => println!("  {:>5}  {text:<32} -- unclassified --", token.range.start_offset),
+                    None => println!(
+                        "  {:>5}  {text:<32} -- unclassified --",
+                        token.range.start_offset
+                    ),
                 }
             }
         }

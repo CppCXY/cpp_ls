@@ -58,5 +58,3 @@ pub use discovery::{DiscoveryProblem, ProjectDiscovery, discover};
 /// adapter for; a database is what they all agree on, and a project that generates none can say so in
 /// `.cppls.toml`.
 pub const CONFIGURATION_FILE_NAMES: &[&str] = &[PROJECT_CONFIG_FILE, "compile_commands.json"];
-
-

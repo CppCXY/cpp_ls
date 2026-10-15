@@ -140,7 +140,10 @@ fn main() {
                 body,
             };
 
-            if unconditional.insert(fact.name.clone(), definition).is_some() {
+            if unconditional
+                .insert(fact.name.clone(), definition)
+                .is_some()
+            {
                 ambiguous.insert(fact.name.clone());
             }
         }
@@ -171,7 +174,9 @@ fn main() {
             continue;
         };
         let expanded = expand(&source, &definitions, steps);
-        let raw = CppParser::parse(&source, ParserConfig::default()).get_errors().len();
+        let raw = CppParser::parse(&source, ParserConfig::default())
+            .get_errors()
+            .len();
         let after = CppParser::parse(&expanded, ParserConfig::default())
             .get_errors()
             .len();
@@ -219,7 +224,11 @@ fn name_of(path: &Path) -> String {
 ///
 /// The facts carry the two ends and not the list itself (`MacroFact::body_range`'s documentation says why), and the
 /// gap is exactly `(a, b, c)` — so the list is read from the text the file already wrote rather than stored twice.
-fn parameters_of(source: &str, fact: &cpp_code_analysis::MacroFact, body_start: Option<usize>) -> Vec<String> {
+fn parameters_of(
+    source: &str,
+    fact: &cpp_code_analysis::MacroFact,
+    body_start: Option<usize>,
+) -> Vec<String> {
     if !fact.function_like {
         return Vec::new();
     }
@@ -508,7 +517,8 @@ fn carries_pasting(body: &str) -> bool {
     let mut errors = Vec::new();
     let mut lexer = CppLexer::new(body, LexerConfig::default(), &mut errors);
 
-    lexer.tokenize().iter().any(|token| {
-        matches!(token.kind, CppTokenKind::Hash | CppTokenKind::HashHash)
-    })
+    lexer
+        .tokenize()
+        .iter()
+        .any(|token| matches!(token.kind, CppTokenKind::Hash | CppTokenKind::HashHash))
 }

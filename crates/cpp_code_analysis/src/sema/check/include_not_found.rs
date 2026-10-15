@@ -58,7 +58,9 @@ impl Check for IncludeNotFound {
                 ),
                 // Refused above; written out rather than unreachable so that adding a fourth form is a compile
                 // error here instead of a silently wrong message.
-                IncludeForm::Macro => unreachable!("a macro target is not reported — see the module note"),
+                IncludeForm::Macro => {
+                    unreachable!("a macro target is not reported — see the module note")
+                }
             };
             // **Already in the file''s coordinates**: this range came from the summary - see `CheckContext::written`.
             context.add_in_the_file(
@@ -70,4 +72,3 @@ impl Check for IncludeNotFound {
         }
     }
 }
-

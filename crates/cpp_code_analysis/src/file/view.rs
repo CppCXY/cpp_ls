@@ -121,7 +121,8 @@ impl TokensOf {
     pub fn source(&self) -> &str {
         &self.source
     }
-}/// A file in the VFS, parsed, with its scopes.
+}
+/// A file in the VFS, parsed, with its scopes.
 #[derive(Debug, Clone)]
 pub struct FileView {
     /// The file's identity inside the VFS — stable across spellings of its path, and what the view is *of*.
@@ -182,7 +183,9 @@ impl FileView {
         if self.written.is_none() {
             return Some(FileOffset::new(in_the_reading));
         }
-        Some(FileOffset::new(self.span_at(in_the_reading)?.reported.start_offset))
+        Some(FileOffset::new(
+            self.span_at(in_the_reading)?.reported.start_offset,
+        ))
     }
 
     /// **Where in the file a *range's end* is** — the outbound mapping for the far end of a range.
@@ -386,7 +389,9 @@ impl FileView {
                 .get_offset(line, column, text)
                 .map(|at| FileOffset::new(usize::from(at))),
             // The ordinary case: one text and one index, and it is already the file's.
-            _ => self.offset_at(line, column).map(|at| FileOffset::new(at.get())),
+            _ => self
+                .offset_at(line, column)
+                .map(|at| FileOffset::new(at.get())),
         }
     }
 }
@@ -553,8 +558,10 @@ impl FileView {
     ///
     /// Kept as a function that answers `None` rather than deleted, so that the boundary is a place in the code with
     /// an explanation attached instead of a constructor that a future caller finds and uses.
-    #[deprecated(note = "there is no semantic view of unexpanded text; use Session::view for meaning \
-                         (and defer when it answers None) or Session::tokens_of for positions")]
+    #[deprecated(
+        note = "there is no semantic view of unexpanded text; use Session::view for meaning \
+                         (and defer when it answers None) or Session::tokens_of for positions"
+    )]
     pub fn parse(file: &VfsFile) -> Option<FileView> {
         let _ = file;
         None
@@ -720,7 +727,10 @@ impl FileView {
 /// Free rather than a method because two callers need it and they hold different trees: a view walks the tree it
 /// parsed, and [`Session::selection_chain`](crate::Session::selection_chain) walks a parse of the file's **own** text
 /// — which is a tree no `FileView` in this crate holds, because every view is of a rendering. One walk, two trees.
-pub(crate) fn selection_chain_of(root: &CppSyntaxNode, offset: usize) -> Vec<cpp_parser::SourceRange> {
+pub(crate) fn selection_chain_of(
+    root: &CppSyntaxNode,
+    offset: usize,
+) -> Vec<cpp_parser::SourceRange> {
     let mut chain: Vec<cpp_parser::SourceRange> = Vec::new();
     let add = |range: cpp_parser::SourceRange, chain: &mut Vec<cpp_parser::SourceRange>| {
         if range.length == 0 {
@@ -733,7 +743,8 @@ pub(crate) fn selection_chain_of(root: &CppSyntaxNode, offset: usize) -> Vec<cpp
         // Strictly inside the previous range — see the note on the method. A range that merely *equals* the previous
         // one adds nothing: expanding the selection to the same text twice is a keystroke that does nothing.
         let already_covered = chain.last().is_some_and(|previous| {
-            range.start_offset >= previous.start_offset && range.end_offset() <= previous.end_offset()
+            range.start_offset >= previous.start_offset
+                && range.end_offset() <= previous.end_offset()
         });
         if !already_covered {
             chain.push(range);
@@ -768,7 +779,6 @@ pub(crate) fn selection_chain_of(root: &CppSyntaxNode, offset: usize) -> Vec<cpp
 }
 
 impl FileView {
-
     /// A byte offset from a **line and column**, both counted from zero.
     ///
     /// The mapping a client's positions need, and the one place LSP's own rule is *not* implemented: the columns
@@ -826,7 +836,8 @@ mod tests {
 
     #[test]
     fn a_view_maps_positions_through_the_index_the_vfs_built() {
-        let mut vfs = Vfs::new(MemoryFiles::new().with_file("/p/a.cpp", "int a;\nint b;\nint c;\n"));
+        let mut vfs =
+            Vfs::new(MemoryFiles::new().with_file("/p/a.cpp", "int a;\nint b;\nint c;\n"));
         let (tokens, file) = tokens(&mut vfs, "/p/a.cpp");
 
         assert!(
@@ -841,8 +852,16 @@ mod tests {
 
         // **And the tokens really are the file.** The stream covers the text byte for byte, which is what makes a
         // range built from two tokens a range in this file — the property everything lexical rests on.
-        let covered: String = tokens.tokens.iter().map(|t| &tokens.source[t.range.start_offset..t.range.end_offset()]).collect();
-        assert_eq!(covered, tokens.source(), "the tokens cover the file byte for byte");
+        let covered: String = tokens
+            .tokens
+            .iter()
+            .map(|t| &tokens.source[t.range.start_offset..t.range.end_offset()])
+            .collect();
+        assert_eq!(
+            covered,
+            tokens.source(),
+            "the tokens cover the file byte for byte"
+        );
     }
 
     #[test]
@@ -862,7 +881,11 @@ mod tests {
         let (after, _) = tokens(&mut vfs, "/p/a.cpp");
 
         assert!(after.open, "and the reading says the text is a buffer");
-        assert_eq!(after.offset_at(1, 4), Some(ReadingOffset::new(11)), "`b` of the new second line");
+        assert_eq!(
+            after.offset_at(1, 4),
+            Some(ReadingOffset::new(11)),
+            "`b` of the new second line"
+        );
         assert_eq!(
             before.offset_at(1, 4),
             Some(ReadingOffset::new(7)),
@@ -871,15 +894,3 @@ mod tests {
         );
     }
 }
-
-
-
-
-
-
-
-
-
-
-
-

@@ -408,7 +408,12 @@ mod tests {
                 target: name.into(),
                 is_next: false,
             };
-            match resolver.resolve(&include, std::path::Path::new("/nowhere"), None, &mut interner) {
+            match resolver.resolve(
+                &include,
+                std::path::Path::new("/nowhere"),
+                None,
+                &mut interner,
+            ) {
                 Resolution::Resolved(resolved) => Some(resolved.path),
                 Resolution::Unresolved(_) => None,
             }
@@ -437,11 +442,11 @@ mod tests {
             // **The rule that makes the fallback safe.** A file that a search path *can* place must be placed by it:
             // reaching the fallback means every exact candidate was tried and answered `None`, so a guess can never
             // take a resolution away from a directory the project named.
-            let (root, mut config) = project(
-                "shadow",
-                &["named/Widget.h", "elsewhere/named/Widget.h"],
-            );
-            config.include_paths.push(crate::config::IncludePath::user(root.join("named")));
+            let (root, mut config) =
+                project("shadow", &["named/Widget.h", "elsewhere/named/Widget.h"]);
+            config
+                .include_paths
+                .push(crate::config::IncludePath::user(root.join("named")));
 
             let found = resolve("Widget.h", &config).expect("the search path found it");
 
@@ -497,7 +502,8 @@ mod tests {
     }
 
     #[test]
-    fn a_quoted_include_prefers_the_files_own_directory() {        let resolution = resolve("local.h", IncludeForm::Quote, "src", false);
+    fn a_quoted_include_prefers_the_files_own_directory() {
+        let resolution = resolve("local.h", IncludeForm::Quote, "src", false);
 
         assert_eq!(
             resolution.resolved().map(|it| it.path.as_path()),

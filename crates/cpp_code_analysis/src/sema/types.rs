@@ -101,7 +101,9 @@ pub type TypeOf = Arc<Type>;
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Type {
     /// A builtin: `int`, `void`, `unsigned long long`, `decltype(auto)`.
-    Builtin { spelling: String },
+    Builtin {
+        spelling: String,
+    },
     /// A name, with the template arguments it was written with — `Widget`, `std::vector<int>`, `T`.
     ///
     /// Declared separately from [`Type::TemplateParameter`] because the difference is a *fact about the context*
@@ -113,7 +115,9 @@ pub enum Type {
         arguments: Vec<Type>,
     },
     /// A template parameter written where nothing has said what it stands for: the `T` of a template body.
-    TemplateParameter { name: String },
+    TemplateParameter {
+        name: String,
+    },
     Pointer {
         to: TypeOf,
     },
@@ -134,7 +138,9 @@ pub enum Type {
         parameters: Vec<Type>,
     },
     /// A `pack`: `Args...` — a template parameter that stands for several arguments.
-    Pack { of: TypeOf },
+    Pack {
+        of: TypeOf,
+    },
     /// **A qualified type**: `const Widget`, `volatile int`.
     ///
     /// A wrapper rather than a flag on every variant, because a qualifier belongs to *the type it is written on*
@@ -142,7 +148,9 @@ pub enum Type {
     /// `Widget* const` is a const pointer, the same words in a different place, and the operators between them are
     /// what tells the two apart. A wrapper is also the shape a peel can build at the moment it knows which type the
     /// qualifier was written on, which is exactly when it reads it.
-    Qualified { of: TypeOf },
+    Qualified {
+        of: TypeOf,
+    },
 }
 
 impl Type {
@@ -212,9 +220,7 @@ impl Type {
     pub fn decay(&self) -> Type {
         match self {
             Type::Reference { to, .. } => to.decay(),
-            Type::Array { of, .. } => Type::Pointer {
-                to: Arc::clone(of),
-            },
+            Type::Array { of, .. } => Type::Pointer { to: Arc::clone(of) },
             // **A qualifier survives the decay**, because the thing it qualifies does: `const int arr[4]` used as a
             // value is a pointer to a const `int`. Dropping it here would make `const` disappear from exactly the
             // types a `auto p = &arr;` deduces.
@@ -295,9 +301,9 @@ impl Type {
             (Type::Pointer { .. }, b) if b.is_arithmetic() => Known::No,
             (a, Type::Pointer { .. }) if a.is_arithmetic() => Known::No,
 
-            _ => Known::Unknown(crate::sema::symbol::UnknownReason::UnknownType(
-                Box::from("a conversion between these two types is not decided by their shapes"),
-            )),
+            _ => Known::Unknown(crate::sema::symbol::UnknownReason::UnknownType(Box::from(
+                "a conversion between these two types is not decided by their shapes",
+            ))),
         }
     }
 
@@ -825,7 +831,6 @@ pub fn parse_type_spelling(written: &str) -> Type {
         return Type::builtin("void");
     }
 
-
     let qualified = match base.find('<') {
         Some(at) if base.ends_with('>') => {
             let name = base[..at].trim_end().to_string();
@@ -920,14 +925,41 @@ fn split_trailing_parameters(written: &str) -> Option<(&str, &str)> {
 fn is_a_builtin(spelling: &str) -> bool {
     matches!(
         spelling,
-        "void" | "bool" | "char" | "char8_t" | "char16_t" | "char32_t" | "wchar_t"
-            | "short" | "int" | "long" | "float" | "double" | "signed" | "unsigned"
-            | "short int" | "long int" | "long long" | "long long int" | "long double"
-            | "unsigned short" | "unsigned int" | "unsigned long" | "unsigned long long"
-            | "unsigned short int" | "unsigned long int" | "unsigned long long int"
-            | "signed short" | "signed int" | "signed long" | "signed long long"
-            | "signed short int" | "signed long int" | "signed long long int"
-            | "signed char" | "unsigned char"
+        "void"
+            | "bool"
+            | "char"
+            | "char8_t"
+            | "char16_t"
+            | "char32_t"
+            | "wchar_t"
+            | "short"
+            | "int"
+            | "long"
+            | "float"
+            | "double"
+            | "signed"
+            | "unsigned"
+            | "short int"
+            | "long int"
+            | "long long"
+            | "long long int"
+            | "long double"
+            | "unsigned short"
+            | "unsigned int"
+            | "unsigned long"
+            | "unsigned long long"
+            | "unsigned short int"
+            | "unsigned long int"
+            | "unsigned long long int"
+            | "signed short"
+            | "signed int"
+            | "signed long"
+            | "signed long long"
+            | "signed short int"
+            | "signed long int"
+            | "signed long long int"
+            | "signed char"
+            | "unsigned char"
     )
 }
 
@@ -975,7 +1007,6 @@ fn split_leading_qualifiers(written: &str) -> (Option<&str>, &str) {
 
     (qualifier, rest.trim_end())
 }
-
 
 /// Split a template argument list on the commas that are **not** inside a nested list.
 ///
@@ -1126,7 +1157,8 @@ pub fn declarator_declaring(
                 .children()
                 .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::Declarator)
         })
-}/// **Read a declared type from a declaration's syntax** — the specifier sequence plus the declarator around a name.
+}
+/// **Read a declared type from a declaration's syntax** — the specifier sequence plus the declarator around a name.
 ///
 /// # Why both halves are needed
 ///
@@ -1335,7 +1367,9 @@ fn read_named(node: &CppSyntaxNode) -> Option<Type> {
         Some(at) => {
             let list = node
                 .descendants()
-                .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::TemplateArgumentList)
+                .find(|child| {
+                    CppSyntaxKind::from(child.kind()) == CppSyntaxKind::TemplateArgumentList
+                })
                 .map(|list| read_template_arguments(&list))
                 .unwrap_or_default();
             (written[..at].trim_end().to_string(), list)
@@ -1416,7 +1450,6 @@ fn read_argument(node: &CppSyntaxNode) -> Type {
     Type::named(node.text().to_string().trim())
 }
 
-
 /// Does this node's span **contain the start** of that range?
 ///
 /// The weaker test, and the right one for walking *down* a declarator: a declarator's span ends at its own last
@@ -1442,7 +1475,10 @@ fn reaches(node: &CppSyntaxNode, range: cpp_parser::SourceRange) -> bool {
 /// `(6, 8)` — while the name is `(8, 9)`: the end is one byte short, so a descent that asked "does this child
 /// contain the name" would refuse the very node it is looking for and stop at the outer one, which is the shape
 /// that read `Widget* p` as `Widget`.
-fn declarator_holding_the_name(declarator: &CppSyntaxNode, name: cpp_parser::SourceRange) -> CppSyntaxNode {
+fn declarator_holding_the_name(
+    declarator: &CppSyntaxNode,
+    name: cpp_parser::SourceRange,
+) -> CppSyntaxNode {
     let mut node = declarator.clone();
 
     loop {
@@ -1618,7 +1654,11 @@ fn wrap(
 /// it back.
 fn array_extent(node: &CppSyntaxNode) -> Option<usize> {
     let text = node.text().to_string();
-    let inside = text.trim().trim_start_matches('[').trim_end_matches(']').trim();
+    let inside = text
+        .trim()
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .trim();
     inside.parse().ok()
 }
 
@@ -1690,12 +1730,10 @@ mod tests {
             .descendants()
             .filter(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::Declarator)
             .filter(|child| {
-                child
-                    .descendants()
-                    .any(|inner| {
-                        CppSyntaxKind::from(inner.kind()) == CppSyntaxKind::NameExpr
-                            && inner.text().to_string().trim() == name
-                    })
+                child.descendants().any(|inner| {
+                    CppSyntaxKind::from(inner.kind()) == CppSyntaxKind::NameExpr
+                        && inner.text().to_string().trim() == name
+                })
             })
             .min_by_key(|child| {
                 usize::from(child.text_range().end()) - usize::from(child.text_range().start())
@@ -1705,8 +1743,9 @@ mod tests {
         let specifiers = declared
             .ancestors()
             .find_map(|node| {
-                node.children()
-                    .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::DeclSpecifierSeq)
+                node.children().find(|child| {
+                    CppSyntaxKind::from(child.kind()) == CppSyntaxKind::DeclSpecifierSeq
+                })
             })
             .unwrap_or_else(|| panic!("{name} has a specifier sequence in {source:?}"));
 
@@ -1720,7 +1759,10 @@ mod tests {
     #[test]
     fn a_builtin_is_its_words_in_order() {
         assert_eq!(written("int x;", "x"), "int");
-        assert_eq!(written("unsigned long long big;", "big"), "unsigned long long");
+        assert_eq!(
+            written("unsigned long long big;", "big"),
+            "unsigned long long"
+        );
         assert_eq!(written("char c;", "c"), "char");
     }
 
@@ -1734,7 +1776,6 @@ mod tests {
         assert_eq!(written("Widget&& rr;", "rr"), "Widget&&");
         assert_eq!(written("const Widget* q;", "q"), "Widget*");
     }
-
 
     /// **A name is read without its template arguments and with them.** The class question wants the first, the
     /// type a consumer shows is the second, and both come from one node.
@@ -1774,7 +1815,11 @@ mod tests {
     fn a_reference_decays_to_what_it_refers_to() {
         let reference = type_of("Widget& r;", "r");
         assert_eq!(reference.decay().to_string(), "Widget");
-        assert_eq!(reference.class_name(), Some("Widget"), "a class question sees through it");
+        assert_eq!(
+            reference.class_name(),
+            Some("Widget"),
+            "a class question sees through it"
+        );
     }
 
     /// A `*` on a pointer gives the pointee, and on anything else gives nothing — a class with an `operator*` needs
@@ -1782,7 +1827,9 @@ mod tests {
     #[test]
     fn a_pointee_is_read_out_of_a_pointer() {
         assert_eq!(
-            type_of("Widget* p;", "p").pointee().map(|found| found.to_string()),
+            type_of("Widget* p;", "p")
+                .pointee()
+                .map(|found| found.to_string()),
             Some("Widget".to_string())
         );
         assert_eq!(type_of("int x;", "x").pointee(), None);
@@ -1802,7 +1849,11 @@ mod tests {
     fn a_parameter_in_a_template_body_is_read_as_a_name() {
         let found = type_of("template <class T> void f(T value) { }", "value");
         assert_eq!(found.to_string(), "T");
-        assert_eq!(found.class_name(), Some("T"), "the text is a name either way");
+        assert_eq!(
+            found.class_name(),
+            Some("T"),
+            "the text is a name either way"
+        );
 
         let parameter = Type::TemplateParameter {
             name: "T".to_string(),
@@ -1860,12 +1911,14 @@ mod tests {
     /// before spending an index query on it.
     #[test]
     fn a_type_that_holds_a_parameter_says_so() {
-        assert!(Type::Pointer {
-            to: Arc::new(Type::TemplateParameter {
-                name: "T".to_string()
-            })
-        }
-        .depends_on_a_parameter());
+        assert!(
+            Type::Pointer {
+                to: Arc::new(Type::TemplateParameter {
+                    name: "T".to_string()
+                })
+            }
+            .depends_on_a_parameter()
+        );
 
         assert!(
             Type::Named {
@@ -1918,15 +1971,26 @@ mod tests {
     /// recoverable and a wrong class name is not: it sends a member query to a class that does not exist.
     #[test]
     fn a_spelling_is_read_back_into_the_class_it_names() {
-        let class_of = |written: &str| parse_type_spelling(written).class_name().map(str::to_string);
+        let class_of = |written: &str| {
+            parse_type_spelling(written)
+                .class_name()
+                .map(str::to_string)
+        };
         assert_eq!(class_of("Widget"), Some("Widget".to_string()));
-        assert_eq!(class_of("std::vector<int>"), Some("std::vector".to_string()));
+        assert_eq!(
+            class_of("std::vector<int>"),
+            Some("std::vector".to_string())
+        );
         assert_eq!(
             class_of("std::map<std::string, int>"),
             Some("std::map".to_string()),
             "the commas inside the argument list are not the type's own"
         );
-        assert_eq!(class_of("Widget*"), None, "a pointer names no class — decay first");
+        assert_eq!(
+            class_of("Widget*"),
+            None,
+            "a pointer names no class — decay first"
+        );
         assert_eq!(class_of("const Widget&"), Some("Widget".to_string()));
         assert_eq!(class_of("Widget&&"), Some("Widget".to_string()));
         assert_eq!(
@@ -1934,7 +1998,10 @@ mod tests {
             None,
             "the `const` on either side does not make it a class"
         );
-        assert_eq!(class_of("std::vector<std::pair<int, int>>&"), Some("std::vector".to_string()));
+        assert_eq!(
+            class_of("std::vector<std::pair<int, int>>&"),
+            Some("std::vector".to_string())
+        );
         // **A builtin is not a class**, which is why `parse_type_spelling` carries the language's own list of words:
         // reading `int` as a name would make a member access on an `int` ask the index for a class called `int` and
         // report "nothing declares it" — which a reader takes as "this class is missing" rather than "this is not a
@@ -2033,4 +2100,3 @@ mod tests {
         assert!(Arc::ptr_eq(to, &pointee));
     }
 }
-

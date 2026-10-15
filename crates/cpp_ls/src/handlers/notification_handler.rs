@@ -6,8 +6,8 @@ use lsp_types::{
     CancelParams, DidChangeConfigurationParams, NumberOrString,
     notification::{
         Cancel, DidChangeConfiguration, DidChangeTextDocument, DidChangeWatchedFiles,
-        DidCloseTextDocument, DidOpenTextDocument, DidSaveTextDocument, Notification as LspNotification,
-        SetTrace,
+        DidCloseTextDocument, DidOpenTextDocument, DidSaveTextDocument,
+        Notification as LspNotification, SetTrace,
     },
 };
 

@@ -1004,7 +1004,10 @@ fn interface_units_are_found_by_module_name() {
 fn a_module_beside_the_importing_file_is_found_from_that_file() {
     let files = MemoryFiles::new()
         .with_file("src/main.cpp", "import mathlib;\n")
-        .with_file("src/mathlib.ixx", "export module mathlib;\nexport int add(int, int);\n");
+        .with_file(
+            "src/mathlib.ixx",
+            "export module mathlib;\nexport int add(int, int);\n",
+        );
 
     let (graph, _interner) = scan(&files, "src/main.cpp");
 
@@ -1027,9 +1030,7 @@ fn a_module_beside_the_importing_file_is_found_from_that_file() {
 /// `<iostream>` from the include path.
 #[test]
 fn a_header_unit_makes_the_headers_declarations_visible() {
-    use cpp_code_analysis::{
-        DiskFiles, Known, OpenDocuments, Session, SessionFiles, WatchFilter,
-    };
+    use cpp_code_analysis::{DiskFiles, Known, OpenDocuments, Session, SessionFiles, WatchFilter};
 
     let memory = MemoryFiles::new()
         .with_file(
@@ -1074,9 +1075,7 @@ fn a_header_unit_makes_the_headers_declarations_visible() {
 /// none.
 #[test]
 fn only_exported_names_are_visible_through_an_import() {
-    use cpp_code_analysis::{
-        DiskFiles, Known, OpenDocuments, Session, SessionFiles, WatchFilter,
-    };
+    use cpp_code_analysis::{DiskFiles, Known, OpenDocuments, Session, SessionFiles, WatchFilter};
 
     let memory = MemoryFiles::new()
         .with_file(
@@ -1135,9 +1134,7 @@ fn only_exported_names_are_visible_through_an_import() {
 /// `lib/modules/std.ixx` is its sibling, and the importing file is in neither directory.
 #[test]
 fn a_module_whose_interface_unit_is_outside_the_project_is_read_in() {
-    use cpp_code_analysis::{
-        DiskFiles, Known, OpenDocuments, Session, SessionFiles, WatchFilter,
-    };
+    use cpp_code_analysis::{DiskFiles, Known, OpenDocuments, Session, SessionFiles, WatchFilter};
 
     let files = MemoryFiles::new()
         .with_file(
@@ -1156,14 +1153,19 @@ fn a_module_whose_interface_unit_is_outside_the_project_is_read_in() {
     // Before the read: the import resolves to a file the index has never seen, so `std::string` is unknown. This is
     // the state the test exists to change, and asserting it first is what makes the second assertion mean something
     // — a `Yes` here would say the answer came from somewhere other than the module.
-    let before = session.index().definition("std::string", Path::new("src/main.cpp"));
+    let before = session
+        .index()
+        .definition("std::string", Path::new("src/main.cpp"));
     assert!(
         !matches!(before, Known::Yes(_)),
         "no summary of `lib/modules/std.ixx` exists yet, so nothing can answer for `std`: {before:?}"
     );
 
     let read_in = session.read_the_modules_a_file_imports(Path::new("src/main.cpp"));
-    assert_eq!(read_in, 1, "one interface unit: `std.ixx`, and nothing else");
+    assert_eq!(
+        read_in, 1,
+        "one interface unit: `std.ixx`, and nothing else"
+    );
 
     assert_eq!(
         session.index().interface_unit_of("std"),
@@ -1171,7 +1173,9 @@ fn a_module_whose_interface_unit_is_outside_the_project_is_read_in() {
         "and the index now knows which file an `import std;` reaches"
     );
 
-    let after = session.index().definition("std::string", Path::new("src/main.cpp"));
+    let after = session
+        .index()
+        .definition("std::string", Path::new("src/main.cpp"));
     assert!(
         matches!(after, Known::Yes(_)),
         "`std::string` is declared in the header the interface unit includes: {after:?}"
@@ -1201,9 +1205,7 @@ fn a_module_whose_interface_unit_is_outside_the_project_is_read_in() {
 /// the module and an `#include` line, with no declarations of its own.
 #[test]
 fn a_names_imported_from_the_standard_module_are_offered_after_the_scope() {
-    use cpp_code_analysis::{
-        DiskFiles, OpenDocuments, Session, SessionFiles, WatchFilter,
-    };
+    use cpp_code_analysis::{DiskFiles, OpenDocuments, Session, SessionFiles, WatchFilter};
 
     let main = "import std;\n\nstd::string greeting{\"hi\"};\n";
     let files = MemoryFiles::new()
@@ -1211,10 +1213,7 @@ fn a_names_imported_from_the_standard_module_are_offered_after_the_scope() {
             "lib/modules/std.ixx",
             "export module std;\n#include <string>\n#include <vector>\n",
         )
-        .with_file(
-            "lib/include/string",
-            "namespace std { class string {}; }\n",
-        )
+        .with_file("lib/include/string", "namespace std { class string {}; }\n")
         .with_file(
             "lib/include/vector",
             "namespace std { template <class T> class vector {}; }\n",
@@ -1240,7 +1239,10 @@ fn a_names_imported_from_the_standard_module_are_offered_after_the_scope() {
     // when the popup appears. The offset is found from the text rather than written as a number, because a fixture
     // edited above must not silently move the question.
     let after_the_scope = main.find("std::").expect("the fixture writes `std::`") + "std::".len();
-    let found = session.completions(&view, cpp_code_analysis::file::coordinates::FileOffset::new(after_the_scope));
+    let found = session.completions(
+        &view,
+        cpp_code_analysis::file::coordinates::FileOffset::new(after_the_scope),
+    );
 
     let labels: Vec<&str> = found.items.iter().map(|item| item.label.as_str()).collect();
 
@@ -1268,20 +1270,14 @@ fn a_names_imported_from_the_standard_module_are_offered_after_the_scope() {
 /// import is on, and that is the half that needs the file's tree rather than its summary.
 #[test]
 fn an_import_nothing_declares_gets_a_note_on_the_line_that_wrote_it() {
-    use cpp_code_analysis::{
-        DiskFiles, OpenDocuments, Session, SessionFiles, WatchFilter,
-    };
+    use cpp_code_analysis::{DiskFiles, OpenDocuments, Session, SessionFiles, WatchFilter};
 
     let source = "// a file whose module is not in this project\nimport mylib;\n\nint main() { return 0; }\n";
     let files = MemoryFiles::new().with_file("src/main.cpp", source);
 
     let providers = SessionFiles::new(OpenDocuments::new(), files);
-    let mut session = Session::with_config(
-        ".",
-        providers,
-        WatchFilter::new("."),
-        CompilerConfig::new(),
-    );
+    let mut session =
+        Session::with_config(".", providers, WatchFilter::new("."), CompilerConfig::new());
     session.add_project_files([std::path::PathBuf::from("src/main.cpp")]);
     // **The ask, and then the pump**: `Session::view` is a request for the cooked reading and answers `None` until
     // something has asked for it — the pair every other fixture in this workspace uses.
@@ -1329,12 +1325,8 @@ fn an_import_nothing_declares_gets_a_note_on_the_line_that_wrote_it() {
         .with_file("src/main.cpp", "import mylib;\n")
         .with_file("src/mylib.ixx", "export module mylib;\n");
     let providers = SessionFiles::new(OpenDocuments::new(), files);
-    let mut session = Session::with_config(
-        ".",
-        providers,
-        WatchFilter::new("."),
-        CompilerConfig::new(),
-    );
+    let mut session =
+        Session::with_config(".", providers, WatchFilter::new("."), CompilerConfig::new());
     session.add_project_files([
         std::path::PathBuf::from("src/main.cpp"),
         std::path::PathBuf::from("src/mylib.ixx"),
@@ -1365,9 +1357,7 @@ fn an_import_nothing_declares_gets_a_note_on_the_line_that_wrote_it() {
 /// naming resolution is exercised as well as the graph.
 #[test]
 fn a_partitions_names_reach_a_file_that_imports_the_module() {
-    use cpp_code_analysis::{
-        DiskFiles, Known, OpenDocuments, Session, SessionFiles, WatchFilter,
-    };
+    use cpp_code_analysis::{DiskFiles, Known, OpenDocuments, Session, SessionFiles, WatchFilter};
 
     let files = MemoryFiles::new()
         .with_file(
@@ -1382,15 +1372,14 @@ fn a_partitions_names_reach_a_file_that_imports_the_module() {
              export int rectangle(int, int);\n\
              export int square(int);\n",
         )
-        .with_file("partitions.cpp", "import shapes;\nint area = rectangle(3, 4);\n");
+        .with_file(
+            "partitions.cpp",
+            "import shapes;\nint area = rectangle(3, 4);\n",
+        );
 
     let providers = SessionFiles::new(OpenDocuments::new(), files);
-    let mut session = Session::with_config(
-        ".",
-        providers,
-        WatchFilter::new("."),
-        CompilerConfig::new(),
-    );
+    let mut session =
+        Session::with_config(".", providers, WatchFilter::new("."), CompilerConfig::new());
     session.add_project_files([
         std::path::PathBuf::from("shapes.cppm"),
         std::path::PathBuf::from("shapes-area.cppm"),
@@ -1399,7 +1388,9 @@ fn a_partitions_names_reach_a_file_that_imports_the_module() {
     session.index_everything();
 
     // The file that says `import shapes;` sees the interface unit's own name…
-    let perimeter = session.index().definition("perimeter", Path::new("partitions.cpp"));
+    let perimeter = session
+        .index()
+        .definition("perimeter", Path::new("partitions.cpp"));
     assert!(
         matches!(perimeter, Known::Yes(_)),
         "`perimeter` is declared in the interface unit itself: {perimeter:?}"
@@ -1407,7 +1398,9 @@ fn a_partitions_names_reach_a_file_that_imports_the_module() {
 
     // …and the partition's names, which are in another file that only the module's re-export reaches.
     for name in ["rectangle", "square"] {
-        let found = session.index().definition(name, Path::new("partitions.cpp"));
+        let found = session
+            .index()
+            .definition(name, Path::new("partitions.cpp"));
 
         assert!(
             matches!(found, Known::Yes(_)),
@@ -1430,21 +1423,15 @@ fn a_partitions_names_reach_a_file_that_imports_the_module() {
 /// fixture **with** the partition file present must produce no note at all.
 #[test]
 fn a_partition_the_project_does_not_have_gets_a_note_about_its_module() {
-    use cpp_code_analysis::{
-        DiskFiles, OpenDocuments, Session, SessionFiles, WatchFilter,
-    };
+    use cpp_code_analysis::{DiskFiles, OpenDocuments, Session, SessionFiles, WatchFilter};
 
     let interface = "export module shapes;\nexport import :area;\n";
 
     // The partition's file is missing: the analysis knows the module `shapes` — and nothing declares `:area`.
     let files = MemoryFiles::new().with_file("src/shapes.cppm", interface);
     let providers = SessionFiles::new(OpenDocuments::new(), files);
-    let mut session = Session::with_config(
-        ".",
-        providers,
-        WatchFilter::new("."),
-        CompilerConfig::new(),
-    );
+    let mut session =
+        Session::with_config(".", providers, WatchFilter::new("."), CompilerConfig::new());
     session.add_project_files([std::path::PathBuf::from("src/shapes.cppm")]);
     // **The ask, and then the pump** — see the note on the fixture above.
     session.want_cooked_reading(std::path::Path::new("src/shapes.cppm"));
@@ -1473,12 +1460,8 @@ fn a_partition_the_project_does_not_have_gets_a_note_about_its_module() {
             "export module shapes:area;\nexport int rectangle(int, int);\n",
         );
     let providers = SessionFiles::new(OpenDocuments::new(), files);
-    let mut session = Session::with_config(
-        ".",
-        providers,
-        WatchFilter::new("."),
-        CompilerConfig::new(),
-    );
+    let mut session =
+        Session::with_config(".", providers, WatchFilter::new("."), CompilerConfig::new());
     session.add_project_files([
         std::path::PathBuf::from("src/shapes.cppm"),
         std::path::PathBuf::from("src/shapes-area.cppm"),
@@ -1497,16 +1480,17 @@ fn a_partition_the_project_does_not_have_gets_a_note_about_its_module() {
 
 #[test]
 fn an_import_makes_the_modules_names_visible() {
-    use cpp_code_analysis::{
-        DiskFiles, Known, OpenDocuments, Session, SessionFiles, WatchFilter,
-    };
+    use cpp_code_analysis::{DiskFiles, Known, OpenDocuments, Session, SessionFiles, WatchFilter};
 
     let mut memory = MemoryFiles::new()
         .with_file(
             "mathlib.ixx",
             "export module mathlib;\nexport namespace mathlib { int add(int, int); }\n",
         )
-        .with_file("main.cpp", "import mathlib;\nint f() { return mathlib::add(1, 2); }\n");
+        .with_file(
+            "main.cpp",
+            "import mathlib;\nint f() { return mathlib::add(1, 2); }\n",
+        );
 
     memory = memory.with_file("unrelated.h", "int elsewhere;\n");
 
@@ -1534,5 +1518,3 @@ fn an_import_makes_the_modules_names_visible() {
 
     let _ = DiskFiles;
 }
-
-

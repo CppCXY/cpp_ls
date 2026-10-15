@@ -20,9 +20,15 @@ fn main() {
         eprintln!("usage: env_probe <include-dir> <file> <offset> <name>");
         std::process::exit(2);
     };
-    let file = args.get(1).cloned().unwrap_or_else(|| "vcruntime.h".to_string());
+    let file = args
+        .get(1)
+        .cloned()
+        .unwrap_or_else(|| "vcruntime.h".to_string());
     let offset: usize = args.get(2).and_then(|v| v.parse().ok()).unwrap_or(0);
-    let name = args.get(3).cloned().unwrap_or_else(|| "__cplusplus".to_string());
+    let name = args
+        .get(3)
+        .cloned()
+        .unwrap_or_else(|| "__cplusplus".to_string());
 
     let path = std::path::PathBuf::from(dir).join(&file);
     let mut session = cpp_code_analysis::Session::open(
@@ -41,7 +47,10 @@ fn main() {
     match marked.lookup(&name) {
         cpp_code_analysis::Lookup::Defined(definition) => {
             let body: Vec<&str> = definition.body.significant().map(|t| t.text()).collect();
-            println!("  Marked (the query path)      {name} -> Defined  body = {:?}", body.join(" "));
+            println!(
+                "  Marked (the query path)      {name} -> Defined  body = {:?}",
+                body.join(" ")
+            );
         }
         other => println!("  Marked (the query path)      {name} -> {other:?}"),
     }

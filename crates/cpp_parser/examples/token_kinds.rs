@@ -19,7 +19,9 @@ use cpp_parser::{CppKind, CppParser, CppTokenKind, ParserConfig};
 const DEFAULT_SOURCE: &str = "int main() { int x = 0; if (x = 1) { return x; } return 0; }\n";
 
 fn main() {
-    let source = std::env::args().nth(1).unwrap_or_else(|| DEFAULT_SOURCE.to_string());
+    let source = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| DEFAULT_SOURCE.to_string());
     let tree = CppParser::parse(&source, ParserConfig::default());
 
     println!("--- every token, in order ---");

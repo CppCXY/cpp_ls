@@ -52,7 +52,9 @@ fn main() {
     if text.is_empty() {
         // Said out loud rather than measured around: an empty file seeds a closure of one, and every count below
         // would then be about nothing.
-        eprintln!("warning: {root} could not be read or is empty — the numbers below are about no corpus");
+        eprintln!(
+            "warning: {root} could not be read or is empty — the numbers below are about no corpus"
+        );
     }
 
     let opened = std::time::Instant::now();
@@ -89,7 +91,8 @@ fn main() {
         let mut step_ms: Vec<u128> = Vec::new();
         let draining = std::time::Instant::now();
         let mut heaviest: Vec<(u128, String, usize, String)> = Vec::new();
-        let mut by_depth: std::collections::BTreeMap<usize, (u128, usize)> = std::collections::BTreeMap::new();
+        let mut by_depth: std::collections::BTreeMap<usize, (u128, usize)> =
+            std::collections::BTreeMap::new();
         while session.pending() > 0 {
             let started = std::time::Instant::now();
             let worked = session.advance(1);
@@ -115,7 +118,11 @@ fn main() {
             "\n--- the index queue, one step at a time ---\n  {} step(s) in {} ms: mean {} ms, median {} ms, p90 {} ms, max {} ms",
             step_ms.len(),
             drained.as_millis(),
-            if step_ms.is_empty() { 0 } else { drained.as_millis() as usize / step_ms.len() },
+            if step_ms.is_empty() {
+                0
+            } else {
+                drained.as_millis() as usize / step_ms.len()
+            },
             pick(sorted.len() / 2),
             pick(sorted.len() * 9 / 10),
             pick(sorted.len().saturating_sub(1)),
@@ -126,7 +133,11 @@ fn main() {
         let total: u128 = step_ms.iter().sum();
         println!(
             "\n  the ten heaviest steps are {top} ms of {total} ms ({:.0}%)",
-            if total == 0 { 0.0 } else { top as f64 * 100.0 / total as f64 }
+            if total == 0 {
+                0.0
+            } else {
+                top as f64 * 100.0 / total as f64
+            }
         );
         for (ms, path, depth, outcome) in heaviest.iter().take(12) {
             println!("    {ms:>6} ms  depth {depth}  {outcome:<8}  {path}");
@@ -193,7 +204,8 @@ fn main() {
 
     let mut checked = 0usize;
     let mut refused = 0usize;
-    let mut by_check: std::collections::BTreeMap<&'static str, usize> = std::collections::BTreeMap::new();
+    let mut by_check: std::collections::BTreeMap<&'static str, usize> =
+        std::collections::BTreeMap::new();
     let mut shown = 0usize;
 
     for path in &paths {
@@ -226,7 +238,6 @@ fn main() {
         "  refused      {refused} file(s) (no cooked reading: the ask above did not reach them)"
     );
 
-
     println!("\n--- what was found, per check ---");
     let mut ran = 0usize;
     for code in cpp_code_analysis::sema::check::DiagnosticCode::ALL {
@@ -234,12 +245,8 @@ fn main() {
         ran += 1;
         println!("  {count:>5}  {}", code.name());
     }
-    println!("  {ran} check(s) accounted for, {} with a finding", by_check.len());
+    println!(
+        "  {ran} check(s) accounted for, {} with a finding",
+        by_check.len()
+    );
 }
-
-
-
-
-
-
-

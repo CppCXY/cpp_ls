@@ -30,7 +30,6 @@
 //! member list from the model. A chain like `a.b.c` therefore asks about `a.b` first, and is only judged when that
 //! answer is a type whose member list was read.
 
-
 use super::{Check, CheckContext, DiagnosticCode};
 
 /// **`undefined-field`** — see the module documentation.
@@ -54,7 +53,9 @@ impl Check for UndefinedField {
             let crate::Known::Yes((object, _)) = context.type_of(&access.object) else {
                 continue;
             };
-            let crate::Known::Yes(members) = context.model.members_of(&object.class_name().unwrap_or_default())
+            let crate::Known::Yes(members) = context
+                .model
+                .members_of(&object.class_name().unwrap_or_default())
             else {
                 // Not known to be a class, or known and never read — see the module documentation.
                 continue;
@@ -83,6 +84,3 @@ impl Check for UndefinedField {
         }
     }
 }
-
-
-

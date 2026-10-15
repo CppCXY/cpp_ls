@@ -205,7 +205,11 @@ fn an_argument_is_expanded_before_a_nested_stringize_sees_it() {
         "S(LEVEL) S_(LEVEL)",
     );
 
-    assert_eq!(text(&expansion), ["\"0\"", "\"LEVEL\""], "`#x` directly on the argument stringizes the name");
+    assert_eq!(
+        text(&expansion),
+        ["\"0\"", "\"LEVEL\""],
+        "`#x` directly on the argument stringizes the name"
+    );
 }
 
 /// An operand of `##` is used as written: pre-expanding it would paste the value instead of the name.

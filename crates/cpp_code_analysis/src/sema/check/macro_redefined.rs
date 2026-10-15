@@ -119,6 +119,3 @@ fn bodies_are_equal(context: &CheckContext<'_>, first: &MacroFact, second: &Macr
 
     text(first) == text(second)
 }
-
-
-

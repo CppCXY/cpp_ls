@@ -37,7 +37,6 @@ use crate::util::uri_to_file_path;
 
 pub use client_config::{ClientConfig, get_client_config};
 
-
 /// How long the pump sleeps when there is nothing to read, before looking again.
 ///
 /// A safety net rather than the mechanism: an edit *wakes* the pump (`AnalysisState::wake`), and a wake-up that
@@ -182,13 +181,16 @@ async fn open_session(context: &ServerContextSnapshot) -> Option<PathBuf> {
         let count = open_files.len();
         context
             .analysis()
-            .update_session("initialized: the files the client had open", move |session| {
-                for (uri, text) in &open_files {
-                    if let Some(path) = uri_to_file_path(uri) {
-                        session.did_open(path, text);
+            .update_session(
+                "initialized: the files the client had open",
+                move |session| {
+                    for (uri, text) in &open_files {
+                        if let Some(path) = uri_to_file_path(uri) {
+                            session.did_open(path, text);
+                        }
                     }
-                }
-            })
+                },
+            )
             .await;
         log::info!("re-marked {count} open buffers as the text the analysis reads");
     }
@@ -219,7 +221,10 @@ fn report_project_configuration(context: &ServerContextSnapshot) {
 
     if report.problems.is_empty() {
         if let Some(path) = &report.path {
-            log::info!("project configuration: {} (nothing to report)", path.display());
+            log::info!(
+                "project configuration: {} (nothing to report)",
+                path.display()
+            );
         }
     } else {
         let path = report
@@ -288,11 +293,7 @@ fn report_project_configuration(context: &ServerContextSnapshot) {
 /// again, and it is one task rather than a rule every handler would have to remember.
 async fn index_in_background(context: ServerContextSnapshot) {
     tokio::spawn(async move {
-        let version = context
-            .workspace_manager()
-            .lock()
-            .await
-            .workspace_version();
+        let version = context.workspace_manager().lock().await.workspace_version();
         let mut first_pass = true;
         // What the last slice left to do — see the drain below, which is the moment a file's **cooked** reading
         // changes hands.
@@ -301,13 +302,7 @@ async fn index_in_background(context: ServerContextSnapshot) {
         loop {
             // A reload bumps the version and starts a pump of its own: this one stops rather than racing it for
             // the write lock, because its idea of what the project is is the one that was replaced.
-            if context
-                .workspace_manager()
-                .lock()
-                .await
-                .workspace_version()
-                != version
-            {
+            if context.workspace_manager().lock().await.workspace_version() != version {
                 log::debug!("the workspace was reloaded; this indexing pass stops");
                 return;
             }
@@ -550,4 +545,3 @@ pub fn workspace_roots(params: &InitializeParams) -> Vec<PathBuf> {
 
     roots
 }
-

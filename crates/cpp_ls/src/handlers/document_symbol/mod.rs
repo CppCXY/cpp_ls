@@ -30,8 +30,8 @@
 
 use cpp_code_analysis::{FileView, OutlineSymbol};
 use lsp_types::{
-    ClientCapabilities, DocumentSymbol, DocumentSymbolParams, DocumentSymbolResponse, OneOf, Position, Range,
-    ServerCapabilities,
+    ClientCapabilities, DocumentSymbol, DocumentSymbolParams, DocumentSymbolResponse, OneOf,
+    Position, Range, ServerCapabilities,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -159,5 +159,3 @@ impl RegisterCapabilities for DocumentSymbolCapabilities {
         server_capabilities.document_symbol_provider = Some(OneOf::Left(true));
     }
 }
-
-

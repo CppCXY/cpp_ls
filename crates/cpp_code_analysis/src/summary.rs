@@ -26,11 +26,11 @@
 
 use std::path::Path;
 
+use crate::Marked;
 use crate::cache::SummaryKey;
 use crate::guard::{Branch, Region, Visibility};
 use crate::index::environment::a_guard_is_in_force;
 use crate::macros::MacroDef;
-use crate::Marked;
 
 /// A declaration the file writes: enough to find it, name it, and say what kind of thing it is.
 ///
@@ -661,10 +661,8 @@ fn definition_written_at(event: &TuEvent, body: &str) -> Option<crate::macros::M
 
     // The macro's own text in that file: its name and its replacement list. Not the whole directive — the
     // `#define` head is not part of what a fact records — which is what "reveal this macro" wants anyway.
-    let range = cpp_parser::SourceRange::new(
-        event.at,
-        body_range.end_offset().saturating_sub(event.at),
-    );
+    let range =
+        cpp_parser::SourceRange::new(event.at, body_range.end_offset().saturating_sub(event.at));
 
     let mut definition = crate::macros::parse_define(&tokens, range)?;
     definition.written_in = Some(crate::macros::MacroFile::Frame(event.frame));
@@ -683,10 +681,7 @@ fn lex_in_place(text: &str, at: usize) -> Vec<crate::token::Token> {
             crate::token::Token::new(
                 token.kind,
                 &text[token.range.start_offset..token.range.end_offset()],
-                cpp_parser::SourceRange::new(
-                    at + token.range.start_offset,
-                    token.range.length,
-                ),
+                cpp_parser::SourceRange::new(at + token.range.start_offset, token.range.length),
             )
         })
         .collect()
@@ -891,9 +886,9 @@ pub fn macros_from_direct_includes_with_bodies<'a>(
             // The body's **text**, sliced out of the file that defines it by the fact's own range — the piece
             // expansion reads. `None` when the body is empty (`#define FOO`), or when the range does not index
             // the source (a summary from a different revision of that file, which is the caller's to detect).
-            let body_text = fact
-                .body_range
-                .and_then(|range| source.get(range.start_offset..range.start_offset + range.length));
+            let body_text = fact.body_range.and_then(|range| {
+                source.get(range.start_offset..range.start_offset + range.length)
+            });
 
             entries.push(if fact.kind.is_definition() {
                 cpp_parser::IncludedMacro::defined_with_body_and_parameters(
@@ -976,9 +971,6 @@ struct UnitState {
     /// answer for the ones below it. Between two such changes, an answer depends on nothing but *(region, branch)* —
     /// see the memo in `walk_one_file` for why that pair is the whole key.
     generation: u64,
-
-
-
 }
 
 /// One definition the unit has in force: what it says, and where it was said.
@@ -989,8 +981,6 @@ struct Binding {
     defined_in: Box<std::path::Path>,
     defined_at: usize,
 }
-
-
 
 impl UnitState {
     fn define(
@@ -1030,12 +1020,11 @@ pub struct MacroDefinitions {
     /// define the same name twice (`#define WIDTH 80` above an `#undef` and a second `#define WIDTH 120`), and a
     /// cache keyed by the name would hand the second fact the first one's definition — a wrong expansion rather than
     /// a missing one. A fact is identified by the range its name is written at, which is unique in its file.
-    parsed: std::collections::HashMap<(std::path::PathBuf, usize), Option<std::sync::Arc<MacroDef>>>,
-
+    parsed:
+        std::collections::HashMap<(std::path::PathBuf, usize), Option<std::sync::Arc<MacroDef>>>,
 }
 
 impl MacroDefinitions {
-
     /// The definition behind one fact, read from the file that wrote it.
     ///
     /// The `#define` is **put back together** from what the fact carries — its name, and the rest of its logical
@@ -1125,7 +1114,9 @@ fn read_back_a_define(source: &str, fact: &MacroFact) -> Option<MacroDef> {
     while index < bytes.len() {
         match bytes[index] {
             b'\\' if bytes.get(index + 1) == Some(&b'\n') => index += 2,
-            b'\\' if bytes.get(index + 1) == Some(&b'\r') && bytes.get(index + 2) == Some(&b'\n') => {
+            b'\\'
+                if bytes.get(index + 1) == Some(&b'\r') && bytes.get(index + 2) == Some(&b'\n') =>
+            {
                 index += 3;
             }
             b'\n' => break,
@@ -1206,7 +1197,9 @@ impl crate::condition::MacroValues for UnitMacros<'_> {
                     None => "object-like".to_string(),
                     Some(list) => format!(
                         "fn-like({:?})",
-                        list.iter().map(|held| held.name.as_ref()).collect::<Vec<_>>()
+                        list.iter()
+                            .map(|held| held.name.as_ref())
+                            .collect::<Vec<_>>()
                     ),
                 };
                 let body: Vec<&str> = binding
@@ -1362,7 +1355,8 @@ fn walk_the_translation_unit<'a>(
         };
         let from_offset = all_from.unwrap_or(include.range.start_offset + include.range.length);
 
-        let mut seen: std::collections::HashSet<&std::path::Path> = std::collections::HashSet::new();
+        let mut seen: std::collections::HashSet<&std::path::Path> =
+            std::collections::HashSet::new();
         walk_one_file(
             root,
             from_offset,
@@ -1579,7 +1573,8 @@ impl TranslationUnit {
             definitions: std::collections::HashMap::new(),
             generation: 0,
         };
-        let mut seen: std::collections::HashSet<&std::path::Path> = std::collections::HashSet::new();
+        let mut seen: std::collections::HashSet<&std::path::Path> =
+            std::collections::HashSet::new();
 
         // The root is walked by the same function every included file is: it *is* a file of the unit, and a
         // second entry point for it would be a second place for the include order to be got wrong.
@@ -1625,7 +1620,8 @@ impl TranslationUnit {
         conditional_facts: usize,
         facts_in_force: usize,
     ) -> Self {
-        let mut entered: std::collections::HashMap<std::path::PathBuf, u32> = std::collections::HashMap::new();
+        let mut entered: std::collections::HashMap<std::path::PathBuf, u32> =
+            std::collections::HashMap::new();
         for (index, frame) in frames.iter().enumerate() {
             entered.entry(frame.file.clone()).or_insert(index as u32);
         }
@@ -1746,12 +1742,17 @@ impl TranslationUnit {
             }
         }
 
-        UnitDefinitions { by_event, ..counted }
+        UnitDefinitions {
+            by_event,
+            ..counted
+        }
     }
 
     /// The path of a frame — how a [`crate::macros::MacroFile::Frame`] becomes something a consumer can open.
     pub fn frame_file(&self, frame: u32) -> Option<&std::path::Path> {
-        self.frames.get(frame as usize).map(|frame| frame.file.as_path())
+        self.frames
+            .get(frame as usize)
+            .map(|frame| frame.file.as_path())
     }
 
     /// How many of those facts carry a **replacement list**, and how many are in the **in-force** channel.
@@ -1771,7 +1772,11 @@ impl TranslationUnit {
                     .is_some_and(|text| !text.trim().is_empty())
             })
             .count();
-        let in_force = self.events.iter().filter(|event| !event.unconditional).count();
+        let in_force = self
+            .events
+            .iter()
+            .filter(|event| !event.unconditional)
+            .count();
         (with_a_body, in_force)
     }
 
@@ -1958,7 +1963,10 @@ impl UnitCook<'_> {
     fn stitch(&self, frame: u32, out: &mut RenderedUnit) {
         let included = &self.children[frame as usize];
 
-        let Some(text) = self.sources.source_of(&self.unit.frames[frame as usize].file) else {
+        let Some(text) = self
+            .sources
+            .source_of(&self.unit.frames[frame as usize].file)
+        else {
             // A file nobody has the text of: the includes it names are still stitched (the walk reached them
             // through it), and the hole is counted rather than cooked as an empty file.
             out.missing += 1;
@@ -2011,7 +2019,8 @@ impl UnitCook<'_> {
         }
 
         if depth != 0 {
-            out.unbalanced.push(self.unit.frames[frame as usize].file.clone());
+            out.unbalanced
+                .push(self.unit.frames[frame as usize].file.clone());
         }
 
         // **`#pragma once`, for a file that has nothing else to carry it.**
@@ -2194,12 +2203,7 @@ impl TranslationUnit {
     /// include contributes its own definitions at the point it is included. Asking without a position means asking
     /// about the end of the file, which is how a name that `xtr1common:22` had `#undef`ed still read as defined — see
     /// [`crate::preprocess::cooked::attribute_support`], where that mistake cost the `[[msvc::…]]` attributes.
-    pub fn macro_at(
-        &self,
-        file: &std::path::Path,
-        name: &str,
-        offset: usize,
-    ) -> Option<MacroAt> {
+    pub fn macro_at(&self, file: &std::path::Path, name: &str, offset: usize) -> Option<MacroAt> {
         // **The file is matched the way this crate matches every path**, not by `Path` equality: a caller reaching for
         // a header from an `#include <...>` spelling hands over forward slashes and whatever case it typed, while the
         // walk recorded the path the filesystem gave it. Comparing raw paths made every question about a system header
@@ -2459,9 +2463,10 @@ impl cpp_parser::MacroFacts for MacroView<'_> {
             return None;
         }
         match (event.function_like, event.body) {
-            (Some(function_like), Some(body)) => {
-                Some(cpp_parser::SymbolKind::Macro { function_like, body })
-            }
+            (Some(function_like), Some(body)) => Some(cpp_parser::SymbolKind::Macro {
+                function_like,
+                body,
+            }),
             // An `#undef`, or a definition whose shape the index could not read: the name is a fact, the shape is
             // not. See the type's note on the two channels.
             _ => None,
@@ -2490,12 +2495,14 @@ impl cpp_parser::MacroFacts for MacroView<'_> {
     }
 
     fn parameters_in_force(&self, name: &str) -> Option<&str> {
-        self.the_body_in_force(name).and_then(|event| event.parameters.as_deref())
+        self.the_body_in_force(name)
+            .and_then(|event| event.parameters.as_deref())
     }
 
     fn body_in_force_is_object_like(&self, name: &str) -> bool {
         matches!(
-            self.the_body_in_force(name).map(|event| event.function_like),
+            self.the_body_in_force(name)
+                .map(|event| event.function_like),
             Some(Some(false))
         )
     }
@@ -2524,7 +2531,10 @@ impl cpp_parser::MacroFacts for MacroView<'_> {
         self.unit
             .by_name
             .values()
-            .filter(|indices| self.last_visible(indices, |event| event.unconditional).is_some())
+            .filter(|indices| {
+                self.last_visible(indices, |event| event.unconditional)
+                    .is_some()
+            })
             .count()
     }
 
@@ -2875,7 +2885,9 @@ impl RenderedUnit {
 
     /// The path a span's file index names.
     pub fn file_of(&self, file: u32) -> Option<&std::path::Path> {
-        self.files.get(file as usize).map(std::path::PathBuf::as_path)
+        self.files
+            .get(file as usize)
+            .map(std::path::PathBuf::as_path)
     }
 
     /// How many tokens the unit's stream has.
@@ -2923,11 +2935,9 @@ impl RenderedUnit {
     /// those keep their space. Same rule as `CookedStream::render`, asked of the field this map already keeps.
     pub(crate) fn push(&mut self, text: &str, file: u32, written: cpp_parser::SourceRange) {
         if !self.text.is_empty() {
-            let touching = self
-                .previous
-                .is_some_and(|(previous_file, previous)| {
-                    previous_file == file && previous.end_offset() == written.start_offset
-                });
+            let touching = self.previous.is_some_and(|(previous_file, previous)| {
+                previous_file == file && previous.end_offset() == written.start_offset
+            });
 
             if self.pending_break {
                 self.text.push('\n');
@@ -3024,7 +3034,6 @@ impl RenderedUnit {
         out
     }
 
-
     /// **Only the tokens `file` itself wrote** (a token a macro of its own produced counts) — what a file whose brace
     /// had to be given up is read from, so that its own scopes are all its own.
     ///
@@ -3034,10 +3043,16 @@ impl RenderedUnit {
         let mut out = self.empty_like();
         for span in &self.spans {
             if span.file == file {
-                if span.cooked.start_offset > 0 && self.text.as_bytes()[span.cooked.start_offset - 1] == b'\n' {
+                if span.cooked.start_offset > 0
+                    && self.text.as_bytes()[span.cooked.start_offset - 1] == b'\n'
+                {
                     out.break_line_before_next();
                 }
-                out.push(&self.text[span.cooked.start_offset..span.cooked.end_offset()], span.file, span.written);
+                out.push(
+                    &self.text[span.cooked.start_offset..span.cooked.end_offset()],
+                    span.file,
+                    span.written,
+                );
             }
         }
         out
@@ -3103,9 +3118,9 @@ impl<'a> Walked<'a> {
         let macros = by_name
             .into_values()
             .map(|(from_offset, fact, source)| {
-                let body_text = fact
-                    .body_range
-                    .and_then(|range| source.get(range.start_offset..range.start_offset + range.length));
+                let body_text = fact.body_range.and_then(|range| {
+                    source.get(range.start_offset..range.start_offset + range.length)
+                });
 
                 if fact.kind.is_definition() {
                     cpp_parser::IncludedMacro::defined_with_body_and_parameters(
@@ -3166,9 +3181,6 @@ fn walk_one_file<'a>(
         return;
     }
 
-
-
-
     let Some((file, source)) = look_up(path) else {
         // A file this walk cannot read is a file **outside the analysis**: none of the files the caller indexed.
         // Pretending it defines nothing is the reading every walk here has always taken — a name nobody saw is
@@ -3184,10 +3196,10 @@ fn walk_one_file<'a>(
     // The frame this file occupies in the unit's timeline, when the walk is building one. Entered **after** the
     // two early returns above, so a file that is skipped leaves no frame behind — and closed at the end of this
     // function, which is after every file it includes has been walked, so the frame's subtree is an interval.
-    let frame = walked.timeline.as_mut().map(|timeline| {
-        timeline.enter(path, parent, from_in_parent, file.guards.visit_once)
-    });
-
+    let frame = walked
+        .timeline
+        .as_mut()
+        .map(|timeline| timeline.enter(path, parent, from_in_parent, file.guards.visit_once));
 
     // **One answer per *(region, branch)*, with the generation it was worked out at.**
     //
@@ -3301,9 +3313,9 @@ fn walk_one_file<'a>(
             if matches!(fact.guard, FactGuard::Unconditional) {
                 walked.entries.push((from_offset, fact, source));
             } else if fact.kind.is_definition()
-                && let Some(text) = fact
-                    .body_range
-                    .and_then(|range| source.get(range.start_offset..range.start_offset + range.length))
+                && let Some(text) = fact.body_range.and_then(|range| {
+                    source.get(range.start_offset..range.start_offset + range.length)
+                })
             {
                 let parameters = fact
                     .body_range
@@ -3320,7 +3332,12 @@ fn walk_one_file<'a>(
             // hold what the per-file walk would have collected — including the conditional-but-in-force bodies the
             // second channel carries.
             if let (Some(frame), Some(timeline)) = (frame, walked.timeline.as_mut()) {
-                timeline.record(frame, fact, source, matches!(fact.guard, FactGuard::Unconditional));
+                timeline.record(
+                    frame,
+                    fact,
+                    source,
+                    matches!(fact.guard, FactGuard::Unconditional),
+                );
             }
 
             continue;
@@ -3385,8 +3402,6 @@ fn walk_one_file<'a>(
     if let (Some(frame), Some(timeline)) = (frame, walked.timeline.as_mut()) {
         timeline.leave(frame);
     }
-
-
 }
 
 /// The macros a file's **direct** includes define — the one-hop variant, kept as the measured comparison for the
@@ -3569,7 +3584,10 @@ impl SummaryGuards {
         // starts at its condition, and a position before the first branch's body is not in the region at all.
         let mut current = (0..self.conditionals.len())
             .filter(|index| self.conditionals[*index].contains(offset))
-            .min_by_key(|index| self.span_of(*index as u32).map_or(usize::MAX, |span| span.length));
+            .min_by_key(|index| {
+                self.span_of(*index as u32)
+                    .map_or(usize::MAX, |span| span.length)
+            });
 
         while let Some(index) = current {
             let Some(span) = self.span_of(index as u32) else {
@@ -3583,7 +3601,9 @@ impl SummaryGuards {
                 });
             }
 
-            current = self.conditionals[index].parent.map(|parent| parent as usize);
+            current = self.conditionals[index]
+                .parent
+                .map(|parent| parent as usize);
         }
 
         found
@@ -3646,9 +3666,13 @@ impl SummaryGuards {
         // tokens every time. **The `Branch` caches are cloned with their values**, so a parse kept by
         // `an_expression_holds` is still there on the next question about this region instead of being dropped at
         // the end of the guard that made it.
-        let decoded = conditional
-            .decoded
-            .get_or_init(|| conditional.branches.iter().map(GuardBranch::as_branch).collect());
+        let decoded = conditional.decoded.get_or_init(|| {
+            conditional
+                .branches
+                .iter()
+                .map(GuardBranch::as_branch)
+                .collect()
+        });
 
         Some(Region {
             branches: decoded.clone(),
@@ -3731,7 +3755,11 @@ impl ConditionalRegion {
         self.branches
             .iter()
             .rposition(|branch| branch.body.start_offset <= offset)
-            .or(if self.branches.is_empty() { None } else { Some(0) })
+            .or(if self.branches.is_empty() {
+                None
+            } else {
+                Some(0)
+            })
     }
 
     /// Is there an `#else`? Then one of the branches is taken whatever the conditions say.
@@ -3743,9 +3771,9 @@ impl ConditionalRegion {
 
     /// Does this region's body hold `offset`?
     fn contains(&self, offset: usize) -> bool {
-        self.branches.iter().any(|branch| {
-            branch.body.start_offset <= offset && offset < branch.body.end_offset()
-        })
+        self.branches
+            .iter()
+            .any(|branch| branch.body.start_offset <= offset && offset < branch.body.end_offset())
     }
 }
 
@@ -3782,7 +3810,8 @@ impl GuardBranch {
         };
 
         let mut errors = Vec::new();
-        let mut lexer = cpp_parser::CppLexer::new(text, cpp_parser::LexerConfig::default(), &mut errors);
+        let mut lexer =
+            cpp_parser::CppLexer::new(text, cpp_parser::LexerConfig::default(), &mut errors);
 
         let base = self.range.start_offset;
         lexer
@@ -3794,7 +3823,10 @@ impl GuardBranch {
                     token.kind,
                     text.get(token.range.start_offset..token.range.end_offset())
                         .unwrap_or_default(),
-                    cpp_parser::SourceRange::new(base + token.range.start_offset, token.range.length),
+                    cpp_parser::SourceRange::new(
+                        base + token.range.start_offset,
+                        token.range.length,
+                    ),
                 )
             })
             .collect()
@@ -4016,25 +4048,29 @@ impl FileSummary {
     /// Dropping is the honest answer for a fact whose range cannot be placed: an empty node covers no token, and a
     /// declaration the parser recovered out of nothing has nothing to point at. It is counted so that a caller can
     /// say how much of a reading it could use — see [`MapReport`].
-    pub fn map_into_the_file(&mut self, rendered: &crate::preprocess::cooked::RenderedCooked) -> MapReport {
+    pub fn map_into_the_file(
+        &mut self,
+        rendered: &crate::preprocess::cooked::RenderedCooked,
+    ) -> MapReport {
         let mut report = MapReport::default();
-        let place = |range: cpp_parser::SourceRange, report: &mut MapReport| {
-            match rendered.reported_span(range) {
-                Some(mapped) => {
-                    report.placed += 1;
-                    Some(mapped)
-                }
-                None => {
-                    report.dropped += 1;
-                    None
-                }
+        let place = |range: cpp_parser::SourceRange, report: &mut MapReport| match rendered
+            .reported_span(range)
+        {
+            Some(mapped) => {
+                report.placed += 1;
+                Some(mapped)
+            }
+            None => {
+                report.dropped += 1;
+                None
             }
         };
 
         self.declarations.retain_mut(|fact| {
-            let (Some(range), Some(name_range)) =
-                (place(fact.range, &mut report), place(fact.name_range, &mut report))
-            else {
+            let (Some(range), Some(name_range)) = (
+                place(fact.range, &mut report),
+                place(fact.name_range, &mut report),
+            ) else {
                 // One of the two did not place, and a declaration is kept **whole or not at all**: half of it in
                 // the file and half of it in a rendering is not a smaller answer, it is a wrong one.
                 return false;
@@ -4128,7 +4164,7 @@ pub struct IndexedUnit {
     ///
     /// This used to be called *quarantine*, and the name was the mechanism: the file's tokens left the program
     /// entirely ([`RenderedUnit::without`]), so a file that leaked one brace lost every declaration in it. The plan's
-        /// **How many braces were given up to repair a crossing, and none of them is still in the stream.**
+    /// **How many braces were given up to repair a crossing, and none of them is still in the stream.**
     ///
     /// Counted as the offsets **actually neutralised** — not as the crossings a parse reported, which is a different
     /// number for a reason worth knowing: a parse that reports a crossing out of braces already given up has found
@@ -4138,7 +4174,7 @@ pub struct IndexedUnit {
     /// the declarations nearest those braces are the ones to doubt — not a reason to file nothing. Compare
     /// [`RenderedUnit::unbalanced`], which records a file whose braces do not balance before the parse even runs;
     /// this is the after-the-parse half of the same policy, and it is the one that must not scale up to the whole
-        /// **Crossings the repair could not cure**, one per crossing left in the final parse.
+    /// **Crossings the repair could not cure**, one per crossing left in the final parse.
     ///
     /// The honest counterpart of [`IndexedUnit::repaired`], and it exists because the two can differ: a parser that
     /// reports a crossing out of braces that are *already* markers has nothing left for the repair to give up, so the
@@ -4147,7 +4183,7 @@ pub struct IndexedUnit {
     /// Zero in every case measured, and non-zero is **not** a reason to refuse the reading — it is the same
     /// all-or-nothing gate this whole milestone removed, one level down. What it means is that the files named in
     /// [`IndexedUnit::quarantined`] are the ones whose scopes the program's parse got wrong, and that their own
-        /// Errors the parse of the stream reported.
+    /// Errors the parse of the stream reported.
     ///
     /// Reported per file (each lands in the file it is in) and never the gate — see `repaired`. It was the gate
     /// while the only defence against one file's unclosed scope was to refuse the whole program.
@@ -4271,17 +4307,3 @@ impl DeclKind {
 // stored, not a place that knows about directives. There was a `build_declarations` here that took only a scope
 // tree and filled every guard with `Unconditional`; it was deleted rather than kept, because a function whose
 // contract is "the guards are wrong" is one a caller reaches for by accident.
-
-
-
-
-
-
-
-
-
-
-
-
-
-

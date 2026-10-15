@@ -18,7 +18,10 @@ fn main() {
         eprintln!("usage: member_probe_at <file> <line> <column> [--cook]");
         std::process::exit(2);
     };
-    let offset: usize = args.get(1).and_then(|value| value.parse().ok()).unwrap_or(0);
+    let offset: usize = args
+        .get(1)
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(0);
     let cook = args.iter().any(|argument| argument == "--cook");
 
     let source = std::fs::read_to_string(path).expect("the file is readable");
@@ -28,7 +31,10 @@ fn main() {
     // counted them as `\n` — which is one byte short per line in a file that ends its lines with `\r\n`, so it
     // landed four thousand bytes early and reported "not a member access at that offset". An offset has no such
     // arithmetic in it.
-    let root = path.parent().unwrap_or(std::path::Path::new(".")).to_path_buf();
+    let root = path
+        .parent()
+        .unwrap_or(std::path::Path::new("."))
+        .to_path_buf();
     let mut session = cpp_code_analysis::Session::open(
         root,
         cpp_code_analysis::SessionFiles::new(
@@ -47,13 +53,21 @@ fn main() {
         std::process::exit(2);
     };
 
-    println!("  offset {offset}: {:?}", &source[offset.saturating_sub(20)..(offset + 20).min(source.len())]);
+    println!(
+        "  offset {offset}: {:?}",
+        &source[offset.saturating_sub(20)..(offset + 20).min(source.len())]
+    );
 
     // **The object's type first**, because that is what the class spelling is derived from — and the class spelling
     // is the one thing three hand-guesses could not settle.
     if let Some(access) = cpp_code_analysis::sema::resolve::member_access_at(&view.root, offset) {
         println!("  object: {:?}", access.object.text().to_string().trim());
-        match session.type_at(&view, cpp_code_analysis::file::coordinates::ReadingOffset::new(usize::from(access.object.text_range().start()))) {
+        match session.type_at(
+            &view,
+            cpp_code_analysis::file::coordinates::ReadingOffset::new(usize::from(
+                access.object.text_range().start(),
+            )),
+        ) {
             cpp_code_analysis::Known::Yes(found) => println!("  object type -> {}", found.type_of),
             cpp_code_analysis::Known::No => println!("  object type -> NO"),
             cpp_code_analysis::Known::Unknown(reason) => {
@@ -73,7 +87,11 @@ fn main() {
         offset,
     ) {
         cpp_code_analysis::Known::Yes(found) => {
-            println!("  member -> {} in {}", found.fact.qualified_name(), found.file.display());
+            println!(
+                "  member -> {} in {}",
+                found.fact.qualified_name(),
+                found.file.display()
+            );
         }
         cpp_code_analysis::Known::No => println!("  member -> NO"),
         cpp_code_analysis::Known::Unknown(reason) => {

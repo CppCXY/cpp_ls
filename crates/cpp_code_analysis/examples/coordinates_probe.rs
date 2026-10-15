@@ -85,7 +85,11 @@ fn main() {
     println!("{}", file.display());
     println!(
         "  the view is {} of {} bytes; the file is {} bytes",
-        if view.written_text().is_some() { "a rendering" } else { "the file's own tokens" },
+        if view.written_text().is_some() {
+            "a rendering"
+        } else {
+            "the file's own tokens"
+        },
         view.source.len(),
         text.len()
     );
@@ -121,7 +125,8 @@ fn main() {
                 // **What the analysis answers about that offset**, which is the number the report was really about:
                 // the mapping can be right and the *name* found there still be the wrong one, and the two failures
                 // look identical from a screenshot. `definition_at` is the same call the hover handler makes first.
-                let name = cpp_code_analysis::sema::resolve::name_at(&view.root, in_the_reading.get());
+                let name =
+                    cpp_code_analysis::sema::resolve::name_at(&view.root, in_the_reading.get());
                 println!("        name_at -> {name:?}");
                 match session.definition(&view, in_the_reading) {
                     cpp_code_analysis::Known::Yes(found) => {
@@ -189,6 +194,3 @@ fn main() {
         }
     }
 }
-
-
-

@@ -8,10 +8,10 @@
 //! what is asserted is what a client is shown: the run, the codes, and the two filters a finding passes on its way
 //! out (the config, and the model's three-valued answers).
 
+use cpp_code_analysis::sema::check::{RuleSeverity, RuleTag};
 use cpp_code_analysis::{
     CompilerConfig, DiagnosticCode, MemoryFiles, OpenDocuments, Session, SessionFiles, WatchFilter,
 };
-use cpp_code_analysis::sema::check::{RuleSeverity, RuleTag};
 
 /// **The codes a file produces** — through the whole session, exactly as a diagnostics request does.
 ///
@@ -269,7 +269,8 @@ fn assign_type_check_reports_both_places_a_value_is_assigned() {
 /// against.
 #[test]
 fn assign_type_check_stays_quiet_when_the_target_is_a_class_it_cannot_see_into() {
-    let source = "#include <string>\nstd::string line = 1231;\nint main() { return (int)line.size(); }\n";
+    let source =
+        "#include <string>\nstd::string line = 1231;\nint main() { return (int)line.size(); }\n";
     assert!(
         !codes_of(source).contains(&DiagnosticCode::AssignTypeCheck),
         "a conversion nobody modelled is not a fact about the program: {:?}",
@@ -295,14 +296,16 @@ fn access_invisible_is_reported_outside_the_class() {
 
 #[test]
 fn access_invisible_is_not_reported_for_a_public_member_or_from_inside() {
-    let public_member = "class Widget {\npublic:\n    int size;\n};\n\nint main() { Widget w; return w.size; }\n";
+    let public_member =
+        "class Widget {\npublic:\n    int size;\n};\n\nint main() { Widget w; return w.size; }\n";
     assert!(
         !codes_of(public_member).contains(&DiagnosticCode::AccessInvisible),
         "`size` is public: {:?}",
         codes_of(public_member)
     );
 
-    let from_inside = "class Widget {\n    int secret;\npublic:\n    int mine() { return secret; }\n};\n";
+    let from_inside =
+        "class Widget {\n    int secret;\npublic:\n    int mine() { return secret; }\n};\n";
     assert!(
         !codes_of(from_inside).contains(&DiagnosticCode::AccessInvisible),
         "a member function may read its own class private member: {:?}",
@@ -529,7 +532,8 @@ int main() {
 #[test]
 fn an_include_in_a_fixture_does_not_resolve_unless_the_test_proves_it_does() {
     let header = "// a header\nstruct FromTheHeader { int size; };\n";
-    let source = "#include \"big.h\"\n\nint main() {\n    int never_used = 1;\n    return never_used;\n}\n";
+    let source =
+        "#include \"big.h\"\n\nint main() {\n    int never_used = 1;\n    return never_used;\n}\n";
 
     let files = MemoryFiles::new()
         .with_file("/p/a.cpp", source)
@@ -707,44 +711,3 @@ fn every_code_has_a_name_and_the_name_comes_back() {
         );
     }
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

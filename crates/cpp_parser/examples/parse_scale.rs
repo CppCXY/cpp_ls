@@ -35,8 +35,16 @@ fn main() {
     let lexer_config = cpp_parser::LexerConfig::default();
     let parser_config = cpp_parser::ParserConfig::default().with_lexer_config(lexer_config);
 
-    println!("file {} | {} bytes | {} lines", path, text.len(), text.lines().count());
-    println!("{:>10}  {:>9}  {:>9}  {:>9}  {:>9}", "bytes", "lex ms", "parse ms", "lex ms/KB", "parse ms/KB");
+    println!(
+        "file {} | {} bytes | {} lines",
+        path,
+        text.len(),
+        text.lines().count()
+    );
+    println!(
+        "{:>10}  {:>9}  {:>9}  {:>9}  {:>9}",
+        "bytes", "lex ms", "parse ms", "lex ms/KB", "parse ms/KB"
+    );
 
     // Fractions of the file, smallest first, plus the whole thing: `/8`, `/4`, `/2`, `1`. A prefix cut in the
     // middle of a token is a lexer error rather than a panic — the lexer is total, and this is a timing run.

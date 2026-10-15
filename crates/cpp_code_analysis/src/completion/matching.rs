@@ -309,7 +309,10 @@ mod tests {
     #[test]
     fn the_initials_of_underscored_words_match() {
         // `bsc` -> `basic_string`: the case a literal prefix cannot answer, and the reason the module exists.
-        assert!(quality("basic_string", "bsc") >= SUBSEQUENCE, "the letters are in there and it is offered");
+        assert!(
+            quality("basic_string", "bsc") >= SUBSEQUENCE,
+            "the letters are in there and it is offered"
+        );
         assert_eq!(quality("get_parent_id", "gpid"), WORD_START);
         assert_eq!(quality("small_vector", "sv"), WORD_START);
         // **A separator is part of what was typed and part of no word**, so it narrows the candidates without

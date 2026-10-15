@@ -347,8 +347,7 @@ pub fn scan_directives(source: &str, tokens: &[CppTokenData]) -> Vec<SpannedDire
             .map_or(start_offset, |token| token.range.end_offset());
         let line = SourceRange::new(start_offset, own_end.saturating_sub(start_offset));
 
-        let directive =
-            parse_directive_tokens(&to_tokens(source, &tokens[index..after]), range);
+        let directive = parse_directive_tokens(&to_tokens(source, &tokens[index..after]), range);
         let kind = directive.kind();
 
         // `#endif` is the only directive that *ends* a region. `#elif` and `#else` continue the one they are

@@ -325,7 +325,11 @@ mod tests {
             Some(11),
             "the third line is the second line now"
         );
-        assert_eq!(changed.position_at(20), None, "and offset 20 is past the end");
+        assert_eq!(
+            changed.position_at(20),
+            None,
+            "and offset 20 is past the end"
+        );
     }
 
     #[test]
@@ -400,4 +404,3 @@ mod tests {
         assert_eq!(vfs.len(), 1);
     }
 }
-

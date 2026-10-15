@@ -139,10 +139,15 @@ mod tests {
         // The file's own view, built from what the VFS holds — see the note in `handlers::references`: a rendering is
         // asked for and waits for the cook, and this fixture is a plain file with nothing to cook.
         let held = session.files().held("/p/a.cpp").expect("the file is held");
-        let view = cpp_code_analysis::FileView::parse_with(&held, &cpp_parser::MacroEnvironment::default());
+        let view = cpp_code_analysis::FileView::parse_with(
+            &held,
+            &cpp_parser::MacroEnvironment::default(),
+        );
         let file = session.files().held("/p/a.cpp").expect("held");
 
-        let chain = view.selection_chain(cpp_code_analysis::file::coordinates::ReadingOffset::new(source.find('1').expect("the fixture has one")));
+        let chain = view.selection_chain(cpp_code_analysis::file::coordinates::ReadingOffset::new(
+            source.find('1').expect("the fixture has one"),
+        ));
         assert!(chain.len() >= 3, "the fixture has several rungs: {chain:?}");
 
         let nested = chain_of(file, &chain).expect("every rung is a place in the file");
@@ -172,5 +177,3 @@ mod tests {
         assert_eq!(chain_of(file, &[]), None);
     }
 }
-
-

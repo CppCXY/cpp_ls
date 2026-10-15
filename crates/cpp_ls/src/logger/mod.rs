@@ -2,9 +2,9 @@ mod best_log_path;
 
 use std::{env, fs, path::PathBuf};
 
+use crate::util::path_to_uri;
 use best_log_path::get_best_log_dir;
 use chrono::Local;
-use crate::util::path_to_uri;
 use fern::Dispatch;
 use log::{LevelFilter, info};
 

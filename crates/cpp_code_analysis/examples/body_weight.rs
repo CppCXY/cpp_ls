@@ -94,12 +94,17 @@ fn main() {
     };
 
     println!("{files} file(s)\n");
-    println!("  nodes  {nodes:>9}   in a body {nodes_in_bodies:>9}   {:>5.1}%", share(nodes_in_bodies, nodes));
-    println!("  tokens {tokens:>9}   in a body {tokens_in_bodies:>9}   {:>5.1}%", share(tokens_in_bodies, tokens));
+    println!(
+        "  nodes  {nodes:>9}   in a body {nodes_in_bodies:>9}   {:>5.1}%",
+        share(nodes_in_bodies, nodes)
+    );
+    println!(
+        "  tokens {tokens:>9}   in a body {tokens_in_bodies:>9}   {:>5.1}%",
+        share(tokens_in_bodies, tokens)
+    );
     println!(
         "\n  item 4's ceiling: the node `descendants()` walk shrinks by {:.1}%, and the lexer's work does not shrink",
         share(nodes_in_bodies, nodes)
     );
     let _ = Path::new("");
 }
-

@@ -55,7 +55,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use cpp_code_analysis::{
-    CommandRunner, DiskCommands, DiskFiles, OpenDocuments, Report, SessionFiles, StreamToken, WatchFilter,
+    CommandRunner, DiskCommands, DiskFiles, OpenDocuments, Report, SessionFiles, StreamToken,
+    WatchFilter,
 };
 
 fn main() {
@@ -188,7 +189,10 @@ fn main() {
                 "{} ({}, {})",
                 toolchain.compiler_name(),
                 toolchain.source.words(),
-                toolchain.version.as_deref().unwrap_or("version not reported")
+                toolchain
+                    .version
+                    .as_deref()
+                    .unwrap_or("version not reported")
             ));
         }
         (session.config().clone(), describes.pop())
@@ -268,8 +272,7 @@ fn main() {
         stream.braces,
     );
 
-    if stages {
-    }
+    if stages {}
 
     // **What the compilation would have said** — every live `#error` and `#warning`, with the file that wrote it.
     //
@@ -283,7 +286,10 @@ fn main() {
     // times, because the copy's own include guard, include order and `#pragma push_macro`s had all moved. This asks
     // the real chain, through the real walk.
     if !stream.messages.is_empty() {
-        println!("\n--- {} messages (#error/#warning) ---", stream.messages.len());
+        println!(
+            "\n--- {} messages (#error/#warning) ---",
+            stream.messages.len()
+        );
         for message in stream.messages.iter().take(40) {
             let file = message
                 .file
@@ -320,7 +326,11 @@ fn main() {
     };
 
     let arguments = preprocessor_arguments(&file, &config);
-    println!("\n--- the compiler's side ---\n{} {}", program.display(), arguments.join(" "));
+    println!(
+        "\n--- the compiler's side ---\n{} {}",
+        program.display(),
+        arguments.join(" ")
+    );
 
     // **A warning when the two sides are not the same compiler.** The analysis modelled *this* project's toolchain —
     // that is where its builtin macro table, its search paths and its dialect came from — and the comparison is only
@@ -525,7 +535,10 @@ fn record_ours(ours: &[StreamToken], stream: &cpp_code_analysis::RenderedUnit) {
         stream.unbalanced.len(),
         stream.braces,
     );
-    println!("summary  ours={} theirs=- matched=- differences=-", ours.len());
+    println!(
+        "summary  ours={} theirs=- matched=- differences=-",
+        ours.len()
+    );
     record_files(ours, &stream.files);
 }
 
@@ -546,7 +559,9 @@ fn record_files(ours: &[StreamToken], files: &[PathBuf]) {
         .collect();
     for token in ours {
         if let Some(file) = token.file.as_deref() {
-            *counts.entry(cpp_code_analysis::align::normalized(file)).or_default() += 1;
+            *counts
+                .entry(cpp_code_analysis::align::normalized(file))
+                .or_default() += 1;
         }
     }
 
@@ -576,10 +591,7 @@ fn our_tokens(stream: &cpp_code_analysis::RenderedUnit) -> Vec<StreamToken> {
 /// `-E` (or MSVC's `/E`) is the whole request: preprocess, and write the result to standard output. Line markers are
 /// kept — they are on by default in all three compilers and they are what the comparison reads file boundaries out
 /// of, so a flag that suppressed them would silently reduce the comparison to a token count.
-fn preprocessor_arguments(
-    file: &Path,
-    config: &cpp_code_analysis::CompilerConfig,
-) -> Vec<String> {
+fn preprocessor_arguments(file: &Path, config: &cpp_code_analysis::CompilerConfig) -> Vec<String> {
     let msvc = config.dialect() == cpp_parser::Dialect::Msvc;
     let mut arguments: Vec<String> = Vec::new();
 
@@ -654,7 +666,8 @@ fn compiler_environment(
     // A path that cannot be joined (`;` inside one, which Windows allows very few of) leaves the variable unset
     // rather than set to something the compiler would parse wrongly — and an unset `INCLUDE` makes `cl` report a
     // missing header, which is a visible failure rather than a silent difference in the reading.
-    let Ok(joined) = std::env::join_paths(config.include_paths.iter().map(|path| &path.directory)) else {
+    let Ok(joined) = std::env::join_paths(config.include_paths.iter().map(|path| &path.directory))
+    else {
         return Vec::new();
     };
 
@@ -680,7 +693,10 @@ fn strip_verbatim(path: &Path) -> PathBuf {
 
     // `\\?\C:\…` — a drive letter, a colon, a separator. Anything else keeps its prefix.
     let bytes = rest.as_bytes();
-    if bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && (bytes[2] == b'\\' || bytes[2] == b'/')
+    if bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes[2] == b'\\' || bytes[2] == b'/')
     {
         PathBuf::from(rest)
     } else {
@@ -710,7 +726,9 @@ fn print_per_file(ours: &[StreamToken], files: &[PathBuf]) {
         .collect();
     for token in ours {
         if let Some(file) = token.file.as_deref() {
-            *counts.entry(cpp_code_analysis::align::normalized(file)).or_default() += 1;
+            *counts
+                .entry(cpp_code_analysis::align::normalized(file))
+                .or_default() += 1;
         }
     }
 
@@ -743,7 +761,10 @@ fn print_per_file(ours: &[StreamToken], files: &[PathBuf]) {
                     name.rsplit(['/', '\\']).next().unwrap_or(&name).to_string()
                 })
                 .unwrap_or_else(|| "<no file>".to_string());
-            println!("  {index:>3}  {:?}  [{file}:{:?}]", token.spelling, token.line);
+            println!(
+                "  {index:>3}  {:?}  [{file}:{:?}]",
+                token.spelling, token.line
+            );
         }
     }
 }
@@ -866,7 +887,10 @@ fn print_regions(ours: &[StreamToken], theirs: &[StreamToken]) {
     }
 
     let short = |text: &str| {
-        let text = text.replace("c:/program files/microsoft visual studio/18/community/vc/tools/msvc/", "<msvc>/");
+        let text = text.replace(
+            "c:/program files/microsoft visual studio/18/community/vc/tools/msvc/",
+            "<msvc>/",
+        );
         text.replace("c:/program files (x86)/windows kits/10/include/", "<kits>/")
     };
 
@@ -879,7 +903,10 @@ fn print_regions(ours: &[StreamToken], theirs: &[StreamToken]) {
     let mut files: Vec<_> = by_file.into_iter().collect();
     files.sort_by_key(|(_, (_, tokens))| std::cmp::Reverse(*tokens));
 
-    println!("\n--- {} regions; differing tokens per file ---", regions.len());
+    println!(
+        "\n--- {} regions; differing tokens per file ---",
+        regions.len()
+    );
     for (file, (count, tokens)) in files.iter().take(30) {
         println!("{tokens:>7} tokens in {count:>4} regions  {file}");
     }

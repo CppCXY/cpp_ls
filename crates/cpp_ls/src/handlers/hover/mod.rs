@@ -188,7 +188,8 @@ fn overloads_markdown(
     session: &Session<DiskFiles>,
     view: Option<&FileView>,
     found: &cpp_code_analysis::ProjectDefinitions,
-) -> String {    let mut lines = String::new();
+) -> String {
+    let mut lines = String::new();
     for declaration in &found.found {
         lines.push_str(&signature_line(&declaration.fact));
         lines.push('\n');
@@ -219,7 +220,12 @@ fn overloads_markdown(
         .collect();
     out.push_str(&format!(
         "\nDeclared in {}",
-        where_clause(session, view, first.file.as_path(), first.fact.name_range.start_offset)
+        where_clause(
+            session,
+            view,
+            first.file.as_path(),
+            first.fact.name_range.start_offset
+        )
     ));
     if files.len() > 1 {
         out.push_str(&format!(" and {} other file(s)", files.len() - 1));
@@ -283,7 +289,13 @@ fn macro_markdown(session: &Session<DiskFiles>, view: &FileView, found: &Project
     }
 
     let mut out = String::new();
-    let definition = definition_line(session, view, &found.file, fact.range.start_offset, fact.body_range);
+    let definition = definition_line(
+        session,
+        view,
+        &found.file,
+        fact.range.start_offset,
+        fact.body_range,
+    );
     out.push_str(&code_block(&definition.text));
 
     out.push_str(&format!(
@@ -301,7 +313,9 @@ fn macro_markdown(session: &Session<DiskFiles>, view: &FileView, found: &Project
         where_clause(session, Some(view), &found.file, fact.range.start_offset)
     ));
 
-    if let Some(documentation) = documentation_of_a_fact(session, view, &found.file, fact.range.start_offset) {
+    if let Some(documentation) =
+        documentation_of_a_fact(session, view, &found.file, fact.range.start_offset)
+    {
         out.push_str(&format!("\n{documentation}\n"));
     }
 
@@ -328,13 +342,20 @@ fn declaration_markdown(
 
     // The comment the file writes above the declaration, in the place clangd and the C++ extension put it: after
     // the signature, before where it was declared from.
-    if let Some(documentation) = documentation_of_a_fact(session, view, &found.file, fact.range.start_offset) {
+    if let Some(documentation) =
+        documentation_of_a_fact(session, view, &found.file, fact.range.start_offset)
+    {
         out.push_str(&format!("\n{documentation}\n"));
     }
 
     out.push_str(&format!(
         "\nDeclared in {}",
-        where_clause(session, Some(view), &found.file, fact.name_range.start_offset)
+        where_clause(
+            session,
+            Some(view),
+            &found.file,
+            fact.name_range.start_offset
+        )
     ));
 
     if let FactGuard::Region(_) = fact.guard {
@@ -475,7 +496,10 @@ fn kind_words(fact: &DeclFact) -> String {
     // The one word *not* shown is `class` or `typename`: the fact records the parameter names and not their keywords,
     // and printing `class` for a `typename` would be a guess dressed as a fact.
     if !fact.parameters.is_empty() {
-        words.push_str(&format!(" template over `{}`", fact.parameters.join("`, `")));
+        words.push_str(&format!(
+            " template over `{}`",
+            fact.parameters.join("`, `")
+        ));
     }
 
     match (&fact.type_of, &fact.returns) {
@@ -546,7 +570,12 @@ fn declaration_text(
             // The file's own bindings carry no `type_of` at all, and the offset to ask at is the fact's own name —
             // which is in this view's coordinates exactly when the fact is about this file.
             None if view.is_some_and(|view| is_the_viewed_file(view, file)) => {
-                match session.type_at(view.expect("established above"), cpp_code_analysis::file::coordinates::ReadingOffset::new(fact.name_range.start_offset)) {
+                match session.type_at(
+                    view.expect("established above"),
+                    cpp_code_analysis::file::coordinates::ReadingOffset::new(
+                        fact.name_range.start_offset,
+                    ),
+                ) {
                     Known::Yes(type_of) => Some(type_of.type_of.clone()),
                     _ => None,
                 }
@@ -618,7 +647,10 @@ fn definition_line(
     // fact about the viewed file carries the rendering's offsets, and its `#define` line is the rendering's line.
     let Some(text) = the_text_a_facts_offsets_are_in(session, Some(view), file) else {
         return RenderedText {
-            text: format!("<the macro is defined in an unreadable file: {}>", file.display()),
+            text: format!(
+                "<the macro is defined in an unreadable file: {}>",
+                file.display()
+            ),
         };
     };
     let name_offset = name_offset.min(text.len());
@@ -633,7 +665,9 @@ fn definition_line(
 
     // The directive's own `#define` keyword is before the name, and the fact does not record it: taking the line's
     // start is honest — it is the directive — where inventing the keyword would not be.
-    let line_start = text[..name_offset].rfind('\n').map_or(0, |offset| offset + 1);
+    let line_start = text[..name_offset]
+        .rfind('\n')
+        .map_or(0, |offset| offset + 1);
 
     RenderedText {
         text: text[line_start..end].trim_end().to_string(),
@@ -679,7 +713,10 @@ fn where_clause(
     // different document: measured, a class on line 6 of a file with five `#include`s above it was announced as
     // `main.cpp:1:7` — the column right and the line five short.
     let asked = match view {
-        Some(view) if is_the_viewed_file(view, file) => crate::util::position_at_offset(view, cpp_code_analysis::file::coordinates::ReadingOffset::new(offset)),
+        Some(view) if is_the_viewed_file(view, file) => crate::util::position_at_offset(
+            view,
+            cpp_code_analysis::file::coordinates::ReadingOffset::new(offset),
+        ),
         _ => session
             .files()
             .held(file)
@@ -803,4 +840,3 @@ fn documentation_of_a_fact(
 
     documentation_markdown(session, view, file, in_the_file.get())
 }
-

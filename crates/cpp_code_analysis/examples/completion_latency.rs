@@ -85,7 +85,10 @@ fn main() {
         WatchFilter::new(&root),
     );
 
-    match session.toolchain().and_then(|toolchain| toolchain.version.clone()) {
+    match session
+        .toolchain()
+        .and_then(|toolchain| toolchain.version.clone())
+    {
         Some(version) => println!("toolchain: {version}"),
         None => println!("toolchain: none discovered (the compile database is the configuration)"),
     }
@@ -137,11 +140,17 @@ fn main() {
     let whole = time_completion(&session, &file, cursor);
     let bare = session.view_of_the_file(&file).map(|view| {
         let started = Instant::now();
-        let _ = session.completions(&view, cpp_code_analysis::file::coordinates::FileOffset::new(0));
+        let _ = session.completions(
+            &view,
+            cpp_code_analysis::file::coordinates::FileOffset::new(0),
+        );
         started.elapsed()
     });
     println!("  the file's view (a parse)        {} ms", view.as_millis());
-    println!("  view + query (what a handler pays) {} ms", whole.as_millis());
+    println!(
+        "  view + query (what a handler pays) {} ms",
+        whole.as_millis()
+    );
     println!(
         "  the query, offset 0, view outside  {} ms",
         bare.unwrap_or_default().as_millis()
@@ -164,8 +173,11 @@ fn main() {
     // A second file's worth of work, so that the index is moving while the query runs — the state the whole probe
     // is about. `more.cpp` pulls `<map>` and `<memory>`, which is a new closure for the pump to read.
     let more = root.join("more.cpp");
-    std::fs::write(&more, "#include <map>\n#include <memory>\nint more() { return 0; }\n")
-        .expect("more.cpp writes");
+    std::fs::write(
+        &more,
+        "#include <map>\n#include <memory>\nint more() { return 0; }\n",
+    )
+    .expect("more.cpp writes");
     let queued = session.add_project_files([more.clone()]);
     println!("  queued {queued} more file(s)");
 
@@ -272,7 +284,15 @@ fn main() {
 
         let querying = Instant::now();
         let items = view
-            .map(|view| session.completions(&view, cpp_code_analysis::file::coordinates::FileOffset::new(cursor)).items.len())
+            .map(|view| {
+                session
+                    .completions(
+                        &view,
+                        cpp_code_analysis::file::coordinates::FileOffset::new(cursor),
+                    )
+                    .items
+                    .len()
+            })
             .unwrap_or(0);
         let queried = querying.elapsed();
 
@@ -311,7 +331,9 @@ fn main() {
     ] {
         let at_the_cursor = format!("{line}{MARK}");
         let written = at_the_cursor.replace(MARK, "");
-        let marker = at_the_cursor.find(MARK).expect("the marker is in the fixture");
+        let marker = at_the_cursor
+            .find(MARK)
+            .expect("the marker is in the fixture");
 
         // One statement inside the body, before `return 0;`, so the cursor is a name position in a function.
         let source = MAIN_CPP.replace(
@@ -332,7 +354,10 @@ fn main() {
         let cursor = at + marker;
 
         let asking = Instant::now();
-        let found = session.completions(&view, cpp_code_analysis::file::coordinates::FileOffset::new(cursor));
+        let found = session.completions(
+            &view,
+            cpp_code_analysis::file::coordinates::FileOffset::new(cursor),
+        );
         let took = asking.elapsed();
 
         let labels: Vec<&str> = found.items.iter().map(|item| item.label.as_str()).collect();
@@ -346,7 +371,10 @@ fn main() {
 
         // Whether the answer moved session state, which is the difference between a first ask and a repeat.
         let again = Instant::now();
-        let second = session.completions(&view, cpp_code_analysis::file::coordinates::FileOffset::new(cursor));
+        let second = session.completions(
+            &view,
+            cpp_code_analysis::file::coordinates::FileOffset::new(cursor),
+        );
         println!(
             "        again: {} ms, {} item(s)",
             again.elapsed().as_millis(),
@@ -373,9 +401,15 @@ fn regions_of_one_query(session: &Session<DiskFiles>, file: &Path, cursor: usize
         return "no view".to_string();
     };
     let started = std::time::Instant::now();
-    let _ = session.completions(&view, cpp_code_analysis::file::coordinates::FileOffset::new(cursor));
+    let _ = session.completions(
+        &view,
+        cpp_code_analysis::file::coordinates::FileOffset::new(cursor),
+    );
 
-    format!("one query took {:.1} ms", started.elapsed().as_secs_f64() * 1000.0)
+    format!(
+        "one query took {:.1} ms",
+        started.elapsed().as_secs_f64() * 1000.0
+    )
 }
 
 /// One completion, asked the way the handler asks it: the file's own view, then the query at an offset in it.
@@ -384,7 +418,10 @@ fn time_completion(session: &Session<DiskFiles>, file: &Path, offset: usize) -> 
     let Some(view) = session.view_of_the_file(file) else {
         return started.elapsed();
     };
-    let _ = session.completions(&view, cpp_code_analysis::file::coordinates::FileOffset::new(offset));
+    let _ = session.completions(
+        &view,
+        cpp_code_analysis::file::coordinates::FileOffset::new(offset),
+    );
     started.elapsed()
 }
 
@@ -410,5 +447,3 @@ fn position_of(source: &str, needle: &str) -> (u32, u32) {
         .unwrap_or(0) as u32;
     (line, character)
 }
-
-

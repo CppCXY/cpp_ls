@@ -780,7 +780,10 @@ fn assert_only_header_names_were_folded(
         let end = folded.range.end_offset();
         let first = i;
         while i < lexed.len() && lexed[i].range.start_offset < end {
-            assert!(lexed[i].range.start_offset >= start, "{name}: run escapes it");
+            assert!(
+                lexed[i].range.start_offset >= start,
+                "{name}: run escapes it"
+            );
             i += 1;
         }
         assert!(i > first, "{name}: a header name replaced no token at all");

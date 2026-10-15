@@ -173,10 +173,8 @@ fn directive_folds(source: &str, directives: &[SpannedDirective]) -> Vec<Fold> {
                 // follows — the newline, a blank line, and any comment (a comment is trivia too, which is how a
                 // fold built from the span ends up several lines below the region). `SpannedDirective::line` is the
                 // directive's own extent, derived where the rule that decides it lives.
-                let range = SourceRange::new(
-                    start,
-                    directive.line.end_offset().saturating_sub(start),
-                );
+                let range =
+                    SourceRange::new(start, directive.line.end_offset().saturating_sub(start));
                 if spans_lines(source, range) {
                     folds.push(Fold {
                         range,
