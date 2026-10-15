@@ -295,6 +295,26 @@ impl ScopeWalker<'_> {
         let mut opened: Vec<(ScopeId, ScopeId)> = Vec::new();
 
         for child in node.children() {
+            // **A constructor's body has already been walked, by the declaration that owns it.**
+            //
+            // The grammar writes the member-initializer list and the body as siblings of the declarator, so the body
+            // is a child of the **class body** rather than of the declaration:
+            //
+            // ```text
+            // A(int f) : x(f) { … }   Declaration > Declarator, MemberInitializer  ▏  CompoundStat
+            //                         └──────────── ClassBody children ────────────┘
+            // ```
+            //
+            // `declaration_parts` reads that shape (`function_body`) and walks the body into the **function** scope,
+            // where the parameters are. This loop would then meet the same `CompoundStat` a second time and open a
+            // `Block` under the *class*, so the body's positions resolve through that block — whose chain is
+            // `[Block, Class, …]` and does not contain the function at all. Measured: a cursor in the body saw
+            // `here` (declared in the block) and the class's fields, and **not** `f` or `m`, while the same cursor in
+            // `: x(f)` saw them both — the one difference being that the initializer list has no block of its own.
+            if is_a_constructors_body(&child) {
+                continue;
+            }
+
             // **A directive is read before it is asked about**, so a `#define` this file writes is in force for
             // everything below it and not for what stands above. See [`ScopeWalker::own`].
             if let Some((name, body)) = a_define_at(&child) {
@@ -1642,18 +1662,21 @@ enum SpecifierName {
     InDeclarator(BindingKind),
 }
 
-/// The body of a function, which the grammar places beside or around the declarator rather than inside it.
+/// **Is this the body of the constructor declared just above it?**
 ///
-/// Several shapes reach here and all of them occur in real code:
+/// The grammar writes a constructor's member-initializer list and its body as siblings of the declarator, which puts
+/// the body among the class body's children rather than inside the declaration. [`declaration_parts`] reads that and
+/// walks the body into the function scope; the child loop must not then walk it again under the class.
 ///
-/// ```text
-/// int f() { ... }                  the body is a direct child of the declaration
-/// struct S { void m() { ... } };   inside a class body, inside the specifier sequence
-/// void f() { ... }                 the body hangs off the *declarator*, which is not a direct child
-/// ```
-///
-/// The search is over the declarators rather than over the whole subtree, so a `CompoundStat` belonging to
-/// something else — a lambda's body in an initialiser — is not mistaken for this function's.
+/// The anchor is the same one [`function_body`] uses, and for the same reason: a preceding sibling that declares a
+/// constructor — a declaration carrying a `MemberInitializer`, which no other construct writes.
+fn is_a_constructors_body(node: &CppSyntaxNode) -> bool {
+    CppSyntaxKind::from(node.kind()) == CppSyntaxKind::CompoundStat
+        && node
+            .prev_sibling()
+            .is_some_and(|before| declares_a_constructor(&before))
+}
+
 /// **Does this declaration write a constructor** — a function declarator whose name is its own class's?
 ///
 /// The test for the shape [`function_body`] reads a body out of a *sibling* for, and it has to be narrow: a plain
@@ -1668,6 +1691,18 @@ fn declares_a_constructor(node: &CppSyntaxNode) -> bool {
         .any(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::MemberInitializer)
 }
 
+/// The body of a function, which the grammar places beside or around the declarator rather than inside it.
+///
+/// Several shapes reach here and all of them occur in real code:
+///
+/// ```text
+/// int f() { ... }                  the body is a direct child of the declaration
+/// struct S { void m() { ... } };   inside a class body, inside the specifier sequence
+/// void f() { ... }                 the body hangs off the *declarator*, which is not a direct child
+/// ```
+///
+/// The search is over the declarators rather than over the whole subtree, so a `CompoundStat` belonging to
+/// something else — a lambda's body in an initialiser — is not mistaken for this function's.
 fn function_body(node: &CppSyntaxNode) -> Option<CppSyntaxNode> {
     if let Some(direct) = first_child(node, CppSyntaxKind::CompoundStat) {
         return Some(direct);

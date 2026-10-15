@@ -1877,8 +1877,7 @@ fn names_in_a_scope(
 /// In practice every binding here is the buffer's own — `build_scopes` walks one file's tree, and a name reached
 /// through an include is a [`NameProvenance::DirectInclude`] fact from the index rather than a binding — so this is
 /// the guard that keeps the rule from being wrong if that ever changes.
-fn declared_above(candidate: &Candidate, offset: usize, in_this_file: &str) -> bool {
-    if candidate.file != Path::new(in_this_file) {
+fn declared_above(candidate: &Candidate, offset: usize, in_this_file: &str) -> bool {    if candidate.file != Path::new(in_this_file) {
         return true;
     }
 

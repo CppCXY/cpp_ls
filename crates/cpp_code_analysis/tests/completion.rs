@@ -1220,7 +1220,6 @@ int main() {
 /// The member-initializer walk added beside it therefore has no scope to walk into.
 ///
 /// `#[ignore]` rather than deleted: it is the measurement, and the next round starts from here.
-#[ignore]
 #[test]
 fn a_constructors_parameters_are_in_scope() {
     let source = "struct Name {\n\
@@ -1241,6 +1240,19 @@ fn a_constructors_parameters_are_in_scope() {
     );
     session.load("/p/ctor.cpp");
     let view = session.view_of_the_file(std::path::Path::new("/p/ctor.cpp")).expect("a view");
+
+    for scope in view.scopes.scopes() {
+        println!(
+            "{:?} range={:?} bindings={:?}",
+            scope.kind,
+            scope.range.map(|r| (r.start_offset, r.end_offset())),
+            scope
+                .bindings
+                .iter()
+                .map(|b| (b.name.text(), b.name_range.start_offset))
+                .collect::<Vec<_>>()
+        );
+    }
 
     for (what, needle) in [("the member-initializer list", ": first("), ("the body", "int here = ")] {
         let at = source.find(needle).expect("the fixture writes it") + needle.len();
