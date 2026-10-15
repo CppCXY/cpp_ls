@@ -876,3 +876,80 @@ fn an_unterminated_attribute_list_is_reported_and_consumes_the_rest() {
         "the rest of the file is inside the unclosed construct: {declarations:?}"
     );
 }
+/// **A function definition holds its body**, whichever way the body is written.
+///
+/// The plain spelling nests the body under the declarator and the tree has always shown it inside the declaration.
+/// A constructor writes a member-initializer list between the two, which puts the body one level out — and a
+/// consumer reading "the declaration's body" then finds nothing, which is what made a constructor's parameters
+/// invisible in its own body.
+/// **`#[ignore]`: a constructor's body is a sibling of its declaration, not a child.**
+///
+/// The grammar's marker for a constructor's declaration **does** span the body — `parse_declaration_here` runs the
+/// body rule with that mark open — but the body's own marker opens *after* the declarator's marker has been put back
+/// into the parent's child list, so the range this pass computes for the body starts one element before its first
+/// child. Measured on `struct A { A(int f) : x(f) { } };`:
+///
+/// ```text
+/// Declaration  recorded=6 kept=6..=10  :: [ …, DeclaratorN@6, …, MemberInitializerN@10, Whitespace@26 ]
+/// CompoundStat recorded=8 kept=7..=11  :: [ …, DeclaratorN@7, Whitespace@26, LeftBrace@27, … ]
+///                                            ↑ index 7 is the declaration, not this body's child
+/// ```
+///
+/// So the body comes out beside the declaration instead of inside it, and a consumer asking "what is this
+/// declaration's body" finds nothing — which is what made a constructor's parameters invisible in its own body.
+///
+/// # Why this is not fixed by moving it afterwards
+///
+/// Reparenting the sibling into the declaration is not enough, and is worse: the body's range holds the **tail of the
+/// declaration** as well as the body, so moving it puts those elements after the declaration's last child in text
+/// order. Measured, `/// @returns …\n    double x()` came out as `/// @returns …\n     doublex()` — every byte
+/// present, the length equal, and the file no longer reconstructable.
+///
+/// The correction belongs where the range is computed. This test is the measurement for it, and the first two cases
+/// pass today — a plain function and a member function both nest their body — so it is specifically the
+/// member-initializer list that puts the body one level out.
+#[ignore]
+#[test]
+fn a_function_definition_holds_its_body() {
+    for (what, source) in [
+        ("a plain function", "int g() { return 1; }\n"),
+        ("a member function", "struct A {\n    void g() { return; }\n};\n"),
+        (
+            "a constructor with an initializer list",
+            "struct A {\n    A(int f) : x(f) { int q = f; }\n    int x;\n};\n",
+        ),
+    ] {
+        let tree = CppParser::parse(source, ParserConfig::default());
+        let declaration = tree
+            .get_red_root()
+            .descendants()
+            .filter(|node| {
+                CppSyntaxKind::from(node.kind()) == CppSyntaxKind::Declaration
+                    && node
+                        .descendants()
+                        .any(|inner| CppSyntaxKind::from(inner.kind()) == CppSyntaxKind::CompoundStat)
+            })
+            // The **innermost** holder: a member function's body is also inside the class's own declaration, and
+            // the question here is about the function's, not the class's.
+            .min_by_key(|node| usize::from(node.text_range().end()) - usize::from(node.text_range().start()))
+            .unwrap_or_else(|| panic!("{what}: no declaration holds a body in {source:?}"));
+
+        let body = declaration
+            .children()
+            .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::CompoundStat)
+            .unwrap_or_else(|| {
+                panic!(
+                    "{what}: the body is not a child of the declaration: {:?}",
+                    declaration
+                        .children()
+                        .map(|child| format!("{:?}", CppSyntaxKind::from(child.kind())))
+                        .collect::<Vec<_>>()
+                )
+            });
+
+        assert!(
+            body.text().to_string().contains('{'),
+            "{what}: the body is the `{{ … }}` it was written as"
+        );
+    }
+}

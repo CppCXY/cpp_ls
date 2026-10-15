@@ -174,6 +174,23 @@ impl CppGreenNodeBuilder<'_> {
             Vec::new()
         };
 
+        // **A function definition holds its body**, whichever way the body was written.
+        //
+        // The grammar's marker for a constructor's declaration does span the body — `parse_declaration_here` runs the
+        // body rule with that mark open — but the body's marker opens *after* the declarator's marker has already been
+        // put back into this node's child list, so the range this pass computes for the body starts before its own
+        // first child. Measured on `struct A { A(int f) : x(f) { } };`:
+        //
+        // ```text
+        // Declaration  recorded=6 kept=6..=10  :: [ …, DeclaratorN@6, …, MemberInitializerN@10, Whitespace@26 ]
+        // CompoundStat recorded=8 kept=7..=11  :: [ …, DeclaratorN@7, Whitespace@26, LeftBrace@27, … ]
+        //                                            ↑ index 7 is the declaration's own node, not this body's child
+        // ```
+        //
+        // So the body came out as the declaration's **sibling**. Correcting it here is a statement about the shape the
+        // tree is supposed to have rather than a patch on that arithmetic: a `CompoundStat` that follows a
+        // declaration carrying a `MemberInitializer` **is** that declaration's body, and every consumer reads it that
+        // way — `function_body` looked for exactly this.
         let at = self.elements.len();
         self.elements.push(CppGreenElement::Node { kind, children });
 
@@ -306,6 +323,115 @@ impl CppGreenNodeBuilder<'_> {
 
         self.builder.finish()
     }
+}
+
+/// **Move a constructor's body inside its declaration.**
+///
+/// A declaration that carries a `MemberInitializer` is writing a constructor, and the `CompoundStat` written after it
+/// is that constructor's body — the one construct in the language that puts a body beside a declaration rather than
+/// inside it. Consumers read it that way (`sema::scopes::function_body` asks for exactly this shape), and the grammar's
+/// own marker spans it.
+///
+/// # Why this is not the right fix, and is not applied
+///
+/// It reorders between siblings, which is enough to give the body the right parent — but the body's **range** is
+/// wrong as well: its recorded start is one element earlier than its own `{`, so it holds the tail of the declaration
+/// as well as the body. Moving it in that state puts those elements after the declaration's last child in text order,
+/// and the reconstruction shows it exactly:
+///
+/// ```text
+/// source:  "), y_(y) {}\n\n    /// @returns the horizontal coordinate\n    double x() const noexcept { … }"
+/// built:   "), y_(y) {}\n\n    /// @returns the horizontal coordinate\n     doublex() const noexcept { … }"
+/// ```
+///
+/// Every byte is still there and the length matches; the order does not. That is a worse failure than the one this
+/// fixes — a tree that cannot reproduce the file is a tree nothing downstream can trust — so the correction belongs
+/// where the **range** is computed, not here. `tests/ast.rs`'s `a_function_definition_holds_its_body` is the
+/// measurement for it, and it is red until that lands.
+///
+/// Kept as a function rather than deleted because the shape rule it states is the one that has to hold: the body is
+/// the declaration's, and the fact that it is a *sibling* in the child list is the accident.
+#[allow(dead_code)]
+fn adopt_a_constructor_body(children: &mut Vec<usize>, elements: &mut [CppGreenElement]) {
+    let mut at = 0;
+    while at + 1 < children.len() {
+        let declares_a_constructor = matches!(
+            elements.get(children[at]),
+            Some(CppGreenElement::Node { kind, children: declared })
+                if *kind == CppSyntaxKind::Declaration
+                    && !holds_a_body(declared, elements)
+                    && holds_an_initializer_list(declared, elements)
+        );
+        let is_a_body = matches!(
+            elements.get(children[at + 1]),
+            Some(CppGreenElement::Node { kind, .. }) if *kind == CppSyntaxKind::CompoundStat
+        );
+
+        if declares_a_constructor && is_a_body {
+            let body = children.remove(at + 1);
+            let given_back = trim_to_the_brace(body, elements);
+            let declaration = children[at];
+            if let Some(CppGreenElement::Node {
+                children: declared, ..
+            }) = elements.get_mut(declaration)
+            {
+                declared.extend(given_back);
+                declared.push(body);
+            }
+            at += 1;
+            continue;
+        }
+
+        at += 1;
+    }
+}
+
+/// Take the elements in front of a `CompoundStat`'s own `{` out of it, and hand them back.
+///
+/// With nothing to take — the ordinary case, where the node's range is already right — this changes nothing and
+/// returns an empty list.
+fn trim_to_the_brace(body: usize, elements: &mut [CppGreenElement]) -> Vec<usize> {
+    let Some(CppGreenElement::Node { children, .. }) = elements.get(body) else {
+        return Vec::new();
+    };
+    let Some(brace) = children.iter().position(|child| {
+        matches!(
+            elements.get(*child),
+            Some(CppGreenElement::Token {
+                kind: CppTokenKind::LeftBrace,
+                ..
+            })
+        )
+    }) else {
+        return Vec::new();
+    };
+    if brace == 0 {
+        return Vec::new();
+    }
+
+    let given_back: Vec<usize> = children[..brace].to_vec();
+    if let Some(CppGreenElement::Node { children, .. }) = elements.get_mut(body) {
+        children.drain(..brace);
+    }
+    given_back
+}
+
+fn holds_a_body(declared: &[usize], elements: &[CppGreenElement]) -> bool {
+    declared.iter().any(|child| {
+        matches!(
+            elements.get(*child),
+            Some(CppGreenElement::Node { kind, .. }) if *kind == CppSyntaxKind::CompoundStat
+        )
+    })
+}
+
+fn holds_an_initializer_list(declared: &[usize], elements: &[CppGreenElement]) -> bool {
+    declared.iter().any(|child| {
+        matches!(
+            elements.get(*child),
+            Some(CppGreenElement::Node { kind, .. }) if *kind == CppSyntaxKind::MemberInitializer
+        )
+    })
 }
 
 /// Emit `element` into `builder`, descending into nodes.

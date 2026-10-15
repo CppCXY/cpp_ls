@@ -637,6 +637,7 @@ pub fn parse_declaration(p: &mut CppParser) -> ParseResult {
 
     let result = parse_declaration_here(p);
 
+
     p.truncate_template_parameters(parameters_before);
     p.set_a_template_id_may_be_the_name(outer);
     result
