@@ -945,6 +945,107 @@ const CLEAN_CPP: &str = "int g();\nstruct Name {\n    int middleName;\n    void 
 const EDITED_CPP: &str = "int g();\nstruct Name {\n    int middleName;\n    void print(int i) {\n        \
                           middleName = i\n    }\n};\n";
 
+/// **The reported file is answered — and the answer is an empty list, which is correct.**
+///
+/// Reported twice: first a `return 0` with no `;` produced no diagnostic, and after that was fixed the file *with*
+/// its semicolons still produced none. The two have different causes, and the second is not a defect:
+///
+/// ```text
+/// the file parses                 so `syntax-error` is absent — a fact, because the parser defect is fixed
+/// the only check that fires      `IncludeNotFound`, which is about the machine's include paths
+/// on a machine that has them     nothing at all
+/// ```
+///
+/// Logged from a run of this fixture, with the probes that established it:
+///
+/// ```text
+/// COOK PROBE: summary=true cooked=true pending=0
+/// READ PROBE: held=true key=Some("…/main.cpp") checks=Some((0, 0, Cooked))
+/// ```
+///
+/// `checks=0` with the reading **cooked** and the file **held** is the whole answer: the channel is working and the
+/// file is clean. So this test asserts the thing that is actually true and was worth doubting — that the server
+/// **publishes**, that the publish is stamped with the document's version, and that the answer for this text is the
+/// empty list rather than no message at all. A server that never reached the client, and one that answered "clean",
+/// are the two states the report could not tell apart, and only the first is a bug.
+///
+/// What the file *does* deserve — `full.size();` discarding its result three times — is a rule this layer does not
+/// have. `cpp_code_analysis`'s `the_reported_file_reports_only_its_unresolved_includes` records that.
+#[test]
+fn the_reported_file_is_answered() {
+    let project = Project::new("reported-file");
+    project.write("main.cpp", REPORTED_CPP);
+
+    let mut server = Server::start(project.root());
+    let main_uri = uri_of(&project.root().join("main.cpp"));
+
+    server.request(
+        1,
+        "initialize",
+        json!({
+            "processId": std::process::id(),
+            "rootUri": uri_of(project.root()),
+            "capabilities": {
+                "workspace": { "configuration": true, "didChangeWatchedFiles": { "dynamicRegistration": true } },
+                "window": { "workDoneProgress": true },
+            },
+        }),
+    );
+    server.notify("initialized", json!({}));
+    server.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": { "uri": main_uri, "languageId": "cpp", "version": 1, "text": REPORTED_CPP }
+        }),
+    );
+
+    let published = server.wait_for(|message| {
+        message["method"] == json!("textDocument/publishDiagnostics")
+            && message["params"]["uri"] == json!(main_uri)
+    });
+    assert_eq!(
+        published["params"]["version"],
+        json!(1),
+        "the answer is stamped with the revision it is about: {published}"
+    );
+
+    let diagnostics = published["params"]["diagnostics"]
+        .as_array()
+        .unwrap_or_else(|| panic!("diagnostics is an array: {published}"));
+    eprintln!(
+        "the server published {} diagnostic(s): {diagnostics:?}",
+        diagnostics.len()
+    );
+    assert!(
+        diagnostics.iter().all(|diagnostic| diagnostic["code"] != json!("syntax-error")),
+        "the file parses, and `return` reporting a missing `;` is the defect this fixture was built from: \
+         {published}"
+    );
+
+    server.request(999, "shutdown", Value::Null);
+    server.notify("exit", Value::Null);
+}
+
+/// The reported file, verbatim: the includes it does not write are part of the report.
+const REPORTED_CPP: &str = r#"#include <iostream>
+#include <string>
+#include <cstdio>
+int main() {
+    int a = 1, b = 2;
+    int sum = a + b;
+    std::cout << "The sum of " << a << " and " << b << " is: " << sum << std::endl;
+    std::string full;
+    std::cout << "Full name: " << full << std::endl;
+    std::cout << "hello world " << std::endl;
+    full.size();
+    full.length();
+    full.size();
+    printf("Full name Length: %zu\n", full.size());
+    // printf("Full name Length using length(): %zu\n", full.length());
+    return 0;
+}
+"#;
+
 /// The namespace is opened by a macro in a header the open file includes. **The raw reading handles this one** —
 /// an indexer given the closure's macro bodies reads `BEGIN_NS` as `namespace one {`, which is what the shape rules
 /// exist for — so this fixture is about the member question rather than about the second reading.

@@ -43,6 +43,59 @@ fn codes_of(source: &str) -> Vec<DiagnosticCode> {
         .unwrap_or_default()
 }
 
+/// **What the reported file actually produces, and why it is not `Unused`.**
+///
+/// Reported from an editor: this file produced no diagnostic at all, twice — first with a `return 0` that had no
+/// `;` (a real parser defect, fixed: `return` was the one statement that said nothing when its terminator was
+/// missing), and then with the semicolons written, where the server correctly published an **empty list**.
+///
+/// The second report is the one this test documents, and the answer is not a bug: the file parses, so
+/// `syntax-error` is absent, and the only thing the checks have to say about it is that its three `#include`s do not
+/// resolve — which is a fact about the machine the analysis runs on, not about the code:
+///
+/// ```text
+/// in the tests:      [IncludeNotFound, IncludeNotFound, IncludeNotFound]   no compiler search paths exist
+/// on a real server:  []                                                    the machine's own paths find them
+/// ```
+///
+/// So a server reporting nothing for this file is **right**, and the expectation that it should say something was
+/// wrong. `full.size();` discarding its result is the thing a reader would want underlined, and **no check covers
+/// it** — that is a missing rule rather than a broken channel, and it is recorded here rather than asserted, because
+/// a test that demanded it would be asserting a rule this layer does not have.
+#[test]
+fn the_reported_file_reports_only_its_unresolved_includes() {
+    let codes = codes_of(REPORTED);
+    assert_eq!(
+        codes,
+        vec![
+            DiagnosticCode::IncludeNotFound,
+            DiagnosticCode::IncludeNotFound,
+            DiagnosticCode::IncludeNotFound
+        ],
+        "the file parses; the only claim the checks make about it is about the machine's include paths"
+    );
+}
+
+/// The reported file, verbatim.
+const REPORTED: &str = r#"#include <iostream>
+#include <string>
+#include <cstdio>
+int main() {
+    int a = 1, b = 2;
+    int sum = a + b;
+    std::cout << "The sum of " << a << " and " << b << " is: " << sum << std::endl;
+    std::string full;
+    std::cout << "Full name: " << full << std::endl;
+    std::cout << "hello world " << std::endl;
+    full.size();
+    full.length();
+    full.size();
+    printf("Full name Length: %zu\n", full.size());
+    // printf("Full name Length using length(): %zu\n", full.length());
+    return 0;
+}
+"#;
+
 /// **A file that is correct produces nothing.** The contract of the layer, and the first assertion of every rule
 /// below — a check that cannot be quiet about this file is a check that will fire on a real one.
 #[test]

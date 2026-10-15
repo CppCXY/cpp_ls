@@ -464,7 +464,8 @@ impl AnalysisState {
                 session.load(&to_cook);
                 session.add_project_files([to_cook.clone()]);
                 session.index_everything();
-                session.cook(&to_cook).is_some()
+                let cooked = session.cook(&to_cook).is_some();
+                cooked
             })
             .await;
 
