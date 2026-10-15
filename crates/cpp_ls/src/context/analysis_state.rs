@@ -388,6 +388,33 @@ impl AnalysisState {
         }
     }
 
+    /// **Is there a reading for this file, and read and cook it if not.**
+    ///
+    /// The write half of a pull request, and it must happen **before** the query: [`AnalysisState::query_blocking`]
+    /// runs its closure under the read lock — that is what lets queries run beside the index pump — while reading a
+    /// file and cooking it are `&mut Session`. So the two are split where the two locks are, and this is the first.
+    ///
+    /// # Why `textDocument/diagnostic` needed it
+    ///
+    /// The pull handler used [`AnalysisState::prepare`], which **queues** a file for cooking and returns — and then
+    /// asked the query, which found no reading and answered `Missing`. A `Missing` outcome becomes a JSON `null`
+    /// response (`context::ServerContext::task`), and a client expecting a `DocumentDiagnosticReport` drops it: the
+    /// diagnostics it already had stay on screen, which is what "输入代码之后诊断不改变" is.
+    ///
+    /// The `bool` is whether the file can be cooked at all: `false` means it is not there, which is the honest
+    /// `Missing` rather than an empty report.
+    pub async fn prepare_for_a_diagnostic(&self, path: &std::path::Path) -> bool {
+        let to_prepare = path.to_path_buf();
+        self.update_session("prepare a file a pull request named", move |session| {
+            session.load(&to_prepare);
+            session.add_project_files([to_prepare.clone()]);
+            session.index_everything();
+            session.cook(&to_prepare).is_some()
+        })
+        .await
+        .unwrap_or(false)
+    }
+
     /// Tell the analysis what a path's text is now, or answer `None` when no workspace has been opened.
     ///
     /// The notification worker's entry point: `didOpen`, `didChange`, `didSave`, `didClose` and the client's file

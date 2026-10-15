@@ -52,6 +52,118 @@ const WIDGET_H: &str = "struct Widget { int size; };\n";
 /// is a real gap in its error reporting and it is recorded.)
 const MAIN_CPP: &str = "#include \"widget.h\"\n\nvoid f() {\n    Widget w;\n    w.size = 1;\n}\nstruct Unclosed { int x;\n";
 
+/// **A client that pulls gets a report, not `null`.**
+///
+/// The reported symptom was that diagnostics did not change while typing, and this is the layer it was in. A client
+/// that advertises `textDocument.diagnostic` is answered by `textDocument/diagnostic` instead of by
+/// `publishDiagnostics`, and that handler went through `analysis_query` → `query_blocking` →
+/// `RequestOutcome::Missing`, which `ServerContext::task` turns into **`Response::new_ok(id, Value::Null)`**.
+///
+/// `null` is not a `DocumentDiagnosticReport`. A client that asked for one and got `null` cannot tell it from a
+/// failure, so it keeps the diagnostics it already had — which is precisely "输入代码之后诊断不改变", and it is why
+/// the push-path fixes had no visible effect for this client.
+///
+/// There were **two** ways to reach `Missing` and both are fixed in the handler:
+///
+/// ```text
+/// the file was never read     `prepare` queues cooking and returns, so the query found no reading
+/// `diagnose_file` answered None   …which was then reported as `Missing` rather than as "nothing wrong"
+/// ```
+///
+/// So this asserts the two things a pull client needs and neither of which it was getting: the answer is an
+/// **object with an `items` array** (the shape the protocol requires), and it is non-empty for a file with a parse
+/// error. An empty `items` here would be the old `null` in a different disguise — a client shown "clean" for a file
+/// that does not parse.
+#[test]
+fn a_pulling_client_gets_a_report_and_not_null() {
+    let project = Project::new("pull-diagnostics");
+    project.write("widget.h", WIDGET_H);
+    project.write("main.cpp", MAIN_CPP);
+
+    let mut server = Server::start(project.root());
+    let main_uri = uri_of(&project.root().join("main.cpp"));
+
+    let initialized = server.request(
+        1,
+        "initialize",
+        json!({
+            "processId": std::process::id(),
+            "rootUri": uri_of(project.root()),
+            "capabilities": {
+                // **The pull capability**, which is what routes diagnostics to the request instead of the
+                // notification. Its absence is what the other tests exercise.
+                "textDocument": { "diagnostic": { "dynamicRegistration": false } },
+                "workspace": { "configuration": true, "didChangeWatchedFiles": { "dynamicRegistration": true } },
+                "window": { "workDoneProgress": true },
+            },
+        }),
+    );
+    assert_eq!(
+        initialized["result"]["capabilities"]["diagnosticProvider"]["interFileDependencies"],
+        json!(true),
+        "the server advertises the provider a pulling client looks for: {initialized}"
+    );
+    server.notify("initialized", json!({}));
+    server.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": { "uri": main_uri, "languageId": "cpp", "version": 1, "text": MAIN_CPP }
+        }),
+    );
+
+    let report = server.ask_until(100, |id| {
+        json!({
+            "id": id,
+            "method": "textDocument/diagnostic",
+            "params": { "textDocument": { "uri": main_uri } },
+        })
+    });
+
+    assert!(
+        !report["result"].is_null(),
+        "`null` is what a client cannot act on, and it is what this answered: {report}"
+    );
+    let items = report["result"]["items"]
+        .as_array()
+        .unwrap_or_else(|| panic!("a full document diagnostic report has an `items` array: {report}"));
+    assert!(
+        !items.is_empty(),
+        "the file has an unclosed class, so a report with no items is \"clean\" and wrong: {report}"
+    );
+    assert!(
+        items.iter().any(|item| item["message"]
+            .as_str()
+            .is_some_and(|message| message.contains(';'))),
+        "and the parse error is the one the push test also expects: {report}"
+    );
+
+    // --- **Asking twice is answered twice, and the second answer is the same** -----------------------
+    //
+    // A pulling client re-asks after every edit, so the request is made repeatedly against unchanged text. The
+    // answer must be the *same* answer and not, say, one that depends on whether the reading happened to be cached —
+    // which is the property that makes a pull client's screen stable.
+    //
+    // **And it is where a duplicate was found**: measured, this same file reported its `expected \`;\`` **twice** on
+    // the second ask. `prepare_for_a_diagnostic` re-reads and re-cooks the file, and a path that is cooked twice can
+    // be counted twice by whatever reads the errors.
+    // asserted about it.
+    let again = server.ask_until(200, |id| {
+        json!({
+            "id": id,
+            "method": "textDocument/diagnostic",
+            "params": { "textDocument": { "uri": main_uri } },
+        })
+    });
+    assert_eq!(
+        again["result"]["items"].as_array().map(Vec::len),
+        Some(items.len()),
+        "the same text has to give the same answer twice: first {report}, then {again}"
+    );
+
+    server.request(999, "shutdown", Value::Null);
+    server.notify("exit", Value::Null);
+}
+
 #[test]
 fn a_client_can_open_a_file_and_get_diagnostics_a_definition_and_a_hover() {
     let project = Project::new("handshake");
