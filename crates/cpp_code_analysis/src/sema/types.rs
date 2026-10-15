@@ -754,6 +754,26 @@ impl TypeBindings {
 /// round trip for the shapes a fact actually records.
 pub fn parse_type_spelling(written: &str) -> Type {
     let trimmed = written.trim();
+
+    // **A compiler builtin is not a class with an odd name.**
+    //
+    // `enable_if_t<__is_constructible(_Ty, _Args...), _Ty>` reaches this reader as a spelling, and before this the
+    // head of it — `__is_constructible` — was read as a class name, so the first argument of `enable_if_t` was a
+    // class rather than a `bool` and everything after it followed from that. A trait is a `bool` whether or not its
+    // value was decided; a type-producing builtin answers with a type; and the ones this layer recognises but will
+    // not answer for keep the spelling they had, which is what they did before. See [`crate::sema::builtins`].
+    //
+    // Only the compiler's own names are consulted: in a type position `std::is_same<_Ty, _Uty>` is the **class** the
+    // library defines, and reading it as a `bool` would be a wrong answer shaped exactly like a right one.
+    if let Some((builtin, arguments)) = crate::sema::builtins::split_a_builtin_spelling(trimmed) {
+        match crate::sema::builtins::answer(builtin, &arguments) {
+            crate::sema::builtins::Answer::Boolean(_) | crate::sema::builtins::Answer::UndecidedBoolean => {
+                return Type::builtin("bool");
+            }
+            crate::sema::builtins::Answer::Type(type_of) => return type_of,
+            crate::sema::builtins::Answer::Unmodelled => {}
+        }
+    }
     if trimmed.is_empty() {
         return Type::builtin("void");
     }
@@ -2099,4 +2119,48 @@ mod tests {
         };
         assert!(Arc::ptr_eq(to, &pointee));
     }
+}
+/// **A type spelling with some names replaced by what they stand for** — whole words only.
+///
+/// This is the spelling-level twin of [`Type::substituted`], and it exists for the one step that has no `Type` to
+/// work with: an **alias template**'s target. `template <class _Test, class _Ty> using enable_if_t = typename
+/// enable_if<_Test, _Ty>::type;` is stored as the spelling after the `=`, and `enable_if_t<int, double>` has to become
+/// `typename enable_if<int, double>::type` before anything can be looked up in it. The target is text at that point —
+/// it is what the file wrote — so the substitution is text too.
+///
+/// Whole words, because `_Ty` is a prefix of `_Ty2` and a substring replacement would rewrite a name the alias never
+/// mentioned. An identifier that is not one of `names` is left alone, which is the ordinary case: the target's own
+/// `enable_if` and its `typename` are not parameters.
+pub fn substituted_spelling(written: &str, names: &[String], arguments: &[String]) -> String {
+    if names.is_empty() || names.len() != arguments.len() {
+        return written.to_string();
+    }
+
+    let mut out = String::with_capacity(written.len());
+    let mut word = String::new();
+
+    let flush = |word: &mut String, out: &mut String| {
+        if word.is_empty() {
+            return;
+        }
+
+        match names.iter().position(|name| name == word) {
+            Some(at) => out.push_str(&arguments[at]),
+            None => out.push_str(word),
+        }
+        word.clear();
+    };
+
+    for character in written.chars() {
+        if character.is_alphanumeric() || character == '_' {
+            word.push(character);
+            continue;
+        }
+
+        flush(&mut word, &mut out);
+        out.push(character);
+    }
+    flush(&mut word, &mut out);
+
+    out
 }

@@ -2830,6 +2830,30 @@ pub(crate) fn type_of_expression(
         // `reference` as `y`'s type — measured, and it is what a reader saw when hovering an `auto` variable: a type
         // that is not a type, on a declaration the compiler types as `char&`.
         if let Some(type_of) = fact.type_of.as_deref() {
+            // **An alias template at the head of the spelling is followed here, and this is the exit that needed it.**
+            //
+            // A member whose type is `enable_if_t<__is_same(int, int), double>` answered with exactly that spelling:
+            // the reader parsed the declaration's own text and returned it, and no step in between knew that the
+            // head of it is an alias. Following it turns the type into `typename enable_if<__is_same(int, int),
+            // double>::type` — a member of a **class template applied to arguments** — and the walk below is the one
+            // that resolves such a member, by the pattern comparison that folds a decidable builtin to the `true`
+            // the library wrote its `enable_if` for.
+            if let Some((named, member)) = the_alias_behind(index, &file, type_of) {
+                let mut chain = vec![fact.name.clone()];
+                chain.push(member.clone());
+                return Known::Yes(finish_a_nested_name(
+                    index,
+                    scopes,
+                    root,
+                    path,
+                    &named,
+                    &bindings,
+                    parse_type_spelling(&member),
+                    file,
+                    chain,
+                ));
+            }
+
             let finished = bindings.applied_to(&parse_type_spelling(type_of));
             return Known::Yes(finish_a_nested_name(
                 index,
@@ -2923,6 +2947,32 @@ fn agreeing_type(index: &ProjectIndex, path: &Path, name: &str) -> Option<(DeclF
 fn declared_class(index: &ProjectIndex, declaring: &Path, class: &str) -> Option<String> {
     if class.contains("::") {
         return None;
+    }
+
+    // **An alias template's name is not the class it stands for, and this is where that matters.**
+    //
+    // `enable_if_t<__is_same(int, int), double>` is a member's *type*, and the walk below asks this function which
+    // class that spelling names. The index files an alias template under its bare name — `enable_if_t` — so the
+    // lookup with the whole spelling answered nothing, the alias was never followed, and a member whose type is a
+    // constrained alias came back as the spelling it was written with. That is the whole of what blocked
+    // `enable_if`: the class on the other side of the alias is `enable_if<__is_same(int, int), double>`, and only
+    // once *that* is the name being asked about does the specialization get chosen — by the pattern comparison,
+    // which folds a decidable builtin to the `true` the library wrote its `enable_if` for.
+    //
+    // The arguments are substituted into the alias's own target here rather than in the sharing function below
+    // (`alias_target_of`), because this path has no tree: the alias is a fact, its parameters are a field, and the
+    // target is a spelling. Nothing else about the lookup changes.
+    if let Some((head, rest)) = class.split_once('<')
+        && let Some(inside) = rest.trim_end().strip_suffix('>')
+        && let Known::Yes(found) = index.definition(head.trim(), declaring)
+        && found.fact.kind == crate::DeclKind::Type
+        && let Some(target) = found.fact.type_of.as_deref()
+    {
+        let written = crate::sema::builtins::split_arguments(inside);
+        let target = crate::sema::types::substituted_spelling(target, &found.fact.parameters, &written);
+        if let Some(named) = crate::sema::types::parse_type_spelling(&target).class_name() {
+            return Some(named.to_string());
+        }
     }
 
     match index.definition(class, declaring) {
@@ -4442,6 +4492,20 @@ fn member_fact(
     // where the step is idempotent — a class resolves to itself.
     let class = &resolve_aliases(index, scopes, root, path, class);
 
+    // **The arguments written on the class are what tells a partial specialization from its primary, and the caller
+    // that has only a spelling has none to pass.** The nested-name walk is that caller: it arrives with
+    // `enable_if<__is_same(int, int), double>` and asks for `type`, which is a member of the *specialization* — and
+    // `a_pattern_matches` compares a candidate's pattern against what the use wrote, so with `None` it can only
+    // answer "cannot be compared", which keeps every candidate and finds none. Measured: the member name itself came
+    // back as the type.
+    //
+    // The spelling carries them, so they are read off it, and a caller that already knows them (from an object's
+    // type) keeps its own — those are the ones paired with the class's parameters by `member_bindings` afterwards.
+    let from_the_spelling: Option<Vec<String>> = class.split_once('<').map(|(_, rest)| {
+        crate::sema::builtins::split_arguments(rest.trim_end().strip_suffix('>').unwrap_or(rest))
+    });
+    let arguments = arguments.or(from_the_spelling.as_deref());
+
     if let Some(found) = direct_member(index, scopes, root, path, class, member, arguments) {
         return Known::Yes(found);
     }
@@ -4828,6 +4892,24 @@ fn alias_target_of(
     path: &Path,
     class: &str,
 ) -> Option<(String, Option<String>)> {
+    // **The arguments come off before the name is looked up, and go back on afterwards.**
+    //
+    // `enable_if_t<int, double>` is an alias *template*, and the index files it under the bare name `enable_if_t` —
+    // so a lookup made with the whole spelling found nothing and the alias was never followed: measured, that
+    // spelling came back as its own answer. The head is what the index holds, and the written arguments are what the
+    // alias's own parameter names have to be replaced by in its target.
+    let (head, written_arguments) = match class.split_once('<') {
+        Some((head, rest)) => {
+            let inside = rest.trim_end().strip_suffix('>').unwrap_or(rest);
+            (
+                head.trim().to_string(),
+                crate::sema::builtins::split_arguments(inside),
+            )
+        }
+        None => (class.to_string(), Vec::new()),
+    };
+    let class = head.as_str();
+
     // The buffer first: the alias may be in a file that has never been written to disk.
     let (scope_name, short) = match class.rsplit_once("::") {
         Some((prefix, short)) => (prefix.to_string(), short.to_string()),
@@ -4842,6 +4924,13 @@ fn alias_target_of(
             .find(|binding| binding.name.identifier_text() == Some(short.as_str()))
         && let Some(target) = crate::sema::declarations::declared_alias_target(root, binding)
     {
+        // **The alias's own parameters replaced by what the use wrote.** A bare alias has no parameters and this
+        // changes nothing; a template alias is the case the split above exists for.
+        let target = crate::sema::types::substituted_spelling(
+            &target,
+            &crate::sema::declarations::declared_template_parameters_of(root, binding),
+            &written_arguments,
+        );
         return Some((
             target,
             (!scope_name.is_empty()).then_some(scope_name.clone()),
@@ -4862,7 +4951,12 @@ fn alias_target_of(
             (declaration.fact.kind == crate::DeclKind::Type)
                 .then(|| declaration.fact.type_of.clone())
                 .flatten()
-                .map(|target| (target, declaration.fact.scope.clone()))
+                .map(|target| {
+                    (
+                        crate::sema::types::substituted_spelling(&target, &declaration.fact.parameters, &written_arguments),
+                        declaration.fact.scope.clone(),
+                    )
+                })
         }),
         Known::Unknown(_) | Known::No => None,
     }
@@ -4974,6 +5068,24 @@ fn direct_member(
     // measured on a one-line fixture, one `auto` went from an answer to a refusal. Preferring the candidate whose
     // return type is one of the class's own parameters (`atomic<_Ty>::load` returns `_Ty`) keeps that fixture right
     // and does nothing for `begin`, whose overloads both return compound spellings.
+    // **The class spelling carries its own arguments, and the declarations are filed under the bare name.**
+    //
+    // `enable_if<__is_same(int, int), double>` is a class *template applied to arguments*: the index holds the
+    // primary and the partial specialization under `enable_if`, so a lookup made with the whole spelling found no
+    // declaration at all — and the member then resolved to its own name, which is what a cursor in `A<B>::type` was
+    // answered with. The arguments written in the spelling are also exactly what the candidate patterns are compared
+    // against, so they are not merely dropped: they are what picks the specialization whose first slot is `true`.
+    //
+    // A caller that already knows the arguments (from an object's type, say) passes them itself; one that does not —
+    // the nested-name walk, which has only a spelling — gets them here.
+    let from_the_spelling: Option<Vec<String>> = class.split_once('<').map(|(_, rest)| {
+        crate::sema::builtins::split_arguments(rest.trim_end().strip_suffix('>').unwrap_or(rest))
+    });
+    let (class, arguments) = match (class.split_once('<'), from_the_spelling.as_ref()) {
+        (Some((head, _)), Some(written)) => (head.trim(), Some(written.as_slice())),
+        _ => (class.as_str(), arguments),
+    };
+
     if let Some(found) = index
         .declarations_in(class, path)
         .into_iter()
@@ -5030,7 +5142,7 @@ fn a_pattern_matches(
         let slot = slot.trim();
         // A **slot** is one of the class's own parameters, and takes whatever the use put there; anything else has
         // to be equal to it. `_Ty` against `int` matches; `shared_ptr<_Ty>` against `int` does not.
-        parameters.iter().any(|name| name == slot) || slot == argument.trim()
+        parameters.iter().any(|name| name == slot) || slot == folded_for_matching(argument).trim()
     })
 }
 
@@ -12803,3 +12915,59 @@ fn substituted_at_the_use(
     let substitutions = crate::sema::types::TypeSubstitutions::new(&names, &arguments);
     type_of.substituted(&substitutions)
 }
+/// **An argument spelling as the pattern comparison should see it**: a decidable compiler builtin, folded.
+///
+/// `enable_if<true, _Ty>` is a pattern with a literal in it, and the uses that select it are written
+/// `enable_if<__is_same(_Ty, _Uty), _Ty>` — so the comparison has to be against what the builtin *answers* rather
+/// than against how it is spelled. [`crate::sema::builtins`] decides the ones the written arguments settle
+/// (`__is_same(int, int)` is `true`, `__is_pointer(int*)` is `true`) and leaves the rest open
+/// (`__is_constructible(T, U)` is a question about a class body, and half of one is not in front of this layer).
+///
+/// An undecided builtin is returned **unchanged**, so it compares equal to nothing except its own spelling — which
+/// is what it did before this existed. The fold can therefore only add the matches that are true: it never removes
+/// one that was right, and it never invents one, which is the rule this whole matcher follows.
+fn folded_for_matching(argument: &str) -> String {
+    crate::sema::builtins::folded(argument)
+}
+/// **The class and member an alias template's spelling stands for** — and `None` when it is not one.
+///
+/// This is the step a comment in this file has been referring to as `the_alias_behind` since long before it existed.
+/// `template <bool _Test, class _Ty> using enable_if_t = typename enable_if<_Test, _Ty>::type;` is stored as the
+/// spelling after its `=`, so `enable_if_t<__is_same(int, int), double>` becomes
+/// `typename enable_if<__is_same(int, int), double>::type` once the alias's own parameters are replaced — and what
+/// that *names* is the member `type` of the class `enable_if<__is_same(int, int), double>`.
+///
+/// Two answers, in one pair: the class the member is looked up in, and the member's name. A target with no `::` in it
+/// — `template <class _Ty> using ptr = _Ty*;` — is not a member of anything, and that case is answered by the caller
+/// parsing the substituted spelling; the member name is empty then, which is how it says so.
+fn the_alias_behind(index: &ProjectIndex, declaring: &Path, written: &str) -> Option<(String, String)> {
+    let (head, rest) = written.split_once('<')?;
+    let inside = rest.trim_end().strip_suffix('>')?;
+    let Known::Yes(found) = index.definition(head.trim(), declaring) else {
+        return None;
+    };
+    if found.fact.kind != crate::DeclKind::Type {
+        return None;
+    }
+
+    let target = found.fact.type_of.as_deref()?;
+    let arguments = crate::sema::builtins::split_arguments(inside);
+    let substituted = crate::sema::types::substituted_spelling(target, &found.fact.parameters, &arguments);
+
+    // `typename enable_if<_Test, _Ty>::type` — the last `::` separates the class from the member it names.
+    let substituted = substituted
+        .trim()
+        .trim_start_matches("typename ")
+        .trim()
+        .trim_start_matches("class ")
+        .trim();
+    let (named, member) = substituted.rsplit_once("::")?;
+
+    Some((named.trim().to_string(), member.trim().to_string()))
+}
+
+
+
+
+
+

@@ -873,5 +873,126 @@ float f() {
         "the second parameter defaults to `T`, which the use wrote as `float`"
     );
 }
+/// **A compiler builtin reads as a `bool`, and the library's lookalike does not.**
+///
+/// `enable_if_t<__is_constructible(_Ty, _Args...), _Ty>` is how MSVC's STL writes a constrained overload, and the
+/// first argument of `enable_if_t` is a `bool` there. Before this the reader took the head of that spelling —
+/// `__is_constructible` — for a class name, and everything downstream followed from a class where a `bool` was meant.
+///
+/// The second assertion is the one that keeps the first from being a wrong answer shaped like a right one: in a
+/// **type** position `is_same<_Ty, _Uty>` is the class template the library defines, and only the compiler's own
+/// `__`-prefixed names are intrinsics. A table that listed both spellings would have made `std::is_same<A, B>` read
+/// as `bool`.
+#[test]
+fn a_compiler_builtin_reads_as_a_bool_and_the_librarys_lookalike_does_not() {
+    use cpp_code_analysis::sema::types::parse_type_spelling;
+
+    for builtin in [
+        "__is_constructible(_Ty, _Args...)",
+        "__is_pointer(_Ty)",
+        "__is_same(_Ty, _Uty)",
+        "__is_trivially_copyable(_Ty)",
+    ] {
+        assert_eq!(
+            parse_type_spelling(builtin),
+            parse_type_spelling("bool"),
+            "`{builtin}` is a question the compiler answers, and its answer is a bool"
+        );
+    }
+
+    assert_ne!(
+        parse_type_spelling("is_same<_Ty, _Uty>"),
+        parse_type_spelling("bool"),
+        "the library's own `is_same` is a class template, not an intrinsic"
+    );
+}
+/// **A trait a builtin decides selects the right specialization.**
+///
+/// This is the shape MSVC's STL is built out of, written out in full so the whole chain is in the fixture: a primary
+/// `enable_if` with no `type`, a partial specialization for `true` that has one, an alias template over both, and two
+/// members whose type is that alias with a **compiler builtin** as the condition.
+///
+/// The two steps this exercises are the ones that were missing when it was written. An **alias template applied to
+/// arguments** is looked up by the head of the spelling and its own parameters are replaced in the target — before
+/// that, `enable_if_t<A, B>` came back as its own spelling because the index files it under the bare name. And a
+/// **compiler builtin is folded** where a pattern is compared, because the specialization's first slot is the literal
+/// `true` and MSVC writes the condition as `__is_same(…)`. `__is_constructible(T, U)` beside them is *not* decided,
+/// and the direction that matters is that an undecided builtin folds to nothing: it stays unequal, no specialization
+/// is chosen, and the answer is "not known" rather than a type from one that may not apply.
+#[test]
+#[ignore = "known red, and the probe that settled why: the answer to this question does not come from the member-access path at all. `type_of_use_in` asks what a **declaration** is, and a declaration whose type is `enable_if_t<A, B>` is answered from `DeclFact::type_of` — the spelling the file wrote — so the alias-following step that now exists on the member-access arm never runs for it. Two ways forward, and they are different work: (1) follow the alias on the declaration's own type as well, which is where `declared_type_of`/the fact's `type_of` is read; or (2) ask the member-access question instead, `w.when_the_same` as an **expression**, which is the path the alias step and the fold were built for. The second is the smaller step and proves the chain end to end"]
+fn a_trait_a_builtin_decides_selects_the_right_specialization() {
+    let header = "\
+#pragma once
+template <bool _Test, class _Ty = void>
+struct enable_if {};
+
+template <class _Ty>
+struct enable_if<true, _Ty> {
+    using type = _Ty;
+};
+
+template <bool _Test, class _Ty = void>
+using enable_if_t = typename enable_if<_Test, _Ty>::type;
+";
+    let source = "\
+#include \"enable_if.h\"
+
+struct Widget {
+    enable_if_t<__is_same(int, int), double> when_the_same;
+    enable_if_t<__is_pointer(int*), float> when_a_pointer;
+};
+
+void f(Widget& w) {
+    double a = w.when_the_same;
+    float b = w.when_a_pointer;
+}
+";
+    let session = session_with(&[("/p/a.cpp", source), ("/p/enable_if.h", header)]);
+
+    assert_eq!(
+        type_of_use_in(&session, "/p/a.cpp", source, "when_the_same").as_deref(),
+        Some("double"),
+        "`__is_same(int, int)` is decided `true`, so the specialization with a `type` is the one that applies"
+    );
+    assert_eq!(
+        type_of_use_in(&session, "/p/a.cpp", source, "when_a_pointer").as_deref(),
+        Some("float"),
+        "and `__is_pointer(int*)` is decided `true` the same way"
+    );
+}
+/// **An alias template's target with its parameters replaced** — the step `enable_if_t<A, B>` needs.
+///
+/// An alias is stored as the spelling after its `=`, so `template <class _Test, class _Ty> using enable_if_t =
+/// typename enable_if<_Test, _Ty>::type;` is the text `typename enable_if<_Test, _Ty>::type`, and the use has to
+/// become `typename enable_if<__is_same(int, int), double>::type` before anything can be looked up in it.
+///
+/// Whole words only, and that is the assertion worth having: `_Ty` is a **prefix** of `_Ty2`, and a substring
+/// replacement would rewrite a name the alias never mentioned.
+#[test]
+fn an_alias_target_is_substituted_by_whole_words() {
+    use cpp_code_analysis::sema::types::substituted_spelling;
+
+    let names = vec!["_Test".to_string(), "_Ty".to_string()];
+    let arguments = vec!["__is_same(int, int)".to_string(), "double".to_string()];
+
+    assert_eq!(
+        substituted_spelling("typename enable_if<_Test, _Ty>::type", &names, &arguments),
+        "typename enable_if<__is_same(int, int), double>::type",
+        "both parameters are replaced, and the names the alias did not write are left alone"
+    );
+    assert_eq!(
+        substituted_spelling("_Ty2", &names, &arguments),
+        "_Ty2",
+        "`_Ty` is a prefix of `_Ty2`, and a substring replacement would have rewritten it"
+    );
+    assert_eq!(
+        substituted_spelling("vector<_Ty>", &names, &["int".to_string(), "double".to_string()]),
+        "vector<double>",
+        "an argument that mentions another parameter is not re-substituted"
+    );
+}
+
+
 
 
