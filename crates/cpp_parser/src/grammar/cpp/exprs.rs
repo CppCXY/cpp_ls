@@ -1,5 +1,8 @@
 use crate::{
-    grammar::ParseResult,
+    grammar::{
+        ParseResult,
+        cpp::{decls, stats, types},
+    },
     kind::{CppSyntaxKind, CppTokenKind},
     parser::{CppParser, MarkerEventContainer},
     parser_error::CppParseError,
@@ -242,7 +245,7 @@ pub fn parse_assignment_expr(p: &mut CppParser) -> ParseResult {
 /// be braces, so the choice belongs to the call arm.
 pub fn parse_argument(p: &mut CppParser) -> ParseResult {
     if p.current_token() == CppTokenKind::LeftBrace {
-        return super::decls::parse_braced_initializer(p);
+        return decls::parse_braced_initializer(p);
     }
 
     parse_assignment_expr(p)
@@ -263,7 +266,7 @@ pub fn parse_argument(p: &mut CppParser) -> ParseResult {
 ///
 /// — a *call* whose argument is a type, a qualifier or a bare operator, which is nothing the expression grammar
 /// can read. The reading that fits is the one the macro rules already use: a balanced group of raw tokens, kept
-/// under an `ArgumentList` node (see [`super::decls::parse_balanced_token_group`]).
+/// under an `ArgumentList` node (see [`decls::parse_balanced_token_group`]).
 ///
 /// # The criterion, and what it costs
 ///
@@ -520,7 +523,7 @@ fn parse_ternary_expr(p: &mut CppParser) -> ParseResult {
         // so a count kept by this function would have to know about every rule that can read a directive between
         // here and there. See [`CppParser::open_conditionals`], and the snapshot at the top of this arm.
         while p.current_token() == CppTokenKind::Hash {
-            super::stats::parse_preprocessor_directive(p)?;
+            stats::parse_preprocessor_directive(p)?;
         }
 
         expect_token(p, CppTokenKind::Colon)?;
@@ -550,7 +553,7 @@ fn parse_ternary_expr(p: &mut CppParser) -> ParseResult {
         // another `:` branch.
         let mut read_a_branch_of_the_tail = false;
         while p.open_conditionals() > conditionals_when_the_conditional_began
-            && let Some(writes_the_terminator) = super::decls::a_branch_continues_the_tail(p)
+            && let Some(writes_the_terminator) = decls::a_branch_continues_the_tail(p)
         {
             if writes_the_terminator {
                 p.bump(); // this branch's `;`
@@ -559,7 +562,7 @@ fn parse_ternary_expr(p: &mut CppParser) -> ParseResult {
             }
 
             while p.current_token() == CppTokenKind::Hash {
-                super::stats::parse_preprocessor_directive(p)?;
+                stats::parse_preprocessor_directive(p)?;
             }
 
             expect_token(p, CppTokenKind::Colon)?;
@@ -689,7 +692,7 @@ fn parse_binary_expr_with_precedence(p: &mut CppParser, min_prec: u8) -> ParseRe
                 if matches!(p.peek_token_text_at(1), "else" | "elif") {
                     opens_another_branch = true;
                 }
-                super::stats::parse_preprocessor_directive(p)?;
+                stats::parse_preprocessor_directive(p)?;
             }
 
             let an_operator_follows =
@@ -727,7 +730,7 @@ fn parse_binary_expr_with_precedence(p: &mut CppParser, min_prec: u8) -> ParseRe
         // It produces the same `InitListExpr` a declaration's initializer produces; the two differ only in the
         // grammar production that reached it, and both are a consumer's answer to "what is being assigned?".
         if is_assignment_operator(operator) && p.current_token() == CppTokenKind::LeftBrace {
-            super::decls::parse_braced_initializer(p)?;
+            decls::parse_braced_initializer(p)?;
             left = m.complete(p);
             continue;
         }
@@ -950,8 +953,8 @@ fn parse_unary_expr(p: &mut CppParser, fold_operand: bool) -> ParseResult {
         // as two expressions in a row — which is how that file reported ``expected `;` after expression`` against
         // the `__extension__` itself. Stepped over, with the node the specifier sequence gives it, and the operand
         // asked for again.
-        _ if super::types::at_an_implementation_keyword(p) => {
-            super::types::parse_an_implementation_keyword(p);
+        _ if types::at_an_implementation_keyword(p) => {
+            types::parse_an_implementation_keyword(p);
             parse_unary_expr(p, fold_operand)
         }
 
@@ -969,7 +972,7 @@ fn parse_unary_expr(p: &mut CppParser, fold_operand: bool) -> ParseResult {
 ///
 /// # Why the type-id must not stop at one name here
 ///
-/// [`super::types::parse_type_id`] uses the same sequence as a declaration, where a second name is the
+/// [`types::parse_type_id`] uses the same sequence as a declaration, where a second name is the
 /// declarator. That is what is wanted: `sizeof(unsigned long)` and `(MyType)x` both need the type to be read
 /// in full, and a `sizeof` of a variable is not a declaration, so there is no declarator to protect.
 ///
@@ -992,7 +995,7 @@ pub fn parse_type_id_or_expression(p: &mut CppParser) -> ParseResult {
     // A type-id that *does* swallow the whole payload stays the type reading, which is the case the rule exists
     // for: `sizeof(int[4])` is an array type rather than an index, and `sizeof(unsigned long)` is two keywords
     // rather than a comparison.
-    if super::types::parse_type_id(p).is_ok()
+    if types::parse_type_id(p).is_ok()
         && p.current_token_index() > before
         && p.current_token() == CppTokenKind::RightParen
     {
@@ -1081,7 +1084,7 @@ fn is_a_type_in_parentheses(p: &CppParser) -> bool {
     }
 
     match p.peek_token_kind_at(1..2).first() {
-        Some(&kind) if super::types::is_type_specifier_keyword(kind) => true,
+        Some(&kind) if types::is_type_specifier_keyword(kind) => true,
         Some(&CppTokenKind::Identifier) => {
             // The name must be one the file declares to be a type: a name alone is the token a type and an
             // expression share, and reading every `(a)` as a cast is the mistake this check exists to avoid.
@@ -1156,7 +1159,7 @@ fn is_a_type_in_parentheses(p: &CppParser) -> bool {
 /// [`starts_an_operand`], which is where that rule is written.
 fn read_a_template_id_here(p: &mut CppParser) -> bool {
     let before_the_arguments = p.checkpoint();
-    let read = super::types::parse_template_argument_list(p);
+    let read = types::parse_template_argument_list(p);
 
     // The operand rule is suspended **inside a clause**, except when the operand is inside parentheses that are
     // still open — see [`an_operand_is_decisive`], which is the same question the cast rule asks about its own `)`.
@@ -1486,7 +1489,7 @@ fn parse_new_type_and_initializer(p: &mut CppParser) -> ParseResult {
 
         if placement_arguments_at(p) {
             let placement = p.mark(CppSyntaxKind::ArgumentList);
-            super::decls::parse_expression_list(p, CppTokenKind::RightParen)?;
+            decls::parse_expression_list(p, CppTokenKind::RightParen)?;
             placement.complete(p);
             return parse_a_type_here(p);
         }
@@ -1505,7 +1508,7 @@ fn parse_new_type_and_initializer(p: &mut CppParser) -> ParseResult {
 
         // `new (buf) Widget()`: a placement list, and then the type it allocates.
         let placement = p.mark(CppSyntaxKind::ArgumentList);
-        super::decls::parse_expression_list(p, CppTokenKind::RightParen)?;
+        decls::parse_expression_list(p, CppTokenKind::RightParen)?;
         placement.complete(p);
     }
 
@@ -1514,23 +1517,23 @@ fn parse_new_type_and_initializer(p: &mut CppParser) -> ParseResult {
 
 /// Parse a type-id at the cursor, requiring that it consume something.
 ///
-/// [`super::types::parse_type_id`] succeeds having consumed nothing when there is no type, which is the correct
+/// [`types::parse_type_id`] succeeds having consumed nothing when there is no type, which is the correct
 /// answer for a caller that only has to *attach* a type and is the wrong one here: `new` with no type is not a
 /// `new` at all. The progress check turns "it parsed" into "there was a type".
 /// Parse a type-id at the cursor, requiring that it consume something.
 ///
-/// [`super::types::parse_type_id_with`] succeeds having consumed nothing when there is no type, which is the
+/// [`types::parse_type_id_with`] succeeds having consumed nothing when there is no type, which is the
 /// correct answer for a caller that only has to *attach* a type and the wrong one here: `new` with no type is
 /// not a `new` at all. The progress check turns "it parsed" into "there was a type".
 ///
 /// `a_name_may_be_a_type` is `false` and that is the whole reason this wrapper exists: in a `new`, the
 /// parentheses before the type may be a **placement list**, so `new (Widget)(1)` and `new (Widget*)()` must be
 /// told apart by whether `Widget` is a type the file declares — not by whether it looks like one. See
-/// [`super::types::parse_type_id_with`].
+/// [`types::parse_type_id_with`].
 fn parse_a_type_here(p: &mut CppParser) -> ParseResult {
     let before = p.current_token_index();
 
-    super::types::parse_type_id_for_an_allocation(p)?;
+    types::parse_type_id_for_an_allocation(p)?;
     if p.current_token_index() == before {
         return Err(CppParseError::syntax_error_from(
             "expected a type to allocate",
@@ -1642,7 +1645,7 @@ fn parse_new_initializer(p: &mut CppParser) -> ParseResult {
     match p.current_token() {
         CppTokenKind::LeftParen => {
             let init = p.mark(CppSyntaxKind::Initializer);
-            if let Err(err) = super::decls::parse_expression_list(p, CppTokenKind::RightParen) {
+            if let Err(err) = decls::parse_expression_list(p, CppTokenKind::RightParen) {
                 init.undo(p);
                 return Err(err);
             }
@@ -1650,7 +1653,7 @@ fn parse_new_initializer(p: &mut CppParser) -> ParseResult {
         }
         CppTokenKind::LeftBrace => {
             let init = p.mark(CppSyntaxKind::Initializer);
-            if let Err(err) = super::decls::parse_braced_initializer(p) {
+            if let Err(err) = decls::parse_braced_initializer(p) {
                 init.undo(p);
                 return Err(err);
             }
@@ -1692,7 +1695,7 @@ fn parse_postfix_suffixes(
                 let before_the_arguments = p.checkpoint();
                 if parse_call_arguments(p).is_err() {
                     p.rollback(before_the_arguments);
-                    super::decls::parse_balanced_token_group(p, CppSyntaxKind::ArgumentList)?;
+                    decls::parse_balanced_token_group(p, CppSyntaxKind::ArgumentList)?;
                 }
 
                 expr = m.complete(p);
@@ -1759,7 +1762,7 @@ fn parse_postfix_suffixes(
                         // is what separates it from a comparison written after a member access.
                         let before_the_qualifier = p.checkpoint();
                         p.bump();
-                        if super::types::parse_template_argument_list(p).is_err()
+                        if types::parse_template_argument_list(p).is_err()
                             || p.current_token() != CppTokenKind::Scope
                         {
                             p.rollback(before_the_qualifier);
@@ -1791,9 +1794,9 @@ fn parse_postfix_suffixes(
                     // only if what follows can follow a template-id. `a.b < c > d` is a comparison written after a
                     // member access, and the member is `b` — so the rollback here rewinds to just after the name,
                     // not to the `.b`, and the comparison rule then sees the whole `a.b < c > d`.
-                    if super::types::could_start_template_arguments(p) {
+                    if types::could_start_template_arguments(p) {
                         let before_the_arguments = p.checkpoint();
-                        let read = super::types::parse_template_argument_list(p);
+                        let read = types::parse_template_argument_list(p);
 
                         if read.is_err() || starts_an_operand(p, 0) {
                             p.rollback(before_the_arguments);
@@ -1803,13 +1806,13 @@ fn parse_postfix_suffixes(
                     // An **explicit call to a member operator**: `x.operator<(...)`, `x.operator->()`,
                     // `x.operator std::string_view()`. The name after a `.` is an operator name as much as a
                     // member name is, and the same reader a declaration's operator name goes through is what
-                    // reads it — see [`super::types::parse_operator_name_here`], which is exposed for exactly
+                    // reads it — see [`types::parse_operator_name_here`], which is exposed for exactly
                     // this: one answer to "what is an operator name" rather than two.
-                    super::types::parse_operator_name_here(p)?;
+                    types::parse_operator_name_here(p)?;
                     // `x.template operator()<I>(args)`: the explicit template arguments of a call operator.
-                    if super::types::could_start_template_arguments(p) {
+                    if types::could_start_template_arguments(p) {
                         let before_the_arguments = p.checkpoint();
-                        let read = super::types::parse_template_argument_list(p);
+                        let read = types::parse_template_argument_list(p);
                         if read.is_err() || starts_an_operand(p, 0) {
                             p.rollback(before_the_arguments);
                         }
@@ -1848,9 +1851,9 @@ fn parse_postfix_suffixes(
                             // template-id. Without this the `<` of `x.~A<int>()` was left standing, the expression
                             // rule read it as a comparison, and `int` became an operand with no primary expression —
                             // measured, `expected primary expression` at the `int`.
-                            if super::types::could_start_template_arguments(p) {
+                            if types::could_start_template_arguments(p) {
                                 let before_the_arguments = p.checkpoint();
-                                let read = super::types::parse_template_argument_list(p);
+                                let read = types::parse_template_argument_list(p);
                                 if read.is_err() || starts_an_operand(p, 0) {
                                     p.rollback(before_the_arguments);
                                 }
@@ -1944,7 +1947,7 @@ fn parse_postfix_suffixes(
             {
                 let marks_before = p.open_marks();
                 let m = expr.precede(p, CppSyntaxKind::InitListExpr);
-                if let Err(err) = super::decls::parse_braced_initializer(p) {
+                if let Err(err) = decls::parse_braced_initializer(p) {
                     // The node is closed as if its `}` had been present, which is the same recovery every other
                     // rule uses and is *not* the same as dropping it: `precede` may have re-parented the events
                     // of the expression already parsed into this node, and a marker left open over them would
@@ -1975,7 +1978,7 @@ fn parse_postfix_suffixes(
 ///
 /// The `::` has to be found by **matching the `decltype`'s own parentheses**, because the payload may contain
 /// them: `decltype(f(a))::type`. No `peek` can do it — the parser has no "token after the matching bracket"
-/// lookahead, which is the same reason [`super::decls::index_after_the_group`] counts rather than peeks.
+/// lookahead, which is the same reason [`decls::index_after_the_group`] counts rather than peeks.
 fn a_decltype_that_begins_a_qualified_name(p: &CppParser) -> bool {
     if p.current_token() != CppTokenKind::DecltypeKeyword {
         return false;
@@ -1985,7 +1988,7 @@ fn a_decltype_that_begins_a_qualified_name(p: &CppParser) -> bool {
         return false;
     }
 
-    let mut index = super::decls::next_significant_index(p, p.current_token_index());
+    let mut index = decls::next_significant_index(p, p.current_token_index());
     let mut depth = 0isize;
 
     while index < p.token_count() {
@@ -1994,7 +1997,7 @@ fn a_decltype_that_begins_a_qualified_name(p: &CppParser) -> bool {
             CppTokenKind::RightParen => {
                 depth -= 1;
                 if depth == 0 {
-                    let after = super::decls::next_significant_index(p, index);
+                    let after = decls::next_significant_index(p, index);
                     return p.token_kind_at(after) == CppTokenKind::Scope;
                 }
             }
@@ -2098,7 +2101,7 @@ fn parse_primary_expr(p: &mut CppParser, fold_operand: bool) -> ParseResult {
                 )
             {
                 if p.current_token() == CppTokenKind::Hash {
-                    super::stats::parse_preprocessor_directive(p)?;
+                    stats::parse_preprocessor_directive(p)?;
                 } else {
                     p.bump();
                 }
@@ -2132,7 +2135,7 @@ fn parse_primary_expr(p: &mut CppParser, fold_operand: bool) -> ParseResult {
         // the name rule below — the `::` was left with nothing to continue. See
         // [`a_decltype_here_continues_a_name`], which is `true` for every other keyword here and only asks the
         // question `decltype` has an answer to.
-        kind if super::types::is_type_specifier_keyword(kind)
+        kind if types::is_type_specifier_keyword(kind)
             && matches!(
                 p.peek_next_token(),
                 CppTokenKind::LeftParen | CppTokenKind::LeftBrace
@@ -2189,7 +2192,7 @@ fn parse_primary_expr(p: &mut CppParser, fold_operand: bool) -> ParseResult {
             p.bump(); // `typename`
 
             let the_type = p.mark(CppSyntaxKind::TypenameType);
-            if let Err(err) = super::types::parse_name(p) {
+            if let Err(err) = types::parse_name(p) {
                 the_type.undo(p);
                 m.undo(p);
                 return Err(err);
@@ -2237,7 +2240,7 @@ fn parse_primary_expr(p: &mut CppParser, fold_operand: bool) -> ParseResult {
             p.bump(); // the keyword
 
             let parsed = expect_token(p, CppTokenKind::Less)
-                .and_then(|_| super::types::parse_type_id(p))
+                .and_then(|_| types::parse_type_id(p))
                 .and_then(|_| expect_token(p, CppTokenKind::Greater))
                 .and_then(|_| expect_token(p, CppTokenKind::LeftParen))
                 // **The operand may be empty**: `static_cast<T>()` is a value-initialisation, and refusing it
@@ -2334,7 +2337,7 @@ fn parse_primary_expr(p: &mut CppParser, fold_operand: bool) -> ParseResult {
                         p.bump(); // `decltype`
                         p.bump(); // `(`
                         let payload = if p.current_token() == CppTokenKind::AutoKeyword {
-                            super::types::parse_type_id(p).map(|_| ())
+                            types::parse_type_id(p).map(|_| ())
                         } else {
                             parse_expr(p).map(|_| ())
                         };
@@ -2353,7 +2356,7 @@ fn parse_primary_expr(p: &mut CppParser, fold_operand: bool) -> ParseResult {
                         break;
                     }
                     CppTokenKind::OperatorKeyword => {
-                        super::types::parse_operator_name_here(p)?;
+                        types::parse_operator_name_here(p)?;
                         break;
                     }
                     _ => {
@@ -2382,7 +2385,7 @@ fn parse_primary_expr(p: &mut CppParser, fold_operand: bool) -> ParseResult {
                 // build and throw away an argument list to find that out. Correctness does not rest on it —
                 // everything it accepts is checked below — which also means it no longer has to be exact.
                 if p.current_token() == CppTokenKind::Less
-                    && super::types::could_start_template_arguments(p)
+                    && types::could_start_template_arguments(p)
                 {
                     if !read_a_template_id_here(p) {
                         break;
@@ -2520,7 +2523,7 @@ fn parse_primary_expr(p: &mut CppParser, fold_operand: bool) -> ParseResult {
                                     //
                                     // The spelling is what a file's own defines leave as evidence, and it is the
                                     // reading this rule had before an environment could be passed at all.
-                                    p.is_a_macro(&name) == Some(true) || super::types::written_like_a_macro(&name)
+                                    p.is_a_macro(&name) == Some(true) || types::written_like_a_macro(&name)
                                 })
                                 .unwrap_or(taken > 0);
                             the_prefix_is_a_macro && a_template_id_here_is_called(p)
@@ -2548,7 +2551,7 @@ fn parse_primary_expr(p: &mut CppParser, fold_operand: bool) -> ParseResult {
                 // a `<` it has no arm for — measured, one error per ordinary `for (i = 0; i < n; i++)` in the crate's
                 // own test suite.
                 if p.current_token() == CppTokenKind::Less
-                    && super::types::could_start_template_arguments(p)
+                    && types::could_start_template_arguments(p)
                 {
                     read_a_template_id_here(p);
                 }
@@ -2573,7 +2576,7 @@ fn parse_primary_expr(p: &mut CppParser, fold_operand: bool) -> ParseResult {
             let m = p.mark(CppSyntaxKind::CastExpr);
             p.bump(); // `(`
 
-            let parsed = super::types::parse_type_id(p)
+            let parsed = types::parse_type_id(p)
                 .and_then(|_| expect_token(p, CppTokenKind::RightParen))
                 // The operand of a cast is a unary expression, which is what keeps `(int)a + b` a sum of a cast
                 // and `b` rather than a cast of `a + b`.
@@ -2674,7 +2677,7 @@ fn parse_primary_expr(p: &mut CppParser, fold_operand: bool) -> ParseResult {
 /// consumer sees the same node for `f()` and for `int()`.
 fn parse_functional_payload(p: &mut CppParser) -> ParseResult {
     if p.current_token() == CppTokenKind::LeftBrace {
-        return super::decls::parse_braced_initializer(p);
+        return decls::parse_braced_initializer(p);
     }
 
     let m = p.mark(CppSyntaxKind::ParenExpr);
@@ -2799,7 +2802,7 @@ fn parse_requires_expression(p: &mut CppParser) -> ParseResult {
     // The parameter list, when it is written. A requires-expression's parameters are the ordinary ones —
     // `requires(T t)`, `requires(std::vector<int> v)` — so the parameter rule is reused rather than re-spelled.
     if p.current_token() == CppTokenKind::LeftParen
-        && let Err(err) = super::decls::parse_parameter_list(p)
+        && let Err(err) = decls::parse_parameter_list(p)
     {
         p.close_marks_above(base);
         return Err(err);
@@ -2842,7 +2845,7 @@ fn parse_requires_expression(p: &mut CppParser) -> ParseResult {
         // class's own `}` — so every member after it was read at *namespace* scope and the file's only diagnostic
         // appeared 900 lines later, on the leftover `}` at the end. One seam, one file.
         if p.current_token() == CppTokenKind::Hash {
-            if let Err(err) = super::stats::parse_preprocessor_directive(p) {
+            if let Err(err) = stats::parse_preprocessor_directive(p) {
                 p.close_marks_above(base);
                 return Err(err);
             }
@@ -2896,8 +2899,8 @@ fn parse_requirement(p: &mut CppParser) -> ParseResult {
         // The guard is what keeps the *identifier* reading available here as well: `requires;` is a simple
         // requirement whose expression is a name, and the clause rule consumes nothing on it. `requires(x);` reads
         // as a nested requirement, which is the standard's own reading of those tokens.
-        CppTokenKind::Identifier if at_requires(p) && super::decls::starts_a_requires_clause(p) => {
-            if let Err(err) = super::decls::parse_requires_clause(p) {
+        CppTokenKind::Identifier if at_requires(p) && decls::starts_a_requires_clause(p) => {
+            if let Err(err) = decls::parse_requires_clause(p) {
                 p.close_marks_above(base);
                 return Err(err);
             }
@@ -2906,7 +2909,7 @@ fn parse_requirement(p: &mut CppParser) -> ParseResult {
         // A type requirement: `typename T::value_type;`. Also the `template`-disambiguated spelling
         // `typename T::template rebind<U>;`, which is why this goes through the type-id rule.
         CppTokenKind::TypenameKeyword => {
-            if let Err(err) = super::types::parse_type_id(p) {
+            if let Err(err) = types::parse_type_id(p) {
                 p.close_marks_above(base);
                 return Err(err);
             }
@@ -2950,7 +2953,7 @@ fn parse_requirement(p: &mut CppParser) -> ParseResult {
             if p.current_token() == CppTokenKind::Arrow {
                 let trailing = p.mark(CppSyntaxKind::TrailingReturnType);
                 p.bump(); // `->`
-                if let Err(err) = super::types::parse_type_id(p) {
+                if let Err(err) = types::parse_type_id(p) {
                     trailing.undo(p);
                     p.close_marks_above(base);
                     return Err(err);
@@ -3108,7 +3111,7 @@ fn parse_lambda(p: &mut CppParser) -> ParseResult {
         if p.current_token() == CppTokenKind::TemplateKeyword {
             p.bump();
         }
-        if let Err(err) = super::decls::parse_template_parameter_list(p) {
+        if let Err(err) = decls::parse_template_parameter_list(p) {
             p.close_marks_above(base);
             return Err(err);
         }
@@ -3117,18 +3120,18 @@ fn parse_lambda(p: &mut CppParser) -> ParseResult {
     // The parameter list, when it is written. A lambda's parameters are the same grammar as a function's, and
     // reusing the rule is what makes a default argument, a pack or a `std::function` parameter work here too.
     if p.current_token() == CppTokenKind::LeftParen
-        && let Err(err) = super::decls::parse_parameter_list(p)
+        && let Err(err) = decls::parse_parameter_list(p)
     {
         p.close_marks_above(base);
         return Err(err);
     }
 
     // `mutable`, `constexpr`, `consteval`, `noexcept`, `-> type`, and the attributes that may appear among them.
-    super::types::eat_function_qualifiers(p);
+    types::eat_function_qualifiers(p);
 
     // The body. A lambda's body is a compound statement like any other, so it is parsed by the statement rule —
     // which is also what keeps `return` and every other statement inside it working.
-    if let Err(err) = super::stats::parse_compound_stat(p) {
+    if let Err(err) = stats::parse_compound_stat(p) {
         p.close_marks_above(base);
         return Err(err);
     }
