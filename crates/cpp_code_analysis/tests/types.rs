@@ -797,3 +797,81 @@ int f() { return 0; }
         "the innermost template is the one that introduces the class"
     );
 }
+/// **A variable template takes its type from the arguments**, the way a class template's member does.
+///
+/// `template <class T> constexpr T pi = T(3.14159);` is a `Variable` whose name sits in the specifier sequence its
+/// template introduces — the same relation a class or function template has — and the filter that decides which
+/// bindings may have template parameters did not list `Variable`, so `pi<double>` had **no parameters to substitute
+/// into** and its type stayed the parameter's own name: measured before this was written, `double x = pi<double>;`
+/// answered `T`.
+///
+/// **And the spellings this does not cover, both measured.**
+///
+/// * **A two-argument template-id in an expression** — `ratio<float, double>` — answers `None` rather than a type.
+///   That is the oldest ambiguity in C++ (`a < b, c > d`) and it belongs to the expression reader, not to this
+///   pairing: the one-argument case below is the same code path and it works.
+/// * **A defaulted parameter** — see the test below.
+#[test]
+fn a_variable_template_takes_its_type_from_the_arguments() {
+    let header = "\
+#pragma once
+template <class T>
+constexpr T pi = T(3.14159);
+
+
+template <class T, class U = T>
+constexpr U twice = U(2);
+";
+    let source = "\
+#include \"constants.h\"
+double f() {
+    double a = pi<double>;
+    // A two-argument template-id is a separate question: measured, `ratio<float, double>` answers `None`, which is the
+    // shape of the oldest ambiguity in C++ — `a < b, c > d` — and it belongs to the expression reader, not here.
+    return a + b;
+}
+";
+    let session = session_with(&[("/p/a.cpp", source), ("/p/constants.h", header)]);
+
+    assert_eq!(
+        type_of_use_in(&session, "/p/a.cpp", source, "pi").as_deref(),
+        Some("double"),
+        "`pi` is declared `T`, and `T` is `double` here"
+    );
+
+}
+
+/// **A defaulted template parameter of a variable template is still not read.**
+///
+/// `template <class T, class U = T> constexpr U twice = U(2);` called as `twice<float>` writes one argument for two
+/// parameters, and the second must take its default — which makes the answer `float`. It answers `U` instead, and the
+/// reason is where the defaults are not: `DeclFact::parameters` holds the parameter **names** and nothing holds the
+/// `= T` beside them, so the positional pairing runs out of arguments and leaves the name standing.
+///
+/// Filling that in is a field on the fact plus a codec change, which is why this is recorded rather than done here.
+/// The explicit half of the same question works and is asserted above.
+#[test]
+#[ignore = "known red: a template parameter's default argument is not in the fact, so `twice<float>` answers `U`"]
+fn a_defaulted_template_parameter_of_a_variable_template_substitutes() {
+    let header = "\
+#pragma once
+template <class T, class U = T>
+constexpr U twice = U(2);
+";
+    let source = "\
+#include \"constants.h\"
+float f() {
+    float b = twice<float>;
+    return b;
+}
+";
+    let session = session_with(&[("/p/a.cpp", source), ("/p/constants.h", header)]);
+
+    assert_eq!(
+        type_of_use_in(&session, "/p/a.cpp", source, "twice").as_deref(),
+        Some("float"),
+        "the second parameter defaults to `T`, which the use wrote as `float`"
+    );
+}
+
+

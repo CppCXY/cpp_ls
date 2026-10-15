@@ -2445,7 +2445,7 @@ pub(crate) fn type_of_expression(
         return match declaration_of_expression(index, scopes, root, path, expression) {
             Known::Yes(named) => {
                 match declared_type(index, declaring, scopes, root, path, &named, depth) {
-                    Known::Yes(type_of) => Known::Yes((type_of, named.file(path))),
+                    Known::Yes(type_of) => Known::Yes((substituted_at_the_use(index, scopes, root, path, expression, &named, type_of), named.file(path))),
                     Known::Unknown(reason) => Known::Unknown(reason),
                     // The declaration is a function, a class or an alias: none of them has a type *as a name*, which
                     // is the distinction `DeclFact::returns` exists for.
@@ -12766,4 +12766,40 @@ mod name_index_agrees_with_the_scan {
         );
         assert!(index.symbols_matching("w", 10).is_empty());
     }
+}
+/// **What a template-id's own arguments do to the type its declaration wrote.**
+///
+/// `template <class T> constexpr T pi = T(3.14159);` declares a type spelled **`T`**, and `pi<double>` names that
+/// declaration with `double` written for it. Without this, the type of a use of a variable template was the
+/// parameter's own name — measured: `double x = pi<double>;` answered `T`, which is not a missing answer but a wrong
+/// one, because nothing in the answer says the file did not write it.
+///
+/// The pairing is positional and both halves already exist: the declaration's template parameter names — through
+/// [`NamedDeclaration::parameters_of`], which reads `DeclFact::parameters` for a declaration in another file and walks
+/// this tree for one in the file being edited — and the arguments the **use** wrote, through the same
+/// `written_template_arguments` the call path uses. Nothing is invented here. When either side is empty the type is
+/// returned untouched, which is the ordinary case and the reason this is a pass-through rather than a step in the
+/// chain: `v.front` on a `std::vector<int>` is substituted from the *object's* type, which is a different question
+/// with a different source of arguments.
+fn substituted_at_the_use(
+    index: &ProjectIndex,
+    scopes: &crate::ScopeTree,
+    root: &cpp_parser::CppSyntaxNode,
+    path: &Path,
+    expression: &cpp_parser::CppSyntaxNode,
+    named: &NamedDeclaration,
+    type_of: Type,
+) -> Type {
+    let arguments = written_template_arguments(expression);
+    if arguments.is_empty() {
+        return type_of;
+    }
+
+    let (names, _) = named.parameters_of(index, scopes, root, path);
+    if names.is_empty() {
+        return type_of;
+    }
+
+    let substitutions = crate::sema::types::TypeSubstitutions::new(&names, &arguments);
+    type_of.substituted(&substitutions)
 }

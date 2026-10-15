@@ -841,3 +841,43 @@ fn every_code_has_a_name_and_the_name_comes_back() {
         );
     }
 }
+/// **A parameter pack is not a fixed arity, and neither is a C-style `...`.**
+///
+/// `template <class... Args> void f(Args&&... args)` may be called with as many arguments as the caller likes, and the
+/// cross-file half of `argument-count` counted it as **one written, one required** parameter: a call passing three was
+/// reported as *"takes 1 argument(s) and this call passes more"*. The test was `parameter.ends_with("...")`, which is
+/// true of the C-style `...` and of `Args...` and of **nothing else people write** — `Args&&... args` and `Args... args`
+/// are the two spellings the standard library is actually full of. The file-scope half of the same check was already
+/// right, because it asks each parameter's **tokens** for an `Ellipsis`; only the text half was wrong.
+///
+/// Measured on a two-file fixture in `target/arity` with `one_check`: with the old test, three findings —
+/// `forward_all(1, 2, 3)`, `forward_plain(1, 2, 3)` and the genuine `fixed_two(1, 2, 3)`; with this one, only the
+/// genuine one. The fixture here deliberately calls **nothing but** variadic functions, so a single code says which —
+/// the check fires, or it does not.
+#[test]
+fn a_parameter_pack_is_not_a_fixed_arity() {
+    let declarations = "\
+template <class... Args>
+void forward_all(Args&&... args);
+
+template <class... Args>
+void forward_plain(Args... args);
+
+void classic(const char* format, ...);
+";
+    let calls = "\
+#include \"other.h\"
+
+void use() {
+    forward_all(1, 2, 3);
+    forward_plain(1, 2, 3);
+    classic(\"%d %d %d\", 1, 2, 3);
+}
+";
+    let codes = codes_with_two_files(calls, declarations);
+
+    assert!(
+        !codes.contains(&DiagnosticCode::ArgumentCount),
+        "every callee here takes as many arguments as it is given: {codes:?}"
+    );
+}

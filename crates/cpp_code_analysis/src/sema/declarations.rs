@@ -1820,6 +1820,18 @@ fn declared_template_parameters_with(shapes: &DeclarationShapes, binding: &Bindi
             | BindingKind::ConversionFunction
             | BindingKind::OperatorFunction
             | BindingKind::LiteralOperator
+            // **A variable template's list is as real as the others.** `template <class T> constexpr T pi = …` is a
+            // `Variable` whose name sits in the specifier sequence the template introduces, exactly as a class's or a
+            // function's does — and the filter above refused it, so `pi<double>` had no parameters to substitute into
+            // and its type stayed the parameter's own name. Measured on the fixture this was written for:
+            // `double x = pi<double>;` answered `T`.
+            //
+            // `Alias` and `Typedef` come along for the same reason (`template <class T> using ptr = T*;`), and they
+            // are harmless for the aliases that have no template at all — a namespace alias introduces no parameter
+            // list, so the scan below finds no template naming it and answers empty, which is what it answered before.
+            | BindingKind::Variable
+            | BindingKind::Alias
+            | BindingKind::Typedef
     ) {
         return Vec::new();
     }
@@ -4153,3 +4165,4 @@ int Box<int>::Inner::deep = 0;
         assert_eq!(of("plain").returns.as_deref(), Some("void"));
     }
 }
+

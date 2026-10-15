@@ -225,7 +225,19 @@ fn callee_from_the_index(context: &CheckContext<'_>, name: &str) -> Option<Calle
         if parameter.is_empty() {
             return;
         }
-        if parameter == "..." || parameter.ends_with("...") {
+        // **A pack is a `...` that is not the whole parameter, and this test used to miss every real spelling of it.**
+        //
+        // The file-scope half above asks the **tokens** of each parameter for an `Ellipsis`, so `Args&&... args` marks
+        // the callee variadic there. Here the parameter list is text — it is a `DeclFact` produced by the cook, read
+        // when the declaration lives in another file — and the test was `parameter.ends_with("...")`, which is true of
+        // the C-style `...` and of `Args...` and of **nothing else people write**. Measured shape of the defect:
+        // `template <class... Args> void f(Args&&... args)` recorded one written, one required parameter, so a call
+        // `f(1, 2, 3)` was reported as *"takes 1 argument(s) and this call passes more"*.
+        //
+        // The rule is now the file half's rule — an ellipsis anywhere in the parameter means the parameter (or the
+        // callee) is a pack — with one guard the token half gets for free: an ellipsis inside a literal is text, not a
+        // pack, so `const char* dots = "..."` does not make a callee variadic.
+        if has_an_ellipsis(parameter) {
             *variadic = true;
             return;
         }
@@ -260,3 +272,43 @@ fn callee_from_the_index(context: &CheckContext<'_>, name: &str) -> Option<Calle
 fn at_least(name: &str, required: usize) -> String {
     format!("`{name}` needs {required} argument(s) and this call passes fewer")
 }
+/// **Is there a `...` in this parameter that the language would call one?**
+///
+/// The parameter list of a declaration in another file arrives as text, so this is a scan rather than a token walk —
+/// and the one thing a scan gets wrong is an ellipsis written inside a literal. `void log(const char* dots = "...")`
+/// is not variadic, and `standardese`'s own `Args... args` is. Quotes are tracked with a backslash escape and no
+/// attempt at raw strings: a raw string holding an odd number of quotes is the one case this misreads, and it errs
+/// towards calling the callee variadic, which is the quiet direction.
+fn has_an_ellipsis(parameter: &str) -> bool {
+    let bytes = parameter.as_bytes();
+    let mut at = 0usize;
+    let mut quoted: Option<u8> = None;
+
+    while at < bytes.len() {
+        let byte = bytes[at];
+        match quoted {
+            Some(quote) => {
+                if byte == b'\\' {
+                    at += 2;
+                    continue;
+                }
+                if byte == quote {
+                    quoted = None;
+                }
+            }
+            None => {
+                if byte == b'"' || byte == b'\'' {
+                    quoted = Some(byte);
+                } else if parameter[at..].starts_with("...") {
+                    return true;
+                }
+            }
+        }
+
+        at += 1;
+    }
+
+    false
+}
+
+
