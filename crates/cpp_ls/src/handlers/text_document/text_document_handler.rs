@@ -45,6 +45,7 @@ pub async fn process_did_open_text_document(
     params: DidOpenTextDocumentParams,
 ) -> Option<()> {
     let uri = params.text_document.uri;
+    let version = params.text_document.version;
     let text = params.text_document.text;
     let path = uri_to_file_path(&uri)?;
 
@@ -55,7 +56,7 @@ pub async fn process_did_open_text_document(
         workspace_manager.sync_open_file(uri.clone(), text.clone());
     }
 
-    apply_buffer(&context, path, text).await;
+    apply_buffer(&context, path, text, Some(version)).await;
 
     Some(())
 }
@@ -74,6 +75,7 @@ pub async fn process_did_change_text_document(
     params: DidChangeTextDocumentParams,
 ) -> Option<()> {
     let uri = params.text_document.uri;
+    let version = params.text_document.version;
     // Full sync (`TextDocumentSyncKind::FULL` is what this server advertises), so the last change is the text. A
     // client that sent incremental changes anyway would need their ranges applied here, which is the one thing
     // advertising FULL is for: it does not have to.
@@ -85,7 +87,7 @@ pub async fn process_did_change_text_document(
         workspace_manager.sync_open_file(uri.clone(), text.clone());
     }
 
-    apply_buffer(&context, path, text).await;
+    apply_buffer(&context, path, text, Some(version)).await;
 
     Some(())
 }
@@ -109,6 +111,8 @@ pub async fn process_did_save_text_document(
 ) -> Option<()> {
     let text = params.text?;
     let uri = params.text_document.uri;
+    // **No version to carry.** A save's params have no `version` field — the document's is the last `didChange`'s,
+    // and naming it here would be guessing at which change the text belongs to.
     let path = uri_to_file_path(&uri)?;
 
     {
@@ -116,7 +120,7 @@ pub async fn process_did_save_text_document(
         workspace_manager.sync_open_file(uri, text.clone());
     }
 
-    apply_buffer(&context, path, text).await;
+    apply_buffer(&context, path, text, None).await;
 
     Some(())
 }
@@ -160,15 +164,26 @@ pub async fn process_did_close_document(
             .clear_push_file_diagnostics(uri.clone());
     } else if !context.lsp_features().supports_pull_diagnostic() {
         // The path is the disk's now, and the text may differ from the buffer that was just dropped; the client's
-        // diagnostics are about text that is no longer there.
-        schedule_diagnostics(&context, path).await;
+        // diagnostics are about text that is no longer there. **No version**: the document is closed, so there is no
+        // revision to stamp and the client has nothing to compare against.
+        schedule_diagnostics(&context, path, None).await;
     }
 
     Some(())
 }
 
 /// Tell the session what a path's text is now, and schedule the diagnostics that follow.
-async fn apply_buffer(context: &ServerContextSnapshot, path: PathBuf, text: String) {
+///
+/// `version` is the client's own counter for the document, carried so the answer can be stamped with it: a client
+/// discards a diagnostic whose version is older than the text it is showing, which is the only defence it has against
+/// an answer that arrives after the edit that replaced it. `None` where the message carries no version — a `didSave`
+/// with text.
+async fn apply_buffer(
+    context: &ServerContextSnapshot,
+    path: PathBuf,
+    text: String,
+    version: Option<i32>,
+) {
     let analysis: &AnalysisState = context.analysis();
     let for_session = path.clone();
     let applied = analysis
@@ -188,7 +203,7 @@ async fn apply_buffer(context: &ServerContextSnapshot, path: PathBuf, text: Stri
     // something reads it again. That is the pump's job, and this is how it is told there is work.
     analysis.wake();
 
-    schedule_diagnostics(context, path).await;
+    schedule_diagnostics(context, path, version).await;
 }
 
 /// Schedule a file's diagnostics, unless the client pulls them instead.
@@ -197,7 +212,11 @@ async fn apply_buffer(context: &ServerContextSnapshot, path: PathBuf, text: Stri
 /// otherwise: how long a given project's files take to typing-stop is a property of the project and of the machine
 /// it is edited on, which is why it is configurable at all — and why the default is a compromise rather than a
 /// measurement.
-async fn schedule_diagnostics(context: &ServerContextSnapshot, path: PathBuf) {
+async fn schedule_diagnostics(
+    context: &ServerContextSnapshot,
+    path: PathBuf,
+    version: Option<i32>,
+) {
     if context.lsp_features().supports_pull_diagnostic() {
         return;
     }
@@ -210,6 +229,6 @@ async fn schedule_diagnostics(context: &ServerContextSnapshot, path: PathBuf) {
 
     context
         .file_diagnostic()
-        .add_diagnostic_task(path, interval)
+        .add_diagnostic_task(path, interval, version)
         .await;
 }

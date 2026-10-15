@@ -43,12 +43,35 @@ use crate::handlers::diagnose_file;
 /// How long a file's diagnostics wait for the typing to stop, when the caller does not say.
 pub const DEFAULT_DIAGNOSTIC_INTERVAL: u64 = 500;
 
+/// One file's pending pass: the token that cancels it, and which pass it is.
+///
+/// **The generation is what makes the removal safe.** A pass removes itself from the map when it finishes, and
+/// between its start and its finish a newer edit may have replaced it — so a removal by key alone deletes the
+/// *newer* entry and leaves the next edit with nothing to cancel:
+///
+/// ```text
+/// t1  a change arrives                    → token A registered
+/// t2  its delay elapses, the pass starts  → several seconds of work
+/// t3  the user types again                → A is cancelled (too late, it is running), token B registered
+/// t4  the pass finishes                   → `remove(&path)` deletes **B**
+/// t5  the user types again                → nothing to cancel, and the pass from t2 publishes stale diagnostics
+/// ```
+///
+/// A pass removes its entry only when the generation still names it, so the entry that a newer edit installed
+/// survives, and that edit's own cancellation works.
+struct Pending {
+    token: CancellationToken,
+    generation: u64,
+}
+
 pub struct DiagnosticService {
     analysis: Arc<AnalysisState>,
     client: Arc<ClientProxy>,
     status_bar: Arc<StatusBar>,
-    /// One token per file, so a newer edit cancels the pass a previous edit scheduled.
-    diagnostic_tokens: Arc<Mutex<HashMap<PathBuf, CancellationToken>>>,
+    /// One entry per file, so a newer edit cancels the pass a previous edit scheduled.
+    diagnostic_tokens: Arc<Mutex<HashMap<PathBuf, Pending>>>,
+    /// Increments on every scheduled pass, so a finishing pass can tell whether it is still the newest.
+    next_generation: Arc<std::sync::atomic::AtomicU64>,
     workspace_diagnostic_token: Arc<Mutex<Option<CancellationToken>>>,
     /// One workspace pass at a time: a second request replaces the first rather than running beside it.
     workspace_run_lock: Arc<Mutex<()>>,
@@ -65,6 +88,7 @@ impl DiagnosticService {
             client,
             status_bar,
             diagnostic_tokens: Arc::new(Mutex::new(HashMap::new())),
+            next_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             workspace_diagnostic_token: Arc::new(Mutex::new(None)),
             workspace_run_lock: Arc::new(Mutex::new(())),
         }
@@ -75,16 +99,30 @@ impl DiagnosticService {
     /// A file with no session behind it — the client opened a file before a workspace root was named — publishes
     /// nothing and says so in the log, rather than publishing an empty list: "I have not read this" and "this file
     /// has no errors" are different statements, and only one of them is true.
-    pub async fn add_diagnostic_task(&self, path: PathBuf, interval: u64) {
+    ///
+    /// `version` is the client's counter for the document the text came from, and it is **stamped on the answer**.
+    /// A client discards a diagnostic whose version is older than the text it is showing, and that is the only
+    /// defence it has: this server debounces and cancels, but a pass that has already started cannot be stopped, so
+    /// an answer about text the user has since replaced can still reach the wire. See [`Pending`] for the other half.
+    pub async fn add_diagnostic_task(&self, path: PathBuf, interval: u64, version: Option<i32>) {
+        let generation = self
+            .next_generation
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let cancel_token = {
             let mut tokens = self.diagnostic_tokens.lock().await;
-            if let Some(token) = tokens.get(&path) {
-                token.cancel();
+            if let Some(pending) = tokens.get(&path) {
+                pending.token.cancel();
                 debug!("cancelled the pending diagnostics for {}", path.display());
             }
 
             let cancel_token = CancellationToken::new();
-            tokens.insert(path.clone(), cancel_token.clone());
+            tokens.insert(
+                path.clone(),
+                Pending {
+                    token: cancel_token.clone(),
+                    generation,
+                },
+            );
             cancel_token
         };
 
@@ -106,13 +144,19 @@ impl DiagnosticService {
                             client.publish_diagnostics(PublishDiagnosticsParams {
                                 uri,
                                 diagnostics,
-                                version: None,
+                                version,
                             });
                         }
                         None => debug!("nothing to diagnose: the file could not be read"),
                     }
 
-                    tokens.lock().await.remove(&key);
+                    // **Only its own entry.** A newer edit may have replaced this one while the pass ran, and
+                    // removing by key would delete *that* entry — leaving the next edit with nothing to cancel and
+                    // this pass's stale answer on the client. See [`Pending`].
+                    let mut tokens = tokens.lock().await;
+                    if is_still_the_newest(tokens.get(&key), generation) {
+                        tokens.remove(&key);
+                    }
                 }
                 _ = cancel_token.cancelled() => {
                     debug!("a newer change replaced the pending diagnostics");
@@ -122,9 +166,12 @@ impl DiagnosticService {
     }
 
     /// [`DiagnosticService::add_diagnostic_task`] for a list, all with the same interval.
+    ///
+    /// No version: these are files the client is not showing, so there is no document revision to stamp — a file
+    /// nobody has open has only its disk text.
     pub async fn add_files_diagnostic_task(&self, paths: Vec<PathBuf>, interval: u64) {
         for path in paths {
-            self.add_diagnostic_task(path, interval).await;
+            self.add_diagnostic_task(path, interval, None).await;
         }
     }
 
@@ -133,6 +180,9 @@ impl DiagnosticService {
         self.client.publish_diagnostics(PublishDiagnosticsParams {
             uri,
             diagnostics: vec![],
+            // No version: this is not an answer about a revision, it is the statement that there is nothing to say.
+            // A client that compared it against a newer document would be right to ignore it, and the file is being
+            // closed in any case.
             version: None,
         });
     }
@@ -220,8 +270,8 @@ impl DiagnosticService {
     /// about a session that no longer exists.
     pub async fn cancel_all(&self) {
         let mut tokens = self.diagnostic_tokens.lock().await;
-        for token in tokens.values() {
-            token.cancel();
+        for pending in tokens.values() {
+            pending.token.cancel();
         }
         tokens.clear();
         drop(tokens);
@@ -243,8 +293,60 @@ fn percentage(done: usize, total: usize) -> Option<u32> {
     (total > 0).then(|| ((done as f64 / total as f64) * 100.0) as u32)
 }
 
+/// A pass removes its own entry, and **only** its own.
+///
+/// This is the whole of the fix for a race that is invisible without a test: a pass runs for seconds, an edit during
+/// it installs a newer entry, and the finishing pass used to remove by key — deleting the newer one and leaving the
+/// next edit with nothing to cancel. The check is stated as a function so it can be tested without a session, a
+/// client or a clock.
+fn is_still_the_newest(pending: Option<&Pending>, generation: u64) -> bool {
+    pending.is_some_and(|pending| pending.generation == generation)
+}
+
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn a_finishing_pass_removes_only_its_own_entry() {
+        let mine = Pending {
+            token: CancellationToken::new(),
+            generation: 3,
+        };
+        assert!(
+            is_still_the_newest(Some(&mine), 3),
+            "no edit arrived while this pass ran, so it owns the entry"
+        );
+
+        // An edit arrived during the pass: the entry is the newer pass's, and removing it would leave the *next*
+        // edit with nothing to cancel — and this pass's stale answer on the client.
+        assert!(
+            !is_still_the_newest(Some(&mine), 2),
+            "an older pass must not remove the entry a newer edit installed"
+        );
+        assert!(
+            !is_still_the_newest(None, 3),
+            "an entry removed by someone else is not this pass's to remove again"
+        );
+    }
+
+    /// The cancelled token a newer edit leaves behind is what the *client* would go on showing, so it is worth
+    /// pinning that cancelling is visible to the pass that is waiting: a cancellation that a running pass cannot see
+    /// is exactly the hole this service has to close by stamping the version.
+    #[test]
+    fn a_newer_edit_cancels_the_pending_one() {
+        let pending = Pending {
+            token: CancellationToken::new(),
+            generation: 0,
+        };
+        assert!(!pending.token.is_cancelled());
+        pending.token.cancel();
+        assert!(
+            pending.token.is_cancelled(),
+            "the pass waiting on this token has to see the cancellation"
+        );
+    }
+
     use super::percentage;
 
     #[test]
