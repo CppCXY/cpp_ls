@@ -43,6 +43,83 @@ fn codes_of(source: &str) -> Vec<DiagnosticCode> {
         .unwrap_or_default()
 }
 
+/// **A template's body is not checked until it is instantiated, and it must not be.**
+///
+/// Reported from an editor: this file produced several errors, and none of them is a fact about it. A template is
+/// checked when it is *instantiated*, with the arguments written at that call site — so inside the body of a template
+/// nothing is known about `C` and `Fn` at all:
+///
+/// ```text
+/// C x{42};        `C` could be anything; whether `{42}` fits is decided per instantiation
+/// op(x);          `Fn` could be any callable, or a function pointer, or a member pointer
+/// return x.n;     `x.n` is the canonical dependent name — it exists only for the C it is instantiated with
+/// ```
+///
+/// Every one of those is a **false positive** if reported, and this layer's whole contract is that it never invents
+/// a finding: an editor that underlines correct code is one the user turns off, and then it reports nothing at all,
+/// forever (see this file's header). A template is the place that matters most, because dependent code is exactly
+/// what a compiler refuses to diagnose and what a reader most needs *not* underlined.
+#[test]
+fn a_template_body_is_not_checked() {
+    let codes = codes_of(TEMPLATE);
+    assert!(
+        codes.is_empty(),
+        "nothing in a template body is knowable before instantiation: {codes:?}"
+    );
+}
+
+/// **The suppression is about the type being a parameter, not about the member access.**
+///
+/// The fix for [`a_template_body_is_not_checked`] is a `continue` in `undefined-field`, and a `continue` that fires
+/// too often is how the check stops working without anything going red. So the same shape is written twice, once
+/// with a template parameter and once with a real class:
+///
+/// ```text
+/// template <class C> void f() { C x; x.n; }   nothing — `C` is decided at instantiation
+/// struct C { int n; };  void g() { C x; x.n; } nothing — `n` is declared
+/// struct C { int n; };  void g() { C x; x.m; } UndefinedField — `C` is a class with no `m`
+/// ```
+///
+/// The third is the one that matters: it is the check's whole reason to exist, and it goes through every step the
+/// template case now skips past except the last.
+#[test]
+fn a_real_class_still_reports_an_undefined_member() {
+    let declares_it = codes_of("struct C { int n; };\nvoid g() { C x; x.n; }\n");
+    assert!(
+        declares_it.is_empty(),
+        "`C` declares `n`, so there is nothing to say: {declares_it:?}"
+    );
+
+    let does_not = codes_of("struct C { int n; };\nvoid g() { C x; x.m; }\n");
+    assert!(
+        does_not.contains(&DiagnosticCode::UndefinedField),
+        "`C` is a class that declares no `m`, which is the finding this check exists for: {does_not:?}"
+    );
+
+    // **And the name is not what decides it.** A file that has both a parameter called `C` and a class called `C`
+    // asks the question the suppression has to get right, and it is the *type* that answers it: inside the template
+    // `C` is the parameter, so `x.m` is unknown; outside it `C` is the class, so `x.m` is a finding. A suppression
+    // keyed on the name would be silent in both, and this is the case that says so.
+    let both = codes_of(
+        "template <class C> void f() { C x; x.m; return; }\n\
+         struct C { int n; };\n\
+         void g() { C x; x.m; return; }\n",
+    );
+    assert!(
+        both.contains(&DiagnosticCode::UndefinedField),
+        "the class `C` outside the template still declares no `m`: {both:?}"
+    );
+}
+
+/// The reported file, verbatim.
+const TEMPLATE: &str = r#"template <class C, class Fn>
+constexpr int consteval_validate_destruction(Fn op) {
+    C x{42};
+    op(x);
+    return x.n;
+}
+"#;
+
 /// **What the reported file actually produces, and why it is not `Unused`.**
 ///
 /// Reported from an editor: this file produced no diagnostic at all, twice — first with a `return 0` that had no

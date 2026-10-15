@@ -53,6 +53,28 @@ impl Check for UndefinedField {
             let crate::Known::Yes((object, _)) = context.type_of(&access.object) else {
                 continue;
             };
+
+            // **A dependent type has no member list to check against, and asking for one invents an answer.**
+            //
+            // `template <class C, class Fn> constexpr int f(Fn op) { C x{42}; op(x); return x.n; }` — `x` has type
+            // `C`, and `C` is a template parameter. Every step below is individually correct and the conclusion is
+            // wrong: `members_of("C")` finds nothing written in `C` (a parameter declares no members), then finds a
+            // declaration whose qualified name is `C` — **the parameter itself**, recorded as `DeclKind::Type`, the
+            // kind a class gets — and answers "that class was read and has nothing in it". `x.n` is then reported as
+            // a member of a class with no `n`.
+            //
+            // That is the false positive this layer is written against, on the construct a compiler most refuses to
+            // diagnose: what `C` is, and therefore whether it has an `n`, is decided at instantiation. See
+            // [`crate::sema::model::SemanticModel::names_a_template_parameter`] for why the question is asked of the
+            // scope tree rather than of the index.
+            if object.class_name().is_some_and(|class| {
+                context
+                    .model
+                    .names_a_template_parameter(class, access.object.text_range().start().into())
+            }) {
+                continue;
+            }
+
             let crate::Known::Yes(members) = context
                 .model
                 .members_of(&object.class_name().unwrap_or_default())

@@ -917,6 +917,7 @@ pub fn members_of(
     class: &str,
 ) -> Known<MemberList> {
     let listed = members_of_inner(index, scopes, root, path, class);
+
     // The diagnostic that found why `std::ios::` offered nothing: whether a member is *present* and at what depth,
     // which is the difference between "the base walk worked" and "the list happens to be long". Off unless asked
     // for, like this crate's other traces.

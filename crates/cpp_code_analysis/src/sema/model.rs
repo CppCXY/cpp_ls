@@ -154,6 +154,52 @@ impl<'a> SemanticModel<'a> {
         project::members_of(self.index, self.scopes, self.root, self.path, class)
     }
 
+    /// **Does `name` name a template parameter *where it is used*** — the `C` of `template <class C>`?
+    ///
+    /// The question a consumer must ask *before* treating a name as a class, and the reason it is not answered by
+    /// [`project::members_of`] is worth stating: that function is asked about a **spelling**, and by the time it has
+    /// one there is nothing left in it that says whether the spelling named a class or a parameter. A template
+    /// parameter is recorded in the index as `DeclKind::Type` — the same kind a class gets, because `DeclFact` does
+    /// not carry `BindingKind` — so the index cannot tell them apart either.
+    ///
+    /// The **scope tree** can, and this is the question asked of it: a parameter is bound in a
+    /// `ScopeKind::TemplateParameters` scope which carries no name of its own (`sema::scopes` creates it with `None`,
+    /// because a parameter declares nothing a `::` name could reach), so a walk of the chain outward from the use is
+    /// what finds it.
+    ///
+    /// # Why it is asked at an offset rather than of the file
+    ///
+    /// Measured, and it is the whole reason for the parameter. Asking "is `C` a parameter anywhere in this file"
+    /// answered **yes** for
+    ///
+    /// ```cpp
+    /// template <class C> void f() { C x; x.m; }   // a parameter here
+    /// struct C { int n; };
+    /// void g() { C x; x.m; }                      // …and a class here, which must still be reported
+    /// ```
+    ///
+    /// so the class's `x.m` went unreported: a suppression that silences correct code one scope away from where it
+    /// was meant to apply. A name is looked up from where it is written, so that is where the question starts.
+    pub fn names_a_template_parameter(&self, name: &str, at: usize) -> bool {
+        if name.is_empty() {
+            return false;
+        }
+
+        let Some(innermost) = self.scopes.scope_at(at) else {
+            return false;
+        };
+
+        self.scopes.scope_chain(innermost).iter().any(|id| {
+            self.scopes.scope(*id).is_some_and(|scope| {
+                scope.kind == crate::sema::symbol::ScopeKind::TemplateParameters
+                    && scope
+                        .bindings
+                        .iter()
+                        .any(|binding| binding.name.text() == name)
+            })
+        })
+    }
+
     /// What [`SemanticModel::type_of`] has cost so far: `(inferences run, answers reused)`.
     ///
     /// The two numbers that say whether a memo is working, and the reason this type has a counter at all: an
