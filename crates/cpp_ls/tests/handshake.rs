@@ -8,8 +8,16 @@
 //! ```text
 //! initialize ──▶ capabilities          definition ──▶ the declaration's file and range
 //! initialized ─▶ the workspace opens   hover ──────▶ markdown about the name under the cursor
-//! didOpen ────▶ publishDiagnostics
+//! didOpen ────▶ the buffer is the text textDocument/diagnostic ──▶ the file's report
 //! ```
+//!
+//! # Why diagnostics are **pulled** and not awaited
+//!
+//! The server does not publish diagnostics. `textDocument/diagnostic` is asked, and `Server::pull_diagnostics` is
+//! how these tests ask it — the same request a client makes, so every diagnostic assertion here exercises the path
+//! a user's editor takes. There used to be a push half beside it, and a client that declared
+//! `textDocument.diagnostic` got that instead; two channels for one answer is how a screen ends up holding an
+//! answer about text that is gone.
 //!
 //! # Why the definition is asked for more than once
 //!
@@ -55,25 +63,26 @@ const MAIN_CPP: &str = "#include \"widget.h\"\n\nvoid f() {\n    Widget w;\n    
 /// **A client that pulls gets a report, not `null`.**
 ///
 /// The reported symptom was that diagnostics did not change while typing, and this is the layer it was in. A client
-/// that advertises `textDocument.diagnostic` is answered by `textDocument/diagnostic` instead of by
-/// `publishDiagnostics`, and that handler went through `analysis_query` → `query_blocking` →
-/// `RequestOutcome::Missing`, which `ServerContext::task` turns into **`Response::new_ok(id, Value::Null)`**.
+/// that advertises `textDocument.diagnostic` is answered by `textDocument/diagnostic`, and that handler went through
+/// `analysis_query` → `query_blocking` → `RequestOutcome::Missing`, which `ServerContext::task` turns into
+/// **`Response::new_ok(id, Value::Null)`**.
 ///
 /// `null` is not a `DocumentDiagnosticReport`. A client that asked for one and got `null` cannot tell it from a
-/// failure, so it keeps the diagnostics it already had — which is precisely "输入代码之后诊断不改变", and it is why
-/// the push-path fixes had no visible effect for this client.
+/// failure, so it keeps the diagnostics it already had — which is precisely "输入代码之后诊断不改变".
 ///
 /// There were **two** ways to reach `Missing` and both are fixed in the handler:
 ///
 /// ```text
-/// the file was never read     `prepare` queues cooking and returns, so the query found no reading
+/// the file was never read         `prepare` queues cooking and returns, so the query found no reading
 /// `diagnose_file` answered None   …which was then reported as `Missing` rather than as "nothing wrong"
 /// ```
 ///
-/// So this asserts the two things a pull client needs and neither of which it was getting: the answer is an
-/// **object with an `items` array** (the shape the protocol requires), and it is non-empty for a file with a parse
-/// error. An empty `items` here would be the old `null` in a different disguise — a client shown "clean" for a file
-/// that does not parse.
+/// So this asserts what a pull client needs: the answer is an **object with an `items` array** (the shape the
+/// protocol requires), it is non-empty for a file with a parse error, and **asking twice gives the same answer** —
+/// a pulling client re-asks after every edit, and a screen that flickers between answers is one nobody trusts.
+///
+/// This is also the test that says the push half is gone: it declares the pull capability, and no test in this file
+/// waits for a `publishDiagnostics` notification any more, because the server does not send one.
 #[test]
 fn a_pulling_client_gets_a_report_and_not_null() {
     let project = Project::new("pull-diagnostics");
@@ -212,16 +221,10 @@ fn a_client_can_open_a_file_and_get_diagnostics_a_definition_and_a_hover() {
         }),
     );
 
-    let diagnostics = server.wait_for(|message| {
-        message["method"] == json!("textDocument/publishDiagnostics")
-            && message["params"]["uri"] == json!(main_uri)
-    });
-    let reported = diagnostics["params"]["diagnostics"]
-        .as_array()
-        .expect("diagnostics is an array");
+    let reported = server.pull_diagnostics(90, &main_uri);
     assert!(
         !reported.is_empty(),
-        "the last class is never closed, so a parse error is expected: {diagnostics}"
+        "the last class is never closed, so a parse error is expected: {reported:?}"
     );
     assert_eq!(
         reported[0]["severity"],
@@ -231,13 +234,13 @@ fn a_client_can_open_a_file_and_get_diagnostics_a_definition_and_a_hover() {
     assert_eq!(
         reported[0]["range"]["start"]["line"],
         json!(6),
-        "the error is on the last line: {diagnostics}"
+        "the error is on the last line: {reported:?}"
     );
     assert!(
         reported[0]["message"]
             .as_str()
             .is_some_and(|message| message.contains(';')),
-        "and it is the parser's own message about the missing `;`: {diagnostics}"
+        "and it is the parser's own message about the missing `;`: {reported:?}"
     );
 
     // --- definition: the member declared in the included header ------------------------------------
@@ -644,6 +647,29 @@ impl Server {
         }
     }
 
+    /// **Ask for a file's diagnostics, the way a client does** — `textDocument/diagnostic`, the pull half.
+    ///
+    /// The server used to publish these; it does not any more, and every test that used to wait for a
+    /// `publishDiagnostics` notification asks here instead. That is not a test convenience: it is the same request a
+    /// client makes, and going through it is what makes these tests exercise the path a user's editor takes.
+    ///
+    /// `first_id` is the caller's, so two pulls in one test cannot be confused with each other. The answer must be a
+    /// **report** — the `items` array — because a `null` result is what the handler used to return and no client can
+    /// act on it.
+    fn pull_diagnostics(&mut self, first_id: i64, uri: &str) -> Vec<Value> {
+        let report = self.ask_until(first_id, |id| {
+            json!({
+                "id": id,
+                "method": "textDocument/diagnostic",
+                "params": { "textDocument": { "uri": uri } },
+            })
+        });
+        report["result"]["items"]
+            .as_array()
+            .unwrap_or_else(|| panic!("a pull request is answered with a report, not `null`: {report}"))
+            .clone()
+    }
+
     /// [`Server::ask_until`] for a request whose answer can arrive **worth having but not yet complete**: keeps
     /// asking until the closure accepts one.
     ///
@@ -898,19 +924,18 @@ fn a_declaration_a_macro_makes_is_found_over_the_wire() {
 const BRANCH_CPP: &str = "#include \"cfg.h\"\n#if OFF\nstruct Unclosed { int x;\n#endif\nint ok;\n";
 const CFG_H: &str = "#define OFF 0\n";
 
-/// **A branch nobody takes is published as clean.**
+/// **A branch nobody takes is answered as clean.**
 ///
 /// The two readings disagree about this file, and that disagreement is the reason the diagnostics channel reads the
 /// cooked one: the raw reading reports the unclosed class — correctly, the *text* says so — and a compiler never
-/// sees that branch. A server that published the raw answer would put a red squiggle on code that is not compiled,
-/// which is the false positive the whole second reading exists to remove.
+/// sees that branch. A server that answered from the raw reading would put a red squiggle on code that is not
+/// compiled, which is the false positive the whole second reading exists to remove.
 ///
-/// The assertion is about the **last** thing the client is told, and that is deliberate: the answer for an open file
-/// can be published before the file has been cooked (a cooked reading needs its translation unit read), so the
-/// client may first hear the raw error and then, once the indexing queue drains, hear that the file is clean. A
-/// server that only published on the change would leave the first answer on screen.
+/// **Pull makes this the first answer rather than a later one.** The handler reads and cooks the file before it
+/// queries, so there is no window in which the raw answer could reach a client — which is what the push path had to
+/// live with, and what made this test above say "the assertion is about the *last* thing the client is told".
 #[test]
-fn a_branch_nobody_takes_is_published_as_clean_once_the_file_is_cooked() {
+fn a_branch_nobody_takes_is_answered_as_clean() {
     let project = Project::new("cooked-diagnostics");
     project.write("cfg.h", CFG_H);
     project.write("main.cpp", BRANCH_CPP);
@@ -940,18 +965,10 @@ fn a_branch_nobody_takes_is_published_as_clean_once_the_file_is_cooked() {
         }),
     );
 
-    let clean = server.wait_for(|message| {
-        message["method"] == json!("textDocument/publishDiagnostics")
-            && message["params"]["uri"] == json!(main_uri)
-            && message["params"]["diagnostics"]
-                .as_array()
-                .is_some_and(|diagnostics| diagnostics.is_empty())
-    });
+    let clean = server.pull_diagnostics(90, &main_uri);
     assert!(
-        clean["params"]["diagnostics"]
-            .as_array()
-            .is_some_and(|diagnostics| diagnostics.is_empty()),
-        "the branch is not compiled, so there is nothing to report: {clean}"
+        clean.is_empty(),
+        "the branch is not compiled, so there is nothing to report: {clean:?}"
     );
 
     // **The falsification lives one layer down**, where the same fixture is read both ways:
@@ -985,7 +1002,7 @@ fn a_branch_nobody_takes_is_published_as_clean_once_the_file_is_cooked() {
 /// So this opens a file that is **clean**, edits it into having a missing `;`, and requires the client to be told
 /// about it. A server that waits for a re-read fails here and passes the fixture whose text was already on disk.
 #[test]
-fn an_error_typed_into_an_open_file_is_published() {
+fn an_error_typed_into_an_open_file_is_answered() {
     let project = Project::new("diagnostics-after-an-edit");
     project.write("main.cpp", CLEAN_CPP);
 
@@ -1022,36 +1039,21 @@ fn an_error_typed_into_an_open_file_is_published() {
         }),
     );
 
-    let with_the_error = server.wait_for(|message| {
-        message["method"] == json!("textDocument/publishDiagnostics")
-            && message["params"]["uri"] == json!(main_uri)
-            && message["params"]["diagnostics"]
-                .as_array()
-                .is_some_and(|diagnostics| !diagnostics.is_empty())
-    });
-
-    let diagnostics = with_the_error["params"]["diagnostics"]
-        .as_array()
-        .expect("diagnostics is an array");
+    let diagnostics = server.pull_diagnostics(300, &main_uri);
     assert!(
         diagnostics
             .iter()
             .any(|diagnostic| diagnostic["message"]
                 .as_str()
                 .is_some_and(|message| message.contains(';'))),
-        "the missing `;` is the only difference from the clean file: {with_the_error}"
-    );
-    assert_eq!(
-        with_the_error["params"]["version"],
-        json!(2),
-        "and the answer is stamped with the revision it is about, so a client can discard it: {with_the_error}"
+        "the missing `;` is the only difference from the clean file: {diagnostics:?}"
     );
 
     server.request(999, "shutdown", Value::Null);
     server.notify("exit", Value::Null);
 }
 
-/// The clean file [`an_error_typed_into_an_open_file_is_published`] opens, and the same file one `;` short.
+/// The clean file [`an_error_typed_into_an_open_file_is_answered`] opens, and the same file one `;` short.
 const CLEAN_CPP: &str = "int g();\nstruct Name {\n    int middleName;\n    void print(int i) {\n        \
                          middleName = i;\n    }\n};\n";
 const EDITED_CPP: &str = "int g();\nstruct Name {\n    int middleName;\n    void print(int i) {\n        \
@@ -1111,27 +1113,15 @@ fn the_reported_file_is_answered() {
         }),
     );
 
-    let published = server.wait_for(|message| {
-        message["method"] == json!("textDocument/publishDiagnostics")
-            && message["params"]["uri"] == json!(main_uri)
-    });
-    assert_eq!(
-        published["params"]["version"],
-        json!(1),
-        "the answer is stamped with the revision it is about: {published}"
-    );
-
-    let diagnostics = published["params"]["diagnostics"]
-        .as_array()
-        .unwrap_or_else(|| panic!("diagnostics is an array: {published}"));
+    let diagnostics = server.pull_diagnostics(90, &main_uri);
     eprintln!(
-        "the server published {} diagnostic(s): {diagnostics:?}",
+        "the server answered with {} diagnostic(s): {diagnostics:?}",
         diagnostics.len()
     );
     assert!(
         diagnostics.iter().all(|diagnostic| diagnostic["code"] != json!("syntax-error")),
         "the file parses, and `return` reporting a missing `;` is the defect this fixture was built from: \
-         {published}"
+         {diagnostics:?}"
     );
 
     server.request(999, "shutdown", Value::Null);

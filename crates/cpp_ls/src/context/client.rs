@@ -6,8 +6,7 @@ use std::{
 use lsp_server::{Connection, Message, Notification, RequestId, Response};
 use lsp_types::{
     ApplyWorkspaceEditParams, ApplyWorkspaceEditResponse, ConfigurationParams, MessageActionItem,
-    PublishDiagnosticsParams, RegistrationParams, ShowMessageParams, ShowMessageRequestParams,
-    UnregistrationParams,
+    RegistrationParams, ShowMessageParams, ShowMessageRequestParams, UnregistrationParams,
 };
 use serde::de::DeserializeOwned;
 use tokio::{
@@ -158,10 +157,15 @@ impl ClientProxy {
         }
     }
 
-    pub fn publish_diagnostics(&self, params: PublishDiagnosticsParams) {
-        self.send_notification("textDocument/publishDiagnostics", params);
-    }
-
+    /// **`textDocument/publishDiagnostics` is deliberately not here.**
+    ///
+    /// It was, and it is gone with the push path: diagnostics are **pulled** (`textDocument/diagnostic`), so the
+    /// server never sends them unasked. A client that asks is answered from the index as it stands, which is what
+    /// removes the whole class of defect the push path kept having — an answer about text the user has since
+    /// replaced, arriving after the edit that replaced it.
+    ///
+    /// The one notification that remains is [`ClientProxy::refresh_workspace_diagnostics`], which is not an answer
+    /// but a request for one.
     pub async fn apply_edit(
         &self,
         params: ApplyWorkspaceEditParams,

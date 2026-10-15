@@ -428,83 +428,6 @@ impl AnalysisState {
         self.update(label, |slot| slot.as_mut().map(f)).await
     }
 
-    /// **A file's diagnostics, cooking it first when the reading is not there yet.**
-    ///
-    /// # The defect this exists for
-    ///
-    /// [`Session::diagnostics`] answers from the file's **cooked reading** — the text a compiler parses, with its
-    /// macros expanded and the branches nobody takes left out — and the answer for a file with none is `None` rather
-    /// than a reading from the file's own bytes. That is right: an untaken branch is not compiled, so an error inside
-    /// one is an error about a program that does not exist. See [`DiagnosticReading::Cooked`].
-    ///
-    /// But **an edit drops the reading**, and nothing rebuilt it before the diagnostic pass ran. Measured on the
-    /// reported case — `std::cout << middleName << std::endl` with no `;`:
-    ///
-    /// ```text
-    /// before the edit:       Some(1)    the reading is there and reports the error
-    /// right after the edit:  None       dropped, and nothing has cooked the new text
-    /// after re-indexing:     Some(1)    the pump got to it
-    /// ```
-    ///
-    /// `diagnose_file` answered `None`, and the pass logged *"nothing to diagnose: the file could not be read"* and
-    /// published **nothing** — so the client kept whatever it had, which is exactly "等了很久都没有等到诊断".
-    /// The reading comes back when the index pump reaches the file, and the pump's order is the queue's, not the
-    /// editor's: a file being typed in is re-cooked **after** whatever the index is already busy with.
-    ///
-    /// # Why cooking here is the right answer rather than waiting
-    ///
-    /// Cooking one file is a render and a parse of *that* file — the work the pump would do anyway, and the same work
-    /// this crate already does for a file a request names ([`AnalysisState::prepare`] queues it for exactly this
-    /// reason). Doing it on the spot makes the diagnostic pass independent of the pump's queue, which is what a
-    /// keystroke-driven pass needs.
-    ///
-    /// The cost is the write lock for the length of one cook. That is the same lock the notification path takes to
-    /// apply the edit itself, and the alternative — publish nothing and hope the next pass is later — is what the
-    /// bug was.
-    pub async fn cook_and_diagnose(
-        &self,
-        path: &std::path::Path,
-    ) -> Option<(lsp_types::Uri, Vec<lsp_types::Diagnostic>)> {
-        // The common case: the reading is already there and this is a read, which runs beside the pump.
-        if let Some(answered) = self
-            .run_blocking({
-                let path = path.to_path_buf();
-                move |session| crate::handlers::diagnose_file(session, &path)
-            })
-            .await
-        {
-            return Some(answered);
-        }
-
-        // **No reading — and an edit takes the file's summary with it, so reading is not enough.**
-        //
-        // `session.load` fills the file table and builds nothing; a summary is what a reading is built out of, and
-        // the edit dropped it. Measured, after an edit: `summary=None`, so `cook` answers `None` and a pass that
-        // waited for one would wait forever. The file is re-queued by the same edit (`Session::did_open`), so the
-        // work is to **drive the queue for it here** rather than hope the pump reaches it: that is the difference
-        // between an answer now and an answer after whatever the index is already busy with.
-        //
-        // It is one file's read and one file's cook — the pump's own two steps, for the file the user is looking at.
-        let to_cook = path.to_path_buf();
-        let cooked = self
-            .update_session("read and cook a file whose diagnostics were asked for", move |session| {
-                session.load(&to_cook);
-                session.add_project_files([to_cook.clone()]);
-                session.index_everything();
-                let cooked = session.cook(&to_cook).is_some();
-                cooked
-            })
-            .await;
-
-        if cooked != Some(true) {
-            return None;
-        }
-
-        let to_read = path.to_path_buf();
-        self.run_blocking(move |session| crate::handlers::diagnose_file(session, &to_read))
-            .await
-    }
-
     /// Change the analysis — including opening and closing the session itself.
     ///
     /// The closure sees the slot rather than a session because this is the one path that can *create* one
@@ -612,9 +535,9 @@ mod tests {
     /// ```
     ///
     /// The file here is a buffer with no summary and nothing having cooked it, which is exactly the state a file is
-    /// in between an edit and the index pump reaching it. A `cook_and_diagnose` that only *reads* answers `None` and
-    /// this test fails; one that cooks the file's current text answers, which is what makes the pass independent of
-    /// the pump's queue.
+    /// in between an edit and the index pump reaching it. A handler that only *reads* answers `None` — and that
+    /// `None` reached the client as a JSON `null`; one that cooks the file's current text answers, which is what
+    /// makes the pull path independent of the pump's queue.
     #[tokio::test]
     async fn diagnostics_are_answered_before_the_index_has_read_the_file() {
         let state = AnalysisState::new();
@@ -651,12 +574,23 @@ mod tests {
             "an edit drops the file's summary, so a pass that only reads has no answer — which is the defect"
         );
 
-        let answered = state.cook_and_diagnose(std::path::Path::new("/p/main.cpp")).await;
-
-        let (_, diagnostics) = answered.expect(
-            "a file whose text the client is holding has an answer, whether or not the index has reached it",
-        );
+        // **The pull path's own two steps**, which is what a `textDocument/diagnostic` request is made of.
         assert!(
+            state
+                .prepare_for_a_diagnostic(std::path::Path::new("/p/main.cpp"))
+                .await,
+            "the file can be read and cooked"
+        );
+        let diagnostics = state
+            .with_snapshot(|session| {
+                crate::handlers::diagnostic::diagnose_file(
+                    session,
+                    std::path::Path::new("/p/main.cpp"),
+                )
+            })
+            .flatten()
+            .expect("a file whose text the client is holding has an answer")
+            .1;        assert!(
             diagnostics
                 .iter()
                 .any(|diagnostic| diagnostic.message.contains(';')),

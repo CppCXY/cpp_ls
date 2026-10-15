@@ -1,8 +1,10 @@
-//! `textDocument/diagnostic` — the **pull** half of diagnostics.
+//! `textDocument/diagnostic` — **the diagnostics channel**, because there is no other one.
 //!
-//! A client that supports pull diagnostics asks about a file after an edit; the push half
-//! ([`crate::context::DiagnosticService`]) publishes without being asked, for clients that do not. Both call
-//! [`super::diagnose_file`], so the two can differ in *when* they answer and not in *what*.
+//! A client asks about a file, and [`super::diagnose_file`] answers from the index as it stands at that moment. There
+//! was a push half beside this — a service that published `textDocument/publishDiagnostics` after an edit settled, for
+//! clients that do not pull — and it is deleted. One answer with two delivery schedules is how a screen ends up
+//! holding a diagnostic about text that is gone; a pulled answer is computed when it is asked for, so it cannot be
+//! overtaken by the edit that follows it.
 //!
 //! # Two defects this handler had, and why they are one question
 //!

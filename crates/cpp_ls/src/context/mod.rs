@@ -1,7 +1,6 @@
 mod analysis_state;
 mod client;
 mod client_id;
-mod diagnostic_service;
 mod lsp_features;
 mod pull_cache;
 mod query_runner;
@@ -10,11 +9,9 @@ mod status_bar;
 mod update_queue;
 mod workspace_manager;
 mod workspace_state;
-
 pub use analysis_state::AnalysisState;
 pub use client::ClientProxy;
 pub use client_id::{ClientId, get_client_id};
-pub use diagnostic_service::{DEFAULT_DIAGNOSTIC_INTERVAL, DiagnosticService};
 pub use lsp_features::LspFeatures;
 use lsp_server::{Connection, ErrorCode, RequestId, Response};
 use lsp_types::ClientCapabilities;
@@ -47,18 +44,11 @@ impl ServerContext {
             client.clone(),
             lsp_features.supports_work_done_progress(),
         ));
-        let file_diagnostic = Arc::new(DiagnosticService::new(
-            analysis.clone(),
-            status_bar.clone(),
-            client.clone(),
-        ));
-        let workspace_manager =
-            Arc::new(Mutex::new(WorkspaceManager::new(file_diagnostic.clone())));
+        let workspace_manager = Arc::new(Mutex::new(WorkspaceManager::new()));
 
         let inner = Arc::new(ServerContextInner {
             analysis,
             client,
-            file_diagnostic,
             workspace_manager,
             status_bar,
             lsp_features,

@@ -27,9 +27,7 @@ use lsp_types::{
     DidSaveTextDocumentParams,
 };
 
-use crate::context::{
-    AnalysisState, DEFAULT_DIAGNOSTIC_INTERVAL, ServerContextSnapshot, UpdateEvent,
-};
+use crate::context::{AnalysisState, ServerContextSnapshot, UpdateEvent};
 use crate::util::uri_to_file_path;
 
 pub async fn on_did_open_text_document(
@@ -45,7 +43,6 @@ pub async fn process_did_open_text_document(
     params: DidOpenTextDocumentParams,
 ) -> Option<()> {
     let uri = params.text_document.uri;
-    let version = params.text_document.version;
     let text = params.text_document.text;
     let path = uri_to_file_path(&uri)?;
 
@@ -56,7 +53,7 @@ pub async fn process_did_open_text_document(
         workspace_manager.sync_open_file(uri.clone(), text.clone());
     }
 
-    apply_buffer(&context, path, text, Some(version)).await;
+    apply_buffer(&context, path, text).await;
 
     Some(())
 }
@@ -75,7 +72,6 @@ pub async fn process_did_change_text_document(
     params: DidChangeTextDocumentParams,
 ) -> Option<()> {
     let uri = params.text_document.uri;
-    let version = params.text_document.version;
     // Full sync (`TextDocumentSyncKind::FULL` is what this server advertises), so the last change is the text. A
     // client that sent incremental changes anyway would need their ranges applied here, which is the one thing
     // advertising FULL is for: it does not have to.
@@ -87,7 +83,7 @@ pub async fn process_did_change_text_document(
         workspace_manager.sync_open_file(uri.clone(), text.clone());
     }
 
-    apply_buffer(&context, path, text, Some(version)).await;
+    apply_buffer(&context, path, text).await;
 
     Some(())
 }
@@ -120,7 +116,7 @@ pub async fn process_did_save_text_document(
         workspace_manager.sync_open_file(uri, text.clone());
     }
 
-    apply_buffer(&context, path, text, None).await;
+    apply_buffer(&context, path, text).await;
 
     Some(())
 }
@@ -156,34 +152,19 @@ pub async fn process_did_close_document(
         .await;
     context.analysis().wake();
 
-    // A file that is gone from disk has nothing left to diagnose, and the client's list for it has to be cleared by
-    // hand: no later parse will ever publish an empty list for a file nobody can read.
-    if !path.exists() {
-        context
-            .file_diagnostic()
-            .clear_push_file_diagnostics(uri.clone());
-    } else if !context.lsp_features().supports_pull_diagnostic() {
-        // The path is the disk's now, and the text may differ from the buffer that was just dropped; the client's
-        // diagnostics are about text that is no longer there. **No version**: the document is closed, so there is no
-        // revision to stamp and the client has nothing to compare against.
-        schedule_diagnostics(&context, path, None).await;
-    }
-
+    // **Nothing is published, and nothing has to be.** Diagnostics are pulled: a client asks about the file it is
+    // showing, and a closed file is one it is not showing — so there is no list of ours to clear, which is what the
+    // `clear_push_file_diagnostics` branch here used to do by hand. The disk answers for this path again
+    // (`Session::did_close`), and the next pull is answered from it.
     Some(())
 }
 
-/// Tell the session what a path's text is now, and schedule the diagnostics that follow.
+/// Tell the session what a path's text is now.
 ///
-/// `version` is the client's own counter for the document, carried so the answer can be stamped with it: a client
-/// discards a diagnostic whose version is older than the text it is showing, which is the only defence it has against
-/// an answer that arrives after the edit that replaced it. `None` where the message carries no version — a `didSave`
-/// with text.
-async fn apply_buffer(
-    context: &ServerContextSnapshot,
-    path: PathBuf,
-    text: String,
-    version: Option<i32>,
-) {
+/// **The diagnostics follow from the client's own next request**, which is the whole of the pull design: an edit is
+/// recorded here, and the answer is computed when it is asked for. There is no schedule and no delay, and therefore
+/// no window in which the client holds an answer about text that is gone.
+async fn apply_buffer(context: &ServerContextSnapshot, path: PathBuf, text: String) {
     let analysis: &AnalysisState = context.analysis();
     let for_session = path.clone();
     let applied = analysis
@@ -202,33 +183,4 @@ async fn apply_buffer(
     // The edit *dropped* this file's summary and queued it (`Session::did_open`), so the index is stale until
     // something reads it again. That is the pump's job, and this is how it is told there is work.
     analysis.wake();
-
-    schedule_diagnostics(context, path, version).await;
-}
-
-/// Schedule a file's diagnostics, unless the client pulls them instead.
-///
-/// The delay is the project's when it says one (`diagnostics.on_change_ms` in `.cppls.toml`) and this server's
-/// otherwise: how long a given project's files take to typing-stop is a property of the project and of the machine
-/// it is edited on, which is why it is configurable at all — and why the default is a compromise rather than a
-/// measurement.
-async fn schedule_diagnostics(
-    context: &ServerContextSnapshot,
-    path: PathBuf,
-    version: Option<i32>,
-) {
-    if context.lsp_features().supports_pull_diagnostic() {
-        return;
-    }
-
-    let interval = context
-        .analysis()
-        .with_snapshot(|session| session.project_config().config.diagnostics.on_change_ms)
-        .flatten()
-        .unwrap_or(DEFAULT_DIAGNOSTIC_INTERVAL);
-
-    context
-        .file_diagnostic()
-        .add_diagnostic_task(path, interval, version)
-        .await;
 }

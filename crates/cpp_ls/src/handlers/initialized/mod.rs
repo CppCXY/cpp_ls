@@ -30,7 +30,7 @@ use std::path::PathBuf;
 use lsp_types::InitializeParams;
 
 use crate::cmd_args::CmdArgs;
-use crate::context::{DiagnosticService, ProgressTask, ServerContextSnapshot, get_client_id};
+use crate::context::{ProgressTask, ServerContextSnapshot, get_client_id};
 use crate::handlers::register_files_watch;
 use crate::logger::init_logger;
 use crate::util::uri_to_file_path;
@@ -476,10 +476,15 @@ async fn index_in_background(context: ServerContextSnapshot) {
 /// The open ones and not the project: those are the files whose answers a user is looking at, and the only ones whose
 /// reading this pass can have changed — everything else has no cooked reading to gain and no client waiting on it.
 ///
-/// Two client shapes, one moment: a pull client is told to refresh (`workspace/diagnostic/refresh`, which is what it
-/// asks its own list of files with), and a push client is given the files directly. A client that supports neither
-/// pull nor refresh gets nothing here, which is the same position it was in before the drain — the answer it holds
-/// came from the per-change pass.
+/// # Why this is a refresh and not an answer
+///
+/// The index settling **changes the answer without the document changing**, which is the one case a client cannot
+/// notice by itself: a check that needs another file's facts has none until that file is read, and a pull client
+/// that already asked will not ask again for text it believes it has seen. So the server says "ask again" —
+/// `workspace/diagnostic/refresh` — and the client decides which of its files to ask about.
+///
+/// A client that does not advertise `refreshSupport` gets nothing, and that is correct rather than a gap: it has no
+/// way to be told, and its next ask is its next reason to ask — a scroll, a click, an edit.
 async fn republish_open_file_diagnostics(context: &ServerContextSnapshot) {
     let open = context
         .analysis()
@@ -490,36 +495,21 @@ async fn republish_open_file_diagnostics(context: &ServerContextSnapshot) {
         return;
     }
 
-    if context.lsp_features().supports_pull_diagnostic() {
-        if context.lsp_features().supports_refresh_diagnostic() {
-            context.client().refresh_workspace_diagnostics();
-        }
-        return;
+    if context.lsp_features().supports_refresh_diagnostic() {
+        context.client().refresh_workspace_diagnostics();
     }
-
-    // No delay: the wait this replaces has already happened, and the whole point is that the answer changed now.
-    context
-        .file_diagnostic()
-        .add_files_diagnostic_task(open, 0)
-        .await;
 }
 
-/// The first full diagnostic pass, once the index holds something.
+/// **Nothing to do, and that is the whole of this function's contract.**
 ///
-/// Published rather than pulled, because a client that supports pull diagnostics asks for a file's diagnostics when
-/// it shows that file — and there is nothing to push to it. A client that does not would otherwise see an empty
-/// problem list until it opened every file in the project.
-async fn publish_workspace_diagnostics(context: &ServerContextSnapshot) {
-    let file_diagnostic: &DiagnosticService = context.file_diagnostic();
-    if context.lsp_features().supports_pull_diagnostic() {
-        if context.lsp_features().supports_refresh_diagnostic() {
-            context.client().refresh_workspace_diagnostics();
-        }
-        return;
-    }
-
-    file_diagnostic.add_workspace_diagnostic_task(0).await;
-}
+/// It used to publish an answer here: a pull client was told to refresh, and a push client was given every indexed
+/// file's diagnostics directly. With the push path gone the second half has no meaning, and the first is what a pull
+/// client does by itself — it asks about the file it is showing, whenever it wants to know.
+///
+/// It is kept as a function rather than deleted so the call site still says *why* the moment after a workspace is
+/// opened needs nothing: the answer a client holds came from its own request, and a request is answered from the
+/// index as it stands.
+async fn publish_workspace_diagnostics(_context: &ServerContextSnapshot) {}
 
 /// The folders the client opened.
 ///

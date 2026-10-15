@@ -15,8 +15,6 @@
 //! because their search would now fail. All of that is `SummaryStore::respond`, and the response is what this module
 //! turns into work.
 
-use std::path::PathBuf;
-
 use lsp_types::{DidChangeWatchedFilesParams, FileChangeType};
 
 use crate::context::{ServerContextSnapshot, UpdateEvent};
@@ -96,24 +94,20 @@ pub async fn process_did_change_watched_files(
         // configuration change — and the pump is what reads it.
         context.analysis().wake();
 
+        // **The answer changed and the document did not**, which is the one case a client cannot notice by itself: a
+        // watched file is not one it is editing, so nothing about the text it is showing has moved. A client that can
+        // be told is told; one that cannot is answered the next time it asks.
         if response.everything {
             log::info!("the whole project has to be read again");
-        } else {
-            let paths: Vec<PathBuf> = response.reindex.clone();
-            if !context.lsp_features().supports_pull_diagnostic() {
-                context
-                    .file_diagnostic()
-                    .add_files_diagnostic_task(paths, crate::context::DEFAULT_DIAGNOSTIC_INTERVAL)
-                    .await;
-            }
+        }
+        if context.lsp_features().supports_refresh_diagnostic() {
+            context.client().refresh_workspace_diagnostics();
         }
     }
 
-    for uri in deleted {
-        if !uri_to_file_path(&uri).is_some_and(|path| path.exists()) {
-            context.file_diagnostic().clear_push_file_diagnostics(uri);
-        }
-    }
+    // **Nothing to clear.** A deleted file is one a pull client asks about and is answered with an empty report; the
+    // list it holds is its own, and no message from here can go stale in it.
+    let _ = deleted;
 
     if reload_needed {
         for path in configuration_files {

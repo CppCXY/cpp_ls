@@ -23,7 +23,7 @@
 mod completion;
 mod configuration;
 mod definition;
-mod diagnostic;
+pub mod diagnostic;
 mod document_symbol;
 mod folding_range;
 mod hover;
@@ -39,8 +39,6 @@ mod semantic_token;
 mod signature_help;
 mod text_document;
 mod workspace_symbol;
-
-pub use diagnostic::diagnose_file;
 
 use crate::context::ServerContextSnapshot;
 pub use initialized::{ClientConfig, initialized_handler, start_analysis};

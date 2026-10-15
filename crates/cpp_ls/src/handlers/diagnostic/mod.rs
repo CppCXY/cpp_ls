@@ -19,9 +19,17 @@
 //! cooked reading, that is the text the compiler parses, and its errors are placed back in the file by the same map
 //! every declaration's range goes through.
 //!
-//! Two clients, one conversion: the push path ([`crate::context::DiagnosticService`], which publishes after an
-//! edit settles) and the pull path (`textDocument/diagnostic`) both call [`diagnose_file`]. That is deliberate —
-//! a server whose two diagnostic paths disagree is worse than one with only one of them.
+//! # One channel, and it is the client's
+//!
+//! Diagnostics are **pulled**: a client asks with `textDocument/diagnostic` and [`diagnose_file`] answers. There was
+//! a push half beside it — a service that published `textDocument/publishDiagnostics` after an edit settled — and it
+//! is deleted. Two channels for one answer is how a screen ends up holding a diagnostic about text that is gone: a
+//! published answer cannot be recalled, while a pulled one is computed when it is asked for, from the index as it
+//! stands at that moment.
+//!
+//! So the timing questions this layer used to have — how long to wait after a keystroke, what to do with an answer
+//! that has been overtaken, whether a finishing pass may remove another's bookkeeping — do not have answers here any
+//! more. They have no place to be asked.
 mod document_diagnostic;
 
 use std::path::Path;
@@ -226,8 +234,11 @@ impl RegisterCapabilities for DiagnosticCapabilities {
                 // answer no longer has — and the day it was `false` the claim was true, because the parse of one file
                 // really was the whole answer.
                 inter_file_dependencies: true,
-                // Still not offered: workspace diagnostics would be this same per-file answer over every indexed
-                // file, and the push path already runs that pass once the index settles (`DiagnosticService`).
+                // **Not offered, and now for a simpler reason than before.** `workspace/diagnostic` would be the same
+                // per-file answer over every indexed file, and a client does not need the server to walk the project
+                // to learn about the files it is showing. It used to say this while *also* pushing a workspace pass
+                // from the settle path — offering `false` and sending anyway, which is the contradiction the push
+                // path's removal resolved.
                 workspace_diagnostics: false,
                 ..Default::default()
             }))

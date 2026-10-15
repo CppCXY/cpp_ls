@@ -31,7 +31,7 @@ use tokio::sync::Mutex as AsyncMutex;
 use tokio_util::sync::CancellationToken;
 
 use super::workspace_state::WorkspaceState;
-use super::{DiagnosticService, ServerContextSnapshot};
+use super::ServerContextSnapshot;
 use crate::handlers::ClientConfig;
 
 /// How long the events have to stop before a reload runs.
@@ -45,7 +45,6 @@ pub struct WorkspaceManager {
     config_reload_token: Arc<PendingTask>,
     reload_lock: Arc<AsyncMutex<()>>,
     reload_generation: Arc<AtomicU64>,
-    file_diagnostic: Arc<DiagnosticService>,
     /// Bumped whenever the workspace changes underneath the analysis, so a background pass can see that it has been
     /// superseded and stop instead of writing into a workspace that no longer exists.
     workspace_version: Arc<AtomicI64>,
@@ -53,12 +52,11 @@ pub struct WorkspaceManager {
 }
 
 impl WorkspaceManager {
-    pub fn new(file_diagnostic: Arc<DiagnosticService>) -> Self {
+    pub fn new() -> Self {
         Self {
             config_reload_token: Arc::new(PendingTask::default()),
             reload_lock: Arc::new(AsyncMutex::new(())),
             reload_generation: Arc::new(AtomicU64::new(0)),
-            file_diagnostic,
             workspace_version: Arc::new(AtomicI64::new(0)),
             state: WorkspaceState::new(ClientConfig::default()),
         }
@@ -139,11 +137,11 @@ impl WorkspaceManager {
 
     /// Drop what belongs to the workspace being left behind, and mark the workspace as changed.
     ///
-    /// The published diagnostics are cleared: a path in the old workspace may be a different file in the new one,
-    /// and a client that kept the old errors would show them against text nobody has parsed. The buffers stay —
-    /// they are the editor's, not the workspace's.
+    /// **Nothing has to be cleared on the client's side.** Diagnostics are pulled, so a client asks about a file
+    /// under the new workspace and is answered from it — there is no published list to go stale, which is the defect
+    /// this used to have to undo (`DiagnosticService::cancel_all` and the clear it led to are gone with the push
+    /// path). The buffers stay: they are the editor's, not the workspace's.
     pub async fn clear_workspace(&self) {
-        self.file_diagnostic.cancel_all().await;
         self.workspace_version.fetch_add(1, Ordering::AcqRel);
     }
 

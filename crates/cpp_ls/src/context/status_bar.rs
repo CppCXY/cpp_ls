@@ -12,10 +12,15 @@ pub struct StatusBar {
     supports_work_done_progress: bool,
 }
 
+/// Progress a client can be shown.
+///
+/// **One variant, and there was a second.** `DiagnoseWorkspace` reported a pass that published every indexed file's
+/// diagnostics; with diagnostics pulled (`textDocument/diagnostic`) there is no such pass — a client asks about the
+/// files it is showing, and the server does not walk the project to answer them. A variant nothing constructs is an
+/// invitation to construct it, so it is gone with the pass.
 #[derive(Debug, Clone, Copy)]
 pub enum ProgressTask {
     LoadWorkspace = 0,
-    DiagnoseWorkspace = 1,
 }
 
 impl ProgressTask {
@@ -26,7 +31,6 @@ impl ProgressTask {
     pub fn get_task_name(&self) -> &'static str {
         match self {
             ProgressTask::LoadWorkspace => "Load workspace",
-            ProgressTask::DiagnoseWorkspace => "Diagnose workspace",
         }
     }
 }

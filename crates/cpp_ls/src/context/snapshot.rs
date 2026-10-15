@@ -4,8 +4,8 @@ use tokio::sync::Mutex;
 use crate::context::{UpdateEvent, UpdateInbox, lsp_features::LspFeatures};
 
 use super::{
-    AnalysisState, RequestManager, client::ClientProxy, diagnostic_service::DiagnosticService,
-    status_bar::StatusBar, workspace_manager::WorkspaceManager,
+    AnalysisState, RequestManager, client::ClientProxy, status_bar::StatusBar,
+    workspace_manager::WorkspaceManager,
 };
 
 #[derive(Clone)]
@@ -24,10 +24,6 @@ impl ServerContextSnapshot {
 
     pub fn client(&self) -> &ClientProxy {
         &self.inner.client
-    }
-
-    pub fn file_diagnostic(&self) -> &DiagnosticService {
-        &self.inner.file_diagnostic
     }
 
     pub fn workspace_manager(&self) -> &Mutex<WorkspaceManager> {
@@ -63,7 +59,6 @@ impl ServerContextSnapshot {
 pub struct ServerContextInner {
     pub analysis: Arc<AnalysisState>,
     pub client: Arc<ClientProxy>,
-    pub file_diagnostic: Arc<DiagnosticService>,
     pub workspace_manager: Arc<Mutex<WorkspaceManager>>,
     pub status_bar: Arc<StatusBar>,
     pub lsp_features: Arc<LspFeatures>,
