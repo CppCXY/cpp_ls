@@ -145,6 +145,50 @@ fn function_definition_exposes_params_and_body() {
     );
 }
 
+/// **A `return` with no `;` is an error, and it was the only statement that said nothing.**
+///
+/// Reported from an editor: `return 0` written without a semicolon produced no diagnostic, and no amount of waiting
+/// helped — because the analysis was right to be silent. The parser had reported nothing:
+///
+/// ```text
+/// int f() { int x }        errors=1   the declaration rule reports it
+/// int f() { return 0 }     errors=0   and the return rule did not
+/// ```
+///
+/// `parse_return_statement` emitted a zero-width `MissingNode` and returned `Ok`, which keeps the tree well-formed
+/// and leaves `get_errors` empty. Every other statement that ends in a `;` reports it —
+/// `parse_keyword_statement` (`break`, `continue`), `parse_goto_statement`, `parse_throw_statement` — so this is the
+/// odd one out rather than a deliberate leniency, and the assertion is that all four agree.
+///
+/// The second case is why it is not merely cosmetic: without an error the rule stopped at the newline, so the next
+/// statement was read as part of the `return` and a file with a missing `;` produced **one** construct fewer than it
+/// has.
+#[test]
+fn a_return_without_a_semicolon_is_an_error() {
+    for (what, source) in [
+        ("at the end of a body", "int f() { return 0 }\n"),
+        ("before another statement", "int f() { return 0\n int x; }\n"),
+        // The three statements that already reported it, so the four cannot drift apart again.
+        ("a `break`", "void f() { while (1) { break } }\n"),
+        ("a `continue`", "void f() { while (1) { continue } }\n"),
+        ("a `goto`", "void f() { goto done }\n"),
+    ] {
+        let tree = CppParser::parse(source, ParserConfig::default());
+        assert!(
+            !tree.get_errors().is_empty(),
+            "{what}: a missing `;` is an error in {source:?}"
+        );
+    }
+
+    // …and the correct spelling stays clean, which is what makes the above a statement about the `;` rather than
+    // about `return`.
+    let tree = CppParser::parse("int f() { return 0; }\n", ParserConfig::default());
+    assert!(
+        tree.get_errors().is_empty(),
+        "and `return 0;` is not an error"
+    );
+}
+
 #[test]
 fn function_definition_with_trailing_return_type() {
     let (root, _) = unit("auto begin() -> int* { return nullptr; }\n");
