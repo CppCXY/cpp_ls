@@ -1642,7 +1642,29 @@ fn parse_return_statement(p: &mut CppParser) -> ParseResult {
     if p.current_token() == CppTokenKind::Semicolon {
         p.bump();
     } else {
-        p.emit_missing_node();
+        // **A missing `;` is an error, and this rule used to say nothing.**
+        //
+        // It emitted a zero-width `MissingNode` and returned `Ok`, which is not a diagnosis: the tree stays
+        // well-formed, `get_errors` is empty, and `return 0` written with no semicolon is **accepted**. Reported from
+        // an editor, where a `return 0` with no `;` produced no diagnostic and no amount of waiting helped — the
+        // analysis was right to say nothing, because the parser had found nothing.
+        //
+        // Every other statement that ends in a `;` reports it: `parse_keyword_statement` (`break`, `continue`),
+        // `parse_goto_statement`, `parse_throw_statement`. Measured on the pair:
+        //
+        // ```text
+        // int f() { int x }        errors=1   the declaration rule reports it
+        // int f() { return 0 }     errors=0   and this rule did not
+        // ```
+        //
+        // `decls::expect_semicolon` is the shared rule, and using it rather than repeating the shape is deliberate:
+        // it is the one that knows about a `;` a conditional branch already carried
+        // (`take_the_terminator_came_from_a_branch`) and about leaving the layout after the `;` to the enclosing
+        // block rather than taking it into this node.
+        if let Err(err) = decls::expect_semicolon(p) {
+            p.close_marks_above(base);
+            return Err(err);
+        }
     }
 
     Ok(m.complete(p))
