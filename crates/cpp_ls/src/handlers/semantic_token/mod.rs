@@ -196,6 +196,7 @@ pub fn encode(
     );
     push_names(&mut builder, names);
     push_keywords(&mut builder, view);
+    push_doc_commands(&mut builder, view);
 
     if builder.unplaceable() > 0 {
         log::debug!(
@@ -265,6 +266,66 @@ fn names_a_type(kind: cpp_parser::CppTokenKind) -> bool {
             | CppTokenKind::DoubleKeyword
             | CppTokenKind::VoidKeyword
     )
+}
+
+/// **Pass 3 — the Doxygen commands**, which the parser already reads and nothing was drawing.
+///
+/// ```cpp
+/// /// @param x the x coordinate
+/// /// ^^^^^^
+/// ```
+///
+/// The grammar has had these since `docs.rs` was written: a `DocCommand` node with a `DocCommandName` token, and a
+/// table of the commands Doxygen knows. **No consumer was reading them.** A doc comment is one colour to a
+/// highlighter, so `@param` and the prose after it look the same, and the markers a reader scans a header's
+/// documentation for are the ones that do not stand out.
+///
+/// # Why this is the server's and not the client's
+///
+/// A client could find `@word` in a comment with a regular expression, and that is the wrong place for it: which
+/// comments *are* documentation (`///`, `/** */`, and not `//`), where a command ends and its argument begins, and
+/// which words are commands at all rather than prose that happens to start with `@` — all of that is what the
+/// parser decided, and re-deciding it in TypeScript would be a second implementation of a question this repository
+/// has already answered once. The client's half is *how it looks*, which is a theme's business and is where the VS
+/// Code extension remaps it.
+///
+/// The command's own token is the whole `@param` and not the `param` the parser stores: `DocCommandName` is the
+/// name **without its introducer**, and the introducer is half of what a reader recognises.
+fn push_doc_commands(builder: &mut Builder<'_>, view: Option<&FileView>) {
+    use cpp_parser::{CppAstNode, CppAstToken, CppDocCommand, CppSyntaxKind};
+
+    let Some(view) = view else {
+        return;
+    };
+    let source: &str = view.source.as_ref();
+
+    for node in view.root.descendants() {
+        if CppSyntaxKind::from(node.kind()) != CppSyntaxKind::DocCommand {
+            continue;
+        }
+        let Some(command) = CppDocCommand::cast(node) else {
+            continue;
+        };
+        let Some(name) = command.get_name_token() else {
+            continue;
+        };
+
+        let range = name.syntax().text_range();
+        let start = usize::from(range.start());
+        let mut end = usize::from(range.end());
+
+        // The introducer, which is the character just before the name: `@` or `\`. Widened by one only when that
+        // character really is there — a command written without one is a command this grammar accepted, and
+        // claiming the character before it would take the space or the comment's own text.
+        if start > 0 && matches!(source.as_bytes().get(start - 1), Some(b'@' | b'\\')) {
+            end = end.max(start);
+            let widened = start - 1;
+            builder.push_range(widened, end, TypeKind::DocCommand, Modifier::none());
+            continue;
+        }
+
+        builder.push_range(start, end, TypeKind::DocCommand, Modifier::none());
+    }
 }
 
 /// **The two things this layer must decide that the analysis does not**, and they are both about the client.
@@ -849,6 +910,60 @@ mod tests {
         assert_eq!(split[0].length, 6, "`/* one` is six columns");
         assert_eq!(split[1].length, 3, "`two` is the whole of its line");
         assert_eq!(split[2].length, 8, "`three */` ends at column 8");
+    }
+
+    /// **A Doxygen command is drawn, and the introducer is part of it.**
+    ///
+    /// The parser has read these since `docs.rs` was written — a `DocCommand` node with a `DocCommandName` token and a
+    /// table of the commands Doxygen knows — and **no consumer was reading them**, so a doc comment was one colour to
+    /// a highlighter and the markers a reader scans a header for did not stand out.
+    ///
+    /// The token is the whole `@param` and not the `param` the parser stores: `DocCommandName` is the name **without
+    /// its introducer**, and the introducer is half of what a reader recognises. Both spellings are written here,
+    /// because Doxygen takes both and a highlighter that knew only `@` would leave every `\param` in a real header
+    /// undrawn.
+    #[test]
+    fn a_doxygen_command_is_drawn_with_its_introducer() {
+        let text = "/// @brief The width.\n\
+                    /// @param x the x coordinate\n\
+                    /// \\returns the width\n\
+                    int width(int x);\n";
+        let (session, path) = a_held_file(text);
+        let view = session.view_of_the_file(&path).expect("a view");
+        let file = session.files().held(&path).expect("the file is held");
+        let names = session.classified_names(&view);
+        let tokens = encode(file, Some(&view), &names, &None, false);
+        let at_type = by_offset(text, &tokens);
+
+        let a_command = index_of(TypeKind::DocCommand);
+
+        // **Found by `find`, and the `@` is asserted to be inside the span.** The first version of this test looked
+        // up the offset of `param` — the *name*, which is what the parser stores — and would have passed on a token
+        // that began there and left the `@` uncoloured, which is the half a reader actually sees.
+        for introducer in ["@brief", "@param", "\\returns"] {
+            let at = text.find(introducer).expect("the fixture writes it");
+            assert_eq!(
+                at_type.get(&at),
+                Some(&a_command),
+                "`{introducer}` is a command, introducer and all: {at_type:?}"
+            );
+
+            // And the whole of it, not just its first character.
+            let after = at + introducer.len();
+            assert!(
+                at_type.get(&after).is_none_or(|kind| *kind != a_command),
+                "the command's token ends after `{introducer}`"
+            );
+        }
+
+        // **Prose is not a command.** `the x coordinate` follows `@param x`, and drawing a word of it would be the
+        // false positive this whole layer is written against.
+        let prose = text.find("coordinate").expect("the fixture writes it");
+        assert_ne!(
+            at_type.get(&prose),
+            Some(&a_command),
+            "a word of the description is not a command"
+        );
     }
 
     /// A client that asks for semantic tokens but names no type this server uses gets an empty list rather than a

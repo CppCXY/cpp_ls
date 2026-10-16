@@ -63,6 +63,15 @@ pub enum TypeKind {
     Keyword,
     Modifier,
     Operator,
+    /// **A Doxygen command** — the `@param` of `@param x the x`.
+    ///
+    /// Its own kind rather than `Keyword`, because it is not one: a command is *inside a comment*, and a theme
+    /// that draws it exactly as it draws `return` is saying a comment contains code. The protocol's `decorator` is
+    /// the closest standard type for a marker that introduces something — an annotation, an attribute, a doc tag —
+    /// and it is the one a client can remap on its own: VS Code's `semanticTokenScopes` lets a client say "draw
+    /// `decorator` from this server as `keyword.doxygen`", which is what the cppls extension does. Sending a
+    /// *custom* type instead would make the server's answer unreadable to every client but that one.
+    DocCommand,
 }
 
 impl TypeKind {
@@ -84,6 +93,7 @@ impl TypeKind {
             TypeKind::Keyword => 12,
             TypeKind::Modifier => 13,
             TypeKind::Operator => 14,
+            TypeKind::DocCommand => 15,
         }
     }
 
@@ -105,6 +115,7 @@ impl TypeKind {
             TypeKind::Keyword => SemanticTokenType::KEYWORD,
             TypeKind::Modifier => SemanticTokenType::MODIFIER,
             TypeKind::Operator => SemanticTokenType::OPERATOR,
+            TypeKind::DocCommand => SemanticTokenType::DECORATOR,
         }
     }
 
@@ -125,6 +136,7 @@ impl TypeKind {
         TypeKind::Keyword,
         TypeKind::Modifier,
         TypeKind::Operator,
+        TypeKind::DocCommand,
     ];
 }
 
