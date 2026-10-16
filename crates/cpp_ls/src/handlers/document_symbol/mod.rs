@@ -175,26 +175,41 @@ fn declaration_range(view: &FileView, fact: &cpp_code_analysis::DeclFact) -> cpp
         return fact.range;
     }
 
-    let start = usize::from(declaration.text_range().start());
+    let start = declaration_start(&declaration);
     let mut end = usize::from(declaration.text_range().end());
 
-    // **The body, which the grammar writes beside the declaration.** A definition's `{ … }` is a *sibling* of the
-    // declaration that names it — deliberately: the declaration is complete before its body is read, so `precede`
-    // opens a declaration around it and the body joins as the second child. Measured on the reported file, where
-    // this was the visible half of the bug:
+    // **The body needs no separate search.** It was looked for as the declaration's next sibling — the shape a
+    // definition once had — and every shape was measured against that loop: it answered `None` for all of them,
+    // because a declaration that holds a body already ends at it. Recorded because the loop was here for several
+    // revisions and the reason it could go is the measurement, not a hunch:
     //
-    //     Name(const std::string& f, …)    the bound node is `Declarator@39..109`, the head alone
-    //     std::string getFullName(int i)   the bound node is `InitDeclarator@239..263`, the head alone
+    //     void plain() { }                    node=Declaration 53..83   body_after=None
+    //     template <…> void templated() { }    node=Declaration 0..53    body_after=None
+    //     WithCtor(int a) : value(a) { }       inside its declaration too
     //
-    // So a client folded a function to its signature and left the body outside. The body is looked for after the
-    // declaration **and after each ancestor**, because which node holds the sibling depends on how many wrappers
-    // the shape has — a plain definition has one, a templated one has two.
-    for node in std::iter::once(declaration.clone()).chain(declaration.ancestors()) {
-        if let Some(body_end) = body_after(&node)
-            && body_end > end
-        {
-            end = body_end;
-        }
+    // So the only thing wrong with the end was the trivia it absorbed, below.
+
+    // **Backed up over the trivia the declaration absorbed.** A `Declaration` that holds its body runs to the
+    // whitespace **after** the body's `}`, so its own end lands on the blank line that follows the function —
+    // measured on a three-line definition, the node ended at offset 83 while its `}` was at 81, and a client folded
+    // one line too many: `plain` came out `5:0..9:0` where the function is `5:0..7:1`.
+    //
+    // So the end is the last **significant** token's, found inside the declaration rather than taken from its span.
+    // `is_trivia` is the tree's own predicate — whitespace, newlines, line splices and comments — which is exactly
+    // the set a body may absorb and a symbol's range must not claim. Collected first because the tree's own
+    // iterators are forward-only.
+    let significant_end = declaration
+        .descendants_with_tokens()
+        .filter_map(|element| element.into_token())
+        .filter(|token| !cpp_parser::is_trivia(cpp_parser::CppTokenKind::from(token.kind())))
+        .map(|token| usize::from(token.text_range().end()))
+        .collect::<Vec<_>>()
+        .into_iter()
+        .next_back();
+    if let Some(significant_end) = significant_end
+        && significant_end < end
+    {
+        end = significant_end;
     }
 
     let range = cpp_parser::SourceRange::new(start, end.saturating_sub(start));
@@ -207,6 +222,54 @@ fn declaration_range(view: &FileView, fact: &cpp_code_analysis::DeclFact) -> cpp
     } else {
         fact.range
     }
+}
+
+/// **Where the declaration begins** — past a template head, when it has one.
+///
+/// Measured on the shapes a header is made of, with the reported case among them:
+///
+/// ```text
+/// template <class T> void templated() { }    range began at `template`   ✗
+/// template <class T> class C { };            range began at `template`   ✓ — but only because
+///                                                                           the head is the whole node's start
+/// template <class T> using A = T;            `using A = T;`             ✓
+/// void plain() { }                           `void plain() { }`         ✓
+/// class Outer { … };                         `class Outer { … };`       ✓
+/// ```
+///
+/// So **the tree is not wrong about templates in general** — it is wrong about one thing, and this is the whole of
+/// it: the head is the declaration's **first child**, so the declaration's own start includes it. A `using`, a
+/// `concept` and a `typedef` are dispatched to their own rules that return before the declaration is built, which is
+/// why they are unaffected; a class is written `template <class T> class C` and its name is inside the head's
+/// reach anyway.
+///
+/// # Why this is a traversal fix and not a grammar change
+///
+/// Because a `Declaration` that contains its head **is a faithful record of what is written**: the head applies to
+/// the declaration, the two are adjacent, and the tree is lossless about it. What was wrong was the question this
+/// file asked of the tree — *"where does the declaration start"* read as *"where does this node start"*, and those
+/// differ by exactly one child. The grammar change I first reached for (a second `Declaration` marker after the
+/// head) would have made the tree **less** faithful to the file's own spelling in order to make one consumer's
+/// arithmetic easier, and would have needed the marker closed on six exit paths.
+///
+/// The predicate is "the first child is a `TemplateDecl`" rather than "the node starts with `template`": a head
+/// written inside a conditional is still one node, and asking the tree about its own children is asking about the
+/// thing that is there rather than about the bytes.
+fn declaration_start(declaration: &cpp_parser::CppSyntaxNode) -> usize {
+    let mut children = declaration.children();
+    let Some(first) = children.next() else {
+        return usize::from(declaration.text_range().start());
+    };
+    if cpp_parser::CppSyntaxKind::from(first.kind()) != cpp_parser::CppSyntaxKind::TemplateDecl {
+        return usize::from(declaration.text_range().start());
+    }
+
+    // The next child, which is the declaration itself: `children()` yields **nodes**, so the whitespace and any
+    // comment between the head and what it heads are not in this list and need no filter.
+    children
+        .next()
+        .map(|child| usize::from(child.text_range().start()))
+        .unwrap_or_else(|| usize::from(declaration.text_range().start()))
 }
 
 /// **The deepest node containing `offset`** — the node the offset names rather than any of its ancestors.
@@ -222,14 +285,6 @@ fn innermost_holding(
         node = next;
     }
     Some(node)
-}
-/// them.
-fn body_after(declaration: &cpp_parser::CppSyntaxNode) -> Option<usize> {
-    let sibling = declaration.next_sibling()?;
-    if cpp_parser::CppSyntaxKind::from(sibling.kind()) != cpp_parser::CppSyntaxKind::CompoundStat {
-        return None;
-    }
-    Some(cpp_parser::source_range(sibling.text_range()).end_offset())
 }
 
 /// A source range as a place in the file, through **the file's own** line index.
@@ -555,10 +610,9 @@ constexpr bool test_triviality_of_assignment_all() {
     /// expected    range 1:0..15:1    `constexpr void … { … }`
     /// ```
     ///
-    /// # The cause, which is in the parser and not in this handler
+    /// # The cause, which is one child
     ///
-    /// The head and the declaration it applies to are written into **one** `Declaration`, so there is no node that
-    /// begins at the function:
+    /// The head is the declaration's **first child**, so the declaration's own start includes it:
     ///
     /// ```text
     /// Syntax(Declaration)@0..648        from `template` to the function's `}`
@@ -568,17 +622,11 @@ constexpr bool test_triviality_of_assignment_all() {
     ///   Syntax(CompoundStat)@…          the body
     /// ```
     ///
-    /// A consumer asking "which declaration is this name written in" therefore finds the outer one, and the
-    /// nearest `Declaration` above `f` is the whole template. The non-templated spelling has the shape this needs —
-    /// a `Declaration` around the specifiers, the declarator and the body — so the fix is a declaration marker
-    /// opened **after** the head in `parse_declaration_here`, which also makes the head a *sibling* of what it
-    /// applies to. The three other constructs dispatched after a head (`using`, `concept`, `typedef`) return before
-    /// that point and are unaffected.
-    ///
-    /// `#[ignore]` because the fix is in the grammar and this file cannot make it. The test is the measurement: it
-    /// states the range the parser has to make possible, and it will pass the moment the marker exists.
+    /// **The tree is not wrong about this** — the head applies to the declaration, they are adjacent, and the file
+    /// is recorded losslessly. What was wrong was the question asked of it: *"where does the declaration start"*
+    /// read as *"where does this node start"*, and those differ by exactly one child. See [`declaration_start`],
+    /// which is where the difference is now made.
     #[test]
-    #[ignore = "the cause is in the parser: a template head and its declaration share one Declaration node"]
     fn a_templated_definitions_range_excludes_its_template_head() {
         let text = "\
 template <class Scenario>
@@ -607,6 +655,130 @@ constexpr void test_triviality_of_assignment() {
             (1, 0, 3, 1),
             "the range is the declaration, `template` header excluded"
         );
+    }
+
+    /// **Every shape a declaration is written in**, so that a fix for one cannot quietly move another.
+    ///
+    /// The expectations are the line ranges of the fixture, written so that a reader can check them against it
+    /// without counting columns — and they are what the measurement produced once the two defects were fixed:
+    ///
+    /// ```text
+    /// template <class T> void f() { }        began at `template`   ✗ → the declaration's first child
+    /// template <class T> using A = T;        already right
+    /// template <class T> class C { };        already right
+    /// class Outer { … };                     already right
+    /// void plain() { }                       already right
+    /// int field;                             already right
+    /// ```
+    ///
+    /// So the defect was narrow and the guard is deliberately wide: **the last line is the one that catches an
+    /// end that runs into the blank line after a function**, which is what `plain` and every definition did before
+    /// the trim — `5:0..9:0` where the function is `5:0..7:1`.
+    #[test]
+    fn every_shape_of_declaration_reports_its_own_lines() {
+        let text = "\
+template <class T>
+void templated() {
+    return;
+}
+
+void plain() {
+    return;
+}
+
+class Outer {
+public:
+    template <class T>
+    void member_templated() {
+        return;
+    }
+    void member_plain() {
+        return;
+    }
+    int field;
+};
+
+template <class T>
+class TemplatedClass {
+    int inner;
+};
+
+template <class T>
+using Alias = T;
+
+template <class T>
+T global_variable = T();
+
+namespace ns {
+    template <class T>
+    void in_namespace() {
+        return;
+    }
+}
+
+class WithCtor {
+public:
+    WithCtor(int a)
+        : value(a) {
+    }
+    int value;
+};
+";
+        let (session, path) = a_session(text);
+        let view = session
+            .view_of_the_file(&path)
+            .expect("a view of the file's own text");
+        let outline = session.outline(&view);
+        let symbols = symbols(&view, &outline);
+
+        // Name → the lines the symbol covers, as `(first, last)`.
+        let mut found: Vec<(String, u32, u32)> = Vec::new();
+        fn collect(symbols: &[DocumentSymbol], into: &mut Vec<(String, u32, u32)>) {
+            for symbol in symbols {
+                into.push((
+                    symbol.name.clone(),
+                    symbol.range.start.line,
+                    symbol.range.end.line,
+                ));
+                if let Some(children) = &symbol.children {
+                    collect(children, into);
+                }
+            }
+        }
+        collect(&symbols, &mut found);
+
+        // The lines each name is written on, found in the fixture rather than counted — and the expectations are
+        // written as complete line ranges, because every attempt to derive them with arithmetic (`the next
+        // declaration's line, less the blank line`) was wrong in a different way for each shape. The fixture is
+        // numbered in its own doc comment above; these are those numbers.
+        let numbers: Vec<(&str, u32, u32)> = vec![
+            ("templated", 1, 3),
+            ("plain", 5, 7),
+            ("Outer", 9, 19),
+            ("member_templated", 12, 14),
+            ("member_plain", 15, 17),
+            ("field", 18, 18),
+            ("TemplatedClass", 22, 24),
+            ("inner", 23, 23),
+            ("Alias", 27, 27),
+            ("global_variable", 30, 30),
+            ("in_namespace", 34, 36),
+            ("WithCtor", 39, 45),
+            ("value", 44, 44),
+        ];
+
+        for (name, first, last) in numbers {
+            let (found_first, found_last) = found
+                .iter()
+                .find(|(found, ..)| found == name)
+                .map(|(_, first, last)| (*first, *last))
+                .unwrap_or_else(|| panic!("`{name}` is in the outline: {found:?}"));
+            assert_eq!(
+                (found_first, found_last),
+                (first, last),
+                "`{name}` covers lines {first}..={last}"
+            );
+        }
     }
 
     /// A workspace holding one file, so the outline comes from the file's own declarations.
