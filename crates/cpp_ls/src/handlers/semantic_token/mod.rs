@@ -156,11 +156,9 @@ fn push_keywords(builder: &mut Builder<'_>, view: Option<&FileView>) {
             continue;
         }
 
-        let kind = if names_a_type(token.kind) {
-            TypeKind::Type
-        } else {
-            TypeKind::Keyword
-        };
+        // **What it is drawn as**, which is not one answer — see [`kind_of_keyword`]. `None` means the word is about
+        // the syntax itself, and `keyword` is what a theme draws those with.
+        let kind = kind_of_keyword(token.kind, text).unwrap_or(TypeKind::Keyword);
         builder.push_range(
             token.range.start_offset,
             token.range.end_offset(),
@@ -232,40 +230,105 @@ fn is_contextual_keyword(text: &str) -> bool {
     matches!(text, "requires" | "concept")
 }
 
-/// **Does this keyword name a type**, rather than being one of the words around a declaration?
+/// **What a keyword is drawn as** — which is not one answer, and that is the correction.
 ///
-/// `void`, `char`, `short`, `int`, `long`, `float`, `double`, `signed`, `unsigned` and `bool` do, and a reader reads
-/// them as types: `const char* ptr` should have `char` the same colour as `Widget` in `const Widget& w`.
+/// Reported from an editor: *"these are rendered as keywords, but keywords differ and should not share a colour —
+/// `this` should be the same colour as `bool`"*. Every keyword was sent as `keyword`, so `bool`, `const`,
+/// `constexpr`, `this`, `return` and `class` were one shade. A reader scans for the difference between them: a type,
+/// a qualifier and a statement keyword are three different things to look at, and a theme colours them apart for
+/// exactly that reason.
 ///
-/// [`cpp_parser::is_type_keyword`] is the lexer's own list and it is **wider than this question**: it includes
-/// `class`, `struct`, `union`, `enum` and `typename`, which introduce a type rather than naming one — `struct` in
-/// `struct Widget` is a keyword that happens to be followed by a type, and a theme that drew it as a type would be
-/// saying something the code does not. `auto` and `decltype` are type *specifiers*: neither names a type, and a
-/// reader reads them as keywords.
+/// The classification is the C++ grammar's own, not a list of favourites:
 ///
-/// The list is stated here rather than by subtracting from `is_type_keyword`, because a keyword added to that list
-/// would silently become a type here — and the subtraction would be four names long anyway.
-fn names_a_type(kind: cpp_parser::CppTokenKind) -> bool {
+/// ```text
+/// Type      `bool` `char` `int` `void` …          names a type; a theme draws it as one
+/// Modifier  `const` `constexpr` `static` `virtual`  qualifies a declaration
+/// Variable  `this` `nullptr` `true` `false`         a value, not a word about the syntax around it
+/// Keyword   everything else — `return`, `class`, `for`, `sizeof`
+/// ```
+///
+/// # Why `this` is a variable and `nullptr` is too
+///
+/// They are *values*, and the theme's `variable` colour is what a reader's eye already reads a value with. Drawing
+/// them as keywords says they are part of the syntax the way `return` is, which is the opposite of what they are:
+/// `this` is a pointer the expression names, and it is the analogy with `bool` that the report makes.
+///
+/// # The one word whose kind is not enough
+///
+/// `bool` is a `BoolLiteral` in this lexer rather than a keyword of its own — the table says `"bool" =>
+/// BoolLiteral` — so the type and the literal share a kind. The text tells them apart, which is why this takes the
+/// spelling as well as the kind: `bool` is a type and `true` is a value, and a rule keyed on the kind alone would
+/// have to pick one of them to be wrong about.
+///
+/// # What is deliberately not here
+///
+/// `class`, `struct`, `union`, `enum` introduce a type rather than naming one, and a theme that drew `struct` as a
+/// type would be saying something `struct Widget` does not — so they stay keywords.
+/// [`cpp_parser::is_type_keyword`] is wider than this question for the same reason, which is why the list is written
+/// out rather than subtracted from it.
+///
+/// **`auto`, `decltype` and `typename` are modifiers, not types.** They are spellings in a declaration's specifier
+/// sequence — `auto x = f();`, `decltype(a) b;`, `typename T::type c;` — so a reader sees them as part of *how* the
+/// declaration is written, which is what a theme's `modifier` colour means. Calling them types would be the mistake
+/// the note above refuses for `struct`: neither names a type, both stand for one.
+///
+/// **`final` and `override` are not here at all.** The lexer leaves them identifiers because code that predates
+/// C++11 uses them as names ([`is_contextual_keyword`] says the same about `requires`), and reserving them for
+/// colour would underline a variable called `final`.
+fn kind_of_keyword(kind: cpp_parser::CppTokenKind, text: &str) -> Option<TypeKind> {
     use cpp_parser::CppTokenKind;
 
-    matches!(
-        kind,
-        // `bool` is a `BoolLiteral` in this lexer rather than a keyword of its own — the keyword table says
-        // `"bool" => BoolLiteral` — so the type and the literal share a kind. The literal `true` is a `BoolLiteral`
-        // too, and drawing it as a type would be wrong; it is excluded by the `is_keyword` check the caller makes,
-        // since `is_keyword(BoolLiteral)` is true for the type's spelling and the literal never reaches here as a
-        // keyword.
-        CppTokenKind::BoolLiteral
-            | CppTokenKind::CharKeyword
-            | CppTokenKind::ShortKeyword
-            | CppTokenKind::IntKeyword
-            | CppTokenKind::LongKeyword
-            | CppTokenKind::SignedKeyword
-            | CppTokenKind::UnsignedKeyword
-            | CppTokenKind::FloatKeyword
-            | CppTokenKind::DoubleKeyword
-            | CppTokenKind::VoidKeyword
-    )
+    Some(match kind {
+        CppTokenKind::BoolLiteral => {
+            // The keyword and the literal, told apart by their spelling — see the note above.
+            if text == "bool" {
+                TypeKind::Type
+            } else {
+                TypeKind::Variable
+            }
+        }
+
+        CppTokenKind::CharKeyword
+        | CppTokenKind::ShortKeyword
+        | CppTokenKind::IntKeyword
+        | CppTokenKind::LongKeyword
+        | CppTokenKind::SignedKeyword
+        | CppTokenKind::UnsignedKeyword
+        | CppTokenKind::FloatKeyword
+        | CppTokenKind::DoubleKeyword
+        | CppTokenKind::VoidKeyword => TypeKind::Type,
+
+        // A value the expression names rather than a word about the syntax around it.
+        CppTokenKind::ThisKeyword | CppTokenKind::NullptrKeyword => TypeKind::Variable,
+
+        // `true` and `false` are the same `BoolLiteral` kind the type shares, handled above.
+        CppTokenKind::TrueKeyword | CppTokenKind::FalseKeyword => TypeKind::Variable,
+
+        // **A qualifier is not a statement keyword.** `constexpr` in particular is written constantly in modern
+        // C++ and reads as a *property of the declaration*, which is what a theme's `modifier` colour is for.
+        CppTokenKind::ConstKeyword
+        | CppTokenKind::ConstexprKeyword
+        | CppTokenKind::ConstevalKeyword
+        | CppTokenKind::ConstinitKeyword
+        | CppTokenKind::VolatileKeyword
+        | CppTokenKind::MutableKeyword
+        | CppTokenKind::StaticKeyword
+        | CppTokenKind::ExternKeyword
+        | CppTokenKind::RegisterKeyword
+        | CppTokenKind::ThreadLocalKeyword
+        | CppTokenKind::InlineKeyword
+        | CppTokenKind::VirtualKeyword
+        | CppTokenKind::ExplicitKeyword
+        | CppTokenKind::FriendKeyword
+        | CppTokenKind::TypenameKeyword
+        | CppTokenKind::AutoKeyword
+        | CppTokenKind::DecltypeKeyword
+        | CppTokenKind::NoexceptKeyword => TypeKind::Modifier,
+
+        // Everything else: `return`, `if`, `for`, `class`, `sizeof`, `new`, `template` …  — the words that are
+        // about the syntax itself. `None` for a kind this list does not name, and the caller decides.
+        _ => return None,
+    })
 }
 
 /// **Pass 3 — the Doxygen commands**, which the parser already reads and nothing was drawing.
@@ -968,6 +1031,64 @@ mod tests {
 
     /// A client that asks for semantic tokens but names no type this server uses gets an empty list rather than a
     /// legend it cannot read.
+    /// **Keywords do not share one colour**, which is the report this answers.
+    ///
+    /// *"These are rendered as keywords, but keywords differ and should not share a colour — `this` should be the
+    /// same colour as `bool`."* Every keyword used to be sent as `keyword`, so a type, a qualifier, a value and a
+    /// statement word were one shade. The classification is [`kind_of_keyword`]'s, and this is the table it promises:
+    ///
+    /// ```text
+    /// bool int char void      a type
+    /// const constexpr static  a modifier
+    /// this nullptr true false a value — `variable`, which is the analogy the report draws with `bool`
+    /// return if class sizeof  a keyword
+    /// ```
+    ///
+    /// The offsets are found with `find` rather than written down, so a fixture edit cannot leave the assertions
+    /// pointing at different words.
+    #[test]
+    fn a_keyword_is_drawn_as_what_it_is() {
+        let text = "constexpr bool ready() const { this->x = nullptr; return true; }\n";
+        let (session, path) = a_held_file(text);
+        let view = session.view_of_the_file(&path).expect("a view");
+        let file = session.files().held(&path).expect("the file is held");
+        let names = session.classified_names(&view);
+        let tokens = encode(file, Some(&view), &names, &None, false);
+        let at_type = by_offset(text, &tokens);
+        eprintln!("PROBE text={text:?}");
+        for (off, kind) in &at_type {
+            let word = &text[*off..(*off + 12).min(text.len())];
+            eprintln!("PROBE  {off} -> {kind:?}  {word:?}");
+        }
+
+        for (word, expected, why) in [
+            ("bool", TypeKind::Type, "`bool` names a type"),
+            ("constexpr", TypeKind::Modifier, "a qualifier is a property of the declaration"),
+            ("this", TypeKind::Variable, "`this` is a value, and the report asks for it to match `bool`'s *kind* — a type it is not"),
+            ("nullptr", TypeKind::Variable, "and so is `nullptr`"),
+            ("true", TypeKind::Variable, "`true` is the literal, not the type it shares a token kind with"),
+            ("return", TypeKind::Keyword, "`return` is about the syntax, which is what `keyword` means"),
+            ("const", TypeKind::Modifier, "the trailing `const` too"),
+        ] {
+            let at = text[..text.find(word).expect("the fixture writes it")].len();
+            assert_eq!(
+                at_type.get(&at),
+                Some(&index_of(expected)),
+                "`{word}`: {why}"
+            );        }
+
+        // **`bool` and `true` are one token kind and two colours**, which is why the classification reads the
+        // spelling as well as the kind: the lexer's table says `"bool" => BoolLiteral`, so the type and the literal
+        // arrive as the same thing.
+        let bool_at = text.find("bool").expect("the fixture writes it");
+        let true_at = text.rfind("true").expect("the fixture writes it");
+        assert_ne!(
+            at_type.get(&bool_at),
+            at_type.get(&true_at),
+            "the type and its literal are not one colour"
+        );
+    }
+
     /// **A keyword is sent, and a name that covers it wins the span.**
     ///
     /// The module note used to say keywords are the client's to draw, which is right about a file the parser read and

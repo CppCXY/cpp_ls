@@ -124,10 +124,17 @@ impl CppKeywordToken {
 ///
 /// `false` for `final` and `override`: they *look* like keywords but are identifiers with special
 /// meaning, which is why the parser matches them by text.
+///
+/// **`bool` is here and its spelling is why.** The lexer's table says `"bool" => BoolLiteral`, so the *type* shares
+/// a kind with the boolean literals — and the literals have kinds of their own (`"true" => TrueKeyword`,
+/// `"false" => FalseKeyword`), so `BoolLiteral` is reached only by the type. It was left out while that was not so,
+/// and the effect was that a highlighter had nothing to say about `bool` at all: measured while classifying
+/// keywords by kind, every other type name was drawn as a type and `bool` was not drawn.
 pub fn is_keyword(kind: CppTokenKind) -> bool {
     matches!(
         kind,
         CppTokenKind::AutoKeyword
+            | CppTokenKind::BoolLiteral
             | CppTokenKind::BreakKeyword
             | CppTokenKind::CaseKeyword
             | CppTokenKind::CatchKeyword

@@ -146,12 +146,13 @@ fn document_symbol(view: &FileView, symbol: &OutlineSymbol) -> DocumentSymbol {
 fn declaration_range(view: &FileView, fact: &cpp_code_analysis::DeclFact) -> cpp_parser::SourceRange {
     let mut node = view.root.clone();
     let at = fact.name_range.start_offset;
-    let mut innermost: Option<cpp_parser::SourceRange> = None;
+    let mut innermost: Option<cpp_parser::CppSyntaxNode> = None;
 
     while let Some(child) = node.children().find(|child| {
         let range = child.text_range();
         usize::from(range.start()) <= at && at < usize::from(range.end())
-    }) {        if cpp_parser::CppSyntaxKind::from(child.kind()) == cpp_parser::CppSyntaxKind::Declaration {
+    }) {
+        if cpp_parser::CppSyntaxKind::from(child.kind()) == cpp_parser::CppSyntaxKind::Declaration {
             let declarators = child
                 .children()
                 .filter(|inner| {
@@ -162,22 +163,74 @@ fn declaration_range(view: &FileView, fact: &cpp_code_analysis::DeclFact) -> cpp
                 })
                 .count();
             if declarators == 1 {
-                innermost = Some(cpp_parser::source_range(child.text_range()));
+                // The **node**, not only its span: the body is a *sibling*, so it can only be found from here.
+                innermost = Some(child.clone());
             }
         }
         node = child;
     }
 
-    // Wider than the fact and still holding the name — otherwise the declarator is the honest answer.
-    match innermost {
-        Some(range)
-            if range.start_offset <= fact.name_range.start_offset
-                && range.end_offset() >= fact.name_range.end_offset() =>
-        {
-            range
+    // **The body, which the grammar writes beside the declaration.** A definition's `{ … }` is a *sibling* of the
+    // declaration that names it — the shape the parser builds, and deliberately: the declaration is complete before
+    // its body is read, so `precede` opens a declaration around it and the body joins as the second child.
+    // Measured on the reported file, where this was the visible half of the bug:
+    //
+    //     Name(const std::string& f, …)    bound node is `Declarator@39..109`, the head alone
+    //       : firstName(f), … {  }
+    //     std::string getFullName(int i)   bound node is `InitDeclarator@239..263`, the head alone
+    //
+    // so a client folded a function to its signature and left the body outside — every entry for a definition was
+    // wrong at its **end**, which is what "the range is still wrong" describes.
+    //
+    // Taken only when it is the **immediately next** sibling and only a `CompoundStat`: anything else between the
+    // two means this declaration and that block are not one construct, and a `;` declaration has no body at all.
+    // **The declaration's own span first, and a body sibling only when there is one.**
+    //
+    // A `Declaration` that holds its body already ends at the body's `}` — the walk above reaches the *outer*
+    // declaration, which is the one `precede` built around the head and the body together. Measured on the reported
+    // file, that is the case for a member function definition: `getFullName`'s declaration ends at the `}` of its
+    // body already, and asking `next_sibling` there reached into the **next** member and made the range too long.
+    //
+    // A **constructor** is the exception the sibling is for: its declaration is two nested ones and the outer holds
+    // the head, the member-initializer list and the body, so `next_sibling` on the outer is the following member —
+    // the body is already inside. The sibling case is kept for the shapes where it is the only way to the body, and
+    // it is taken **only when it is a `CompoundStat` immediately after**.
+    let end = match innermost {
+        Some(declaration) => {
+            let span = cpp_parser::source_range(declaration.text_range());
+            match body_after(&declaration) {
+                // A body that reaches **past** the declaration is one the declaration does not hold, and the
+                // range is extended to it. One that starts inside is already covered.
+                Some(body_end) if body_end > span.end_offset() => {
+                    cpp_parser::SourceRange::new(span.start_offset, body_end - span.start_offset)
+                }
+                _ => span,
+            }
         }
-        _ => fact.range,
+        None => fact.range,
+    };
+
+    // Wider than the fact and still holding the name — otherwise the declarator is the honest answer.
+    if end.start_offset <= fact.name_range.start_offset
+        && end.end_offset() >= fact.name_range.end_offset()
+    {
+        end
+    } else {
+        fact.range
     }
+}
+
+/// **The end of the body written after `declaration`**, when there is one.
+///
+/// The declaration's own span is its head, so the body is the next significant sibling — which is why this takes
+/// the node rather than a range: a range has no siblings. `None` for a declaration with no body, which is most of
+/// them.
+fn body_after(declaration: &cpp_parser::CppSyntaxNode) -> Option<usize> {
+    let sibling = declaration.next_sibling()?;
+    if cpp_parser::CppSyntaxKind::from(sibling.kind()) != cpp_parser::CppSyntaxKind::CompoundStat {
+        return None;
+    }
+    Some(cpp_parser::source_range(sibling.text_range()).end_offset())
 }
 
 /// A source range as a place in the file, through **the file's own** line index.
