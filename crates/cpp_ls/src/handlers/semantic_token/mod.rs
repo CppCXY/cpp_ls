@@ -652,6 +652,54 @@ mod tests {
         );
     }
 
+    /// **`concept`, and the concept's own name.**
+    ///
+    /// The other half of "concept 系列关键词". `concept` is a contextual keyword for the same reason `requires` is, and
+    /// is sent as a keyword for the same reason — a reader scanning a constraints header is looking for it.
+    ///
+    /// The name it introduces is the part that is *not* a keyword, and it is the part a theme distinguishes: a concept
+    /// is a type-level entity, and VS Code's own grammar (`source.cpp`, the C++20 rules) tags `concept` as
+    /// `storage.type` and the name after it as `entity.name.type`. That is what this asks: the word is a keyword, the
+    /// name it declares is a type — and the name's declaration is the one place the parser and the scope tree already
+    /// agree about it.
+    #[test]
+    fn a_concept_is_a_keyword_and_its_name_is_a_type() {
+        // **A real newline.** The first version of this wrote `"…>\nconcept …"` in an ordinary string literal, where
+        // `\n` is two characters and not a line break — so the whole thing was one line, the parser recovered by
+        // nesting the concept inside the `TemplateDecl`, and the test was asking about a file nobody would write.
+        let text = "template <class T>\nconcept UnaryCopyable = requires(T t) { t.f(); };\n";
+        let (session, path) = a_held_file(text);
+        let view = session.view_of_the_file(&path).expect("a view");
+        let file = session.files().held(&path).expect("the file is held");
+        let names = session.classified_names(&view);
+        let tokens = encode(file, Some(&view), &names, &None);
+        let at_type = by_offset(text, &tokens);
+
+        let a_keyword = super::index_of(&SemanticTokenType::KEYWORD);
+        let a_type = super::index_of(&SemanticTokenType::TYPE);
+
+        assert_eq!(
+            at_type.get(&text.find("concept").expect("the fixture writes it")),
+            Some(&a_keyword),
+            "`concept` introduces a concept, it is not one"
+        );
+
+        // **The name it declares.** What this colours is whatever a theme draws an entity name with; the assertion is
+        // that the analysis has an opinion at all, because "no token" is the client's own TextMate colour and that is
+        // what the report was about.
+        assert_eq!(
+            at_type.get(&text.find("UnaryCopyable").expect("the fixture writes it")),
+            Some(&a_type),
+            "the name a `concept` declares is the concept, and a theme colours that as a type"
+        );
+
+        // And `requires` again, in the position it most often appears.
+        assert_eq!(
+            at_type.get(&text.find("requires").expect("the fixture writes it")),
+            Some(&a_keyword)
+        );
+    }
+
     fn name(start: usize, length: usize, kind: NameKind, declaration: bool) -> Name {
         Name {
             range: SourceRange::new(start, length),

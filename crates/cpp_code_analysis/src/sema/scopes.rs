@@ -479,6 +479,18 @@ impl ScopeWalker<'_> {
                 self.items(node, parameters);
             }
             CppSyntaxKind::TypedefDecl => self.typedef_decl(node, scope),
+            // **A `concept` declares a type-level name, and it declares it in the scope it is written in.**
+            //
+            // The node was read by the parser and by nothing else: measured, `grep ConceptDecl` over this crate found
+            // **no** handling anywhere, so `template <class T> concept UnaryCopyable = …;` bound nothing — and a
+            // highlighter then had no opinion about `UnaryCopyable`, which is the name a reader most needs coloured
+            // in a constraints header.
+            //
+            // `BindingKind::Alias` rather than a kind of its own: a concept *is* a name for a constraint rather than
+            // a storage class, and every consumer that treats an alias as a type — completion, semantic tokens, the
+            // signature of a template — is saying the right thing about it. A new kind would have to be taught to all
+            // of them to say the same.
+            CppSyntaxKind::ConceptDecl => self.concept_decl(node, scope),
             CppSyntaxKind::UsingDecl => self.using_decl(node, scope),
             CppSyntaxKind::UsingDirective => self.using_directive(node, scope),
             CppSyntaxKind::Declaration => self.declaration(node, scope),
@@ -780,6 +792,55 @@ impl ScopeWalker<'_> {
         }
     }
 
+    /// `concept UnaryCopyable = requires(T t) { … };`.
+    ///
+    /// The name is a `NameExpr` child of the node rather than a declarator — the parser reads a `ConceptDecl` as
+    /// `concept <name> = <constraint>`, and there is no `Declarator` in it:
+    ///
+    /// ```text
+    /// Syntax(ConceptDecl)@19..68
+    ///   Token(Identifier)@19..26 "concept"
+    ///   Syntax(NameExpr)@27..40
+    ///     Token(Identifier)@27..40 "UnaryCopyable"     ← this
+    ///   Token(Assign)@41..42 "="
+    /// ```
+    ///
+    /// `declared_name` is the wrong reader here, and the reason is worth writing down: it looks for a name **only
+    /// along the declarator-to-name path**, which is what keeps it from binding the `b` of `a = b;` — and a
+    /// `ConceptDecl` has no declarator at all, so that path finds nothing. The name is the `NameExpr` child, and the
+    /// identifier inside it is read directly.
+    fn concept_decl(&mut self, node: &CppSyntaxNode, scope: ScopeId) {
+        let Some(name_expr) = node
+            .children()
+            .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::NameExpr)
+        else {
+            return;
+        };
+
+        // The first identifier of the name expression: a concept is declared with an unqualified identifier, so
+        // there is exactly one, and a qualified spelling would not be a concept declaration in the first place.
+        let Some(token) = name_expr
+            .descendants_with_tokens()
+            .filter_map(|element| element.into_token())
+            .find(|token| CppTokenKind::from(token.kind()) == CppTokenKind::Identifier)
+        else {
+            return;
+        };
+
+        let text = token.text().to_string();
+        if text.is_empty() {
+            return;
+        }
+
+        self.bind(
+            scope,
+            Name::identifier(text),
+            BindingKind::Alias,
+            node,
+            cpp_parser::source_range(token.text_range()),
+        );
+    }
+
     /// `typedef int Integer;`.
     fn typedef_decl(&mut self, node: &CppSyntaxNode, scope: ScopeId) {
         // The names are in the declarators, not on the node: `typedef <specifiers> <declarator>, <declarator>;`.
@@ -988,6 +1049,26 @@ impl ScopeWalker<'_> {
         // alias template declares its name where the template was written, exactly as a class template does.
         if let Some(using) = first_child(node, CppSyntaxKind::UsingDecl) {
             self.using_decl(&using, scope);
+            return;
+        }
+
+        // **A templated `concept` is the same shape as a templated `using`, and needs the same reading.**
+        //
+        // ```text
+        // Syntax(Declaration)@0..68
+        //   Syntax(TemplateDecl)@0..18        `template <class T>`
+        //   Syntax(ConceptDecl)@19..68        `concept UnaryCopyable = requires(T t) { … };`
+        // ```
+        //
+        // The two arrive beside the parameter list rather than inside it, and `declaration_parts` reads
+        // *declarators* — which a `ConceptDecl` has none of, so it declared nothing and `UnaryCopyable` was a name
+        // no consumer could classify. Measured: `grep ConceptDecl` over this crate found no handling anywhere, so
+        // **every** concept in every project was invisible.
+        //
+        // Bound in `scope` and not in `parameters`, for the reason the `using` note above gives: a concept declares
+        // its name where the template was written, exactly as a class template does.
+        if let Some(concept) = first_child(node, CppSyntaxKind::ConceptDecl) {
+            self.concept_decl(&concept, scope);
             return;
         }
 
