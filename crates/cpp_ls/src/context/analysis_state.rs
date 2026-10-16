@@ -64,6 +64,28 @@
 //! An empty popup is still the symptom to watch for. The fix for it is the hot set and the per-file reads, **never a
 //! global wait**.
 
+/// **How many files one pull request may index** — the bound that was missing, and the 102 seconds it cost.
+///
+/// [`Session::index_everything`] loops until the queue is **empty**, so a caller that asks for it asks for the whole
+/// project. A pull request did exactly that, and the budget warning caught what it means:
+///
+/// ```text
+/// 20:22:22  index slice: prepared 128, committed 32, write lock held 563 ms, 1258 left
+/// 20:24:05  `prepare a file a pull request named` held the analysis for 102700 ms
+/// 20:24:09  index slice: prepared 1, committed 1, write lock held 0 ms, 1 to cook, 0 left
+/// ```
+///
+/// The pump was 1 258 files from finished and the pull drained all of them in one closure — **102 seconds of write
+/// hold**, during which every keystroke, hover and completion in the editor waited. The queue was empty when the
+/// pump got control back, which is why its own line says `0 left`.
+///
+/// **The number is larger than the pump's own slice on purpose.** A file cannot be cooked until its include chain
+/// has been read, so a pull that stops too early cannot answer at all — and an empty answer is the defect this
+/// function exists to fix. Five hundred files is far more than an ordinary include chain and one two-hundredth of
+/// the project above; the pump finishes whatever is left within the second, and the pull no longer holds the editor
+/// for a minute and a half.
+const PREPARE_INDEX_SLICE: usize = 500;
+
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock, RwLockReadGuard};
 use std::time::Duration;
@@ -496,7 +518,17 @@ impl AnalysisState {
             {
                 session.add_project_files([to_prepare.clone()]);
             }
-            session.index_everything();
+
+            // **Bounded, and by a slice.** That call loops until the queue is empty, so a pull was asking for the
+            // whole project — see [`PREPARE_INDEX_SLICE`] for the 102 seconds that cost. A pull is a nudge for one
+            // file; the pump is the loop that owns this work, and anything still queued is left for it.
+            //
+            // **A count and not a deadline, which was tried here and is worse.** The file cannot be cooked until
+            // its include chain has been read, and how many files that is cannot be known without reading them — so
+            // a slice that is too small answers `false` and the client shows nothing, which is the defect this
+            // function exists to fix. A count large enough for an ordinary include chain and far short of a project
+            // is the honest setting; the pump finishes the rest within the second.
+            session.advance(PREPARE_INDEX_SLICE);
             session.cook(&to_prepare).is_some()
         })
         .await
@@ -737,6 +769,86 @@ mod tests {
     /// that hold sees zero either way. What *is* observable is the thing that made the cost expensive — **taking the
     /// write lock at all**. So the test holds the analysis's own gate for writing and then pulls: a pull that needs
     /// the lock cannot return, and one that finds the work already done answers without it.
+    ///
+    /// That is also the shape of the defect: the write hold is what every other request waits for, so a pull that
+    /// takes it is a pull that delays hover, completion and typing.
+    /// **A pull leaves the queue for the pump**, which is the 102 seconds this test exists to prevent.
+    ///
+    /// `Session::index_everything` loops until the queue is empty, so asking for it asks for the whole project — and
+    /// a pull request did. Measured in the server's own log while this was being fixed, with the pump 1 258 files
+    /// from finished:
+    ///
+    /// ```text
+    /// 20:24:05 `prepare a file a pull request named` held the analysis for 102700 ms
+    /// 20:24:09 index slice: prepared 1, committed 1, write lock held 0 ms, 1 to cook, 0 left
+    /// ```
+    ///
+    /// The assertion is on what the pull **left behind**, because that is the property: a bounded pull hands the
+    /// rest of the project back to the loop that owns it. Both directions are covered — this fails if the bound is
+    /// removed (zero left), and the cold-start tests next door fail if it is made too small to read a file's
+    /// includes.
+    #[tokio::test]
+    async fn a_pull_leaves_the_queue_for_the_pump() {
+        let state = AnalysisState::new();
+        let root = std::env::temp_dir().join("cppls-analysis-state-tests");
+        opened(&state, &root).await;
+
+        // A project far larger than one pull's slice.
+        state
+            .files()
+            .overlay
+            .open("/p/main.cpp", "int main() { return 0; }\n");
+        let many: Vec<PathBuf> = (0..1500)
+            .map(|at| PathBuf::from(format!("/p/file{at}.cpp")))
+            .collect();
+        for path in &many {
+            state.files().overlay.open(
+                path.to_str().unwrap_or_default(),
+                "int a_variable_in_this_file = 0;\n",
+            );
+        }
+        state
+            .update_session("the fixture's discovery", move |session| {
+                session.add_project_files(many);
+            })
+            .await;
+
+        state
+            .prepare_for_a_diagnostic(std::path::Path::new("/p/main.cpp"))
+            .await;
+
+        let left = state
+            .with_snapshot(|session| session.pending())
+            .unwrap_or(usize::MAX);
+        assert!(
+            left > 0,
+            "a pull must not drain the whole project — that was 102 seconds of write hold, and every keystroke, \
+             hover and completion in the editor waited for it"
+        );
+    }
+
+    /// **A second pull for a file already analysed must not re-index the project.**
+    ///
+    /// This is the defect the guard exists for, measured on a real project from the server's own budget warning:
+    ///
+    /// ```text
+    /// 17:52:25 `prepare a file a pull request named` held the analysis for 195264 ms
+    /// 17:53:58   … 3524 ms
+    /// 17:54:20   … 2068 ms
+    /// 17:54:49   … 7018 ms
+    /// ```
+    ///
+    /// Every one of those is discovery work that had already been done, for a file whose answer was already in the
+    /// index. A write hold is what every other request waits for, so the cost was paid by hover, completion and
+    /// typing rather than by diagnostics.
+    ///
+    /// # How the fast path is detected rather than assumed
+    ///
+    /// Not by timing, which is flaky, and not by the queue, which was measured and does not work: `add_project_files`
+    /// refills the index queue and the drain empties it **inside the same write hold**, so a caller outside that hold
+    /// sees zero either way. What *is* observable is the thing that made the cost expensive — **taking the write lock
+    /// at all**. So the test holds the analysis's own gate for writing and then pulls: a pull that needs the lock
+    /// cannot return, and one that finds the work already done answers without it.
     ///
     /// That is also the shape of the defect: the write hold is what every other request waits for, so a pull that
     /// takes it is a pull that delays hover, completion and typing.
