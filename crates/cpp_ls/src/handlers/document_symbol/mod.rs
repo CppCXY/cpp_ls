@@ -782,7 +782,7 @@ public:
     }
 
     /// A workspace holding one file, so the outline comes from the file's own declarations.
-    fn a_session(
+    pub(super) fn a_session(
         text: &str,
     ) -> (
         cpp_code_analysis::Session<cpp_code_analysis::MemoryFiles>,

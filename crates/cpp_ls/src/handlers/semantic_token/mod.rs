@@ -506,8 +506,75 @@ mod tests {
     };
     use cpp_parser::SourceRange;
 
-    /// A file held by a session, so that its line index is the one the VFS built — the same one every position in
-    /// this server comes from.
+    /// **A template parameter is a `typeParameter`, and a variable template is a `variable`.**
+    ///
+    /// Two questions asked from an editor, and both are about what the *server* sends rather than about colour:
+    ///
+    /// * *"some template parameters are not a reasonable colour"* — a parameter is not a type, and a theme draws
+    ///   `typeParameter` separately for exactly that reason: `template <class T>` names a parameter, and drawing it
+    ///   as `int` is what `entity.name.type.cpp` means.
+    /// * *"is a variable template a type's colour or a variable's?"* — **a variable's.** `is_assignable_v` is a
+    ///   variable like any other; the `template <…>` header changes how it is *written*, not what it *is*, and the
+    ///   analysis already records it as a `Variable` — the thing being asserted is that the classification reaches
+    ///   the wire unchanged.
+    ///
+    /// Asserted on the encoded tokens rather than on `classified_names`, because the wire is what a colour comes
+    /// from and a mapping in between could still lose it.
+    #[test]
+    fn a_template_parameter_is_a_type_parameter_and_a_variable_template_is_a_variable() {
+        let text = "\
+template <class T>
+constexpr bool is_trivially_destructible_v = __is_trivially_destructible(T);
+
+template <class To, class From>
+constexpr bool is_assignable_v = __is_assignable(To, From);
+";
+        let (session, path) = a_held_file(text);
+        let view = session.view_of_the_file(&path).expect("a view");
+        let file = session.files().held(&path).expect("the file is held");
+        let names = session.classified_names(&view);
+
+        let tokens = encode(file, Some(&view), &names, &None, false);
+        let at_type = by_offset(text, &tokens);
+
+        for (word, expected, why) in [
+            ("T", TypeKind::TypeParameter, "a template parameter is not a type"),
+            ("To", TypeKind::TypeParameter, "and neither is this one"),
+            ("From", TypeKind::TypeParameter, "nor this"),
+            (
+                "is_trivially_destructible_v",
+                TypeKind::Variable,
+                "a variable template is a variable — the `template` header changes how it is written",
+            ),
+            (
+                "is_assignable_v",
+                TypeKind::Variable,
+                "and so is this one",
+            ),
+        ] {
+            let at = text[..text.find(word).expect("the fixture writes it")].len();
+            assert_eq!(at_type.get(&at), Some(&index_of(expected)), "`{word}`: {why}");
+        }
+
+        // **The declaration is coloured and the uses inside a macro's argument list are not**, which is a separate
+        // defect and is recorded rather than asserted away. Measured: `T` in `__is_trivially_destructible(T)` gets no
+        // token, because a call to a name the preprocessor knows as a macro is not classified as an expression — so
+        // a client draws the declaration as a `typeParameter` and the use by whatever TextMate guessed, which is
+        // one name in two colours. The assertion below states the half that works; the other half is the next thing
+        // to fix, and it belongs in the analysis layer where the macro is known.
+        assert_eq!(
+            at_type.get(&text.find("T>").expect("the fixture writes it")),
+            Some(&index_of(TypeKind::TypeParameter)),
+            "the declaration is a template parameter"
+        );
+        let in_the_macro = text.rfind("(T)").expect("the fixture writes it") + 1;
+        assert_eq!(
+            at_type.get(&in_the_macro),
+            None,
+            "NOT YET: a template parameter written as a macro's argument gets no token"
+        );
+    }
+
     fn a_held_file(text: &str) -> (Session<MemoryFiles>, std::path::PathBuf) {
         let files = MemoryFiles::new().with_file("/p/a.cpp", text);
         let providers = SessionFiles::new(OpenDocuments::new(), files);
