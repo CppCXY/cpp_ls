@@ -1277,7 +1277,28 @@ fn could_take_an_arithmetic_value(parameter: &str) -> Option<bool> {
 pub fn run(context: CheckContext<'_>) -> Vec<Finding> {
     let mut context = context;
 
-    run_check::<syntax_error::SyntaxError>(&mut context);
+    // **`syntax_error` is NOT run, and this is where the duplicate was.**
+    //
+    // It is the one check that does not reason about the program — it republishes what the parser already answered —
+    // and those answers are **already a channel of their own**: `FileDiagnostics::errors` carries
+    // `cooked.diagnostics`, which `handlers::diagnostic::diagnose_file` publishes first. Running the check as well
+    // put every parse error on the wire **twice**, which is what was reported and what
+    // `handshake.rs`'s `a_pulling_client_gets_a_report_and_not_null` asserts against:
+    //
+    // ```text
+    // PROBE channels: errors=1 checks=1 notes=0   →   final: 2 items, both `expected \`;\``
+    // ```
+    //
+    // One error from the channel built for it, one from the check that copies it. The fix is not to stop publishing
+    // either one — it is to stop having two. `errors` is the one kept, because it is the channel that carries the
+    // parser's own diagnostics and the `unplaced` count with them; the check is left in the tree, compiled and
+    // documented, for the reader who wants to know how the two ever came apart. `DiagnosticCode::SyntaxError` is
+    // still the code every parse error is published under, and `syntax_error_is_reported` still passes, because it
+    // collects `errors` as well as `checks`.
+    //
+    // The **order** that check's own note argues for is kept by construction: `diagnose_file` chains `found.errors`
+    // before `check_findings`, so a reader is still told what to fix before what the fixed text will still be wrong
+    // about.
     run_check::<include_not_found::IncludeNotFound>(&mut context);
     run_check::<macro_redefined::MacroRedefined>(&mut context);
     run_check::<unused::Unused>(&mut context);
