@@ -221,6 +221,44 @@ impl FileView {
         ))
     }
 
+    /// **A whole range of the reading, as the range of the file a reader would point at.**
+    ///
+    /// The companion of [`FileView::file_offset_of`], and separate from it for the reason a range is not two
+    /// offsets: a macro's expansion reports **one** position for each of its tokens — the invocation — so mapping a
+    /// range end by end collapses anything built from a body onto that one spot.
+    ///
+    /// The answer is the **bounding range of every span the range covers**. A range entirely inside a macro body
+    /// therefore maps to the whole invocation, which is the text a reader can see and fold; a range the file wrote,
+    /// with a macro's argument in the middle, maps to itself with the argument's call site in place.
+    ///
+    /// `None` when no span covers the range — the spans tile the rendering, so a gap is text the cook produced
+    /// rather than text anyone wrote. See [`FileView::was_written_here`], which relies on the same tiling.
+    pub fn file_range_of(&self, in_the_reading: cpp_parser::SourceRange) -> Option<cpp_parser::SourceRange> {
+        if self.written.is_none() {
+            return Some(in_the_reading);
+        }
+
+        let mut bounds: Option<(usize, usize)> = None;
+        for span in self
+            .reading
+            .iter()
+            .skip_while(|span| span.cooked.end_offset() <= in_the_reading.start_offset)
+            .take_while(|span| span.cooked.start_offset < in_the_reading.end_offset())
+        {
+            let reported = &span.reported;
+            bounds = Some(match bounds {
+                Some((start, end)) => (
+                    start.min(reported.start_offset),
+                    end.max(reported.end_offset()),
+                ),
+                None => (reported.start_offset, reported.end_offset()),
+            });
+        }
+
+        let (start, end) = bounds?;
+        Some(cpp_parser::SourceRange::new(start, end.saturating_sub(start)))
+    }
+
     /// **Was this range of the reading written in this file?**
     ///
     /// The cook already knows, per token: [`RenderedSpan::written`] is `Some` where the file wrote the spelling and

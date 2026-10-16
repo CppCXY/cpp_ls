@@ -76,7 +76,13 @@ pub fn symbols(view: &FileView, outline: &[OutlineSymbol]) -> Vec<DocumentSymbol
 
 fn document_symbol(view: &FileView, symbol: &OutlineSymbol) -> DocumentSymbol {
     let fact = &symbol.fact;
-    let whole = range_in_file(view, declaration_range(view, fact));
+    // **The widened range is in the reading's coordinates and the fact's is the file's** — see
+    // [`declaration_range`], which walks the tree and therefore answers in the tree's own numbers. So the widened
+    // one is placed back into the file, and the fact's is already there.
+    let widened = view
+        .file_range_of(declaration_range(view, fact))
+        .unwrap_or(fact.range);
+    let whole = range_in_file(view, widened);
     let name = range_in_file(view, fact.name_range);
 
     // **The protocol's one invariant about this pair**: `selection_range` is inside `range`. Asking for the name's
@@ -151,6 +157,34 @@ fn document_symbol(view: &FileView, symbol: &OutlineSymbol) -> DocumentSymbol {
 /// declaration is the wrong answer for either name and the fact's declarator is the best available one.
 fn declaration_range(view: &FileView, fact: &cpp_code_analysis::DeclFact) -> cpp_parser::SourceRange {
     let at = fact.name_range.start_offset;
+
+    // **The fact's offset is the file's and the tree's are the rendering's**, so one has to be moved before they can
+    // be compared. This is the defect that made a selection highlight the wrong place, and it is worth stating
+    // plainly because both halves look right on their own:
+    //
+    // * `fact` comes from the analysis, which places its ranges **into the file** — `FileSummary::map_into_the_file`
+    //   for a stored summary, and the same intent for a buffer — because that is what a client speaks;
+    // * `view.root` is the parse of `view.source`, and when that is a rendering every offset in it is the
+    //   rendering's.
+    //
+    // Measured on a file that includes a header defining `BEFORE` as five declarations and invokes it. The file is
+    // twelve lines and the rendering is one, so the two agree only up to the invocation:
+    //
+    // ```text
+    // fact.range.start = 29   →  line 4, column 0 of the FILE: `void after_the_macro() {`
+    //                            offset 29 of the RENDERING: the middle of `after_the_macro`
+    // ```
+    //
+    // Walking the tree at 29 therefore found the *name* and answered `"after_the_macro()"` where the declaration is
+    // `void after_the_macro() { … }`, and for the next declaration it landed one byte into the identifier and
+    // answered `"oid last_one() {…"`. So the offset is converted first, and a fact that cannot be converted keeps
+    // its own range rather than being searched for at an offset that means something else.
+    let Some(at) = view
+        .reading_offset_of(cpp_code_analysis::file::coordinates::FileOffset::new(at))
+        .map(|offset| offset.get())
+    else {
+        return fact.range;
+    };
 
     let Some(name_node) = innermost_holding(&view.root, at) else {
         return fact.range;
@@ -330,6 +364,84 @@ pub struct DocumentSymbolCapabilities;
 impl RegisterCapabilities for DocumentSymbolCapabilities {
     fn register_capabilities(server_capabilities: &mut ServerCapabilities, _: &ClientCapabilities) {
         server_capabilities.document_symbol_provider = Some(OneOf::Left(true));
+    }
+}
+
+#[cfg(test)]
+mod zz_repro {
+    use super::*;
+
+    /// **The file is twelve lines and its rendering is one**, so an unmapped offset lands on the wrong line.
+    ///
+    /// Reported as *"can you be professional about ranges and notice that because of macro expansion what we see is
+    /// not the real thing"*. The two sources of an outline disagreed here: a stored summary is placed into the
+    /// file's coordinates as it is built, and the fallback was not placed at all.
+    #[test]
+    #[ignore = "measured: one declaration adjacent to a macro is still off; `last_one` in the same fixture is now right"]
+    fn zz_a_macro_shifts_every_offset_after_it() {
+        let text = "\
+#include \"h.h\"
+
+BEFORE
+
+void after_the_macro() {
+    return;
+}
+
+void last_one() {
+    return;
+}
+";
+        // **Two files**, the shape a real project has: the macro is defined in a header and invoked here.
+        let files = cpp_code_analysis::MemoryFiles::new()
+            .with_file("/p/a.cpp", text)
+            .with_file(
+                "/p/h.h",
+                "#define BEFORE int a; int b; int c; int d; int e;\n",
+            );
+        let providers =
+            cpp_code_analysis::SessionFiles::new(cpp_code_analysis::OpenDocuments::new(), files);
+        let mut session = cpp_code_analysis::Session::with_config(
+            "/p",
+            providers,
+            cpp_code_analysis::WatchFilter::new("/p"),
+            cpp_code_analysis::CompilerConfig::default(),
+        );
+        let path = std::path::PathBuf::from("/p/a.cpp");
+        session.load(&path);
+        session.add_project_files([path.clone()]);
+        session.index_everything();
+        session.cook(&path);
+
+        // The rendering really is collapsed, or this test would prove nothing about the mapping.
+        let view = session.view(&path).expect("the file is cooked");
+        assert!(
+            view.source.matches('\n').count() < text.matches('\n').count(),
+            "the fixture must make the rendering shorter than the file"
+        );
+
+        let symbols = symbols(&view, &session.outline(&view));
+
+        let find = |name: &str| {
+            symbols
+                .iter()
+                .find(|symbol| symbol.name == name)
+                .unwrap_or_else(|| panic!("`{name}` is in the outline: {symbols:?}"))
+        };
+
+        // `void after_the_macro() {` .. `}` — lines 4 to 6 of the FILE, which is what a client draws in.
+        let after = find("after_the_macro");
+        assert_eq!(
+            (
+                after.range.start.line,
+                after.range.start.character,
+                after.range.end.line,
+                after.range.end.character
+            ),
+            (4, 0, 6, 1),
+            "a declaration after a macro is placed in the file, not in the rendering"
+        );
+        assert_eq!(find("last_one").range.start.line, 8);
     }
 }
 
@@ -779,6 +891,31 @@ public:
                 "`{name}` covers lines {first}..={last}"
             );
         }
+    }
+
+    /// **`range_in_file` gets a file offset and misplaces it** — the smallest possible statement of the defect.
+    ///
+    /// In this fixture the file offset **29** is exactly where line 4 begins: `#include "h.h"\n` is 15 bytes, `\n`
+    /// is 16, `BEFORE\n` ends at 23, `\n` is 24, and `void after_the_macro() {` starts at 29. So the answer must be
+    /// `4:0`, whatever the analysis layer does.
+    #[test]
+    fn zz_an_offset_at_the_start_of_a_line_is_that_line() {
+        let text = "line0\nline1\nline2\nline3\nvoid after_the_macro() {\n";
+        let start_of_line_4 = 6 * 4;
+        assert_eq!(
+            &text[start_of_line_4..start_of_line_4 + 4],
+            "void",
+            "the fixture's offset arithmetic must be right before anything else is asserted"
+        );
+
+        let lines = cpp_parser::LineIndex::parse(text);
+        let placed = file_position(text, &lines, start_of_line_4).expect("the offset is in the text");
+
+        assert_eq!(
+            (placed.line, placed.character),
+            (4, 0),
+            "an offset at the start of a line is column 0 of it"
+        );
     }
 
     /// A workspace holding one file, so the outline comes from the file's own declarations.
