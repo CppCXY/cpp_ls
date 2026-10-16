@@ -1697,7 +1697,7 @@ impl ScopeWalker<'_> {
                 // The second is right; the first included a newline that belongs to the file. Trimmed here rather
                 // than narrowed to the name, because [`crate::DeclFact::range`] is documented as *"the whole
                 // declaration, for a go-to-definition highlight"* — that is the answer callers want, minus the trivia.
-                range: without_trailing_trivia(node),
+                range: without_trailing_trivia(&node),
                 name_range,
                 scope,
                 origin: None,
@@ -1708,47 +1708,72 @@ impl ScopeWalker<'_> {
 
 /// **A node's span, backed up over the trivia it absorbed** — see the note where this is called.
 ///
-/// Walks the node's *last* tokens backwards while they are trivia, which is at most the whitespace and comments the
-/// tree builder attached after the final real token. A node whose every token is trivia keeps its own span, since
-/// there is then nothing to trim to.
+/// # Why this descends instead of scanning the node's own children
+///
+/// The first version walked the node's **direct** children backwards and stopped at the first that was not
+/// trivia — and for every braced declaration that stopped immediately, because the last child is the body:
+///
+/// ```text
+/// Syntax(NamespaceDecl)@0..55
+///   Token(NamespaceKeyword)@0..9
+///   Syntax(NameExpr)@10..12
+///   Syntax(CompoundStat)@12..55        ← not trivia, so the scan stopped here
+///     …
+///     Token(Newline)@53..55 "\r\n"     ← …and this is where the trivia actually is
+/// ```
+///
+/// The trailing newline is a child of the **body**, so it survived, and a namespace's declared range ran to the end
+/// of the file. Measured: `namespace ns { … }` in a 55-byte file bound as `0..55` while the `}` ends at 53, which
+/// made every outline entry for a namespace, class or function one line too long — a fold that swallows the blank
+/// line after it, and a breadcrumb whose "whole declaration" is really "the rest of the file".
+///
+/// So the walk follows the chain of **last** children down to the deepest one that holds a real token, which is
+/// where the declaration actually ends, and takes the trivia off from there.
 fn without_trailing_trivia(node: &CppSyntaxNode) -> cpp_parser::SourceRange {
     let range = cpp_parser::source_range(node.text_range());
-    let mut end = range.end_offset();
+    let end = significant_end(node).unwrap_or(range.end_offset());
+    cpp_parser::SourceRange::new(
+        range.start_offset,
+        end.max(range.start_offset) - range.start_offset,
+    )
+}
+
+/// Where `node`'s last **significant** token ends, descending through trailing child nodes.
+///
+/// `None` when the node holds nothing but trivia, which the caller reads as "keep the node's own span": there is
+/// then nothing to trim to.
+fn significant_end(node: &CppSyntaxNode) -> Option<usize> {
+    // Reversed, so the first significant thing found is the last one written.
     for element in node
         .children_with_tokens()
         .collect::<Vec<_>>()
         .into_iter()
         .rev()
     {
-        // A **node** is trivia only if everything in it is; the case that matters is a comment, which is a leaf, and
-        // anything holding a real token is part of the declaration. `rowan` is not a dependency of this crate, so the
-        // two are told apart by asking for the token — the idiom the walks above use.
-        let (starts, trivia) = match element.clone().into_token() {
-            Some(token) => (
-                cpp_parser::source_range(token.text_range()).start_offset,
-                cpp_parser::is_trivia(cpp_parser::CppTokenKind::from(token.kind())),
-            ),
+        match element.clone().into_token() {
+            Some(token) => {
+                if !cpp_parser::is_trivia(cpp_parser::CppTokenKind::from(token.kind())) {
+                    return Some(cpp_parser::source_range(token.text_range()).end_offset());
+                }
+                // Trivia: this token does not end the declaration, so keep looking backwards.
+            }
             None => {
-                let node = element
+                let inner = element
                     .into_node()
                     .expect("a node-or-token is one of the two");
-                (
-                    cpp_parser::source_range(node.text_range()).start_offset,
-                    node.descendants_with_tokens().all(|inner| {
-                        cpp_parser::is_trivia(cpp_parser::CppTokenKind::from(inner.kind()))
-                    }),
-                )
+                match significant_end(&inner) {
+                    // The child holds something real: the declaration ends where that ends.
+                    Some(inner_end) => return Some(inner_end),
+                    // All trivia — a comment between two members — so keep looking backwards.
+                    None => continue,
+                }
             }
-        };
-        if !trivia {
-            break;
         }
-        end = starts;
     }
-    cpp_parser::SourceRange::new(
-        range.start_offset,
-        end.max(range.start_offset) - range.start_offset,
-    )
+
+    // Every child, and every leaf inside them, was trivia. The caller reads the `None` as "keep the node's own
+    // span", which is the only honest answer when there is nothing significant to trim to.
+    None
 }
 
 /// Where the name of a class-like declaration was written.

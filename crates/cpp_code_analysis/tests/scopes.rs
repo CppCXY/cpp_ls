@@ -2097,11 +2097,38 @@ fn a_scope_reports_only_its_own_bindings() {
 /// The name range is the identifier's, not the whole declarator's.
 ///
 /// The difference between a rename that edits one identifier and one that eats the initialiser, so it is
-/// asserted on the source text rather than on the numbers. The declaration range deliberately covers the
-/// **declarator** (`counter = 42`) rather than the whole `Declaration`: the type specifiers are shared by every
-/// declarator in `int a, b;`, so including them would attribute the same text to both bindings.
+/// asserted on the source text rather than on the numbers.
 #[test]
 fn a_bindings_name_range_covers_just_the_name() {
+    let source = "int counter = 42;\n";
+    let table = scopes(source);
+    let file = table.root().unwrap();
+
+    let binding = &table.scope(file).unwrap().bindings[0];
+
+    let slice = |range: cpp_parser::SourceRange| &source[range.start_offset..range.end_offset()];
+
+    assert_eq!(slice(binding.name_range), "counter");
+    assert!(
+        binding.name_range.length < binding.range.length,
+        "the name is a part of the declaration, not the whole of it"
+    );
+}
+
+/// **A binding records its declarator**, which is the layer's contract rather than a display choice.
+///
+/// `"counter = 42"` and not `"int counter = 42;"`, and the reason is worth keeping written down because a reader
+/// will meet it from the other side: an editor's outline wants the whole declaration, and the first attempt at
+/// giving it that widened *this* — which broke `auto` deduction in two suites, because a fact's range text is where
+/// the operators of a deduced type are read from and its start is how a declaration finds the template parameters
+/// in scope. Measured: `const auto& r = base` came back as `const int`.
+///
+/// So the widening lives in the handler that presents symbols
+/// (`cpp_ls::handlers::document_symbol::declaration_range`) and this stays the declarator. The two are different
+/// questions and the test that says so is this one, beside
+/// `the_declaration_range_is_the_whole_declaration_when_it_is_that_names` in the handler.
+#[test]
+fn a_bindings_range_is_its_declarator() {
     let source = "int counter = 42;\n";
     let table = scopes(source);
     let file = table.root().unwrap();
@@ -2116,6 +2143,33 @@ fn a_bindings_name_range_covers_just_the_name() {
         binding.name_range.length < binding.range.length,
         "the name is a part of the declarator, not the whole of it"
     );
+}
+
+/// **And two declarators keep their own**, which is the case the rule above must not swallow.
+///
+/// `int a, b;` declares two names under one type, so the type belongs to neither of them alone: attributing
+/// `int a, b;` to both would make a rename or a highlight of one edit the other.
+#[test]
+fn a_shared_declaration_is_not_attributed_to_one_name() {
+    let source = "int a = 1, b = 2;\n";
+    let table = scopes(source);
+    let file = table.root().unwrap();
+
+    let slice = |range: cpp_parser::SourceRange| &source[range.start_offset..range.end_offset()];
+
+    let named = |name: &str| {
+        table
+            .scope(file)
+            .unwrap()
+            .bindings
+            .iter()
+            .find(|binding| binding.name.text() == name)
+            .unwrap_or_else(|| panic!("`{name}` is declared here"))
+            .range
+    };
+
+    assert_eq!(slice(named("a")), "a = 1");
+    assert_eq!(slice(named("b")), "b = 2");
 }
 
 // ---------------------------------------------------------------------------------------------

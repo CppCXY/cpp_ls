@@ -76,7 +76,7 @@ pub fn symbols(view: &FileView, outline: &[OutlineSymbol]) -> Vec<DocumentSymbol
 
 fn document_symbol(view: &FileView, symbol: &OutlineSymbol) -> DocumentSymbol {
     let fact = &symbol.fact;
-    let whole = range_in_file(view, fact.range);
+    let whole = range_in_file(view, declaration_range(view, fact));
     let name = range_in_file(view, fact.name_range);
 
     // **The protocol's one invariant about this pair**: `selection_range` is inside `range`. Asking for the name's
@@ -111,6 +111,72 @@ fn document_symbol(view: &FileView, symbol: &OutlineSymbol) -> DocumentSymbol {
                 .map(|child| document_symbol(view, child))
                 .collect(),
         ),
+    }
+}
+
+/// **The range a client folds and draws a breadcrumb with** — the whole declaration, not just its declarator.
+///
+/// A binding records its **declarator**, which is right for the many consumers that ask "what does this name
+/// declare" and wrong for this one: the protocol documents `DocumentSymbol.range` as the range *"enclosing this
+/// symbol"*, and measured on
+///
+/// ```text
+/// struct Widget {
+///     int size;
+///     int scaled(int factor) const;
+/// };
+/// ```
+///
+/// `size`'s declarator is `"size"` and `scaled`'s is `"int scaled(int factor) const"` — so the first folded nothing
+/// at all while the second looked right.
+///
+/// **Why the widening is here and not in the scope walker.** Five test files across the analysis depend on a
+/// binding's range being its declarator: its text is where the operators of a deduced type are read from, and the
+/// position it starts at is how a declaration finds the template parameters in scope. Widening it there broke `auto`
+/// deduction in two suites — `const auto& r = base` came back as `const int` — which is the measurement that moved
+/// this here. Those consumers want the declarator; this one wants the declaration; the difference is a presentation
+/// choice and belongs at the layer that presents.
+///
+/// The **innermost** `Declaration` holding the name is the one used, not the first: a declaration can hold another,
+/// and `struct Widget { int size; };` is one `Declaration` whose body holds a second for `size`. An outer one would
+/// answer a member's range with the whole class.
+///
+/// The enclosing `Declaration` is used only when it holds **exactly one** declarator. With two, `int a, b;`, the
+/// whole declaration is the wrong answer for either name and the fact's declarator is the best available one.
+fn declaration_range(view: &FileView, fact: &cpp_code_analysis::DeclFact) -> cpp_parser::SourceRange {
+    let mut node = view.root.clone();
+    let at = fact.name_range.start_offset;
+    let mut innermost: Option<cpp_parser::SourceRange> = None;
+
+    while let Some(child) = node.children().find(|child| {
+        let range = child.text_range();
+        usize::from(range.start()) <= at && at < usize::from(range.end())
+    }) {        if cpp_parser::CppSyntaxKind::from(child.kind()) == cpp_parser::CppSyntaxKind::Declaration {
+            let declarators = child
+                .children()
+                .filter(|inner| {
+                    matches!(
+                        cpp_parser::CppSyntaxKind::from(inner.kind()),
+                        cpp_parser::CppSyntaxKind::InitDeclarator | cpp_parser::CppSyntaxKind::Declarator
+                    )
+                })
+                .count();
+            if declarators == 1 {
+                innermost = Some(cpp_parser::source_range(child.text_range()));
+            }
+        }
+        node = child;
+    }
+
+    // Wider than the fact and still holding the name — otherwise the declarator is the honest answer.
+    match innermost {
+        Some(range)
+            if range.start_offset <= fact.name_range.start_offset
+                && range.end_offset() >= fact.name_range.end_offset() =>
+        {
+            range
+        }
+        _ => fact.range,
     }
 }
 
@@ -157,5 +223,191 @@ pub struct DocumentSymbolCapabilities;
 impl RegisterCapabilities for DocumentSymbolCapabilities {
     fn register_capabilities(server_capabilities: &mut ServerCapabilities, _: &ClientCapabilities) {
         server_capabilities.document_symbol_provider = Some(OneOf::Left(true));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// **The two ranges, on the shapes that used to get them wrong.**
+    ///
+    /// Reported from an editor: *"our documentSymbol positions are almost always wrong"*. Two defects, and every
+    /// symbol in a braced declaration had one or both:
+    ///
+    /// ```text
+    /// namespace ns { … }   the range ran to the END OF THE FILE, because the trailing newline is a child of the
+    ///                      body rather than of the declaration and the trim only looked at direct children
+    /// int size;            the range was `"size"` — the declarator — with neither `int` nor `;`
+    /// void f();            the range was `"f()"`, same reason
+    /// ```
+    ///
+    /// A client folds, highlights and draws a breadcrumb from `range`, and the protocol documents it as *"the range
+    /// enclosing this symbol"*. So a range ending at the file's last line swallows everything after the declaration,
+    /// and a range that is only the name folds nothing at all.
+    ///
+    /// The expectations are written as the **text they select**, sliced out of the fixture, which is the only
+    /// spelling a reader can check without counting columns — and the one that shows both defects at a glance.
+    #[test]
+    fn a_symbols_range_is_its_whole_declaration() {
+        // CRLF and tabs on purpose: a real file written on Windows, which is where the newline defect showed.
+        let text = "namespace ns {\r\n\tstruct Widget {\r\n\t\tint size;\r\n\t\tvoid f();\r\n\t};\r\n}\r\n";
+        let (session, path) = a_session(text);
+        let view = session
+            .view_of_the_file(&path)
+            .expect("a view of the file's own text");
+        let outline = session.outline(&view);
+
+        let selected = |range: Range| -> String {
+            let lines: Vec<&str> = text.split("\r\n").collect();
+            let from = lines[range.start.line as usize];
+            let to = lines[range.end.line as usize];
+            if range.start.line == range.end.line {
+                from[range.start.character as usize..range.end.character as usize].to_string()
+            } else {
+                format!(
+                    "{}…{}",
+                    &from[range.start.character as usize..],
+                    &to[..range.end.character as usize]
+                )
+            }
+        };
+
+        let symbols = symbols(&view, &outline);
+        let ns = &symbols[0];
+        assert_eq!(ns.name, "ns");
+        assert_eq!(
+            selected(ns.range),
+            "namespace ns {…}",
+            "a namespace ends at its own `}}`, not at the end of the file: {:?}",
+            ns.range
+        );
+        assert_eq!(
+            selected(ns.selection_range),
+            "ns",
+            "and the name is what a client selects"
+        );
+
+        // **The members**, which are the shapes whose range was only the name. The expected text carries the
+        // fixture's own tab, because that is what the range really covers.
+        let members = ns.children.as_ref().expect("the class is inside the namespace");
+        let widget = &members[0];
+        assert_eq!(widget.name, "Widget");
+        assert_eq!(
+            selected(widget.range),
+            "struct Widget {…\t}",
+            "a class ends at its `}};`, indentation and all: {:?}",
+            widget.range
+        );
+
+        let body = widget.children.as_ref().expect("its members");
+        assert_eq!(body[0].name, "size");
+        assert_eq!(
+            selected(body[0].range),
+            "int size;",
+            "a variable's range is the declaration, type and `;` included: {:?}",
+            body[0].range
+        );
+        assert_eq!(
+            selected(body[0].selection_range),
+            "size",
+            "and its name is inside it, which the protocol requires"
+        );
+
+        assert_eq!(body[1].name, "f");
+        assert_eq!(
+            selected(body[1].range),
+            "void f();",
+            "and so is a member function's: {:?}",
+            body[1].range
+        );
+
+        // **The pair's invariant**, on every symbol however deep: `selection_range` inside `range`. A client that
+        // rejected an outline because one entry disagreed would show nothing at all.
+        fn check(symbols: &[DocumentSymbol]) {
+            for symbol in symbols {
+                let inside = symbol.selection_range.start >= symbol.range.start
+                    && symbol.selection_range.end <= symbol.range.end;
+                assert!(
+                    inside,
+                    "`{}` selects {:?} which is not inside {:?}",
+                    symbol.name, symbol.selection_range, symbol.range
+                );
+                if let Some(children) = &symbol.children {
+                    check(children);
+                }
+            }
+        }
+        check(&symbols);
+
+        // **A member's range is its own declaration, not the class's.** The walk that finds the enclosing
+        // `Declaration` must take the innermost one; taking the first gave `size` the whole `struct Widget { … };`.
+        assert_ne!(
+            body[0].range, widget.range,
+            "a member is not the class it is written in"
+        );
+        assert!(
+            body[0].range.start >= widget.range.start && body[0].range.end <= widget.range.end,
+            "and it is written inside it"
+        );
+    }
+
+    /// **Two declarators keep their own ranges**, which the widening must not swallow.
+    ///
+    /// `int a = 1, b = 2;` declares two names under one type, so the type belongs to neither alone: attributing
+    /// the whole declaration to both would make folding or highlighting one edit the other.
+    #[test]
+    fn a_shared_declaration_is_not_attributed_to_one_name() {
+        let text = "int a = 1, b = 2;\n";
+        let (session, path) = a_session(text);
+        let view = session
+            .view_of_the_file(&path)
+            .expect("a view of the file's own text");
+        let outline = session.outline(&view);
+        let symbols = symbols(&view, &outline);
+
+        let mut found: Vec<(String, Range)> = Vec::new();
+        collect(&symbols, &mut found);
+        assert_eq!(found.len(), 2, "two names: {found:?}");
+
+        let line = "int a = 1, b = 2;";
+        for (name, range) in &found {
+            let selected = &line[range.start.character as usize..range.end.character as usize];
+            assert!(
+                !selected.starts_with("int"),
+                "`{name}` must not claim the shared type: {selected:?}"
+            );
+        }
+    }
+
+    fn collect(symbols: &[DocumentSymbol], into: &mut Vec<(String, Range)>) {
+        for symbol in symbols {
+            into.push((symbol.name.clone(), symbol.range));
+            if let Some(children) = &symbol.children {
+                collect(children, into);
+            }
+        }
+    }
+
+    /// A workspace holding one file, so the outline comes from the file's own declarations.
+    fn a_session(
+        text: &str,
+    ) -> (
+        cpp_code_analysis::Session<cpp_code_analysis::MemoryFiles>,
+        std::path::PathBuf,
+    ) {
+        use cpp_code_analysis::{
+            CompilerConfig, MemoryFiles, OpenDocuments, Session, SessionFiles, WatchFilter,
+        };
+        let files = MemoryFiles::new().with_file("/p/a.cpp", text);
+        let providers = SessionFiles::new(OpenDocuments::new(), files);
+        let mut session = Session::with_config(
+            "/p",
+            providers,
+            WatchFilter::new("/p"),
+            CompilerConfig::default(),
+        );
+        session.load("/p/a.cpp");
+        (session, std::path::PathBuf::from("/p/a.cpp"))
     }
 }
