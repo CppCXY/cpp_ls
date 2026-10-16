@@ -76,13 +76,13 @@ pub fn symbols(view: &FileView, outline: &[OutlineSymbol]) -> Vec<DocumentSymbol
 
 fn document_symbol(view: &FileView, symbol: &OutlineSymbol) -> DocumentSymbol {
     let fact = &symbol.fact;
-    // **The widened range is in the reading's coordinates and the fact's is the file's** — see
-    // [`declaration_range`], which walks the tree and therefore answers in the tree's own numbers. So the widened
-    // one is placed back into the file, and the fact's is already there.
-    let widened = view
-        .file_range_of(declaration_range(view, fact))
-        .unwrap_or(fact.range);
-    let whole = range_in_file(view, widened);
+    // **Both ranges are the file's, and `declaration_range` is written to answer in the file's.**
+    //
+    // It reads the fact (the file's) and converts it into the reading before walking the tree, so what it returns is
+    // already back in the file's coordinates — no placement step here. Placing it as well was measured and is wrong:
+    // the widened range for `after_the_macro` came out `29..46`, which is line 4 column 0, and `file_range_of` read
+    // those numbers as *rendering* offsets and answered `16..44` — line 2, the `BEFORE` line.
+    let whole = range_in_file(view, declaration_range(view, fact));
     let name = range_in_file(view, fact.name_range);
 
     // **The protocol's one invariant about this pair**: `selection_range` is inside `range`. Asking for the name's
@@ -248,6 +248,18 @@ fn declaration_range(view: &FileView, fact: &cpp_code_analysis::DeclFact) -> cpp
 
     let range = cpp_parser::SourceRange::new(start, end.saturating_sub(start));
 
+    // **Back into the file's coordinates**, because everything above this line walked the tree.
+    //
+    // `start` and `end` are offsets of `view.root`, and a view of a rendering has its own numbering — the caller
+    // (`document_symbol`) draws positions in the file's, and so does the fact this is compared against below. The
+    // conversion is the same `file_range_of` the caller would have had to use, done here so that the function's
+    // contract is one coordinate system rather than two; measured before this, the range was answered in the
+    // rendering's and came out on the `BEFORE` line.
+    //
+    // A range no span covers keeps the tree's numbers and is then refused by the containment test below, which is
+    // the honest outcome: a range the file does not contain is not this declaration's.
+    let range = view.file_range_of(range).unwrap_or(range);
+
     // Wider than the fact and still holding the name — otherwise the declarator is the honest answer.
     if range.start_offset <= fact.name_range.start_offset
         && range.end_offset() >= fact.name_range.end_offset()
@@ -368,7 +380,7 @@ impl RegisterCapabilities for DocumentSymbolCapabilities {
 }
 
 #[cfg(test)]
-mod zz_repro {
+mod a_rendering_is_not_the_file {
     use super::*;
 
     /// **The file is twelve lines and its rendering is one**, so an unmapped offset lands on the wrong line.
@@ -377,8 +389,7 @@ mod zz_repro {
     /// not the real thing"*. The two sources of an outline disagreed here: a stored summary is placed into the
     /// file's coordinates as it is built, and the fallback was not placed at all.
     #[test]
-    #[ignore = "measured: one declaration adjacent to a macro is still off; `last_one` in the same fixture is now right"]
-    fn zz_a_macro_shifts_every_offset_after_it() {
+    fn a_declaration_after_a_macro_is_placed_in_the_file() {
         let text = "\
 #include \"h.h\"
 
@@ -899,7 +910,7 @@ public:
     /// is 16, `BEFORE\n` ends at 23, `\n` is 24, and `void after_the_macro() {` starts at 29. So the answer must be
     /// `4:0`, whatever the analysis layer does.
     #[test]
-    fn zz_an_offset_at_the_start_of_a_line_is_that_line() {
+    fn an_offset_at_the_start_of_a_line_is_that_line() {
         let text = "line0\nline1\nline2\nline3\nvoid after_the_macro() {\n";
         let start_of_line_4 = 6 * 4;
         assert_eq!(
