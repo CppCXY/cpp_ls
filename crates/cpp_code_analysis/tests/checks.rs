@@ -249,6 +249,61 @@ fn macro_redefined_is_not_reported_for_an_identical_definition() {
     );
 }
 
+/// **`>=` is not an assignment**, and the reason a token-kind test cannot tell is worth writing down.
+///
+/// The lexer **splits** `>=` into two one-byte tokens on purpose, so that `>>` can collapse in
+/// `vector<vector<int>>` (see `CppLexer::push`). So the `=` of a `>=` arrives as
+/// [`CppTokenKind::Assign`] — the same kind a real assignment has. Measured on
+///
+/// ```cpp
+/// if (a >= b) { … }   →  Greater@32..33 ">"   Assign@33..34 "="   ← one operator, two tokens
+/// if (a = b)  { … }   →                          Assign@74..75 "="  ← the real thing
+/// ```
+///
+/// so `is_an_assignment`, which asked only for the kind, reported **both** as `if (a >= b) assigns rather than
+/// compares`. The distinction is positional: a real assignment's `=` is the **first** token of the condition, while
+/// a split `>=` has its `>` before it. Asking for that is asking the tree what the operator was.
+#[test]
+fn a_greater_equal_is_not_an_assignment() {
+    let source = "\
+int f(int a, int b) {
+    if (a >= b) {
+        return 1;
+    }
+    if (a <= b) {
+        return 2;
+    }
+    if (a == b) {
+        return 3;
+    }
+    if (a = b) {
+        return 4;
+    }
+    return 0;
+}
+";
+    let found = codes_with_lines(source);
+    let lines: Vec<usize> = found
+        .iter()
+        .filter(|(code, _)| *code == DiagnosticCode::AssignmentInCondition)
+        .map(|(_, line)| *line)
+        .collect();
+
+    // **Every comparison the lexer splits**, which is the whole family: `>=` and `<=` are each two one-byte tokens
+    // so that `>>` can collapse in `vector<vector<int>>` (see `CppLexer::push`), and the `=` half arrives as an
+    // `Assign` — the same kind a real assignment has. `==` is not split and was never affected.
+    for (line, written) in [(1, "a >= b"), (4, "a <= b"), (7, "a == b")] {
+        assert!(
+            !lines.contains(&line),
+            "`if ({written})` is a comparison, not an assignment: {found:?}"
+        );
+    }
+    assert!(
+        lines.contains(&10),
+        "`if (a = b)` is the defect this check exists for: {found:?}"
+    );
+}
+
 /// **The same regression, and the same cause** — see `assignment_in_condition_is_reported_and_the_deliberate_idiom_is_not`.
 #[test]
 fn unnecessary_branch_is_reported_for_a_literal_condition() {

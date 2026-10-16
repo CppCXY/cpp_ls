@@ -93,29 +93,80 @@ impl Check for AssignmentInCondition {
 
 /// **Is this condition nothing but an assignment?**
 ///
-/// Decided from the **tokens**, which is what makes it trustworthy: `=` is an `Assign` token and `==` is a different
-/// one, so no amount of punctuation reading can confuse the two — the character scan this replaces had to look at
-/// both sides of every `=` and read the first character of `==` as an assignment, which is how `if (x == 1)` came to
-/// be reported as *`=` in a condition is almost always a `==`*. A string literal is one token as well, so an `=` in
-/// `if (s == "a=b")` cannot be seen at all.
+/// Decided from the **tokens**, which is what makes it trustworthy: a string literal is one token, so an `=` in
+/// `if (s == "a=b")` cannot be seen at all, and a compound condition is refused before any `=` is looked for.
 ///
 /// **The whole condition has to be the assignment.** A **compound** — `&&`, `||`, a comma — is not this rule's shape
 /// whatever it holds inside: `if (x = f() && ok)` is a rarer and different mistake than `if (x = f())`, and
 /// reporting the first as the second is what put a finding on a line whose condition is two comparisons.
+///
+/// # Why the kind alone was wrong, and the position is the fix
+///
+/// **The lexer splits `>=` into two tokens on purpose**, so that `>>` can collapse in `vector<vector<int>>`:
+///
+/// ```text
+/// CppTokenKind::GreaterEqual => {
+///     tokens.push(part(start, CppTokenKind::Greater));
+///     tokens.push(part(start + 1, CppTokenKind::Assign));   // ← the "=" of ">="
+/// }
+/// ```
+///
+/// So the `=` of a `>=` arrives as [`CppTokenKind::Assign`], exactly as a real assignment's does, and a test for the
+/// *kind* reported both. Measured on
+///
+/// ```cpp
+/// if (a >= b) { … }   →  Greater@32..33 ">"   Assign@33..34 "="
+/// if (a = b)  { … }   →                          Assign@74..75 "="
+/// ```
+///
+/// that was `if (a >= b) assigns rather than compares`, reported from an editor against real code. One `if (x >=
+/// size())` — the most ordinary bounds check there is — was a finding on every occurrence.
+///
+/// The distinction is **positional**, and it is the grammar's own: a real assignment's `=` is the operator of the
+/// expression, so it is the **first** token of the condition, while a split `>=` has its `>` before it. Asking for
+/// that asks the tree what the operator was rather than reading punctuation.
 fn is_an_assignment(condition: &cpp_parser::CppSyntaxNode) -> bool {
-    let mut assigns = false;
-    for token in condition
+    // **The condition arrives as the `ParenExpr`** — `(a = b)`, tokens `(`, `a`, `=`, `b`, `)` — so the leading and
+    // trailing parentheses are skipped and what is left is the expression. A condition that is *only* parentheses
+    // is not this shape.
+    let mut significant = condition
         .descendants_with_tokens()
         .filter_map(|element| element.into_token())
-    {
-        match token.kind().into() {
-            // **A compound condition is not this question**, refused before the assignment is even looked for.
-            cpp_parser::CppTokenKind::LogicalAnd
-            | cpp_parser::CppTokenKind::LogicalOr
-            | cpp_parser::CppTokenKind::Comma => return false,
-            cpp_parser::CppTokenKind::Assign => assigns = true,
-            _ => {}
-        }
+        .filter(|token| !cpp_parser::is_trivia(cpp_parser::CppTokenKind::from(token.kind())))
+        .map(|token| cpp_parser::CppTokenKind::from(token.kind()))
+        .collect::<Vec<_>>();
+    while matches!(
+        significant.first(),
+        Some(cpp_parser::CppTokenKind::LeftParen)
+    ) {
+        significant.remove(0);
     }
-    assigns
+    while matches!(significant.last(), Some(cpp_parser::CppTokenKind::RightParen)) {
+        significant.pop();
+    }
+
+    // **The token after the left operand is the operator**, which is where a binary expression puts it: `a = b` is
+    // `a`, `=` and `b`, and `a >= b` is `a`, `>` and `=` and `b`. The first is the operand in both, so asking for the
+    // *second* is the question — and asking for the kind anywhere in the range finds the split `=` of a `>=` just as
+    // readily as a real one, which is the defect this replaced.
+    let mut significant = significant.into_iter();
+    if significant.next().is_none() {
+        return false;
+    }
+    let is_the_operator = significant.next() == Some(cpp_parser::CppTokenKind::Assign);
+
+    is_the_operator
+    // **And a compound condition is not this question.** `if (x = f() && ok)` is a rarer and different mistake than
+    // `if (x = f())`; it is refused here rather than by the caller so that both halves of the rule are in one place.
+    && !condition
+        .descendants_with_tokens()
+        .filter_map(|element| element.into_token())
+        .any(|token| {
+            matches!(
+                cpp_parser::CppTokenKind::from(token.kind()),
+                cpp_parser::CppTokenKind::LogicalAnd
+                    | cpp_parser::CppTokenKind::LogicalOr
+                    | cpp_parser::CppTokenKind::Comma
+            )
+        })
 }
