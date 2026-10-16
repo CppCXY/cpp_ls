@@ -167,6 +167,27 @@ void f(int& x) { x.~int(); }   // 合法 C++（Pseudo-destructor call）
 `x.~decltype(a)()` / `x.~T()` / `x.~S()` / `x.~A<int>()` / `x.~Outer::Inner()` /
 `x.~A<int>::B()` / `p->~T()` 全部零错误，而 `a.b < c > d`（比较）仍然零错误。
 
+```text
+⑭ **限定名定义把整个函数体丢掉** —— 详见 §十一（2026，真实工程上复现）
+   渲染里没有类的定义时，`LuaSource::IsEmptyLine` 这类声明的**名字不绑、作用域不开、函数体不遍历**，
+   于是函数内的局部变量既无补全也无 hover。根因是 `sema/scopes.rs:1125` 的一个 `return`；
+   正确修法（不绑名字但仍遍历函数体）与验收判据都写在 §十一 里。
+   **未修**：它是结构性的，影响每一个「类定义不可见」的文件，即所有 `.cpp`。
+
+⑮ **诊断的 pull 会抽干整个索引队列**（2026，真实工程上量到）
+   `prepare_for_a_diagnostic` 曾无条件做 `load` + `add_project_files` + `index_everything`，
+   而 `index_everything` 循环到队列为空 —— 服务器自己的预算告警记下了它的代价：
+
+     20:22:22  index slice: prepared 128, committed 32, write lock held 563 ms, 1258 left
+     20:24:05  `prepare a file a pull request named` held the analysis for 102700 ms
+     20:24:09  index slice: prepared 1, committed 1, write lock held 0 ms, 1 to cook, 0 left
+
+   泵离完成还差 1258 个文件，那一次 pull 把它们一次性抽干 —— **102 秒的 write hold**，
+   期间每一次按键、hover、补全都在等这把锁。**这才是「补全很慢」的真正原因**
+   （补全查询本身实测 1.9 ms）。
+   `add_project_files` 的重复入队已修（只对索引从没听说过的文件才发现）；
+   **drain 的上界一度加上又被回滚，因此这条仍未修**。修法是用有界的 `advance(N)` 而不是
+   `index_everything`，N 要大于一条普通 include 链。
 ```
 
 ## 五、写这一层时反复踩到的两类坑（值得继续防）
@@ -361,7 +382,10 @@ crates/cpp_ls/tests/latency.rs      1 条失败：稳态补全偶发 1.4 s（预
 ## 七、下一步
 
 ```text
-近期   ⑪ **已修**（文法：构造函数声明不再被读成变量）—— 用真实语料重测 `unused` 的四条误报是否随之消失
+近期   ⑭ **限定名定义丢弃函数体**（§十一）—— 改动点在 `sema/scopes.rs:1125` 一处，
+       验收必须用真实 `.cpp`（夹具里类定义和函数定义在同一个文件，走的是另一条路）
+       ⑮ **pull 的 drain 要有上界**（§四）—— `advance(N)` 取代 `index_everything`，
+       N > 一条普通 include 链；这是「补全很慢」的真正原因
        ⑫ `this->` 的成员查询经索引解析外层类（复现已在 tests/completion.rs 里）
        ① argument-count 的跨文件查找 ② param-type-check 接上索引事实
        ③ 给现有 13 项检查逐条补"真实语料上的正例"验证
@@ -396,6 +420,11 @@ cargo run --release -p cpp_code_analysis --example one_check -- target/std-cook 
 
 # 一个 token 的真实 kind（这一层的 API 之一，曾被误判两次）
 cargo run --release -p cpp_parser --example token_kinds
+
+# 诊断 pull 的 write hold 与索引进度（§四 ⑮）—— 现在 `index slice` 是 info 级，
+# 日志里能看到「prepared / committed / write lock held / 还剩多少」
+#   %LOCALAPPDATA%\cpp_ls\logs\<工程名>.log
+# 关键一行是 `prepare a file a pull request named held the analysis for N ms`
 ```
 ## 九、加载为什么慢 —— 量出来的结论（2024，`E:\EmmyLuaCodeStyle`）
 
@@ -497,3 +526,113 @@ CLion/VS 是同一思路：头文件的 AST 索引一次，每个 TU 只重放�
 上一次是"计时探针的 Drop 守卫写在 if 里"；这一次是"把缓存做在了会变的东西上"。
 两次都说明同一件事：**先量命中率，再谈优化** —— 缓存键会因为每一次 `#define` 而变化这件事，
 在写代码时看一眼就该发现。
+
+## 十一、限定名定义把整个函数体丢掉 —— 一个 `return` 造成的三个症状（2026，`EmmyLuaCodeStyle`）
+
+> 这一条是**未修**的：根因、证据链和正确修法的形状都已量清，改动点只有一处，但它是结构性的
+> （影响每一个"类的定义不可见时被分析的文件"，也就是所有 `.cpp`），所以单独记在这里。
+
+### 症状（都来自真实工程，不是夹具）
+
+在 `LuaParser/src/File/LuaSource.cpp` 的 `LuaSource::IsEmptyLine` 里输入 `l`：
+
+```text
+补全只给出关键字:  ["class", "dowhile", "else", "ifelse", "include", "template", "while",
+                    "long", "thread_local", "alignas", "alignof", "bool", …]
+函数自己的 line / lineStartOffset / nextLineStartOffset 一个都没有
+```
+
+同时整个工程的加载/补全**都很慢** —— 那是**另一条独立的缺陷**（§四 ⑮：pull 的 drain 抽干整个索引队列，
+102 秒的 write hold），不是这一条造成的：这一条只影响"补全给了什么"，不影响"多久才给"。
+
+### 证据链（每一步都有测量）
+
+```text
+① 补全查询本身 = 1.9 ms                      ← 不是查询慢，是别的东西在占锁
+② 渲染 5111 字节（文件 6509），1136 个节点，0 个语法错误
+③ 渲染的顶层是 12 个 Declaration，全部是限定定义:
+     std::shared_ptr<LuaSource> LuaSource::From(std::string &&source)
+     LuaSource::LuaSource(std::string &&fileText) : _source(fileText), …
+     std::size_t LuaSource::GetLine(std::size_t offset) const { … }
+     …
+   渲染里 contains "IsEmptyLine" = true
+   渲染里 contains "class LuaSource" = **false**      ← 类的定义不在渲染里
+④ 作用域树: **只有 1 个 scope —— TranslationUnit，bindings = []**
+⑤ 所以 scope_at(光标) 落到 TranslationUnit → 可见名字集合为空 → 只剩关键字
+```
+
+### 根因：`declaration_parts` 里的一个 `return`
+
+`crates/cpp_code_analysis/src/sema/scopes.rs:1125`：
+
+```rust
+if declaration_is_qualified(node) {
+    if !self.names_a_scope_this_file_has(node) {   // LuaSource::IsEmptyLine → LuaSource 找不到
+        return;                                     // ← 名字不绑、作用域不开、**函数体完全不遍历**
+    }
+}
+```
+
+**设计意图是对的**（`::` 限定的声明不该把名字绑到文件作用域，否则一个不能非限定使用的名字会和
+每一个同名者冲突 —— 那条注释和它的测试 `a_qualified_declaration_binds_nothing_here` 都成立）。
+**错的是把"不绑这个名字"扩大成了"整个声明都不看"**：
+
+```text
+丢掉的不只是那个名字,而是: 函数作用域 + 全部形参 + 全部局部变量
+→ "补全没有函数内变量" 和 "补全只有关键字" 是同一个原因的两个面
+```
+
+### 反证：类"找不到"的两条路都通向同一个 `None`
+
+把 `class LuaSource {};` 加进渲染，看能否救活：
+
+```text
+scope 0 = TranslationUnit  bindings=["LuaSource:Class"]   ← 绑定有了
+scope_with_qualified_name("LuaSource") = None             ← 但作用域还是没有
+scopes.len() 仍然是 1
+```
+
+因为 `class_like` 里另有一道守卫（`scopes.rs:707`）：
+
+```rust
+if body.children().next().is_none() { return; }   // "空 body 不开作用域"
+```
+
+两条路都让 `scope_of_a_qualifier` 返回 `None`：
+
+```text
+真实渲染: 没有 class LuaSource             → 找不到
+我加的:   class LuaSource {}; 是空 body    → 守卫拒绝建作用域 → 找不到
+```
+
+### 正确修法的形状（未实现）
+
+```text
+在限定名解析不到时: **名字不绑,但仍然遍历函数体**
+  → 形参 + 局部变量绑进一个作用域(父 = 该声明所在的 scope)
+  → 函数内补全、hover 恢复
+  → "名字不绑" 这一点保持不变(a_qualified_declaration_binds_nothing_here 仍成立)
+```
+
+验收判据（**必须用真实文件，不能用夹具**）：对 `LuaSource.cpp` 在 `IsEmptyLine` 内问补全，
+`line` / `lineStartOffset` / `nextLineStartOffset` 必须出现。
+
+### 方法上的教训（第三次同类）
+
+§五 的第二条说过"别拿夹具当产品"，这一次是它的一个更隐蔽的变体：
+
+> **夹具里 `class LuaSource` 是我自己写的，所以合成夹具永远测不到"类的定义不可见"这个真实条件。**
+
+`docs` 里那些 `struct Widget { … }; void Widget::g() { … }` 的夹具**全部**把类定义和函数定义放在
+同一个文件里 —— 于是它们全部走的是"限定名解析成功"那条路，而真实工程里 `.cpp` 的常态正相反：
+类在头文件里，渲染里根本没有它。**这一类缺陷只能被真实文件暴露。**
+
+### 复现命令
+
+```bash
+# 真实文件上的补全（把 nextLineStartOffset = 0; 改成 = l;，光标在 l 之后）
+cargo test --release -p cpp_code_analysis --test completion -- --ignored
+
+# 渲染与文件的第一处差异、渲染的顶层节点、作用域数量
+cargo run --release -p cpp_parser --bin cpp_dump -- <file> --tree
+```
