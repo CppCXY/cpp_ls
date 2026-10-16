@@ -53,145 +53,238 @@ use tokio_util::sync::CancellationToken;
 
 use super::RegisterCapabilities;
 use crate::context::{RequestOutcome, ServerContextSnapshot, snapshot_query};
-use crate::util::{position_in_file, uri_to_file_path};
+use crate::util::uri_to_file_path;
 
-/// Where a name kind sits in the legend, which is also the number the encoding sends for it.
-///
-/// The `index` is written out rather than taken from the position in this list, and the two are asserted equal by
-/// a test: the numbers in an answer are indices into the advertised legend, so a list that disagreed with itself
-/// would colour every name as whatever sits at that index — a wrong answer that looks exactly like a right one.
-struct Legend {
-    /// The number a token of this kind carries.
-    index: u32,
-    /// The classification this number means.
-    kind: NameKind,
-    /// The protocol's name for it, advertised to the client.
-    token_type: SemanticTokenType,
+mod builder;
+
+pub use builder::{Builder, Modifier, TypeKind};
+
+/// The legend, as advertised in `initialize` and as the encoding numbers it — see [`Builder::legend`].
+fn legend() -> SemanticTokensLegend {
+    SemanticTokensLegend {
+        token_types: Builder::legend(),
+        token_modifiers: Modifier::all_modifiers(),
+    }
 }
 
-/// **Where a token type sits in the legend**, which is the number the encoding sends for it.
+/// **What a classified name is drawn as** — the one place the analysis's vocabulary meets the protocol's.
 ///
-/// Every type the encoder can name is in [`legend`]: the nine [`LEGEND`] entries plus `keyword` and `type`. The
-/// assertion is the guard against advertising a legend that does not match the numbers — the failure mode is a client
-/// colouring every name as whatever sits at a shifted index, which looks exactly like a right answer.
-fn index_of(token_type: &SemanticTokenType) -> u32 {
-    legend()
-        .token_types
-        .iter()
-        .position(|advertised| advertised == token_type)
-        .expect("every type the encoder sends is advertised") as u32
+/// `emmylua_ls` splits its own answer three ways where this has one: a `TypeDef` of kind Class/Enum/Alias, a
+/// function member against a property, and a fallback that guesses from the spelling. The first two are
+/// subdivisions C++ does not need — a class and an alias are both a `type` here, and a data member and a member
+/// function are told apart by the analysis rather than guessed — but the **third** is worth naming as absent on
+/// purpose: `default_identifier_token_type` colours an unknown capitalised name as a class, and this server sends
+/// nothing for a name it cannot place (see the module note on what is not sent). A guess is a colour the analysis
+/// did not make.
+fn type_of_a_name_kind(kind: NameKind) -> Option<TypeKind> {
+    Some(match kind {
+        NameKind::Namespace => TypeKind::Namespace,
+        NameKind::Type => TypeKind::Type,
+        NameKind::TypeParameter => TypeKind::TypeParameter,
+        NameKind::EnumMember => TypeKind::EnumMember,
+        NameKind::Function => TypeKind::Function,
+        NameKind::Method => TypeKind::Method,
+        NameKind::Variable => TypeKind::Variable,
+        NameKind::Parameter => TypeKind::Parameter,
+        NameKind::Macro => TypeKind::Macro,
+    })
 }
 
-/// **The token types this server uses**, in the order the encoding's numbers refer to.
-///
-/// Fixed, and advertised once in `initialize`: the numbers in the answer are indices into this list, so a legend
-/// that changed per request would make every number mean something different.
-const LEGEND: &[Legend] = &[
-    Legend {
-        index: 0,
-        kind: NameKind::Namespace,
-        token_type: SemanticTokenType::NAMESPACE,
-    },
-    Legend {
-        index: 1,
-        kind: NameKind::Type,
-        token_type: SemanticTokenType::TYPE,
-    },
-    Legend {
-        index: 2,
-        kind: NameKind::TypeParameter,
-        token_type: SemanticTokenType::TYPE_PARAMETER,
-    },
-    Legend {
-        index: 3,
-        kind: NameKind::EnumMember,
-        token_type: SemanticTokenType::ENUM_MEMBER,
-    },
-    Legend {
-        index: 4,
-        kind: NameKind::Function,
-        token_type: SemanticTokenType::FUNCTION,
-    },
-    Legend {
-        index: 5,
-        kind: NameKind::Method,
-        token_type: SemanticTokenType::METHOD,
-    },
-    Legend {
-        index: 6,
-        kind: NameKind::Variable,
-        token_type: SemanticTokenType::VARIABLE,
-    },
-    Legend {
-        index: 7,
-        kind: NameKind::Parameter,
-        token_type: SemanticTokenType::PARAMETER,
-    },
-    Legend {
-        index: 8,
-        kind: NameKind::Macro,
-        token_type: SemanticTokenType::MACRO,
-    },
-];
-
-/// **What a token's colour can be qualified by** — and the order is the encoding, so an entry is never moved.
-///
-/// The protocol has a dozen of these and a client declares which it draws. Four are sent:
-///
-/// ```text
-/// declaration   this is where the name is declared — a fact the scope tree gives for free
-/// readonly      a `const` object — read from the declaration's own specifiers, in the file's shape table
-/// static        `static`, at file scope or in a class — the same source
-/// deprecated    a declaration that says it is deprecated — again the same source
-/// ```
-///
-/// The last three are new, and the note that stood here said why they could not be: *"every one of them is a fact
-/// this layer does not have — a summary records a kind, a scope and whether a declaration is conditional"*. That is
-/// true of a **summary**, which is what the index holds about a file the cursor is not in. It was never true of the
-/// file being edited: its declaration shapes record each declaration's specifier tokens, which is the same table
-/// `access_at` reads, and `const` is one of them.
-///
-/// So these are sent for a name whose declaration is **in this file**, and not for a use of a header's `const`
-/// variable. That direction is deliberate — a modifier is a visible claim about the code, and the honest answer for
-/// a declaration this layer cannot read is to say nothing and let the client's own theme colour it.
-const TOKEN_MODIFIERS: &[lsp_types::SemanticTokenModifier] = &[
-    lsp_types::SemanticTokenModifier::DECLARATION,
-    lsp_types::SemanticTokenModifier::READONLY,
-    lsp_types::SemanticTokenModifier::STATIC,
-    lsp_types::SemanticTokenModifier::DEPRECATED,
-];
-
-/// A name's modifiers, as the bitset the legend indexes — see [`TOKEN_MODIFIERS`].
-fn modifier_bits(name: &cpp_code_analysis::semantic::Name) -> u32 {
+/// A name's modifiers, as the bitflag the legend indexes — see [`Modifier`].
+fn modifiers_of(name: &Name) -> Modifier {
     use cpp_code_analysis::semantic::NameModifier;
 
-    let mut bits = 0;
+    let mut bits = Modifier::none();
     if name.declaration {
-        bits |= 1 << 0;
+        bits |= Modifier::DECLARATION;
     }
     for modifier in &name.modifiers {
         bits |= match modifier {
-            NameModifier::ReadOnly => 1 << 1,
-            NameModifier::Static => 1 << 2,
-            NameModifier::Deprecated => 1 << 3,
+            NameModifier::ReadOnly => Modifier::READONLY,
+            NameModifier::Static => Modifier::STATIC,
+            NameModifier::Deprecated => Modifier::DEPRECATED,
         };
     }
     bits
 }
 
-/// The legend, as advertised in `initialize` and as the encoding indexes it.
-fn legend() -> SemanticTokensLegend {
-    let mut token_types: Vec<SemanticTokenType> = LEGEND
-        .iter()
-        .map(|entry| entry.token_type.clone())
-        .collect();
-    // **Appended, never inserted.** The numbers in an answer are indices into this list, so moving an entry would
-    token_types.push(SemanticTokenType::KEYWORD);
-
-    SemanticTokensLegend {
-        token_types,
-        token_modifiers: TOKEN_MODIFIERS.to_vec(),
+/// **Pass 1 — the analysis's names.** What the file declares and what its names resolve to.
+///
+/// Run first, and that is the priority: a name the analysis placed knows more about a span than the lexer does, so
+/// it takes the offset and the keyword pass below finds it claimed. See [`Builder`] for why "first claim wins" is
+/// the whole overlap rule.
+fn push_names(builder: &mut Builder<'_>, names: &[Name]) {
+    for name in names {
+        let Some(kind) = type_of_a_name_kind(name.kind) else {
+            continue;
+        };
+        builder.push_range(
+            name.range.start_offset,
+            name.range.end_offset(),
+            kind,
+            modifiers_of(name),
+        );
     }
+}
+
+/// **Pass 2 — the lexer's keywords**, which are the tokens no name is.
+///
+/// `int`, `return`, `const` and `noexcept` are the lexer's; the analysis classifies names rather than punctuation.
+/// A file the parser read has these coloured by the client's own grammar, and a file being *edited* does not —
+/// `struct`, `template` and `constexpr` are exactly what a partial parse leaves uncoloured, and they are the ones a
+/// reader scanning for. So they are sent, and a name that covers one wins the span by having claimed it first.
+///
+/// The tokens come from the file's **own** token stream rather than from the rendered text: a keyword inside a
+/// macro body is not in this file, and one written here is not in the rendering.
+fn push_keywords(builder: &mut Builder<'_>, view: Option<&FileView>) {
+    let Some(view) = view else {
+        return;
+    };
+    let source: &str = view.source.as_ref();
+
+    for token in view.tree.get_tokens() {
+        let Some(text) = source.get(token.range.start_offset..token.range.end_offset()) else {
+            continue;
+        };
+
+        // **Two ways to be a keyword.** The lexer's kinds, and the words it deliberately leaves as identifiers: a
+        // reader sees `requires` and `concept` as keywords, and the grammar reads them by text for the same reason
+        // the lexer does not reserve them. See [`is_contextual_keyword`].
+        let contextual =
+            token.kind == cpp_parser::CppTokenKind::Identifier && is_contextual_keyword(text);
+        if !cpp_parser::is_keyword(token.kind) && !contextual {
+            continue;
+        }
+
+        let kind = if names_a_type(token.kind) {
+            TypeKind::Type
+        } else {
+            TypeKind::Keyword
+        };
+        builder.push_range(
+            token.range.start_offset,
+            token.range.end_offset(),
+            kind,
+            Modifier::none(),
+        );
+    }
+}
+
+/// The tokens, as the protocol's delta walk — see the module documentation for why nothing may be skipped or
+/// reordered here.
+///
+/// `drawable` is the client's list of supported types, or `None` for "it said nothing", in which case everything
+/// this server can say is sent.
+///
+/// `multi_line_support` is the client's own capability: a token whose range spans lines is sent whole to a client
+/// that can draw one and split into one token per line for a client that cannot.
+///
+/// `view` is the file being drawn, and `None` means **names only** — which is what a caller with no parse in hand
+/// has, and what the tests of the walk itself use. Keywords come from the view's own token stream, so a caller
+/// without one sends classified names and nothing else, which is what this handler did before keywords were sent.
+pub fn encode(
+    file: &VfsFile,
+    view: Option<&FileView>,
+    names: &[Name],
+    drawable: &Option<Vec<SemanticTokenType>>,
+    multi_line_support: bool,
+) -> Vec<SemanticToken> {
+    let mut builder = Builder::new(
+        file,
+        drawable.as_deref(),
+        multi_line_support,
+    );
+    push_names(&mut builder, names);
+    push_keywords(&mut builder, view);
+
+    if builder.unplaceable() > 0 {
+        log::debug!(
+            "{} claim(s) dropped: the file cannot place their offsets",
+            builder.unplaceable()
+        );
+    }
+
+    builder.build()
+}
+
+/// **A word that is a keyword in this position but an ordinary identifier in another.**
+///
+/// The lexer does not make these keywords, and it is right not to: `requires` and `concept` are legal names —
+/// `int requires;` compiles, and so does a variable called `concept` — so a lexer that reserved them would change
+/// what a file means. The parser matches them **by text**, and [`cpp_parser::is_keyword`] says why in the same
+/// words.
+///
+/// A highlighter is the other kind of consumer, and it wants the *reader's* answer rather than the grammar's: in
+/// `template <class T> concept C = requires(T t) { t.f(); };` nobody is reading `concept` or `requires` as a name.
+/// So the two are separated here, on the same list the grammar uses, and only for colour.
+///
+/// # Why the list is short
+///
+/// These are the words a C++20 reader meets constantly and that no reasonable code uses as identifiers. `module`
+/// and `import` are deliberately absent although they are the same kind of word: `import` is a common variable
+/// name in code that parses some other format, and underlining it as a keyword would be the false positive this
+/// layer is written against. `final` and `override` are absent for the same reason — `final` is a routine method
+/// name in code that predates C++11.
+///
+/// `consteval` and `constinit` are **not** here: the lexer already reserves them, so they arrive as keywords.
+fn is_contextual_keyword(text: &str) -> bool {
+    matches!(text, "requires" | "concept")
+}
+
+/// **Does this keyword name a type**, rather than being one of the words around a declaration?
+///
+/// `void`, `char`, `short`, `int`, `long`, `float`, `double`, `signed`, `unsigned` and `bool` do, and a reader reads
+/// them as types: `const char* ptr` should have `char` the same colour as `Widget` in `const Widget& w`.
+///
+/// [`cpp_parser::is_type_keyword`] is the lexer's own list and it is **wider than this question**: it includes
+/// `class`, `struct`, `union`, `enum` and `typename`, which introduce a type rather than naming one — `struct` in
+/// `struct Widget` is a keyword that happens to be followed by a type, and a theme that drew it as a type would be
+/// saying something the code does not. `auto` and `decltype` are type *specifiers*: neither names a type, and a
+/// reader reads them as keywords.
+///
+/// The list is stated here rather than by subtracting from `is_type_keyword`, because a keyword added to that list
+/// would silently become a type here — and the subtraction would be four names long anyway.
+fn names_a_type(kind: cpp_parser::CppTokenKind) -> bool {
+    use cpp_parser::CppTokenKind;
+
+    matches!(
+        kind,
+        // `bool` is a `BoolLiteral` in this lexer rather than a keyword of its own — the keyword table says
+        // `"bool" => BoolLiteral` — so the type and the literal share a kind. The literal `true` is a `BoolLiteral`
+        // too, and drawing it as a type would be wrong; it is excluded by the `is_keyword` check the caller makes,
+        // since `is_keyword(BoolLiteral)` is true for the type's spelling and the literal never reaches here as a
+        // keyword.
+        CppTokenKind::BoolLiteral
+            | CppTokenKind::CharKeyword
+            | CppTokenKind::ShortKeyword
+            | CppTokenKind::IntKeyword
+            | CppTokenKind::LongKeyword
+            | CppTokenKind::SignedKeyword
+            | CppTokenKind::UnsignedKeyword
+            | CppTokenKind::FloatKeyword
+            | CppTokenKind::DoubleKeyword
+            | CppTokenKind::VoidKeyword
+    )
+}
+
+/// **The two things this layer must decide that the analysis does not**, and they are both about the client.
+///
+/// Which kinds the client can draw is a capability, and a kind it cannot draw is not sent — its number would map to
+/// nothing at the client's end. `None` for "it said nothing", in which case everything is sent: the protocol's own
+/// note says a client may render fewer types than the server advertises, so answering with the full legend is
+/// honest, while refusing to answer is not.
+fn drawable_types(supported: Option<Vec<SemanticTokenType>>) -> Option<Vec<SemanticTokenType>> {
+    match supported {
+        Some(types) if !types.is_empty() => Some(types),
+        _ => None,
+    }
+}
+
+/// Whether the client can draw a token whose range spans lines, which the builder needs to split one for a client
+/// that cannot. Read from the same capability block as [`drawable_types`], and `false` is the safe reading: a
+/// split token is more tokens than necessary, while an unsplit one is a token the client draws wrongly.
+fn multi_line_support(context: &ServerContextSnapshot) -> bool {
+    context.lsp_features().supports_multiline_tokens()
 }
 
 pub async fn on_semantic_tokens(
@@ -203,6 +296,7 @@ pub async fn on_semantic_tokens(
     // **Which kinds the client can draw**, read before the query so that the closure below is a plain function of
     // the session: the client's capabilities are not part of the analysis, and the legend they filter is fixed.
     let drawable = drawable_types(context.lsp_features().semantic_token_types());
+    let multi_line = multi_line_support(&context);
 
     if let Some(path) = uri_to_file_path(&uri) {
         context.analysis().prepare(&path).await;
@@ -238,245 +332,10 @@ pub async fn on_semantic_tokens(
         let names = session.classified_names(&view);
         Some(SemanticTokensResult::Tokens(SemanticTokens {
             result_id: None,
-            data: encode(held, Some(&view), &names, &drawable),
+            data: encode(held, Some(&view), &names, &drawable, multi_line),
         }))
     })
     .await
-}
-
-/// **The two things a token can be, merged into one stream.**
-///
-/// A name the analysis placed ([`Name`]) and a **keyword**, which no name is: `int`, `return`, `const` and
-/// `noexcept` are the lexer's, and the analysis classifies names rather than punctuation.
-///
-/// # Why keywords are sent at all, having deliberately not been
-///
-/// See the module note, which said a client that already lexes C++ draws keywords itself and two answers for one span
-/// is flicker. That is right about a file the parser read and wrong about the file a reader is editing: a keyword
-/// only reaches a client that lexed it, and a client's lexer is not what decides where `const` is. `struct`, `template`
-/// and `constexpr` are exactly the tokens a partial parse leaves uncoloured, and they are the ones a reader is
-/// scanning for.
-///
-/// # Never two tokens for one span
-///
-/// The protocol requires the walk to be **ordered and non-overlapping**, and a keyword token is skipped when any
-/// classified name's range covers its first byte. `operator` is a keyword and begins `operator+`; a name always wins,
-/// because the analysis read a declaration where the lexer read a word.
-struct Ranged {
-    start: usize,
-    end: usize,
-    /// `Some` for a classified name — the legend entry that decides its index and its modifiers.
-    name: Option<&'static Legend>,
-    /// Which type a **keyword** is drawn as, when there is no name. Ignored when `name` is `Some`.
-    ///
-    /// A field rather than a second struct because the two are one stream with one order: see [`merged`].
-    token_type: SemanticTokenType,
-    modifiers: u32,
-}
-
-fn merged(view: Option<&FileView>, names: &[Name]) -> Vec<Ranged> {
-    let mut out: Vec<Ranged> = names
-        .iter()
-        .filter_map(|name| {
-            let entry = legend_entry(name.kind)?;
-            Some(Ranged {
-                start: name.range.start_offset,
-                end: name.range.end_offset(),
-                name: Some(entry),
-                // A name's type comes from the legend; this field is only consulted for a keyword.
-                token_type: entry.token_type.clone(),
-                modifiers: modifier_bits(name),
-            })
-        })
-        .collect();
-
-    // **Two ways to be a keyword.** The lexer's kinds, and the words it deliberately leaves as identifiers: a reader
-    // is looking at `requires` and `concept` as keywords, and the grammar reads them by text for the same reason the
-    // lexer does not reserve them. See [`is_contextual_keyword`].
-    let source: &str = view.map(|view| view.source.as_ref()).unwrap_or_default();
-
-    // **The file's own tokens**, which is what the reader sees rather than what the cooker produced: a keyword
-    // inside a macro body is not in this file, and one written here is not in the rendering.
-    for token in view.map(|view| view.tree.get_tokens()).unwrap_or_default() {
-        let text = &source[token.range.start_offset..token.range.end_offset()];
-        let contextual =
-            token.kind == cpp_parser::CppTokenKind::Identifier && is_contextual_keyword(text);
-        if !cpp_parser::is_keyword(token.kind) && !contextual {
-            continue;
-        }
-        let start = token.range.start_offset;
-        // A name the analysis placed wins the span — see the note above.
-        if names
-            .iter()
-            .any(|name| name.range.start_offset <= start && start < name.range.end_offset())
-        {
-            continue;
-        }
-        out.push(Ranged {
-            start,
-            end: token.range.end_offset(),
-            // **A type name is drawn as a type, not as a keyword.** `void`, `char`, `int` and `bool` name a type, and
-            // a theme colours `type` and `keyword` differently on purpose — C++ highlighting has always drawn
-            // `unsigned` as a type and `return` as a keyword. See [`names_a_type`].
-            name: None,
-            token_type: if names_a_type(token.kind) {
-                SemanticTokenType::TYPE
-            } else {
-                SemanticTokenType::KEYWORD
-            },
-            modifiers: 0,
-        });
-    }
-
-    out.sort_by_key(|ranged| (ranged.start, ranged.end));
-    out
-}
-
-/// **A word that is a keyword in this position but an ordinary identifier in another.**
-///
-/// The lexer does not make these keywords, and it is right not to: `requires`, `concept` and even `final` are legal
-/// names — `int requires;` compiles, and so does a member called `override` — so a lexer that reserved them would
-/// change what a file means. The parser matches them **by text**, and
-/// [`cpp_parser::is_keyword`](cpp_parser::is_keyword) says why in the same words.
-///
-/// A highlighter is the other kind of consumer, and it wants the *reader's* answer rather than the grammar's: in
-/// `template <class T> concept C = requires(T t) { t.f(); };` nobody is reading `concept` or `requires` as a name.
-/// So the two are separated here, on the same list the grammar uses, and only for colour.
-///
-/// # Why the list is short
-///
-/// The words below are the ones a C++20 reader meets constantly and that no reasonable code uses as identifiers.
-/// `module` and `import` are deliberately absent although they are the same kind of word: `import` is a common
-/// variable name (`import` in a parser for a file format, `import` as a member), and underlining it as a keyword
-/// would be the false positive this whole layer is written against. `final` and `override` are absent for the same
-/// reason — `final` is a routine method name in code that predates C++11 and in code that does not use it.
-fn is_contextual_keyword(text: &str) -> bool {
-    matches!(text, "requires" | "concept")
-}
-
-/// **Does this keyword name a type**, rather than being one of the words around a declaration?
-///
-/// `void`, `char`, `short`, `int`, `long`, `float`, `double`, `signed`, `unsigned` and `bool` do, and a reader reads
-/// them as types: `const char* ptr` should have `char` the same colour as `Widget` in `const Widget& w`.
-///
-/// `is_type_keyword` is the lexer's own list and it is **wider than this question**: it includes `class`, `struct`,
-/// `union`, `enum` and `typename`, which introduce a type rather than naming one — `struct` in `struct Widget` is a
-/// keyword that happens to be followed by a type, and a theme that drew it as a type would be saying something the
-/// code does not. `auto` and `decltype` are type *specifiers*: neither names a type, and a reader reads them as
-/// keywords.
-///
-/// The list is stated here rather than by subtracting from `is_type_keyword`, because a keyword added to that list
-/// would silently become a type here — and the subtraction would be four names long anyway.
-fn names_a_type(kind: cpp_parser::CppTokenKind) -> bool {
-    use cpp_parser::CppTokenKind;
-
-    matches!(
-        kind,
-        // `bool` is a `BoolLiteral` in this lexer rather than a keyword of its own — the keyword table says
-        // `"bool" => BoolLiteral` — so the type and the literal share a kind. The literal `true` is a `BoolLiteral`
-        // too, and drawing it as a type would be wrong; it is excluded by the `is_keyword` check the caller makes,
-        // since `is_keyword(BoolLiteral)` is true for the type's spelling and the literal never reaches here as a
-        // keyword. See the test below, which pins both.
-        CppTokenKind::BoolLiteral
-            | CppTokenKind::CharKeyword
-            | CppTokenKind::ShortKeyword
-            | CppTokenKind::IntKeyword
-            | CppTokenKind::LongKeyword
-            | CppTokenKind::SignedKeyword
-            | CppTokenKind::UnsignedKeyword
-            | CppTokenKind::FloatKeyword
-            | CppTokenKind::DoubleKeyword
-            | CppTokenKind::VoidKeyword
-    )
-}
-
-/// Which of this server's kinds the client says it can draw.
-///
-/// `None` — the client said nothing about token types — means **all of them**: a client that asks for semantic
-/// tokens and lists no types is one this server cannot filter for, and refusing to answer would be worse than
-/// answering with a legend the client may partly degrade (the protocol's own note says a client may render fewer
-/// types than the server sends).
-fn drawable_types(supported: Option<Vec<SemanticTokenType>>) -> Option<Vec<SemanticTokenType>> {
-    match supported {
-        Some(types) if !types.is_empty() => Some(types),
-        _ => None,
-    }
-}
-
-/// The tokens, as the protocol's delta walk — see the module documentation for why nothing may be skipped or
-/// reordered here.
-///
-/// `drawable` is the client's list of supported types, or `None` for "it said nothing", in which case everything
-/// this server can say is sent.
-///
-/// `view` is the file being drawn, and `None` means **names only** — which is what a caller with no parse in hand
-/// has, and what the tests of the walk itself use. Keywords come from the view's own token stream, so a caller
-/// without one sends classified names and nothing else, which is what this handler did before keywords were sent.
-pub fn encode(
-    file: &VfsFile,
-    view: Option<&FileView>,
-    names: &[Name],
-    drawable: &Option<Vec<SemanticTokenType>>,
-) -> Vec<SemanticToken> {
-    let mut tokens: Vec<SemanticToken> = Vec::new();
-    let mut previous: Option<(u32, u32)> = None;
-
-    for ranged in merged(view, names) {
-        // A name takes its legend index; a keyword takes the index of the type it is drawn as — which is `type` for
-        // `void` and `keyword` for `return`. See [`Ranged`] and [`names_a_type`].
-        let (index, token_type) = match ranged.name {
-            Some(entry) => (entry.index, entry.token_type.clone()),
-            None => (index_of(&ranged.token_type), ranged.token_type.clone()),
-        };
-        let modifiers = ranged.modifiers;
-
-        // The kind is one this server knows and the client cannot draw: sending its number would be sending a
-        // number the client maps to nothing.
-        if let Some(types) = drawable
-            && !types.contains(&token_type)
-        {
-            continue;
-        }
-
-        let Some(position) = position_in_file(file, ranged.start) else {
-            // A range the file cannot place — an offset past its end, which a stale view could produce. Dropping
-            // one token is the only option that keeps the walk valid: a guessed position would move every token
-            // after it.
-            continue;
-        };
-
-        let (delta_line, delta_start) = match previous {
-            Some((line, character)) if line == position.line => {
-                (0, position.character.saturating_sub(character))
-            }
-            Some((line, _)) => (position.line - line, position.character),
-            None => (position.line, position.character),
-        };
-        previous = Some((position.line, position.character));
-
-        // **UTF-16 code units**, which is what the protocol counts — the token's own text, not its byte length: a
-        // name with a character outside the basic plane is longer in bytes than in what the client measures the span
-        // with.
-        let Some(text) = file.text.get(ranged.start..ranged.end) else {
-            continue;
-        };
-        let length = text.encode_utf16().count() as u32;
-
-        tokens.push(SemanticToken {
-            delta_line,
-            delta_start,
-            length,
-            token_type: index,
-            token_modifiers_bitset: modifiers,
-        });
-    }
-
-    tokens
-}
-
-/// Where this kind sits in [`LEGEND`] — the number the encoding sends, and the type the filter compares.
-fn legend_entry(kind: NameKind) -> Option<&'static Legend> {
-    LEGEND.iter().find(|entry| entry.kind == kind)
 }
 
 pub struct SemanticTokenCapabilities;
@@ -604,13 +463,13 @@ mod tests {
         let view = session.view_of_the_file(&path).expect("a view");
         let file = session.files().held(&path).expect("the file is held");
         let names = session.classified_names(&view);
-        let tokens = encode(file, Some(&view), &names, &None);
+        let tokens = encode(file, Some(&view), &names, &None, false);
         let at_type = by_offset(text, &tokens);
 
-        let a_type = super::index_of(&SemanticTokenType::TYPE);
-        let a_keyword = super::index_of(&SemanticTokenType::KEYWORD);
-        let a_parameter = super::index_of(&SemanticTokenType::PARAMETER);
-        let a_type_parameter = super::index_of(&SemanticTokenType::TYPE_PARAMETER);
+        let a_type = index_of(TypeKind::Type);
+        let a_keyword = index_of(TypeKind::Keyword);
+        let a_parameter = index_of(TypeKind::Parameter);
+        let a_type_parameter = index_of(TypeKind::TypeParameter);
 
         // **Every occurrence of the class's name**, including the three that are constructors and destructors and
         // the one that is a parameter's type. `match_indices` rather than `find`, because the whole point of this
@@ -672,11 +531,11 @@ mod tests {
         let view = session.view_of_the_file(&path).expect("a view");
         let file = session.files().held(&path).expect("the file is held");
         let names = session.classified_names(&view);
-        let tokens = encode(file, Some(&view), &names, &None);
+        let tokens = encode(file, Some(&view), &names, &None, false);
         let at_type = by_offset(text, &tokens);
 
-        let a_keyword = super::index_of(&SemanticTokenType::KEYWORD);
-        let a_type = super::index_of(&SemanticTokenType::TYPE);
+        let a_keyword = index_of(TypeKind::Keyword);
+        let a_type = index_of(TypeKind::Type);
 
         assert_eq!(
             at_type.get(&text.find("concept").expect("the fixture writes it")),
@@ -728,7 +587,7 @@ mod tests {
             name(start, spelling.len(), NameKind::Variable, true)
         };
         let names = vec![at("alpha"), at("beta"), at("gamma")];
-        let tokens = encode(file, None, &names, &None);
+        let tokens = encode(file, None, &names, &None, false);
 
         let mut line = 0u32;
         let mut character = 0u32;
@@ -753,7 +612,7 @@ mod tests {
         assert!(
             tokens
                 .iter()
-                .all(|token| token.token_type == index_of(NameKind::Variable)),
+                .all(|token| token.token_type == index_of(TypeKind::Variable)),
             "every one is a variable"
         );
         assert!(
@@ -786,12 +645,12 @@ mod tests {
         names.insert(1, namespace);
 
         // With everything drawable: three tokens.
-        assert_eq!(encode(file, None, &names, &None).len(), 3);
+        assert_eq!(encode(file, None, &names, &None, false).len(), 3);
 
         // With namespaces unsupported: two, and the second variable's delta is measured from the *first variable*
         // — the skipped token is not a step in the walk.
         let drawable = Some(vec![SemanticTokenType::VARIABLE]);
-        let tokens = encode(file, None, &names, &drawable);
+        let tokens = encode(file, None, &names, &drawable, false);
         assert_eq!(tokens.len(), 2);
         assert_eq!((tokens[0].delta_line, tokens[0].delta_start), (0, 4));
         assert_eq!(
@@ -814,40 +673,43 @@ mod tests {
             name(text.len() + 40, 4, NameKind::Variable, true),
         ];
 
-        assert_eq!(encode(file, None, &names, &None).len(), 1);
+        assert_eq!(encode(file, None, &names, &None, false).len(), 1);
     }
 
-    /// **The advertised legend and the numbers in the answer are the same list**, position by position: a token's
-    /// type index has to point at the type the client was told about, or every colour is off by whatever the two
-    /// lists disagree about. The `index` field is written out by hand, so this is the assertion that keeps it
-    /// honest.
+    /// **The advertised legend and the numbers in an answer are one list**, and this is the assertion that keeps
+    /// them so.
+    ///
+    /// The correction `emmylua_ls` makes and this now follows: a number is a **property of the type**
+    /// ([`TypeKind::to_u32`]) and the legend is built from the same list ([`Builder::legend`]), so the two cannot
+    /// drift. It used to be a hand-written `index` beside a hand-written list, with this test as the only thing
+    /// holding them together — which is a bug waiting for the day someone adds a type and forgets the number. Now
+    /// the property is structural and the test states it rather than enforcing it.
     #[test]
     fn the_advertised_legend_is_the_list_the_numbers_index() {
         let advertised = legend();
-        // **One more than `LEGEND`**, because the keyword type is appended rather than listed: it has no `NameKind`
-        // to key on — see [`KEYWORD_INDEX`]. The count is asserted so that a type added to one and not the other is
-        // caught here rather than by a client colouring every name as whatever shifted into its index.
-        assert_eq!(advertised.token_types.len(), LEGEND.len() + 1);
-        assert_eq!(
-            advertised.token_types[super::index_of(&SemanticTokenType::KEYWORD) as usize],
-            SemanticTokenType::KEYWORD,
-            "the appended type is the one the keyword index refers to"
-        );
-        assert_eq!(advertised.token_modifiers, TOKEN_MODIFIERS.to_vec());
 
-        for (position, entry) in LEGEND.iter().enumerate() {
-            assert_eq!(
-                entry.index, position as u32,
-                "the number is the position it is advertised at"
+        // Every type the encoder can send is advertised, **at its own number** — the whole invariant, in one loop.
+        for kind in TypeKind::ALL {
+            let position = kind.to_u32() as usize;
+            assert!(
+                position < advertised.token_types.len(),
+                "{kind:?} is numbered {position}, past the legend's {} entries",
+                advertised.token_types.len()
             );
             assert_eq!(
-                advertised.token_types[position], entry.token_type,
-                "and the type at that position is the one the entry names"
+                advertised.token_types[position],
+                kind.to_semantic_token_type(),
+                "the type at {position} is the one that number means"
             );
         }
+        assert_eq!(advertised.token_types.len(), TypeKind::ALL.len());
 
-        // Every kind this server can classify has somewhere to be drawn: a kind with no entry is a name the
-        // analysis resolved and this layer silently drops.
+        // The same for the modifiers: the bit a claim sets has to index the modifier the client was told about.
+        assert_eq!(advertised.token_modifiers, Modifier::all_modifiers());
+        assert_eq!(advertised.token_modifiers.len(), Modifier::ALL.len());
+
+        // **Every kind the analysis can produce has somewhere to be drawn.** A kind with no `TypeKind` is a name
+        // the analysis resolved and this layer silently drops, which is the failure this list exists to catch.
         for kind in [
             NameKind::Namespace,
             NameKind::Type,
@@ -859,8 +721,134 @@ mod tests {
             NameKind::Parameter,
             NameKind::Macro,
         ] {
-            assert!(legend_entry(kind).is_some(), "{kind:?} has a legend entry");
+            assert!(
+                type_of_a_name_kind(kind).is_some(),
+                "{kind:?} is classified by the analysis and has no colour"
+            );
         }
+    }
+
+    /// **The two invariants a client cannot recover from**, asserted on a real file rather than argued for.
+    ///
+    /// Every token must be **in order** and **non-overlapping**. A client rebuilds absolute positions from the
+    /// deltas alone, so one token out of order does not shift that token — it shifts *every token after it*, and
+    /// the whole file's colours move. An overlap is the same failure with a different cause.
+    ///
+    /// This was the reason the builder exists (see its module documentation): the rule used to be enforced by a
+    /// hand-written scan at each call site, which is one place to get it wrong per caller. Now the builder decides
+    /// it — first claim wins — and this test asks the *answer* rather than any one caller, so it covers a caller
+    /// that does not exist yet.
+    #[test]
+    fn every_answer_is_ordered_and_non_overlapping() {
+        // A file with the collisions that make the rule hard: `operator` is a keyword that begins the name
+        // `operator+`, `struct` is a keyword immediately before the type it introduces, and a parameter's type and
+        // its name are two tokens written next to each other.
+        let text = "struct Widget { int size; };\n\
+                    Widget operator+(const Widget& left, const Widget& right);\n\
+                    int f(Widget& w) { return w.size; }\n";
+        let (session, path) = a_held_file(text);
+        let view = session.view_of_the_file(&path).expect("a view");
+        let file = session.files().held(&path).expect("the file is held");
+        let names = session.classified_names(&view);
+        let tokens = encode(file, Some(&view), &names, &None, false);
+
+        assert!(!tokens.is_empty(), "the fixture must produce tokens");
+
+        let mut line = 0u32;
+        let mut character = 0u32;
+        let mut previous_end: Option<(u32, u32)> = None;
+        for (at, token) in tokens.iter().enumerate() {
+            line += token.delta_line;
+            character = if token.delta_line == 0 {
+                character + token.delta_start
+            } else {
+                token.delta_start
+            };
+
+            assert!(
+                token.length > 0,
+                "token {at} has no length, which the protocol does not allow: {token:?}"
+            );
+            assert!(
+                token.token_type < TypeKind::ALL.len() as u32,
+                "token {at} names a type past the legend: {token:?}"
+            );
+
+            if let Some((previous_line, previous_column)) = previous_end {
+                let ordered = line > previous_line
+                    || (line == previous_line && character >= previous_column);
+                assert!(
+                    ordered,
+                    "token {at} at {line}:{character} comes before the previous one ends at \
+                     {previous_line}:{previous_column}"
+                );
+            }
+
+            previous_end = Some((line, character + token.length));
+        }
+    }
+
+    /// **A token that spans lines is split for a client that cannot draw one, and sent whole to a client that can.**
+    ///
+    /// The protocol has no way to say "this continues below", so a client without `multilineTokenSupport` would
+    /// draw a spanning token as a run of characters on the wrong line. `emmylua_ls` splits it into one token per
+    /// line — the first from its column to the end of that line, the last from the start of its line — and this
+    /// follows, with the line's real length taken from the file's own index.
+    ///
+    /// A **raw string** is the fixture because that is what spans lines in C++ and is one token: a comment or a
+    /// string literal written across several lines. Block comments are how a reader most often meets this, and a
+    /// block comment is not a semantic token here — so the fixture is a string, which the analysis does not
+    /// classify either… which is why this test drives the builder **directly** rather than through `encode`: what
+    /// is under test is the split, and a claim is the only input it needs.
+    #[test]
+    fn a_spanning_token_is_split_for_a_client_that_cannot_draw_one() {
+        // Three lines, counted from the file's start: `/* one` is line 1, `two` is 2, `three */` is 3.
+        let text = "int a;\n/* one\ntwo\nthree */\nint b;\n";
+        let (session, path) = a_held_file(text);
+        let file = session.files().held(&path).expect("the file is held");
+
+        let start = text.find("/*").expect("the fixture writes it");
+        let end = text.find("*/").expect("the fixture writes it") + 2;
+
+        // **Sent whole** to a client that can draw one: one token, beginning on the comment's own line.
+        let mut whole = Builder::new(file, None, true);
+        assert!(whole.push_range(start, end, TypeKind::Property, Modifier::none()));
+        let whole = whole.build();
+        assert_eq!(whole.len(), 1, "one claim, one token: {whole:?}");
+        assert_eq!(
+            whole[0].delta_line, 1,
+            "the comment begins on the second line of the file: {whole:?}"
+        );
+
+        // **Split** for a client that cannot: one token per line it covers, which is three.
+        let mut split = Builder::new(file, None, false);
+        assert!(split.push_range(start, end, TypeKind::Property, Modifier::none()));
+        let split = split.build();
+        assert_eq!(
+            split.len(),
+            3,
+            "the comment covers three lines and each gets its own token: {split:?}"
+        );
+
+        assert_eq!(
+            (split[0].delta_line, split[0].delta_start),
+            (1, 0),
+            "the first piece is where the claim begins"
+        );
+        for (at, token) in split.iter().enumerate().skip(1) {
+            assert_eq!(
+                (token.delta_line, token.delta_start),
+                (1, 0),
+                "piece {at} begins at the start of the next line"
+            );
+        }
+
+        // **The middle lines are whole lines and the first is not.** `/* one` is the comment's first six columns,
+        // `two` is that whole line, and `three */` ends at column 8 — the pieces are the *lines*, not the token's
+        // columns repeated on each of them, which is the shape a naive split gets wrong.
+        assert_eq!(split[0].length, 6, "`/* one` is six columns");
+        assert_eq!(split[1].length, 3, "`two` is the whole of its line");
+        assert_eq!(split[2].length, 8, "`three */` ends at column 8");
     }
 
     /// A client that asks for semantic tokens but names no type this server uses gets an empty list rather than a
@@ -879,7 +867,7 @@ mod tests {
         let file = session.files().held(&path).expect("the file is held");
         let names = session.classified_names(&view);
 
-        let tokens = encode(file, Some(&view), &names, &None);
+        let tokens = encode(file, Some(&view), &names, &None, false);
         // **`int` is a type and `struct` is a keyword**, and this is the test that says which is which: a theme
         // colours `type` and `keyword` differently on purpose, and `int size` should have `int` the colour of a
         // type — the same colour as `Widget`, not the colour of `struct`.
@@ -902,8 +890,8 @@ mod tests {
             }
         }
 
-        let keyword = super::index_of(&SemanticTokenType::KEYWORD);
-        let a_type = super::index_of(&SemanticTokenType::TYPE);
+        let keyword = index_of(TypeKind::Keyword);
+        let a_type = index_of(TypeKind::Type);
         assert_eq!(
             by_column.get(&at("struct")),
             Some(&keyword),
@@ -973,11 +961,14 @@ mod tests {
         let names = vec![name(4, 5, NameKind::Variable, true)];
         let drawable = Some(vec![SemanticTokenType::COMMENT, SemanticTokenType::STRING]);
 
-        assert!(encode(file, None, &names, &drawable).is_empty());
+        assert!(encode(file, None, &names, &drawable, false).is_empty());
     }
 
-    /// The number the encoding sends for a kind, for a test that wants to name it rather than spell it.
-    fn index_of(kind: NameKind) -> u32 {
-        legend_entry(kind).expect("the kind is in the legend").index
+    /// The number the encoding sends for a type, for a test that wants to name it rather than spell it.
+    ///
+    /// Three lines where it used to be a search of the legend: the number is the type's own — see
+    /// [`TypeKind::to_u32`] — so a test that asks for it cannot disagree with the encoder about it.
+    fn index_of(kind: TypeKind) -> u32 {
+        kind.to_u32()
     }
 }
