@@ -110,10 +110,53 @@ pub fn diagnose_file(session: &Session<DiskFiles>, path: &Path) -> Option<(Uri, 
         })
         .chain(module_notes(&found.notes, held))
         // **And what the checks found**, which is the third channel of `FileDiagnostics` — see `check_findings`.
-        .chain(check_findings(&found.checks, held))
+        //
+        // **Withheld while the index is still filling**, and it is the only channel that has to be. A parse error is
+        // about the text the reader wrote and is the same answer at any index state; a *check* reads the index.
+        // `undefined-field` asks which members a class has, and a class whose header has not been read yet answers
+        // "none" — reported from a lightweight project as
+        //
+        // ```text
+        // anotherVec has no member `push_back`      cppls(undefined-field)
+        // ```
+        //
+        // on the first report after a window opened, while hovering that same name answered **three declarations**
+        // and editing any character made the finding go away. The member was in the index; the report was computed
+        // before the index had finished, and a check turns every hole in it into a claim about correct code.
+        //
+        // `Session::pending_work` is the session's own count of what is outstanding, asked here rather than guessed
+        // — the index queue plus the cooking backlog, both of which have to be empty before a member list is the
+        // whole truth. The withholding ends by itself: the pump drains, this becomes zero, and the client's next
+        // pull carries the checks. Withholding costs a moment; publishing costs a claim the reader cannot check.
+        .chain(if checks_may_be_trusted(session) {
+            check_findings(&found.checks, held).collect::<Vec<Diagnostic>>()
+        } else {
+            Vec::new()
+        })
         .collect();
 
     Some((uri, diagnostics))
+}
+
+/// **May a check's finding be published yet?** — the gate described where it is used.
+///
+/// A check reads the **index**, and an index still being built answers *absence* as if it were a fact:
+/// `undefined-field` asks which members a class has, and a class whose header has not been read yet answers "none".
+/// Reported against a lightweight project, on the first report after a window opened:
+///
+/// ```text
+/// anotherVec has no member `push_back`      cppls(undefined-field)
+/// ```
+///
+/// while hovering that same name answered **three declarations**, and editing any character made the finding go
+/// away. The member was in the index; the report was computed before the index had finished.
+///
+/// A named function rather than the expression at the call site, because it is the *decision* and it should be
+/// readable and testable as one — the session state that drives it is not something a fixture can hold still.
+pub fn checks_may_be_trusted(session: &Session<DiskFiles>) -> bool {
+    // The index queue **plus** the cooking backlog: a summary can be read before its rendering is built, and a
+    // check that walks scopes wants both.
+    session.pending_work() == 0
 }
 
 /// **What the semantic checks found** — one diagnostic per finding, with the rule's own code and severity.
@@ -247,7 +290,7 @@ impl RegisterCapabilities for DiagnosticCapabilities {
 
 #[cfg(test)]
 mod tests {
-    use super::diagnose_file;
+    use super::{checks_may_be_trusted, diagnose_file};
     use cpp_code_analysis::{
         CompilerConfig, DiskFiles, OpenDocuments, Session, SessionFiles, WatchFilter,
     };
@@ -262,7 +305,15 @@ mod tests {
     /// [`diagnose_file`] takes a `Session<DiskFiles>` — it is the handler the server calls, and the server's session
     /// is over the disk — so a test that used an in-memory provider would be testing a different function.
     fn a_project_importing_a_module_nobody_declares(text: &str) -> (Session<DiskFiles>, PathBuf) {
-        let root = std::env::temp_dir().join(format!("cppls-diagnostic-{}", std::process::id()));
+        a_project_in_a_scratch_directory_named("cppls-diagnostic", text)
+    }
+
+    /// The same fixture under a **name of its own**, because two tests sharing one scratch directory race: this
+    /// workspace's tests run in parallel, and a second test that rewrites `main.cpp` while the first is reading it is
+    /// a failure in whichever one loses. Measured while adding the gate's test: it wrote its text over the module
+    /// test's file and that test reported three diagnostics instead of one.
+    fn a_project_in_a_scratch_directory_named(name: &str, text: &str) -> (Session<DiskFiles>, PathBuf) {
+        let root = std::env::temp_dir().join(format!("{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).expect("a scratch directory");
 
@@ -288,7 +339,62 @@ mod tests {
         (session, file)
     }
 
-    /// **An unreadable module reaches a client as `INFORMATION` on the `import` line.**
+    /// **The checks are withheld while the index is still filling, and the errors are not.**
+    ///
+    /// Reported against a lightweight project, on the first diagnostics a window asked for:
+    ///
+    /// ```text
+    /// anotherVec has no member `push_back`      cppls(undefined-field)
+    /// ```
+    ///
+    /// while hovering that same name answered three declarations, and editing any character made the finding go
+    /// away. The member was in the index; the report was computed before the index had finished, and a check reads
+    /// *absence* out of that index as a fact.
+    ///
+    /// The split is the whole point: **a parse error is about the text and is the same answer at any index state**,
+    /// so only the checks wait. Withholding both is what the first attempt did, and it hid an unclosed brace until
+    /// the project finished loading — `a_pulling_client_gets_a_report_and_not_null` caught that.
+    ///
+    /// # What this test can and cannot reach
+    ///
+    /// It asserts the decision and the half of what it gates that a fixture can hold: a **parse error** is
+    /// published, on a settled index, from the same `found.errors` channel the withheld state reads. The
+    /// *mid-index* state is not driven, and that is stated rather than worked around: `pending_work` is the index
+    /// queue plus the cooking backlog, and a fixture that queues a file finds the next `advance` drain it — the
+    /// state is a race against the pump, not a value a fixture can hold still. That is why the decision is a named
+    /// function with a claim of its own instead of an expression inline.
+    #[test]
+    fn the_checks_are_gated_on_the_index_and_the_errors_are_not() {
+        let (session, path) = a_project_in_a_scratch_directory_named(
+            "cppls-gate",
+            // A `;` is missing, so this text really does not parse — and the second line shadows a standard name,
+            // which is what the checks are for.
+            "namespace std { template <class T> class vector; }\n\
+             void f(std::vector<int>& anotherVec) { anotherVec.push_back(1231) }\n\
+             int g() { return 1 }\n",
+        );
+
+        assert_eq!(
+            checks_may_be_trusted(&session),
+            session.pending_work() == 0,
+            "the gate is `pending_work() == 0` and nothing else"
+        );
+        assert!(
+            checks_may_be_trusted(&session),
+            "this fixture's index is settled, so its checks are trusted"
+        );
+
+        let (_, found) = diagnose_file(&session, &path).expect("the file is held");
+        assert!(
+            found.iter().any(|diagnostic| matches!(
+                diagnostic.code.as_ref(),
+                Some(lsp_types::NumberOrString::String(name)) if name == "syntax-error"
+            )),
+            "a parse error is about the text and is never withheld: {found:?}"
+        );
+    }
+
+/// **An unreadable module reaches a client as `INFORMATION` on the `import` line.**
     ///
     /// The analysis layer answers with offsets and a sentence; what a *client* does with them is this layer's: the
     /// severity (nothing is wrong with the file), the range (the line the reader wrote, not the top of the file),
