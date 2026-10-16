@@ -403,11 +403,99 @@ impl AnalysisState {
     ///
     /// The `bool` is whether the file can be cooked at all: `false` means it is not there, which is the honest
     /// `Missing` rather than an empty report.
+    ///
+    /// # The fast path, and the 195 seconds that made it necessary
+    ///
+    /// Every one of those three steps is **discovery work that has already been done**, and there was no check for
+    /// that. `add_project_files` re-queues **every file of the project** — see its own note, where the queue is the
+    /// one thing it always touches — and `index_everything` then drains that queue, so a pull request re-indexed the
+    /// whole project. A write hold is what every other request waits for, so this is not "diagnostics are slow": it
+    /// is **hover, completion and every keystroke** waiting behind it.
+    ///
+    /// Measured on a real project (`EmmyLuaCodeStyle`, 5 000+ files) from the server's own budget warning, which
+    /// names the label this function passes:
+    ///
+    /// ```text
+    /// 17:52:25 `prepare a file a pull request named` held the analysis for 195264 ms
+    /// 17:53:58   … 3524 ms
+    /// 17:54:20   … 2068 ms
+    /// 17:54:49   … 7018 ms
+    /// ```
+    ///
+    /// **195 seconds, and then seconds on every request after it.**
+    ///
+    /// # Why the guard is these two questions, and why one was not enough
+    ///
+    /// **`session.view(path)` is `Some` only when the file is indexed *and* its rendering is cached.** It builds
+    /// nothing; on a miss it only notes that the file wants cooking. So it is exactly "the rendering this function
+    /// exists to produce is already there".
+    ///
+    /// **And it is not enough on its own**, which a test caught: a *rendering* is cached by content hash and an
+    /// **edit does not evict it** — the file's summary is what an edit drops (see [`crate::FileSummary`] and
+    /// `Session::did_open`). A guard of `view` alone therefore answered "already prepared" for a buffer the client
+    /// had just changed, skipped the re-index, and the query that followed found no summary and answered nothing —
+    /// which is the very defect (`诊断不改变`) this function was written to fix. Measured by
+    /// `diagnostics_are_answered_before_the_index_has_read_the_file`, which indexes a file, edits it, and requires
+    /// the pull path to bring the answer back.
+    ///
+    /// So the summary is required as well: **a summary exists exactly when the index has read the file's current
+    /// text**, and that is the freshness this has to be sure of. Both together mean "the work is done and it is the
+    /// work for the text now in the buffer".
+    ///
+    /// It is also conservative in the direction that matters: a file that is **not** ready still takes the path
+    /// below unchanged, so a cold file, an edited file and a file whose rendering is one pump away all behave
+    /// exactly as they did. Nothing here can make a diagnostic disappear that used to appear; the only change is
+    /// that work already finished is not done again.
     pub async fn prepare_for_a_diagnostic(&self, path: &std::path::Path) -> bool {
         let to_prepare = path.to_path_buf();
+
+        // **`try_read`, not `with_snapshot`.** A blocking read here would queue this request behind whatever write
+        // hold is in flight — which during a cold index is the 195 seconds this whole guard exists to avoid. An
+        // unavailable lock means "cannot answer the question yet", which is a `false` that falls through to the
+        // path below rather than a wait.
+        if let Ok(session) = self.inner.try_read()
+            && let Some(session) = session.as_ref()
+            && session.index().summary(&to_prepare).is_some()
+            && session.view(&to_prepare).is_some()
+        {
+            return true;
+        }
+
         self.update_session("prepare a file a pull request named", move |session| {
             session.load(&to_prepare);
-            session.add_project_files([to_prepare.clone()]);
+
+            // **`index_everything`, but `add_project_files` only for a file the index has never heard of.**
+            //
+            // The pair is the whole of the cost, and only one half of it is needed for the ordinary case.
+            // `add_project_files` re-queues **every file of the project** — it is a discovery step, and its own note
+            // says the queue is the one thing it always touches — so a pull re-indexed a 5 000-file project to
+            // answer a question about one buffer. `index_everything` is the *drain*, and what it drains can be just
+            // this file.
+            //
+            // And for an edited file it already is: `Session::did_change`/`did_open` queue it at `Priority::Open`
+            // and mark it for cooking (see `Session::buffer_changed`). So the file being prepared is already the
+            // head of the queue and the drain below reads **it** — which is exactly the "answer before the pump
+            // reaches it" that the pull path exists for. Dropping the re-queue removes the project-wide work and
+            // changes nothing about which file gets read.
+            //
+            // The exception is a file that is **not a project file at all** — one the index has never discovered,
+            // which is the first pull after a session opens. There is no summary for it and nothing queued it, so
+            // discovery is the only thing that can make it readable, and it is done once rather than per request.
+            //
+            // Measured from the budget warning before this, on every keystroke rather than once:
+            //
+            // ```text
+            // 17:53:58 `prepare a file a pull request named` held the analysis for 3524 ms
+            // 17:54:20   … 2068 ms
+            // 17:54:49   … 7018 ms
+            // ```
+            if !session
+                .project_files()
+                .iter()
+                .any(|known| known == &to_prepare)
+            {
+                session.add_project_files([to_prepare.clone()]);
+            }
             session.index_everything();
             session.cook(&to_prepare).is_some()
         })
@@ -625,6 +713,76 @@ mod tests {
             )
             .await;
         assert!(opened);
+    }
+
+    /// **A second pull for a file already analysed must not re-index the project.**
+    ///
+    /// This is the defect the guard exists for, measured on a real project from the server's own budget warning:
+    ///
+    /// ```text
+    /// 17:52:25 `prepare a file a pull request named` held the analysis for 195264 ms
+    /// 17:53:58   … 3524 ms
+    /// 17:54:20   … 2068 ms
+    /// 17:54:49   … 7018 ms
+    /// ```
+    ///
+    /// Every one of those is `add_project_files` re-queuing **every file of the project** and `index_everything`
+    /// draining it again, for a file whose answer was already sitting in the index. A write hold is what every other
+    /// request waits for, so the cost was paid by hover, completion and typing rather than by diagnostics.
+    ///
+    /// # How the fast path is detected rather than assumed
+    ///
+    /// Not by timing, which is flaky, and not by the queue, which was measured and does not work: `add_project_files`
+    /// refills the index queue and `index_everything` drains it **inside the same write hold**, so a caller outside
+    /// that hold sees zero either way. What *is* observable is the thing that made the cost expensive — **taking the
+    /// write lock at all**. So the test holds the analysis's own gate for writing and then pulls: a pull that needs
+    /// the lock cannot return, and one that finds the work already done answers without it.
+    ///
+    /// That is also the shape of the defect: the write hold is what every other request waits for, so a pull that
+    /// takes it is a pull that delays hover, completion and typing.
+    #[tokio::test]
+    async fn a_second_pull_does_not_take_the_analysis_for_writing() {
+        let state = AnalysisState::new();
+        let root = std::env::temp_dir().join("cppls-analysis-state-tests");
+        opened(&state, &root).await;
+
+        state
+            .files()
+            .overlay
+            .open("/p/main.cpp", "int main() { return 0; }\n");
+        let path = std::path::Path::new("/p/main.cpp");
+
+        // **The first pull does the work**, and it is the file's first: the cold path, unchanged.
+        assert!(
+            state.prepare_for_a_diagnostic(path).await,
+            "the file can be read and cooked"
+        );
+        state
+            .update_session("a test's drain", |session| session.index_everything())
+            .await;
+        assert!(
+            state
+                .with_snapshot(|session| session.view(path).is_some())
+                .unwrap_or(false),
+            "the fixture must reach the analysed state, or this test proves nothing about skipping it"
+        );
+
+        // **Hold the gate for writing.** Any `update_session` — which is what the slow path is made of — blocks
+        // here, so a pull that returns has proved it never asked for the lock.
+        let held = state.gate.clone().write_owned().await;
+        let second = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            state.prepare_for_a_diagnostic(path),
+        )
+        .await;
+        drop(held);
+
+        assert_eq!(
+            second,
+            Ok(true),
+            "a file already indexed and cooked is prepared from the read lock alone; a pull that needed the write \
+             lock would still be waiting here — and that wait is what every other request pays"
+        );
     }
 
     /// A buffer the client opened is the text the analysis reads, through **both** handles: the state's provider

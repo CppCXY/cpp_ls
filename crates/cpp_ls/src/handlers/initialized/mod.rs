@@ -354,7 +354,14 @@ async fn index_in_background(context: ServerContextSnapshot) {
 
                     let pending_now = session.pending_work();
                     if taken > 0 || prepared_count > 0 || !drain.is_empty() || !claimed.is_empty() {
-                        log::debug!(
+                        // **`info!`, not `debug!`.** The budget warning above names the label but not the work, and
+                        // the work is what a reader has to change: on a real project the log showed
+                        // `index slice held the analysis for 1323 ms` with nothing beside it saying which stage
+                        // inside the slice that was. The numbers here are the split — prepared under the read lock,
+                        // committed under the write one — so the next reader sees whether it was the parse, the
+                        // insert or the queueing without re-instrumenting. `docs/cold-start-cpu.md` asks for exactly
+                        // this and the request was recorded there rather than in a plan.
+                        log::info!(
                             "index slice: prepared {prepared_count}, committed {taken}, write lock held {held} ms, \
                              {cooking} to cook, {pending_now} left",
                             cooking = claimed.len()
