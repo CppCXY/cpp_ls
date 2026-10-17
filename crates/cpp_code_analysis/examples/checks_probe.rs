@@ -114,6 +114,44 @@ fn main() {
         return;
     }
 
+    // **`--stages <file>`**: the parse, the shape table and the scope tree timed separately, from outside the crate.
+    // No instrumentation goes into the library: every one of these is a `pub` entry point, which is what makes the
+    // measurement repeatable by anyone with the probe.
+    if let Some(at) = args.iter().position(|argument| argument == "--stages") {
+        let Some(file) = args.get(at + 1) else { std::process::exit(2) };
+        let text = std::fs::read_to_string(file).unwrap_or_default();
+        let started = std::time::Instant::now();
+        let tree = cpp_parser::CppParser::parse(&text, cpp_parser::ParserConfig::default());
+        let parse = started.elapsed();
+        let root = tree.get_red_root();
+
+        // The floor: what visiting every node costs and nothing else.
+        let started = std::time::Instant::now();
+        let nodes = root.descendants().count();
+        let walked = started.elapsed();
+
+        let started = std::time::Instant::now();
+        let shapes = cpp_code_analysis::sema::declarations::DeclarationShapes::of(&root);
+        let shaped = started.elapsed();
+
+        let started = std::time::Instant::now();
+        let scopes = cpp_code_analysis::sema::scopes::build_scopes(&root, &NoBodies);
+        let scoped = started.elapsed();
+
+        println!(
+            "{file}\n  {} line(s), {} node(s)\n  walk    {:>8.1} ms (descendants() only)\n  parse   {:>8.1} ms\n  shapes  {:>8.1} ms ({} shape(s))\n  scopes  {:>8.1} ms ({} scope(s))",
+            text.lines().count(),
+            nodes,
+            walked.as_secs_f64() * 1000.0,
+            parse.as_secs_f64() * 1000.0,
+            shaped.as_secs_f64() * 1000.0,
+            shapes.len(),
+            scoped.as_secs_f64() * 1000.0,
+            scopes.scopes().len(),
+        );
+        return;
+    }
+
     let root_path = std::path::PathBuf::from(root);
     let text = std::fs::read_to_string(&root_path).unwrap_or_default();
     if text.is_empty() {
@@ -365,4 +403,13 @@ fn main() {
         "  {ran} check(s) accounted for, {} with a finding",
         by_check.len()
     );
+}
+
+/// The probe's own evidence source: the file's own `#define`s are read by the walker, and nothing from the include
+/// closure is available here — which is the honest state for a measurement of the walk itself.
+struct NoBodies;
+impl cpp_parser::MacroBodies for NoBodies {
+    fn body_at(&self, _name: &str, _at: usize) -> Option<std::borrow::Cow<'_, str>> {
+        None
+    }
 }

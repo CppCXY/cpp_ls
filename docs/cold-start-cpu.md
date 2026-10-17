@@ -779,3 +779,60 @@ And the whole arc, from the first measurement:
 `Declarations::of` all traverse the same nodes and all read a node's kind and children. Merging them is the next
 measurable win, and it is a refactor rather than a defect — which is why it should be done where the suite and the census
 can see it, with the same before/after discipline as everything above.
+## Avenue A, measured and refuted: merging the walks is not where the time is
+
+A `--stages` mode was added to the probe — it times `CppParser::parse`, `DeclarationShapes::of` and `build_scopes` from
+**outside** the crate, so nothing had to go back into the library. It also times a floor: `root.descendants()` and
+nothing else.
+
+```text
+windows.ui.composition.h   38,841 line(s), 125,233 node(s)
+  walk    (descendants() only)    6.3 ms     50 ns/node      <- the floor
+  parse                          86.9 ms
+  shapes                         26.0 ms     207 ns/node     (24,132 shapes)
+  scopes                         63.3 ms     505 ns/node     (2,995 scopes)
+```
+
+Two things follow, and the second one kills the plan:
+
+```text
+1  the walks are not the cost     a pure traversal is 6.3 ms; the shape table adds 20 ms of *work* and the scope tree
+                                 adds 57. Merging the two traversals would save the 6.3 ms, not the 77 — two to nine
+                                 percent of the file, and nothing at all on the files that are already fast.
+2  **19 us per scope**           the scope tree's 57 ms over 2,995 scopes is not per-node work. That is the shape of a
+                                 scan: something done per scope or per binding that is linear in what already exists.
+```
+
+So the next target is not the number of walks but **what `build_scopes` does per scope**, and the instrument for it is
+already in the probe (`--stages`, plus a `--count` style option if a per-scope count is needed). The lesson from the
+four quadratic defects so far applies unchanged: 19 us for "create a scope" is not a constant factor.
+## B' investigated: the scope tree has no quadratic — it has a constant factor
+
+Read, with the `--stages` numbers as the target:
+
+```text
+ScopeTree::create_named_scope     push a Scope, push into the parent's children   O(1)
+a_define_at(child)                kind check first; only a directive allocates    early return, cheap
+item(node)                        one match on kind; `Declaration` -> declaration()
+declaration()                     first_child(DeclSpecifierSeq) -> first_child(ExternSpec),
+                                  first_child(TemplateDecl), then declaration_parts
+```
+
+So a `Declaration` costs **four to six scans of its own children**, and a header of 125,233 nodes with 24,132
+declaration-shaped nodes pays that. It is linear with a large constant — 505 ns per node against the 50 ns of a bare
+`descendants()` — and **not** a quadratic: there is no list being rescanned per item.
+
+That closes the "19 µs per scope" lead honestly: it was 2 µs per **declaration**, times several declarations per scope.
+Two things are therefore true at once:
+
+```text
+there is nothing to fix here      no defect, no rescanned list — the same walk measured 6.3 ms and this one 63 ms
+                                  because it does six small scans per declaration rather than one
+it is still the largest slice     after parse (87 ms), the scope tree is the second biggest item of a big header
+                                  (63 ms of 276 ms), and the way to reduce it is a redesign — one child scan per
+                                  node feeding several questions — not a bug fix
+```
+
+What the four defects and this investigation now say together: this pipeline's remaining time is **not** in hidden
+quadratics any more. It is in the parse (21-MB/s floor) and in per-node constant factors, and both need a different kind
+of work than the last five rounds — which is the right place to stop and hand over.

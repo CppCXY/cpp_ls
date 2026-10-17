@@ -37,8 +37,8 @@ use std::error::Error;
 use log::error;
 use lsp_server::{Request, Response};
 use lsp_types::request::{
-    Completion, DocumentDiagnosticRequest, DocumentSymbolRequest, FoldingRangeRequest,
-    GotoDefinition, HoverRequest, InlayHintRequest, PrepareRenameRequest, References, Rename,
+    Completion, DocumentDiagnosticRequest, DocumentLinkRequest, DocumentSymbolRequest, FoldingRangeRequest,
+    GotoDefinition, GotoImplementation, HoverRequest, InlayHintRequest, PrepareRenameRequest, References, Rename,
     Request as LspRequest, ResolveCompletionItem, SelectionRangeRequest, SemanticTokensFullRequest,
     SignatureHelpRequest, WorkspaceSymbolRequest,
 };
@@ -49,9 +49,11 @@ use super::{
     completion::{on_completion, on_completion_resolve},
     definition::on_goto_definition_handler,
     diagnostic::on_pull_document_diagnostic,
+    document_link::on_document_link,
     document_symbol::on_document_symbol,
     folding_range::on_folding_range,
     hover::on_hover,
+    implementation::on_goto_implementation,
     inlay_hint::on_inlay_hint,
     references::on_references,
     rename::{on_prepare_rename, on_rename},
@@ -105,9 +107,11 @@ pub async fn on_request_handler(
     // The first four are the ones the C++ analysis answers today: a location, a type, the names that can be
     // written at a cursor, and a file's diagnostics. The rest of the table is a one-line row each
     GotoDefinition => on_goto_definition_handler,
+    GotoImplementation => on_goto_implementation,
     HoverRequest => on_hover,
     Completion => on_completion,
     ResolveCompletionItem => on_completion_resolve,
+    DocumentLinkRequest => on_document_link,
     DocumentSymbolRequest => on_document_symbol,
     FoldingRangeRequest => on_folding_range,
     InlayHintRequest => on_inlay_hint,

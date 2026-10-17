@@ -24,10 +24,12 @@ mod completion;
 mod configuration;
 mod definition;
 pub mod diagnostic;
+mod document_link;
 mod document_symbol;
 mod folding_range;
 mod hover;
 mod initialized;
+mod implementation;
 mod inlay_hint;
 mod notification_handler;
 mod references;
@@ -156,8 +158,10 @@ capabilities!(modules: {
     definition => DefinitionCapabilities,
     hover => HoverCapabilities,
     completion => CompletionCapabilities,
+    document_link => DocumentLinkCapabilities,
     document_symbol => DocumentSymbolCapabilities,
     folding_range => FoldingRangeCapabilities,
+    implementation => ImplementationCapabilities,
     inlay_hint => InlayHintCapabilities,
     references => ReferencesCapabilities,
     rename => RenameCapabilities,
