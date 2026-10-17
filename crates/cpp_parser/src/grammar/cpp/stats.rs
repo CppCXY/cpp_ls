@@ -786,6 +786,21 @@ fn parse_declaration_or_expression_statement(p: &mut CppParser) -> ParseResult {
         return decls::parse_declaration(p);
     }
 
+    // **`take(&n);` is a call, and the declaration reading makes it the declaration of a reference.**
+    //
+    // Measured: that line parsed to zero errors, round-tripped exactly, and produced **no `CallExpr` at all** — a
+    // `Declaration` whose declarator was a `ReferenceType` (`&`) and a `NameExpr` (`n`), with `take` read as the type.
+    // This grammar lets any identifier start a type, so the most-vexing-parse shape is available everywhere, and
+    // nothing that starts from a call — signature help, hover on the callee, both argument checks — could see the most
+    // ordinary line there is. `take(p)` was unaffected, which is why the defect read as a template problem for a round.
+    //
+    // The rule is one lookahead and is exact: an identifier, then `(`, then `&` is a call whose first argument is an
+    // address. `void f(int& x);` is not matched — there the `&` follows a type, not the parenthesis — and neither is
+    // `f(&x)` used as anything but a statement, because this rule only runs where a statement begins.
+    if a_call_whose_first_argument_is_an_address(p) {
+        return parse_expression_statement(p);
+    }
+
     let start = p.current_token_index();
     let checkpoint = p.checkpoint();
     match decls::parse_declaration(p) {
@@ -1753,4 +1768,14 @@ fn parse_label_statement(p: &mut CppParser) -> ParseResult {
     }
 
     Ok(m.complete(p))
+}
+
+/// **Is this statement `name ( & …`?** — see the rule at the head of `parse_declaration_or_expression_statement`.
+fn a_call_whose_first_argument_is_an_address(p: &CppParser) -> bool {
+    // `token_kind_at` is an **absolute** index, so the lookahead is from the current token — the first version of this
+    // asked for tokens 0, 1 and 2, which are the first three of the file and never a call.
+    let at = p.current_token_index();
+    p.token_kind_at(at) == CppTokenKind::Identifier
+        && p.token_kind_at(at + 1) == CppTokenKind::LeftParen
+        && p.token_kind_at(at + 2) == CppTokenKind::Ampersand
 }

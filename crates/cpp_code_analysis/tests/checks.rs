@@ -882,6 +882,81 @@ int main() {
         codes_with_two_files(too_many, other)
     );
 }
+/// **A template's parameter is silent to the argument checks, and that is the right answer rather than a gap.**
+///
+/// Deduction turns `f(T)` into `f(std::string)` for a `std::string` argument, and a parameter that *is* the argument's
+/// own type is convertible by construction — so inferring the template arguments cannot make `param-type-check` report
+/// anything it does not report today. The check that *can* see a template is the arity one, and it does: `written` and
+/// `required` come from the declaration's tokens, not from its types.
+///
+/// Written as a test so that "no finding" is a decision with a reason rather than an accident, and so that a future
+/// change that makes this report is a deliberate one.
+#[test]
+fn a_templates_own_parameter_is_silent_to_the_type_check_and_the_arity_check_still_judges_it() {
+    let silent = "\
+template <typename T>
+void take(T value);
+void g() {
+    take(1);
+    take(\"one\");
+}
+";
+    assert!(
+        !codes_of(silent).contains(&DiagnosticCode::ParamTypeCheck),
+        "a `T` parameter is the argument's own type however it was deduced: {:?}",
+        codes_of(silent)
+    );
+
+    let wrong_arity = "\
+template <typename T>
+void take(T value);
+void g() {
+    take(1, 2);
+}
+";
+    assert!(
+        codes_of(wrong_arity).contains(&DiagnosticCode::ArgumentCount),
+        "the arity of a template is in its tokens, so it is judged: {:?}",
+        codes_of(wrong_arity)
+    );
+}
+/// **An overload set is resolved, not judged against its last declaration.**
+///
+/// Before the resolver existed, this check kept one `Callee` per name — a later declaration **overwrote** an earlier
+/// one — so `f(1)` beside `f(int)` and `f(int, int)` was judged against whichever was read last and reported *"takes 2
+/// argument(s) and this call passes fewer"* about a program that is perfectly well-formed. The set is now ranked
+/// against the call's own argument types, and a call that **some** candidate takes is silence.
+#[test]
+fn an_overload_set_is_resolved_rather_than_judged_against_its_last_declaration() {
+    let well_formed = "\
+void f(int) {}
+void f(int, int) {}
+void g() {
+    f(1);
+    f(1, 2);
+}
+";
+    assert!(
+        !codes_of(well_formed).contains(&DiagnosticCode::ArgumentCount),
+        "every call fits a declaration: {:?}",
+        codes_of(well_formed)
+    );
+
+    // **And the case that is still a finding**: no candidate takes this shape, so the call cannot be right about any
+    // of them. This is the only arity report the resolution leaves, and it is the one that is a fact about the file.
+    let nothing_fits = "\
+void f(int) {}
+void f(int, int) {}
+void g() {
+    f(1, 2, 3);
+}
+";
+    assert!(
+        codes_of(nothing_fits).contains(&DiagnosticCode::ArgumentCount),
+        "no declaration takes three arguments: {:?}",
+        codes_of(nothing_fits)
+    );
+}
 /// **Every code has a name, and the name round-trips** — the property a client's filter and a config file both
 /// depend on, asserted here because it is the one thing that cannot be checked by looking at a fixture.
 #[test]

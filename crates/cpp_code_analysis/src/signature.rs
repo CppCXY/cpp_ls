@@ -33,7 +33,7 @@ use std::path::{Path, PathBuf};
 use cpp_parser::{CppDocComment, CppSyntaxElement, CppSyntaxKind, CppSyntaxNode, CppTokenKind};
 
 use crate::index::project::{Callee, callees_of_a_call};
-use crate::inlay::parameter_list_of;
+use crate::inlay::{arguments_of, parameter_list_of};
 use crate::sema::scopes::parameters_of;
 use crate::{FileView, Known, ProjectIndex};
 
@@ -92,6 +92,8 @@ pub fn signatures_at<F>(
 where
     F: FnMut(&Path) -> Option<FileView>,
 {
+
+
     let Some(call) = call_around(&view.root, offset) else {
         return Vec::new();
     };
@@ -110,6 +112,7 @@ where
         return Vec::new();
     };
 
+
     // **The callee's spelling, not the whole call**: a reader who wrote `w.scaled(` already knows the object, and
     // the popup is about which function and which parameter. A `::`-qualified name is kept whole, because there the
     // qualifier is part of the name.
@@ -127,6 +130,10 @@ where
     let mut parsed: std::collections::HashMap<PathBuf, Option<FileView>> =
         std::collections::HashMap::new();
     let mut signatures = Vec::new();
+    // **The parameter spellings the ranking should see**, aligned with `signatures`. For a plain function they are the
+    // declaration's own; for a template they are **substituted** once the call's argument types are known, which is
+    // what makes `f(T)` and `f(int)` the same candidate for `f(1)`.
+    let mut rankable: Vec<(Vec<String>, Vec<String>)> = Vec::new();
 
     for candidate in candidates {
         // The file being edited is already parsed; every other file is parsed once and kept for the rest of this
@@ -150,6 +157,7 @@ where
         // The fallback used to be `continue`, and that is why a constructor offered nothing at all: the name in a
         // constructor call resolves to the class, `parameter_list_of` answered `None`, and the popup was empty on
         // the most ordinary line of code there is. See `tests/signature.rs::a_constructor_call_offers_its_parameters`.
+
         let sources: Vec<Callee> = match parameter_list_of(declared_in, candidate.name_offset) {
             Some(_) => vec![candidate.clone()],
             None => constructors_of(declared_in, candidate.name_offset),
@@ -190,6 +198,14 @@ where
                 })
                 .collect();
 
+            // The declaration's own parameter texts, names dropped, and the template header it owns — the last read
+            // from the text before the declaration, which is a heuristic and is stated as one below.
+            let plain: Vec<String> = parameters
+                .iter()
+                .map(|(_, text)| crate::sema::overload::a_type_without_its_name(text))
+                .collect();
+            let templates = crate::sema::deduction::template_parameters_before(&declared_in.source, source.name_offset);
+
             signatures.push(CallSignature {
                 label,
                 parameters,
@@ -198,6 +214,7 @@ where
                 declared_at: source.name_offset,
                 documentation: None,
             });
+            rankable.push((plain, templates));
         }
     }
 
@@ -212,6 +229,68 @@ where
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     signatures.retain(|signature| seen.insert(signature.label.clone()));
 
+
+    // **Which of these the call's own arguments select.**
+    //
+    // The list is kept — a client shows them stacked and the reader cycles — but the one the arguments select goes
+    // **first**, so a client whose `activeSignature` defaults to the first shows the language's answer rather than
+    // whichever overload the index happened to hold first. The pieces are all here already: the call, the candidates,
+    // and each candidate's parameter spellings; what the ranking needs is the arguments' types, which is the one thing
+    // a `SemanticModel` is for.
+    if signatures.len() > 1 {
+        let model = crate::sema::model::SemanticModel::new(
+            index,
+            &view.root,
+            &view.scopes,
+            &view.source,
+            &view.path,
+            Box::new(|wanted: &Path| view_of(wanted)),
+        );
+        // Every node of this file's own text, traversed once: `inlay::arguments_of` is the crate's answer to "where are
+        // this call's arguments", and the `SemanticModel` is what types them.
+        let arguments = arguments_of(&call).unwrap_or_default();
+        let types: Vec<crate::Known<String>> = arguments
+            .iter()
+            .map(|argument| match model.type_of(argument) {
+                crate::Known::Yes((a_type, _)) => crate::Known::Yes(a_type.to_string()),
+                crate::Known::No => crate::Known::No,
+                crate::Known::Unknown(reason) => crate::Known::Unknown(reason),
+            })
+            .collect();
+        // **Deduce, then substitute, then rank.** A template candidate whose arguments the call fixes is ranked as the
+        // function it instantiates; one whose arguments the call does not fix keeps its declared spellings, and the
+        // resolver reads those as `Match::Unranked` — which is the quiet direction, and the right one: a template this
+        // analysis cannot deduce is a template whose ranking it does not know.
+        let ranked: Vec<crate::sema::overload::Candidate> = signatures
+            .iter()
+            .enumerate()
+            .map(|(at, signature)| {
+                let (plain, templates) = rankable.get(at).cloned().unwrap_or_default();
+                let plain_for_ordering = plain.clone();
+                let parameters = match crate::sema::deduction::deduce(&templates, &plain, &types) {
+                    Some(arguments) => plain
+                        .iter()
+                        .map(|spelling| {
+                            crate::sema::types::substituted_spelling(spelling, &templates, &arguments)
+                        })
+                        .collect(),
+                    None => plain,
+                };
+                let candidate = crate::sema::overload::Candidate::new(
+                    parameters,
+                    signature.label.trim_end().ends_with("...)"),
+                    signature.label.clone(),
+                );
+                candidate.with_declaration(plain_for_ordering, templates.clone())
+            })
+            .collect();
+        if let crate::sema::overload::Choice::One(chosen) =
+            crate::sema::overload::choose(&types, &ranked)
+        {
+            let chosen = signatures.remove(chosen);
+            signatures.insert(0, chosen);
+        }
+    }
     signatures
 }
 

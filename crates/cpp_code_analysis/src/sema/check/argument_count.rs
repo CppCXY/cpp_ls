@@ -41,6 +41,7 @@ use super::{Check, CheckContext, DiagnosticCode};
 pub struct ArgumentCount;
 
 /// What a callee declared in this file says about how it may be called.
+#[derive(Clone)]
 struct Callee {
     /// The parameters that have no default — a call below this many is missing arguments.
     required: usize,
@@ -48,6 +49,9 @@ struct Callee {
     written: usize,
     /// The declaration ends in `...`, so any number of arguments above `required` is allowed.
     variadic: bool,
+    /// **The parameter types**, in order, with the parameter names dropped — what the overload resolver ranks a call
+    /// against. `f(int)` and `f(const char*)` are `["int"]` and `["const char*"]`; `f(int n)` is `["int"]`.
+    parameters: Vec<String>,
 }
 
 impl Check for ArgumentCount {
@@ -79,22 +83,63 @@ impl Check for ArgumentCount {
             // defaults and its `...` are; one declared in another file is a **fact** the cook already produced —
             // `DeclFact::parameter_list`, the field whose own documentation says it is stored *"because a query holds
             // one file and the parameters are written in another"*.
+            // **Every declaration of that name** — this file first, the index second. A name with several used to
+            // be skipped whole; the set is what the resolver is for.
             let declared = match callees.get(name.as_str()) {
-                Some(declared) => Callee {
-                    required: declared.required,
-                    written: declared.written,
-                    variadic: declared.variadic,
-                },
-                None => match callee_from_the_index(context, &name) {
-                    Some(declared) => declared,
-                    // Overloaded, or not a function this index can see: not judged, which is the direction to be
-                    // wrong in. See the module documentation.
-                    None => continue,
-                },
+                Some(declared) if !declared.is_empty() => declared.clone(),
+                _ => callees_from_the_index(context, &name),
             };
+            if declared.is_empty() {
+                continue;
+            }
+
 
             // The arguments as the typed layer counts them — for `scale(1, 2, 3)`, three.
             let passed = call.get_args().len();
+
+
+            // **Which declaration this call means, if one of them is the language's answer.** `One` is a candidate
+            // that fits, so the arity below cannot fire against it. `None` is the only arity report that is a fact
+            // about the program — nothing in view takes this shape — and it is reported against the **nearest**
+            // declaration, so a message can still say "too many" or "too few" about something real. `Ambiguous` is
+            // the language's own answer, and it is silence.
+            let declared = match declared.as_slice() {
+                [only] => only,
+                several => {
+                    // The engine answers with a parsed `Type` and the file it came from; the resolver ranks spellings,
+                    // which is the same information in the form both the file half and the index half of this check
+                    // have. An `Unknown` travels with its reason rather than becoming "no type".
+                    let types: Vec<crate::Known<String>> = call
+                        .get_args()
+                        .iter()
+                        .map(|argument| match context.type_of(argument.syntax()) {
+                            crate::Known::Yes((a_type, _)) => crate::Known::Yes(a_type.to_string()),
+                            crate::Known::No => crate::Known::No,
+                            crate::Known::Unknown(reason) => crate::Known::Unknown(reason),
+                        })
+                        .collect();
+                    let candidates: Vec<crate::sema::overload::Candidate> = several
+                        .iter()
+                        .map(|callee| {
+                            crate::sema::overload::Candidate::new(
+                                callee.parameters.clone(),
+                                callee.variadic,
+                                callee.parameters.join(", "),
+                            )
+                        })
+                        .collect();
+
+                    match crate::sema::overload::choose(&types, &candidates) {
+                        crate::sema::overload::Choice::One(chosen) => &several[chosen],
+                        crate::sema::overload::Choice::None => match closest(several, passed) {
+                            Some(closest) => closest,
+                            None => continue,
+                        },
+                        crate::sema::overload::Choice::Ambiguous => continue,
+                    }
+                }
+            };
+
 
             if !declared.variadic && passed > declared.written {
                 context.add(
@@ -119,8 +164,8 @@ impl Check for ArgumentCount {
 ///
 /// Built once per check run: a file with a hundred calls and one declaration should read the declaration once, and
 /// the map is what makes the cost the calls rather than the calls times the declarations.
-fn callees_in_this_file(context: &CheckContext<'_>) -> std::collections::HashMap<String, Callee> {
-    let mut callees = std::collections::HashMap::new();
+fn callees_in_this_file(context: &CheckContext<'_>) -> std::collections::HashMap<String, Vec<Callee>> {
+    let mut callees: std::collections::HashMap<String, Vec<Callee>> = std::collections::HashMap::new();
 
     // **The shared predicate**, and the parameters through the typed layer: measured, a file-scope definition is a
     // `Declaration` whose parameter list is a **grandchild** (`InitDeclarator > Declarator > ParameterList`), so a
@@ -141,6 +186,7 @@ fn callees_in_this_file(context: &CheckContext<'_>) -> std::collections::HashMap
         let mut written = 0usize;
         let mut required = 0usize;
         let mut variadic = false;
+        let mut spellings: Vec<String> = Vec::new();
         for parameter in parameters.children() {
             // **Read from the tokens**, not from the parameter's text: a `...` is a token, an `=` is a different
             // token, and a default value that happens to hold an `=` — `int n = a == b` — is a string of tokens
@@ -162,16 +208,25 @@ fn callees_in_this_file(context: &CheckContext<'_>) -> std::collections::HashMap
             if !kinds.contains(&cpp_parser::CppTokenKind::Assign) {
                 required += 1;
             }
+            // **The parameter's own text.** `spelling_of` is for the declarator and expression nodes a declaration's
+            // name is read from, and answers `None` for a parameter node — measured: two overloads of `f` with
+            // different arities produced two candidates whose parameter lists were both **empty**, so the dedupe below
+            // kept one of them and every call was judged against it. `text()` is the node's own source text.
+            let written_as = parameter.text().to_string();
+            spellings.push(crate::sema::overload::a_type_without_its_name(&written_as));
         }
 
-        callees.insert(
-            name,
-            Callee {
+        // A declaration and its definition name the same function; the same list twice is one candidate, not an
+        // ambiguous call to something nobody overloaded.
+        let declared = callees.entry(name).or_default();
+        if !declared.iter().any(|known| known.parameters == spellings) {
+            declared.push(Callee {
                 required,
                 written,
                 variadic,
-            },
-        );
+                parameters: spellings,
+            });
+        }
     }
 
     callees
@@ -193,9 +248,9 @@ fn at_most(name: &str, written: usize) -> String {
 ///
 /// `None` as well for a declaration that is not a function, for one whose parameter list the reading could not
 /// reach, and for a name the index does not hold at all.
-fn callee_from_the_index(context: &CheckContext<'_>, name: &str) -> Option<Callee> {
+fn callees_from_the_index(context: &CheckContext<'_>, name: &str) -> Vec<Callee> {
     let crate::Known::Yes(definitions) = context.index().definitions(name, context.path) else {
-        return None;
+        return Vec::new();
     };
     // A class's constructor and a free function may share a spelling; only the functions are this rule's question.
     let functions: Vec<&crate::DeclFact> = definitions
@@ -204,11 +259,23 @@ fn callee_from_the_index(context: &CheckContext<'_>, name: &str) -> Option<Calle
         .map(|definition| &definition.fact)
         .filter(|fact| fact.kind == crate::DeclKind::Function)
         .collect();
-    let [only] = functions.as_slice() else {
-        return None;
-    };
+    let mut callees: Vec<Callee> = Vec::new();
+    for only in functions {
+        let Some(parameters) = only.parameter_list.as_deref() else {
+            continue;
+        };
+        let Some(callee) = the_callee_in(parameters) else {
+            continue;
+        };
+        if !callees.iter().any(|known| known.parameters == callee.parameters) {
+            callees.push(callee);
+        }
+    }
+    callees
+}
 
-    let parameters = only.parameter_list.as_deref()?;
+/// **One candidate out of a `parameter_list` spelling** — the text side of [`callees_from_the_index`].
+fn the_callee_in(parameters: &str) -> Option<Callee> {
     // **The parameters, split where the language splits them**: a comma at depth zero. `std::pair<int, int>` is one
     // parameter, and splitting on every comma would count it as two.
     let inner = parameters
@@ -220,7 +287,12 @@ fn callee_from_the_index(context: &CheckContext<'_>, name: &str) -> Option<Calle
     let mut required = 0usize;
     let mut variadic = false;
     let mut current = String::new();
-    let take = |parameter: &str, written: &mut usize, required: &mut usize, variadic: &mut bool| {
+    let mut spellings: Vec<String> = Vec::new();
+    let take = |parameter: &str,
+                written: &mut usize,
+                required: &mut usize,
+                variadic: &mut bool,
+                spellings: &mut Vec<String>| {
         let parameter = parameter.trim();
         if parameter.is_empty() {
             return;
@@ -246,13 +318,16 @@ fn callee_from_the_index(context: &CheckContext<'_>, name: &str) -> Option<Calle
         if !parameter.contains('=') {
             *required += 1;
         }
+        // The type, with any default and any parameter name dropped — see `a_type_without_its_name`.
+        let without_default = parameter.split('=').next().unwrap_or(parameter).trim();
+        spellings.push(crate::sema::overload::a_type_without_its_name(without_default));
     };
     for character in inner.chars() {
         match character {
             '<' | '(' | '[' => depth += 1,
             '>' | ')' | ']' => depth -= 1,
             ',' if depth == 0 => {
-                take(&current, &mut written, &mut required, &mut variadic);
+                take(&current, &mut written, &mut required, &mut variadic, &mut spellings);
                 current.clear();
                 continue;
             }
@@ -260,12 +335,27 @@ fn callee_from_the_index(context: &CheckContext<'_>, name: &str) -> Option<Calle
         }
         current.push(character);
     }
-    take(&current, &mut written, &mut required, &mut variadic);
+    take(&current, &mut written, &mut required, &mut variadic, &mut spellings);
 
     Some(Callee {
         required,
         written,
         variadic,
+        parameters: spellings,
+    })
+}
+
+/// **The candidate to blame when none is viable**: the one whose arity is nearest the call's, so a message about a
+/// call that fits nothing can still say "too many" or "too few" about a real declaration.
+fn closest(candidates: &[Callee], passed: usize) -> Option<&Callee> {
+    candidates.iter().min_by_key(|callee| {
+        if passed > callee.written {
+            passed - callee.written
+        } else if passed < callee.required {
+            callee.required - passed
+        } else {
+            0
+        }
     })
 }
 
@@ -310,5 +400,3 @@ fn has_an_ellipsis(parameter: &str) -> bool {
 
     false
 }
-
-

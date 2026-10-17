@@ -5117,6 +5117,139 @@ impl<F: FileProvider + Clone> Session<F> {
         signatures
     }
 
+    /// **Which of these declarations a call at this offset means** — an index into `parameter_lists`.
+    ///
+    /// The same resolution the argument checks and the signature popup use, asked over the declarations a caller already
+    /// holds: a hover has the facts of the name under the cursor and needs to know which of them the call selects. The
+    /// answer must not depend on the index having read the declaring file *as a source of parsed signatures* — the
+    /// parameters are in the facts (`DeclFact::parameter_list`) — because a hover on a call whose header is not yet in
+    /// the index is exactly the case that made the signature query answer nothing (`docs/overloads.md` §18).
+    ///
+    /// `None` when the offset is not on a call, when no candidate is viable, or when the choice is ambiguous — the three
+    /// answers a reader should see nothing marked for.
+    pub fn the_declaration_a_call_means(
+        &self,
+        view: &FileView,
+        offset: ReadingOffset,
+        parameter_lists: &[Option<String>],
+        template_parameters: &[Vec<String>],
+    ) -> Option<usize> {
+        let token = cpp_parser::token_at(&view.root, offset.get())?;
+        let call = token.parent_ancestors().find(|node| {
+            cpp_parser::CppSyntaxKind::from(node.kind()) == cpp_parser::CppSyntaxKind::CallExpr
+        })?;
+        let arguments = crate::inlay::arguments_of(&call)?;
+
+        // The engine answers with a parsed `Type` and the file it came from; the resolver ranks spellings, which is the
+        // same information the facts carry.
+        let session: &Session<F> = self;
+        let index: &crate::ProjectIndex = session.store.index();
+        let resolver = Box::new(move |path: &Path| -> Option<FileView> { session.view_of_the_file(path) });
+        let model = crate::sema::model::SemanticModel::new(
+            index,
+            &view.root,
+            &view.scopes,
+            &view.source,
+            &view.path,
+            resolver,
+        );
+        let types: Vec<crate::Known<String>> = arguments
+            .iter()
+            .map(|argument| match model.type_of(argument) {
+                crate::Known::Yes((a_type, _)) => crate::Known::Yes(a_type.to_string()),
+                crate::Known::No => crate::Known::No,
+                crate::Known::Unknown(reason) => crate::Known::Unknown(reason),
+            })
+            .collect();
+
+        let candidates: Vec<crate::sema::overload::Candidate> = parameter_lists
+            .iter()
+            .enumerate()
+            .map(|(at, parameters)| {
+                let (declared, variadic) = parameters
+                    .as_deref()
+                    .map(crate::sema::overload::parameters_in)
+                    .unwrap_or_default();
+                // **A template candidate is ranked as what the call instantiates**, when the caller could read its
+                // header: `take(T*)` and `take(T)` say nothing about an `int*`, and deduced they say `int*` and `int`.
+                // The names are the caller's because they come from the declaring file's text, which a fact does not
+                // carry — `docs/overloads.md` §21.
+                let names = template_parameters.get(at).cloned().unwrap_or_default();
+                // Kept for the partial ordering, which compares what the *declarations* wrote, not what the call
+                // substituted — and the substitution below consumes `declared`.
+                let declared_for_ordering = declared.clone();
+                let (types, is_a_template) = match crate::sema::deduction::deduce(&names, &declared, &types) {
+                    Some(arguments) => (
+                        declared
+                            .iter()
+                            .map(|spelling| {
+                                crate::sema::types::substituted_spelling(spelling, &names, &arguments)
+                            })
+                            .collect(),
+                        true,
+                    ),
+                    None => (declared, !names.is_empty()),
+                };
+                let candidate =
+                    crate::sema::overload::Candidate::new(types, variadic, format!("declaration {at}"));
+                if is_a_template {
+                    candidate.with_declaration(declared_for_ordering, names.clone())
+                } else {
+                    candidate
+                }
+            })
+            .collect();
+
+
+        match crate::sema::overload::choose(&types, &candidates) {
+            crate::sema::overload::Choice::One(chosen) => Some(chosen),
+            _ => None,
+        }
+    }
+    /// **The template arguments a call fixes**, for a declaration the caller already holds.
+    ///
+    /// Deduction needs the call's argument types, which is what a `SemanticModel` is for; the names come from the
+    /// declaration's own text ([`crate::sema::deduction::template_parameters_before`]) and the parameters from its fact.
+    /// `None` when the declaration is not a template, when the offset is not on a call, or when the call does not fix
+    /// every parameter — the three answers for which nothing should be shown as an instantiation.
+    pub fn the_deduced_arguments(
+        &self,
+        view: &FileView,
+        offset: ReadingOffset,
+        template_parameters: &[String],
+        parameters: &[String],
+    ) -> Option<Vec<String>> {
+        if template_parameters.is_empty() {
+            return None;
+        }
+        let token = cpp_parser::token_at(&view.root, offset.get())?;
+        let call = token.parent_ancestors().find(|node| {
+            cpp_parser::CppSyntaxKind::from(node.kind()) == cpp_parser::CppSyntaxKind::CallExpr
+        })?;
+        let arguments = crate::inlay::arguments_of(&call)?;
+
+        let session: &Session<F> = self;
+        let index: &crate::ProjectIndex = session.store.index();
+        let resolver = Box::new(move |path: &Path| -> Option<FileView> { session.view_of_the_file(path) });
+        let model = crate::sema::model::SemanticModel::new(
+            index,
+            &view.root,
+            &view.scopes,
+            &view.source,
+            &view.path,
+            resolver,
+        );
+        let types: Vec<crate::Known<String>> = arguments
+            .iter()
+            .map(|argument| match model.type_of(argument) {
+                crate::Known::Yes((a_type, _)) => crate::Known::Yes(a_type.to_string()),
+                crate::Known::No => crate::Known::No,
+                crate::Known::Unknown(reason) => crate::Known::Unknown(reason),
+            })
+            .collect();
+
+        crate::sema::deduction::deduce(template_parameters, parameters, &types)
+    }
     /// The members of a type, as a file's own scopes and the index together know them.
     ///
     /// `written_type` is a spelling — `Widget`, `ns::Widget`, `const Widget&` — and following it to a class is the

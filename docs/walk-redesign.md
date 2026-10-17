@@ -674,3 +674,33 @@ learned    a design's justifying ratio is not its payoff: 37× of the entries is
 
 The step that is **not** in this document, and should be next, is the fresh decomposition of today's remaining ~117 s:
 the walk is provably no longer it.
+### 11.14 Round 11: the interleaving is **in**, and the test is still red — the next divergence is elsewhere
+
+The splice now merges its three lists **by offset**: a file's state changes, the evidence it wrote, and the include
+edges it took are one sequence in the source, and the walk visits them in that order. The loop pops the smallest offset
+of the three, applies the changes there, pushes the evidence there, and recurses the edge there. `StateChange` carries
+its offset for exactly this (`Defined.at`, `Undefined.at`).
+
+Measured with the sharing on, the same test still fails:
+
+```text
+a_declaration_only_a_macro_makes_is_found_once_the_session_has_cooked_the_file   FAILED
+```
+
+So the ordering was a real defect — two of the three divergences so far were — and it was not this one's cause. The
+sharing is off again (`const SHARE: bool = false`), the suite is back to **53 targets ok** with only the pre-existing
+latency red, and the merge stays in the tree because it is right on its own terms and the ordering it fixes is
+observable in principle (a `#define` written after an `#include`).
+
+**What the next probe should ask**, in this order and each in one run of the one-second test:
+
+```text
+1  does the contribution for `handle.h` hold its `DECLARE_HANDLE` event at all?   print `contribution.events.len()`
+   and each event's name/at/unconditional when the record happens
+2  is that same event present in the spliced unit's timeline?                     print the events the unit ends with
+3  does the unit's `entries` hold it after the splice?                            print `walked.entries.len()` before
+                                                                                  and after `splice_a_contribution`
+```
+
+One of those three is where the walked unit and the spliced unit differ, and each is a line of instrumentation rather
+than a hypothesis.

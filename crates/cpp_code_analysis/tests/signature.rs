@@ -122,6 +122,85 @@ int main() {
         "the constructor's own parameters, or nothing: {label:?}"
     );
 }
+/// **The overload the call's arguments select comes first.**
+///
+/// A client whose `activeSignature` defaults to the first entry shows the language's answer; before the resolver was
+/// used here it showed whichever overload the index happened to hold first — a popup that is *right* about the set and
+/// wrong about the call. The list is still sent whole, so a reader can still cycle to the others.
+#[test]
+fn the_overload_the_arguments_select_is_the_first_signature() {
+    let integer = "\
+void print(int value);
+void print(const char* text);
+void g() {
+    print(|1);
+}
+";
+    let (_, signature) = signature_where_marked(integer);
+    let label = signature.map(|signature| signature.label).unwrap_or_default();
+    assert!(
+        label.starts_with("print(int"),
+        "an `int` argument selects the `int` overload: {label:?}"
+    );
+
+    let text = "\
+void print(int value);
+void print(const char* text);
+void g() {
+    print(|\"x\");
+}
+";
+    let (_, signature) = signature_where_marked(text);
+    let label = signature.map(|signature| signature.label).unwrap_or_default();
+    assert!(
+        label.starts_with("print(const char*"),
+        "a string literal selects the `const char*` overload: {label:?}"
+    );
+}
+/// **A template candidate is ranked as the function the call instantiates.**
+///
+/// The distinguishing fixture: two templates whose declared spellings (`T*` and `T`) say nothing about an `int*`
+/// argument — without deduction both are `Match::Unranked` and the call is ambiguous, so nothing is chosen. With it,
+/// the first is `int*` (exact) and the second is `int` against an `int*` (not viable), so the `T*` one is chosen and
+/// comes first. If deduction silently stopped working, this test would still pass its first half and the signature
+/// would be the `T` one — so the assertion is on **which** of the two.
+/// **The fixture's argument is a pointer variable, not `&n`** — measured: `take(&n)` produces **no call node at all**
+/// (`call_around` answers `None`), so the address-of expression as a call argument is a parser defect of its own,
+/// recorded in `docs/overloads.md` §12. With `int* p = &n; take(p);` the callees are found (two candidates, both with
+/// their parameter lists) and the deduction is what decides between them.
+#[test]
+fn a_template_candidate_is_ranked_as_the_function_the_call_instantiates() {
+    let source = "\
+template <typename T> void take(T* value);
+template <typename T> void take(T value);
+int g() { int n = 0; int* p = &n; take(|p); return 0; }
+";
+    let (_, signature) = signature_where_marked(source);
+    let label = signature.map(|signature| signature.label).unwrap_or_default();
+    assert!(
+        label.contains("T*"),
+        "an `int*` argument selects the `T*` overload: {label:?}"
+    );
+}
+/// **An ordinary function is what a tie means.**
+///
+/// The template is written **first**, so a resolution without the rule would keep the declaration order and show
+/// `pick(T value)` — which is a list that is right about the set and wrong about the call. With it, `f(int)` is chosen
+/// for `f(5)` even though the template deduces to exactly the same type.
+#[test]
+fn an_ordinary_function_beats_a_template_that_is_equally_good() {
+    let source = "\
+template <typename T> void pick(T value);
+void pick(int value);
+int g() { pick(|5); return 0; }
+";
+    let (_, signature) = signature_where_marked(source);
+    let label = signature.map(|signature| signature.label).unwrap_or_default();
+    assert!(
+        label.starts_with("pick(int"),
+        "the ordinary function comes first, not the template: {label:?}"
+    );
+}
 /// The label at the cursor, and the text each declared span points at.
 fn label_where_marked(source: &str) -> (String, Vec<String>, Option<usize>) {
     let (_, signature) = signature_where_marked(source);

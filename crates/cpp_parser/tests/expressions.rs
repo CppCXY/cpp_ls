@@ -30,6 +30,40 @@ fn count(source: &str, kind: CppSyntaxKind) -> usize {
         .count()
 }
 
+/// **`f(&n)` is a call.**
+///
+/// Measured while wiring template deduction into signature help: `take(&n)` produced **no call node at all**, so
+/// nothing that starts from a call — signature help, hover on a callee, the argument checks — could see the most
+/// ordinary line there is. `take(p)` with a pointer variable did produce one, which is what makes the argument's own
+/// form, and not the call, the thing under test.
+/// **`f(&n)` is a call, and it used to be the declaration of a reference.**
+///
+/// The tree for `take(&n)` was a `Declaration` whose declarator was a `ReferenceType` (`&`) and a `NameExpr` (`n`):
+/// this grammar lets any identifier start a type, so `take` was read as one and the line as the declaration of a
+/// reference `n`. Nothing that starts from a call saw it, and `take(p)` worked — which is what made it read as a
+/// template problem for a whole round. The statement rule now takes the expression reading when the shape is
+/// `identifier ( &`.
+#[test]
+fn a_call_whose_argument_is_an_address_of_expression_is_a_call() {
+
+
+    parses("void g() { int n = 0; take(&n); }");
+    assert_eq!(
+        count("void g() { int n = 0; take(&n); }", CppSyntaxKind::CallExpr),
+        1,
+        "`take(&n)` is a call"
+    );
+    assert_eq!(
+        count("void g() { int n = 0; take(&n, 1); }", CppSyntaxKind::CallExpr),
+        1,
+        "and it stays one with a second argument"
+    );
+    assert_eq!(
+        count("void g() { int n = 0; take(&n); take(n); }", CppSyntaxKind::CallExpr),
+        2,
+        "and the plain call beside it is still one"
+    );
+}
 #[test]
 fn sizeof_reads_an_operand_that_is_not_a_bare_name() {
     // `sizeof` and `typeid` accept a type-id *or* an expression, and the type reading is tried first because it

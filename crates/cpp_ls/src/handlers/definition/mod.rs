@@ -129,15 +129,23 @@ pub async fn on_goto_definition_handler(
             return None;
         };
 
-        let mut locations: Vec<Location> = Vec::new();
-        for declaration in &found.found {
+        // **The overload a call means comes first.** The protocol allows a list and a client shows it in order, so the
+        // first entry is what a reader who does not pick from the popup gets — and for a call that is the declaration
+        // its arguments select. The same two queries the hover marks from, so the two handlers cannot disagree.
+        let chosen = chosen_definition(session, &view, offset, &found);
+
+        let mut ordered: Vec<(bool, Location)> = Vec::new();
+        for (at, declaration) in found.found.iter().enumerate() {
             let Some(uri) = path_to_uri(&declaration.file) else {
                 continue;
             };
             let range =
                 name_range(session, &declaration.file, &declaration.fact).unwrap_or_default();
-            locations.push(Location { uri, range });
+            ordered.push((Some(at) == chosen, Location { uri, range }));
         }
+        // Stable, so everything that is not the chosen one keeps the order the index answered in.
+        ordered.sort_by_key(|(is_the_one, _)| !*is_the_one);
+        let mut locations: Vec<Location> = ordered.into_iter().map(|(_, location)| location).collect();
 
         match locations.len() {
             0 => None,
@@ -198,4 +206,42 @@ impl RegisterCapabilities for DefinitionCapabilities {
     fn register_capabilities(server_capabilities: &mut ServerCapabilities, _: &ClientCapabilities) {
         server_capabilities.definition_provider = Some(OneOf::Left(true));
     }
+}
+
+/// **Which declaration a call at this offset means**, as an index into `found.found`.
+///
+/// `None` for a name with one declaration, for a cursor that is not on a call, and for a call whose arguments select
+/// nothing — the three cases in which there is no first location to move forward.
+fn chosen_definition(
+    session: &Session<DiskFiles>,
+    view: &cpp_code_analysis::FileView,
+    offset: cpp_code_analysis::file::coordinates::ReadingOffset,
+    found: &cpp_code_analysis::ProjectDefinitions,
+) -> Option<usize> {
+    if found.found.len() < 2 {
+        return None;
+    }
+    let parameter_lists: Vec<Option<String>> = found
+        .found
+        .iter()
+        .map(|declaration| declaration.fact.parameter_list.clone())
+        .collect();
+    // The template names are the caller's, because they are in the declaring file's text and a fact does not carry
+    // them — `docs/overloads.md` §21.
+    let template_parameters: Vec<Vec<String>> = found
+        .found
+        .iter()
+        .map(|declaration| {
+            session
+                .text(&declaration.file)
+                .map(|text| {
+                    cpp_code_analysis::sema::deduction::template_parameters_before(
+                        &text,
+                        declaration.fact.name_range.start_offset,
+                    )
+                })
+                .unwrap_or_default()
+        })
+        .collect();
+    session.the_declaration_a_call_means(view, offset, &parameter_lists, &template_parameters)
 }

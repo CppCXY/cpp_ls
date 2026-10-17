@@ -161,7 +161,7 @@ pub fn hover(
         // is asking for ("what can I call here"), and the index can now show each one's parameters.
         Known::Unknown(UnknownReason::Ambiguous(_)) => match session.definitions(view, offset) {
             Known::Yes(found) if found.found.len() > 1 => {
-                Some(markdown(overloads_markdown(session, Some(view), &found)))
+                Some(markdown(overloads_markdown(session, Some(view), offset, &found)))
             }
             _ => expression_markdown(session, view, offset).map(markdown),
         },
@@ -187,11 +187,80 @@ pub fn hover(
 fn overloads_markdown(
     session: &Session<DiskFiles>,
     view: Option<&FileView>,
+    offset: cpp_code_analysis::file::coordinates::ReadingOffset,
     found: &cpp_code_analysis::ProjectDefinitions,
 ) -> String {
+    // **Which of them this call means, if the reader is on a call.**
+    //
+    // `Session::signatures_at` already ranks the declarations and puts the chosen one **first** — the same resolver the
+    // argument checks and the signature popup use — so this is a read of an answer that exists, not a second opinion.
+    // It is `None` when the cursor is not on a call at all (a bare `std::format`), and then the list is all there is
+    // and the old sentence is still the honest one.
+    // **Which of them this call means.** The query resolves the call's arguments against the declarations' own
+    // parameter lists — the facts this hover already holds — so it does not need the index to have read the declaring
+    // file as a source of parsed signatures. §18 of `docs/overloads.md` is the measurement that made that matter.
+    let chosen = view.and_then(|view| {
+        let parameter_lists: Vec<Option<String>> = found
+            .found
+            .iter()
+            .map(|declaration| declaration.fact.parameter_list.clone())
+            .collect();
+        // The template names are the caller's, because they come from the declaring file's text and a fact does not
+        // carry them — `docs/overloads.md` §21. One `text` read per declaration, and the files are held afterwards.
+        let template_parameters: Vec<Vec<String>> = found
+            .found
+            .iter()
+            .map(|declaration| {
+                session
+                    .text(&declaration.file)
+                    .map(|text| {
+                        cpp_code_analysis::sema::deduction::template_parameters_before(
+                            &text,
+                            declaration.fact.name_range.start_offset,
+                        )
+                    })
+                    .unwrap_or_default()
+            })
+            .collect();
+
+        let chosen =
+            session.the_declaration_a_call_means(view, offset, &parameter_lists, &template_parameters)?;
+        let declaration = found.found.get(chosen)?;
+        Some((
+            declaration.file.clone(),
+            declaration.fact.name_range.start_offset,
+        ))
+    });
     let mut lines = String::new();
     for declaration in &found.found {
-        lines.push_str(&signature_line(&declaration.fact));
+        let is_the_one = chosen.as_ref().is_some_and(|(file, at)| {
+            *file == declaration.file && *at == declaration.fact.name_range.start_offset
+        });
+        let mut line = signature_line(&declaration.fact);
+        if is_the_one
+            && let Some(view) = view
+            && let Some(text) = session.text(&declaration.file)
+        {
+            // **The instantiated spelling, when the call fixes it.** `take(T* value)` is what the declaration says and
+            // `take(int* value)` is what this call means; a reader who sees only the first cannot tell that the analysis
+            // deduced anything. The substitution is whole-word (`types::substituted_spelling`), so `T` does not reach
+            // into `Trait`.
+            let names = cpp_code_analysis::sema::deduction::template_parameters_before(
+                &text,
+                declaration.fact.name_range.start_offset,
+            );
+            let (parameters, _) = declaration
+                .fact
+                .parameter_list
+                .as_deref()
+                .map(cpp_code_analysis::sema::overload::parameters_in)
+                .unwrap_or_default();
+            if let Some(arguments) = session.the_deduced_arguments(view, offset, &names, &parameters) {
+                line = cpp_code_analysis::sema::types::substituted_spelling(&line, &names, &arguments);
+            }
+        }
+        lines.push_str(if is_the_one { "→ " } else { "  " });
+        lines.push_str(&line);
         lines.push('\n');
     }
 
@@ -200,9 +269,15 @@ fn overloads_markdown(
     let mut out = code_block(lines.trim_end());
 
     out.push_str(&format!(
-        "\n`{qualified}` — {} declarations. Which one a call means is decided by the arguments, so they are all \
-         here rather than one of them being guessed at.\n",
-        found.found.len()
+        "\n`{qualified}` — {} declarations. {}\n",
+        found.found.len(),
+        if chosen.is_some() {
+            "The `→` one is what a call here means: the arguments select it, and the others are what a different \
+             argument list would reach."
+        } else {
+            "Which one a call means is decided by the arguments, so they are all here rather than one of them being \
+             guessed at."
+        }
     ));
 
     if found.conditional > 0 {

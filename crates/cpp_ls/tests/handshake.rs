@@ -3301,6 +3301,200 @@ fn parameter_names_are_drawn_at_the_arguments() {
 /// One name covering several declarations is ordinary C++ — `find` in `std::basic_string` is seventeen of them in
 /// MSVC's library — and `null` for all of them is a dead end for the reader. What must *not* happen is the other
 /// mistake: a name with one declaration still answers `Scalar`, so nothing about the common case changes.
+/// **The overload a call means is marked in the hover list.**
+///
+/// Hover on a name with several declarations answers with every signature, because that is what a reader on a callee is
+/// asking. It used to say, in as many words, that *which* one the call means was not decided here — and now it is: the
+/// resolver the checks and the signature popup share picks one, and the chosen line is the one with `→`.
+/// **The chosen template overload is shown instantiated.**
+///
+/// `take(T* value)` is what the declaration says; `take(int* value)` is what this call means, and a reader who sees only
+/// the first cannot tell that the analysis deduced anything. The substitution is whole-word, so `T` does not reach into
+/// a longer name.
+/// **The chosen template overload is shown instantiated** — `take(int* value)` rather than `take(T* value)`.
+///
+/// Two rules had to exist before this could pass: the template arguments are deduced from the call and substituted
+/// (§12, §19), and two templates that deduce to the same types are settled by **partial ordering** — `T*` is more
+/// specialized than `T` (§22). No `→` at all was the earlier measurement: without the names the candidates tie, and a
+/// tie is `Ambiguous`.
+#[test]
+fn the_chosen_template_overload_is_shown_instantiated() {
+    const TAKE_H: &str = "template <typename T> void take(T* value);\ntemplate <typename T> void take(T value);\n";
+    const TAKE_CPP: &str =
+        "#include \"take.h\"\nint g() { int n = 0; int* p = &n; take(p); return 0; }\n";
+
+    let project = Project::new("hover-template-overloads");
+    project.write("take.h", TAKE_H);
+    project.write("main.cpp", TAKE_CPP);
+
+    let mut server = Server::start(project.root());
+    let main_uri = uri_of(&project.root().join("main.cpp"));
+
+    server.request(
+        1,
+        "initialize",
+        json!({
+            "processId": std::process::id(),
+            "rootUri": uri_of(project.root()),
+            "capabilities": {
+                "workspace": { "configuration": true, "didChangeWatchedFiles": { "dynamicRegistration": true } },
+                "window": { "workDoneProgress": true },
+            },
+        }),
+    );
+    server.notify("initialized", json!({}));
+    server.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": { "uri": main_uri, "languageId": "cpp", "version": 1, "text": TAKE_CPP }
+        }),
+    );
+
+    let hovered = hover_over(&mut server, 100, &main_uri, TAKE_CPP, "take(p)");
+    let text = hovered["result"]["contents"]["value"]
+        .as_str()
+        .unwrap_or_else(|| panic!("a markdown answer was expected, got {hovered}"));
+
+    assert!(
+        text.contains("→ "),
+        "an overload is marked as what the call means: {text}"
+    );
+    assert!(
+        text.lines()
+            .any(|line| line.trim_start().starts_with("→ ") && line.contains("int* value")),
+        "and it is shown instantiated — `take(int* value)` rather than `take(T* value)`: {text}"
+    );
+}
+/// **The overload a call means is marked in the list, and the mark is the argument's choice.**
+///
+/// Two measurements stand behind it: asking `signatures_at` from a hover never answered (§18 of `docs/overloads.md`) —
+/// it needs the declaring file parsed as a source of signatures, which a hover on a call does not prepare — and the
+/// fact-based query answers from the declarations the hover already holds.
+/// **The overload a call means is the first location `textDocument/definition` answers.**
+///
+/// The protocol allows a list and a client shows it in order, so the first entry is what a reader who does not pick gets
+/// — and for a call that should be the declaration its arguments select. The three declarations are one per line in the
+/// header, so the line number of the first location says which one was chosen: `parse(1)` must lead with line 0,
+/// `parse("x")` with line 1.
+#[test]
+fn the_definition_of_a_call_leads_with_the_overload_it_means() {
+    const OVERLOADS_H: &str =
+        "int parse(int value);\nint parse(const char* text);\nint parse(double value);\n";
+    const OVERLOADS_CPP: &str = "#include \"overloads.h\"\nint f() { return parse(1); }\n";
+
+    let project = Project::new("definition-overloads-order");
+    project.write("overloads.h", OVERLOADS_H);
+    project.write("main.cpp", OVERLOADS_CPP);
+
+    let mut server = Server::start(project.root());
+    let main_uri = uri_of(&project.root().join("main.cpp"));
+
+    server.request(
+        1,
+        "initialize",
+        json!({
+            "processId": std::process::id(),
+            "rootUri": uri_of(project.root()),
+            "capabilities": {
+                "workspace": { "configuration": true, "didChangeWatchedFiles": { "dynamicRegistration": true } },
+                "window": { "workDoneProgress": true },
+            },
+        }),
+    );
+    server.notify("initialized", json!({}));
+    server.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": { "uri": main_uri, "languageId": "cpp", "version": 1, "text": OVERLOADS_CPP }
+        }),
+    );
+
+    // The cursor goes to `parse` in the call, and the request is repeated until the header has been read — the index is
+    // lazy on purpose.
+    let line = OVERLOADS_CPP
+        .lines()
+        .position(|line| line.contains("parse(1)"))
+        .unwrap_or_default();
+    let character = OVERLOADS_CPP
+        .lines()
+        .nth(line)
+        .and_then(|text| text.find("parse"))
+        .unwrap_or_default();
+
+    let mut first_line = None;
+    for attempt in 0..40 {
+        let answer = server.request(
+            100 + attempt,
+            "textDocument/definition",
+            json!({
+                "textDocument": { "uri": main_uri },
+                "position": { "line": line, "character": character },
+            }),
+        );
+        let locations = answer["result"].as_array().cloned().unwrap_or_default();
+        if locations.len() > 1 {
+            first_line = locations[0]["range"]["start"]["line"].as_u64();
+            break;
+        }
+    }
+
+    assert_eq!(
+        first_line,
+        Some(0),
+        "an `int` argument leads with `int parse(int value);`, which is line 0 of the header"
+    );
+}
+#[test]
+fn the_overload_a_call_means_is_marked_in_the_hover_list() {
+    const OVERLOADS_H: &str = "int parse(int value);\nint parse(const char* text);\n";
+    const OVERLOADS_CPP: &str = "#include \"overloads.h\"\nint f() { return parse(1); }\n";
+
+    let project = Project::new("hover-overloads");
+    project.write("overloads.h", OVERLOADS_H);
+    project.write("main.cpp", OVERLOADS_CPP);
+
+    let mut server = Server::start(project.root());
+    let main_uri = uri_of(&project.root().join("main.cpp"));
+
+    server.request(
+        1,
+        "initialize",
+        json!({
+            "processId": std::process::id(),
+            "rootUri": uri_of(project.root()),
+            "capabilities": {
+                "workspace": { "configuration": true, "didChangeWatchedFiles": { "dynamicRegistration": true } },
+                "window": { "workDoneProgress": true },
+            },
+        }),
+    );
+    server.notify("initialized", json!({}));
+    server.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": { "uri": main_uri, "languageId": "cpp", "version": 1, "text": OVERLOADS_CPP }
+        }),
+    );
+
+    let hovered = hover_over(&mut server, 100, &main_uri, OVERLOADS_CPP, "parse(1)");
+    let text = hovered["result"]["contents"]["value"]
+        .as_str()
+        .unwrap_or_else(|| panic!("a markdown answer was expected, got {hovered}"));
+
+    assert!(
+        text.contains("→ "),
+        "the overload this call means is marked: {text}"
+    );
+    let marked = text
+        .lines()
+        .find(|line| line.trim_start().starts_with("→ "))
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        marked.contains("int value"),
+        "and it is the `int` one, because the argument is an `int`: {marked:?} of\n{text}"
+    );
+}
 #[test]
 fn an_overload_set_answers_with_every_location() {
     const OVERLOADS_H: &str =

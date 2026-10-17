@@ -8,6 +8,9 @@
 //! local to it, [`check`] is the third diagnostics channel: what is **wrong** rather than what was read, and
 //! [`model`] is the **query entry point** — one file's questions, remembered for as long as the request lasts.
 
+pub mod deduction;
+pub mod overload;
+
 pub mod check;
 pub mod declarations;
 pub mod deduce;
@@ -20,4 +23,5 @@ pub mod scopes;
 pub mod symbol;
 pub mod builtins;
 pub mod types;
+
 
