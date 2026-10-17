@@ -77,6 +77,11 @@ pub fn build_facts(
     let out = file.build();
     if std::env::var_os("CPPLS_SUMMARY_TRACE").is_some() {
         eprintln!(
+            "      [facts: names_a_parameter {:.0} ms, on_the_path {:.0} ms]",
+            NAP_NS.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1e6,
+            WALK_NS.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1e6,
+        );
+        eprintln!(
             "      [facts: using_alias_target {:.0} ms, type_of_declaration {:.0} ms]",
             USING_NS.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1e6,
             TD_NS.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1e6,
@@ -246,7 +251,10 @@ fn declared_type_of_with(shapes: &DeclarationShapes, binding: &Binding) -> Optio
     // **Asked once, not once per shape.** This was inside the visitor below, so every shape on the path paid a
     // `names_a_parameter` scan: measured on `arm_neon.h`, that was **1.9 ms per `Variable` binding** — 8.4 s of an
     // 8.5 s summary build — while the answer depends only on the offset, not on the shape.
+    let nap = std::time::Instant::now();
     let name_is_a_parameter = shapes.names_a_parameter(binding.name_range.start_offset);
+    NAP_NS.fetch_add(nap.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+    let walk = std::time::Instant::now();
     shapes.on_the_path(the_offset_to_descend_by(binding), |shape| {
         if let Some(node) = &shape.specifiers {
             specifiers = Some(node.clone());
@@ -277,6 +285,7 @@ fn declared_type_of_with(shapes: &DeclarationShapes, binding: &Binding) -> Optio
             declarator = Some(node.clone());
         }
     });
+    WALK_NS.fetch_add(walk.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
 
     // **A `using` alias writes its type after the `=`**, in a `TypeId` of its own rather than in a declarator:
     // `using size_type = unsigned long;` has a `NameExpr` and a `TypeId` under the declaration and no specifier
@@ -353,12 +362,20 @@ pub struct DeclarationShapes {
     /// from the parent chain: `template <…>` and the class it introduces are *siblings*, and the specifier sequence
     /// between them is not itself a shape.
     templates: Vec<(cpp_parser::SourceRange, CppSyntaxNode)>,
-    /// **The tree these shapes were read from**, kept for the one question that is about an offset's *ancestry*
+    /// **Where the file's parameter lists are**, in document order (so start-offset order), so that
+    /// [`DeclarationShapes::names_a_parameter`] is a binary search rather than a descent from the root.
+    ///
+    /// This replaces the whole tree, which was kept for that one question: `names_a_parameter` then did
+    /// `token_at(root, offset)` — a descent that scans siblings at every level — once per binding. Measured on
+    /// `arm_neon.h`: **2,032 ms of a 2,060 ms build**, on 6,703 bindings.
+    ///
+    /// **The tree these shapes were read from** — retained for the calls above that still read nodes out of it.s *ancestry*
     /// rather than about a shape: whether a name stands inside a parameter list — see
     /// [`DeclarationShapes::names_a_parameter`].
     ///
     /// A reference to a node the caller already owns, so this costs a clone of a handle rather than a walk.
     root: CppSyntaxNode,
+    parameter_lists: Vec<cpp_parser::SourceRange>,
 }
 
 /// One node a question is answered at, and how it is reached.
@@ -428,8 +445,20 @@ impl DeclarationShapes {
         // The `export`ed regions the walk has entered, innermost last — see [`Shape::exported`].
         let mut exports: Vec<usize> = Vec::new();
 
+        let mut parameter_lists: Vec<cpp_parser::SourceRange> = Vec::new();
         for node in root.descendants() {
             let at = cpp_parser::source_range(node.text_range());
+            // Recorded before any skip: a `ParameterList` is not a shape, and this is the only place that sees it.
+            //
+            // **Nested lists are folded into the outer one**, which makes the table disjoint and therefore a plain
+            // binary search at query time. A pre-order walk sees a list before the lists nested inside it, so the last
+            // entry is the only one a new list can be inside of.
+            if CppSyntaxKind::from(node.kind()) == CppSyntaxKind::ParameterList {
+                match parameter_lists.last_mut() {
+                    Some(last) if last.start_offset <= at.start_offset && at.end_offset() <= last.end_offset() => {}
+                    _ => parameter_lists.push(at),
+                }
+            }
 
             // Close every shape this node is not inside; what is left is the chain it belongs to.
             while chain
@@ -572,6 +601,7 @@ impl DeclarationShapes {
             children,
             templates,
             root: root.clone(),
+            parameter_lists,
         }
     }
 
@@ -586,12 +616,15 @@ impl DeclarationShapes {
     /// tree rather than about any node's contents: `typedef void (*F)(int)` also holds a parameter list, and its name
     /// is not inside it, so its type stays the whole `void (*)(int)`.
     pub fn names_a_parameter(&self, offset: usize) -> bool {
-        let Some(token) = cpp_parser::token_at(&self.root, offset) else {
+        // The lists are disjoint and in start order (nested ones were folded into their outer list when the table was
+        // built), so the last one starting at or before the offset is the only candidate.
+        let at = self
+            .parameter_lists
+            .partition_point(|range| range.start_offset <= offset);
+        let Some(index) = at.checked_sub(1) else {
             return false;
         };
-        token
-            .parent_ancestors()
-            .any(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::ParameterList)
+        offset < self.parameter_lists[index].end_offset()
     }
 
     /// How many shapes the file has — what a caller prints when it wants to know whether the walk was worth it.
@@ -4263,3 +4296,7 @@ static QUESTIONS: (
 /// **Temporary** — see `docs/cold-start-cpu.md`: which half of `declared_type_of_with` pays for a `Variable`.
 static USING_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static TD_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// **Temporary** — see `docs/cold-start-cpu.md`.
+static NAP_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static WALK_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);

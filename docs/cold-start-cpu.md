@@ -510,3 +510,79 @@ census tests, and the latency test. The hoist changes when the answer is compute
 
 What is left of the 2.2 s is the next question, and the instrumented blocks that found this are still in the tree behind
 `CPPLS_SUMMARY_TRACE` — they are deleted when that question is answered, not before.
+## The same cold run, before and after the hoist
+
+```text
+                        before            after
+total (chunked)         156,270 ms        116,547 ms      −25%
+toolchain (498 steps)   141,095 ms        101,242 ms      −28%
+the project's own        14,627 ms         14,738 ms      unchanged (as it should be)
+heaviest single step      8,640 ms          3,022 ms      −65%
+the ten heaviest steps        27%               18%      the cost is now spread
+mean per step               139 ms            103 ms
+median                       13 ms             13 ms
+```
+
+**The fix is real and it is bounded.** One line moved out of a visitor; 40 seconds off a cold index; every test still
+green (54 targets, 0 failures); the project's own files unchanged to the millisecond.
+
+What is left is still the same class of question, one level down: a toolchain step is now ~203 ms of a 498-step 101 s.
+Inside `declared_type_of_with`, the two leaf calls are cheap (`using_alias_target` 1 ms, `type_of_declaration` 5 ms for
+the whole file) and `on_the_path` is a binary search per level, so the remaining ~0.3 ms per `Variable` binding is in the
+visitor's **per-shape work** — which is the next thing to time, not the next thing to guess.
+## The second fix: `names_a_parameter` was a descent from the root, once per binding
+
+The same instrument, one level deeper. Inside `declared_type_of_with` the walk was cheap and the two leaf calls were
+cheap; the cost was in the one question that went **back to the tree**:
+
+```text
+[facts: names_a_parameter 2032 ms]   [facts: on_the_path 3 ms]
+[facts: using_alias_target 0 ms]     [facts: type_of_declaration 4 ms]
+```
+
+`names_a_parameter` did `token_at(&self.root, offset)` — a descent that scans siblings at every level — and it was asked
+once per binding: 6,703 × 0.3 ms = 2.0 s on `arm_neon.h`. The struct's own comment said why the tree was kept at all:
+*"kept for the one question that is about an offset rather than about a shape"*. So the answer moved into the table:
+
+```rust
+// in `DeclarationShapes::of`, recorded before any skip (a ParameterList is not a shape):
+// nested lists are folded into the outer one, so the table is disjoint and start-ordered
+if CppSyntaxKind::from(node.kind()) == CppSyntaxKind::ParameterList {
+    match parameter_lists.last_mut() {
+        Some(last) if last.start_offset <= at.start_offset && at.end_offset() <= last.end_offset() => {}
+        _ => parameter_lists.push(at),
+    }
+}
+
+// the query: one binary search and one containment test
+let at = self.parameter_lists.partition_point(|range| range.start_offset <= offset);
+let Some(index) = at.checked_sub(1) else { return false };
+offset < self.parameter_lists[index].end_offset()
+```
+
+Measured, and the guard:
+
+```text
+arm_neon.h                 8,257 ms → 2,200 ms → **131 ms**   (63× overall)
+windows.ui.composition.h   5,302 ms → 2,462 ms →   276 ms    (19× overall)
+full suite                     54 targets, **0 failures** — every summary-content test, the census, the latency test
+```
+
+And the cold index over the real project, three runs of the same command:
+
+```text
+                        as found    after fix 1    after fix 2
+total (chunked)        156,270 ms   116,547 ms     **89,035 ms**   −43%
+toolchain (498 steps)  141,095 ms   101,242 ms      **74,082 ms**   −47%
+the project's own       14,627 ms    14,738 ms         14,398 ms   unchanged
+the heaviest step        8,640 ms     3,022 ms          1,829 ms   −79%
+the ten heaviest             27%          18%              10%      the cost is spread
+mean per step              139 ms       103 ms             79 ms
+```
+
+Two one-line moves — an answer hoisted out of a visitor, an answer precomputed into a table — took **67 seconds** off a
+cold index with no change to what any of them computes.
+
+**What is left**: 74 s over 498 toolchain steps is 149 ms per step, and the next question is what a step spends that on
+now. The instrumented blocks that found both of these are still behind `CPPLS_SUMMARY_TRACE`; they are removed by
+`git diff` as the first task of the next session, because that diff is the only trustworthy list of what was added.
