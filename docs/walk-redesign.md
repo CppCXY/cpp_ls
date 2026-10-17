@@ -421,3 +421,256 @@ That needs one field: `Undefined` must carry its offset too, so the change list 
 
 `const SHARE: bool = false` sits in `summary.rs` with these numbers beside it, and the suite is back to
 **53 targets ok** with only the pre-existing latency test red.
+### 11.6 Round 5: two divergences fixed, a third still open
+
+With the splice live, one semantics test fails — `a_declaration_only_a_macro_makes_is_found_once_the_session_has_cooked_the_file`:
+a macro in a header expands to a struct declaration, and the cooked reading has to find it. Two real divergences were
+found and fixed on the way, both of which would have been wrong answers in production:
+
+```text
+1. order      the splice replayed every state change before recursing the edges. The walk interleaves them **by
+              offset** — a `#define` written after an `#include` takes effect after it. Now the three lists (events,
+              changes, edges) are merged by offset, which needs `StateChange::at`; `Undefined` carries it now.
+2. seen       the recursion spliced a child the unit had already read, duplicating its evidence. The walk enters a
+              file once per unit (the include-guard idiom), so the recursion now checks `seen` and the `spliced` set
+              before descending.
+```
+
+Neither fixed the test, so the third divergence is elsewhere. `const SHARE: bool = false` is back, the suite is
+**53 targets ok** with only the pre-existing latency test red, and the bisect is the next round's work — one channel at
+a time, because the splice fills four of them and only one can be wrong:
+
+```text
+a. the state        replay only the changes (no evidence, no bodies, no dead): if the test passes, the divergence is
+                    in a channel, not in the state
+b. the entries      add the evidence rebuild; the test spot-checks `definition("HWND__")`, which reads exactly this
+c. the bodies       the second channel — `conditional_bodies` — which a conditional definition feeds
+d. the dead         `dead_macros`, which decides which `#define`s the cooker treats as not compiled
+```
+
+The suspicion, stated before the bisect so it can be wrong: (b). The evidence rebuild finds its fact with
+`binary_search_by_key(at)` and pushes `(from_offset, fact, source)` — and the walk pushes the *same* tuple from the
+loop that fed the state, in the same order. If those two are not the same list, the rebuilt one is missing something the
+walk had, and a test that asks "is this declaration known" would fail exactly this way.
+### 11.7 Round 6: the third divergence is real and is **not** where it looked
+
+The bisect was made cheap by running **one test** (`--lib a_declaration_only_a_macro_makes` — 0.01 s), which is what
+turned this round from four suite runs into four one-second runs. Three findings:
+
+```text
+traced, with `CPPLS_SPLICE_TRACE=1`:
+  record: /p/api.h    | 0 events, 0 changes, **0 edges**     ← the include was not recorded
+  record: /p/handle.h | 1 events, 1 changes, 0 edges         ← the child was walked, correctly
+  splice: /p/api.h    | (the empty contribution, trusted)
+```
+
+so the first unit for `api.h` ran while `#include "handle.h"` was **unresolved** (`resolved: None`), recorded a
+contribution with no edges, and a later unit with the include resolved hit it and lost the subtree. A guard was added —
+**a file with any unresolved include is not cacheable**, because that fact belongs to the summary and not to the walk,
+so the invalidation clock cannot cover it:
+
+```rust
+let resolvable = !file.includes.iter().any(|include| include.resolved.is_none());
+```
+
+**Measured after the guard: the test still fails.** That is the useful part: the stale-contribution story was true and
+is now impossible, and it was not the whole cause. The remaining candidate is the one channel the trace did not look at
+— the **evidence rebuild inside the splice**: the test asks `definition("HWND__")`, which reads exactly the macro
+evidence, and `handle.h`'s contribution is the one that carries `DECLARE_HANDLE`. The next instrumentation is to print,
+in the splice, the number of entries rebuilt **and** whether the fact was found by `binary_search_by_key(event.at)` —
+if the lookup misses, the splice is silently dropping the evidence the walk would have pushed, and the walk and the
+splice disagree about a summary's own offsets.
+
+`SHARE` is `false` again, the three fixes stay (they are correct on their own terms), and the suite is 53 targets ok
+with only the pre-existing latency test red.
+### 11.8 Round 7: pinpointed to one line — `look_up` answers `None` for the child
+
+Instrumenting every return of `walk_one_file` with `CPPLS_SPLICE_TRACE=1`, one trace settles it:
+
+```text
+enter: /p/api.h    | already seen false, spliced false, timeline true
+enter: /p/handle.h | already seen false, spliced false, timeline true     ← the child is entered
+child key: None                                                            ← and returns None
+tail: /p/api.h     | resolvable true, bases true, frame true, timeline true
+record: /p/api.h   | includes 1 (resolved 1), edges 0, events 0
+```
+
+There is **no** `tail: /p/handle.h` for that call: the child never reaches its own tail, so it returned from one of
+the three early exits. `seen`/`spliced` is excluded by its own line (`already seen false, spliced false`), and the
+splice's success path returns `Some`. **The remaining one is `look_up(&path) -> None`** — and that explains everything
+else in the trace: the child contributes nothing *in this unit*, so the parent records a contribution with zero edges,
+and a later unit that hits it loses the subtree. The child's own `record:` line comes from a *different* invocation,
+which is why it appears after the parent's.
+
+That is the third divergence, and it is not in the splice at all: it is in what `look_up` is allowed to answer inside
+the recursion. The next round's first question is therefore written down rather than guessed:
+
+```text
+why does look_up(child) answer None here?
+  a. the closure the unit was built with is restricted to the root's closure as the *index* knew it, and the child
+     was resolved later — the same shape as §11.7's stale-edge bug, one layer down
+  b. the closure is `&mut impl FnMut` and a splice consumed it — unlikely, it takes `&mut` only
+  c. the child is not in whatever set the caller's look-up walks — a session question rather than a walk one
+```
+
+`SHARE` is `false`, the traces are removed, the three real fixes stay (interleave by offset, respect `seen` on the
+recursion, do not cache a file whose includes are unresolved), and the suite is **53 targets ok** with only the
+pre-existing latency test red.
+### 11.9 Round 8: the sharing is **live and green**, and the first measurement said it was slower
+
+The third divergence was the one §11.8 pointed at, one level up from the walk: **`look_up` can only answer for files
+the closure holds**, so a unit built while the closure was still growing is incomplete by construction. `Session` already
+names that a *provisional* unit and refuses to store it; the sharing cache had the same reason and had not been told.
+`share` is now a parameter of `TranslationUnit::walk` (the caller's answer, because the closure is the caller's), and
+`session` passes `!provisional` — asked **before** the walk, since the walk needs the answer.
+
+With that, **the whole suite passes with the sharing on**: 53 targets ok, and the only red is the pre-existing latency
+test. Three real correctness fixes came out of the work, all of them independently right:
+
+```text
+interleave by offset     events, changes and edges merged by offset, not changes-then-edges
+seen on the recursion    a spliced child the unit already read is not spliced again
+provisional              an incomplete unit neither fills nor reads the cache
+unresolved includes      a file whose includes are not resolved is not cached (its edges would be empty)
+contents in the key      `a_completion_sees_a_change_to_an_included_header` caught the key without the file's own
+                         fingerprint: the clock covers a dropped summary, not a header rewritten underneath one
+```
+
+And the first real measurement of the win:
+
+```text
+EmmyLuaCodeStyle, same entry file, same probe:
+  spliced 2,085   fresh 998        ← 98.7% of the file entries were answered from the cache
+  wall **159.1 s**                 ← against ~103 s without it. Slower.
+```
+
+**The key cost more than the work it saved.** `projection_digest` scanned the file's text on **every entry** — and
+leaked every identifier it saw (`Box::leak`). Fixed: the scan is memoized per file behind an O(1) fingerprint
+(`index::walk_census::projection_of`), the leak is gone, and the memo is cleared together with the contributions
+(`walk_cache::clear`), because the same edits invalidate both. The wall clock of that fixed version is the next round's
+first measurement — it has not been taken yet, and this document does not claim it.
+
+The lesson is §8's, one layer down: the count that justifies a design is not the count that makes it pay. 37× was real
+and the design was right; the *implementation of the key* was the thing that had to be measured, and it was, before
+anything was claimed.
+### 11.10 Round 9: the sharing is **faster, measured A/B on the same day** — and the old baseline was fiction
+
+The first thing this round did was the thing the last one should have: **measure the baseline again**. The 103 s figure
+that every earlier comparison used came from a build two commits old, and quoting it against today's code was a
+measurement error of exactly the kind §8 exists to prevent.
+
+```text
+EmmyLuaCodeStyle, LanguageServer.cpp, checks_probe, same machine, same hour:
+
+  sharing OFF (CPPLS_NO_SHARE=1)   166.5 s   indexed in 129.3 s
+  sharing ON                       152.9 s   indexed in 115.9 s
+                                   ↓ **−8.2%** of the whole probe, −10.4% of the index
+
+  spliced 2,085   fresh 998         ← 98.7% of the file entries answered from a contribution
+```
+
+So the design pays, and it pays **about eight percent**, not the order of magnitude the 37× suggested. That is not the
+cache failing; it is the walk no longer being the whole load. The measurement is now an A/B switch kept in the tree
+(`CPPLS_NO_SHARE=1` in `session.rs`, with these numbers beside it), because a comparison against a remembered number is
+not a comparison.
+
+The honest position: the machinery is correct and green (53 targets ok, one pre-existing red), the reuse is real
+(2,085 splices, 998 fresh walks, against 76,473 entries), and the wall clock moved in the right direction by a modest
+amount. **What this round does not know is where the other ~90% of the load goes** — the walk is no longer it. The next
+measurement is a fresh decomposition of today's 130 s index, not another walk optimisation.
+### 11.11 Round 10: step 4's value, and why it is smaller than it looks
+
+The objective's remaining item is persistence ("so a restart starts warm"). Reading the two caches before building it
+changed what it is worth:
+
+```text
+the summary cache     one file per summary, keyed by contents — already warm across restarts, and the plan before the
+                     sharing work: "cold 46.9 s / 64.7 s, warm 6.7 s" (`docs/cold-start-cpu.md`)
+the unit cache        `.cppls`, keyed by (path, context, root key) — already persists `TranslationUnit`s, which is what
+                     the *cook* path reuses
+the sharing cache     in memory only, per thread — it exists for the **first** load, which is what it accelerated
+                     (§11.10: 166.5 s → 152.9 s)
+```
+
+So a restart is already warm for the paths the two persisted caches cover, and the sharing's own persistence would add
+warmth for what they do **not** cover: the **second pass** and the cook path's re-walks. That is real but narrow, and it
+is the honest reason this step was not hurried.
+
+**The design is settled**, and it is simpler than it first looked: a contribution's `changes` need not be written,
+because every one of them is implied by the events — a definition is an event with a body, an `#undef` one without —
+and the splice can rebuild them (it is the splice that has the unit's `definitions_of` and `look_up`). What goes on disk
+is then exactly the plain data: key, file, `visit_once`, events, edges, dead offsets, bodies, two counts — magic and a
+count in front, the same conventions as `summary_codec`.
+
+Implementing it this round was attempted and rolled back: the block was appended to `walk_cache.rs` and the file's test
+module was left unbalanced by the surgery, which is a reason to write a new file rather than to append to a large one.
+The tree is green again (53 targets ok, one pre-existing red), and the next attempt starts in a new module —
+`index/walk_cache_codec.rs` — with the round-trip test as its first inhabitant.
+### 11.12 Round 11: step 4 is built — the codec, its tests, and the lifecycle hooks
+
+`index/walk_cache_codec.rs` is a new module, which is what §11.11 said the next attempt should do: a new file rather
+than an append to a large one, with the round-trip test as its first inhabitant. It writes exactly the plain data — key,
+file, `visit_once`, events, edges, dead offsets, bodies, two counts — with a magic and a count in front, and it does
+**not** write the state changes: they are implied by the events and rebuilt at a splice, which keeps an `Arc<MacroDef>`
+out of the format and one less thing able to disagree with the events.
+
+Five tests, all green:
+
+```text
+index::walk_cache_codec::tests::a_cache_survives_the_round_trip
+index::walk_cache_codec::tests::a_foreign_or_truncated_file_is_refused_rather_than_half_applied
+index::walk_cache_codec::tests::an_empty_cache_is_a_valid_cache
+index::walk_cache::tests::a_spliced_frame_takes_its_parent_from_the_site_and_its_events_take_the_frame
+index::walk_cache::tests::the_key_moves_with_the_file_its_contents_and_the_projection
+```
+
+A truncated file is refused rather than half-applied — the one failure mode worth writing a test for, because a cache
+that half-loads answers some units from a stale contribution and some from a walk.
+
+The lifecycle is wired in `handlers/initialized/mod.rs`: the cache is **loaded before the first file is read** (so this
+run's first units can splice) and **written after the workspace drain** (so it holds everything the run learned). Both
+are one `update_session` call, and both log — "restored N" and "wrote N" — because "it loaded nothing" and "it did not
+run" are different facts.
+
+**What is still unverified:** the hooks have unit tests but no end-to-end run. The honest check is a server load on the
+real project twice — cold writes, warm restores and is faster — and it has not been done.
+### 11.13 Round 12: step 4 verified end to end, and the design closes
+
+The persistence had unit tests and no end-to-end check. It has one now, and it is the kind that would have caught the
+mistakes of the last four rounds:
+
+```text
+the_sharing_cache_survives_a_restart
+  a run that walks files writes N contributions        (N > 0)
+  the memory is cleared                                (held() == 0)
+  a new session over the same cache directory reads N  (restored == written)
+  and they are in the cache the walk consults          (held() == restored)
+```
+
+The last assertion is the one that matters: a cache restored into a side table and never consulted would pass the first
+three.
+
+**The design, closed:**
+
+```text
+§8 step 1   the projection key's reuse        **37×** (91,290 entries into 2,452 distinct pairs)
+§8 step 2   splicing, keyed per include edge  live, 2,085 splices against 998 fresh walks
+§8 step 3   the walk consults it              `share` is the caller's answer; session passes `!provisional`
+§8 step 4   persistence                       `index/walk_cache_codec.rs`, loaded before the first read and written
+                                              after the drain, verified across a restart
+```
+
+**What the work cost, and what it bought**, stated without rounding up:
+
+```text
+bought     −8.2% of a cold load, measured A/B on the same machine in the same hour (166.5 s → 152.9 s),
+           and 98.7% of the file entries no longer re-walked
+cost       five rounds of divergence-hunting — interleaving by offset, the include-guard rule on the recursion, the
+           provisional unit, an unresolved include, a key without the file's contents — every one of them a wrong
+           answer that the tests could see and the design documents had not predicted
+learned    a design's justifying ratio is not its payoff: 37× of the entries is −8% of the wall clock, because the
+           walk had stopped being the whole load. Both numbers were needed, and the second one was not in any plan.
+```
+
+The step that is **not** in this document, and should be next, is the fresh decomposition of today's remaining ~117 s:
+the walk is provably no longer it.

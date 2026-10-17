@@ -34,6 +34,7 @@
 // rather than a green build bought by deleting the tests.
 #[allow(dead_code)]
 pub mod walk_cache;
+pub mod walk_cache_codec;
 
 use std::path::{Path, PathBuf};
 

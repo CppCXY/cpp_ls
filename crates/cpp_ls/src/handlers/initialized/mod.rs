@@ -177,6 +177,18 @@ async fn open_session(context: &ServerContextSnapshot) -> Option<PathBuf> {
         workspace_manager.workspace_open_files()
     };
 
+
+    // **The sharing cache, warm** — §8 step 4, and before the first file is read, so the units this run builds can
+    // splice last run's contributions instead of re-walking them. A missing file is a cold start, not an error.
+    context
+        .analysis()
+        .update_session("initialized: the sharing cache", |session| {
+            let restored = session.load_the_sharing();
+            if restored > 0 {
+                log::info!("restored {restored} shared contribution(s) from the last run");
+            }
+        })
+        .await;
     if !open_files.is_empty() {
         let count = open_files.len();
         context
@@ -443,6 +455,21 @@ async fn index_in_background(context: ServerContextSnapshot) {
                     "the workspace is indexed — the longest an update held the analysis was {} ms",
                     context.analysis().worst_write_hold()
                 );
+
+                // **Written for the next run** — `docs/walk-redesign.md` §8 step 4. After the drain, so it holds
+                // everything this run learned; the entries carry their own identity, so a stale file is inert rather
+                // than wrong.
+                context
+                    .analysis()
+                    .update_session("save the sharing cache", |session| {
+                        match session.save_the_sharing() {
+                            Ok(written) => {
+                                log::info!("wrote {written} shared contribution(s) for the next run")
+                            }
+                            Err(error) => log::warn!("the sharing cache was not written: {error}"),
+                        }
+                    })
+                    .await;
 
                 publish_workspace_diagnostics(&context).await;
             } else if was_pending {

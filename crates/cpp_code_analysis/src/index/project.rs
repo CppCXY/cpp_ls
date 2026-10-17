@@ -8912,6 +8912,7 @@ mod tests {
             },
             &crate::Marked::default(),
             &mut definitions,
+            false,
         );
         let (tokens, _) = cpp_parser::lex(source, &cpp_parser::LexerConfig::default());
         let unit_definitions = unit.definitions();
@@ -12965,6 +12966,7 @@ fn the_alias_behind(index: &ProjectIndex, declaring: &Path, written: &str) -> Op
 
     Some((named.trim().to_string(), member.trim().to_string()))
 }
+
 
 
 

@@ -1,145 +1,170 @@
 #![allow(dead_code)]
-//! **The projection's reuse ratio** — the one number `docs/walk-redesign.md` says stands between the sharing design
-//! and abandoning it.
+//! **The projection's reuse ratio, and the memo that makes it cheap** — the number `docs/walk-redesign.md` says stands
+//! between the sharing design and abandoning it, and the key it is measured with.
 //!
-//! # What is being counted, and why this key
+//! # The key, and why it is a projection
 //!
 //! The design's first key was the **whole environment**: the set of names in force when a file is entered. Measured
-//! (`docs/walk-redesign.md` §9, §10): it is a key that never repeats — every root defines its own macros before it
-//! reaches a shared header, so 99,238 entries fell into 67,554 pairs and the cache would have bought **1.5×**.
+//! (`docs/walk-redesign.md` §9, §10): it never repeats — every root defines its own macros before it reaches a shared
+//! header, so 99,238 entries fell into 67,554 pairs and a cache would have bought **1.5×**.
 //!
-//! The refinement is a *projection*: a file's conditions do not depend on the whole set in force, only on the **names
-//! those conditions mention**.
+//! The refinement is a projection: a file's conditions depend only on the **names those conditions mention**.
 //!
 //! ```text
 //! #if defined(_STD_BEGIN) || _HAS_CXX20      depends on two names, and on nothing the root did
 //! ```
 //!
-//! A root that defines `MY_FEATURE` before including `<string>` changes the environment and not this projection, so
-//! the entry still hits. That is the same idea clangd uses when it hashes what a preamble *uses*.
+//! A root that defines `MY_FEATURE` before including `<string>` changes the environment and **not** this projection, so
+//! the entry still hits. Measured on EmmyLuaCodeStyle: **91,290 entries into 2,452 distinct pairs — 37×** (§11).
 //!
-//! # What is counted, exactly
+//! # The names come from the file's own text
 //!
-//! * **entries** — every file the walk enters, which is the work that would be skipped on a hit;
-//! * **distinct (file, projection)** — the entries that could not hit, which is the work that would remain.
+//! Not from a walk and not from a summary: the identifiers on the file's `#if` / `#ifdef` / `#ifndef` / `#elif` lines,
+//! by the preprocessor's own syntax. The scan is deliberately **wider** than the true dependency (every identifier on
+//! the line, `defined` included), and a wider key makes fewer hits — so a ratio measured this way is a floor.
 //!
-//! An entry's key is the file plus, for each name its conditions mention, **whether it is defined at that moment**.
-//! Definedness and not the definition, because that is what the walk itself carries: `UnitState`'s own note says the
-//! walk answers with definedness and not with values.
+//! # Why the memo exists, measured
 //!
-//! # The names, read statically
+//! The first version scanned the text on **every entry** and leaked every identifier it saw. With the cache skipping
+//! 98.7% of the walks the load still went from **103 s to 159 s**: the key cost more than the work it saved. So the
+//! scan is memoized per file behind a fingerprint that is O(1) in the file's size, and is cleared with the
+//! contributions — the same edits invalidate both.
 //!
-//! From the file's own text, by the preprocessor's own syntax: the identifiers on its `#if` / `#ifdef` / `#ifndef` /
-//! `#elif` lines. No walk, no summary, no coordinates — which is what makes the key something a cache could compute
-//! before deciding whether to walk at all.
+//! # The counters
 //!
-//! Stated in the safe direction: the scan is slightly **wider** than the conditions' true dependencies (it takes every
-//! identifier on the line, including keywords and macro *bodies*), and a wider key makes **fewer** hits. A ratio
-//! measured this way is therefore a floor, not an estimate.
-//!
-//! # Why this is a probe and not a cache
-//!
-//! `docs/walk-redesign.md` §8 says the count comes first, and §10 says what skipping it cost. So this counts and
-//! prints, holds no answers, and is deleted once the number is in — including the counters, because a cache that
-//! cannot hit is worse than no cache: it *looks* like the fix.
+//! `entries` is every file the walk enters; `distinct` is how many could not be skipped; `spliced` is how many were
+//! answered from a contribution and `fresh` how many were really walked. A probe reports them (`CPPLS_WALK_CENSUS=1`),
+//! and the line is printed on every entry so that "it did not run" is never readable as "it measured zero".
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
-/// Is the census on? Read **once** — a probe that reads its environment per entry is a probe that measures itself.
+/// Is the census on? Read **once** — a probe that reads its environment per entry measures itself.
 fn enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("CPPLS_WALK_CENSUS").is_some())
 }
 
 static ENTRIES: AtomicU64 = AtomicU64::new(0);
-/// How many entries were answered by **splicing** a shared contribution instead of walking.
 static SPLICED: AtomicU64 = AtomicU64::new(0);
-/// How many entries were actually walked — the number the sharing is supposed to drive toward the distinct count.
 static FRESH: AtomicU64 = AtomicU64::new(0);
-static UNITS: AtomicU64 = AtomicU64::new(0);
 
 fn distinct() -> &'static Mutex<HashSet<u64>> {
     static SEEN: OnceLock<Mutex<HashSet<u64>>> = OnceLock::new();
     SEEN.get_or_init(|| Mutex::new(HashSet::new()))
 }
 
+thread_local! {
+    /// The names each file's conditions mention, keyed by path and a cheap fingerprint — see [`projection_of`].
+    static PROJECTIONS: std::cell::RefCell<HashMap<std::path::PathBuf, (u64, Arc<Vec<(Box<str>, u64)>>)>> =
+        std::cell::RefCell::new(HashMap::new());
+}
+
 /// **One file entered** — count it, and print the running totals.
-///
-/// `definitions` is the walk's own table of names in force: a name is "defined" when the table holds it. The entries
-/// are what a cache would skip; the distinct keys are what it would still walk.
-pub(crate) fn entered(
-    path: &std::path::Path,
-    source: &str,
-    defined: impl Fn(&str) -> bool,
-) {
+pub(crate) fn entered(path: &std::path::Path, source: &str, defined: impl Fn(&str) -> bool) {
     if !enabled() {
         return;
     }
 
-    let digests = projection(source);
-    let mut key = self::hash(path.to_string_lossy().as_bytes());
-    for (name, hash) in &digests {
-        // Definedness, and only definedness: a `#define X 1` and a `#define X 2` are the same answer to every
-        // condition that asks about `X`.
-        key = key.rotate_left(5) ^ hash ^ if defined(name.as_str()) { 0x9e37 } else { 0 };
+    let mut key = hash(path.to_string_lossy().as_bytes());
+    for (name, hash) in projection_of(path, source).iter() {
+        // Definedness, and only definedness: `#define X 1` and `#define X 2` answer every condition about `X` alike.
+        key = key.rotate_left(5) ^ hash ^ if defined(name) { 0x9e37 } else { 0 };
     }
 
     ENTRIES.fetch_add(1, Ordering::Relaxed);
-    let mut seen = distinct().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    seen.insert(key);
-    let distinct_now = seen.len() as u64;
+    let distinct_now = {
+        let mut seen = distinct()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        seen.insert(key);
+        seen.len() as u64
+    };
     let entries = ENTRIES.load(Ordering::Relaxed);
-
-    // Printed on **every** entry rather than only at the end: the library has no "the load is over" hook, the last
-    // line has the totals, and 1122 lines is nothing beside what they measure.
-    let spliced = SPLICED.load(Ordering::Relaxed);
-    let fresh = FRESH.load(Ordering::Relaxed);
     eprintln!(
-        "census: entries {entries} distinct {distinct_now} ratio {:.2} | spliced {spliced} fresh {fresh}",
-        entries as f64 / distinct_now.max(1) as f64
+        "census: entries {entries} distinct {distinct_now} ratio {:.2} | spliced {} fresh {}",
+        entries as f64 / distinct_now.max(1) as f64,
+        SPLICED.load(Ordering::Relaxed),
+        FRESH.load(Ordering::Relaxed),
     );
 }
 
-/// **One entry answered by a splice** — see `index::walk_cache`.
+/// **One entry answered by a splice**.
 pub(crate) fn a_splice() {
     if enabled() {
         SPLICED.fetch_add(1, Ordering::Relaxed);
     }
 }
 
-/// **One entry walked for real**, so that the two can be read against each other in the census line.
+/// **One entry walked for real**, so the two can be read against each other.
 pub(crate) fn a_fresh_walk() {
     if enabled() {
         FRESH.fetch_add(1, Ordering::Relaxed);
     }
 }
 
-/// **Announce a unit**, so the totals can be read against how many walks produced them.
-pub(crate) fn unit() {
-    if enabled() {
-        let units = UNITS.fetch_add(1, Ordering::Relaxed) + 1;
-        if units % 200 == 0 {
-            let entries = ENTRIES.load(Ordering::Relaxed);
-            let distinct_now = distinct().lock().map(|seen| seen.len()).unwrap_or(0) as u64;
-            eprintln!(
-                "census: after {units} unit(s), entries {entries} distinct {distinct_now} ratio {:.2}",
-                entries as f64 / distinct_now.max(1) as f64
-            );
-        }
+/// **The projection's digest against the names in force** — the key `index::walk_cache` files a contribution under.
+pub(crate) fn projection_digest(
+    path: &std::path::Path,
+    source: &str,
+    defined: impl Fn(&str) -> bool,
+) -> u64 {
+    let mut digest: u64 = 0xcbf2_9ce4_8422_2325;
+    for (name, hash) in projection_of(path, source).iter() {
+        let value = hash ^ if defined(name) { 0x9e37_79b9_7f4a_7c15 } else { 0 };
+        digest = digest.rotate_left(5) ^ value;
     }
+    digest
 }
 
-/// **The names this file's conditions mention**, deduplicated, with a hash of each.
+/// **The names a file's conditions mention**, memoized — see the module documentation for the 103 s → 159 s that made
+/// the memo necessary.
+pub(crate) fn projection_of(path: &std::path::Path, source: &str) -> Arc<Vec<(Box<str>, u64)>> {
+    if path.as_os_str().is_empty() {
+        return Arc::new(scan(source));
+    }
+
+    let fingerprint = fingerprint_of(source);
+    let hit = PROJECTIONS.with(|held| {
+        held.borrow()
+            .get(path)
+            .filter(|(known, _)| *known == fingerprint)
+            .map(|(_, names)| names.clone())
+    });
+    if let Some(hit) = hit {
+        return hit;
+    }
+
+    let names = Arc::new(scan(source));
+    PROJECTIONS.with(|held| {
+        held.borrow_mut()
+            .insert(path.to_path_buf(), (fingerprint, names.clone()));
+    });
+    names
+}
+
+/// **Forget the memo** — called with the contributions, because the same edits invalidate both.
+pub(crate) fn forget_projections() {
+    PROJECTIONS.with(|held| held.borrow_mut().clear());
+}
+
+/// A length-and-edges fingerprint: O(1) in the file's size, and enough to notice a change a *cheap* check can see.
+fn fingerprint_of(source: &str) -> u64 {
+    let mut hash = source.len() as u64;
+    for byte in source.as_bytes().chunks(64).take(4).flatten() {
+        hash = hash.rotate_left(5) ^ u64::from(*byte);
+    }
+    hash
+}
+
+/// **The scan itself**: the identifiers on a file's conditional lines, deduplicated, each with its hash.
 ///
-/// By the preprocessor's syntax rather than by a parse: a line whose first token is `#` and whose next is `if`,
-/// `ifdef`, `ifndef` or `elif`. Identifiers are taken as runs of `[A-Za-z0-9_]` that start with a letter or `_` — a
-/// narrower rule would miss a name, and a missing name makes the key **coarser** than the truth, which is the
-/// direction that would flatter the ratio.
-fn projection(source: &str) -> Vec<(String, u64)> {
-    let mut names: Vec<(String, u64)> = Vec::new();
-    let mut seen: HashSet<&str> = HashSet::new();
+/// By the preprocessor's syntax rather than by a parse — a line whose first token is `#` and whose next is `if`,
+/// `ifdef`, `ifndef` or `elif`.
+fn scan(source: &str) -> Vec<(Box<str>, u64)> {
+    let mut names: Vec<(Box<str>, u64)> = Vec::new();
+    let mut seen: HashSet<Box<str>> = HashSet::new();
 
     for line in source.lines() {
         let trimmed = line.trim_start();
@@ -155,20 +180,18 @@ fn projection(source: &str) -> Vec<(String, u64)> {
             continue;
         }
 
-        let words = after_hash[directive.len()..].chars();
         let mut word = String::new();
-        let flush = |word: &mut String, names: &mut Vec<(String, u64)>, seen: &mut HashSet<&str>| {
-            if word.is_empty() {
-                return;
-            }
-            // A name that only appears once per directive still belongs in the key; the set is what matters.
-            if seen.insert(Box::leak(word.clone().into_boxed_str())) {
-                let hash = self::hash(word.as_bytes());
-                names.push((word.clone(), hash));
-            }
-            word.clear();
-        };
-        for character in words {
+        let flush =
+            |word: &mut String, names: &mut Vec<(Box<str>, u64)>, seen: &mut HashSet<Box<str>>| {
+                if word.is_empty() {
+                    return;
+                }
+                if seen.insert(Box::from(&**word)) {
+                    names.push((Box::from(&**word), hash(word.as_bytes())));
+                }
+                word.clear();
+            };
+        for character in after_hash[directive.len()..].chars() {
             if character.is_alphanumeric() || character == '_' {
                 word.push(character);
             } else {
@@ -181,8 +204,7 @@ fn projection(source: &str) -> Vec<(String, u64)> {
     names
 }
 
-/// A 64-bit hash with no dependency and no state: FNV-1a, which is the same everywhere and therefore the same across
-/// the two runs a ratio is compared between.
+/// FNV-1a: no dependency, no state, and the same everywhere — so two runs are comparable.
 pub(crate) fn hash(bytes: &[u8]) -> u64 {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for byte in bytes {
@@ -191,23 +213,4 @@ pub(crate) fn hash(bytes: &[u8]) -> u64 {
     }
     hash
 }
-/// **The projection's digest for a file, against the names in force** — the key `index::walk_cache` files a
-/// contribution under.
-///
-/// The same scanner §11's ratio was measured with, so that what the cache keys on and what the ratio describes are one
-/// thing rather than two: the identifiers on the file's own conditional lines, each contributing *definedness* and
-/// nothing else. `defined` is the unit's own table, asked per name.
-// **Wired in by the splice** — `docs/walk-redesign.md` §11.2 step 4. Unused until then, and allowed rather than
-// removed: it is the second half of the cache key, and its test is the ratio in §11.
-#[allow(dead_code)]
-pub(crate) fn projection_digest(source: &str, defined: impl Fn(&str) -> bool) -> u64 {
-    let mut digest: u64 = 0xcbf2_9ce4_8422_2325;
-    for (name, hash) in projection(source) {
-        let value = hash ^ if defined(&name) { 0x9e37_79b9_7f4a_7c15 } else { 0 };
-        digest = digest.rotate_left(5) ^ value;
-    }
-    digest
-}
-
-
 

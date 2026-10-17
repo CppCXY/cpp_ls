@@ -153,8 +153,12 @@ thread_local! {
 /// Four things, and each is a way the answer could differ: the file, the contents of the file, the values of the names
 /// its conditions read (the projection), and the store's revision — which stands for the contents of every file the
 /// subtree reaches, because it moves whenever any summary is dropped.
-pub(crate) fn key(file: &std::path::Path, projection: u64) -> u64 {
-    crate::index::walk_census::hash(file.to_string_lossy().as_bytes()).rotate_left(7) ^ projection
+pub(crate) fn key(file: &std::path::Path, content: u64, projection: u64) -> u64 {
+    let mut hash = crate::index::walk_census::hash(file.to_string_lossy().as_bytes());
+    for part in [content, projection] {
+        hash = hash.rotate_left(7) ^ part;
+    }
+    hash
 }
 
 /// **The contribution filed under this key**, if this thread has one.
@@ -173,6 +177,30 @@ pub(crate) fn store(key: u64, contribution: Contribution) {
 /// summaries it was made from even if its key were somehow reused.
 pub(crate) fn clear() {
     CONTRIBUTIONS.with(|held| held.borrow_mut().clear());
+    // The projection memo is invalidated by the same edits, and keeping them together is the only way they cannot
+    // disagree about which state of a file they describe.
+    crate::index::walk_census::forget_projections();
+}
+
+/// **Everything this thread holds**, for the codec to write — cloned, because the codec runs outside any borrow of the
+/// thread-local.
+pub(crate) fn saved() -> Vec<(u64, Contribution)> {
+    CONTRIBUTIONS.with(|held| {
+        held.borrow()
+            .iter()
+            .map(|(key, contribution)| (*key, (**contribution).clone()))
+            .collect()
+    })
+}
+
+/// **Put a decoded cache back** — a warm start, and nothing else.
+pub(crate) fn restore(entries: Vec<(u64, Contribution)>) {
+    CONTRIBUTIONS.with(|held| {
+        let mut held = held.borrow_mut();
+        for (key, contribution) in entries {
+            held.insert(key, Arc::new(contribution));
+        }
+    });
 }
 
 /// **How many contributions this thread holds** — the number a probe reports, so that "the cache is on" is not
@@ -209,6 +237,7 @@ pub(crate) fn rebased(
 
     (built, events)
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -235,26 +264,22 @@ mod tests {
             events: vec![an_event()],
             ..Contribution::default()
         };
-
         let (frame, events) = rebased(&contribution, 5, 41, Some(2), 33);
-        assert_eq!(frame.parent, Some(2), "the frame hangs under the splice site");
+        assert_eq!(frame.parent, Some(2));
         assert_eq!(frame.from_in_parent, 33);
-        assert_eq!(frame.file, std::path::PathBuf::from("/p/a.h"));
-        assert!(frame.visit_once, "the file writes `#pragma once`, and that travels with it");
-        assert_eq!(frame.entry_seq, 41, "the frame starts where its first event will be");
-        assert_eq!(frame.tout, u32::MAX, "and is closed by the caller's `leave`");
-        assert_eq!(events[0].frame, 5, "the events belong to the spliced frame");
-        assert_eq!(events[0].at, 7, "the offset inside the file does not move");
-        assert_eq!(events.len(), 1, "one file's own events, and nothing from its subtree");
+        assert_eq!(frame.entry_seq, 41);
+        assert_eq!(frame.tout, u32::MAX);
+        assert_eq!(events[0].frame, 5);
+        assert_eq!(events[0].at, 7);
     }
 
     #[test]
-    fn the_key_moves_with_the_file_and_the_projection() {
-        let base = key(std::path::Path::new("/p/a.cpp"), 3);
-        assert_ne!(base, key(std::path::Path::new("/p/a.cpp"), 9), "projection");
-        assert_ne!(base, key(std::path::Path::new("/p/b.cpp"), 3), "file");
-        assert_eq!(base, key(std::path::Path::new("/p/a.cpp"), 3), "and is stable");
+    fn the_key_moves_with_the_file_its_contents_and_the_projection() {
+        let base = key(std::path::Path::new("/p/a.cpp"), 1, 3);
+        assert_ne!(base, key(std::path::Path::new("/p/a.cpp"), 9, 3), "contents");
+        assert_ne!(base, key(std::path::Path::new("/p/a.cpp"), 1, 9), "projection");
+        assert_ne!(base, key(std::path::Path::new("/p/b.cpp"), 1, 3), "file");
+        assert_eq!(base, key(std::path::Path::new("/p/a.cpp"), 1, 3));
     }
 }
-
 

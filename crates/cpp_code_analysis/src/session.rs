@@ -111,6 +111,8 @@ use crate::symbol::{Known, UnknownReason};
 // is what it calls), and this is the count that call passes — kept here because the number is a property of cooking
 // rather than of a language server: one file is a render and a parse of it, measured at 9–269 ms on MSVC's headers.
 #[allow(dead_code)]
+/// The sharing cache's file name inside the cache directory — see [`Session::save_the_sharing`].
+const SHARING_FILE: &str = "sharing.bin";
 const COOK_SLICE: usize = 4;
 
 /// **Where one `diagnostics` call spent its time**, on `CPPLS_TRACE_DIAGNOSTICS=1`.
@@ -2561,6 +2563,41 @@ impl<F: FileProvider + Clone> Session<F> {
         self.cooking.len()
     }
 
+    /// **Write the sharing cache** next to the summaries, so that the next run starts warm — §8 step 4.
+    ///
+    /// One file, `<cache>/sharing.bin`. Its entries carry their own identity (the file's fingerprint and the projection
+    /// of its conditions), so a stale file cannot answer a different question — it simply fails to hit.
+    pub fn save_the_sharing(&self) -> std::io::Result<usize> {
+        use crate::index::{walk_cache, walk_cache_codec};
+
+        let entries = walk_cache::saved();
+        let written = entries.len();
+        std::fs::write(
+            self.store.cache_directory().join(SHARING_FILE),
+            walk_cache_codec::encode(&entries),
+        )?;
+        Ok(written)
+    }
+
+    /// **Read the sharing cache back**, if this run's cache directory holds one.
+    ///
+    /// A missing or unreadable file is a cold start, not an error: the cache is an accelerator and the walk is always
+    /// correct without it. Say how many entries were restored, because "it loaded nothing" and "it did not run" are
+    /// different facts and only one of them is interesting.
+    pub fn load_the_sharing(&self) -> usize {
+        use crate::index::{walk_cache, walk_cache_codec};
+
+        let Ok(bytes) = std::fs::read(self.store.cache_directory().join(SHARING_FILE)) else {
+            return 0;
+        };
+        let Some(entries) = walk_cache_codec::decode(&bytes) else {
+            return 0;
+        };
+        let restored = entries.len();
+        walk_cache::restore(entries);
+        restored
+    }
+
     /// Is this file's summary in the index — the question [`Session::pending`] answers for the whole project.
     pub fn is_indexed(&self, path: impl AsRef<Path>) -> bool {
         self.store.index().summary(path.as_ref()).is_some()
@@ -3371,6 +3408,9 @@ impl<F: FileProvider + Clone> Session<F> {
                     // An `Arc` from the start, because a shared timeline hands the *same* value to every root that
                     // asks for it: `TranslationUnit` is not `Clone` and does not need to be — the units table has
                     // always held `Arc`s, and this is the same value reaching more callers.
+                    // **Is the closure still growing?** Asked *before* the walk, because a unit whose closure can still
+                    // grow is incomplete by construction: it must neither fill the sharing cache nor read from it.
+                    let provisional = self.closure_is_still_growing(&closure, &closure_by_key);
                     let walked = std::sync::Arc::new({
                         crate::TranslationUnit::walk(
                             root,
@@ -3381,6 +3421,11 @@ impl<F: FileProvider + Clone> Session<F> {
                             },
                             index.macros(),
                             &mut definitions,
+                            // **A/B switch, kept**: `CPPLS_NO_SHARE=1` turns the sharing off so that the same machine,
+                            // the same day and the same entry file can be measured with and without it. Comparing
+                            // against a wall clock from an older build is how a 103 s figure got quoted for a code
+                            // base it no longer described.
+                            !provisional && std::env::var_os("CPPLS_NO_SHARE").is_none(),
                         )
                     });
 
@@ -3388,7 +3433,6 @@ impl<F: FileProvider + Clone> Session<F> {
                     // closure could not offer is either outside the analysis — the permanent reading, and the one
                     // the walk's own early return documents — or *not yet read*, which is a fact about the queue and
                     // not about the file. See [`HeldUnit`] for what storing the second kind cost.
-                    let provisional = self.closure_is_still_growing(&closure, &closure_by_key);
 
                     if !provisional {
                         // Written for the **next run**.
@@ -6029,6 +6073,38 @@ mod tests {
     /// a macro-shaped scope and of a body written in another file, and it is why this test is about a declaration
     /// the file does not write at all rather than about one it writes.)
     #[test]
+    fn the_sharing_cache_survives_a_restart() {
+        let handle = "#define DECLARE_HANDLE(name) struct name##__ { int unused; };\n";
+        let source = "#include \"handle.h\"\nDECLARE_HANDLE(HWND);\n";
+        let files = MemoryFiles::new()
+            .with_file("/p/handle.h", handle)
+            .with_file("/p/api.h", source);
+        let fixture = Memory::new("the-sharing-cache-survives-a-restart", &files);
+
+        // **The run that fills it.**
+        let written = {
+            let mut session = fixture.session();
+            session.did_open("/p/api.h", source);
+            session.index_everything();
+            session.save_the_sharing().expect("the cache directory is the fixture's")
+        };
+        assert!(written > 0, "a run that walked files must have something to write");
+
+        // **A restart**: the memory is empty, the disk is not.
+        crate::index::walk_cache::clear();
+        assert_eq!(crate::index::walk_cache::held(), 0, "everything is cleared");
+
+        let session = fixture.session();
+        let restored = session.load_the_sharing();
+        assert_eq!(restored, written, "what was written is what is read back");
+        assert_eq!(
+            crate::index::walk_cache::held(),
+            restored,
+            "and it is in the cache the walk consults, not merely counted"
+        );
+    }
+
+    #[test]
     fn a_declaration_only_a_macro_makes_is_found_once_the_session_has_cooked_the_file() {
         let handle = "#define DECLARE_HANDLE(name) struct name##__ { int unused; }; \
                       typedef struct name##__ *name\n";
@@ -8442,4 +8518,10 @@ mod tests {
         );
     }
 }
+
+
+
+
+
+
 

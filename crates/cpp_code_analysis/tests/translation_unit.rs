@@ -113,6 +113,7 @@ impl Unit {
             |wanted| self.look_up(wanted),
             &self.seed,
             definitions,
+            false,
         )
     }
 }
@@ -403,6 +404,7 @@ fn the_unit_walks_its_files_once() {
         look_up,
         &seed,
         &mut definitions,
+        false,
     );
 
     // `a.h` is included twice (`c.h` and `b.h` both take it) and walked once: the guard idiom means a second read
@@ -1314,3 +1316,4 @@ fn a_file_cooks_the_same_through_the_unit_as_through_a_table_of_its_own() {
         "and a name nobody defines is nobody's: the seed does not invent one"
     );
 }
+

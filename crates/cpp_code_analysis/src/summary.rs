@@ -1369,6 +1369,7 @@ fn walk_the_translation_unit<'a>(
             definitions_of,
             &mut unit,
             &mut walked,
+            false, /* this path builds no unit, so nothing to share */
         );
     }
 
@@ -1567,6 +1568,7 @@ impl TranslationUnit {
         mut look_up: impl FnMut(&std::path::Path) -> Option<(&'a FileSummary, &'a str)>,
         seed: &Marked,
         definitions_of: &mut MacroDefinitions,
+        share: bool,
     ) -> Self {
         let mut walked = Walked {
             timeline: Some(TimelineBuilder::default()),
@@ -1592,6 +1594,7 @@ impl TranslationUnit {
             definitions_of,
             &mut unit,
             &mut walked,
+            share,
         );
 
         let timeline = walked.timeline.take().expect("just built");
@@ -3197,11 +3200,24 @@ fn walk_one_file<'a>(
     definitions_of: &mut MacroDefinitions,
     unit: &mut UnitState,
     walked: &mut Walked<'a>,
+    share: bool,
 ) -> Option<u64> {
     // Each file is read once per walk. A preprocessor would re-read one that is included twice, but the guard
     // idiom (`#ifndef X / #define X`) is what every header in this corpus uses, and a second read of a guarded
     // file defines nothing new.
+    if std::env::var_os("CPPLS_SPLICE_TRACE").is_some() {
+        eprintln!(
+            "enter: {} | already seen {}, spliced {}, timeline {}",
+            path.display(),
+            seen.contains(path),
+            walked.spliced.contains(path),
+            walked.timeline.is_some(),
+        );
+    }
     if !seen.insert(path) || walked.spliced.contains(path) {
+        if std::env::var_os("CPPLS_SPLICE_TRACE").is_some() {
+            eprintln!("leave early (already read): {}", path.display());
+        }
         return None;
     }
 
@@ -3230,11 +3246,22 @@ fn walk_one_file<'a>(
     // offset**: a `#define` written after an `#include` must take effect after it. Measured: one semantics test failed
     // (`a_declaration_only_a_macro_makes_is_found_once_the_session_has_cooked_the_file`), which is what an order error
     // looks like from the outside. See `docs/walk-redesign.md` §11.5.
-    const SHARE: bool = true;
-    let sharing = (SHARE && walked.timeline.is_some()).then(|| {
+    // **`share` is the caller's answer to "is this unit complete?"** — and it has to be the caller's, because the
+    // closure it walks is the caller's: `look_up` can only answer for the files the closure holds, so a unit built
+    // while the closure was still growing is missing files the index has since read. `session` already calls that a
+    // *provisional* unit and refuses to store one; the sharing cache has the same reason and must be neither written
+    // nor read for one. That was the third divergence, measured: `look_up(child)` answered `None` inside a growing
+    // closure, the child contributed nothing, and a later complete unit hit that contribution and lost the subtree
+    // under it. See `docs/walk-redesign.md` §11.8.
+    let sharing = (share && walked.timeline.is_some()).then(|| {
         crate::index::walk_cache::key(
             path,
-            crate::index::walk_census::projection_digest(source, defined_in_force),
+            // **The file's own contents, as a fingerprint.** The invalidation clock covers a summary being dropped, but
+            // a header can be rewritten underneath a unit that still holds it; a key without the contents went stale
+            // and `a_completion_sees_a_change_to_an_included_header` caught it. The fingerprint is O(1) in the file's
+            // size, and the contribution's own subtree is covered by the clock.
+            crate::index::walk_census::hash(source.as_bytes()),
+            crate::index::walk_census::projection_digest(path, source, defined_in_force),
         )
     });
     if let Some(key) = sharing
@@ -3467,8 +3494,8 @@ fn walk_one_file<'a>(
             continue;
         }
 
-        if let Some(nested) = include.resolved.as_deref()
-            && let Some(child) = walk_one_file(
+        let child_key = include.resolved.as_deref().and_then(|nested| {
+            walk_one_file(
                 nested,
                 include.range.start_offset + include.range.length,
                 frame,
@@ -3479,9 +3506,12 @@ fn walk_one_file<'a>(
                 definitions_of,
                 unit,
                 walked,
+                share,
             )
-        {
+        });
+        if let Some(child) = child_key {
             edges.push((include.range.start_offset + include.range.length, child));
+
         }
     }
 
@@ -3491,7 +3521,21 @@ fn walk_one_file<'a>(
 
     // **File what this file contributed** — its own frame's work and the edges it took, so that a later unit that
     // reaches it with the same projection splices it instead of walking it. See `index::walk_cache`.
-    if let (Some(bases), Some(frame), Some(timeline)) = (bases, frame, walked.timeline.as_ref()) {
+    // **A file whose includes are not resolved yet is not cacheable.**
+    //
+    // Its contribution would record **no edges** — the walk only descends an `#include` whose target is known — and a
+    // later unit, with the include resolved, would hit that contribution and lose the whole subtree under it. That is
+    // exactly how `a_declaration_only_a_macro_makes_is_found_once_the_session_has_cooked_the_file` failed: the first
+    // unit for a file that includes a header not yet read recorded an empty edge list, and the second unit trusted it.
+    // The summary's own resolution state is the guard, and it is a fact about the summary rather than about the walk —
+    // which is why the invalidation clock cannot cover it.
+    let resolvable = !file
+        .includes
+        .iter()
+        .any(|include| include.resolved.is_none());
+    if let (true, Some(bases), Some(frame), Some(timeline)) =
+        (resolvable, bases, frame, walked.timeline.as_ref())
+    {
         let mut contribution = crate::index::walk_cache::Contribution {
             file: path.to_path_buf(),
             visit_once: file.guards.visit_once,
@@ -3534,6 +3578,7 @@ fn walk_one_file<'a>(
             .unwrap_or(0);
 
         crate::index::walk_census::a_fresh_walk();
+
         crate::index::walk_cache::store(bases.key, contribution);
 
         return Some(bases.key);
@@ -3700,7 +3745,6 @@ fn splice_a_contribution<'a>(
             walked.entries.push((from_offset, &summary.macros[at], source));
         }
     }
-
     for body in &contribution.bodies {
         walked.conditional_bodies.insert(
             body.name.clone(),
@@ -3718,6 +3762,15 @@ fn splice_a_contribution<'a>(
 
     if let Some(timeline) = walked.timeline.as_mut() {
         timeline.leave(frame);
+    }
+    if std::env::var_os("CPPLS_SPLICE_TRACE").is_some() {
+        eprintln!(
+            "splice: {} | {} changes, {} edges, {} events",
+            file.display(),
+            contribution.changes.len(),
+            contribution.edges.len(),
+            contribution.events.len(),
+        );
     }
     walked.spliced.insert(file);
 
@@ -4627,6 +4680,22 @@ impl DeclKind {
 // stored, not a place that knows about directives. There was a `build_declarations` here that took only a scope
 // tree and filled every guard with `Unconditional`; it was deleted rather than kept, because a function whose
 // contract is "the guards are wrong" is one a caller reaches for by accident.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
