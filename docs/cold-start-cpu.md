@@ -730,3 +730,52 @@ numbers above are the ones to trust.
 `CPPLS_SUMMARY_TRACE`, in `index/mod.rs`, `sema/declarations.rs`, `sema/scopes.rs`, `index/project.rs` and
 `parser/cpp_parser.rs` + `grammar/cpp/mod.rs`. They are inert without the variable but they are not free (an
 `Instant::now()` per binding in `fact_for`), and `git diff` is the only trustworthy list of them.
+## The instrumentation removed, and what it cost
+
+Every gated `CPPLS_SUMMARY_TRACE` block is gone: the `Instant::now()` pairs in `fact_for` (six per binding), the statics
+that accumulated them, `scopetime` in `sema/scopes.rs`, the parser's trivia counters, and the `let mut stage` ladder in
+`index/mod.rs`. The dead `root` field of `DeclarationShapes` went with them — it was kept for exactly the query that now
+reads the parameter-list table.
+
+The removal is worth measuring, because it was not free:
+
+```text
+                             instrumented    clean      difference
+cold index, total             92,050 ms    87,499 ms    -4.5 s  (-5%)
+toolchain (498 steps)         74,275 ms    70,544 ms    -3.7 s
+heaviest single step             895 ms       808 ms
+the ten heaviest              7,547 ms     7,104 ms
+```
+
+The two fixes were verified to survive the cleanup:
+
+```text
+winerror.h     2,187 ms -> 92 ms   (24x, 34.0 -> 1.4 us/line)
+arm_neon.h     8,257 ms -> 129 ms  (64x)
+full suite     54 targets, 0 failures
+```
+
+And the whole arc, from the first measurement:
+
+```text
+156,270 ms  as found
+116,547 ms  fix: the parameter test out of the visitor            (-25%)
+ 89,035 ms  fix: the parameter lists precomputed into a table     (-43%)
+ 87,499 ms  the debug instrumentation removed                     (-44%)
+```
+
+## What the next step should be, in the numbers
+
+```text
+70.5 s over 498 toolchain steps = 142 ms/step
+  parse        21-24 MB/s of C++ — the floor, and the largest single slice of a big file
+  scopes       one full tree walk (0.2 us/node, linear, 62 ms on the largest header)
+  shapes       another full tree walk (35 ms, includes DeclarationShapes::of and Declarations::of)
+  facts        the per-binding walk over the scopes (36 ms after the two fixes)
+  preprocess   ~10 ms
+```
+
+**Three walks over one tree** is the remaining structural redundancy: `build_scopes`, `DeclarationShapes::of` and
+`Declarations::of` all traverse the same nodes and all read a node's kind and children. Merging them is the next
+measurable win, and it is a refactor rather than a defect — which is why it should be done where the suite and the census
+can see it, with the same before/after discipline as everything above.

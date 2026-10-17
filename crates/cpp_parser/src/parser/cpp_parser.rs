@@ -432,19 +432,6 @@ impl<'a> CppParser<'a> {
     /// and through `ErrorNode`/`MissingNode` nodes, not through a `Result`.
     pub fn parse(text: &'a str, config: ParserConfig<'a>) -> CppSyntaxTree {
         let tree = Self::parse_inner(text, config).0;
-        if std::env::var_os("CPPLS_SUMMARY_TRACE").is_some() {
-            eprintln!(
-                "      [parse: comment_group_at {:.1} ms, comment_sources {:.1} ms, parse_comment_group {:.1} ms, groups {}]",
-                GROUP_NS.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1e6,
-                SOURCES_NS.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1e6,
-                DOC_NS.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1e6,
-                GROUPS.load(std::sync::atomic::Ordering::Relaxed)
-            );
-            GROUP_NS.store(0, std::sync::atomic::Ordering::Relaxed);
-            DOC_NS.store(0, std::sync::atomic::Ordering::Relaxed);
-            SOURCES_NS.store(0, std::sync::atomic::Ordering::Relaxed);
-            GROUPS.store(0, std::sync::atomic::Ordering::Relaxed);
-        }
         tree
     }
 
@@ -536,12 +523,8 @@ impl<'a> CppParser<'a> {
         let mut errors: Vec<CppParseError> = Vec::new();
         let mut parser = CppParser::with_text(text, config, &mut errors);
 
-        let t_grammar = std::time::Instant::now();
         parse_cpp_unit(&mut parser);
-        let grammar = t_grammar.elapsed();
-        let t_audit = std::time::Instant::now();
         let audit = parser.audit_events();
-        let audit_time = t_audit.elapsed();
 
         debug_assert!(
             parser.open_marks.is_empty(),
@@ -558,15 +541,6 @@ impl<'a> CppParser<'a> {
             builder.build();
             builder.finish()
         };
-        let build = t_audit.elapsed() - audit_time;
-        if std::env::var_os("CPPLS_SUMMARY_TRACE").is_some() {
-            eprintln!(
-                "      [parse_inner: grammar {:.1} ms, audit {:.1} ms, tree {} ms]",
-                grammar.as_secs_f64() * 1000.0,
-                audit_time.as_secs_f64() * 1000.0,
-                build.as_secs_f64() * 1000.0
-            );
-        }
 
         let tokens = std::mem::take(&mut parser.tokens);
         (CppSyntaxTree::new(root, errors, tokens), audit)
@@ -1748,19 +1722,12 @@ impl<'a> CppParser<'a> {
                 continue;
             }
 
-            let t_group = std::time::Instant::now();
             let group = self.comment_group_at(index, end);
-            GROUP_NS.fetch_add(t_group.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
-            let t_sources = std::time::Instant::now();
             let sources = self.comment_sources(&group);
-            SOURCES_NS.fetch_add(t_sources.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
-            GROUPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             // The doc parse is total: it cannot fail, and it cannot leave a marker open, so there is
             // nothing to recover from and nothing to check. Anything it wants to report it reports
             // through `push_error`.
-            let t_doc = std::time::Instant::now();
             let _ = crate::grammar::doc::parse_comment_group(self, &sources);
-            DOC_NS.fetch_add(t_doc.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
 
             index = *group.last().expect("a group has at least one comment") + 1;
         }
@@ -2267,9 +2234,4 @@ mod tests {
     }
 }
 
-/// **Temporary** — see `docs/cold-start-cpu.md`: the two halves of the trivia path.
-static GROUP_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-static DOC_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-static SOURCES_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-static GROUPS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
