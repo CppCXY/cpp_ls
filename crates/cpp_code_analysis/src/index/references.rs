@@ -1357,3 +1357,103 @@ mod tests {
         }
     }
 }
+
+/// **Every place a name is written, across the files that can see it** — the non-macro half of
+/// [`crate::ProjectIndex::macro_references`], and the answer `textDocument/references` needs for a function, a class or
+/// a variable.
+///
+/// # The rule, and where it is silent
+///
+/// A file can only refer to a name it can see, so the candidates are the files that declare it and everything that
+/// **transitively includes** one of those. That is the same narrowing the macro path makes, and it is a sound one: a
+/// file outside the closure refers to the name only if it reaches it another way, and the include graph is the only way
+/// a name crosses a file boundary.
+///
+/// A candidate that **declares the same spelling as a local** is not searched. Its uses may name its own local, and a
+/// listing that said so would be a list of two different things under one name — which is exactly the shape a rename
+/// must never be built on. Those files come back in `not_looked_at`, because "there are no more references" and "I did
+/// not look" are different answers.
+///
+/// # What it costs
+///
+/// One `read` and one lex per candidate, bounded by `budget` files. A candidate whose text does not contain the name is
+/// one read and no lex, which is the cheap filter that makes a large closure affordable.
+pub fn name_references(
+    index: &crate::ProjectIndex,
+    read: &dyn Fn(&std::path::Path) -> Option<String>,
+    name: &str,
+    declaring: &[std::path::PathBuf],
+    budget: usize,
+) -> NameReferences {
+    use std::collections::{HashSet, VecDeque};
+
+    let mut found = NameReferences::default();
+    let mut seen: HashSet<std::path::PathBuf> = HashSet::new();
+    let mut queue: VecDeque<std::path::PathBuf> = declaring.iter().cloned().collect();
+    while let Some(path) = queue.pop_front() {
+        if !seen.insert(path.clone()) {
+            continue;
+        }
+        for includer in index.includers_of(&path) {
+            if !seen.contains(&includer) {
+                queue.push_back(includer);
+            }
+        }
+    }
+
+    for path in seen {
+        if found.looked_at >= budget {
+            found.not_looked_at.push(path);
+            continue;
+        }
+        let Some(text) = read(&path) else {
+            found.not_looked_at.push(path);
+            continue;
+        };
+        // **A file that declares the spelling as a local is not searched.** Its uses may mean its own local.
+        let declares_a_local = index
+            .summary(&path)
+            .is_some_and(|summary| {
+                summary
+                    .declarations
+                    .iter()
+                    .any(|fact| fact.local && fact.name == name)
+            });
+        if declares_a_local {
+            found.not_looked_at.push(path);
+            continue;
+        }
+        if !text.contains(name) {
+            found.looked_at += 1;
+            continue;
+        }
+        found.looked_at += 1;
+        let (tokens, _) = cpp_parser::lex(&text, &cpp_parser::LexerConfig::default());
+        let at: Vec<cpp_parser::SourceRange> = tokens
+            .iter()
+            .filter(|token| {
+                cpp_parser::CppTokenKind::from(token.kind) == cpp_parser::CppTokenKind::Identifier
+                    && text
+                        .get(token.range.start_offset..token.range.end_offset())
+                        .is_some_and(|spelled| spelled == name)
+            })
+            .map(|token| token.range)
+            .collect();
+        if !at.is_empty() {
+            found.found.push((path, at));
+        }
+    }
+
+    found
+}
+
+/// What [`name_references`] answered: the places, the files that were read, and the files it would not read.
+#[derive(Debug, Default)]
+pub struct NameReferences {
+    /// Places the name is written, one entry per file, in the order the files were examined.
+    pub found: Vec<(std::path::PathBuf, Vec<cpp_parser::SourceRange>)>,
+    /// How many files were read and lexed.
+    pub looked_at: usize,
+    /// Files that were **not** searched: over budget, unreadable, or declaring the spelling as a local.
+    pub not_looked_at: Vec<std::path::PathBuf>,
+}

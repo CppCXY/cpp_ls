@@ -37,7 +37,8 @@ use std::error::Error;
 use log::error;
 use lsp_server::{Request, Response};
 use lsp_types::request::{
-    Completion, DocumentDiagnosticRequest, DocumentLinkRequest, DocumentSymbolRequest, FoldingRangeRequest,
+    CodeActionRequest,
+    Completion, DocumentDiagnosticRequest, DocumentHighlightRequest, DocumentLinkRequest, DocumentSymbolRequest, FoldingRangeRequest,
     GotoDefinition, GotoImplementation, HoverRequest, InlayHintRequest, PrepareRenameRequest, References, Rename,
     Request as LspRequest, ResolveCompletionItem, SelectionRangeRequest, SemanticTokensFullRequest,
     SignatureHelpRequest, WorkspaceSymbolRequest,
@@ -46,9 +47,11 @@ use lsp_types::request::{
 use crate::context::ServerContext;
 
 use super::{
+    code_action::on_code_action,
     completion::{on_completion, on_completion_resolve},
     definition::on_goto_definition_handler,
     diagnostic::on_pull_document_diagnostic,
+    document_highlight::on_document_highlight,
     document_link::on_document_link,
     document_symbol::on_document_symbol,
     folding_range::on_folding_range,
@@ -109,8 +112,10 @@ pub async fn on_request_handler(
     GotoDefinition => on_goto_definition_handler,
     GotoImplementation => on_goto_implementation,
     HoverRequest => on_hover,
+    CodeActionRequest => on_code_action,
     Completion => on_completion,
     ResolveCompletionItem => on_completion_resolve,
+    DocumentHighlightRequest => on_document_highlight,
     DocumentLinkRequest => on_document_link,
     DocumentSymbolRequest => on_document_symbol,
     FoldingRangeRequest => on_folding_range,

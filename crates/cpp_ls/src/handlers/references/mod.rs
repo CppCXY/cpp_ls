@@ -156,9 +156,16 @@ pub fn locations<F: cpp_code_analysis::FileProvider + Clone>(
     }
 
     let Known::Yes(found) = session.macro_references(view, offset) else {
-        // Not a macro, or not a name at all: the protocol's answer for "nothing here" is an empty list, and the
-        // difference between the two is the analysis's to explain, not this layer's to guess at.
-        return Some(Vec::new());
+        // **Not a macro: a name-level answer.** The candidate rule is the macro path's own — a file can only refer to a
+        // name it can see, so the files that declare it and everything that includes them. What differs is the second
+        // level: a macro is decided by its environment, a name by its **scopes**, and a candidate that declares the
+        // spelling as a local is therefore not searched at all rather than guessed at.
+        return Some(name_level_locations(
+            session,
+            view,
+            offset,
+            include_declaration,
+        ));
     };
 
     let mut locations = Vec::new();
@@ -354,6 +361,156 @@ mod tests {
             .len(),
             1,
             "and `includeDeclaration: false` leaves the `#define` out"
+        );
+    }
+}
+
+/// How many candidate files one name-level find-references will read.
+///
+/// The same shape as `cpp_code_analysis::index::references`' macro budget: a bound that is **reported** rather than
+/// silently enforced. A project this server measures is a thousand files and a closure of a few hundred, so the
+/// default is past anything measured.
+const NAME_REFERENCE_BUDGET: usize = 2000;
+
+/// The locations of a **name** — a function, a class, a variable — as opposed to a macro's.
+///
+/// The declarations come from the index (`Session::definitions`), which is the same answer "go to definition" gives;
+/// the uses come from `name_references`, which lexes the files that can see those declarations. The two are merged and
+/// deduplicated, because a declaration is also a place the name is written and a client shows it once.
+fn name_level_locations<F: cpp_code_analysis::FileProvider + Clone>(
+    session: &cpp_code_analysis::Session<F>,
+    view: &cpp_code_analysis::FileView,
+    offset: cpp_code_analysis::file::coordinates::ReadingOffset,
+    include_declaration: bool,
+) -> Vec<Location> {
+    let Known::Yes(defined) = session.definitions(view, offset) else {
+        return Vec::new();
+    };
+    let Some(first) = defined.found.first() else {
+        return Vec::new();
+    };
+    let name = first.fact.name.clone();
+
+    let mut declaring: Vec<std::path::PathBuf> = defined
+        .found
+        .iter()
+        .map(|definition| definition.file.clone())
+        .collect();
+    declaring.sort();
+    declaring.dedup();
+
+    let mut locations: Vec<Location> = Vec::new();
+    let push = |file: &std::path::Path,
+                    range: cpp_parser::SourceRange,
+                    locations: &mut Vec<Location>| {
+        let Some(held) = session.files().held(file) else {
+            return;
+        };
+        let Some(uri) = crate::util::path_to_uri(file) else {
+            return;
+        };
+        let (Some(start), Some(end)) = (
+            crate::util::position_in_file(held, range.start_offset),
+            crate::util::position_in_file(held, range.end_offset()),
+        ) else {
+            return;
+        };
+        let location = Location {
+            uri,
+            range: lsp_types::Range { start, end },
+        };
+        if !locations
+            .iter()
+            .any(|held| held.uri == location.uri && held.range == location.range)
+        {
+            locations.push(location);
+        }
+    };
+
+    if include_declaration {
+        for definition in &defined.found {
+            push(&definition.file, definition.fact.name_range, &mut locations);
+        }
+    }
+
+    let read = |path: &std::path::Path| {
+        session
+            .files()
+            .held(path)
+            .map(|file| file.text.to_string())
+    };
+    let references = cpp_code_analysis::index::references::name_references(
+        session.index(),
+        &read,
+        &name,
+        &declaring,
+        NAME_REFERENCE_BUDGET,
+    );
+    for (file, ranges) in references.found {
+        for range in ranges {
+            push(&file, range, &mut locations);
+        }
+    }
+
+    locations
+}
+
+#[cfg(test)]
+mod name_level {
+    use std::path::PathBuf;
+
+    use cpp_code_analysis::{
+        CompilerConfig, MemoryFiles, OpenDocuments, Session, SessionFiles, WatchFilter,
+    };
+
+    use super::name_level_locations;
+
+    const BASE_H: &str = "struct Widget {\n    int size;\n};\n";
+    const USE_CPP: &str = "#include \"base.h\"\nvoid f(Widget w) {\n    (void)w.size;\n}\n";
+
+    /// **A name's references cross files, and the declaration is one of them.**
+    ///
+    /// The candidate rule is the macro path's — a file can only refer to a name it can see — and the second level is
+    /// scopes: `use.cpp` does not declare `Widget` itself, so its identifiers are name-level uses. The assertion that
+    /// matters for a reader is that the answer spans **both** files; the one that matters for a rename is that the
+    /// declaration is in the list when it is asked for.
+    #[test]
+    fn a_class_declared_in_a_header_is_referenced_from_the_file_that_includes_it() {
+        let files = MemoryFiles::new()
+            .with_file("/p/base.h", BASE_H)
+            .with_file("/p/use.cpp", USE_CPP);
+        let providers = SessionFiles::new(OpenDocuments::new(), files);
+        let mut session = Session::with_config(
+            "/p",
+            providers,
+            WatchFilter::new("/p"),
+            CompilerConfig::default(),
+        );
+        session.add_project_files([PathBuf::from("/p/base.h"), PathBuf::from("/p/use.cpp")]);
+        session.index_everything();
+
+        let use_path = PathBuf::from("/p/use.cpp");
+        let held = session.files().held(&use_path).expect("the file is held");
+        let view = cpp_code_analysis::FileView::parse_with(
+            held,
+            &cpp_parser::MacroEnvironment::default(),
+        );
+        let at = USE_CPP.find("Widget").expect("the fixture uses it");
+
+        let locations = name_level_locations(
+            &session,
+            &view,
+            cpp_code_analysis::file::coordinates::ReadingOffset::new(at),
+            true,
+        );
+
+        assert!(
+            locations.iter().any(|found| found.uri.path().ends_with("base.h")),
+            "the declaration in the header is one of the references: {locations:?}"
+        );
+        assert!(
+            locations.iter().any(|found| found.uri.path().ends_with("use.cpp")),
+            "and the use in the file that included it: {locations:?}"
         );
     }
 }

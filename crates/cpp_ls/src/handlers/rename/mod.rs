@@ -170,7 +170,28 @@ pub fn workspace_edit_of_renaming_a_macro<F: cpp_code_analysis::FileProvider + C
         return None;
     }
 
-    // (5) Every file with an edit in it has to be spellable as ranges.
+    // (5) **Never outside the project.** A rename edits the user's files; a build system's headers are not the user's
+    // files. Renaming `_STD_BEGIN` or a macro the toolchain owns would rewrite a header this server must not touch, and
+    // the answer is `null` rather than a partial edit — a rename that changes some of a macro's uses and not the rest
+    // is a broken build written into someone else's tree.
+    //
+    // The root is the session's own, so this is the same boundary the file scan uses: anything the project's
+    // `compile_commands.json` reaches *through* an include is readable, and only what lies under the root is writable.
+    if let Some(outside) = found
+        .files
+        .iter()
+        .map(|file| &file.file)
+        .find(|file| !is_inside(file, session.root()))
+    {
+        log::warn!(
+            "refusing to rename `{}`: {} is outside the project",
+            found.name,
+            outside.display()
+        );
+        return None;
+    }
+
+    // (6) Every file with an edit in it has to be spellable as ranges.
     let mut changes: HashMap<lsp_types::Uri, Vec<TextEdit>> = HashMap::new();
 
     for edit in found.rename(new_name) {
@@ -367,4 +388,19 @@ mod tests {
             "every edit writes the new name: {changes:?}"
         );
     }
+}
+
+/// Is `path` inside `root`, compared the way the rest of this server compares paths?
+///
+/// Byte-for-byte only after normalising: Windows compares case-insensitively and spells separators both ways, and the
+/// two sides here come from different places — the index's file list and the session's own root — so a raw
+/// `starts_with` would answer "outside" for a header the user just wrote.
+fn is_inside(path: &std::path::Path, root: &std::path::Path) -> bool {
+    let flatten = |path: &std::path::Path| {
+        let text = path.to_string_lossy().replace('\\', "/");
+        if cfg!(windows) { text.to_lowercase() } else { text }
+    };
+    let path = flatten(path);
+    let root = flatten(root);
+    path == root || path.starts_with(&format!("{root}/"))
 }

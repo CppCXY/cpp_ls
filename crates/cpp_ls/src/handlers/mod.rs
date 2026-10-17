@@ -20,10 +20,12 @@
 //! `document_symbol`, `folding_range`, `references`, `rename`, `selection_range`, `workspace_symbol` and
 //! `inlay_hint` all came back that way.
 
+mod code_action;
 mod completion;
 mod configuration;
 mod definition;
 pub mod diagnostic;
+mod document_highlight;
 mod document_link;
 mod document_symbol;
 mod folding_range;
@@ -157,7 +159,9 @@ capabilities!(modules: {
     // The capabilities the C++ analysis can already answer, or is being built to answer first.
     definition => DefinitionCapabilities,
     hover => HoverCapabilities,
+    code_action => CodeActionCapabilities,
     completion => CompletionCapabilities,
+    document_highlight => DocumentHighlightCapabilities,
     document_link => DocumentLinkCapabilities,
     document_symbol => DocumentSymbolCapabilities,
     folding_range => FoldingRangeCapabilities,
