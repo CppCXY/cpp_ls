@@ -355,3 +355,158 @@ what the 4 are:
 
 So on this project: **38 wrong findings at the start of the census, 2 now**, with a test behind each move and a
 two-minute instrument to repeat it.
+## Where the 111.8 s actually is: the toolchain's headers, and the deep ones
+
+`checks_probe --chunked` drains the queue **one step at a time** and reports the distribution. Cold cache, same project:
+
+```text
+1122 step(s) in 156270 ms: mean 139 ms, median 13 ms, p90 396 ms, max 8640 ms
+the ten heaviest steps are 42712 ms of 155722 ms (27%)
+
+by tree:
+   14627 ms over   624 step(s)   the project and its own headers      (23 ms/step)
+  141095 ms over   498 step(s)   toolchain (Program Files)            (**283 ms/step**)
+
+by depth:
+  depth 0-6    24.5 s over 804 steps    (~30 ms/step)
+  depth 7-16  118.5 s over 190 steps    (~623 ms/step)
+  depth 12-15  73.4 s over  76 steps    (~966 ms/step)
+```
+
+**90% of the cold index is in headers the toolchain owns**, and the heaviest single steps are named:
+
+```text
+8528 ms  arm_neon.h            5015 ms  arm64_neon.h        4174 ms  zmmintrin.h
+6081 ms  windows.ui.composition.h       4707 ms  windows.media.capture.h
+3844 ms  windows.media.core.h           3652 ms  windows.devices.sensors.h
+```
+
+### What that licenses, and what it does not — measured, not assumed
+
+The tempting reading is "stop indexing headers the compilation cannot include". It is **unsound for most of them**:
+
+```text
+arm_neon.h / arm64_neon.h   included from `<intrin.h>` under `#if defined(_M_ARM…)` — on an x64 build they are
+                            genuinely dead, and they are 13.5 s of the 156. Dropping them is precision-preserving.
+zmmintrin.h                 x64 **AVX-512** intrinsics: an x64 build includes it. Not droppable.
+windows.ui.* / media.*      `windows.h` includes them under `WINAPI_FAMILY_PARTITION(WINAPI_PARTITION_APP)`, and a
+                            desktop app *is* in `WINAPI_PARTITION_APP`. Not droppable.
+```
+
+The general rule fails for a reason worth stating: an include's guard is decided against the **including file's**
+environment, which is the walk's answer — so the queue cannot decide it without becoming the walk.
+
+### The three sound avenues, in the order the numbers argue for
+
+```text
+1  priority, not exclusion   the queue currently mixes the project's 624 steps with the toolchain's 498. Ordering it
+                             by "the open file's closure, then the project, then the toolchain" turns 111 s of "before
+                             you can ask anything" into "in the background", and changes **no** answer. This is the same
+                             arrangement the request gates already got (docs/usability.md).
+2  lazy units                a deep step is a translation unit over a big closure (`Built` in every heavy step). If a
+                             unit is built only when a cooked reading is asked for, the index stops paying for units
+                             nobody reads — but the second pass may need them, so this needs its own count first.
+3  parallel unit walks       141 s of CPU-bound work on a 16-core machine, at 1.2 cores. Legitimate engineering, and
+                             the last step rather than the first.
+```
+## Avenue 1 was tried and reverted: the order is not free
+
+The change: a third queue tier (`Priority::Outside`) and routing every include outside the workspace root into it, so the
+project's own files are read before `<windows.h>`. It compiled, the semantics were unchanged in principle — and the
+**chunked probe never finished**: 20+ minutes against the same run's **157 s** before the change, and it had to be killed.
+
+The cause is **not established**, and two mechanisms are consistent with what the code says:
+
+```text
+a `pending()` that never reaches 0    `Work::pop` skips an entry whose standing disagrees with the deque it came from
+                                      (the upgrade path writes a new entry and leaves the old one), and the skip does
+                                      not touch `queued`. A downgrade like `Rest` -> `Outside` is refused outright
+                                      (`Some(_) => false`), so the old entry stays — which should be popped normally.
+                                      This needs a test on `Work`, not a reading.
+a much larger second pass             the re-read slice's cost is measured, in the code's own comment, as 150 ms for one
+                                      file, 1105 for eight, 2636 for thirty-two — the pass scans the project's `#define`s
+                                      for the names each slice's texts mention. A different interleaving changes which
+                                      slices exist.
+```
+
+Reverted by hand: the enum variant, the deque, the three queue arms and the include routing. The probe's
+`the project and its own files are all read by T ms` line is kept, because it is the right instrument for whoever tries
+this again — with a **step cap** in the drain loop, which is what would have made the failure visible in a minute
+instead of twenty.
+
+**The lesson, stated plainly:** reordering a queue that a loop drains until empty is a change to that loop's
+termination, and the instrument must have a bound before the change is measured, not after.
+## The measurement that changed the target: `summarize` is superlinear in facts
+
+Reading `StepOutcome` again — after writing the paragraph above — showed that `Built` means "the file was read and
+summarised", not "a translation unit was built". That sent the investigation to `index::summarize`, which a probe can
+time directly (`checks_probe --summarize <file>`, outside the library, no instrumentation):
+
+```text
+file                                        lines     bytes     summarize    per line      per fact
+arm_neon.h                                  7,728    570 KB    8,257 ms     1,068 us      708 us   (11,665)
+windows.ui.composition.h                   38,841  1,848 KB    5,302 ms       136 us      572 us   ( 9,262)
+LanguageServer.cpp                            106     2.7 KB        0.9 ms       8.6 us        —      (     3)
+LuaStyle.h                                    174     5.0 KB        4.5 ms      25.6 us       64 us   (    70)
+```
+
+Two facts fall out of it, and they are the point:
+
+1. **It is not per byte.** 570 KB costs 8.3 s while 1.85 MB costs 5.3 s — the *smaller* file is the slower one.
+2. **It is per fact, and it grows.** ~700 us per declaration/macro at eleven thousand of them, against 64 us at
+   seventy. That is not a constant factor: it is a step whose cost depends on how much has already been collected.
+
+So the cold start's 141 s of toolchain headers is not "too many headers"; it is a **quadratic summary build** on files
+with many facts — `arm_neon.h` alone is 5% of the whole cold start because of it. The next step is to cut `summarize`
+into its phases with a temporary, gated timer (parse / declarations / macros), find the arm that is quadratic, and
+delete the timer after measuring — the same rule the earlier stage timers were removed under.
+## The quadratic, found and fixed: `names_a_parameter` inside the visitor
+
+The bisection, each step measured rather than argued:
+
+```text
+summarize              8.3 s
+  parse                 40 ms   cheap — the tree is not the problem
+  index_tree           ~8.3 s
+    preprocess          14 ms
+    scopes              30 ms
+    facts              ~8.5 s
+      DeclarationShapes::of   12 ms   cheap — the shape table is not the problem
+      the binding walk       ~8.5 s
+        per-binding timing:  Function 0.004 ms     Variable **1.9 ms**
+        inside the Variable path: using_alias_target 2 ms total, type_of_declaration 5 ms total
+```
+
+So the cost was in `declared_type_of_with`, on the `Variable` path, between the two cheap calls — and it was one line
+on the wrong side of a closure boundary:
+
+```rust
+// before — asked once per *shape on the path*:
+shapes.on_the_path(offset, |shape| {
+    let name_is_a_parameter = shapes.names_a_parameter(binding.name_range.start_offset);   // ← the scan
+    …
+});
+
+// after — asked once per binding:
+let name_is_a_parameter = shapes.names_a_parameter(binding.name_range.start_offset);
+shapes.on_the_path(offset, |shape| { … });
+```
+
+`names_a_parameter` is a scan, and the answer depends only on the offset, not on which shape is being visited. A
+parameter binding sits under several shapes, so it paid the scan several times — 1.9 ms per `Variable`, 8.4 s of an
+8.5 s build.
+
+Measured after the change:
+
+```text
+arm_neon.h                8,257 ms → **2,200 ms**   (3.8×)
+windows.ui.composition.h  5,302 ms → **2,462 ms**   (2.2×)
+LanguageServer.cpp            0.9 ms →     1.1 ms   (noise)
+LuaStyle.h                    4.5 ms →     2.3 ms
+```
+
+And the guard that matters for precision: **the full suite, 54 targets, 0 failures** — every summary content test, the
+census tests, and the latency test. The hoist changes when the answer is computed, not what it is.
+
+What is left of the 2.2 s is the next question, and the instrumented blocks that found this are still in the tree behind
+`CPPLS_SUMMARY_TRACE` — they are deleted when that question is answered, not before.

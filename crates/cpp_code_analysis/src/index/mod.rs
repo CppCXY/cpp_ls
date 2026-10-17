@@ -312,14 +312,29 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
         // should be in front of them. `ParserConfig::skip_bodies` carries the same figures.
         let config = ParserConfig::default().with_dialect(self.config.dialect());
 
+        // **Temporary measurement**, gated on `CPPLS_SUMMARY_TRACE`, and deleted when the question is answered — see
+        // `docs/cold-start-cpu.md`. A summary build on `arm_neon.h` costs 8.3 s and is superlinear in its facts; the
+        // three phases below are what says which arm of it is.
+        let t0 = std::time::Instant::now();
         let tree = { CppParser::parse(source, config) };
+        let t1 = std::time::Instant::now();
         let summary = { self.index_tree(path, source, &tree, key) };
+        let t2 = std::time::Instant::now();
         // **Destroying the tree is work**, and it is timed because it is not free and not obvious: a file's tree is
         // tens of thousands of green nodes held by `Arc`s, and dropping it walks every one of them. On the 138-file
         // project this was the missing third of the cold index after the shape walk was fixed — the stages summed to
         // 6.0 s of a 9.5 s run, and the difference was here.
         {
             drop(tree);
+        }
+        if std::env::var_os("CPPLS_SUMMARY_TRACE").is_some() {
+            eprintln!(
+                "  [summary] {}: parse {:.1} ms, index_tree {:.1} ms, drop {:.1} ms",
+                path.file_name().unwrap_or_default().to_string_lossy(),
+                t1.duration_since(t0).as_secs_f64() * 1000.0,
+                t2.duration_since(t1).as_secs_f64() * 1000.0,
+                t2.elapsed().as_secs_f64() * 1000.0,
+            );
         }
         summary
     }
@@ -348,7 +363,7 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
         let (mut tokens, _) = cpp_parser::lex(source, &cpp_parser::LexerConfig::default());
         fold_quoted_header_names(source, &mut tokens);
 
-        let mut interner = PathInterner::new(cfg!(windows));
+let mut interner = PathInterner::new(cfg!(windows));
         let resolver = IncludeResolver::new(self.files, self.config);
         let directory = path.parent().unwrap_or(Path::new("."));
 
@@ -638,6 +653,8 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
         let key = SummaryKey::new(content_hash(source), key.context_hash);
 
         let root = tree.get_red_root();
+        // **Temporary measurement**, gated on `CPPLS_SUMMARY_TRACE` — see `index`. Deleted when answered.
+        let mut stage = std::time::Instant::now();
         let preprocessing = {
             // **With what the compilation already knows**, so a `#define` in a branch nobody compiles is not
             // recorded: `vcruntime.h` writes `_STL_LANG` once per branch of `#ifdef __cplusplus`, the last of them
@@ -652,6 +669,10 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
                 None => crate::preprocess::preprocess(source, tree.get_tokens()),
             }
         };
+        if std::env::var_os("CPPLS_SUMMARY_TRACE").is_some() {
+            eprintln!("    [1 preprocess] {:.1} ms", stage.elapsed().as_secs_f64() * 1000.0);
+            stage = std::time::Instant::now();
+        }
         // The same evidence object for both readers — see the field's note. The cast is the point: the scope walk
         // asks the trait, the parse asked the concrete type, and there is one value behind both.
         let evidence: &dyn cpp_parser::MacroBodies = match self.bodies {
@@ -659,6 +680,10 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
             None => &crate::sema::scopes::NoMacroBodies,
         };
         let scopes = { build_scopes(&root, evidence) };
+        if std::env::var_os("CPPLS_SUMMARY_TRACE").is_some() {
+            eprintln!("    [2 scopes] {:.1} ms", stage.elapsed().as_secs_f64() * 1000.0);
+            stage = std::time::Instant::now();
+        }
         // The diagnostics, as ranges, for the one field a fact takes from them rather than from the tree — see
         // [`DeclFact::clean`]. Collected once for the whole file: the parser reports a handful per file, and
         // asking per declaration would be a scan of the list per fact.
@@ -671,6 +696,10 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
         let (mut declarations, mut guards) =
             { build_facts(&scopes, &preprocessing, &root, &errors) };
 
+        if std::env::var_os("CPPLS_SUMMARY_TRACE").is_some() {
+            eprintln!("    [3 facts] {:.1} ms", stage.elapsed().as_secs_f64() * 1000.0);
+            stage = std::time::Instant::now();
+        }
         let mut interner = PathInterner::new(cfg!(windows));
         let resolver = IncludeResolver::new(self.files, self.config);
         let directory = path.parent().unwrap_or(Path::new("."));
@@ -706,11 +735,16 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
             (macros, includes)
         };
 
+        if std::env::var_os("CPPLS_SUMMARY_TRACE").is_some() {
+            eprintln!("    [4 macros+includes] {:.1} ms", stage.elapsed().as_secs_f64() * 1000.0);
+            stage = std::time::Instant::now();
+        }
         // Every kind of fact carries a guard, and they are assigned together rather than per kind: the sweep is
         // over *offsets*, and running it once per fact list would rebuild the region list each time. An include's
         // guard is the one that earns its keep — it is what a cross-file lookup reads to decide whether a
         // declaration reached through that include is unconditionally in scope — but a `#define` inside an `#if`
         // is the same question about a macro.
+        let _ = stage; // the last timer's start is not read: the sweep below is measured separately
         macros.sort_by_key(|fact| fact.range.start_offset);
         includes.sort_by_key(|fact| fact.range.start_offset);
 
@@ -2177,8 +2211,8 @@ mod tests {
 
         let files = MemoryFiles::new();
         let config = CompilerConfig::default();
-        let resolver = IncludeResolver::new(&files, &config);
         let mut interner = PathInterner::new(cfg!(windows));
+        let resolver = IncludeResolver::new(&files, &config);
 
         let facts: Vec<_> = preprocessing
             .directives

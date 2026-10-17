@@ -47,6 +47,46 @@ fn main() {
         .and_then(|value| value.parse().ok())
         .unwrap_or(usize::MAX);
 
+    // **`--summarize <file>`**: time one summary build and nothing else. It exists because a step's `Built` outcome
+    // means "read and summarised", not "walked", and the difference between *parsing* a header and *extracting* from it
+    // is the difference between two fixes. Called on the probe's own thread, outside the library, so no instrumentation
+    // goes into the code under test.
+    if let Some(at) = args.iter().position(|argument| argument == "--summarize") {
+        let Some(file) = args.get(at + 1) else {
+            eprintln!("usage: checks_probe --summarize <file>");
+            std::process::exit(2);
+        };
+        let text = std::fs::read_to_string(file).unwrap_or_default();
+        if text.is_empty() {
+            eprintln!("{file} could not be read");
+            std::process::exit(2);
+        }
+        let started = std::time::Instant::now();
+        let summary = cpp_code_analysis::index::summarize(
+            std::path::Path::new(file),
+            &text,
+            cpp_code_analysis::cache::SummaryKey::new(0, 0),
+        );
+        let took = started.elapsed().as_secs_f64();
+        println!(
+            "{file}\n  {} line(s), {} byte(s)",
+            text.lines().count(),
+            text.len()
+        );
+        println!(
+            "  summarize: {:.1} ms  ({:.2} MB/s, {:.1} us per line)",
+            took * 1000.0,
+            text.len() as f64 / 1e6 / took.max(1e-9),
+            took * 1e6 / text.lines().count().max(1) as f64
+        );
+        println!(
+            "  declarations: {}   macros: {}",
+            summary.declarations.len(),
+            summary.macros.len()
+        );
+        return;
+    }
+
     let root_path = std::path::PathBuf::from(root);
     let text = std::fs::read_to_string(&root_path).unwrap_or_default();
     if text.is_empty() {
@@ -93,6 +133,15 @@ fn main() {
         let mut heaviest: Vec<(u128, String, usize, String)> = Vec::new();
         let mut by_depth: std::collections::BTreeMap<usize, (u128, usize)> =
             std::collections::BTreeMap::new();
+        // **Which tree the time is in.** A deep step is usually a header the *toolchain* owns, and whether the time is
+        // in the project's own files or in `Program Files` decides between "optimise the analysis" and "stop reading
+        // files the compilation cannot include". Keyed by the first path component after the drive.
+        let mut by_tree: std::collections::BTreeMap<String, (u128, usize)> =
+            std::collections::BTreeMap::new();
+        // **When the project's own files were done** — the number the *order* of the queue is for. The total is the
+        // same however the queue is ordered; what a reader feels is the moment their own files are all read.
+        let mut running = 0u128;
+        let mut project_finished = 0u128;
         while session.pending() > 0 {
             let started = std::time::Instant::now();
             let worked = session.advance(1);
@@ -101,6 +150,22 @@ fn main() {
                 step_ms.push(ms);
                 by_depth.entry(step.depth).or_default().0 += ms;
                 by_depth.entry(step.depth).or_default().1 += 1;
+                {
+                    let path = step.path.to_string_lossy().to_lowercase();
+                    let tree = if path.contains("program files") {
+                        "toolchain (Program Files)"
+                    } else if path.contains("windows kits") {
+                        "windows kits"
+                    } else {
+                        "the project and its own headers"
+                    };
+                    by_tree.entry(tree.to_string()).or_default().0 += ms;
+                    by_tree.entry(tree.to_string()).or_default().1 += 1;
+                    running += ms;
+                    if tree == "the project and its own headers" {
+                        project_finished = running;
+                    }
+                }
                 heaviest.push((
                     ms,
                     step.path.to_string_lossy().replace('\\', "/"),
@@ -127,6 +192,15 @@ fn main() {
             pick(sorted.len() * 9 / 10),
             pick(sorted.len().saturating_sub(1)),
         );
+
+        println!(
+            "\n  the project and its own headers are all read by {project_finished} ms (of the total {:.1} s)",
+            drained.as_millis() as f64 / 1000.0
+        );
+        println!("\n  by tree:");
+        for (tree, (ms, count)) in &by_tree {
+            println!("    {ms:>7} ms over {count:>5} step(s)   {tree}");
+        }
 
         heaviest.sort_unstable_by(|left, right| right.0.cmp(&left.0));
         let top: u128 = heaviest.iter().take(10).map(|(ms, ..)| *ms).sum();

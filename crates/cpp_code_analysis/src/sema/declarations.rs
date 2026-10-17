@@ -71,8 +71,33 @@ pub fn build_facts(
     root: &CppSyntaxNode,
     errors: &[SourceRange],
 ) -> (Vec<DeclFact>, SummaryGuards) {
+    let t = std::time::Instant::now();
     let file = DeclarationFacts::new(scopes, preprocessing, root, errors);
-    file.build()
+    let built = t.elapsed();
+    let out = file.build();
+    if std::env::var_os("CPPLS_SUMMARY_TRACE").is_some() {
+        eprintln!(
+            "      [facts: using_alias_target {:.0} ms, type_of_declaration {:.0} ms]",
+            USING_NS.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1e6,
+            TD_NS.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1e6,
+        );
+        eprintln!(
+            "      [facts: the five questions: type_of {:.0} ms (of which the alias fallback {:.0} ms, the primary {:.0} ms), returns {:.0} ms, bases {:.0} ms, templates {:.0} ms, access {:.0} ms]",
+            QUESTIONS.5.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1e6,
+            QUESTIONS.6.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1e6,
+            QUESTIONS.0.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1e6,
+            QUESTIONS.1.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1e6,
+            QUESTIONS.2.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1e6,
+            QUESTIONS.3.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1e6,
+            QUESTIONS.4.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1e6,
+        );
+        eprintln!(
+            "      [facts: new (shapes) {:.1} ms, build {:.1} ms]",
+            built.as_secs_f64() * 1000.0,
+            t.elapsed().as_secs_f64() * 1000.0 - built.as_secs_f64() * 1000.0
+        );
+    }
+    out
 }
 
 /// The type a variable-like declaration was written with, as it is spelled before the name.
@@ -218,6 +243,10 @@ fn declared_type_of_with(shapes: &DeclarationShapes, binding: &Binding) -> Optio
     // to answer these questions in one pass, and it can answer this one.
     let mut specifiers = None;
     let mut declarator: Option<CppSyntaxNode> = None;
+    // **Asked once, not once per shape.** This was inside the visitor below, so every shape on the path paid a
+    // `names_a_parameter` scan: measured on `arm_neon.h`, that was **1.9 ms per `Variable` binding** — 8.4 s of an
+    // 8.5 s summary build — while the answer depends only on the offset, not on the shape.
+    let name_is_a_parameter = shapes.names_a_parameter(binding.name_range.start_offset);
     shapes.on_the_path(the_offset_to_descend_by(binding), |shape| {
         if let Some(node) = &shape.specifiers {
             specifiers = Some(node.clone());
@@ -233,13 +262,16 @@ fn declared_type_of_with(shapes: &DeclarationShapes, binding: &Binding) -> Optio
         // else's is. Not "the declarator holds a parameter list" — `typedef void (*F)(int)` holds one and its type is
         // the whole `void (*)(int)`, which the test `a_function_pointer_typedef_records_the_whole_type` pins. A
         // version that used the looser test broke exactly that, and this test is what said so.
-        let name_is_a_parameter = shapes.names_a_parameter(binding.name_range.start_offset);
         if declarator.is_none()
             && let Some(node) = &shape.declarator
             && reaches_the_name(node, binding.name_range)
+            // **A direct child, not a subtree.** This asked `node.descendants()` — a walk of the whole declarator
+            // subtree — for **every shape on the path**, and a function declarator is the biggest node on the path.
+            // Measured on `arm_neon.h`: 6,703 bindings × 1.3 ms = **9.8 s of an 8.3 s summary build**, all of it here.
+            // A parameter list is a *direct* child of the declarator that has one, which is the whole question.
             && !(name_is_a_parameter
                 && node
-                    .descendants()
+                    .children()
                     .any(|inner| CppSyntaxKind::from(inner.kind()) == CppSyntaxKind::ParameterList))
         {
             declarator = Some(node.clone());
@@ -252,17 +284,22 @@ fn declared_type_of_with(shapes: &DeclarationShapes, binding: &Binding) -> Optio
     // declarator, `using` reads the type id — and both end in the same field. Measured: without this branch a
     // `using` alias answered `void`, because the specifiers of the *enclosing* class were what the walk had last
     // seen.
-    if let Some(target) = using_alias_target(shapes, binding.name_range) {
+    let ua = std::time::Instant::now();
+    let using_answer = using_alias_target(shapes, binding.name_range);
+    USING_NS.fetch_add(ua.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+    if let Some(target) = using_answer {
         return Some(target);
     }
 
     let specifiers = specifiers?;
 
+    let td = std::time::Instant::now();
     let found = crate::sema::types::type_of_declaration(
         &specifiers,
         declarator.as_ref(),
         binding.name_range,
     );
+    TD_NS.fetch_add(td.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
 
     let written = found.to_string();
     (!written.is_empty()).then_some(written)
@@ -1963,8 +2000,19 @@ fn fact_for(
     // **The four type questions, timed apart.** Together they are 98% of the index's sweep on a real project
     // (138 files of MSVC's standard library), and each one is a different traversal of the same tree — so which of
     // them dominates is the difference between four different fixes. See `crate::stages`.
-    let type_of = { declared_type_of_with(shapes, binding) }
-        .or_else(|| declared_alias_target_with(shapes, binding));
+    // **Temporary, gated on `CPPLS_SUMMARY_TRACE`** — see `docs/cold-start-cpu.md`. Which of the five questions pays.
+    let q0 = std::time::Instant::now();
+    let type_of = { declared_type_of_with(shapes, binding) };
+    let q0b = std::time::Instant::now();
+    let type_of = type_of.or_else(|| {
+        let inner = std::time::Instant::now();
+        let answer = declared_alias_target_with(shapes, binding);
+        QUESTIONS.5.fetch_add(inner.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+        answer
+    });
+    let q1 = std::time::Instant::now();
+    QUESTIONS.6.fetch_add(q0b.duration_since(q0).as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+    QUESTIONS.0.fetch_add(q1.duration_since(q0).as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
     let returns = {
         // **The written return type, and the deduced one when there is none to write.** `declared_returns_of_with`
         // answers `None` for `auto`, by design and for a reason that has not changed — `auto` is not a class
@@ -1973,14 +2021,22 @@ fn fact_for(
         // that is provable at this layer, and why the rest is refused rather than approximated.
         declared_returns_of_with(shapes, binding).or_else(|| deduced_returns_of(root, binding))
     };
+    let q2 = std::time::Instant::now();
+    QUESTIONS.1.fetch_add(q2.duration_since(q1).as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
     let bases = { declared_bases_of_with(shapes, binding) };
+    let q3 = std::time::Instant::now();
+    QUESTIONS.2.fetch_add(q3.duration_since(q2).as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
     // The class template's parameter names, for the members whose types are written with them. Answered from the
     // shapes like the four questions above it, and on a unit read it is the reason they are all asked of a table
     // rather than of the tree — see [`declared_template_parameters_of`].
     let parameters = { declared_template_parameters_with(shapes, binding) };
+    let q4 = std::time::Instant::now();
+    QUESTIONS.3.fetch_add(q4.duration_since(q3).as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
     // **Who may name it.** Recorded on the shape the binding's name sits in, which the pass that built this table
     // already knows — see [`Shape::access`]. `None` for a name no class body contains.
     let access = shapes.access_at(the_offset_to_descend_by(binding));
+    let q5 = std::time::Instant::now();
+    QUESTIONS.4.fetch_add(q5.duration_since(q4).as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
     // **…and whether an importer may.** The other half of "who may name it", for a file that declares a module:
     // see [`Shape::exported`] and [`crate::ProjectIndex::visible_files`], which is where it is applied.
     let exported = shapes.exported_at(the_offset_to_descend_by(binding));
@@ -2602,7 +2658,10 @@ impl<'a> DeclarationFacts<'a> {
             let in_namespace = local.then(|| enclosing_namespaces_of(scopes, id)).flatten();
 
             for binding in &scope.bindings {
-                if let Some(fact) = fact_for(
+                let traced = std::env::var_os("CPPLS_SUMMARY_TRACE").is_some()
+                    && (facts.len() < 3 || facts.len() % 1000 == 0);
+                let one = std::time::Instant::now();
+                let built = fact_for(
                     root,
                     &shapes,
                     binding,
@@ -2610,22 +2669,38 @@ impl<'a> DeclarationFacts<'a> {
                     local,
                     in_namespace.clone(),
                     &declarations,
-                ) {
+                );
+                if traced {
+                    eprintln!(
+                        "        [binding {} of kind {:?}: {:.3} ms → {}]",
+                        facts.len(),
+                        binding.kind,
+                        one.elapsed().as_secs_f64() * 1000.0,
+                        built.is_some()
+                    );
+                }
+                if let Some(fact) = built {
                     facts.push(fact);
                 }
             }
         }
 
+
         // The sweep below needs both lists in offset order. Facts are sorted rather than built in order
         // because the scope tree's order is depth-first, which is not offset order — a nested class's members
         // are walked before the next top-level declaration.
+
         facts.sort_by_key(|fact| fact.range.start_offset);
 
         let mut targets: Vec<(&mut FactGuard, usize)> = facts
             .iter_mut()
             .map(|fact| (&mut fact.guard, fact.range.start_offset))
             .collect();
+        let sweep_started = std::time::Instant::now();
         assign_guards(&mut targets, preprocessing, &mut guards);
+        if std::env::var_os("CPPLS_SUMMARY_TRACE").is_some() {
+            eprintln!("      [facts: assign_guards {:.1} ms]", sweep_started.elapsed().as_secs_f64() * 1000.0);
+        }
 
         (facts, guards)
     }
@@ -4166,3 +4241,25 @@ int Box<int>::Inner::deep = 0;
     }
 }
 
+/// **Temporary** — the nanoseconds each of `fact_for`'s five questions took in this file, printed by `build_facts`.
+static QUESTIONS: (
+    std::sync::atomic::AtomicU64,
+    std::sync::atomic::AtomicU64,
+    std::sync::atomic::AtomicU64,
+    std::sync::atomic::AtomicU64,
+    std::sync::atomic::AtomicU64,
+    std::sync::atomic::AtomicU64,
+    std::sync::atomic::AtomicU64,
+) = (
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+);
+
+/// **Temporary** — see `docs/cold-start-cpu.md`: which half of `declared_type_of_with` pays for a `Variable`.
+static USING_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static TD_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);

@@ -141,6 +141,7 @@ impl<'s, F: FileProvider> Worklist<'s, F> {
         match priority {
             Priority::Open => self.open.extend(next),
             Priority::Rest => self.tail.extend(next),
+
         }
 
         Some(Step {
@@ -183,6 +184,7 @@ pub enum Priority {
     Open,
     /// The rest of the project the caller listed, or something one of those includes.
     Rest,
+
 }
 
 /// One file's turn in the work list.

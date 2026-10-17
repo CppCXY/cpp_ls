@@ -5805,6 +5805,7 @@ impl Work {
             (Priority::Open, false) => self.open.push_back((path, depth)),
             (Priority::Rest, true) => self.rest.push_front((path, depth)),
             (Priority::Rest, false) => self.rest.push_back((path, depth)),
+
         }
     }
 
