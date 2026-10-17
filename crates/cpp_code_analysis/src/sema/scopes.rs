@@ -87,6 +87,13 @@ pub fn build_scopes(root: &CppSyntaxNode, bodies: &dyn MacroBodies) -> ScopeTree
 
     walker.items(root, file);
 
+    if std::env::var_os("CPPLS_SUMMARY_TRACE").is_some() {
+        eprintln!(
+            "    [scopes: opened_by_a_body {:.1} ms over {} call(s)]",
+            scopetime::NS.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1e6,
+            scopetime::CALLS.load(std::sync::atomic::Ordering::Relaxed)
+        );
+    }
     walker.table
 }
 
@@ -366,6 +373,7 @@ impl ScopeWalker<'_> {
         if CppSyntaxKind::from(node.kind()) != CppSyntaxKind::MacroCall {
             return None;
         }
+        let _guard = scopetime::Guard(std::time::Instant::now());
 
         let name = invocation_name(node)?;
         let range = cpp_parser::source_range(node.text_range());
@@ -2893,4 +2901,18 @@ pub fn declares_a_binding(node: &CppSyntaxNode) -> bool {
 /// A node's kind, by name, for a test that reports what it found.
 pub fn kind_name(node: &CppSyntaxNode) -> String {
     format!("{:?}", CppSyntaxKind::from(node.kind()))
+}
+
+/// **Temporary** — see `docs/cold-start-cpu.md`.
+#[allow(dead_code)]
+mod scopetime {
+    pub static NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    pub static CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    pub struct Guard(pub std::time::Instant);
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            NS.fetch_add(self.0.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+            CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
 }

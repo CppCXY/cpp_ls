@@ -586,3 +586,147 @@ cold index with no change to what any of them computes.
 **What is left**: 74 s over 498 toolchain steps is 149 ms per step, and the next question is what a step spends that on
 now. The instrumented blocks that found both of these are still behind `CPPLS_SUMMARY_TRACE`; they are removed by
 `git diff` as the first task of the next session, because that diff is the only trustworthy list of what was added.
+## After two fixes: what a toolchain step's 149 ms is made of, and why it is now structural
+
+Three representative headers, measured on the same instrument:
+
+```text
+windows.ui.composition.h   38,841 lines / 1.85 MB   276 ms
+  parse         ~88 ms      the floor: 21 MB/s of C++
+  scopes         62 ms      one tree walk, 0.2 us per node — linear, and checked: opened_by_a_body is 0.1 ms / 405 calls
+  facts          71 ms      of which `DeclarationShapes::of` is 35 ms — another full tree walk
+  preprocess     10 ms
+zmmintrin.h                 148 ms   scopes 45, facts 38, parse ~55
+urlmon.h                     78 ms   scopes 7, facts 16, parse ~50
+```
+
+**No quadratic is left in this path.** The three numbers that were quadratic — `names_a_parameter` (2.0 s), the per-shape
+parameter test (6.1 s), the per-binding `descendant` walk — are gone, and what remains is **three separate full-tree
+walks** over the same tree: `build_scopes`, `DeclarationShapes::of`, and `Declarations::of`.
+
+So the next win is structural rather than a defect to be found: **merge the walks**. `build_scopes` and
+`DeclarationShapes::of` both walk `root.descendants()` and both read a node's kind and its children; merging them saves
+~35 ms of 276 ms on the largest header (13%) and rather more on the middle-sized ones, where the fixed cost of a walk is
+a larger share. That is a refactor of two independent readers, not a one-line move, and it should be done where the
+census and the suite can see it.
+
+**The honest ceiling**: `parse` is 21 MB/s and is the floor of every step. The toolchain's 74 s is ~0.5 GB of headers
+read at that rate plus the three walks. Getting below it needs either a faster parse or not reading the headers — and
+the second is the deferral that was rejected for good reasons.
+## The biggest single step is not a summary at all: the *parser* is quadratic on `winerror.h`
+
+`winerror.h` is the heaviest step in the cold index (1,829 ms of 1,122 steps). `--summarize` on it:
+
+```text
+[summary] winerror.h: parse 2125.7 ms, index_tree 58.0 ms, drop 3.4 ms
+summarize: 2187.2 ms  (0.72 MB/s, 33.7 us per line)
+```
+
+**2,126 of the 2,187 ms is `parse`.** And it is superlinear — measured by truncating the real file, not a synthetic:
+
+```text
+ 25%  16,228 lines   155.7 ms    9.6 us/line
+ 50%  32,456 lines   569.0 ms   17.5 us/line     2x the lines, 3.65x the time
+ 75%  48,683 lines  1230.2 ms   25.3 us/line
+100%  64,911 lines  2188.4 ms   33.7 us/line
+```
+
+Three synthetic files were built to isolate the trigger, and **all three are linear**:
+
+```text
+1,000-8,000 single-line `#define`s      4.2 -> 34.0 ms   linear
+ 500-2,000 multi-line `#define`s       10.9 -> 44.1 ms   linear
+ 500-4,000 defines inside one `#ifndef` 4.0 -> 32.0 ms   linear
+```
+
+So the trigger is in what the real header contains and the synthetics do not — the next measurement is to truncate at define
+boundaries and bisect *within* the file, not outside it. Two hypotheses were already refuted this round and reverted:
+the `insert_sorted` memmove (a fast path that did not move the total by one millisecond) and the define shapes above.
+
+The lesson from the three fixes so far holds: every one of them was a **quadratic the code did not intend**, and this is the
+fourth — in the parser this time, which is the one layer nobody had suspected because "parsing is linear" was an
+assumption rather than a measurement.
+## The parser's quadratic trigger is comments — and the trivia path itself is innocent
+
+The lexer is linear and fast (6.2 ms for 1.57 MB, 243 MB/s), so the 2,126 ms parse of `winerror.h` is not lexical. Bisecting
+by content isolated the trigger to **comment density**, not define count:
+
+```text
+single-line defines, 8k -> 32k      34.3 -> 155.2 ms    linear (4.3 -> 4.9 us/line)
+multi-line defines,  8k -> 16k      69.1 -> 144.7 ms    linear (2.9 -> 3.0 us/line)
+defines in one #ifndef, 500 -> 4k    4.0 ->  32.0 ms    linear
+**comments before every define**, 2k -> 16k:
+   2,000   145.0 ms    8.1 us/line
+   4,000   540.6 ms   15.0 us/line     2x the file, 3.7x the time
+   8,000  2041.4 ms   28.4 us/line     2x, 3.8x
+  16,000  7983.3 ms   55.4 us/line     2x, 3.9x
+```
+
+`winerror.h` is ~6.5万 lines of which roughly 80% are `//` comments, which is why it costs 2.1 s.
+
+And the trivia path is **not** the quadratic — measured with a counter inside the parser:
+
+```text
+4,000 commented defines:  comment_group_at 0.8 ms   parse_comment_group 6.1 ms   (total parse 526 ms)
+8,000 commented defines:  comment_group_at 1.9 ms   parse_comment_group 13.8 ms  (total parse 2013 ms)
+```
+
+Both halves are linear and together are 1% of the parse. So the cost is in **what the grammar does when the token stream is
+denser**, not in the trivia handling itself. The next place to look is `CppGreenNodeBuilder` — the one piece of the parser
+that is about ranges rather than about syntax, and the one that the file's own comments describe as correcting edges at
+`finish_node`.
+
+## Parser code review, first pass
+
+Read while hunting, worth writing down before they are forgotten:
+
+1. **Comments are tokens on the same stream as everything else.** Every rule pays `skip_trivia` and any lookahead that
+   forgets it sees a comment instead of the token it asked for — a whole class of bugs, defended one call site at a time.
+   Two streams at lex time (or trivia attached to the token it precedes) would remove the class.
+2. **`parse_trivia_tokens` has an `expect`**: `group.last().expect("a group has at least one comment")`. It is provably
+   safe (the group is seeded with `start`), but it is a panic path in the hot loop of a parser whose own doc says the doc
+   parse "is total: it cannot fail".
+3. **`token_kind_at(index)` takes an *absolute* index**, and this session already produced a bug by passing `0`/`1`/`2`
+   believing them relative. An API whose index space is not the caller's is an invitation.
+4. **`lines_between` scans bytes for every pair of comments.** Fine while a "gap" is one line; it is the kind of helper that
+   becomes the next quadratic the day something groups across a paragraph.
+## The parser's quadratic: `comment_sources` scanned the file for every comment
+
+The trigger was comments, and the layer was `CppParser::comment_sources` — the function that hands the doc parser its
+separators. For **each** comment of a group it scanned `self.tokens[..token_index]`, every token from the start of the
+file:
+
+```rust
+for token in self.tokens[..token_index].iter().filter(|token| {
+    is_line_layout_kind(token.kind) && token.range.start_offset >= previous_end
+}) { … }
+```
+
+The separators are exactly the layout tokens **between the previous comment and this one**, and the group's construction
+already guarantees that span holds nothing else. The fix is an index range instead of a scan from zero:
+
+```rust
+let previous_index = group[position - 1];
+for token in &self.tokens[previous_index + 1..token_index] { … }
+```
+
+Measured:
+
+```text
+comment block, 4,000 lines     comment_sources  8.0 ms  ->  0.1 ms
+comment block, 16,000 lines    comment_sources 139.6 ms ->  0.3 ms      (465x)
+winerror.h                     parse          2125.7 ms -> 38.5 ms      (55x)
+                               summarize      2187.2 ms -> 101.5 ms     (21.5x, 34.0 -> 1.6 us/line)
+```
+
+And the guard: **the full suite, 54 targets, 0 failures** — including every doc-comment test, which is what the separators
+are for.
+
+The cold index over the real project moved from a 1,829 ms heaviest step to **895 ms**, and the ten heaviest from 8,549 ms
+to 7,547 ms; the total (92.0 s against 89.0 s) is inside this machine's run-to-run noise, which is why the per-file
+numbers above are the ones to trust.
+
+**Debt, stated plainly**: the instrumented blocks that found all of this are still in the tree, gated on
+`CPPLS_SUMMARY_TRACE`, in `index/mod.rs`, `sema/declarations.rs`, `sema/scopes.rs`, `index/project.rs` and
+`parser/cpp_parser.rs` + `grammar/cpp/mod.rs`. They are inert without the variable but they are not free (an
+`Instant::now()` per binding in `fact_for`), and `git diff` is the only trustworthy list of them.

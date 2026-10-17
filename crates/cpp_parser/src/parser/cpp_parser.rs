@@ -431,7 +431,21 @@ impl<'a> CppParser<'a> {
     /// all of `text` (invariant I1). Problems are reported through [`CppSyntaxTree::get_errors`]
     /// and through `ErrorNode`/`MissingNode` nodes, not through a `Result`.
     pub fn parse(text: &'a str, config: ParserConfig<'a>) -> CppSyntaxTree {
-        Self::parse_inner(text, config).0
+        let tree = Self::parse_inner(text, config).0;
+        if std::env::var_os("CPPLS_SUMMARY_TRACE").is_some() {
+            eprintln!(
+                "      [parse: comment_group_at {:.1} ms, comment_sources {:.1} ms, parse_comment_group {:.1} ms, groups {}]",
+                GROUP_NS.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1e6,
+                SOURCES_NS.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1e6,
+                DOC_NS.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1e6,
+                GROUPS.load(std::sync::atomic::Ordering::Relaxed)
+            );
+            GROUP_NS.store(0, std::sync::atomic::Ordering::Relaxed);
+            DOC_NS.store(0, std::sync::atomic::Ordering::Relaxed);
+            SOURCES_NS.store(0, std::sync::atomic::Ordering::Relaxed);
+            GROUPS.store(0, std::sync::atomic::Ordering::Relaxed);
+        }
+        tree
     }
 
     /// Like [`CppParser::parse`], but also reports the raw event stream's balance.
@@ -512,6 +526,7 @@ impl<'a> CppParser<'a> {
             builder.finish()
         };
 
+
         let tokens = std::mem::take(&mut parser.tokens);
         let tree = CppSyntaxTree::new(root, errors, tokens);
         (tree, events)
@@ -521,9 +536,12 @@ impl<'a> CppParser<'a> {
         let mut errors: Vec<CppParseError> = Vec::new();
         let mut parser = CppParser::with_text(text, config, &mut errors);
 
+        let t_grammar = std::time::Instant::now();
         parse_cpp_unit(&mut parser);
-
+        let grammar = t_grammar.elapsed();
+        let t_audit = std::time::Instant::now();
         let audit = parser.audit_events();
+        let audit_time = t_audit.elapsed();
 
         debug_assert!(
             parser.open_marks.is_empty(),
@@ -540,6 +558,15 @@ impl<'a> CppParser<'a> {
             builder.build();
             builder.finish()
         };
+        let build = t_audit.elapsed() - audit_time;
+        if std::env::var_os("CPPLS_SUMMARY_TRACE").is_some() {
+            eprintln!(
+                "      [parse_inner: grammar {:.1} ms, audit {:.1} ms, tree {} ms]",
+                grammar.as_secs_f64() * 1000.0,
+                audit_time.as_secs_f64() * 1000.0,
+                build.as_secs_f64() * 1000.0
+            );
+        }
 
         let tokens = std::mem::take(&mut parser.tokens);
         (CppSyntaxTree::new(root, errors, tokens), audit)
@@ -1721,12 +1748,19 @@ impl<'a> CppParser<'a> {
                 continue;
             }
 
+            let t_group = std::time::Instant::now();
             let group = self.comment_group_at(index, end);
+            GROUP_NS.fetch_add(t_group.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+            let t_sources = std::time::Instant::now();
             let sources = self.comment_sources(&group);
+            SOURCES_NS.fetch_add(t_sources.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+            GROUPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             // The doc parse is total: it cannot fail, and it cannot leave a marker open, so there is
             // nothing to recover from and nothing to check. Anything it wants to report it reports
             // through `push_error`.
+            let t_doc = std::time::Instant::now();
             let _ = crate::grammar::doc::parse_comment_group(self, &sources);
+            DOC_NS.fetch_add(t_doc.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
 
             index = *group.last().expect("a group has at least one comment") + 1;
         }
@@ -1748,10 +1782,16 @@ impl<'a> CppParser<'a> {
                 // Everything between the previous comment and this one. The group is built from
                 // comment positions plus the layout between them, so this is that layout — and only
                 // layout, since a non-layout token would have ended the group.
-                let previous_end = self.tokens[group[position - 1]].range.end_offset();
-                for token in self.tokens[..token_index].iter().filter(|token| {
-                    is_line_layout_kind(token.kind) && token.range.start_offset >= previous_end
-                }) {
+                // **The gap, not the file.** This scanned `self.tokens[..token_index]` — every token from the start of
+                // the file — once per comment of the group. Measured on a comment block: 8.0 ms at 4,000 lines and
+                // 139.6 ms at 16,000 (quadratic), and `winerror.h`, whose 6.5万 lines are ~80% comments, paid 2.1 s of
+                // parse for it. The separators are exactly the layout tokens between the previous comment and this
+                // one, and the group's construction already guarantees the span holds nothing else.
+                let previous_index = group[position - 1];
+                for token in &self.tokens[previous_index + 1..token_index] {
+                    if !is_line_layout_kind(token.kind) {
+                        continue;
+                    }
                     if source.separator_len < crate::grammar::doc::MAX_SEPARATOR_TOKENS {
                         source.separator[source.separator_len] = Some(token.range);
                         source.separator_len += 1;
@@ -2226,3 +2266,10 @@ mod tests {
         assert_eq!(parser.current_token_index(), 0, "and so did the cursor");
     }
 }
+
+/// **Temporary** — see `docs/cold-start-cpu.md`: the two halves of the trivia path.
+static GROUP_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static DOC_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+static SOURCES_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static GROUPS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);

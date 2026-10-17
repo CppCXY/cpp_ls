@@ -27,8 +27,13 @@ pub fn parse_cpp_unit(p: &mut CppParser) {
     let base = p.open_marks();
     let m = p.mark(CppSyntaxKind::TranslationUnit);
 
+    let t_init = std::time::Instant::now();
     p.init();
+    let init_time = t_init.elapsed();
+    let t_loop = std::time::Instant::now();
+    let mut iterations = 0usize;
     while p.current_token() != CppTokenKind::Eof {
+        iterations += 1;
         let consume_count = p.current_token_index();
         parse_stats(p);
 
@@ -51,8 +56,17 @@ pub fn parse_cpp_unit(p: &mut CppParser) {
         base + 1,
         "a grammar rule unwound past the translation unit marker"
     );
+    let loop_time = t_loop.elapsed();
     m.complete(p);
     p.close_marks_above(base);
+    if std::env::var_os("CPPLS_SUMMARY_TRACE").is_some() {
+        eprintln!(
+            "      [parse_cpp_unit: init {:.1} ms, loop {:.1} ms over {} iteration(s)]",
+            init_time.as_secs_f64() * 1000.0,
+            loop_time.as_secs_f64() * 1000.0,
+            iterations
+        );
+    }
 }
 
 /// Report a token that is expected but absent, without consuming anything.

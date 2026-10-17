@@ -84,6 +84,33 @@ fn main() {
             summary.declarations.len(),
             summary.macros.len()
         );
+        {
+            // A second parse, only for the error count — the summary does not carry it.
+            let tree = cpp_parser::CppParser::parse(&text, cpp_parser::ParserConfig::default());
+            println!(
+                "  tokens: {}   parse errors: {}",
+                tree.get_tokens().len(),
+                tree.get_errors().len()
+            );
+        }
+        return;
+    }
+
+    // **`--lex <file>`**: the lexer alone, so that a quadratic in a parse can be told apart from one in a scan.
+    if let Some(at) = args.iter().position(|argument| argument == "--lex") {
+        let Some(file) = args.get(at + 1) else { std::process::exit(2) };
+        let text = std::fs::read_to_string(file).unwrap_or_default();
+        let started = std::time::Instant::now();
+        let (tokens, _) = cpp_parser::lex(&text, &cpp_parser::LexerConfig::default());
+        let took = started.elapsed().as_secs_f64();
+        println!(
+            "{file}\n  {} tokens, {} line(s)\n  lex: {:.1} ms ({:.2} MB/s, {:.2} us per line)",
+            tokens.len(),
+            text.lines().count(),
+            took * 1000.0,
+            text.len() as f64 / 1e6 / took.max(1e-9),
+            took * 1e6 / text.lines().count().max(1) as f64
+        );
         return;
     }
 
