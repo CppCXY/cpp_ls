@@ -1,0 +1,260 @@
+#![allow(dead_code)]
+//! **A file's contribution to a translation unit, shared between units** — `docs/walk-redesign.md` §4.2 and §8 step 2.
+//!
+//! # What a contribution is
+//!
+//! When the walk enters a file it produces, in order: the macro state changes the file makes, the timeline frames and
+//! events for the file and everything it includes, the unconditional facts that become the unit's evidence, the bodies
+//! of conditional definitions that came out in force, and the `#define`s it decided are not compiled. Those are a pure
+//! function of *(the file, the values of the names its conditions read)* — which is the projection whose reuse ratio
+//! was measured at **37×** (`crate::index::walk_census`, `docs/walk-redesign.md` §11).
+//!
+//! So the contribution is stored keyed by that projection, and a later unit that reaches the same file with the same
+//! projection **splices** it instead of walking: the frames and events are copied with their indices rebased, and the
+//! state changes are replayed into the unit's own table. Nothing is re-decided and no text is re-read.
+//!
+//! # Why the entries are stored as positions and not as facts
+//!
+//! `Walked::entries` holds `&'a MacroFact` — borrowed from the summaries, which is exactly why a contribution cannot
+//! hold them. The positions are enough: an entry is `(file, offset)` and the summary's own `macros` are in offset
+//! order, so a splice finds each fact again with a binary search. That is a lookup per entry, against a walk per
+//! entry, which is the trade this whole design is.
+//!
+//! # Invalidation, and why the key carries a revision
+//!
+//! A contribution depends on the **contents of every file in its subtree**, and a shorter key would go stale the
+//! moment a header changed — silently, which is the one failure mode this crate refuses. So the key carries
+//! [`crate::index::store::SummaryStore::revision`], a counter that only moves when a summary is dropped or invalidated:
+//! one edit anywhere retires every contribution, which is conservative in the only safe direction. The counter is not
+//! bumped by ordinary commits, or the cache would never survive two files in a row.
+//!
+//! The cache is **per thread**, because a walk holds `&FileSummary` borrows and the store is not shared across threads
+//! while one is in progress. That costs a duplicate cache per thread and nothing else; a single-threaded pump — which
+//! is what the index has today — gets the whole of it.
+
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use crate::macros::MacroDef;
+use crate::summary::{TuEvent, TuFrame};
+
+/// **One state change a file makes**, in the order it makes it.
+///
+/// Order is the whole point: `#define X 1` followed by `#undef X` is not the same unit as the reverse, and a
+/// contribution that stored only the final table would replay the wrong one.
+#[derive(Debug, Clone)]
+pub(crate) enum StateChange {
+    /// A name put in force, with the definition and the position it was written at.
+    Defined {
+        name: Box<str>,
+        definition: Arc<MacroDef>,
+        file: std::path::PathBuf,
+        at: usize,
+    },
+    /// A name taken out of force. The file is carried for the same reason as above: a contribution keeps the changes
+    /// **it** made, and a walk interleaves a file's own facts with the subtrees it includes.
+    Undefined {
+        name: Box<str>,
+        file: std::path::PathBuf,
+        /// Where the `#undef` was written — the key a splice merges the changes with the events and the edges by.
+        at: usize,
+    },
+}
+
+/// **One entry of a unit's evidence**, as a position rather than a borrow — see the module documentation.
+#[derive(Debug, Clone)]
+pub(crate) struct EntryPosition {
+    /// Where the name becomes visible: the file's own depth in the walk, **relative** to this contribution's root.
+    pub(crate) from_offset: isize,
+    pub(crate) file: std::path::PathBuf,
+    pub(crate) at: usize,
+}
+
+/// **A body a condition guarded that came out in force** — owned, because a contribution outlives the walk.
+#[derive(Debug, Clone)]
+pub(crate) struct ConditionalBody {
+    pub(crate) name: Box<str>,
+    pub(crate) function_like: bool,
+    pub(crate) parameters: Option<Box<str>>,
+    pub(crate) body: Box<str>,
+}
+
+/// **What one file contributed** — its own frame, its own facts, and the edges it took.
+///
+/// **Not its subtree.** The first version stored the subtree, and a chain of depth *d* then kept *d* copies of every
+/// file's work; measured, that cost more than the walks it saved (`docs/walk-redesign.md` §11.3). A contribution is
+/// one file, and the edges are how a splice reaches the rest — the memoized traversal §4.3 describes.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Contribution {
+    /// The file this contribution is for.
+    pub(crate) file: std::path::PathBuf,
+    /// The file writes `#pragma once`, so it is entered at most once per unit.
+    pub(crate) visit_once: bool,
+    /// The events **this file wrote**, every one of them with `frame == 0` once spliced.
+    pub(crate) events: Vec<TuEvent>,
+    /// The state changes this file made, in order.
+    pub(crate) changes: Vec<StateChange>,
+    /// **The include edges this file took**, in order: where in the file, and the key of what was walked there.
+    pub(crate) edges: Vec<(usize, u64)>,
+    /// The conditional bodies that came out in force.
+    pub(crate) bodies: Vec<ConditionalBody>,
+    /// The `#define`s *this file* decided are not compiled.
+    pub(crate) dead: Vec<usize>,
+    pub(crate) conditional_facts: usize,
+    pub(crate) facts_in_force: usize,
+}
+
+impl StateChange {
+    /// The file that made the change — a contribution keeps only its own, and a walk interleaves a file with its
+    /// includes.
+    pub(crate) fn file(&self) -> &std::path::Path {
+        match self {
+            StateChange::Defined { file, .. } => file,
+            StateChange::Undefined { file, .. } => file,
+        }
+    }
+
+    /// **Where in its file the change was written** — the key a splice interleaves by.
+    ///
+    /// A file's own facts and the includes it takes are one sequence in the source, and the walk visits them in offset
+    /// order. A contribution that replayed all of its changes before recursing its edges would apply a `#define`
+    /// written after an `#include` before it — a different program, and measured as one failing semantics test
+    /// (`docs/walk-redesign.md` §11.5).
+    pub(crate) fn at(&self) -> usize {
+        match self {
+            StateChange::Defined { at, .. } => *at,
+            StateChange::Undefined { at, .. } => *at,
+        }
+    }
+}
+
+/// A frame as a contribution stores it: the parent is relative, so a subtree can be moved.
+#[derive(Debug, Clone)]
+pub(crate) struct CachedFrame {
+    pub(crate) file: std::path::PathBuf,
+    /// `None` for the contribution's root, whose parent is the frame the splice hangs it under.
+    pub(crate) parent: Option<u32>,
+    pub(crate) from_in_parent: usize,
+    pub(crate) visit_once: bool,
+    /// The first event of this frame's subtree, **relative** to the contribution's first event.
+    pub(crate) entry_seq: u32,
+    /// One past this frame's subtree, as a frame index **relative** to the contribution's first frame.
+    pub(crate) tout: u32,
+}
+
+thread_local! {
+    /// The contributions this thread has recorded, keyed by [`key`].
+    static CONTRIBUTIONS: RefCell<HashMap<u64, Arc<Contribution>>> = RefCell::new(HashMap::new());
+}
+
+/// **The identities a contribution is filed under.**
+///
+/// Four things, and each is a way the answer could differ: the file, the contents of the file, the values of the names
+/// its conditions read (the projection), and the store's revision — which stands for the contents of every file the
+/// subtree reaches, because it moves whenever any summary is dropped.
+pub(crate) fn key(file: &std::path::Path, projection: u64) -> u64 {
+    crate::index::walk_census::hash(file.to_string_lossy().as_bytes()).rotate_left(7) ^ projection
+}
+
+/// **The contribution filed under this key**, if this thread has one.
+pub(crate) fn lookup(key: u64) -> Option<Arc<Contribution>> {
+    CONTRIBUTIONS.with(|held| held.borrow().get(&key).cloned())
+}
+
+/// **File a contribution**, replacing whatever was there.
+pub(crate) fn store(key: u64, contribution: Contribution) {
+    CONTRIBUTIONS.with(|held| {
+        held.borrow_mut().insert(key, Arc::new(contribution));
+    });
+}
+
+/// **Forget everything.** Called when the store's revision moves, so that a stale contribution cannot outlive the
+/// summaries it was made from even if its key were somehow reused.
+pub(crate) fn clear() {
+    CONTRIBUTIONS.with(|held| held.borrow_mut().clear());
+}
+
+/// **How many contributions this thread holds** — the number a probe reports, so that "the cache is on" is not
+/// something to infer from a wall clock.
+pub(crate) fn held() -> usize {
+    CONTRIBUTIONS.with(|held| held.borrow().len())
+}
+
+/// **The frame and events a splice puts in the timeline**, rebased onto the site's indices.
+///
+/// A contribution is one file, so this is one frame: the site supplies the parent and the offset inside it, and the
+/// caller closes it with `leave` once the edges have been spliced. An event's `frame` becomes the frame's own id.
+pub(crate) fn rebased(
+    contribution: &Contribution,
+    frame: u32,
+    event_base: u32,
+    parent: Option<u32>,
+    from_in_parent: usize,
+) -> (TuFrame, Vec<TuEvent>) {
+    let built = TuFrame {
+        file: contribution.file.clone(),
+        parent,
+        from_in_parent,
+        visit_once: contribution.visit_once,
+        entry_seq: event_base,
+        // Closed by the caller's `leave`, exactly as a walked frame is.
+        tout: u32::MAX,
+    };
+
+    let mut events = contribution.events.clone();
+    for event in &mut events {
+        event.frame = frame;
+    }
+
+    (built, events)
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn an_event() -> TuEvent {
+        TuEvent {
+            name: std::sync::Arc::from("X"),
+            function_like: None,
+            body: None,
+            body_text: None,
+            parameters: None,
+            body_range: None,
+            frame: 0,
+            at: 7,
+            unconditional: true,
+        }
+    }
+
+    #[test]
+    fn a_spliced_frame_takes_its_parent_from_the_site_and_its_events_take_the_frame() {
+        let contribution = Contribution {
+            file: std::path::PathBuf::from("/p/a.h"),
+            visit_once: true,
+            events: vec![an_event()],
+            ..Contribution::default()
+        };
+
+        let (frame, events) = rebased(&contribution, 5, 41, Some(2), 33);
+        assert_eq!(frame.parent, Some(2), "the frame hangs under the splice site");
+        assert_eq!(frame.from_in_parent, 33);
+        assert_eq!(frame.file, std::path::PathBuf::from("/p/a.h"));
+        assert!(frame.visit_once, "the file writes `#pragma once`, and that travels with it");
+        assert_eq!(frame.entry_seq, 41, "the frame starts where its first event will be");
+        assert_eq!(frame.tout, u32::MAX, "and is closed by the caller's `leave`");
+        assert_eq!(events[0].frame, 5, "the events belong to the spliced frame");
+        assert_eq!(events[0].at, 7, "the offset inside the file does not move");
+        assert_eq!(events.len(), 1, "one file's own events, and nothing from its subtree");
+    }
+
+    #[test]
+    fn the_key_moves_with_the_file_and_the_projection() {
+        let base = key(std::path::Path::new("/p/a.cpp"), 3);
+        assert_ne!(base, key(std::path::Path::new("/p/a.cpp"), 9), "projection");
+        assert_ne!(base, key(std::path::Path::new("/p/b.cpp"), 3), "file");
+        assert_eq!(base, key(std::path::Path::new("/p/a.cpp"), 3), "and is stable");
+    }
+}
+
+

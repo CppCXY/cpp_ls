@@ -68,7 +68,7 @@ pub async fn on_signature_help(
         let view = session.view(&path)?;
         let offset = offset_at_position(&view, position)?;
 
-        if session.pending() > 0 {
+        if !session.is_locally_ready(&path) {
             log::debug!(
                 "no signature yet: {} file(s) are queued, and where the callee is declared is not known",
                 session.pending()
@@ -242,3 +242,4 @@ mod tests {
         );
     }
 }
+

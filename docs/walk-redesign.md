@@ -235,3 +235,189 @@ module, one call site and one run; skipping it cost a built-and-reverted cache a
 The count is now taken, the plan stops where the document said it would, and one number (the projection's ratio) is
 what stands between this design and being abandoned for the other half of the load — `[indexing]`, which was 34.6% of
 the instrumented work and has nothing to do with the walk.
+## 11. The projection key, measured — **37×**, and the design may proceed
+
+§10 left one number standing between this design and its abandonment. It is now taken, with the key §9 argued for:
+
+```text
+EmmyLuaCodeStyle, 1122 files, one real entry file (`CodeFormatServer/src/LanguageServer.cpp`):
+  census: entries 91,290   distinct (file, projection) 2,452   ratio **37.2**
+```
+
+against the whole-environment key's **1.5**. The difference is the whole point of the refinement: a root that defines
+its own macros before reaching `<string>` changes the environment and **not** the names `<string>`'s conditions read,
+so the entry hits.
+
+**37 is a floor, not an estimate.** The projection is read by scanning the file's own text for the identifiers on its
+`#if` / `#ifdef` / `#ifndef` / `#elif` lines — no walk, no summary, no coordinates — and that scan is deliberately
+**wider** than the true dependency (it takes every identifier on the line, `defined` included). A wider key makes
+fewer hits, so the true ratio is at least this.
+
+The census is `crates/cpp_code_analysis/src/index/walk_census.rs`, switched on with `CPPLS_WALK_CENSUS=1` and printing
+a line per entry so that "it did not run" cannot be read as "it found nothing" (§7's rule). It is kept rather than
+deleted because step 2 has a correctness verification it can give: **after the splice, the number of entries walked
+fresh must fall to the distinct count** — 2,452 — and the ratio must approach the entry count.
+
+Verified by:
+
+```text
+cargo run --release -p cpp_code_analysis --example checks_probe -- E:\EmmyLuaCodeStyle <entry.cpp>
+CPPLS_WALK_CENSUS=1   # and read the last `census:` line
+```
+
+### What remains, in the order §8 gives
+
+```text
+2. the splice        TimelineBuilder opens a frame whose subtree comes from the cache
+3. the walk consults it   compare wall clock on the same project and entry; the census's distinct count is the
+                          expected number of fresh walks
+4. persistence       through the existing codec, so a restart starts warm
+```
+### 11.1 Step 2's design, settled by reading the structures
+
+Two facts decide how the splice is written, and both were read out of `summary.rs` rather than assumed:
+
+```text
+TuFrame { file, parent, from_in_parent, visit_once, entry_seq, tout }
+```
+
+* **A frame's subtree is contiguous in both vectors.** Frames are pushed in depth-first order and a frame's events are
+  `events[entry_seq..tout]`, so splicing is an index rewrite (add the base) plus a parent remap — which is what §4.2
+  claimed and this is the field that makes it true.
+* **`Walked.entries` cannot be cached.** It is `Vec<(usize, &'a MacroFact, &'a str)>` — borrowed from the summaries —
+  so a contribution stored across walks must keep the **events** and re-derive the entries when it is spliced: an
+  event already carries `name`, `at`, `frame`, the body text and the parameters, and the summary's own facts are
+  reachable by `(file, at)`. `conditional_bodies` is re-derived the same way; `dead_macros` is owned
+  (`HashMap<PathBuf, Vec<usize>>`) and is stored as it stands.
+
+And one correctness condition that the splice must carry, which is *not* in §4:
+
+```text
+seen   the walk enters each file once per unit (the include-guard idiom, `visit_once`). A cached subtree therefore
+       records what a file contributed **when it was first entered** — so before splicing, every file in the subtree
+       must be one this walk has not already seen. If any of them is, walk the file fresh instead: conservative,
+       correct, and the ordinary case is a fresh include tree anyway.
+```
+
+The cache itself is keyed by `(file, projection digest)` — the 37× key — with the projection computed by
+`index::walk_census`'s scanner, which is already written and already the thing the ratio was measured with.
+### 11.2 Step 2's edit list, as far as it is built
+
+**Built and green** (`cargo build`, `cargo test`): `index/walk_cache.rs` with the `Contribution` type, the key, the
+per-thread store, `rebase` and its two tests; `SummaryStore::revision()` with a bump and a cache clear in `forget` and
+`invalidate`; `Clone`/`Debug` on `TuEvent` and `TuFrame`; `walk_census::{hash, projection_digest}`.
+
+The rest, in the order the compiler will force:
+
+```text
+1. Walked.entries gains the file     it is (usize, &'a MacroFact, &'a str) today, and a contribution has to say which
+                                     file each entry came from. One push site (summary.rs, the unconditional arm),
+                                     and the consumers follow the compiler.
+2. Walked gains `changes`            the ordered define/undefine list, pushed in the same two arms of the macro loop
+                                     that already call unit.define / unit.undefine. A splice replays it into the unit.
+3. the splice, in summary.rs         NOT in walk_cache: it touches UnitState, Walked and the `seen` set, all private
+                                     there. It enters the root, rebases the frames and events, replays the changes,
+                                     appends the entries/bodies/dead lists, adds the counts, and marks every file in
+                                     `files` as seen.
+4. the record, at the tail           capture (frames, events, changes, entries) lengths at the head, and at the exit
+                                     build the Contribution from the ranges. Frames store `parent`, `entry_seq` and
+                                     `tout` **relative** to the head's bases; the root's `parent` is replaced at splice
+                                     time by the site's.
+5. the precondition                  a splice only when none of `files` is already in `seen` — the include-guard
+                                     condition, see 11.1.
+```
+
+Then the verification §11 already names: the census's fresh entries must fall toward **2,452**, and the cold-load wall
+clock on the same entry file must fall with it. The cache is per thread, so a single-threaded pump gets all of it and
+a parallel one gets a share; that is deliberate — this round is about the work being done once, not about how many
+cores do it.
+### 11.3 The first splice was built, measured, and was **wrong in its granularity**
+
+Built: a `(file, contents, projection)` keyed cache of a file's **whole subtree** — frames, events, state changes,
+evidence positions, bodies, dead macros — spliced by rebasing indices and replaying the changes. The suite stayed green
+(53 targets ok, the pre-existing latency test red), so it is semantically plausible; the numbers say it is the wrong
+shape:
+
+```text
+EmmyLuaCodeStyle, same entry file, same probe:
+  spliced 0      fresh 69,089        ← the cache never hit
+  wall 216.5 s                       ← against ~103 s with the cache off
+```
+
+Two causes, and only the second is a defect of the *number* rather than of the design:
+
+* **A subtree per file is quadratic.** Every file of a chain of depth *d* stored *d* copies of its subtree, so the
+  bookkeeping alone cost more than the walks it was meant to save. §4.2 says "a file's contribution is its frame
+  subtree" — but §4.3 keys the cache **per include edge** and splices *recursively*, which is what keeps each stored
+  contribution to one file's own frames.
+* **The key's `contents` half was the text `look_up` answered with**, which is the rendered reading in one unit and the
+  written one in another — so the same file hashed differently and the lookup could not repeat. The file's identity
+  must come from the summary it was read from (its `SummaryKey`), not from a string the caller happens to hold.
+
+Switched off behind `const SHARE: bool = false` in `summary.rs` with these numbers beside it, because leaving a cache
+that is slower and never hits is worse than leaving none. The next step is the one §4.3 actually specifies:
+
+```text
+per-file contribution   the file's own frames (not its subtree) + the edges it took, each with the child's key
+splice                  enter the frame, replay the changes, then recurse the edges — a memoized DAG traversal
+key                     (the summary's own identity, the projection) and nothing taken from the caller's text
+```
+### 11.4 Round 3: the shape is corrected, the wiring is not yet in
+
+The contribution was reshaped to what §4.3 specifies — **one file**, not a subtree:
+
+```text
+Contribution { file, visit_once, events (this file's own), changes (this file's),
+               edges: [(offset in this file, the child's key)], bodies, dead, counts }
+```
+
+and `rebased` became one frame plus its events (`walk_cache`'s test says so: the frame takes the site's parent and
+offset, the events take the frame's id, `tout` is left for the caller's `leave`). `Walked` gained `changes` and
+`spliced`, the state-change type carries the file so a contribution can keep only its own, and `walk_one_file` was to
+return the key it filed under so that the parent could record an edge.
+
+**What is not in yet, and why it was not forced:** the walk's own wiring — the head's lookup, the recursive splice, and
+the tail's record — was written for the subtree shape and does not survive the reshaping in the same round. Rather than
+leave a half-rewritten walk on the hottest path, `summary.rs` was restored and the two new modules kept, compiling and
+tested, behind `#![allow(dead_code)]` with this note. The suite is as it was: **53 targets ok**, one pre-existing red.
+
+The remaining edits, in order, are exactly the ones this round settled:
+
+```text
+1. walk_one_file returns Option<u64>          the key it filed under, so a parent can record an edge
+2. the include site pushes (offset, child key) into a local `edges` vec
+3. the head: key = (path, projection); lookup; if it hits and the file is not already spliced, recurse-splice and
+   return the key. `SHARE` is the constant that turns it on, and it stays `false` until the numbers are in
+4. the tail: build a Contribution from the *ranges within this frame* — events whose `frame` is this one, the changes
+   whose file is this one, the edges vec, the dead offsets, the bodies rebuilt from this file's own events — and store
+   it. Per-frame counts need the same treatment: `conditional_facts`/`facts_in_force` are unit-wide totals today and a
+   contribution must carry only this file's share, or a spliced unit's evidence density will read low.
+5. the splice recurses on the edges with a depth cap, entering one frame per file, and `leave`s it after the edges.
+```
+
+The verification is unchanged and takes one run: `spliced` should approach 91,290 − 2,452, `fresh` should approach
+2,452, and the wall clock must beat the 103 s baseline — the number §11.2's census line already prints.
+### 11.5 Round 4: the splice is wired and **the order is wrong**
+
+The per-file shape from §11.4 is wired: `walk_one_file` returns the key it filed under, the include site collects
+`(offset, child key)`, the head computes `(path, projection)` and splices on a hit, the tail records this file's own
+events, changes, edges, dead offsets and per-frame counts, and the splice recurses the edges with a depth cap.
+
+With it live, **one** test failed:
+
+```text
+a_declaration_only_a_macro_makes_is_found_once_the_session_has_cooked_the_file     FAILED
+```
+
+and the cause is exact rather than mysterious: a contribution keeps its **state changes** and its **include edges** in
+two lists, so the splice replays every change and only then recurses the edges. The walk interleaves them **by offset**
+— one loop over macros and includes, whichever the file writes first — so a `#define` written after an `#include` must
+take effect after the subtree that include pulled in. Replaying it before is a different program.
+
+**The fix, which the next round is one step away from:** a contribution's events, changes and edges are all in
+**offset order already** (the walk visits them in that order), so the splice merges the three by offset and does each
+thing where it belongs — an event where its fact was, its state change with it, and an edge where the include was.
+That needs one field: `Undefined` must carry its offset too, so the change list can be merged by the same key.
+
+`const SHARE: bool = false` sits in `summary.rs` with these numbers beside it, and the suite is back to
+**53 targets ok** with only the pre-existing latency test red.

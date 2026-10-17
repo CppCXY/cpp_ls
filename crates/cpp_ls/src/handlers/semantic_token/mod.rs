@@ -445,7 +445,7 @@ pub async fn on_semantic_tokens(
         // index, and before it has been read that name has no classification — so an answer now would be a
         // *shorter* list, which a client caches until the next edit. The protocol has a word for "ask again
         // later", and this is it: `null`.
-        if session.pending() > 0 {
+        if !session.is_locally_ready(&view.path) {
             log::debug!(
                 "no semantic tokens yet: {} file(s) are queued, and a name in one of them would be uncoloured",
                 session.pending()
@@ -1275,3 +1275,4 @@ constexpr bool is_assignable_v = __is_assignable(To, From);
         kind.to_u32()
     }
 }
+

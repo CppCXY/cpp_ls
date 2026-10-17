@@ -2417,6 +2417,25 @@ impl<F: FileProvider + Clone> Session<F> {
         self.queue.is_queued(path) || !self.unread_includes_of(path).is_empty()
     }
 
+    /// **Can a question about this file be answered from what has been read?** — the question a *local* request asks.
+    ///
+    /// [`Session::pending`] is the project's queue, and it is not this question. What a name means, where it is
+    /// declared, what a call's signature is: each of those depends on the file and on the headers it includes, and on
+    /// nothing else in the project. A project of five hundred sources whose *other* files are still queued is fully
+    /// able to answer about the one the editor has open.
+    ///
+    /// The measured cost of the confusion: opening a real project queued 1122 files, and every local request was
+    /// refused until the last of them — including a second pass that re-reads 773 files at about half a second each,
+    /// so the refusal lasted **minutes** after the answers were already available. See `docs/status.md` §九 and
+    /// `docs/cold-start-cpu.md`.
+    ///
+    /// The asymmetry with [`Session::pending`] is deliberate and is the whole of this method: a **project-wide**
+    /// question — a reference search, a rename, a workspace symbol — genuinely needs coverage, and those handlers keep
+    /// asking [`Session::pending`]. A **local** one does not.
+    pub fn is_locally_ready(&self, path: &Path) -> bool {
+        self.is_indexed(path) && !self.needs_catching_up(path)
+    }
+
     /// Work until there is nothing left, and say how many files were read.
     ///
     /// Chunked rather than one `advance(usize::MAX)`: the steps of a whole project are a `Vec` nobody wants, and a
@@ -8423,3 +8442,4 @@ mod tests {
         );
     }
 }
+

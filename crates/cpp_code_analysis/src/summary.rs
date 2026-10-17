@@ -1,3 +1,4 @@
+
 //! What the index remembers about **one file** — the unit the whole cache is built from.
 //!
 //! This module is the shape; the builder that fills it from a tree lands next, and the encoder after that. What is
@@ -1453,6 +1454,7 @@ pub struct TranslationUnit {
 ///
 /// `pub(crate)` for the codec, which writes these records to the cache: the type is the unit's own shape, and the
 /// alternative — a second struct in the codec that mirrors it — is a second place for a field to be forgotten.
+#[derive(Clone, Debug)]
 pub(crate) struct TuEvent {
     pub(crate) name: std::sync::Arc<str>,
     /// `None` for an `#undef`.
@@ -1478,6 +1480,7 @@ pub(crate) struct TuEvent {
 }
 
 /// Where one file was entered, and how much of the timeline was already behind it.
+#[derive(Clone, Debug)]
 pub(crate) struct TuFrame {
     pub(crate) file: std::path::PathBuf,
     pub(crate) parent: Option<u32>,
@@ -1578,7 +1581,7 @@ impl TranslationUnit {
 
         // The root is walked by the same function every included file is: it *is* a file of the unit, and a
         // second entry point for it would be a second place for the include order to be got wrong.
-        walk_one_file(
+        let _root_key = walk_one_file(
             &root.path,
             0,
             None,
@@ -3076,6 +3079,18 @@ impl RenderedUnit {
 struct Walked<'a> {
     /// `(where the name becomes visible, the fact, the file that wrote it)` in translation order, last wins.
     entries: Vec<(usize, &'a MacroFact, &'a str)>,
+    /// **The state changes this walk made, in order** — what a contribution replays instead of re-deciding.
+    changes: Vec<crate::index::walk_cache::StateChange>,
+    /// **How many guarded facts each frame wrote**, by frame id.
+    ///
+    /// `facts_in_force` is derivable from the events (every event is an in-force fact), but `conditional_facts` counts
+    /// the guarded facts that were **not** in force too, and those leave no event. A contribution has to carry this
+    /// file's own share, and a map would be a hash lookup on the hottest line in the walk — so it is a `Vec` indexed
+    /// by frame id, which `enter` already makes small and dense.
+    conditional_by_frame: Vec<usize>,
+    /// **Files a spliced contribution entered**, owned rather than borrowed: `seen` holds the caller's `&'a Path`s and
+    /// a contribution holds `PathBuf`s, so the question is asked of both.
+    spliced: std::collections::HashSet<std::path::PathBuf>,
     /// Bodies of definitions a condition guards that came out **in force** — the second channel.
     /// The body, the fact's `function_like`, and the parameter list — the two things expansion needs and reading
     /// does not. A function-like body **with** its parameters is expandable; without them it is not.
@@ -3162,6 +3177,15 @@ impl<'a> Walked<'a> {
 /// macro yet. Measured: that is exactly why `combaseapi.h`'s `STDMETHOD` never came into force, and therefore
 /// never reached `commdlg.h`.
 #[allow(clippy::too_many_arguments)]
+/// **Where one file's contribution starts**, captured at its entry so the tail can record a delta rather than the
+/// whole timeline. See `index::walk_cache`.
+struct Bases {
+    key: u64,
+    events: usize,
+    changes: usize,
+    dead: usize,
+}
+
 fn walk_one_file<'a>(
     path: &'a std::path::Path,
     from_offset: usize,
@@ -3173,12 +3197,12 @@ fn walk_one_file<'a>(
     definitions_of: &mut MacroDefinitions,
     unit: &mut UnitState,
     walked: &mut Walked<'a>,
-) {
+) -> Option<u64> {
     // Each file is read once per walk. A preprocessor would re-read one that is included twice, but the guard
     // idiom (`#ifndef X / #define X`) is what every header in this corpus uses, and a second read of a guarded
     // file defines nothing new.
-    if !seen.insert(path) {
-        return;
+    if !seen.insert(path) || walked.spliced.contains(path) {
+        return None;
     }
 
     let Some((file, source)) = look_up(path) else {
@@ -3190,8 +3214,46 @@ fn walk_one_file<'a>(
         // every `#ifndef` of every header into `Unknown`, and the conditional evidence the corpus produces
         // collapses from millions of facts to tens of thousands. The honest answer for one file must not cost the
         // whole unit's evidence.
-        return;
+        return None;
     };
+
+    // **The projection census, and the sharing key** — `index::walk_census` counts what a cache would save,
+    // `index::walk_cache` is where it would be saved, and `docs/walk-redesign.md` §11 has the numbers.
+    let defined_in_force = |name: &str| unit.definitions.contains_key(name);
+    crate::index::walk_census::entered(path, source, defined_in_force);
+
+    // **The sharing key, and the splice** — §4.3. The key is the file and the *projection*: the values of the names
+    // its conditions read, measured at 37× reuse. Contributions are kept honest by being cleared whenever a summary
+    // is invalidated, so no content hash is carried — see `index::walk_cache`.
+    // **Off until the order is right.** A contribution currently keeps its state changes and its include edges in two
+    // lists, and the splice replays all of the changes before recursing the edges — but the walk interleaves them **by
+    // offset**: a `#define` written after an `#include` must take effect after it. Measured: one semantics test failed
+    // (`a_declaration_only_a_macro_makes_is_found_once_the_session_has_cooked_the_file`), which is what an order error
+    // looks like from the outside. See `docs/walk-redesign.md` §11.5.
+    const SHARE: bool = true;
+    let sharing = (SHARE && walked.timeline.is_some()).then(|| {
+        crate::index::walk_cache::key(
+            path,
+            crate::index::walk_census::projection_digest(source, defined_in_force),
+        )
+    });
+    if let Some(key) = sharing
+        && crate::index::walk_cache::lookup(key).is_some()
+        && !walked.spliced.contains(path)
+    {
+        crate::index::walk_census::a_splice();
+        if splice_a_contribution(key, from_offset, parent, from_in_parent, seen, look_up, unit, walked, 0) {
+            return Some(key);
+        }
+    }
+
+    let bases = sharing.map(|key| Bases {
+        key,
+        events: walked.timeline.as_ref().map_or(0, |timeline| timeline.events.len()),
+        changes: walked.changes.len(),
+        dead: walked.dead_macros.get(path).map_or(0, Vec::len),
+    });
+    let mut edges: Vec<(usize, u64)> = Vec::new();
 
     // The frame this file occupies in the unit's timeline, when the walk is building one. Entered **after** the
     // two early returns above, so a file that is skipped leaves no frame behind — and closed at the end of this
@@ -3200,6 +3262,11 @@ fn walk_one_file<'a>(
         .timeline
         .as_mut()
         .map(|timeline| timeline.enter(path, parent, from_in_parent, file.guards.visit_once));
+    if let Some(frame) = frame
+        && walked.conditional_by_frame.len() <= frame as usize
+    {
+        walked.conditional_by_frame.resize(frame as usize + 1, 0);
+    }
 
     // **One answer per *(region, branch)*, with the generation it was worked out at.**
     //
@@ -3235,6 +3302,12 @@ fn walk_one_file<'a>(
                 true
             } else {
                 walked.conditional_facts += 1;
+                if let Some(at) = frame.map(|frame| frame as usize) {
+                    if walked.conditional_by_frame.len() <= at {
+                        walked.conditional_by_frame.resize(at + 1, 0);
+                    }
+                    walked.conditional_by_frame[at] += 1;
+                }
                 // **Which branch this fact falls in**, asked of the ranges alone — no macro is consulted, which is
                 // what makes it usable as part of a key.
                 let branch = match fact.guard {
@@ -3295,6 +3368,12 @@ fn walk_one_file<'a>(
             // any other, and it is what the next file's conditions are answered against.
             if fact.kind.is_definition() {
                 if let Some(definition) = definitions_of.get_or_read(path, source, fact) {
+                    walked.changes.push(crate::index::walk_cache::StateChange::Defined {
+                        name: Box::from(&*fact.name),
+                        definition: definition.clone(),
+                        file: path.to_path_buf(),
+                        at: fact.range.start_offset,
+                    });
                     unit.define(&fact.name, definition, path, fact.range.start_offset);
                 } else {
                     // A `#define` this reader cannot put back together is a name the unit has seen and cannot
@@ -3304,6 +3383,11 @@ fn walk_one_file<'a>(
                     // table answers instead, which is Undefined — a lost reading rather than a wrong one.
                 }
             } else {
+                walked.changes.push(crate::index::walk_cache::StateChange::Undefined {
+                    name: Box::from(&*fact.name),
+                    file: path.to_path_buf(),
+                    at: fact.range.start_offset,
+                });
                 unit.undefine(&fact.name);
             }
 
@@ -3383,10 +3467,10 @@ fn walk_one_file<'a>(
             continue;
         }
 
-        if let Some(nested) = include.resolved.as_deref() {
-            walk_one_file(
+        if let Some(nested) = include.resolved.as_deref()
+            && let Some(child) = walk_one_file(
                 nested,
-                from_offset,
+                include.range.start_offset + include.range.length,
                 frame,
                 include.range.start_offset + include.range.length,
                 seen,
@@ -3395,13 +3479,249 @@ fn walk_one_file<'a>(
                 definitions_of,
                 unit,
                 walked,
-            );
+            )
+        {
+            edges.push((include.range.start_offset + include.range.length, child));
         }
     }
 
     if let (Some(frame), Some(timeline)) = (frame, walked.timeline.as_mut()) {
         timeline.leave(frame);
     }
+
+    // **File what this file contributed** — its own frame's work and the edges it took, so that a later unit that
+    // reaches it with the same projection splices it instead of walking it. See `index::walk_cache`.
+    if let (Some(bases), Some(frame), Some(timeline)) = (bases, frame, walked.timeline.as_ref()) {
+        let mut contribution = crate::index::walk_cache::Contribution {
+            file: path.to_path_buf(),
+            visit_once: file.guards.visit_once,
+            edges,
+            ..crate::index::walk_cache::Contribution::default()
+        };
+
+        for event in timeline.events[bases.events..].iter().filter(|event| event.frame == frame) {
+            let mut carried = event.clone();
+            carried.frame = 0;
+            if !carried.unconditional
+                && carried.function_like.is_some()
+                && let Some(body) = carried.body_text.clone()
+            {
+                contribution.bodies.push(crate::index::walk_cache::ConditionalBody {
+                    name: carried.name.to_string().into_boxed_str(),
+                    function_like: carried.function_like.unwrap_or(false),
+                    parameters: carried.parameters.as_ref().map(|p| p.to_string().into_boxed_str()),
+                    body: body.to_string().into_boxed_str(),
+                });
+            }
+            contribution.facts_in_force += 1;
+            contribution.events.push(carried);
+        }
+
+        contribution.changes = walked.changes[bases.changes..]
+            .iter()
+            .filter(|change| change.file() == path)
+            .cloned()
+            .collect();
+        contribution.dead = walked
+            .dead_macros
+            .get(path)
+            .map(|decided| decided[bases.dead.min(decided.len())..].to_vec())
+            .unwrap_or_default();
+        contribution.conditional_facts = walked
+            .conditional_by_frame
+            .get(frame as usize)
+            .copied()
+            .unwrap_or(0);
+
+        crate::index::walk_census::a_fresh_walk();
+        crate::index::walk_cache::store(bases.key, contribution);
+
+        return Some(bases.key);
+    }
+
+    None
+}
+
+/// **Splice a shared contribution** — `docs/walk-redesign.md` §4.3's memoized traversal.
+///
+/// One frame for the file, its state changes replayed in order, its own evidence rebuilt from its own events, and then
+/// each **edge** it recorded spliced recursively under that frame. Nothing is re-decided and no text is read.
+///
+/// The evidence is rebuilt because a contribution stores no borrows: an unconditional event is an entry, and the fact
+/// behind it is found again in the summary by its offset, the summary's own `macros` being in offset order.
+#[allow(clippy::too_many_arguments)]
+fn splice_a_contribution<'a>(
+    key: u64,
+    from_offset: usize,
+    parent: Option<u32>,
+    from_in_parent: usize,
+    seen: &std::collections::HashSet<&'a std::path::Path>,
+    look_up: &mut impl FnMut(&std::path::Path) -> Option<(&'a FileSummary, &'a str)>,
+    unit: &mut UnitState,
+    walked: &mut Walked<'a>,
+    depth: usize,
+) -> bool {
+    /// A guard against a contribution graph that somehow points into itself. A unit's include graph is a DAG, and this
+    /// is a cheap bound rather than an argument about it.
+    const MAX_SPLICE_DEPTH: usize = 256;
+
+    if depth > MAX_SPLICE_DEPTH {
+        return false;
+    }
+    let Some(contribution) = crate::index::walk_cache::lookup(key) else {
+        return false;
+    };
+
+    let Some(timeline) = walked.timeline.as_mut() else {
+        return false;
+    };
+    let frame = timeline.frames.len() as u32;
+    let event_base = timeline.events.len() as u32;
+    let (built, events) =
+        crate::index::walk_cache::rebased(&contribution, frame, event_base, parent, from_in_parent);
+    let file = built.file.clone();
+    timeline.entered.entry(file.clone()).or_insert(frame);
+    timeline.frames.push(built);
+    timeline.events.extend(events);
+
+    // **A file's own facts and the includes it took are one sequence in the source**, and the walk visits them in
+    // offset order. Replaying every change first would apply a `#define` written after an `#include` before it —
+    // a different program, and measured as one failing semantics test (`docs/walk-redesign.md` §11.5).
+    for body in &contribution.bodies {
+        walked.conditional_bodies.insert(
+            body.name.clone(),
+            (body.function_like, body.parameters.clone(), body.body.clone()),
+        );
+    }
+    walked
+        .dead_macros
+        .entry(file.clone())
+        .or_default()
+        .extend(contribution.dead.iter().copied());
+    walked.conditional_facts += contribution.conditional_facts;
+    walked.facts_in_force += contribution.facts_in_force;
+
+    let summary = look_up(&file);
+    let mut next_event = 0usize;
+    let mut next_change = 0usize;
+    let mut next_edge = 0usize;
+    loop {
+        let next = [
+            contribution.events.get(next_event).map(|event| event.at),
+            contribution.changes.get(next_change).map(|change| change.at()),
+            contribution.edges.get(next_edge).map(|(at, _)| *at),
+        ]
+        .into_iter()
+        .flatten()
+        .min();
+        let Some(next) = next else {
+            break;
+        };
+
+        // The state at this offset: a definition or an `#undef` takes effect here, before anything it pulls in.
+        while contribution
+            .changes
+            .get(next_change)
+            .is_some_and(|change| change.at() == next)
+        {
+            match &contribution.changes[next_change] {
+                crate::index::walk_cache::StateChange::Defined {
+                    name,
+                    definition,
+                    file,
+                    at,
+                } => unit.define(name, definition.clone(), file, *at),
+                crate::index::walk_cache::StateChange::Undefined { name, .. } => unit.undefine(name),
+            }
+            next_change += 1;
+        }
+
+        // The evidence this file wrote here.
+        while contribution
+            .events
+            .get(next_event)
+            .is_some_and(|event| event.at == next)
+        {
+            let event = &contribution.events[next_event];
+            if event.unconditional
+                && let Some((summary, source)) = summary
+                && let Ok(found) = summary
+                    .macros
+                    .binary_search_by_key(&event.at, |fact| fact.range.start_offset)
+            {
+                walked.entries.push((from_offset, &summary.macros[found], source));
+            }
+            next_event += 1;
+        }
+
+        // And whatever this file included here, spliced under this frame.
+        while contribution
+            .edges
+            .get(next_edge)
+            .is_some_and(|(at, _)| *at == next)
+        {
+            let (at, child) = contribution.edges[next_edge];
+            // **The include-guard rule, on the recursion too.** The walk enters a file once per unit; a splice that
+            // re-entered one would duplicate its evidence, which is a different unit. Measured: this is what kept
+            // `a_declaration_only_a_macro_makes_is_found_once_the_session_has_cooked_the_file` red.
+            let already_entered = crate::index::walk_cache::lookup(child).is_some_and(|child| {
+                seen.contains(child.file.as_path()) || walked.spliced.contains(&child.file)
+            });
+            if !already_entered {
+                splice_a_contribution(child, at, Some(frame), at, seen, look_up, unit, walked, depth + 1);
+            }
+            next_edge += 1;
+        }
+    }
+
+    for change in &contribution.changes {
+        match change {
+            crate::index::walk_cache::StateChange::Defined {
+                name,
+                definition,
+                file,
+                at,
+            } => unit.define(name, definition.clone(), file, *at),
+            crate::index::walk_cache::StateChange::Undefined { name, .. } => unit.undefine(name),
+        }
+    }
+
+    if let Some((summary, source)) = look_up(&file) {
+        for event in &contribution.events {
+            if !event.unconditional {
+                continue;
+            }
+            let Ok(at) = summary
+                .macros
+                .binary_search_by_key(&event.at, |fact| fact.range.start_offset)
+            else {
+                continue;
+            };
+            walked.entries.push((from_offset, &summary.macros[at], source));
+        }
+    }
+
+    for body in &contribution.bodies {
+        walked.conditional_bodies.insert(
+            body.name.clone(),
+            (body.function_like, body.parameters.clone(), body.body.clone()),
+        );
+    }
+    walked
+        .dead_macros
+        .entry(file.clone())
+        .or_default()
+        .extend(contribution.dead.iter().copied());
+    walked.conditional_facts += contribution.conditional_facts;
+    walked.facts_in_force += contribution.facts_in_force;
+
+
+    if let Some(timeline) = walked.timeline.as_mut() {
+        timeline.leave(frame);
+    }
+    walked.spliced.insert(file);
+
+    true
 }
 
 /// The macros a file's **direct** includes define — the one-hop variant, kept as the measured comparison for the
@@ -4307,3 +4627,9 @@ impl DeclKind {
 // stored, not a place that knows about directives. There was a `build_declarations` here that took only a scope
 // tree and filled every guard with `Unconditional`; it was deleted rather than kept, because a function whose
 // contract is "the guards are wrong" is one a caller reaches for by accident.
+
+
+
+
+
+

@@ -29,6 +29,12 @@
 //! honest answer rather than a missing one: the file said `#include "widget.h"` and nothing here knows where
 //! that is.
 
+// **Wire in progress** — `docs/walk-redesign.md` §11.2 lists the five edits that make it live. Until the splice is in,
+// the type and its fields are read by nothing but their own tests, and an allow here is the honest way to say so
+// rather than a green build bought by deleting the tests.
+#[allow(dead_code)]
+pub mod walk_cache;
+
 use std::path::{Path, PathBuf};
 
 use cpp_parser::{CppParser, CppSyntaxTree, ParserConfig};
@@ -39,6 +45,7 @@ pub mod project;
 pub mod references;
 pub mod store;
 pub mod watch;
+pub mod walk_census;
 pub mod worklist;
 
 pub use environment::{MacrosHere, visibility_at};
@@ -2257,3 +2264,5 @@ mod tests {
         assert_eq!(files.read(Path::new("/p/other.h")), None);
     }
 }
+
+

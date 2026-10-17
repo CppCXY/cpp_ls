@@ -86,6 +86,8 @@ pub struct SummaryStore<F: FileProvider = DiskFiles> {
     files: F,
     index: ProjectIndex,
     stats: StoreStats,
+    /// See [`SummaryStore::revision`] — the clock `index::walk_cache` keys its contributions by.
+    revision: std::sync::atomic::AtomicU64,
     /// **What the unit walk decided about each file's `#define`s**, kept here because two paths build a summary and
     /// only one of them has a unit in hand.
     ///
@@ -371,6 +373,7 @@ impl<F: FileProvider> SummaryStore<F> {
             files,
             index: ProjectIndex::new(),
             stats: StoreStats::default(),
+            revision: std::sync::atomic::AtomicU64::new(0),
             dead_macros: std::sync::Mutex::new(std::collections::HashMap::new()),
         }
     }
@@ -1406,7 +1409,25 @@ impl<F: FileProvider> SummaryStore<F> {
     /// drops is the in-memory summary, so that a query stops finding declarations in a file that no longer exists.
     ///
     /// Returns whether there was anything to forget.
+    /// **How many times a summary has been dropped or invalidated** — the clock `index::walk_cache` keys its
+    /// contributions by.
+    ///
+    /// A contribution depends on the contents of every file in its subtree, and there is no cheap way to hash that
+    /// whole set. What is cheap is a counter that only moves when a summary is dropped: one edit anywhere retires every
+    /// contribution, which is conservative in the only safe direction, and ordinary commits do not move it — so a load
+    /// keeps its contributions from one file to the next, which is the whole point.
+    pub fn revision(&self) -> u64 {
+        self.revision.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn a_summary_was_dropped(&self) {
+        self.revision
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        crate::index::walk_cache::clear();
+    }
+
     pub fn forget(&mut self, path: &Path) -> bool {
+        self.a_summary_was_dropped();
         self.index.forget(path)
     }
 
@@ -1461,6 +1482,7 @@ impl<F: FileProvider> SummaryStore<F> {
     /// disappearing**, because a summary records where its includes *resolved* — and that is what this walk is
     /// for, since the files that resolved to the one that moved are exactly its includers.
     pub fn invalidate(&self, path: &Path) -> Vec<PathBuf> {
+        self.a_summary_was_dropped();
         let mut work = Vec::new();
         let mut visited: HashSet<String> = HashSet::new();
         let mut pending = vec![path.to_path_buf()];
@@ -2998,3 +3020,5 @@ mod tests {
         );
     }
 }
+
+
