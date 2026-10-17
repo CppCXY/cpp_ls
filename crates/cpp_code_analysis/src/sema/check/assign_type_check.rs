@@ -118,6 +118,24 @@ impl Check for AssignTypeCheck {
                 continue;
             };
 
+            // **A parameter's default value is not this check's question.** Measured on EmmyLuaCodeStyle:
+            // `Range(Position _start = Position(0, 0), Position _end = Position(0, 0));` produced two findings — the
+            // initialiser is a default argument, and what a default may be is the parameter's declaration rather than a
+            // variable's own type.
+            if declarator.ancestors().any(|node| {
+                cpp_parser::CppSyntaxKind::from(node.kind()) == cpp_parser::CppSyntaxKind::ParameterList
+            }) {
+                continue;
+            }
+
+            // **A construction is not a conversion to check.** Measured on EmmyLuaCodeStyle:
+            // `LineSpace line_space_after_if_statement = LineSpace(LineSpaceType::Keep);` produced ten findings. The
+            // initialiser is a call to the type's **own name**, and what the type engine answers for that call is not
+            // the type it constructs — so there is nothing here for this rule to compare.
+            if constructs_the_written_type(&expression, written) {
+                continue;
+            }
+
             report_if_it_does_not_convert(context, &expression, written, &name, "initialised");
         }
 
@@ -220,4 +238,21 @@ fn report(
         name.to_string(),
         format!("`{name}` is {how} with a value that does not convert to `{written}`"),
     );
+}
+
+/// **Is this expression a call to the very type it is assigned to?** — `LineSpace(…)` for a `LineSpace`.
+///
+/// The last component of a qualified spelling is what a construction writes: `std::string(…)` for a `std::string`.
+fn constructs_the_written_type(expression: &cpp_parser::CppSyntaxNode, written: &str) -> bool {
+    if cpp_parser::CppSyntaxKind::from(expression.kind()) != cpp_parser::CppSyntaxKind::CallExpr {
+        return false;
+    }
+    let Some(callee) = expression.children().next() else {
+        return false;
+    };
+    let Some(spelled) = super::spelling_of(&callee) else {
+        return false;
+    };
+    let target = written.rsplit("::").next().unwrap_or(written).trim();
+    spelled.trim() == written.trim() || spelled.trim() == target
 }

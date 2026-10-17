@@ -69,6 +69,24 @@ pub async fn on_prepare_rename(
         context.analysis().catch_up(&path).await;
     }
 
+    // **A refused rename says why.** The gate below is right — a partial search would write half a rename into the
+    // user's files — but the protocol's `null` is what an editor shows as "this cannot be renamed here", and during a
+    // project's first minute that is the wrong sentence. The message is sent before the decision is taken, because the
+    // decision cannot carry it: `RequestOutcome` has `Ready`, `Cancelled` and `Missing`, and no error.
+    let still_reading = context
+        .analysis()
+        .with_snapshot(|session| session.pending())
+        .unwrap_or(0);
+    if still_reading > 0 {
+        context.client().show_message(lsp_types::ShowMessageParams {
+            typ: lsp_types::MessageType::INFO,
+            message: format!(
+                "cpp_ls is still reading the project ({still_reading} file(s) left), so a rename would miss uses. \
+                 The editor offers it again when the index has caught up."
+            ),
+        });
+    }
+
     snapshot_query(context.analysis(), cancel_token, move |session| {
         let path = uri_to_file_path(&uri)?;
         let view = session.view_of_the_file(&path)?;
@@ -95,6 +113,7 @@ pub async fn on_rename(
     if let Some(path) = uri_to_file_path(&uri) {
         context.analysis().prepare(&path).await;
     }
+
 
     snapshot_query(context.analysis(), cancel_token, move |session| {
         let path = uri_to_file_path(&uri)?;

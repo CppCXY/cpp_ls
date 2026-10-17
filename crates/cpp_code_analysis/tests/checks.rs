@@ -882,6 +882,165 @@ int main() {
         codes_with_two_files(too_many, other)
     );
 }
+/// **A function template whose return-type spelling carries its header is not judged for a missing return.**
+///
+/// Measured on EmmyLuaCodeStyle: `template<ServiceClass Service, typename... ARGS> void
+/// LanguageServer::AddService(ARGS &&...args) { … }` was reported as returning something with no `return` in its body —
+/// the fact carried the **template header and the return type** in one string, and the check compared it to `"void"`
+/// exactly.
+#[test]
+fn a_function_templates_type_that_carries_its_header_is_not_judged() {
+    let source = "\
+template<class Service>
+void AddService(Service service) {
+    int unused_index = 0;
+}
+";
+    assert!(
+        !codes_of(source).contains(&DiagnosticCode::MissingReturn),
+        "`void` after a template header is still `void`: {:?}",
+        codes_of(source)
+    );
+
+    let really_missing = "\
+int AddService(int service) {
+    int unused_index = 0;
+}
+";
+    assert!(
+        codes_of(really_missing).contains(&DiagnosticCode::MissingReturn),
+        "and an `int` function with no return is still a finding: {:?}",
+        codes_of(really_missing)
+    );
+}
+/// **A construction and a parameter's default are not conversions to judge.**
+///
+/// Both shapes are from EmmyLuaCodeStyle, and between them they were all twelve of the project's `assign-type-check`
+/// findings: `LineSpace x = LineSpace(LineSpaceType::Keep);` ten times, and `Range(Position _start = Position(0, 0))`
+/// twice. The second half says a real mismatch is still reported, so neither guard becomes a blanket silence.
+#[test]
+fn a_construction_and_a_default_argument_are_not_conversions_to_judge() {
+    let constructions = "\
+enum class LineSpaceType { Keep };
+struct LineSpace { LineSpace(LineSpaceType); };
+LineSpace line_space_after_if_statement = LineSpace(LineSpaceType::Keep);
+";
+    assert!(
+        !codes_of(constructions).contains(&DiagnosticCode::AssignTypeCheck),
+        "the initialiser names the target type: {:?}",
+        codes_of(constructions)
+    );
+
+    let defaults = "\
+struct Position { Position(int line, int character); };
+struct Range { Range(Position start = Position(0, 0)); };
+";
+    assert!(
+        !codes_of(defaults).contains(&DiagnosticCode::AssignTypeCheck),
+        "a default argument is the parameter's declaration, not a variable's: {:?}",
+        codes_of(defaults)
+    );
+
+    // The module's own example, which is the shape this check exists for. (A *class* target with a string initialiser
+    // is not one: `convertible_to` answers `Unknown` there, and the check is quiet — which is the second assertion
+    // above, seen from the other side.)
+    let real_mismatch = "\
+void g() {
+    int count = \"four\";
+}
+";
+    assert!(
+        codes_of(real_mismatch).contains(&DiagnosticCode::AssignTypeCheck),
+        "and a string assigned to an int is still a finding: {:?}",
+        codes_of(real_mismatch)
+    );
+}
+/// **A call whose name is also a type is a constructor call, and is not judged as a free function's arity.**
+///
+/// The shape is the one EmmyLuaCodeStyle has 16 times: `NameStyleRule(NameStyleType::SnakeCase)` — one argument — beside
+/// a *function* fact named `NameStyleRule` with two parameters, which made the check report "needs 2 … passes fewer" on
+/// code that compiles. Which constructor a call means is overload resolution among constructors, which this check does
+/// not do; a name that names a type is silence instead.
+#[test]
+fn a_call_whose_name_is_also_a_type_is_not_judged_for_arity() {
+    // The struct and the function share a spelling in **one** file, which is the real project's shape: the name is a
+    // type, so the call constructs, and the function's arity says nothing about it.
+    let source = "\
+struct NameStyleRule {
+    int value;
+};
+void NameStyleRule(int first, int second) {}
+void g() {
+    NameStyleRule(1);
+}
+";
+    assert!(
+        !codes_of(source).contains(&DiagnosticCode::ArgumentCount),
+        "the name is a type here, so the call constructs rather than calls: {:?}",
+        codes_of(source)
+    );
+}
+/// **An arrow reaches through something this check cannot see.**
+///
+/// Measured on EmmyLuaCodeStyle: `_session->Send(std::move(message))` was reported as "`_session` has no member
+/// `Send`" — the receiver is a `std::shared_ptr<Session>`, whose member list is `shared_ptr`'s, and the member the
+/// program means is behind `operator->`. The guard says an arrow is not evidence; the second half says the check still
+/// reports a `.` on a class whose member list really does not have the name, so the guard cannot become a blanket
+/// silence.
+#[test]
+fn a_member_reached_through_an_arrow_is_not_judged_as_missing() {
+    let through_an_arrow = "\
+struct Session {
+    void Run();
+};
+void g(Session* session) {
+    session->Run();
+    session->Missing();
+}
+";
+    assert!(
+        !codes_of(through_an_arrow).contains(&DiagnosticCode::UndefinedField),
+        "the pointee's members are not this check's question: {:?}",
+        codes_of(through_an_arrow)
+    );
+
+    let through_a_dot = "\
+struct Session {
+    void Run();
+};
+void g(Session session) {
+    session.Missing();
+}
+";
+    assert!(
+        codes_of(through_a_dot).contains(&DiagnosticCode::UndefinedField),
+        "and a `.` on a class whose member list has no such name is still reported: {:?}",
+        codes_of(through_a_dot)
+    );
+}
+/// **A member call is not judged against a free function of the same name.**
+///
+/// Measured on EmmyLuaCodeStyle: `_session.Run(…)` was judged against a free `Run()` taking no arguments and reported as
+/// "takes 0 argument(s) and this call passes more" — the wrong declaration, with the wrong arity, on code that compiles.
+/// Resolving the member needs the object's type; until that answer is trusted here, the check says nothing, which is the
+/// direction this layer documents.
+#[test]
+fn a_member_call_is_not_judged_against_a_free_function_of_the_same_name() {
+    let source = "\
+struct Session {
+    void Run();
+};
+void Run(int value, int other) {}
+void g(Session session) {
+    session.Run();
+}
+";
+    assert!(
+        !codes_of(source).contains(&DiagnosticCode::ArgumentCount),
+        "`session.Run()` is the member, not the free `Run(int, int)`: {:?}",
+        codes_of(source)
+    );
+}
 /// **A template's parameter is silent to the argument checks, and that is the right answer rather than a gap.**
 ///
 /// Deduction turns `f(T)` into `f(std::string)` for a `std::string` argument, and a parameter that *is* the argument's

@@ -74,11 +74,34 @@ impl Check for ArgumentCount {
             let Some(callee) = call.get_callee() else {
                 continue;
             };
+            // **A member call is not a free function of that name.** `_session.Run(…)` was judged against a free
+            // `Run()` that takes no arguments — measured on EmmyLuaCodeStyle: **19 of the project's 40 findings** came
+            // from this one line, and another 6 from the same shape in `undefined-field` (`docs/cold-start-cpu.md`).
+            // Resolving the member needs the object's type, which is a different question with its own false positives;
+            // until that answer is trusted here, staying silent is the direction this module documents.
+            if crate::sema::resolve::member_access_of(callee.syntax()).is_some() {
+                continue;
+            }
+
+
             // The **last name written** is what a declaration can be found by: `scale` in `scale(1)`, `scale` in
             // `w.scale(1)`, and the last of them in `ns::scale(1)`.
             let Some(name) = super::spelling_of(callee.syntax()) else {
                 continue;
             };
+            // **A name that is also a type is a constructor call.** Measured on EmmyLuaCodeStyle: `NameStyleRule(
+            // NameStyleType::SnakeCase)` — **one** argument — was reported as "needs 2 argument(s) and this call passes
+            // fewer", sixteen times, because the name is a class and a *function* fact of that name with two parameters
+            // is in the index. Which constructor a call means is overload resolution among constructors, which this
+            // check does not do; a name that names a type is silence rather than a wrong arity.
+            //
+            // Asked before **both** ways of finding a callee, because a function defined in this file takes the first
+            // path and the index's facts are never consulted for it — the first version of this guard sat in the index
+            // path and the fixture that reproduces the defect passed straight through it.
+            if names_a_type(context, &name) {
+                continue;
+            }
+
             // **This file first, the index second.** A callee declared here is read from the tree, which is where its
             // defaults and its `...` are; one declared in another file is a **fact** the cook already produced —
             // `DeclFact::parameter_list`, the field whose own documentation says it is stored *"because a query holds
@@ -253,6 +276,7 @@ fn callees_from_the_index(context: &CheckContext<'_>, name: &str) -> Vec<Callee>
         return Vec::new();
     };
     // A class's constructor and a free function may share a spelling; only the functions are this rule's question.
+
     let functions: Vec<&crate::DeclFact> = definitions
         .found
         .iter()
@@ -399,4 +423,15 @@ fn has_an_ellipsis(parameter: &str) -> bool {
     }
 
     false
+}
+
+/// **Is this name a type as well as a function?** — see the guard that calls this.
+fn names_a_type(context: &CheckContext<'_>, name: &str) -> bool {
+    let crate::Known::Yes(definitions) = context.index().definitions(name, context.path) else {
+        return false;
+    };
+    definitions
+        .found
+        .iter()
+        .any(|definition| definition.fact.kind != crate::DeclKind::Function)
 }

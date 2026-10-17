@@ -120,6 +120,21 @@ impl Check for MissingReturn {
             let Some(declared) = super::return_type_written_by(&function) else {
                 continue;
             };
+            // **A spelling that carries a template header is not a return type.** Measured on EmmyLuaCodeStyle: a member
+            // function template's fact carried `template<ServiceClass Service, typename... ARGS> void` — the template
+            // header and the return type in one string — and the exact comparison below read that as "returns
+            // something", which is the false positive this check cannot afford. A spelling with `template` in it is not
+            // a type, and a type is what this rule judges.
+            if declared.contains("template") {
+                continue;
+            }
+
+            // **`void` with a suffix** — an attribute, a macro — is still `void`: the exact comparison below would read
+            // `void [[nodiscard]]` as a return type and report a body that returns nothing.
+            if declared.trim_end().eq("void") || declared.trim_end().ends_with(" void") {
+                continue;
+            }
+
             if declared == "void" || declared == "auto" || declared == "decltype(auto)" {
                 continue;
             }

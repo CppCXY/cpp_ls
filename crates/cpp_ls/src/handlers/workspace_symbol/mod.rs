@@ -65,12 +65,14 @@ pub fn symbols<F: cpp_code_analysis::FileProvider + Clone>(
     session: &Session<F>,
     query: &str,
 ) -> Option<Vec<WorkspaceSymbol>> {
+    // **Answered from what is indexed.** Same reasoning as `references`: a search over an index that is still filling
+    // is what the reader asked for, and refusing for a project's first minute makes the command look broken. The count
+    // is logged so a thin answer is explainable rather than mysterious.
     if session.pending() > 0 {
-        log::debug!(
-            "no symbol search yet: {} file(s) are queued and their declarations are not in the index",
+        log::info!(
+            "a symbol search while {} file(s) are still queued: declarations in those files are not in this answer",
             session.pending()
         );
-        return None;
     }
 
     // One more than the cap, so that "the answer was truncated" is knowable rather than inferred from a length that
@@ -138,14 +140,23 @@ mod tests {
 
     const WIDGET_H: &str = "namespace ns {\nstruct Widget { int size; };\n}\n";
 
-    /// **A search is refused while the index has work**, for the reason the module documents: the protocol's
+    /// **A search is answered while the index has work, and complete once it has none**, deterministically.
+    ///
+    /// The state is built rather than waited for — a project list with the file queued and nothing read — and the answer
+    /// is what the index can see, which here is nothing yet: an **empty list**, not `null`. The earlier version refused,
+    /// reasoning that the response has no "and there may be more" and a partial search is a false answer; the cost was a
+    /// search during a project's first minute looking like a command that does not work. The second half is the same
+    /// call once the queue is empty, which is what makes the first half a statement about timing.
+    ///
+    /// (`docs/latency.md` keeps the record of the opposite mistake, in `references`.)
+    /// The protocol's
     /// response has no "and there may be more", so a partial search is a false answer rather than a smaller one.
     ///
     /// The state is built rather than waited for — a project list with the file queued and nothing read — and the
     /// second half is the same call once the queue is empty, which is what makes the first half about timing rather
     /// than about a search that never works.
     #[test]
-    fn a_symbol_search_is_refused_while_the_index_has_work() {
+    fn a_symbol_search_is_answered_while_the_index_has_work_and_complete_after() {
         let files = MemoryFiles::new().with_file("/p/widget.h", WIDGET_H);
         let providers = SessionFiles::new(OpenDocuments::new(), files);
         let mut session = Session::with_config(
@@ -156,11 +167,10 @@ mod tests {
         );
 
         session.add_project_files([PathBuf::from("/p/widget.h")]);
-        assert!(session.pending() > 0, "the fixture is the refused state");
-        assert_eq!(
-            symbols(&session, "Widget"),
-            None,
-            "an answer now would be missing symbols"
+        assert!(session.pending() > 0, "the fixture is the state this test is about");
+        assert!(
+            symbols(&session, "Widget").is_some_and(|found| found.is_empty()),
+            "a list of what the index has — empty here, because nothing has been read — rather than `null`"
         );
 
         session.index_everything();

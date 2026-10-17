@@ -218,10 +218,25 @@ fn main() {
             *by_check.entry(finding.code.name()).or_default() += 1;
             if shown < 60 {
                 shown += 1;
+                // **A line of the reading the check ran over, not the byte offset this used to print.** The first
+                // version put `finding.range.start_offset` in a `path:line` field, and "line 1764" of a 53-line header
+                // went into the record as a coordinate defect. It was that file's **1764th byte** — the offsets are
+                // reading offsets and the file is 53 lines long, which is exactly what an offset of 1764 looks like.
+                //
+                // What this still does not show is the line the **editor** would draw, because that is the publishing
+                // path's conversion and nothing here measures it. A probe that prints the rendering's line and the
+                // file's line side by side would be the instrument for that, and it does not exist yet.
+                let line = session
+                    .view_of_the_file(path)
+                    .map(|view| {
+                        let upto = finding.range.start_offset.min(view.source.len());
+                        view.source[..upto].matches('\n').count() + 1
+                    })
+                    .unwrap_or(0);
                 println!(
                     "  {}:{}  [{}]  {}",
                     path.to_string_lossy().replace('\\', "/"),
-                    finding.range.start_offset,
+                    line,
                     finding.code.name(),
                     finding.message
                 );

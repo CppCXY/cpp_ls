@@ -61,7 +61,7 @@ const IDLE_WAIT: std::time::Duration = std::time::Duration::from_millis(1000);
 /// fast because they had *nothing to say*. A slice that ends early drains the queue later, and a list with no
 /// summary behind it is not a fast answer but no answer. Throughput and latency pull against each other here, and
 /// this count already sat at a workable point between them.
-const INDEX_SLICE: usize = 32;
+const INDEX_SLICE: usize = 4;
 
 /// **How many files one slice cooks** — the same shape as [`INDEX_SLICE`], and the same reason.
 ///
@@ -311,7 +311,14 @@ async fn index_in_background(context: ServerContextSnapshot) {
         // changes hands.
         let mut was_pending = false;
 
-        loop {
+        // **The wave the pump is asking for**, adjusted after every slice (see below). It starts small because the first
+    // wave of a cold start is the expensive one — measured: a fixed cap of 32 held the writer for 3309 ms on the
+    // latency fixture's first wave and a completion that arrived inside it waited for all of it; a fixed 4 answered in
+    // 137 ms. That is the whole reason this is a measurement rather than a constant.
+    const THE_FIRST_WAVE: usize = 8;
+    let mut wave = THE_FIRST_WAVE;
+
+    loop {
             // A reload bumps the version and starts a pump of its own: this one stops rather than racing it for
             // the write lock, because its idea of what the project is is the one that was replaced.
             if context.workspace_manager().lock().await.workspace_version() != version {
@@ -336,13 +343,14 @@ async fn index_in_background(context: ServerContextSnapshot) {
             // here: the parse of the wave's files, and the **unit walk** the pass after it needs — measured holding
             // the writer for **1003 ms** on the first slice after a cold start, which was the largest single thing a
             // drain did. Neither changes anything, so neither belongs under the lock a query waits for.
+            // **Sized by the number a reader can feel**, which is how long the writer is held — see [`THE_FIRST_WAVE`].
             let prepared = context
                 .analysis()
-                .with_snapshot(|session| session.prepare_a_wave(INDEX_SLICE))
+                .with_snapshot(move |session| session.prepare_a_wave(wave))
                 .unwrap_or_default();
             let prepared_count = prepared.prepared.len();
 
-            let Some((pending, drain, claimed)) = context
+            let Some((pending, drain, claimed, held)) = context
                 .analysis()
                 .update_session("index slice", |session| {
                     // **Timed, and split, because the count is only a proxy for the one number a caller can feel:**
@@ -350,7 +358,7 @@ async fn index_in_background(context: ServerContextSnapshot) {
                     // the read lock above — and neither is the drain that follows the inserts, which comes back as a
                     // plan and is paid for under the read lock below. What is left is the insert and the queueing.
                     let started = std::time::Instant::now();
-                    let (done, drain) = session.commit_a_wave(prepared, INDEX_SLICE);
+                    let (done, drain) = session.commit_a_wave(prepared, wave);
                     let taken = done.len();
                     let held = started.elapsed().as_millis();
 
@@ -379,12 +387,24 @@ async fn index_in_background(context: ServerContextSnapshot) {
                             cooking = claimed.len()
                         );
                     }
-                    (pending_now, drain, claimed)
+                    (pending_now, drain, claimed, held)
                 })
                 .await
             else {
                 log::warn!("the workspace was closed while it was being indexed");
                 return;
+            };
+
+            // **The wave finds the size the machine has.** A wave that ran well over the budget halves, one that finished
+            // well inside it grows by a file, and one that landed near it stays. `INDEX_SLICE` is the cap and
+            // [`INDEX_SLICE_MS`] the target; what a fixed number costs is in [`THE_FIRST_WAVE`].
+            // **Over the target halves at once**, not at twice it: measured, a rule that only halved above 80 ms let the
+            // wave creep back to 32 while small headers were fast, and one heavy wave then held the writer for **1720
+            // ms**. Under half the target grows by a file, so the search settles where the machine's files actually are.
+            wave = match held {
+                over if over > u128::from(INDEX_SLICE_MS) => (wave / 2).max(1),
+                under if under < u128::from(INDEX_SLICE_MS) / 2 => (wave + 1).min(INDEX_SLICE),
+                _ => wave,
             };
 
             // **The drain's and the cooking slice's expensive halves, under one read lock.** Measured, the second

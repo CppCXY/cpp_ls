@@ -159,6 +159,7 @@ fn member_access_from_the_text(
         object,
         member: String::new(),
         member_range: SourceRange::new(at, 0),
+        arrow: false,
     })
 }
 

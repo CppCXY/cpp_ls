@@ -156,3 +156,202 @@ Recorded because each of these sent a search in the wrong direction for a round:
 * **A warm cache is not a cold one.** Three warm runs at 0 % CPU were read as "the spin does not reproduce", when they
   were simply runs with an empty work list.
 * **"Pinned forever" was an inference.** The pin was observed for 164 s and never for its own end.
+## The cold index decomposed, today, on EmmyLuaCodeStyle (cold cache)
+
+Run with the project cache **moved aside**, so every summary is rebuilt:
+
+```text
+opened in 223 ms, indexed in 120361 ms   (1122 file(s) in the index, 0 pending)
+of which:           111830 ms to index, 1122 file(s) in the index
+```
+
+So of today's **120.4 s**: the session opens in **0.2 s**, and **111.8 s** is the index itself — the drain that reads
+the project, re-reads the files whose includes arrived late, and cooks. The remaining ~8.4 s is the cooking and check
+phase the probe runs after it. That is the coarsest useful split, and it says where the next measurement must be: an
+`advance(64)` slab loop around the same drain, printing `pending()` after each slab, would show whether the 111.8 s is
+the first pass or the second.
+
+## 和 it: the same run is a false-positive census, and the numbers are not good
+
+The probe prints every finding it makes, and on this project (`LanguageServer.cpp` plus its closure) it made **both** a
+decomposition and a list that reads like a defect report:
+
+```text
+  **40 findings**: 19 argument-count, 12 assign-type-check, 6 undefined-field, 2 include-not-found, 1 missing-return
+
+  [argument-count]    `NameStyleRule` needs 2 argument(s) and this call passes fewer      (17 of the 19, one header)
+                      `CodeActionService` needs 1 … / `dump` needs 4 … / `Run` takes 0 …
+  [undefined-field]   `_session` has no member `Send`; `object` has no member `Deserialize`
+  [assign-type-check] `_start` is initialised with a value that does not convert to `Position`
+  [missing-return]    a template `void` function "has no return"
+  [include-not-found] `asio.hpp` — correct: the dependency is not vendored
+```
+
+The shape of the argument-count ones is the same defect three times: `_session.Run(...)` and `_session.Send(...)` are
+**member calls**, and the check resolves the name `Run` to the free function of that name — the wrong declaration, with
+the wrong arity. That is one root cause for 19 + 6 findings, and it is the first thing to fix for "usable".
+
+Real code compiles, so most of those are **wrong**. `argument-count` on a member called on an object (`_session.Send(…)`)
+counts only free functions of that name; `undefined-field` is the same class of gap; `missing-return` reads a template's
+`void` return as something a body must return. That is the "usable" question that matters more than any performance
+number, and it is now a recorded census rather than an anecdote: **the fixes to make next are the checks' false
+positives, not more speed.**
+## The census, one round later: 40 → 37, and the two defects it exposed instead
+
+The member-call fix (`argument_count` skips a callee that is a member access, because resolving the member needs the
+object's type) removed **3** findings and no test depended on them. Pinned by
+`checks.rs::a_member_call_is_not_judged_against_a_free_function_of_the_same_name`.
+
+The remaining 16 `argument-count` findings turned out **not** to be member calls, and reading two of them was worth more
+than the fix:
+
+```text
+LuaDiagnosticStyle.h has **53 lines**; the findings cite lines 436, 541, 640, …, 1764
+the flagged call is `NameStyleRule(NameStyleType::SnakeCase)` — **one** argument — and the message says
+"needs 2 argument(s) and this call passes fewer"
+```
+
+**The first of those two was this probe's bug, not the server's** — corrected here rather than left standing, because a
+wrong record is worse than a missing one: the probe printed `finding.range.start_offset` in a `path:line` field, so a
+53-line header's **1764th byte** was written down as its "line 1764". The range is a byte offset of the *rendering* the
+check ran over, and that file is 1764 bytes long. The probe now prints the line, and the findings read plausibly
+(`LanguageServer.cpp:11` is the `#include "asio.hpp"`).
+
+**What the readable positions then showed** — two classes of false positive, both confirmed by reading the code they
+point at:
+
+```text
+1  **The published line is not a line of the file.** A 53-line file cannot have a diagnostic on line 1764, so the
+   range survives a coordinate change (`ReadingOffset` vs `FileOffset`) somewhere on the publishing path. Every
+   diagnostic on a file whose rendering differs from its text is then drawn in the wrong place — which is worse than
+   a missing diagnostic.
+2  A call whose name is also a **class/constructor** is resolved to a two-parameter function of the same name, so the
+   arity is judged against a declaration the program never called.
+```
+
+```text
+LanguageServer.cpp:60   `_session->Send(std::move(message));`     `_session` is a `std::shared_ptr<Session>`:
+                                                                  `members_of("std::shared_ptr")` is `shared_ptr`'s
+                                                                  member list, the member the program means is behind
+                                                                  `operator->`, and the check reports and does not
+                                                                  follow it
+LSP.h:29                `array.push_back(v.Serialize());`          inside `if constexpr` in a template: the receiver's
+                                                                  type is not knowable there, and the check reports
+                                                                  anyway
+```
+
+The next fix is the arrow one and it is small: **an arrow access is not evidence** — the pointee's type is a question
+this check does not ask, so when the receiver's type is a known class and the member is not in its list, an `->` should
+be silence. That needs `MemberAccess` to say which access it was (`resolve::member_access_of` knows, and the struct does
+not carry it), which is why it is the next round's work rather than this one's.
+## The arrow guard: 37 → 33 findings, and the census is now an instrument
+
+`MemberAccess` now says which operator it was (`.` or `->`), and `undefined-field` treats an arrow as **not evidence**:
+the pointee's members are not that check's question, and `std::shared_ptr<Session>` has no `Send` in its own list. Pinned
+by `checks.rs::a_member_reached_through_an_arrow_is_not_judged_as_missing`, which also asserts that a `.` on a class
+without the member is **still** reported — the guard cannot become a blanket silence.
+
+Measured on EmmyLuaCodeStyle with the same probe and the same entry file:
+
+```text
+before this round   37 findings   19 argument-count  12 assign-type-check  6 undefined-field  2 include-not-found
+after                33 findings   16 argument-count  12 assign-type-check  **2** undefined-field  2 include-not-found
+```
+
+The two that remain are `array.push_back(…)` inside an `if constexpr` in a template — a receiver whose type is not
+knowable there, which is the next class and a different fix.
+
+**Why this is worth more than it looks:** the census is now a **two-minute instrument** (`checks_probe` with a warm
+cache, 33 findings on this project, positions that are real lines), so "usable" has a number that moves instead of an
+argument. The order of the remaining work is visible in it: 16 `argument-count` (a class-or-constructor call resolved to
+a same-named function) then 12 `assign-type-check`.
+## The type-name guard: 33 → 17, and `argument-count` is quiet on this project
+
+A call whose name is **also a type** is a constructor call. Which constructor it means is overload resolution among
+constructors, which this check does not do — so the check now says nothing about it rather than judging the call against
+a same-named *function* fact's parameters. Asked before **both** ways of finding a callee, because a function defined in
+the same file takes the first path and the index's facts are never consulted for it (the first version of the guard sat
+in the index path, and the fixture that reproduces the defect passed straight through it — the test caught that).
+
+```text
+census, same probe, same entry file:
+  round 4   40 findings   19 argument-count
+  round 5   37           16
+  round 6   33           16   (the arrow guard: undefined-field 6 → 2)
+  round 7   **17**       **0** argument-count
+```
+
+What 17 is made of now:
+
+```text
+12  assign-type-check    `_start` initialised with a value that does not convert to `Position` — a class-to-class
+                         conversion this layer cannot see, which is the next class
+ 2  undefined-field      `array.push_back(…)` inside `if constexpr` in a template: no knowable receiver type
+ 2  include-not-found    `asio.hpp` twice — **correct**: the dependency is not vendored
+ 1  missing-return       a template whose return type is `void`-returning, read as needing a `return`
+```
+
+The number moved 40 → 17 in four rounds with a test behind each move, and it is now a measurement anyone can repeat in
+two minutes: `checks_probe` on a warm cache, count the `[code]` lines.
+## Two guards on `assign-type-check`: 17 → 5 findings, and 2 of the 5 are correct
+
+All twelve of the project's `assign-type-check` findings had one of two shapes, and neither is a conversion this rule can
+judge:
+
+```cpp
+LineSpace line_space_after_if_statement = LineSpace(LineSpaceType::Keep);   // ten of them
+Range(Position _start = Position(0, 0), Position _end = Position(0, 0));    // two of them
+```
+
+```text
+a construction        the initialiser is a call to the type's **own name**; what the type engine answers for that call
+                      is not the type it constructs, so there is nothing to compare — `constructs_the_written_type`
+a default argument    the initialiser is a parameter's default; what a default may be is the parameter's declaration,
+                      not a variable's own type — the loop now skips an initialiser inside a `ParameterList`
+```
+
+Pinned by `checks.rs::a_construction_and_a_default_argument_are_not_conversions_to_judge`, whose third half asserts that
+`int count = "four"` is **still** reported — and whose first attempt failed, because it used a *class* target with a
+string, where `convertible_to` answers `Unknown` and the check is correctly quiet. The fixture was wrong, not the guard.
+
+The census, same probe and same entry file, five rounds:
+
+```text
+40 → 37 → 33 → 17 → **5**
+
+what the 5 are:
+  2  include-not-found   `asio.hpp` twice — **correct**: the dependency is not vendored
+  2  undefined-field     `array.push_back(…)` inside `if constexpr` in a template — no knowable receiver type
+  1  missing-return      a template whose return type is a `void`-returning of something, read as needing a `return`
+```
+
+So the project went from **38 findings that are wrong** to **3**, measured with a two-minute instrument and a test behind
+each move.
+## The template-header guard: 5 → 4, and 2 of the 4 are correct
+
+`missing-return` compared the written return type to `"void"` exactly, and a member function template's fact carries
+`template<ServiceClass Service, typename... ARGS> void` — the header and the return type in one string — so a `void`
+function was read as returning something. Two guards, both about what a spelling *is*:
+
+```text
+a spelling containing `template`   not a return type this rule can judge — silence
+`void` with a suffix              `void [[nodiscard]]` is still `void`
+```
+
+Pinned by `checks.rs::a_function_templates_type_that_carries_its_header_is_not_judged`, whose second half keeps
+`int f() { }` a finding.
+
+The census, six rounds, same probe and same entry file:
+
+```text
+40 → 37 → 33 → 17 → 5 → **4**
+
+what the 4 are:
+  2  include-not-found   `asio.hpp` twice — **correct**: the dependency is not vendored
+  2  undefined-field     `array.push_back(…)` where `array` is an `nlohmann::json`: `json::push_back` exists, so the
+                         class's member list the index holds is **partial** — a template class read through its own
+                         declaration is the next class of defect, and it is not a guard
+```
+
+So on this project: **38 wrong findings at the start of the census, 2 now**, with a test behind each move and a
+two-minute instrument to repeat it.

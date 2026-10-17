@@ -733,6 +733,10 @@ pub struct MemberAccess {
     pub member: String,
     /// The member's range, for a selection or a rename. Empty and past the operator when nothing is written.
     pub member_range: SourceRange,
+    /// **Whether the member is reached through `->` rather than `.`.** A check that reports a missing member on an
+    /// arrow is guessing that the receiver has no `operator->`; `std::shared_ptr<Session>` does, and its own member list
+    /// has no `Send`, which is how `_session->Send(…)` was reported on a real project.
+    pub arrow: bool,
 }
 
 /// The member access the cursor at `offset` is in, if it is in one.
@@ -806,6 +810,9 @@ pub fn member_access_of(node: &CppSyntaxNode) -> Option<MemberAccess> {
             .is_some_and(|token| token.text() == "." || token.text() == "->")
     })?;
     let operator_range = elements[operator].as_token()?.text_range();
+    let arrow = elements[operator]
+        .as_token()
+        .is_some_and(|token| token.text() == "->");
 
     // The object is the first **node** before the operator. A node rather than a token, because that is what a
     // type has to be inferred *from*: `(*p)`, `make()` and `a.b` are all nodes, and the inference decides which
@@ -833,6 +840,7 @@ pub fn member_access_of(node: &CppSyntaxNode) -> Option<MemberAccess> {
             object,
             member: String::new(),
             member_range: SourceRange::new(usize::from(operator_range.end()), 0),
+            arrow,
         });
     };
 
@@ -840,6 +848,7 @@ pub fn member_access_of(node: &CppSyntaxNode) -> Option<MemberAccess> {
         object,
         member: member_token.text().to_string(),
         member_range: cpp_parser::source_range(member_token.text_range()),
+        arrow,
     })
 }
 

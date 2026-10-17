@@ -143,12 +143,16 @@ pub fn locations<F: cpp_code_analysis::FileProvider + Clone>(
     offset: cpp_code_analysis::file::coordinates::ReadingOffset,
     include_declaration: bool,
 ) -> Option<Vec<Location>> {
+    // **Answered from what is indexed, and the omission is on the record.** This used to answer `null` while any file
+    // was queued, on the reasoning that a use in an unread file would be missing — true, and the cost was that a reader
+    // who asked during a project's first minute got *nothing*, which an editor shows as "no occurrences". A partial
+    // list is what clangd answers in the same state, and the count below is how the next reader sees that it was
+    // partial rather than complete.
     if session.pending() > 0 {
-        log::debug!(
-            "no reference list yet: {} file(s) are queued and their uses would be missing",
+        log::info!(
+            "a reference list while {} file(s) are still queued: uses in those files are not in this answer",
             session.pending()
         );
-        return None;
     }
 
     let Known::Yes(found) = session.macro_references(view, offset) else {
@@ -268,16 +272,15 @@ mod tests {
         session
     }
 
-    /// **A reference list is refused while the index has work**, deterministically rather than by timing.
+    /// **A reference list is answered while the index has work, and grows when it finishes**, deterministically.
     ///
-    /// The request arrives with both files queued, which is the state that would make the answer a lie: the use in
-    /// `items.cpp` cannot be found, because nothing has read that file. The protocol has no `isIncomplete` for this
-    /// response, so the honest answer is `null` — and this test builds that state instead of hoping to catch it.
-    ///
-    /// The second half is the same call once the queue is empty, which is what makes the first half a statement
-    /// about *timing* rather than about the query being broken.
+    /// The request arrives with both files queued: the use in `items.cpp` cannot be found, because nothing has read
+    /// that file. The answer is a **list of what can be seen**, not `null` — the earlier version refused, on the
+    /// reasoning that a partial list is a lie, and a reader who asked during a project's first minute got nothing at
+    /// all. What makes a partial list honest is that it grows: the second half is the same call after the pump, and it
+    /// finds at least what the first one did.
     #[test]
-    fn a_reference_list_is_refused_while_the_index_has_work() {
+    fn a_reference_list_is_partial_while_the_index_has_work_and_complete_after() {
         let mut session = session_with_an_unread_project();
         // **A view of the file the session holds, not of its rendering.** This test is about the state where the
         // index still has work to do, so it deliberately does not pump — and `Session::view` is a *request* for the
@@ -296,16 +299,17 @@ mod tests {
             .find("MAX_ITEMS")
             .expect("the fixture uses the macro");
 
-        assert!(session.pending() > 0, "the fixture is the refused state");
-        assert_eq!(
-            locations(
-                &session,
-                &view,
-                cpp_code_analysis::file::coordinates::ReadingOffset::new(on_the_use),
-                true
-            ),
-            None,
-            "an answer now would be missing whatever the queued files use"
+        assert!(session.pending() > 0, "the fixture is the state this test is about");
+        let partial = locations(
+            &session,
+            &view,
+            cpp_code_analysis::file::coordinates::ReadingOffset::new(on_the_use),
+            true,
+        )
+        .expect("a list is answered from what the index has, not refused");
+        assert!(
+            partial.len() <= 1,
+            "and it holds only what an unread `items.cpp` can already show: {partial:?}"
         );
 
         session.index_everything();

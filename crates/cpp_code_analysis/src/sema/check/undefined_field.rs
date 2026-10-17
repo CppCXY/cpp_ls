@@ -91,6 +91,15 @@ impl Check for UndefinedField {
                 continue;
             }
 
+            // **An arrow is not evidence.** Measured on EmmyLuaCodeStyle: `_session->Send(std::move(message))` was
+            // reported as "`_session` has no member `Send`" — the receiver is a `std::shared_ptr<Session>`, whose
+            // member list is `shared_ptr`'s, and the member the program means is behind `operator->`. Following that
+            // needs the pointee's type, which this check does not ask; until it does, an arrow says nothing rather
+            // than something wrong, which is the direction the module documents.
+            if access.arrow {
+                continue;
+            }
+
             // The message names what the reader wrote rather than a rendering of the type: `w.weight` is what is on
             // their screen, and a type pretty-printed by this layer would be a second spelling to disagree with.
             context.add(
