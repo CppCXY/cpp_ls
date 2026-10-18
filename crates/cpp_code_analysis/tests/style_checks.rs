@@ -19,13 +19,14 @@ fn the_style_codes_are_named_and_round_trip() {
         ("cstyle-cast", DiagnosticCode::CStyleCast),
         ("use-auto", DiagnosticCode::UseAuto),
         ("macro-parentheses", DiagnosticCode::MacroParentheses),
+        ("implicit-bool-conversion", DiagnosticCode::ImplicitBoolConversion),
     ];
     for (name, code) in expected {
         assert_eq!(code.name(), name);
         assert_eq!(DiagnosticCode::from_name(name), Some(code));
         assert!(DiagnosticCode::ALL.contains(&code), "{name} is in ALL");
     }
-    assert_eq!(DiagnosticCode::ALL.len(), 22, "the eight are in the list");
+    assert_eq!(DiagnosticCode::ALL.len(), 23, "the nine are in the list");
 }
 
 /// `readability-braces-around-statements`: a one-statement body should be a block.
@@ -187,5 +188,66 @@ fn a_comment_and_a_string_literal_are_not_code() {
     assert!(
         !macro_in_a_comment.contains(&DiagnosticCode::MacroParentheses),
         "a commented-out macro is not a macro: {macro_in_a_comment:?}"
+    );
+}
+
+/// **The rule that needs the type**: `if (count)` converts an `int` to `bool`, and `if (flag)` does not.
+///
+/// The two differ by the declaration and nothing else — this is what the scope tree, the index and the semantic model are
+/// for. A text rule cannot see it, and a rule that flagged both would be wrong about every `bool` in the project.
+#[test]
+fn an_arithmetic_condition_is_an_implicit_conversion() {
+    let reported = codes_of("void f(int count) {\n    if (count) { return; }\n}\n");
+    assert!(
+        reported.contains(&DiagnosticCode::ImplicitBoolConversion),
+        "an `int` in a condition is a conversion: {reported:?}"
+    );
+
+    // A `bool` is the type the conversion would produce, so it is not a conversion.
+    let quiet = codes_of("void f(bool ready) {\n    if (ready) { return; }\n}\n");
+    assert!(
+        !quiet.contains(&DiagnosticCode::ImplicitBoolConversion),
+        "a `bool` is not converted to `bool`: {quiet:?}"
+    );
+
+    // A pointer is the same conversion and the idiom every codebase uses; the rule leaves it alone.
+    let a_pointer = codes_of("void f(int* p) {\n    if (p) { return; }\n}\n");
+    assert!(
+        !a_pointer.contains(&DiagnosticCode::ImplicitBoolConversion),
+        "`if (ptr)` is the nullable-pointer idiom: {a_pointer:?}"
+    );
+
+    // `while` is the same question and the same walk.
+    let looped = codes_of("void f(int n) {\n    while (n) { --n; }\n}\n");
+    assert!(
+        looped.contains(&DiagnosticCode::ImplicitBoolConversion),
+        "`while (n)` converts too: {looped:?}"
+    );
+}
+
+/// **A preprocessor condition is not a cast** — the false positive the first census found, in its own words.
+///
+/// 813 findings over 46 files, and the examples were `#if (_MSC_VER)` and `#if (ASIO_USE_TS_EXECUTOR_AS_DEFAULT)`: an
+/// identifier in parentheses on a directive line, following an `#`, and read by a scanner as a cast whose operand is
+/// whatever came next. A census is what turns "the rule is tested" into "the rule is right".
+#[test]
+fn a_preprocessor_condition_is_not_a_cast() {
+    for quiet in [
+        "#if (_MSC_VER)\nint f();\n#endif\n",
+        "#if (ASIO_USE_TS_EXECUTOR_AS_DEFAULT)\nint f();\n#endif\n",
+        "#if (_MSC_VER)\nint a;\n#elif (OTHER)\nint b;\n#endif\n",
+    ] {
+        let found = codes_of(quiet);
+        assert!(
+            !found.contains(&DiagnosticCode::CStyleCast),
+            "{quiet}: {found:?}"
+        );
+    }
+
+    // …and a real cast is still reported, on a directive line or not.
+    let still_reported = codes_of("#define CAST(x) (int)(x)\nvoid f(int n) { (void)CAST(n); }\n");
+    assert!(
+        still_reported.contains(&DiagnosticCode::CStyleCast),
+        "the cast in the macro body is written in the file: {still_reported:?}"
     );
 }

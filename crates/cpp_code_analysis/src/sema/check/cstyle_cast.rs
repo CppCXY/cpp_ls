@@ -46,6 +46,17 @@ impl Check for CStyleCast {
             if context.in_a_comment_or_literal(open, &protected) {
                 continue;
             }
+            // **A preprocessor condition is not a cast.** `#if (_MSC_VER)` and `#if (ASIO_USE_… )` are the shapes the first
+            // census run reported 813 times over 46 files, and every one of them was this: an identifier in parentheses on
+            // a directive line, which is a condition the preprocessor evaluates and not something being cast.
+            let line_start = source[..open].rfind('\n').map(|newline| newline + 1).unwrap_or(0);
+            if source[line_start..open].trim_start().starts_with('#') {
+                continue;
+            }
+            // …and the operand has to be on the same line: `#if (X)\n` is not `(X)` applied to whatever follows.
+            if source[close + 1..].chars().take_while(|character| character.is_whitespace()).any(|character| character == '\n') {
+                continue;
+            }
             // What follows the `)`, skipping whitespace — an operand starts a cast, and an operator does not.
             let after = source[close + 1..].trim_start();
             let Some(next) = after.chars().next() else {

@@ -157,3 +157,25 @@ lexer    which bytes are code — `comments_and_literals`
 model    what a type means — `members_of` for `use-override`
 text     the spelling inside a node, for the rules whose subject *is* a spelling
 ```
+
+## The first rule that needs the type
+
+```text
+implicit-bool-conversion   `if (count)` converts an `int` to `bool`; `if (flag)` does not. The two differ by the
+                           declaration and nothing else, which is what the scope tree, the index and the semantic model are
+                           for. `if (ptr)` is the same conversion and the idiom every codebase uses for a nullable pointer,
+                           so the rule reports an **arithmetic** operand that is not `bool` and leaves pointers alone.
+```
+
+Tests: `an_arithmetic_condition_is_an_implicit_conversion` — four cases, and two of them are the discrimination that a text
+rule cannot make:
+
+```text
+void f(int count)  { if (count) … }    reported ✓
+void f(bool ready) { if (ready) … }    silent   ✓   the type is what the conversion would produce
+void f(int* p)     { if (p) … }        silent   ✓   the nullable-pointer idiom
+void f(int n)      { while (n) … }     reported ✓   the same question, the same walk
+```
+
+Not covered yet, and each is the same two lines: `do`/`while`, `for`'s condition, `!`, `&&`/`||` operands, and the
+conditional operator's condition.

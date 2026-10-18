@@ -93,6 +93,8 @@ pub enum DiagnosticCode {
     UseAuto,
     /// A macro body that needs its own parentheses — see [`super::macro_parentheses`].
     MacroParentheses,
+    /// A non-boolean value used as a condition — see [`super::implicit_bool_conversion`].
+    ImplicitBoolConversion,
 }
 
 impl DiagnosticCode {
@@ -102,7 +104,7 @@ impl DiagnosticCode {
     /// what it says about types, then what it says about a whole body, then the two that are about the reading
     /// rather than the program. A consumer that shows a settings screen, or a test that asserts every rule has a
     /// name and a module, iterates this.
-    pub const ALL: [DiagnosticCode; 22] = [
+    pub const ALL: [DiagnosticCode; 23] = [
         DiagnosticCode::SyntaxError,
         DiagnosticCode::ParamTypeCheck,
         DiagnosticCode::AssignTypeCheck,
@@ -125,6 +127,7 @@ impl DiagnosticCode {
         DiagnosticCode::CStyleCast,
         DiagnosticCode::UseAuto,
         DiagnosticCode::MacroParentheses,
+        DiagnosticCode::ImplicitBoolConversion,
     ];
 
     /// **The code a client is shown**, and the spelling a config file uses: kebab case, and the module's file name
@@ -156,6 +159,7 @@ impl DiagnosticCode {
             DiagnosticCode::CStyleCast => "cstyle-cast",
             DiagnosticCode::UseAuto => "use-auto",
             DiagnosticCode::MacroParentheses => "macro-parentheses",
+            DiagnosticCode::ImplicitBoolConversion => "implicit-bool-conversion",
         }
     }
 
@@ -215,6 +219,7 @@ impl DiagnosticCode {
             DiagnosticCode::UseAuto => RuleSeverity::Hint,
             // A macro body without its own parentheses is a bug in the *caller's* expression order, not a style question.
             DiagnosticCode::MacroParentheses => RuleSeverity::Warning,
+            DiagnosticCode::ImplicitBoolConversion => RuleSeverity::Hint,
         }
     }
 

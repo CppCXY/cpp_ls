@@ -124,6 +124,7 @@ mod else_after_return;
 mod cstyle_cast;
 mod use_auto;
 mod macro_parentheses;
+mod implicit_bool_conversion;
 
 pub use config::CheckConfig;
 pub use diagnostic_code::{DiagnosticCode, RuleSeverity, RuleTag};
@@ -1366,6 +1367,9 @@ pub fn run(context: CheckContext<'_>) -> Vec<Finding> {
     run_check::<cstyle_cast::CStyleCast>(&mut context);
     run_check::<use_auto::UseAuto>(&mut context);
     run_check::<macro_parentheses::MacroParentheses>(&mut context);
+    // **The first rule that cannot be written from the text**: whether `if (x)` is a conversion depends on `x`'s **type**,
+    // which is the scope tree and the index, not the spelling.
+    run_check::<implicit_bool_conversion::ImplicitBoolConversion>(&mut context);
     run_check::<access_invisible::AccessInvisible>(&mut context);
     run_check::<missing_return::MissingReturn>(&mut context);
     run_check::<assignment_in_condition::AssignmentInCondition>(&mut context);
