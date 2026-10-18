@@ -251,3 +251,30 @@ fn a_preprocessor_condition_is_not_a_cast() {
         "the cast in the macro body is written in the file: {still_reported:?}"
     );
 }
+
+/// **A parameter list is not a cast** — the census's second false positive, after the preprocessor conditions.
+///
+/// 376 findings remained after the `#` fix, and the examples were `(const any_io_executor& e)` and `(nullptr_t)`:
+/// parenthesised **parameter** spellings inside declarations, which are a type with a name after it rather than a value being
+/// cast. The tell is the trailing identifier — a cast's parenthesised spelling has no name after its type.
+#[test]
+fn a_parameter_list_is_not_a_cast() {
+    for quiet in [
+        "using handler = void (const Widget& value);\nstruct Widget { };\n",
+        "void f(int (int n));\n",
+        "void g(void (*callback)(int value));\n",
+    ] {
+        let found = codes_of(quiet);
+        assert!(
+            !found.contains(&DiagnosticCode::CStyleCast),
+            "{quiet}: {found:?}"
+        );
+    }
+
+    // …and a cast of a named type is still reported.
+    let still = codes_of("struct Widget { };\nvoid f(const Widget& w) { (void)(Widget)w; }\n");
+    assert!(
+        still.contains(&DiagnosticCode::CStyleCast),
+        "a cast is a type with no name after it: {still:?}"
+    );
+}

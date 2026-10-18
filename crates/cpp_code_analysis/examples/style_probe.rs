@@ -52,28 +52,42 @@ fn main() {
         session.did_open(first, &text);
     }
     session.add_project_files(files.clone());
+    let indexed = std::time::Instant::now();
     session.index_everything();
+    // **The pump is drained once, not stepped per file.** `advance(1)` is the single-step form — right for a test that is
+    // about one step, wrong for a census: 1216 calls of it cooked 46 files and took ten minutes. The pump is incremental by
+    // design, and its own unit is the wave.
+    let mut waves = 0usize;
+    while session.pending() > 0 || session.pending_cooking() > 0 {
+        let done = session.advance(64);
+        waves += 1;
+        if done.is_empty() {
+            break;
+        }
+        if waves > 100_000 {
+            break;
+        }
+    }
+    println!(
+        "indexed in {:.1} s over {waves} wave(s) — pending {} / cooking {}",
+        indexed.elapsed().as_secs_f64(),
+        session.pending(),
+        session.pending_cooking()
+    );
 
-    let (mut viewed, mut answered) = (0usize, 0usize);
+    // **One call, which is the point of the method.** The three queues, the render and the commit are its business; a
+    // consumer asks for the diagnostics of the project.
+    let asked = std::time::Instant::now();
+    let diagnosed = session.diagnose_everything(files.len() + 1);
+    println!(
+        "diagnosed {} file(s) in {:.1} s",
+        diagnosed.len(),
+        asked.elapsed().as_secs_f64()
+    );
+
     let mut counts: BTreeMap<&'static str, usize> = BTreeMap::new();
     let mut examples: BTreeMap<&'static str, Vec<String>> = BTreeMap::new();
-    for file in &files {
-        // **A file is diagnosed from its *rendering***, and a rendering is built because something asked for one — see
-        // `tests/completion.rs`'s note. Without the ask, `diagnostics` answers `None` for every file, which is how the first
-        // run of this probe printed an empty census over 1216 files.
-        session.want_cooked_reading(file);
-        if session.view(file).is_none() {
-            // The ask queues the work; the pump is what does it. One step per file is enough — the pump is incremental by
-            // design, and a probe that drained it eagerly would be measuring the index rather than the rules.
-            session.advance(1);
-        }
-        if session.view(file).is_some() {
-            viewed += 1;
-        }
-        let Some(found) = session.diagnostics(file) else {
-            continue;
-        };
-        answered += 1;
+    for (file, found) in &diagnosed {
         let Ok(text) = std::fs::read_to_string(file) else {
             continue;
         };
@@ -99,8 +113,6 @@ fn main() {
             }
         }
     }
-
-    println!("\nviewed {viewed} of {}, answered {answered}", files.len());
     let mut ordered: Vec<_> = counts.into_iter().collect();
     ordered.sort_by(|left, right| right.1.cmp(&left.1));
     println!("\n{:<28} {:>6}", "code", "count");

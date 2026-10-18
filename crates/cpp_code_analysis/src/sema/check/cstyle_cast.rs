@@ -53,6 +53,12 @@ impl Check for CStyleCast {
             if source[line_start..open].trim_start().starts_with('#') {
                 continue;
             }
+            // **A parameter list is not a cast.** `void (const any_io_executor& e)` inside a declaration — the shape the
+            // census reported 376 times — is a *type* with a *name* after it, which is what a parameter is and what a cast's
+            // parenthesised type never is. The last word being an identifier that is not a type keyword is the evidence.
+            if is_a_parameter_list(inner) {
+                continue;
+            }
             // …and the operand has to be on the same line: `#if (X)\n` is not `(X)` applied to whatever follows.
             if source[close + 1..].chars().take_while(|character| character.is_whitespace()).any(|character| character == '\n') {
                 continue;
@@ -98,4 +104,24 @@ fn looks_like_a_type(written: &str) -> bool {
             .chars()
             .all(|character| character.is_alphanumeric() || matches!(character, '_' | ':' | '*' | '&' | ' '))
         && !written.contains("  ")
+}
+
+/// Is this written parenthesis a **parameter list** — `const any_io_executor& e`, `int n`, `Widget* w` — rather than a
+/// type? The tell is a trailing identifier that is not a type keyword: a cast's parenthesised spelling has no name after
+/// its type, and a parameter has nothing else.
+fn is_a_parameter_list(inner: &str) -> bool {
+    const TYPE_WORDS: &[&str] = &[
+        "const", "volatile", "unsigned", "signed", "long", "short", "int", "float", "double", "char", "bool",
+        "void", "auto", "struct", "class", "enum", "union", "typename",
+    ];
+    let Some(last) = inner.split_whitespace().last() else {
+        return false;
+    };
+    let last = last.trim_start_matches(['&', '*']).trim();
+    let is_a_name = !last.is_empty()
+        && last.chars().next().is_some_and(|first| first.is_alphabetic() || first == '_' || first == ':')
+        && last.chars().all(|character| character.is_alphanumeric() || matches!(character, '_' | ':'))
+        && !TYPE_WORDS.contains(&last);
+    // …and there has to be something before it: `(int)` is a type with no name, `(int n)` is a parameter.
+    is_a_name && inner.split_whitespace().count() > 1
 }
