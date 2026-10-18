@@ -97,6 +97,13 @@ impl<'a> CppLexer<'a> {
     }
 
     /// Convert identifier to keyword token if it matches a C++ keyword
+    /// **Is this standard-gated keyword a keyword here?** — `consteval` is one from C++20 and an ordinary identifier
+    /// before it, and a project that used the name for a variable is entitled to keep doing so. The guard, not the level,
+    /// is what decides: a C configuration answers differently from a C++ one, which the old enum could not express.
+    fn accepts(&self, feature: crate::features::Feature) -> bool {
+        self.lexer_config.language().support(feature)
+    }
+
     fn name_to_kind(&self, name: &str) -> CppTokenKind {
         match name {
             // Basic keywords
@@ -152,11 +159,11 @@ impl<'a> CppLexer<'a> {
             "while" => CppTokenKind::WhileKeyword,
 
             // C++11 and later keywords
-            "alignas" => CppTokenKind::AlignasKeyword,
+            "alignas" if self.accepts(crate::features::Feature::AlignasCpp) => CppTokenKind::AlignasKeyword,
             "alignof" => CppTokenKind::AlignofKeyword,
-            "constexpr" => CppTokenKind::ConstexprKeyword,
-            "consteval" => CppTokenKind::ConstevalKeyword,
-            "constinit" => CppTokenKind::ConstinitKeyword,
+            "constexpr" if self.accepts(crate::features::Feature::Constexpr) => CppTokenKind::ConstexprKeyword,
+            "consteval" if self.accepts(crate::features::Feature::Consteval) => CppTokenKind::ConstevalKeyword,
+            "constinit" if self.accepts(crate::features::Feature::Constinit) => CppTokenKind::ConstinitKeyword,
             "decltype" => CppTokenKind::DecltypeKeyword,
 
             // The **GNU spellings of constructs that are standard keywords**, mapped to the same kind because a
@@ -172,7 +179,18 @@ impl<'a> CppLexer<'a> {
             // …and the spelling without the underscores, which GCC has accepted since before `decltype` existed and
             // which real headers write (`typeof(x) y = …;` in glibc's `sys/types.h`). Measured: `__typeof__` parsed and
             // `typeof` did not, which is the worst kind of gap — one spelling of a construct working and the other not.
-            "__typeof__" | "__typeof" | "__decltype" | "typeof" => CppTokenKind::DecltypeKeyword,
+            // **`typeof` is a feature, not a keyword.** C23 and GNU in every mode; `__typeof__` and `__typeof` are the GNU
+            // spellings, `__decltype` is MSVC's, and all four are the same token *when the configuration says so* and an
+            // ordinary identifier when it does not — which is what a strict `-std=c++20` parse must see, and what the
+            // `typeof` test in `extensions_gnu.rs` pins from the other side.
+            "__typeof__" | "__typeof" | "__decltype" | "typeof"
+                if self
+                    .lexer_config
+                    .language()
+                    .support(crate::features::Feature::Typeof) =>
+            {
+                CppTokenKind::DecltypeKeyword
+            }
             // **The four named casts.** Absent until now, and their absence was invisible: an unrecognised
             // `static_cast` is an *identifier*, so `static_cast<int>(x)` lexes as `static_cast` `<` `int` `>` `(`
             // `x` `)` and parses — without an error — as a comparison chain. Measured: `auto x =
@@ -189,19 +207,24 @@ impl<'a> CppLexer<'a> {
             "register" => CppTokenKind::RegisterKeyword,
             "namespace" => CppTokenKind::NamespaceKeyword,
             "noexcept" => CppTokenKind::NoexceptKeyword,
-            "nullptr" => CppTokenKind::NullptrKeyword,
-            "static_assert" => CppTokenKind::StaticAssertKeyword,
+            "nullptr" if self.accepts(crate::features::Feature::Nullptr) => CppTokenKind::NullptrKeyword,
+            "static_assert"
+                if self.accepts(crate::features::Feature::StaticAssert)
+                    || self.accepts(crate::features::Feature::StaticAssertC) =>
+            {
+                CppTokenKind::StaticAssertKeyword
+            }
             "template" => CppTokenKind::TemplateKeyword,
-            "thread_local" => CppTokenKind::ThreadLocalKeyword,
+            "thread_local" if self.accepts(crate::features::Feature::ThreadLocal) => CppTokenKind::ThreadLocalKeyword,
 
             // C++20 keywords
             // `concept` and `requires` are deliberately **not** here. Both are contextual keywords — the grammar
             // reads them as keywords in the positions the standard gives them a meaning, and as ordinary names
             // everywhere else — so the lexer hands them over as identifiers and the grammar decides. See
             // [`crate::grammar::cpp::is_contextual_keyword`].
-            "co_await" => CppTokenKind::CoAwaitKeyword,
-            "co_return" => CppTokenKind::CoReturnKeyword,
-            "co_yield" => CppTokenKind::CoYieldKeyword,
+            "co_await" if self.accepts(crate::features::Feature::Coroutines) => CppTokenKind::CoAwaitKeyword,
+            "co_return" if self.accepts(crate::features::Feature::Coroutines) => CppTokenKind::CoReturnKeyword,
+            "co_yield" if self.accepts(crate::features::Feature::Coroutines) => CppTokenKind::CoYieldKeyword,
 
             // Not a keyword, return as identifier
             _ => CppTokenKind::Identifier,
@@ -1006,7 +1029,13 @@ impl<'a> CppLexer<'a> {
                     state = NumberState::Hex;
                 }
                 'b' | 'B' => {
-                    if self.lexer_config.language_level < crate::kind::CppLanguageLevel::Cpp14 {
+                    // **A feature, not a level test.** `0b1010` is C++14's, and a C configuration is a different question
+                    // the level could never answer: `CppLanguageLevel` has no C values at all.
+                    if !self
+                        .lexer_config
+                        .language()
+                        .support(crate::features::Feature::BinaryLiterals)
+                    {
                         self.errors.push(CppParseError::syntax_error_from(
                             "binary literals require C++14",
                             self.reader.saved_range(),

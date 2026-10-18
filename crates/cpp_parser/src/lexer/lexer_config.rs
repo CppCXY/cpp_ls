@@ -1,3 +1,4 @@
+use crate::features::LanguageConfig;
 use crate::kind::CppLanguageLevel;
 
 /// Lexer configuration.
@@ -9,6 +10,11 @@ pub struct LexerConfig {
     /// Target standard. Gates features that are not in older standards (raw strings in C++11,
     /// digit separators in C++14, `<=>` in C++20).
     pub language_level: CppLanguageLevel,
+    /// **The syntax this lexer accepts**, as a set of standards and vendors — see [`crate::features`].
+    ///
+    /// `language_level` is kept for the callers that still take one; this is the field the lexer's own branches read, and
+    /// [`LexerConfig::new`] derives it so a caller that has not migrated gets the level's meaning rather than nothing.
+    pub language: LanguageConfig,
 
     /// Accept `$` in identifiers.
     ///
@@ -34,13 +40,31 @@ pub struct LexerConfig {
 }
 
 impl LexerConfig {
+    pub fn with_language(mut self, language: LanguageConfig) -> Self {
+        self.language = language;
+        self
+    }
+
+    /// The syntax this lexer accepts.
+    pub fn language(&self) -> LanguageConfig {
+        self.language
+    }
+
     pub fn new(language_level: CppLanguageLevel) -> Self {
+        // **The standards from the level, and every vendor** — see the field's own note: that is what this lexer did
+        // before the migration, so the migration changes no parse.
+        let language = LanguageConfig::from_language_level(language_level).with_all_vendors();
         LexerConfig {
             language_level,
+            // **The level's standards, and every vendor.** That is what this lexer did before the migration — its keyword
+            // table was unconditional, so `__typeof__` and `__declspec` were recognised whatever the level said — and
+            // keeping it means the migration changes no parse. A caller that knows its compiler narrows this with
+            // `with_language`.
+            language,
             // See the field: every mainstream compiler accepts it in its default mode, and a corpus
             // that *uses* it is the argument. The strict reading is `with_dollar_in_identifier(false)`.
             dollar_in_identifier: true,
-            string_prefixes: language_level >= CppLanguageLevel::Cpp11,
+            string_prefixes: language.support(crate::features::Feature::RawStrings),
         }
     }
 
@@ -56,15 +80,18 @@ impl LexerConfig {
 
     /// Are raw string literals available at this language level?
     pub fn supports_raw_strings(&self) -> bool {
-        self.string_prefixes && self.language_level >= CppLanguageLevel::Cpp11
+        // **Through the feature set, and nothing else.** `R"(…)` is C++11 and not C's, and a lexer configured for C must
+        // refuse it whatever its old `language_level` says — the conflation `features` exists to remove. The first
+        // version of this function kept the level test *beside* the feature test, and a `Cpp23` level with a C
+        // configuration answered "yes"; one authority or none.
+        self.string_prefixes && self.language.support(crate::features::Feature::RawStrings)
     }
 
     /// Are digit separators (`1'000'000`) available at this language level?
     pub fn supports_digit_separators(&self) -> bool {
-        self.language_level >= CppLanguageLevel::Cpp14
+        self.language.support(crate::features::Feature::DigitSeparators)
     }
 }
-
 impl Default for LexerConfig {
     fn default() -> Self {
         LexerConfig::new(CppLanguageLevel::default_level())

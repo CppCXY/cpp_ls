@@ -31,3 +31,6 @@ rust_i18n::i18n!("./locales", fallback = "en");
 pub fn set_locale(locale: &str) {
     rust_i18n::set_locale(locale);
 }
+
+/// **The syntax a parse accepts**, as a set of standards and vendors — see [eatures].
+pub use kind::features;

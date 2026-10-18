@@ -149,7 +149,27 @@ impl<'cache> ParserConfig<'cache> {
     /// Parse for a **target compiler**: what its reserved spellings mean. See [`Dialect`].
     pub fn with_dialect(mut self, dialect: Dialect) -> Self {
         self.dialect = dialect;
+        // **A dialect is a vendor**, and that is the only thing it ever said: which compiler's own spellings this parse
+        // should recognise. Passing it on as a vendor keeps the two layers consistent instead of leaving the flags in two
+        // vocabularies that can disagree.
+        let vendor = match dialect {
+            Dialect::Gnu => Some(crate::features::Vendor::Gnu),
+            Dialect::Msvc => Some(crate::features::Vendor::Msvc),
+        };
+        if let Some(vendor) = vendor {
+            self.lexer_config.language = self.lexer_config.language.with_vendor(vendor);
+        }
         self
+    }
+
+    /// **The syntax this parse accepts**, as a set of standards and vendors — see [`crate::features`].
+    pub fn with_language(mut self, language: crate::features::LanguageConfig) -> Self {
+        self.lexer_config.language = language;
+        self
+    }
+
+    pub fn language(&self) -> crate::features::LanguageConfig {
+        self.lexer_config.language()
     }
 
     pub fn dialect(&self) -> Dialect {

@@ -5837,6 +5837,12 @@ fn an_implementation_keyword(p: &CppParser) -> Option<ImplementationKeyword> {
 /// declaration of something else: `unsigned __int128 x;` came out as a declaration of a variable named
 /// `__int128` whose **suffix** was the macro `x` (measured on `bits/bmi2intrin.h`, whose first error that was).
 /// `_Float16` and `__bf16` are in the corpus too (`avx512fp16intrin.h`, the `avx10_2` headers).
+/// # Why this is still `dialect()` and not a feature
+///
+/// Because the two vendors **disagree about the same spelling**, and that is a different question from "which syntax does
+/// this project accept". `__int64` is a type under MSVC and a macro under GNU (`_mingw.h` defines it), so a parse that
+/// knows both vendors cannot answer "is `__int64` a type" by asking whether either is enabled — it needs to know *which
+/// one is reading the file*. `Dialect` is exactly that, and it is the one place where it still is.
 fn a_type_the_compiler_spells(p: &CppParser) -> bool {
     match p.dialect() {
         Dialect::Gnu => matches!(

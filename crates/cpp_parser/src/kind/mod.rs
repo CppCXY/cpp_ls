@@ -188,3 +188,5 @@ mod tests {
         assert!((CppTokenKind::Error as u32) < SYNTAX_KIND_TAG as u32);
     }
 }
+
+pub mod features;

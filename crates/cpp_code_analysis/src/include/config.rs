@@ -194,6 +194,31 @@ impl CompilerConfig {
     ///
     /// A file no target describes is returned unchanged, and so is a configuration whose root is unknown — the
     /// paths in a configuration file are relative to the root, so without one there is nothing to resolve.
+    /// **The language a file is compiled as**, from its own command's `-std=` — the last thing that decides which syntax
+    /// the parser may accept, and until now the one thing nobody asked about.
+    ///
+    /// Order, and why: the file's own command first, because a compilation database is per translation unit and one
+    /// target may be C++17 while another is C++20; then the project's `extra_args`, which is a person saying what the
+    /// build is; then [`LanguageConfig::permissive`], because a parse that has not been told what it is reading must not
+    /// refuse the headers it is reading.
+    ///
+    /// No stored field: a cached copy would go stale the moment the database or `extra_args` changed, and the database is
+    /// already the one place the answer comes from.
+    pub fn language_for(&self, file: &Path) -> cpp_parser::features::LanguageConfig {
+        let from_the_command = self
+            .database
+            .as_ref()
+            .and_then(|database| database.command_for(file))
+            .and_then(|command| {
+                cpp_parser::features::LanguageConfig::from_command_line(command.arguments.iter())
+            });
+        from_the_command
+            .or_else(|| {
+                cpp_parser::features::LanguageConfig::from_command_line(self.extra_args.iter())
+            })
+            .unwrap_or_else(cpp_parser::features::LanguageConfig::permissive)
+    }
+
     pub fn for_file(&self, file: &Path) -> CompilerConfig {
         let Some(root) = self.root.clone() else {
             return self.clone();

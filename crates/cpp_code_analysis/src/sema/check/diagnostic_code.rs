@@ -77,6 +77,18 @@ pub enum DiagnosticCode {
     /// Not a check: nothing is wrong with the file, and the reader is told where a file they named is. It is a code
     /// because it is a diagnostic a client shows, and the point of the enum is that **everything shown has one**.
     ModuleNote,
+    /// `if (x)` / `for (…)` / `while (…)` whose body is a single statement — see [`super::braces_around_statements`].
+    BracesAroundStatements,
+    /// `NULL` where `nullptr` is meant — see [`super::use_nullptr`].
+    UseNullptr,
+    /// A `virtual` member function that overrides without saying `override` — see [`super::use_override`].
+    UseOverride,
+    /// `if (x == true)` and its siblings — see [`super::simplify_boolean_expr`].
+    SimplifyBooleanExpr,
+    /// An `else` after a branch that returns — see [`super::else_after_return`].
+    ElseAfterReturn,
+    /// A C-style cast — see [`super::cstyle_cast`].
+    CStyleCast,
 }
 
 impl DiagnosticCode {
@@ -86,7 +98,7 @@ impl DiagnosticCode {
     /// what it says about types, then what it says about a whole body, then the two that are about the reading
     /// rather than the program. A consumer that shows a settings screen, or a test that asserts every rule has a
     /// name and a module, iterates this.
-    pub const ALL: [DiagnosticCode; 14] = [
+    pub const ALL: [DiagnosticCode; 20] = [
         DiagnosticCode::SyntaxError,
         DiagnosticCode::ParamTypeCheck,
         DiagnosticCode::AssignTypeCheck,
@@ -101,6 +113,12 @@ impl DiagnosticCode {
         DiagnosticCode::MissingReturn,
         DiagnosticCode::AssignmentInCondition,
         DiagnosticCode::ModuleNote,
+        DiagnosticCode::BracesAroundStatements,
+        DiagnosticCode::UseNullptr,
+        DiagnosticCode::UseOverride,
+        DiagnosticCode::SimplifyBooleanExpr,
+        DiagnosticCode::ElseAfterReturn,
+        DiagnosticCode::CStyleCast,
     ];
 
     /// **The code a client is shown**, and the spelling a config file uses: kebab case, and the module's file name
@@ -124,6 +142,12 @@ impl DiagnosticCode {
             DiagnosticCode::MissingReturn => "missing-return",
             DiagnosticCode::AssignmentInCondition => "assignment-in-condition",
             DiagnosticCode::ModuleNote => "module-note",
+            DiagnosticCode::BracesAroundStatements => "braces-around-statements",
+            DiagnosticCode::UseNullptr => "use-nullptr",
+            DiagnosticCode::UseOverride => "use-override",
+            DiagnosticCode::SimplifyBooleanExpr => "simplify-boolean-expr",
+            DiagnosticCode::ElseAfterReturn => "else-after-return",
+            DiagnosticCode::CStyleCast => "cstyle-cast",
         }
     }
 
@@ -171,6 +195,15 @@ impl DiagnosticCode {
             // A judgement rather than a law: an assignment in a condition is deliberate in a great deal of code.
             DiagnosticCode::AssignmentInCondition => RuleSeverity::Warning,
             DiagnosticCode::ModuleNote => RuleSeverity::Information,
+            // **The style checks are hints**: none of them is a program that will not build, and the quietest rendering
+            // is the one that lets a reader keep them off without losing an error's squiggle.
+            DiagnosticCode::BracesAroundStatements => RuleSeverity::Hint,
+            DiagnosticCode::UseNullptr => RuleSeverity::Hint,
+            DiagnosticCode::UseOverride => RuleSeverity::Hint,
+            DiagnosticCode::SimplifyBooleanExpr => RuleSeverity::Hint,
+            DiagnosticCode::ElseAfterReturn => RuleSeverity::Hint,
+            // A C-style cast is the one of these that a project's guidelines usually forbid rather than merely prefer.
+            DiagnosticCode::CStyleCast => RuleSeverity::Warning,
         }
     }
 

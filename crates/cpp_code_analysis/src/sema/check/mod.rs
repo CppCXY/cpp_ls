@@ -116,6 +116,12 @@ pub mod syntax_error;
 pub mod undefined_field;
 pub mod unnecessary_branch;
 pub mod unused;
+mod braces_around_statements;
+mod use_nullptr;
+mod use_override;
+mod simplify_boolean_expr;
+mod else_after_return;
+mod cstyle_cast;
 
 pub use config::CheckConfig;
 pub use diagnostic_code::{DiagnosticCode, RuleSeverity, RuleTag};
@@ -1314,6 +1320,14 @@ pub fn run(context: CheckContext<'_>) -> Vec<Finding> {
     run_check::<include_not_found::IncludeNotFound>(&mut context);
     run_check::<macro_redefined::MacroRedefined>(&mut context);
     run_check::<unused::Unused>(&mut context);
+    // **The style rules**, named after clang-tidy's own — see each module for what it will say and why it is worth saying.
+    // They are registered and do nothing yet: a rule with a name, a code and a test is what the next pass fills in.
+    run_check::<braces_around_statements::BracesAroundStatements>(&mut context);
+    run_check::<use_nullptr::UseNullptr>(&mut context);
+    run_check::<use_override::UseOverride>(&mut context);
+    run_check::<simplify_boolean_expr::SimplifyBooleanExpr>(&mut context);
+    run_check::<else_after_return::ElseAfterReturn>(&mut context);
+    run_check::<cstyle_cast::CStyleCast>(&mut context);
     run_check::<access_invisible::AccessInvisible>(&mut context);
     run_check::<missing_return::MissingReturn>(&mut context);
     run_check::<assignment_in_condition::AssignmentInCondition>(&mut context);
