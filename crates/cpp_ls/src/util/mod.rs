@@ -27,3 +27,19 @@ pub use position::{
 // from, and what a handler with a view's own text and line index uses.
 pub use time_cancel_token::time_cancel_token;
 pub use uri::{path_to_uri, uri_to_file_path};
+
+/// Is `path` inside `root`, compared the way this server compares paths elsewhere?
+///
+/// Byte-for-byte only after normalising: Windows compares case-insensitively and spells separators both ways, and the
+/// two sides of a comparison like this come from different places — an index's file list and a configuration's root — so
+/// a raw `starts_with` answers "outside" for a file the user just wrote. That is the same rule the index's own path
+/// keys follow, stated once here so a write boundary and a workspace boundary cannot disagree.
+pub fn is_inside(path: &std::path::Path, root: &std::path::Path) -> bool {
+    let flatten = |path: &std::path::Path| {
+        let text = path.to_string_lossy().replace('\\', "/");
+        if cfg!(windows) { text.to_lowercase() } else { text }
+    };
+    let path = flatten(path);
+    let root = flatten(root);
+    path == root || path.starts_with(&format!("{root}/"))
+}

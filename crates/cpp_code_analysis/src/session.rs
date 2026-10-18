@@ -81,7 +81,7 @@ use crate::file::vfs::Vfs;
 use crate::file::view::{FileView, TokensOf};
 use crate::include::config::{CompileCommands, CompilerConfig, project_config_from_flags};
 use crate::include::toolchain::{self, DiskCommands, Environment, Toolchain};
-use crate::index::project::{
+use crate::index::project::{substituted_members, 
     MemberCompletions, MemberList, NameCompletions, ProjectDefinition, ProjectDefinitions,
     ProjectIndex, ProjectMacro,
 };
@@ -5255,13 +5255,16 @@ impl<F: FileProvider + Clone> Session<F> {
     /// `written_type` is a spelling — `Widget`, `ns::Widget`, `const Widget&` — and following it to a class is the
     /// same work [`Session::member_completions`] does for an object expression.
     pub fn members_of(&self, view: &FileView, written_type: &str) -> Known<MemberList> {
-        members_of(
+        let listed = members_of(
             self.store.index(),
             &view.scopes,
             &view.root,
             &view.path,
             written_type,
-        )
+        );
+        // **The class's arguments, written through its members** — see [`substituted_members`].
+        let mut read = |path: &Path| self.view_of_the_file(path);
+        substituted_members(self.store.index(), &view.path, written_type, listed, &mut read)
     }
 
     /// **A type name as a declaration wrote it, resolved where it was written — through a base if it has to.**

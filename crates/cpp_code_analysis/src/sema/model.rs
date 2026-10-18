@@ -151,7 +151,10 @@ impl<'a> SemanticModel<'a> {
 
     /// **The members of a class, inherited ones included** — see [`project::members_of`].
     pub fn members_of(&self, class: &str) -> Known<MemberList> {
-        project::members_of(self.index, self.scopes, self.root, self.path, class)
+        let listed = project::members_of(self.index, self.scopes, self.root, self.path, class);
+        // **The class's arguments, written through its members** — see [`project::substituted_members`].
+        let mut resolver = self.resolver.borrow_mut();
+        project::substituted_members(self.index, &self.path, class, listed, &mut **resolver)
     }
 
     /// **Does `name` name a template parameter *where it is used*** — the `C` of `template <class C>`?
@@ -234,3 +237,4 @@ impl<'a> SemanticModel<'a> {
         self.scopes
     }
 }
+

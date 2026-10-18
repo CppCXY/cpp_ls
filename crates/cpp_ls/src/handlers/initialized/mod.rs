@@ -344,9 +344,15 @@ async fn index_in_background(context: ServerContextSnapshot) {
             // the writer for **1003 ms** on the first slice after a cold start, which was the largest single thing a
             // drain did. Neither changes anything, so neither belongs under the lock a query waits for.
             // **Sized by the number a reader can feel**, which is how long the writer is held — see [`THE_FIRST_WAVE`].
+            // **The parse runs on a blocking thread, not on the runtime.** `run_blocking` is what the queries already
+            // use, and the reason is the same one: a wave is a parse per file, and doing it inline in an `async` task
+            // takes the executor away from every request in flight for the length of the wave. Measured with the
+            // latency fixture: one completion in about twelve lost **1.7 s** with no session lock held at all — the
+            // lock was free and the thread was busy. That is the difference `spawn_blocking` makes.
             let prepared = context
                 .analysis()
-                .with_snapshot(move |session| session.prepare_a_wave(wave))
+                .run_blocking(move |session| Some(session.prepare_a_wave(wave)))
+                .await
                 .unwrap_or_default();
             let prepared_count = prepared.prepared.len();
 
@@ -412,15 +418,18 @@ async fn index_in_background(context: ServerContextSnapshot) {
             // and together they were the largest thing left inside the write lock, holding it for up to **572 ms** on
             // a slice that committed *no* files at all. None of them changes anything, so none of them belongs under
             // the lock a query waits for.
+            // …and the same for the drain and the cooking slice: a rendering is 9–269 ms per file and a unit walk is
+            // 150 ms, so this phase is the longest remaining uninterrupted span of CPU in the loop.
             let (prepared_drain, rendered_cooks) = context
                 .analysis()
-                .with_snapshot(move |session| {
+                .run_blocking(move |session| {
                     let materials = session.materials_for(claimed);
-                    (
+                    Some((
                         session.prepare_the_drain(drain),
                         session.render_them(materials),
-                    )
+                    ))
                 })
+                .await
                 .unwrap_or_default();
 
             // **And the insert, under the write lock** — one `insert` per re-read summary and one `insert_cooked` per

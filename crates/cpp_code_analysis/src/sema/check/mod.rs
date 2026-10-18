@@ -1167,6 +1167,18 @@ fn parameters_that_could_accept(written: &str, value: &crate::sema::types::Type)
     }
     parameters.push(current);
 
+    // **One value fills one parameter.** A constructor written with two parameters cannot be built from one value,
+    // unless one of them has a default — `basic_string(size_type _Count, _Elem _Ch)` takes two, `_Ty(int, int = 0)`
+    // takes one. Without this, `struct S { S(int, int); }; S s = 123;` was read as buildable because `int` accepts an
+    // `int`, which is the arity question answered by the wrong rule.
+    if parameters.len() > 1 {
+        return if parameters.iter().any(|parameter| parameter.contains('=')) {
+            None
+        } else {
+            Some(false)
+        };
+    }
+
     let mut any = false;
     for parameter in parameters {
         let Some(classified) = could_take_an_arithmetic_value(&parameter) else {
@@ -1313,4 +1325,21 @@ pub fn run(context: CheckContext<'_>) -> Vec<Finding> {
     run_check::<return_type_mismatch::ReturnTypeMismatch>(&mut context);
 
     context.into_findings()
+}
+
+/// **The member access a callee is the name of** — `push_back` in `v.push_back(…)`.
+///
+/// `member_access_of` answers for the **node that holds the operator**, and a call's callee is the identifier to its
+/// right: the access is the parent. Walking up a couple of levels rather than asserting the shape keeps this honest for
+/// the grammar's other spellings (`(*p).f`, `a.b.f`), where the callee's parent is not always the outermost access.
+pub fn member_access_above(node: &cpp_parser::CppSyntaxNode) -> Option<crate::sema::resolve::MemberAccess> {
+    let mut current = Some(node.clone());
+    for _ in 0..3 {
+        let node = current?;
+        if let Some(access) = crate::sema::resolve::member_access_of(&node) {
+            return Some(access);
+        }
+        current = node.parent();
+    }
+    None
 }

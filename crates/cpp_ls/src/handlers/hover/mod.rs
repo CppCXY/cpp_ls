@@ -147,6 +147,16 @@ pub fn hover(
         return Some(markdown(header_markdown(&header)));
     }
 
+    // **A member access is a question about the object's type, not about the name.** `z.append(…)` used to fall through
+    // to the name query, which answers "every declaration called `append` in the project" — nine `basic_string::append`
+    // overloads for a `std::vector`. The honest answers are two: the member the object's type actually has, or a popup
+    // that says the type is not known here. Listing unrelated names is neither.
+    if let Some(access) =
+        cpp_code_analysis::sema::resolve::member_access_at(&view.root, offset.get())
+    {
+        return Some(markdown(member_markdown(session, view, &access)));
+    }
+
     // The macro question first: it is about the text, and it is answered without the scope tree.
     if let Known::Yes(found) = session.macro_definition(view, offset) {
         return Some(markdown(macro_markdown(session, view, &found)));
@@ -171,6 +181,55 @@ pub fn hover(
         // a different question about the same position, and the one a reader on a keyword is asking.
         Known::No | Known::Unknown(_) => expression_markdown(session, view, offset).map(markdown),
     }
+}
+
+/// **The member a `.` or `->` names, resolved through the object's type** — or an explanation when the type is unknown.
+fn member_markdown(
+    session: &Session<DiskFiles>,
+    view: &FileView,
+    access: &cpp_code_analysis::sema::resolve::MemberAccess,
+) -> String {
+    let object = access.object.text().to_string();
+    let object = object.trim();
+    let at = cpp_code_analysis::file::coordinates::ReadingOffset::new(
+        usize::from(access.object.text_range().start()),
+    );
+
+    let cpp_code_analysis::Known::Yes(found) = session.type_at(view, at) else {
+        // **Saying "I do not know" is the answer.** A reader who sees this knows the popup is about a type the analysis
+        // could not read, and the next thing to do — annotate the declaration, or read the header it comes from — is
+        // theirs. Nine unrelated declarations would tell them the same thing at four times the size, and worse.
+        return format!(
+            "`{}`\n\nThe type of `{object}` is not known here, so `{}` cannot be resolved. That usually means the \
+             declaration's type is `auto`, a template parameter, or comes from a header this project has not read.",
+            access.member, access.member
+        );
+    };
+
+    let written = found.type_of;
+    let cpp_code_analysis::Known::Yes(list) = session.members_of(view, &written) else {
+        return format!(
+            "`{written}` has no member `{}`\n\n`{object}` is a `{written}`, and its members could not be read — the \
+             class is out of the index, or a base is.",
+            access.member
+        );
+    };
+    let Some(member) = list
+        .members
+        .iter()
+        .find(|member| member.fact.name == access.member)
+    else {
+        return format!(
+            "`{written}` has no member `{}`\n\n`{object}` is a `{written}`.",
+            access.member
+        );
+    };
+
+    let definition = cpp_code_analysis::ProjectDefinition {
+        file: member.file.clone(),
+        fact: member.fact.clone(),
+    };
+    declaration_markdown(session, view, &definition)
 }
 
 /// **Every declaration of one name**, as one popup — what a hover says about an overloaded function.
@@ -310,7 +369,19 @@ fn overloads_markdown(
 }
 
 /// One declaration, as the line a hover shows: `string format(const _Fmt, _Args...)`.
+/// Can the facts spell this declaration as a signature? A return type, a parameter list or a written type is what the
+/// reconstruction needs; a class or a namespace has none of them, and keeps its raw text.
+fn spells_a_signature(fact: &DeclFact) -> bool {
+    fact.returns.is_some() || fact.parameter_list.is_some() || fact.type_of.is_some()
+}
+
 fn signature_line(fact: &DeclFact) -> String {
+    if fact.returns.is_none()
+        && fact.parameter_list.is_none()
+        && let Some(written) = &fact.type_of
+    {
+        return format!("{written} {}", fact.name);
+    }
     match (&fact.returns, &fact.parameter_list) {
         (Some(returns), Some(parameters)) => format!("{returns} {}{parameters}", fact.name),
         (Some(returns), None) => format!("{returns} {}(…)", fact.name),
@@ -406,7 +477,17 @@ fn declaration_markdown(
     let fact = &found.fact;
     let mut out = String::new();
 
-    let declaration = declaration_text(session, Some(view), &found.file, fact);
+    // **Reconstructed from the facts when they can spell it, and copied only when they cannot.** The raw text of a
+    // declaration is what a *reader* cannot use in a popup: it carries the vendor's macro noise (`& _CLR_OR_THIS_CALL
+    // read(…)` for `basic_istream::read`), the lines the file happened to break it across, and the spelling of the one
+    // declaration that was found rather than the shape of the thing. The signature line is the same reconstruction the
+    // overload popup uses, so the two answers cannot disagree — and a declaration whose facts are too thin to spell (a
+    // class, a namespace) keeps the raw text rather than a worse guess.
+    let declaration = if spells_a_signature(fact) {
+        signature_line(fact)
+    } else {
+        declaration_text(session, Some(view), &found.file, fact)
+    };
     out.push_str(&code_block(&declaration));
 
     out.push_str(&format!(

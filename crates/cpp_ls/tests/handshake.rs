@@ -4173,3 +4173,98 @@ fn probe_the_cpu_shape_of_the_real_project() {
         println!("  {count:>7} x {shape}");
     }
 }
+
+/// **A hover on a member resolves through the object's type, and says so when it cannot.**
+///
+/// The shape from a real editor session: `auto z = std::vector<int>();` then `z.push_back(…)` and `z.append(…)`. The
+/// first must name `push_back` on the vector; the second must say the member is absent rather than answer with the nine
+/// `basic_string::append` overloads that the name query finds in a standard library the project has read.
+///
+/// This is a handshake test rather than a unit one because `hover` is written against `Session<DiskFiles>` — the
+/// provider a server uses — so the honest way to exercise it is through a server.
+#[test]
+fn a_member_hover_is_resolved_through_the_objects_type() {
+    let project = Project::new("member-hover");
+    let source = "\
+namespace std {
+template <class T>
+class vector {
+public:
+    void push_back(T value);
+};
+}
+void f() {
+    auto z = std::vector<int>();
+    z.push_back(1);
+    z.append(2);
+}
+";
+    project.write("a.cpp", source);
+    let mut server = Server::start(project.root());
+    let a_uri = uri_of(&project.root().join("a.cpp"));
+    server.request(
+        1,
+        "initialize",
+        json!({
+            "processId": std::process::id(),
+            "rootUri": uri_of(project.root()),
+            "capabilities": {},
+        }),
+    );
+    server.notify("initialized", json!({}));
+    server.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": { "uri": a_uri, "languageId": "cpp", "version": 1, "text": source }
+        }),
+    );
+
+    let line_of = |needle: &str| -> u32 {
+        source
+            .lines()
+            .position(|line| line.contains(needle))
+            .expect("the fixture has the line") as u32
+    };
+    // **Asked until it answers.** A hover before the project has been read is `null` — the analysis has no view yet —
+    // and a well-behaved client asks again as it types; asserting the first answer would be asserting the machine's
+    // speed rather than the server's behaviour.
+    let mut hover_on = |id: i64, line: u32, character: u32| -> serde_json::Value {
+        let uri = a_uri.clone();
+        server.ask_until_it(
+            id,
+            move |_asked| {
+                json!({
+                    "method": "textDocument/hover",
+                    "params": {
+                        "textDocument": { "uri": uri },
+                        "position": { "line": line, "character": character },
+                    },
+                })
+            },
+            |response| !response["result"].is_null(),
+        )
+    };
+
+    // `z.push_back` — the member, on the type the `auto` initialiser gave it.
+    let member = hover_on(2, line_of("z.push_back"), 6);
+    let text = member["result"]["contents"]["value"]
+        .as_str()
+        .unwrap_or_else(|| panic!("a hover is expected: {member}"))
+        .to_string();
+    assert!(text.contains("push_back"), "the member is the answer: {text}");
+
+    // `z.append` — absent, said plainly, and **not** another class's member.
+    let absent = hover_on(3, line_of("z.append"), 6);
+    let text = absent["result"]["contents"]["value"]
+        .as_str()
+        .unwrap_or_else(|| panic!("a hover is expected: {absent}"))
+        .to_string();
+    assert!(
+        text.contains("no member `append`") || text.contains("not known here"),
+        "an absent member is answered honestly: {text}"
+    );
+    assert!(
+        !text.contains("basic_string"),
+        "and never with another class's members: {text}"
+    );
+}

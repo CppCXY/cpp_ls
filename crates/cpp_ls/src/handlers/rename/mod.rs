@@ -181,7 +181,7 @@ pub fn workspace_edit_of_renaming_a_macro<F: cpp_code_analysis::FileProvider + C
         .files
         .iter()
         .map(|file| &file.file)
-        .find(|file| !is_inside(file, session.root()))
+        .find(|file| !crate::util::is_inside(file, session.root()))
     {
         log::warn!(
             "refusing to rename `{}`: {} is outside the project",
@@ -390,17 +390,37 @@ mod tests {
     }
 }
 
-/// Is `path` inside `root`, compared the way the rest of this server compares paths?
-///
-/// Byte-for-byte only after normalising: Windows compares case-insensitively and spells separators both ways, and the
-/// two sides here come from different places — the index's file list and the session's own root — so a raw
-/// `starts_with` would answer "outside" for a header the user just wrote.
-fn is_inside(path: &std::path::Path, root: &std::path::Path) -> bool {
-    let flatten = |path: &std::path::Path| {
-        let text = path.to_string_lossy().replace('\\', "/");
-        if cfg!(windows) { text.to_lowercase() } else { text }
-    };
-    let path = flatten(path);
-    let root = flatten(root);
-    path == root || path.starts_with(&format!("{root}/"))
+
+#[cfg(test)]
+mod inside {
+    use std::path::Path;
+
+    use crate::util::is_inside;
+
+    /// **What "inside the project" means, stated once and tested on the awkward cases.**
+    ///
+    /// The two sides of the comparison come from different places — the index's file list and the session's own root —
+    /// so they spell separators differently and, on Windows, may differ in case. A raw `starts_with` answers "outside"
+    /// for a header the user just wrote, which would refuse every rename in a project whose root was typed with a
+    /// different case than the build system used. That is the bug this test exists for.
+    #[test]
+    fn the_project_boundary_is_compared_the_way_paths_are() {
+        let root = Path::new("/p");
+        assert!(is_inside(Path::new("/p/a.cpp"), root));
+        assert!(is_inside(Path::new("/p/src/deep/a.cpp"), root));
+
+        // A sibling that shares the prefix is **outside**: `/project2` is not `/project`.
+        assert!(!is_inside(Path::new("/project2/a.cpp"), root));
+        assert!(!is_inside(Path::new("/a.cpp"), root));
+        assert!(!is_inside(Path::new("/p"), Path::new("/p/src")), "the root is not inside a child");
+
+        // Separators, both ways.
+        assert!(is_inside(Path::new(r"\p\a.cpp"), root));
+        assert!(is_inside(Path::new("/p/a.cpp"), Path::new(r"\p")));
+
+        // And on Windows the comparison is case-insensitive, because the filesystem is.
+        if cfg!(windows) {
+            assert!(is_inside(Path::new("/P/A.CPP"), root));
+        }
+    }
 }

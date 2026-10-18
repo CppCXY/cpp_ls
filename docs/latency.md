@@ -67,3 +67,29 @@ That is the next measurement, and it is one line of code to test: put the pump's
 `tokio::task::spawn_blocking` and see whether the outlier disappears. Nothing else was changed, the suite is unchanged
 (53 targets ok, the latency test the only red), and the wave search is the one improvement kept from this round: the
 **first** completion went from 3309 ms to ~175 ms.
+## The starvation fixed: the pump's CPU phases moved off the runtime
+
+The measurement said the slow request waited for no lock: the session's budget warning never fired, and one completion in
+about twelve lost ~1.7 s anyway. That is the executor, not the analysis — the pump ran `prepare_a_wave`,
+`prepare_the_drain` and `render_them` **inline in an `async` task**, so a wave of parses took the runtime thread away from
+every request in flight for its whole length.
+
+The fix is the one the queries already use: `AnalysisState::run_blocking`, which takes a blocking permit, moves the
+closure to `spawn_blocking`, and holds the read guard on **that** thread.
+
+Measured on the latency fixture, three runs of the same test:
+
+```text
+before   … #7 1735 ms, #11 1697 ms, #9 1629 ms   (an outlier in every run, moving between requests)
+after    run 1   490  5  7  41  16  16  26  7  147  52  39  54
+         run 2   273  6 30  33  16   7  25 11  154  52  45  37
+         run 3   232  7 37  32  20  19  24 17  142  49  44  42
+```
+
+The outlier is gone: the worst completion is now ~490 ms, and that is the **first** one, before the index has anything to
+answer from.
+
+**What the test still says** is a different, smaller thing: the steady-state budget is 50 ms and the eighth completion is
+~145–155 ms in every run. That is a spike of ~100 ms, not a starvation, and it lands on the same request index every time
+— so it is a phase of the pump that the fix did not move: the write-lock commit, or the cooking claim between it. That is
+the next measurement, and it is a much smaller one than the 1.7 s was.

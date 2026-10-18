@@ -283,21 +283,6 @@ pub fn member_definitions_across_files(
 
     if found.is_empty() {
         // **Not a definite no**: the class may be a template this layer does not instantiate, or inherit from one
-        // it could not open — [`MemberList::unlisted`] is the same gap, and it is why this is `Unknown`.
-        if access.member.starts_with("_Lock") || access.member == "data" {
-            eprintln!(
-                "[member] `{class}::{}` not among {} members {:?} (unlisted {:?})",
-                access.member,
-                members.members.len(),
-                members
-                    .members
-                    .iter()
-                    .map(|m| m.fact.name.clone())
-                    .take(14)
-                    .collect::<Vec<_>>(),
-                members.unlisted,
-            );
-        }
         return Known::Unknown(UnknownReason::NotDeclaredHere(Box::from(format!(
             "{class}::{}",
             access.member
@@ -2402,6 +2387,49 @@ pub(crate) fn type_of_expression(
                 path.to_path_buf(),
             ));
         }
+    }
+
+    // **A functional cast of a template-id is that type.** `std::vector<int>()` — the initialiser behind every
+    // `auto z = std::vector<int>();` — is a **call expression** whose callee is a *type with arguments in it*, so the
+    // function lookup below cannot answer it: there is no function called `std::vector<int>`. The type is the
+    // spelling, read off the expression, and the arguments are kept rather than resolved because `std::vector<int>`
+    // is what a reader wants to see and substituting `int` into a template's parameters would be a second answer
+    // free to disagree with the one the file wrote.
+    //
+    // Measured on a real editor session: `auto z = std::vector<int>();` had **no** type, so `z.append(…)` fell back
+    // to "every `append` in the project" and hover answered with nine `basic_string::append` declarations.
+    if cpp_parser::CppSyntaxKind::from(expression.kind()) == cpp_parser::CppSyntaxKind::CallExpr
+        && let Some(callee) = written.strip_suffix("()")
+        && callee.contains('<')
+        // **A type spelling has no space in it.** `_STD h<int>()` is a macro followed by a name — two identifiers the
+        // parse keeps as one name, because that is what the standard library writes — and it is not a type; a type-id
+        // is one spelling. This is the shape that made the arm claim `_STD _Convert_size<int>` as a type.
+        && !callee.chars().any(char::is_whitespace)
+        // **…and the name before the arguments is a class.** `h<int>()` is a **function template** call, whose type is
+        // `h`'s return type — the call path answers that, and answering `h<int>` here would shadow it. So the arm asks
+        // the index one question: is the bare name a class? Only then is this a construction rather than a call.
+        && index
+            .files_declaring(callee.split('<').next().unwrap_or(callee).trim(), path)
+            .iter()
+            .any(|declared| declared.fact.kind == crate::DeclKind::Type)
+        // **Not a macro.** `MAKE_T<int>()` is a macro invocation whose expansion the parse does not have here, and
+        // `auto x = MAKE_T<int>();` is deduced from the macro's own body elsewhere — claiming the spelling as a type
+        // would answer `MAKE_T<int>`, which is not a type. An all-uppercase first segment is the convention every C++
+        // codebase follows for a macro, and it is the one piece of evidence this arm has.
+        && !callee
+            .split("::")
+            .next()
+            .unwrap_or(callee)
+            .split('<')
+            .next()
+            .unwrap_or(callee)
+            .chars()
+            .all(|character| !character.is_ascii_lowercase())
+    {
+        return Known::Yes((
+            Type::named(callee.trim()),
+            path.to_path_buf(),
+        ));
     }
 
     // `this` is the enclosing class, and no inference is involved: the scope chain already knows which class this
@@ -12967,9 +12995,92 @@ fn the_alias_behind(index: &ProjectIndex, declaring: &Path, written: &str) -> Op
     Some((named.trim().to_string(), member.trim().to_string()))
 }
 
+/// **`std::vector<int>`'s members, with `T` written through as `int`.**
+///
+/// A member's fact records the spelling its **class** wrote — `void push_back(T value)`, `T& front()` — and every
+/// consumer of the list reads those spellings: completion offers the parameters, hover shows them, `param-type-check`
+/// and `argument-count` compare against them. For an instantiated use they are wrong, and the consequence is silence:
+/// `std::vector<int>::push_back("text")` is not reported, because `T value` is a parameter neither check can classify.
+///
+/// The substitution is `sema::types::substituted_spelling` — the same function that makes a member's **return** type
+/// come out as `int&` — so this is the arguments reaching the member list, not a second implementation of anything.
+/// The parameter names come from the class's own declaration header, which is why a reader is required: the index stores
+/// facts, and a template header is text.
+pub fn substituted_members(
+    index: &ProjectIndex,
+    from: &Path,
+    class: &str,
+    listed: Known<MemberList>,
+    read: &mut dyn FnMut(&Path) -> Option<crate::FileView>,
+) -> Known<MemberList> {
+    let Known::Yes(mut list) = listed else {
+        return listed;
+    };
+    let Some((base, arguments)) = split_template_arguments(class) else {
+        return Known::Yes(list);
+    };
+    let Some(declared) = index
+        .files_declaring(&base, from)
+        .into_iter()
+        .find(|declared| declared.fact.kind == crate::DeclKind::Type)
+    else {
+        return Known::Yes(list);
+    };
+    let Some(view) = read(&declared.file) else {
+        return Known::Yes(list);
+    };
+    let names = crate::sema::deduction::template_parameters_before(
+        &view.source,
+        declared.fact.range.start_offset,
+    );
+    if names.is_empty() {
+        return Known::Yes(list);
+    }
+    for member in &mut list.members {
+        for spelling in [
+            &mut member.fact.parameter_list,
+            &mut member.fact.returns,
+            &mut member.fact.type_of,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            *spelling = crate::sema::types::substituted_spelling(spelling, &names, &arguments);
+        }
+    }
+    Known::Yes(list)
+}
 
-
-
-
-
-
+/// **Split `std::vector<int>` into its name and its arguments** — `("std::vector", ["int"])`.
+///
+/// `None` when there is no top-level `<…>` at the end: a plain class name has no arguments to substitute, and returning
+/// an empty list rather than `None` would make `std::vector<>` and `std::vector` indistinguishable at the call site.
+fn split_template_arguments(spelling: &str) -> Option<(String, Vec<String>)> {
+    let spelling = spelling.trim();
+    let open = spelling.find('<')?;
+    let close = spelling.rfind('>')?;
+    if close < open || close + 1 != spelling.len() {
+        return None;
+    }
+    let base = spelling[..open].trim().to_string();
+    let mut arguments: Vec<String> = Vec::new();
+    let mut depth = 0i32;
+    let mut current = String::new();
+    for character in spelling[open + 1..close].chars() {
+        match character {
+            '<' | '(' | '[' => depth += 1,
+            '>' | ')' | ']' => depth -= 1,
+            ',' if depth == 0 => {
+                arguments.push(current.trim().to_string());
+                current.clear();
+                continue;
+            }
+            _ => {}
+        }
+        current.push(character);
+    }
+    if !current.trim().is_empty() {
+        arguments.push(current.trim().to_string());
+    }
+    Some((base, arguments))
+}

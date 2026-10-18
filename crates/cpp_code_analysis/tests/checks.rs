@@ -1170,3 +1170,308 @@ void use() {
         "every callee here takes as many arguments as it is given: {codes:?}"
     );
 }
+
+/// **A member of a template class is a member.** The census on EmmyLuaCodeStyle's `nlohmann::json` reported
+/// `` `array` has no member `push_back` `` — the class is `basic_json<>`, its members are written inside a
+/// `template<...> struct`, and the lookup that reads members must follow the template header to reach them.
+#[test]
+fn a_member_written_inside_a_template_class_is_found() {
+    let source = "\
+template <class T>
+struct Box {
+    void push(T value);
+};
+void g(Box<int> box) {
+    box.push(1);
+}
+";
+    assert!(
+        !codes_of(source).contains(&DiagnosticCode::UndefinedField),
+        "`push` is a member of the template: {:?}",
+        codes_of(source)
+    );
+}
+
+/// **The `nlohmann::json` shape**: a member reached through an **alias to a template instantiation**.
+///
+/// `using json = basic_json<int>;` and then `array.push_back(3)` — the cursor's class name is the alias, the members are
+/// in the template's body, and the instantiation is the `int` that the alias supplied. This is the shape the census
+/// found twice on a real project, and it is the one the simple template test above does not cover.
+#[test]
+fn a_member_reached_through_an_alias_to_a_template_is_found() {
+    let source = "\
+namespace nlohmann {
+template <class T>
+class basic_json {
+public:
+    void push_back(T value);
+};
+using json = basic_json<int>;
+}
+void g(nlohmann::json array) {
+    array.push_back(3);
+}
+";
+    assert!(
+        !codes_of(source).contains(&DiagnosticCode::UndefinedField),
+        "`push_back` is a member of `basic_json`, which `json` names: {:?}",
+        codes_of(source)
+    );
+}
+
+/// **The exact shape from `LSP.h`**: an alias to a template, a static member call, and a use inside a template
+/// function — `nlohmann::json array = nlohmann::json::array(); … array.push_back(…)`.
+///
+/// The three pieces are each plausible on their own, which is why this test exists beside the two above: an alias to a
+/// template (passing on its own), a static member used as an initialiser, and a body inside a template whose parameter
+/// is `T`. The census found `push_back` missing in this shape twice, and it is the last false positive on a real
+/// project.
+#[test]
+fn the_nlohmann_shape_keeps_its_member() {
+    let source = "\
+namespace nlohmann {
+template <class T>
+class basic_json {
+public:
+    using array_t = int;
+    static array_t array();
+    void push_back(int value);
+};
+using json = basic_json<int>;
+}
+
+template <class T>
+nlohmann::json SerializeArray(std::vector<T>& vec) {
+    nlohmann::json array = nlohmann::json::array();
+    for (auto& v : vec) {
+        array.push_back(1);
+        (void)v;
+    }
+    return array;
+}
+";
+    assert!(
+        !codes_of(source).contains(&DiagnosticCode::UndefinedField),
+        "`push_back` is a member of `basic_json`: {:?}",
+        codes_of(source)
+    );
+}
+
+/// **A base the index could read nothing from is not evidence that a member is absent.**
+///
+/// `struct D : Missing` gives `D` a member list that is **partial** — `Missing` contributed nothing, because it is not
+/// in the index — and a member written on a `D` is then "not in the list" without being absent from the class. The
+/// check must stay silent, which is what `MemberList::unlisted` is for.
+///
+/// Measured on a real project this is the shape of the worst report of the census: `std::cin.read(…)` was reported as
+/// "`std::cin` has no member `read`" while the hover found `basic_istream::read` at once — the same index, asked two
+/// ways, answering differently because this check treated "not in the part I read" as "not there".
+#[test]
+fn a_member_of_a_class_with_an_unread_base_is_not_reported() {
+    let source = "\
+struct D : Missing {
+    void f();
+};
+void g(D d) {
+    d.not_read_anywhere();
+}
+";
+    assert!(
+        !codes_of(source).contains(&DiagnosticCode::UndefinedField),
+        "the list is partial, so the absence is not evidence: {:?}",
+        codes_of(source)
+    );
+}
+
+/// **A constructor with two parameters cannot be built from one value.**
+///
+/// `struct S { S(int, int); }; S s = 123;` does not compile. The question "can a class be built from this value" was
+/// answered by scanning the parameters for one that accepts it — so the first `int` said yes and the arity was never
+/// asked. This is the shape `std::string s = 123;` has in a standard library, whose `basic_string(size_type, char)` is
+/// the constructor the scan used to accept.
+#[test]
+fn a_two_parameter_constructor_cannot_be_built_from_one_value() {
+    let source = "\
+struct S {
+    S(int count, int other);
+};
+void g() {
+    S s = 123;
+}
+";
+    assert!(
+        codes_of(source).contains(&DiagnosticCode::AssignTypeCheck),
+        "one value cannot fill two parameters: {:?}",
+        codes_of(source)
+    );
+
+    // …and one defaulted parameter is still one value.
+    let defaulted = "\
+struct S {
+    S(int count, int other = 0);
+};
+void g() {
+    S s = 123;
+}
+";
+    assert!(
+        !codes_of(defaulted).contains(&DiagnosticCode::AssignTypeCheck),
+        "a defaulted parameter does not need a value: {:?}",
+        codes_of(defaulted)
+    );
+}
+
+/// **The type check a reader most wants from generics**: the argument against the **instantiated** parameter.
+///
+/// `push_back` on a `std::vector<int>` takes an `int`, because the class was instantiated at `int`. The member's fact
+/// says `T value` — the spelling the class wrote — so a check that reads only the fact sees a parameter it cannot
+/// classify and stays silent. This is the "type checking after instantiation" the reader asked for, and it is the next
+/// layer of the generics work.
+/// # Why this is ignored rather than passing
+///
+/// The fix is one seam, and it is not this file's: `members_of` is called with `written.class_name()`, which has already
+/// **dropped** the template arguments (`cpp_code_analysis::completion` line 468), so the member list it builds cannot
+/// substitute anything. The substitution itself exists — `sema::types::substituted_spelling`, used by the member
+/// **return** type, which is why `basic_string<char>::back()` already answers `char&`. What is missing is the class's
+/// parameter names and the use's arguments reaching the member facts.
+///
+/// The test is kept and ignored rather than deleted: it states the behaviour a reader expects, and it will pass the day
+/// the seam is moved.
+///
+/// # What the substitution did not fix, measured after it landed
+///
+/// `SemanticModel::members_of` now substitutes the class's arguments into its members — `std::vector<int>::push_back`
+/// reports `(int value)` rather than `(T value)`. The diagnostic still does not appear, and the reason is a **second**
+/// seam: the argument checks **skip member calls deliberately** (`argument_count`'s member-access guard, added because
+/// `_session.Run(…)` was being judged against a free `Run()`). So `v.push_back(…)` never reaches an arity or a type
+/// comparison at all, substituted parameters or not. Making this test pass is the work of resolving a member call to the
+/// member — `member_access_at` plus `members_of` — rather than of substituting anything.
+#[test]
+fn a_member_parameter_is_checked_after_instantiation() {
+    let source = "\
+namespace std {
+template <class T>
+class vector {
+public:
+    void push_back(T value);
+};
+}
+void f() {
+    std::vector<int> v;
+    v.push_back(\"text\");
+}
+";
+    assert!(
+        codes_of(source).contains(&DiagnosticCode::ParamTypeCheck)
+            || codes_of(source).contains(&DiagnosticCode::ArgumentCount),
+        "an `int` parameter does not take a string literal: {:?}",
+        codes_of(source)
+    );
+}
+
+/// **The other half of the rule: a member call whose argument fits is silent.**
+///
+/// The instantiated check above reports; this one says the report is not blanket. `push_back(1)` on a `std::vector<int>`
+/// passes an `int` to an `int`, and nothing is said.
+#[test]
+fn a_member_call_whose_argument_fits_is_silent() {
+    let source = "\
+namespace std {
+template <class T>
+class vector {
+public:
+    void push_back(T value);
+};
+}
+void f() {
+    std::vector<int> v;
+    v.push_back(1);
+}
+";
+    assert!(
+        !codes_of(source).contains(&DiagnosticCode::ParamTypeCheck),
+        "an `int` for an `int` is right: {:?}",
+        codes_of(source)
+    );
+}
+
+/// **A non-template class's member is checked the same way** — the substitution is not what makes the check work, it is
+/// what makes it *correct* for a template; the plain case has to work on its own.
+#[test]
+fn a_member_call_on_a_plain_class_is_checked() {
+    let source = "\
+struct Widget {
+    void resize(int width);
+};
+void f() {
+    Widget w;
+    w.resize(\"wide\");
+}
+";
+    assert!(
+        codes_of(source).contains(&DiagnosticCode::ParamTypeCheck),
+        "a string literal for an `int` is not right: {:?}",
+        codes_of(source)
+    );
+}
+
+/// **Too many arguments to a member** is the arity rule, through the same resolution.
+#[test]
+fn a_member_call_with_too_many_arguments_is_a_different_finding() {
+    let source = "\
+struct Widget {
+    void resize(int width);
+};
+void f() {
+    Widget w;
+    w.resize(1, 2);
+}
+";
+    assert!(
+        codes_of(source).contains(&DiagnosticCode::ArgumentCount),
+        "one parameter, two arguments: {:?}",
+        codes_of(source)
+    );
+}
+
+/// **A free function is still checked** — the member path was added beside the old one, not instead of it.
+#[test]
+fn a_free_function_call_is_still_checked() {
+    // **A definition**, not a declaration: this check's table is built from this file's function definitions (its
+    // module documentation says so), which is exactly the rule that made a class *member* invisible to it.
+    let source = "\
+void resize(int) { }
+void f() {
+    resize(\"wide\");
+}
+";
+    assert!(
+        codes_of(source).contains(&DiagnosticCode::ParamTypeCheck),
+        "the free path is unchanged: {:?}",
+        codes_of(source)
+    );
+}
+
+/// **A named parameter is not checked, and that is a gap rather than a rule.**
+///
+/// `parameter_spellings_of` returns the parameter as the file wrote it — `int width` — and `parse_type_spelling` reads a
+/// *type*, so the comparison sees a spelling it cannot parse and says nothing. Measured: the same call is reported when
+/// the parameter is unnamed (`void resize(int)`) and silent when it is named, which is the shape every real codebase
+/// writes. `sema::overload::parameters_in` already strips the name (`a_type_without_its_name`), so the fix is to read the
+/// spellings through it — recorded here rather than asserted, because changing it makes this check fire on code it has
+/// never judged before, which is a census to run first.
+#[test]
+#[ignore = "a passed `int` against a written `int width` parses as neither side; see docs/generics.md"]
+fn a_named_parameter_is_checked_too() {
+    let source = "\
+void resize(int width) { }
+void f() {
+    resize(\"wide\");
+}
+";
+    assert!(
+        codes_of(source).contains(&DiagnosticCode::ParamTypeCheck),
+        "the name is not part of the type: {:?}",
+        codes_of(source)
+    );
+}

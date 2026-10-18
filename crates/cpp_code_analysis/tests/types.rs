@@ -993,6 +993,88 @@ fn an_alias_target_is_substituted_by_whole_words() {
     );
 }
 
+/// **`auto` over a temporary of a template type** — the shape from a real editor session that reported nothing.
+///
+/// `auto z = std::vector<int>();` writes no type next to the name; the type is the initialiser's, and that initialiser
+/// is a **type-id call**. If the spelling comes out as `std::vector` without its argument, every later answer is wrong:
+/// the member list is looked up for a class that has none, and a hover on `z.push_back` falls back to "every
+/// `push_back` in the project".
+#[test]
+fn an_auto_variable_takes_the_templated_temporarys_type() {
+    // `std::vector` is **declared** here, because a bare `auto z = std::vector<int>()` in a file with no `<vector>` is a
+    // construction of a name the index has never seen — and then the honest answer is "no type", not a guess.
+    let source = "\
+namespace std {
+template <class T>
+class vector;
+}
+void f() {
+    auto z = std::vector<int>();
+}
+";
+    assert_eq!(
+        type_of_use(source, "z").as_deref(),
+        Some("std::vector<int>"),
+        "the argument is part of the type the declaration has"
+    );
+}
 
+/// And the same for a call: `auto y = g();` has `g`'s return type, template arguments and all.
+#[test]
+fn an_auto_variable_takes_the_calls_return_type() {
+    let source = "\
+std::string g();
+void f() {
+    auto y = g();
+}
+";
+    assert_eq!(type_of_use(source, "y").as_deref(), Some("std::string"));
+}
 
+/// **A member's return type with the class's arguments substituted** — `basic_string<char>::back()` is `char&`.
+///
+/// The declaration writes `_Elem&`; the class is `template <class _Elem> class basic_string`; the use is through
+/// `std::string`, which is `basic_string<char>`. The answer a reader wants is `char&`, and it exists in the same two
+/// facts the member lookup already reads: the parameters the class declares and the arguments the alias supplies.
+#[test]
+fn a_members_return_type_has_the_class_arguments_substituted() {
+    let source = "\
+namespace std {
+template <class Elem>
+class basic_string {
+public:
+    Elem& back();
+};
+using string = basic_string<char>;
+}
+void f() {
+    std::string x;
+    auto y = x.back();
+}
+";
+    assert_eq!(
+        type_of_use(source, "y").as_deref(),
+        Some("char&"),
+        "`back()` on a `basic_string<char>` returns `char&`"
+    );
+}
 
+/// The same substitution, with the class used **directly as a template-id** rather than through an alias:
+/// `std::vector<int> v; auto z = v.front();` is `int&`.
+#[test]
+fn a_member_return_type_is_substituted_through_a_template_id_use() {
+    let source = "\
+namespace std {
+template <class T>
+class vector {
+public:
+    T& front();
+};
+}
+void f() {
+    std::vector<int> v;
+    auto z = v.front();
+}
+";
+    assert_eq!(type_of_use(source, "z").as_deref(), Some("int&"));
+}

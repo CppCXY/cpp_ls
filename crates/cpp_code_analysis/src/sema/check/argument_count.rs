@@ -79,7 +79,8 @@ impl Check for ArgumentCount {
             // from this one line, and another 6 from the same shape in `undefined-field` (`docs/cold-start-cpu.md`).
             // Resolving the member needs the object's type, which is a different question with its own false positives;
             // until that answer is trusted here, staying silent is the direction this module documents.
-            if crate::sema::resolve::member_access_of(callee.syntax()).is_some() {
+            if let Some(access) = super::member_access_above(callee.syntax()) {
+                judge_a_member_call(context, &call, &access);
                 continue;
             }
 
@@ -434,4 +435,59 @@ fn names_a_type(context: &CheckContext<'_>, name: &str) -> bool {
         .found
         .iter()
         .any(|definition| definition.fact.kind != crate::DeclKind::Function)
+}
+
+/// **A member call, judged against the member it names.**
+///
+/// The guard above used to skip every member call, because `_session.Run(…)` was being judged against a free `Run()` and
+/// reported 19 times on a real project. Skipping was the right *direction* and the wrong *answer*: the member is
+/// resolvable — `member_access_at` gives the object, the object's type gives the member list, and the member gives the
+/// parameter list — so the call can be judged instead of ignored.
+///
+/// Any overload that accepts this many arguments answers it; only when none does is the closest reported, which is the
+/// same rule the free-function path uses.
+fn judge_a_member_call(
+    context: &mut CheckContext<'_>,
+    call: &cpp_parser::CppCallExpr,
+    access: &crate::sema::resolve::MemberAccess,
+) {
+    let crate::Known::Yes((a_type, _)) = context.type_of(&access.object) else {
+        return;
+    };
+    let crate::Known::Yes(list) = context.model.members_of(&a_type.to_string()) else {
+        return;
+    };
+    let members: Vec<Callee> = list
+        .members
+        .iter()
+        .filter(|member| member.fact.name == access.member)
+        .filter_map(|member| member.fact.parameter_list.as_deref())
+        .filter_map(the_callee_in)
+        .collect();
+    if members.is_empty() {
+        return;
+    }
+
+    let passed = call.get_args().len();
+    if members
+        .iter()
+        .any(|member| member.variadic || (passed >= member.required && passed <= member.written))
+    {
+        return;
+    }
+    let Some(declared) = closest(&members, passed) else {
+        return;
+    };
+
+    let name = access.member.clone();
+    context.add(
+        DiagnosticCode::ArgumentCount,
+        cpp_parser::source_range(call.get_range()),
+        name.clone(),
+        if passed > declared.written {
+            at_most(&name, declared.written)
+        } else {
+            at_least(&name, declared.required)
+        },
+    );
 }

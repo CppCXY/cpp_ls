@@ -169,7 +169,10 @@ impl<'a> CppLexer<'a> {
             // The tree keeps the spelling: a token's text is the source text, so a consumer that needs to tell
             // `__typeof__` from `decltype` reads the token, not the kind — and one that asks "is this a type
             // expression?" gets the right answer for both.
-            "__typeof__" | "__typeof" | "__decltype" => CppTokenKind::DecltypeKeyword,
+            // …and the spelling without the underscores, which GCC has accepted since before `decltype` existed and
+            // which real headers write (`typeof(x) y = …;` in glibc's `sys/types.h`). Measured: `__typeof__` parsed and
+            // `typeof` did not, which is the worst kind of gap — one spelling of a construct working and the other not.
+            "__typeof__" | "__typeof" | "__decltype" | "typeof" => CppTokenKind::DecltypeKeyword,
             // **The four named casts.** Absent until now, and their absence was invisible: an unrecognised
             // `static_cast` is an *identifier*, so `static_cast<int>(x)` lexes as `static_cast` `<` `int` `>` `(`
             // `x` `)` and parses — without an error — as a comparison chain. Measured: `auto x =

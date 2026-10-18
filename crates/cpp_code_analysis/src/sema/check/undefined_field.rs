@@ -91,6 +91,18 @@ impl Check for UndefinedField {
                 continue;
             }
 
+            // **A partial list is not evidence.** `MemberList::unlisted` names the bases whose members could not be
+            // read — a base out of the index, a base reached through a macro, a base whose own summary was not built —
+            // and a member inherited from one of those is *missing from the list* without being absent from the class.
+            //
+            // Measured on a real project: `std::cin.read(…)` was reported as "`std::cin` has no member `read`", while
+            // the hover, which asks the same index a different way, found `basic_istream::read` at once. The two
+            // answered differently because this check treated "not in the part I read" as "not there". The list is
+            // only an answer when it is complete.
+            if !members.unlisted.is_empty() {
+                continue;
+            }
+
             // **An arrow is not evidence.** Measured on EmmyLuaCodeStyle: `_session->Send(std::move(message))` was
             // reported as "`_session` has no member `Send`" — the receiver is a `std::shared_ptr<Session>`, whose
             // member list is `shared_ptr`'s, and the member the program means is behind `operator->`. Following that

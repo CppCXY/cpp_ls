@@ -836,3 +836,26 @@ it is still the largest slice     after parse (87 ms), the scope tree is the sec
 What the four defects and this investigation now say together: this pipeline's remaining time is **not** in hidden
 quadratics any more. It is in the parse (21-MB/s floor) and in per-node constant factors, and both need a different kind
 of work than the last five rounds — which is the right place to stop and hand over.
+## A correction: the template-class member table is not the defect the census made it look like
+
+The census's last two findings on EmmyLuaCodeStyle are `undefined-field` on `array.push_back(…)`, where `array` is an
+`nlohmann::json` — and I recorded them as "the member list the index holds for a template class is **partial**". Three
+fixtures now say otherwise, and they are in `tests/checks.rs`:
+
+```text
+a_member_written_inside_a_template_class_is_found              template <class T> struct Box { void push(T); }  ✓ passes
+a_member_reached_through_an_alias_to_a_template_is_found       using json = basic_json<int>;                   ✓ passes
+the_nlohmann_shape_keeps_its_member                            alias + static array() + use inside a template  ✓ passes
+```
+
+So a member written inside a `template<…>` body **is** found, through an alias, through a static call in the initialiser,
+and from inside another template. The three shapes cover everything the reduced source shows, and none of them
+reproduces the finding.
+
+What that means for the record: **"partial member table" was a guess, and it is wrong as stated.** The real header is
+the only thing that reproduces it — `basic_json` is macro-generated in places, has many specialisations, and is written
+across several files — so the next attempt should run the census **against the real project** with a count of what
+`members_of("nlohmann::json")` returns, rather than another fixture. Until then the two findings stay as the census found
+them: **unexplained, not diagnosed.**
+
+The three tests are kept: they pin behaviour that is currently right, which is what a regression guard is for.
