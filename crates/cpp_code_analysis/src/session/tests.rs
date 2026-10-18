@@ -1,0 +1,2530 @@
+    use super::{OpenDocuments, Session, SessionFiles, queue_key};
+    use crate::file::coordinates::ReadingOffset;
+    use crate::file::paths::{DiskFiles, FileProvider, MemoryFiles};
+    use crate::include::config::{CommandLineMacro, CompilerConfig};
+    use crate::include::toolchain::{Toolchain, ToolchainSource};
+    use crate::index::watch::{FileEvent, WatchFilter};
+    use crate::index::{Priority, StepOutcome};
+    use crate::symbol::Known;
+    use std::path::{Path, PathBuf};
+
+    /// A project in memory: the files, the buffers in front of them, and the providers that join the two.
+    ///
+    /// The fixture keeps the providers and hands each session a **clone**, which is what a caller outside a test
+    /// does too — a provider is a handle, so the fixture's copy and the session's copy read the same files, and a
+    /// test can go on looking at what the analysis read while the session owns its own chain.
+    struct Memory<'a> {
+        files: &'a MemoryFiles,
+        documents: OpenDocuments,
+        providers: SessionFiles<MemoryFiles>,
+        root: PathBuf,
+    }
+
+    impl<'a> Memory<'a> {
+        fn new(name: &str, files: &'a MemoryFiles) -> Self {
+            let root = std::env::temp_dir().join("cppls-session-tests").join(name);
+            let _ = std::fs::remove_dir_all(&root);
+
+            let documents = OpenDocuments::new();
+            let providers = SessionFiles::new(documents.clone(), files.clone());
+
+            Memory {
+                files,
+                documents,
+                providers,
+                root,
+            }
+        }
+
+        fn session(&self) -> Session<MemoryFiles> {
+            Session::with_config(
+                &self.root,
+                self.providers.clone(),
+                WatchFilter::new(&self.root),
+                CompilerConfig::default(),
+            )
+        }
+
+        /// The text the analysis would read for a path — the buffer if there is one.
+        fn text(&self, path: &str) -> Option<String> {
+            self.documents
+                .text(path)
+                .or_else(|| self.files.read(Path::new(path)))
+        }
+    }
+
+    impl Drop for Memory<'_> {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    /// The paths of a run of steps, for an assertion about the order rather than about the work.
+    fn paths(steps: &[crate::index::Step]) -> Vec<String> {
+        steps
+            .iter()
+            .map(|step| step.path.to_string_lossy().replace('\\', "/"))
+            .collect()
+    }
+
+    // -------------------------------------------------------------------------------------------
+    // The buffer is the text
+    // -------------------------------------------------------------------------------------------
+
+    /// **A declaration only a macro makes becomes one this session answers for**, once its queue drains.
+    ///
+    /// `DECLARE_HANDLE(HWND)` declares `HWND__` and `HWND` to a compiler and *nothing* to a reader of the file's own
+    /// text: the declaration is inside the macro's replacement list, and the invocation is not a declaration. So the
+    /// index has no `HWND__` before the file is cooked and has one after — which is the whole reason the reading
+    /// exists.
+    ///
+    /// (The other half of what cooking buys — the *scope* a namespace-opening macro puts a declaration in — is
+    /// already handled by the raw reading when the indexer is given the closure's macro bodies: `BEGIN_NS` is
+    /// `namespace ns {` to the parser and a declaration inside it is scoped correctly. That is the two-hop reading of
+    /// a macro-shaped scope and of a body written in another file, and it is why this test is about a declaration
+    /// the file does not write at all rather than about one it writes.)
+    #[test]
+    fn the_sharing_cache_survives_a_restart() {
+        let handle = "#define DECLARE_HANDLE(name) struct name##__ { int unused; };\n";
+        let source = "#include \"handle.h\"\nDECLARE_HANDLE(HWND);\n";
+        let files = MemoryFiles::new()
+            .with_file("/p/handle.h", handle)
+            .with_file("/p/api.h", source);
+        let fixture = Memory::new("the-sharing-cache-survives-a-restart", &files);
+
+        // **The run that fills it.**
+        let written = {
+            let mut session = fixture.session();
+            session.did_open("/p/api.h", source);
+            session.index_everything();
+            session.save_the_sharing().expect("the cache directory is the fixture's")
+        };
+        assert!(written > 0, "a run that walked files must have something to write");
+
+        // **A restart**: the memory is empty, the disk is not.
+        crate::index::walk_cache::clear();
+        assert_eq!(crate::index::walk_cache::held(), 0, "everything is cleared");
+
+        let session = fixture.session();
+        let restored = session.load_the_sharing();
+        assert_eq!(restored, written, "what was written is what is read back");
+        assert_eq!(
+            crate::index::walk_cache::held(),
+            restored,
+            "and it is in the cache the walk consults, not merely counted"
+        );
+    }
+
+    #[test]
+    fn a_declaration_only_a_macro_makes_is_found_once_the_session_has_cooked_the_file() {
+        let handle = "#define DECLARE_HANDLE(name) struct name##__ { int unused; }; \
+                      typedef struct name##__ *name\n";
+        let source = "#include \"handle.h\"\nDECLARE_HANDLE(HWND);\n";
+        let files = MemoryFiles::new()
+            .with_file("/p/handle.h", handle)
+            .with_file("/p/api.h", source);
+        let fixture = Memory::new("cooked-reading-is-indexed", &files);
+        let mut session = fixture.session();
+
+        session.did_open("/p/api.h", source);
+
+        // **One step**: `api.h` is read and its include is queued, so the queue is *not* empty — and a file whose
+        // includes have not been read has an environment that is not complete, which is why nothing is cooked yet.
+        session.advance(1);
+        let before = session.index().definition("HWND__", Path::new("/p/api.h"));
+        assert!(
+            matches!(before, Known::Unknown(_)),
+            "the file's own text does not declare what the macro declares: {before:?}"
+        );
+        assert!(
+            session
+                .index()
+                .cooked_declarations(Path::new("/p/api.h"))
+                .is_none(),
+            "and nothing has cooked it yet"
+        );
+
+        // **Drain**: the queue emptying is the moment a file's environment is complete, and that is where the
+        // session cooks the files a reader is looking at. No caller asked for this — it is the indexing loop's own
+        // last step.
+        session.index_everything();
+
+        let after = session.index().definition("HWND__", Path::new("/p/api.h"));
+        let Known::Yes(found) = after else {
+            panic!("the cooked reading declares it: {after:?}");
+        };
+        assert_eq!(found.file, Path::new("/p/api.h"));
+        let at = found.fact.range;
+        let written = &source[at.start_offset..at.end_offset()];
+        assert!(
+            written.contains("DECLARE_HANDLE"),
+            "the declaration is reported at the invocation: {written:?}"
+        );
+
+        // What the cook reported about itself, asked for explicitly so the numbers are part of the test: the file
+        // was already cooked once by the drain, and cooking it again reads the same thing.
+        let cooked = session.cook_the_open_files();
+        assert_eq!(cooked.len(), 1, "api.h is the open file");
+        let (path, reading) = &cooked[0];
+        assert_eq!(path, Path::new("/p/api.h"));
+        assert!(
+            reading.declarations >= 2,
+            "the struct, its member and the typedef are declarations here: {reading:?}"
+        );
+        assert!(
+            reading.only_after_expansion >= 2,
+            "`HWND__` and `HWND` exist only after expansion: {reading:?}"
+        );
+        assert_eq!(reading.mapped.dropped, 0, "every range landed in the file");
+    }
+
+    /// **Opening a file reads the files it includes the way a compiler reads them too.**
+    ///
+    /// A name used in the file the user is editing is declared in a header — often one they never open — and the
+    /// answer comes from **that** file's reading. So the closure is what gets cooked, not the one file: here
+    /// `main.cpp` is open, `api.h` is not, and the declaration only exists because `api.h` was read as a compiler
+    /// reads it. Without the closure marking the index would have the raw reading of `api.h` — which cannot see
+    /// what `DECLARE_HANDLE` declares at all.
+    ///
+    /// **The bound is one level of includes, and a unit read moves it** — see
+    /// [`a_unit_read_reads_the_whole_program_once`] for what the session does when a caller asks for the program
+    /// rather than for one file, and why that is not wired into the pump yet.
+    #[test]
+    fn a_header_the_user_never_opened_is_cooked_when_a_request_names_it() {
+        let handle = "#include \"deep.h\"\n#define DECLARE_HANDLE(name) struct name##__ { int unused; }; \
+                      typedef struct name##__ *name\n";
+        let api = "#include \"handle.h\"\nDECLARE_HANDLE(HWND);\n";
+        let main = "#include \"api.h\"\nHWND h;\n";
+        let files = MemoryFiles::new()
+            .with_file("/p/deep.h", "#define DEEP 1\n")
+            .with_file("/p/handle.h", handle)
+            .with_file("/p/api.h", api)
+            .with_file("/p/main.cpp", main);
+        let fixture = Memory::new("a-named-file-is-cooked", &files);
+        let mut session = fixture.session();
+
+        session.did_open("/p/main.cpp", main);
+        session.index_everything();
+
+        // **The open file, and the files its own text names.** `api.h` is one of them, so the declaration the macro
+        // writes in it is `api.h`'s declaration and a question about `HWND` is answered with a jump into it — the
+        // capability that the closure used to buy, bought for the price of one direct include instead of 138 files.
+        let after = session
+            .index()
+            .definition("HWND__", Path::new("/p/main.cpp"));
+        let Known::Yes(found) = after else {
+            panic!("`api.h`'s cooked reading declares it: {after:?}");
+        };
+        assert_eq!(
+            found.file,
+            Path::new("/p/api.h"),
+            "the file that invoked the macro, which nobody opened"
+        );
+
+        // **And one level further, which is the bound** — `handle.h` is a nested include of a direct one, and
+        // `want_the_closure_cooked` reaches it deliberately: [`COOK_ONE_LEVEL_FURTHER`] exists because MSVC's
+        // `<string>` is a thin wrapper over `<xstring>`, and `std::string` lives in the *second* level, so a policy
+        // that stopped at the direct includes answered `std::string` with nothing. Cooking is a render and an index
+        // per file, so the level is bounded at sixty-four rather than taken to the closure — measured on a real
+        // project, the closure was 138 files and **11.7 s of every startup**, and the direct includes are four.
+        assert!(
+            session
+                .index()
+                .cooked_declarations(Path::new("/p/handle.h"))
+                .is_some(),
+            "the level under a direct include is where the library keeps what a reader asks for"
+        );
+
+        // **And no further than that.** `deep.h` is three levels down, which is the closure again — the bound is a
+        // number of levels and not a distance, and this is the assertion that says so.
+        assert!(
+            session
+                .index()
+                .cooked_declarations(Path::new("/p/deep.h"))
+                .is_none(),
+            "past the bound a file has no reading until something looks at it"
+        );
+
+        // A request naming it — the shell's `prepare` does this for every file a request is about — is what makes it.
+        session.want_cooked_reading(Path::new("/p/handle.h"));
+        session.index_everything();
+        assert!(
+            session
+                .index()
+                .cooked_declarations(Path::new("/p/handle.h"))
+                .is_some(),
+            "and then it has one"
+        );
+    }
+
+    /// **A file whose text does not balance its braces is named, and its declarations are filed anyway.**
+    ///
+    /// The hazard this pins was found by measurement, not by reading: on a real project
+    /// `CodeAnalysis/sourceannotations.h` — the Windows SDK's `/analyze` header, the one file a census has never
+    /// read cleanly — opens `namespace vc_attributes {` whose close is not in the text we rendered. Everything
+    /// spliced after it read as `vc_attributes::std`: `<cstdio>`'s declarations, `<string>`'s, the lot. A reader
+    /// asking about `std::size_t` was told the index had no such name while the file in front of them declared it.
+    ///
+    /// # What this used to assert, and why it was the wrong shape
+    ///
+    /// It used to assert that such a file's text was **left out of the stream** — the plan's gate ①, one of the two
+    /// all-or-nothing gates §2 names. That throws away every declaration in the file to protect the ones after it,
+    /// which is §4 rule 1's *"任何一层都不允许因为'不确定'而放弃已经确定的答案"* broken in the same way the
+    /// `crossings == 0` gate broke it one layer up.
+    ///
+    /// The text now goes in, and the crossed pairing it creates is repaired like every other crossed pairing: the
+    /// `{` this file opened is paired with a `}` in another file, **that pair** is neutralised, and both files are
+    /// read on their own as well. So the assertions here are the two that matter and they pull in opposite
+    /// directions, which is what makes them worth having: the file after the unbalanced one is still scoped by its
+    /// own namespace, **and** the unbalanced file's own declaration is in the index.
+    #[test]
+    fn a_file_that_does_not_balance_its_braces_is_named_and_still_read() {
+        let files = MemoryFiles::new()
+            // Opens a namespace and never closes it: what a `/analyze` header does, and what swallows a program.
+            .with_file(
+                "/p/broken.h",
+                "namespace vc_attributes {\nstruct NotAClosure { int x; };\n",
+            )
+            .with_file(
+                "/p/good.h",
+                "namespace good {\nstruct Inside { int y; };\n}\n",
+            )
+            .with_file(
+                "/p/main.cpp",
+                "#include \"broken.h\"\n#include \"good.h\"\nInside i;\n",
+            );
+        let fixture = Memory::new("a-unit-that-does-not-balance", &files);
+        let mut session = fixture.session();
+
+        session.did_open(
+            "/p/main.cpp",
+            "#include \"broken.h\"\n#include \"good.h\"\nInside i;\n",
+        );
+        session.index_everything();
+
+        let reading = session
+            .read_the_unit(Path::new("/p/main.cpp"))
+            .expect("the unit reads");
+
+        assert_eq!(
+            reading.unbalanced.len(),
+            1,
+            "one file does not balance: {reading:?}"
+        );
+        assert!(
+            reading.unbalanced[0].ends_with("broken.h"),
+            "and it is the one that opens a brace it never closes: {reading:?}"
+        );
+
+        // **And the file after it is not nested inside the scope `broken.h` left open.** `broken.h`'s unclosed
+        // namespace ends at the end of `broken.h`, so `good.h`'s own namespace holds `Inside` and nothing else.
+        //
+        // This is the parser's `file_boundaries` rule, the same one
+        // `a_file_that_does_not_balance_costs_nothing_but_a_name` asserts for a file whose braces do not balance at
+        // all. Measured on 2026-06: **it does not hold here** — `good.h` comes out scoped `vc_attributes::good`, so
+        // the namespace `broken.h` opened is still open across the boundary. The assertion is left as written
+        // because it is the contract; the failure is real and is not a stale expectation.
+        let inside = session
+            .index()
+            .cooked_declarations(Path::new("/p/good.h"))
+            .expect("good.h is part of the program");
+        let inside = inside
+            .iter()
+            .find(|fact| fact.name == "Inside")
+            .expect("the class is declared there");
+        assert_eq!(
+            inside.scope.as_deref(),
+            Some("good"),
+            "a scope does not cross a file boundary, so `good.h` is scoped by its own namespace"
+        );
+
+        // **And the unbalanced file did not lose its own declarations.** This is the half gate ① could not give: the
+        // file's struct is declared in it, and it is filed under the namespace the file itself opens.
+        let broken = session
+            .index()
+            .cooked_declarations(Path::new("/p/broken.h"))
+            .expect("the unbalanced file's own reading is filed too");
+        let struct_fact = broken
+            .iter()
+            .find(|fact| fact.name == "NotAClosure")
+            .expect("the struct is declared in the file that does not balance");
+        assert_eq!(
+            struct_fact.scope.as_deref(),
+            Some("vc_attributes"),
+            "and at the scope its own text gives it: {broken:?}"
+        );
+    }
+
+    /// **MSVC's single-bracket attribute no longer leaks, and the fence is not what saves it.**
+    ///
+    /// This test used to assert that `broken.h` was *quarantined*: its text balances its braces, the parser still
+    /// got it wrong — `REPEATABLE [source_annotation_attribute(1)] struct X { … };` read as an expression whose
+    /// lambda body never closes — and the fence took the file out of the program so that `good.h` could still be
+    /// read as itself. The reading was right and the file was not.
+    ///
+    /// The parser now reads that shape (a decl-specifier sequence accepts a single-bracket attribute, see
+    /// [`cpp_parser`]'s `at_a_single_bracket_attribute`), so the assertion has to be the *stronger* one: nothing
+    /// is quarantined, because nothing leaked — and the declarations of the file that used to poison the program
+    /// are in the index under their own names.
+    ///
+    /// The fence itself is still tested, by [`a_file_that_really_leaks_is_repaired_and_still_filed`] with a file that
+    /// still does.
+    #[test]
+    fn a_single_bracket_attribute_no_longer_props_the_program_open() {
+        let leaky =
+            "REPEATABLE\n[source_annotation_attribute( 1 )]\nstruct Pre\n{\n int Deref;\n};\n";
+        let main = "#include \"broken.h\"\n#include \"good.h\"\nInside i;\n";
+        let files = MemoryFiles::new()
+            .with_file("/p/broken.h", leaky)
+            .with_file(
+                "/p/good.h",
+                "namespace good {\nstruct Inside { int y; };\n}\n",
+            )
+            .with_file("/p/main.cpp", main);
+        let fixture = Memory::new("a-scope-that-used-to-leak", &files);
+        let mut session = fixture.session();
+
+        session.did_open("/p/main.cpp", main);
+        session.index_everything();
+        let reading = session
+            .read_the_unit(Path::new("/p/main.cpp"))
+            .expect("the unit reads");
+
+        assert!(
+            reading.unbalanced.is_empty(),
+            "the text balances, and now the parse does too: {reading:?}"
+        );
+        assert!(
+            reading.unbalanced.is_empty(),
+            "nothing leaked and nothing is out of balance: {reading:?}"
+        );
+
+        // **The declarations of the file that used to poison the program are filed, under their own names.**
+        let pre = session
+            .index()
+            .cooked_declarations(Path::new("/p/broken.h"))
+            .expect("the reading was filed")
+            .iter()
+            .find(|fact| fact.name == "Pre")
+            .expect("the struct the attribute precedes is declared there");
+        assert_eq!(
+            pre.scope, None,
+            "and it is at file scope, not inside anything"
+        );
+
+        let inside = session
+            .index()
+            .cooked_declarations(Path::new("/p/good.h"))
+            .expect("the reading was filed")
+            .iter()
+            .find(|fact| fact.name == "Inside")
+            .expect("the class is declared there")
+            .scope
+            .clone();
+        assert_eq!(
+            inside.as_deref(),
+            Some("good"),
+            "the file after it is read as itself"
+        );
+    }
+
+    /// **A file that really leaks no longer costs anything, because there is no fence to invoke.**
+    ///
+    /// `good.h` opens a namespace and never closes it, so a parse of the program sees `other.h` inside it. That
+    /// used to be found (a brace paired across two files) and repaired (the pair neutralised, both files read on
+    /// their own). **Both halves are gone**, and the reason is the plan's §3.0: a crossing needs the parser to pair
+    /// a brace in one file with one in another, which it can only do when the text it is given has a macro invocation
+    /// in place of the braces — and this stream is the *cooked* one, where every macro is already replaced.
+    ///
+    /// So what is asserted here is what remains true and matters: nothing is refused, the file after the leak is
+    /// scoped by its own namespace, and the leaking file keeps its own declaration.
+    #[test]
+    fn a_file_that_does_not_balance_costs_nothing_but_a_name() {
+        // `good.h` opens a namespace and never closes it. `other.h` is the file after it.
+        let good = "namespace good {\nstruct Good { int x; };\n";
+        let other = "struct Other { int y; };\n";
+        let main = "#include \"good.h\"\n#include \"other.h\"\nOther o;\n";
+        let files = MemoryFiles::new()
+            .with_file("/p/good.h", good)
+            .with_file("/p/other.h", other)
+            .with_file("/p/main.cpp", main);
+        let fixture = Memory::new("a-scope-that-really-leaks", &files);
+        let mut session = fixture.session();
+
+        session.did_open("/p/main.cpp", main);
+        session.index_everything();
+        let reading = session
+            .read_the_unit(Path::new("/p/main.cpp"))
+            .expect("the unit reads");
+
+        // **The imbalance is named, and that is all that happens to it.** No file is quarantined, nothing is
+        // repaired, and the reading is filed — the plan's §4 rule 1.
+        assert_eq!(
+            reading.unbalanced.len(),
+            1,
+            "one file does not balance, and it is reported: {reading:?}"
+        );
+
+        // **The file after it is read as itself, at file scope.**
+        //
+        // This is what the fence used to buy, and it is now bought **in the parser**: a scope may not cross a file
+        // boundary, so the `{` that `good.h` never closed is closed at the end of `good.h` rather than paired with a
+        // `}` in `other.h`. See `ParserConfig::file_boundaries` for the rule and `balance_events` for where it is
+        // applied.
+        //
+        // The distinction matters for who owns the fix: deleting the fence exposed this leak, and the answer was not
+        // to put the fence back — it was a defect **in the parser**, and the parser is where it is now fixed.
+        let other_fact = session
+            .index()
+            .cooked_declarations(Path::new("/p/other.h"))
+            .expect("other.h is part of the program")
+            .iter()
+            .find(|fact| fact.name == "Other")
+            .map(|fact| fact.scope.clone())
+            .expect("the struct is declared there");
+        assert_eq!(
+            other_fact, None,
+            "the file after the unbalanced one is at file scope, not inside `good::`: {reading:?}"
+        );
+
+        // **And the unbalanced file did not lose its own declarations.**
+        let good_facts = session
+            .index()
+            .cooked_declarations(Path::new("/p/good.h"))
+            .expect("the leaking file's own reading is filed too");
+        assert!(
+            good_facts.iter().any(|fact| fact.name == "Good"),
+            "the struct is declared in the file that does not balance: {good_facts:?}"
+        );
+    }
+
+    /// **A program in which no file leaks is read once** — the ordinary case has no quarantine and no second parse.
+    #[test]
+    fn a_program_whose_files_keep_their_scopes_quarantines_nothing() {
+        let main = "#include \"a.h\"\n#include \"b.h\"\nint main_variable;\n";
+        let files = MemoryFiles::new()
+            .with_file("/p/a.h", "namespace a {\nstruct A { int x; };\n}\n")
+            .with_file("/p/b.h", "namespace b {\n#include \"c.h\"\n}\n")
+            .with_file("/p/c.h", "struct C { int z; };\n")
+            .with_file("/p/main.cpp", main);
+        let fixture = Memory::new("a-program-that-does-not-leak", &files);
+        let mut session = fixture.session();
+
+        session.did_open("/p/main.cpp", main);
+        session.index_everything();
+        let reading = session
+            .read_the_unit(Path::new("/p/main.cpp"))
+            .expect("the unit reads");
+
+        assert!(
+            reading.unbalanced.is_empty(),
+            "a scope that closes around an `#include` is in balance: {reading:?}"
+        );
+        let c = session
+            .index()
+            .cooked_declarations(Path::new("/p/c.h"))
+            .expect("filed")
+            .iter()
+            .find(|fact| fact.name == "C")
+            .expect("declared")
+            .scope
+            .clone();
+        assert_eq!(
+            c.as_deref(),
+            Some("b"),
+            "the namespace `b.h` opens around its include still holds `C`"
+        );
+    }
+
+    /// **A unit read puts the whole program in the index, once** — [`Session::read_the_unit`].
+    ///
+    /// The reading this session is built to reach and has not reached: one walk, one stream, one parse, and every
+    /// declaration filed under the file it was written in — so a header has the program's reading whether or not
+    /// anybody opened it. Here the same fixture as above, asked for the **program** rather than for one file:
+    /// `handle.h` is read (it is what the program is made of), and a file the program does not read is not.
+    ///
+    /// It is a test of a call the pump does **not** make yet, and that is deliberate: wiring it changes answers in a
+    /// way that is not explained (the note on [`Session::read_the_unit`] has the three readings and the bisect), and
+    /// an unexplained change in answers is not shipped to buy a capability.
+    #[test]
+    fn a_unit_read_reads_the_whole_program_once() {
+        let handle = "#include \"deep.h\"\n#define DECLARE_HANDLE(name) struct name##__ { int unused; }; \
+                      typedef struct name##__ *name\n";
+        let api = "#include \"handle.h\"\nDECLARE_HANDLE(HWND);\n";
+        let main = "#include \"api.h\"\nHWND h;\n";
+        let files = MemoryFiles::new()
+            .with_file("/p/deep.h", "#define DEEP 1\n")
+            .with_file("/p/handle.h", handle)
+            .with_file("/p/api.h", api)
+            .with_file("/p/main.cpp", main)
+            .with_file("/p/other.cpp", "#include \"other.h\"\nvoid g() { }\n")
+            .with_file("/p/other.h", "struct Unrelated { int y; };\n");
+        let fixture = Memory::new("a-unit-read", &files);
+        let mut session = fixture.session();
+
+        session.did_open("/p/main.cpp", main);
+        session.index_everything();
+
+        // **The per-file policy has a bound, and this is it.** `handle.h` is the level under a direct include, which
+        // [`COOK_ONE_LEVEL_FURTHER`] reaches on purpose (`<string>` → `<xstring>`, where `std::string` lives);
+        // `deep.h` is past it and has no reading until something looks at it. The rest of this test is what the
+        // session does when a caller asks for the **program** instead of for one file, and the contrast is the
+        // point: a unit read has no bound at all.
+        assert!(
+            session
+                .index()
+                .cooked_declarations(Path::new("/p/handle.h"))
+                .is_some(),
+            "the level under a direct include is cooked"
+        );
+        assert!(
+            session
+                .index()
+                .cooked_declarations(Path::new("/p/deep.h"))
+                .is_none(),
+            "and the level under that is not"
+        );
+
+        let reading = session
+            .read_the_unit(Path::new("/p/main.cpp"))
+            .expect("the unit reads");
+        assert_eq!(reading.root, Path::new("/p/main.cpp"));
+        // **`files` is the walk's frames; `files_with_tokens` is smaller, and that is not a defect.** `handle.h`
+        // holds one `#define` and nothing else, and a directive contributes no token to the rendering — the same
+        // distinction the census records as "a clean file whose rendering is empty was not read at all" (§7). Both
+        // numbers are asserted so that the difference stays visible rather than being smoothed over.
+        assert!(
+            reading.files >= 3,
+            "the program is three files: {reading:?}"
+        );
+        assert_eq!(
+            reading.files_with_tokens, 2,
+            "two of them write tokens; a file of directives writes none: {reading:?}"
+        );
+        assert_eq!(reading.missing, 0, "every file had text: {reading:?}");
+
+        // **The program's files**, including the header nobody opened, the level the per-file policy stopped short
+        // of, and the macro's declaration in the file that invoked it.
+        for (file, why) in [
+            (
+                "/p/handle.h",
+                "a file the program is made of is read with it",
+            ),
+            ("/p/deep.h", "including the one the per-file bound left out"),
+        ] {
+            assert!(
+                session
+                    .index()
+                    .cooked_declarations(Path::new(file))
+                    .is_some(),
+                "{why}"
+            );
+        }
+        let after = session
+            .index()
+            .definition("HWND__", Path::new("/p/main.cpp"));
+        let Known::Yes(found) = after else {
+            panic!("`api.h`'s cooked reading declares it: {after:?}");
+        };
+        assert_eq!(found.file, Path::new("/p/api.h"));
+
+        // **And a file outside the program is not touched**: nothing compiles `other.cpp`, nobody opens it.
+        assert!(
+            session
+                .index()
+                .cooked_declarations(Path::new("/p/other.cpp"))
+                .is_none(),
+            "a file no program reads and nobody opens has no reading"
+        );
+    }
+
+    /// **The diagnostics of a file whose error is in a branch nobody takes.**
+    ///
+    /// The two readings disagree here, and that is the whole reason [`Session::diagnostics`] exists: the file's own
+    /// text has an unclosed class inside `#if OFF`, so the raw reading reports it (correctly — the *text* says so),
+    /// while a compiler never sees that branch at all. Publishing the raw answer would put a red squiggle on code
+    /// that is not compiled, which is the false positive the cooked reading removes.
+    #[test]
+    fn a_branch_nobody_takes_reports_nothing_once_the_file_is_cooked() {
+        let main = "#include \"cfg.h\"\n#if OFF\nstruct Unclosed { int x;\n#endif\nint ok;\n";
+        let files = MemoryFiles::new()
+            .with_file("/p/cfg.h", "#define OFF 0\n")
+            .with_file("/p/main.cpp", main);
+        let fixture = Memory::new("a-branch-nobody-takes", &files);
+        let mut session = fixture.session();
+
+        // **Before the file is cooked there is no answer, and that is the contract now.** This used to assert a
+        // `Raw` reading — the file's own text — whose single error was the unclosed class in the untaken branch. That
+        // reading is gone: an untaken branch is not compiled, so reporting an error inside one is reporting an error
+        // about a program that does not exist. The file is *held* rather than opened, so nothing has asked for a
+        // rendering and there is nothing to answer from.
+        session.load("/p/main.cpp");
+        assert!(
+            session.diagnostics("/p/main.cpp").is_none(),
+            "nothing has read this file as a compiler reads it, so there is nothing to say about it"
+        );
+
+        session.did_open("/p/main.cpp", main);
+        session.index_everything();
+
+        let cooked = session.diagnostics("/p/main.cpp").expect("the file reads");
+        assert_eq!(
+            cooked.reading,
+            super::DiagnosticReading::Cooked,
+            "the index holds a reading of this file now"
+        );
+        assert!(
+            cooked.errors.is_empty(),
+            "and the branch it complained about is not in it: {cooked:?}"
+        );
+        assert_eq!(
+            cooked.unplaced, 0,
+            "nothing was hidden from the reader either"
+        );
+    }
+
+    /// **A cooked error's offsets are offsets in the file**, not in the rendering it was found in.
+    ///
+    /// The two coordinate systems are different here, which is what makes the claim checkable: the file writes
+    /// `DECLARE_HANDLE(HWND);` and the rendering has the struct and the typedef the macro expands to, so an offset
+    /// taken from the rendering lands past the end of the file. The evidence that the expansion really happened is
+    /// in the same test — the declaration the file never wrote (`HWND__`) — because a fixture where the macro stayed
+    /// unexpanded would make a rendering offset and a file offset the same number and the assertion worthless.
+    #[test]
+    fn a_cooked_error_is_placed_in_the_file_not_in_the_rendering() {
+        let handle = "#define DECLARE_HANDLE(name) struct name##__ { int unused; }; \
+                      typedef struct name##__ *name\n";
+        let main = "#include \"handle.h\"\nDECLARE_HANDLE(HWND);\nstruct Unclosed { int x;\n";
+        let files = MemoryFiles::new()
+            .with_file("/p/handle.h", handle)
+            .with_file("/p/main.cpp", main);
+        let fixture = Memory::new("cooked-errors-are-file-offsets", &files);
+        let mut session = fixture.session();
+
+        session.did_open("/p/main.cpp", main);
+        session.index_everything();
+
+        let declarations = session
+            .index()
+            .cooked_declarations(Path::new("/p/main.cpp"))
+            .expect("the file was cooked");
+        assert!(
+            declarations.iter().any(|fact| fact.name == "HWND__"),
+            "the rendering is not the file's text: the macro declared a struct this file never wrote: {:?}",
+            declarations
+                .iter()
+                .map(|fact| &fact.name)
+                .collect::<Vec<_>>()
+        );
+
+        let found = session.diagnostics("/p/main.cpp").expect("the file reads");
+        assert_eq!(found.reading, super::DiagnosticReading::Cooked);
+        assert_eq!(found.errors.len(), 1, "{found:?}");
+
+        let error = &found.errors[0];
+        let unclosed = main.find("struct Unclosed").expect("the fixture writes it");
+        assert!(
+            error.start >= unclosed,
+            "the error is about the line that is still unclosed: {error:?}"
+        );
+        assert!(
+            error.end <= main.len(),
+            "and it is a position in the file — a rendering offset would be past its end: {error:?}"
+        );
+        assert_eq!(found.unplaced, 0, "nothing had to be hidden: {found:?}");
+    }
+
+    /// **What is cooked is what is looked at**: the open files and the files their own text names, plus any file a
+    /// request is about — not a closure, and not a project.
+    ///
+    /// The reader who needed the old behaviour was the diagnostic pass, which publishes an answer for every indexed
+    /// file — but "every indexed file" is the **closure** of an open file, and on a real project that was 138 files:
+    /// measured at **11.7 s** of the startup, every time, cache or no cache, for the difference between 999 and 1000
+    /// declarations. A file nobody looks at is answered from its own text, and the diagnostic layer says so
+    /// ([`super::DiagnosticReading::Raw`]) rather than pretending otherwise.
+    #[test]
+    fn a_file_nobody_looked_at_is_not_cooked_and_one_a_request_names_is() {
+        let main = "#include \"a.h\"\n#include \"b.h\"\n#include \"c.h\"\nA a; B b; C c;\n";
+        let files = MemoryFiles::new()
+            .with_file("/p/a.h", "struct A { int x; };\n")
+            .with_file("/p/b.h", "struct B { int x; };\n")
+            .with_file("/p/c.h", "struct C { int x; };\n")
+            .with_file("/p/main.cpp", main)
+            .with_file("/p/other.cpp", "#include \"a.h\"\nvoid g() { }\n");
+        let fixture = Memory::new("only-what-is-looked-at-is-cooked", &files);
+        let mut session = fixture.session();
+
+        // A file the caller knows about, in the rest half of the queue. Nothing opens it, nothing looks at it.
+        session.add_project_files([PathBuf::from("/p/other.cpp")]);
+        session.did_open("/p/main.cpp", main);
+
+        session.index_everything();
+        assert_eq!(session.pending_work(), 0, "both kinds of work are done");
+
+        for looked_at in ["/p/main.cpp", "/p/a.h", "/p/b.h", "/p/c.h"] {
+            assert!(
+                session
+                    .index()
+                    .cooked_declarations(Path::new(looked_at))
+                    .is_some(),
+                "{looked_at} is what the reader is looking at"
+            );
+        }
+        assert!(
+            session
+                .index()
+                .cooked_declarations(Path::new("/p/other.cpp"))
+                .is_none(),
+            "and a file nobody opened, nobody included and no request named has no reading"
+        );
+
+        // A request names it: that is what the shell does before every query, and the reading follows.
+        session.want_cooked_reading(Path::new("/p/other.cpp"));
+        session.index_everything();
+        assert!(
+            session
+                .index()
+                .cooked_declarations(Path::new("/p/other.cpp"))
+                .is_some(),
+            "the file a request is about is read the way a compiler reads it"
+        );
+    }
+
+    /// **Editing a header invalidates the reading of every file that had one**, and those come back.
+    ///
+    /// The set is every dependent ([`crate::ProjectIndex::dependents_of`]), because a stale reading is a wrong answer
+    /// rather than a missing one — and it is *only* the dependents that had a reading, because a file nobody has
+    /// looked at has nothing to invalidate and asking for a new reading would cook a file nobody asked about.
+    #[test]
+    fn editing_a_header_invalidates_the_readings_that_depend_on_it() {
+        let ns = "#define BEGIN_NS namespace one {\n#define END_NS }\n";
+        let api = "#include \"ns.h\"\nBEGIN_NS struct Widget { int size; }; END_NS\n";
+        let other = "#include \"api.h\"\nWidget w;\n";
+        let files = MemoryFiles::new()
+            .with_file("/p/ns.h", ns)
+            .with_file("/p/api.h", api)
+            .with_file("/p/other.cpp", other);
+        let fixture = Memory::new("a-cooked-file-goes-stale", &files);
+        let mut session = fixture.session();
+
+        session.add_project_files([PathBuf::from("/p/other.cpp")]);
+        session.did_open("/p/api.h", api);
+        // A request names `other.cpp`, so it has a reading to lose — which is what this test is about.
+        session.want_cooked_reading(Path::new("/p/other.cpp"));
+        session.index_everything();
+        assert!(
+            session
+                .index()
+                .cooked_declarations(Path::new("/p/other.cpp"))
+                .is_some(),
+            "the fixture starts with the dependent cooked"
+        );
+
+        // The header the macro is written in opens the *other* namespace.
+        let changed = "#define BEGIN_NS namespace two {\n#define END_NS }\n";
+        session.did_open("/p/ns.h", changed);
+
+        for stale in ["/p/other.cpp", "/p/api.h"] {
+            assert!(
+                session
+                    .index()
+                    .cooked_declarations(Path::new(stale))
+                    .is_none(),
+                "{stale} was read as the namespace the macro used to open"
+            );
+        }
+
+        session.index_everything();
+        assert!(
+            matches!(
+                session
+                    .index()
+                    .definition("two::Widget", Path::new("/p/other.cpp")),
+                Known::Yes(_)
+            ),
+            "and it is read again, as the new macro says: {:?}",
+            session
+                .index()
+                .definition("two::Widget", Path::new("/p/other.cpp"))
+        );
+    }
+
+    /// **A file that defines no macros invalidates nothing**, which is what keeps the common edit cheap.
+    ///
+    /// The environment is macros: a header that only declares things cannot change what any file that includes it
+    /// expands to, so its dependents' readings are still readings of the truth. Without this gate, an edit anywhere
+    /// in a project would drop the readings of everything that includes the file — and in a standard library that is
+    /// most of the project, on every keystroke.
+    #[test]
+    fn editing_a_file_that_defines_no_macros_keeps_its_dependents_readings() {
+        let api = "struct Widget { int size; };\n";
+        let other = "#include \"api.h\"\nWidget w;\n";
+        let files = MemoryFiles::new()
+            .with_file("/p/api.h", api)
+            .with_file("/p/other.cpp", other);
+        let fixture = Memory::new("a-declaration-is-not-an-environment", &files);
+        let mut session = fixture.session();
+
+        session.add_project_files([PathBuf::from("/p/other.cpp")]);
+        session.did_open("/p/api.h", api);
+        session.want_cooked_reading(Path::new("/p/other.cpp"));
+        session.index_everything();
+
+        // The same declarations with one more member: the file changed, its macros did not.
+        session.did_open("/p/api.h", "struct Widget { int size; int weight; };\n");
+
+        assert!(
+            session
+                .index()
+                .cooked_declarations(Path::new("/p/other.cpp"))
+                .is_some(),
+            "nothing in this file is part of anyone's environment"
+        );
+        assert!(
+            session
+                .index()
+                .cooked_declarations(Path::new("/p/api.h"))
+                .is_none(),
+            "…while the file itself is re-read, which is not a question about macros"
+        );
+    }
+
+    /// **The first `#define` a header gets reaches the files that include it.**
+    ///
+    /// The gate this replaced asked whether the header defined macros *before* the edit — so the edit that added the
+    /// header's first macro was the one edit it could not see, and every includer went on answering from a reading
+    /// built when the macro did not exist.
+    #[test]
+    fn the_first_macro_a_header_defines_invalidates_the_readings_that_include_it() {
+        let api = "#include \"ns.h\"\nBEGIN_NS struct Widget { int size; }; END_NS\n";
+        let other = "#include \"api.h\"\nWidget w;\n";
+        let files = MemoryFiles::new()
+            .with_file("/p/ns.h", "// nothing to say yet\n")
+            .with_file("/p/api.h", api)
+            .with_file("/p/other.cpp", other);
+        let fixture = Memory::new("the-first-macro-of-a-header", &files);
+        let mut session = fixture.session();
+
+        session.add_project_files([PathBuf::from("/p/other.cpp")]);
+        session.want_cooked_reading(Path::new("/p/other.cpp"));
+        session.index_everything();
+        assert!(
+            session
+                .index()
+                .cooked_declarations(Path::new("/p/other.cpp"))
+                .is_some(),
+            "the fixture starts with the dependent cooked"
+        );
+
+        session.did_open(
+            "/p/ns.h",
+            "#define BEGIN_NS namespace one {\n#define END_NS }\n",
+        );
+
+        assert!(
+            session
+                .index()
+                .cooked_declarations(Path::new("/p/other.cpp"))
+                .is_none(),
+            "the reading was built when `BEGIN_NS` meant nothing"
+        );
+    }
+
+    /// **Typing in a file's body does not cost the walk of its closure, and typing above the body does.**
+    ///
+    /// This is the acceptance of `docs/status.md` stage 1, and it is written as a *count* rather than a
+    /// duration because the design is about what gets recomputed. The numbers are [`Session::unit_stats`]'s:
+    /// `walked` is a closure read and a timeline built, `from_disk` is the entry that replaces it.
+    ///
+    /// The fixture is two sessions over one cache directory, because the disk entry is the thing under test: a
+    /// unit walked by the first session is what the second has to be served, and the in-memory table would hide
+    /// whether that happened.
+    ///
+    /// # Why the root used to be walked on every keystroke
+    ///
+    /// A unit's closure includes the file it is rooted at, and the key was every file's whole text — so the file
+    /// being typed into invalidated its own unit on every character. The key is now that file's **preamble**: see
+    /// [`crate::RootKey`] for what that is and why the tail is checked separately.
+    #[test]
+    fn typing_in_a_body_does_not_cost_the_walk_a_translation_unit_is() {
+        let main = "#include \"b.h\"\nint main() { return A; }\n";
+        let files = MemoryFiles::new()
+            .with_file("/p/a.h", "#pragma once\n#define A 1\n")
+            .with_file(
+                "/p/b.h",
+                "#pragma once\n#include \"a.h\"\nstruct B { int b; };\n",
+            )
+            .with_file("/p/main.cpp", main);
+        let fixture = Memory::new("a-body-edit-is-not-a-walk", &files);
+
+        // **The first session walks, because there is nothing to reuse** — and writes the entry for the next one.
+        // `index_everything` is the whole of the work: it reads the queue *and* drains the cooking backlog, which
+        // is where a unit is reached.
+        let mut first = fixture.session();
+        first.add_project_files([PathBuf::from("/p/main.cpp")]);
+        first.did_open("/p/main.cpp", main);
+        first.index_everything();
+        assert!(
+            first
+                .index()
+                .cooked_declarations(Path::new("/p/main.cpp"))
+                .is_some(),
+            "the fixture cooked the file, which is what walks its unit"
+        );
+        assert!(
+            first.unit_stats().walked > 0,
+            "…and nothing was on disk to serve it: {:?}",
+            first.unit_stats()
+        );
+        // **And it left the entry behind**, which is the whole of what the sessions below are reading: a walk that
+        // was not written is a walk the next one pays for again.
+        let units_on_disk = fixture
+            .root
+            .join(crate::CACHE_DIRECTORY)
+            .join(crate::TRANSLATION_UNITS_DIRECTORY);
+        let written = std::fs::read_dir(&units_on_disk)
+            .map(|entries| entries.flatten().count())
+            .unwrap_or(0);
+        assert!(
+            written > 0,
+            "the first session wrote the unit it walked into {units_on_disk:?}"
+        );
+
+        // **One fresh session per question**, because the in-memory table would otherwise answer and hide whether
+        // the entry on disk was usable at all — and the entry on disk is the thing under test: it is what has to
+        // survive a keystroke, for a session that has not seen the file before and for the one that has.
+        let over_a_fresh_session = |what: &str, text: &str| {
+            let mut session = fixture.session();
+            session.add_project_files([PathBuf::from("/p/main.cpp")]);
+            session.did_open("/p/main.cpp", text);
+            session.index_everything();
+            let stats = session.unit_stats();
+            assert!(
+                session
+                    .index()
+                    .cooked_declarations(Path::new("/p/main.cpp"))
+                    .is_some(),
+                "{what}: the fixture cooked the file"
+            );
+            stats
+        };
+
+        // **The text that was walked**: served off the disk, with no walk of its own.
+        let unedited = over_a_fresh_session("unedited", main);
+        assert_eq!(
+            unedited.walked, 0,
+            "the entry the first session wrote answers for the text it was walked from: {unedited:?}"
+        );
+        assert!(
+            unedited.from_disk > 0,
+            "…and it is the disk entry that answered: {unedited:?}"
+        );
+
+        // **A character typed into the body.** Nothing above the file's last directive moves, and nothing below it
+        // can be read by a walk — so the unit the first session built is still this file's unit. **This is the
+        // acceptance of stage 1**: before the root of a unit was keyed on its preamble, this session walked.
+        let typed = format!("{main}\nint more() {{ return A; }}\n");
+        let edited = over_a_fresh_session("a body edit", &typed);
+        assert_eq!(
+            edited.walked, 0,
+            "a body edit is not an input to the file's own timeline, so it must not cost a walk: {edited:?}"
+        );
+        assert!(
+            edited.from_disk > 0,
+            "…and the entry the first session wrote is what answered: {edited:?}"
+        );
+
+        // **An `#include` above the body is a different matter**: it moves the preamble, which is the key.
+        let with_an_include = "#include \"a.h\"\n#include \"b.h\"\nint main() { return A; }\n";
+        let moved = over_a_fresh_session("an include above the body", with_an_include);
+        assert!(
+            moved.walked > 0,
+            "an edit above the bound is an edit to what the walk reads: {moved:?}"
+        );
+    }
+
+    /// **A file this session already has a unit for is read *with* that unit's environment, and the second pass is
+    /// not paid for it.**
+    ///
+    /// This is `docs/status.md` §5.2 steps 1–3, and it is the enabling half of stage 2 rather than a
+    /// saving of its own: measured with `examples/keystroke.rs`, there is **no second parse to remove** for the
+    /// ordinary edit, because the second pass's filter only selects a file whose scopes could depend on a macro
+    /// body. What it buys is that the *first* parse is the right one — which is the thing that has to be true
+    /// before the rendering can be skipped, because the rendering is what repairs a reading made without an
+    /// environment.
+    /// Two sessions, and the difference between them is the whole claim:
+    ///
+    /// ```text
+    ///   cold   nothing is in memory, so there is no environment to read the file against — today's path, and the
+    ///          file goes to the second pass like any other file that was parsed
+    ///   warm   the unit is in memory, so the file is read once *with* its environment, and the pass that exists
+    ///          only to repair a reading made without one has nothing to do
+    /// ```
+    ///
+    /// # The sharper assertion, and why it is not here
+    ///
+    /// What the environment is *for* is the scope: `BEGIN_NS` is `namespace one {` to a compiler, so the sharper
+    /// test is "`one::Widget` is in the index after one step, with no second pass to fix it". It cannot be written
+    /// today, and the reason is not this change: **`one::Widget` is not in the index after a full
+    /// `index_everything` either** — the cooked reading places `Widget` at file scope, with the macro unexpanded.
+    /// That is one of the five failures `status.md` §6 records, and
+    /// `editing_a_header_invalidates_the_readings_that_depend_on_it` fails through exactly this fixture and
+    /// exactly this name.
+    ///
+    /// So this asserts what the change is about — **which files the second pass is handed** — and the doc comment
+    /// is the note to tighten it into the scope assertion the moment that defect is fixed. A test that asserted the
+    /// scope now would be red for a reason that has nothing to do with the flag, which is the shape of test
+    /// `status.md` §6 warns about in its second rule.
+    #[test]
+    fn a_file_read_back_through_its_own_unit_is_not_read_again_by_the_second_pass() {
+        let ns = "#define BEGIN_NS namespace one {\n#define END_NS }\n";
+        let api = "#include \"ns.h\"\nBEGIN_NS struct Widget { int size; }; END_NS\n";
+        let typed = format!("{api}void body() {{ int inside; }}\n");
+        let files = MemoryFiles::new()
+            .with_file("/p/ns.h", ns)
+            .with_file("/p/api.h", api);
+        let fixture = Memory::new("a-file-is-read-with-its-environment", &files);
+
+        let second_pass_has = |session: &Session<MemoryFiles>| {
+            session
+                .parsed_since_the_last_pass
+                .iter()
+                .any(|queued| queued.ends_with("api.h"))
+        };
+
+        // **Cold**: nothing has been walked, so there is no environment in hand.
+        let mut cold = fixture.session();
+        cold.did_open("/p/api.h", api);
+        cold.advance(1);
+        assert!(
+            second_pass_has(&cold),
+            "with no unit in memory the file is read the way it always was, and the pass still has it: {:?}",
+            cold.parsed_since_the_last_pass
+        );
+
+        // **Warm**: the fixture has read the file once, so its unit is in memory.
+        let mut warm = fixture.session();
+        warm.did_open("/p/api.h", api);
+        warm.index_everything();
+        assert!(
+            holds_a_unit_for(&warm, "/p/api.h"),
+            "the fixture walked a unit for the file"
+        );
+        // **And this is the assertion to tighten.** `one::Widget` is what the environment is *for* — it is now in
+        // the index (`scope: Some("one")`, the macro's `namespace` placed) where before this round it was
+        // `NotDeclaredHere`, and a test that pinned that would be the sharpest statement of what was fixed. It is
+        // deliberately not asserted here, because the same name is the subject of two of the failures
+        // `status.md` §6 records, and a red test with two possible causes is worse than a narrow green one.
+        //
+        // What *is* asserted is this change's own subject: which files the second pass is handed.
+        //
+        // **`advance(64)` and not `advance(1)`**, because that is the path where this used to be dead. With more
+        // than one step to take, `advance` prepares a *wave* on the read path and hands the file's summary back
+        // through `index_one`'s `Some` arm — where no environment is available and none is looked for. The
+        // mechanism was written, tested against `advance(1)`, and never once reached on the pump's path. See
+        // `Session::advance` for what now keeps such a file out of the wave.
+        warm.did_change("/p/api.h", &typed);
+        warm.advance(64);
+
+        assert!(
+            !second_pass_has(&warm),
+            "read with the environment of its own closure, so the pass has nothing to repair: {:?}",
+            warm.parsed_since_the_last_pass
+        );
+    }
+
+    /// **An `#include` added to a header that defines nothing is still a change to its includers' environment.**
+    #[test]
+    fn an_include_added_to_a_header_invalidates_the_readings_that_include_it() {
+        let files = MemoryFiles::new()
+            .with_file("/p/macros.h", "#define ANSWER 42\n")
+            .with_file("/p/api.h", "int declared;\n")
+            .with_file("/p/other.cpp", "#include \"api.h\"\nint x = ANSWER;\n");
+        let fixture = Memory::new("an-include-is-an-environment", &files);
+        let mut session = fixture.session();
+
+        session.add_project_files([PathBuf::from("/p/other.cpp")]);
+        session.want_cooked_reading(Path::new("/p/other.cpp"));
+        session.index_everything();
+        assert!(
+            session
+                .index()
+                .cooked_declarations(Path::new("/p/other.cpp"))
+                .is_some()
+        );
+
+        session.did_open("/p/api.h", "#include \"macros.h\"\nint declared;\n");
+
+        assert!(
+            session
+                .index()
+                .cooked_declarations(Path::new("/p/other.cpp"))
+                .is_none(),
+            "`ANSWER` is now in force where it was not"
+        );
+    }
+
+    /// **Typing below the last directive keeps the edited file's unit; touching a directive drops it — and it
+    /// drops that one, not the table.**
+    ///
+    /// A unit is a timeline of directives, so what decides whether an edit can have moved it is whether any directive
+    /// did — nearly every keystroke is in a body, and re-walking the closure for each of them was most of what a
+    /// keystroke cost.
+    ///
+    /// **The second half is `docs/status.md` stage 1.** Dropping the whole table was the first version of
+    /// this rule and it invalidated up to `MAX_UNITS` units to invalidate one — including, on the next keystroke,
+    /// the one the file needed. A file that merely *includes* the edited one has a timeline of its own, and it is
+    /// still the same directives at the same offsets: `ns.h` knows nothing about `api.h`.
+    #[test]
+    fn a_unit_survives_typing_in_a_body_and_not_a_change_to_a_directive() {
+        let ns = "#define BEGIN_NS namespace one {\n#define END_NS }\n";
+        let api = "#include \"ns.h\"\nBEGIN_NS struct Widget { int size; }; END_NS\n";
+        let files = MemoryFiles::new()
+            .with_file("/p/ns.h", ns)
+            .with_file("/p/api.h", api);
+        let fixture = Memory::new("a-unit-survives-a-body", &files);
+        let mut session = fixture.session();
+
+        session.did_open("/p/api.h", api);
+        session.index_everything();
+        assert!(
+            holds_a_unit_for(&session, "/p/api.h"),
+            "the fixture cooked the file, which walked a unit"
+        );
+        assert!(
+            holds_a_unit_for(&session, "/p/ns.h"),
+            "…and the header it includes, whose closure does not contain `api.h`"
+        );
+
+        let typed = format!("{api}void body() {{ int inside; }}\n");
+        session.did_change("/p/api.h", &typed);
+        assert!(
+            holds_a_unit_for(&session, "/p/api.h"),
+            "a body was typed below the last directive"
+        );
+
+        let typed_more = format!("{api}void body() {{ int inside; int more; }}\n");
+        session.did_change("/p/api.h", &typed_more);
+        assert!(holds_a_unit_for(&session, "/p/api.h"), "and again");
+
+        session.did_change(
+            "/p/api.h",
+            &format!("#include \"ns.h\"\n#define EXTRA 1\n{typed_more}"),
+        );
+        assert!(
+            !holds_a_unit_for(&session, "/p/api.h"),
+            "a directive appeared, so `api.h`'s timeline is out of date"
+        );
+        assert!(
+            holds_a_unit_for(&session, "/p/ns.h"),
+            "…and `ns.h`'s is not: nothing in its closure moved, and dropping it would be a walk bought for nothing"
+        );
+    }
+
+    /// **Is a translation unit held for this file?** — asked through the table's own lock, and per file, because
+    /// what an edit invalidates is one file's timeline rather than the whole table.
+    ///
+    /// Four assertions here used to call `units.is_empty()` on the `Mutex` itself, so the *test* had stopped
+    /// compiling when the field gained a lock; they were then rewritten to ask about the whole table, which was
+    /// right while an edit cleared it and is wrong now that it does not.
+    fn holds_a_unit_for(session: &Session<MemoryFiles>, path: &str) -> bool {
+        session
+            .units
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .held
+            .contains_key(&queue_key(Path::new(path)))
+    }
+
+    /// **Editing a header invalidates the reading of the open file that includes it.**
+    ///
+    /// A file's cooked reading is a reading of its *environment* as well as of its text: `BEGIN_NS` opening a
+    /// namespace is a fact about `ns.h`, and a reading of `api.h` built before `ns.h` changed would keep answering
+    /// the old way — a jump to a scope that no longer exists, which is a wrong answer rather than a missing one.
+    #[test]
+    fn editing_a_header_stales_the_cooked_reading_of_a_file_that_includes_it() {
+        let files = MemoryFiles::new()
+            .with_file(
+                "/p/ns.h",
+                "#define BEGIN_NS namespace one {\n#define END_NS }\n",
+            )
+            .with_file(
+                "/p/api.h",
+                "#include \"ns.h\"\nBEGIN_NS struct Widget { int size; }; END_NS\n",
+            );
+        let fixture = Memory::new("a-header-edit-stales-readings", &files);
+        let mut session = fixture.session();
+
+        session.did_open(
+            "/p/api.h",
+            "#include \"ns.h\"\nBEGIN_NS struct Widget { int size; }; END_NS\n",
+        );
+        session.index_everything();
+        assert!(
+            matches!(
+                session
+                    .index()
+                    .definition("one::Widget", Path::new("/p/api.h")),
+                Known::Yes(_)
+            ),
+            "the fixture reads as the header says: {:?}",
+            session
+                .index()
+                .definition("one::Widget", Path::new("/p/api.h"))
+        );
+
+        // The header changes the namespace it opens. `api.h`'s text does not change at all — what changes is what
+        // its environment says, which is exactly the dependency a per-file invalidation would miss.
+        session.did_change(
+            "/p/ns.h",
+            "#define BEGIN_NS namespace two {\n#define END_NS }\n",
+        );
+        assert!(
+            session.pending_cooking() > 0,
+            "the open file that includes it is marked for cooking again"
+        );
+        session.index_everything();
+
+        assert!(
+            matches!(
+                session
+                    .index()
+                    .definition("two::Widget", Path::new("/p/api.h")),
+                Known::Yes(_)
+            ),
+            "and the new reading is the one in the index: {:?}",
+            session
+                .index()
+                .definition("two::Widget", Path::new("/p/api.h"))
+        );
+        assert!(
+            session
+                .index()
+                .cooked_declarations(Path::new("/p/api.h"))
+                .is_some_and(|facts| facts
+                    .iter()
+                    .any(|fact| fact.qualified_name() == "two::Widget")),
+            "the stale reading was replaced, not kept beside it"
+        );
+    }
+
+    #[test]
+    fn a_buffer_is_the_text_the_analysis_reads() {
+        // The whole reason an editor needs an overlay: the file on disk says `old`, the user is typing `fresh`, and
+        // an analysis that answered about the disk would answer about code that no longer exists.
+        let files = MemoryFiles::new()
+            .with_file("/p/widget.h", "struct Widget { int old; };\n")
+            .with_file(
+                "/p/main.cpp",
+                "#include \"widget.h\"\nvoid f() { Widget w; }\n",
+            );
+        let fixture = Memory::new("buffer-is-the-text", &files);
+        let mut session = fixture.session();
+
+        session.did_open("/p/widget.h", "struct Widget { int fresh; };\n");
+        session.did_open(
+            "/p/main.cpp",
+            "#include \"widget.h\"\nvoid f() { Widget w; }\n",
+        );
+        session.index_everything();
+
+        let view = session.view("/p/main.cpp").expect("the file reads");
+        let at = view
+            .source
+            .find("Widget w")
+            .expect("the use is in the text");
+
+        match session.definition(&view, ReadingOffset::new(at)) {
+            Known::Yes(found) => {
+                assert_eq!(found.file, Path::new("/p/widget.h"));
+                assert_eq!(found.fact.name, "Widget");
+            }
+            other => panic!("the buffer's declaration should be found, got {other:?}"),
+        }
+
+        // And the members are the buffer's, which is the half a definition jump cannot show.
+        match session.members_of(&view, "Widget") {
+            Known::Yes(members) => {
+                let names: Vec<&str> = members
+                    .own()
+                    .map(|member| member.fact.name.as_str())
+                    .collect();
+                assert_eq!(
+                    names,
+                    ["fresh"],
+                    "the disk says `old` and the disk is not the text"
+                );
+            }
+            other => panic!("the buffer's class should have members, got {other:?}"),
+        }
+
+        assert_eq!(
+            fixture.text("/p/widget.h").as_deref(),
+            Some("struct Widget { int fresh; };\n")
+        );
+    }
+
+    #[test]
+    fn a_buffer_that_has_never_been_saved_is_a_file_like_any_other() {
+        // A file the user has created and not saved has no path on disk at all. The overlay answers for it, the
+        // include resolves to it, and its summary is built from text no filesystem has seen.
+        let files = MemoryFiles::new().with_file(
+            "/p/main.cpp",
+            "#include \"widget.h\"\nvoid f() { Widget w; }\n",
+        );
+        let fixture = Memory::new("unsaved", &files);
+        let mut session = fixture.session();
+
+        session.did_open("/p/widget.h", "struct Widget { int size; };\n");
+        session.did_open(
+            "/p/main.cpp",
+            "#include \"widget.h\"\nvoid f() { Widget w; }\n",
+        );
+        assert!(
+            session.index_everything() >= 2,
+            "both the buffer and its includer"
+        );
+
+        let view = session.view("/p/main.cpp").expect("the file reads");
+        let at = view
+            .source
+            .find("Widget w")
+            .expect("the use is in the text");
+        assert!(
+            matches!(session.definition(&view, ReadingOffset::new(at)), Known::Yes(found) if found.file == Path::new("/p/widget.h")),
+            "a buffer no file has answers as the declaration's file"
+        );
+    }
+
+    #[test]
+    fn an_edit_replaces_what_the_index_knew_and_the_gap_is_visible() {
+        // Two claims in one test because they are one decision: the summary built from the old text is dropped —
+        // so a query about the file answers "not read yet" rather than the edit's predecessor — and the file is
+        // queued again, so the answer comes back a step later.
+        let files = MemoryFiles::new().with_file("/p/widget.h", "struct Widget { int before; };\n");
+        let fixture = Memory::new("edit", &files);
+        let mut session = fixture.session();
+
+        session.add_project_files([PathBuf::from("/p/widget.h")]);
+        session.index_everything();
+        assert!(session.is_indexed("/p/widget.h"));
+        assert!(session.is_idle());
+
+        session.did_change("/p/widget.h", "struct Widget { int after; };\n");
+
+        assert!(
+            !session.is_indexed("/p/widget.h"),
+            "the summary describes text the user has replaced"
+        );
+        assert_eq!(session.pending(), 1, "and the file is queued again");
+
+        let steps = session.advance(4);
+        assert_eq!(paths(&steps), ["/p/widget.h"]);
+        assert_eq!(
+            steps[0].outcome,
+            StepOutcome::Built,
+            "the summary was dropped, so this is a parse and not a cache hit"
+        );
+
+        // **The pump to the end, because the question is semantic.** `advance` reads files into the index and
+        // `Pending` returned here is a *cook* — so a view needs the loop that runs the cook as well, and
+        // `advance` alone never takes it. The assertions above are about the queue and stay about the queue; this
+        // one is about the members a class has, which is a claim about meaning and needs a rendering.
+        session.index_everything();
+        let view = session.view("/p/widget.h").expect("the file reads");
+        match session.members_of(&view, "Widget") {
+            Known::Yes(members) => {
+                let names: Vec<&str> = members
+                    .own()
+                    .map(|member| member.fact.name.as_str())
+                    .collect();
+                assert_eq!(names, ["after"]);
+            }
+            other => panic!("the edited buffer's class should have members, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn closing_a_document_goes_back_to_the_file() {
+        // An unsaved buffer defines a name the disk does not have. Closing is the client saying "this path is the
+        // filesystem's again", and an analysis that kept the buffer would report a declaration that exists nowhere.
+        let files =
+            MemoryFiles::new().with_file("/p/widget.h", "struct Widget { int on_disk; };\n");
+        let fixture = Memory::new("close", &files);
+        let mut session = fixture.session();
+
+        session.did_open("/p/widget.h", "struct Widget { int in_the_buffer; };\n");
+        session.index_everything();
+        session.did_close("/p/widget.h");
+
+        assert!(!fixture.documents.is_open("/p/widget.h"));
+        assert!(!session.is_indexed("/p/widget.h"));
+
+        let steps = session.advance(4);
+        assert_eq!(paths(&steps), ["/p/widget.h"]);
+        assert_eq!(
+            steps[0].priority,
+            Priority::Rest,
+            "the user has stopped looking at it, so it is not urgent"
+        );
+
+        // **The two requests told apart, which is the contract this change introduced.** Closing dropped the buffer
+        // and with it the rendering that was made *of the buffer*, so this first request gets no semantic reading and
+        // must not be handed one: `None` here means "not this time", and the `advance` above is what has just queued
+        // the work that answers it. A caller that could not tell `None` from "no such file" would report a missing
+        // file; [`Session::is_indexed`] and [`Session::pending_work`] are how it tells them apart, and both are
+        // asserted above.
+        assert!(
+            session.view("/p/widget.h").is_none(),
+            "a buffer's rendering was made of the buffer, and the buffer is closed"
+        );
+
+        // Ask again after the work the close queued, and the reading is the disk's — which is the point of the
+        // test: a closed document is the filesystem's again, and the analysis must agree.
+        session.index_everything();
+        let view = session
+            .view("/p/widget.h")
+            .expect("the file has been read again");
+        match session.members_of(&view, "Widget") {
+            Known::Yes(members) => {
+                let names: Vec<&str> = members
+                    .own()
+                    .map(|member| member.fact.name.as_str())
+                    .collect();
+                assert_eq!(names, ["on_disk"]);
+            }
+            other => panic!("the file's own class should have members, got {other:?}"),
+        }
+    }
+
+    // -------------------------------------------------------------------------------------------
+    // The order
+    // -------------------------------------------------------------------------------------------
+
+    #[test]
+    fn the_open_file_is_worked_first_and_its_includes_next() {
+        // The order fixes, read off the steps: what the user is looking at, then what it
+        // includes, and only then the project. A session that worked the project first would answer the first
+        // question after ten thousand files.
+        let files = MemoryFiles::new()
+            .with_file("/p/open.cpp", "#include \"deep.h\"\nvoid f() { }\n")
+            .with_file("/p/deep.h", "int deep;\n")
+            .with_file("/p/one.cpp", "int one;\n")
+            .with_file("/p/two.cpp", "int two;\n");
+        let fixture = Memory::new("order", &files);
+        let mut session = fixture.session();
+
+        session.add_project_files([PathBuf::from("/p/one.cpp"), PathBuf::from("/p/two.cpp")]);
+        session.did_open("/p/open.cpp", "#include \"deep.h\"\nvoid f() { }\n");
+
+        let steps = session.advance(8);
+        assert_eq!(
+            paths(&steps),
+            ["/p/open.cpp", "/p/deep.h", "/p/one.cpp", "/p/two.cpp"]
+        );
+
+        assert_eq!(steps[0].priority, Priority::Open);
+        assert_eq!(steps[0].depth, 0);
+        assert_eq!(
+            (steps[1].priority, steps[1].depth),
+            (Priority::Open, 1),
+            "a header an open file includes is worth reading before the project"
+        );
+        assert_eq!((steps[2].priority, steps[2].depth), (Priority::Rest, 0));
+    }
+
+    #[test]
+    fn a_project_file_that_is_opened_moves_to_the_open_half() {
+        // The case the two halves exist for: the scan lists every file at open time, and then the user opens one of
+        // them. Without the upgrade the file the user is looking at would sit behind everything else in the
+        // project, and the queue would look right in every test that never opens anything.
+        let files = MemoryFiles::new()
+            .with_file("/p/widget.h", "struct Widget { int size; };\n")
+            .with_file("/p/one.cpp", "int one;\n");
+        let fixture = Memory::new("upgrade", &files);
+        let mut session = fixture.session();
+
+        session.add_project_files([PathBuf::from("/p/one.cpp"), PathBuf::from("/p/widget.h")]);
+        session.did_open("/p/widget.h", "struct Widget { int size; };\n");
+
+        let steps = session.advance(1);
+        assert_eq!(paths(&steps), ["/p/widget.h"]);
+        assert_eq!(steps[0].priority, Priority::Open);
+
+        // And the entry it left in the rest half is not a second read of the same file.
+        let rest = session.advance(4);
+        assert_eq!(paths(&rest), ["/p/one.cpp"]);
+        assert!(session.is_idle());
+        assert_eq!(session.pending(), 0);
+    }
+
+    #[test]
+    fn a_file_that_was_worked_is_queued_again_when_its_answer_changes() {
+        // The other half of the queue's memory: `add` refuses a path it has already worked, which is what keeps a
+        // header included forty times one step — and a change has to get past exactly that rule.
+        let files = MemoryFiles::new().with_file("/p/widget.h", "struct Widget { int a; };\n");
+        let fixture = Memory::new("again", &files);
+        let mut session = fixture.session();
+
+        session.did_open("/p/widget.h", "struct Widget { int a; };\n");
+        session.index_everything();
+        assert!(session.is_idle());
+
+        let before = session.stats();
+        session.did_change("/p/widget.h", "struct Widget { int b; };\n");
+        assert_eq!(session.pending(), 1);
+
+        let steps = session.advance(4);
+        assert_eq!(paths(&steps), ["/p/widget.h"]);
+        assert_eq!(session.stats().since(before).rebuilt, 1);
+    }
+
+    // -------------------------------------------------------------------------------------------
+    // What the client says changed
+    // -------------------------------------------------------------------------------------------
+
+    #[test]
+    fn a_reported_change_is_read_again_and_a_reported_removal_is_forgotten() {
+        // The "no OS watcher" entry point: the client reports events, the session turns them into work. A modified
+        // header is one file to re-read — its includers' summaries do not depend on its contents — and a removed
+        // one is forgotten together with the files whose includes resolved to it.
+        let files = MemoryFiles::new()
+            .with_file("/p/widget.h", "struct Widget { int size; };\n")
+            .with_file(
+                "/p/main.cpp",
+                "#include \"widget.h\"\nvoid f() { Widget w; }\n",
+            );
+        let fixture = Memory::new("client-events", &files);
+        let mut session = fixture.session();
+
+        session.add_project_files([PathBuf::from("/p/main.cpp")]);
+        session.index_everything();
+        assert!(
+            session.is_indexed("/p/widget.h"),
+            "the closure was followed"
+        );
+
+        let modified = session.changed([FileEvent::modified("/p/widget.h")]);
+        assert_eq!(modified.reindex, [PathBuf::from("/p/widget.h")]);
+        assert!(modified.forgotten.is_empty());
+        assert!(!modified.everything);
+        assert_eq!(session.pending(), 1, "the reported change is queued");
+
+        let steps = session.advance(4);
+        assert_eq!(paths(&steps), ["/p/widget.h"]);
+        assert_eq!(
+            steps[0].outcome,
+            StepOutcome::Reused,
+            "the text did not change, so the key still names the stored summary"
+        );
+
+        let removed = session.changed([FileEvent::removed("/p/widget.h")]);
+        assert_eq!(removed.forgotten, [PathBuf::from("/p/widget.h")]);
+        assert_eq!(
+            removed.reindex,
+            [PathBuf::from("/p/main.cpp")],
+            "the file that resolved to it records a search that would now fail"
+        );
+        assert!(
+            !session.is_indexed("/p/widget.h"),
+            "and the declarations are out of the index before anything is re-read"
+        );
+    }
+
+    #[test]
+    fn a_change_the_client_does_not_care_about_is_no_work() {
+        // The filter is the session's, so the cache directory and `.git` are dropped once, where the events arrive,
+        // rather than in every query. The compile database is the one path that is *reported* rather than dropped.
+        let files = MemoryFiles::new().with_file("/p/a.cpp", "int a;\n");
+        let fixture = Memory::new("ignored-events", &files);
+        let mut session = fixture.session();
+        session.add_project_files([PathBuf::from("/p/a.cpp")]);
+        session.index_everything();
+
+        let root = fixture.root.clone();
+        let quiet = session.changed([
+            FileEvent::modified(root.join(".git/index.lock")),
+            FileEvent::modified(root.join(".cppls/summaries/ab/cdef.bin")),
+            FileEvent::modified(root.join("notes.md")),
+        ]);
+
+        assert!(quiet.is_empty(), "{quiet:?}");
+        assert!(session.is_idle());
+
+        let configuration =
+            session.changed([FileEvent::modified(root.join("compile_commands.json"))]);
+        assert!(configuration.everything);
+    }
+
+    #[test]
+    fn a_configuration_change_re_seeds_the_project_and_the_open_buffers() {
+        // The configuration is part of every summary's key, so one `-I` added to the database makes every stored
+        // summary a miss — and the work is the project list again. What the user has open is queued first, because
+        // that is the file they are waiting for.
+        let files = MemoryFiles::new()
+            .with_file("/p/a.cpp", "int a;\n")
+            .with_file("/p/b.cpp", "int b;\n")
+            .with_file("/p/open.cpp", "int open;\n");
+        let fixture = Memory::new("configuration", &files);
+        let mut session = fixture.session();
+
+        session.add_project_files([PathBuf::from("/p/a.cpp"), PathBuf::from("/p/b.cpp")]);
+        session.did_open("/p/open.cpp", "int open;\n");
+        session.index_everything();
+        assert!(session.is_idle());
+
+        let response = session.changed([FileEvent::modified(
+            fixture.root.join("compile_commands.json"),
+        )]);
+        assert!(response.everything);
+
+        assert_eq!(
+            session.pending(),
+            3,
+            "the project list and the buffer are all work again"
+        );
+
+        let steps = session.advance(8);
+        assert_eq!(paths(&steps), ["/p/open.cpp", "/p/a.cpp", "/p/b.cpp"]);
+    }
+
+    #[test]
+    fn a_change_to_a_file_that_was_already_worked_is_queued_and_then_reused() {
+        // A configuration change re-arms files the queue had already finished, which is the one thing `add` refuses
+        // to do. The work is still cheap: the key is computed from the text, so a file whose text did not change is
+        // a hit, and "ask again" costs a read rather than a parse.
+        let files = MemoryFiles::new().with_file("/p/a.cpp", "int a;\n");
+        let fixture = Memory::new("rearm", &files);
+        let mut session = fixture.session();
+
+        session.add_project_files([PathBuf::from("/p/a.cpp")]);
+        session.index_everything();
+
+        let before = session.stats();
+        session.changed([FileEvent::modified(
+            fixture.root.join("compile_commands.json"),
+        )]);
+
+        let steps = session.advance(4);
+        assert_eq!(paths(&steps), ["/p/a.cpp"]);
+        assert_eq!(steps[0].outcome, StepOutcome::Reused);
+        assert_eq!(
+            session.stats().since(before).rebuilt,
+            0,
+            "a configuration change costs reads, not parses"
+        );
+    }
+
+    // -------------------------------------------------------------------------------------------
+    // What the answers are, and what they are before the work is done
+    // -------------------------------------------------------------------------------------------
+
+    #[test]
+    fn a_name_in_a_file_that_has_not_been_read_is_unknown_and_the_queue_says_so() {
+        // The honest boundary of lazy indexing, asserted rather than described: the query answers
+        // `NotDeclaredHere` — which is what a fully indexed project says about a name that is not there — and the
+        // only thing that tells the two apart is whether the queue is empty. A consumer that reports an unresolved
+        // name as an error has to ask.
+        let files = MemoryFiles::new()
+            .with_file("/p/widget.h", "struct Widget { int size; };\n")
+            .with_file(
+                "/p/main.cpp",
+                "#include \"widget.h\"\nvoid f() { Widget w; }\n",
+            );
+        let fixture = Memory::new("not-read-yet", &files);
+        let mut session = fixture.session();
+
+        session.add_project_files([PathBuf::from("/p/main.cpp")]);
+
+        // The file is loaded but **not indexed**: the *index* is what this test is about, and reading it would take
+        // the queue step it goes on to assert.
+        session.load("/p/main.cpp");
+
+        // **And there is no view yet, which is now a state a caller has to handle rather than an implementation
+        // detail.** The file has been read neither by the index nor as a compiler would, so a semantic question has
+        // no reading to be answered from — and the two ways of saying "not yet" are both here: `view` answers
+        // `None` and does not queue, because nothing has asked for a rendering of it.
+        assert!(
+            session.view("/p/main.cpp").is_none(),
+            "a file nothing has read as a compiler reads it has no semantic view"
+        );
+
+        session.index_everything();
+        let view = session.view("/p/main.cpp").expect("the pump has read it");
+        let at = view
+            .source
+            .find("Widget w")
+            .expect("the use is in the text");
+
+        assert!(session.is_idle());
+        assert!(
+            matches!(session.definition(&view, ReadingOffset::new(at)), Known::Yes(found) if found.file == Path::new("/p/widget.h")),
+            "the same question, answered once the file has been read"
+        );
+    }
+
+    #[test]
+    fn a_view_is_the_buffer_parsed_and_maps_a_position_onto_an_offset() {
+        // **Two questions that used to share one answer, and no longer do.** A position is a question about bytes
+        // and a definition is a question about meaning; the first is available as soon as the file is held, and the
+        // second needs the file read the way a compiler reads it. This test is the pair, side by side.
+        let files =
+            MemoryFiles::new().with_file("/p/a.cpp", "int on_disk;\nvoid f() { on_disk = 1; }\n");
+        let fixture = Memory::new("view", &files);
+        let mut session = fixture.session();
+
+        session.did_open("/p/a.cpp", "int in_buffer;\nvoid f() { in_buffer = 1; }\n");
+
+        // **The position, with no reading at all.** `tokens_of` is of the buffer — `load` was not needed and no cook
+        // was waited for — and it says which of the two texts it read, which is what a client's offsets are in.
+        let tokens = session.tokens_of("/p/a.cpp").expect("the buffer is held");
+        assert!(
+            tokens.open,
+            "the reading says which of the two texts it read"
+        );
+        let at = tokens
+            .source
+            .find("in_buffer = 1")
+            .expect("the use is in the text");
+        assert_eq!(
+            tokens.offset_at(1, 11),
+            Some(ReadingOffset::new(at)),
+            "line 1, column 11 is where `in_buffer` is written on the second line"
+        );
+        assert_eq!(
+            tokens.offset_at(99, 0),
+            None,
+            "a line past the end is not an offset"
+        );
+
+        // **The meaning, after a cook, and it is the buffer's.** The file's own scope answers the query with no index
+        // involved at all — and it answers about `in_buffer`, which exists only in the buffer.
+        session.index_everything();
+        let view = session.view("/p/a.cpp").expect("the pump has read it");
+        assert!(
+            view.source.contains("in_buffer"),
+            "the reading is the buffer's"
+        );
+        let at = view
+            .source
+            .find("in_buffer = 1")
+            .expect("the use is in the text");
+
+        // And the file's own scope answers the query, with no index involved at all.
+        assert!(
+            matches!(session.definition(&view, ReadingOffset::new(at)), Known::Yes(found) if found.file == Path::new("/p/a.cpp")),
+            "a local declaration is resolved by the file's scopes"
+        );
+
+        assert!(session.view("/p/not_there.cpp").is_none());
+    }
+
+    #[test]
+    fn a_position_maps_back_onto_the_offset_it_came_from() {
+        // The direction a diagnostic needs: the parser reports byte offsets and a client wants a position. The two
+        // mappings have to agree, and the case that makes that worth a test is a line that is not ASCII — the
+        // column a client sends counts **characters**, so a one-byte-per-column round trip is the wrong answer the
+        // moment a line contains `é`.
+        let files = MemoryFiles::new()
+            .with_file("/p/a.cpp", "// é comment\nint x = 1;\n")
+            .with_file("/p/crlf.cpp", "int a;\r\nint b;\r\n");
+        let fixture = Memory::new("position", &files);
+        let mut session = fixture.session();
+        // A view is of a file the session is **holding** (`file::vfs`): nothing has read these yet, so they are
+        // loaded explicitly — the way a notification or an indexing step loads one.
+        session.load("/p/a.cpp");
+        session.load("/p/crlf.cpp");
+
+        // **Through `tokens_of`, because this is a question about the text.** It needs a line index and a length and
+        // nothing a declaration means, so it does not wait for a cook: positions are available the moment the file is
+        // held, which is what a fold, a selection and a diagnostic span all rely on. Asking `view` here would now
+        // mean asking a semantic question to get an answer about bytes.
+        let view = session.tokens_of("/p/a.cpp").expect("the file reads");
+        let at = view
+            .source
+            .find("x = 1")
+            .expect("the statement is in the text");
+        assert_eq!(
+            view.position_at(ReadingOffset::new(at)),
+            Some((1, 4)),
+            "the offset of `x` is line 1, column 4"
+        );
+
+        // The round trip in both directions, on the line with the two-byte character.
+        let (line, column) = view
+            .position_at(ReadingOffset::new(at))
+            .expect("the offset is in the file");
+        assert_eq!(view.offset_at(line, column), Some(ReadingOffset::new(at)));
+
+        let comment = view.source.find('é').expect("the character is in the text");
+        assert_eq!(
+            view.position_at(ReadingOffset::new(comment)),
+            Some((0, 3)),
+            "a character counts as one column, whatever it costs in bytes"
+        );
+
+        // And a CRLF file is one line break, not two: the `\r` is part of line 0, so line 1 starts after it.
+        let crlf = session.tokens_of("/p/crlf.cpp").expect("the file reads");
+        let second = crlf
+            .source
+            .find("int b")
+            .expect("the second line is in the text");
+        assert_eq!(crlf.position_at(ReadingOffset::new(second)), Some((1, 0)));
+        assert_eq!(
+            crlf.position_at(ReadingOffset::new(crlf.source.len())),
+            Some((2, 0)),
+            "the end of the text is a position: it is where a range at EOF sits"
+        );
+
+        assert_eq!(
+            crlf.position_at(ReadingOffset::new(crlf.source.len() + 1)),
+            None,
+            "an offset past the end is not a position"
+        );
+    }
+
+    // -------------------------------------------------------------------------------------------
+    // Opening a project on disk
+    // -------------------------------------------------------------------------------------------
+
+    /// A project directory, removed when the test ends — including when it fails.
+    struct Project {
+        root: PathBuf,
+    }
+
+    impl Project {
+        fn new(name: &str) -> Self {
+            let root = std::env::temp_dir().join("cppls-session-disk").join(name);
+            let _ = std::fs::remove_dir_all(&root);
+            std::fs::create_dir_all(&root).expect("the fixture directory");
+
+            Project { root }
+        }
+
+        fn write(&self, name: &str, text: &str) -> PathBuf {
+            let path = self.root.join(name);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).expect("the fixture directory");
+            }
+            std::fs::write(&path, text).expect("the fixture writes");
+            path
+        }
+
+        /// The project's own files, as paths relative to the root with `/` separators.
+        fn relative(&self, paths: &[PathBuf]) -> Vec<String> {
+            paths
+                .iter()
+                .filter_map(|path| path.strip_prefix(&self.root).ok())
+                .map(|path| path.to_string_lossy().replace('\\', "/"))
+                .collect()
+        }
+    }
+
+    impl Drop for Project {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    #[test]
+    fn the_scan_finds_the_projects_sources_and_leaves_the_rest() {
+        // What a scan is for, and what it must not do: a build tree and `.git` are not project source, a `.md` is
+        // not a source at all, and a file with no extension is reached through an include rather than guessed at.
+        let project = Project::new("scan");
+        project.write("main.cpp", "int main() { return 0; }\n");
+        project.write("include/widget.hpp", "struct Widget { int size; };\n");
+        project.write("notes.md", "# notes\n");
+        project.write("build/generated.cpp", "int generated;\n");
+        project.write(".git/hooks/thing.cpp", "int hook;\n");
+        project.write("extensionless", "int nothing;\n");
+
+        let documents = OpenDocuments::new();
+        let providers = SessionFiles::new(documents, DiskFiles);
+        let filter = WatchFilter::new(&project.root).ignore(project.root.join("build"));
+
+        let session = Session::with_config(
+            &project.root,
+            providers.clone(),
+            filter,
+            CompilerConfig::default(),
+        );
+
+        assert_eq!(
+            project.relative(session.project_files()),
+            ["include/widget.hpp", "main.cpp"]
+        );
+        assert_eq!(
+            session.pending(),
+            2,
+            "and the list is the queue's seed, so the work is ready before the first query"
+        );
+    }
+
+    #[test]
+    fn a_class_scoped_by_another_files_macro_body_is_scoped_through_the_session() {
+        // The store's second pass, on the closure a **session** builds one file at a time. MSVC's STL is
+        // written this way: `<vector>` opens `std` with `_STD_BEGIN`, whose replacement list is in `yvals_core.h`,
+        // and it *includes* that file — while a file is read before the files it includes, because its own
+        // `#include`s are a product of parsing it. So the first reading of every such file puts its declarations at
+        // file scope. Measured on the whole STL through the driver: **0/9** without this pass, **9/9** with it,
+        // against 9/9 for the same index built by `SummaryStore::index_includes_from` (which always had one).
+        //
+        // No compiler and no compile database take part: the body is written in a file of the project, which is
+        // what makes this test the same on every machine.
+        let project = Project::new("body-pass");
+        project.write(
+            "open.h",
+            "#pragma once\n#define _STD_BEGIN namespace std {\n#define _STD_END }\n",
+        );
+        let widget = project.write(
+            "widget.h",
+            "#include \"open.h\"\n_STD_BEGIN\nstruct Widget { int size; };\n_STD_END\n",
+        );
+        let main = project.write("main.cpp", "#include \"widget.h\"\n");
+
+        let mut session = Session::with_config(
+            &project.root,
+            SessionFiles::new(OpenDocuments::new(), DiskFiles),
+            WatchFilter::new(&project.root),
+            CompilerConfig::default(),
+        );
+        session.index_everything();
+
+        let found = session.index().definition("std::Widget", &main);
+        let Known::Yes(found) = found else {
+            panic!("`Widget` is declared behind a macro body written in `open.h`: {found:?}");
+        };
+        assert_eq!(found.file, widget);
+        assert_eq!(found.fact.scope.as_deref(), Some("std"));
+
+        // And the reading is recorded as **evidence** rather than as a conclusion: the summary says which body
+        // opened the scope, which is what lets a consumer re-read it when the macro changes. See
+        // A fact derived from a macro body is evidence, not part of the key.
+        let summary = session.index().summary(&widget).expect("indexed");
+        assert!(
+            !summary.macro_readings.is_empty(),
+            "the scope came from a body, and the summary has to say so"
+        );
+    }
+
+    // -------------------------------------------------------------------------------------------
+    // The project's own configuration file
+    // -------------------------------------------------------------------------------------------
+
+    #[test]
+    fn a_project_configuration_narrows_the_scan_and_widens_the_source_list() {
+        // The two things `[workspace]` is for: a tree the analysis should not read, and an extension the engine
+        // does not know about. Both are read from the project's own file, on disk, by a session the caller
+        // configured — which is the path a test can take without running a compiler.
+        let project = Project::new("config-scan");
+        project.write("main.cpp", "int main() { return 0; }\n");
+        project.write("vendor/third_party.cpp", "int vendored;\n");
+        project.write("kernels/vector.cuh", "struct FromCuda { int x; };\n");
+        project.write(
+            ".cppls.toml",
+            "[workspace]\nexclude = [\"vendor/**\"]\nsource_extensions = [\"cuh\"]\n",
+        );
+
+        let documents = OpenDocuments::new();
+        let providers = SessionFiles::new(documents, DiskFiles);
+        let session = Session::with_config(
+            &project.root,
+            providers,
+            WatchFilter::new(&project.root),
+            CompilerConfig::default(),
+        );
+
+        assert_eq!(
+            project.relative(session.project_files()),
+            ["kernels/vector.cuh", "main.cpp"],
+            "the excluded tree is not scanned, and the project's own extension is"
+        );
+        assert!(
+            session.project_config().found(),
+            "the file was read: {:?}",
+            session.project_config()
+        );
+        assert!(session.project_config().problems.is_empty());
+    }
+
+    #[test]
+    fn the_projects_flags_win_over_the_databases_and_extra_args_add_to_the_winner() {
+        // The decision `CompileSection::args` records, pinned: `args` wins outright, `extra_args` adds to whatever
+        // won, and `remove_args` drops a flag from it. One test because the three keys are one pass over one list —
+        // splitting them would let the order they are documented in stop being the order they happen in.
+        let project = Project::new("config-flags");
+        project.write("main.cpp", "int main() { return 0; }\n");
+        let root = project.root.to_string_lossy().replace('\\', "/");
+
+        project.write(
+            "compile_commands.json",
+            &format!(
+                "[\n  {{\"directory\": \"{root}\", \"file\": \"{root}/main.cpp\", \
+                 \"arguments\": [\"g++\", \"-DFROM_THE_DATABASE\", \"-std=c++17\", \"-Werror\", \
+                 \"-c\", \"{root}/main.cpp\"]}}\n]\n"
+            ),
+        );
+        project.write(
+            ".cppls.toml",
+            "[compile]\nargs = [\"-DFROM_THE_CONFIG\", \"-std=c++20\"]\nextra_args = [\"-DEXTRA\"]\n",
+        );
+
+        let documents = OpenDocuments::new();
+        let providers = SessionFiles::new(documents, DiskFiles);
+        let session = Session::open(&project.root, providers, WatchFilter::new(&project.root));
+
+        let defines: Vec<&str> = session
+            .config()
+            .defines
+            .iter()
+            .map(|define| define.name.as_ref())
+            .collect();
+        assert_eq!(
+            defines,
+            ["FROM_THE_CONFIG", "EXTRA"],
+            "the file's flags are the compilation, and `extra_args` joins them"
+        );
+        assert_eq!(
+            session.config().standard.as_deref(),
+            Some("c++20"),
+            "the database's `-std=c++17` is not in effect"
+        );
+    }
+
+    #[test]
+    fn removing_and_adding_a_flag_is_one_pass_in_that_order() {
+        // `remove_args` drops from the list that won, and `extra_args` appends to it — removing *first* is what
+        // makes "drop the database's `-std=c++17`, add `-std=c++20`" mean c++20 rather than c++17.
+        let project = Project::new("config-remove");
+        project.write("main.cpp", "int main() { return 0; }\n");
+        let root = project.root.to_string_lossy().replace('\\', "/");
+
+        project.write(
+            "compile_commands.json",
+            &format!(
+                "[\n  {{\"directory\": \"{root}\", \"file\": \"{root}/main.cpp\", \
+                 \"arguments\": [\"g++\", \"-std=c++17\", \"-DKEEP\", \"-Werror\", \"-c\", \"{root}/main.cpp\"]}}\n]\n"
+            ),
+        );
+        project.write(
+            ".cppls.toml",
+            "[compile]\nremove_args = [\"-Werror\", \"-std=c++17\"]\nextra_args = [\"-std=c++20\"]\n",
+        );
+
+        let documents = OpenDocuments::new();
+        let providers = SessionFiles::new(documents, DiskFiles);
+        let session = Session::open(&project.root, providers, WatchFilter::new(&project.root));
+
+        assert_eq!(
+            session
+                .config_for(&project.root.join("main.cpp"))
+                .standard
+                .as_deref(),
+            Some("c++20")
+        );
+        let per_file = session.config_for(&project.root.join("main.cpp"));
+        let defines: Vec<&str> = per_file
+            .defines
+            .iter()
+            .map(|define| define.name.as_ref())
+            .collect();
+        assert_eq!(defines, ["KEEP"], "a flag nobody removed still applies");
+    }
+
+    /// A database written somewhere no convention predicts, named by the project's own file.
+    #[test]
+    fn the_database_can_be_somewhere_no_convention_predicts() {
+        let project = Project::new("config-database");
+        project.write("main.cpp", "int main() { return 0; }\n");
+        let root = project.root.to_string_lossy().replace('\\', "/");
+        project.write(
+            "out/compile_commands.json",
+            &format!(
+                "[\n  {{\"directory\": \"{root}\", \"file\": \"{root}/main.cpp\", \
+                 \"arguments\": [\"g++\", \"-DFROM_ELSEWHERE\", \"-c\", \"{root}/main.cpp\"]}}\n]\n"
+            ),
+        );
+        project.write(
+            ".cppls.toml",
+            "[compile]\ndatabase = \"out/compile_commands.json\"\n",
+        );
+
+        let documents = OpenDocuments::new();
+        let providers = SessionFiles::new(documents, DiskFiles);
+        let session = Session::open(&project.root, providers, WatchFilter::new(&project.root));
+
+        assert_eq!(
+            session.compile_database().map(crate::CompileCommands::len),
+            Some(1)
+        );
+        let defines: Vec<&str> = session
+            .config()
+            .defines
+            .iter()
+            .map(|define| define.name.as_ref())
+            .collect();
+        assert_eq!(defines, ["FROM_ELSEWHERE"]);
+        assert_eq!(project.relative(session.project_files()), ["main.cpp"]);
+    }
+
+    #[test]
+    fn the_cache_goes_where_the_project_says_and_the_filter_follows_it() {
+        // The cache directory is one name with three readers — the store that writes under it, the filter that
+        // ignores its events, and the report a user reads — and this is the property that keeps them one answer.
+        let project = Project::new("config-cache");
+        project.write("main.cpp", "int main() { return 0; }\n");
+        project.write(".cppls.toml", "[index]\ncache_dir = \".cppls-cache\"\n");
+
+        let documents = OpenDocuments::new();
+        let providers = SessionFiles::new(documents, DiskFiles);
+        let mut session = Session::with_config(
+            &project.root,
+            providers,
+            WatchFilter::new(&project.root),
+            CompilerConfig::default(),
+        );
+
+        session.index_everything();
+        assert_eq!(session.stats().rebuilt, 1, "the file was read");
+
+        let summaries = project.root.join(".cppls-cache").join("summaries");
+        assert!(
+            summaries.is_dir(),
+            "the summaries are under the configured directory, not the default: {}",
+            summaries.display()
+        );
+        assert!(
+            !project.root.join(crate::CACHE_DIRECTORY).exists(),
+            "and the default directory was not created at all"
+        );
+    }
+
+    #[test]
+    fn the_sections_a_language_server_reads_come_from_the_same_parse() {
+        // One file, one parser: the server's keys are read from the session's report rather than by a second
+        // TOML reader in the other crate, which is what keeps the two from disagreeing about what it says.
+        let project = Project::new("config-server-keys");
+        project.write("main.cpp", "int main() { return 0; }\n");
+        project.write(
+            ".cppls.toml",
+            "[diagnostics]\non_change_ms = 250\n\n[hover]\nenable = false\n",
+        );
+
+        let documents = OpenDocuments::new();
+        let providers = SessionFiles::new(documents, DiskFiles);
+        let session = Session::with_config(
+            &project.root,
+            providers,
+            WatchFilter::new(&project.root),
+            CompilerConfig::default(),
+        );
+
+        let config = &session.project_config().config;
+        assert_eq!(config.diagnostics.on_change_ms, Some(250));
+        assert_eq!(config.hover.enable, Some(false));
+    }
+
+    #[test]
+    fn a_configuration_file_with_a_typo_still_analyses_the_project() {
+        // The failure mode the section-by-section parse exists for: one bad key must not cost the project its
+        // exclusions, and the problem must be visible to whoever asks the session what it thought.
+        let project = Project::new("config-typo");
+        project.write("main.cpp", "int main() { return 0; }\n");
+        project.write("vendor/third_party.cpp", "int vendored;\n");
+        project.write(
+            ".cppls.toml",
+            "[workspace]\nexclude = [\"vendor/**\"]\n\n[index]\ncache_dir = 5\n",
+        );
+
+        let documents = OpenDocuments::new();
+        let providers = SessionFiles::new(documents, DiskFiles);
+        let session = Session::with_config(
+            &project.root,
+            providers,
+            WatchFilter::new(&project.root),
+            CompilerConfig::default(),
+        );
+
+        assert_eq!(
+            project.relative(session.project_files()),
+            ["main.cpp"],
+            "the exclusions are in effect"
+        );
+        assert_eq!(session.project_config().problems.len(), 1);
+        assert!(
+            session.project_config().problems[0]
+                .message
+                .contains("[index]")
+        );
+        assert_eq!(session.project_config().errors().count(), 1);
+    }
+
+    #[test]
+    fn a_database_in_a_build_directory_is_found_and_its_flags_reach_the_session() {
+        // The whole point of the build-system half: a project that exports its database into `build/` must be
+        // analysed with *those* flags and *that* file list, without anybody naming the path. This is the test that
+        // fails if the discovery is written but not wired into the session.
+        let project = Project::new("build-directory-database");
+        project.write("main.cpp", "int main() { return 0; }\n");
+        let root = project.root.to_string_lossy().replace('\\', "/");
+
+        project.write(
+            "build/compile_commands.json",
+            &format!(
+                "[\n  {{\"directory\": \"{root}\", \"file\": \"{root}/main.cpp\", \
+                 \"arguments\": [\"g++\", \"-DFROM_THE_BUILD_DIRECTORY\", \"-std=c++20\", \
+                 \"-c\", \"{root}/main.cpp\"]}}\n]\n"
+            ),
+        );
+
+        let documents = OpenDocuments::new();
+        let providers = SessionFiles::new(documents, DiskFiles);
+        let session = Session::open(&project.root, providers, WatchFilter::new(&project.root));
+
+        assert_eq!(
+            session.compile_database().map(crate::CompileCommands::len),
+            Some(1),
+            "the database in the build directory was read"
+        );
+        assert_eq!(
+            session
+                .discovery()
+                .database
+                .as_ref()
+                .map(|found| found.origin),
+            Some(crate::DatabaseOrigin::BuildDirectory),
+            "and the report says where it was found"
+        );
+        let per_file = session.config_for(&project.root.join("main.cpp"));
+        let defines: Vec<&str> = per_file
+            .defines
+            .iter()
+            .map(|define| define.name.as_ref())
+            .collect();
+        assert_eq!(defines, ["FROM_THE_BUILD_DIRECTORY"]);
+        assert_eq!(
+            session
+                .config_for(&project.root.join("main.cpp"))
+                .standard
+                .as_deref(),
+            Some("c++20")
+        );
+        assert!(
+            session
+                .discovery()
+                .problems
+                .iter()
+                .any(|problem| problem.message.contains("build directory")),
+            "and a user reading the report is told: {:?}",
+            session.discovery().problems
+        );
+    }
+
+    #[test]
+    /// Restored after a scripted edit ate this header — the body below is unchanged.
+    fn a_project_without_a_database_is_analysed_against_the_compilers_defaults() {
+        // No database and no `[compile].args`: the analysis is about the compiler's own defaults rather than about
+        // the project's build. That *works*, and the problem list says what would make it better — which is the
+        // whole reason the list exists.
+        let project = Project::new("without-a-database");
+        project.write("main.cpp", "int main() { return 0; }\n");
+
+        let documents = OpenDocuments::new();
+        let providers = SessionFiles::new(documents, DiskFiles);
+        let session = Session::open(&project.root, providers, WatchFilter::new(&project.root));
+
+        assert!(session.compile_database().is_none());
+        assert!(
+            session
+                .discovery()
+                .problems
+                .iter()
+                .any(|problem| problem.message.contains("no compile database")),
+            "the way to do better is spelled out: {:?}",
+            session.discovery().problems
+        );
+    }
+
+    #[test]
+    fn a_compile_database_names_the_files_that_are_here_and_the_flags_they_are_built_with() {
+        // The two things a database is read for: which files are compiled — the list is better than a scan, because
+        // it is the project's own statement — and the flags, which are the whole reason the configuration is not
+        // guessed. An entry naming a file this checkout does not have is dropped rather than queued, because a
+        // checked-in database writes the absolute paths of the machine that produced it.
+        let project = Project::new("database");
+        project.write("main.cpp", "int main() { return 0; }\n");
+        let root = project.root.to_string_lossy().replace('\\', "/");
+
+        project.write(
+            "compile_commands.json",
+            &format!(
+                "[\n  {{\"directory\": \"{root}\", \"file\": \"{root}/main.cpp\", \
+                 \"arguments\": [\"g++\", \"-DFROM_THE_DATABASE\", \"-I{root}/include\", \"-std=c++20\", \
+                 \"-c\", \"{root}/main.cpp\"]}},\n  \
+                 {{\"directory\": \"{root}\", \"file\": \"{root}/elsewhere.cpp\", \
+                 \"arguments\": [\"g++\", \"-c\", \"{root}/elsewhere.cpp\"]}}\n]\n"
+            ),
+        );
+
+        let documents = OpenDocuments::new();
+        let providers = SessionFiles::new(documents, DiskFiles);
+        let session = Session::open(
+            &project.root,
+            providers.clone(),
+            WatchFilter::new(&project.root),
+        );
+
+        let database = session.compile_database().expect("the database is read");
+        assert_eq!(database.len(), 2);
+
+        let per_file = session.config_for(&project.root.join("main.cpp"));
+        let defines: Vec<&str> = per_file
+            .defines
+            .iter()
+            .map(|define| define.name.as_ref())
+            .collect();
+        assert_eq!(defines, ["FROM_THE_DATABASE"]);
+        assert_eq!(
+            session
+                .config_for(&project.root.join("main.cpp"))
+                .standard
+                .as_deref(),
+            Some("c++20")
+        );
+
+        assert_eq!(project.relative(session.project_files()), ["main.cpp"]);
+        assert_eq!(
+            session.pending(),
+            1,
+            "the entry for a file that is not here is not work"
+        );
+    }
+
+    #[test]
+    /// Restored after a scripted edit ate this header — the body below is unchanged.
+    fn a_define_the_compile_database_carries_decides_a_condition_in_a_file() {
+        // The whole way a `-D` travels: the database's flags become the configuration, the configuration becomes
+        // the macro environment, and the environment decides the `#ifdef` around an `#include`. The *answer*
+        // therefore depends on how the project is built while the *summary* does not — which is why a summary
+        // stores the question rather than the answer, and why changing `-D` does not throw the cache away.
+        let project = Project::new("conditional-include");
+        let root = project.root.to_string_lossy().replace('\\', "/");
+
+        project.write("feature.h", "#define FEATURE_ONLY int\n");
+        project.write(
+            "main.cpp",
+            "#ifdef FROM_THE_DATABASE\n#include \"feature.h\"\n#endif\nFEATURE_ONLY x;\n",
+        );
+        project.write(
+            "compile_commands.json",
+            &format!(
+                "[{{\"directory\": \"{root}\", \"file\": \"{root}/main.cpp\", \
+                 \"arguments\": [\"g++\", \"-DFROM_THE_DATABASE\", \"-c\", \"{root}/main.cpp\"]}}]\n"
+            ),
+        );
+
+        let documents = OpenDocuments::new();
+        let providers = SessionFiles::new(documents, DiskFiles);
+        let mut session = Session::open(
+            &project.root,
+            providers.clone(),
+            WatchFilter::new(&project.root),
+        );
+
+        // **Both files, because the closure of `main.cpp` is what the query walks.**
+        session.advance(64);
+
+        let path = project.root.join("main.cpp");
+        let _source = std::fs::read_to_string(&path).expect("the fixture reads");
+
+        // **The asking side, which is how a project nobody has opened gets read.**
+        //
+        // `advance` reads files into the index and never cooks, and nothing here is open — so no file was queued for
+        // cooking and the first ask has no rendering to answer from. That is the deferral, and this is what a real
+        // caller does with it: the ask **queues** the file, the pump cooks it, the next ask has it. Written as the
+        // two steps rather than one because the first answer is `None` by contract and a test that hid that would be
+        // asserting a behaviour the product does not have.
+        assert!(
+            session.view(&path).is_none(),
+            "nothing has read this file as a compiler reads it, and that is what the ask is for"
+        );
+        session.index_everything();
+
+        let view = session
+            .view(&path)
+            .expect("the ask queued it and the pump cooked it");
+
+        // **The rendering is the proof, and it is a stronger one than the reference list was.**
+        //
+        // The chain under test is *flags → configuration → environment → the branch an `#ifdef` takes*, and the
+        // endpoint of that chain is the text a compiler would parse. `-DFROM_THE_DATABASE` decides
+        // `#ifdef FROM_THE_DATABASE`, which decides whether `feature.h` is reached, which decides what
+        // `FEATURE_ONLY` — defined there as `int` — expands to. So a rendering of exactly `int x;` says every link
+        // held: the define came from the database, the include was taken, and the macro was substituted.
+        assert_eq!(
+            view.source.as_ref(),
+            "int x;",
+            "the -D took the branch, the branch included feature.h, and FEATURE_ONLY became int"
+        );
+
+        // **And what this test does NOT prove, said rather than implied.** It shows the chain holds *with* the
+        // database's flag. It cannot show it *fails* without it, and the reason is the session's contract rather
+        // than an oversight here: [`Session::open`] reads `compile_commands.json` whenever the project has one
+        // (`session.rs:66`), so a second session over this same directory necessarily has the same `-D`. A negative
+        // half was written and **measured to be worthless** — it rendered `int x;` as well, because the flag was
+        // there in both sessions:
+        //
+        // ```text
+        //   with no -D the `#ifdef` is false ...: got "int x;"
+        // ```
+        //
+        // A one-sided assertion is the failure mode this test now names instead of hiding: without a session whose
+        // flags differ, `int x;` is consistent with reading the include unconditionally. Building that session means
+        // opening a project whose database has no flags — a fixture change, not a new assertion here.
+        //
+        // **And the reference half was removed rather than repaired.** It asked [`Session::macro_references`] about
+        // `FEATURE_ONLY`, which needs a *name at an offset* and gets one from a tree; but a macro is **gone** from a
+        // rendering — that is what a rendering is — so the question was a category error and answered
+        // `Unknown(UnparsableName)`. A macro question wants the file's own tokens plus the closure's macro facts,
+        // and `Session::tokens_of` is the first half of that. What is missing is the entry point, not the reading:
+        // see the note on `Session::macro_references`.
+    }
+
+    #[test]
+    fn the_compilation_is_known_only_when_the_compiler_answered_with_its_macros() {
+        // The licence for one claim — *a name none of the witnesses mentions is not defined* — pinned on the three
+        // shapes a session can be in. The middle one is why this is a function rather than a field read at the call
+        // site: a toolchain **exists** on a machine whose headers were found by a convention and whose compiler
+        // could not be asked, and its macro table is empty. Claiming completeness there would read all five hundred
+        // of the compiler's own names as "not defined" — `#ifdef _MSC_VER` coming out false *on MSVC* — which is a
+        // wrong answer rather than a missing one, the direction this layer must never fail in.
+        assert!(
+            !super::the_compilation_is_known(None),
+            "no compiler answered, so nothing witnesses the built-ins"
+        );
+
+        let unasked = Toolchain {
+            compiler: None,
+            version: None,
+            system_include_paths: vec![PathBuf::from("/usr/include")],
+            builtin_macros: Vec::new(),
+            dialect: None,
+            standard: None,
+            source: ToolchainSource::SystemHeaders,
+            note: Some("no compiler could be asked".to_string()),
+        };
+        assert!(
+            !super::the_compilation_is_known(Some(&unasked)),
+            "directories without a macro table are half a toolchain, and the missing half is the built-ins"
+        );
+
+        let asked = Toolchain {
+            compiler: Some(PathBuf::from("cl")),
+            builtin_macros: vec![CommandLineMacro::defined("_MSC_VER")],
+            ..unasked
+        };
+        assert!(
+            super::the_compilation_is_known(Some(&asked)),
+            "a compiler that answered is the only witness there is to the names no file defines"
+        );
+    }
