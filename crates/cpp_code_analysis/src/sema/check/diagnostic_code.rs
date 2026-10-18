@@ -89,6 +89,10 @@ pub enum DiagnosticCode {
     ElseAfterReturn,
     /// A C-style cast — see [`super::cstyle_cast`].
     CStyleCast,
+    /// An iterator declared by its full spelling — see [`super::use_auto`].
+    UseAuto,
+    /// A macro body that needs its own parentheses — see [`super::macro_parentheses`].
+    MacroParentheses,
 }
 
 impl DiagnosticCode {
@@ -98,7 +102,7 @@ impl DiagnosticCode {
     /// what it says about types, then what it says about a whole body, then the two that are about the reading
     /// rather than the program. A consumer that shows a settings screen, or a test that asserts every rule has a
     /// name and a module, iterates this.
-    pub const ALL: [DiagnosticCode; 20] = [
+    pub const ALL: [DiagnosticCode; 22] = [
         DiagnosticCode::SyntaxError,
         DiagnosticCode::ParamTypeCheck,
         DiagnosticCode::AssignTypeCheck,
@@ -119,6 +123,8 @@ impl DiagnosticCode {
         DiagnosticCode::SimplifyBooleanExpr,
         DiagnosticCode::ElseAfterReturn,
         DiagnosticCode::CStyleCast,
+        DiagnosticCode::UseAuto,
+        DiagnosticCode::MacroParentheses,
     ];
 
     /// **The code a client is shown**, and the spelling a config file uses: kebab case, and the module's file name
@@ -148,6 +154,8 @@ impl DiagnosticCode {
             DiagnosticCode::SimplifyBooleanExpr => "simplify-boolean-expr",
             DiagnosticCode::ElseAfterReturn => "else-after-return",
             DiagnosticCode::CStyleCast => "cstyle-cast",
+            DiagnosticCode::UseAuto => "use-auto",
+            DiagnosticCode::MacroParentheses => "macro-parentheses",
         }
     }
 
@@ -204,6 +212,9 @@ impl DiagnosticCode {
             DiagnosticCode::ElseAfterReturn => RuleSeverity::Hint,
             // A C-style cast is the one of these that a project's guidelines usually forbid rather than merely prefer.
             DiagnosticCode::CStyleCast => RuleSeverity::Warning,
+            DiagnosticCode::UseAuto => RuleSeverity::Hint,
+            // A macro body without its own parentheses is a bug in the *caller's* expression order, not a style question.
+            DiagnosticCode::MacroParentheses => RuleSeverity::Warning,
         }
     }
 

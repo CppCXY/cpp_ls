@@ -122,6 +122,8 @@ mod use_override;
 mod simplify_boolean_expr;
 mod else_after_return;
 mod cstyle_cast;
+mod use_auto;
+mod macro_parentheses;
 
 pub use config::CheckConfig;
 pub use diagnostic_code::{DiagnosticCode, RuleSeverity, RuleTag};
@@ -281,6 +283,40 @@ impl<'a> CheckContext<'a> {
         message: impl Into<String>,
     ) {
         self.push(code, range, None, name, message);
+    }
+
+    /// **The comment and literal ranges of the file as written**, for the rules that read the *text* rather than the tree.
+    ///
+    /// A rule that scans `written` — `cstyle_cast`, `use_auto` — is scanning prose and data as well as code, and the
+    /// spellings it looks for occur in both: a comment that says "we removed `(int)` casts" and a string that contains
+    /// `"NULL"` are not a cast and a null pointer. The reading has this for free (the cook strips comments), the written
+    /// text does not, so the check layer lexes once and hands the ranges over.
+    ///
+    /// **One lex per call**, not per offset: the two rules that need it call this once and test every candidate against the
+    /// list. A lex is not a parse — it is the `skip_trivia` the parser already does — and two per file per run is not the
+    /// cost this layer is written against.
+    pub fn comments_and_literals(&self) -> Vec<SourceRange> {
+        let (tokens, _) = cpp_parser::lex(self.written, &cpp_parser::LexerConfig::default());
+        tokens
+            .into_iter()
+            .filter(|token| {
+                matches!(
+                    token.kind,
+                    cpp_parser::CppTokenKind::LineComment
+                        | cpp_parser::CppTokenKind::BlockComment
+                        | cpp_parser::CppTokenKind::StringLiteral
+                        | cpp_parser::CppTokenKind::CharLiteral
+                )
+            })
+            .map(|token| token.range)
+            .collect()
+    }
+
+    /// Is this file offset inside a comment or a literal?
+    pub fn in_a_comment_or_literal(&self, offset: usize, protected: &[SourceRange]) -> bool {
+        protected
+            .iter()
+            .any(|range| offset >= range.start_offset && offset < range.end_offset())
     }
 
     /// **A range read from the tree, said in the file's coordinates.**
@@ -1328,6 +1364,8 @@ pub fn run(context: CheckContext<'_>) -> Vec<Finding> {
     run_check::<simplify_boolean_expr::SimplifyBooleanExpr>(&mut context);
     run_check::<else_after_return::ElseAfterReturn>(&mut context);
     run_check::<cstyle_cast::CStyleCast>(&mut context);
+    run_check::<use_auto::UseAuto>(&mut context);
+    run_check::<macro_parentheses::MacroParentheses>(&mut context);
     run_check::<access_invisible::AccessInvisible>(&mut context);
     run_check::<missing_return::MissingReturn>(&mut context);
     run_check::<assignment_in_condition::AssignmentInCondition>(&mut context);

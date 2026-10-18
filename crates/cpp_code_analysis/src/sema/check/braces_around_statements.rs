@@ -9,8 +9,12 @@
 //! else g();` binds the `else` to the *inner* `if`, which is the shape of more real bugs than any other one-line style
 //! question. clang-tidy's name is kept so a reader can look the rule up.
 //!
-//! **Not implemented yet.** The file exists so the rule has a name, a code, and a test stating what it should say; the walk
-//! is over `if`/`for`/`while`/`do`/`else` nodes and asks whether the body is a `CompoundStmt`.
+//! # How it is found
+//!
+//! Over an `if` whose then-branch text does not begin with `{`. The `for`/`while`/`do`/`else` bodies are the same question
+//! and the same walk, and the first version covers the `if` because that is the one the dangling-`else` bug lives in.
+
+use cpp_parser::CppAstNode;
 
 use super::{Check, CheckContext, DiagnosticCode};
 
@@ -19,7 +23,23 @@ pub struct BracesAroundStatements;
 impl Check for BracesAroundStatements {
     const CODES: &'static [DiagnosticCode] = &[DiagnosticCode::BracesAroundStatements];
 
-    fn check(_context: &mut CheckContext<'_>) {
-        // See the module documentation: the rule is named and tested, and this is where its walk will live.
+    fn check(context: &mut CheckContext<'_>) {
+        for statement in context.own::<cpp_parser::CppIfStat>().collect::<Vec<_>>() {
+            let Some(then_branch) = statement.get_then_branch() else {
+                continue;
+            };
+            let written = then_branch.syntax().text().to_string();
+            if written.trim_start().starts_with('{') {
+                continue;
+            }
+            context.add(
+                DiagnosticCode::BracesAroundStatements,
+                cpp_parser::source_range(then_branch.syntax().text_range()),
+                written.trim().to_string(),
+                "a body that is one statement should be a block — `if (…) { … }` — because `if (a) if (b) f(); else g();` \
+                 binds the `else` to the inner `if`"
+                    .to_string(),
+            );
+        }
     }
 }

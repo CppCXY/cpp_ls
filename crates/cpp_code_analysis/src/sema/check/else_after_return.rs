@@ -8,7 +8,13 @@
 //! Flat is easier to read than nested, and the early return exists precisely to make the rest of the function flat. The rule
 //! is a hint because a deliberate symmetry (`if (x) return a; else return b;`) is a legitimate style.
 //!
-//! **Not implemented yet.** The walk is over `if` statements whose then-branch ends in a `return` and which have an `else`.
+//! # How it is found
+//!
+//! Over an `if` whose then-branch **contains** a `return` and which has an `else`. Containment rather than "ends in" for the
+//! first version: a branch with a return in it and an `else` after it is the shape the rule is about, and the stricter
+//! reading (the *last* statement) is a refinement that can land without changing the finding's shape.
+
+use cpp_parser::CppAstNode;
 
 use super::{Check, CheckContext, DiagnosticCode};
 
@@ -17,7 +23,26 @@ pub struct ElseAfterReturn;
 impl Check for ElseAfterReturn {
     const CODES: &'static [DiagnosticCode] = &[DiagnosticCode::ElseAfterReturn];
 
-    fn check(_context: &mut CheckContext<'_>) {
-        // See the module documentation.
+    fn check(context: &mut CheckContext<'_>) {
+        for statement in context.own::<cpp_parser::CppIfStat>().collect::<Vec<_>>() {
+            let Some(else_branch) = statement.get_else_branch() else {
+                continue;
+            };
+            let Some(then_branch) = statement.get_then_branch() else {
+                continue;
+            };
+            // **Text, not the tree.** `descendants()` is untyped in this parser, and the question here is a sentence's
+            // shape: the branch says `return`. A `return` inside a nested lambda would be a false positive, which is the
+            // refinement a typed walk would make; the finding's shape does not change.
+            if !then_branch.syntax().text().to_string().contains("return") {
+                continue;
+            }
+            context.add(
+                DiagnosticCode::ElseAfterReturn,
+                cpp_parser::source_range(else_branch.syntax().text_range()),
+                "else".to_string(),
+                "this branch returns, so the `else` nests what does not need nesting — drop it and unindent".to_string(),
+            );
+        }
     }
 }

@@ -17,18 +17,19 @@ fn the_style_codes_are_named_and_round_trip() {
         ("simplify-boolean-expr", DiagnosticCode::SimplifyBooleanExpr),
         ("else-after-return", DiagnosticCode::ElseAfterReturn),
         ("cstyle-cast", DiagnosticCode::CStyleCast),
+        ("use-auto", DiagnosticCode::UseAuto),
+        ("macro-parentheses", DiagnosticCode::MacroParentheses),
     ];
     for (name, code) in expected {
         assert_eq!(code.name(), name);
         assert_eq!(DiagnosticCode::from_name(name), Some(code));
         assert!(DiagnosticCode::ALL.contains(&code), "{name} is in ALL");
     }
-    assert_eq!(DiagnosticCode::ALL.len(), 20, "the six are in the list");
+    assert_eq!(DiagnosticCode::ALL.len(), 22, "the eight are in the list");
 }
 
 /// `readability-braces-around-statements`: a one-statement body should be a block.
 #[test]
-#[ignore = "the walk is not written; see sema/check/braces_around_statements.rs"]
 fn a_one_statement_body_is_reported() {
     let found = codes_of("void f(bool ready) {\n    if (ready) return;\n}\n");
     assert!(found.contains(&DiagnosticCode::BracesAroundStatements), "{found:?}");
@@ -39,7 +40,6 @@ fn a_one_statement_body_is_reported() {
 
 /// `modernize-use-nullptr`: `NULL` is `0`.
 #[test]
-#[ignore = "the walk is not written; see sema/check/use_nullptr.rs"]
 fn a_null_macro_is_reported() {
     let found = codes_of("void f(int*);\nvoid g() {\n    f(NULL);\n}\n");
     assert!(found.contains(&DiagnosticCode::UseNullptr), "{found:?}");
@@ -49,7 +49,6 @@ fn a_null_macro_is_reported() {
 
 /// `modernize-use-override`: an overriding declaration should say so.
 #[test]
-#[ignore = "the walk is not written; see sema/check/use_override.rs"]
 fn an_override_without_the_keyword_is_reported() {
     let found = codes_of(
         "struct Base { virtual void f(); };\nstruct Derived : Base { void f(); };\n",
@@ -63,7 +62,6 @@ fn an_override_without_the_keyword_is_reported() {
 
 /// `readability-simplify-boolean-expr`: `x == true` is `x`.
 #[test]
-#[ignore = "the walk is not written; see sema/check/simplify_boolean_expr.rs"]
 fn a_comparison_against_true_is_reported() {
     let found = codes_of("void f(bool ready) {\n    if (ready == true) { return; }\n}\n");
     assert!(found.contains(&DiagnosticCode::SimplifyBooleanExpr), "{found:?}");
@@ -73,7 +71,6 @@ fn a_comparison_against_true_is_reported() {
 
 /// `readability-else-after-return`: an `else` after a return is a nesting that is not needed.
 #[test]
-#[ignore = "the walk is not written; see sema/check/else_after_return.rs"]
 fn an_else_after_a_return_is_reported() {
     let found = codes_of(
         "void f(bool ready) {\n    if (ready) { return; } else { g(); }\n}\nvoid g();\n",
@@ -85,7 +82,6 @@ fn an_else_after_a_return_is_reported() {
 
 /// `cppcoreguidelines-pro-type-cstyle-cast`: a C-style cast can remove `const` without saying so.
 #[test]
-#[ignore = "the walk is not written; see sema/check/cstyle_cast.rs"]
 fn a_c_style_cast_is_reported() {
     let found = codes_of("void f(double n) {\n    int i = (int)n;\n}\n");
     assert!(found.contains(&DiagnosticCode::CStyleCast), "{found:?}");
@@ -120,4 +116,76 @@ fn codes_of(source: &str) -> Vec<DiagnosticCode> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// `modernize-use-auto`, narrowed to the case that is never wrong: an iterator declared by its full spelling.
+#[test]
+fn a_full_iterator_spelling_is_reported() {
+    let found = codes_of("void f() {\n    std::vector<int>::iterator it;\n    (void)it;\n}\n");
+    assert!(found.contains(&DiagnosticCode::UseAuto), "{found:?}");
+
+    // …and a type that is not an iterator spelling is not the rule's shape.
+    let not_an_iterator = codes_of("void f() {\n    std::vector<int>::value_type value;\n    (void)value;\n}\n");
+    assert!(!not_an_iterator.contains(&DiagnosticCode::UseAuto), "{not_an_iterator:?}");
+}
+
+/// `bugprone-macro-parentheses`: a replacement list that is not parenthesised.
+#[test]
+fn an_unparenthesised_macro_is_reported() {
+    let found = codes_of("#define TWICE(x) x * 2\nint f(int n) { return TWICE(n + 1); }\n");
+    assert!(found.contains(&DiagnosticCode::MacroParentheses), "{found:?}");
+
+    // …and the parenthesised form is the answer, so it is silent.
+    let parenthesised = codes_of("#define TWICE(x) ((x) * 2)\nint f(int n) { return TWICE(n + 1); }\n");
+    assert!(!parenthesised.contains(&DiagnosticCode::MacroParentheses), "{parenthesised:?}");
+
+    // A macro that is one token, or a call, or a block, is not this rule's shape.
+    for quiet in [
+        "#define ANSWER 42\nint f() { return ANSWER; }\n",
+        "#define MAX(a, b) ((a) > (b) ? (a) : (b))\nint f(int x, int y) { return MAX(x, y); }\n",
+    ] {
+        let found = codes_of(quiet);
+        assert!(!found.contains(&DiagnosticCode::MacroParentheses), "{quiet}: {found:?}");
+    }
+}
+
+/// **The cost of reading text instead of the tree**: a comment and a string literal are not code.
+///
+/// Every text-based rule has this hole, and it is the same hole in each: the spelling is in the file, and the file also
+/// contains prose and data that spell the same characters. These assertions state what the tree/token layer is for — a
+/// comment saying "`NULL` is what we used to write" is not a `NULL` a pointer is initialised with.
+#[test]
+fn a_comment_and_a_string_literal_are_not_code() {
+    // `NULL` in a comment.
+    let in_a_comment = codes_of("// NULL is what we used to write\nint f() { return 0; }\n");
+    assert!(
+        !in_a_comment.contains(&DiagnosticCode::UseNullptr),
+        "a comment is not a use: {in_a_comment:?}"
+    );
+
+    // `NULL` in a string literal.
+    let in_a_string = codes_of("void f();\nvoid g() { f(\"NULL\"); }\n");
+    assert!(
+        !in_a_string.contains(&DiagnosticCode::UseNullptr),
+        "a string literal is not a use: {in_a_string:?}"
+    );
+
+    // `(int)` in a comment, and `== true` in a string.
+    let cast_in_a_comment = codes_of("// we removed (int) casts everywhere\nvoid f() { }\n");
+    assert!(
+        !cast_in_a_comment.contains(&DiagnosticCode::CStyleCast),
+        "a comment is not a cast: {cast_in_a_comment:?}"
+    );
+    let boolean_in_a_string = codes_of("void f(bool ready) {\n    if (ready) { g(\"x == true y\"); }\n}\nvoid g(const char*);\n");
+    assert!(
+        !boolean_in_a_string.contains(&DiagnosticCode::SimplifyBooleanExpr),
+        "a string is not a condition: {boolean_in_a_string:?}"
+    );
+
+    // `#define TWICE(x) x * 2` inside a block comment.
+    let macro_in_a_comment = codes_of("/*\n#define TWICE(x) x * 2\n*/\nint f() { return 0; }\n");
+    assert!(
+        !macro_in_a_comment.contains(&DiagnosticCode::MacroParentheses),
+        "a commented-out macro is not a macro: {macro_in_a_comment:?}"
+    );
 }
