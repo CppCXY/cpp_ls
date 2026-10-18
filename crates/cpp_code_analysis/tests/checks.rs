@@ -1475,3 +1475,56 @@ void f() {
         codes_of(source)
     );
 }
+
+/// **An assignment whose result is compared is the idiom**, and the census found the one place this rule got it wrong.
+///
+/// `if ((op = queue.front()) != 0)` is deliberate: the assignment is parenthesised and the *comparison* is the condition.
+/// The rule now reads the condition's own operator, so a comparison at depth zero inside the parentheses keeps it quiet —
+/// while `if (x = 1)` still reports, and so does `if (x = a < b)`, whose `<` is inside the assignment.
+#[test]
+fn an_assignment_compared_against_something_is_quiet() {
+    let idiom = "struct Q { int value() const; };\n\
+                 void f(Q q) {\n    int op = 0;\n    if ((op = q.value()) != 0) { return; }\n}\n";
+    assert!(
+        !codes_of(idiom).contains(&DiagnosticCode::AssignmentInCondition),
+        "a compared assignment is the shape the rule allows: {:?}",
+        codes_of(idiom)
+    );
+
+    for reported in [
+        // The mistake the rule exists for.
+        "void f() {\n    int x = 0;\n    if (x = 1) { return; }\n}\n",
+        // A comparison inside the assignment's right-hand side does not hide it: the condition's operator is still `=`.
+        "void f() {\n    int x = 0; int a = 0; int b = 0;\n    if (x = a < b) { return; }\n}\n",
+    ] {
+        assert!(
+            codes_of(reported).contains(&DiagnosticCode::AssignmentInCondition),
+            "{reported}: {:?}",
+            codes_of(reported)
+        );
+    }
+}
+
+/// **`0` is the null pointer constant**, and it converts to a class that takes a pointer — the shape the census found as the
+/// only one its `assign-type-check` examples shared.
+///
+/// `P p = 0;` where `P` has `P(int*)` is valid C++: `0` is a null pointer constant. The conversion relation cannot see the
+/// constructor, so it answered `Unknown`, and the class case answered "cannot be built from an `int`" — both true of an
+/// `int` and both wrong of the **literal**. (The negative side — a value that is not `0` is still checked — is covered by
+/// the existing cases in this file; the claim here is only the one this fix makes.)
+#[test]
+fn zero_is_a_null_pointer_constant() {
+    let source = "\
+struct P {
+    P(int* pointer);
+};
+void f() {
+    P p = 0;
+}
+";
+    assert!(
+        !codes_of(source).contains(&DiagnosticCode::AssignTypeCheck),
+        "`0` is the null pointer constant: {:?}",
+        codes_of(source)
+    );
+}

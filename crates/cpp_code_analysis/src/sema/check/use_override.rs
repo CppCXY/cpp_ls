@@ -33,6 +33,13 @@ impl Check for UseOverride {
             .map(|fact| (fact.name.clone(), fact.bases.clone()))
             .collect();
 
+        // **One `members_of` per base, not one per member.** The first version asked for a base's members inside the member
+        // loop — `members × bases` lookups per class, and the same base re-asked for every class that derives from it. On a
+        // project of 1191 files that is the difference between a cache and a query storm; the census's 586 s of checks is the
+        // number this addresses.
+        let mut base_members: std::collections::BTreeMap<String, Vec<String>> =
+            std::collections::BTreeMap::new();
+
         for (class, bases) in declarations {
             let members: Vec<(String, String, usize)> = context
                 .summary
@@ -56,15 +63,29 @@ impl Check for UseOverride {
                 if written.contains("override") || written.contains("final") {
                     continue;
                 }
-                // **Does a base actually declare it?** Only then is this an override that forgot to say so.
-                let overrides = bases.iter().any(|base| {
-                    match context.model.members_of(base) {
-                        crate::Known::Yes(list) => {
-                            list.members.iter().any(|member| member.fact.name == name)
-                        }
-                        _ => false,
+                // **Does a base actually declare it?** Only then is this an override that forgot to say so. Answered from the
+                // cache: a base's member names are the same for every class that derives from it.
+                let mut overrides = false;
+                for base in &bases {
+                    if !base_members.contains_key(base) {
+                        let names = match context.model.members_of(base) {
+                            crate::Known::Yes(list) => list
+                                .members
+                                .iter()
+                                .map(|member| member.fact.name.clone())
+                                .collect(),
+                            _ => Vec::new(),
+                        };
+                        base_members.insert(base.clone(), names);
                     }
-                });
+                    if base_members
+                        .get(base)
+                        .is_some_and(|names| names.iter().any(|declared| declared == &name))
+                    {
+                        overrides = true;
+                        break;
+                    }
+                }
                 if !overrides {
                     continue;
                 }

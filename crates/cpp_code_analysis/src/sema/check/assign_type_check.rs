@@ -198,6 +198,13 @@ fn report_if_it_does_not_convert(
     name: &str,
     how: &str,
 ) {
+    // **`0` is the null pointer constant.** It converts to any pointer, to `std::nullptr_t`, and to every smart pointer whose
+    // constructor takes one — and the conversion relation cannot say so, because it lives in the type algebra and never sees a
+    // declaration. The census found this as the only shape its `assign-type-check` examples shared: `0` into `scoped_ptr`,
+    // `op_queue` and `object_pool` on a real project, every one of them valid C++.
+    if expression.text().to_string().trim() == "0" {
+        return;
+    }
     let known_from = context.type_of(expression);
     let target = crate::sema::types::parse_type_spelling(written);
     let crate::Known::Yes((from, _)) = known_from else {

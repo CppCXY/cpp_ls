@@ -179,3 +179,63 @@ void f(int n)      { while (n) … }     reported ✓   the same question, the s
 
 Not covered yet, and each is the same two lines: `do`/`while`, `for`'s condition, `!`, `&&`/`||` operands, and the
 conditional operator's condition.
+
+## Rules are language-dependent, and the census made that concrete
+
+`cstyle-cast` flagged every `(T)x` in a 1191-file project — 17,697 of them — and a reader pointed out the obvious: **a C
+program has no `static_cast`.** The C-style cast is the only cast C has, so recommending another one is recommending C++ in
+a C file.
+
+`CheckContext` now carries `language: LanguageConfig` (from `Session::config_for(file).language_for(file)`, which reads the
+file's own `-std=` out of the compile database), and `cstyle_cast` returns early when the language is **known** to be C:
+
+```text
+-std=c++17   (double)n   reported     ✓   C++ has `static_cast` to recommend
+-std=c11     (double)n   silent       ✓   the recommendation would not compile
+unconfigured (double)n   reported     ✓   `None` is not "C" — an unconfigured project keeps the findings it had
+```
+
+`LanguageConfig::family()` is the predicate: `Some(C)` for a C-only configuration, `Some(Cpp)` for a C++-only one, `None`
+when both families are enabled — which is what `permissive` is, and the honest answer for a parse nobody configured.
+
+**This is the seam the rest of the language work was for.** The parser's feature set, the compile flags and the rules now
+speak one vocabulary: a rule asks about the language, not about a constant somewhere.
+
+## The assignment idiom, measured on one file
+
+The census's single `assignment-in-condition` finding was `if ((op = impl->op_queue_.front()) != 0)` — the shape the rule
+exists to **allow**. The condition's own operator is `!=`; the assignment is parenthesised inside it.
+
+The tell is subtle enough to be worth writing down: after stripping the condition's outer parentheses, `x = a < b` also has
+its comparison at depth zero. What distinguishes the idiom is that a **group has closed** — `(op = q.front())` — before the
+comparison, so the comparison belongs to the condition and not to the assignment's right-hand side. Both cases have tests:
+
+```text
+if ((op = q.value()) != 0)   silent    ✓   the assignment is parenthesised and its result is compared
+if (x = 1)                   reported  ✓   the mistake the rule exists for
+if (x = a < b)               reported  ✓   the `<` is inside the assignment
+```
+
+## The census's three follow-ups
+
+```text
+② assign-type-check   `0` is the **null pointer constant**: it converts to any pointer and to any class whose constructor
+                      takes one. `P p = 0;` with `P(int*)` is valid C++, and the rule reported it because the conversion
+                      relation cannot see a constructor and the class case read the *literal* as an `int`. The expression's
+                      spelling is asked first now.
+① cstyle-cast         the remaining classes were **template arguments** — `(nullptr_t)`, `(Executor)` in a template list.
+                      The tell is the line: an unmatched `<` before the `(` means an angle-bracket list, and a cast on a line
+                      with no `<` is still a cast. (The first version tried a depth/`>` heuristic and a test showed `x = a <
+                      b` has its `<` at depth zero too; the line's angle brackets are the thing that actually distinguishes
+                      them.)
+③ the cost            `use-override` asked `members_of` once per **(member × base)**, and re-asked the same base for every
+                      class deriving from it — a query storm on a 1191-file project, where the checks cost 586 s against
+                      56 s of cooking. The member names of a base are cached now, one lookup per base.
+```
+
+Each has a test, and the tests are the ones that would have caught the census's findings: `zero_is_a_null_pointer_constant`,
+`a_template_argument_is_not_a_cast`, and `an_override_without_the_keyword_is_reported` (which the cache must not break — it
+does not).
+
+**Not measured**: the performance of ③. A full census is twelve minutes, and the number it would produce is the one the next
+census run prints; the claim here is structural — one lookup per base instead of one per member per base — not a stopwatch.

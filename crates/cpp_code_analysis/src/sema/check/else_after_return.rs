@@ -34,7 +34,7 @@ impl Check for ElseAfterReturn {
             // **Text, not the tree.** `descendants()` is untyped in this parser, and the question here is a sentence's
             // shape: the branch says `return`. A `return` inside a nested lambda would be a false positive, which is the
             // refinement a typed walk would make; the finding's shape does not change.
-            if !then_branch.syntax().text().to_string().contains("return") {
+            if !context.node_text(then_branch.syntax()).contains("return") {
                 continue;
             }
             context.add(

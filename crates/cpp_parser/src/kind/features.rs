@@ -508,6 +508,19 @@ impl LanguageConfig {
         Self { bits }
     }
 
+    /// **Which family this configuration is for**, when it says one: `Some(C)` for a C-only config, `Some(Cpp)` for a
+    /// C++-only one, and `None` when both are enabled — which is what `permissive` is, and what a parse must answer when
+    /// nobody told it what it is reading. A rule that only makes sense for one family asks this, never "is C++23 enabled".
+    pub fn family(self) -> Option<Family> {
+        let c = self.standards().any(|standard| standard.family() == Family::C);
+        let cpp = self.standards().any(|standard| standard.family() == Family::Cpp);
+        match (c, cpp) {
+            (true, false) => Some(Family::C),
+            (false, true) => Some(Family::Cpp),
+            _ => None,
+        }
+    }
+
     /// The standards this config enables — the set bits of the standards' block.
     pub fn standards(self) -> impl Iterator<Item = Standard> {
         STANDARDS.into_iter().filter(move |standard| self.bits & standard.bit() != 0)

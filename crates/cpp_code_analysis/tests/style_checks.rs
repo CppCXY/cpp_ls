@@ -278,3 +278,93 @@ fn a_parameter_list_is_not_a_cast() {
         "a cast is a type with no name after it: {still:?}"
     );
 }
+
+/// **A rule is not always a rule in both languages**: a C program has no `static_cast`, so a C-style cast is the only cast
+/// there is.
+///
+/// The same source, two compile flags: `-std=c++17` is told to name the cast it meant, `-std=c11` is not — because the
+/// alternative the message recommends does not exist in that language. This is what `CheckContext::is_c` is for, and it is
+/// the same distinction `docs/syntax.md` draws for the parser.
+#[test]
+fn a_c_style_cast_is_not_a_rule_in_c() {
+    let source = "void f(double n) {\n    int i = (int)n;\n    (void)i;\n}\n";
+
+    let cpp = codes_of_with(source, "-std=c++17");
+    assert!(
+        cpp.contains(&DiagnosticCode::CStyleCast),
+        "C++ has `static_cast`, so the cast should be named: {cpp:?}"
+    );
+
+    let c = codes_of_with(source, "-std=c11");
+    assert!(
+        !c.contains(&DiagnosticCode::CStyleCast),
+        "C has no other cast to recommend: {c:?}"
+    );
+
+    // …and an unconfigured project is not "C": with both families enabled the rule keeps firing, which is the conservative
+    // direction for a project nobody told us about.
+    let unconfigured = codes_of(source);
+    assert!(
+        unconfigured.contains(&DiagnosticCode::CStyleCast),
+        "`None` is not C: {unconfigured:?}"
+    );
+}
+
+/// Run the checks over one file **compiled with a given `-std=`**, which is what the language-sensitive rules read.
+fn codes_of_with(source: &str, standard: &str) -> Vec<DiagnosticCode> {
+    use cpp_code_analysis::{
+        CompilerConfig, MemoryFiles, OpenDocuments, Session, SessionFiles, WatchFilter,
+    };
+    let files = MemoryFiles::new().with_file("/p/a.cpp", source);
+    let providers = SessionFiles::new(OpenDocuments::new(), files);
+    let config = CompilerConfig {
+        extra_args: vec![standard.to_string()],
+        ..CompilerConfig::default()
+    };
+    let mut session = Session::with_config(
+        "/p",
+        providers,
+        WatchFilter::new("/p"),
+        config,
+    );
+    session.add_project_files([std::path::PathBuf::from("/p/a.cpp")]);
+    session.want_cooked_reading(std::path::Path::new("/p/a.cpp"));
+    session.index_everything();
+    session
+        .diagnostics(std::path::Path::new("/p/a.cpp"))
+        .map(|found| {
+            found
+                .checks
+                .iter()
+                .map(|finding| finding.code)
+                .chain(found.errors.iter().map(|error| error.code))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// **A template argument is not a cast** — the third false-positive class the census produced, after preprocessor
+/// conditions and parameter lists.
+///
+/// `template <class T = (Executor)>` writes a parenthesised name inside an angle-bracket list, which a scanner reads as a
+/// cast whose operand follows. The tell is the line: an unmatched `<` before the `(`.
+#[test]
+fn a_template_argument_is_not_a_cast() {
+    for quiet in [
+        "struct Executor { };\ntemplate <class T = (Executor)> struct Box { T value; };\n",
+        "template <class T, class U = (T)> struct Pair { T first; U second; };\n",
+    ] {
+        let found = codes_of(quiet);
+        assert!(
+            !found.contains(&DiagnosticCode::CStyleCast),
+            "{quiet}: {found:?}"
+        );
+    }
+
+    // …and a cast on a line with no `<` is still reported.
+    let still = codes_of("void f(double n) { int i = (int)n; (void)i; }\n");
+    assert!(
+        still.contains(&DiagnosticCode::CStyleCast),
+        "a cast is still a cast: {still:?}"
+    );
+}

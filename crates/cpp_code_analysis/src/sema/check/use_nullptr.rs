@@ -27,7 +27,7 @@ impl Check for UseNullptr {
 
     fn check(context: &mut CheckContext<'_>) {
         for expression in context.own::<cpp_parser::CppExpr>().collect::<Vec<_>>() {
-            if expression.syntax().text().to_string().trim() != "NULL" {
+            if context.node_text(expression.syntax()) != "NULL" {
                 continue;
             }
             let range = expression.syntax().text_range();

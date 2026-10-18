@@ -3272,6 +3272,9 @@ impl<F: FileProvider + Clone> Session<F> {
             view.tree.get_errors(),
             view,
             &config,
+            // **The language this file is compiled as**, which is what makes a C-only rule quiet in C: the compile flags say
+            // `-std=c11`, and `cstyle_cast` is then not a rule about this file at all.
+            self.config_for(&key).language_for(&key),
         ))
     }
 
@@ -4575,6 +4578,43 @@ impl<F: FileProvider + Clone> Session<F> {
     }
 
     /// Which `#define` or `#undef` settles the macro name at `offset`.
+    /// **The macro a use names, asked in the file's own coordinates.**
+    ///
+    /// `macro_definition` takes the **rendering's** offset, and a macro has no footprint there: the cook expanded every use,
+    /// so the tree at `int n = MAX;` says `((a) > (b) ? (a) : (b))` and the reader's `MAX` is not in it. The writer's text still
+    /// has it — `written_text()` — and the macro's definition ranges are file offsets, so this is the query the two agree on.
+    ///
+    /// Measured: at a use of a file's own `#define MAX(a, b)`, `macro_definition` answered `NotDeclaredHere("MAX")` because the
+    /// rendering offset it was given (`"MAX"`) named a position the *file* does not have.
+    pub fn macro_at_a_file_offset(
+        &self,
+        view: &FileView,
+        offset: crate::file::coordinates::FileOffset,
+    ) -> Known<ProjectMacro> {
+        let Some(written) = view.written_text() else {
+            return Known::Unknown(UnknownReason::NotDeclaredHere(Box::from("no written text")));
+        };
+        let at = offset.get();
+        // The word under the cursor, in the file's own bytes — the same walk `hover`'s `name_at_the_cursor` makes for a fix.
+        let is_a_word = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'_';
+        let bytes = written.as_bytes();
+        let mut start = at.min(bytes.len());
+        while start > 0 && is_a_word(bytes[start - 1]) {
+            start -= 1;
+        }
+        let mut end = at.min(bytes.len());
+        while end < bytes.len() && is_a_word(bytes[end]) {
+            end += 1;
+        }
+        let name = &written[start..end];
+        if name.is_empty() {
+            return Known::Unknown(UnknownReason::UnparsableName);
+        }
+        self.store
+            .index()
+            .macro_definition(name, &view.path, at)
+    }
+
     pub fn macro_definition(&self, view: &FileView, offset: ReadingOffset) -> Known<ProjectMacro> {
         macro_across_files(self.store.index(), &view.root, &view.path, offset.get())
     }

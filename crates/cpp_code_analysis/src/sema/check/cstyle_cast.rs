@@ -24,6 +24,13 @@ impl Check for CStyleCast {
     const CODES: &'static [DiagnosticCode] = &[DiagnosticCode::CStyleCast];
 
     fn check(context: &mut CheckContext<'_>) {
+        // **Not a rule in C.** A C program has no `static_cast`, no `const_cast` and no `reinterpret_cast` — the C-style cast
+        // is the only cast the language has, and telling a reader to name the one they meant would be telling them to write
+        // C++ in a C file. `is_c` is `None`-tolerant: a configuration that enables both families is not "C", so an
+        // unconfigured project keeps the findings it had.
+        if context.is_c() {
+            return;
+        }
         // **A scan of the text**, because the parenthesis the tree holds for a cast also holds the operand and its node kind
         // does not say "cast". The question is a spelling's shape: `(` a type `)` then something that is not an operator.
         // **The file, not the reading.** A cast written in a `#define` is written *there*, and that is where a reader
@@ -53,7 +60,15 @@ impl Check for CStyleCast {
             if source[line_start..open].trim_start().starts_with('#') {
                 continue;
             }
-            // **A parameter list is not a cast.** `void (const any_io_executor& e)` inside a declaration — the shape the
+            // **A template argument is not a cast.** The census's remaining examples — `(nullptr_t)`, `(Executor)`,
+            // `(OtherAnyExecutor)` — were all in a template argument list, where a parenthesised name is an argument and not
+            // something being converted. The tell is the line: an unmatched `<` before the `(` means this is inside an
+            // angle-bracket list, and `f((int)x)` on a line with no `<` is still a cast.
+            let line_start = source[..open].rfind('\n').map(|newline| newline + 1).unwrap_or(0);
+            let line = &source[line_start..open];
+            if line.matches('<').count() > line.matches('>').count() {
+                continue;
+            }            // **A parameter list is not a cast.** `void (const any_io_executor& e)` inside a declaration — the shape the
             // census reported 376 times — is a *type* with a *name* after it, which is what a parameter is and what a cast's
             // parenthesised type never is. The last word being an identifier that is not a type keyword is the evidence.
             if is_a_parameter_list(inner) {

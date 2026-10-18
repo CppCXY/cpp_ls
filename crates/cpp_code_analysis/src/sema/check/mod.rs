@@ -220,6 +220,12 @@ pub struct CheckContext<'a> {
     pub view: &'a FileView,
     /// Which codes may be reported — see [`CheckConfig`].
     pub config: &'a CheckConfig,
+    /// **The language this file is compiled as** — `-std=c++17`, `-std=gnu89`, or "not told".
+    ///
+    /// A rule is not always a rule in both languages: a C program has no `static_cast`, so a C-style cast is the only cast
+    /// there is and [the rule that flags one](super::cstyle_cast) must not fire. `family()` answers `None` when the
+    /// configuration enables both families, which is the honest answer for a parse nobody configured.
+    pub language: cpp_parser::features::LanguageConfig,
     findings: Vec<Finding>,
 }
 
@@ -234,6 +240,7 @@ impl<'a> CheckContext<'a> {
         errors: &'a [cpp_parser::CppParseError],
         view: &'a FileView,
         config: &'a CheckConfig,
+        language: cpp_parser::features::LanguageConfig,
     ) -> Self {
         CheckContext {
             path,
@@ -244,6 +251,7 @@ impl<'a> CheckContext<'a> {
             errors,
             config,
             view,
+            language,
             findings: Vec::new(),
         }
     }
@@ -284,6 +292,29 @@ impl<'a> CheckContext<'a> {
         message: impl Into<String>,
     ) {
         self.push(code, range, None, name, message);
+    }
+
+    /// **A node's text, as a slice of the rendering** — no `SyntaxText`, no `String`, no `trim`.
+    ///
+    /// `node.text()` builds a `SyntaxText` and `.to_string()` copies it; a check that asks for the text of hundreds of nodes
+    /// per file pays that copy for each. The source the node's range came from is right here, so the answer is a slice.
+    ///
+    /// **No `trim`.** A *token* never carries surrounding whitespace, and a node from this tree carries only what the cook
+    /// put between its tokens — which is the text a reader wrote, not padding a caller has to strip. The first version of
+    /// these checks trimmed anyway, which was a habit from reading file text rather than a need.
+    pub fn node_text(&self, node: &cpp_parser::CppSyntaxNode) -> &'a str {
+        let range = cpp_parser::source_range(node.text_range());
+        self.source
+            .get(range.start_offset..range.end_offset())
+            .unwrap_or_default()
+    }
+
+    /// **Is this file compiled as C?** — the question a rule that only makes sense for C++ asks before it fires.
+    ///
+    /// `None` (a configuration that enables both families) answers `false`: a rule is quiet when it *knows* the language is
+    /// C, not when it cannot tell, so an unconfigured project keeps the findings it had.
+    pub fn is_c(&self) -> bool {
+        self.language.family() == Some(cpp_parser::features::Family::C)
     }
 
     /// **The comment and literal ranges of the file as written**, for the rules that read the *text* rather than the tree.

@@ -30,8 +30,7 @@ impl Check for SimplifyBooleanExpr {
             let Some(condition) = statement.get_condition() else {
                 continue;
             };
-            let written = condition.syntax().text().to_string();
-            let written = written.trim();
+            let written = context.node_text(condition.syntax());
             let against_a_literal = ["== true", "== false", "true ==", "false =="]
                 .iter()
                 .any(|spelling| written.contains(spelling));

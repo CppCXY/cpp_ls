@@ -157,7 +157,14 @@ pub fn hover(
         return Some(markdown(member_markdown(session, view, &access)));
     }
 
-    // The macro question first: it is about the text, and it is answered without the scope tree.
+    // **The macro question, asked in the file's coordinates.** A macro use has no footprint in the rendering — the cook
+    // expanded it — so the query takes the file offset the client gave us. Measured: a hover on a file's own
+    // `#define MAX(a, b)` answered nothing, because the reading offset named a position the file does not have.
+    if let Known::Yes(found) = session.macro_at_a_file_offset(view, in_the_file) {
+        return Some(markdown(macro_markdown(session, view, &found)));
+    }
+    // …and the rendering's coordinates for a macro written where the cook kept it (a `#define`'s own body, a directive
+    // argument), which is what the old path answered.
     if let Known::Yes(found) = session.macro_definition(view, offset) {
         return Some(markdown(macro_markdown(session, view, &found)));
     }

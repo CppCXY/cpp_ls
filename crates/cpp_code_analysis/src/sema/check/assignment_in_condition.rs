@@ -75,7 +75,14 @@ impl Check for AssignmentInCondition {
             if !is_an_assignment(&condition) {
                 continue;
             }
+            // **An assignment *compared against something* is the idiom**, not the mistake. `if ((op = queue.front()) != 0)`
+            // is written deliberately: the assignment is parenthesised, and its result is compared — which is exactly the
+            // shape the extra-parentheses rule exists for. The census found one such finding in 1191 files, in boost's
+            // `win_object_handle_service.ipp`, and it was this.
             let text = condition.text().to_string();
+            if has_a_top_level_comparison(&text) {
+                continue;
+            }
             let text = text.trim();
             let text = text.trim_start_matches('(').trim_end_matches(')').trim();
 
@@ -169,4 +176,38 @@ fn is_an_assignment(condition: &cpp_parser::CppSyntaxNode) -> bool {
                     | cpp_parser::CppTokenKind::Comma
             )
         })
+}
+
+/// **Is the assignment's result compared against something?** — `(op = q.front()) != 0` is, `x = a < b` is not.
+///
+/// Depth alone does not tell them apart: with the condition's outer parentheses stripped, `x = a < b` has its `<` at depth
+/// zero too. What distinguishes the idiom is that the assignment is **enclosed in its own parentheses** before the
+/// comparison — a `)` closes a group at depth zero, and only then does the comparison belong to the condition rather than to
+/// the assignment's right-hand side.
+fn has_a_top_level_comparison(written: &str) -> bool {
+    let inner = written
+        .trim()
+        .strip_prefix('(')
+        .and_then(|rest| rest.strip_suffix(')'))
+        .unwrap_or(written)
+        .trim();
+    let characters: Vec<char> = inner.chars().collect();
+    let mut depth = 0i32;
+    let mut closed_a_group = false;
+    for (at, character) in characters.iter().enumerate() {
+        match character {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    closed_a_group = true;
+                }
+            }
+            // A comparison that follows a completed group belongs to the condition.
+            '<' | '>' | '!' if depth == 0 && closed_a_group => return true,
+            '=' if depth == 0 && closed_a_group && characters.get(at + 1) == Some(&'=') => return true,
+            _ => {}
+        }
+    }
+    false
 }

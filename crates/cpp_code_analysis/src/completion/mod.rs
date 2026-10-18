@@ -132,7 +132,13 @@ impl CompletionItem {
         CompletionItem {
             label: fact.name.clone(),
             kind: kind_of(fact.kind),
-            insert: fact.name.clone(),
+            insert: match (&fact.kind, &fact.parameter_list) {
+            // **A function-like macro is inserted with its parenthesis** — the only hint a completion item carries about how a
+            // name is used: `MAX(` says it takes arguments, and `MAX` alone does not. Measured before this: the item for
+            // `#define MAX(a, b)` read `insert: "MAX"`, `kind: Macro`, and nothing else.
+            (crate::DeclKind::MacroLike, Some(_)) => format!("{}(", fact.name),
+            _ => fact.name.clone(),
+        },
             snippet: false,
             detail: detail_of(fact),
             identity,

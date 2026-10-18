@@ -1516,6 +1516,59 @@ pub fn name_completions_at(
         }
     };
 
+    // **The file's own macros**, which the index half cannot see. A `#define` is a preprocessing fact of *this* file, not a
+    // declaration in any scope — measured at four cursors in one file: `MA` offered only `main`, `MAX` offered nothing, and
+    // `WIDTH` offered 89 names without itself. A macro is offered with `MacroLike`, which the ranking already places after
+    // variables and before keywords, and it is a `ThisFile` provenance because that is where a `#define` lives.
+    let mut names = names;
+    if let Some(summary) = index.summary(path) {
+        // **The file's own macros and those of the headers it includes directly.** A `#define` is a preprocessing fact of one
+        // file, so the index half of this query cannot see either — and a header's macros are the common case: a project's
+        // `config.h` defines the names its sources use. The direct includes are the boundary: a macro two headers away is
+        // reachable only through the macro environment, which is the hover's query, not this one's.
+        let mut offered_macros: Vec<(&str, bool)> = Vec::new();
+        for fact in &summary.macros {
+            offered_macros.push((fact.name.as_str(), fact.function_like));
+        }
+        for include in &summary.includes {
+            let Some(resolved) = &include.resolved else {
+                continue;
+            };
+            let Some(included) = index.summary(resolved) else {
+                continue;
+            };
+            for fact in &included.macros {
+                offered_macros.push((fact.name.as_str(), fact.function_like));
+            }
+        }
+        offered_macros.sort_by(|left, right| left.0.cmp(right.0));
+        offered_macros.dedup_by(|left, right| left.0 == right.0);
+
+        for (name, function_like) in offered_macros {
+            if !position.written.is_empty() && !name.starts_with(&position.written) {
+                continue;
+            }
+            // A fact cloned from one of the file's own declarations rather than built from nothing: `DeclFact` has no
+            // `Default` (its `DeclKind`, `SourceRange` and `FactGuard` do not), and adding one for this would put a
+            // meaningless declaration shape in the type. The name and the kind are the only fields that matter here.
+            let Some(template) = summary.declarations.first() else {
+                continue;
+            };
+            let mut declaration = template.clone();
+            declaration.name = name.to_string();
+            declaration.kind = crate::DeclKind::MacroLike;
+            // **A function-like macro is offered with its parenthesis**, which is the only hint a completion item can carry
+            // about how it is used: `MAX(` tells the reader the name takes arguments, and `MAX` alone does not.
+            declaration.parameter_list = function_like.then(|| "(".to_string());
+            names.push(OfferedName {
+                file: path.to_path_buf(),
+                fact: declaration,
+                depth: 0,
+                from: NameProvenance::ThisFile,
+            });
+        }
+    }
+
     Known::Yes(NameCompletions {
         scope: position.scope,
         names,
