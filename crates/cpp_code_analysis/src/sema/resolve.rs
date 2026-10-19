@@ -176,6 +176,43 @@ fn header_name_token_at(root: &CppSyntaxNode, offset: usize) -> Option<cpp_parse
         })
 }
 
+/// **The span of the path inside one `#include`** — `vector` for `#include <vector>`, not the directive.
+///
+/// The question a **document link** asks, which [`header_name_at`] cannot answer: that one is about a cursor and
+/// takes an offset, and a link is built for every include in a file at once, from the summary's facts. A fact
+/// records the **directive's** range (`IncludeFact::range`), because that is what a jump to a header highlights —
+/// the line the reader wrote — and a link is the other shape: a clickable span, which should be the file's name
+/// and nothing else. Measured on a real file: every link covered its whole line, so `#include <iostream>  // 包含…
+/// was underlined through the comment.
+///
+/// The answer is the name **without its delimiters**, for the reason [`header_name_at`] gives: the delimiters are
+/// the *form* rather than part of the name. `None` when the directive's range holds no header-name token — a macro
+/// include (`#include HEADER`) is a name rather than a path, and a directive the parser could not read is not a
+/// path either. A caller that gets `None` still has the directive's own range to fall back to, and that is the
+/// honest answer for the one shape where nothing better exists.
+pub fn header_name_in(root: &CppSyntaxNode, directive: SourceRange) -> Option<SourceRange> {
+    let token = root
+        .descendants_with_tokens()
+        .filter_map(|element| element.into_token())
+        .find(|token| {
+            cpp_parser::CppTokenKind::from(token.kind()) == cpp_parser::CppTokenKind::HeaderName
+                && directive.start_offset <= usize::from(token.text_range().start())
+                && usize::from(token.text_range().end()) <= directive.end_offset()
+        })?;
+
+    let range = cpp_parser::source_range(token.text_range());
+    let text = token.text();
+
+    // The delimiters are one byte each when they are there, and a token without them (`#include vector`, which is a
+    // macro include and should not have produced a `HeaderName`) keeps its own bounds.
+    let inside = text.len().saturating_sub(2);
+    if inside == 0 || !(text.starts_with('<') || text.starts_with('"')) {
+        return Some(range);
+    }
+
+    Some(SourceRange::new(range.start_offset + 1, inside))
+}
+
 /// The `.` or `->` token **inside `position`**, wherever in it the token's own range begins.
 ///
 /// # The two ways a client's caret lands on an operator
