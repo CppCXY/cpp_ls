@@ -161,6 +161,17 @@ fn main() {
     // **What a scope-level query says about the three namespaces this project is about.** `std` comes from the
     // system headers, `math` and `shapes` from the module interface units — and a completion after `X::` is a
     // question about exactly this list.
+    println!(
+        "   visible_files: {} file(s) are in view of this one | declarations_in(\"std\") = {} | \
+         declarations_in_where(\"std\") = {} | scope_postings = {}",
+        session.index().visible_files(&view.path).len(),
+        session.index().declarations_in("std", &view.path).len(),
+        session
+            .index()
+            .declarations_in_where("std", &view.path, |_| true)
+            .len(),
+        session.index().scope_postings("std"),
+    );
     for scope in ["std", "math", "shapes"] {
         let listed = session.members_of(&view, scope);
         println!(
@@ -232,6 +243,12 @@ fn main() {
             println!("   `{needle}`: not in this file");
             continue;
         };
+        // **What the completion thinks the cursor is**, which is the question every branch below turns on: a
+        // `Qualified` context names a scope and a prefix, and the prefix is what the list is filtered by.
+        println!(
+            "   context at {at}: {:?}",
+            cpp_code_analysis::completion::context_at(&view.root, at)
+        );
         let step = Instant::now();
         let offered = session.completions(&view, FileOffset::new(at));
         let took = step.elapsed();

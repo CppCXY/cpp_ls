@@ -168,6 +168,75 @@ fn push_keywords(builder: &mut Builder<'_>, view: Option<&FileView>) {
     }
 }
 
+/// **Pass 2b — a module declaration's own words**, which are neither the lexer's keywords nor names the analysis
+/// classifies.
+///
+/// `module` and `import` are **context-sensitive keywords**: `int import = 1;` is a declaration of a variable called
+/// `import`, so the lexer leaves them as identifiers and the grammar matches them by text. Colouring them by spelling
+/// would underline that variable, which is why they are not in [`is_contextual_keyword`]. The **tree** knows the
+/// difference, and this pass asks it: a token inside a `ModuleDecl` or an `ImportDecl` is that declaration's word.
+///
+/// ```text
+/// module / import / export          keyword    the reader's reading of them
+/// the module name after them        namespace  `math` in `import math;` names a scope, and a theme draws a
+///                                              qualified-name root as one — the same colour as `std`
+/// ```
+///
+/// Reported from an editor as "the module syntax has no colour at all": every token of `module;`, `export module
+/// math;` and `import math;` was left to the client's TextMate grammar, which does not know C++20 modules.
+fn push_module_declarations(builder: &mut Builder<'_>, view: Option<&FileView>) {
+    let Some(view) = view else {
+        return;
+    };
+
+    // The tokens **in the declaration**, which for a module directive is the whole line: `module`, the name, and
+    // the punctuation. Asked of the tree rather than of the text so that a variable called `import` in a function
+    // body is not caught — its parent is a declarator, not an `ImportDecl`.
+    for element in view.root.descendants_with_tokens() {
+        let Some(token) = element.into_token() else {
+            continue;
+        };
+        // **Anywhere inside the directive, not just under it.** A module name is a node of its own —
+    // `ImportDecl > ModuleName > Identifier` — so the test walks a few ancestors rather than one. A bound rather
+    // than a full walk because the answer is at most two levels up and a walk would make this pass proportional to
+    // the depth of every token in the file.
+    let mut node = token.parent();
+    let mut in_a_module_directive = false;
+    for _ in 0..3 {
+        let Some(current) = node else {
+            break;
+        };
+        if matches!(
+            cpp_parser::CppSyntaxKind::from(current.kind()),
+            cpp_parser::CppSyntaxKind::ModuleDecl | cpp_parser::CppSyntaxKind::ImportDecl
+        ) {
+            in_a_module_directive = true;
+            break;
+        }
+        node = current.parent();
+    }
+    if !in_a_module_directive {
+        continue;
+    }
+
+        let text = token.text().to_string();
+        let kind = match text.as_str() {
+            "module" | "import" | "export" => TypeKind::Keyword,
+            // The name. A dotted module name is one `ModuleName` node whose parts are identifiers, and every part is
+            // part of the name: `std.compat` is two segments of one module.
+            _ if token.kind() == cpp_parser::CppTokenKind::Identifier.into() => TypeKind::Namespace,
+            _ => continue,
+        };
+
+        builder.push_range(
+            cpp_parser::source_range(token.text_range()).start_offset,
+            cpp_parser::source_range(token.text_range()).end_offset(),
+            kind,
+            Modifier::none(),
+        );
+    }
+}
+
 /// The tokens, as the protocol's delta walk — see the module documentation for why nothing may be skipped or
 /// reordered here.
 ///
@@ -194,6 +263,7 @@ pub fn encode(
     );
     push_names(&mut builder, names);
     push_keywords(&mut builder, view);
+    push_module_declarations(&mut builder, view);
     push_doc_commands(&mut builder, view);
 
     if builder.unplaceable() > 0 {
@@ -1093,6 +1163,60 @@ constexpr bool is_assignable_v = __is_assignable(To, From);
             at_type.get(&prose),
             Some(&a_command),
             "a word of the description is not a command"
+        );
+    }
+
+    /// **A module declaration's words are drawn, and a variable called `import` is not.**
+    ///
+    /// `module` and `import` are context-sensitive keywords, so the lexer leaves them identifiers and
+    /// [`is_contextual_keyword`] deliberately does not colour them by spelling. The tree knows the difference: a
+    /// token inside a `ModuleDecl`/`ImportDecl` is that declaration's word, and everywhere else it is a name. Without
+    /// this pass a file of `module;` / `export module math;` / `import math;` had **no colour at all** on those
+    /// lines, because the client's TextMate grammar does not know C++20 modules and the analysis sent nothing.
+    #[test]
+    fn a_module_declaration_is_drawn_and_a_variable_called_import_is_not() {
+        let text = "export module math;\nimport math;\nint import = 1;\n";
+        let (session, path) = a_held_file(text);
+        let view = session.view_of_the_file(&path).expect("a view");
+        let file = session.files().held(&path).expect("the file is held");
+        let names = session.classified_names(&view);
+        let tokens = encode(file, Some(&view), &names, &None, false);
+        let at_offset = by_offset(text, &tokens);
+
+        let at = |needle: &str| {
+            let start = text.find(needle).expect("the fixture writes it");
+            at_offset.get(&start).copied()
+        };
+
+        assert_eq!(
+            at("export"),
+            Some(index_of(TypeKind::Keyword)),
+            "`export` in `export module math;`"
+        );
+        assert_eq!(
+            at("module"),
+            Some(index_of(TypeKind::Keyword)),
+            "the module keyword"
+        );
+        assert_eq!(
+            at("import"),
+            Some(index_of(TypeKind::Keyword)),
+            "and the import keyword"
+        );
+        assert_eq!(
+            at("math"),
+            Some(index_of(TypeKind::Namespace)),
+            "the module name is a scope name, which is how a theme draws a qualified-name root"
+        );
+
+        // **The same spelling, one line down, is a variable.** `int import = 1;` compiles, and a colour that
+        // matched on the word would underline it — the false positive this pass exists to avoid.
+        let variable = text.rfind("import").expect("the fixture writes it");
+        assert_eq!(
+            at_offset.get(&variable).copied(),
+            Some(index_of(TypeKind::Variable)),
+            "a variable called `import` is a name, not a keyword: {:?}",
+            at_offset
         );
     }
 

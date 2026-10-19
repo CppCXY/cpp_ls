@@ -342,6 +342,11 @@ pub fn completion_with(
             names(index, scopes, root, path, &position, offset, true)
         }
         CompletionContext::DirectiveName { written, range } => directives(&written, range),
+        // **A module name is answered by the session, not here**, and the empty set says so rather than guessing:
+        // the names are the *project's* (its `.cppm` files and the modules the index can name), which is a question
+        // about the index and the file list rather than about the tree — see `Session::module_completions`. This arm
+        // exists because the match must be total, and a caller that reaches it has no session to ask.
+        CompletionContext::ModuleName { .. } => CompletionSet::default(),
         CompletionContext::DirectiveArgument { written, range } => {
             let position = crate::sema::resolve::NamePosition {
                 scope: String::new(),

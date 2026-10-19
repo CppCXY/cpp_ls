@@ -1587,7 +1587,16 @@ pub fn name_completions_at(
     // `WIDTH` offered 89 names without itself. A macro is offered with `MacroLike`, which the ranking already places after
     // variables and before keywords, and it is a `ThisFile` provenance because that is where a `#define` lives.
     let mut names = names;
-    if let Some(summary) = index.summary(path) {
+    // **The macro tail belongs to an ordinary name position, not to a `::`-qualified one.** A macro is not a member
+    // of anything: `std::NOATOM` is legal only because the preprocessor replaced the name before the compiler saw it,
+    // and a reader who typed `std::` is asking about `std`. Appending the macros there was not merely noise — it
+    // **crowded the list out**: with an empty prefix the ranking falls through to the label, and every macro of the
+    // headers the file includes sorts before every lowercase name, so `ITEM_BUDGET` was spent on `NOATOM`, `_WINDOWS_`,
+    // `_GLIBCXX_…` and `string`, `format`, `expected` were cut. Measured on a real C++23 project: 200 items after
+    // `std::`, **none of them a name from `std`**, while `declarations_in("std")` held 2352 (`docs/status.md` §十三).
+    if position.scope.is_empty()
+        && let Some(summary) = index.summary(path)
+    {
         // **The file's own macros and those of the headers it includes directly.** A `#define` is a preprocessing fact of one
         // file, so the index half of this query cannot see either — and a header's macros are the common case: a project's
         // `config.h` defines the names its sources use. The direct includes are the boundary: a macro two headers away is
@@ -5942,6 +5951,20 @@ impl ProjectIndex {
     /// reads the file in itself: [`crate::Session::read_the_modules_a_file_imports`].
     pub fn interface_unit_of(&self, name: &str) -> Option<&str> {
         self.module_interfaces.get(name).map(String::as_str)
+    }
+
+    /// **Every module the index can point at a file for** — `(name, interface unit)`, in name order.
+    ///
+    /// Sorted rather than left in the map's order, because this is a completion list: two identical requests must
+    /// answer with the same order, and a [`std::collections::HashMap`] iteration order is not a promise.
+    pub fn interface_units(&self) -> Vec<(String, String)> {
+        let mut all: Vec<(String, String)> = self
+            .module_interfaces
+            .iter()
+            .map(|(name, unit)| (name.clone(), unit.clone()))
+            .collect();
+        all.sort();
+        all
     }
 
     /// Every summary, in insertion order.

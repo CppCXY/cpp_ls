@@ -582,6 +582,17 @@ pub struct Session<F: FileProvider = DiskFiles> {
     walks_by_root: std::sync::Mutex<std::collections::HashMap<String, u64>>,
 }
 
+/// **One `import` a file writes**, as a link or a jump can use it — see [`Session::module_imports_of`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModuleImport {
+    /// The module's name as written: `math`, `std.compat`.
+    pub name: String,
+    /// The **name's** own span in the file — what a document link covers, not the whole declaration.
+    pub range: cpp_parser::SourceRange,
+    /// The interface unit the name reaches, when the analysis can point at one.
+    pub resolved: Option<PathBuf>,
+}
+
 impl Session<DiskFiles> {
     /// Open a project the way a language server does: ask the machine what it compiles with.
     ///
@@ -4668,8 +4679,173 @@ impl<F: FileProvider + Clone> Session<F> {
             .macro_definition(name, &view.path, at)
     }
 
+    /// **Every module this project can name**, for a completion after `import`.
+    ///
+    /// Two sources, cheapest first, and neither parses anything:
+    ///
+    /// ```text
+    /// the index      `interface_unit_of` — exact, for a module whose interface unit has been read
+    /// the file list  the project's own `.cppm`/`.ixx`/… files, named by the convention the resolver proposes with —
+    ///                so a name offered here is a name `import` will resolve, even before the unit is read
+    /// ```
+    ///
+    /// A file named `math.cppm` is module `math`; a dotted one (`std.compat.ixx`) is `std.compat`. That is the
+    /// convention [`crate::ModuleScanner`] searches by, and taking it from the *files* rather than from a scan is
+    /// what keeps this cheap enough to answer on every keystroke.
+    pub fn module_names(&self) -> Vec<(String, PathBuf)> {
+        let mut found: Vec<(String, PathBuf)> = self
+            .store
+            .index()
+            .interface_units()
+            .into_iter()
+            .map(|(name, unit)| (name, PathBuf::from(unit)))
+            .collect();
+
+        // **Only the extensions that are a module unit by naming convention.** `INTERFACE_UNIT_EXTENSIONS` also
+        // holds `cpp`/`cc`/`cxx`, because a `.cpp` *may* declare a module — but a completion built from that list
+        // offers `main` for `main.cpp` and `math` three times for a project with `math.cpp` and `math.cppm`.
+        // Measured on the C++23 fixture: six items for two modules. A `.cpp` that really is an interface unit is
+        // found by the **index** once it is read, which is the exact source and the one above.
+        const A_MODULE_FILE: &[&str] = &["cppm", "ixx", "ccm", "cxxm"];
+        for path in &self.project {
+            let Some(extension) = path.extension().and_then(|extension| extension.to_str()) else {
+                continue;
+            };
+            if !A_MODULE_FILE
+                .iter()
+                .any(|known| known.eq_ignore_ascii_case(extension))
+            {
+                continue;
+            }
+            let Some(name) = path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .filter(|stem| !stem.is_empty())
+            else {
+                continue;
+            };
+            found.push((name.to_string(), path.clone()));
+        }
+
+        // **One row per name**, and the index's comes first: `sort_by` is stable, so a name the index knows keeps
+        // its exact unit and the file-list entry for the same name is dropped.
+        found.sort_by(|left, right| left.0.cmp(&right.0));
+        found.dedup_by(|later, earlier| later.0 == earlier.0);
+        found
+    }
+
+    /// **The module names a reader can type at this cursor** — the answer to a [`crate::completion::context::CompletionContext::ModuleName`]
+    /// position.
+    ///
+    /// A list of names, not of declarations: nothing declares a module name, so the items carry the name as their
+    /// label and the unit as their detail, and the client replaces the partial word the reader has typed.
+    fn module_completions(
+        &self,
+        written: &str,
+        range: cpp_parser::SourceRange,
+    ) -> crate::CompletionSet {
+        let mut items: Vec<crate::completion::CompletionItem> = Vec::new();
+
+        for (name, unit) in self.module_names() {
+            if !written.is_empty()
+                && !name
+                    .to_ascii_lowercase()
+                    .starts_with(&written.to_ascii_lowercase())
+            {
+                continue;
+            }
+            items.push(crate::completion::CompletionItem {
+                label: name.clone(),
+                insert: name.clone(),
+                snippet: false,
+                // A module name is a scope name, which is the kind a theme draws a qualified-name root with.
+                kind: crate::completion::ItemKind::Namespace,
+                detail: Some(format!("module {}", unit.display())),
+                identity: None,
+                filter: None,
+                fact: None,
+                replace: range,
+            });
+        }
+
+        crate::CompletionSet {
+            scope: String::new(),
+            prefix: written.to_string(),
+            replace: range,
+            truncated: false,
+            items,
+        }
+    }
+
     pub fn macro_definition(&self, view: &FileView, offset: ReadingOffset) -> Known<ProjectMacro> {
         macro_across_files(self.store.index(), &view.root, &view.path, offset.get())
+    }
+
+    /// **Every `import m;` this file writes, with the file each one reaches** — the module's answer to what
+    /// [`crate::IncludeFact`] is for `#include`.
+    ///
+    /// The range is the **module name** and not the declaration, for the same reason a document link covers
+    /// `vector` rather than `#include <vector>`: a link is a clickable span, and the name is the clickable thing.
+    ///
+    /// # Where the answer comes from, in order
+    ///
+    /// ```text
+    /// the index        `interface_unit_of(m)` — exact, and free, for a module whose unit has been read
+    /// the scanner      the naming convention beside this file and along the include paths — which is how the
+    ///                  FIRST request in a module file learns where the module lives, before any of it is indexed
+    /// ```
+    ///
+    /// `None` for a module neither can name, which is the honest answer: the link leads nowhere, and an underline
+    /// that leads nowhere is worse than none. A **partition** (`import :part;`) and a **header unit**
+    /// (`import <vector>;`) are not module names and are skipped here — the header unit is a header, and the
+    /// partition belongs to the file's own module.
+    pub fn module_imports_of(&self, view: &FileView) -> Vec<ModuleImport> {
+        let mut imports: Vec<ModuleImport> = Vec::new();
+        let directory = crate::paths::parent_normalized(&view.path, self.files.is_case_insensitive());
+        let mut interner = PathInterner::new(self.files.is_case_insensitive());
+        let mut scanner: Option<ModuleScanner<'_, OverlayFiles<OpenDocuments, F>>> = None;
+
+        for node in view.root.descendants() {
+            if cpp_parser::CppSyntaxKind::from(node.kind()) != cpp_parser::CppSyntaxKind::ImportDecl {
+                continue;
+            }
+            let Some(name_node) = node.descendants().find(|inner| {
+                cpp_parser::CppSyntaxKind::from(inner.kind())
+                    == cpp_parser::CppSyntaxKind::ModuleName
+            }) else {
+                continue;
+            };
+
+            let name = name_node.text().to_string().trim().to_string();
+            if name.is_empty() {
+                continue;
+            }
+            let range = cpp_parser::source_range(name_node.text_range());
+
+            let resolved = match self.store.index().interface_unit_of(&name) {
+                Some(path) => Some(PathBuf::from(path)),
+                None => {
+                    let scanner = scanner
+                        .get_or_insert_with(|| ModuleScanner::new(&self.files, &self.config));
+                    match scanner.resolve_module(&name, &directory, &mut interner) {
+                        ImportOutcome::Resolved(unit) => scanner
+                            .units()
+                            .iter()
+                            .find(|entry| entry.file == unit)
+                            .map(|entry| entry.path.clone()),
+                        _ => None,
+                    }
+                }
+            };
+
+            imports.push(ModuleImport {
+                name,
+                range,
+                resolved,
+            });
+        }
+
+        imports
     }
 
     /// **Where the `#include` under the cursor points** — the fourth answer a jump can give.
@@ -4845,6 +5021,20 @@ impl<F: FileProvider + Clone> Session<F> {
         // **`offset` here is still the parameter**: one statement lower it is the *reading''s*, and for `"#inc\nint
         // x;\n"` the cursor at file offset 4 maps into the rendering at 0 - the directive is gone - so the written
         // text was asked at 0, before the `#`, and the list came from the vocabulary''s `include` *snippet*.
+        // **A module name is the file's own question, asked first.** `import ` names a file, so the answer needs the
+        // *project* rather than the reading — and unlike a directive, the context is the same in both readings
+        // (`import math;` survives the preprocess untouched), so the file's text is where it is read from. Asked
+        // before the `written_text` branch below because a view of the file's own text has no `written_text` at all,
+        // and that branch is what a *rendering* is answered through.
+        {
+            let source: &str = view.written_text().unwrap_or(&view.source);
+            if let Some((written, range)) =
+                crate::completion::context::module_name_from_the_text(source, offset.get())
+            {
+                return self.module_completions(&written, range);
+            }
+        }
+
         if let Some(written) = view.written_text() {
             if crate::file::view::in_prose(written, offset.get()) {
                 return crate::CompletionSet::default();

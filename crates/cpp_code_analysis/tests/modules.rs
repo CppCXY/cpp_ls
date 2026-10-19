@@ -8,7 +8,7 @@
 
 use cpp_code_analysis::{
     CompilerConfig, FileProvider, ImportEdge, ImportOutcome, ImportTarget, MAX_IMPORT_DEPTH,
-    MemoryFiles, ModuleGraph, ModuleUnit, PathInterner, scan_imports,
+    MemoryFiles, ModuleGraph, ModuleUnit, PathInterner, Session, scan_imports,
 };
 use cpp_parser::{CppParser, ParserConfig};
 use std::path::Path;
@@ -1191,6 +1191,74 @@ fn a_module_whose_interface_unit_is_outside_the_project_is_read_in() {
 
     let _ = DiskFiles;
 }
+
+/// **The module names are offered after `import`** — the completion the keyword had none of.
+///
+/// `import math;` names a file, and a name that is not a declaration is answered by no query the completion had: the
+/// scope walk sees nothing, the index by name sees nothing (a module name is not a `DeclFact`), so the list after
+/// `import ` was the names in scope — the reader's locals and every macro of every header — and the module's own
+/// name had to be typed from memory.
+///
+/// Two sources, and neither parses: the index (`interface_unit_of`, exact) and the project's own `.cppm`/`.ixx`
+/// files, which are named by the convention the resolver searches with. A `.cpp` is **not** one of them even though
+/// it may declare a module: measured on `src/`, taking every interface-unit extension offered `main` for
+/// `main.cpp` and `math` three times for a project with `math.cpp` and `math.cppm`.
+#[test]
+fn a_module_name_is_offered_after_import() {
+    use cpp_code_analysis::file::coordinates::FileOffset;
+    use cpp_code_analysis::{OpenDocuments, SessionFiles, WatchFilter};
+
+    let text = "import \nimport sh\nint x = 0;\n";
+    let files = MemoryFiles::new()
+        .with_file("src/main.cpp", text)
+        .with_file("src/math.cppm", "export module math;\n")
+        .with_file("src/shapes.cppm", "export module shapes;\n")
+        .with_file("src/math.cpp", "module math;\n");
+    let providers = SessionFiles::new(OpenDocuments::new(), files);
+    let mut session =
+        Session::with_config(".", providers, WatchFilter::new("."), CompilerConfig::new());
+    session.add_project_files([
+        std::path::PathBuf::from("src/main.cpp"),
+        std::path::PathBuf::from("src/math.cppm"),
+        std::path::PathBuf::from("src/shapes.cppm"),
+        std::path::PathBuf::from("src/math.cpp"),
+    ]);
+    session.index_everything();
+
+    let view = session
+        .view_of_the_file("src/main.cpp")
+        .expect("the file is held");
+    let cursor = text.find("import ").expect("the fixture writes it") + "import ".len();
+
+    let offered = session.completions(&view, FileOffset::new(cursor));
+    let labels: Vec<&str> = offered.items.iter().map(|item| item.label.as_str()).collect();
+    assert!(
+        labels.contains(&"math") && labels.contains(&"shapes"),
+        "the two modules this project declares: {labels:?}"
+    );
+    assert!(
+        !labels.contains(&"main"),
+        "`main.cpp` is a source, not a module unit: {labels:?}"
+    );
+    assert_eq!(
+        labels.iter().filter(|label| **label == "math").count(),
+        1,
+        "one row per name, however many files mention it: {labels:?}"
+    );
+
+    // **The partial word is a prefix, not a new question**: `import sh` narrows to `shapes`, and the range a client
+    // replaces is the word the reader typed.
+    let partial = text.find("import sh").expect("…") + "import sh".len();
+    let narrowed = session.completions(&view, FileOffset::new(partial));
+    let labels: Vec<&str> = narrowed.items.iter().map(|item| item.label.as_str()).collect();
+    assert_eq!(labels, ["shapes"], "the prefix filters the list");
+    assert_eq!(
+        narrowed.replace,
+        cpp_parser::SourceRange::new(partial - 2, 2),
+        "and the client replaces the typed word"
+    );
+}
+
 
 /// **A module beside the file that imports it** — the ordinary project layout, and the one the request path missed.
 ///

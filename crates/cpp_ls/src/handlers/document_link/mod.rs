@@ -60,15 +60,22 @@ pub async fn on_document_link(
         let held = session.files().held(&view.path)?;
         let summary = session.index().summary(&view.path)?;
 
-        Some(
-            summary
-                .includes
-                .iter()
-                .filter_map(|include| {
-                    document_link_of(held, include, header_name_in(&view.root, include.range))
-                })
-                .collect(),
-        )
+        let headers = summary
+            .includes
+            .iter()
+            .filter_map(|include| {
+                document_link_of(held, include, header_name_in(&view.root, include.range))
+            });
+
+        // **And the modules it imports.** `import math;` names a file exactly as `#include "math.cppm"` would, and
+        // the analysis already knows which one — through the index once the interface unit has been read, and
+        // through the naming convention before that. The link covers the **module name**, not the declaration.
+        let modules = session
+            .module_imports_of(&view)
+            .into_iter()
+            .filter_map(move |import| module_link_of(held, &import));
+
+        Some(headers.chain(modules).collect())
     })
     .await
 }
@@ -96,6 +103,27 @@ pub fn document_link_of(
         range: lsp_types::Range { start, end },
         target: path_to_uri(resolved),
         tooltip: Some(include.spelling.clone()),
+        data: None,
+    })
+}
+
+/// **One `import m;`, as the protocol's link** — the module's counterpart of [`document_link_of`].
+///
+/// A module name is a reference to a file exactly as a header name is, and the analysis has already resolved it
+/// ([`cpp_code_analysis::Session::module_imports_of`]). Two decisions, the same two: the span is the **name** the
+/// reader wrote, and an import that reached no file gets no link.
+pub fn module_link_of(
+    file: &cpp_code_analysis::VfsFile,
+    import: &cpp_code_analysis::ModuleImport,
+) -> Option<DocumentLink> {
+    let resolved = import.resolved.as_ref()?;
+    let start = position_in_file(file, import.range.start_offset)?;
+    let end = position_in_file(file, import.range.end_offset())?;
+
+    Some(DocumentLink {
+        range: lsp_types::Range { start, end },
+        target: path_to_uri(resolved),
+        tooltip: Some(format!("import {}", import.name)),
         data: None,
     })
 }
@@ -223,6 +251,59 @@ mod tests {
             )
             .is_none(),
             "an include that did not resolve leads nowhere and is not a link"
+        );
+    }
+
+    /// **An `import` is a link to the file that declares the module.**
+    ///
+    /// A module name is a reference to a file exactly as a header name is, and it had none: `import math;` in an
+    /// editor was plain text while `#include "math.cppm"` beside it was clickable. The span is the **module name**,
+    /// for the same reason the include's is the path — a link is a clickable region, and the rest of the line is the
+    /// reader's syntax.
+    #[test]
+    fn an_import_becomes_a_link_that_covers_the_module_name() {
+        let text = "import math;\nint x = 0;\n";
+        let files = MemoryFiles::new()
+            .with_file("/p/main.cpp", text)
+            .with_file(
+                "/p/math.cppm",
+                "export module math;\nexport int add(int, int);\n",
+            );
+        let providers = SessionFiles::new(OpenDocuments::new(), files);
+        let mut session = Session::with_config(
+            "/p",
+            providers,
+            WatchFilter::new("/p"),
+            CompilerConfig::default(),
+        );
+        session.add_project_files([PathBuf::from("/p/main.cpp")]);
+        session.index_everything();
+
+        let view = session
+            .view_of_the_file("/p/main.cpp")
+            .expect("the file's own reading is held");
+        let file = session.files().held("/p/main.cpp").expect("the file is held");
+
+        let imports = session.module_imports_of(&view);
+        assert_eq!(
+            imports.len(),
+            1,
+            "the file imports one module: {imports:?}"
+        );
+        assert_eq!(imports[0].name, "math");
+
+        let link = module_link_of(file, &imports[0]).expect("a resolved import is a link");
+        assert_eq!(link.range.start, lsp_types::Position::new(0, 7));
+        assert_eq!(
+            link.range.end,
+            lsp_types::Position::new(0, 11),
+            "the link is `math`, not the declaration"
+        );
+        assert_eq!(link.tooltip.as_deref(), Some("import math"));
+        let target = link.target.as_ref().expect("the target is the unit");
+        assert!(
+            target.path().ends_with("math.cppm"),
+            "and it points at the interface unit: {target:?}"
         );
     }
 

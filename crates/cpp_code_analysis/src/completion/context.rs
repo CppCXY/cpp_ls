@@ -64,6 +64,12 @@ pub enum CompletionContext {
     /// A macro name in a `#define`/`#ifdef`/`#ifndef`/`#undef` line, or any other directive position where a name
     /// is the answer.
     DirectiveArgument { written: String, range: SourceRange },
+    /// **After `import`, or after `module`** — where the answer is the project's module names.
+    ///
+    /// `import math;` names a file, and the name is not a declaration in any scope: the scope walk answers nothing,
+    /// the index by name answers nothing (a module name is not a `DeclFact`), and a reader had to type the whole
+    /// name from memory. `written` is the part already typed (`ma`), and `range` is what a client replaces.
+    ModuleName { written: String, range: SourceRange },
     /// Prose, or a position where nothing can be written.
     Nothing,
 }
@@ -84,6 +90,13 @@ pub fn context_at(root: &CppSyntaxNode, offset: usize) -> CompletionContext {
         return directive;
     }
 
+    // **A module name comes before the name question**, because it is a name position in this grammar too:
+    // `import math;` parses as an `IdentifierExpr` holding `math`, and the name question would answer "every name
+    // in scope" for a word that names a file.
+    if let Some((written, range)) = module_name_from_the_text(&root.text().to_string(), offset) {
+        return CompletionContext::ModuleName { written, range };
+    }
+
     // The member question before the name question, because a member access **is** a name node in this grammar —
     // `w.size` is an `IndexExpr` holding a `NameExpr` — and a reader that asked the name question first would
     // answer "every name in scope" after a `.`.
@@ -100,6 +113,56 @@ pub fn context_at(root: &CppSyntaxNode, offset: usize) -> CompletionContext {
         Some(position) => CompletionContext::Qualified(position),
         None => CompletionContext::Nothing,
     }
+}
+
+/// **The module name being typed at `offset`**, or `None` — read from the text on the cursor's own line.
+///
+/// The text rather than the tree, for the reason `w.` is read from the text: `import ma` is a file being typed at,
+/// and what the recovery made of it is not something a completion should depend on. The rule is the language's own
+/// spelling: the word before the one being typed is `import` or `module` (so `export module ma` counts too), and the
+/// word being typed holds no `<` or `"` — those are header units (`import <vector>;`), whose completion is the
+/// include search's question and not this one.
+///
+/// `None` for every other position, which is nearly all of them: `int import = 1;` has `int` before the word, and a
+/// cursor right after that `import` has nothing before it at all.
+pub fn module_name_from_the_text(
+    text: &str,
+    offset: usize,
+) -> Option<(String, SourceRange)> {
+    let before = text.get(..offset.min(text.len()))?;
+    let line_start = before.rfind('\n').map_or(0, |at| at + 1);
+    let line = &before[line_start..];
+
+    // **The word being typed, and what comes before it.** A line that ends in whitespace has no word yet —
+    // `import |` is the common case and the one that matters most — and only the keyword is before the cursor.
+    // Reading it as "the last word is `import`" is what the first version did, and `import ` then looked like a
+    // cursor *inside* the keyword, so the module list never appeared.
+    let is_a_name_character =
+        |character: char| character.is_alphanumeric() || character == '_' || character == '.';
+    let (written, head) = if line.ends_with(char::is_whitespace) {
+        ("", line.trim_end())
+    } else {
+        let word_start = line
+            .rfind(|character: char| !is_a_name_character(character))
+            .map_or(0, |at| at + 1);
+        (&line[word_start..], line[..word_start].trim_end())
+    };
+
+    // A header unit is not a module name: `import <vector>;` is the include search's question.
+    if written.contains('<') || written.contains('"') {
+        return None;
+    }
+
+    let keyword = head
+        .rsplit(|character: char| !character.is_alphanumeric())
+        .next()
+        .unwrap_or_default();
+    if keyword != "import" && keyword != "module" {
+        return None;
+    }
+
+    let start = offset.checked_sub(written.len())?;
+    Some((written.to_string(), SourceRange::new(start, written.len())))
 }
 
 /// **The member access the text says is here, when the tree does not.**
