@@ -559,6 +559,7 @@ pub struct ProjectIndex {
     /// never come to point at a different file than it was made for.
     sequence: HashMap<String, u32>,
     next_sequence: u32,
+
     /// The inverted index — see [`crate::index::names`]. Derived from `summaries` and `cooked`, and updated in the
     /// same call that changes either; nothing else writes it.
     names: NameIndex,
@@ -7285,6 +7286,7 @@ impl ProjectIndex {
     /// answered `Ambiguous`, and every one of them had a perfectly good list behind it (an overload set, a
     /// redeclaration, a namespace).
     pub fn definition(&self, name: &str, visible_from: &Path) -> Known<ProjectDefinition> {
+
         match self.definitions(name, visible_from) {
             Known::Yes(mut found) if found.found.len() == 1 => Known::Yes(found.found.remove(0)),
             Known::Yes(_) => Known::Unknown(UnknownReason::Ambiguous(Box::from(name))),

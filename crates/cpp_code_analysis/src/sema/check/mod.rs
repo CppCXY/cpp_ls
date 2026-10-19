@@ -164,7 +164,24 @@ pub trait Check {
 /// not the sentence it produces: a rule the user turned off should cost nothing at all.
 pub fn run_check<T: Check>(context: &mut CheckContext<'_>) {
     if T::CODES.iter().any(|code| context.config.is_enabled(*code)) {
-        T::check(context);
+        // **Per-rule timing, while a pathological file is being found.** `CPPLS_TIME_CHECKS=1` prints one line per rule per
+        // file; summed over a run it names the rule that takes the forty-five seconds. Temporary — a probe is a tool, not a
+        // feature, and this one comes out when the quadratic is fixed.
+        if std::env::var_os("CPPLS_TIME_CHECKS").is_some() {
+            let at = std::time::Instant::now();
+            T::check(context);
+            let took = at.elapsed();
+            if took.as_millis() > 0 {
+                eprintln!(
+                    "[check] {:<32} {:>6} ms  {}",
+                    std::any::type_name::<T>().rsplit("::").next().unwrap_or("?"),
+                    took.as_millis(),
+                    context.path.display()
+                );
+            }
+        } else {
+            T::check(context);
+        }
     }
 }
 

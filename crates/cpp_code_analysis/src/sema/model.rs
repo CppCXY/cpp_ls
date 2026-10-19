@@ -79,6 +79,9 @@ pub struct SemanticModel<'a> {
     /// shared model is the ordinary case, and a check that had to hold `&mut` would not be able to ask two questions
     /// while iterating the file.
     types: RefCell<BTreeMap<NodeKey, Known<(Type, PathBuf)>>>,
+    /// **What `members_of` was asked, and what it answered** — a class's members do not change during one file's checks, and
+    /// the same class is asked once per member access. See `members_of` for the measurement that made this necessary.
+    members: RefCell<BTreeMap<String, Known<MemberList>>>,
     /// How many times the inference engine actually ran — the number that says whether the memo is working.
     inferred: std::cell::Cell<usize>,
     /// How many times a cached answer was handed back.
@@ -108,6 +111,7 @@ impl<'a> SemanticModel<'a> {
             path,
             resolver: RefCell::new(resolver),
             types: RefCell::new(BTreeMap::new()),
+            members: RefCell::new(BTreeMap::new()),
             inferred: std::cell::Cell::new(0),
             reused: std::cell::Cell::new(0),
         }
@@ -156,6 +160,19 @@ impl<'a> SemanticModel<'a> {
     /// gives (`docs/status.md` §十五 ④: it was not, because this call passed the rendering to a function reading the
     /// file's own text at the fact's offsets).
     pub fn members_of(&self, class: &str) -> Known<MemberList> {
+        // **Memoised, because the same class is asked dozens of times per file.** Measured on one header of a real project:
+        // `std::vector<heap_entry>` was asked **64 times** and each answer cost about **589 ms** — 37 seconds of a file that
+        // took 45, and the reason five different rules all looked slow. The memo is the same shape as the `types` one beside
+        // it: a `RefCell` keyed by the question, because the queries are `&self` and a shared model is the ordinary case.
+        if let Some(answer) = self.members.borrow().get(class) {
+            return answer.clone();
+        }
+        let answer = self.members_of_uncached(class);
+        self.members.borrow_mut().insert(class.to_string(), answer.clone());
+        answer
+    }
+
+    fn members_of_uncached(&self, class: &str) -> Known<MemberList> {
         let listed = project::members_of(self.index, self.scopes, self.root, self.path, class);
         // **The class's arguments, written through its members** — see [`project::substituted_members`].
         project::substituted_members(self.index, &self.path, class, listed)
