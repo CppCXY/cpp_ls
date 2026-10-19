@@ -9,10 +9,11 @@
 //! # The link is the **path**, and that is not what the fact records
 //!
 //! An [`IncludeFact::range`] is the **directive** — `#include <vector>  // the container` and its trailing comment
-//! included — because that is the span a *jump* to a header highlights, and it is what the file's own summary
-//! stored. A link is the other shape: a clickable region, which should be the file's name and nothing else. Sending
-//! the directive made every link in a real file cover its whole line, which reads as an underline under a comment
-//! the reader wrote for themselves. So the name is read back out of the **file's own text**
+//! included — which is the fact's answer to *where is this `#include`*: it is what matches a cursor on the line to
+//! the fact that says where the line points ([`cpp_code_analysis::Session::header_at`]). A link is the other shape:
+//! a clickable region, which should be the file's name and nothing else. Sending the directive made every link in a
+//! real file cover its whole line, which reads as an underline under a comment the reader wrote for themselves. So
+//! the name is read back out of the **file's own text**
 //! ([`cpp_code_analysis::sema::resolve::header_name_in`]), and the directive's range is only the fallback for the
 //! shape that has no name in it (`#include HEADER`, whose target is a macro rather than a path).
 //!

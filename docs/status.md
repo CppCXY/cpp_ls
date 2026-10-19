@@ -671,8 +671,8 @@ param-type-check 键 = 类里写的形参    语言要的是"实例化之后的�
 
 ```text
 根因  IncludeFact::range 是**整条指令**的 range（含行尾 trivia）
-      这不是 bug —— 它是"跳到某个头文件时该高亮什么"的答案（跳转连注释一起选中是合理的）
-      但 link 是另一种形状：可点击区间。两者共用一个字段，于是 link 用了跳转的答案
+      它不是 bug —— 它是"这条指令在哪"的答案（Session::header_at 拿它把光标匹配到指令）
+      但 link 是另一种形状：可点击区间，应该是文件名本身。两者共用一个字段，于是 link 用了指令的答案
 修法  sema::resolve::header_name_in(root, directive) —— 从**文件自己的**语法树里读出 HeaderName
       token，再剥掉 <> 或 ""；document_link 改用 view_of_the_file（渲染里没有指令）
      None 时回退到整条指令（#include HEADER 这种宏包含没有 HeaderName token）
