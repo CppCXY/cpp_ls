@@ -158,6 +158,24 @@ fn main() {
         return;
     };
 
+    // **What a scope-level query says about the three namespaces this project is about.** `std` comes from the
+    // system headers, `math` and `shapes` from the module interface units — and a completion after `X::` is a
+    // question about exactly this list.
+    for scope in ["std", "math", "shapes"] {
+        let listed = session.members_of(&view, scope);
+        println!(
+            "   members_of({scope:?}): {}",
+            match &listed {
+                Known::Yes(list) => format!(
+                    "{} member(s), unlisted {}",
+                    list.members.len(),
+                    list.unlisted.len()
+                ),
+                other => format!("{other:?}"),
+            }
+        );
+    }
+
     // **What the compiler's reading of this file is.** A global module fragment is `module;` … `module m;`, and the
     // includes in it are what the file's own names come from — so a rendering that does not contain them is a file
     // whose `std::` completion is empty for a reason that has nothing to do with modules.
