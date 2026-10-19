@@ -876,8 +876,8 @@ declarator，所以它们根本不成其为 shape —— 不是 shape 的声明�
 `(` 只问一次，"下次再问就有了"永远不会发生：
 
 ```text
-math::add(        第一次 0 个签名        第二次 1 个
-std::println(     0 → 4 个重载
+math::add(        0 个签名（第一次问是 0，索引跑完之后再问仍是 0）
+std::println(     0 → 修法后 4 个重载
 ```
 
 修法：`Callee` 带上 fact 里的 `parameter_list`（索引本来就有）；渲染缺失时用它拼出 label。丢掉的是参数的
