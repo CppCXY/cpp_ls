@@ -123,7 +123,8 @@ impl Check for AssignTypeCheck {
             // initialiser is a default argument, and what a default may be is the parameter's declaration rather than a
             // variable's own type.
             if declarator.ancestors().any(|node| {
-                cpp_parser::CppSyntaxKind::from(node.kind()) == cpp_parser::CppSyntaxKind::ParameterList
+                cpp_parser::CppSyntaxKind::from(node.kind())
+                    == cpp_parser::CppSyntaxKind::ParameterList
             }) {
                 continue;
             }

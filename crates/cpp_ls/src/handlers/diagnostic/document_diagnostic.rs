@@ -46,10 +46,7 @@ pub async fn on_pull_document_diagnostic(
     let Some(path) = uri_to_file_path(&uri) else {
         return RequestOutcome::Ready(an_empty_report());
     };
-    context
-        .analysis()
-        .prepare_for_a_diagnostic(&path)
-        .await;
+    context.analysis().prepare_for_a_diagnostic(&path).await;
 
     let for_the_query = path.clone();
     let outcome = analysis_query(
@@ -64,7 +61,9 @@ pub async fn on_pull_document_diagnostic(
     outcome.map(|found| {
         // `None` from `diagnose_file` is "this file cannot be read", and it is answered with an empty report rather
         // than with the `Missing` that would become a JSON `null` — see this module's note.
-        let items = found.map(|(_, diagnostics)| diagnostics).unwrap_or_default();
+        let items = found
+            .map(|(_, diagnostics)| diagnostics)
+            .unwrap_or_default();
         DocumentDiagnosticReport::Full(RelatedFullDocumentDiagnosticReport {
             related_documents: None,
             full_document_diagnostic_report: FullDocumentDiagnosticReport {

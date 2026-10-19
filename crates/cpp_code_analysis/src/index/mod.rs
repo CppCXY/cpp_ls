@@ -45,8 +45,8 @@ mod names;
 pub mod project;
 pub mod references;
 pub mod store;
-pub mod watch;
 pub mod walk_census;
+pub mod watch;
 pub mod worklist;
 
 pub use environment::{MacrosHere, visibility_at};
@@ -349,7 +349,7 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
         let (mut tokens, _) = cpp_parser::lex(source, &cpp_parser::LexerConfig::default());
         fold_quoted_header_names(source, &mut tokens);
 
-let mut interner = PathInterner::new(cfg!(windows));
+        let mut interner = PathInterner::new(cfg!(windows));
         let resolver = IncludeResolver::new(self.files, self.config);
         let directory = path.parent().unwrap_or(Path::new("."));
 
@@ -2267,5 +2267,3 @@ mod tests {
         assert_eq!(files.read(Path::new("/p/other.h")), None);
     }
 }
-
-

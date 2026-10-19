@@ -838,7 +838,6 @@ double f() {
         Some("double"),
         "`pi` is declared `T`, and `T` is `double` here"
     );
-
 }
 
 /// **A defaulted template parameter of a variable template is still not read.**
@@ -987,7 +986,11 @@ fn an_alias_target_is_substituted_by_whole_words() {
         "`_Ty` is a prefix of `_Ty2`, and a substring replacement would have rewritten it"
     );
     assert_eq!(
-        substituted_spelling("vector<_Ty>", &names, &["int".to_string(), "double".to_string()]),
+        substituted_spelling(
+            "vector<_Ty>",
+            &names,
+            &["int".to_string(), "double".to_string()]
+        ),
         "vector<double>",
         "an argument that mentions another parameter is not re-substituted"
     );

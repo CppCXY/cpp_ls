@@ -306,7 +306,10 @@ mod tests {
             .find("MAX_ITEMS")
             .expect("the fixture uses the macro");
 
-        assert!(session.pending() > 0, "the fixture is the state this test is about");
+        assert!(
+            session.pending() > 0,
+            "the fixture is the state this test is about"
+        );
         let partial = locations(
             &session,
             &view,
@@ -400,32 +403,31 @@ fn name_level_locations<F: cpp_code_analysis::FileProvider + Clone>(
     declaring.dedup();
 
     let mut locations: Vec<Location> = Vec::new();
-    let push = |file: &std::path::Path,
-                    range: cpp_parser::SourceRange,
-                    locations: &mut Vec<Location>| {
-        let Some(held) = session.files().held(file) else {
-            return;
+    let push =
+        |file: &std::path::Path, range: cpp_parser::SourceRange, locations: &mut Vec<Location>| {
+            let Some(held) = session.files().held(file) else {
+                return;
+            };
+            let Some(uri) = crate::util::path_to_uri(file) else {
+                return;
+            };
+            let (Some(start), Some(end)) = (
+                crate::util::position_in_file(held, range.start_offset),
+                crate::util::position_in_file(held, range.end_offset()),
+            ) else {
+                return;
+            };
+            let location = Location {
+                uri,
+                range: lsp_types::Range { start, end },
+            };
+            if !locations
+                .iter()
+                .any(|held| held.uri == location.uri && held.range == location.range)
+            {
+                locations.push(location);
+            }
         };
-        let Some(uri) = crate::util::path_to_uri(file) else {
-            return;
-        };
-        let (Some(start), Some(end)) = (
-            crate::util::position_in_file(held, range.start_offset),
-            crate::util::position_in_file(held, range.end_offset()),
-        ) else {
-            return;
-        };
-        let location = Location {
-            uri,
-            range: lsp_types::Range { start, end },
-        };
-        if !locations
-            .iter()
-            .any(|held| held.uri == location.uri && held.range == location.range)
-        {
-            locations.push(location);
-        }
-    };
 
     if include_declaration {
         for definition in &defined.found {
@@ -433,12 +435,8 @@ fn name_level_locations<F: cpp_code_analysis::FileProvider + Clone>(
         }
     }
 
-    let read = |path: &std::path::Path| {
-        session
-            .files()
-            .held(path)
-            .map(|file| file.text.to_string())
-    };
+    let read =
+        |path: &std::path::Path| session.files().held(path).map(|file| file.text.to_string());
     let references = cpp_code_analysis::index::references::name_references(
         session.index(),
         &read,
@@ -491,10 +489,8 @@ mod name_level {
 
         let use_path = PathBuf::from("/p/use.cpp");
         let held = session.files().held(&use_path).expect("the file is held");
-        let view = cpp_code_analysis::FileView::parse_with(
-            held,
-            &cpp_parser::MacroEnvironment::default(),
-        );
+        let view =
+            cpp_code_analysis::FileView::parse_with(held, &cpp_parser::MacroEnvironment::default());
         let at = USE_CPP.find("Widget").expect("the fixture uses it");
 
         let locations = name_level_locations(
@@ -505,11 +501,15 @@ mod name_level {
         );
 
         assert!(
-            locations.iter().any(|found| found.uri.path().ends_with("base.h")),
+            locations
+                .iter()
+                .any(|found| found.uri.path().ends_with("base.h")),
             "the declaration in the header is one of the references: {locations:?}"
         );
         assert!(
-            locations.iter().any(|found| found.uri.path().ends_with("use.cpp")),
+            locations
+                .iter()
+                .any(|found| found.uri.path().ends_with("use.cpp")),
             "and the use in the file that included it: {locations:?}"
         );
     }

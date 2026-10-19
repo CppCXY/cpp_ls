@@ -51,7 +51,11 @@ impl Check for UseAuto {
                     .chars()
                     .take_while(|character| character.is_alphanumeric() || *character == '_')
                     .collect();
-                let start = source[..at].rfind(|character: char| !(character.is_alphanumeric() || matches!(character, ':' | '_' | '<' | '>' | ',' | ' ')))
+                let start = source[..at]
+                    .rfind(|character: char| {
+                        !(character.is_alphanumeric()
+                            || matches!(character, ':' | '_' | '<' | '>' | ',' | ' '))
+                    })
                     .map(|boundary| boundary + 1)
                     .unwrap_or(0);
                 context.add_in_the_file(

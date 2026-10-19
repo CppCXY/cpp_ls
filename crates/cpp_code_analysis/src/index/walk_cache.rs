@@ -276,10 +276,17 @@ mod tests {
     #[test]
     fn the_key_moves_with_the_file_its_contents_and_the_projection() {
         let base = key(std::path::Path::new("/p/a.cpp"), 1, 3);
-        assert_ne!(base, key(std::path::Path::new("/p/a.cpp"), 9, 3), "contents");
-        assert_ne!(base, key(std::path::Path::new("/p/a.cpp"), 1, 9), "projection");
+        assert_ne!(
+            base,
+            key(std::path::Path::new("/p/a.cpp"), 9, 3),
+            "contents"
+        );
+        assert_ne!(
+            base,
+            key(std::path::Path::new("/p/a.cpp"), 1, 9),
+            "projection"
+        );
         assert_ne!(base, key(std::path::Path::new("/p/b.cpp"), 1, 3), "file");
         assert_eq!(base, key(std::path::Path::new("/p/a.cpp"), 1, 3));
     }
 }
-

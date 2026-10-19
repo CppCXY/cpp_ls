@@ -37,9 +37,9 @@ use std::error::Error;
 use log::error;
 use lsp_server::{Request, Response};
 use lsp_types::request::{
-    CodeActionRequest,
-    Completion, DocumentDiagnosticRequest, DocumentHighlightRequest, DocumentLinkRequest, DocumentSymbolRequest, FoldingRangeRequest,
-    GotoDefinition, GotoImplementation, HoverRequest, InlayHintRequest, PrepareRenameRequest, References, Rename,
+    CodeActionRequest, Completion, DocumentDiagnosticRequest, DocumentHighlightRequest,
+    DocumentLinkRequest, DocumentSymbolRequest, FoldingRangeRequest, GotoDefinition,
+    GotoImplementation, HoverRequest, InlayHintRequest, PrepareRenameRequest, References, Rename,
     Request as LspRequest, ResolveCompletionItem, SelectionRangeRequest, SemanticTokensFullRequest,
     SignatureHelpRequest, WorkspaceSymbolRequest,
 };

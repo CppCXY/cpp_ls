@@ -244,7 +244,12 @@ fn push_module_declarations(builder: &mut Builder<'_>, view: Option<&FileView>) 
                 _ => continue,
             };
 
-            builder.push_range(range.start_offset, range.end_offset(), drawn, Modifier::none());
+            builder.push_range(
+                range.start_offset,
+                range.end_offset(),
+                drawn,
+                Modifier::none(),
+            );
         }
     }
 }
@@ -268,11 +273,7 @@ pub fn encode(
     drawable: &Option<Vec<SemanticTokenType>>,
     multi_line_support: bool,
 ) -> Vec<SemanticToken> {
-    let mut builder = Builder::new(
-        file,
-        drawable.as_deref(),
-        multi_line_support,
-    );
+    let mut builder = Builder::new(file, drawable.as_deref(), multi_line_support);
     push_names(&mut builder, names);
     push_keywords(&mut builder, view);
     push_module_declarations(&mut builder, view);
@@ -618,7 +619,11 @@ constexpr bool is_assignable_v = __is_assignable(To, From);
         let at_type = by_offset(text, &tokens);
 
         for (word, expected, why) in [
-            ("T", TypeKind::TypeParameter, "a template parameter is not a type"),
+            (
+                "T",
+                TypeKind::TypeParameter,
+                "a template parameter is not a type",
+            ),
             ("To", TypeKind::TypeParameter, "and neither is this one"),
             ("From", TypeKind::TypeParameter, "nor this"),
             (
@@ -626,14 +631,14 @@ constexpr bool is_assignable_v = __is_assignable(To, From);
                 TypeKind::Variable,
                 "a variable template is a variable — the `template` header changes how it is written",
             ),
-            (
-                "is_assignable_v",
-                TypeKind::Variable,
-                "and so is this one",
-            ),
+            ("is_assignable_v", TypeKind::Variable, "and so is this one"),
         ] {
             let at = text[..text.find(word).expect("the fixture writes it")].len();
-            assert_eq!(at_type.get(&at), Some(&index_of(expected)), "`{word}`: {why}");
+            assert_eq!(
+                at_type.get(&at),
+                Some(&index_of(expected)),
+                "`{word}`: {why}"
+            );
         }
 
         // **The declaration is coloured and the uses inside a macro's argument list are not**, which is a separate
@@ -755,7 +760,10 @@ constexpr bool is_assignable_v = __is_assignable(To, From);
     ///
     /// The deltas are relative, so a test that read them directly would be asserting about arithmetic rather than
     /// about colour. This rebuilds absolute positions from the line starts, which is what a client does with them.
-    fn by_offset(text: &str, tokens: &[lsp_types::SemanticToken]) -> std::collections::HashMap<usize, u32> {
+    fn by_offset(
+        text: &str,
+        tokens: &[lsp_types::SemanticToken],
+    ) -> std::collections::HashMap<usize, u32> {
         let mut line_starts = vec![0usize];
         for (at, ch) in text.char_indices() {
             if ch == '\n' {
@@ -828,7 +836,10 @@ constexpr bool is_assignable_v = __is_assignable(To, From);
         // **Every occurrence of the class's name**, including the three that are constructors and destructors and
         // the one that is a parameter's type. `match_indices` rather than `find`, because the whole point of this
         // test is that the *same* spelling is one colour wherever it appears.
-        let written: Vec<usize> = text.match_indices("ExpectedVoid").map(|(at, _)| at).collect();
+        let written: Vec<usize> = text
+            .match_indices("ExpectedVoid")
+            .map(|(at, _)| at)
+            .collect();
         assert_eq!(
             written.len(),
             5,
@@ -1129,8 +1140,8 @@ constexpr bool is_assignable_v = __is_assignable(To, From);
             );
 
             if let Some((previous_line, previous_column)) = previous_end {
-                let ordered = line > previous_line
-                    || (line == previous_line && character >= previous_column);
+                let ordered =
+                    line > previous_line || (line == previous_line && character >= previous_column);
                 assert!(
                     ordered,
                     "token {at} at {line}:{character} comes before the previous one ends at \
@@ -1347,11 +1358,27 @@ constexpr bool is_assignable_v = __is_assignable(To, From);
 
         for (word, expected, why) in [
             ("bool", TypeKind::Type, "`bool` names a type"),
-            ("constexpr", TypeKind::Modifier, "a qualifier is a property of the declaration"),
-            ("this", TypeKind::Variable, "`this` is a value, and the report asks for it to match `bool`'s *kind* — a type it is not"),
+            (
+                "constexpr",
+                TypeKind::Modifier,
+                "a qualifier is a property of the declaration",
+            ),
+            (
+                "this",
+                TypeKind::Variable,
+                "`this` is a value, and the report asks for it to match `bool`'s *kind* — a type it is not",
+            ),
             ("nullptr", TypeKind::Variable, "and so is `nullptr`"),
-            ("true", TypeKind::Variable, "`true` is the literal, not the type it shares a token kind with"),
-            ("return", TypeKind::Keyword, "`return` is about the syntax, which is what `keyword` means"),
+            (
+                "true",
+                TypeKind::Variable,
+                "`true` is the literal, not the type it shares a token kind with",
+            ),
+            (
+                "return",
+                TypeKind::Keyword,
+                "`return` is about the syntax, which is what `keyword` means",
+            ),
             ("const", TypeKind::Modifier, "the trailing `const` too"),
         ] {
             let at = text[..text.find(word).expect("the fixture writes it")].len();
@@ -1359,7 +1386,8 @@ constexpr bool is_assignable_v = __is_assignable(To, From);
                 at_type.get(&at),
                 Some(&index_of(expected)),
                 "`{word}`: {why}"
-            );        }
+            );
+        }
 
         // **`bool` and `true` are one token kind and two colours**, which is why the classification reads the
         // spelling as well as the kind: the lexer's table says `"bool" => BoolLiteral`, so the type and the literal
@@ -1492,4 +1520,3 @@ constexpr bool is_assignable_v = __is_assignable(To, From);
         kind.to_u32()
     }
 }
-

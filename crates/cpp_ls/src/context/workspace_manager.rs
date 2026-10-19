@@ -30,8 +30,8 @@ use std::time::Duration;
 use tokio::sync::Mutex as AsyncMutex;
 use tokio_util::sync::CancellationToken;
 
-use super::workspace_state::WorkspaceState;
 use super::ServerContextSnapshot;
+use super::workspace_state::WorkspaceState;
 use crate::handlers::ClientConfig;
 
 /// How long the events have to stop before a reload runs.

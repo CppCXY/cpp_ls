@@ -46,7 +46,8 @@ impl Check for UseOverride {
                 .declarations
                 .iter()
                 .filter(|fact| {
-                    fact.kind == crate::DeclKind::Function && fact.scope.as_deref() == Some(class.as_str())
+                    fact.kind == crate::DeclKind::Function
+                        && fact.scope.as_deref() == Some(class.as_str())
                 })
                 .filter_map(|fact| {
                     let written = context

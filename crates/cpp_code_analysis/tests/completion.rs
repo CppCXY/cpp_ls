@@ -1521,7 +1521,11 @@ fn a_missing_semicolon_is_reported() {
             .iter()
             .any(|error| error.message.contains(';') || error.message.contains("expected")),
         "the missing `;` is a parse error and nothing else: {:?}",
-        found.errors.iter().map(|e| e.message.clone()).collect::<Vec<_>>()
+        found
+            .errors
+            .iter()
+            .map(|e| e.message.clone())
+            .collect::<Vec<_>>()
     );
 }
 
@@ -1556,10 +1560,20 @@ fn a_macro_is_not_shown_with_a_signature() {
         .iter()
         .find(|item| item.label == "FULL_NAME_FORMAT")
         .expect("the macro is offered");
-    println!("item: kind={:?} detail={:?} fact={:?}", item.kind, item.detail, item.fact.as_ref().map(|fact| (&fact.kind, &fact.returns, &fact.parameter_list)));
+    println!(
+        "item: kind={:?} detail={:?} fact={:?}",
+        item.kind,
+        item.detail,
+        item.fact
+            .as_ref()
+            .map(|fact| (&fact.kind, &fact.returns, &fact.parameter_list))
+    );
     assert_eq!(
-        item.detail, None,
+        item.detail,
+        None,
         "a macro has no returns and no parameters: {:?}",
-        item.fact.as_ref().map(|fact| (&fact.kind, &fact.returns, &fact.parameter_list))
+        item.fact
+            .as_ref()
+            .map(|fact| (&fact.kind, &fact.returns, &fact.parameter_list))
     );
 }

@@ -132,9 +132,9 @@ fn a_pulling_client_gets_a_report_and_not_null() {
         !report["result"].is_null(),
         "`null` is what a client cannot act on, and it is what this answered: {report}"
     );
-    let items = report["result"]["items"]
-        .as_array()
-        .unwrap_or_else(|| panic!("a full document diagnostic report has an `items` array: {report}"));
+    let items = report["result"]["items"].as_array().unwrap_or_else(|| {
+        panic!("a full document diagnostic report has an `items` array: {report}")
+    });
     assert!(
         !items.is_empty(),
         "the file has an unclosed class, so a report with no items is \"clean\" and wrong: {report}"
@@ -666,7 +666,9 @@ impl Server {
         });
         report["result"]["items"]
             .as_array()
-            .unwrap_or_else(|| panic!("a pull request is answered with a report, not `null`: {report}"))
+            .unwrap_or_else(|| {
+                panic!("a pull request is answered with a report, not `null`: {report}")
+            })
             .clone()
     }
 
@@ -1041,11 +1043,9 @@ fn an_error_typed_into_an_open_file_is_answered() {
 
     let diagnostics = server.pull_diagnostics(300, &main_uri);
     assert!(
-        diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic["message"]
-                .as_str()
-                .is_some_and(|message| message.contains(';'))),
+        diagnostics.iter().any(|diagnostic| diagnostic["message"]
+            .as_str()
+            .is_some_and(|message| message.contains(';'))),
         "the missing `;` is the only difference from the clean file: {diagnostics:?}"
     );
 
@@ -1119,7 +1119,9 @@ fn the_reported_file_is_answered() {
         diagnostics.len()
     );
     assert!(
-        diagnostics.iter().all(|diagnostic| diagnostic["code"] != json!("syntax-error")),
+        diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic["code"] != json!("syntax-error")),
         "the file parses, and `return` reporting a missing `;` is the defect this fixture was built from: \
          {diagnostics:?}"
     );
@@ -3319,7 +3321,8 @@ fn parameter_names_are_drawn_at_the_arguments() {
 /// tie is `Ambiguous`.
 #[test]
 fn the_chosen_template_overload_is_shown_instantiated() {
-    const TAKE_H: &str = "template <typename T> void take(T* value);\ntemplate <typename T> void take(T value);\n";
+    const TAKE_H: &str =
+        "template <typename T> void take(T* value);\ntemplate <typename T> void take(T value);\n";
     const TAKE_CPP: &str =
         "#include \"take.h\"\nint g() { int n = 0; int* p = &n; take(p); return 0; }\n";
 
@@ -4251,7 +4254,10 @@ void f() {
         .as_str()
         .unwrap_or_else(|| panic!("a hover is expected: {member}"))
         .to_string();
-    assert!(text.contains("push_back"), "the member is the answer: {text}");
+    assert!(
+        text.contains("push_back"),
+        "the member is the answer: {text}"
+    );
 
     // `z.append` — absent, said plainly, and **not** another class's member.
     let absent = hover_on(3, line_of("z.append"), 6);

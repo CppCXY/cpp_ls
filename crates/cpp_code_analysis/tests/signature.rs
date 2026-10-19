@@ -137,7 +137,9 @@ void g() {
 }
 ";
     let (_, signature) = signature_where_marked(integer);
-    let label = signature.map(|signature| signature.label).unwrap_or_default();
+    let label = signature
+        .map(|signature| signature.label)
+        .unwrap_or_default();
     assert!(
         label.starts_with("print(int"),
         "an `int` argument selects the `int` overload: {label:?}"
@@ -151,7 +153,9 @@ void g() {
 }
 ";
     let (_, signature) = signature_where_marked(text);
-    let label = signature.map(|signature| signature.label).unwrap_or_default();
+    let label = signature
+        .map(|signature| signature.label)
+        .unwrap_or_default();
     assert!(
         label.starts_with("print(const char*"),
         "a string literal selects the `const char*` overload: {label:?}"
@@ -176,7 +180,9 @@ template <typename T> void take(T value);
 int g() { int n = 0; int* p = &n; take(|p); return 0; }
 ";
     let (_, signature) = signature_where_marked(source);
-    let label = signature.map(|signature| signature.label).unwrap_or_default();
+    let label = signature
+        .map(|signature| signature.label)
+        .unwrap_or_default();
     assert!(
         label.contains("T*"),
         "an `int*` argument selects the `T*` overload: {label:?}"
@@ -195,7 +201,9 @@ void pick(int value);
 int g() { pick(|5); return 0; }
 ";
     let (_, signature) = signature_where_marked(source);
-    let label = signature.map(|signature| signature.label).unwrap_or_default();
+    let label = signature
+        .map(|signature| signature.label)
+        .unwrap_or_default();
     assert!(
         label.starts_with("pick(int"),
         "the ordinary function comes first, not the template: {label:?}"
@@ -272,7 +280,10 @@ fn a_declaration_in_an_uncooked_file_still_answers() {
             "/p/math.cppm",
             "export module math;\nexport namespace math {\nint add(int lhs, int rhs);\n}\n",
         ),
-        ("/p/a.cpp", "import math;\nint f() { return math::add(|1, 2); }\n"),
+        (
+            "/p/a.cpp",
+            "import math;\nint f() { return math::add(|1, 2); }\n",
+        ),
     ];
     let mut memory = MemoryFiles::new();
     for (path, source) in files {
@@ -323,7 +334,6 @@ fn a_declaration_in_an_uncooked_file_still_answers() {
         "the spans do need one, and are honestly absent rather than wrong"
     );
 }
-
 
 /// **A cursor on the callee is not a call being typed.** It is a question about the name — which is hover's and
 /// definition's business — and a signature popup there would appear while the reader is still choosing the

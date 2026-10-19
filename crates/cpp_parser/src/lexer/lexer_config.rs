@@ -89,7 +89,8 @@ impl LexerConfig {
 
     /// Are digit separators (`1'000'000`) available at this language level?
     pub fn supports_digit_separators(&self) -> bool {
-        self.language.support(crate::features::Feature::DigitSeparators)
+        self.language
+            .support(crate::features::Feature::DigitSeparators)
     }
 }
 impl Default for LexerConfig {

@@ -84,7 +84,6 @@ impl Check for ArgumentCount {
                 continue;
             }
 
-
             // The **last name written** is what a declaration can be found by: `scale` in `scale(1)`, `scale` in
             // `w.scale(1)`, and the last of them in `ns::scale(1)`.
             let Some(name) = super::spelling_of(callee.syntax()) else {
@@ -117,10 +116,8 @@ impl Check for ArgumentCount {
                 continue;
             }
 
-
             // The arguments as the typed layer counts them — for `scale(1, 2, 3)`, three.
             let passed = call.get_args().len();
-
 
             // **Which declaration this call means, if one of them is the language's answer.** `One` is a candidate
             // that fits, so the arity below cannot fire against it. `None` is the only arity report that is a fact
@@ -164,7 +161,6 @@ impl Check for ArgumentCount {
                 }
             };
 
-
             if !declared.variadic && passed > declared.written {
                 context.add(
                     DiagnosticCode::ArgumentCount,
@@ -188,8 +184,11 @@ impl Check for ArgumentCount {
 ///
 /// Built once per check run: a file with a hundred calls and one declaration should read the declaration once, and
 /// the map is what makes the cost the calls rather than the calls times the declarations.
-fn callees_in_this_file(context: &CheckContext<'_>) -> std::collections::HashMap<String, Vec<Callee>> {
-    let mut callees: std::collections::HashMap<String, Vec<Callee>> = std::collections::HashMap::new();
+fn callees_in_this_file(
+    context: &CheckContext<'_>,
+) -> std::collections::HashMap<String, Vec<Callee>> {
+    let mut callees: std::collections::HashMap<String, Vec<Callee>> =
+        std::collections::HashMap::new();
 
     // **The shared predicate**, and the parameters through the typed layer: measured, a file-scope definition is a
     // `Declaration` whose parameter list is a **grandchild** (`InitDeclarator > Declarator > ParameterList`), so a
@@ -292,7 +291,10 @@ fn callees_from_the_index(context: &CheckContext<'_>, name: &str) -> Vec<Callee>
         let Some(callee) = the_callee_in(parameters) else {
             continue;
         };
-        if !callees.iter().any(|known| known.parameters == callee.parameters) {
+        if !callees
+            .iter()
+            .any(|known| known.parameters == callee.parameters)
+        {
             callees.push(callee);
         }
     }
@@ -345,14 +347,22 @@ fn the_callee_in(parameters: &str) -> Option<Callee> {
         }
         // The type, with any default and any parameter name dropped — see `a_type_without_its_name`.
         let without_default = parameter.split('=').next().unwrap_or(parameter).trim();
-        spellings.push(crate::sema::overload::a_type_without_its_name(without_default));
+        spellings.push(crate::sema::overload::a_type_without_its_name(
+            without_default,
+        ));
     };
     for character in inner.chars() {
         match character {
             '<' | '(' | '[' => depth += 1,
             '>' | ')' | ']' => depth -= 1,
             ',' if depth == 0 => {
-                take(&current, &mut written, &mut required, &mut variadic, &mut spellings);
+                take(
+                    &current,
+                    &mut written,
+                    &mut required,
+                    &mut variadic,
+                    &mut spellings,
+                );
                 current.clear();
                 continue;
             }
@@ -360,7 +370,13 @@ fn the_callee_in(parameters: &str) -> Option<Callee> {
         }
         current.push(character);
     }
-    take(&current, &mut written, &mut required, &mut variadic, &mut spellings);
+    take(
+        &current,
+        &mut written,
+        &mut required,
+        &mut variadic,
+        &mut spellings,
+    );
 
     Some(Callee {
         required,

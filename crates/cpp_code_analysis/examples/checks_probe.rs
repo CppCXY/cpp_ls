@@ -98,7 +98,9 @@ fn main() {
 
     // **`--lex <file>`**: the lexer alone, so that a quadratic in a parse can be told apart from one in a scan.
     if let Some(at) = args.iter().position(|argument| argument == "--lex") {
-        let Some(file) = args.get(at + 1) else { std::process::exit(2) };
+        let Some(file) = args.get(at + 1) else {
+            std::process::exit(2)
+        };
         let text = std::fs::read_to_string(file).unwrap_or_default();
         let started = std::time::Instant::now();
         let (tokens, _) = cpp_parser::lex(&text, &cpp_parser::LexerConfig::default());
@@ -118,7 +120,9 @@ fn main() {
     // No instrumentation goes into the library: every one of these is a `pub` entry point, which is what makes the
     // measurement repeatable by anyone with the probe.
     if let Some(at) = args.iter().position(|argument| argument == "--stages") {
-        let Some(file) = args.get(at + 1) else { std::process::exit(2) };
+        let Some(file) = args.get(at + 1) else {
+            std::process::exit(2)
+        };
         let text = std::fs::read_to_string(file).unwrap_or_default();
         let started = std::time::Instant::now();
         let tree = cpp_parser::CppParser::parse(&text, cpp_parser::ParserConfig::default());

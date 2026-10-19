@@ -199,7 +199,9 @@ pub fn decide(question: Trait, arguments: &[String]) -> Option<bool> {
 enum Shape<'a> {
     Pointer,
     /// A reference, and which kind — the two traits that ask about references differ only here.
-    Reference { rvalue: bool },
+    Reference {
+        rvalue: bool,
+    },
     /// An array, with whether it was written with a bound.
     Array(bool),
     Function,
@@ -268,7 +270,11 @@ fn same(arguments: &[String]) -> Option<bool> {
 
     match (shape(left), shape(right)) {
         (Shape::Builtin(one), Shape::Builtin(other)) => Some(one == other),
-        (Shape::Builtin(_), other) | (other, Shape::Builtin(_)) if !matches!(other, Shape::Open) => Some(false),
+        (Shape::Builtin(_), other) | (other, Shape::Builtin(_))
+            if !matches!(other, Shape::Open) =>
+        {
+            Some(false)
+        }
         _ => None,
     }
 }
@@ -296,11 +302,40 @@ fn shape(written: &str) -> Shape<'_> {
 fn is_an_integral_spelling(name: &str) -> bool {
     let name = name.trim();
     const INTEGRAL: &[&str] = &[
-        "bool", "char", "signed char", "unsigned char", "wchar_t", "char8_t", "char16_t", "char32_t", "short",
-        "short int", "unsigned short", "unsigned short int", "int", "signed", "signed int", "unsigned",
-        "unsigned int", "long", "long int", "unsigned long", "unsigned long int", "long long", "long long int",
-        "unsigned long long", "unsigned long long int", "__int8", "__int16", "__int32", "__int64",
-        "unsigned __int8", "unsigned __int16", "unsigned __int32", "unsigned __int64", "__wchar_t",
+        "bool",
+        "char",
+        "signed char",
+        "unsigned char",
+        "wchar_t",
+        "char8_t",
+        "char16_t",
+        "char32_t",
+        "short",
+        "short int",
+        "unsigned short",
+        "unsigned short int",
+        "int",
+        "signed",
+        "signed int",
+        "unsigned",
+        "unsigned int",
+        "long",
+        "long int",
+        "unsigned long",
+        "unsigned long int",
+        "long long",
+        "long long int",
+        "unsigned long long",
+        "unsigned long long int",
+        "__int8",
+        "__int16",
+        "__int32",
+        "__int64",
+        "unsigned __int8",
+        "unsigned __int16",
+        "unsigned __int32",
+        "unsigned __int64",
+        "__wchar_t",
     ];
     INTEGRAL.contains(&name)
 }
@@ -352,11 +387,26 @@ mod tests {
 
     #[test]
     fn an_array_answers_the_bound_question_as_well_as_the_array_one() {
-        assert_eq!(decided(Trait::Array(ArrayBound::Either), &["int[4]"]), Some(true));
-        assert_eq!(decided(Trait::Array(ArrayBound::Bounded), &["int[4]"]), Some(true));
-        assert_eq!(decided(Trait::Array(ArrayBound::Bounded), &["int[]"]), Some(false));
-        assert_eq!(decided(Trait::Array(ArrayBound::Unbounded), &["int[]"]), Some(true));
-        assert_eq!(decided(Trait::Array(ArrayBound::Either), &["int"]), Some(false));
+        assert_eq!(
+            decided(Trait::Array(ArrayBound::Either), &["int[4]"]),
+            Some(true)
+        );
+        assert_eq!(
+            decided(Trait::Array(ArrayBound::Bounded), &["int[4]"]),
+            Some(true)
+        );
+        assert_eq!(
+            decided(Trait::Array(ArrayBound::Bounded), &["int[]"]),
+            Some(false)
+        );
+        assert_eq!(
+            decided(Trait::Array(ArrayBound::Unbounded), &["int[]"]),
+            Some(true)
+        );
+        assert_eq!(
+            decided(Trait::Array(ArrayBound::Either), &["int"]),
+            Some(false)
+        );
         assert_eq!(decided(Trait::Array(ArrayBound::Either), &["_Ty"]), None);
     }
 
@@ -364,7 +414,10 @@ mod tests {
     fn a_builtin_is_its_own_answer_and_a_name_is_not_one() {
         assert_eq!(decided(Trait::Void, &["void"]), Some(true));
         assert_eq!(decided(Trait::Void, &["int"]), Some(false));
-        assert_eq!(decided(Trait::Integral, &["unsigned long long"]), Some(true));
+        assert_eq!(
+            decided(Trait::Integral, &["unsigned long long"]),
+            Some(true)
+        );
         assert_eq!(decided(Trait::Integral, &["double"]), Some(false));
         assert_eq!(decided(Trait::FloatingPoint, &["double"]), Some(true));
         assert_eq!(decided(Trait::FloatingPoint, &["int"]), Some(false));
@@ -375,7 +428,10 @@ mod tests {
     #[test]
     fn sameness_is_answered_only_when_the_shapes_settle_it() {
         assert_eq!(decided(Trait::Same, &["int", "int"]), Some(true));
-        assert_eq!(decided(Trait::Same, &["vector<int>", "vector<int>"]), Some(true));
+        assert_eq!(
+            decided(Trait::Same, &["vector<int>", "vector<int>"]),
+            Some(true)
+        );
         assert_eq!(decided(Trait::Same, &["int", "double"]), Some(false));
         assert_eq!(decided(Trait::Same, &["int", "int*"]), Some(false));
         // `size_type` is very often `unsigned long long`, so different spellings are not different types.
@@ -394,8 +450,14 @@ mod tests {
 
     #[test]
     fn the_names_the_headers_write_are_the_names_this_knows() {
-        assert_eq!(named("__is_constructible").map(|builtin| builtin.kind), Some(Kind::Trait(Trait::Unknown)));
-        assert_eq!(named("__is_pointer").map(|builtin| builtin.kind), Some(Kind::Trait(Trait::Pointer)));
+        assert_eq!(
+            named("__is_constructible").map(|builtin| builtin.kind),
+            Some(Kind::Trait(Trait::Unknown))
+        );
+        assert_eq!(
+            named("__is_pointer").map(|builtin| builtin.kind),
+            Some(Kind::Trait(Trait::Pointer))
+        );
         assert!(named("printf").is_none());
         // **The library's own names are not builtins**, and this is the assertion that keeps a spelling like
         // `std::is_same<_Ty, _Uty>` — a class in a type position — from being read as a `bool`.
@@ -404,6 +466,3 @@ mod tests {
         assert!(named("__is_same").is_some());
     }
 }
-
-
-

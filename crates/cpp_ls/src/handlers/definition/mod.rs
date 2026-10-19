@@ -145,7 +145,8 @@ pub async fn on_goto_definition_handler(
         }
         // Stable, so everything that is not the chosen one keeps the order the index answered in.
         ordered.sort_by_key(|(is_the_one, _)| !*is_the_one);
-        let mut locations: Vec<Location> = ordered.into_iter().map(|(_, location)| location).collect();
+        let mut locations: Vec<Location> =
+            ordered.into_iter().map(|(_, location)| location).collect();
 
         match locations.len() {
             0 => None,

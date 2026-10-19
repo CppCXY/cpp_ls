@@ -3,7 +3,7 @@
 //! The point of these tests is the one the enum could not express: a project is a **combination** of a standard and the
 //! vendor whose compiler built it, and a parser that models the standard alone refuses the project's own headers.
 
-use cpp_parser::features::{Feature, LanguageConfig, Standard, Vendor, STANDARDS};
+use cpp_parser::features::{Feature, LanguageConfig, STANDARDS, Standard, Vendor};
 
 /// **`-std=gnu++23`: the standard and the extensions at once.** The case the single enum could not state.
 #[test]
@@ -25,7 +25,10 @@ fn a_gnu_cpp23_build_has_the_standard_and_the_gnu_extensions() {
     assert!(config.support(Feature::Typeof));
 
     // Empty braces and the like are not GNU's.
-    assert!(!config.support(Feature::StructuredExceptionHandling), "that is MSVC's");
+    assert!(
+        !config.support(Feature::StructuredExceptionHandling),
+        "that is MSVC's"
+    );
     assert!(!config.support(Feature::BlockLiteral), "that is Clang's");
 }
 
@@ -46,8 +49,14 @@ fn a_later_standard_covers_the_earlier_ones() {
     assert!(config.support(Feature::StructuredBindings), "C++17");
     assert!(config.support(Feature::GenericLambda), "C++14");
     assert!(config.support(Feature::Lambda), "C++11");
-    assert!(!config.support(Feature::DeducingThis), "C++23, which is later");
-    assert!(!config.support(Feature::StatementExpression), "GNU, which is not the standard");
+    assert!(
+        !config.support(Feature::DeducingThis),
+        "C++23, which is later"
+    );
+    assert!(
+        !config.support(Feature::StatementExpression),
+        "GNU, which is not the standard"
+    );
 }
 
 /// **The two families do not cover each other**: C++23 says nothing about C's `_Generic`.
@@ -61,7 +70,10 @@ fn the_families_are_separate() {
     let c = LanguageConfig::new().with_standard(Standard::C11);
     assert!(c.support(Feature::GenericSelection));
     assert!(c.support(Feature::Atomic));
-    assert!(c.support(Feature::VariableLengthArrays), "C99, covered by C11");
+    assert!(
+        c.support(Feature::VariableLengthArrays),
+        "C99, covered by C11"
+    );
     assert!(!c.support(Feature::Lambda));
 }
 
@@ -73,7 +85,10 @@ fn gnu_c89_has_the_extensions_and_not_c99() {
         .with_vendor(Vendor::Gnu);
     assert!(config.support(Feature::StatementExpression));
     assert!(config.support(Feature::Typeof));
-    assert!(config.support(Feature::VariableLengthArrays), "GNU accepts them in every mode");
+    assert!(
+        config.support(Feature::VariableLengthArrays),
+        "GNU accepts them in every mode"
+    );
     assert!(!config.support(Feature::GenericSelection), "C11");
     assert!(!config.support(Feature::Atomic), "C11");
 }
@@ -91,22 +106,34 @@ fn strict_c11_has_c99_and_not_the_extensions() {
 /// **A feature with two ways to arrive** — designated initializers are C99 and C++20, and neither the other's.
 #[test]
 fn a_feature_with_two_requirements_accepts_either() {
-    assert!(LanguageConfig::new()
-        .with_standard(Standard::C99)
-        .support(Feature::DesignatedInitializers));
-    assert!(LanguageConfig::new()
-        .with_standard(Standard::Cpp20)
-        .support(Feature::DesignatedInitializers));
+    assert!(
+        LanguageConfig::new()
+            .with_standard(Standard::C99)
+            .support(Feature::DesignatedInitializers)
+    );
+    assert!(
+        LanguageConfig::new()
+            .with_standard(Standard::Cpp20)
+            .support(Feature::DesignatedInitializers)
+    );
     // C11 **covers** C99, so designated initializers are there — that is the same rule that makes C++20 cover C++17.
-    assert!(LanguageConfig::new()
-        .with_standard(Standard::C11)
-        .support(Feature::DesignatedInitializers));
-    assert!(!LanguageConfig::new()
-        .with_standard(Standard::C89)
-        .support(Feature::DesignatedInitializers), "C89 is not C99");
-    assert!(!LanguageConfig::new()
-        .with_standard(Standard::Cpp17)
-        .support(Feature::DesignatedInitializers), "C++17 is not C++20");
+    assert!(
+        LanguageConfig::new()
+            .with_standard(Standard::C11)
+            .support(Feature::DesignatedInitializers)
+    );
+    assert!(
+        !LanguageConfig::new()
+            .with_standard(Standard::C89)
+            .support(Feature::DesignatedInitializers),
+        "C89 is not C99"
+    );
+    assert!(
+        !LanguageConfig::new()
+            .with_standard(Standard::Cpp17)
+            .support(Feature::DesignatedInitializers),
+        "C++17 is not C++20"
+    );
 }
 
 /// **`typeof` is C23 *and* GNU**, which is why it was visible as a gap: a `gnu++` config has it and a strict `c++` one
@@ -122,7 +149,13 @@ fn typeof_arrives_by_either_route() {
     assert!(c23.support(Feature::Typeof));
 
     let strict_cpp = LanguageConfig::new().with_standard(Standard::Cpp23);
-    assert!(!strict_cpp.support(Feature::Typeof).then_some(true).unwrap_or(false) && !strict_cpp.support(Feature::Typeof));
+    assert!(
+        !strict_cpp
+            .support(Feature::Typeof)
+            .then_some(true)
+            .unwrap_or(false)
+            && !strict_cpp.support(Feature::Typeof)
+    );
 }
 
 /// **An unconfigured parse accepts nothing**, which is the conservative direction: a caller that forgot to configure gets
@@ -159,11 +192,15 @@ fn the_description_reads_like_a_compiler_flag() {
         "gnu++23"
     );
     assert_eq!(
-        LanguageConfig::new().with_standard(Standard::Cpp20).describe(),
+        LanguageConfig::new()
+            .with_standard(Standard::Cpp20)
+            .describe(),
         "c++20"
     );
     assert_eq!(
-        LanguageConfig::new().with_standard(Standard::C89).describe(),
+        LanguageConfig::new()
+            .with_standard(Standard::C89)
+            .describe(),
         "c89"
     );
     assert_eq!(
@@ -331,10 +368,15 @@ fn c99_adds_what_c89_lacks() {
     assert!(gnu_cpp.support(Feature::RestrictGnu));
     // …and `restrict` itself arrives by either route — C99's own spelling, or GNU's — so a **gnu** C++ config has it and
     // a strict one does not.
-    assert!(gnu_cpp.support(Feature::Restrict), "GNU's spelling is one of its two routes");
-    assert!(!LanguageConfig::new()
-        .with_standard(Standard::Cpp17)
-        .support(Feature::Restrict));
+    assert!(
+        gnu_cpp.support(Feature::Restrict),
+        "GNU's spelling is one of its two routes"
+    );
+    assert!(
+        !LanguageConfig::new()
+            .with_standard(Standard::Cpp17)
+            .support(Feature::Restrict)
+    );
 }
 
 /// **C11's additions**, and C17's honest emptiness.
@@ -378,13 +420,17 @@ fn c23_adds_the_modern_spellings() {
     }
 
     // …and a C++23 config does not get C23's `typeof`, while a `gnu++23` one does.
-    assert!(!LanguageConfig::new()
-        .with_standard(Standard::Cpp23)
-        .support(Feature::Typeof));
-    assert!(LanguageConfig::new()
-        .with_standard(Standard::Cpp23)
-        .with_vendor(Vendor::Gnu)
-        .support(Feature::Typeof));
+    assert!(
+        !LanguageConfig::new()
+            .with_standard(Standard::Cpp23)
+            .support(Feature::Typeof)
+    );
+    assert!(
+        LanguageConfig::new()
+            .with_standard(Standard::Cpp23)
+            .with_vendor(Vendor::Gnu)
+            .support(Feature::Typeof)
+    );
 }
 
 /// **C and C++ share the features they share**, and the requirement says so once: `//` comments are C99 and C++11.
@@ -394,24 +440,36 @@ fn a_feature_shared_by_the_families() {
         LanguageConfig::new().with_standard(Standard::C99),
         LanguageConfig::new().with_standard(Standard::Cpp11),
     ] {
-        assert!(config.support(Feature::LineComments), "{}", config.describe());
+        assert!(
+            config.support(Feature::LineComments),
+            "{}",
+            config.describe()
+        );
     }
-    assert!(!LanguageConfig::new()
-        .with_standard(Standard::C89)
-        .support(Feature::LineComments));
+    assert!(
+        !LanguageConfig::new()
+            .with_standard(Standard::C89)
+            .support(Feature::LineComments)
+    );
 }
 
 /// **A `-std=` flag becomes a config**, which is what `compile_commands.json` hands over.
 #[test]
 fn a_standard_flag_becomes_a_configuration() {
     let config = LanguageConfig::from_flag("-std=gnu++23").expect("a flag a compiler accepts");
-    assert_eq!(config.standards().collect::<Vec<_>>(), vec![Standard::Cpp23]);
+    assert_eq!(
+        config.standards().collect::<Vec<_>>(),
+        vec![Standard::Cpp23]
+    );
     assert_eq!(config.vendors().collect::<Vec<_>>(), vec![Vendor::Gnu]);
     assert!(config.support(Feature::DeducingThis));
     assert!(config.support(Feature::StatementExpression));
 
     let strict = LanguageConfig::from_flag("c++20").expect("the spelling without the flag");
-    assert_eq!(strict.standards().collect::<Vec<_>>(), vec![Standard::Cpp20]);
+    assert_eq!(
+        strict.standards().collect::<Vec<_>>(),
+        vec![Standard::Cpp20]
+    );
     assert!(strict.vendors().next().is_none());
 
     let c = LanguageConfig::from_flag("-std=gnu89").expect("the C89 report");
@@ -428,9 +486,16 @@ fn a_standard_flag_becomes_a_configuration() {
         ("--std=c11", Standard::C11),
     ] {
         let config = LanguageConfig::from_flag(spelling).unwrap_or_else(|| panic!("{spelling}"));
-        assert_eq!(config.standards().collect::<Vec<_>>(), vec![standard], "{spelling}");
+        assert_eq!(
+            config.standards().collect::<Vec<_>>(),
+            vec![standard],
+            "{spelling}"
+        );
     }
-    assert!(LanguageConfig::from_flag("-std=c++03").is_none(), "not a spelling we model");
+    assert!(
+        LanguageConfig::from_flag("-std=c++03").is_none(),
+        "not a spelling we model"
+    );
     assert!(LanguageConfig::from_flag("-std=").is_none());
 }
 
@@ -446,7 +511,10 @@ fn the_last_standard_flag_wins() {
         "main.cpp",
     ];
     let config = LanguageConfig::from_command_line(command).expect("a std flag is there");
-    assert_eq!(config.standards().collect::<Vec<_>>(), vec![Standard::Cpp20]);
+    assert_eq!(
+        config.standards().collect::<Vec<_>>(),
+        vec![Standard::Cpp20]
+    );
     assert_eq!(config.vendors().collect::<Vec<_>>(), vec![Vendor::Gnu]);
 
     assert!(LanguageConfig::from_command_line(["cl.exe", "-c", "main.cpp"]).is_none());
@@ -533,9 +601,10 @@ fn the_lexer_gates_read_the_feature_set() {
         .with_language(LanguageConfig::from_flag("-std=gnu++20").expect("a flag"));
     assert!(from_flag.supports_raw_strings());
     assert!(from_flag.supports_digit_separators());
-    assert!(from_flag
-        .language()
-        .support(Feature::StatementExpression), "gnu++20 has the GNU extensions");
+    assert!(
+        from_flag.language().support(Feature::StatementExpression),
+        "gnu++20 has the GNU extensions"
+    );
 }
 
 /// **`ParserConfig` carries the same language**, and a `Dialect` is a vendor written the old way.
@@ -558,8 +627,14 @@ fn the_parser_carries_the_language_and_the_dialect_is_a_vendor() {
     let msvc = ParserConfig::new(CppLanguageLevel::Cpp17, None)
         .with_language(strict)
         .with_dialect(Dialect::Msvc);
-    assert_eq!(msvc.language().vendors().collect::<Vec<_>>(), vec![Vendor::Msvc]);
-    assert!(msvc.language().support(Feature::StructuredExceptionHandling));
+    assert_eq!(
+        msvc.language().vendors().collect::<Vec<_>>(),
+        vec![Vendor::Msvc]
+    );
+    assert!(
+        msvc.language()
+            .support(Feature::StructuredExceptionHandling)
+    );
     assert!(!msvc.language().support(Feature::StatementExpression));
 
     let gnu = ParserConfig::new(CppLanguageLevel::Cpp17, None)
@@ -569,7 +644,10 @@ fn the_parser_carries_the_language_and_the_dialect_is_a_vendor() {
     assert!(!gnu.language().support(Feature::StructuredExceptionHandling));
 
     // The standards survive the dialect: this is still C++17 plus a vendor, not "GNU means everything".
-    assert_eq!(gnu.language().standards().collect::<Vec<_>>(), vec![Standard::Cpp17]);
+    assert_eq!(
+        gnu.language().standards().collect::<Vec<_>>(),
+        vec![Standard::Cpp17]
+    );
 }
 
 /// **The same source, two configurations** — which is the whole point of the migration, stated as one test.
@@ -637,7 +715,9 @@ fn binary_literals_are_a_feature_not_a_level() {
         "C++11 does not"
     );
     assert!(
-        !CppParser::parse(source, with(Standard::C11)).get_errors().is_empty(),
+        !CppParser::parse(source, with(Standard::C11))
+            .get_errors()
+            .is_empty(),
         "and C11 has never had them — the level could not say this, and the config can"
     );
 }
@@ -650,9 +730,9 @@ fn binary_literals_are_a_feature_not_a_level() {
 /// `Identifier` is a token the grammar cannot treat as a keyword.
 #[test]
 fn the_keyword_table_reads_the_feature_set() {
+    use cpp_parser::CppLexer;
     use cpp_parser::features::{Feature, LanguageConfig, Standard};
     use cpp_parser::{CppLanguageLevel, CppTokenKind, LexerConfig};
-    use cpp_parser::CppLexer;
 
     let kind_of = |word: &str, standard: Standard| {
         let config = LexerConfig::new(CppLanguageLevel::Cpp23)
@@ -666,45 +746,104 @@ fn the_keyword_table_reads_the_feature_set() {
     };
 
     // `consteval` is C++20's.
-    assert_eq!(kind_of("consteval", Standard::Cpp17), CppTokenKind::Identifier);
-    assert_eq!(kind_of("consteval", Standard::Cpp20), CppTokenKind::ConstevalKeyword);
-    assert_eq!(kind_of("consteval", Standard::Cpp23), CppTokenKind::ConstevalKeyword);
+    assert_eq!(
+        kind_of("consteval", Standard::Cpp17),
+        CppTokenKind::Identifier
+    );
+    assert_eq!(
+        kind_of("consteval", Standard::Cpp20),
+        CppTokenKind::ConstevalKeyword
+    );
+    assert_eq!(
+        kind_of("consteval", Standard::Cpp23),
+        CppTokenKind::ConstevalKeyword
+    );
 
     // `nullptr` has two routes: C++11 and C23.
     assert_eq!(kind_of("nullptr", Standard::C11), CppTokenKind::Identifier);
-    assert_eq!(kind_of("nullptr", Standard::C23), CppTokenKind::NullptrKeyword);
-    assert_eq!(kind_of("nullptr", Standard::Cpp11), CppTokenKind::NullptrKeyword);
+    assert_eq!(
+        kind_of("nullptr", Standard::C23),
+        CppTokenKind::NullptrKeyword
+    );
+    assert_eq!(
+        kind_of("nullptr", Standard::Cpp11),
+        CppTokenKind::NullptrKeyword
+    );
 
     // `static_assert` is C++11's *and* C11's, which is what a disjunction looks like in the table.
-    assert_eq!(kind_of("static_assert", Standard::C89), CppTokenKind::Identifier);
-    assert_eq!(kind_of("static_assert", Standard::C11), CppTokenKind::StaticAssertKeyword);
-    assert_eq!(kind_of("static_assert", Standard::Cpp11), CppTokenKind::StaticAssertKeyword);
+    assert_eq!(
+        kind_of("static_assert", Standard::C89),
+        CppTokenKind::Identifier
+    );
+    assert_eq!(
+        kind_of("static_assert", Standard::C11),
+        CppTokenKind::StaticAssertKeyword
+    );
+    assert_eq!(
+        kind_of("static_assert", Standard::Cpp11),
+        CppTokenKind::StaticAssertKeyword
+    );
 
     // `alignas` is C++11's spelling; C11 writes `_Alignas`.
     assert_eq!(kind_of("alignas", Standard::C11), CppTokenKind::Identifier);
-    assert_eq!(kind_of("alignas", Standard::Cpp11), CppTokenKind::AlignasKeyword);
+    assert_eq!(
+        kind_of("alignas", Standard::Cpp11),
+        CppTokenKind::AlignasKeyword
+    );
 
     // `thread_local`, and the coroutine words from C++20.
-    assert_eq!(kind_of("thread_local", Standard::C89), CppTokenKind::Identifier);
-    assert_eq!(kind_of("thread_local", Standard::Cpp11), CppTokenKind::ThreadLocalKeyword);
+    assert_eq!(
+        kind_of("thread_local", Standard::C89),
+        CppTokenKind::Identifier
+    );
+    assert_eq!(
+        kind_of("thread_local", Standard::Cpp11),
+        CppTokenKind::ThreadLocalKeyword
+    );
     for word in ["co_await", "co_return", "co_yield"] {
-        assert_eq!(kind_of(word, Standard::Cpp17), CppTokenKind::Identifier, "{word}");
-        assert_eq!(kind_of(word, Standard::Cpp20), match word {
-            "co_await" => CppTokenKind::CoAwaitKeyword,
-            "co_return" => CppTokenKind::CoReturnKeyword,
-            _ => CppTokenKind::CoYieldKeyword,
-        }, "{word}");
+        assert_eq!(
+            kind_of(word, Standard::Cpp17),
+            CppTokenKind::Identifier,
+            "{word}"
+        );
+        assert_eq!(
+            kind_of(word, Standard::Cpp20),
+            match word {
+                "co_await" => CppTokenKind::CoAwaitKeyword,
+                "co_return" => CppTokenKind::CoReturnKeyword,
+                _ => CppTokenKind::CoYieldKeyword,
+            },
+            "{word}"
+        );
     }
 
     // `constexpr` is C++11's and C23's — the third feature with two routes.
-    assert_eq!(kind_of("constexpr", Standard::C89), CppTokenKind::Identifier);
-    assert_eq!(kind_of("constexpr", Standard::C11), CppTokenKind::Identifier);
-    assert_eq!(kind_of("constexpr", Standard::Cpp11), CppTokenKind::ConstexprKeyword);
-    assert_eq!(kind_of("constexpr", Standard::C23), CppTokenKind::ConstexprKeyword);
+    assert_eq!(
+        kind_of("constexpr", Standard::C89),
+        CppTokenKind::Identifier
+    );
+    assert_eq!(
+        kind_of("constexpr", Standard::C11),
+        CppTokenKind::Identifier
+    );
+    assert_eq!(
+        kind_of("constexpr", Standard::Cpp11),
+        CppTokenKind::ConstexprKeyword
+    );
+    assert_eq!(
+        kind_of("constexpr", Standard::C23),
+        CppTokenKind::ConstexprKeyword
+    );
 
     // `constinit` is C++20's.
-    assert_eq!(kind_of("constinit", Standard::Cpp17), CppTokenKind::Identifier);
-    assert_eq!(kind_of("constinit", Standard::Cpp20), CppTokenKind::ConstinitKeyword);
+    assert_eq!(
+        kind_of("constinit", Standard::Cpp17),
+        CppTokenKind::Identifier
+    );
+    assert_eq!(
+        kind_of("constinit", Standard::Cpp20),
+        CppTokenKind::ConstinitKeyword
+    );
 
     // …and a `gnu++17` config is still C++17 for these, because GNU is a vendor and `consteval` is a standard's word.
     let gnu17 = LexerConfig::new(CppLanguageLevel::Cpp23)

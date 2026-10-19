@@ -1,4 +1,3 @@
-
 //! What the index remembers about **one file** — the unit the whole cache is built from.
 //!
 //! This module is the shape; the builder that fills it from a tree lands next, and the encoder after that. What is
@@ -1645,7 +1644,9 @@ impl TranslationUnit {
     ) -> Self {
         let mut entered: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
         for (index, frame) in frames.iter().enumerate() {
-            entered.entry(frame_key(&frame.file)).or_insert(index as u32);
+            entered
+                .entry(frame_key(&frame.file))
+                .or_insert(index as u32);
         }
 
         let mut by_name: std::collections::HashMap<std::sync::Arc<str>, Vec<u32>> =
@@ -3282,14 +3283,27 @@ fn walk_one_file<'a>(
         && !walked.spliced.contains(path)
     {
         crate::index::walk_census::a_splice();
-        if splice_a_contribution(key, from_offset, parent, from_in_parent, seen, look_up, unit, walked, 0) {
+        if splice_a_contribution(
+            key,
+            from_offset,
+            parent,
+            from_in_parent,
+            seen,
+            look_up,
+            unit,
+            walked,
+            0,
+        ) {
             return Some(key);
         }
     }
 
     let bases = sharing.map(|key| Bases {
         key,
-        events: walked.timeline.as_ref().map_or(0, |timeline| timeline.events.len()),
+        events: walked
+            .timeline
+            .as_ref()
+            .map_or(0, |timeline| timeline.events.len()),
         changes: walked.changes.len(),
         dead: walked.dead_macros.get(path).map_or(0, Vec::len),
     });
@@ -3408,12 +3422,14 @@ fn walk_one_file<'a>(
             // any other, and it is what the next file's conditions are answered against.
             if fact.kind.is_definition() {
                 if let Some(definition) = definitions_of.get_or_read(path, source, fact) {
-                    walked.changes.push(crate::index::walk_cache::StateChange::Defined {
-                        name: Box::from(&*fact.name),
-                        definition: definition.clone(),
-                        file: path.to_path_buf(),
-                        at: fact.range.start_offset,
-                    });
+                    walked
+                        .changes
+                        .push(crate::index::walk_cache::StateChange::Defined {
+                            name: Box::from(&*fact.name),
+                            definition: definition.clone(),
+                            file: path.to_path_buf(),
+                            at: fact.range.start_offset,
+                        });
                     unit.define(&fact.name, definition, path, fact.range.start_offset);
                 } else {
                     // A `#define` this reader cannot put back together is a name the unit has seen and cannot
@@ -3423,11 +3439,13 @@ fn walk_one_file<'a>(
                     // table answers instead, which is Undefined — a lost reading rather than a wrong one.
                 }
             } else {
-                walked.changes.push(crate::index::walk_cache::StateChange::Undefined {
-                    name: Box::from(&*fact.name),
-                    file: path.to_path_buf(),
-                    at: fact.range.start_offset,
-                });
+                walked
+                    .changes
+                    .push(crate::index::walk_cache::StateChange::Undefined {
+                        name: Box::from(&*fact.name),
+                        file: path.to_path_buf(),
+                        at: fact.range.start_offset,
+                    });
                 unit.undefine(&fact.name);
             }
 
@@ -3524,7 +3542,6 @@ fn walk_one_file<'a>(
         });
         if let Some(child) = child_key {
             edges.push((include.range.start_offset + include.range.length, child));
-
         }
     }
 
@@ -3556,19 +3573,27 @@ fn walk_one_file<'a>(
             ..crate::index::walk_cache::Contribution::default()
         };
 
-        for event in timeline.events[bases.events..].iter().filter(|event| event.frame == frame) {
+        for event in timeline.events[bases.events..]
+            .iter()
+            .filter(|event| event.frame == frame)
+        {
             let mut carried = event.clone();
             carried.frame = 0;
             if !carried.unconditional
                 && carried.function_like.is_some()
                 && let Some(body) = carried.body_text.clone()
             {
-                contribution.bodies.push(crate::index::walk_cache::ConditionalBody {
-                    name: carried.name.to_string().into_boxed_str(),
-                    function_like: carried.function_like.unwrap_or(false),
-                    parameters: carried.parameters.as_ref().map(|p| p.to_string().into_boxed_str()),
-                    body: body.to_string().into_boxed_str(),
-                });
+                contribution
+                    .bodies
+                    .push(crate::index::walk_cache::ConditionalBody {
+                        name: carried.name.to_string().into_boxed_str(),
+                        function_like: carried.function_like.unwrap_or(false),
+                        parameters: carried
+                            .parameters
+                            .as_ref()
+                            .map(|p| p.to_string().into_boxed_str()),
+                        body: body.to_string().into_boxed_str(),
+                    });
             }
             contribution.facts_in_force += 1;
             contribution.events.push(carried);
@@ -3648,7 +3673,11 @@ fn splice_a_contribution<'a>(
     for body in &contribution.bodies {
         walked.conditional_bodies.insert(
             body.name.clone(),
-            (body.function_like, body.parameters.clone(), body.body.clone()),
+            (
+                body.function_like,
+                body.parameters.clone(),
+                body.body.clone(),
+            ),
         );
     }
     walked
@@ -3666,7 +3695,10 @@ fn splice_a_contribution<'a>(
     loop {
         let next = [
             contribution.events.get(next_event).map(|event| event.at),
-            contribution.changes.get(next_change).map(|change| change.at()),
+            contribution
+                .changes
+                .get(next_change)
+                .map(|change| change.at()),
             contribution.edges.get(next_edge).map(|(at, _)| *at),
         ]
         .into_iter()
@@ -3689,7 +3721,9 @@ fn splice_a_contribution<'a>(
                     file,
                     at,
                 } => unit.define(name, definition.clone(), file, *at),
-                crate::index::walk_cache::StateChange::Undefined { name, .. } => unit.undefine(name),
+                crate::index::walk_cache::StateChange::Undefined { name, .. } => {
+                    unit.undefine(name)
+                }
             }
             next_change += 1;
         }
@@ -3707,7 +3741,9 @@ fn splice_a_contribution<'a>(
                     .macros
                     .binary_search_by_key(&event.at, |fact| fact.range.start_offset)
             {
-                walked.entries.push((from_offset, &summary.macros[found], source));
+                walked
+                    .entries
+                    .push((from_offset, &summary.macros[found], source));
             }
             next_event += 1;
         }
@@ -3726,7 +3762,17 @@ fn splice_a_contribution<'a>(
                 seen.contains(child.file.as_path()) || walked.spliced.contains(&child.file)
             });
             if !already_entered {
-                splice_a_contribution(child, at, Some(frame), at, seen, look_up, unit, walked, depth + 1);
+                splice_a_contribution(
+                    child,
+                    at,
+                    Some(frame),
+                    at,
+                    seen,
+                    look_up,
+                    unit,
+                    walked,
+                    depth + 1,
+                );
             }
             next_edge += 1;
         }
@@ -3755,13 +3801,19 @@ fn splice_a_contribution<'a>(
             else {
                 continue;
             };
-            walked.entries.push((from_offset, &summary.macros[at], source));
+            walked
+                .entries
+                .push((from_offset, &summary.macros[at], source));
         }
     }
     for body in &contribution.bodies {
         walked.conditional_bodies.insert(
             body.name.clone(),
-            (body.function_like, body.parameters.clone(), body.body.clone()),
+            (
+                body.function_like,
+                body.parameters.clone(),
+                body.body.clone(),
+            ),
         );
     }
     walked
@@ -3771,7 +3823,6 @@ fn splice_a_contribution<'a>(
         .extend(contribution.dead.iter().copied());
     walked.conditional_facts += contribution.conditional_facts;
     walked.facts_in_force += contribution.facts_in_force;
-
 
     if let Some(timeline) = walked.timeline.as_mut() {
         timeline.leave(frame);
@@ -4693,25 +4744,3 @@ impl DeclKind {
 // stored, not a place that knows about directives. There was a `build_declarations` here that took only a scope
 // tree and filled every guard with `Unconditional`; it was deleted rather than kept, because a function whose
 // contract is "the guards are wrong" is one a caller reaches for by accident.
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

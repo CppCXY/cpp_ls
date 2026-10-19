@@ -710,7 +710,8 @@ mod tests {
             })
             .flatten()
             .expect("a file whose text the client is holding has an answer")
-            .1;        assert!(
+            .1;
+        assert!(
             diagnostics
                 .iter()
                 .any(|diagnostic| diagnostic.message.contains(';')),

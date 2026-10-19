@@ -125,10 +125,7 @@ pub fn context_at(root: &CppSyntaxNode, offset: usize) -> CompletionContext {
 ///
 /// `None` for every other position, which is nearly all of them: `int import = 1;` has `int` before the word, and a
 /// cursor right after that `import` has nothing before it at all.
-pub fn module_name_from_the_text(
-    text: &str,
-    offset: usize,
-) -> Option<(String, SourceRange)> {
+pub fn module_name_from_the_text(text: &str, offset: usize) -> Option<(String, SourceRange)> {
     let before = text.get(..offset.min(text.len()))?;
     let line_start = before.rfind('\n').map_or(0, |at| at + 1);
     let line = &before[line_start..];

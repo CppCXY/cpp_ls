@@ -778,7 +778,8 @@ pub fn parse_type_spelling(written: &str) -> Type {
     // library defines, and reading it as a `bool` would be a wrong answer shaped exactly like a right one.
     if let Some((builtin, arguments)) = crate::sema::builtins::split_a_builtin_spelling(trimmed) {
         match crate::sema::builtins::answer(builtin, &arguments) {
-            crate::sema::builtins::Answer::Boolean(_) | crate::sema::builtins::Answer::UndecidedBoolean => {
+            crate::sema::builtins::Answer::Boolean(_)
+            | crate::sema::builtins::Answer::UndecidedBoolean => {
                 return Type::builtin("bool");
             }
             crate::sema::builtins::Answer::Type(type_of) => return type_of,
@@ -2163,10 +2164,7 @@ mod tests {
         // parameter may have a converting constructor, so the answer stays `Unknown` rather than becoming `No`.
         let a_string_target = parse_type_spelling("const std::string&");
         assert!(
-            matches!(
-                a_string.convertible_to(&a_string_target),
-                Known::Unknown(_)
-            ),
+            matches!(a_string.convertible_to(&a_string_target), Known::Unknown(_)),
             "a class with a conversion constructor is not this layer's answer: {:?}",
             a_string.convertible_to(&a_string_target)
         );

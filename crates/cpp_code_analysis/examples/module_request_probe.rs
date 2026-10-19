@@ -115,7 +115,10 @@ fn main() {
         let mut scanner = ModuleScanner::new(&DiskFiles, session.config());
         for module in ["math", "shapes"] {
             let outcome = scanner.resolve_module(module, &file, &mut interner);
-            println!("   scanner.resolve_module({module:?}): {}", outcome.describe());
+            println!(
+                "   scanner.resolve_module({module:?}): {}",
+                outcome.describe()
+            );
         }
         println!(
             "   the scanner's units: {:?}",
@@ -212,7 +215,11 @@ fn main() {
             continue;
         }
         if let Some(summary) = session.index().summary(unit) {
-            println!("   summary of {}: {} facts", unit.display(), summary.declarations.len());
+            println!(
+                "   summary of {}: {} facts",
+                unit.display(),
+                summary.declarations.len()
+            );
             for fact in &summary.declarations {
                 if fact.name == "math" || fact.scope.as_deref() == Some("math") {
                     println!(
@@ -230,7 +237,10 @@ fn main() {
         session.index().name_postings("add"),
     );
     for name in [
-        "std", "std::size_t", "math", "math::add",
+        "std",
+        "std::size_t",
+        "math",
+        "math::add",
         "math::Vec2",
         "shapes",
         "shapes::Circle",
@@ -253,7 +263,10 @@ fn main() {
     // (`math::`, `vec.`, `std::`, `namespace math {`). The defaults are the two that a module project raises.
     let mut asked: Vec<String> = args.collect();
     if asked.is_empty() {
-        asked = ["math::", "vec."].iter().map(|ask| ask.to_string()).collect();
+        asked = ["math::", "vec."]
+            .iter()
+            .map(|ask| ask.to_string())
+            .collect();
     }
 
     for needle in &asked {
@@ -277,7 +290,11 @@ fn main() {
         let step = Instant::now();
         let offered = session.completions(&view, FileOffset::new(at));
         let took = step.elapsed();
-        let labels: Vec<&str> = offered.items.iter().map(|item| item.label.as_str()).collect();
+        let labels: Vec<&str> = offered
+            .items
+            .iter()
+            .map(|item| item.label.as_str())
+            .collect();
         println!(
             "   `{needle}` completion at {at}: {} item(s) in {} ms",
             labels.len(),
@@ -348,7 +365,11 @@ fn main() {
                 continue;
             };
             let offered = session.completions(&view, FileOffset::new(at));
-            let labels: Vec<&str> = offered.items.iter().map(|item| item.label.as_str()).collect();
+            let labels: Vec<&str> = offered
+                .items
+                .iter()
+                .map(|item| item.label.as_str())
+                .collect();
             println!(
                 "   `{needle}` completion: {} item(s) | {}",
                 labels.len(),
@@ -362,7 +383,10 @@ fn main() {
         }
 
         // hover's own queries: the type of the object before a `.`, and the declaration of the name after a `::`.
-        for needle in asked.iter().filter(|needle| needle.ends_with('.') || needle.ends_with("::")) {
+        for needle in asked
+            .iter()
+            .filter(|needle| needle.ends_with('.') || needle.ends_with("::"))
+        {
             let Some(at) = text.find(needle.as_str()).map(|at| at + needle.len()) else {
                 continue;
             };
@@ -387,7 +411,10 @@ fn main() {
                 ),
                 other => format!("{other:?}"),
             };
-            println!("   definition at `{needle}`: {said} in {} ms", took.as_millis());
+            println!(
+                "   definition at `{needle}`: {said} in {} ms",
+                took.as_millis()
+            );
         }
 
         // The likely type of the object before a `.` — `vec.` means "the type of `vec`".

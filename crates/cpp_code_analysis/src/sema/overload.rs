@@ -96,7 +96,11 @@ impl Candidate {
 
     /// **The same candidate, with what the declaration wrote** — the spellings and the template names partial ordering
     /// needs, kept beside the substituted ones the ranking uses.
-    pub(crate) fn with_declaration(mut self, declared: Vec<String>, template_parameters: Vec<String>) -> Self {
+    pub(crate) fn with_declaration(
+        mut self,
+        declared: Vec<String>,
+        template_parameters: Vec<String>,
+    ) -> Self {
         self.is_a_template = !template_parameters.is_empty();
         self.declared = declared;
         self.template_parameters = template_parameters;
@@ -134,16 +138,13 @@ pub(crate) fn choose(argument_types: &[Known<String>], candidates: &[Candidate])
         .filter(|index| candidates[*index].takes(argument_types.len()))
         .filter(|index| {
             let candidate = &candidates[*index];
-            argument_types
-                .iter()
-                .enumerate()
-                .all(|(at, argument)| {
-                    // A variadic candidate has no parameter to rank against beyond its own list.
-                    match candidate.parameters.get(at) {
-                        Some(parameter) => rank(parameter, argument) != Match::NotViable,
-                        None => true,
-                    }
-                })
+            argument_types.iter().enumerate().all(|(at, argument)| {
+                // A variadic candidate has no parameter to rank against beyond its own list.
+                match candidate.parameters.get(at) {
+                    Some(parameter) => rank(parameter, argument) != Match::NotViable,
+                    None => true,
+                }
+            })
         })
         .collect();
 
@@ -168,7 +169,8 @@ pub(crate) fn choose(argument_types: &[Known<String>], candidates: &[Candidate])
             })
             .collect()
     };
-    let ranked: Vec<(usize, Vec<Match>)> = viable.iter().map(|index| (*index, ranks(*index))).collect();
+    let ranked: Vec<(usize, Vec<Match>)> =
+        viable.iter().map(|index| (*index, ranks(*index))).collect();
 
     // **The candidates nothing beats.** A candidate is out when another is strictly better than it; everything left is
     // a tie, and a tie is what the language calls ambiguous — with one exception, below.
@@ -197,7 +199,11 @@ pub(crate) fn choose(argument_types: &[Known<String>], candidates: &[Candidate])
         .copied()
         .filter(|index| !candidates[*index].is_a_template)
         .collect();
-    let maximal = if ordinary.is_empty() { maximal } else { ordinary };
+    let maximal = if ordinary.is_empty() {
+        maximal
+    } else {
+        ordinary
+    };
 
     // **The more specialized template wins.** Two templates can deduce to the same parameter types — `take(T*)` and
     // `take(T)` both become `int*` for an `int*` — and the language settles that by **partial ordering**: the more
@@ -208,9 +214,9 @@ pub(crate) fn choose(argument_types: &[Known<String>], candidates: &[Candidate])
             .iter()
             .copied()
             .filter(|mine| {
-                maximal
-                    .iter()
-                    .all(|other| other == mine || !more_specialized(&candidates[*other], &candidates[*mine]))
+                maximal.iter().all(|other| {
+                    other == mine || !more_specialized(&candidates[*other], &candidates[*mine])
+                })
             })
             .collect();
         if !ordinary.is_empty() && ordinary.len() < maximal.len() {
@@ -247,9 +253,9 @@ fn better_or_equal(mine: &[Match], theirs: &[Match]) -> bool {
 
 /// `mine` is strictly better in at least one argument that either of them can rank.
 fn better(mine: &[Match], theirs: &[Match]) -> bool {
-    mine.iter()
-        .zip(theirs)
-        .any(|(mine, theirs)| mine < theirs && *mine != Match::Unranked && *theirs != Match::Unranked)
+    mine.iter().zip(theirs).any(|(mine, theirs)| {
+        mine < theirs && *mine != Match::Unranked && *theirs != Match::Unranked
+    })
 }
 
 /// **How well one argument matches one parameter** — see [`Match`].
@@ -284,7 +290,10 @@ fn the_shape_of(spelling: &str) -> String {
     // Pointers and arrays are shape: strip the reference markers only.
     loop {
         let trimmed = text.trim();
-        if let Some(before) = trimmed.strip_suffix("&&").or_else(|| trimmed.strip_suffix('&')) {
+        if let Some(before) = trimmed
+            .strip_suffix("&&")
+            .or_else(|| trimmed.strip_suffix('&'))
+        {
             text = before.trim_end().to_string();
         } else {
             break;
@@ -293,7 +302,10 @@ fn the_shape_of(spelling: &str) -> String {
     // A leading `const`/`volatile` on the object itself is not part of the choice.
     loop {
         let trimmed = text.trim_start();
-        if let Some(after) = trimmed.strip_prefix("const ").or_else(|| trimmed.strip_prefix("volatile ")) {
+        if let Some(after) = trimmed
+            .strip_prefix("const ")
+            .or_else(|| trimmed.strip_prefix("volatile "))
+        {
             text = after.trim_start().to_string();
         } else {
             break;
@@ -332,7 +344,10 @@ mod tests {
 
     fn candidate(parameters: &[&str]) -> Candidate {
         Candidate::new(
-            parameters.iter().map(|parameter| (*parameter).to_string()).collect(),
+            parameters
+                .iter()
+                .map(|parameter| (*parameter).to_string())
+                .collect(),
             false,
             parameters.join(", "),
         )
@@ -360,7 +375,10 @@ mod tests {
         let candidates = vec![candidate(&["int"]), candidate(&["int", "int"])];
 
         assert_eq!(choose(&[a_type("int")], &candidates), Choice::One(0));
-        assert_eq!(choose(&[a_type("int"), a_type("int")], &candidates), Choice::One(1));
+        assert_eq!(
+            choose(&[a_type("int"), a_type("int")], &candidates),
+            Choice::One(1)
+        );
         // Both need a default argument for a zero-argument call, so both are viable and the one using fewer defaults
         // wins — see `choose`. "None" would be a claim about the program that is not true.
         assert_eq!(choose(&[], &candidates), Choice::One(0));
@@ -389,7 +407,10 @@ mod tests {
         // A `std::string` **can** convert to `int` through a conversion operator, and this analysis cannot see one. The
         // answer that produces no finding is "ambiguous", not "no candidate".
         let candidates = vec![candidate(&["int"]), candidate(&["double"])];
-        assert_eq!(choose(&[a_type("std::string")], &candidates), Choice::Ambiguous);
+        assert_eq!(
+            choose(&[a_type("std::string")], &candidates),
+            Choice::Ambiguous
+        );
     }
 
     #[test]
@@ -406,7 +427,12 @@ mod tests {
     fn an_unknown_argument_neither_wins_nor_loses_but_cannot_beat_a_known_exact_one() {
         let candidates = vec![candidate(&["int"]), candidate(&["double"])];
         assert_eq!(
-            choose(&[Known::Unknown(crate::sema::symbol::UnknownReason::DependentName)], &candidates),
+            choose(
+                &[Known::Unknown(
+                    crate::sema::symbol::UnknownReason::DependentName
+                )],
+                &candidates
+            ),
             Choice::Ambiguous,
             "nothing is known about the argument, so nothing ranks these two apart"
         );
@@ -421,10 +447,7 @@ mod tests {
     fn an_ordinary_function_beats_a_template_that_is_equally_good() {
         // The language's rule: a tie between a template and an ordinary function goes to the ordinary one. Both are
         // `Exact` for an `int` argument — the template after its deduction, which the caller does, not this module.
-        let candidates = vec![
-            candidate(&["T"]).as_a_template(),
-            candidate(&["int"]),
-        ];
+        let candidates = vec![candidate(&["T"]).as_a_template(), candidate(&["int"])];
         assert_eq!(
             choose(&[a_type("int")], &candidates),
             Choice::One(1),
@@ -432,7 +455,10 @@ mod tests {
         );
 
         // Two templates are still a tie, and a tie is still ambiguous: the rule above is about the *ordinary* one.
-        let both = vec![candidate(&["T"]).as_a_template(), candidate(&["T"]).as_a_template()];
+        let both = vec![
+            candidate(&["T"]).as_a_template(),
+            candidate(&["T"]).as_a_template(),
+        ];
         assert_eq!(choose(&[a_type("int")], &both), Choice::Ambiguous);
     }
 
@@ -469,7 +495,9 @@ pub(crate) fn a_type_without_its_name(parameter: &str) -> String {
             .next()
             .is_some_and(|character| character.is_alphabetic() || character == '_');
     if is_a_name {
-        return parameter[..parameter.len() - last.len()].trim_end().to_string();
+        return parameter[..parameter.len() - last.len()]
+            .trim_end()
+            .to_string();
     }
     parameter.to_string()
 }
@@ -556,37 +584,41 @@ pub(crate) fn more_specialized(mine: &Candidate, theirs: &Candidate) -> bool {
     theirs_deduces_into_mine && !mine_deduces_into_theirs
 }
 
-    #[test]
-    fn the_more_specialized_of_two_templates_wins() {
-        // The shape that needed it: `take(T*)` and `take(T)` both deduce to `int*` for an `int*` argument, so the
-        // ranking ties and the language's answer is partial ordering — `T*` is more specialized.
-        let by_pointer = Candidate::new(vec!["int*".to_string()], false, "take(T*)".to_string())
-            .with_declaration(vec!["T*".to_string()], vec!["T".to_string()]);
-        let by_value = Candidate::new(vec!["int*".to_string()], false, "take(T)".to_string())
-            .with_declaration(vec!["T".to_string()], vec!["T".to_string()]);
+#[test]
+fn the_more_specialized_of_two_templates_wins() {
+    // The shape that needed it: `take(T*)` and `take(T)` both deduce to `int*` for an `int*` argument, so the
+    // ranking ties and the language's answer is partial ordering — `T*` is more specialized.
+    let by_pointer = Candidate::new(vec!["int*".to_string()], false, "take(T*)".to_string())
+        .with_declaration(vec!["T*".to_string()], vec!["T".to_string()]);
+    let by_value = Candidate::new(vec!["int*".to_string()], false, "take(T)".to_string())
+        .with_declaration(vec!["T".to_string()], vec!["T".to_string()]);
 
-        assert!(
-            more_specialized(&by_pointer, &by_value),
-            "`T*` is more specialized than `T`"
-        );
-        assert!(
-            !more_specialized(&by_value, &by_pointer),
-            "and the relation is not symmetric"
-        );
+    assert!(
+        more_specialized(&by_pointer, &by_value),
+        "`T*` is more specialized than `T`"
+    );
+    assert!(
+        !more_specialized(&by_value, &by_pointer),
+        "and the relation is not symmetric"
+    );
 
-        let chosen = choose(
+    let chosen = choose(
+        &[crate::Known::Yes("int*".to_string())],
+        &[by_pointer.clone(), by_value.clone()],
+    );
+    assert_eq!(
+        chosen,
+        Choice::One(0),
+        "so the pointer template is the one a call means"
+    );
+
+    // Two declarations that are the same are neither more specialized, and a tie is still a tie.
+    assert!(!more_specialized(&by_value, &by_value));
+    assert_eq!(
+        choose(
             &[crate::Known::Yes("int*".to_string())],
-            &[
-                by_pointer.clone(),
-                by_value.clone(),
-            ],
-        );
-        assert_eq!(chosen, Choice::One(0), "so the pointer template is the one a call means");
-
-        // Two declarations that are the same are neither more specialized, and a tie is still a tie.
-        assert!(!more_specialized(&by_value, &by_value));
-        assert_eq!(
-            choose(&[crate::Known::Yes("int*".to_string())], &[by_value.clone(), by_value.clone()]),
-            Choice::Ambiguous
-        );
-    }
+            &[by_value.clone(), by_value.clone()]
+        ),
+        Choice::Ambiguous
+    );
+}

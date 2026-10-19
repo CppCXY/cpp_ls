@@ -167,7 +167,10 @@ mod tests {
         );
 
         session.add_project_files([PathBuf::from("/p/widget.h")]);
-        assert!(session.pending() > 0, "the fixture is the state this test is about");
+        assert!(
+            session.pending() > 0,
+            "the fixture is the state this test is about"
+        );
         assert!(
             symbols(&session, "Widget").is_some_and(|found| found.is_empty()),
             "a list of what the index has — empty here, because nothing has been read — rather than `null`"

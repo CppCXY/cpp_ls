@@ -231,7 +231,11 @@ fn a_windows_path_keeps_its_separators() {
     // A quoted path with a space, and a UNC share: the two spellings a naive "strip every backslash" gets wrong.
     assert_eq!(
         split_command_line(r#""C:\Program Files\mingw\c++.exe" -I \\server\share\inc"#),
-        vec![r#"C:\Program Files\mingw\c++.exe"#, "-I", r#"\\server\share\inc"#]
+        vec![
+            r#"C:\Program Files\mingw\c++.exe"#,
+            "-I",
+            r#"\\server\share\inc"#
+        ]
     );
 
     // And the escapes a command line really does use still work: a quote inside a quoted run, and an escaped space.

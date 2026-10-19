@@ -1687,10 +1687,20 @@ int main()
     let codes = codes_of_files(&[("/p/vector.h", header), ("/p/a.cpp", source)], "/p/a.cpp");
     {
         // PROBE: what the member list says the parameters are.
-        let files = MemoryFiles::new().with_file("/p/vector.h", header).with_file("/p/a.cpp", source);
+        let files = MemoryFiles::new()
+            .with_file("/p/vector.h", header)
+            .with_file("/p/a.cpp", source);
         let providers = SessionFiles::new(OpenDocuments::new(), files);
-        let mut session = Session::with_config("/p", providers, WatchFilter::new("/p"), CompilerConfig::default());
-        session.add_project_files([std::path::PathBuf::from("/p/vector.h"), std::path::PathBuf::from("/p/a.cpp")]);
+        let mut session = Session::with_config(
+            "/p",
+            providers,
+            WatchFilter::new("/p"),
+            CompilerConfig::default(),
+        );
+        session.add_project_files([
+            std::path::PathBuf::from("/p/vector.h"),
+            std::path::PathBuf::from("/p/a.cpp"),
+        ]);
         session.want_cooked_reading(std::path::Path::new("/p/a.cpp"));
         session.want_cooked_reading(std::path::Path::new("/p/vector.h"));
         session.index_everything();
@@ -1698,7 +1708,13 @@ int main()
         match session.members_of(&view, "std::vector<int>") {
             cpp_code_analysis::Known::Yes(list) => {
                 for member in &list.members {
-                    eprintln!("PROBE {:?} kind {:?} params {:?} type_of {:?}", member.fact.name, member.fact.kind, member.fact.parameter_list, member.fact.type_of);
+                    eprintln!(
+                        "PROBE {:?} kind {:?} params {:?} type_of {:?}",
+                        member.fact.name,
+                        member.fact.kind,
+                        member.fact.parameter_list,
+                        member.fact.type_of
+                    );
                 }
             }
             other => eprintln!("PROBE members_of: {other:?}"),
@@ -1738,7 +1754,9 @@ int main()
 ";
     let file = "/p/vector.h";
     let caller = "/p/a.cpp";
-    let mut memory = MemoryFiles::new().with_file(file, header).with_file(caller, source);
+    let mut memory = MemoryFiles::new()
+        .with_file(file, header)
+        .with_file(caller, source);
     let providers = SessionFiles::new(OpenDocuments::new(), memory.clone());
     let mut session = Session::with_config(
         "/p",
@@ -1746,7 +1764,10 @@ int main()
         WatchFilter::new("/p"),
         CompilerConfig::default(),
     );
-    session.add_project_files([std::path::PathBuf::from(file), std::path::PathBuf::from(caller)]);
+    session.add_project_files([
+        std::path::PathBuf::from(file),
+        std::path::PathBuf::from(caller),
+    ]);
     // **Both files are cooked**, which is the state a check runs in: the open file's closure is read and rendered
     // before a diagnostic is asked for. `codes_of_files` asks for the *caller* only, and the substitution needs the
     // class's own file — see `substituted_members`, whose first step is reading the declaring file.

@@ -145,8 +145,10 @@ pub(crate) fn decode(bytes: &[u8]) -> Option<Vec<(u64, Contribution)>> {
                     None
                 }
                 _ => {
-                    let start = u64::from_le_bytes(bytes.get(at + 1..at + 9)?.try_into().ok()?) as usize;
-                    let length = u64::from_le_bytes(bytes.get(at + 9..at + 17)?.try_into().ok()?) as usize;
+                    let start =
+                        u64::from_le_bytes(bytes.get(at + 1..at + 9)?.try_into().ok()?) as usize;
+                    let length =
+                        u64::from_le_bytes(bytes.get(at + 9..at + 17)?.try_into().ok()?) as usize;
                     at += 17;
                     Some(cpp_parser::SourceRange {
                         start_offset: start,
@@ -160,7 +162,8 @@ pub(crate) fn decode(bytes: &[u8]) -> Option<Vec<(u64, Contribution)>> {
                 // The body's *shape* is the parser's, and a contribution never needs it: the splice puts the events in
                 // the timeline and the definitions are rebuilt from the summary the walk already holds.
                 body: None,
-                body_text: body_text.map(|text| std::sync::Arc::from(std::str::from_utf8(text).unwrap_or(""))),
+                body_text: body_text
+                    .map(|text| std::sync::Arc::from(std::str::from_utf8(text).unwrap_or(""))),
                 parameters: parameters
                     .map(|text| std::sync::Arc::from(std::str::from_utf8(text).unwrap_or(""))),
                 body_range,
@@ -204,14 +207,17 @@ pub(crate) fn decode(bytes: &[u8]) -> Option<Vec<(u64, Contribution)>> {
             contribution.bodies.push(ConditionalBody {
                 name: std::str::from_utf8(name).ok()?.into(),
                 function_like,
-                parameters: parameters.map(|text| String::from_utf8_lossy(text).into_owned().into_boxed_str()),
+                parameters: parameters
+                    .map(|text| String::from_utf8_lossy(text).into_owned().into_boxed_str()),
                 body: std::str::from_utf8(body).ok()?.into(),
             });
         }
 
-        contribution.conditional_facts = u64::from_le_bytes(bytes.get(at..at + 8)?.try_into().ok()?) as usize;
+        contribution.conditional_facts =
+            u64::from_le_bytes(bytes.get(at..at + 8)?.try_into().ok()?) as usize;
         at += 8;
-        contribution.facts_in_force = u64::from_le_bytes(bytes.get(at..at + 8)?.try_into().ok()?) as usize;
+        contribution.facts_in_force =
+            u64::from_le_bytes(bytes.get(at..at + 8)?.try_into().ok()?) as usize;
         at += 8;
 
         entries.push((key, contribution));
@@ -238,7 +244,10 @@ fn take_bytes(bytes: &[u8], at: usize) -> Option<(&[u8], usize)> {
         return None;
     }
     let start = at + 4;
-    Some((bytes.get(start..start + length as usize)?, start + length as usize))
+    Some((
+        bytes.get(start..start + length as usize)?,
+        start + length as usize,
+    ))
 }
 
 fn take_optional(bytes: &[u8], at: usize) -> Option<(Option<&[u8]>, usize)> {
@@ -247,7 +256,10 @@ fn take_optional(bytes: &[u8], at: usize) -> Option<(Option<&[u8]>, usize)> {
         return Some((None, at + 4));
     }
     let start = at + 4;
-    Some((Some(bytes.get(start..start + length as usize)?), start + length as usize))
+    Some((
+        Some(bytes.get(start..start + length as usize)?),
+        start + length as usize,
+    ))
 }
 
 #[cfg(test)]
@@ -319,13 +331,21 @@ mod tests {
         assert_eq!(read.events[0].name.as_ref(), "DECLARE");
         assert_eq!(read.events[0].at, 7);
         assert_eq!(read.events[0].function_like, Some(true));
-        assert_eq!(read.events[0].body_text.as_deref(), Some("struct n##__ { int unused; };"));
+        assert_eq!(
+            read.events[0].body_text.as_deref(),
+            Some("struct n##__ { int unused; };")
+        );
         assert_eq!(read.events[0].parameters.as_deref(), Some("n"));
         assert_eq!(
-            read.events[0].body_range.map(|range| (range.start_offset, range.length)),
+            read.events[0]
+                .body_range
+                .map(|range| (range.start_offset, range.length)),
             Some((3, 4))
         );
-        assert!(!read.events[1].unconditional, "an `#undef` is an event with no body");
+        assert!(
+            !read.events[1].unconditional,
+            "an `#undef` is an event with no body"
+        );
         assert_eq!(read.edges, wrote.edges);
         assert_eq!(read.dead, wrote.dead);
         assert_eq!(read.bodies.len(), 1);
@@ -341,11 +361,20 @@ mod tests {
 
     #[test]
     fn a_foreign_or_truncated_file_is_refused_rather_than_half_applied() {
-        assert!(decode(b"not a cache file at all").is_none(), "the magic is the first check");
-        assert!(decode(b"CPPLSWS1").is_none(), "a magic with no count is not a cache");
+        assert!(
+            decode(b"not a cache file at all").is_none(),
+            "the magic is the first check"
+        );
+        assert!(
+            decode(b"CPPLSWS1").is_none(),
+            "a magic with no count is not a cache"
+        );
 
         let whole = encode(&[(1, a_contribution())]);
-        assert!(decode(&whole[..whole.len() - 3]).is_none(), "a truncated file is not half a cache");
+        assert!(
+            decode(&whole[..whole.len() - 3]).is_none(),
+            "a truncated file is not half a cache"
+        );
         assert!(decode(&whole).is_some(), "and the whole one still is");
     }
 

@@ -194,9 +194,7 @@ fn main() {
         total.as_secs_f64(),
         session.index().len()
     );
-    println!(
-        "  summaries        {reused:>6} reused from disk, {built} built, {missing} missing"
-    );
+    println!("  summaries        {reused:>6} reused from disk, {built} built, {missing} missing");
     let units = session.unit_stats();
     println!(
         "  timelines        {:>6} walked, {} from disk, {} from memory",

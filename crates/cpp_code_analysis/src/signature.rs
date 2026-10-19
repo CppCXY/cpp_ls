@@ -92,8 +92,6 @@ pub fn signatures_at<F>(
 where
     F: FnMut(&Path) -> Option<FileView>,
 {
-
-
     let Some(call) = call_around(&view.root, offset) else {
         return Vec::new();
     };
@@ -111,7 +109,6 @@ where
     ) else {
         return Vec::new();
     };
-
 
     // **The callee's spelling, not the whole call**: a reader who wrote `w.scaled(` already knows the object, and
     // the popup is about which function and which parameter. A `::`-qualified name is kept whole, because there the
@@ -230,7 +227,10 @@ where
                 .iter()
                 .map(|(_, text)| crate::sema::overload::a_type_without_its_name(text))
                 .collect();
-            let templates = crate::sema::deduction::template_parameters_before(&declared_in.source, source.name_offset);
+            let templates = crate::sema::deduction::template_parameters_before(
+                &declared_in.source,
+                source.name_offset,
+            );
 
             signatures.push(CallSignature {
                 label,
@@ -254,7 +254,6 @@ where
     // The first of a pair is kept, which is the declaration the index's own order reached first.
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     signatures.retain(|signature| seen.insert(signature.label.clone()));
-
 
     // **Which of these the call's own arguments select.**
     //
@@ -297,7 +296,9 @@ where
                     Some(arguments) => plain
                         .iter()
                         .map(|spelling| {
-                            crate::sema::types::substituted_spelling(spelling, &templates, &arguments)
+                            crate::sema::types::substituted_spelling(
+                                spelling, &templates, &arguments,
+                            )
                         })
                         .collect(),
                     None => plain,

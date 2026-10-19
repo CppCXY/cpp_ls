@@ -177,9 +177,12 @@ pub fn hover(
         // `std::format` showed an empty popup on the most ordinary call in modern C++. The list is what the reader
         // is asking for ("what can I call here"), and the index can now show each one's parameters.
         Known::Unknown(UnknownReason::Ambiguous(_)) => match session.definitions(view, offset) {
-            Known::Yes(found) if found.found.len() > 1 => {
-                Some(markdown(overloads_markdown(session, Some(view), offset, &found)))
-            }
+            Known::Yes(found) if found.found.len() > 1 => Some(markdown(overloads_markdown(
+                session,
+                Some(view),
+                offset,
+                &found,
+            ))),
             _ => expression_markdown(session, view, offset).map(markdown),
         },
         // `No` and `Unknown` both leave the name question unanswered: the first says the analysis looked and there
@@ -198,9 +201,9 @@ fn member_markdown(
 ) -> String {
     let object = access.object.text().to_string();
     let object = object.trim();
-    let at = cpp_code_analysis::file::coordinates::ReadingOffset::new(
-        usize::from(access.object.text_range().start()),
-    );
+    let at = cpp_code_analysis::file::coordinates::ReadingOffset::new(usize::from(
+        access.object.text_range().start(),
+    ));
 
     let cpp_code_analysis::Known::Yes(found) = session.type_at(view, at) else {
         // **Saying "I do not know" is the answer.** A reader who sees this knows the popup is about a type the analysis
@@ -289,8 +292,12 @@ fn overloads_markdown(
             })
             .collect();
 
-        let chosen =
-            session.the_declaration_a_call_means(view, offset, &parameter_lists, &template_parameters)?;
+        let chosen = session.the_declaration_a_call_means(
+            view,
+            offset,
+            &parameter_lists,
+            &template_parameters,
+        )?;
         let declaration = found.found.get(chosen)?;
         Some((
             declaration.file.clone(),
@@ -321,8 +328,11 @@ fn overloads_markdown(
                 .as_deref()
                 .map(cpp_code_analysis::sema::overload::parameters_in)
                 .unwrap_or_default();
-            if let Some(arguments) = session.the_deduced_arguments(view, offset, &names, &parameters) {
-                line = cpp_code_analysis::sema::types::substituted_spelling(&line, &names, &arguments);
+            if let Some(arguments) =
+                session.the_deduced_arguments(view, offset, &names, &parameters)
+            {
+                line =
+                    cpp_code_analysis::sema::types::substituted_spelling(&line, &names, &arguments);
             }
         }
         lines.push_str(if is_the_one { "→ " } else { "  " });

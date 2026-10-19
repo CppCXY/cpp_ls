@@ -94,11 +94,26 @@ mod tests {
     fn the_two_real_transforms_are_recognised_and_not_answered_for() {
         for (spelling, _) in TRANSFORMS {
             let builtin = named(spelling).expect("the name is in the table");
-            assert_eq!(builtin.kind, Kind::Transform(TRANSFORMS.iter().find(|(name, _)| name == spelling).expect("just found").1));
-            assert_eq!(apply(Transform::UnderlyingType, &["E".to_string()]), Answer::Unmodelled);
+            assert_eq!(
+                builtin.kind,
+                Kind::Transform(
+                    TRANSFORMS
+                        .iter()
+                        .find(|(name, _)| name == spelling)
+                        .expect("just found")
+                        .1
+                )
+            );
+            assert_eq!(
+                apply(Transform::UnderlyingType, &["E".to_string()]),
+                Answer::Unmodelled
+            );
         }
 
-        assert!(named("__decay").is_none(), "an expression builtin is not a type-producing one");
+        assert!(
+            named("__decay").is_none(),
+            "an expression builtin is not a type-producing one"
+        );
     }
     /// **The pack element a literal index names is that type.**
     ///
@@ -108,10 +123,18 @@ mod tests {
     /// and an index past the end of what was written is a header this layer is misreading — neither is a type.
     #[test]
     fn the_pack_element_a_literal_index_names_is_that_type() {
-        let arguments = |parts: &[&str]| parts.iter().map(|one| one.to_string()).collect::<Vec<String>>();
+        let arguments = |parts: &[&str]| {
+            parts
+                .iter()
+                .map(|one| one.to_string())
+                .collect::<Vec<String>>()
+        };
 
         assert_eq!(
-            apply(Transform::TypePackElement, &arguments(&["1", "int", "double"])),
+            apply(
+                Transform::TypePackElement,
+                &arguments(&["1", "int", "double"])
+            ),
             Answer::Type(crate::sema::types::parse_type_spelling("double"))
         );
         assert_eq!(
@@ -119,10 +142,17 @@ mod tests {
             Answer::Type(crate::sema::types::parse_type_spelling("const int*")),
             "and the element keeps its own spelling, qualifiers and all"
         );
-        assert_eq!(apply(Transform::TypePackElement, &arguments(&["_Idx", "int"])), Answer::Unmodelled);
-        assert_eq!(apply(Transform::TypePackElement, &arguments(&["4", "int"])), Answer::Unmodelled);
-        assert_eq!(apply(Transform::TypePackElement, &arguments(&[])), Answer::Unmodelled);
+        assert_eq!(
+            apply(Transform::TypePackElement, &arguments(&["_Idx", "int"])),
+            Answer::Unmodelled
+        );
+        assert_eq!(
+            apply(Transform::TypePackElement, &arguments(&["4", "int"])),
+            Answer::Unmodelled
+        );
+        assert_eq!(
+            apply(Transform::TypePackElement, &arguments(&[])),
+            Answer::Unmodelled
+        );
     }
 }
-
-

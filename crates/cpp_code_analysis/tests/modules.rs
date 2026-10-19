@@ -1231,7 +1231,11 @@ fn a_module_name_is_offered_after_import() {
     let cursor = text.find("import ").expect("the fixture writes it") + "import ".len();
 
     let offered = session.completions(&view, FileOffset::new(cursor));
-    let labels: Vec<&str> = offered.items.iter().map(|item| item.label.as_str()).collect();
+    let labels: Vec<&str> = offered
+        .items
+        .iter()
+        .map(|item| item.label.as_str())
+        .collect();
     assert!(
         labels.contains(&"math") && labels.contains(&"shapes"),
         "the two modules this project declares: {labels:?}"
@@ -1250,7 +1254,11 @@ fn a_module_name_is_offered_after_import() {
     // replaces is the word the reader typed.
     let partial = text.find("import sh").expect("…") + "import sh".len();
     let narrowed = session.completions(&view, FileOffset::new(partial));
-    let labels: Vec<&str> = narrowed.items.iter().map(|item| item.label.as_str()).collect();
+    let labels: Vec<&str> = narrowed
+        .items
+        .iter()
+        .map(|item| item.label.as_str())
+        .collect();
     assert_eq!(labels, ["shapes"], "the prefix filters the list");
     assert_eq!(
         narrowed.replace,
@@ -1258,7 +1266,6 @@ fn a_module_name_is_offered_after_import() {
         "and the client replaces the typed word"
     );
 }
-
 
 /// **`import std;` on GCC — the standard module is a source file in the include tree.**
 ///
@@ -1325,7 +1332,6 @@ fn the_standard_module_is_found_in_gcc_include_tree() {
     );
 }
 
-
 /// **`export namespace math { … }` exports the namespace's own name, and its concepts.**
 ///
 /// The export region is stored **per declaration shape**, and `exported_at` is answered from the shapes containing
@@ -1379,7 +1385,11 @@ fn an_exported_namespace_and_its_concept_are_exported_facts() {
     };
     assert_eq!(exported("math"), Some(true), "the namespace's own name");
     assert_eq!(exported("Number"), Some(true), "and a concept inside it");
-    assert_eq!(exported("add"), Some(true), "the function, which always was");
+    assert_eq!(
+        exported("add"),
+        Some(true),
+        "the function, which always was"
+    );
 
     // **And the consequence the reader sees**: the name is offered in the importing file.
     let view = session
@@ -1387,13 +1397,16 @@ fn an_exported_namespace_and_its_concept_are_exported_facts() {
         .expect("the caller is held");
     let cursor = caller.find("mat").expect("the fixture writes it") + "mat".len();
     let offered = session.completions(&view, FileOffset::new(cursor));
-    let labels: Vec<&str> = offered.items.iter().map(|item| item.label.as_str()).collect();
+    let labels: Vec<&str> = offered
+        .items
+        .iter()
+        .map(|item| item.label.as_str())
+        .collect();
     assert!(
         labels.contains(&"math"),
         "`math` is a name an importer can write: {labels:?}"
     );
 }
-
 
 /// **A module beside the file that imports it** — the ordinary project layout, and the one the request path missed.
 ///
@@ -1425,7 +1438,8 @@ fn a_module_beside_the_importing_file_is_read_in() {
         .with_file("src/main.cpp", "import math;\nint x = add(1, 2);\n");
 
     let providers = SessionFiles::new(OpenDocuments::new(), files);
-    let mut session = Session::with_config(".", providers, WatchFilter::new("."), CompilerConfig::new());
+    let mut session =
+        Session::with_config(".", providers, WatchFilter::new("."), CompilerConfig::new());
     session.add_project_files([std::path::PathBuf::from("src/main.cpp")]);
     session.index_everything();
 

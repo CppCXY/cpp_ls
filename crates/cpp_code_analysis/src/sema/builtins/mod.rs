@@ -213,22 +213,32 @@ mod tests {
     #[test]
     fn the_two_forms_a_builtin_is_written_in_are_both_read() {
         assert_eq!(
-            split_a_builtin_spelling("__is_pointer(int*)").map(|(builtin, arguments)| (builtin.name, arguments)),
+            split_a_builtin_spelling("__is_pointer(int*)")
+                .map(|(builtin, arguments)| (builtin.name, arguments)),
             Some(("__is_pointer", vec!["int*".to_string()]))
         );
         assert_eq!(
             split_a_builtin_spelling("__type_pack_element<0, _Types...>")
                 .map(|(builtin, arguments)| (builtin.name, arguments)),
-            Some(("__type_pack_element", vec!["0".to_string(), "_Types...".to_string()])),
+            Some((
+                "__type_pack_element",
+                vec!["0".to_string(), "_Types...".to_string()]
+            )),
             "a template-id form is split the same way a call is"
         );
-        assert!(split_a_builtin_spelling("vector<int>").is_none(), "an ordinary class is not a builtin");
+        assert!(
+            split_a_builtin_spelling("vector<int>").is_none(),
+            "an ordinary class is not a builtin"
+        );
     }
 
     #[test]
     fn arguments_are_split_where_the_language_splits_them() {
         assert_eq!(split_arguments("A, B"), vec!["A", "B"]);
-        assert_eq!(split_arguments("vector<int>, pair<int, int>"), vec!["vector<int>", "pair<int, int>"]);
+        assert_eq!(
+            split_arguments("vector<int>, pair<int, int>"),
+            vec!["vector<int>", "pair<int, int>"]
+        );
         assert_eq!(split_arguments(""), Vec::<String>::new());
     }
 }

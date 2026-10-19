@@ -132,14 +132,25 @@ fn completion_at_four_positions() {
             "{label:<28} offset {at:>3} → {} item(s){}{}",
             labels.len(),
             if labels.is_empty() { "" } else { ": " },
-            labels.iter().take(6).cloned().collect::<Vec<_>>().join(", ")
+            labels
+                .iter()
+                .take(6)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
         );
     };
     ask("after `MAX` in `= MAX;`", SOURCE.find("MAX;").unwrap() + 3);
     ask("inside `MA`", SOURCE.find("MAX;").unwrap() + 2);
-    ask("after `WIDTH` in `= WIDTH;`", SOURCE.find("WIDTH;").unwrap() + 5);
+    ask(
+        "after `WIDTH` in `= WIDTH;`",
+        SOURCE.find("WIDTH;").unwrap() + 5,
+    );
     ask("start of `int w`", SOURCE.find("    int w").unwrap() + 4);
-    ask("inside the body, after `{`", SOURCE.find("void f() {").unwrap() + 10);
+    ask(
+        "inside the body, after `{`",
+        SOURCE.find("void f() {").unwrap() + 10,
+    );
 }
 
 /// **A macro defined in an included header is offered too** — the common case: a project's `config.h` defines the names its

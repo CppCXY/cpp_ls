@@ -188,7 +188,9 @@ pub async fn on_completion(
             // an answer is never asked. Every reason the list can be empty is temporary: the file's summary was just
             // dropped by an edit, a declaration it needs has not been read yet, the cursor is mid-word in a way this
             // layer cannot see. None of them is a fact about the prefix.
-            is_incomplete: found.items.is_empty() || !session.is_locally_ready(&path) || found.truncated,
+            is_incomplete: found.items.is_empty()
+                || !session.is_locally_ready(&path)
+                || found.truncated,
             items: found
                 .items
                 .iter()
@@ -630,4 +632,3 @@ mod tests {
         assert_eq!(completion_kind(ItemKind::Header), CompletionItemKind::FILE);
     }
 }
-

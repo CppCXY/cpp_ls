@@ -21,8 +21,8 @@
 use cpp_code_analysis::VfsFile;
 use cpp_code_analysis::sema::declarations::{LocalReferences, local_references_of};
 use lsp_types::{
-    ClientCapabilities, DocumentHighlight, DocumentHighlightKind, DocumentHighlightParams, OneOf, Range,
-    ServerCapabilities,
+    ClientCapabilities, DocumentHighlight, DocumentHighlightKind, DocumentHighlightParams, OneOf,
+    Range, ServerCapabilities,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -46,7 +46,9 @@ pub async fn on_document_highlight(
         let path = uri_to_file_path(&uri)?;
         let view = session.view(&path)?;
         let held = session.files().held(&view.path)?;
-        let offset = view.file_offset_of(offset_at_position(&view, position)?)?.get();
+        let offset = view
+            .file_offset_of(offset_at_position(&view, position)?)?
+            .get();
 
         let locals = local_references_of(&view.scopes, &view.root);
         Some(highlights_of(held, &view.source, offset, &locals))
@@ -71,9 +73,21 @@ pub fn highlights_of(
     };
 
     let mut found = Vec::new();
-    push_highlight(file, source, entry.declared_at as usize, DocumentHighlightKind::WRITE, &mut found);
+    push_highlight(
+        file,
+        source,
+        entry.declared_at as usize,
+        DocumentHighlightKind::WRITE,
+        &mut found,
+    );
     for at in &entry.uses {
-        push_highlight(file, source, *at as usize, DocumentHighlightKind::READ, &mut found);
+        push_highlight(
+            file,
+            source,
+            *at as usize,
+            DocumentHighlightKind::READ,
+            &mut found,
+        );
     }
     found
 }
@@ -145,20 +159,14 @@ mod tests {
         let held = session.files().held(&path).expect("the file is held");
         // The view without a project: the file's own text, parsed and scoped, which is what a highlight of a local
         // needs — no include closure is involved in resolving a local.
-        let view = cpp_code_analysis::FileView::parse_with(
-            held,
-            &cpp_parser::MacroEnvironment::default(),
-        );
+        let view =
+            cpp_code_analysis::FileView::parse_with(held, &cpp_parser::MacroEnvironment::default());
         let locals = local_references_of(&view.scopes, &view.root);
 
         // The cursor on the first use of `value` on the third line: a use selects its declaration's entry.
         let on_a_use = text.find("value = value").expect("the fixture uses it");
         let found = highlights_of(held, &view.source, on_a_use, &locals);
-        assert_eq!(
-            found.len(),
-            3,
-            "the declaration and two uses: {found:?}"
-        );
+        assert_eq!(found.len(), 3, "the declaration and two uses: {found:?}");
         assert_eq!(found[0].kind, Some(DocumentHighlightKind::WRITE));
         assert!(
             found[1..]
@@ -171,7 +179,10 @@ mod tests {
             found[0].range.start.character, 8,
             "`int value`: the name starts at column 8"
         );
-        assert_eq!(found[0].range.end.character, 13, "`value` is five characters");
+        assert_eq!(
+            found[0].range.end.character, 13,
+            "`value` is five characters"
+        );
 
         // A cursor on nothing is no highlight at all, which is what a client expects on every blank position.
         assert!(highlights_of(held, &view.source, 0, &locals).is_empty());

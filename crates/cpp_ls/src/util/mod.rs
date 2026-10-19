@@ -37,7 +37,11 @@ pub use uri::{path_to_uri, uri_to_file_path};
 pub fn is_inside(path: &std::path::Path, root: &std::path::Path) -> bool {
     let flatten = |path: &std::path::Path| {
         let text = path.to_string_lossy().replace('\\', "/");
-        if cfg!(windows) { text.to_lowercase() } else { text }
+        if cfg!(windows) {
+            text.to_lowercase()
+        } else {
+            text
+        }
     };
     let path = flatten(path);
     let root = flatten(root);

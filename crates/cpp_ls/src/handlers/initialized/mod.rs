@@ -177,7 +177,6 @@ async fn open_session(context: &ServerContextSnapshot) -> Option<PathBuf> {
         workspace_manager.workspace_open_files()
     };
 
-
     // **The sharing cache, warm** — §8 step 4, and before the first file is read, so the units this run builds can
     // splice last run's contributions instead of re-walking them. A missing file is a cold start, not an error.
     context
@@ -312,13 +311,13 @@ async fn index_in_background(context: ServerContextSnapshot) {
         let mut was_pending = false;
 
         // **The wave the pump is asking for**, adjusted after every slice (see below). It starts small because the first
-    // wave of a cold start is the expensive one — measured: a fixed cap of 32 held the writer for 3309 ms on the
-    // latency fixture's first wave and a completion that arrived inside it waited for all of it; a fixed 4 answered in
-    // 137 ms. That is the whole reason this is a measurement rather than a constant.
-    const THE_FIRST_WAVE: usize = 8;
-    let mut wave = THE_FIRST_WAVE;
+        // wave of a cold start is the expensive one — measured: a fixed cap of 32 held the writer for 3309 ms on the
+        // latency fixture's first wave and a completion that arrived inside it waited for all of it; a fixed 4 answered in
+        // 137 ms. That is the whole reason this is a measurement rather than a constant.
+        const THE_FIRST_WAVE: usize = 8;
+        let mut wave = THE_FIRST_WAVE;
 
-    loop {
+        loop {
             // A reload bumps the version and starts a pump of its own: this one stops rather than racing it for
             // the write lock, because its idea of what the project is is the one that was replaced.
             if context.workspace_manager().lock().await.workspace_version() != version {
@@ -493,7 +492,9 @@ async fn index_in_background(context: ServerContextSnapshot) {
                     .update_session("save the sharing cache", |session| {
                         match session.save_the_sharing() {
                             Ok(written) => {
-                                log::info!("wrote {written} shared contribution(s) for the next run")
+                                log::info!(
+                                    "wrote {written} shared contribution(s) for the next run"
+                                )
                             }
                             Err(error) => log::warn!("the sharing cache was not written: {error}"),
                         }

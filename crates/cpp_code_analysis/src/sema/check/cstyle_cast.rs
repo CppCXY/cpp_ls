@@ -56,7 +56,10 @@ impl Check for CStyleCast {
             // **A preprocessor condition is not a cast.** `#if (_MSC_VER)` and `#if (ASIO_USE_… )` are the shapes the first
             // census run reported 813 times over 46 files, and every one of them was this: an identifier in parentheses on
             // a directive line, which is a condition the preprocessor evaluates and not something being cast.
-            let line_start = source[..open].rfind('\n').map(|newline| newline + 1).unwrap_or(0);
+            let line_start = source[..open]
+                .rfind('\n')
+                .map(|newline| newline + 1)
+                .unwrap_or(0);
             if source[line_start..open].trim_start().starts_with('#') {
                 continue;
             }
@@ -64,18 +67,25 @@ impl Check for CStyleCast {
             // `(OtherAnyExecutor)` — were all in a template argument list, where a parenthesised name is an argument and not
             // something being converted. The tell is the line: an unmatched `<` before the `(` means this is inside an
             // angle-bracket list, and `f((int)x)` on a line with no `<` is still a cast.
-            let line_start = source[..open].rfind('\n').map(|newline| newline + 1).unwrap_or(0);
+            let line_start = source[..open]
+                .rfind('\n')
+                .map(|newline| newline + 1)
+                .unwrap_or(0);
             let line = &source[line_start..open];
             if line.matches('<').count() > line.matches('>').count() {
                 continue;
-            }            // **A parameter list is not a cast.** `void (const any_io_executor& e)` inside a declaration — the shape the
+            } // **A parameter list is not a cast.** `void (const any_io_executor& e)` inside a declaration — the shape the
             // census reported 376 times — is a *type* with a *name* after it, which is what a parameter is and what a cast's
             // parenthesised type never is. The last word being an identifier that is not a type keyword is the evidence.
             if is_a_parameter_list(inner) {
                 continue;
             }
             // …and the operand has to be on the same line: `#if (X)\n` is not `(X)` applied to whatever follows.
-            if source[close + 1..].chars().take_while(|character| character.is_whitespace()).any(|character| character == '\n') {
+            if source[close + 1..]
+                .chars()
+                .take_while(|character| character.is_whitespace())
+                .any(|character| character == '\n')
+            {
                 continue;
             }
             // What follows the `)`, skipping whitespace — an operand starts a cast, and an operator does not.
@@ -83,14 +93,23 @@ impl Check for CStyleCast {
             let Some(next) = after.chars().next() else {
                 continue;
             };
-            if !(next.is_alphanumeric() || matches!(next, '_' | '(' | '*' | '&' | '!' | '"' | '\'')) {
+            if !(next.is_alphanumeric() || matches!(next, '_' | '(' | '*' | '&' | '!' | '"' | '\''))
+            {
                 continue;
             }
             // …and a *statement* keyword in the parentheses is not a type.
             if matches!(
                 inner,
-                "if" | "for" | "while" | "switch" | "catch" | "return" | "sizeof" | "decltype" | "alignof"
-                    | "static_assert" | "assert"
+                "if" | "for"
+                    | "while"
+                    | "switch"
+                    | "catch"
+                    | "return"
+                    | "sizeof"
+                    | "decltype"
+                    | "alignof"
+                    | "static_assert"
+                    | "assert"
             ) {
                 continue;
             }
@@ -115,9 +134,9 @@ fn looks_like_a_type(written: &str) -> bool {
             .chars()
             .next()
             .is_some_and(|first| first.is_alphabetic() || first == '_' || first == ':')
-        && written
-            .chars()
-            .all(|character| character.is_alphanumeric() || matches!(character, '_' | ':' | '*' | '&' | ' '))
+        && written.chars().all(|character| {
+            character.is_alphanumeric() || matches!(character, '_' | ':' | '*' | '&' | ' ')
+        })
         && !written.contains("  ")
 }
 
@@ -126,16 +145,21 @@ fn looks_like_a_type(written: &str) -> bool {
 /// its type, and a parameter has nothing else.
 fn is_a_parameter_list(inner: &str) -> bool {
     const TYPE_WORDS: &[&str] = &[
-        "const", "volatile", "unsigned", "signed", "long", "short", "int", "float", "double", "char", "bool",
-        "void", "auto", "struct", "class", "enum", "union", "typename",
+        "const", "volatile", "unsigned", "signed", "long", "short", "int", "float", "double",
+        "char", "bool", "void", "auto", "struct", "class", "enum", "union", "typename",
     ];
     let Some(last) = inner.split_whitespace().last() else {
         return false;
     };
     let last = last.trim_start_matches(['&', '*']).trim();
     let is_a_name = !last.is_empty()
-        && last.chars().next().is_some_and(|first| first.is_alphabetic() || first == '_' || first == ':')
-        && last.chars().all(|character| character.is_alphanumeric() || matches!(character, '_' | ':'))
+        && last
+            .chars()
+            .next()
+            .is_some_and(|first| first.is_alphabetic() || first == '_' || first == ':')
+        && last
+            .chars()
+            .all(|character| character.is_alphanumeric() || matches!(character, '_' | ':'))
         && !TYPE_WORDS.contains(&last);
     // …and there has to be something before it: `(int)` is a type with no name, `(int n)` is a parameter.
     is_a_name && inner.split_whitespace().count() > 1

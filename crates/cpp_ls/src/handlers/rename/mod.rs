@@ -114,7 +114,6 @@ pub async fn on_rename(
         context.analysis().prepare(&path).await;
     }
 
-
     snapshot_query(context.analysis(), cancel_token, move |session| {
         let path = uri_to_file_path(&uri)?;
         let view = session.view_of_the_file(&path)?;
@@ -390,7 +389,6 @@ mod tests {
     }
 }
 
-
 #[cfg(test)]
 mod inside {
     use std::path::Path;
@@ -412,7 +410,10 @@ mod inside {
         // A sibling that shares the prefix is **outside**: `/project2` is not `/project`.
         assert!(!is_inside(Path::new("/project2/a.cpp"), root));
         assert!(!is_inside(Path::new("/a.cpp"), root));
-        assert!(!is_inside(Path::new("/p"), Path::new("/p/src")), "the root is not inside a child");
+        assert!(
+            !is_inside(Path::new("/p"), Path::new("/p/src")),
+            "the root is not inside a child"
+        );
 
         // Separators, both ways.
         assert!(is_inside(Path::new(r"\p\a.cpp"), root));

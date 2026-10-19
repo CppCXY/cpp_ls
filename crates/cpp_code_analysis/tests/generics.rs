@@ -172,7 +172,11 @@ fn an_instantiated_member_list_records_the_arguments() {
         .expect("the member is on the class");
     // The substituted spelling keeps the class's own spacing (`int &`), which is the same type.
     assert_eq!(
-        front.fact.returns.as_deref().map(|written| written.replace(' ', "")),
+        front
+            .fact
+            .returns
+            .as_deref()
+            .map(|written| written.replace(' ', "")),
         Some("int&".to_string())
     );
 }

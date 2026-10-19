@@ -233,7 +233,10 @@ impl FileView {
     ///
     /// `None` when no span covers the range — the spans tile the rendering, so a gap is text the cook produced
     /// rather than text anyone wrote. See [`FileView::was_written_here`], which relies on the same tiling.
-    pub fn file_range_of(&self, in_the_reading: cpp_parser::SourceRange) -> Option<cpp_parser::SourceRange> {
+    pub fn file_range_of(
+        &self,
+        in_the_reading: cpp_parser::SourceRange,
+    ) -> Option<cpp_parser::SourceRange> {
         if self.written.is_none() {
             return Some(in_the_reading);
         }
@@ -256,7 +259,10 @@ impl FileView {
         }
 
         let (start, end) = bounds?;
-        Some(cpp_parser::SourceRange::new(start, end.saturating_sub(start)))
+        Some(cpp_parser::SourceRange::new(
+            start,
+            end.saturating_sub(start),
+        ))
     }
 
     /// **Was this range of the reading written in this file?**

@@ -107,24 +107,24 @@ pub mod diagnostic_code;
 // Checks/Finding { check: … } shape, so they are declared again the moment their bodies are rewritten. Kept in
 // the tree rather than deleted, because their reasoning (and the measured 119-findings defect they record) is what
 // the ported versions have to preserve.
+mod braces_around_statements;
+mod cstyle_cast;
+mod else_after_return;
+mod implicit_bool_conversion;
 pub mod include_not_found;
+mod macro_parentheses;
 pub mod macro_redefined;
 pub mod missing_return;
 pub mod param_type_check;
 pub mod return_type_mismatch;
+mod simplify_boolean_expr;
 pub mod syntax_error;
 pub mod undefined_field;
 pub mod unnecessary_branch;
 pub mod unused;
-mod braces_around_statements;
+mod use_auto;
 mod use_nullptr;
 mod use_override;
-mod simplify_boolean_expr;
-mod else_after_return;
-mod cstyle_cast;
-mod use_auto;
-mod macro_parentheses;
-mod implicit_bool_conversion;
 
 pub use config::CheckConfig;
 pub use diagnostic_code::{DiagnosticCode, RuleSeverity, RuleTag};
@@ -1419,7 +1419,9 @@ pub fn run(context: CheckContext<'_>) -> Vec<Finding> {
 /// `member_access_of` answers for the **node that holds the operator**, and a call's callee is the identifier to its
 /// right: the access is the parent. Walking up a couple of levels rather than asserting the shape keeps this honest for
 /// the grammar's other spellings (`(*p).f`, `a.b.f`), where the callee's parent is not always the outermost access.
-pub fn member_access_above(node: &cpp_parser::CppSyntaxNode) -> Option<crate::sema::resolve::MemberAccess> {
+pub fn member_access_above(
+    node: &cpp_parser::CppSyntaxNode,
+) -> Option<crate::sema::resolve::MemberAccess> {
     let mut current = Some(node.clone());
     for _ in 0..3 {
         let node = current?;

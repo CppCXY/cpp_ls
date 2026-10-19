@@ -136,7 +136,6 @@ fn a_call_into_an_uncooked_header_is_still_hinted() {
     );
 }
 
-
 /// A parameter list is not a call, and a hint goes at the **argument**: the declaration above writes
 /// `int value`, and the one hint is the one at `other`, named after the parameter it lands in.
 #[test]

@@ -112,7 +112,12 @@ pub(crate) fn projection_digest(
 ) -> u64 {
     let mut digest: u64 = 0xcbf2_9ce4_8422_2325;
     for (name, hash) in projection_of(path, source).iter() {
-        let value = hash ^ if defined(name) { 0x9e37_79b9_7f4a_7c15 } else { 0 };
+        let value = hash
+            ^ if defined(name) {
+                0x9e37_79b9_7f4a_7c15
+            } else {
+                0
+            };
         digest = digest.rotate_left(5) ^ value;
     }
     digest
@@ -213,4 +218,3 @@ pub(crate) fn hash(bytes: &[u8]) -> u64 {
     }
     hash
 }
-

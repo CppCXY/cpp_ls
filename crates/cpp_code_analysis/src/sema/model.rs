@@ -241,4 +241,3 @@ impl<'a> SemanticModel<'a> {
         self.scopes
     }
 }
-

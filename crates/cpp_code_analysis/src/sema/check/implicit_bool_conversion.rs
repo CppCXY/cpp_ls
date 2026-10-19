@@ -52,7 +52,10 @@ impl Check for ImplicitBoolConversion {
                 return;
             }
             let range = inner.text_range();
-            conditions.push((usize::from(range.start()), usize::from(range.end()) - usize::from(range.start())));
+            conditions.push((
+                usize::from(range.start()),
+                usize::from(range.end()) - usize::from(range.start()),
+            ));
         };
 
         for statement in context.own::<cpp_parser::CppIfStat>().collect::<Vec<_>>() {
@@ -60,7 +63,10 @@ impl Check for ImplicitBoolConversion {
                 note(&condition);
             }
         }
-        for statement in context.own::<cpp_parser::CppWhileStat>().collect::<Vec<_>>() {
+        for statement in context
+            .own::<cpp_parser::CppWhileStat>()
+            .collect::<Vec<_>>()
+        {
             if let Some(condition) = statement.get_condition() {
                 note(&condition);
             }

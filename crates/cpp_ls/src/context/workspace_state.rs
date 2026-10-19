@@ -150,7 +150,11 @@ impl WorkspaceState {
             return true;
         }
 
-        if !self.roots.iter().any(|root| crate::util::is_inside(path, root)) {
+        if !self
+            .roots
+            .iter()
+            .any(|root| crate::util::is_inside(path, root))
+        {
             return false;
         }
 

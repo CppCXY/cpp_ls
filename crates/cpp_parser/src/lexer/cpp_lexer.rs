@@ -159,11 +159,19 @@ impl<'a> CppLexer<'a> {
             "while" => CppTokenKind::WhileKeyword,
 
             // C++11 and later keywords
-            "alignas" if self.accepts(crate::features::Feature::AlignasCpp) => CppTokenKind::AlignasKeyword,
+            "alignas" if self.accepts(crate::features::Feature::AlignasCpp) => {
+                CppTokenKind::AlignasKeyword
+            }
             "alignof" => CppTokenKind::AlignofKeyword,
-            "constexpr" if self.accepts(crate::features::Feature::Constexpr) => CppTokenKind::ConstexprKeyword,
-            "consteval" if self.accepts(crate::features::Feature::Consteval) => CppTokenKind::ConstevalKeyword,
-            "constinit" if self.accepts(crate::features::Feature::Constinit) => CppTokenKind::ConstinitKeyword,
+            "constexpr" if self.accepts(crate::features::Feature::Constexpr) => {
+                CppTokenKind::ConstexprKeyword
+            }
+            "consteval" if self.accepts(crate::features::Feature::Consteval) => {
+                CppTokenKind::ConstevalKeyword
+            }
+            "constinit" if self.accepts(crate::features::Feature::Constinit) => {
+                CppTokenKind::ConstinitKeyword
+            }
             "decltype" => CppTokenKind::DecltypeKeyword,
 
             // The **GNU spellings of constructs that are standard keywords**, mapped to the same kind because a
@@ -207,7 +215,9 @@ impl<'a> CppLexer<'a> {
             "register" => CppTokenKind::RegisterKeyword,
             "namespace" => CppTokenKind::NamespaceKeyword,
             "noexcept" => CppTokenKind::NoexceptKeyword,
-            "nullptr" if self.accepts(crate::features::Feature::Nullptr) => CppTokenKind::NullptrKeyword,
+            "nullptr" if self.accepts(crate::features::Feature::Nullptr) => {
+                CppTokenKind::NullptrKeyword
+            }
             "static_assert"
                 if self.accepts(crate::features::Feature::StaticAssert)
                     || self.accepts(crate::features::Feature::StaticAssertC) =>
@@ -215,16 +225,24 @@ impl<'a> CppLexer<'a> {
                 CppTokenKind::StaticAssertKeyword
             }
             "template" => CppTokenKind::TemplateKeyword,
-            "thread_local" if self.accepts(crate::features::Feature::ThreadLocal) => CppTokenKind::ThreadLocalKeyword,
+            "thread_local" if self.accepts(crate::features::Feature::ThreadLocal) => {
+                CppTokenKind::ThreadLocalKeyword
+            }
 
             // C++20 keywords
             // `concept` and `requires` are deliberately **not** here. Both are contextual keywords — the grammar
             // reads them as keywords in the positions the standard gives them a meaning, and as ordinary names
             // everywhere else — so the lexer hands them over as identifiers and the grammar decides. See
             // [`crate::grammar::cpp::is_contextual_keyword`].
-            "co_await" if self.accepts(crate::features::Feature::Coroutines) => CppTokenKind::CoAwaitKeyword,
-            "co_return" if self.accepts(crate::features::Feature::Coroutines) => CppTokenKind::CoReturnKeyword,
-            "co_yield" if self.accepts(crate::features::Feature::Coroutines) => CppTokenKind::CoYieldKeyword,
+            "co_await" if self.accepts(crate::features::Feature::Coroutines) => {
+                CppTokenKind::CoAwaitKeyword
+            }
+            "co_return" if self.accepts(crate::features::Feature::Coroutines) => {
+                CppTokenKind::CoReturnKeyword
+            }
+            "co_yield" if self.accepts(crate::features::Feature::Coroutines) => {
+                CppTokenKind::CoYieldKeyword
+            }
 
             // Not a keyword, return as identifier
             _ => CppTokenKind::Identifier,

@@ -19,11 +19,17 @@ fn a_projects_own_flags_decide_the_language() {
     };
     let language = config.language_for(Path::new("/p/a.cpp"));
     assert_eq!(language.describe(), "gnu++20");
-    assert_eq!(language.standards().collect::<Vec<_>>(), vec![Standard::Cpp20]);
+    assert_eq!(
+        language.standards().collect::<Vec<_>>(),
+        vec![Standard::Cpp20]
+    );
     assert_eq!(language.vendors().collect::<Vec<_>>(), vec![Vendor::Gnu]);
     assert!(language.support(Feature::Concepts));
     assert!(language.support(Feature::StatementExpression));
-    assert!(!language.support(Feature::DeducingThis), "C++23, which is later");
+    assert!(
+        !language.support(Feature::DeducingThis),
+        "C++23, which is later"
+    );
 }
 
 /// **Nothing said means nothing refused**: with no database and no flags, the answer is `permissive`, because a parse that
@@ -35,7 +41,11 @@ fn an_unconfigured_project_is_permissive() {
     assert!(language.support(Feature::StatementExpression));
     assert!(language.support(Feature::StructuredExceptionHandling));
     assert!(language.support(Feature::C89Declarations));
-    assert_eq!(language.standards().count(), 10, "every standard, every vendor");
+    assert_eq!(
+        language.standards().count(),
+        10,
+        "every standard, every vendor"
+    );
 }
 
 /// **A flag that is not a standard is not a language**: `-Ifoo` and `-O2` say nothing about syntax, so the answer falls
@@ -43,11 +53,18 @@ fn an_unconfigured_project_is_permissive() {
 #[test]
 fn a_command_without_a_standard_flag_falls_through() {
     let config = CompilerConfig {
-        extra_args: vec!["-Iinclude".to_string(), "-O2".to_string(), "-DFOO=1".to_string()],
+        extra_args: vec![
+            "-Iinclude".to_string(),
+            "-O2".to_string(),
+            "-DFOO=1".to_string(),
+        ],
         ..CompilerConfig::default()
     };
     let language = config.language_for(Path::new("/p/a.cpp"));
-    assert!(language.support(Feature::DeducingThis), "the permissive fallback");
+    assert!(
+        language.support(Feature::DeducingThis),
+        "the permissive fallback"
+    );
     assert_eq!(language.standards().count(), 10);
 }
 
@@ -58,5 +75,8 @@ fn a_separated_standard_flag_is_read() {
         extra_args: vec!["-std".to_string(), "c++17".to_string()],
         ..CompilerConfig::default()
     };
-    assert_eq!(config.language_for(Path::new("/p/a.cpp")).describe(), "c++17");
+    assert_eq!(
+        config.language_for(Path::new("/p/a.cpp")).describe(),
+        "c++17"
+    );
 }

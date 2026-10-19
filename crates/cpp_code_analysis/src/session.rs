@@ -81,9 +81,9 @@ use crate::file::vfs::Vfs;
 use crate::file::view::{FileView, TokensOf};
 use crate::include::config::{CompileCommands, CompilerConfig, project_config_from_flags};
 use crate::include::toolchain::{self, DiskCommands, Environment, Toolchain};
-use crate::index::project::{substituted_members, 
+use crate::index::project::{
     MemberCompletions, MemberList, NameCompletions, ProjectDefinition, ProjectDefinitions,
-    ProjectIndex, ProjectMacro,
+    ProjectIndex, ProjectMacro, substituted_members,
 };
 use crate::index::references::{MacroReferences, ReferenceBudget, macro_references};
 use crate::index::store::{StoreStats, SummaryStore};
@@ -1553,7 +1553,10 @@ impl<F: FileProvider + Clone> Session<F> {
     ///  56 s   cook        this method
     ///   …     diagnose    the checks, per file
     /// ```
-    pub fn diagnose_everything(&mut self, up_to: usize) -> Vec<(std::path::PathBuf, FileDiagnostics)> {
+    pub fn diagnose_everything(
+        &mut self,
+        up_to: usize,
+    ) -> Vec<(std::path::PathBuf, FileDiagnostics)> {
         let paths: Vec<std::path::PathBuf> = self
             .store
             .index()
@@ -4122,7 +4125,8 @@ impl<F: FileProvider + Clone> Session<F> {
         // `math`". The other two callers of this resolution (`scan_imports`, `module_reading`) already pass a
         // directory, which is why the standard-module tests passed: their module is found through an include path's
         // sibling `modules/` directory, and the broken first entry was never the one that answered.
-        let directory = crate::paths::parent_normalized(importing, self.files.is_case_insensitive());
+        let directory =
+            crate::paths::parent_normalized(importing, self.files.is_case_insensitive());
 
         for module in wanted {
             if let ImportOutcome::Resolved(unit) =
@@ -4696,9 +4700,7 @@ impl<F: FileProvider + Clone> Session<F> {
         if name.is_empty() {
             return Known::Unknown(UnknownReason::UnparsableName);
         }
-        self.store
-            .index()
-            .macro_definition(name, &view.path, at)
+        self.store.index().macro_definition(name, &view.path, at)
     }
 
     /// **Every module this project can name**, for a completion after `import`.
@@ -4823,12 +4825,14 @@ impl<F: FileProvider + Clone> Session<F> {
     /// partition belongs to the file's own module.
     pub fn module_imports_of(&self, view: &FileView) -> Vec<ModuleImport> {
         let mut imports: Vec<ModuleImport> = Vec::new();
-        let directory = crate::paths::parent_normalized(&view.path, self.files.is_case_insensitive());
+        let directory =
+            crate::paths::parent_normalized(&view.path, self.files.is_case_insensitive());
         let mut interner = PathInterner::new(self.files.is_case_insensitive());
         let mut scanner: Option<ModuleScanner<'_, OverlayFiles<OpenDocuments, F>>> = None;
 
         for node in view.root.descendants() {
-            if cpp_parser::CppSyntaxKind::from(node.kind()) != cpp_parser::CppSyntaxKind::ImportDecl {
+            if cpp_parser::CppSyntaxKind::from(node.kind()) != cpp_parser::CppSyntaxKind::ImportDecl
+            {
                 continue;
             }
             let Some(name_node) = node.descendants().find(|inner| {
@@ -5510,7 +5514,8 @@ impl<F: FileProvider + Clone> Session<F> {
         // same information the facts carry.
         let session: &Session<F> = self;
         let index: &crate::ProjectIndex = session.store.index();
-        let resolver = Box::new(move |path: &Path| -> Option<FileView> { session.view_of_the_file(path) });
+        let resolver =
+            Box::new(move |path: &Path| -> Option<FileView> { session.view_of_the_file(path) });
         let model = crate::sema::model::SemanticModel::new(
             index,
             &view.root,
@@ -5544,20 +5549,26 @@ impl<F: FileProvider + Clone> Session<F> {
                 // Kept for the partial ordering, which compares what the *declarations* wrote, not what the call
                 // substituted — and the substitution below consumes `declared`.
                 let declared_for_ordering = declared.clone();
-                let (types, is_a_template) = match crate::sema::deduction::deduce(&names, &declared, &types) {
-                    Some(arguments) => (
-                        declared
-                            .iter()
-                            .map(|spelling| {
-                                crate::sema::types::substituted_spelling(spelling, &names, &arguments)
-                            })
-                            .collect(),
-                        true,
-                    ),
-                    None => (declared, !names.is_empty()),
-                };
-                let candidate =
-                    crate::sema::overload::Candidate::new(types, variadic, format!("declaration {at}"));
+                let (types, is_a_template) =
+                    match crate::sema::deduction::deduce(&names, &declared, &types) {
+                        Some(arguments) => (
+                            declared
+                                .iter()
+                                .map(|spelling| {
+                                    crate::sema::types::substituted_spelling(
+                                        spelling, &names, &arguments,
+                                    )
+                                })
+                                .collect(),
+                            true,
+                        ),
+                        None => (declared, !names.is_empty()),
+                    };
+                let candidate = crate::sema::overload::Candidate::new(
+                    types,
+                    variadic,
+                    format!("declaration {at}"),
+                );
                 if is_a_template {
                     candidate.with_declaration(declared_for_ordering, names.clone())
                 } else {
@@ -5565,7 +5576,6 @@ impl<F: FileProvider + Clone> Session<F> {
                 }
             })
             .collect();
-
 
         match crate::sema::overload::choose(&types, &candidates) {
             crate::sema::overload::Choice::One(chosen) => Some(chosen),
@@ -5596,7 +5606,8 @@ impl<F: FileProvider + Clone> Session<F> {
 
         let session: &Session<F> = self;
         let index: &crate::ProjectIndex = session.store.index();
-        let resolver = Box::new(move |path: &Path| -> Option<FileView> { session.view_of_the_file(path) });
+        let resolver =
+            Box::new(move |path: &Path| -> Option<FileView> { session.view_of_the_file(path) });
         let model = crate::sema::model::SemanticModel::new(
             index,
             &view.root,
@@ -6173,7 +6184,6 @@ impl Work {
             (Priority::Open, false) => self.open.push_back((path, depth)),
             (Priority::Rest, true) => self.rest.push_front((path, depth)),
             (Priority::Rest, false) => self.rest.push_back((path, depth)),
-
         }
     }
 

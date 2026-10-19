@@ -22,7 +22,8 @@
 use cpp_code_analysis::{FileProvider, FileView, Known, Session};
 use lsp_types::{
     ClientCapabilities, CodeAction, CodeActionKind, CodeActionOrCommand, CodeActionParams,
-    CodeActionProviderCapability, Position, Range, ServerCapabilities, TextEdit, Uri, WorkspaceEdit,
+    CodeActionProviderCapability, Position, Range, ServerCapabilities, TextEdit, Uri,
+    WorkspaceEdit,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -125,7 +126,13 @@ impl<F: FileProvider + Clone> FixContext<'_, F> {
     }
 
     /// One action whose whole edit is **inserting `text` at a position** — the shape most fixes take.
-    pub fn insert_at(&self, title: String, kind: CodeActionKind, at: Position, text: String) -> Option<CodeAction> {
+    pub fn insert_at(
+        &self,
+        title: String,
+        kind: CodeActionKind,
+        at: Position,
+        text: String,
+    ) -> Option<CodeAction> {
         let uri: Uri = crate::util::path_to_uri(&self.view.path)?;
         Some(CodeAction {
             title,
@@ -139,10 +146,13 @@ impl<F: FileProvider + Clone> FixContext<'_, F> {
                             uri: uri.clone(),
                             version: None,
                         },
-                        edits: vec![lsp_types::OneOf3::Left(TextEdit {
-                            range: Range { start: at, end: at },
-                            new_text: text,
-                        }.into())],
+                        edits: vec![lsp_types::OneOf3::Left(
+                            TextEdit {
+                                range: Range { start: at, end: at },
+                                new_text: text,
+                            }
+                            .into(),
+                        )],
                     },
                 ])),
                 change_annotations: None,
@@ -261,13 +271,15 @@ mod tests {
         let session = a_project(source);
         let path = PathBuf::from("/p/use.cpp");
         let held = session.files().held(&path).expect("the file is held");
-        let view = cpp_code_analysis::FileView::parse_with(
-            held,
-            &cpp_parser::MacroEnvironment::default(),
-        );
+        let view =
+            cpp_code_analysis::FileView::parse_with(held, &cpp_parser::MacroEnvironment::default());
         let at = source.find("Widget").expect("the fixture names it");
 
-        let fixes = fixes_of(&session, &view, cpp_code_analysis::file::coordinates::ReadingOffset::new(at));
+        let fixes = fixes_of(
+            &session,
+            &view,
+            cpp_code_analysis::file::coordinates::ReadingOffset::new(at),
+        );
         assert_eq!(fixes.len(), 1, "one header declares it: {fixes:?}");
         assert!(fixes[0].title.contains("base.h"), "{:?}", fixes[0].title);
 
@@ -283,7 +295,10 @@ mod tests {
         let lsp_types::OneOf3::Left(insert) = &edits[0].edits[0] else {
             panic!("expected a plain text edit");
         };
-        assert_eq!(insert.range.start, insert.range.end, "an insertion, not a replacement");
+        assert_eq!(
+            insert.range.start, insert.range.end,
+            "an insertion, not a replacement"
+        );
         assert!(insert.new_text.contains("base.h"), "{:?}", insert.new_text);
     }
 
@@ -294,15 +309,17 @@ mod tests {
         let session = a_project(source);
         let path = PathBuf::from("/p/use.cpp");
         let held = session.files().held(&path).expect("the file is held");
-        let view = cpp_code_analysis::FileView::parse_with(
-            held,
-            &cpp_parser::MacroEnvironment::default(),
-        );
+        let view =
+            cpp_code_analysis::FileView::parse_with(held, &cpp_parser::MacroEnvironment::default());
         let at = source.find("Widget").expect("the fixture names it");
 
         assert!(
-            fixes_of(&session, &view, cpp_code_analysis::file::coordinates::ReadingOffset::new(at))
-                .is_empty(),
+            fixes_of(
+                &session,
+                &view,
+                cpp_code_analysis::file::coordinates::ReadingOffset::new(at)
+            )
+            .is_empty(),
             "a name that resolves is not a missing include"
         );
     }

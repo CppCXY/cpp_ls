@@ -155,7 +155,10 @@ fn document_symbol(view: &FileView, symbol: &OutlineSymbol) -> DocumentSymbol {
 ///
 /// The declaration is used only when it holds **exactly one** declarator. With two, `int a, b;`, the whole
 /// declaration is the wrong answer for either name and the fact's declarator is the best available one.
-fn declaration_range(view: &FileView, fact: &cpp_code_analysis::DeclFact) -> cpp_parser::SourceRange {
+fn declaration_range(
+    view: &FileView,
+    fact: &cpp_code_analysis::DeclFact,
+) -> cpp_parser::SourceRange {
     let at = fact.name_range.start_offset;
 
     // **The fact's offset is the file's and the tree's are the rendering's**, so one has to be moved before they can
@@ -189,10 +192,9 @@ fn declaration_range(view: &FileView, fact: &cpp_code_analysis::DeclFact) -> cpp
     let Some(name_node) = innermost_holding(&view.root, at) else {
         return fact.range;
     };
-    let Some(declaration) = name_node
-        .ancestors()
-        .find(|node| cpp_parser::CppSyntaxKind::from(node.kind()) == cpp_parser::CppSyntaxKind::Declaration)
-    else {
+    let Some(declaration) = name_node.ancestors().find(|node| {
+        cpp_parser::CppSyntaxKind::from(node.kind()) == cpp_parser::CppSyntaxKind::Declaration
+    }) else {
         return fact.range;
     };
 
@@ -520,7 +522,10 @@ mod tests {
 
         // **The members**, which are the shapes whose range was only the name. The expected text carries the
         // fixture's own tab, because that is what the range really covers.
-        let members = ns.children.as_ref().expect("the class is inside the namespace");
+        let members = ns
+            .children
+            .as_ref()
+            .expect("the class is inside the namespace");
         let widget = &members[0];
         assert_eq!(widget.name, "Widget");
         assert_eq!(
@@ -920,7 +925,8 @@ public:
         );
 
         let lines = cpp_parser::LineIndex::parse(text);
-        let placed = file_position(text, &lines, start_of_line_4).expect("the offset is in the text");
+        let placed =
+            file_position(text, &lines, start_of_line_4).expect("the offset is in the text");
 
         assert_eq!(
             (placed.line, placed.character),

@@ -11,9 +11,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use cpp_code_analysis::{
-    DiskFiles, OpenDocuments, Session, SessionFiles, WatchFilter,
-};
+use cpp_code_analysis::{DiskFiles, OpenDocuments, Session, SessionFiles, WatchFilter};
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -107,7 +105,9 @@ fn main() {
                     .to_string();
                 kept.push(format!(
                     "{}: `{}`",
-                    file.file_name().and_then(|name| name.to_str()).unwrap_or("?"),
+                    file.file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or("?"),
                     line
                 ));
             }
@@ -137,9 +137,15 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>, depth: usize) {
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
-            let name = path.file_name().and_then(|name| name.to_str()).unwrap_or("");
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("");
             // The usual build and dependency directories: not the project's own code, and slow to walk.
-            if matches!(name, ".git" | "build" | "out" | "node_modules" | ".vs" | "CMakeFiles") {
+            if matches!(
+                name,
+                ".git" | "build" | "out" | "node_modules" | ".vs" | "CMakeFiles"
+            ) {
                 continue;
             }
             walk(&path, out, depth + 1);

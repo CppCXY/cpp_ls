@@ -60,13 +60,13 @@ use std::path::{Path, PathBuf};
 
 use cpp_parser::Dialect;
 
+use crate::IncludeForm;
 use crate::cache::{SummaryKey, content_hash, fnv1a64};
 use crate::file::paths::{DiskFiles, FileProvider, normalize_path};
 use crate::include::config::CompilerConfig;
 use crate::index::project::ProjectIndex;
 use crate::index::{FileIndexer, read_summary, write_summary};
 use crate::summary::{FileSummary, IncludeFact};
-use crate::IncludeForm;
 
 /// A project's summaries on disk and in memory, and the rule for when each is rebuilt.
 ///
@@ -118,8 +118,9 @@ pub struct SummaryStore<F: FileProvider = DiskFiles> {
     /// The key is the question, not the file: `(form, is_next, spelling, directory)`. A quoted include is relative to
     /// the including file's directory and so keeps that in the key; an angled one is not, and gives the key an empty
     /// directory, because `<vector>` asked from four hundred headers is one search.
-    include_searches:
-        std::sync::Mutex<std::collections::HashMap<(IncludeForm, bool, Box<str>, PathBuf), Option<PathBuf>>>,
+    include_searches: std::sync::Mutex<
+        std::collections::HashMap<(IncludeForm, bool, Box<str>, PathBuf), Option<PathBuf>>,
+    >,
 }
 
 /// **The second pass, planned but not applied** — what [`SummaryStore::prepare_the_re_read`] worked out.
@@ -168,7 +169,8 @@ fn note_a_prepared_file(
 ) {
     use std::sync::atomic::Ordering::Relaxed;
 
-    let nanos = |duration: std::time::Duration| duration.as_nanos().min(u128::from(u64::MAX)) as u64;
+    let nanos =
+        |duration: std::time::Duration| duration.as_nanos().min(u128::from(u64::MAX)) as u64;
     PREPARED[0].fetch_add(1, Relaxed);
     PREPARED[1].fetch_add(nanos(read), Relaxed);
     PREPARED[2].fetch_add(nanos(decode), Relaxed);
@@ -603,7 +605,12 @@ impl<F: FileProvider> SummaryStore<F> {
                 let verifying = std::time::Instant::now();
                 let still_holds = self.resolution_still_holds(path, &stored);
                 if tracing {
-                    note_a_prepared_file(read, decoded, verifying.elapsed(), std::time::Duration::ZERO);
+                    note_a_prepared_file(
+                        read,
+                        decoded,
+                        verifying.elapsed(),
+                        std::time::Duration::ZERO,
+                    );
                 }
                 if still_holds {
                     if let Some(tell) = includes.as_mut() {
@@ -617,7 +624,12 @@ impl<F: FileProvider> SummaryStore<F> {
                     return Prepared(PreparedOutcome::Stored(stored));
                 }
             } else if tracing {
-                note_a_prepared_file(read, decoded, std::time::Duration::ZERO, std::time::Duration::ZERO);
+                note_a_prepared_file(
+                    read,
+                    decoded,
+                    std::time::Duration::ZERO,
+                    std::time::Duration::ZERO,
+                );
             }
         }
 
@@ -3252,5 +3264,3 @@ mod tests {
         );
     }
 }
-
-

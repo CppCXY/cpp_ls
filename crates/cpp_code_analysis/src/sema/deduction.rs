@@ -130,7 +130,11 @@ fn around_a_name<'a>(parameter: &'a str, names: &[String]) -> Option<(String, St
                     .next()
                     .is_some_and(|character| character.is_alphanumeric() || character == '_');
             if whole_start && whole_end && !(before.is_empty() && after.is_empty()) {
-                return Some((before.trim().to_string(), name.clone(), after.trim().to_string()));
+                return Some((
+                    before.trim().to_string(),
+                    name.clone(),
+                    after.trim().to_string(),
+                ));
             }
             from = end;
         }
@@ -214,7 +218,11 @@ mod tests {
     #[test]
     fn a_name_deduced_twice_has_to_agree() {
         assert_eq!(
-            deduce(&names(&["T"]), &parameters(&["T", "T"]), &[yes("int"), yes("int")]),
+            deduce(
+                &names(&["T"]),
+                &parameters(&["T", "T"]),
+                &[yes("int"), yes("int")]
+            ),
             Some(names(&["int"])),
             "two deductions that agree are one deduction"
         );
@@ -235,7 +243,10 @@ mod tests {
             deduce(
                 &names(&["T"]),
                 &parameters(&["T", "const T&"]),
-                &[Known::Unknown(crate::sema::symbol::UnknownReason::DependentName), yes("int")],
+                &[
+                    Known::Unknown(crate::sema::symbol::UnknownReason::DependentName),
+                    yes("int")
+                ],
             ),
             Some(names(&["int"])),
             "the second parameter still fixes T"

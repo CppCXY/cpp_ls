@@ -11,7 +11,10 @@ use cpp_code_analysis::sema::check::diagnostic_code::DiagnosticCode;
 #[test]
 fn the_style_codes_are_named_and_round_trip() {
     let expected = [
-        ("braces-around-statements", DiagnosticCode::BracesAroundStatements),
+        (
+            "braces-around-statements",
+            DiagnosticCode::BracesAroundStatements,
+        ),
         ("use-nullptr", DiagnosticCode::UseNullptr),
         ("use-override", DiagnosticCode::UseOverride),
         ("simplify-boolean-expr", DiagnosticCode::SimplifyBooleanExpr),
@@ -19,7 +22,10 @@ fn the_style_codes_are_named_and_round_trip() {
         ("cstyle-cast", DiagnosticCode::CStyleCast),
         ("use-auto", DiagnosticCode::UseAuto),
         ("macro-parentheses", DiagnosticCode::MacroParentheses),
-        ("implicit-bool-conversion", DiagnosticCode::ImplicitBoolConversion),
+        (
+            "implicit-bool-conversion",
+            DiagnosticCode::ImplicitBoolConversion,
+        ),
     ];
     for (name, code) in expected {
         assert_eq!(code.name(), name);
@@ -33,10 +39,16 @@ fn the_style_codes_are_named_and_round_trip() {
 #[test]
 fn a_one_statement_body_is_reported() {
     let found = codes_of("void f(bool ready) {\n    if (ready) return;\n}\n");
-    assert!(found.contains(&DiagnosticCode::BracesAroundStatements), "{found:?}");
+    assert!(
+        found.contains(&DiagnosticCode::BracesAroundStatements),
+        "{found:?}"
+    );
     // …and a braced body is not.
     let braced = codes_of("void f(bool ready) {\n    if (ready) { return; }\n}\n");
-    assert!(!braced.contains(&DiagnosticCode::BracesAroundStatements), "{braced:?}");
+    assert!(
+        !braced.contains(&DiagnosticCode::BracesAroundStatements),
+        "{braced:?}"
+    );
 }
 
 /// `modernize-use-nullptr`: `NULL` is `0`.
@@ -45,39 +57,53 @@ fn a_null_macro_is_reported() {
     let found = codes_of("void f(int*);\nvoid g() {\n    f(NULL);\n}\n");
     assert!(found.contains(&DiagnosticCode::UseNullptr), "{found:?}");
     let nullptr = codes_of("void f(int*);\nvoid g() {\n    f(nullptr);\n}\n");
-    assert!(!nullptr.contains(&DiagnosticCode::UseNullptr), "{nullptr:?}");
+    assert!(
+        !nullptr.contains(&DiagnosticCode::UseNullptr),
+        "{nullptr:?}"
+    );
 }
 
 /// `modernize-use-override`: an overriding declaration should say so.
 #[test]
 fn an_override_without_the_keyword_is_reported() {
-    let found = codes_of(
-        "struct Base { virtual void f(); };\nstruct Derived : Base { void f(); };\n",
-    );
+    let found =
+        codes_of("struct Base { virtual void f(); };\nstruct Derived : Base { void f(); };\n");
     assert!(found.contains(&DiagnosticCode::UseOverride), "{found:?}");
     let says_so = codes_of(
         "struct Base { virtual void f(); };\nstruct Derived : Base { void f() override; };\n",
     );
-    assert!(!says_so.contains(&DiagnosticCode::UseOverride), "{says_so:?}");
+    assert!(
+        !says_so.contains(&DiagnosticCode::UseOverride),
+        "{says_so:?}"
+    );
 }
 
 /// `readability-simplify-boolean-expr`: `x == true` is `x`.
 #[test]
 fn a_comparison_against_true_is_reported() {
     let found = codes_of("void f(bool ready) {\n    if (ready == true) { return; }\n}\n");
-    assert!(found.contains(&DiagnosticCode::SimplifyBooleanExpr), "{found:?}");
+    assert!(
+        found.contains(&DiagnosticCode::SimplifyBooleanExpr),
+        "{found:?}"
+    );
     let plain = codes_of("void f(bool ready) {\n    if (ready) { return; }\n}\n");
-    assert!(!plain.contains(&DiagnosticCode::SimplifyBooleanExpr), "{plain:?}");
+    assert!(
+        !plain.contains(&DiagnosticCode::SimplifyBooleanExpr),
+        "{plain:?}"
+    );
 }
 
 /// `readability-else-after-return`: an `else` after a return is a nesting that is not needed.
 #[test]
 fn an_else_after_a_return_is_reported() {
-    let found = codes_of(
-        "void f(bool ready) {\n    if (ready) { return; } else { g(); }\n}\nvoid g();\n",
+    let found =
+        codes_of("void f(bool ready) {\n    if (ready) { return; } else { g(); }\n}\nvoid g();\n");
+    assert!(
+        found.contains(&DiagnosticCode::ElseAfterReturn),
+        "{found:?}"
     );
-    assert!(found.contains(&DiagnosticCode::ElseAfterReturn), "{found:?}");
-    let flat = codes_of("void f(bool ready) {\n    if (ready) { return; }\n    g();\n}\nvoid g();\n");
+    let flat =
+        codes_of("void f(bool ready) {\n    if (ready) { return; }\n    g();\n}\nvoid g();\n");
     assert!(!flat.contains(&DiagnosticCode::ElseAfterReturn), "{flat:?}");
 }
 
@@ -126,19 +152,30 @@ fn a_full_iterator_spelling_is_reported() {
     assert!(found.contains(&DiagnosticCode::UseAuto), "{found:?}");
 
     // …and a type that is not an iterator spelling is not the rule's shape.
-    let not_an_iterator = codes_of("void f() {\n    std::vector<int>::value_type value;\n    (void)value;\n}\n");
-    assert!(!not_an_iterator.contains(&DiagnosticCode::UseAuto), "{not_an_iterator:?}");
+    let not_an_iterator =
+        codes_of("void f() {\n    std::vector<int>::value_type value;\n    (void)value;\n}\n");
+    assert!(
+        !not_an_iterator.contains(&DiagnosticCode::UseAuto),
+        "{not_an_iterator:?}"
+    );
 }
 
 /// `bugprone-macro-parentheses`: a replacement list that is not parenthesised.
 #[test]
 fn an_unparenthesised_macro_is_reported() {
     let found = codes_of("#define TWICE(x) x * 2\nint f(int n) { return TWICE(n + 1); }\n");
-    assert!(found.contains(&DiagnosticCode::MacroParentheses), "{found:?}");
+    assert!(
+        found.contains(&DiagnosticCode::MacroParentheses),
+        "{found:?}"
+    );
 
     // …and the parenthesised form is the answer, so it is silent.
-    let parenthesised = codes_of("#define TWICE(x) ((x) * 2)\nint f(int n) { return TWICE(n + 1); }\n");
-    assert!(!parenthesised.contains(&DiagnosticCode::MacroParentheses), "{parenthesised:?}");
+    let parenthesised =
+        codes_of("#define TWICE(x) ((x) * 2)\nint f(int n) { return TWICE(n + 1); }\n");
+    assert!(
+        !parenthesised.contains(&DiagnosticCode::MacroParentheses),
+        "{parenthesised:?}"
+    );
 
     // A macro that is one token, or a call, or a block, is not this rule's shape.
     for quiet in [
@@ -146,7 +183,10 @@ fn an_unparenthesised_macro_is_reported() {
         "#define MAX(a, b) ((a) > (b) ? (a) : (b))\nint f(int x, int y) { return MAX(x, y); }\n",
     ] {
         let found = codes_of(quiet);
-        assert!(!found.contains(&DiagnosticCode::MacroParentheses), "{quiet}: {found:?}");
+        assert!(
+            !found.contains(&DiagnosticCode::MacroParentheses),
+            "{quiet}: {found:?}"
+        );
     }
 }
 
@@ -177,7 +217,9 @@ fn a_comment_and_a_string_literal_are_not_code() {
         !cast_in_a_comment.contains(&DiagnosticCode::CStyleCast),
         "a comment is not a cast: {cast_in_a_comment:?}"
     );
-    let boolean_in_a_string = codes_of("void f(bool ready) {\n    if (ready) { g(\"x == true y\"); }\n}\nvoid g(const char*);\n");
+    let boolean_in_a_string = codes_of(
+        "void f(bool ready) {\n    if (ready) { g(\"x == true y\"); }\n}\nvoid g(const char*);\n",
+    );
     assert!(
         !boolean_in_a_string.contains(&DiagnosticCode::SimplifyBooleanExpr),
         "a string is not a condition: {boolean_in_a_string:?}"
@@ -321,12 +363,7 @@ fn codes_of_with(source: &str, standard: &str) -> Vec<DiagnosticCode> {
         extra_args: vec![standard.to_string()],
         ..CompilerConfig::default()
     };
-    let mut session = Session::with_config(
-        "/p",
-        providers,
-        WatchFilter::new("/p"),
-        config,
-    );
+    let mut session = Session::with_config("/p", providers, WatchFilter::new("/p"), config);
     session.add_project_files([std::path::PathBuf::from("/p/a.cpp")]);
     session.want_cooked_reading(std::path::Path::new("/p/a.cpp"));
     session.index_everything();

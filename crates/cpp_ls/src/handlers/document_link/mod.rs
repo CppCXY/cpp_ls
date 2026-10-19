@@ -60,12 +60,9 @@ pub async fn on_document_link(
         let held = session.files().held(&view.path)?;
         let summary = session.index().summary(&view.path)?;
 
-        let headers = summary
-            .includes
-            .iter()
-            .filter_map(|include| {
-                document_link_of(held, include, header_name_in(&view.root, include.range))
-            });
+        let headers = summary.includes.iter().filter_map(|include| {
+            document_link_of(held, include, header_name_in(&view.root, include.range))
+        });
 
         // **And the modules it imports.** `import math;` names a file exactly as `#include "math.cppm"` would, and
         // the analysis already knows which one — through the index once the interface unit has been read, and
@@ -144,8 +141,8 @@ mod tests {
     use std::path::PathBuf;
 
     use cpp_code_analysis::{
-        CompilerConfig, IncludeFact, IncludeForm, MemoryFiles, OpenDocuments, Session, SessionFiles,
-        WatchFilter,
+        CompilerConfig, IncludeFact, IncludeForm, MemoryFiles, OpenDocuments, Session,
+        SessionFiles, WatchFilter,
     };
 
     use super::*;
@@ -172,7 +169,11 @@ mod tests {
         (session, PathBuf::from("/p/a.cpp"), text.to_string())
     }
 
-    fn an_include(spelling: &str, resolved: Option<PathBuf>, range: cpp_parser::SourceRange) -> IncludeFact {
+    fn an_include(
+        spelling: &str,
+        resolved: Option<PathBuf>,
+        range: cpp_parser::SourceRange,
+    ) -> IncludeFact {
         IncludeFact {
             form: IncludeForm::Quote,
             spelling: spelling.to_string(),
@@ -205,11 +206,7 @@ mod tests {
             .includes
             .iter()
             .filter_map(|include| {
-                document_link_of(
-                    file,
-                    include,
-                    header_name_in(&view.root, include.range),
-                )
+                document_link_of(file, include, header_name_in(&view.root, include.range))
             })
             .collect();
 
@@ -263,12 +260,10 @@ mod tests {
     #[test]
     fn an_import_becomes_a_link_that_covers_the_module_name() {
         let text = "import math;\nint x = 0;\n";
-        let files = MemoryFiles::new()
-            .with_file("/p/main.cpp", text)
-            .with_file(
-                "/p/math.cppm",
-                "export module math;\nexport int add(int, int);\n",
-            );
+        let files = MemoryFiles::new().with_file("/p/main.cpp", text).with_file(
+            "/p/math.cppm",
+            "export module math;\nexport int add(int, int);\n",
+        );
         let providers = SessionFiles::new(OpenDocuments::new(), files);
         let mut session = Session::with_config(
             "/p",
@@ -282,14 +277,13 @@ mod tests {
         let view = session
             .view_of_the_file("/p/main.cpp")
             .expect("the file's own reading is held");
-        let file = session.files().held("/p/main.cpp").expect("the file is held");
+        let file = session
+            .files()
+            .held("/p/main.cpp")
+            .expect("the file is held");
 
         let imports = session.module_imports_of(&view);
-        assert_eq!(
-            imports.len(),
-            1,
-            "the file imports one module: {imports:?}"
-        );
+        assert_eq!(imports.len(), 1, "the file imports one module: {imports:?}");
         assert_eq!(imports[0].name, "math");
 
         let link = module_link_of(file, &imports[0]).expect("a resolved import is a link");

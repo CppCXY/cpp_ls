@@ -513,7 +513,6 @@ impl<'a> CppParser<'a> {
             builder.finish()
         };
 
-
         let tokens = std::mem::take(&mut parser.tokens);
         let tree = CppSyntaxTree::new(root, errors, tokens);
         (tree, events)
@@ -2233,5 +2232,3 @@ mod tests {
         assert_eq!(parser.current_token_index(), 0, "and so did the cursor");
     }
 }
-
-

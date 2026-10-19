@@ -1502,14 +1502,12 @@ pub fn name_references(
             continue;
         };
         // **A file that declares the spelling as a local is not searched.** Its uses may mean its own local.
-        let declares_a_local = index
-            .summary(&path)
-            .is_some_and(|summary| {
-                summary
-                    .declarations
-                    .iter()
-                    .any(|fact| fact.local && fact.name == name)
-            });
+        let declares_a_local = index.summary(&path).is_some_and(|summary| {
+            summary
+                .declarations
+                .iter()
+                .any(|fact| fact.local && fact.name == name)
+        });
         if declares_a_local {
             found.not_looked_at.push(path);
             continue;

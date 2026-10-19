@@ -413,7 +413,9 @@ impl DeclarationShapes {
             // entry is the only one a new list can be inside of.
             if CppSyntaxKind::from(node.kind()) == CppSyntaxKind::ParameterList {
                 match parameter_lists.last_mut() {
-                    Some(last) if last.start_offset <= at.start_offset && at.end_offset() <= last.end_offset() => {}
+                    Some(last)
+                        if last.start_offset <= at.start_offset
+                            && at.end_offset() <= last.end_offset() => {}
                     _ => parameter_lists.push(at),
                 }
             }
@@ -2652,7 +2654,6 @@ impl<'a> DeclarationFacts<'a> {
                 }
             }
         }
-
 
         // The sweep below needs both lists in offset order. Facts are sorted rather than built in order
         // because the scope tree's order is depth-first, which is not offset order — a nested class's members

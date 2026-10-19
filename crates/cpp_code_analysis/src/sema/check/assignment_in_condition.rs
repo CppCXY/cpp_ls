@@ -148,7 +148,10 @@ fn is_an_assignment(condition: &cpp_parser::CppSyntaxNode) -> bool {
     ) {
         significant.remove(0);
     }
-    while matches!(significant.last(), Some(cpp_parser::CppTokenKind::RightParen)) {
+    while matches!(
+        significant.last(),
+        Some(cpp_parser::CppTokenKind::RightParen)
+    ) {
         significant.pop();
     }
 
@@ -205,7 +208,9 @@ fn has_a_top_level_comparison(written: &str) -> bool {
             }
             // A comparison that follows a completed group belongs to the condition.
             '<' | '>' | '!' if depth == 0 && closed_a_group => return true,
-            '=' if depth == 0 && closed_a_group && characters.get(at + 1) == Some(&'=') => return true,
+            '=' if depth == 0 && closed_a_group && characters.get(at + 1) == Some(&'=') => {
+                return true;
+            }
             _ => {}
         }
     }

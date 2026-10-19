@@ -11,6 +11,7 @@
 pub mod deduction;
 pub mod overload;
 
+pub mod builtins;
 pub mod check;
 pub mod declarations;
 pub mod deduce;
@@ -21,7 +22,4 @@ pub mod parser_symbols;
 pub mod resolve;
 pub mod scopes;
 pub mod symbol;
-pub mod builtins;
 pub mod types;
-
-

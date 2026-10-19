@@ -312,7 +312,10 @@ mod tests {
     /// workspace's tests run in parallel, and a second test that rewrites `main.cpp` while the first is reading it is
     /// a failure in whichever one loses. Measured while adding the gate's test: it wrote its text over the module
     /// test's file and that test reported three diagnostics instead of one.
-    fn a_project_in_a_scratch_directory_named(name: &str, text: &str) -> (Session<DiskFiles>, PathBuf) {
+    fn a_project_in_a_scratch_directory_named(
+        name: &str,
+        text: &str,
+    ) -> (Session<DiskFiles>, PathBuf) {
         let root = std::env::temp_dir().join(format!("{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).expect("a scratch directory");
@@ -394,7 +397,7 @@ mod tests {
         );
     }
 
-/// **An unreadable module reaches a client as `INFORMATION` on the `import` line.**
+    /// **An unreadable module reaches a client as `INFORMATION` on the `import` line.**
     ///
     /// The analysis layer answers with offsets and a sentence; what a *client* does with them is this layer's: the
     /// severity (nothing is wrong with the file), the range (the line the reader wrote, not the top of the file),

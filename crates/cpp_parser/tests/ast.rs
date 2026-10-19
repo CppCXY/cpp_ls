@@ -167,7 +167,10 @@ fn function_definition_exposes_params_and_body() {
 fn a_return_without_a_semicolon_is_an_error() {
     for (what, source) in [
         ("at the end of a body", "int f() { return 0 }\n"),
-        ("before another statement", "int f() { return 0\n int x; }\n"),
+        (
+            "before another statement",
+            "int f() { return 0\n int x; }\n",
+        ),
         // The three statements that already reported it, so the four cannot drift apart again.
         ("a `break`", "void f() { while (1) { break } }\n"),
         ("a `continue`", "void f() { while (1) { continue } }\n"),

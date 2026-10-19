@@ -1543,11 +1543,7 @@ pub fn parse_init_declarator(p: &mut CppParser) -> ParseResult {
 /// Completing the declaration *before* the `{` instead — which is what this did — put every function body beside its
 /// declaration. Measured on `struct A { A(int f) : x(f) { } };`: `Declaration@11..26` with `CompoundStat@26..42` as a
 /// following sibling, so every constructor's parameters were invisible in its own body.
-fn finish_init_declarator(
-    p: &mut CppParser,
-    m: Marker,
-    declarator_from: usize,
-) -> ParseResult {
+fn finish_init_declarator(p: &mut CppParser, m: Marker, declarator_from: usize) -> ParseResult {
     // A declarator with a parameter list can only declare a function, so a `{` after it opens a
     // body no matter what is inside. `parse_declaration` handles the body; this rule must not
     // consume it.

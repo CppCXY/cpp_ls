@@ -87,7 +87,6 @@ pub fn build_scopes(root: &CppSyntaxNode, bodies: &dyn MacroBodies) -> ScopeTree
 
     walker.items(root, file);
 
-
     walker.table
 }
 
@@ -367,7 +366,6 @@ impl ScopeWalker<'_> {
         if CppSyntaxKind::from(node.kind()) != CppSyntaxKind::MacroCall {
             return None;
         }
-
 
         let name = invocation_name(node)?;
         let range = cpp_parser::source_range(node.text_range());

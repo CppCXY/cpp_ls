@@ -96,8 +96,8 @@ where
             continue;
         };
 
-        let names = parameter_names_for(view, &callee, &mut declaring, &mut view_of)
-            .or_else(|| {
+        let names =
+            parameter_names_for(view, &callee, &mut declaring, &mut view_of).or_else(|| {
                 // **A declaration whose file has no rendering still has names.** The list is in its *fact*, which
                 // the index keeps as text — so the reading is made from the text instead of from the tree. This is
                 // the difference between `push_back(_Val: …)` and `printf(…)` on the same line of a real file: a

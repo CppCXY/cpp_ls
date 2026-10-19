@@ -9,17 +9,29 @@ use common::assert_all_parse;
 
 const CONSTRUCTS: &[(&str, &str)] = &[
     ("__attribute__", "__attribute__((always_inline)) void f();"),
-    ("__attribute__ after the declarator", "int f() __attribute__((pure));"),
+    (
+        "__attribute__ after the declarator",
+        "int f() __attribute__((pure));",
+    ),
     ("__typeof__", "void f() { __typeof__(1) n = 1; }"),
     ("typeof", "void f() { typeof(1) n = 1; }"),
     ("__extension__", "__extension__ typedef int T;"),
     ("an asm block", "void f() { __asm__ volatile (\"nop\"); }"),
     ("__int128", "__int128 big = 0;"),
     ("__restrict__", "void f(int* __restrict__ a);"),
-    ("a case range", "void f(int n) { switch (n) { case 1 ... 5: break; default: break; } }"),
-    ("__builtin_expect", "void f(int n) { if (__builtin_expect(n, 1)) { return; } }"),
+    (
+        "a case range",
+        "void f(int n) { switch (n) { case 1 ... 5: break; default: break; } }",
+    ),
+    (
+        "__builtin_expect",
+        "void f(int n) { if (__builtin_expect(n, 1)) { return; } }",
+    ),
     ("#include_next", "#include_next <stdio.h>\n"),
-    ("__asm__ as a declaration's specifier", "__asm__(\".globl f\");"),
+    (
+        "__asm__ as a declaration's specifier",
+        "__asm__(\".globl f\");",
+    ),
 ];
 
 #[test]
@@ -43,8 +55,14 @@ fn the_gnu_gaps_are_named() {
     assert_all_parse(
         "GNU gaps",
         &[
-            ("a statement expression", "void f() { int n = ({ int a = 1; a; }); (void)n; }"),
-            ("an elvis operator", "void f(int a, int b) { int n = a ?: b; (void)n; }"),
+            (
+                "a statement expression",
+                "void f() { int n = ({ int a = 1; a; }); (void)n; }",
+            ),
+            (
+                "an elvis operator",
+                "void f(int a, int b) { int n = a ?: b; (void)n; }",
+            ),
         ],
     );
 }

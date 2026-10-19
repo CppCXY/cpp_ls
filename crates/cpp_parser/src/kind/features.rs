@@ -71,10 +71,14 @@ pub const STANDARDS: [Standard; 10] = [
 impl Standard {
     pub fn family(self) -> Family {
         match self {
-            Standard::C89 | Standard::C99 | Standard::C11 | Standard::C17 | Standard::C23 => Family::C,
-            Standard::Cpp11 | Standard::Cpp14 | Standard::Cpp17 | Standard::Cpp20 | Standard::Cpp23 => {
-                Family::Cpp
+            Standard::C89 | Standard::C99 | Standard::C11 | Standard::C17 | Standard::C23 => {
+                Family::C
             }
+            Standard::Cpp11
+            | Standard::Cpp14
+            | Standard::Cpp17
+            | Standard::Cpp20
+            | Standard::Cpp23 => Family::Cpp,
         }
     }
 
@@ -309,22 +313,28 @@ impl Feature {
             // C++ — each feature to the standard that introduced it.
             Auto | Lambda | RvalueReferences | VariadicTemplates | AliasTemplates | Attributes
             | StaticAssert | RawStrings | AlignasCpp | ThreadLocal => S(Standard::Cpp11),
-            GenericLambda | VariableTemplates | BinaryLiterals | DigitSeparators => S(Standard::Cpp14),
-            StructuredBindings | IfConstexpr | FoldExpressions | InlineVariables
+            GenericLambda | VariableTemplates | BinaryLiterals | DigitSeparators => {
+                S(Standard::Cpp14)
+            }
+            StructuredBindings
+            | IfConstexpr
+            | FoldExpressions
+            | InlineVariables
             | ClassTemplateArgumentDeduction => S(Standard::Cpp17),
-            Concepts | Modules | Coroutines | ThreeWayComparison | UsingEnum | Char8T | Consteval
-            | Constinit => S(Standard::Cpp20),
+            Concepts | Modules | Coroutines | ThreeWayComparison | UsingEnum | Char8T
+            | Consteval | Constinit => S(Standard::Cpp20),
             // C99 **and** C++20 — the reason a feature carries a `Requirement` rather than a single standard.
             DesignatedInitializers => AnyOf(&[S(Standard::C99), S(Standard::Cpp20)]),
-            DeducingThis | IfConsteval | MultidimensionalSubscript | StaticOperator => S(Standard::Cpp23),
+            DeducingThis | IfConsteval | MultidimensionalSubscript | StaticOperator => {
+                S(Standard::Cpp23)
+            }
 
             // C.
             C89Declarations => S(Standard::C89),
             VariableLengthArrays => AnyOf(&[S(Standard::C99), V(Vendor::Gnu)]),
             LineComments => AnyOf(&[S(Standard::C99), S(Standard::Cpp11)]),
-            LongLong | InlineC | BoolC | FlexibleArrayMembers | VariadicMacros | CompoundLiterals => {
-                S(Standard::C99)
-            }
+            LongLong | InlineC | BoolC | FlexibleArrayMembers | VariadicMacros
+            | CompoundLiterals => S(Standard::C99),
             // C99's `restrict`, and GNU accepts its own spelling in every mode — including C++.
             Restrict => AnyOf(&[S(Standard::C99), V(Vendor::Gnu)]),
             GenericSelection | Atomic | StaticAssertC | Alignas | Noreturn | AnonymousStructs
@@ -336,7 +346,9 @@ impl Feature {
             // `AttributesC`, `Nullptr` and `Constexpr` are **not** here: they have a second route (C++11) and are matched
             // by the arm above. A duplicate in this list silently won, because a `match` takes the last arm that names a
             // variant — which is what made `nullptr` C23-only for an afternoon.
-            BitInt | AutoC | EnumeratorsWithAFixedType | EmptyInitializer | Elifdef => S(Standard::C23),
+            BitInt | AutoC | EnumeratorsWithAFixedType | EmptyInitializer | Elifdef => {
+                S(Standard::C23)
+            }
 
             // Vendors.
             StatementExpression | ElvisOperator | AsmBlock | NestedFunction => V(Vendor::Gnu),
@@ -512,8 +524,12 @@ impl LanguageConfig {
     /// C++-only one, and `None` when both are enabled — which is what `permissive` is, and what a parse must answer when
     /// nobody told it what it is reading. A rule that only makes sense for one family asks this, never "is C++23 enabled".
     pub fn family(self) -> Option<Family> {
-        let c = self.standards().any(|standard| standard.family() == Family::C);
-        let cpp = self.standards().any(|standard| standard.family() == Family::Cpp);
+        let c = self
+            .standards()
+            .any(|standard| standard.family() == Family::C);
+        let cpp = self
+            .standards()
+            .any(|standard| standard.family() == Family::Cpp);
         match (c, cpp) {
             (true, false) => Some(Family::C),
             (false, true) => Some(Family::Cpp),
@@ -523,7 +539,9 @@ impl LanguageConfig {
 
     /// The standards this config enables — the set bits of the standards' block.
     pub fn standards(self) -> impl Iterator<Item = Standard> {
-        STANDARDS.into_iter().filter(move |standard| self.bits & standard.bit() != 0)
+        STANDARDS
+            .into_iter()
+            .filter(move |standard| self.bits & standard.bit() != 0)
     }
 
     pub fn vendors(self) -> impl Iterator<Item = Vendor> {
@@ -551,9 +569,9 @@ impl LanguageConfig {
         match requirement {
             Requirement::Standard(needed) => self.bits & needed.covered_by_mask() != 0,
             Requirement::Vendor(vendor) => self.bits & vendor.bit() != 0,
-            Requirement::AnyOf(alternatives) => {
-                alternatives.iter().any(|alternative| self.supports(*alternative))
-            }
+            Requirement::AnyOf(alternatives) => alternatives
+                .iter()
+                .any(|alternative| self.supports(*alternative)),
         }
     }
 
@@ -561,10 +579,7 @@ impl LanguageConfig {
     pub fn describe(self) -> String {
         // The suffix a compiler's flag writes: `++23` for C++, `89` for C. GNU prefixes the whole thing (`gnu++23`,
         // `gnu89`), which is why the family has to be decided before the vendor is.
-        let suffix = match self
-            .standards()
-            .max_by_key(|standard| standard.rank())
-        {
+        let suffix = match self.standards().max_by_key(|standard| standard.rank()) {
             Some(Standard::C89) => "89",
             Some(Standard::C99) => "99",
             Some(Standard::C11) => "11",
@@ -596,7 +611,12 @@ impl fmt::Debug for LanguageConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // The flag rather than the number: a log line says `gnu++23`, and the mask is one `bits()` away when it is what
         // the reader needs.
-        write!(f, "LanguageConfig({}, {:#014b})", self.describe(), self.bits)
+        write!(
+            f,
+            "LanguageConfig({}, {:#014b})",
+            self.describe(),
+            self.bits
+        )
     }
 }
 
@@ -675,7 +695,9 @@ impl LanguageConfig {
     ///
     /// `compile_commands.json` holds a real command line, and a project that passes `-std=c++17` before its own flags and
     /// something else after it means the later one. Reading the first would be wrong in exactly the case this exists for.
-    pub fn from_command_line<S: AsRef<str>>(arguments: impl IntoIterator<Item = S>) -> Option<Self> {
+    pub fn from_command_line<S: AsRef<str>>(
+        arguments: impl IntoIterator<Item = S>,
+    ) -> Option<Self> {
         let mut found: Option<Self> = None;
         let mut iterator = arguments.into_iter();
         while let Some(argument) = iterator.next() {
@@ -685,7 +707,10 @@ impl LanguageConfig {
             } else if argument == "-std" || argument == "--std" {
                 // A separated form: `-std gnu++23`, which is not how a compiler wants it but is how some build systems
                 // write it.
-                if let Some(config) = iterator.next().and_then(|next| Self::from_flag(next.as_ref())) {
+                if let Some(config) = iterator
+                    .next()
+                    .and_then(|next| Self::from_flag(next.as_ref()))
+                {
                     found = Some(config);
                 }
             }
@@ -703,7 +728,9 @@ impl LanguageConfig {
         let standard = match level {
             CppLanguageLevel::Cpp11 => Standard::Cpp11,
             CppLanguageLevel::Cpp14 => Standard::Cpp14,
-            CppLanguageLevel::Cpp17 | CppLanguageLevel::GnuCpp | CppLanguageLevel::MsvcCpp => Standard::Cpp17,
+            CppLanguageLevel::Cpp17 | CppLanguageLevel::GnuCpp | CppLanguageLevel::MsvcCpp => {
+                Standard::Cpp17
+            }
             CppLanguageLevel::Cpp20 => Standard::Cpp20,
             CppLanguageLevel::Cpp23 => Standard::Cpp23,
         };

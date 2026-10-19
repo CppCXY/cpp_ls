@@ -375,7 +375,8 @@ pub fn definitions_across_files(
             // an ordinary name does not reach into a class: measured on a two-file project, go-to-definition on
             // `printf` in a `.cpp` answered **three** declarations — a class's member, its out-of-class definition,
             // and `stdio.h`'s `printf` — while the only one the file can name is the last.
-            return if naming_a_member || inside_a_definition_written_with_a_qualifier(root, offset) {
+            return if naming_a_member || inside_a_definition_written_with_a_qualifier(root, offset)
+            {
                 index.definitions(&name, path)
             } else {
                 index.definitions_in_scope(&name, path)
@@ -2568,10 +2569,7 @@ pub(crate) fn type_of_expression(
             .chars()
             .all(|character| !character.is_ascii_lowercase())
     {
-        return Known::Yes((
-            Type::named(callee.trim()),
-            path.to_path_buf(),
-        ));
+        return Known::Yes((Type::named(callee.trim()), path.to_path_buf()));
     }
 
     // `this` is the enclosing class, and no inference is involved: the scope chain already knows which class this
@@ -2615,7 +2613,12 @@ pub(crate) fn type_of_expression(
         return match declaration_of_expression(index, scopes, root, path, expression) {
             Known::Yes(named) => {
                 match declared_type(index, declaring, scopes, root, path, &named, depth) {
-                    Known::Yes(type_of) => Known::Yes((substituted_at_the_use(index, scopes, root, path, expression, &named, type_of), named.file(path))),
+                    Known::Yes(type_of) => Known::Yes((
+                        substituted_at_the_use(
+                            index, scopes, root, path, expression, &named, type_of,
+                        ),
+                        named.file(path),
+                    )),
                     Known::Unknown(reason) => Known::Unknown(reason),
                     // The declaration is a function, a class or an alias: none of them has a type *as a name*, which
                     // is the distinction `DeclFact::returns` exists for.
@@ -3139,7 +3142,8 @@ fn declared_class(index: &ProjectIndex, declaring: &Path, class: &str) -> Option
         && let Some(target) = found.fact.type_of.as_deref()
     {
         let written = crate::sema::builtins::split_arguments(inside);
-        let target = crate::sema::types::substituted_spelling(target, &found.fact.parameters, &written);
+        let target =
+            crate::sema::types::substituted_spelling(target, &found.fact.parameters, &written);
         if let Some(named) = crate::sema::types::parse_type_spelling(&target).class_name() {
             return Some(named.to_string());
         }
@@ -5154,7 +5158,11 @@ fn alias_target_of(
                 .flatten()
                 .map(|target| {
                     (
-                        crate::sema::types::substituted_spelling(&target, &declaration.fact.parameters, &written_arguments),
+                        crate::sema::types::substituted_spelling(
+                            &target,
+                            &declaration.fact.parameters,
+                            &written_arguments,
+                        ),
                         declaration.fact.scope.clone(),
                     )
                 })
@@ -7425,7 +7433,11 @@ impl ProjectIndex {
     ///
     /// `Unknown(NotDeclaredHere)` when the scope rule leaves nothing, which is the same answer as a name that is not
     /// declared here — and it is the honest one, because no declaration the caller can write reaches the name.
-    pub fn definitions_in_scope(&self, name: &str, visible_from: &Path) -> Known<ProjectDefinitions> {
+    pub fn definitions_in_scope(
+        &self,
+        name: &str,
+        visible_from: &Path,
+    ) -> Known<ProjectDefinitions> {
         // The reason is passed through as it stands: this method has nothing to add to `NotDeclaredHere`,
         // `Ambiguous` or `ConditionalCompilation`, and re-asking the query to keep the value would run a visibility
         // walk twice for an answer that is already in hand.
@@ -13308,7 +13320,11 @@ fn folded_for_matching(argument: &str) -> String {
 /// Two answers, in one pair: the class the member is looked up in, and the member's name. A target with no `::` in it
 /// — `template <class _Ty> using ptr = _Ty*;` — is not a member of anything, and that case is answered by the caller
 /// parsing the substituted spelling; the member name is empty then, which is how it says so.
-fn the_alias_behind(index: &ProjectIndex, declaring: &Path, written: &str) -> Option<(String, String)> {
+fn the_alias_behind(
+    index: &ProjectIndex,
+    declaring: &Path,
+    written: &str,
+) -> Option<(String, String)> {
     let (head, rest) = written.split_once('<')?;
     let inside = rest.trim_end().strip_suffix('>')?;
     let Known::Yes(found) = index.definition(head.trim(), declaring) else {
@@ -13320,7 +13336,8 @@ fn the_alias_behind(index: &ProjectIndex, declaring: &Path, written: &str) -> Op
 
     let target = found.fact.type_of.as_deref()?;
     let arguments = crate::sema::builtins::split_arguments(inside);
-    let substituted = crate::sema::types::substituted_spelling(target, &found.fact.parameters, &arguments);
+    let substituted =
+        crate::sema::types::substituted_spelling(target, &found.fact.parameters, &arguments);
 
     // `typename enable_if<_Test, _Ty>::type` — the last `::` separates the class from the member it names.
     let substituted = substituted
@@ -13437,7 +13454,11 @@ pub fn substituted_members(
         .flatten()
         {
             if !alias_names.is_empty() {
-                *spelling = crate::sema::types::substituted_spelling(spelling, &alias_names, &alias_targets);
+                *spelling = crate::sema::types::substituted_spelling(
+                    spelling,
+                    &alias_names,
+                    &alias_targets,
+                );
             }
             *spelling = crate::sema::types::substituted_spelling(spelling, &names, &arguments);
         }

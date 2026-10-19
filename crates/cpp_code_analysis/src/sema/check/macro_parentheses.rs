@@ -35,7 +35,9 @@ impl Check for MacroParentheses {
                 let range = fact.body_range?;
                 // The body is sliced again below, where the borrow of `context` is not held; here it only proves the range
                 // is inside the file.
-                context.written.get(range.start_offset..range.end_offset())?;
+                context
+                    .written
+                    .get(range.start_offset..range.end_offset())?;
                 Some((fact.name.clone(), range.start_offset, range.end_offset()))
             })
             .collect();
@@ -46,8 +48,7 @@ impl Check for MacroParentheses {
             if body.is_empty()
                 || body.starts_with('(')
                 || body.starts_with('{')
-                || body.starts_with("do")
-                && !has_a_loose_operator(body)
+                || body.starts_with("do") && !has_a_loose_operator(body)
             {
                 continue;
             }
@@ -75,12 +76,17 @@ fn has_a_loose_operator(body: &str) -> bool {
         match character {
             '(' | '[' | '{' => depth += 1,
             ')' | ']' | '}' => depth -= 1,
-            '+' | '-' | '*' | '/' | '%' | '&' | '|' | '^' | '?' | '<' | '>' | '=' | '!' if depth == 0 => {
+            '+' | '-' | '*' | '/' | '%' | '&' | '|' | '^' | '?' | '<' | '>' | '=' | '!'
+                if depth == 0 =>
+            {
                 let before = body[..index].chars().last();
                 let after = body[index + 1..].chars().next();
                 let is_unary = before.is_none()
                     || before.is_some_and(|previous| {
-                        matches!(previous, '(' | '[' | '{' | ',' | '=' | '+' | '-' | '*' | '/' | '!' | '?' | ':')
+                        matches!(
+                            previous,
+                            '(' | '[' | '{' | ',' | '=' | '+' | '-' | '*' | '/' | '!' | '?' | ':'
+                        )
                     });
                 let is_a_suffix = matches!(
                     (character, after),

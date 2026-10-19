@@ -1358,4 +1358,3 @@ fn a_file_cooks_the_same_through_the_unit_as_through_a_table_of_its_own() {
         "and a name nobody defines is nobody's: the seed does not invent one"
     );
 }
-

@@ -476,7 +476,8 @@ fn modifiers_of(
 
     // The declaration's own specifiers, in the shape table — the same source `access_at` reads, and for the same
     // reason: it is one entry per declaration rather than a walk of the tree.
-    let shapes = shapes.get_or_init(|| crate::sema::declarations::DeclarationShapes::of(&view.root));
+    let shapes =
+        shapes.get_or_init(|| crate::sema::declarations::DeclarationShapes::of(&view.root));
     let Some(specifiers) = shapes.specifiers_at(name_at) else {
         return Vec::new();
     };

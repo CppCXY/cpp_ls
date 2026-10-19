@@ -72,7 +72,10 @@ pub async fn on_goto_implementation(
 ///
 /// A free function so that a test can ask it without a client, and generic over the provider for the same reason
 /// [`crate::handlers::references::locations`] is: the fixture that reproduces the question is a session, not a server.
-pub fn implementations_of<F: FileProvider + Clone>(session: &Session<F>, name: &str) -> Vec<Location> {
+pub fn implementations_of<F: FileProvider + Clone>(
+    session: &Session<F>,
+    name: &str,
+) -> Vec<Location> {
     let summaries = session.index().all_summaries();
 
     // **The classes the name belongs to.** A class name belongs to no class (it *is* one), a member to its scope —
@@ -154,7 +157,10 @@ fn push_location<F: FileProvider + Clone>(
         Some(range) => Location { uri, range },
         None => at_the_top,
     };
-    if !found.iter().any(|held| held.uri == location.uri && held.range == location.range) {
+    if !found
+        .iter()
+        .any(|held| held.uri == location.uri && held.range == location.range)
+    {
         found.push(location);
     }
 }
@@ -191,10 +197,7 @@ mod tests {
             WatchFilter::new("/p"),
             CompilerConfig::default(),
         );
-        session.add_project_files([
-            PathBuf::from("/p/base.h"),
-            PathBuf::from("/p/derived.h"),
-        ]);
+        session.add_project_files([PathBuf::from("/p/base.h"), PathBuf::from("/p/derived.h")]);
         session.index_everything();
         session
     }
@@ -211,7 +214,11 @@ mod tests {
 
         let classes = implementations_of(&session, "Base");
         assert_eq!(classes.len(), 1, "one class derives from Base: {classes:?}");
-        assert!(classes[0].uri.path().ends_with("derived.h"), "{:?}", classes[0]);
+        assert!(
+            classes[0].uri.path().ends_with("derived.h"),
+            "{:?}",
+            classes[0]
+        );
 
         let overrides = implementations_of(&session, "run");
         assert!(
@@ -219,7 +226,9 @@ mod tests {
             "the member `run` of the derived class implements the base's"
         );
         assert!(
-            overrides.iter().any(|found| found.uri.path().ends_with("derived.h")),
+            overrides
+                .iter()
+                .any(|found| found.uri.path().ends_with("derived.h")),
             "the implementation is in the derived class: {overrides:?}"
         );
     }

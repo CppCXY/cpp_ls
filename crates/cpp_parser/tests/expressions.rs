@@ -45,8 +45,6 @@ fn count(source: &str, kind: CppSyntaxKind) -> usize {
 /// `identifier ( &`.
 #[test]
 fn a_call_whose_argument_is_an_address_of_expression_is_a_call() {
-
-
     parses("void g() { int n = 0; take(&n); }");
     assert_eq!(
         count("void g() { int n = 0; take(&n); }", CppSyntaxKind::CallExpr),
@@ -54,12 +52,18 @@ fn a_call_whose_argument_is_an_address_of_expression_is_a_call() {
         "`take(&n)` is a call"
     );
     assert_eq!(
-        count("void g() { int n = 0; take(&n, 1); }", CppSyntaxKind::CallExpr),
+        count(
+            "void g() { int n = 0; take(&n, 1); }",
+            CppSyntaxKind::CallExpr
+        ),
         1,
         "and it stays one with a second argument"
     );
     assert_eq!(
-        count("void g() { int n = 0; take(&n); take(n); }", CppSyntaxKind::CallExpr),
+        count(
+            "void g() { int n = 0; take(&n); take(n); }",
+            CppSyntaxKind::CallExpr
+        ),
         2,
         "and the plain call beside it is still one"
     );
