@@ -776,3 +776,126 @@ anotherVec.push_back("123131");     // 期望 param-type-check，实际 0 条
 修法的验收因此改成**多文件夹具**（`codes_of_files`）：类在 `box.h`，且 `box.h` 里 class 之上有一行
 `#include`，调用在 `a.cpp`。这三件事同时在场，才复现用户那一行。
 
+
+## 十三、真实 C++23 模块工程上的四个缺陷（2026，`C:\Users\zc\Desktop\test_module`）
+
+用户的抱怨是一句话："语言服务在这上面的表现并不好，首先他就几乎不认识模块，然后在有模块的文件内几乎就不能补全，
+hover 需要等待的时间也非常长。" 四项，三项已修，第四项已量清、待做。
+
+工程：CMake + Ninja + MinGW GCC 15.1，`-std=c++23 -fmodules-ts`，5 个源文件（`math.cppm` / `shapes.cppm`
+接口单元，`math.cpp` 实现单元，`main.cpp` 导入 `math`/`shapes`，`std_module_demo.cpp` 导入 `std`），
+`build/compile_commands.json` 4 条命令。
+
+### ① `compile_commands.json` 里的 Windows 路径被吃掉反斜杠 —— **已修**
+
+`split_command_line` 把 `\` 一律当 POSIX 转义字符，于是：
+
+```text
+真正    C:\Users\zc\Desktop\mingw\mingw64\bin\c++.exe
+解析成  C:UserszcDesktopmingwmingw64binc++.exe
+```
+
+discovery 没法运行这个编译器，**静默退回机器上的另一个工具链**：
+
+```text
+              改前                          改后
+dialect       Msvc                          Gnu
+include       8 条 MSVC / Windows SDK       6 条 MinGW GCC 15.1
+索引文件数     304                           478
+```
+
+一个 MinGW 工程被当成 MSVC 分析，`#include <print>` 落到错误的库或落空 —— 这就是"不认识这个工程"的一半。
+修法：`\` 只在**引号或空白**前才是转义，其余一律是路径分隔符；`C:\Users\…`、`"C:\Program Files\…"`、
+`\\server\share` 全部保住，`a\ b` 与 `\"` 照旧。测试 `a_windows_path_keeps_its_separators`。
+
+### ② 请求路径给模块解析传了一个**文件**，而它要的是**目录** —— **已修**
+
+`ModuleScanner::resolve_module` 把模块名拼到"给定目录"上，而 `Session::module_interface_units_of` 传的是
+**导入它的那个文件**，于是候选成了 `<dir>/main.cpp/math.cppm` —— 没有任何文件系统有这条路径：
+
+```text
+resolve_module("math")            no file in this project declares module `math`
+read_the_modules_a_file_imports   0
+imports_a_module_that_is_not_read 永远 true   → 模块文件里**每个请求**都拿一次写锁
+```
+
+实测修复前后：`read_the_modules` **0 → 2**，`interface_unit_of("math")` **None → `…/src/math.cppm`**。
+标准库模块的测试一直是绿的，因为它们的 `.ixx` 是从 include path 旁边的 `modules/` 找到的，坏掉的第一个候选
+从来不是回答的那个；新测试的夹具**故意不配 include path**（`a_module_beside_the_importing_file_is_read_in`）。
+
+### ③ `std::` 补全为空 —— 宏把预算挤满了 —— **已修**
+
+`name_completions_at` 把文件自身及其直接包含头文件的宏追加到**每一个**名字列表，包括 `::` 限定位置。
+空前缀时排序落到 label，而宏全是大写/下划线，排在所有小写名字之前：
+
+```text
+`std::`     200 条，第一条 NOATOM … _WINDOWS_ … string/expected 全被截掉
+`math::`     44 条，同样是宏 + 少量成员
+```
+
+而 `declarations_in("std")` 有 **2352** 条 —— 数据一直在，是列表被宏占满了。修法：宏只追加给普通名字位置，
+`::` 限定位置不追加（宏不是任何东西的成员）。改后：`std::` → 200 条真名，`math::` → 模块导出的 5 个，
+`std::string` → `string, string_view, stringbuf, …`。
+
+### ④ 请求里做全量索引 —— **已量清，待做**
+
+`read_the_modules_a_file_imports` 内部调用 `index_everything()`：模块文件里第一次 hover/补全要等整条索引链。
+
+```text
+read_the_modules  2 module(s)  1416 ms（热）/ 8906 ms（冷）      紧接着 index_everything 57 ms
+```
+
+### 顺带做的三件模块功能
+
+```text
+高亮       module/import/export 关键字 + 模块名(namespace)；`int import = 1;` 仍是变量
+documentLink  `import math;` → src/math.cppm，区间是**模块名**而不是整条声明
+补全       `import ` → math, shapes；`import sh` → shapes（索引 + 工程里的 .cppm/.ixx，一行一个名字）
+```
+
+## 十四、语义高亮的一次 encode 是 2.1 秒 —— 两处都是"每个 token 做一次"（2026）
+
+用户指出实现里的两件事："你会先取得每个 token 的文本再判断 token 的 kind"、"我们获取文本的方式太原始了"。
+两件都对，而顺着查下去发现了第三件更贵的：**行查找是从文件头数行**。
+
+```text
+236 000 字节 / 164 000 token 的文件，一次 encode
+改前  2119 ms
+改后    24 ms      （88 倍）
+```
+
+三处：
+
+```text
+① 先取文本再判 kind
+   push_keywords 对**每个** token 先切 &str，再判断它是不是关键字；
+   164 000 个 token 里关键字 8 000 个、需要文本的 32 000 个，其余 132 000 个白切。
+   修法：先看 kind —— Identifier 才需要文本（requires/concept），BoolLiteral 才需要（bool vs true/false），
+        其余 kind 直接由 kind_of_keyword 回答，这个函数现在**不接收文本**。
+
+② 模块指令那一遍是"每个 token 都问祖先"
+   第一版为了给 module/import 上色，遍历**全部** token、每个问三次父节点，再 to_string() ——
+   一个不 import 任何东西的头文件（<algorithm>，4 100 token）做 4 100 次祖先查询来什么也不画。
+   修法：先找 ModuleDecl/ImportDecl 节点（模块文件里一两条），只在这些节点内部走 token。
+
+③ 行查找是 O(文件长度)，于是整个 encode 是 O(token × 文件长度)
+   util::line_body 用 source.split_inclusive('\n').nth(line) 找行 —— 从字节 0 数起。
+   而它每个 claim 被调用：push_range 两次、build 两次。24 000 个 claim × 4 次 × 236 000 字节 ≈ 5.6 GB 扫描。
+   修法：line_body 收 LineIndex（get_line_offset 是二分），push_range 的"文件能否放置"改成**长度比较**。
+```
+
+### 方法上的教训
+
+> **"每个 token 做 X"在 164 000 个 token 上是四个数量级的差别。**
+
+三条里只有①是用户看出来的；③才是主项（2119 ms 里 ~2 000 ms 在它身上），而它藏在 `position_in_file`
+这个"看起来只是查个行列"的函数里。量的时候只量 `encode` 整体，就会以为是①；量到行查找才看见真正的
+热点的形状：**一个 O(n) 的辅助函数被放在一个 O(n) 的循环里。**
+
+同时留下的探针：
+
+```text
+cargo test --release -p cpp_ls --lib -- a_big_file --ignored --nocapture
+```
+
+它会打印 token 数、需要取文本的 token 数、以及一次 encode 的时间。

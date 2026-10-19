@@ -286,9 +286,13 @@ impl<'a> Builder<'a> {
         // A range the file cannot place — an offset past its end, which a stale view or a cooked reading can
         // produce. Dropping one claim is the only option that keeps the walk valid: a guessed position would move
         // every token after it.
-        if position_in_file(self.file, start).is_none()
-            || position_in_file(self.file, end).is_none()
-        {
+        //
+        // **A length check, not two line lookups.** This runs once per claim and a large file has tens of thousands
+        // of them; `position_in_file` answered the same question by finding the line of the offset — twice — which
+        // is a binary search and a slice each time. Every offset up to and including the text's length is a place
+        // the file can put a position (the end of the text is a zero-width range at EOF), and every offset past it
+        // is not, so the length *is* the test.
+        if end > self.file.text.len() {
             self.unplaceable += 1;
             return false;
         }

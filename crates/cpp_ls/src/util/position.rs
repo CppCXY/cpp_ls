@@ -45,7 +45,7 @@ pub fn offset_at_position(view: &FileView, position: Position) -> Option<Reading
     // there is one. Reaching for `source` here is the mistake this module exists to prevent: the two have different
     // line breaks wherever a macro expanded, so a line number from one is a different document's line number.
     let written = view.written_text().unwrap_or(&view.source);
-    let body = line_body(written, line)?;
+    let body = line_body(written, view.written_lines(), line)?;
     let column = character_column(body, position.character as usize);
     let in_the_file = view.file_offset_at(line, column)?;
     // …and where the reading is. `None` for a region the rendering does not contain — a branch nobody takes, a
@@ -58,7 +58,7 @@ pub fn offset_at_position(view: &FileView, position: Position) -> Option<Reading
 pub fn file_offset_at_position(view: &FileView, position: Position) -> Option<FileOffset> {
     let line = position.line as usize;
     let written = view.written_text().unwrap_or(&view.source);
-    let body = line_body(written, line)?;
+    let body = line_body(written, view.written_lines(), line)?;
     let column = character_column(body, position.character as usize);
     view.file_offset_at(line, column)
 }
@@ -86,7 +86,7 @@ pub fn position_at_offset(view: &FileView, offset: ReadingOffset) -> Option<Posi
 /// view-shaped entry point existed and was deleted when the diagnostics channel stopped parsing to answer.
 pub fn position_in(text: &str, index: &LineIndex, offset: usize) -> Option<Position> {
     let (line, column) = index.position_of(offset, text)?;
-    let body = line_body(text, line)?;
+    let body = line_body(text, index, line)?;
     Some(Position::new(line as u32, utf16_column(body, column)))
 }
 
@@ -100,17 +100,22 @@ pub fn position_in_file(file: &VfsFile, offset: usize) -> Option<Position> {
 /// `None` past the last line. A text that ends in a newline has one more line than it has line bodies, and that
 /// last line is empty — the same line the parser's own line map counts (`LineIndex::parse` pushes an offset after
 /// every `\n`), so a position at the very end of a file maps onto a real line rather than onto nothing.
-pub fn line_body(source: &str, line: usize) -> Option<&str> {
-    let mut count = 0;
+///
+/// # Why the line *index* is a parameter
+///
+/// Because this is called **once per token** by anything that answers in a client's positions, and the first
+/// version found the line by counting: `source.split_inclusive('\n').nth(line)`, which reads the file from byte
+/// zero for every token. Quadratic — measured on a 236 KB file of 164 000 tokens, the semantic token pass spent
+/// **2.1 s** in it, six calls per claim (two in the claim, two in the build, and the scan each time). With the
+/// index it is `get_line_offset`, a binary search, and the pass fell to **11 ms** (docs/status.md §十四).
+pub fn line_body<'a>(source: &'a str, index: &LineIndex, line: usize) -> Option<&'a str> {
+    let start = usize::from(index.get_line_offset(line)?);
+    let end = index
+        .get_line_offset(line + 1)
+        .map_or(source.len(), usize::from)
+        .min(source.len());
 
-    for text in source.split_inclusive('\n') {
-        if count == line {
-            return Some(without_terminator(text));
-        }
-        count += 1;
-    }
-
-    (count == line).then_some("")
+    Some(without_terminator(source.get(start..end)?))
 }
 
 /// The character column a UTF-16 column is, for one line body.
@@ -156,16 +161,19 @@ mod tests {
     #[test]
     fn a_line_body_is_the_line_without_its_break() {
         let source = "one\nsecond\r\n";
-        assert_eq!(line_body(source, 0), Some("one"));
-        assert_eq!(line_body(source, 1), Some("second"));
+        let index = LineIndex::parse(source);
+        assert_eq!(line_body(source, &index, 0), Some("one"));
+        assert_eq!(line_body(source, &index, 1), Some("second"));
         assert_eq!(
-            line_body(source, 2),
+            line_body(source, &index, 2),
             Some(""),
             "the position after the last newline is a line of its own"
         );
-        assert_eq!(line_body(source, 3), None);
-        assert_eq!(line_body("", 0), Some(""));
-        assert_eq!(line_body("", 1), None);
+        assert_eq!(line_body(source, &index, 3), None);
+
+        let empty = LineIndex::parse("");
+        assert_eq!(line_body("", &empty, 0), Some(""));
+        assert_eq!(line_body("", &empty, 1), None);
     }
 
     #[test]

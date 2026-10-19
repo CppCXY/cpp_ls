@@ -364,7 +364,7 @@ fn range_in_file(view: &FileView, range: cpp_parser::SourceRange) -> Option<Rang
 /// file's — see [`range_in_file`].
 fn file_position(text: &str, lines: &cpp_parser::LineIndex, offset: usize) -> Option<Position> {
     let (line, column) = lines.position_of(offset, text)?;
-    let body = crate::util::line_body(text, line)?;
+    let body = crate::util::line_body(text, lines, line)?;
     Some(Position::new(
         line as u32,
         crate::util::utf16_column(body, column),

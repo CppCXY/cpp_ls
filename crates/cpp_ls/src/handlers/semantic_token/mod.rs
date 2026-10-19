@@ -140,29 +140,43 @@ fn push_keywords(builder: &mut Builder<'_>, view: Option<&FileView>) {
     let Some(view) = view else {
         return;
     };
-    let source: &str = view.source.as_ref();
 
     for token in view.tree.get_tokens() {
-        let Some(text) = source.get(token.range.start_offset..token.range.end_offset()) else {
-            continue;
+        // **The kind is asked first, and the text only where the kind cannot answer.** A file has thousands of
+        // tokens and the keywords are a minority of them: measured on the standard library's `<algorithm>`, 4 100
+        // tokens of which 700 are keywords. The first version fetched every token's text before looking at its
+        // kind, so 3 400 tokens paid for a `&str` to answer a question their kind had already answered, and every
+        // identifier was handed to `is_contextual_keyword` on the off chance it was `requires`.
+        let drawn = match token.kind {
+            // The lexer deliberately leaves these as identifiers — `int requires;` compiles — so the **spelling**
+            // is the only thing that can tell a keyword from a name, and only these tokens need it.
+            cpp_parser::CppTokenKind::Identifier => {
+                let Some(text) = view.get_token_text(token.range) else {
+                    continue;
+                };
+                if !is_contextual_keyword(text) {
+                    continue;
+                }
+                TypeKind::Keyword
+            }
+            // **`bool` shares its kind with `true`/`false`** — the lexer's table says `"bool" => BoolLiteral` and
+            // the literals have kinds of their own only for `true`/`false`, so this is the one lexer keyword whose
+            // colour lives in its spelling: the type is drawn as a type and the literals as values.
+            cpp_parser::CppTokenKind::BoolLiteral => match view.get_token_text(token.range) {
+                Some("bool") => TypeKind::Type,
+                _ => TypeKind::Variable,
+            },
+            other if cpp_parser::is_keyword(other) => {
+                kind_of_keyword(other).unwrap_or(TypeKind::Keyword)
+            }
+            // Punctuation, literals, comments: not this pass's business.
+            _ => continue,
         };
 
-        // **Two ways to be a keyword.** The lexer's kinds, and the words it deliberately leaves as identifiers: a
-        // reader sees `requires` and `concept` as keywords, and the grammar reads them by text for the same reason
-        // the lexer does not reserve them. See [`is_contextual_keyword`].
-        let contextual =
-            token.kind == cpp_parser::CppTokenKind::Identifier && is_contextual_keyword(text);
-        if !cpp_parser::is_keyword(token.kind) && !contextual {
-            continue;
-        }
-
-        // **What it is drawn as**, which is not one answer — see [`kind_of_keyword`]. `None` means the word is about
-        // the syntax itself, and `keyword` is what a theme draws those with.
-        let kind = kind_of_keyword(token.kind, text).unwrap_or(TypeKind::Keyword);
         builder.push_range(
             token.range.start_offset,
             token.range.end_offset(),
-            kind,
+            drawn,
             Modifier::none(),
         );
     }
@@ -189,51 +203,49 @@ fn push_module_declarations(builder: &mut Builder<'_>, view: Option<&FileView>) 
         return;
     };
 
-    // The tokens **in the declaration**, which for a module directive is the whole line: `module`, the name, and
-    // the punctuation. Asked of the tree rather than of the text so that a variable called `import` in a function
-    // body is not caught — its parent is a declarator, not an `ImportDecl`.
-    for element in view.root.descendants_with_tokens() {
-        let Some(token) = element.into_token() else {
-            continue;
-        };
-        // **Anywhere inside the directive, not just under it.** A module name is a node of its own —
-    // `ImportDecl > ModuleName > Identifier` — so the test walks a few ancestors rather than one. A bound rather
-    // than a full walk because the answer is at most two levels up and a walk would make this pass proportional to
-    // the depth of every token in the file.
-    let mut node = token.parent();
-    let mut in_a_module_directive = false;
-    for _ in 0..3 {
-        let Some(current) = node else {
-            break;
-        };
-        if matches!(
-            cpp_parser::CppSyntaxKind::from(current.kind()),
+    // **The directives first, then the tokens inside them.** A module file has one or two, so this walks a line or
+    // two rather than the file. The first version walked every token and asked each one's ancestors which node it
+    // was under — which is proportional to the file, and on a header that imports nothing (`<algorithm>`, 4 100
+    // tokens) it was 4 100 ancestor walks to colour nothing at all.
+    for node in view.root.descendants() {
+        let directive = cpp_parser::CppSyntaxKind::from(node.kind());
+        if !matches!(
+            directive,
             cpp_parser::CppSyntaxKind::ModuleDecl | cpp_parser::CppSyntaxKind::ImportDecl
         ) {
-            in_a_module_directive = true;
-            break;
+            continue;
         }
-        node = current.parent();
-    }
-    if !in_a_module_directive {
-        continue;
-    }
 
-        let text = token.text().to_string();
-        let kind = match text.as_str() {
-            "module" | "import" | "export" => TypeKind::Keyword,
-            // The name. A dotted module name is one `ModuleName` node whose parts are identifiers, and every part is
-            // part of the name: `std.compat` is two segments of one module.
-            _ if token.kind() == cpp_parser::CppTokenKind::Identifier.into() => TypeKind::Namespace,
-            _ => continue,
-        };
+        for element in node.descendants_with_tokens() {
+            let Some(token) = element.into_token() else {
+                continue;
+            };
+            let range = cpp_parser::source_range(token.text_range());
+            let Some(text) = view.get_token_text(range) else {
+                continue;
+            };
 
-        builder.push_range(
-            cpp_parser::source_range(token.text_range()).start_offset,
-            cpp_parser::source_range(token.text_range()).end_offset(),
-            kind,
-            Modifier::none(),
-        );
+            // The name is the token under a `ModuleName`, which is the only child that is a module's name: a
+            // **header unit** (`import <vector>;`) has no `ModuleName`, so nothing inside it is coloured here.
+            let in_a_module_name = token.parent().is_some_and(|parent| {
+                cpp_parser::CppSyntaxKind::from(parent.kind())
+                    == cpp_parser::CppSyntaxKind::ModuleName
+            });
+
+            let drawn = match text {
+                "module" | "import" | "export" => TypeKind::Keyword,
+                // A dotted module name is one `ModuleName` node whose parts are identifiers, and every part is part
+                // of the name: `std.compat` is two segments of one module.
+                _ if in_a_module_name
+                    && token.kind() == cpp_parser::CppTokenKind::Identifier.into() =>
+                {
+                    TypeKind::Namespace
+                }
+                _ => continue,
+            };
+
+            builder.push_range(range.start_offset, range.end_offset(), drawn, Modifier::none());
+        }
     }
 }
 
@@ -326,9 +338,10 @@ fn is_contextual_keyword(text: &str) -> bool {
 /// # The one word whose kind is not enough
 ///
 /// `bool` is a `BoolLiteral` in this lexer rather than a keyword of its own — the table says `"bool" =>
-/// BoolLiteral` — so the type and the literal share a kind. The text tells them apart, which is why this takes the
-/// spelling as well as the kind: `bool` is a type and `true` is a value, and a rule keyed on the kind alone would
-/// have to pick one of them to be wrong about.
+/// BoolLiteral` — so the type and the literal share a kind. **`bool` is answered by the caller**, which is the one
+/// place that has the spelling in hand: [`push_keywords`] asks the token's text for exactly those two kinds, and
+/// this function takes no text at all. Passing the spelling down — which the first version did — meant every caller
+/// had to fetch one, and every caller was a loop over a file.
 ///
 /// # What is deliberately not here
 ///
@@ -345,19 +358,10 @@ fn is_contextual_keyword(text: &str) -> bool {
 /// **`final` and `override` are not here at all.** The lexer leaves them identifiers because code that predates
 /// C++11 uses them as names ([`is_contextual_keyword`] says the same about `requires`), and reserving them for
 /// colour would underline a variable called `final`.
-fn kind_of_keyword(kind: cpp_parser::CppTokenKind, text: &str) -> Option<TypeKind> {
+fn kind_of_keyword(kind: cpp_parser::CppTokenKind) -> Option<TypeKind> {
     use cpp_parser::CppTokenKind;
 
     Some(match kind {
-        CppTokenKind::BoolLiteral => {
-            // The keyword and the literal, told apart by their spelling — see the note above.
-            if text == "bool" {
-                TypeKind::Type
-            } else {
-                TypeKind::Variable
-            }
-        }
-
         CppTokenKind::CharKeyword
         | CppTokenKind::ShortKeyword
         | CppTokenKind::IntKeyword
@@ -656,6 +660,56 @@ constexpr bool is_assignable_v = __is_assignable(To, From);
         );
         session.load("/p/a.cpp");
         (session, std::path::PathBuf::from("/p/a.cpp"))
+    }
+
+    /// **How much work one encode is** — a measurement, not an assertion, and `#[ignore]`d because the fixture is a
+    /// quarter of a megabyte and the *setup* (a parse, a classification) costs more than the loop it measures.
+    ///
+    /// ```text
+    /// cargo test --release -p cpp_ls --lib -- a_big_file --ignored --nocapture
+    /// ```
+    ///
+    /// It prints the token count, how many of them the keyword pass has to fetch text for, and the time of
+    /// `encode`. The first version fetched **every** token's text to decide a question the kind had already
+    /// answered, and the line lookup behind each position scanned the file from byte zero: measured on 236 000
+    /// bytes and 164 000 tokens, **2.1 s** per encode before and **24 ms** after.
+    #[test]
+    #[ignore = "a measurement: the fixture is deliberately huge"]
+    fn a_big_file_measures_what_a_walk_costs() {
+        let line = "for (int i = 0; i < n; ++i) { total += values[i].size(); }\n";
+        let text: String = std::iter::repeat_n(line, 4000).collect();
+
+        let (session, path) = a_held_file(&text);
+        let view = session.view_of_the_file(&path).expect("a view");
+        let file = session.files().held(&path).expect("the file is held");
+        let names = session.classified_names(&view);
+
+        let tokens = view.tree.get_tokens().len();
+        let mut fetched = 0;
+        let mut keywords = 0;
+        for token in view.tree.get_tokens() {
+            let needs_text = matches!(
+                token.kind,
+                cpp_parser::CppTokenKind::Identifier | cpp_parser::CppTokenKind::BoolLiteral
+            );
+            let keyword = cpp_parser::is_keyword(token.kind);
+            fetched += usize::from(needs_text && !keyword);
+            keywords += usize::from(keyword);
+        }
+
+        let started = std::time::Instant::now();
+        let rounds = 20;
+        let mut drawn = 0;
+        for _ in 0..rounds {
+            drawn = encode(file, Some(&view), &names, &None, false).len();
+        }
+        let each = started.elapsed() / rounds;
+
+        eprintln!(
+            "PROBE {} bytes, {tokens} tokens ({keywords} keyword kinds, {fetched} need a text fetch), \
+             {drawn} tokens drawn, {each:?} per encode",
+            text.len()
+        );
     }
 
     /// **Every token the encoding sends, by absolute offset** — decoding the walk the way a client does.

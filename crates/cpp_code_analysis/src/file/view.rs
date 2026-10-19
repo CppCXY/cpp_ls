@@ -847,6 +847,21 @@ impl FileView {
     pub fn source(&self) -> &str {
         &self.source
     }
+
+    /// **The text of one token**, by the range the token carries — nothing allocated, nothing copied.
+    ///
+    /// The accessor a **token walk** wants, and the reason it exists: a pass over a file's tokens is the one loop
+    /// in this crate that runs once per token — a large header is 60 000 of them — and the two things such a pass
+    /// must not do are `token.text().to_string()` (a `String` per token, for a word nobody asked about) and
+    /// `&source[start..end]` (a panic when the range is not in this text). This answers `&str` or `None`, and `None`
+    /// is a real answer: a pass that walks a rendering's tree against the file's own text gives ranges past the end.
+    ///
+    /// **Ask the kind first.** A caller deciding "is this token interesting" should decide it from the token's
+    /// kind and fetch the text only for the ones that pass — the semantic token layer did the opposite, and paid a
+    /// slice per token to colour the keywords among them (`crates/cpp_ls/src/handlers/semantic_token`).
+    pub fn get_token_text(&self, range: cpp_parser::SourceRange) -> Option<&str> {
+        self.source.get(range.start_offset..range.end_offset())
+    }
 }
 
 #[cfg(test)]
