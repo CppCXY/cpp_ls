@@ -990,3 +990,81 @@ cargo run --release -p cpp_code_analysis --example semantic_probe -- <文件列�
 前者打印两个夹具的 token 数、view / 分类 / encode 三段耗时；后者对真实文件打印每个文件的
 标识符数、分类数、耗时与来源分布。
 
+
+## 十五、一次会话里的四份报告，两份"缓存了一份错误的答案"（2026）
+
+四条都来自同一个编辑器会话，前三条已修，第四条已定位、未修。
+
+### ① `std::endl` 启动时不是函数，编辑一下就是 —— **已修**
+
+这不是分类的错，是**时机和缓存**：语义高亮一次给整个文件，客户端把它缓存到下一次编辑。启动时请求到达时，
+`is_locally_ready` 只问"这个文件的**直接** include 读了吗"，而 `std::endl` 在 `<ostream>` 里，经
+`<iostream>` 十层才到 —— 直接层读完了，深层的还没有，于是那些名字没有分类，客户端的语法色就留在了上面。
+
+修法两半：
+
+```text
+判定     Session::is_closure_ready —— 整个可见闭包都有摘要才算准备好（visible_files + 摘要查询）
+刷新     workspace/semanticTokens/refresh —— 索引落定后让客户端重问一次（与 inlayHint/refresh 同一机制）
+```
+
+测试 `a_file_is_closure_ready_only_once_what_it_reaches_is_read` —— 它把最深那个文件的摘要丢掉，
+断言 `is_locally_ready` 仍为真而 `is_closure_ready` 为假。
+
+### ② 宏的补全行带着 `int ()` —— **已修**
+
+`#define FULL_NAME_FORMAT "Full name: {}"` 在补全里显示 `int ()`。那个 detail 来自
+`DeclFact` 的 `returns` + `parameter_list`，而宏的 fact 是**克隆**来的：
+
+```rust
+let mut declaration = summary.declarations.first()?.clone();   // ← 文件的第一个声明
+declaration.name = name; declaration.kind = MacroLike;         // ← 只改了这两个字段
+```
+
+于是 `int main()` 的 `returns`、`parameter_list`、`bases`、`parameters`、`local` 全都留在了宏的 fact 上，
+`completionItem/resolve` 又把它们读出来画成 `int ()`。
+
+修法：克隆之后**清掉所有属于那个声明的字段**（`type_of`、`returns`、`bases`、`parameters`、`local`），
+只留 fact 的形状。测试 `a_macro_is_not_shown_with_a_signature` 断言宏 fact 的这几项都是空的。
+
+### ③ `printf(…)` 没有参数提示，`push_back(_Val: …)` 有 —— **已修**
+
+同一个文件里相邻两行：成员调用的名字来自 `members_of` 的 **fact**（不需要渲染树），自由函数的名字来自
+`parameter_list_of`，那需要**声明所在文件的渲染** —— 而查询不建渲染。于是系统头里没有渲染的自由函数
+静默地没有提示。和上一节 ⑥（签名提示）是同一个根因，只是另一条路径。
+
+修法：`inlay::parameter_hints` 在 `parameter_names_for` 失败时，用 `Callee::parameters`（fact 里的参数表
+文本）读名字 —— **把那段文本包成一条合成声明去 parse**（`void __hint(const char* __format, ...);`），
+而不是按逗号切：`int (*f)(int)`、带默认参数的 `map<int, string> m = {}`、`...` 都会切错。
+测试 `a_call_into_an_uncooked_header_is_still_hinted` —— 它断言声明所在文件**没有**渲染。
+
+### ④ `std::vector<int>::push_back("123131")` 没有类型错误 —— **已定位，未修**
+
+检查本身对"类模板的成员"是好的：`void push_back(const _Tp& __x);` 在 `std::vector<int>` 上会报
+（测试 `a_member_of_a_class_template_is_checked_after_substitution`）。
+
+断掉的是**别名这一步**，而这正是 libstdc++ 真实写法：
+
+```cpp
+template <class _Tp> class vector {
+public:
+    using value_type = _Tp;
+    void push_back(const value_type& __x);   // ← 参数类型是类自己的别名
+};
+```
+
+`members_of` 会把类实参**替换进成员的 `type_of`/`returns`**，但 `parameter_list` 是声明的**原文**，
+替换不进去 —— 于是目标类型停在 `const value_type&`，`convertible_to(const char[7], const value_type&)`
+答 `Unknown`，而"无法比较"的检查必须沉默。
+
+修法（下一步）：让 `members_of` 在替换成员类型时也替换 `parameter_list`（文本替换，`_Tp` → `int`），
+并且先把类自己的别名成员（`value_type` → `_Tp`）展开一次。测试已经写好并 `#[ignore]`：
+`a_member_parameter_written_with_the_classs_alias_is_checked`。
+
+### 方法上的教训（第五次同类）
+
+> **一个"少给一些"的加速，会被客户端缓存成"少给就是全部"。**
+
+①和③都是"查询不建渲染/不读闭包，先用已知的回答"的产物 —— 这个决定本身是对的（否则每个请求几百毫秒），
+错的是**没有人再告诉客户端可以重问了**。①现在有了 `semanticTokens/refresh`，③有 `inlayHint/refresh`；
+两者都是"答案变了而文档没变"这一个协议盲区，而这类答案在这个服务器里还有几处（诊断已经是 pull）。

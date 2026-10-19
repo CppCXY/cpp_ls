@@ -1524,3 +1524,43 @@ fn a_missing_semicolon_is_reported() {
         found.errors.iter().map(|e| e.message.clone()).collect::<Vec<_>>()
     );
 }
+
+/// **A macro is not a function** — its completion row carries no signature.
+///
+/// Reported from an editor: `FULL_NAME_FORMAT` is `#define FULL_NAME_FORMAT "Full name: {}"` and the completion
+/// listed it with the detail `int ()`. A detail comes from `DeclFact`'s `returns`/`parameter_list`, and a macro has
+/// neither — so the row was built from a fact whose four "what type does this declare" questions had been answered
+/// about a *different* declaration: the macro's name offset is inside no declaration shape, so the shape lookup that
+/// answers those questions found whatever enclosed it — here `int main()`, hence `int` and `()`.
+#[test]
+fn a_macro_is_not_shown_with_a_signature() {
+    let source = "#define FULL_NAME_FORMAT \"Full name: {}\"\nint main() { FULL_NAME_FORMAT }\n";
+    let mut memory = MemoryFiles::new().with_file("/p/a.cpp", source);
+    let providers = SessionFiles::new(OpenDocuments::new(), memory.clone());
+    let mut session = Session::with_config(
+        "/p",
+        providers,
+        WatchFilter::new("/p"),
+        CompilerConfig::default(),
+    );
+    session.add_project_files([std::path::PathBuf::from("/p/a.cpp")]);
+    let view = cooked_view(&mut session, "/p/a.cpp");
+    let _ = &mut memory;
+
+    let cursor = source.rfind("FULL_NAME_FORMAT").expect("the fixture") + "FULL_NAME_FORMAT".len();
+    let offered = session.completions(
+        &view,
+        cpp_code_analysis::file::coordinates::FileOffset::new(cursor),
+    );
+    let item = offered
+        .items
+        .iter()
+        .find(|item| item.label == "FULL_NAME_FORMAT")
+        .expect("the macro is offered");
+    println!("item: kind={:?} detail={:?} fact={:?}", item.kind, item.detail, item.fact.as_ref().map(|fact| (&fact.kind, &fact.returns, &fact.parameter_list)));
+    assert_eq!(
+        item.detail, None,
+        "a macro has no returns and no parameters: {:?}",
+        item.fact.as_ref().map(|fact| (&fact.kind, &fact.returns, &fact.parameter_list))
+    );
+}

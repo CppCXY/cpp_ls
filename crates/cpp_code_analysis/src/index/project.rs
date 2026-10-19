@@ -1625,13 +1625,27 @@ pub fn name_completions_at(
             }
             // A fact cloned from one of the file's own declarations rather than built from nothing: `DeclFact` has no
             // `Default` (its `DeclKind`, `SourceRange` and `FactGuard` do not), and adding one for this would put a
-            // meaningless declaration shape in the type. The name and the kind are the only fields that matter here.
+            // meaningless declaration shape in the type.
+            //
+            // **What the clone keeps is the shape and nothing else**, and that is a correction rather than a
+            // tidy-up: everything the template said about *itself* — the return type, the parameter list, the
+            // template parameters, the bases — belongs to a different declaration, and this fact speaks for a
+            // macro. Measured from an editor: `#define FULL_NAME_FORMAT "Full name: {}"` was listed with the detail
+            // **`int ()`**, which is `int main()`'s signature — the first declaration of the file, cloned field for
+            // field, and read back by `completionItem/resolve` (`docs/status.md` §十五).
             let Some(template) = summary.declarations.first() else {
                 continue;
             };
             let mut declaration = template.clone();
             declaration.name = name.to_string();
             declaration.kind = crate::DeclKind::MacroLike;
+            // Nothing of the template's *declaration* survives: a macro has no type, no return type, no
+            // parameters of its own and no bases, and a `#define` is never local.
+            declaration.type_of = None;
+            declaration.returns = None;
+            declaration.bases.clear();
+            declaration.parameters.clear();
+            declaration.local = false;
             // **A function-like macro is offered with its parenthesis**, which is the only hint a completion item can carry
             // about how it is used: `MAX(` tells the reader the name takes arguments, and `MAX` alone does not.
             declaration.parameter_list = function_like.then(|| "(".to_string());
@@ -3541,6 +3555,19 @@ impl NamedDeclaration {
             NamedDeclaration::Indexed(fact, _, _) => fact.name_range.start_offset,
         }
     }
+
+    /// **The declaration's parameter list, as its fact holds it** — `(const char* __format, ...)`.
+    ///
+    /// `None` for a binding in the file being edited, whose list is read from the tree the caller already has. The
+    /// indexed half is what a caller needs when that file has no **rendering**: a hint's parameter names used to
+    /// come only from a tree, so a call into a header nobody had cooked had no hint at all — `printf(...)` beside a
+    /// `push_back(...)` whose names came from the index is what a reader sees of that (`docs/status.md` §十五).
+    fn parameter_list(&self) -> Option<String> {
+        match self {
+            NamedDeclaration::Here(_) => None,
+            NamedDeclaration::Indexed(fact, _, _) => fact.parameter_list.clone(),
+        }
+    }
 }
 
 /// **A type that is still a member's name is followed to what that member declares** — one step at a time, with
@@ -4636,9 +4663,7 @@ pub(crate) fn callee_of_a_call(
         Known::Yes(named) => Known::Yes(Callee {
             file: named.file(path),
             name_offset: named.name_offset(),
-            // The singular caller reads the declaration's own file (a parameter hint is drawn from the tree), so the
-            // fact's copy is not the answer here — see [`Callee::parameters`] for where it is.
-            parameters: None,
+            parameters: named.parameter_list(),
         }),
         Known::Unknown(reason) => Known::Unknown(reason),
         Known::No => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),

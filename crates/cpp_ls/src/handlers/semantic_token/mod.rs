@@ -515,11 +515,17 @@ pub async fn on_semantic_tokens(
         let view = session.view_of_the_file(&path)?;
         let held = session.files().held(&view.path)?;
 
-        // **No answer while the index is still reading.** A name a header declares is classified through the
-        // index, and before it has been read that name has no classification — so an answer now would be a
-        // *shorter* list, which a client caches until the next edit. The protocol has a word for "ask again
+        // **No answer while the file's closure is still being read.** A name a header declares is classified
+        // through the index, and before it has been read that name has no classification — so an answer now would
+        // be a *shorter* list, which a client caches until the next edit. The protocol has a word for "ask again
         // later", and this is it: `null`.
-        if !session.is_locally_ready(&view.path) {
+        //
+        // **The closure, not the direct includes.** `is_locally_ready` asks whether the file's own includes are
+        // read — the question `catch_up` answers — and `std::endl` lives ten headers deeper than `<iostream>`, so a
+        // request during startup passed that test and produced a file coloured almost entirely with the client's own
+        // grammar: measured from an editor, `std::endl` was drawn as a variable at startup and as a function after
+        // any edit. The refresh below is the other half — see `workspace/semanticTokens/refresh` in the idle loop.
+        if !session.is_locally_ready(&view.path) || !session.is_closure_ready(&view.path) {
             log::debug!(
                 "no semantic tokens yet: {} file(s) are queued, and a name in one of them would be uncoloured",
                 session.pending()

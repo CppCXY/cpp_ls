@@ -2631,3 +2631,46 @@
             "a compiler that answered is the only witness there is to the names no file defines"
         );
     }
+
+    /// **The closure, not the direct includes** — the question a *colouring* asks.
+    ///
+    /// `is_locally_ready` asks whether the file's own includes are read, which is exactly what `catch_up` does and
+    /// what one name lookup needs. A semantic token pass classifies **every** identifier, so what it needs is the
+    /// whole closure: `std::endl` is declared in `<ostream>`, reached through `<iostream>`, and a request answered
+    /// while only the first level was read drew it with the client's own grammar colour (measured from an editor:
+    /// a variable at startup, a function after any edit).
+    #[test]
+    #[test]
+    fn a_file_is_closure_ready_only_once_what_it_reaches_is_read() {
+        let files = MemoryFiles::new()
+            .with_file("/p/mid.h", "#include \"deep.h\"\n")
+            .with_file("/p/deep.h", "namespace std { int endl(); }\n")
+            .with_file("/p/a.cpp", "#include \"mid.h\"\nint main() { return std::endl(); }\n");
+        let fixture = Memory::new("is-closure-ready", &files);
+
+        let mut session = fixture.session();
+        session.add_project_files([PathBuf::from("/p/a.cpp")]);
+        session.index_everything();
+
+        assert!(
+            session.is_locally_ready(Path::new("/p/a.cpp")),
+            "the file and its direct includes are read"
+        );
+        assert!(
+            session.is_closure_ready(Path::new("/p/a.cpp")),
+            "and so is everything they reach"
+        );
+
+        // **The distinction, made by dropping the deepest file's summary** — the state a project is in while its
+        // queue is still being read: `a.cpp`'s direct include (`mid.h`) is in, its include's (`deep.h`) is not.
+        session.store.forget(Path::new("/p/deep.h"));
+
+        assert!(
+            session.is_locally_ready(Path::new("/p/a.cpp")),
+            "the direct question is unchanged — `catch_up` has nothing left to read"
+        );
+        assert!(
+            !session.is_closure_ready(Path::new("/p/a.cpp")),
+            "but a name declared in `deep.h` has no classification, which is the question colouring asks"
+        );
+    }

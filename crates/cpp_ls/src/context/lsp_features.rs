@@ -108,6 +108,23 @@ impl LspFeatures {
             .unwrap_or_default()
     }
 
+    /// May the server ask the client to ask again for the **semantic tokens** it is showing?
+    ///
+    /// The same repair as [`LspFeatures::supports_refresh_inlay_hint`], for the other answer that changes without
+    /// the document changing: a name whose declaration lives in a header nobody has read yet is drawn with the
+    /// client's own grammar colour rather than the analysis's, and the client has no reason to ask again. A server
+    /// that answers a token request while the file's include closure is still unread therefore produces a file
+    /// coloured **once, wrongly**, until the next edit — which is what "`std::endl` is not a function until I type
+    /// something" was.
+    pub fn supports_refresh_semantic_tokens(&self) -> bool {
+        self.client_capabilities
+            .workspace
+            .as_ref()
+            .and_then(|workspace| workspace.semantic_tokens.as_ref())
+            .and_then(|tokens| tokens.refresh_support)
+            .unwrap_or_default()
+    }
+
     pub fn supports_dynamic_watched_files_registration(&self) -> bool {
         self.client_capabilities
             .workspace

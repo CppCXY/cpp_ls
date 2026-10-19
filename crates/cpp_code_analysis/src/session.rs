@@ -2531,6 +2531,28 @@ impl<F: FileProvider + Clone> Session<F> {
         self.queue.is_queued(path) || !self.unread_includes_of(path).is_empty()
     }
 
+    /// **Is every file this one can name from a summary in the index** — the question a *colouring* asks.
+    ///
+    /// [`Session::is_locally_ready`] asks about the file's **direct** includes, which is the right question for a
+    /// query that resolves one name (`catch_up` reads exactly what that needs). It is the wrong question for the
+    /// semantic tokens, which classify **every identifier in the file** from the index: a name declared ten headers
+    /// deep (`std::endl` is in `<ostream>` through `<iostream>`) is unclassified when only the first level has been
+    /// read, and the answer a client gets is a file that is mostly drawn in its own grammar colours.
+    ///
+    /// So the test is the **closure**: every file [`ProjectIndex::visible_files`] reaches, summarized. That walk is
+    /// the one every cross-file query already pays (and it is memoized), and the summary lookups are hash reads.
+    pub fn is_closure_ready(&self, path: &Path) -> bool {
+        if !self.store.index().summary(path).is_some() {
+            return false;
+        }
+
+        self.store
+            .index()
+            .visible_files(path)
+            .iter()
+            .all(|(file, _)| self.store.index().summary(Path::new(file)).is_some())
+    }
+
     /// **Can a question about this file be answered from what has been read?** — the question a *local* request asks.
     ///
     /// [`Session::pending`] is the project's queue, and it is not this question. What a name means, where it is

@@ -1656,3 +1656,71 @@ void f() {
         codes_of(source)
     );
 }
+/// **A member of a class template is checked with `T` substituted, through the class's own alias.**
+///
+/// Reported from an editor: `std::vector<int> anotherVec; anotherVec.push_back("123131");` was not reported, while
+/// the same mistake through a plain function was. The declaration is libstdc++'s
+/// `void push_back(const _Tp& __x);` with `using value_type = _Tp;` in the class — so the parameter is an
+/// alias of an alias of the template parameter, and the check has to follow both before it can say the argument is
+/// a `const char[7]` where a `const int&` is wanted.
+#[test]
+fn a_member_of_a_class_template_is_checked_after_substitution() {
+    let header = "\
+namespace std {
+template <class _Tp>
+class vector {
+public:
+    using value_type = _Tp;
+    void push_back(const _Tp& __x);
+};
+}
+";
+    let source = "\
+#include \"vector.h\"
+int main()
+{
+    std::vector<int> anotherVec;
+    anotherVec.push_back(\"123131\");
+    return 0;
+}
+";
+    let codes = codes_of_files(&[("/p/vector.h", header), ("/p/a.cpp", source)], "/p/a.cpp");
+    assert!(
+        codes.contains(&DiagnosticCode::ParamTypeCheck),
+        "the argument is a string literal and the parameter is `const int&`: {codes:?}"
+    );
+}
+
+/// **The alias step is what libstdc++ actually writes, and it is the half that does not work yet.** Ignored rather
+/// than deleted: it is the shape of the report (`std::vector<int>::push_back("…")`), and it will pass the day
+/// `members_of` substitutes the class's arguments into a member's **parameter list** as well as into its type —
+/// today `value_type` is still a name to `convertible_to`, which answers `Unknown`, and a check that cannot compare
+/// says nothing.
+#[test]
+#[ignore = "the parameter list is not substituted through the class's alias: docs/status.md §十五 ④"]
+fn a_member_parameter_written_with_the_classs_alias_is_checked() {
+    let header = "\
+namespace std {
+template <class _Tp>
+class vector {
+public:
+    using value_type = _Tp;
+    void push_back(const value_type& __x);
+};
+}
+";
+    let source = "\
+#include \"vector.h\"
+int main()
+{
+    std::vector<int> anotherVec;
+    anotherVec.push_back(\"123131\");
+    return 0;
+}
+";
+    let codes = codes_of_files(&[("/p/vector.h", header), ("/p/a.cpp", source)], "/p/a.cpp");
+    assert!(
+        codes.contains(&DiagnosticCode::ParamTypeCheck),
+        "the argument is a string literal and the parameter is `const value_type&` = `const int&`: {codes:?}"
+    );
+}

@@ -96,7 +96,20 @@ where
             continue;
         };
 
-        let Some(names) = parameter_names_for(view, &callee, &mut declaring, &mut view_of) else {
+        let names = parameter_names_for(view, &callee, &mut declaring, &mut view_of)
+            .or_else(|| {
+                // **A declaration whose file has no rendering still has names.** The list is in its *fact*, which
+                // the index keeps as text — so the reading is made from the text instead of from the tree. This is
+                // the difference between `push_back(_Val: …)` and `printf(…)` on the same line of a real file: a
+                // member's names come from `members_of`'s facts and needed no tree, a free function's came from
+                // `parameter_list_of` and did — and a system header nobody has opened has no rendering, so the hint
+                // was silently absent (`docs/status.md` §十五).
+                callee
+                    .parameters
+                    .as_deref()
+                    .and_then(parameter_names_from_text)
+            });
+        let Some(names) = names else {
             continue;
         };
 
@@ -152,6 +165,34 @@ where
     };
 
     let list = parameter_list_of(declared_in, callee.name_offset)?;
+    let names: Vec<Option<String>> = parameters_of(&list)
+        .into_iter()
+        .map(|(_, declared)| declared.map(|(name, _)| name.text()))
+        .collect();
+
+    (!names.is_empty()).then_some(names)
+}
+
+/// **The parameter names of a declaration read from its own text**, for a file with no rendering.
+///
+/// `parameter_list` is what the index stores — `(const char* __format, ...)`, parentheses included — so the names
+/// are read by **parsing one synthetic declaration** around it: `void __hint(const char* __format, ...);`. The
+/// tree then tells a name from a type, which is the one thing splitting on commas gets wrong: `int (*f)(int)`,
+/// `const Widget& w`, a default argument containing a comma (`map<int, string> m = {}`), and `...` all come out
+/// right because they are not text to this function.
+///
+/// `None` for a list with no parameter (a `()`), which is also the answer for a declaration whose fact was written
+/// before the field existed.
+fn parameter_names_from_text(parameter_list: &str) -> Option<Vec<Option<String>>> {
+    let text = format!("void __hint{parameter_list};");
+    let tree = cpp_parser::CppParser::parse(&text, cpp_parser::ParserConfig::default());
+    let root = tree.get_red_root();
+
+    let declarator = root
+        .descendants()
+        .find(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::Declarator)?;
+    let list = cpp_parser::first_child_of_kind(&declarator, &[CppSyntaxKind::ParameterList])?;
+
     let names: Vec<Option<String>> = parameters_of(&list)
         .into_iter()
         .map(|(_, declared)| declared.map(|(name, _)| name.text()))

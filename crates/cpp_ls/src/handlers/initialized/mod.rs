@@ -526,6 +526,16 @@ async fn index_in_background(context: ServerContextSnapshot) {
                 if context.lsp_features().supports_refresh_inlay_hint() {
                     context.client().refresh_inlay_hints();
                 }
+
+                // **…and the tokens, which have the same shape of answer and a longer memory.** A name is coloured
+                // from its declaration, so a request that arrives before the index has read the header that declares
+                // it draws that name with the client's own grammar colour — and a client caches the whole file's
+                // tokens until the next edit, so nothing asks again. Measured from an editor: at startup `std::endl`
+                // was drawn as a variable and became a function after any edit at all, which is that cache and that
+                // silence. Nothing else in this loop notices: the document did not change.
+                if context.lsp_features().supports_refresh_semantic_tokens() {
+                    context.client().refresh_semantic_tokens();
+                }
             }
             was_pending = false;
 

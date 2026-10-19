@@ -208,4 +208,15 @@ impl ClientProxy {
     pub fn refresh_inlay_hints(&self) {
         self.send_request_no_response("workspace/inlayHint/refresh", ());
     }
+
+    /// Ask the client to ask again for the **semantic tokens** it is showing.
+    ///
+    /// The same reason as [`ClientProxy::refresh_inlay_hints`], for the answer a reader looks at constantly: a name
+    /// is coloured from its declaration, a declaration in a file the index has not read yet gives no colour, and a
+    /// client that asked once has no reason to ask again — its document did not change. Measured from an editor:
+    /// `std::endl` was drawn as a variable at startup and as a function after any edit, because the first request
+    /// was answered while the standard library's headers were still being read and nothing ever said "look again".
+    pub fn refresh_semantic_tokens(&self) {
+        self.send_request_no_response("workspace/semanticTokens/refresh", ());
+    }
 }

@@ -76,6 +76,67 @@ double f() { return scale(3, 0.5); }
     );
 }
 
+/// **A call into a header nobody has cooked still gets its hints.**
+///
+/// The names used to come only from the declaring file's **rendering**, and a query does not build one — so a
+/// system header nobody had opened answered nothing, and the hint was silently absent. Measured on a real file:
+/// `anotherVec.push_back(_Val: …)` was hinted (a member's names come from `members_of`'s facts) while
+/// `printf(…)` on the next line was not, because a free function's names came from `parameter_list_of` and that
+/// needs a tree.
+///
+/// The fixture is the same shape: only the caller is cooked, and the assertion says so, or the test could pass
+/// through the tree path and prove nothing.
+#[test]
+fn a_call_into_an_uncooked_header_is_still_hinted() {
+    let declaration = "/p/stdio.h";
+    let source = "int printf(const char* __format, ...);\n";
+    let caller = "#include \"stdio.h\"\nint main() { printf(\"x = %d\\n\", 123); }\n";
+
+    let mut memory = MemoryFiles::new();
+    memory = memory.with_file(declaration, source);
+    memory = memory.with_file("/p/a.cpp", caller);
+    let providers = SessionFiles::new(OpenDocuments::new(), memory);
+    let mut session = Session::with_config(
+        "/p",
+        providers,
+        WatchFilter::new("/p"),
+        CompilerConfig::default(),
+    );
+    session.add_project_files([
+        std::path::PathBuf::from(declaration),
+        std::path::PathBuf::from("/p/a.cpp"),
+    ]);
+    session.want_cooked_reading(std::path::Path::new("/p/a.cpp"));
+    session.index_everything();
+
+    let view = session.view("/p/a.cpp").expect("the caller is held");
+    assert!(
+        session.view(declaration).is_none(),
+        "the fixture is only meaningful while the declaration's file has no rendering"
+    );
+
+    // **The argument's offset in the *file***, which is what `inlay_hints` answers in: the handler places the hint
+    // in the buffer the client is showing, so the query maps back across the seam.
+    let argument = caller
+        .find("\"x = %d")
+        .expect("the argument is in the file");
+    let whole_file = cpp_parser::SourceRange::new(0, view.source.len());
+    let hints: Vec<(usize, String)> = session
+        .inlay_hints(&view, whole_file)
+        .into_iter()
+        .map(|hint| (hint.offset, hint.name))
+        .collect();
+
+    assert_eq!(
+        hints,
+        vec![(argument, "__format".to_string())],
+        "one hint, for the named parameter; `...` has no name to show.\n\
+         rendering: {:?}",
+        view.source
+    );
+}
+
+
 /// A parameter list is not a call, and a hint goes at the **argument**: the declaration above writes
 /// `int value`, and the one hint is the one at `other`, named after the parameter it lands in.
 #[test]
