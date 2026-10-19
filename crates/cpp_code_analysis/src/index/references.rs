@@ -34,7 +34,7 @@
 //! * **不猜**。命中只有三种归宿：确定是它（`Use`）、确定不是（计数进 `rejected`）、可能但说不准
 //!   （`Uncertain` 带 `UnknownReason`）。
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 
 use cpp_parser::{CppLexer, CppTokenKind, LexerConfig, SourceRange};
@@ -452,6 +452,11 @@ pub fn symbol_references<F: FileProvider>(
         unreadable: Vec::new(),
     };
 
+    // **Every place the spelling itself is declared**, and by which qualified name — one posting-list read for the
+    // whole query, so that the per-file filter below is a lookup rather than a second query. See the use site for
+    // what it decides and why it is the only semantic call this layer can make without a parse.
+    let declared_at = declarations_of_the_spelling(index, symbol);
+
     for path in symbol_candidates(index, symbol, budget, &mut answer) {
         // **The filter first, and it is what the read was for.** A candidate is every file that can *see* the
         // declaration — the declaring file and everything that transitively includes it — and the loop below reads
@@ -491,8 +496,26 @@ pub fn symbol_references<F: FileProvider>(
             continue;
         }
 
+        // **An occurrence that is another entity's declaration is not a reference to this one.** The lexer finds
+        // every spelling; the index knows which offsets are *declarations*, and of what — so the one thing this
+        // layer can decide without a parse is whether a hit is somebody else's name. Measured on a real two-file
+        // project, `printf`'s reference list held `Name::printf`'s declaration **and** its out-of-class definition:
+        // two places a rename would have edited, and neither of them the symbol the cursor was on.
+        //
+        // A declaration of the **same qualified name** is kept, which is what a redeclaration is (`extern int n;`
+        // written in two headers), and so is every occurrence that is not a declaration name at all — that is a use,
+        // and deciding *which* entity a use belongs to needs its file's scopes, which is the parse this layer does
+        // not do (see the module documentation).
+        let names_declared_here = declared_at.get(&normalize_path(&path, cfg!(windows)));
+
         let references: Vec<Reference> = here
             .into_iter()
+            .filter(|range| {
+                match names_declared_here.and_then(|declared| declared.get(&range.start_offset)) {
+                    Some(qualified) => *qualified == symbol.qualified,
+                    None => true,
+                }
+            })
             .map(|range| Reference {
                 kind: if normalize_path(&path, cfg!(windows))
                     == normalize_path(&symbol.declared_in, cfg!(windows))
@@ -518,6 +541,30 @@ pub fn symbol_references<F: FileProvider>(
         .files
         .sort_by(|left, right| left.file.cmp(&right.file));
     Known::Yes(answer)
+}
+
+/// **Where each declaration of a spelling starts, and what it is called** — by normalized file, then by offset.
+///
+/// The answer to the one question a lexer cannot ask: of the occurrences of `printf` in a file, which are
+/// *declarations*, and of what? The index keeps a fact per declaration, so this is a posting-list read
+/// ([`ProjectIndex::every_fact_named`]) and no parse.
+///
+/// The value is the declaration's **qualified** name, which is the identity two same-spelled declarations do not
+/// share: `printf` at file scope and `Name::printf` inside a class are two entities that a rename must keep apart.
+fn declarations_of_the_spelling(
+    index: &ProjectIndex,
+    symbol: &SymbolToFind,
+) -> HashMap<String, HashMap<usize, String>> {
+    let mut declared: HashMap<String, HashMap<usize, String>> = HashMap::new();
+
+    for (path, fact) in index.every_fact_named(&symbol.last_segment) {
+        declared
+            .entry(normalize_path(&path, cfg!(windows)))
+            .or_default()
+            .insert(fact.name_range.start_offset, fact.qualified_name());
+    }
+
+    declared
 }
 
 /// **Which symbol a cursor is on** — the answer a caller has to have before it can ask for the references.
@@ -817,6 +864,50 @@ mod tests {
             symbol_shown(&files, &index, &object),
             vec!["main.cpp:1:sux".to_string(), "main.cpp:4:sux".to_string(),],
             "an object declared at file scope is used in the function below it"
+        );
+    }
+
+    /// **A same-spelled declaration of another entity is not a reference** — the one semantic call this layer makes.
+    ///
+    /// Reported from an editor as "references are lexical": a `.cpp` that includes a header declaring
+    /// `struct Name { void printf(int); };` — twice over, in the class and again `void Name::printf(int i)` — and
+    /// the C library's `printf`, then asks for the references of the global `printf`. Every occurrence of the
+    /// spelling came back, the class's two declarations among them, and a rename would have edited all of them.
+    ///
+    /// The index knows which offsets are declarations and by what qualified name, so those two are dropped while
+    /// every **use** stays — deciding which entity a use belongs to needs that file's scopes, which is a parse this
+    /// layer does not do (module documentation).
+    #[test]
+    fn another_entitys_declaration_of_the_same_spelling_is_not_a_reference() {
+        let files = MemoryFiles::new()
+            .with_file(
+                "/p/name.h",
+                "struct Name {\n    void printf(int i);\n};\nvoid Name::printf(int i) { }\n",
+            )
+            .with_file("/p/stdio.h", "void printf(const char* format, ...);\n")
+            .with_file(
+                "/p/main.cpp",
+                "#include \"name.h\"\n#include \"stdio.h\"\nvoid f() { printf(\"x\"); }\n",
+            );
+
+        let index = index_of(&files, &["/p/name.h", "/p/stdio.h", "/p/main.cpp"]);
+        let global = SymbolToFind {
+            name: "printf".to_string(),
+            last_segment: "printf".to_string(),
+            qualified: "printf".to_string(),
+            declared_in: std::path::PathBuf::from("/p/stdio.h"),
+            name_at: 5,
+        };
+
+        assert_eq!(
+            symbol_shown(&files, &index, &global),
+            vec![
+                // The use in the file that includes both headers.
+                "main.cpp:2:printf".to_string(),
+                // The declaration the symbol is: `void printf(const char* format, ...);`
+                "stdio.h:0:printf".to_string(),
+            ],
+            "`Name::printf`'s declaration and its definition are a different entity"
         );
     }
 

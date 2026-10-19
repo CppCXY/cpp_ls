@@ -392,8 +392,9 @@ crates/cpp_ls/tests/latency.rs      1 条失败：稳态补全偶发 1.4 s（预
        N > 一条普通 include 链；这是「补全很慢」的真正原因
        ⑫ `this->` 的成员查询经索引解析外层类（复现已在 tests/completion.rs 里）
        ① argument-count 的跨文件查找 ② param-type-check 的**跨文件自由函数**与**具名形参**
-       ② 的兄弟：`symbol_references` 收引用仍是纯词法（§十二 ⑰ 末尾）—— 要判得对需要每个候选
-       文件的作用域，也就是每文件一次解析；改动前先按 index/references.rs 的方法量
+       ② 的兄弟：`symbol_references` 里"某条**使用**属于哪个实体"仍是词法的（§十二 ⑰）——
+       声明的归属已经修了，使用还没有；判它需要每个候选文件的作用域，改动前先按
+       examples/symbol_references_cost.rs 的方法量
        ③ 给现有 13 项检查逐条补"真实语料上的正例"验证
        既有：handshake 的 5 条 `#[ignore]`（4 条是手工探针，1 条要真实标准库闭包）
        与 latency 的 1 条 —— `a_completion_asked_while_the_index_fills…` 的 50 ms 稳态预算：
@@ -432,7 +433,8 @@ cargo run --release -p cpp_parser --example token_kinds
 
 # 三条定向回归（§十二）：documentLink 的区间、裸名字不进类、泛型成员调用的参数检查
 cargo test --release -p cpp_ls --lib -- document_link
-cargo test --release -p cpp_code_analysis --lib -- a_bare_name_does_not_reach a_reference_target
+cargo test --release -p cpp_code_analysis --lib -- a_bare_name_does_not_reach a_reference_target \
+    another_entitys_declaration
 cargo test --release -p cpp_code_analysis --test checks -- member_argument overload_that
 
 # 诊断 pull 的 write hold 与索引进度（§四 ⑮）—— 现在 `index slice` 是 info 级，
@@ -706,11 +708,20 @@ stdio.h     __CRTDECL printf(...)            ← 唯一一条 main.cpp 真能写
 验收  a_bare_name_does_not_reach_a_class_member（三条断言：1 条 / 不过滤时 3 条 / 限定名 2 条）
 ```
 
-**同一把键的第二个后果（未修，记在这里）**：`symbol_references` 收引用时只做词法 ——
-"每个等于末段拼写的 identifier"。所以对 `Name::printf` 求引用仍会列出 `stdio.h` 里的 `printf`，
-反之亦然。要判"这个偏移处的 printf 是不是那个成员"需要**候选文件各自的作用域**（也就是每文件一次解析），
-而候选集是"所有能看见该声明的文件"（标准库规模下是几百个头文件）。这一层现在的取舍写在
-`index/references.rs` 的模块文档里，改动前先量。
+**同一把键的第二个后果，两半里修了一半**：`symbol_references` 收引用时是词法的 —— "每个等于末段拼写的
+identifier"，几十万 token 里当然会把同名不同物的东西收进来。
+
+```text
+已修  某条**声明**若属于另一个实体，就不是这条符号的引用
+      index 知道每个声明名字的偏移和它的 qualified name，于是 Name::printf 的声明与类外定义
+      从 printf 的引用列表里消失（此前重命名会把它们一起改掉 —— 这是会改坏代码的那种错）
+      同一 qualified name 的重复声明仍然保留（extern int n; 写在两个头文件里）
+未修  一条**使用**属于哪个实体：printf("x") 在 Name 的成员函数体里指的是 Name::printf，
+      在全局函数里指的是 ::printf。判这个需要**候选文件各自的作用域**（每文件一次解析），
+      而候选集是"所有能看见该声明的文件"（标准库规模下几百个头文件）
+      取舍写在 index/references.rs 的模块文档里，改动前先按 examples/symbol_references_cost.rs 量
+验收  another_entitys_declaration_of_the_same_spelling_is_not_a_reference
+```
 
 ### ⑱ 泛型成员调用的参数检查不生效 —— **已修（三处叠加）**
 
