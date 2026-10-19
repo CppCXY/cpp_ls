@@ -1535,8 +1535,8 @@ fn a_missing_semicolon_is_reported() {
 #[test]
 fn a_macro_is_not_shown_with_a_signature() {
     let source = "#define FULL_NAME_FORMAT \"Full name: {}\"\nint main() { FULL_NAME_FORMAT }\n";
-    let mut memory = MemoryFiles::new().with_file("/p/a.cpp", source);
-    let providers = SessionFiles::new(OpenDocuments::new(), memory.clone());
+    let memory = MemoryFiles::new().with_file("/p/a.cpp", source);
+    let providers = SessionFiles::new(OpenDocuments::new(), memory);
     let mut session = Session::with_config(
         "/p",
         providers,
@@ -1545,7 +1545,6 @@ fn a_macro_is_not_shown_with_a_signature() {
     );
     session.add_project_files([std::path::PathBuf::from("/p/a.cpp")]);
     let view = cooked_view(&mut session, "/p/a.cpp");
-    let _ = &mut memory;
 
     let cursor = source.rfind("FULL_NAME_FORMAT").expect("the fixture") + "FULL_NAME_FORMAT".len();
     let offered = session.completions(
