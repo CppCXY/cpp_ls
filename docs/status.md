@@ -85,8 +85,12 @@ cargo test --release --workspace                    全绿
    但 v.reserve(1, 2)（reserve 声明在 <vector> 里）在真实语料上仍是 0 条。
    下一步：查 ProjectIndex::definitions(name, path) 在那里到底答了什么。
 
-② param-type-check 还未接上同一套索引事实
-   它目前只看本文件内声明的函数，跨文件实参一律不判——与 ① 同构，修法相同。
+② param-type-check 的**成员调用**已接上索引事实（含模板实例化，见 §十二 ⑱），**自由函数**还没有
+   成员路径：`members_of` 给出实例化后的形参，重载集按"全部候选都不同意才报"判。
+   仍缺的两半：跨文件的自由函数（与 ① 同构）；具名形参 `void f(int width)` ——
+   `parameter_spellings_of` 交回的是 `int width`，`parse_type_spelling` 读不了，
+   `tests/checks.rs::a_named_parameter_is_checked_too` 仍 `#[ignore]`，改之前要先做一次普查
+   （参数名剥掉会让这条检查开始判它从没判过的代码；`sema::overload::parameters_in` 已经会剥）。
 
 ③ missing-return / unnecessary-branch 等检查在真实语料上尚无**正例**验证
    负例（不该报的）全过，正例（该报的）还没有在标准库规模上验证过。
@@ -387,9 +391,14 @@ crates/cpp_ls/tests/latency.rs      1 条失败：稳态补全偶发 1.4 s（预
        ⑮ **pull 的 drain 要有上界**（§四）—— `advance(N)` 取代 `index_everything`，
        N > 一条普通 include 链；这是「补全很慢」的真正原因
        ⑫ `this->` 的成员查询经索引解析外层类（复现已在 tests/completion.rs 里）
-       ① argument-count 的跨文件查找 ② param-type-check 接上索引事实
+       ① argument-count 的跨文件查找 ② param-type-check 的**跨文件自由函数**与**具名形参**
+       ② 的兄弟：`symbol_references` 收引用仍是纯词法（§十二 ⑰ 末尾）—— 要判得对需要每个候选
+       文件的作用域，也就是每文件一次解析；改动前先按 index/references.rs 的方法量
        ③ 给现有 13 项检查逐条补"真实语料上的正例"验证
-       既有：handshake 的 3 条与 latency 的 1 条
+       既有：handshake 的 5 条 `#[ignore]`（4 条是手工探针，1 条要真实标准库闭包）
+       与 latency 的 1 条 —— `a_completion_asked_while_the_index_fills…` 的 50 ms 稳态预算：
+       同一份代码连跑三次是 通过/失败/通过（#10 分别 36 / 52 / 36 ms，单次 #0 就要 450-530 ms），
+       是机器噪声而不是回归，但它确实会红，别把它当成"这次改坏了"
 
 中期   ⑬ 按 tree-shape.md 的步骤把类定义移出 decl-specifier-seq（先跑 ctor_probe 那三十二种拼写）
        补更多 C++ 应有的诊断（重复 case 标签、const 重赋值、自赋值等）
@@ -420,6 +429,11 @@ cargo run --release -p cpp_code_analysis --example one_check -- target/std-cook 
 
 # 一个 token 的真实 kind（这一层的 API 之一，曾被误判两次）
 cargo run --release -p cpp_parser --example token_kinds
+
+# 三条定向回归（§十二）：documentLink 的区间、裸名字不进类、泛型成员调用的参数检查
+cargo test --release -p cpp_ls --lib -- document_link
+cargo test --release -p cpp_code_analysis --lib -- a_bare_name_does_not_reach a_reference_target
+cargo test --release -p cpp_code_analysis --test checks -- member_argument overload_that
 
 # 诊断 pull 的 write hold 与索引进度（§四 ⑮）—— 现在 `index slice` 是 info 级，
 # 日志里能看到「prepared / committed / write lock held / 还剩多少」
@@ -636,3 +650,110 @@ cargo test --release -p cpp_code_analysis --test completion -- --ignored
 # 渲染与文件的第一处差异、渲染的顶层节点、作用域数量
 cargo run --release -p cpp_parser --bin cpp_dump -- <file> --tree
 ```
+
+## 十二、三个"看起来是设计问题、其实是同一把键用错了"的缺陷（2026，`test_cpp`）
+
+三条都是用户在一次会话里报出来的，三条都**已修**，而且三条的根因互不相同 —— 放在同一节是因为它们
+有一个共同形状：**某个查询用"字符串拼写"当键，而语言用的是别的东西。**
+
+```text
+documentLink     键 = 整条指令        语言要的是"路径"那一段
+跳转/引用        键 = 名字拼写        语言要的是"名字 + 所在作用域"
+param-type-check 键 = 类里写的形参    语言要的是"实例化之后的形参"
+```
+
+三条都不是猜出来的：每一条都先用真实文件（或按真实文件形状搭的多文件夹具）量出"它现在答什么"，
+再改那一处。
+
+### ⑯ documentLink 覆盖整行，而不是路径 —— **已修**
+
+实测（真实 `main.cpp`）：每一行 `#include` 的下划线都从 `#` 一直画到行尾注释之后。
+
+```text
+根因  IncludeFact::range 是**整条指令**的 range（含行尾 trivia）
+      这不是 bug —— 它是"跳到某个头文件时该高亮什么"的答案（跳转连注释一起选中是合理的）
+      但 link 是另一种形状：可点击区间。两者共用一个字段，于是 link 用了跳转的答案
+修法  sema::resolve::header_name_in(root, directive) —— 从**文件自己的**语法树里读出 HeaderName
+      token，再剥掉 <> 或 ""；document_link 改用 view_of_the_file（渲染里没有指令）
+     None 时回退到整条指令（#include HEADER 这种宏包含没有 HeaderName token）
+验收  a_resolved_include_becomes_a_link_that_covers_the_path（列 10..18，注释在 20）
+      a_directive_with_no_name_in_it_falls_back_to_its_own_range
+```
+
+### ⑰ 裸名字被解析到了类成员 —— **已修**
+
+实测（`test.h` + `main.cpp`，真实文件）：在 `main.cpp` 里对 `printf` 求定义，peek 列表给出**三条**：
+
+```text
+test.h:21   void printf(int i);              ← Name 的成员
+test.h:26   void Name::printf(int i) { }     ← 同上，类外定义
+stdio.h     __CRTDECL printf(...)            ← 唯一一条 main.cpp 真能写的
+```
+
+```text
+根因  ProjectIndex 把事实按 **DeclFact::name** 建索引，于是"所有头文件里叫 printf 的东西"全是候选
+      而 C++ 按 **名字 + 所在作用域** 解析：文件作用域里的裸 printf 只能指文件作用域的 printf
+修法  ProjectIndex::definitions_in_scope(name, visible_from)
+      · 裸拼写：scope 是**类**的事实一律丢掉（scope 的判定问 index 里那条声明本身是不是 Type，
+        且比的是 qualified_name == scope，避免把 Outermost 里的同名嵌套类当成 Outermost 是类）
+      · 限定拼写（Name::printf）：不动，那本来就是"从外面点名一个成员"的写法
+      · 索引里查不到这个 scope 是不是类 → 保留（"我看不出来"不能变成"没有"）
+      调用点在 definitions_across_files 的 NotDeclaredHere 分支，且**两种情况例外**：
+      (a) 光标在成员访问上（x.eof() 的对象类型未知时仍要按名字找）
+      (b) 光标在 void C::g() { … } 的函数体里 —— 这里裸名字**可以**是 C 的成员，
+          而 C 的定义在别的文件里。判据是 inside_a_definition_written_with_a_qualifier
+          （形参表 ( 之前那个标识符带 ::）。这条是**保守**的：漏判只是回到旧行为，不会造出新答案
+验收  a_bare_name_does_not_reach_a_class_member（三条断言：1 条 / 不过滤时 3 条 / 限定名 2 条）
+```
+
+**同一把键的第二个后果（未修，记在这里）**：`symbol_references` 收引用时只做词法 ——
+"每个等于末段拼写的 identifier"。所以对 `Name::printf` 求引用仍会列出 `stdio.h` 里的 `printf`，
+反之亦然。要判"这个偏移处的 printf 是不是那个成员"需要**候选文件各自的作用域**（也就是每文件一次解析），
+而候选集是"所有能看见该声明的文件"（标准库规模下是几百个头文件）。这一层现在的取舍写在
+`index/references.rs` 的模块文档里，改动前先量。
+
+### ⑱ 泛型成员调用的参数检查不生效 —— **已修（三处叠加）**
+
+实测（`main.cpp` 第 20 行，用户报的那一行）：
+
+```cpp
+std::vector<int> anotherVec;
+anotherVec.push_back("123131");     // 期望 param-type-check，实际 0 条
+```
+
+沿路量出来的是**三个**独立的缺口，每一个单独存在都足以让这一条静默：
+
+```text
+① 替换读的是渲染，偏移是文件的
+   substituted_members 用 view.source（渲染）配 fact.range（文件坐标）去读 template<...>
+   头文件里 class 之上任何一个 #include 都会让偏移错位 → 找不到模板头 → T 还是 T
+   实测：夹具里 class 上方加一行 #include，Box<int>::push_back 就答 (const T& value)
+   修法：view.written_text().unwrap_or(&view.source)
+
+② 两个候选 = "什么也不说"
+   MSVC 的 vector 写两遍 push_back(const _Ty&) / push_back(_Ty&&)，于是 member_parameters 返回 None
+   修法：member_parameter_lists 返回**全部**候选，判据改成检查层一直文档化的那条 ——
+        **每一个**候选都不同意才报；有一个 Yes 或 Unknown 就沉默
+
+③ 引用类型的目标在转换关系里没有分支
+   const int& 既不是 int 也不是指针，convertible_to 落到 _ => Unknown，而检查只报确定的 No
+   修法：Type::convertible_to 先看穿目标顶层的 Reference（绑定就是"能不能转成 referent"）
+        并给了一条单测：const char[7] → const int& 是 No，int → const int& 是 Yes，
+        const char[7] → const std::string& 仍是 Unknown（类可能有转换构造函数）
+验收  a_member_argument_is_checked_through_a_header_and_against_every_overload
+      an_overload_that_takes_the_argument_keeps_the_check_silent
+      a_reference_target_is_judged_by_its_referent
+```
+
+### 方法上的教训（第四次同类）
+
+> **单文件夹具测不到"头文件里的类"这条真实条件。**
+
+⑱① 是这一节最有价值的一条：`tests/checks.rs` 里那条 `a_member_parameter_is_checked_after_instantiation`
+**一直是绿的**，因为它的夹具把 `namespace std { class vector … }` 和调用写在同一个文件里 ——
+渲染与文件坐标相同，于是①那条缺陷不存在。一旦 class 在头文件里（`#include` 之上还有别的指令），
+坐标错位，替换静默失效，而测试没有任何一条变红。
+
+修法的验收因此改成**多文件夹具**（`codes_of_files`）：类在 `box.h`，且 `box.h` 里 class 之上有一行
+`#include`，调用在 `a.cpp`。这三件事同时在场，才复现用户那一行。
+
