@@ -983,6 +983,13 @@ impl<F: FileProvider> SummaryStore<F> {
         units: &[std::sync::Arc<crate::TranslationUnit>],
         truncated: bool,
     ) -> ReRead {
+        // **The shape of this call, on `CPPLS_TRACE_COOKING=1`.** The pass has two forms — one rooted at a slice
+        // with a timeline in hand, and an "eager" one for a caller with no timeline at all that copies every indexed
+        // file's text and asks a question about every `#define` in the project — and from outside they are the same
+        // call. Measured on a real project: four files took 315 ms with a timeline and 18 000 ms without, so the
+        // first question about a slow start-up here is *which form ran*, and these counts answer it.
+        let tracing = crate::probes::cooking();
+        let started = std::time::Instant::now();
         // Every indexed file's text, read once: the walk slices each macro's body out of it, and a candidate is
         // re-parsed from it. One read per file per pass, rather than one per candidate include.
         //
@@ -1071,34 +1078,49 @@ impl<F: FileProvider> SummaryStore<F> {
 
         // **The files the scan below can be about at all**: those that define a word the re-read files mention. With
         // an index of names that is a lookup per word; without timelines it is every file, as it always was.
-        let candidates: Vec<&FileSummary> = if eager {
+        let mut candidates: Vec<&FileSummary> = if eager {
             self.index.summaries().collect()
         } else {
             self.index
                 .files_defining_any_macro(mentioned.iter().map(String::as_str))
         };
+        let uncovered_candidates = candidates
+            .iter()
+            .filter(|summary| bodies_of(&environments, &seed, &summary.path).is_none())
+            .count();
 
+        let uncovered = uncovered_candidates > 0;
         if !eager {
-            // A file no unit covers has no timeline to be read through, so its reading falls back to walking its own
-            // closure — and that walk asks for the text of every file in it. Rare (a project file outside every
-            // unit), and the answer is the old one: read everything, once.
-            let uncovered = candidates
-                .iter()
-                .any(|summary| bodies_of(&environments, &seed, &summary.path).is_none())
-                || indexed
-                    .iter()
-                    .any(|path| !units.iter().any(|unit| unit.environment_of(path).is_some()));
+            // **A file the timelines do not cover cannot be about the reading being repaired.** The units are the
+            // re-read files' own closures, so a name whose only definers are outside them is not a macro the re-read
+            // files can expand — its body cannot change their reading. Dropping those candidates therefore decides
+            // nothing; what it removes is the fallback they used to trigger: a closure walk per candidate, in the
+            // environment that has no timeline, measured at **17 747 ms for one drain of four files**.
+            //
+            // The candidates come from the *whole index* (`files_defining_any_macro`), which is why an ordinary
+            // project has them: `EmmyLuaCodeStyle` mentions `MAX` and `MIN`, which a dozen unrelated headers define.
+            // Measured there: five to forty-one candidates per drain, of which **none** was in the closure.
+            candidates.retain(|summary| bodies_of(&environments, &seed, &summary.path).is_some());
 
-            if uncovered {
-                for summary in self.index.summaries() {
-                    self.read_into(&mut sources, &summary.path);
+            // Then their text, which is what the scan slices bodies out of — and, for a file being re-read that no
+            // timeline covers, its own closure's text (the re-read falls back to walking it). This used to read
+            // **every indexed file** the moment one candidate was uncovered: 1761 texts per drain, 40 MB of copying,
+            // twelve times in one start-up. `read_into` skips what is already there, so a closure is paid once.
+            for summary in &candidates {
+                self.read_into(&mut sources, &summary.path);
+            }
+            for path in indexed {
+                if units.iter().any(|unit| unit.environment_of(path).is_some()) {
+                    continue;
                 }
-            } else {
-                for summary in &candidates {
-                    self.read_into(&mut sources, &summary.path);
+                self.read_into(&mut sources, path);
+                for reached in self.includes_reached_from(path) {
+                    self.read_into(&mut sources, &reached);
                 }
             }
         }
+
+        let uncovered = uncovered || uncovered_candidates > 0;
 
         // The names whose body a **reading** uses, from the **macro facts** of the indexed closure — not from its
         // text, and not from the environment: this is the question "could any file's reading have changed", and
@@ -1220,6 +1242,16 @@ impl<F: FileProvider> SummaryStore<F> {
         }
 
         if bodied.is_empty() {
+            if tracing {
+                eprintln!(
+                    "re-read: eager {eager}, {} source(s), {} word(s) mentioned, {} candidate file(s), \
+                     uncovered {uncovered}, nothing bodied — {} ms",
+                    sources.len(),
+                    mentioned.len(),
+                    candidates.len(),
+                    started.elapsed().as_millis()
+                );
+            }
             return ReRead {
                 rebuilt: Vec::new(),
             };
@@ -1328,6 +1360,18 @@ impl<F: FileProvider> SummaryStore<F> {
 
         rebuilt.extend(rebuilt_through_a_timeline.into_iter().flatten());
 
+        if tracing {
+            eprintln!(
+                "re-read: eager {eager}, {} source(s), {} word(s) mentioned, {} candidate file(s), \
+                 uncovered {uncovered}, {} bodied name(s) — {} ms",
+                sources.len(),
+                mentioned.len(),
+                candidates.len(),
+                bodied.len(),
+                started.elapsed().as_millis()
+            );
+        }
+
         ReRead { rebuilt }
     }
 
@@ -1366,6 +1410,36 @@ impl<F: FileProvider> SummaryStore<F> {
         if let Some(text) = self.files.read(path) {
             sources.insert(key, text);
         }
+    }
+
+    /// **Every file `root` includes, transitively** — the set whose text a closure walk from `root` can slice a body
+    /// out of, and no more.
+    ///
+    /// The bounded form of "read the whole index", which is what this pass used to do the moment one candidate was
+    /// not covered by a timeline: on a 1761-file project that is every source text copied **per drain** to answer a
+    /// question about four files. A file outside the closure cannot be reached by the walk, so reading it was never
+    /// an answer.
+    fn includes_reached_from(&self, root: &Path) -> Vec<PathBuf> {
+        let mut reached: Vec<PathBuf> = Vec::new();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut pending: Vec<PathBuf> = vec![root.to_path_buf()];
+
+        while let Some(path) = pending.pop() {
+            if !seen.insert(normalize_path(&path, cfg!(windows))) {
+                continue;
+            }
+            let Some(summary) = self.index.summary(&path) else {
+                continue;
+            };
+            for include in &summary.includes {
+                if let Some(resolved) = &include.resolved {
+                    reached.push(resolved.clone());
+                    pending.push(resolved.clone());
+                }
+            }
+        }
+
+        reached
     }
 
     /// **One file's own closure, as an environment** — the reading this pass had before a session could hand it a

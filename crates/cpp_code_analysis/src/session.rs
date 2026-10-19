@@ -1755,19 +1755,15 @@ impl<F: FileProvider + Clone> Session<F> {
             self.prefetched.clear();
         }
 
-        // **The units, built by the caller even on this path.** `advance` is the non-pump entry point — a test, or
-        // `catch_up` — and it used to let `finish_a_slice` do the walk itself. Now that the walk belongs to the
-        // preparing half, this path has to do it here; passing nothing would make the second pass skip every file
-        // *silently*, which reads as "the re-read found nothing to change" rather than as a missing argument.
-        //
-        // It is `&self` work, so it is allowed here — what it is not allowed to be is *inside the writer* on the
-        // pump's path, which is what [`Session::prepare_a_wave`] exists for.
-        let units = self.units_for_the_pass(
-            &done
-                .iter()
-                .map(|step| step.path.clone())
-                .collect::<Vec<_>>(),
-        );
+        // **The units are the drain's, and `finish_a_slice` builds them for exactly the slice it takes.** This used
+        // to root them at `done` — the files this call just read — and the two are different sets: the drain takes
+        // its files from `parsed_since_the_last_pass`, a backlog that outlives one call. Rooted at `done`, a slice
+        // whose files the units do not cover is re-read in the pass's fallback form (a closure walk per file), and
+        // with `advance(64)` that is up to **sixty-four timeline walks per call**: measured through
+        // `examples/checks_probe --index-only` on `EmmyLuaCodeStyle`, **224 s** against **20 s** for the same index
+        // through the pump, which had already been given the right slice. Passing nothing is not "passing no
+        // environment" — `finish_a_slice` builds the four the pass needs, outside a writer this path never holds.
+        let units = Vec::new();
         if crate::probes::units() {
             eprintln!(
                 "ADVANCE steps={} done={:?} closure(api.h)={:?}",
@@ -1835,13 +1831,6 @@ impl<F: FileProvider + Clone> Session<F> {
             })
             .collect();
 
-        if wave.is_empty() {
-            return PreparedWave {
-                prepared: Vec::new(),
-                units: Vec::new(),
-            };
-        }
-
         // **The units, rooted at the files the pass after this one will actually re-read** — which is the slice
         // [`Session::finish_a_slice`] is about to drain, **not** the wave about to be parsed.
         //
@@ -1858,6 +1847,16 @@ impl<F: FileProvider + Clone> Session<F> {
         //
         // `parsed_since_the_last_pass` is a field, so the slice the commit will drain is known *here*: take the same
         // prefix it will take, and the units cover precisely the files they are used for.
+        //
+        // **Computed before the empty-wave return below, and that is a measured defect rather than tidiness.** The
+        // last stretch of every start-up is the drain phase: the index queue empties, and the pump then commits
+        // slice after slice of re-reads, each wave having **nothing to prepare** — so this function returned early
+        // and handed the drain `units: []`. `prepare_the_re_read` reads that as "a caller with no timelines" and
+        // changes shape: it copies **every indexed file's text** into a map and asks a question about **every
+        // `#define` in the project** (see the `eager` arm there). Measured on `EmmyLuaCodeStyle` (1761 files): a
+        // warm start was **66 s**, of which 60 s was twelve such calls — 5 s each for four files — while the index
+        // itself took 4 s. One unit per drained slice is what the pass was designed around, and the early return was
+        // silently withholding it.
         let slice: Vec<PathBuf> = self
             .parsed_since_the_last_pass
             .iter()
@@ -1865,6 +1864,13 @@ impl<F: FileProvider + Clone> Session<F> {
             .cloned()
             .collect();
         let units = self.units_for_the_pass(&slice);
+
+        if wave.is_empty() {
+            return PreparedWave {
+                prepared: Vec::new(),
+                units,
+            };
+        }
 
         let room = (steps * 4)
             .saturating_sub(self.prefetched.len())
@@ -1930,7 +1936,7 @@ impl<F: FileProvider + Clone> Session<F> {
     fn finish_a_slice(
         &mut self,
         done: &[Step],
-        units: Vec<std::sync::Arc<crate::TranslationUnit>>,
+        mut units: Vec<std::sync::Arc<crate::TranslationUnit>>,
     ) -> Drain {
         // **The second pass, at the moment the closure is in hand**. `SummaryStore::get` reads one file with
         // the evidence the index has at that moment, and for MSVC's STL that is no evidence at all: `<vector>`'s
@@ -1983,6 +1989,18 @@ impl<F: FileProvider + Clone> Session<F> {
         } else {
             Vec::new()
         };
+
+        // **A caller that passed no timelines for a slice it is about to drain.** `advance` roots its units at the
+        // files it just read, which is not the slice this pass takes — so on the drain phase (nothing left to read,
+        // a backlog in hand) it passed an empty list, and `prepare_the_re_read` changed shape because of it: every
+        // indexed file's text copied, every `#define` in the project asked about. See
+        // [`Session::prepare_a_wave`] for the same defect on the pump's path, where it was 28 s of a 48 s start-up.
+        //
+        // Building them here is inside the writer on the pump's path and free of it on `advance`'s — and the pump
+        // never reaches this line, because `prepare_a_wave` now always hands it the slice's timelines.
+        if units.is_empty() && !files.is_empty() {
+            units = self.units_for_the_pass(&files);
+        }
 
         // **And the files whose cooked reading is out of date**, now that their environments are complete: a file's
         // macros are the ones its includes brought in, and the index queue emptying is the first moment that is
@@ -2144,9 +2162,23 @@ impl<F: FileProvider + Clone> Session<F> {
             units,
             environments,
         } = drain;
+        let tracing = crate::probes::cooking();
 
+        // **The two halves are timed apart**, because a start-up regression of **90 %** was found inside this
+        // function on a warm cache: 1761 summaries reused from disk in 4 s of real work, and 60 s in twelve calls of
+        // this. `prepare_the_re_read` and one environment look the same from outside and have nothing to do with each
+        // other — one re-parses four files with their closure's macros in hand, the other renders a file's whole
+        // closure — so a single number for the drain names neither.
+        let started = std::time::Instant::now();
         let re_read =
             (!files.is_empty()).then(|| self.store.prepare_the_re_read(&files, &units, false));
+        if tracing && !files.is_empty() {
+            eprintln!(
+                "drain: re-read {} file(s) in {} ms",
+                files.len(),
+                started.elapsed().as_millis()
+            );
+        }
 
         // **Remembered under the text it was read from**, which is what the next `view` looks up. The text is taken
         // from the VFS rather than from the rendering: the key is the *file's* content, because that is what a
@@ -2154,6 +2186,7 @@ impl<F: FileProvider + Clone> Session<F> {
         // lock and neither changes the session.
         let mut rendered = Vec::new();
         for path in environments {
+            let step = std::time::Instant::now();
             let Some(reading) = self.rendering_of(&path) else {
                 continue;
             };
@@ -2167,6 +2200,13 @@ impl<F: FileProvider + Clone> Session<F> {
             // not expand. Outside the writer, like the rendering below, and for the same measured reason: building an
             // environment walks the file's whole closure and copies every file's text (103.7 ms on MSVC's headers).
             let _ = self.the_macros_of(&path, &text);
+            if tracing {
+                eprintln!(
+                    "drain: environment for {} in {} ms",
+                    path.display(),
+                    step.elapsed().as_millis()
+                );
+            }
             rendered.push((
                 (path, crate::cache::content_hash(&text)),
                 std::sync::Arc::new(reading),

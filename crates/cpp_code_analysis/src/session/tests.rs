@@ -1133,6 +1133,56 @@
         );
     }
 
+    /// **A wave with nothing left to parse still carries the timelines the drain will need.**
+    ///
+    /// The last stretch of a start-up is the **drain phase**: the index queue is empty and the pump commits re-reads
+    /// slice after slice, so every one of those waves has nothing to prepare. `prepare_a_wave` used to return early
+    /// in exactly that state and hand the drain `units: []` — and `prepare_the_re_read` reads that as *"a caller
+    /// with no timelines"* and changes shape: it copies every indexed file's text into a map and asks a question
+    /// about every `#define` in the project, and its candidate scan falls back to a closure walk per file.
+    ///
+    /// Measured on `EmmyLuaCodeStyle` (1761 files): twelve such calls — four files each — took **28 s of a 49 s**
+    /// cold start and **37 s of a 47 s** warm one, while the index itself was 4–16 s. Handing the drain its
+    /// timelines is what took the warm start to **11.6 s** and the cold one to **20.6 s**.
+    ///
+    /// The state is built the way the pump reaches it: more files parsed in one wave than the second pass takes at
+    /// once, so the queue empties with a backlog still standing.
+    #[test]
+    fn a_wave_with_nothing_to_parse_still_carries_the_drains_timelines() {
+        let files = (0..8).fold(MemoryFiles::new(), |files, at| {
+            files.with_file(format!("/p/f{at}.cpp"), format!("int value_{at} = {at};\n"))
+        });
+        let fixture = Memory::new("a-wave-carries-its-drain-timelines", &files);
+        let mut session = fixture.session();
+        session.add_project_files((0..8).map(|at| PathBuf::from(format!("/p/f{at}.cpp"))));
+
+        // One wave over all eight: the parse happens here, and the commit takes the second pass's slice of four,
+        // leaving four behind — the queue-empty, backlog-not-empty state.
+        let wave = session.prepare_a_wave(8);
+        session.commit_a_wave(wave, 8);
+        assert_eq!(
+            session.pending(),
+            0,
+            "the fixture is the drain phase: nothing left to index"
+        );
+        assert!(
+            !session.parsed_since_the_last_pass.is_empty(),
+            "and the second pass still has files: {:?}",
+            session.parsed_since_the_last_pass
+        );
+
+        let next = session.prepare_a_wave(8);
+        assert!(
+            next.prepared.is_empty(),
+            "there is nothing to parse, which is the state this test is about"
+        );
+        assert_eq!(
+            next.units.len(),
+            session.parsed_since_the_last_pass.len().min(4),
+            "and the drain's timelines are still prepared, one per file it will re-read"
+        );
+    }
+
     /// **An `#include` added to a header that defines nothing is still a change to its includers' environment.**
     #[test]
     fn an_include_added_to_a_header_invalidates_the_readings_that_include_it() {
