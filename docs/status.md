@@ -853,18 +853,18 @@ documentLink  `import math;` → src/math.cppm，区间是**模块名**而不是
 补全       `import ` → math, shapes；`import sh` → shapes（索引 + 工程里的 .cppm/.ixx，一行一个名字）
 ```
 
-## 十四、语义高亮的一次 encode 是 2.1 秒 —— 两处都是"每个 token 做一次"（2026）
+## 十四、语义高亮为什么会花 11 秒 —— 四处"每个 token 做一次"（2026）
 
 用户指出实现里的两件事："你会先取得每个 token 的文本再判断 token 的 kind"、"我们获取文本的方式太原始了"。
-两件都对，而顺着查下去发现了第三件更贵的：**行查找是从文件头数行**。
+两件都对，而顺着查下去又找到两件更贵的 —— 其中一件不在 encode 里，在它前面的分类里。
 
 ```text
-236 000 字节 / 164 000 token 的文件，一次 encode
-改前  2119 ms
-改后    24 ms      （88 倍）
+一次 encode（236 000 字节 / 164 000 token）        2119 ms → 24 ms      （88 倍）
+分类一次（<algorithm>，7 966 个标识符）           11 258 ms → 387 ms    （29 倍）
+分类一次（2 000 个函数，93 KB / 54 000 token）    95 777 ms → 36 ms     （2 680 倍）
 ```
 
-三处：
+四处：
 
 ```text
 ① 先取文本再判 kind
@@ -882,20 +882,32 @@ documentLink  `import math;` → src/math.cppm，区间是**模块名**而不是
    util::line_body 用 source.split_inclusive('\n').nth(line) 找行 —— 从字节 0 数起。
    而它每个 claim 被调用：push_range 两次、build 两次。24 000 个 claim × 4 次 × 236 000 字节 ≈ 5.6 GB 扫描。
    修法：line_body 收 LineIndex（get_line_offset 是二分），push_range 的"文件能否放置"改成**长度比较**。
+
+④ 分类里每个声明名都重建一次声明形状表
+   semantic::modifiers_of 为了读 const/static 调用 DeclarationShapes::of(&view.root) ——
+   那是**一次整棵树的遍历**，而它按名字调用。<algorithm> 有 1 639 个声明名，于是建了 1 639 次表。
+   11.3 秒里几乎全部在这里，与 encode 无关 —— 所以只量 encode 永远看不到它。
+   修法：classified_names 建一个 OnceCell<DeclarationShapes>，第一个需要它的名字建表，其余共享。
 ```
 
 ### 方法上的教训
 
-> **"每个 token 做 X"在 164 000 个 token 上是四个数量级的差别。**
+> **"每个 token 做 X"在 164 000 个 token 上是四个数量级的差别；而"每个 token 建一张表"更贵。**
 
-三条里只有①是用户看出来的；③才是主项（2119 ms 里 ~2 000 ms 在它身上），而它藏在 `position_in_file`
-这个"看起来只是查个行列"的函数里。量的时候只量 `encode` 整体，就会以为是①；量到行查找才看见真正的
-热点的形状：**一个 O(n) 的辅助函数被放在一个 O(n) 的循环里。**
+只有①是用户看出来的。③是 encode 的主项（2119 ms 里约 2 000 ms），藏在 `position_in_file` 这个
+"看起来只是查个行列"的函数里；④是分类的主项，藏在 `modifiers_of` 这个"看起来只是读个 const"的函数里。
+两者形状相同：**一个 O(n) 的辅助函数被放在一个 O(n) 的循环里**，而它自己的名字听起来是 O(1) 的。
 
-同时留下的探针：
+量的时候必须先**分层**（`view` 108 ms / 分类 95 777 ms / encode 24 ms），否则只会看见最后一段——
+而用户报的"高亮卡"里，被卡住的是中间那一段。
+
+### 留下的探针
 
 ```text
 cargo test --release -p cpp_ls --lib -- a_big_file --ignored --nocapture
+cargo run --release -p cpp_code_analysis --example semantic_probe -- <文件列表> --limit 6
 ```
 
-它会打印 token 数、需要取文本的 token 数、以及一次 encode 的时间。
+前者打印两个夹具的 token 数、view / 分类 / encode 三段耗时；后者对真实文件打印每个文件的
+标识符数、分类数、耗时与来源分布。
+

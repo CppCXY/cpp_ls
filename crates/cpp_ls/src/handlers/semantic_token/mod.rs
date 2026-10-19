@@ -676,13 +676,45 @@ constexpr bool is_assignable_v = __is_assignable(To, From);
     #[test]
     #[ignore = "a measurement: the fixture is deliberately huge"]
     fn a_big_file_measures_what_a_walk_costs() {
-        let line = "for (int i = 0; i < n; ++i) { total += values[i].size(); }\n";
-        let text: String = std::iter::repeat_n(line, 4000).collect();
+        // **Two shapes, because one of them is not a C++ file.** The first is ordinary code — two thousand small
+        // functions in a namespace — and it parses without a diagnostic. The second is the one that made this test
+        // 148 seconds: four thousand `for` statements at file scope, which is not a function body, so every one of
+        // them is a recovery node. Kept beside the first because the difference between them *is* the finding.
+        let mut valid = String::from("namespace demo {\n");
+        for index in 0..2000 {
+            valid.push_str(&format!(
+                "int value_{index}(int a, int b) {{ return a + b; }}\n"
+            ));
+        }
+        valid.push_str("}\n");
 
-        let (session, path) = a_held_file(&text);
+        for (name, text) in [
+            ("a namespace of 2 000 functions", valid),
+            (
+                "4 000 `for` statements at file scope",
+                std::iter::repeat_n(
+                    "for (int i = 0; i < n; ++i) { total += values[i].size(); }\n",
+                    4000,
+                )
+                .collect::<String>(),
+            ),
+        ] {
+            measure_one(name, &text);
+        }
+    }
+
+    /// One fixture through the three stages a `textDocument/semanticTokens/full` request pays for.
+    fn measure_one(name: &str, text: &str) {
+        let (session, path) = a_held_file(text);
+        // **The three halves timed apart**, because a request pays all of them: the view (a cook and a parse of the
+        // whole file), the classification — pass 1's input — and the encode itself.
+        let started = std::time::Instant::now();
         let view = session.view_of_the_file(&path).expect("a view");
+        let view_time = started.elapsed();
         let file = session.files().held(&path).expect("the file is held");
+        let started = std::time::Instant::now();
         let names = session.classified_names(&view);
+        let classify_time = started.elapsed();
 
         let tokens = view.tree.get_tokens().len();
         let mut fetched = 0;
@@ -706,8 +738,9 @@ constexpr bool is_assignable_v = __is_assignable(To, From);
         let each = started.elapsed() / rounds;
 
         eprintln!(
-            "PROBE {} bytes, {tokens} tokens ({keywords} keyword kinds, {fetched} need a text fetch), \
-             {drawn} tokens drawn, {each:?} per encode",
+            "PROBE {name}: {} bytes, {tokens} tokens ({keywords} keyword kinds, {fetched} need a text fetch), \
+             {drawn} tokens drawn | view {view_time:?}, classification {classify_time:?}, \
+             {each:?} per encode",
             text.len()
         );
     }

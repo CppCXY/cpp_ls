@@ -236,6 +236,14 @@ pub fn classified_names(index: &ProjectIndex, view: &FileView) -> Vec<Name> {
     let mut asked: HashMap<String, Option<NameKind>> = HashMap::new();
     let mut out: Vec<Name> = Vec::new();
 
+    // **The declaration shape table, built at most once for the whole file.** Reading a declaration's `const`-ness
+    // is a question about the specifiers in front of it, and the table that answers it is a walk of the file — so
+    // asking it per name is a walk per name. Measured on the standard library's `<algorithm>` (7 966 identifiers,
+    // 1 638 of them declarations): **11.3 s**, and the table was rebuilt 1 638 times. Now built on the first name
+    // that needs it (a file whose colouring reaches no value declaration never builds one) and shared by the rest.
+    let shapes: std::cell::OnceCell<crate::sema::declarations::DeclarationShapes> =
+        std::cell::OnceCell::new();
+
     for token in view.tree.get_tokens() {
         if token.kind != CppTokenKind::Identifier {
             continue;
@@ -257,7 +265,7 @@ pub fn classified_names(index: &ProjectIndex, view: &FileView) -> Vec<Name> {
                 range,
                 kind,
                 declaration: true,
-                modifiers: modifiers_of(view, at, kind),
+                modifiers: modifiers_of(view, at, kind, &shapes),
                 provenance: Provenance::DeclaredHere,
             });
             continue;
@@ -291,7 +299,7 @@ pub fn classified_names(index: &ProjectIndex, view: &FileView) -> Vec<Name> {
                 range,
                 kind: *kind,
                 declaration: false,
-                modifiers: modifiers_of(view, at, *kind),
+                modifiers: modifiers_of(view, at, *kind, &shapes),
                 provenance: Provenance::Found,
             });
             continue;
@@ -440,7 +448,15 @@ fn definitions_of(view: &FileView) -> HashSet<&str> {
 ///
 /// `None` for a name whose declaration this layer cannot see: a use of a name from a header, whose specifiers are not
 /// in any tree this pass holds. See [`NameModifier`] for why that is the right answer rather than a guess.
-fn modifiers_of(view: &FileView, name_at: usize, kind: NameKind) -> Vec<NameModifier> {
+/// `shapes` is the **file's** shape table, built once by the caller — see [`classified_names`]. It is a
+/// [`OnceCell`](std::cell::OnceCell) because a file whose colouring reaches no value declaration should not pay for
+/// one, and a file with two thousand of them must not pay for two thousand.
+fn modifiers_of(
+    view: &FileView,
+    name_at: usize,
+    kind: NameKind,
+    shapes: &std::cell::OnceCell<crate::sema::declarations::DeclarationShapes>,
+) -> Vec<NameModifier> {
     // **Only what can carry these modifiers at all.** `readonly` and `static` are properties of an *object* and of a
     // function — not of a type, a namespace or an enumerator — and asking the shape table for them anyway is what
     // produced a `struct Widget` marked `readonly static`, measured: the specifiers a shape records are not always
@@ -455,7 +471,7 @@ fn modifiers_of(view: &FileView, name_at: usize, kind: NameKind) -> Vec<NameModi
 
     // The declaration's own specifiers, in the shape table — the same source `access_at` reads, and for the same
     // reason: it is one entry per declaration rather than a walk of the tree.
-    let shapes = crate::sema::declarations::DeclarationShapes::of(&view.root);
+    let shapes = shapes.get_or_init(|| crate::sema::declarations::DeclarationShapes::of(&view.root));
     let Some(specifiers) = shapes.specifiers_at(name_at) else {
         return Vec::new();
     };
