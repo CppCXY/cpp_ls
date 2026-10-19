@@ -2638,7 +2638,6 @@ fn the_compilation_is_known_only_when_the_compiler_answered_with_its_macros() {
 /// while only the first level was read drew it with the client's own grammar colour (measured from an editor:
 /// a variable at startup, a function after any edit).
 #[test]
-#[test]
 fn a_file_is_closure_ready_only_once_what_it_reaches_is_read() {
     let files = MemoryFiles::new()
         .with_file("/p/mid.h", "#include \"deep.h\"\n")
