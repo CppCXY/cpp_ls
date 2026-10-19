@@ -390,6 +390,9 @@ crates/cpp_ls/tests/latency.rs      1 条失败：稳态补全偶发 1.4 s（预
        验收必须用真实 `.cpp`（夹具里类定义和函数定义在同一个文件，走的是另一条路）
        ⑮ **pull 的 drain 要有上界**（§四）—— `advance(N)` 取代 `index_everything`，
        N > 一条普通 include 链；这是「补全很慢」的真正原因
+       **启动时间**（`docs/cold-start-cpu.md` 最后一节，已从 46.6 s 降到 11.6 s）：下一个杠杆是
+       读 summary 缓存本身（warm 的 7.8 s 里 1714 条 / 65 MB 是逐条解码），其次是每次启动都要
+       重建的那 47 个文件（它们 include 了找不到的头，而"记录了一次失败搜索"的 summary 不能落盘）
        ⑫ `this->` 的成员查询经索引解析外层类（复现已在 tests/completion.rs 里）
        ① argument-count 的跨文件查找 ② param-type-check 的**跨文件自由函数**与**具名形参**
        ② 的兄弟：`symbol_references` 里"某条**使用**属于哪个实体"仍是词法的（§十二 ⑰）——
@@ -424,6 +427,10 @@ cargo run --release -p cpp_parser --bin cpp_dump -- <file> --tree
 
 # 标准库零误报（需要先用真实工具链 cook 出一份语料，target/std-cook 是现成的）
 cargo run --release -p cpp_code_analysis --example checks_probe -- target/std-cook target/std-cook/assign-case.cpp
+
+# 启动时间的分解：read / insert / drain / cook 四段（`docs/cold-start-cpu.md` 最后一节）
+cargo run --release -p cpp_code_analysis --example startup_probe -- <工程根> <工程里一个真实文件>
+# 加上 CPPLS_TRACE_COOKING=1 会逐次打印 drain 的形状（eager / sources / candidates / bodied）
 
 # 逐项检查、逐条发现（带它依据的声明事实）
 cargo run --release -p cpp_code_analysis --example one_check -- target/std-cook target/std-cook/assign-case.cpp unused

@@ -859,3 +859,114 @@ across several files — so the next attempt should run the census **against the
 them: **unexplained, not diagnosed.**
 
 The three tests are kept: they pin behaviour that is currently right, which is what a regression guard is for.
+## The start-up was in the drain, not in the index: 46.6 s → 11.6 s (2026, reported)
+
+Reported as *"startup on EmmyLuaCodeStyle takes too long"*. The index was not the problem, and the way that was
+established is the first thing worth keeping:
+
+```text
+                    before     after
+  warm start        46.6 s     11.6 s
+  cold start        48.7 s     20.6 s
+  checks_probe      224 s      16.0 s
+```
+
+`examples/startup_probe` is the instrument (new): it opens the project the way the server does and times the pump's
+four calls apart, so that "read", "insert", "drain" and "cook" cannot hide inside one number.
+
+```text
+prepare_a_wave   read the text, read or build the summary, the unit walk     (&self)
+commit_a_wave    put the summaries in the index and queue the includes       (&mut self)
+prepare/commit_the_drain   the second pass: files whose reading may have changed
+claim/materials/render/commit   one cooking slice
+```
+
+### What the split said
+
+```text
+indexed 1754 file(s) in 68.1 s over 232 wave(s); index holds 1761
+  summaries          1714 reused from disk, 47 built, 0 missing
+  timelines             1 walked, 47 from disk, 518 from memory
+  prepare_a_wave        3.5 s  (5.2%)     <- the whole index
+  commit_a_wave         0.7 s  (1.0%)
+  drain prepare        61.9 s  (90.9%)    <- the drain phase
+  cook                  2.0 s  (3.0%)
+```
+
+**Four seconds of index work and sixty seconds of drain**, on a warm cache. The drain phase is what the pump does
+after the index queue empties, and it exists for a real reason (a header's scopes can come out of a macro *body*
+written in another file, and that file is read after the header) — the defect was its shape, not its purpose.
+
+### Defect 1: the pump withheld the drain's timelines
+
+`prepare_a_wave` computed the timelines for the files the drain would re-read, and returned them beside the parsed
+wave — but the computation sat **after** an `if wave.is_empty() { return units: [] }`. The drain phase is exactly
+the state where the wave is empty, so every drain call was handed no timelines, and
+`prepare_the_re_read` reads that as *"a caller with no timelines"*:
+
+```text
+re-read: eager false, 1761 source(s), 160 word(s) mentioned, 5 candidate file(s), uncovered true — 159 ms
+re-read: eager false, 1761 source(s), 1689 word(s) mentioned, 41 candidate file(s), uncovered true — 17 747 ms
+```
+
+1761 sources for a call about **four files**. Twelve such calls were 28 s of a 49 s cold start and 37 s of a 47 s
+warm one. Moving the two lines above the early return is the whole of the fix.
+
+The regression test is `a_wave_with_nothing_to_parse_still_carries_the_drains_timelines`, which builds the state the
+pump reaches (eight files parsed in one wave, the drain takes four) and asserts the timelines are still prepared.
+
+### Defect 2: one out-of-closure candidate meant "read every indexed file"
+
+With the timelines in hand the pass still gave `uncovered true`: the candidate list comes from the **whole index**
+(`files_defining_any_macro`), so it holds files the re-read files never include — `MAX` and `MIN` are defined by a
+dozen unrelated headers. One such candidate switched the pass into the eager form (copy every indexed text) and then
+walked *that* candidate's closure in the environmentless form — the 17.7 s line above.
+
+A file the timelines do not cover cannot be about the reading being repaired: its macros are not among the ones the
+re-read file expands. So the candidates are now filtered by the same predicate, and the texts read are the
+candidates' plus — for a re-read file no timeline covers — **its own closure's** text, walked from the index's
+`#include` edges rather than approximated by "everything".
+
+### Defect 3: `advance` rooted the timelines at the wrong files
+
+The server's pump is not the only caller. `advance` (tests, probes, `index_everything`) passed timelines rooted at
+the **sixty-four** files it had just read, while the drain takes four from a backlog that outlives one call — up to
+64 closure walks per call, and a drain whose files those units did not cover.
+
+```text
+checks_probe --index-only, one run      224 s      <- the advance path
+startup_probe, the same index            68 s      <- the pump path, after fixes 1 and 2
+```
+
+`finish_a_slice` now builds the timelines for exactly the slice it takes, and `advance` passes none: 224 s → **16 s**,
+which also makes `docs/status.md` §八's census command usable again.
+
+### What is left, in the numbers
+
+```text
+warm start 11.5 s
+  prepare_a_wave     7.8 s   1714 summary entries decoded from disk (65 MB), 47 rebuilt, 46 timelines
+  commit_a_wave      0.6 s
+  drain prepare      1.5 s   12 calls of four files
+  cook               1.5 s   45 files
+cold start 20.6 s
+  prepare_a_wave    16.3 s   the parse itself — 1761 files, 85 files/s
+```
+
+So the next lever is not the index and not the drain: it is **reading the summary cache** (65 MB of entries decoded
+one by one) and, behind it, the 47 files that are rebuilt on every start because they `#include` something that does
+not resolve and a summary that records a failed search cannot be stored.
+
+### Reproducing it
+
+```bash
+# the split, on a real project (the cache is invalidated by any change to these crates — see READING_FINGERPRINT)
+cargo run --release -p cpp_code_analysis --example startup_probe -- <root> <a real file in it>
+
+# the same index through the other entry point, which is the number docs/status.md §八 quotes
+cargo run --release -p cpp_code_analysis --example checks_probe -- <root> <file> --index-only
+
+# the shape of one drain call, per call
+CPPLS_TRACE_COOKING=1 cargo run --release ... --example startup_probe -- <root> <file>
+```
+
