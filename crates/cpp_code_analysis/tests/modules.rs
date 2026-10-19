@@ -1260,6 +1260,75 @@ fn a_module_name_is_offered_after_import() {
 }
 
 
+/// **`export namespace math { … }` exports the namespace's own name, and its concepts.**
+///
+/// The export region is stored **per declaration shape**, and `exported_at` is answered from the shapes containing
+/// an offset. A namespace and a concept declare no specifiers and own no declarator, so neither used to be a shape at
+/// all — and a declaration that is not a shape has no exported flag to read:
+///
+/// ```text
+/// export namespace math {
+///     template <typename T> concept Number = …;
+///     int add(int, int);            ← exported, because a declarator is a shape
+/// }
+/// ```
+///
+/// Measured on a real C++23 module project: `add`, `Vec2` and `divide` were `exported: true` while `math` and
+/// `Number` were `false`. The consequence is the one a reader sees as "the module is not in my completion": an
+/// importing file only receives **exported** facts from a module unit, so `math` was in the index and invisible
+/// there, and `math::add` could not be typed without it.
+#[test]
+fn an_exported_namespace_and_its_concept_are_exported_facts() {
+    use cpp_code_analysis::file::coordinates::FileOffset;
+    use cpp_code_analysis::{OpenDocuments, SessionFiles, WatchFilter};
+
+    let unit = "export module math;\n\
+                export namespace math {\n\
+                template <typename T> concept Number = true;\n\
+                int add(int lhs, int rhs);\n\
+                }\n";
+    let caller = "import math;\nint value = mat;\n";
+    let files = MemoryFiles::new()
+        .with_file("src/math.cppm", unit)
+        .with_file("src/main.cpp", caller);
+    let providers = SessionFiles::new(OpenDocuments::new(), files);
+    let mut session =
+        Session::with_config(".", providers, WatchFilter::new("."), CompilerConfig::new());
+    session.add_project_files([
+        std::path::PathBuf::from("src/math.cppm"),
+        std::path::PathBuf::from("src/main.cpp"),
+    ]);
+    session.index_everything();
+
+    let summary = session
+        .index()
+        .summary(std::path::Path::new("src/math.cppm"))
+        .expect("the unit is indexed");
+    let exported = |name: &str| {
+        summary
+            .declarations
+            .iter()
+            .find(|fact| fact.name == name)
+            .map(|fact| fact.exported)
+    };
+    assert_eq!(exported("math"), Some(true), "the namespace's own name");
+    assert_eq!(exported("Number"), Some(true), "and a concept inside it");
+    assert_eq!(exported("add"), Some(true), "the function, which always was");
+
+    // **And the consequence the reader sees**: the name is offered in the importing file.
+    let view = session
+        .view_of_the_file("src/main.cpp")
+        .expect("the caller is held");
+    let cursor = caller.find("mat").expect("the fixture writes it") + "mat".len();
+    let offered = session.completions(&view, FileOffset::new(cursor));
+    let labels: Vec<&str> = offered.items.iter().map(|item| item.label.as_str()).collect();
+    assert!(
+        labels.contains(&"math"),
+        "`math` is a name an importer can write: {labels:?}"
+    );
+}
+
+
 /// **A module beside the file that imports it** — the ordinary project layout, and the one the request path missed.
 ///
 /// The two tests above put the interface unit in `lib/modules/`, which is where a *standard* module lives and which

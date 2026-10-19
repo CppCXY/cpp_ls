@@ -24,7 +24,7 @@
 use std::path::PathBuf;
 use std::time::Instant;
 
-use cpp_code_analysis::file::coordinates::FileOffset;
+use cpp_code_analysis::file::coordinates::{FileOffset, ReadingOffset};
 use cpp_code_analysis::{DiskFiles, Known, OpenDocuments, Session, SessionFiles, WatchFilter};
 
 fn main() {
@@ -205,6 +205,24 @@ fn main() {
     // 2. What the index holds for the names `import math;` brings in.
     // ---------------------------------------------------------------------------------------------
     println!("\n--- what the index holds, after the request read the modules ---");
+    // **What the interface unit's summary says about the module's own names**, which is the question a missing
+    // completion turns on: is `math` a fact at all, and is it marked exported for the files that import it?
+    for unit in session.project_files() {
+        if !unit.to_string_lossy().ends_with("math.cppm") {
+            continue;
+        }
+        if let Some(summary) = session.index().summary(unit) {
+            println!("   summary of {}: {} facts", unit.display(), summary.declarations.len());
+            for fact in &summary.declarations {
+                if fact.name == "math" || fact.scope.as_deref() == Some("math") {
+                    println!(
+                        "      {:?} kind {:?} scope {:?} exported {} @ {}",
+                        fact.name, fact.kind, fact.scope, fact.exported, fact.range.start_offset
+                    );
+                }
+            }
+        }
+    }
     println!(
         "   facts in scope `std`: {} | postings named `vector`: {} | facts named `add`: {}",
         session.index().scope_postings("std"),
@@ -267,6 +285,48 @@ fn main() {
                 .collect::<Vec<_>>()
                 .join(", ")
         );
+    }
+
+    // **Signature help, which the user reports as "almost never appearing".** The handler declines to answer while
+    // the file is not locally ready, so both halves are printed: what the call resolves to, and whether the handler
+    // would have returned `None` before asking.
+    println!("\n--- signature help ---");
+    println!("   is_locally_ready: {}", session.is_locally_ready(&file));
+    for needle in ["math::add(", "std::println(", "std::format("] {
+        let Some(at) = text.find(needle).map(|at| at + needle.len()) else {
+            println!("   `{needle}`: not in this file");
+            continue;
+        };
+        let reading = view
+            .reading_offset_of(FileOffset::new(at))
+            .map_or(view.source.len(), |at| at.get());
+        let signatures = session.signatures_at(&view, ReadingOffset::new(reading));
+        let labels: Vec<&str> = signatures.iter().map(|one| one.label.as_str()).collect();
+        println!(
+            "   `{needle}` at {at} (reading {reading}): {} signature(s) {:?}",
+            labels.len(),
+            labels
+        );
+        // **Where the cursor actually landed**, in both texts: a needle can match inside a comment, and the two
+        // coordinate systems disagree by exactly what the cook removed.
+        let window = |source: &str, at: usize| {
+            source
+                .get(at.saturating_sub(48)..at.min(source.len()))
+                .unwrap_or_default()
+                .replace('\n', " ")
+        };
+        println!("      file:      …{}|", window(&text, at));
+        println!("      rendering: …{}|", window(&view.source, reading));
+        // **Why it is zero.** The popup asks the same question the definition does, so its answer is printed next
+        // to it: a `::`-qualified name this file does not declare has to reach the index, and the shape it arrives
+        // in decides whether the index is consulted at all — `No` and `Unknown(NotDeclaredHere)` take two different
+        // branches in `callees_of_a_call`.
+        let name_at = reading.saturating_sub(needle.trim_end_matches('(').len());
+        match session.definitions(&view, ReadingOffset::new(name_at)) {
+            Known::Yes(list) => println!("      definitions: {} declaration(s)", list.found.len()),
+            Known::Unknown(reason) => println!("      definitions: Unknown({reason:?})"),
+            Known::No => println!("      definitions: No"),
+        }
     }
 
     // The same questions with the whole project indexed — is the answer *better* once everything is read, or the

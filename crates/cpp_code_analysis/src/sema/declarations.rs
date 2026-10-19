@@ -742,6 +742,16 @@ fn declares_a_shape(kind: CppSyntaxKind) -> bool {
             // were the only ones still paying a descent from the root.
             | CppSyntaxKind::UnionDef
             | CppSyntaxKind::EnumDef
+            // **A namespace and a concept declare no specifiers, and are shapes for a different reason: their own
+            // names have to be *on the path*.** `exported_at` is answered from the shapes containing an offset, so a
+            // declaration kind that never becomes a shape is a declaration whose name is in no exported region —
+            // measured on a C++23 module: `export namespace math { export int add(int); }` recorded `add` as
+            // exported and `math` as **not**, so an importing file's completion never offered `math` (and
+            // `math::add` could not be typed without it) while `docs/status.md` §十三 had the namespace in the index.
+            // The same held for `export namespace math { template <typename T> concept Number = …; }`: a concept has
+            // no declarator either, so `math::Number` was invisible to importers.
+            | CppSyntaxKind::NamespaceDecl
+            | CppSyntaxKind::ConceptDecl
     )
 }
 

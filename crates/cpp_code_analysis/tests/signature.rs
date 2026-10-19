@@ -252,6 +252,79 @@ fn the_active_parameter_follows_the_arguments() {
     }
 }
 
+/// **A declaration in a file whose rendering nobody has built still gets a popup.**
+///
+/// The popup used to be answered *only* from the declaring file's tree, and that tree is a **rendering** — which a
+/// query does not build (65–190 ms for a header), so `Session::view` queues one and answers `None` and the candidate
+/// was skipped. A client asks once per `(`, so "the next request will have it" never happens: measured on a real
+/// C++23 module project, `math::add(` answered **nothing** on its first `(` and one signature on the second, which
+/// from the outside is "the signature popup almost never appears".
+///
+/// The fallback is the declaration's own **fact**, which every summary already carries a parameter list in. What it
+/// gives up is the parameter spans; what it keeps is the label, the count and the active parameter.
+#[test]
+fn a_declaration_in_an_uncooked_file_still_answers() {
+    // **Only the caller is cooked.** `session_with` asks for every file's rendering, which would answer this test
+    // through the tree path and prove nothing; the state a fresh `(` arrives in is one where the *declaring* file
+    // has no rendering yet.
+    let files = [
+        (
+            "/p/math.cppm",
+            "export module math;\nexport namespace math {\nint add(int lhs, int rhs);\n}\n",
+        ),
+        ("/p/a.cpp", "import math;\nint f() { return math::add(|1, 2); }\n"),
+    ];
+    let mut memory = MemoryFiles::new();
+    for (path, source) in files {
+        memory = memory.with_file(path, source);
+    }
+    let providers = SessionFiles::new(OpenDocuments::new(), memory);
+    let mut session = Session::with_config(
+        "/p",
+        providers,
+        WatchFilter::new("/p"),
+        CompilerConfig::default(),
+    );
+    session.add_project_files([
+        std::path::PathBuf::from("/p/math.cppm"),
+        std::path::PathBuf::from("/p/a.cpp"),
+    ]);
+    session.want_cooked_reading(std::path::Path::new("/p/a.cpp"));
+    session.index_everything();
+
+    let view = session.view("/p/a.cpp").expect("the caller is held");
+    assert!(
+        session.view("/p/math.cppm").is_none(),
+        "the fixture is only meaningful while the declaration's file has no rendering"
+    );
+    let cursor = view
+        .source
+        .find("math::add(")
+        .expect("the fixture writes the call")
+        + "math::add(".len();
+
+    let signatures = session.signatures_at(
+        &view,
+        cpp_code_analysis::file::coordinates::ReadingOffset::new(cursor),
+    );
+    assert_eq!(
+        signatures.len(),
+        1,
+        "the fact is enough to write the label: {signatures:?}"
+    );
+    assert_eq!(signatures[0].label, "math::add(int lhs, int rhs)");
+    assert_eq!(
+        signatures[0].active_parameter,
+        Some(0),
+        "the count and the active parameter do not need a tree"
+    );
+    assert!(
+        signatures[0].parameters.is_empty(),
+        "the spans do need one, and are honestly absent rather than wrong"
+    );
+}
+
+
 /// **A cursor on the callee is not a call being typed.** It is a question about the name — which is hover's and
 /// definition's business — and a signature popup there would appear while the reader is still choosing the
 /// function.

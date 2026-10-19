@@ -145,6 +145,32 @@ where
                 .entry(candidate.file.clone())
                 .or_insert_with(|| view_of(&candidate.file));
             let Some(held) = held.as_ref() else {
+                // **The declaration's *rendering* is not built yet — and the popup is not allowed to wait for it.**
+                // A rendering is a unit walk, a preprocess and a render (65–190 ms for a header), so a query queues
+                // one and answers `None`; the next request would find it. For a signature popup "the next request"
+                // never comes — a client asks once per `(` — so the answer here is built from what the **index**
+                // already holds: the declaration's parameter list, which every fact carries.
+                //
+                // Measured on a C++23 module project: `math::add(` answered **nothing** on the first `(` and
+                // everything on the second, which is exactly the shape of "signature help almost never appears".
+                //
+                // What the fallback gives up is the parameter **spans** (a client bolds the active one): they are
+                // offsets into a list read from a tree, and there is no tree here. The label, the count and the
+                // active parameter are all known, so the popup is useful rather than absent — and the detail is
+                // right, unlike parsing the file's own text at a *rendering* offset, which would name the wrong
+                // declaration in any file with a macro above it.
+                if let Some(parameters) = &candidate.parameters {
+                    let (tidy, _) = crate::inlay::tidy_list_text(parameters);
+                    signatures.push(CallSignature {
+                        label: format!("{spelling}{tidy}"),
+                        parameters: Vec::new(),
+                        active_parameter: active,
+                        declared_in: candidate.file.clone(),
+                        declared_at: candidate.name_offset,
+                        documentation: None,
+                    });
+                    rankable.push((Vec::new(), Vec::new()));
+                }
                 continue;
             };
             held
@@ -358,6 +384,9 @@ fn constructors_of(declared_in: &FileView, name_offset: usize) -> Vec<Callee> {
         constructors.push(Callee {
             file: declared_in.path.clone(),
             name_offset: usize::from(name.text_range().start()),
+            // The caller has this file's tree in hand — that is the whole reason this function can find the
+            // constructors at all — so the fallback copy is never the one used.
+            parameters: None,
         });
     }
 

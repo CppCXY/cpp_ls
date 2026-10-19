@@ -4433,6 +4433,18 @@ pub(crate) struct Callee {
     pub file: PathBuf,
     /// The offset of the declared **name** in that file.
     pub name_offset: usize,
+    /// **The declaration's parameter list as the index already holds it**, parentheses included — the fallback a
+    /// signature popup uses when that file has no *rendering* to read the list out of.
+    ///
+    /// The two are not the same source: `name_offset` is an offset into the file's **cooked rendering**, so a caller
+    /// that has only the file's own text cannot read a parameter list at it — and a query may not build a rendering
+    /// (65–190 ms for a standard-library header). Measured on a real C++23 module project: `math::add(` answered
+    /// **no signatures at all** on the first request and only after a second `(` had queued and built the interface
+    /// unit's rendering — which is what "the signature popup almost never appears" looks like from the outside.
+    ///
+    /// `None` for a declaration whose fact was built before the field existed — the popup then says nothing, which
+    /// is the old behaviour rather than a wrong label.
+    pub parameters: Option<String>,
 }
 
 /// **Every declaration a call's callee names** — one for an ordinary function, all of them for an overload set.
@@ -4505,6 +4517,9 @@ pub(crate) fn callees_of_a_call(
                 .map(|binding| Callee {
                     file: path.to_path_buf(),
                     name_offset: binding.name_range.start_offset,
+                    // The buffer is parsed in front of the caller, so its own list is read from the tree — the
+                    // fallback exists for a declaration in a file nobody has cooked.
+                    parameters: None,
                 })
                 .collect(),
         ),
@@ -4518,6 +4533,7 @@ pub(crate) fn callees_of_a_call(
                     .map(|declaration| Callee {
                         file: declaration.file.clone(),
                         name_offset: declaration.fact.name_range.start_offset,
+                        parameters: declaration.fact.parameter_list.clone(),
                     })
                     .collect(),
             ),
@@ -4577,6 +4593,7 @@ fn member_callees(
         .map(|member| Callee {
             file: member.file.clone(),
             name_offset: member.fact.name_range.start_offset,
+            parameters: member.fact.parameter_list.clone(),
         })
         .collect();
 
@@ -4619,6 +4636,9 @@ pub(crate) fn callee_of_a_call(
         Known::Yes(named) => Known::Yes(Callee {
             file: named.file(path),
             name_offset: named.name_offset(),
+            // The singular caller reads the declaration's own file (a parameter hint is drawn from the tree), so the
+            // fact's copy is not the answer here — see [`Callee::parameters`] for where it is.
+            parameters: None,
         }),
         Known::Unknown(reason) => Known::Unknown(reason),
         Known::No => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),

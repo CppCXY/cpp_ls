@@ -853,6 +853,37 @@ documentLink  `import math;` → src/math.cppm，区间是**模块名**而不是
 补全       `import ` → math, shapes；`import sh` → shapes（索引 + 工程里的 .cppm/.ixx，一行一个名字）
 ```
 
+### ⑤ `export namespace math` 的名字不是 exported —— 导入方永远看不到 `math` —— **已修**
+
+用户在补全里看不到 `math`（截图里 `mat|` 只有一堆 Windows SDK 名字）。索引里有这条 fact：
+
+```text
+"math"   kind Namespace  scope None  exported false      ← 而 add / Vec2 / divide 都是 true
+"Number" kind Type       scope Some("math") exported false
+```
+
+原因是 **导出区域是按"声明形状"记录的**，而 `NamespaceDecl`/`ConceptDecl` 既没有 specifier 也没有
+declarator，所以它们根本不成其为 shape —— 不是 shape 的声明没有地方记 `exported`，于是恒为 false。
+导入方只接收 **exported** 的 fact，所以 `math` 在索引里、在导入方不可见，`math::add` 也就无从写起。
+
+修法：`declares_a_shape` 加上 `NamespaceDecl` 和 `ConceptDecl`（它们成为 shape 的唯一目的是让自己
+的**名字在路径上**）。测试 `an_exported_namespace_and_its_concept_are_exported_facts`。
+
+### ⑥ 签名提示几乎不出现 —— 声明所在文件没有渲染就整个跳过 —— **已修**
+
+`signature::signatures_at` 只从**声明所在文件的渲染树**里读参数表，而渲染是查询**不建**的
+（一个头文件 65–190 ms），`Session::view` 于是入队并返回 `None`，那个候选就被 `continue` 掉。客户端每次
+`(` 只问一次，"下次再问就有了"永远不会发生：
+
+```text
+math::add(        第一次 0 个签名        第二次 1 个
+std::println(     0 → 4 个重载
+```
+
+修法：`Callee` 带上 fact 里的 `parameter_list`（索引本来就有）；渲染缺失时用它拼出 label。丢掉的是参数的
+高亮区间（那是渲染坐标），保留的是签名文本、参数个数和当前参数。测试
+`a_declaration_in_an_uncooked_file_still_answers` —— 它显式断言声明所在文件**没有**渲染。
+
 ## 十四、语义高亮为什么会花 11 秒 —— 四处"每个 token 做一次"（2026）
 
 用户指出实现里的两件事："你会先取得每个 token 的文本再判断 token 的 kind"、"我们获取文本的方式太原始了"。
