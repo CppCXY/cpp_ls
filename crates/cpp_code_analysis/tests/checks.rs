@@ -1671,7 +1671,7 @@ template <class _Tp>
 class vector {
 public:
     using value_type = _Tp;
-    void push_back(const _Tp& __x);
+    void push_back(const value_type& __x);
 };
 }
 ";
@@ -1685,6 +1685,25 @@ int main()
 }
 ";
     let codes = codes_of_files(&[("/p/vector.h", header), ("/p/a.cpp", source)], "/p/a.cpp");
+    {
+        // PROBE: what the member list says the parameters are.
+        let files = MemoryFiles::new().with_file("/p/vector.h", header).with_file("/p/a.cpp", source);
+        let providers = SessionFiles::new(OpenDocuments::new(), files);
+        let mut session = Session::with_config("/p", providers, WatchFilter::new("/p"), CompilerConfig::default());
+        session.add_project_files([std::path::PathBuf::from("/p/vector.h"), std::path::PathBuf::from("/p/a.cpp")]);
+        session.want_cooked_reading(std::path::Path::new("/p/a.cpp"));
+        session.want_cooked_reading(std::path::Path::new("/p/vector.h"));
+        session.index_everything();
+        let view = session.view("/p/a.cpp").expect("held");
+        match session.members_of(&view, "std::vector<int>") {
+            cpp_code_analysis::Known::Yes(list) => {
+                for member in &list.members {
+                    eprintln!("PROBE {:?} kind {:?} params {:?} type_of {:?}", member.fact.name, member.fact.kind, member.fact.parameter_list, member.fact.type_of);
+                }
+            }
+            other => eprintln!("PROBE members_of: {other:?}"),
+        }
+    }
     assert!(
         codes.contains(&DiagnosticCode::ParamTypeCheck),
         "the argument is a string literal and the parameter is `const int&`: {codes:?}"
@@ -1697,7 +1716,6 @@ int main()
 /// today `value_type` is still a name to `convertible_to`, which answers `Unknown`, and a check that cannot compare
 /// says nothing.
 #[test]
-#[ignore = "the parameter list is not substituted through the class's alias: docs/status.md §十五 ④"]
 fn a_member_parameter_written_with_the_classs_alias_is_checked() {
     let header = "\
 namespace std {
@@ -1718,7 +1736,30 @@ int main()
     return 0;
 }
 ";
-    let codes = codes_of_files(&[("/p/vector.h", header), ("/p/a.cpp", source)], "/p/a.cpp");
+    let file = "/p/vector.h";
+    let caller = "/p/a.cpp";
+    let mut memory = MemoryFiles::new().with_file(file, header).with_file(caller, source);
+    let providers = SessionFiles::new(OpenDocuments::new(), memory.clone());
+    let mut session = Session::with_config(
+        "/p",
+        providers,
+        WatchFilter::new("/p"),
+        CompilerConfig::default(),
+    );
+    session.add_project_files([std::path::PathBuf::from(file), std::path::PathBuf::from(caller)]);
+    // **Both files are cooked**, which is the state a check runs in: the open file's closure is read and rendered
+    // before a diagnostic is asked for. `codes_of_files` asks for the *caller* only, and the substitution needs the
+    // class's own file — see `substituted_members`, whose first step is reading the declaring file.
+    session.want_cooked_reading(std::path::Path::new(file));
+    session.want_cooked_reading(std::path::Path::new(caller));
+    session.index_everything();
+
+    let codes: Vec<DiagnosticCode> = session
+        .diagnostics(std::path::Path::new(caller))
+        .map(|found| found.checks.iter().map(|finding| finding.code).collect())
+        .unwrap_or_default();
+    let _ = &mut memory;
+
     assert!(
         codes.contains(&DiagnosticCode::ParamTypeCheck),
         "the argument is a string literal and the parameter is `const value_type&` = `const int&`: {codes:?}"

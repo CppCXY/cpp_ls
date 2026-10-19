@@ -5629,8 +5629,7 @@ impl<F: FileProvider + Clone> Session<F> {
             written_type,
         );
         // **The class's arguments, written through its members** — see [`substituted_members`].
-        let mut read = |path: &Path| self.view_of_the_file(path);
-        substituted_members(self.store.index(), &view.path, written_type, listed, &mut read)
+        substituted_members(self.store.index(), &view.path, written_type, listed)
     }
 
     /// **A type name as a declaration wrote it, resolved where it was written — through a base if it has to.**

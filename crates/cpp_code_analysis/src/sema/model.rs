@@ -150,11 +150,15 @@ impl<'a> SemanticModel<'a> {
     }
 
     /// **The members of a class, inherited ones included** — see [`project::members_of`].
+    ///
+    /// The substitution needs no file: the class's parameter names are in its **fact**, so the model's resolver —
+    /// which hands out *renderings* — is not asked for anything, and the answer is the same one `Session::members_of`
+    /// gives (`docs/status.md` §十五 ④: it was not, because this call passed the rendering to a function reading the
+    /// file's own text at the fact's offsets).
     pub fn members_of(&self, class: &str) -> Known<MemberList> {
         let listed = project::members_of(self.index, self.scopes, self.root, self.path, class);
         // **The class's arguments, written through its members** — see [`project::substituted_members`].
-        let mut resolver = self.resolver.borrow_mut();
-        project::substituted_members(self.index, &self.path, class, listed, &mut **resolver)
+        project::substituted_members(self.index, &self.path, class, listed)
     }
 
     /// **Does `name` name a template parameter *where it is used*** — the `C` of `template <class C>`?

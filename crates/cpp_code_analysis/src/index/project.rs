@@ -13343,14 +13343,27 @@ fn the_alias_behind(index: &ProjectIndex, declaring: &Path, written: &str) -> Op
 ///
 /// The substitution is `sema::types::substituted_spelling` — the same function that makes a member's **return** type
 /// come out as `int&` — so this is the arguments reaching the member list, not a second implementation of anything.
-/// The parameter names come from the class's own declaration header, which is why a reader is required: the index stores
-/// facts, and a template header is text.
+///
+/// # The parameter names come from the **fact**, and that is a correction
+///
+/// They used to be read out of the class's file — `template_parameters_before(text, offset)` — which required a
+/// reader and the file's **own** text: the fact's offset is the file's, while a `FileView` may be of a *rendering*
+/// whose offsets are shifted by everything the cook deleted. `view.written_text().unwrap_or(&view.source)` was the
+/// guard, and it is only right when the caller happened to hand over a written view. `Session::members_of` does;
+/// `SemanticModel::members_of` — which is what every **check** goes through — hands over the rendering, so
+/// `written_text()` was `None`, the guard fell through to the rendering, no `template <…>` was found at the offset,
+/// and the substitution was silently skipped.
+///
+/// Measured on the report this was written for: `std::vector<int> anotherVec; anotherVec.push_back("123131");` on a
+/// class declared `void push_back(const value_type& __x);` with `using value_type = _Tp;` — the parameter stayed
+/// `const value_type&`, `convertible_to(char*, const value_type&)` answered `Unknown`, and the check said nothing.
+/// `DeclFact::parameters` is the class's parameter names, recorded by `declared_template_parameters_with` when the
+/// fact was built, so the answer needs no reader at all — and `SemanticModel` and `Session` cannot disagree about it.
 pub fn substituted_members(
     index: &ProjectIndex,
     from: &Path,
     class: &str,
     listed: Known<MemberList>,
-    read: &mut dyn FnMut(&Path) -> Option<crate::FileView>,
 ) -> Known<MemberList> {
     let Known::Yes(mut list) = listed else {
         return listed;
@@ -13365,26 +13378,55 @@ pub fn substituted_members(
     else {
         return Known::Yes(list);
     };
-    let Some(view) = read(&declared.file) else {
-        return Known::Yes(list);
-    };
-    // **The file's own text, because the fact's offset is the file's.** A fact is placed in the *file* when the
-    // rendering it was read from is mapped back (`FileSummary::map_into_the_file`), while `FileView::source` is the
-    // **rendering** — the same file with every `#include` inlined and every directive deleted, so its offsets are
-    // shifted by however much was deleted above this declaration. Read against the rendering, the template header
-    // was looked for at an offset that named something else, no parameter list was found, and nothing was
-    // substituted: measured on a fixture with one `#include` above the class, `Box<int>::push_back` answered
-    // `(const T& value)` — the spelling nobody can classify, which is the whole reason this function exists. With
-    // the directives removed the shift is *always* there, so the substitution was silently dead for every real
-    // header while the tests — whose fixtures are one file with no directives — passed.
-    let text = view.written_text().unwrap_or(&view.source);
-    let names = crate::sema::deduction::template_parameters_before(
-        text,
-        declared.fact.range.start_offset,
-    );
+    let mut names = declared.fact.parameters.clone();
     if names.is_empty() {
         return Known::Yes(list);
     }
+
+    // **A declaration with a defaulted parameter is written without it at the use.** `std::vector<int>` writes one
+    // argument for `template <class _Tp, class _Alloc = allocator<_Tp>>` — two names — and `substituted_spelling`
+    // refuses a positional substitution whose two sides do not line up (`names.len() != arguments.len()` returns the
+    // text unchanged). So both sides are cut to the shorter one: the arguments written are the first parameters, in
+    // order, which is what a positional substitution means. Measured on the real `<vector>`: without this,
+    // `push_back("123131")` on a `std::vector<int>` stayed silent while the one-parameter fixture beside it reported.
+    let mut arguments = arguments;
+    names.truncate(arguments.len());
+    arguments.truncate(names.len());
+    if names.is_empty() {
+        return Known::Yes(list);
+    }
+
+    // **The class's own aliases, expanded before the arguments go in.** `std::vector` declares its parameter as
+    // `void push_back(const value_type& __x);` with `using value_type = _Tp;` in the class — so substituting
+    // `_Tp → int` alone leaves the word `value_type`, which nothing in this layer can compare: measured on
+    // `std::vector<int> anotherVec; anotherVec.push_back("123131");`, the target stayed `const value_type&`,
+    // `convertible_to(const char[7], const value_type&)` answered `Unknown`, and a check that cannot compare says
+    // nothing — the report. An alias's target is in its own fact (`DeclFact::type_of` is the target for an alias,
+    // see `declared_alias_target`), and the aliases of *this* class are already in the list being substituted,
+    // which is why no second lookup is needed.
+    //
+    // A plain `using value_type = _Tp;` inside a class template records the **class's** parameters as its own
+    // (`declared_template_parameters_with` pairs the `template <…>` head with the declaration it introduces), so
+    // there is deliberately no `parameters.is_empty()` test here: the alias that matters most has one.
+    let mut alias_names: Vec<String> = Vec::new();
+    let mut alias_targets: Vec<String> = Vec::new();
+    for member in list
+        .members
+        .iter()
+        .filter(|member| member.depth == 0 && member.fact.kind == crate::DeclKind::Type)
+    {
+        let Some(target) = member.fact.type_of.clone() else {
+            continue;
+        };
+        // **Not the alias itself**: `type_of` is the target, and a member whose target names itself would make
+        // `value_type` → `value_type` a rewrite that changes nothing but costs a pass.
+        if target == member.fact.name {
+            continue;
+        }
+        alias_names.push(member.fact.name.clone());
+        alias_targets.push(target);
+    }
+
     for member in &mut list.members {
         for spelling in [
             &mut member.fact.parameter_list,
@@ -13394,6 +13436,9 @@ pub fn substituted_members(
         .into_iter()
         .flatten()
         {
+            if !alias_names.is_empty() {
+                *spelling = crate::sema::types::substituted_spelling(spelling, &alias_names, &alias_targets);
+            }
             *spelling = crate::sema::types::substituted_spelling(spelling, &names, &arguments);
         }
     }
