@@ -321,7 +321,10 @@ pub fn definitions_across_files(
     // * a type that **is** known and does not have the member is not that case: answering with another class's
     //   member of the same name would be a jump to a place the language does not name, which the handler's own
     //   rule ("a wrong location is worse than none") forbids.
-    if crate::sema::resolve::member_access_at(root, offset).is_some() {
+    // **Whether the cursor is on a member access**, decided once: the member question below asks it, and the name
+    // query needs the same fact for a different reason — see the `NotDeclaredHere` arm at the end.
+    let naming_a_member = crate::sema::resolve::member_access_at(root, offset).is_some();
+    if naming_a_member {
         match member_definitions_across_files(index, declaring, scopes, root, path, offset) {
             Known::Yes(found) => return Known::Yes(found),
             // The member question could not be asked (the object's type is unknown) **or** was answered with
@@ -362,7 +365,21 @@ pub fn definitions_across_files(
             // The single-file layer has already established the spelling, so the project layer is asked about
             // exactly that name rather than re-reading the cursor — and it answers with the list, which is the
             // whole point of this function.
-            return index.definitions(&name, path);
+            //
+            // **Which list depends on whether the cursor names a member**, and the two differ by a scope rule
+            // rather than by a preference. A member access whose object's type is unknown still wants the member
+            // (`std::cin.eof()` is the measured case: the base walk cannot open `basic_istream`, and `eof` is
+            // reachable only by name), so it asks for every scope. So does a cursor inside a definition written
+            // `void C::g() { … }`, whose body may name `C`'s members with no object and no qualifier at all —
+            // see [`inside_a_definition_written_with_a_qualifier`]. Everything else is an ordinary name lookup, and
+            // an ordinary name does not reach into a class: measured on a two-file project, go-to-definition on
+            // `printf` in a `.cpp` answered **three** declarations — a class's member, its out-of-class definition,
+            // and `stdio.h`'s `printf` — while the only one the file can name is the last.
+            return if naming_a_member || inside_a_definition_written_with_a_qualifier(root, offset) {
+                index.definitions(&name, path)
+            } else {
+                index.definitions_in_scope(&name, path)
+            };
         }
         Known::Unknown(reason) => return Known::Unknown(reason),
         Known::No => {}
@@ -371,6 +388,55 @@ pub fn definitions_across_files(
     // `No` from the single-file layer means the offset is not in a name the scopes could place at all — on
     // punctuation, or past the end — so there is nothing to look up anywhere.
     Known::Unknown(UnknownReason::UnparsableName)
+}
+
+/// **Is the cursor inside a definition written `void C::g() { … }`?** — the one place a bare name in a `.cpp` may
+/// denote a member that file does not declare.
+///
+/// A member function defined out of class has its class **in another file**, while the scope tree is built from the
+/// text of *this* one: `void C::g() { n = 1; }` opens a function scope whose qualifier names no scope here, so `n` is
+/// not in any scope the walk can reach and the project layer is asked instead. `n` may well be `C::n`, which is why
+/// the scope rule that drops class members from a bare name ([`ProjectIndex::definitions_in_scope`]) must not be
+/// applied inside such a body — it would take away the one answer a `.cpp` has.
+///
+/// # What it reads, and the direction it can be wrong in
+///
+/// The identifier immediately before the parameter list's `(`: `void C::g(…)` and `auto C::g(…) -> std::string`
+/// define a qualified name, while `std::string g(…)` returns a qualified type and defines an unqualified one. The
+/// window is bounded by the last whitespace before the `(`, which is what tells those two apart. Written as a
+/// spelling rather than a walk of the grammar's own shapes — the declarator of a definition holds only its
+/// parameter list, and the name it declares sits in the specifier sequence, which is the seam
+/// `sema::scopes::declarator_as` documents. A miss answers `false` and the scope rule applies; it cannot invent a
+/// member, because the query it enables is the one that was made before the rule existed.
+fn inside_a_definition_written_with_a_qualifier(
+    root: &cpp_parser::CppSyntaxNode,
+    offset: usize,
+) -> bool {
+    let mut node = cpp_parser::token_at(root, offset).and_then(|token| token.parent());
+
+    while let Some(current) = node {
+        let is_a_definition = cpp_parser::CppSyntaxKind::from(current.kind())
+            == cpp_parser::CppSyntaxKind::Declaration
+            && current.children().any(|child| {
+                cpp_parser::CppSyntaxKind::from(child.kind())
+                    == cpp_parser::CppSyntaxKind::CompoundStat
+            });
+        if is_a_definition {
+            let text = current.text().to_string();
+            let before_the_parameters = text.split('(').next().unwrap_or_default();
+            let name = before_the_parameters
+                .split_whitespace()
+                .next_back()
+                .unwrap_or_default();
+            if name.contains("::") {
+                return true;
+            }
+        }
+
+        node = current.parent();
+    }
+
+    false
 }
 
 /// The answer to a cross-file question about a macro name.
@@ -7267,6 +7333,94 @@ impl ProjectIndex {
         })
     }
 
+    /// **Every declaration a spelling can denote where it is written** — [`ProjectIndex::definitions`] narrowed by
+    /// the one rule the index cannot put in its key: **a bare name does not reach into a class**.
+    ///
+    /// # The defect this answers
+    ///
+    /// Measured on a two-file project — a header declaring `struct Name { void printf(int); };` and
+    /// `void Name::printf(int i) { … }`, and a `.cpp` that includes it and calls `printf("…")` — go-to-definition on
+    /// `printf` in the `.cpp` answered **three** declarations: the member's declaration, its out-of-class definition,
+    /// and `stdio.h`'s `printf`. The first two are a function the `.cpp` cannot name: `printf` written unqualified at
+    /// file scope denotes the one at file scope, and a member is denoted by a member access or by a qualified name.
+    ///
+    /// The index keys a fact by its **name** ([`DeclFact::name`]), so every `printf` in every included header is a
+    /// candidate; C++ keys it by the **scope it is written in**. This query is the second half of the key.
+    ///
+    /// # The rule, and the two directions it must not go
+    ///
+    /// * A fact whose [`DeclFact::scope`] is a **class** is dropped from a **bare** spelling's answer. A qualified
+    ///   spelling (`Name::printf`) keeps it — that is how a member is named from outside — and so does a caller that
+    ///   already knows it is looking at a member ([`ProjectIndex::definitions`], which this one is a filter over).
+    /// * A scope **nothing in the index declares as a class** keeps its members: `false` there means "I cannot
+    ///   tell", and a lookup that cannot tell must not become a lookup that says there is nothing.
+    ///
+    /// `Unknown(NotDeclaredHere)` when the scope rule leaves nothing, which is the same answer as a name that is not
+    /// declared here — and it is the honest one, because no declaration the caller can write reaches the name.
+    pub fn definitions_in_scope(&self, name: &str, visible_from: &Path) -> Known<ProjectDefinitions> {
+        // The reason is passed through as it stands: this method has nothing to add to `NotDeclaredHere`,
+        // `Ambiguous` or `ConditionalCompilation`, and re-asking the query to keep the value would run a visibility
+        // walk twice for an answer that is already in hand.
+        let mut found = match self.definitions(name, visible_from) {
+            Known::Yes(found) => found,
+            other => return other,
+        };
+
+        // A qualified spelling names the scope it writes, so the key is already as narrow as the language's.
+        if name.contains("::") {
+            return Known::Yes(found);
+        }
+
+        // **One lookup per distinct scope**, not per fact: an overload set is several facts in one scope, and a
+        // visibility walk per candidate would be paid once per overload rather than once per class.
+        let mut decided: Vec<(String, bool)> = Vec::new();
+        let mut kept = Vec::with_capacity(found.found.len());
+
+        for declaration in found.found {
+            let Some(scope) = declaration.fact.scope.clone() else {
+                // File scope: exactly where a bare name looks.
+                kept.push(declaration);
+                continue;
+            };
+
+            let a_class = match decided.iter().find(|(known, _)| *known == scope) {
+                Some((_, answer)) => *answer,
+                None => {
+                    let answer = self.scope_names_a_class(&scope, visible_from);
+                    decided.push((scope.clone(), answer));
+                    answer
+                }
+            };
+
+            if !a_class {
+                kept.push(declaration);
+            }
+        }
+
+        if kept.is_empty() {
+            return Known::Unknown(UnknownReason::NotDeclaredHere(Box::from(name)));
+        }
+
+        found.found = kept;
+        Known::Yes(found)
+    }
+
+    /// **Does the scope a qualified spelling names hold declarations as a class?** — the question
+    /// [`ProjectIndex::definitions_in_scope`] asks before it drops a member.
+    ///
+    /// The scope's own declaration is what answers it, and the comparison is on the **qualified** name rather than
+    /// on [`matches`]'s looser rule: `files_declaring("Name")` also answers a *nested* class called `Name` (its
+    /// fact's `name` is `Name` and its scope is `Outer`), and taking that for a class called `Name` would hide the
+    /// members of a namespace that happens to have a same-named class somewhere inside it.
+    fn scope_names_a_class(&self, scope: &str, visible_from: &Path) -> bool {
+        self.files_declaring(scope, visible_from)
+            .iter()
+            .any(|declaration| {
+                declaration.fact.kind == DeclKind::Type
+                    && declaration.fact.qualified_name() == scope
+            })
+    }
+
     /// **What kind of thing a name is, when every declaration the index holds for it agrees** — and
     /// [`UnknownReason::Ambiguous`] when they do not.
     ///
@@ -9287,6 +9441,70 @@ mod tests {
              two identical requests"
         );
         assert_eq!(found.found[1].file, Path::new("/p/two.h"));
+    }
+
+    /// **A bare name does not reach into a class** — the scope half of the key a name lookup needs.
+    ///
+    /// Reported from an editor: ctrl-click on `printf` in a `.cpp` that includes a header declaring
+    /// `struct Name { void printf(int); };` and `void Name::printf(int i)` offered a peek list of **three** — the
+    /// member's declaration, its out-of-class definition, and the global `printf` from the C library. The first two
+    /// are a function the `.cpp` cannot name without a `Name::` or an object, so following them lands on a
+    /// declaration that does not describe the call.
+    ///
+    /// The two directions are what make this a rule rather than a filter: the member's own definition still
+    /// answers its member (the cursor writes `Name::printf`), and the **unfiltered** query still holds all three —
+    /// that is the list a member access with an unknown object type asks for.
+    #[test]
+    fn a_bare_name_does_not_reach_a_class_member() {
+        let index = index(&[
+            (
+                "/p/name.h",
+                "struct Name {\n    void printf(int i);\n};\nvoid Name::printf(int i) { }\n",
+            ),
+            ("/p/stdio.h", "void printf(const char* format, ...);\n"),
+            (
+                "/p/main.cpp",
+                "#include \"name.h\"\n#include \"stdio.h\"\nvoid f() { printf(\"x\"); }\n",
+            ),
+        ]);
+
+        let found = index.definitions_in_scope("printf", Path::new("/p/main.cpp"));
+        let Known::Yes(found) = found else {
+            panic!("the file can name the global `printf`: {found:?}");
+        };
+        assert_eq!(
+            found.found.len(),
+            1,
+            "one declaration, the only one an unqualified `printf` can denote: {:?}",
+            found
+                .found
+                .iter()
+                .map(|definition| definition.file.display().to_string())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(found.found[0].file, Path::new("/p/stdio.h"));
+
+        // **The unfiltered list is what a member fallback wants**, and it is unchanged: all three declarations.
+        let Known::Yes(every) = index.definitions("printf", Path::new("/p/main.cpp")) else {
+            panic!("the index holds three declarations of the spelling");
+        };
+        assert_eq!(
+            every.found.len(),
+            3,
+            "a member access whose object's type is unknown still asks this one"
+        );
+
+        // **A qualified spelling keeps the member**, which is how one is named from outside the class.
+        let Known::Yes(qualified) =
+            index.definitions_in_scope("Name::printf", Path::new("/p/main.cpp"))
+        else {
+            panic!("a qualified name is a member's own question");
+        };
+        assert_eq!(
+            qualified.found.len(),
+            2,
+            "the member's declaration and its definition, both addressed through the qualifier: {qualified:?}"
+        );
     }
 
     #[test]
@@ -13082,8 +13300,18 @@ pub fn substituted_members(
     let Some(view) = read(&declared.file) else {
         return Known::Yes(list);
     };
+    // **The file's own text, because the fact's offset is the file's.** A fact is placed in the *file* when the
+    // rendering it was read from is mapped back (`FileSummary::map_into_the_file`), while `FileView::source` is the
+    // **rendering** — the same file with every `#include` inlined and every directive deleted, so its offsets are
+    // shifted by however much was deleted above this declaration. Read against the rendering, the template header
+    // was looked for at an offset that named something else, no parameter list was found, and nothing was
+    // substituted: measured on a fixture with one `#include` above the class, `Box<int>::push_back` answered
+    // `(const T& value)` — the spelling nobody can classify, which is the whole reason this function exists. With
+    // the directives removed the shift is *always* there, so the substitution was silently dead for every real
+    // header while the tests — whose fixtures are one file with no directives — passed.
+    let text = view.written_text().unwrap_or(&view.source);
     let names = crate::sema::deduction::template_parameters_before(
-        &view.source,
+        text,
         declared.fact.range.start_offset,
     );
     if names.is_empty() {
