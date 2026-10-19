@@ -250,7 +250,12 @@ pub fn classified_names(index: &ProjectIndex, view: &FileView) -> Vec<Name> {
         }
 
         let range = token.range;
-        let text = &view.source[range.start_offset..range.end_offset()];
+        // `get_token_text` rather than a slice: a token's range is **the text's** when the tree is the text's own,
+        // and this pass is also run against a rendering whose ranges need not fit it — where a slice panics and the
+        // accessor answers `None`.
+        let Some(text) = view.get_token_text(range) else {
+            continue;
+        };
         let at = range.start_offset;
 
         // 1. The declaration's own name. One hash lookup, and it is asked of every identifier in the file.
