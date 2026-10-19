@@ -289,8 +289,50 @@ fn a_files_environment_carries_the_state_of_the_unit_it_is_read_in() {
     );
 }
 
-/// **A definition is in force from the `#include` that brought it in**, and the timeline's offsets say so.
+/// **A file is found in its timeline however its path is spelled** — the defect that made a header uncookable.
 ///
+/// One file reaches these layers in two spellings: a directory scan hands the caller's (`C:\…\LSP.h`), an `#include`
+/// that resolved hands the normalized one (`c:/…/lsp.h`), and the timeline cache is keyed by the normalized form — so
+/// one unit can be written under one spelling and read back under the other. The frames were keyed raw, so
+/// `environment_of` answered `None` for the file the unit was **built for**.
+///
+/// What that cost is not a missing hover: `render_a_cooked` declines on `environment_of(path)?`, the cook slice drops
+/// the file instead of cooking it, and `want_the_closure_cooked` asks for it again on the next idle drain — for ever.
+/// Measured on `EmmyLuaCodeStyle`: **9 987** `did not render` lines for one header in twenty seconds, with the index
+/// queue and the cook queue both empty (see `docs/cold-start-cpu.md`).
+#[test]
+fn a_file_is_found_in_its_timeline_however_its_path_is_spelled() {
+    let files = [
+        ("/p/api.h", "int inside;\n"),
+        ("/p/main.cpp", "#include \"api.h\"\n"),
+    ];
+    let unit = Unit::new(&files);
+    let mut definitions = MacroDefinitions::default();
+    let timeline = unit.timeline_of("/p/main.cpp", &mut definitions);
+
+    assert!(
+        timeline.environment_of(Path::new("/p/main.cpp")).is_some(),
+        "the root is in its own timeline"
+    );
+    assert!(
+        timeline.environment_of(Path::new("/p/api.h")).is_some(),
+        "and so is the file it includes"
+    );
+
+    // **The same two files, spelled the way a directory scan and a cache entry spell them**: case and separators
+    // differ, which is one file on this platform.
+    #[cfg(windows)]
+    for spelled_differently in ["\\p\\MAIN.CPP", "/P/Api.h"] {
+        assert!(
+            timeline
+                .environment_of(Path::new(spelled_differently))
+                .is_some(),
+            "`{spelled_differently}` names a file this unit entered, so it must answer"
+        );
+    }
+}
+
+/// **A definition is in force from the `#include` that brought it in**, and the timeline's offsets say so.///
 /// This is the property that makes the environment *positional*, and the one a careless timeline loses: if every
 /// inherited definition is simply put at offset 0 — or worse, if the file's own offsets are used for a file that
 /// wrote them somewhere else — a name becomes a macro before the line that defines it, and rules that read shape

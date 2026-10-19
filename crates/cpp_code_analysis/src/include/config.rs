@@ -906,23 +906,43 @@ fn array_field(object: &str, name: &str) -> Option<Vec<String>> {
 /// Handles the quoting a build system uses: single and double quotes, and backslash escapes. Not a shell
 /// — no expansion, no pipes — because a compile command is a program with arguments, and anything more
 /// would be reading a language this is not trying to implement.
+///
+/// # A backslash is a separator before it is an escape
+///
+/// The rule is **"a backslash escapes only whitespace and a quote"**, and it is one rule rather than two because
+/// the same function reads the database on every platform: `\` is the path separator on Windows and the escape
+/// character in a POSIX shell, and a reader that treats it as POSIX does everywhere deletes the character after
+/// every separator. Measured on a CMake + MinGW project's `compile_commands.json` (a real one, `docs/status.md`
+/// §十三): the compiler arrived as **`C:UserszcDesktopmingwmingw64binc++.exe`**, discovery could not ask that
+/// program anything, and the session fell back to the machine's other toolchain — MSVC's headers, MSVC's dialect —
+/// for a project built with GCC. Every `#include <print>` in it then resolved to the wrong library or to nothing,
+/// which is what "the editor does not understand this project" looks like from the outside.
+///
+/// So a backslash before a letter, a digit or another backslash is **kept**: `C:\Users\zc` is a path, `-I a\ b` is
+/// an escaped space, `"a \"quoted\" b"` is a quoted run with two quotation marks in it. `\\server\share` keeps both
+/// of its leading separators, which the POSIX rule would have collapsed — the one place this is deliberately wider
+/// than a shell, because a UNC path is a real spelling and `\\` after an escape is not.
 pub fn split_command_line(command: &str) -> Vec<String> {
     let mut arguments = Vec::new();
     let mut current = String::new();
     let mut has_current = false;
     let mut quote: Option<char> = None;
-    let mut escaped = false;
+    let mut characters = command.chars().peekable();
 
-    for character in command.chars() {
-        if escaped {
-            current.push(character);
-            has_current = true;
-            escaped = false;
-            continue;
-        }
-
+    while let Some(character) = characters.next() {
         match character {
-            '\\' if quote != Some('\'') => escaped = true,
+            // Before a quote or a space a backslash is an escape; anywhere else it is a path separator.
+            '\\' if quote != Some('\'') => {
+                let escapes = characters
+                    .peek()
+                    .is_some_and(|next| next.is_whitespace() || *next == '"' || *next == '\'');
+                if escapes {
+                    current.push(characters.next().expect("peeked"));
+                } else {
+                    current.push('\\');
+                }
+                has_current = true;
+            }
             '"' | '\'' if quote.is_none() => {
                 quote = Some(character);
                 // A quote opens an argument even if it is empty: `"" ` is one empty argument.

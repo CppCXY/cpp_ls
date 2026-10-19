@@ -399,10 +399,18 @@ impl<'a, F: FileProvider> ModuleScanner<'a, F> {
     /// Nothing else is tried. A full project scan would find modules with unconventional names, and it is
     /// the wrong trade for a per-keystroke analysis: the cost is proportional to the project on every lookup,
     /// and the case it fixes is one a build system has already solved by knowing where its own sources are.
+    ///
+    /// # `directory` is a **directory**
+    ///
+    /// The importing file's own directory, which is what [`candidate_paths`](Self::candidate_paths) joins a name
+    /// onto. A caller that passes the importing *file* gets `<dir>/main.cpp/math.cppm` for every candidate, no
+    /// filesystem has that path, and the answer is `UnknownModule` — a silence, not an error. That is what
+    /// `Session::module_interface_units_of` did (`docs/status.md` §十三), and it is why this parameter is named for
+    /// what it holds rather than for where it came from.
     pub fn resolve_module(
         &mut self,
         name: &str,
-        including: &Path,
+        directory: &Path,
         interner: &mut PathInterner,
     ) -> ImportOutcome {
         if let Some(entry) = self
@@ -413,7 +421,7 @@ impl<'a, F: FileProvider> ModuleScanner<'a, F> {
             return ImportOutcome::Resolved(entry.file);
         }
 
-        for candidate in self.candidate_paths(name, including) {
+        for candidate in self.candidate_paths(name, directory) {
             let Some(source) = self.files.read(&candidate) else {
                 continue;
             };
@@ -454,7 +462,7 @@ impl<'a, F: FileProvider> ModuleScanner<'a, F> {
         &mut self,
         module: Option<&str>,
         partition: &str,
-        including: &Path,
+        directory: &Path,
         interner: &mut PathInterner,
     ) -> ImportOutcome {
         let Some(module) = module else {
@@ -472,7 +480,7 @@ impl<'a, F: FileProvider> ModuleScanner<'a, F> {
         // The partition's file may exist and not have been read yet: `m:part` is named after the module, so
         // the same convention applies with the partition appended.
         let qualified = format!("{module}:{partition}");
-        for candidate in self.candidate_paths(&qualified, including) {
+        for candidate in self.candidate_paths(&qualified, directory) {
             let Some(source) = self.files.read(&candidate) else {
                 continue;
             };
@@ -512,7 +520,7 @@ impl<'a, F: FileProvider> ModuleScanner<'a, F> {
         &mut self,
         name: &str,
         is_angle: bool,
-        including: &Path,
+        directory: &Path,
         interner: &mut PathInterner,
     ) -> ImportOutcome {
         let include = crate::directive::Include {
@@ -526,7 +534,7 @@ impl<'a, F: FileProvider> ModuleScanner<'a, F> {
         };
 
         let resolver = IncludeResolver::new(self.files, self.config);
-        let outcome = resolver.resolve(&include, including, None, interner);
+        let outcome = resolver.resolve(&include, directory, None, interner);
 
         match outcome {
             Resolution::Resolved(resolved) => ImportOutcome::Resolved(resolved.file),

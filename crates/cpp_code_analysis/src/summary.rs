@@ -33,6 +33,15 @@ use crate::guard::{Branch, Region, Visibility};
 use crate::index::environment::a_guard_is_in_force;
 use crate::macros::MacroDef;
 
+/// The key [`TranslationUnit::entered`] compares by, and the answer to "is this the same file spelled twice".
+///
+/// A path reaches these layers in the spelling whoever named it used: a directory scan keeps the caller's
+/// (`C:\Users\…`), an `#include` that resolved through [`crate::IncludeResolver`] is normalized (`c:/users/…`), and a
+/// cache entry is found by the normalized form either way. Comparing raw spellings made the same file two files.
+fn frame_key(path: &std::path::Path) -> String {
+    crate::paths::normalize_path(path, cfg!(windows))
+}
+
 /// A declaration the file writes: enough to find it, name it, and say what kind of thing it is.
 ///
 /// Deliberately not a syntax tree and not a type: the fields are the ones a *query* needs — where to jump, what to
@@ -1428,7 +1437,15 @@ pub struct TranslationUnit {
     pub(crate) paths: Vec<Vec<(u32, usize)>>,
     /// The frame a file was entered as, the **first** time the walk reached it. A file included twice is walked
     /// once (see `walk_one_file`), so a second entry has no frame of its own.
-    entered: std::collections::HashMap<std::path::PathBuf, u32>,
+    ///
+    /// **Keyed by the normalized spelling**, because the same file reaches a walk in more than one: a project file is
+    /// listed by a directory scan as `C:\Users\…\LSP.h` and included by its neighbours as `c:/users/…/lsp.h`, and a
+    /// cache entry is keyed by the normalized form — so one unit can be written under one spelling and read back
+    /// under the other. Keyed raw, [`TranslationUnit::environment_of`] answered `None` for the file the unit was
+    /// **built for**, which is a header that can never be cooked: `render_a_cooked` declines, the cook slice drops
+    /// it, and `want_the_closure_cooked` asks for it again on the next idle drain, for ever (see the cook loop in
+    /// `docs/cold-start-cpu.md`).
+    entered: std::collections::HashMap<String, u32>,
     /// The same two counters [`ClosureEvidence`] reports, for the same reason: they say whether the corpus was
     /// conditional at all and whether the environment could answer.
     pub conditional_facts: usize,
@@ -1503,7 +1520,7 @@ pub(crate) struct TuFrame {
 struct TimelineBuilder {
     events: Vec<TuEvent>,
     frames: Vec<TuFrame>,
-    entered: std::collections::HashMap<std::path::PathBuf, u32>,
+    entered: std::collections::HashMap<String, u32>,
 }
 
 impl TimelineBuilder {
@@ -1525,7 +1542,7 @@ impl TimelineBuilder {
             // Closed by `leave`; a frame that is never left is the last one, and its subtree runs to the end.
             tout: u32::MAX,
         });
-        self.entered.entry(file.to_path_buf()).or_insert(id);
+        self.entered.entry(frame_key(file)).or_insert(id);
         id
     }
 
@@ -1626,10 +1643,9 @@ impl TranslationUnit {
         conditional_facts: usize,
         facts_in_force: usize,
     ) -> Self {
-        let mut entered: std::collections::HashMap<std::path::PathBuf, u32> =
-            std::collections::HashMap::new();
+        let mut entered: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
         for (index, frame) in frames.iter().enumerate() {
-            entered.entry(frame.file.clone()).or_insert(index as u32);
+            entered.entry(frame_key(&frame.file)).or_insert(index as u32);
         }
 
         let mut by_name: std::collections::HashMap<std::sync::Arc<str>, Vec<u32>> =
@@ -1823,7 +1839,7 @@ impl TranslationUnit {
     /// `None` is the honest answer for a file nothing includes: nothing in this translation unit says what it
     /// sees, and inventing a context for it is what the earlier per-file census did with a heuristic.
     pub fn environment_of(&self, path: &std::path::Path) -> Option<MacroView<'_>> {
-        let &frame = self.entered.get(path)?;
+        let &frame = self.entered.get(&frame_key(path))?;
         Some(self.environment_at(frame))
     }
 
@@ -2214,12 +2230,9 @@ impl TranslationUnit {
         // a header from an `#include <...>` spelling hands over forward slashes and whatever case it typed, while the
         // walk recorded the path the filesystem gave it. Comparing raw paths made every question about a system header
         // answer "this session's walk never reaches that file" — the one answer that is not a reading of anything.
-        let wanted = crate::file::paths::normalize_path(file, true);
-        let frame = self
-            .entered
-            .iter()
-            .find(|(held, _)| crate::file::paths::normalize_path(held, true) == wanted)
-            .map(|(_, frame)| *frame)?;
+        // [`TranslationUnit::entered`] is keyed by the normalized spelling now, so this is a lookup rather than the
+        // scan it used to be (the scan was written when the field was keyed raw).
+        let frame = *self.entered.get(&frame_key(file))?;
         let view = self.environment_at(frame);
 
         // **A file this walk recorded facts for at all**, which is not the same as "a file it entered".
@@ -3625,7 +3638,7 @@ fn splice_a_contribution<'a>(
     let (built, events) =
         crate::index::walk_cache::rebased(&contribution, frame, event_base, parent, from_in_parent);
     let file = built.file.clone();
-    timeline.entered.entry(file.clone()).or_insert(frame);
+    timeline.entered.entry(frame_key(&file)).or_insert(frame);
     timeline.frames.push(built);
     timeline.events.extend(events);
 

@@ -4078,9 +4078,22 @@ impl<F: FileProvider + Clone> Session<F> {
         let mut interner = PathInterner::new(self.files.is_case_insensitive());
         let mut scanner = ModuleScanner::new(&self.files, &self.config);
 
+        // **The directory, not the file.** `ModuleScanner::resolve_module`'s naming convention looks for a module
+        // "beside the importing file", which it does by joining the name onto the directory it is given — and this
+        // call passed the importing *file*, so every candidate became `<dir>/main.cpp/math.cppm`, which is not a
+        // path any filesystem has. The result was not an error but a silence: `read_the_modules_a_file_imports`
+        // answered **0** for every file, `imports_a_module_that_is_not_read` stayed true for ever, and a request in
+        // a module file therefore took the session's write lock on **every keystroke** to discover that there was
+        // nothing to read. Measured on a C++23 modules project (`docs/status.md` §十三): `import math;` from
+        // `src/main.cpp` with `src/math.cppm` beside it, reported as "no file in this project declares module
+        // `math`". The other two callers of this resolution (`scan_imports`, `module_reading`) already pass a
+        // directory, which is why the standard-module tests passed: their module is found through an include path's
+        // sibling `modules/` directory, and the broken first entry was never the one that answered.
+        let directory = crate::paths::parent_normalized(importing, self.files.is_case_insensitive());
+
         for module in wanted {
             if let ImportOutcome::Resolved(unit) =
-                scanner.resolve_module(module, importing, &mut interner)
+                scanner.resolve_module(module, &directory, &mut interner)
                 && let Some(entry) = scanner.units().iter().find(|entry| entry.file == unit)
             {
                 found.push(entry.path.clone());

@@ -1192,8 +1192,69 @@ fn a_module_whose_interface_unit_is_outside_the_project_is_read_in() {
     let _ = DiskFiles;
 }
 
-/// **The name a reader types after `import std;`** — the completion, which is the answer this whole path exists for.
+/// **A module beside the file that imports it** — the ordinary project layout, and the one the request path missed.
 ///
+/// The two tests above put the interface unit in `lib/modules/`, which is where a *standard* module lives and which
+/// the search finds through an include path's sibling `modules/` directory. A project's own modules are beside the
+/// file that imports them — `src/main.cpp` says `import math;`, `src/math.cppm` declares it — and that path is found
+/// by joining the name onto **the importing file's directory**.
+///
+/// `Session::module_interface_units_of` passed the importing **file**, so every candidate was
+/// `src/main.cpp/math.cppm`: no filesystem has that path, the resolution answered "no file declares `math`", and
+/// `read_the_modules_a_file_imports` reported **0** while `imports_a_module_that_is_not_read` stayed true for ever —
+/// which made every request in a module file take the session's write lock to discover that there was nothing to
+/// read. The fixture has no include paths at all, which is what makes it the one that catches this: with an include
+/// path present the sibling `modules/` directory is searched too and the broken first entry is never the one that
+/// answers.
+#[test]
+fn a_module_beside_the_importing_file_is_read_in() {
+    use cpp_code_analysis::{DiskFiles, Known, OpenDocuments, Session, SessionFiles, WatchFilter};
+
+    let files = MemoryFiles::new()
+        .with_file(
+            "src/math.cppm",
+            "export module math;\nexport int add(int lhs, int rhs);\n",
+        )
+        .with_file(
+            "src/impl.cpp",
+            "module math;\nint add(int lhs, int rhs) { return lhs + rhs; }\n",
+        )
+        .with_file("src/main.cpp", "import math;\nint x = add(1, 2);\n");
+
+    let providers = SessionFiles::new(OpenDocuments::new(), files);
+    let mut session = Session::with_config(".", providers, WatchFilter::new("."), CompilerConfig::new());
+    session.add_project_files([std::path::PathBuf::from("src/main.cpp")]);
+    session.index_everything();
+
+    assert!(
+        session.imports_a_module_that_is_not_read(Path::new("src/main.cpp")),
+        "the module is not in the index yet — the state a request finds when it arrives first"
+    );
+    assert_eq!(
+        session.read_the_modules_a_file_imports(Path::new("src/main.cpp")),
+        1,
+        "the interface unit beside the importing file is read in"
+    );
+    assert_eq!(
+        session.index().interface_unit_of("math"),
+        Some("src/math.cppm"),
+        "and the index now knows where `import math;` goes"
+    );
+    assert!(
+        !session.imports_a_module_that_is_not_read(Path::new("src/main.cpp")),
+        "so the next request does not take the write lock to ask again"
+    );
+    let found = session
+        .index()
+        .definitions("add", Path::new("src/main.cpp"));
+    assert!(
+        matches!(found, Known::Yes(_)),
+        "and the name the module exports is now in the index: {found:?}"
+    );
+
+    let _ = (DiskFiles, OpenDocuments::new());
+}
+
 /// The test above stops at the query layer, where a name is a name. This one is the thing a user sees: a cursor after
 /// `std::` in a file whose only import is the standard module, and the list that comes back. Both halves have to be
 /// right and they are different halves — the module read is what puts the standard library's headers in the index,

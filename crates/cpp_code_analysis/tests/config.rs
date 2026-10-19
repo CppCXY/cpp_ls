@@ -206,6 +206,41 @@ fn a_backslash_escapes_the_next_character() {
     assert_eq!(split_command_line("c++ -I a\\ b"), vec!["c++", "-I", "a b"]);
 }
 
+/// **A Windows path keeps its separators** — the defect that made a CMake+MinGW project be analysed by MSVC.
+///
+/// A compile database on Windows spells every path with `\`, and the splitter treated each one as the POSIX escape
+/// character: the compiler arrived as `C:UserszcDesktopmingwmingw64binc++.exe`, discovery could not run it, and the
+/// session fell back to the machine's other toolchain — MSVC's headers and MSVC's dialect for a GCC build, which is
+/// every `#include <print>` resolving to the wrong library or to nothing (`docs/status.md` §十三).
+#[test]
+fn a_windows_path_keeps_its_separators() {
+    assert_eq!(
+        split_command_line(
+            r#"C:\Users\zc\Desktop\mingw\mingw64\bin\c++.exe -std=c++23 -o CMakeFiles\demo.dir\src\main.cpp.obj -c C:\Users\zc\Desktop\p\src\main.cpp"#
+        ),
+        vec![
+            r#"C:\Users\zc\Desktop\mingw\mingw64\bin\c++.exe"#,
+            "-std=c++23",
+            "-o",
+            r#"CMakeFiles\demo.dir\src\main.cpp.obj"#,
+            "-c",
+            r#"C:\Users\zc\Desktop\p\src\main.cpp"#,
+        ]
+    );
+
+    // A quoted path with a space, and a UNC share: the two spellings a naive "strip every backslash" gets wrong.
+    assert_eq!(
+        split_command_line(r#""C:\Program Files\mingw\c++.exe" -I \\server\share\inc"#),
+        vec![r#"C:\Program Files\mingw\c++.exe"#, "-I", r#"\\server\share\inc"#]
+    );
+
+    // And the escapes a command line really does use still work: a quote inside a quoted run, and an escaped space.
+    assert_eq!(
+        split_command_line(r#"-DMSG="say \"hi\"" -I a\ b"#),
+        vec![r#"-DMSG=say "hi""#, "-I", "a b"]
+    );
+}
+
 /// Runs of whitespace collapse, and leading and trailing ones produce nothing.
 #[test]
 fn extra_whitespace_produces_no_empty_arguments() {
