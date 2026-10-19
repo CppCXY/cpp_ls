@@ -957,6 +957,61 @@ So the next lever is not the index and not the drain: it is **reading the summar
 one by one) and, behind it, the 47 files that are rebuilt on every start because they `#include` something that does
 not resolve and a summary that records a failed search cannot be stored.
 
+### Round two: the lever was not the decode either — it was the verification beside it
+
+The stage timers (`CPPLS_TRACE_COOKING=1`, printed per wave by `SummaryStore::prepare_closure`) split a prepared file
+into text / decode / verify / build:
+
+```text
+prepare: 8 file(s) in 15 ms | text 4 ms, decode 1 ms, verify 41 ms, build+encode 0 ms (summed over workers)
+```
+
+**One millisecond of decode and forty of verification**, per wave. The verification is
+`resolution_still_holds`: for every `#include` of every stored summary it re-runs the include search, because a
+summary records *where* an include resolved and nothing in its key would notice a header appearing earlier on the
+path. On 1714 summaries that is ~20 000 searches, each walking the include paths with a filesystem probe per
+candidate — 8 s of a 13 s warm start, against 0.4 s for decoding the same entries.
+
+`SummaryStore::where_it_resolves_now` remembers the answer, keyed by the **question** rather than by the file:
+`(form, is_next, spelling, directory)`. An angled include does not depend on the including directory, so its key is
+the spelling alone — `#include <vector>` asked by four hundred headers is one search. A quoted one depends on the
+directory, which is why the directory is in its key: `#include "x.h"` from `/p/a` and from `/p/b` are two questions
+with two answers, and a memo keyed on the spelling alone would refuse the second one and rebuild it on every start
+(`a_quoted_include_is_verified_in_the_directory_it_is_asked_from`).
+
+It is sound because the answer is a function of the question and not of the asking file: the store is built once per
+session, and its index already answers from summaries read at one moment, so remembering the searches of that moment
+cannot be less current than what is already in memory.
+
+```text
+                      round 1     round 2
+  warm start          11.6 s       9.1 s
+  prepare_a_wave       7.8 s       4.3 s
+```
+
+### What is left after round two
+
+```text
+warm start 9.1 s
+  prepare_a_wave  4.3 s   1714 summaries: text + 0.4 s decode + ~1 s verify + the timelines
+  cook            2.1 s   44 files
+  drain prepare   1.9 s   12 calls of four files
+  commit          0.9 s   the inserts
+  open            0.2 s
+```
+
+Two things are known and neither is measured to the bottom yet:
+
+* **the 47 files rebuilt on every start.** They `#include` something that does not resolve, and a summary recording a
+  failed search cannot be stored — so each start pays their parse and the second pass that follows it.
+* **a file that cannot be rendered is asked for again for ever.** Found while writing round two's probe: a header
+  whose timeline does not cover it makes `render_a_cooked` decline (`unit.environment_of(path)?` → `None`), the cook
+  slice drops it, and `want_the_closure_cooked` asks for it on the next idle drain. Measured: **9 987**
+  `did not render` lines for one header in twenty seconds, with `pending 0 / cooking 0` the whole time. The server's
+  pump does the same thing once per idle round; the probe had to be given a *progress* guard (like
+  `Session::index_everything` has) to finish at all. The next investigation is why a unit's `environment_of` does not
+  cover the file it was built for.
+
 ### Reproducing it
 
 ```bash
@@ -966,7 +1021,7 @@ cargo run --release -p cpp_code_analysis --example startup_probe -- <root> <a re
 # the same index through the other entry point, which is the number docs/status.md §八 quotes
 cargo run --release -p cpp_code_analysis --example checks_probe -- <root> <file> --index-only
 
-# the shape of one drain call, per call
+# the shape of one drain call, and the text/decode/verify/build split of a wave
 CPPLS_TRACE_COOKING=1 cargo run --release ... --example startup_probe -- <root> <file>
 ```
 

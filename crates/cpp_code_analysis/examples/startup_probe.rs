@@ -118,6 +118,7 @@ fn main() {
         let step = Instant::now();
         let (steps, drain) = session.commit_a_wave(prepared, wave);
         commit += step.elapsed();
+        let indexed_this_round = steps.len();
         for done in &steps {
             match done.outcome {
                 cpp_code_analysis::StepOutcome::Reused => reused += 1,
@@ -138,12 +139,12 @@ fn main() {
         }
 
         let step = Instant::now();
-        drain_files += session.commit_the_drain(drain);
+        let committed = session.commit_the_drain(drain);
+        drain_files += committed;
         drain_commit += step.elapsed();
 
         // **One cooking slice**, the same four calls the pump makes.
         let claimed = session.claim_cooking(COOK);
-        let claimed_count = claimed.len();
         let step = Instant::now();
         let materials = session.materials_for(claimed);
         materials_time += step.elapsed();
@@ -153,12 +154,21 @@ fn main() {
         render += step.elapsed();
 
         let step = Instant::now();
-        cooked_files += session.commit_them(rendered).len();
+        let cooked_this_round = session.commit_them(rendered).len();
+        cooked_files += cooked_this_round;
         commit_cooked += step.elapsed();
 
         waves += 1;
 
-        if prepared_count == 0 && claimed_count == 0 && session.pending_work() == 0 {
+        // **Progress, not a queue count.** A file that cannot be rendered is dropped by the cooking slice (claimed,
+        // `render_them` declines, nothing committed) and `want_the_closure_cooked` asks for it again on the next idle
+        // drain — so a loop that watches `pending_work()` never ends. Measured on this project: **9 987**
+        // `did not render` lines for one header in twenty seconds, with `pending 0, cooking 0` the whole time.
+        // `Session::index_everything` guards the same way, and for the same reason. A claimed file that committed
+        // nothing is **not** progress, which is why the claim is not in this test.
+        let progressed =
+            prepared_count > 0 || indexed_this_round > 0 || committed > 0 || cooked_this_round > 0;
+        if !progressed {
             break;
         }
         if last_report.elapsed() > Duration::from_secs(10) {

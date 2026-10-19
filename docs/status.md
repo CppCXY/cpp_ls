@@ -390,9 +390,10 @@ crates/cpp_ls/tests/latency.rs      1 条失败：稳态补全偶发 1.4 s（预
        验收必须用真实 `.cpp`（夹具里类定义和函数定义在同一个文件，走的是另一条路）
        ⑮ **pull 的 drain 要有上界**（§四）—— `advance(N)` 取代 `index_everything`，
        N > 一条普通 include 链；这是「补全很慢」的真正原因
-       **启动时间**（`docs/cold-start-cpu.md` 最后一节，已从 46.6 s 降到 11.6 s）：下一个杠杆是
-       读 summary 缓存本身（warm 的 7.8 s 里 1714 条 / 65 MB 是逐条解码），其次是每次启动都要
-       重建的那 47 个文件（它们 include 了找不到的头，而"记录了一次失败搜索"的 summary 不能落盘）
+       **启动时间**（`docs/cold-start-cpu.md` 最后两节，已从 46.6 s 降到 9.1 s）：下一个杠杆是
+       每次启动都要重建的那 47 个文件（它们 include 了找不到的头，而"记录了一次失败搜索"的 summary
+       不能落盘），以及"一个文件永远渲染不出来却被每一轮 idle drain 重新排队"那个循环
+       （实测 20 秒内 9 987 次 `did not render`，`pending 0 / cooking 0`）
        ⑫ `this->` 的成员查询经索引解析外层类（复现已在 tests/completion.rs 里）
        ① argument-count 的跨文件查找 ② param-type-check 的**跨文件自由函数**与**具名形参**
        ② 的兄弟：`symbol_references` 里"某条**使用**属于哪个实体"仍是词法的（§十二 ⑰）——

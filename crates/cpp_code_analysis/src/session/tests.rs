@@ -1183,6 +1183,59 @@
         );
     }
 
+    /// **A quoted include is verified in the directory it is asked from** — the risk a remembered search carries.
+    ///
+    /// `SummaryStore::where_it_resolves_now` keeps one answer per **question**, and for an angled include the question
+    /// is the spelling alone. A quoted one is not: `#include "x.h"` from `/p/a` and from `/p/b` resolve to two
+    /// different files, so a memo keyed on the spelling would answer the second directory with the first's answer,
+    /// the stored summary would stop "holding", and every start would rebuild it — a cache that silently stops
+    /// working. This pins the direction that matters: both summaries are reused.
+    #[test]
+    fn a_quoted_include_is_verified_in_the_directory_it_is_asked_from() {
+        let files = MemoryFiles::new()
+            .with_file("/p/a/x.h", "int from_a;\n")
+            .with_file("/p/b/x.h", "int from_b;\n")
+            .with_file("/p/a/one.cpp", "#include \"x.h\"\n")
+            .with_file("/p/b/two.cpp", "#include \"x.h\"\n");
+        let fixture = Memory::new("a-quoted-include-is-per-directory", &files);
+        let roots = [
+            PathBuf::from("/p/a/one.cpp"),
+            PathBuf::from("/p/b/two.cpp"),
+        ];
+
+        // The first session builds the four summaries and writes them down.
+        let mut first = fixture.session();
+        first.add_project_files(roots.iter().cloned());
+        first.index_everything();
+        assert!(
+            first.stats().rebuilt >= 2,
+            "the fixture starts cold: {:?}",
+            first.stats()
+        );
+
+        // The second answers every one of them from disk, which is only true when each verification accepted the
+        // resolution its own directory recorded.
+        let mut second = fixture.session();
+        second.add_project_files(roots.iter().cloned());
+        let steps = second.advance(16);
+        let outcomes: Vec<String> = steps
+            .iter()
+            .map(|step| {
+                format!(
+                    "{}: {:?}",
+                    step.path.file_name().unwrap_or_default().to_string_lossy(),
+                    step.outcome
+                )
+            })
+            .collect();
+        assert!(
+            steps
+                .iter()
+                .all(|step| step.outcome == StepOutcome::Reused),
+            "nothing may be rebuilt from a cache that holds every one of these files: {outcomes:?}"
+        );
+    }
+
     /// **An `#include` added to a header that defines nothing is still a change to its includers' environment.**
     #[test]
     fn an_include_added_to_a_header_invalidates_the_readings_that_include_it() {

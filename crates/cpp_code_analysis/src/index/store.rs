@@ -66,6 +66,7 @@ use crate::include::config::CompilerConfig;
 use crate::index::project::ProjectIndex;
 use crate::index::{FileIndexer, read_summary, write_summary};
 use crate::summary::{FileSummary, IncludeFact};
+use crate::IncludeForm;
 
 /// A project's summaries on disk and in memory, and the rule for when each is rebuilt.
 ///
@@ -111,6 +112,14 @@ pub struct SummaryStore<F: FileProvider = DiskFiles> {
     /// every summary built after it — [`SummaryStore::prepare_telling`] consults this map — so the record is made
     /// where it was always made, at the start of the pass, and the lock is what makes that legal from `&self`.
     dead_macros: std::sync::Mutex<std::collections::HashMap<PathBuf, Vec<usize>>>,
+    /// **One entry per distinct include search**, for the life of the store — see
+    /// [`SummaryStore::resolution_still_holds`].
+    ///
+    /// The key is the question, not the file: `(form, is_next, spelling, directory)`. A quoted include is relative to
+    /// the including file's directory and so keeps that in the key; an angled one is not, and gives the key an empty
+    /// directory, because `<vector>` asked from four hundred headers is one search.
+    include_searches:
+        std::sync::Mutex<std::collections::HashMap<(IncludeForm, bool, Box<str>, PathBuf), Option<PathBuf>>>,
 }
 
 /// **The second pass, planned but not applied** — what [`SummaryStore::prepare_the_re_read`] worked out.
@@ -132,6 +141,53 @@ impl ReRead {
 
 /// More threads than this stop paying: the parse is memory-bound long before it is core-bound.
 const PARALLEL_WORKERS: usize = 8;
+
+/// **The four stages of one prepared file**, accumulated only while `CPPLS_TRACE_COOKING` is on.
+///
+/// A warm start's cost is spread over eight workers and three different things — reading the text, decoding a stored
+/// summary, and re-running the include search to see that the stored answer still holds — so a wall clock says
+/// nothing about which one to work on. These are read as a delta around one [`SummaryStore::prepare_closure`], which
+/// is one wave, and printed as one line.
+///
+/// `build` is the whole call for a file that was parsed (read, index, encode, write), because on that path there is
+/// nothing to separate: the parse is what is being paid for.
+static PREPARED: [std::sync::atomic::AtomicU64; 5] = [
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+];
+
+/// Count one prepared file's stages — `(files, read, decode, verify, build)`, in nanoseconds.
+fn note_a_prepared_file(
+    read: std::time::Duration,
+    decode: std::time::Duration,
+    verify: std::time::Duration,
+    build: std::time::Duration,
+) {
+    use std::sync::atomic::Ordering::Relaxed;
+
+    let nanos = |duration: std::time::Duration| duration.as_nanos().min(u128::from(u64::MAX)) as u64;
+    PREPARED[0].fetch_add(1, Relaxed);
+    PREPARED[1].fetch_add(nanos(read), Relaxed);
+    PREPARED[2].fetch_add(nanos(decode), Relaxed);
+    PREPARED[3].fetch_add(nanos(verify), Relaxed);
+    PREPARED[4].fetch_add(nanos(build), Relaxed);
+}
+
+/// [`note_a_prepared_file`]'s counters, as they stand — the delta between two reads is one wave's work.
+fn prepared_stages() -> [u64; 5] {
+    use std::sync::atomic::Ordering::Relaxed;
+
+    [
+        PREPARED[0].load(Relaxed),
+        PREPARED[1].load(Relaxed),
+        PREPARED[2].load(Relaxed),
+        PREPARED[3].load(Relaxed),
+        PREPARED[4].load(Relaxed),
+    ]
+}
 
 /// The stack of an indexing worker. Larger than the default because the parser recurses on nesting depth and a
 /// worker must not be the place a deeply nested header first overflows.
@@ -375,6 +431,7 @@ impl<F: FileProvider> SummaryStore<F> {
             stats: StoreStats::default(),
             revision: std::sync::atomic::AtomicU64::new(0),
             dead_macros: std::sync::Mutex::new(std::collections::HashMap::new()),
+            include_searches: std::sync::Mutex::new(std::collections::HashMap::new()),
         }
     }
 
@@ -525,25 +582,42 @@ impl<F: FileProvider> SummaryStore<F> {
         mut includes: Option<&mut dyn FnMut(&[PathBuf])>,
         environment: Option<(&dyn cpp_parser::MacroBodies, &dyn cpp_parser::MacroFacts)>,
     ) -> Prepared {
+        let tracing = crate::probes::cooking();
+        let entered = std::time::Instant::now();
         let Some(source) = ({ self.files.read(path) }) else {
             return Prepared(PreparedOutcome::Unreadable);
         };
+        let read = entered.elapsed();
         let key = { SummaryKey::new(content_hash(&source), self.context_hash(path)) };
 
         {
-            if let Ok(stored) = read_summary(&key.path_under(&self.cache))
+            let reading = std::time::Instant::now();
+            let stored = read_summary(&key.path_under(&self.cache));
+            let decoded = reading.elapsed();
+            if let Ok(stored) = stored
                 && stored.key == key
-                && self.resolution_still_holds(path, &stored)
             {
-                if let Some(tell) = includes.as_mut() {
-                    let targets: Vec<PathBuf> = stored
-                        .includes
-                        .iter()
-                        .filter_map(|include| include.resolved.clone())
-                        .collect();
-                    tell(&targets);
+                // **The second half, timed apart from the decode**: re-running the include search for every
+                // `#include` of a stored summary is what makes a hit trustworthy, and it is a filesystem search per
+                // include — the one part of a warm start that looks like nothing in the code and can cost seconds.
+                let verifying = std::time::Instant::now();
+                let still_holds = self.resolution_still_holds(path, &stored);
+                if tracing {
+                    note_a_prepared_file(read, decoded, verifying.elapsed(), std::time::Duration::ZERO);
                 }
-                return Prepared(PreparedOutcome::Stored(stored));
+                if still_holds {
+                    if let Some(tell) = includes.as_mut() {
+                        let targets: Vec<PathBuf> = stored
+                            .includes
+                            .iter()
+                            .filter_map(|include| include.resolved.clone())
+                            .collect();
+                        tell(&targets);
+                    }
+                    return Prepared(PreparedOutcome::Stored(stored));
+                }
+            } else if tracing {
+                note_a_prepared_file(read, decoded, std::time::Duration::ZERO, std::time::Duration::ZERO);
             }
         }
 
@@ -588,6 +662,15 @@ impl<F: FileProvider> SummaryStore<F> {
             // A failed write is not a failed lookup: the answer is in hand and in the index. Reporting it would
             // turn a read-only checkout — a perfectly ordinary way to work — into a broken editor.
             let _ = write_summary(&summary, &self.cache);
+        }
+
+        if tracing {
+            note_a_prepared_file(
+                read,
+                std::time::Duration::ZERO,
+                std::time::Duration::ZERO,
+                entered.elapsed(),
+            );
         }
 
         Prepared(PreparedOutcome::Built { summary, stored })
@@ -652,6 +735,10 @@ impl<F: FileProvider> SummaryStore<F> {
         budget: usize,
     ) -> Vec<(PathBuf, Prepared)> {
         use std::sync::{Condvar, Mutex};
+
+        let tracing = crate::probes::cooking();
+        let before = prepared_stages();
+        let started = std::time::Instant::now();
 
         struct Frontier {
             waiting: std::collections::VecDeque<PathBuf>,
@@ -769,6 +856,27 @@ impl<F: FileProvider> SummaryStore<F> {
         if let Some(payload) = frontier.panic.take() {
             std::panic::resume_unwind(payload);
         }
+
+        if tracing {
+            let after = prepared_stages();
+            let millis = |slot: usize| (after[slot] - before[slot]) as f64 / 1e6;
+            let took = started.elapsed();
+            // **Only the calls that are worth reading.** A wave of eight files is a few milliseconds; printing all
+            // 232 of them buries the handful that take a hundred, which is where a warm start still goes.
+            if took.as_millis() >= 40 {
+                eprintln!(
+                    "prepare: {} file(s) in {} ms | text {:.0} ms, decode {:.0} ms, verify {:.0} ms, build+encode \
+                     {:.0} ms (summed over workers)",
+                    after[0] - before[0],
+                    took.as_millis(),
+                    millis(1),
+                    millis(2),
+                    millis(3),
+                    millis(4)
+                );
+            }
+        }
+
         frontier.done
     }
 
@@ -1529,13 +1637,63 @@ impl<F: FileProvider> SummaryStore<F> {
         }
 
         let directory = path.parent().unwrap_or(Path::new("."));
+
+        summary
+            .includes
+            .iter()
+            .all(|fact| self.where_it_resolves_now(fact, directory) == fact.resolved)
+    }
+
+    /// **Where an `#include` resolves *now*** — the search, remembered for the life of the store.
+    ///
+    /// # Why it is remembered, measured
+    ///
+    /// [`SummaryStore::resolution_still_holds`] re-runs the search for every include of every stored summary, because
+    /// a summary records where an include resolved and nothing in its key would notice a header appearing earlier on
+    /// the path. That is the right rule, and it is what makes a warm start almost entirely this: on
+    /// `EmmyLuaCodeStyle` a warm start's `prepare_a_wave` was **9.3 s**, of which the decode of 1714 stored summaries
+    /// was **0.4 s** and these searches were the rest (`CPPLS_TRACE_COOKING=1` prints the split per wave). Each
+    /// search walks the include paths with a filesystem probe per candidate.
+    ///
+    /// # Why it may be remembered
+    ///
+    /// Because the answer is a function of the **question** — the spelling, the form, and (for a quoted include) the
+    /// directory it is asked from — and not of the file that asks it. `#include <vector>` is one search asked by four
+    /// hundred headers; `#include "config.h"` is one search per directory. The store is built once per session and
+    /// its index already answers from summaries read at one moment, so remembering the searches of that moment cannot
+    /// be less current than what is already in memory — and it is *more* consistent than the loop it replaces, where
+    /// two files verified a millisecond apart could disagree if a header appeared between them.
+    fn where_it_resolves_now(&self, fact: &IncludeFact, directory: &Path) -> Option<PathBuf> {
+        // An angled include's search does not look at the including file's directory, so it is not part of the
+        // question — and leaving it out is what turns four hundred `<vector>`s into one search.
+        let key = (
+            fact.form,
+            fact.is_next,
+            Box::from(fact.spelling.as_str()),
+            match fact.form {
+                IncludeForm::Angle => PathBuf::new(),
+                IncludeForm::Quote | IncludeForm::Macro => directory.to_path_buf(),
+            },
+        );
+
+        if let Ok(searches) = self.include_searches.lock()
+            && let Some(known) = searches.get(&key)
+        {
+            return known.clone();
+        }
+
         let resolver = crate::include::IncludeResolver::new(&self.files, &self.config);
         let mut interner = crate::file::paths::PathInterner::new(cfg!(windows));
+        let resolved = resolver
+            .resolve(&fact.as_include(), directory, None, &mut interner)
+            .resolved()
+            .map(|found| found.path.clone());
 
-        summary.includes.iter().all(|fact| {
-            let now = resolver.resolve(&fact.as_include(), directory, None, &mut interner);
-            now.resolved().map(|found| found.path.as_path()) == fact.resolved.as_deref()
-        })
+        if let Ok(mut searches) = self.include_searches.lock() {
+            searches.insert(key, resolved.clone());
+        }
+
+        resolved
     }
 
     /// The work set when `path` changes: the file, and everything that transitively includes it.
