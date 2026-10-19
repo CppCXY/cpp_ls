@@ -262,11 +262,18 @@ fn main() {
             continue;
         };
         // **What the completion thinks the cursor is**, which is the question every branch below turns on: a
-        // `Qualified` context names a scope and a prefix, and the prefix is what the list is filtered by.
-        println!(
-            "   context at {at}: {:?}",
-            cpp_code_analysis::completion::context_at(&view.root, at)
-        );
+        // `Qualified` context names a scope and a prefix, and the prefix is what the list is filtered by. The tree
+        // is the **rendering's**, so the file offset is translated first — passing one straight in panics inside
+        // rowan (`Bad offset: range 0..366 offset 938`), which is the same two-coordinate-systems seam the analysis
+        // keeps paying for.
+        match view.reading_offset_of(FileOffset::new(at)) {
+            Some(reading) => println!(
+                "   context at {at} (reading {}): {:?}",
+                reading.get(),
+                cpp_code_analysis::completion::context_at(&view.root, reading.get())
+            ),
+            None => println!("   context at {at}: not in the rendering"),
+        }
         let step = Instant::now();
         let offered = session.completions(&view, FileOffset::new(at));
         let took = step.elapsed();

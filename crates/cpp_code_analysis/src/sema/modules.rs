@@ -599,6 +599,33 @@ impl<'a, F: FileProvider> ModuleScanner<'a, F> {
             }
         }
 
+        // **GCC's standard module is a *source file* inside the include tree**, and it is spelled unlike any
+        // other module unit: `<include>/bits/std.cc` (97 KB on MinGW GCC 15.1: `module;`, `#include
+        // <bits/stdc++.h>`, `export module std;`, then `export namespace std { … }` blocks) and
+        // `<include>/bits/std.compat.cc`.
+        //
+        // A default GCC install has **no** `std.gcm` — the compiler answers `import std;` with *"failed to read
+        // compiled module: No such file or directory … compiled module file is 'gcm.cache/std.gcm'"* (verified by
+        // running the project's compiler) — so the source is the only thing an analysis can read, and it is the
+        // right thing: it *is* the module's interface unit, and reading it gives the exported names exactly as the
+        // compiler would.
+        //
+        // Appended **after** the naming conventions so that a project shipping its own `std.cppm` still wins, and
+        // only for the two standard names: `bits/<anything>.cc` is not a convention, it is where this one library
+        // put these two files.
+        if matches!(name, "std" | "std.compat") {
+            for directory in self.search_directories(including) {
+                let candidate = join_normalized(
+                    &directory,
+                    Path::new(&format!("bits/{name}.cc")),
+                    case_insensitive,
+                );
+                if !candidates.contains(&candidate) {
+                    candidates.push(candidate);
+                }
+            }
+        }
+
         candidates
     }
 

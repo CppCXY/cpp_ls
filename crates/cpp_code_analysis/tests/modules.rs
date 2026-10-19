@@ -1260,6 +1260,72 @@ fn a_module_name_is_offered_after_import() {
 }
 
 
+/// **`import std;` on GCC — the standard module is a source file in the include tree.**
+///
+/// A default GCC install ships no `std.gcm`, and the compiler is explicit about it:
+///
+/// ```text
+/// $ c++ -std=c++23 -fmodules-ts -fsyntax-only std_module_demo.cpp
+/// std: error: failed to read compiled module: No such file or directory
+/// std: note: compiled module file is 'gcm.cache/std.gcm'
+/// ```
+///
+/// What it *does* ship is the module's **interface unit as a source file**: `<include>/bits/std.cc`, 97 KB of
+/// `module; #include <bits/stdc++.h> … export module std; export namespace std { … }`, with `bits/std.compat.cc`
+/// beside it (verified on MinGW GCC 15.1). That is the file the module is built *from*, so it is the thing to
+/// read: the analysis resolves `std` to it, reads it like any other interface unit, and the importing file gets
+/// the exported names — no compiler run, no binary module file.
+#[test]
+fn the_standard_module_is_found_in_gcc_include_tree() {
+    use cpp_code_analysis::{OpenDocuments, SessionFiles, WatchFilter};
+
+    let std_cc = "module;\n\
+                  #include <bits/stdc++.h>\n\
+                  export module std;\n\
+                  export namespace std {\n\
+                  using size_t = unsigned long long;\n\
+                  template <class T> class vector {};\n\
+                  }\n";
+    let files = MemoryFiles::new()
+        .with_file("/inc/bits/std.cc", std_cc)
+        .with_file("/inc/bits/stdc++.h", "namespace std { }\n")
+        .with_file(
+            "/p/std_demo.cpp",
+            "import std;\nint main() { std::vector<int> words; return 0; }\n",
+        );
+
+    let mut config = CompilerConfig::new();
+    config.include_paths = vec![cpp_code_analysis::IncludePath::system("/inc")];
+    let providers = SessionFiles::new(OpenDocuments::new(), files);
+    let mut session = Session::with_config("/p", providers, WatchFilter::new("/p"), config);
+    session.add_project_files([std::path::PathBuf::from("/p/std_demo.cpp")]);
+    session.index_everything();
+
+    assert!(
+        session.imports_a_module_that_is_not_read(std::path::Path::new("/p/std_demo.cpp")),
+        "the module is not in the index yet — the state a request finds when it arrives first"
+    );
+    assert_eq!(
+        session.read_the_modules_a_file_imports(std::path::Path::new("/p/std_demo.cpp")),
+        1,
+        "the request path resolves `std` and reads it in"
+    );
+    assert_eq!(
+        session.index().interface_unit_of("std"),
+        Some("/inc/bits/std.cc"),
+        "`std` resolves to libstdc++'s own interface unit"
+    );
+
+    let found = session
+        .index()
+        .definitions("std::vector", std::path::Path::new("/p/std_demo.cpp"));
+    assert!(
+        matches!(found, cpp_code_analysis::Known::Yes(_)),
+        "so a name the module exports is in the index for the importer: {found:?}"
+    );
+}
+
+
 /// **`export namespace math { … }` exports the namespace's own name, and its concepts.**
 ///
 /// The export region is stored **per declaration shape**, and `exported_at` is answered from the shapes containing

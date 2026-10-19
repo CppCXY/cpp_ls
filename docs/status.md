@@ -884,6 +884,54 @@ std::println(     0 → 修法后 4 个重载
 高亮区间（那是渲染坐标），保留的是签名文本、参数个数和当前参数。测试
 `a_declaration_in_an_uncooked_file_still_answers` —— 它显式断言声明所在文件**没有**渲染。
 
+### ⑦ `import std;` 在 GCC 上找不到 —— 因为它的接口单元是一个**源文件** —— **已修**
+
+用户在 `std_module_demo.cpp` 上看到我们的诊断（"no file this project contains declares module `std`"）。
+先查编译器本身：
+
+```text
+$ c++ --version                      c++.exe (x86_64-win32-seh-rev0, Built by MinGW-Builds) 15.1.0
+$ c++ -std=c++23 -fmodules-ts -fsyntax-only std_module_demo.cpp
+std: error: failed to read compiled module: No such file or directory
+std: note: compiled module file is 'gcm.cache/std.gcm'
+```
+
+**所以编译器自己也不认识它** —— MinGW 不发预编译的 `std.gcm`，我们的诊断是对的，但只对了一半：GCC 虽然
+没有 `std.gcm`，却**带着这个模块的接口单元源码**：
+
+```text
+<gcc>/include/c++/bits/std.cc         97 KB：module; #include <bits/stdc++.h> #include <execution>
+                                      #include <strstream>  export module std;  export namespace std { … }
+<gcc>/include/c++/bits/std.compat.cc  17 KB
+```
+
+修法：模块解析对 `std` / `std.compat` 额外尝试 `<include>/bits/<name>.cc`（只对这两个名字 —— `bits/<x>.cc`
+不是约定，是这一个库把这两个文件放在那里）。之后一切照旧：它就是接口单元，读它、拿到它导出的名字。
+
+实测（`std_module_demo.cpp`）：
+
+```text
+read_the_modules          1 module(s)   4491 ms 冷 / 532 ms 暖（缓存后）
+索引里 std 作用域          4944 条声明
+std::vector               1 declaration(s)
+`std::vec` 补全            vector                    4 ms
+`std::pr` 补全             print, println, printf, promise, projected, …   5 ms
+```
+
+冷启动那 4.5 秒是**读 `<bits/stdc++.h>` 一遍**的代价 —— 和任何 `#include <bits/stdc++.h>` 的文件一样，
+之后进 summary/timeline 缓存。
+
+**让编译器也认识它**（这样 `std_module_demo.cpp` 才能真正编译），在希望生成 `gcm.cache` 的目录里跑一次：
+
+```text
+c++ -std=c++23 -fmodules-ts -c "<gcc>/include/c++/bits/std.cc" -o std.o
+```
+
+实测：5 秒，产出 `gcm.cache/std.gcm`（30 MB），之后 `c++ -std=c++23 -fmodules-ts -fsyntax-only
+std_module_demo.cpp` 退出码 0。也可以把 `gcm.cache` 放到任意目录并用 `-fprebuilt-module-path=<dir>`。
+
+测试 `the_standard_module_is_found_in_gcc_include_tree`。
+
 ## 十四、语义高亮为什么会花 11 秒 —— 四处"每个 token 做一次"（2026）
 
 用户指出实现里的两件事："你会先取得每个 token 的文本再判断 token 的 kind"、"我们获取文本的方式太原始了"。
