@@ -86,12 +86,15 @@ impl Check for ReturnTypeMismatch {
                             // check invents a problem.
                             continue;
                         };
-                        if !from
-                            .convertible_to(&crate::sema::types::parse_type_spelling(&declared))
-                            .is_definitely_absent()
-                        {
-                            // `Yes` is fine; `Unknown` is a conversion this layer cannot see, which is not a
-                            // conversion the program does not have.
+                        // **The shared facility**, the same one `param-type-check` and `assign-type-check` ask: it normalises
+                        // the spelling (a return type written `const std::string&` is a reference, and `class_name()` answers
+                        // `None` for one), asks the type relation first and the index only for the class question. Only
+                        // `Refused` reports, so an unread class stays quiet — which is the rule the module's own note above
+                        // is about.
+                        let conversion = crate::sema::convert::conversion(&from, &declared, |class| {
+                            super::a_class_can_be_built_from(context, class, &from)
+                        });
+                        if !conversion.is_refused() {
                             continue;
                         }
                         context.add(

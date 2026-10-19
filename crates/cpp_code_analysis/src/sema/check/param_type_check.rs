@@ -93,11 +93,20 @@ impl Check for ParamTypeCheck {
                 continue;
             }
 
-            // **Exactly one declaration, or nothing is said.**
-            let Some(Some(parameters)) = by_name.get(name.as_str()) else {
-                continue;
+            // **Exactly one declaration, or nothing is said.** The table above holds this file's function *definitions* — the
+            // rule that keeps an overload set out of a comparison about one parameter list. But a function declared once in a
+            // header and called here has exactly one parameter list too, and that is the most common shape in a project, so a
+            // name the table does not hold is asked of the index before this check gives up.
+            let parameters: Vec<String> = match by_name.get(name.as_str()) {
+                Some(Some(parameters)) => parameters.clone(),
+                // A name declared twice in this file is an overload set: not this check's question.
+                Some(None) => continue,
+                None => match the_index_declares_one(context, name.as_str()) {
+                    Some(parameters) => parameters,
+                    None => continue,
+                },
             };
-            check_the_arguments(context, &call, &name, std::slice::from_ref(parameters));
+            check_the_arguments(context, &call, &name, std::slice::from_ref(&parameters));
         }
     }
 }
@@ -174,9 +183,26 @@ fn check_the_arguments(
                 }
                 // `Yes` is fine, and `Unknown` is not this layer's to guess about. Either way **this** candidate
                 // could take the argument, and one that could is enough for silence.
-                crate::Known::Yes(()) | crate::Known::Unknown(_) => {
+                crate::Known::Yes(()) => {
                     every_candidate_disagrees = false;
                     break;
+                }
+                // **The class case, inside the `Unknown` arm.** `convertible_to` answers `Unknown` for every class target —
+                // it lives in the type algebra and never sees a constructor — so a parameter written `const std::string&` was
+                // silent whatever the argument was. The question goes to the index instead, and **only a definite refusal
+                // counts**: a class nobody has read, or a template parameter, still answers `None` and stays quiet.
+                // **The class case, through the shared facility** — see `sema::convert`. It normalises the spelling (a
+                // `const std::string&` parameter is `Reference { to: Named(..) }`, and `class_name()` answers `None` for a
+                // reference) and asks the index only for the class question, so a class nobody has read stays quiet.
+                crate::Known::Unknown(_) => {
+                    let conversion = crate::sema::convert::conversion(&from, parameter, |class| {
+                        super::a_class_can_be_built_from(context, class, &from)
+                    });
+                    if !conversion.is_refused() {
+                        every_candidate_disagrees = false;
+                        break;
+                    }
+                    disagreed_with.get_or_insert(parameter);
                 }
             }
         }
@@ -205,4 +231,39 @@ fn check_the_arguments(
             ),
         );
     }
+}
+
+/// **The one parameter list the index has for a name**, with its parameter names stripped — the fallback for a function
+/// declared in a header and called here.
+///
+/// `None` when the index knows no such function, knows several (an overload set, which this check declines), or when the
+/// declaration has no parameter list to compare against.
+
+fn the_index_declares_one(context: &CheckContext<'_>, name: &str) -> Option<Vec<String>> {
+    // **The file's own summary first, then the index.** The summary holds what this file declares; `definitions` answers for
+    // the rest of the project. A name declared once in either is one parameter list; several is an overload set, which this
+    // check declines to resolve.
+    let mut written: Vec<String> = context
+        .summary
+        .declarations
+        .iter()
+        .filter(|fact| fact.kind == crate::DeclKind::Function && fact.name == name)
+        .filter_map(|fact| fact.parameter_list.clone())
+        .collect();
+    if written.is_empty()
+        && let crate::Known::Yes(definitions) = context.index().definitions(name, context.path)
+    {
+        written = definitions
+            .found
+            .iter()
+            .filter(|definition| definition.fact.kind == crate::DeclKind::Function)
+            .filter_map(|definition| definition.fact.parameter_list.clone())
+            .collect();
+    }
+    written.dedup();
+    if written.len() != 1 {
+        return None;
+    }
+    let (parameters, _variadic) = crate::sema::overload::parameters_in(&written[0]);
+    Some(parameters)
 }

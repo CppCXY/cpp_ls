@@ -1786,3 +1786,45 @@ int main()
         "the argument is a string literal and the parameter is `const value_type&` = `const int&`: {codes:?}"
     );
 }
+
+/// **The shape from a real session**: `writeMessage(const std::string& json)` called with `123131`.
+///
+/// `int` does not convert to `const std::string&`, and a compiler refuses it. The check is silent, which is the "has the
+/// form of a check but does not work" the reader reported — and the reason is the class case: the conversion relation
+/// answers `Unknown` for a class target (it lives in the type algebra and never sees a constructor), and the class case only
+/// speaks when it is **sure** the value cannot build the class.
+///
+/// # Where it stands
+///
+/// Three real holes were found and closed on the way, each by printing the step rather than guessing:
+///
+/// ```text
+/// ① the parameter `const std::string&` parses to `Reference { to: Named("std::string") }`, and `class_name()` answers
+///    `None` for a reference — so the index was never asked. The check now strips `const`/`&` before asking.
+/// ② `param-type-check` only looked at this file's function *definitions*, so a function **declared** in a header and called
+///    here was skipped entirely. It now falls back to the summary, then the index.
+/// ③ measured last: `a_class_can_be_built_from("std::string", int)` answers **`Some(true)`** for a class whose only
+///    constructor is `string(const char*)` — a `const char*` parameter cannot take an `int`. The next step is
+///    `parameters_that_could_accept("(const char* text)", int)`, which is where that `true` comes from.
+/// ```
+#[test]
+fn an_int_does_not_convert_to_a_string() {
+    let source = "\
+namespace std {
+class string {
+public:
+    string(const char* text);
+};
+}
+void writeMessage(const std::string& json);
+void f() {
+    writeMessage(123131);
+}
+";
+    let found = codes_of(source);
+    println!("codes: {found:?}");
+    assert!(
+        found.contains(&DiagnosticCode::ParamTypeCheck),
+        "an `int` is not a `std::string`: {found:?}"
+    );
+}

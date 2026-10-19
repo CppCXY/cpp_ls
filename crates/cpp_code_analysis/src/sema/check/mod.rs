@@ -1333,7 +1333,13 @@ fn could_take_an_arithmetic_value(parameter: &str) -> Option<bool> {
     let is_a_pointer_or_reference = type_written.contains('*') || type_written.contains('&');
 
     if is_a_pointer_or_reference {
-        // `const int&` takes an `int`; `const char*` does not.
+        // **A pointer is not an arithmetic value; a reference to one is.** `const int&` binds an `int`, so the reference case
+        // asks about the type behind it — but `const char*` is a pointer, and an `int` does not convert to it. The first
+        // version asked the same question for both, which is how `std::string(const char*)` came back "this constructor can
+        // take `123131`" and the whole class case answered `Some(true)`.
+        if type_written.contains('*') {
+            return Some(false);
+        }
         return Some(arithmetic(behind_the_operator));
     }
 

@@ -2862,7 +2862,40 @@ pub(crate) fn type_of_expression(
                 Some(element) if matches!(type_of, Type::Array { .. }) => {
                     Known::Yes(((*element).clone(), file))
                 }
-                _ => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
+                _ => {
+                    // **The class case, which this arm used to leave alone.** A `std::vector<int>`'s `operator[]` returns
+                    // `T&`, and `members_of` has already substituted the argument — so the answer is the member's own return
+                    // type rather than a guess from the first template argument (which is what the note above rightly
+                    // refuses: `vector` wants `T`, `map` wants `mapped_type`). The member lookup is what knows which.
+                    // **The member list belongs to the file that declares the class.** Measured: with this file's `root` and
+                    // `scopes`, `direct_members("std::vector")` found the scope and it had **zero bindings**, and the index
+                    // answered zero as well — because neither is keyed by a class declared in a *different* file than the one
+                    // the expression is written in. `declaring` is the resolver for exactly that, and it is what
+                    // `declared_type` already uses.
+                    let class = type_of.class_name().unwrap_or_default();
+                    let class_file = index
+                        .files_declaring(&class, path)
+                        .first()
+                        .map(|declared| declared.file.clone());
+                    let class_view = class_file
+                        .as_deref()
+                        .and_then(|at| (declaring)(at));
+                    let (class_scopes, class_root, class_path) = match &class_view {
+                        Some(view) => (&view.scopes, &view.root, view.path.as_path()),
+                        None => (scopes, root, path),
+                    };
+                    if let Known::Yes(list) =
+                        members_of(index, class_scopes, class_root, class_path, &type_of.to_string())
+                        && let Some(subscript) = list
+                            .members
+                            .iter()
+                            .find(|member| member.fact.name == "operator[]")
+                        && let Some(returns) = subscript.fact.returns.as_deref()
+                    {
+                        return Known::Yes((crate::sema::types::parse_type_spelling(returns), file));
+                    }
+                    Known::Unknown(UnknownReason::UnknownType(Box::from(written)))
+                }
             },
             Known::Unknown(reason) => Known::Unknown(reason),
             Known::No => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),

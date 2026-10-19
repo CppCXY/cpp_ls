@@ -211,9 +211,17 @@ fn report_if_it_does_not_convert(
     let crate::Known::Yes((from, _)) = known_from else {
         return;
     };
-    if from.convertible_to(&target).is_definitely_absent() {
-        report(context, expression, name, how, written);
-        return;
+    // **One facility, shared with `param-type-check`** — `sema::convert` normalises the spelling (a `const std::string&`
+    // assignment target is `Reference { to: Named(..) }`, and `class_name()` answers `None` for a reference), asks the type
+    // relation first and the index only for the class question, and answers `Unknown` — silence — when neither can speak.
+    match crate::sema::convert::conversion(&from, written, |class| {
+        super::a_class_can_be_built_from(context, class, &from)
+    }) {
+        crate::sema::convert::Conversion::Refused => {
+            report(context, expression, name, how, written);
+            return;
+        }
+        _ => {}
     }
 
     // **The class case, which the conversion relation cannot answer.** `convertible_to` lives in the type engine and

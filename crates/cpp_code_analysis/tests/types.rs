@@ -1081,3 +1081,59 @@ void f() {
 ";
     assert_eq!(type_of_use(source, "z").as_deref(), Some("int&"));
 }
+
+/// **`operator[]` and the type it produces** — `v[0]` on a `std::vector<int>` should be an `int&`.
+///
+/// A subscript is an operator call, so the question is the same one the member-return tests ask: the class's
+/// `operator[]` returns `T&`, the class is instantiated at `int`, and the answer is `int&`. What this measures is whether
+/// `type_of_expression` knows that a subscript is that call.
+///
+/// # Where it stands
+///
+/// Measured: `v[0]` answers `Unknown(UnknownType("v[0]"))` — a subscript is not an expression kind the engine has an arm
+/// for. An arm was added beside the `new` arm: `IndexExpr` → the object's type → `members_of` → the member named
+/// `operator[]` → its `returns`, which `members_of` has already substituted (`T&` at `int`). It does not fire yet, so one of
+/// its four conditions is false for this fixture; the next probe belongs **inside** that arm, printing which condition.
+/// `v.front()` on the same fixture **does** work (`a_member_return_type_is_substituted_through_a_template_id_use`), so the
+/// substitution itself is not in question.
+#[test]
+#[ignore = "ROOT CAUSE, measured: a class whose only member is `operator[]` answers `members_of → []`, and adding a plain-named `at` beside it answers `members_of → [\"at\"]` — the member collector skips operator overloads with punctuation names, so `operator[]` is never a member. The subscript arm is correct and blocked on that"]
+fn a_subscript_has_the_operators_return_type() {
+    use cpp_code_analysis::file::coordinates::FileOffset;
+    let source = "\
+namespace std {
+template <class T>
+class vector {
+public:
+    T& at(unsigned long index);
+    T& operator[](unsigned long index);
+};
+}
+void f() {
+    std::vector<int> v;
+    int x = v[0];
+    (void)x;
+}
+";
+    let session = session_with(&[("/p/a.cpp", source)]);
+    let view = session.view("/p/a.cpp").expect("the file is cooked");
+    // The cursor on `v` of `v[0]` — a subscript is an expression whose type is the operator's return type.
+    let at = source.find("v[0]").expect("the fixture subscripts") + 1;
+    let reading = view
+        .reading_offset_of(FileOffset::new(at))
+        .expect("the offset is in the file");
+    let answer = match session.type_at(&view, reading) {
+        cpp_code_analysis::Known::Yes(found) => Some(found.type_of),
+        other => {
+            println!("`v[0]` at file {at} → {other:?}");
+            None
+        }
+    };
+
+    println!("`v[0]` is {answer:?}");
+    assert_eq!(
+        answer.as_deref(),
+        Some("int&"),
+        "a subscript is `operator[]`, whose return type is the class's `T&` at `int`"
+    );
+}
