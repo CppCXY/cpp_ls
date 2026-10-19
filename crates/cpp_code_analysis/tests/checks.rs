@@ -1395,6 +1395,134 @@ void f() {
     );
 }
 
+/// **The codes a file produces in a project of several files** — the shape a header has and a one-file fixture cannot.
+///
+/// The defect this exists for needed three things a single-file fixture cannot express: the class in a **header**,
+/// an `#include` **above** the class in that header (which shifts every offset of its rendering), and the call in a
+/// `.cpp`. Each of the three was a seam the member path crossed, and a fixture with none of them passed while every
+/// real `std::vector<int>::push_back("text")` was silent.
+fn codes_of_files(files: &[(&str, &str)], asking: &str) -> Vec<DiagnosticCode> {
+    let mut memory = MemoryFiles::new();
+    for (path, text) in files {
+        memory = memory.with_file(*path, *text);
+    }
+    let providers = SessionFiles::new(OpenDocuments::new(), memory);
+    let mut session = Session::with_config(
+        "/p",
+        providers,
+        WatchFilter::new("/p"),
+        CompilerConfig::default(),
+    );
+    let paths: Vec<std::path::PathBuf> = files
+        .iter()
+        .map(|(path, _)| std::path::PathBuf::from(path))
+        .collect();
+    session.add_project_files(paths);
+    session.want_cooked_reading(std::path::Path::new(asking));
+    session.index_everything();
+
+    session
+        .diagnostics(std::path::Path::new(asking))
+        .map(|found| {
+            found
+                .checks
+                .iter()
+                .map(|finding| finding.code)
+                .chain(found.errors.iter().map(|error| error.code))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// **The signature the standard library actually writes**: a `const _Ty&` parameter, twice over, in a header.
+///
+/// Reported from an editor: `anotherVec.push_back("123131")` on a `std::vector<int>` produced **nothing**, and the
+/// library is not a corner case — `push_back` is declared `void push_back(const _Ty&)` and `void push_back(_Ty&&)`
+/// in every implementation, so "one member of that name or nothing is said" was silence on nearly every member
+/// call there is. Three defects had to be fixed before this line reported, and each is the fixture:
+///
+/// ```text
+/// the substitution read the rendering with a file's offset   the header's own `#include` above the class shifted
+///                                                           it, no template header was found, `T` stayed `T`
+/// two candidates meant "say nothing"                        `push_back` is written twice in every implementation
+/// a reference target had no arm in the conversion relation   `const int&` was neither `int` nor a pointer
+/// ```
+///
+/// The by-value negative is the second half: an `int` for an `int` is right, whichever candidate takes it.
+#[test]
+fn a_member_argument_is_checked_through_a_header_and_against_every_overload() {
+    let header = "\
+#pragma once
+#include <cstddef>
+template <class T>
+struct Box {
+    void push_back(const T& value);
+    void push_back(T&& value);
+    T& front();
+};
+";
+    let file = "\
+#include \"box.h\"
+void f() {
+    Box<int> b;
+    b.push_back(\"text\");
+}
+";
+    let codes = codes_of_files(&[("/p/box.h", header), ("/p/a.cpp", file)], "/p/a.cpp");
+    assert!(
+        codes.contains(&DiagnosticCode::ParamTypeCheck),
+        "a string literal for a `const int&` parameter is not right: {codes:?}"
+    );
+
+    let fits = file.replace("b.push_back(\"text\");", "b.push_back(1);");
+    let codes = codes_of_files(&[("/p/box.h", header), ("/p/a.cpp", &fits)], "/p/a.cpp");
+    assert!(
+        !codes.contains(&DiagnosticCode::ParamTypeCheck),
+        "an `int` for an `int` is right: {codes:?}"
+    );
+}
+
+/// **One candidate that takes the argument keeps the check silent** — the rule an overload set is judged by.
+///
+/// `resize(int)` and `resize(const char*)` are both `resize`, and `w.resize("wide")` is the second one: a check
+/// that reported "this passes a string where an `int` is declared" would be underlining a correct line, which is
+/// the failure mode this whole layer exists to avoid. So a finding needs **every** candidate to disagree — and the
+/// other half is here too: when they all do, it is still reported.
+#[test]
+fn an_overload_that_takes_the_argument_keeps_the_check_silent() {
+    let one_fits = "\
+struct Widget {
+    void resize(int width);
+    void resize(const char* text);
+};
+void f() {
+    Widget w;
+    w.resize(\"wide\");
+}
+";
+    assert!(
+        !codes_of(one_fits).contains(&DiagnosticCode::ParamTypeCheck),
+        "the second overload takes a string literal: {:?}",
+        codes_of(one_fits)
+    );
+
+    let none_fit = "\
+struct Widget {
+    void resize(int width);
+    void resize(double width);
+};
+void f() {
+    Widget w;
+    w.resize(\"wide\");
+}
+";
+    assert!(
+        codes_of(none_fit).contains(&DiagnosticCode::ParamTypeCheck),
+        "neither overload takes a string literal, so this is a finding: {:?}",
+        codes_of(none_fit)
+    );
+}
+
 /// **A non-template class's member is checked the same way** — the substitution is not what makes the check work, it is
 /// what makes it *correct* for a template; the plain case has to work on its own.
 #[test]

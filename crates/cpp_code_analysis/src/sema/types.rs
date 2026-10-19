@@ -254,6 +254,7 @@ impl Type {
     ///   anything to `void`, or `void` to it    -> No      no object has type `void`
     ///   anything named, or a template parameter-> Unknown `S` may have a converting constructor
     ///   pointer to a different pointee         -> Unknown `Derived*` to `Base*` is a real conversion
+    ///   a reference target                     -> the referent's question     `const int&` asked as `int`
     /// ```
     ///
     /// # Why a class is never an answer
@@ -271,7 +272,17 @@ impl Type {
         // decaying the target turned it into `_CharT*` — so `int` met "a pointer" and the relation answered `No` for
         // a pair it cannot decide at all. Array-to-pointer is a conversion the *source* undergoes; the destination
         // of an initialisation keeps whatever shape it was written with.
-        let to = target;
+        //
+        // **A reference binds to its referent**, so the question is the one about the referent. `void
+        // push_back(const _Ty&)` instantiated at `int` declares `const int&`, and a `const char*` argument against
+        // it is the same mistake as against `int` — but this relation had no arm for a `Reference` on the right and
+        // answered `Unknown`, which is why `anotherVec.push_back("123131")` on a `std::vector<int>` was never
+        // reported while the same mistake against a by-value `int` parameter was. Nothing is invented by the peel:
+        // binding a value to a reference of a type it does not convert to is exactly what the language rejects.
+        let to = match target {
+            Type::Reference { to, .. } => &**to,
+            other => other,
+        };
 
         // **Identical is always convertible**, before anything else is asked: a spellings-equal pair needs no rule,
         // and this is what makes `int` to `int` and a pointer to its own type answer `Yes` rather than falling into
@@ -1724,6 +1735,8 @@ mod tests {
     use super::*;
     use cpp_parser::{CppParser, ParserConfig};
 
+    use crate::Known;
+
     /// The type of `name`, read the way a query reads it — see [`type_of_declarator`].
     ///
     /// The **last** declaration of that name, because every fixture declares before it uses and the question these
@@ -2118,6 +2131,45 @@ mod tests {
             panic!("a clone of a pointer is a pointer");
         };
         assert!(Arc::ptr_eq(to, &pointee));
+    }
+
+    /// **A reference target is judged by its referent**, which is where the standard library's signatures live.
+    ///
+    /// `void push_back(const _Ty&)` instantiated at `int` declares `const int&`, and this relation had no arm for a
+    /// `Reference` on the right: a `const char*` against it fell through to `Unknown`, and a check that reports only
+    /// a definite `No` said nothing — measured on a `std::vector<int>`, `push_back("123131")` was silent while the
+    /// same mistake against a by-value `int` parameter was reported.
+    ///
+    /// The two answers below are the whole rule: binding to a reference is the conversion to the referent, so a
+    /// string where an `int` is expected is `No`, and an `int` where an `int` is expected is `Yes`.
+    #[test]
+    fn a_reference_target_is_judged_by_its_referent() {
+        let a_string = parse_type_spelling("const char[7]");
+        let an_int_reference = parse_type_spelling("const int&");
+        assert!(
+            matches!(a_string.convertible_to(&an_int_reference), Known::No),
+            "a string literal does not bind to a `const int&`: {:?}",
+            a_string.convertible_to(&an_int_reference)
+        );
+
+        let an_int = parse_type_spelling("int");
+        assert!(
+            matches!(an_int.convertible_to(&an_int_reference), Known::Yes(())),
+            "an `int` binds to a `const int&`: {:?}",
+            an_int.convertible_to(&an_int_reference)
+        );
+
+        // And the rule is about the **referent's** class, not about references in general: a `std::string`
+        // parameter may have a converting constructor, so the answer stays `Unknown` rather than becoming `No`.
+        let a_string_target = parse_type_spelling("const std::string&");
+        assert!(
+            matches!(
+                a_string.convertible_to(&a_string_target),
+                Known::Unknown(_)
+            ),
+            "a class with a conversion constructor is not this layer's answer: {:?}",
+            a_string.convertible_to(&a_string_target)
+        );
     }
 }
 /// **A type spelling with some names replaced by what they stand for** — whole words only.
