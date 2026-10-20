@@ -1724,6 +1724,18 @@ fn visible_names(
     let chain = scopes.scope_chain(innermost);
     let mut names: Vec<OfferedName> = Vec::new();
 
+    // **The class a separated definition belongs to.** `int Source::GetLine(int) { … }` in a `.cpp` declares no scope for
+    // `Source` here — the class is in a header — so the scope chain below has no class to offer members from, and a
+    // completion in that body named none of `Source`. The declaration node still says which class it is, and this reads it
+    // from the parser's own nodes: the declarator's qualified name lives in the declaration's specifier sequence. Nothing is
+    // synthesized in the scope tree, which is what keeps `resolve`'s rule intact (a qualifier names nothing until something
+    // declares it).
+    if let Some(class) = the_class_a_definition_belongs_to(root, offset)
+        && let Known::Yes(members) = names_of_a_class(index, scopes, root, path, &class)
+    {
+        names.extend(offered(members, 0));
+    }
+
     // The file the cursor is in, as the store spells paths, so that the declaration-order filter can tell this
     // file's offsets from another file's.
     let in_this_file = normalize(path);
@@ -14102,4 +14114,40 @@ fn split_template_arguments(spelling: &str) -> Option<(String, Vec<String>)> {
         arguments.push(current.trim().to_string());
     }
     Some((base, arguments))
+}
+
+/// **The class of the definition the cursor is in, when the declarator is qualified** — `Source` for `int Source::GetLine(…)`.
+///
+/// Read from the parser's nodes: the declaration's specifier sequence holds the qualified declarator, and the segment before
+/// the last `::` is the class. `None` for anything else — a cursor outside a declaration, an ordinary declarator, or a
+/// qualifier with more than one level (which would need the class's own file to resolve the inner one, and is left to the
+/// scope chain).
+fn the_class_a_definition_belongs_to(root: &cpp_parser::CppSyntaxNode, offset: usize) -> Option<String> {
+    use cpp_parser::CppAstNode;
+
+    for declaration in root.descendants() {
+        let range = declaration.text_range();
+        if usize::from(range.start()) > offset || offset >= usize::from(range.end()) {
+            continue;
+        }
+        let Some(declaration) = cpp_parser::CppDeclaration::cast(declaration.clone()) else {
+            continue;
+        };
+        let Some(specifiers) = declaration.child::<cpp_parser::CppDeclSpecifierSeq>() else {
+            continue;
+        };
+        let written = specifiers.syntax().text().to_string();
+        let written = written.trim_end();
+        let at = written.rfind("::")?;
+        let before = written[..at].trim_end();
+        let start = before
+            .rfind(|character: char| !(character.is_alphanumeric() || matches!(character, '_' | ':')))
+            .map(|boundary| boundary + 1)
+            .unwrap_or(0);
+        let class = before[start..].trim();
+        if !class.is_empty() && !class.contains("::") {
+            return Some(class.to_string());
+        }
+    }
+    None
 }

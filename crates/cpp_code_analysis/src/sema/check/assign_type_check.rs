@@ -203,7 +203,11 @@ fn report_if_it_does_not_convert(
     // constructor takes one — and the conversion relation cannot say so, because it lives in the type algebra and never sees a
     // declaration. The census found this as the only shape its `assign-type-check` examples shared: `0` into `scoped_ptr`,
     // `op_queue` and `object_pool` on a real project, every one of them valid C++.
-    if expression.text().to_string().trim() == "0" {
+    // **A literal node, not a trimmed string.** `0` is the null pointer constant, and the parser has a node for a literal —
+    // its text is its token, so this cannot see a `0` inside a comment or a `"0"` string, which the text form could.
+    if cpp_parser::CppLiteralExpr::cast(expression.clone())
+        .is_some_and(|literal| literal.syntax().text().to_string().trim() == "0")
+    {
         return;
     }
     let known_from = context.type_of(expression);

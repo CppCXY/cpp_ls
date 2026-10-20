@@ -31,13 +31,17 @@ impl Check for ElseAfterReturn {
             let Some(then_branch) = statement.get_then_branch() else {
                 continue;
             };
-            // **Text, not the tree.** `descendants()` is untyped in this parser, and the question here is a sentence's
-            // shape: the branch says `return`. A `return` inside a nested lambda would be a false positive, which is the
-            // refinement a typed walk would make; the finding's shape does not change.
-            if !context.node_text(then_branch.syntax()).contains("return") {
+            // **The tree, typed.** The question is "does this branch return", and the parser's own AST answers it in one
+            // query — `descendants::<CppReturnStat>()`. It used to be `node_text(..).contains("return")`, which is true of a
+            // branch that only mentions the word: a comment, a string, a `return` inside a nested lambda, or a variable named
+            // `returns`. The typed query cannot see any of those.
+            if then_branch
+                .descendants::<cpp_parser::CppReturnStat>()
+                .next()
+                .is_none()
+            {
                 continue;
-            }
-            context.add(
+            }            context.add(
                 DiagnosticCode::ElseAfterReturn,
                 cpp_parser::source_range(else_branch.syntax().text_range()),
                 "else".to_string(),

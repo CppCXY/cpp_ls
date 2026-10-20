@@ -146,3 +146,76 @@ cook 也是 `declarations=0`。原因：facts 只从**作用域绑定**产生，
 - clangd, *The clangd index* — <https://clangd.llvm.org/design/indexing>
 - CMake, *CMAKE_EXPORT_COMPILE_COMMANDS* — <https://cmake.org/cmake/help/latest/variable/CMAKE_EXPORT_COMPILE_COMMANDS.html>
 - CMake, *CMAKE_EXPORT_BUILD_DATABASE* — <https://cmake.org/cmake/help/latest/variable/CMAKE_EXPORT_BUILD_DATABASE.html>
+
+## 实测记录（本地 `E:\EmmyLuaCodeStyle`）
+
+### ③ 的根因比文档写的更窄，也更致命
+
+```text
+LuaParser/src/File/LuaSource.cpp   242 行、2085 token、0 解析错误 → **0 条 fact** ✗
+```
+
+四个形状在**有 include 的夹具里全部正常** ✓（`std::size_t` 返回 ✓、模板返回类型 ✓、构造函数＋初始化列表 ✓、
+`std::shared_ptr<C> C::From(int)` ✓），所以不是语法形状的问题。
+
+**决定性实验**：同一段定义，加上两条**无法解析**的 `#include`，fact 变成 0 ✗。
+
+渲染文本是**对的** ✓（`unsigned long C::GetLine(…​) const { … }` 一字不差），所以问题不在文本，而在
+**限定名的前缀从哪来**：`fact_for` 的 `scope` 参数来自 `scopes.qualification_prefix_of(id)`，而作用域树只有在
+**类的声明也在本文件里**时才认得 `C::`。真实 `.cpp` 的类在头文件里 ⇒ include 解析不了 ⇒ 前缀为 `None`
+⇒ **带限定名的声明符一条 fact 都不产生** ✗。
+
+这比文档 ③ 的描述更窄（不是"限定名声明不绑定"）也更致命（**无 CDB 的工程里，每个 `.cpp` 的每个成员定义都不可见** ✗）。
+修法就是文档写的那条第二遍，只是从前缀的来源入手：**从声明符自己的文本取**（最后一个 `::` 之前是作用域、
+之后是名字），不要从作用域树取。
+
+### ① 的现状
+
+配置阶梯的第一步 `.cppls.toml` 已有 ✓；`compile_flags.txt` ✗、`CMakeCache.txt` ✗、布局推断 ✗ 都还没有。
+本地实测路径是 `E:\EmmyLuaCodeStyle`（文档里的 `C:\Users\zc\Desktop\github\…` 是另一台机器）。
+
+### 尝试过的修法，以及为什么不够
+
+`fact_for` 的 `scope` 现在会在作用域树答 `None` 时**从声明符文本**推（声明符末尾是名字，名字前面的 `C::` 是作用域）。
+这一步是对的、也已保留，**但它救不了那 0 条 fact** —— 因为**绑定本身就不存在** ✗：限定名声明符不产生绑定
+（文档写的"按设计不绑定"），`fact_for` 根本没有被调用。
+
+⇒ 必须做文档 ③ 的原方案：**在 `build()` 里加第二遍，遍历语法树**找声明符是限定名的声明，直接合成 fact
+（名字取最后一段、作用域取前缀，`kind`/`returns`/`type_of` 复用现有读取）。这一遍不经过绑定，
+所以"类在头文件里、include 解析不了"不再有影响。
+
+代码里留下的东西：`fact_for` 的前缀回退 ✓（对**有绑定**的限定声明符正确 ✓），以及被 `#[ignore]` 的复现测试
+`an_unresolved_include_does_not_erase_the_files_own_facts`（理由就是上面这段）。
+
+### 已实现：第二遍遍历语法树 ✅
+
+```rust
+// sema/declarations.rs::build，绑定遍之后
+for node in root.descendants() {
+    if !declaring_kinds().contains(&kind) { continue }
+    let range = source_range(node.text_range());
+    if claimed.iter().any(|c| range inside c) { continue }   // 绑定遍已经建过的跳过（按**包含**，不是相等）
+    if let Some(fact) = qualified_declarator_fact(root, range) { facts.push(fact) }
+}
+```
+
+`qualified_declarator_fact` 从文本里读：第一个 `(` 之前的最后一段标识符就是声明符 ✓，含 `::` 才合成 ✓，
+名字取最后一段 ✓、作用域取前缀 ✓、返回类型取前缀之前 ✓、参数表取括号段 ✓、范围取自节点 ✓。
+
+**效果（真实工程）**：
+
+```text
+LuaParser/src/File/LuaSource.cpp    declarations: 0 → **22**    tokens 2085, parse errors 0
+```
+
+复现测试 `an_unresolved_include_does_not_erase_the_files_own_facts` **已转为通过** ✓（不再 ignore ✓）。
+
+**三个测试因此变红，它们是"旧计数"的期望，需要按新事实复核**（本次会话结束前未完成）：
+
+```text
+index::project::tests::an_overload_set_is_a_list_and_a_namespace_is_one_entity   重载集现在多了定义一侧 ✓
+the_folds_of_a_file_are_the_regions_a_reader_hides                              折叠范围随符号数变化 ✓
+a_declaration_in_the_viewed_file_is_reported_on_its_own_line                    报告位置按符号数变化 ✓
+```
+
+每一条都该**逐条确认新数字是对的**，而不是把期望改成新数字 —— 这是本轮唯一未完成的收尾。

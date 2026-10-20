@@ -542,6 +542,13 @@ fn a_blank_line_in_a_body_offers_the_keywords_and_the_snippets() {
 
     let labels = labels_at(&mut session, "/p/a.cpp", cursor);
     let view = cooked_view(&mut session, "/p/a.cpp");
+    match session.members_of(&view, "Source") {
+        cpp_code_analysis::Known::Yes(list) => println!(
+            "members_of(Source) → {:?}",
+            list.members.iter().map(|m| m.fact.name.clone()).collect::<Vec<_>>()
+        ),
+        other => println!("members_of(Source) → {other:?}"),
+    }
     let offered = session.completions(
         &view,
         cpp_code_analysis::file::coordinates::FileOffset::new(cursor),
@@ -1551,6 +1558,13 @@ fn a_macro_is_not_shown_with_a_signature() {
     let view = cooked_view(&mut session, "/p/a.cpp");
 
     let cursor = source.rfind("FULL_NAME_FORMAT").expect("the fixture") + "FULL_NAME_FORMAT".len();
+    match session.members_of(&view, "Source") {
+        cpp_code_analysis::Known::Yes(list) => println!(
+            "members_of(Source) → {:?}",
+            list.members.iter().map(|m| m.fact.name.clone()).collect::<Vec<_>>()
+        ),
+        other => println!("members_of(Source) → {other:?}"),
+    }
     let offered = session.completions(
         &view,
         cpp_code_analysis::file::coordinates::FileOffset::new(cursor),
@@ -1638,7 +1652,14 @@ fn the_typed_prefix_is_the_word_being_replaced() {
         let view = cooked_view(&mut session, "/p/a.cpp");
 
         let at = source.find("auto x = ").expect("the fixture") + "auto x = ".len() + typed.len();
-        let offered = session.completions(
+        match session.members_of(&view, "Source") {
+        cpp_code_analysis::Known::Yes(list) => println!(
+            "members_of(Source) → {:?}",
+            list.members.iter().map(|m| m.fact.name.clone()).collect::<Vec<_>>()
+        ),
+        other => println!("members_of(Source) → {other:?}"),
+    }
+    let offered = session.completions(
             &view,
             cpp_code_analysis::file::coordinates::FileOffset::new(at),
         );
@@ -1690,7 +1711,14 @@ fn a_statement_position_prefix_is_read_too() {
             .expect("the fixture")
             + 4
             + typed.len();
-        let offered = session.completions(
+        match session.members_of(&view, "Source") {
+        cpp_code_analysis::Known::Yes(list) => println!(
+            "members_of(Source) → {:?}",
+            list.members.iter().map(|m| m.fact.name.clone()).collect::<Vec<_>>()
+        ),
+        other => println!("members_of(Source) → {other:?}"),
+    }
+    let offered = session.completions(
             &view,
             cpp_code_analysis::file::coordinates::FileOffset::new(at),
         );
@@ -1733,6 +1761,13 @@ int main()
     println!("rendering: {:?}", view.source);
 
     let at = source.find("    STD s").expect("the fixture") + "    STD s".len();
+    match session.members_of(&view, "Source") {
+        cpp_code_analysis::Known::Yes(list) => println!(
+            "members_of(Source) → {:?}",
+            list.members.iter().map(|m| m.fact.name.clone()).collect::<Vec<_>>()
+        ),
+        other => println!("members_of(Source) → {other:?}"),
+    }
     let offered = session.completions(
         &view,
         cpp_code_analysis::file::coordinates::FileOffset::new(at),
@@ -1792,6 +1827,13 @@ struct Widget { int size; };
 
     // **After `@par`** — the vocabulary, filtered by what was typed.
     let after_par = source.find("/// @par").expect("the fixture") + "/// @par".len();
+    match session.members_of(&view, "Source") {
+        cpp_code_analysis::Known::Yes(list) => println!(
+            "members_of(Source) → {:?}",
+            list.members.iter().map(|m| m.fact.name.clone()).collect::<Vec<_>>()
+        ),
+        other => println!("members_of(Source) → {other:?}"),
+    }
     let offered = session.completions(
         &view,
         cpp_code_analysis::file::coordinates::FileOffset::new(after_par),
@@ -1806,6 +1848,13 @@ struct Widget { int size; };
 
     // **After `@param `** — the parameters of the declaration the comment documents, and nothing else.
     let after_param = source.find("/// @param ").expect("the fixture") + "/// @param ".len();
+    match session.members_of(&view, "Source") {
+        cpp_code_analysis::Known::Yes(list) => println!(
+            "members_of(Source) → {:?}",
+            list.members.iter().map(|m| m.fact.name.clone()).collect::<Vec<_>>()
+        ),
+        other => println!("members_of(Source) → {other:?}"),
+    }
     let offered = session.completions(
         &view,
         cpp_code_analysis::file::coordinates::FileOffset::new(after_param),
@@ -1841,6 +1890,13 @@ fn a_macro_body_offers_its_own_parameters() {
         .find("MAX3(a, b, c) MAX(MAX(a, b)")
         .expect("the fixture")
         + "MAX3(a, b, c) MAX(MAX(a, ".len();
+    match session.members_of(&view, "Source") {
+        cpp_code_analysis::Known::Yes(list) => println!(
+            "members_of(Source) → {:?}",
+            list.members.iter().map(|m| m.fact.name.clone()).collect::<Vec<_>>()
+        ),
+        other => println!("members_of(Source) → {other:?}"),
+    }
     let offered = session.completions(
         &view,
         cpp_code_analysis::file::coordinates::FileOffset::new(at),
@@ -1885,6 +1941,13 @@ int neither;
 
     // After `defined(` in the `#elif`: the macros are the answer, filtered by `FEATU`.
     let at = source.find("#elif defined(FEATU").expect("the fixture") + "#elif defined(FEATU".len();
+    match session.members_of(&view, "Source") {
+        cpp_code_analysis::Known::Yes(list) => println!(
+            "members_of(Source) → {:?}",
+            list.members.iter().map(|m| m.fact.name.clone()).collect::<Vec<_>>()
+        ),
+        other => println!("members_of(Source) → {other:?}"),
+    }
     let offered = session.completions(
         &view,
         cpp_code_analysis::file::coordinates::FileOffset::new(at),
@@ -1896,6 +1959,13 @@ int neither;
 
     // Right after `#if `: every macro the file defines, plus `defined`.
     let blank = source.find("#if VERSION").expect("the fixture") + "#if ".len();
+    match session.members_of(&view, "Source") {
+        cpp_code_analysis::Known::Yes(list) => println!(
+            "members_of(Source) → {:?}",
+            list.members.iter().map(|m| m.fact.name.clone()).collect::<Vec<_>>()
+        ),
+        other => println!("members_of(Source) → {other:?}"),
+    }
     let offered = session.completions(
         &view,
         cpp_code_analysis::file::coordinates::FileOffset::new(blank),
@@ -1952,6 +2022,13 @@ int f() {
         "context: {:?}",
         cpp_code_analysis::completion::context_at(&view.root, reading.get())
     );
+    match session.members_of(&view, "Source") {
+        cpp_code_analysis::Known::Yes(list) => println!(
+            "members_of(Source) → {:?}",
+            list.members.iter().map(|m| m.fact.name.clone()).collect::<Vec<_>>()
+        ),
+        other => println!("members_of(Source) → {other:?}"),
+    }
     let offered = session.completions(
         &view,
         cpp_code_analysis::file::coordinates::FileOffset::new(at),
@@ -1971,5 +2048,76 @@ int f() {
     assert!(
         labels.contains(&"first") && labels.contains(&"second"),
         "the element's members: {labels:?}"
+    );
+}
+
+/// **The original problem**: in a `.cpp` of separated definitions, a completion in the body of `Source::GetLine` cannot name
+/// `Source`'s members.
+///
+/// # What was measured, and why this is not fixed here
+///
+/// The chain at that cursor is `[Function, Class("Source"), TranslationUnit]` once `names_a_scope_this_file_has` accepts a
+/// qualifier this file has not built, and `members_of("Source")` then answers `["GetLine"]` — so the two structural pieces do
+/// work when forced. Forcing them **breaks an invariant**: `sema::resolve::tests::a_qualifier_that_names_nothing_is_unknown_
+/// rather_than_guessed` fails, because synthesising a class scope from a qualifier is exactly the guess that test forbids.
+///
+/// So the fix is **not** in the scope tree. The completion path should ask the question directly — "the declarator that
+/// encloses this cursor is `Source::GetLine`, so the members of `Source` are in scope here" — using the declarator node and
+/// `members_of`, which is what `CppDeclaration`/`CppDeclSpecifierSeq` already expose. That keeps the resolver's rule (a
+/// qualifier names nothing until something declares it) and gives the completion what it needs.
+#[test]
+fn a_member_is_completed_in_a_separated_definition() {
+    let header = "class Source {\npublic:\n    int _offset;\n    int GetLine(int n);\n};\n";
+    let source = "#include \"a.h\"\nint Source::GetLine(int n) {\n    return _;\n}\n";
+    let files = MemoryFiles::new()
+        .with_file("/p/a.h", header)
+        .with_file("/p/a.cpp", source);
+    let providers = SessionFiles::new(OpenDocuments::new(), files);
+    let mut session = Session::with_config(
+        "/p",
+        providers,
+        WatchFilter::new("/p"),
+        CompilerConfig::default(),
+    );
+    session.add_project_files([
+        std::path::PathBuf::from("/p/a.h"),
+        std::path::PathBuf::from("/p/a.cpp"),
+    ]);
+    session.index_everything();
+    let view = cooked_view(&mut session, "/p/a.cpp");
+    let at = source.find("return _").expect("the fixture") + "return _".len();
+    let reading = view
+        .reading_offset_of(cpp_code_analysis::file::coordinates::FileOffset::new(at))
+        .expect("the cursor is in the rendering");
+    if let Some(innermost) = view.scopes.scope_at(reading.get()) {
+        for id in view.scopes.scope_chain(innermost) {
+            if let Some(scope) = view.scopes.scope(id) {
+                println!(
+                    "  chain: kind {:?} name {:?} prefix {:?}",
+                    scope.kind,
+                    scope.name,
+                    view.scopes.qualification_prefix_of(id)
+                );
+            }
+        }
+    }
+    match session.members_of(&view, "Source") {
+        cpp_code_analysis::Known::Yes(list) => println!(
+            "members_of(Source) → {:?}",
+            list.members.iter().map(|m| m.fact.name.clone()).collect::<Vec<_>>()
+        ),
+        other => println!("members_of(Source) → {other:?}"),
+    }
+    let offered = session.completions(
+        &view,
+        cpp_code_analysis::file::coordinates::FileOffset::new(at),
+    );
+    let labels: Vec<&str> = offered.items.iter().map(|item| item.label.as_str()).collect();
+    println!("offered: {labels:?}");
+    // `_offset` is a member too, but a name beginning with `_` inside a body is the implementation's by this crate's rule
+    // (see `unused`'s note), so the assertion is the plain-named member — which is what the completion had none of before.
+    assert!(
+        labels.iter().any(|label| *label == "_offset"),
+        "the body of a separated definition names the class's own members: {labels:?}"
     );
 }

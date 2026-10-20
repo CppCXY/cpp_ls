@@ -25,7 +25,7 @@
 //! and a condition with a mismatched parenthesis is exactly where the grammar recovers hardest. The text is what
 //! the reader wrote, and the question is about what they wrote.
 
-use cpp_parser::CppAstNode;
+use cpp_parser::{CppAstNode, CppAstToken};
 
 use super::{Check, CheckContext, DiagnosticCode};
 
@@ -79,12 +79,21 @@ impl Check for AssignmentInCondition {
             // is written deliberately: the assignment is parenthesised, and its result is compared — which is exactly the
             // shape the extra-parentheses rule exists for. The census found one such finding in 1191 files, in boost's
             // `win_object_handle_service.ipp`, and it was this.
-            let text = condition.text().to_string();
-            if has_a_top_level_comparison(&text) {
+            // **The inner expression decides, and it is typed.** `((op = queue->Peek()))` is a parenthesised expression
+            // whose child is the assignment; `((op = …) != 0)` is one whose child is a comparison *of* a parenthesised
+            // assignment, which is the idiom. The operator **token** on the inner binary says which — the previous form
+            // counted parentheses through text, which is how a `--port` comparison was once read as an assignment.
+            let is_a_comparison = cpp_parser::CppParenExpr::cast(condition.clone())
+                .and_then(|parenthesised| parenthesised.child::<cpp_parser::CppBinaryExpr>())
+                .and_then(|binary| binary.token::<cpp_parser::CppOperatorToken>())
+                .is_some_and(|operator| {
+                    matches!(operator.syntax().text().to_string().as_str(), "==" | "!=" | "<" | ">" | "<=" | ">=")
+                });
+            if is_a_comparison {
                 continue;
             }
+            let text = context.node_text(&condition);
             let text = text.trim();
-            let text = text.trim_start_matches('(').trim_end_matches(')').trim();
 
             context.add(
                 DiagnosticCode::AssignmentInCondition,
@@ -179,40 +188,4 @@ fn is_an_assignment(condition: &cpp_parser::CppSyntaxNode) -> bool {
                     | cpp_parser::CppTokenKind::Comma
             )
         })
-}
-
-/// **Is the assignment's result compared against something?** — `(op = q.front()) != 0` is, `x = a < b` is not.
-///
-/// Depth alone does not tell them apart: with the condition's outer parentheses stripped, `x = a < b` has its `<` at depth
-/// zero too. What distinguishes the idiom is that the assignment is **enclosed in its own parentheses** before the
-/// comparison — a `)` closes a group at depth zero, and only then does the comparison belong to the condition rather than to
-/// the assignment's right-hand side.
-fn has_a_top_level_comparison(written: &str) -> bool {
-    let inner = written
-        .trim()
-        .strip_prefix('(')
-        .and_then(|rest| rest.strip_suffix(')'))
-        .unwrap_or(written)
-        .trim();
-    let characters: Vec<char> = inner.chars().collect();
-    let mut depth = 0i32;
-    let mut closed_a_group = false;
-    for (at, character) in characters.iter().enumerate() {
-        match character {
-            '(' | '[' | '{' => depth += 1,
-            ')' | ']' | '}' => {
-                depth -= 1;
-                if depth == 0 {
-                    closed_a_group = true;
-                }
-            }
-            // A comparison that follows a completed group belongs to the condition.
-            '<' | '>' | '!' if depth == 0 && closed_a_group => return true,
-            '=' if depth == 0 && closed_a_group && characters.get(at + 1) == Some(&'=') => {
-                return true;
-            }
-            _ => {}
-        }
-    }
-    false
 }

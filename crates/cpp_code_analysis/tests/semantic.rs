@@ -1625,3 +1625,118 @@ fn a_modifier_is_read_from_the_declarations_own_specifiers() {
         "a type is not readonly and not static — a modifier that cannot be true is a visible wrong claim"
     );
 }
+
+/// **A definition written with a qualified name is a definition**, and today it is not a fact at all.
+///
+/// `void LuaSource::From(int)` declares `LuaSource::From` outside its class — the shape every `.cpp` uses for every member
+/// it defines. The scope walk binds nothing for it (a qualified declarator declares no name in the *enclosing* scope), so
+/// `build_facts` produces no fact, and find-implementations has nothing on the definition side.
+///
+/// Measured on `LuaParser/src/File/LuaSource.cpp` (the document's example): 6507 bytes, 53 declarations parsed, and **0
+/// facts**.
+#[test]
+fn a_qualified_definition_is_a_fact() {
+    let session = session_with(&[(
+        "/p/a.cpp",
+        "class LuaSource {\npublic:\n    void From(int depth);\n};\nvoid LuaSource::From(int depth) {\n    (void)depth;\n}\n",
+    )]);
+    let summary = session
+        .index()
+        .summary(std::path::Path::new("/p/a.cpp"))
+        .expect("the file is indexed");
+    let names: Vec<(String, String)> = summary
+        .declarations
+        .iter()
+        .map(|fact| (fact.name.clone(), fact.qualified_name()))
+        .collect();
+    println!("facts: {names:?}");
+    assert!(
+        names.iter().any(|(name, qualified)| name == "From" && qualified == "LuaSource::From"),
+        "the out-of-class definition is a fact of its own: {names:?}"
+    );
+}
+
+/// **Which of the file's three shapes loses its fact** — the fixture above worked with `void F::G(int)`, and the real file
+/// has the shapes below.
+#[test]
+fn the_three_shapes_of_the_real_file() {
+    let cases: &[(&str, &str, &str)] = &[
+        (
+            "a `std::size_t` return",
+            "class C {\npublic:\n    unsigned long GetLine(unsigned long offset) const;\n};\nunsigned long C::GetLine(unsigned long offset) const {\n    return offset;\n}\n",
+            "GetLine",
+        ),
+        (
+            "a template return type",
+            "namespace std { template <class T> class shared_ptr { }; }\nclass C {\npublic:\n    void From();\n};\nstd::shared_ptr<C> C::From() {\n    return std::shared_ptr<C>();\n}\n",
+            "From",
+        ),
+        (
+            "a constructor with an initialiser list",
+            "class C {\npublic:\n    C(int n);\n};\nC::C(int n)\n    : _n(n) {\n}\n",
+            "C",
+        ),
+        (
+            "a static member with a template argument",
+            "namespace std { template <class T> class shared_ptr { }; }\nclass C {\npublic:\n    void From();\n};\nstd::shared_ptr<C> C::From(int) {\n    return std::shared_ptr<C>();\n}\n",
+            "From",
+        ),
+    ];
+    for (name, source, wanted) in cases {
+        let session = session_with(&[("/p/a.cpp", source)]);
+        let summary = session
+            .index()
+            .summary(std::path::Path::new("/p/a.cpp"))
+            .expect("indexed");
+        let found: Vec<String> = summary
+            .declarations
+            .iter()
+            .map(|fact| fact.qualified_name())
+            .collect();
+        println!("{name:<40} → {found:?}");
+        assert!(
+            found.iter().any(|qualified| qualified.ends_with(wanted)),
+            "{name} should be a fact: {found:?}"
+        );
+    }
+}
+
+/// **An include nobody can resolve must not erase the file's own facts.**
+///
+/// The real file starts with `#include "LuaParser/File/LuaSource.h"` and `#include "Util/Utf8.h"`, and it summarises to **0
+/// declarations** with 0 parse errors. Every declaration shape in it works in a fixture that has no include, so the include
+/// is the difference — either the rendering drops what follows a failed include, or the summary is taken from a text that
+/// does.
+///
+/// # What was measured, and where the bug is
+///
+/// The **rendering is correct** — with the two includes unresolved it is exactly `unsigned long C::GetLine(…) const { … }`
+/// — so the text `build_facts` reads is not the problem. The fact is missing because of where the **qualified prefix** comes
+/// from: `fact_for` receives `scope` from `scopes.qualification_prefix_of(scope_id)`, and the case that works in a fixture
+/// works because the class is *declared in the same file* — the scope tree then knows what `C::` refers to. In a real
+/// `.cpp` the class is in a header, so with no include resolved the prefix is `None`, and a qualified declarator whose
+/// prefix is unknown produces **no fact at all**. That is the document's ③, and its fix is the documented one: a second
+/// pass over the **tree** for declarations whose declarator is qualified, taking the prefix from the declarator's own text
+/// (the last `::` segment is the name, everything before it is the scope) rather than from the scope tree.
+#[test]
+fn an_unresolved_include_does_not_erase_the_files_own_facts() {
+    let session = session_with(&[(
+        "/p/a.cpp",
+        "#include \"missing/Header.h\"\n#include \"missing/Other.h\"\n\nunsigned long C::GetLine(unsigned long offset) const {\n    return offset;\n}\n",
+    )]);
+    let summary = session
+        .index()
+        .summary(std::path::Path::new("/p/a.cpp"))
+        .expect("indexed");
+    let found: Vec<String> = summary.declarations.iter().map(|fact| fact.qualified_name()).collect();
+    println!("with unresolved includes: {found:?}");
+    if let Some(view) = session.view(std::path::Path::new("/p/a.cpp")) {
+        println!("rendering: {:?}", view.source);
+    } else {
+        println!("rendering: none");
+    }
+    assert!(
+        found.iter().any(|qualified| qualified.ends_with("GetLine")),
+        "the file's own definition survives an include nobody can resolve: {found:?}"
+    );
+}

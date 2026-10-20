@@ -23,50 +23,63 @@ impl Check for UseAuto {
     const CODES: &'static [DiagnosticCode] = &[DiagnosticCode::UseAuto];
 
     fn check(context: &mut CheckContext<'_>) {
-        // **The file, not the reading.** The iterator spelling is a fact about the text its author wrote, and a spelling a
-        // macro produced is not a declaration anybody can edit — `add_in_the_file` says the range already is a file offset.
-        let source = context.written;
-        let protected = context.comments_and_literals();
-        for spelling in ["::iterator", "::const_iterator"] {
-            let mut from = 0usize;
-            while let Some(at) = source[from..].find(spelling) {
-                let at = from + at;
-                from = at + spelling.len();
-                // What follows must be an identifier — `std::vector<int>::iterator it` — and not another `::`.
-                if context.in_a_comment_or_literal(at, &protected) {
-                    continue;
-                }
-                let after = &source[at + spelling.len()..];
-                let after_trimmed = after.trim_start();
-                if after_trimmed.starts_with("::") {
-                    continue;
-                }
-                let Some(first) = after_trimmed.chars().next() else {
+        // **The declarations, not a scan of the file.** The rule is about a declaration whose *type* is written with its
+        // full iterator spelling, and the parser has a node for the type: the declaration's specifier sequence. Reading
+        // that node's own text asks the question exactly — it cannot match a comment, a string, or a `::iterator` in a
+        // template argument that declares nothing, all of which the previous text scan had to defend against by hand.
+        use cpp_parser::CppAstNode;
+        for declaration in context
+            .own::<cpp_parser::CppDeclaration>()
+            .collect::<Vec<_>>()
+        {
+            let Some(specifiers) = declaration.child::<cpp_parser::CppDeclSpecifierSeq>() else {
+                continue;
+            };
+            let written = context.node_text(specifiers.syntax()).trim_end();
+            let spelling = if written.ends_with("::const_iterator") {
+                "::const_iterator"
+            } else if written.ends_with("::iterator") {
+                "::iterator"
+            } else {
+                continue;
+            };
+            // **A declaration, not a mention.** At least one declarator has to carry a plain name, which is what
+            // `std::vector<int>::iterator it` does and what a parameter of that type (`void f(std::vector<int>::iterator)`)
+            // does not — the parameter declares no iterator the author could rewrite as `auto`.
+            let mut named: Option<(String, cpp_parser::SourceRange)> = None;
+            for declarator in declaration.children::<cpp_parser::CppInitDeclarator>() {
+                let Some(name) = declarator.child::<cpp_parser::CppDeclarator>() else {
                     continue;
                 };
-                if !(first.is_alphabetic() || first == '_') {
-                    continue;
+                // **A plain declarator** — `it`, not `it[4]` and not `(*it)`: its whole text is one identifier, which is the
+                // declaration `auto` can replace.
+                let text = context.node_text(name.syntax()).trim();
+                let is_one_name = !text.is_empty()
+                    && text
+                        .chars()
+                        .all(|character| character.is_alphanumeric() || character == '_');
+                if is_one_name {
+                    named = Some((
+                        text.to_string(),
+                        cpp_parser::source_range(name.syntax().text_range()),
+                    ));
+                    break;
                 }
-                let name: String = after_trimmed
-                    .chars()
-                    .take_while(|character| character.is_alphanumeric() || *character == '_')
-                    .collect();
-                let start = source[..at]
-                    .rfind(|character: char| {
-                        !(character.is_alphanumeric()
-                            || matches!(character, ':' | '_' | '<' | '>' | ',' | ' '))
-                    })
-                    .map(|boundary| boundary + 1)
-                    .unwrap_or(0);
-                context.add_in_the_file(
-                    DiagnosticCode::UseAuto,
-                    cpp_parser::SourceRange::new(start, at + spelling.len() - start),
-                    t!("%{spelling} %{name}", spelling = spelling, name = name),
-                    t!(
-                        "`%{name}` is declared by its full iterator spelling — write `auto %{name}`, which is the same type and does not need editing when the container's element type changes", name = name
-                    ),
-                );
             }
+            let Some((name, range)) = named else {
+                continue;
+            };
+            context.add(
+                DiagnosticCode::UseAuto,
+                cpp_parser::source_range(specifiers.syntax().text_range()),
+                t!("%{spelling} %{name}", spelling = spelling, name = name),
+                t!(
+                    "`%{name}` is declared by its full iterator spelling — write `auto %{name}`, which is the same type and \
+                     cannot disagree with the initialiser"
+                ),
+            );
+            let _ = range;
         }
     }
 }
+
