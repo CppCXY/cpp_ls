@@ -1178,7 +1178,17 @@ impl<'a> CppLexer<'a> {
         // user-defined suffix starts with `_` and makes the whole thing a `UserDefinedLiteral`,
         // which the parser must not treat as a plain number.
         if is_float {
-            if matches!(self.reader.current_char(), 'f' | 'F' | 'l' | 'L') {
+            // **The fixed-width suffixes come first, because they begin with the same letter.** C++23
+            // [lex.fcon] adds `f16 f32 f64 f128 f32x f64x f128x` and `bf16` in both cases, and GCC 15's
+            // `<limits>` and `<numbers>` write their `_Float16` constants with them:
+            // `6.103515625e-05F16`. The single-letter rule consumed the `F` and left `16` standing as an
+            // integer, so the declaration read as `return 6.1e-05F 16;` — measured as 12 `expected ;` errors
+            // in those two headers, and the suffix is the whole of it.
+            if let Some(width) = self.fixed_width_float_suffix() {
+                for _ in 0..width {
+                    self.reader.bump();
+                }
+            } else if matches!(self.reader.current_char(), 'f' | 'F' | 'l' | 'L') {
                 self.reader.bump();
             }
         } else {
@@ -1203,6 +1213,28 @@ impl<'a> CppLexer<'a> {
         } else {
             CppTokenKind::IntegerLiteral
         }
+    }
+
+    /// **The length of a fixed-width floating-point suffix at the cursor**, if one is written there.
+    ///
+    /// C++23 [lex.fcon] spells them `f16 f32 f64 f128 f32x f64x f128x bf16`, each in both cases. Longest
+    /// first, because `f32x` and `f32` share a prefix — letting `f32` answer first would leave the `x` as a name
+    /// character and turn the literal into a user-defined one, which is the opposite of what the file wrote.
+    fn fixed_width_float_suffix(&self) -> Option<usize> {
+        const SUFFIXES: [&str; 16] = [
+            "f128x", "F128x", "f32x", "F32x", "f64x", "F64x", "f128", "F128", "bf16", "BF16", "f16", "F16",
+            "f32", "F32", "f64", "F64",
+        ];
+        for suffix in SUFFIXES {
+            if suffix
+                .chars()
+                .enumerate()
+                .all(|(at, expected)| self.reader.lookahead(at) == expected)
+            {
+                return Some(suffix.len());
+            }
+        }
+        None
     }
 
     /// Lex a header name, as it appears in `#include <iostream>` or `#include "local.h"`.

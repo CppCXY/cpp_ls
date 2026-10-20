@@ -1894,3 +1894,59 @@ I6  a_column_read_inside_a_multibyte_character_is_…      偏移量在一个汉
 - **diagnostic 的 378**:我拿用户那个 `std_module_demo.cpp` 复现了一遍 —— 解析错误 0、检查 0、only 一条 module
   note 在 900..913(字符边界正常)。所以那次很可能是**编辑中的缓冲**与已建的行索引不同步,378 落在旧文本的某个
   汉字中间。守卫把这种情况降级为"列取该字符所在位",不再崩溃。
+
+## 三十五、GCC 15 (libstdc++) 闭包里的语法错误：从 971 到 3（2026）
+
+用 `cook_errors` 探针在 `C:\Users\zc\Desktop\test_module`（GCC 15.1.0 + C++23 模块）上量:
+
+```text
+起始   478 个文件入索引,409 个可 cook,3 个文件有解析错误,共 971
+现在   1 个文件有解析错误(片段头),客户端只看到 1 条消息
+```
+
+### ① 定宽浮点后缀 —— `<limits>` / `<numbers` 的 12 个错误
+
+```cpp
+static constexpr _Float16 min() noexcept { return 6.10351562500000000000000000000000000e-05F16; }
+```
+
+词法器只认单字母后缀,`F` 之后把 `16` 留成整数 → `return 6.1e-05F 16;` → `expected ;`。
+C++23 [lex.fcon] 的 `f16 f32 f64 f128 f32x f64x f128x bf16`(大小写各一套)现在整体是一个记号,
+最长优先(`f32x` 先于 `f32`)。测试:`a_fixed_width_float_suffix_is_part_of_the_literal`、
+`a_float16_constant_parses_as_a_return_statement`。
+
+### ② 片段头 `bits/text_encoding-data.h` —— 895 个错误 → 1 条消息
+
+它是**一段初始化列表**,由 `text_encoding.cc` 在花括号里打开,文件自己写着
+`#error "This is not a public header, do not include it directly"`。单独读它,895 个错误全是"没有开括号"的下游;
+编译器只说它自己写的那一句。规则(两个信号都要成立,都是事实):
+
+```text
+文件里写着一行 #error          —— 它自己声明了不能单独读
+渲染的第一个 token 是 { 或 }     —— 没有任何声明这样开头
+⇒ 只发布 #error 的原文,不发布级联错误
+```
+
+测试:`a_fragment_header_reports_its_own_refusal_not_the_cascade`。
+
+### ③ 声明符里的 attribute —— `combaseapi.h` 的 2 个错误
+
+```cpp
+typedef HRESULT (STDAPICALLTYPE *LPFNGETCLASSOBJECT) (REFCLSID, REFIID, LPVOID *);
+```
+
+`STDAPICALLTYPE` 展开成 `__attribute__((__stdcall__))`,于是括号组以 attribute 开头而不是 `*`:
+`a_parenthesised_declarator_with_a_name_follows` 认不出它,`parse_parenthesised_declarator` 也不跳过它。
+现在两者都认(`attribute_group_length`,GNU/MSVC 的 `__attribute__((…))`/`__declspec(…)` 与 C++ 的 `[[…]]`),
+树里是 `Declarator > AttributeList`。实测 `combaseapi.h` 从 2 个错误降到 0。
+
+### 还没消掉的 3 个错误(都在 `<format>`)
+
+```text
+28619  const string_view __narrow(__buf, std::__to_chars_i<…>(…).ptr);
+       "expected a parameter list or an initializer" —— 括号初始化器里的**逗号表达式** `(a, b)` 我们不认
+70352  template<__format::__char _CharT, size_t _Nm> struct formatter<_CharT[_Nm], _CharT>
+       "expected a template argument" —— 疑似**限定名概念作约束**的模板参数,尚未归约成功
+```
+
+两条都记在这里,下一轮从这两个最小复现开始。

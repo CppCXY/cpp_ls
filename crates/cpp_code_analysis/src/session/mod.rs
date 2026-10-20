@@ -3289,18 +3289,37 @@ impl<F: FileProvider + Clone> Session<F> {
             return Some(FileDiagnostics {
                 reading: DiagnosticReading::Cooked,
                 unplaced: cooked.unplaced,
-                errors: cooked
-                    .diagnostics
-                    .iter()
-                    .map(|error| FileDiagnostic {
-                        start: error.range.start_offset,
-                        end: error.range.end_offset(),
-                        message: error.message.clone(),
-                        // **Every diagnostic carries its rule.** These came from the parser, so the rule is
-                        // `syntax-error` — stated here rather than left for the client to guess from the message.
+                // **A file that says it cannot be read on its own.** Some headers are *fragments*: their body is a
+                // piece of an initializer that another file opens and closes around them. libstdc++'s
+                // `bits/text_encoding-data.h` is one — a list of `{ 3, "US-ASCII" }` rows, guarded by
+                // `#error "This is not a public header, do not include it directly"`. Read as a translation unit it
+                // is **895** parse errors, every one of them a consequence of the brace that has no opening; a
+                // compiler says the same thing in one line, which is what its own `#error` is for.
+                //
+                // So the message is published and the cascade is not. Two signals together, and both are facts: the
+                // file writes an `#error` line, **and** its rendering begins with a `{` or a `}` — a token no
+                // declaration starts with. A file with an `#error` in a branch nobody takes, or a fragment with a
+                // typo elsewhere, keeps its own errors: the pair has to hold.
+                errors: match view.as_ref().and_then(Self::a_fragment_and_its_message) {
+                    Some((start, end, message)) => vec![FileDiagnostic {
+                        start,
+                        end,
+                        message,
                         code: crate::sema::check::DiagnosticCode::SyntaxError,
-                    })
-                    .collect(),
+                    }],
+                    None => cooked
+                        .diagnostics
+                        .iter()
+                        .map(|error| FileDiagnostic {
+                            start: error.range.start_offset,
+                            end: error.range.end_offset(),
+                            message: error.message.clone(),
+                            // **Every diagnostic carries its rule.** These came from the parser, so the rule is
+                            // `syntax-error` — stated here rather than left for the client to guess from the message.
+                            code: crate::sema::check::DiagnosticCode::SyntaxError,
+                        })
+                        .collect(),
+                },
                 notes,
                 checks,
             });
@@ -3320,7 +3339,62 @@ impl<F: FileProvider + Clone> Session<F> {
         None
     }
 
-    /// The checks' answer for one file — see [`crate::sema::check`].
+    /// **A file that declares itself a fragment**, with the message it wrote for that case.
+///
+/// The two signals, both facts and both required: the file **writes an `#error` line**, and the **first token of its
+/// rendering is a brace**. A fragment's body begins with the `{` of the initializer its including file opens;
+/// nothing else starts a translation unit that way, and a file that has an `#error` in a branch nobody takes still
+/// starts with a declaration. See the call site for the header this was measured on.
+fn a_fragment_and_its_message(view: &crate::FileView) -> Option<(usize, usize, String)> {
+    let written = view.written_text().unwrap_or(&view.source);
+    let (start, end, message) = Self::error_directive_line(written)?;
+
+    // The rendering's first non-trivia token, read from the tree rather than from the text: comments and directives
+    // are already gone from it, so a `{` here is the file's first real token.
+    let first = view
+        .root
+        .descendants_with_tokens()
+        .filter_map(|element| element.into_token())
+        .map(|token| cpp_parser::CppTokenKind::from(token.kind()))
+        .find(|kind| {
+            !matches!(
+                kind,
+                cpp_parser::CppTokenKind::Whitespace | cpp_parser::CppTokenKind::Newline
+            )
+        })?;
+    if !matches!(
+        first,
+        cpp_parser::CppTokenKind::LeftBrace | cpp_parser::CppTokenKind::RightBrace
+    ) {
+        return None;
+    }
+
+    Some((start, end, message))
+}
+
+/// The first `#error` line of a written text: where it is, and what it says.
+fn error_directive_line(text: &str) -> Option<(usize, usize, String)> {
+    let mut at = 0;
+    for line in text.split_inclusive('\n') {
+        let trimmed = line.trim_start();
+        let indent = line.len() - trimmed.len();
+        if let Some(rest) = trimmed.strip_prefix('#') {
+            let rest = rest.trim_start();
+            if let Some(message) = rest.strip_prefix("error") {
+                let message = message.trim().trim_matches('"').trim();
+                return Some((
+                    at + indent,
+                    at + line.trim_end().len(),
+                    message.to_string(),
+                ));
+            }
+        }
+        at += line.len();
+    }
+    None
+}
+
+/// The checks' answer for one file — see [`crate::sema::check`].
     ///
     /// An empty list when the index holds no summary for the path, which is the same answer as "no check had
     /// anything to say": a check is a claim about facts the analysis has, and a file it has no facts about is a

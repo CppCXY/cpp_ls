@@ -146,4 +146,51 @@ fn main() {
             println!("    {line}");
         }
     }
+
+    // **What the *client* would be shown**, which is not always the same list: `Session::diagnostics` publishes one
+    // message for a file that declares itself a fragment (an `#error` line and a rendering that begins with a brace)
+    // instead of the cascade the grammar reports for it. A probe that stopped at the parse errors could not tell
+    // those apart and would count `bits/text_encoding-data.h` as 895 findings forever.
+    if !worst.is_empty() {
+        println!("\n--- what a client is shown ---");
+        for (path, _) in worst.iter().take(10) {
+            match session.diagnostics(path) {
+                Some(found) => println!(
+                    "  {}  {} error(s){}",
+                    path.display(),
+                    found.errors.len(),
+                    found
+                        .errors
+                        .first()
+                        .map(|error| format!(" — first: {:?}", error.message))
+                        .unwrap_or_default()
+                ),
+                None => println!("  {}  (no reading)", path.display()),
+            }
+        }
+    }
+
+    // **Every file the client would see a squiggle in, with the text around it.** The list above is only the files
+    // the parse errors of *this* pass touched; a file cooked during the pass but asked for afterwards is not in it,
+    // and that is exactly where a construct to fix can hide.
+    println!("\n--- every file with a published error ---");
+    for path in &wanted {
+        let Some(found) = session.diagnostics(path) else {
+            continue;
+        };
+        if found.errors.is_empty() {
+            continue;
+        }
+        let text = std::fs::read_to_string(path).unwrap_or_default();
+        println!("\n  {}  {} error(s)", path.display(), found.errors.len());
+        for error in found.errors.iter().take(2) {
+            let from = error.start.saturating_sub(160);
+            let to = (error.end + 160).min(text.len());
+            let window = text
+                .get(from..to)
+                .unwrap_or_default()
+                .replace('\n', "\\n");
+            println!("    {}  {:?}\n      …{window}…", error.start, error.message);
+        }
+    }
 }

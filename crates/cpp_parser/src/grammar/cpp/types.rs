@@ -4437,6 +4437,57 @@ fn eat_cv_qualifiers(p: &mut CppParser) {
 /// ```
 ///
 /// Only a pointer or reference operator inside the parentheses makes it the first: nothing else can be
+/// **The length of an attribute group at `from`**, including both ends of its own token span — `None` when there is
+/// none there.
+///
+/// `__attribute__((__stdcall__))` is an identifier, a `(`, a balanced run of tokens and the `)` that closes it;
+/// `__declspec(noreturn)` is the same shape with one level; `[[gnu::always_inline]]` is the C++ spelling. Every one
+/// of them can stand **inside a declarator**, which is the case this exists for.
+fn attribute_group_length(p: &CppParser, from: usize) -> Option<usize> {
+    // **The C++ spelling** — `[[gnu::always_inline]]`, two brackets at each end.
+    if p.peek_token_kind_at(from..from + 2).as_slice()
+        == [CppTokenKind::LeftBracket, CppTokenKind::LeftBracket]
+    {
+        let mut at = from + 2;
+        while at < from + 128 {
+            if p.peek_token_kind_at(at..at + 2).as_slice()
+                == [CppTokenKind::RightBracket, CppTokenKind::RightBracket]
+            {
+                return Some(at + 2 - from);
+            }
+            at += 1;
+        }
+        return None;
+    }
+
+    // **The GNU and MSVC spelling** — a keyword and one balanced parenthesis group. The attribute's own arguments
+    // may hold further parentheses, so the length is the one the matching `)` closes.
+    let keyword = p.peek_token_text_at(from);
+    if !matches!(keyword, "__attribute__" | "__attribute" | "__declspec") {
+        return None;
+    }
+    if p.peek_token_kind_at(from + 1..from + 2).as_slice() != [CppTokenKind::LeftParen] {
+        return None;
+    }
+
+    let mut depth = 0usize;
+    let mut at = from + 1;
+    while at < from + 256 {
+        match p.peek_token_kind_at(at..at + 1).as_slice() {
+            [CppTokenKind::LeftParen] => depth += 1,
+            [CppTokenKind::RightParen] => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(at + 1 - from);
+                }
+            }
+            _ => {}
+        }
+        at += 1;
+    }
+    None
+}
+
 /// wrapped in them without a name, since a declarator's parentheses have to *hold* a declarator. `int (int)`
 /// reaches this with a type keyword inside, is refused here, and stays a parameter list; `int (x)` reaches it
 /// with a name, is refused for the same reason, and stays a name.
@@ -4521,6 +4572,27 @@ fn a_parenthesised_declarator_with_a_name_follows(p: &CppParser) -> bool {
     if p.current_token() != CppTokenKind::LeftParen {
         return false;
     }
+    // **An attribute before the pointer** — `typedef int (__attribute__((__stdcall__)) *FN)(int);`, which is how
+    // every MinGW typedef of a calling-convention function pointer is written (`combaseapi.h` has two of them, and
+    // they were the last two parse errors the GCC 15 closure produced). The group begins with the attribute rather
+    // than with the `*`, so the arm above cannot see it — and the group has to be claimed, because its other
+    // reading is a parameter list whose first parameter is `__attribute__((__stdcall__)) *FN`, which is not a
+    // parameter at all.
+    if let Some(length) = attribute_group_length(p, 1) {
+        let after = 1 + length;
+        return matches!(
+            p.peek_token_kind_at(after..after + 3).as_slice(),
+            [
+                CppTokenKind::Star
+                    | CppTokenKind::Ampersand
+                    | CppTokenKind::LogicalAnd
+                    | CppTokenKind::Caret,
+                CppTokenKind::Identifier,
+                CppTokenKind::RightParen
+            ]
+        );
+    }
+
 
     if matches!(
         p.peek_token_kind_at(1..4).as_slice(),
@@ -5074,6 +5146,17 @@ fn parse_parenthesised_declarator(p: &mut CppParser) -> ParseResult {
     let m = p.mark(CppSyntaxKind::Declarator);
 
     expect_token(p, CppTokenKind::LeftParen)?;
+
+    // **An attribute before the declarator's own operator** — `( __attribute__((__stdcall__)) *FN )`, which is
+    // what `STDAPICALLTYPE` expands to in MinGW's `combaseapi.h`. The macro arm below expects the group's first
+    // token to be a name followed by a `*`; here it is the attribute, and the `*` stands after it.
+    while let Some(length) = attribute_group_length(p, 0) {
+        let attribute = p.mark(CppSyntaxKind::AttributeList);
+        for _ in 0..length {
+            p.bump();
+        }
+        attribute.complete(p);
+    }
     // The inner declarator's parentheses wrap a declarator, never a parameter list, so no name may appear
     // there: `(*f)` is a pointer and `(*f(int))` a pointer to a *function*, whose parameter list is read by
     // the outer declarator's suffix loop.

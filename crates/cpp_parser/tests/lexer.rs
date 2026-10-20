@@ -562,3 +562,52 @@ fn a_byte_order_mark_is_whitespace() {
     // The same code point mid-file, where it is only ever a stray mark.
     assert!(errors_for("int x\u{feff}= 1;").is_empty());
 }
+
+/// **C++23 的定宽浮点后缀是一个记号** —— `6.1e-05F16` 不是 `6.1e-05F` 加 `16`。
+///
+/// GCC 15 的 `<limits>` / `<numbers>` 用它写 `_Float16` 常量;单字母规则会把 `F` 吃掉、把 `16` 留成一个整数,
+/// 于是那条 `return` 变成 `return 6.1e-05F 16;`,报 `expected ;`(实测这两个头里 12 个错误全是它)。
+#[test]
+fn a_fixed_width_float_suffix_is_part_of_the_literal() {
+    for (text, name) in [
+        ("6.10351562500000000000000000000000000e-05F16", "F16"),
+        ("2.718281828459045235360287471352662498F16", "F16"),
+        ("1.0f16", "f16"),
+        ("1.0F32", "F32"),
+        ("1.0f32x", "f32x"),
+        ("1.0F64x", "F64x"),
+        ("1.0f128", "f128"),
+        ("1.0F128x", "F128x"),
+        ("1.0bf16", "bf16"),
+        ("1.0BF16", "BF16"),
+    ] {
+        let tree = cpp_parser::CppParser::parse(text, cpp_parser::ParserConfig::default());
+        let root = tree.get_red_root();
+        let tokens: Vec<_> = root
+            .descendants_with_tokens()
+            .filter_map(|element| element.into_token())
+            .filter(|token| !cpp_parser::is_trivia(cpp_parser::CppTokenKind::from(token.kind())))
+            .collect();
+        assert_eq!(
+            tokens.len(),
+            1,
+            "{name}: the whole literal is one token, got {tokens:?}"
+        );
+        assert_eq!(
+            cpp_parser::CppTokenKind::from(tokens[0].kind()),
+            cpp_parser::CppTokenKind::FloatingLiteral,
+            "{name}"
+        );
+        assert_eq!(tokens[0].text(), text, "{name}");
+    }
+}
+
+/// 一个 `_Float16` 常量在声明里不该让解析器报错 —— 这条是上面那条的"后果"测试。
+#[test]
+fn a_float16_constant_parses_as_a_return_statement() {
+    let text = "struct limits { static constexpr _Float16 min() noexcept { return 6.1e-05F16; } };\n";
+    let tree = cpp_parser::CppParser::parse(text, cpp_parser::ParserConfig::default());
+    let errors = tree.get_errors();
+
+    assert!(errors.is_empty(), "{errors:?}");
+}
