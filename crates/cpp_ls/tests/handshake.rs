@@ -4292,3 +4292,65 @@ void f() {
         "and never with another class's members: {text}"
     );
 }
+
+/// **A macro**的 hover 显示的是它自己的 `#define` 行，而不是一段无关的代码。
+///
+/// 报告来自编辑器:悬停 `#define STD std::` 里的 `STD` 时,弹窗里是**一大段 `main` 的函数体**。
+/// 原因是坐标用错了地方:事实(`DeclFact`/`MacroFact` 的 range)按**文件**坐标记录,而当时的实现拿它去切
+/// **渲染**(指令和注释都已被删掉,长度短得多),于是偏移落到了程序中间,再往后切到 body 的末尾。
+///
+/// 断言两件事,因为两件都是这个 bug 的两面:弹窗**包含** `#define STD std::`,且**不含**任何 `int main`。
+#[test]
+fn a_macro_hover_shows_its_own_define_line() {
+    let project = Project::new("macro-hover");
+    let source = "#define FULL_NAME_FORMAT \"Full name: {}\"\n#define STD std::\n\nint main() {\n    STD c;\n    return 0;\n}\n";
+    project.write("main.cpp", source);
+
+    let mut server = Server::start(project.root());
+    let main_uri = uri_of(&project.root().join("main.cpp"));
+
+    server.request(
+        1,
+        "initialize",
+        json!({
+            "processId": std::process::id(),
+            "rootUri": uri_of(project.root()),
+            "capabilities": { "textDocument": { "hover": {} } },
+        }),
+    );
+    server.notify("initialized", json!({}));
+    server.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": { "uri": main_uri, "languageId": "cpp", "version": 1, "text": source }
+        }),
+    );
+
+    // The **use** of `STD` on line 4 (0-based), which is where a reader hovers to ask what it stands for.
+    let hovered = server.ask_until(100, |id| {
+        json!({
+            "id": id,
+            "method": "textDocument/hover",
+            "params": {
+                "textDocument": { "uri": main_uri },
+                "position": { "line": 4, "character": 5 },
+            },
+        })
+    });
+
+    let value = hovered["result"]["contents"]["value"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the macro has a popup: {hovered}"));
+    println!("hover: {value}");
+    assert!(
+        value.contains("#define STD std::"),
+        "the popup is the macro's own definition line: {value}"
+    );
+    assert!(
+        !value.contains("int main"),
+        "and not a slice of the program starting somewhere else: {value}"
+    );
+
+    server.request(999, "shutdown", Value::Null);
+    server.notify("exit", Value::Null);
+}

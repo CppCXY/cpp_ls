@@ -945,13 +945,26 @@ fn definition_line(
 ) -> RenderedText {
     // **The text the offsets are into**, not simply the file's — see [`the_text_a_facts_offsets_are_in`]: a macro
     // fact about the viewed file carries the rendering's offsets, and its `#define` line is the rendering's line.
-    let Some(text) = the_text_a_facts_offsets_are_in(session, Some(view), file) else {
-        return RenderedText {
-            text: format!(
-                "<the macro is defined in an unreadable file: {}>",
-                file.display()
-            ),
-        };
+    // **A macro fact's offsets are the FILE's, so this is the one place that must slice the file's own text.**
+    //
+    // The declaration path wants the rendering (a `DeclFact` about the viewed file is translated into it), but a
+    // macro has no rendering: `#define STD std::` exists only in the file, and the cook is what removes it. Slicing
+    // the rendering with the file's offsets landed in the middle of `main` — measured, hovering `STD` answered with a
+    // screenful of the function body instead of the directive.
+    let text = if is_the_viewed_file(view, file) {
+        view.written_text().unwrap_or(&view.source)
+    } else {
+        match the_text_a_facts_offsets_are_in(session, Some(view), file) {
+            Some(text) => text,
+            None => {
+                return RenderedText {
+                    text: format!(
+                        "<the macro is defined in an unreadable file: {}>",
+                        file.display()
+                    ),
+                };
+            }
+        }
     };
     let name_offset = name_offset.min(text.len());
 
