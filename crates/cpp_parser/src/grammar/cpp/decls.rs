@@ -2475,6 +2475,19 @@ pub fn parse_function_suffix_or_initializer(
         return parse_the_initializer(p);
     }
 
+    // **The last reading a parenthesis group can have: an initializer.** Both readings above can refuse it and both
+    // are right to: the group's arguments are not values (a bare name is also a type), and the declaration
+    // preference has nothing to say when the type came from a *specifier* — `const int n(a, std::g<int>(1).p);` is a
+    // declaration whose initializer is a comma expression, and it reached the caller with the `(` unconsumed, which
+    // was reported as `expected a parameter list or an initializer` and cost `<format>` a whole declaration.
+    //
+    // Taking it here costs nothing that was not already refused: this runs only where the alternative is an error.
+    if p.current_token() == CppTokenKind::LeftParen
+        && let Ok(parsed) = parse_the_initializer(p)
+    {
+        return Ok(parsed);
+    }
+
     Ok(CompleteMarker::empty())
 }
 

@@ -1950,3 +1950,37 @@ typedef HRESULT (STDAPICALLTYPE *LPFNGETCLASSOBJECT) (REFCLSID, REFIID, LPVOID *
 ```
 
 两条都记在这里,下一轮从这两个最小复现开始。
+
+### 续:逗号表达式(已修)与数组模板实参(未修)
+
+**已修** —— 括号初始化器里的逗号表达式:
+
+```cpp
+const int n(a, std::g<int>(1).p);      // <format> 里让整条声明变成裸记号的那一行
+```
+
+两个读法都拒绝它(组里的 `a` 是裸名,不算"值";而类型来自 specifier 时"直接初始化"那条偏好没有话可说),
+拒绝之后没有第三个候选,于是报 `expected a parameter list or an initializer`。现在补上**最后一种读法**:
+两个读法都拒绝时,按初始化器读。它只在"否则就报错"的位置触发,不抢任何能成功的读法。
+新测试 `a_comma_expression_inside_a_parenthesised_initializer_parses`。实测 `<format>`:3 → 2 个错误。
+
+**未修** —— 下面这一条,最小复现能过、真实上下文过不去:
+
+```cpp
+// <format>:2511
+template<__format::__char _CharT, size_t _Nm>
+  struct formatter<_CharT[_Nm], _CharT>
+```
+
+```text
+template<class C, size_t N> struct F; struct F<C[N], C> …            通过
+加 __format::__char 约束、加 namespace std、加 size_t 别名          通过
+真实文件里                                                           报 "expected a template argument"
+```
+
+所以它不是语法形状本身的问题,而是**前面某个构造留下的解析状态**。下一条要看的是同一文件里
+`struct formatter<basic_string<char, _Traits, _Alloc>, char>` 附近 —— 第二个错误
+("expected primary expression")在那里,两个错误可能同源。
+
+判据没有变:`cook_errors` 现在同时打印每个错误的**写下来的文本**和**渲染文本**,并在最后给出
+"客户端实际看到什么"。下次直接从这两条开始。

@@ -191,6 +191,21 @@ fn main() {
                 .unwrap_or_default()
                 .replace('\n', "\\n");
             println!("    {}  {:?}\n      …{window}…", error.start, error.message);
+            // The **rendering** around the same place, because that is the text the parser reads: a macro that
+            // expanded into the construct is invisible in the written window, and the difference is where the
+            // construct to fix is found.
+            if let Some(view) = session.view(path)
+                && let Some(reading) = view.reading_offset_of(
+                    cpp_code_analysis::file::coordinates::FileOffset::new(error.start),
+                )
+            {
+                let source = &*view.source;
+                let at = reading.get();
+                let rfrom = at.saturating_sub(160);
+                let rto = (at + 160).min(source.len());
+                let rwindow = source.get(rfrom..rto).unwrap_or_default().replace('\n', "\\n");
+                println!("      RENDERING …{rwindow}…");
+            }
         }
     }
 }

@@ -752,3 +752,22 @@ fn a_class_definition_without_its_semicolon_is_reported() {
         );
     }
 }
+
+/// **括号初始化器里的逗号表达式** —— `const int n(a, std::g<int>(1).p);` 是一条声明,不是函数声明。
+///
+/// 两个证据都指向"不是参数表":组里的 `a` 是裸名(不是值),而类型来自 *specifier*(`const`)时那条
+/// "直接初始化"的偏好没有话可说。两个读法都拒绝之后,剩下的读法就是它本来的样子 —— 初始化器。
+/// 实测:这条在 GCC 15 的 `<format>` 里让整条声明变成裸记号。
+#[test]
+fn a_comma_expression_inside_a_parenthesised_initializer_parses() {
+    for text in [
+        "void f() { const int n(a, std::g<int>(1).p); }\n",
+        "void f() { const int n(std::g<int>(1)); }\n",
+        "void f() { static T n(a, std::g<int>(1).p); }\n",
+        "void f() { const T n = (a, std::g<int>(1).p); }\n",
+    ] {
+        let tree = cpp_parser::CppParser::parse(text, cpp_parser::ParserConfig::default());
+        let errors = tree.get_errors();
+        assert!(errors.is_empty(), "{text}: {errors:?}");
+    }
+}
