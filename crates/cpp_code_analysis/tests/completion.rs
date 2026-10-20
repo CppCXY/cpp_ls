@@ -1856,3 +1856,56 @@ fn a_macro_body_offers_its_own_parameters() {
         "nothing is typed yet, so the range is where the caret is"
     );
 }
+
+/// **`#if` / `#elif` / `#ifdef` 里补全宏** —— 条件在任何声明存在之前就被求值,所以那里只有宏和 `defined`。
+#[test]
+fn a_conditional_directive_offers_the_macros() {
+    let source = "\
+#define VERSION 3
+#define FEATURE 1
+
+#if VERSION > 2 && defined(FEATURE)
+int newer;
+#elif defined(FEATU)
+int older;
+#else
+int neither;
+#endif
+";
+    let files = MemoryFiles::new().with_file("/p/a.cpp", source);
+    let providers = SessionFiles::new(OpenDocuments::new(), files);
+    let mut session = Session::with_config(
+        "/p",
+        providers,
+        WatchFilter::new("/p"),
+        CompilerConfig::default(),
+    );
+    session.add_project_files([std::path::PathBuf::from("/p/a.cpp")]);
+    let view = cooked_view(&mut session, "/p/a.cpp");
+
+    // After `defined(` in the `#elif`: the macros are the answer, filtered by `FEATU`.
+    let at = source.find("#elif defined(FEATU").expect("the fixture") + "#elif defined(FEATU".len();
+    let offered = session.completions(
+        &view,
+        cpp_code_analysis::file::coordinates::FileOffset::new(at),
+    );
+    let labels: Vec<&str> = offered.items.iter().map(|item| item.label.as_str()).collect();
+    println!("prefix {:?} at {at} → {labels:?}", offered.prefix);
+    assert_eq!(offered.prefix, "FEATU", "the word being typed");
+    assert_eq!(labels, vec!["FEATURE"], "and only the macro that matches");
+
+    // Right after `#if `: every macro the file defines, plus `defined`.
+    let blank = source.find("#if VERSION").expect("the fixture") + "#if ".len();
+    let offered = session.completions(
+        &view,
+        cpp_code_analysis::file::coordinates::FileOffset::new(blank),
+    );
+    let labels: Vec<&str> = offered.items.iter().map(|item| item.label.as_str()).collect();
+    println!("blank prefix {:?} → {labels:?}", offered.prefix);
+    assert!(labels.contains(&"VERSION"), "{labels:?}");
+    assert!(labels.contains(&"defined"), "{labels:?}");
+    assert!(
+        !labels.contains(&"newer"),
+        "a variable is not a word a condition can mean: {labels:?}"
+    );
+}

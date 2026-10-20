@@ -5145,7 +5145,8 @@ impl<F: FileProvider + Clone> Session<F> {
                 // summary.
                 context @ (crate::completion::CompletionContext::DirectiveName { .. }
                 | crate::completion::CompletionContext::Include { .. }
-                | crate::completion::CompletionContext::MacroBody { .. }) => {
+                | crate::completion::CompletionContext::MacroBody { .. }
+                | crate::completion::CompletionContext::Condition { .. }) => {
                     return crate::completion::completion_with(
                         self.store.index(),
                         &view.scopes,

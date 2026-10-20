@@ -70,6 +70,22 @@ pub enum CompletionContext {
     /// the index by name answers nothing (a module name is not a `DeclFact`), and a reader had to type the whole
     /// name from memory. `written` is the part already typed (`ma`), and `range` is what a client replaces.
     ModuleName { written: String, range: SourceRange },
+    /// **A preprocessor condition** — `#if`, `#elif`, `#ifdef`, `#ifndef`, `#undef` — where the answer is the macros
+    /// this file can see, and the operators on them.
+    ///
+    /// ```cpp
+    /// #if |              the macros, and `defined`
+    /// #if defined(|      the same — `defined` takes a macro name
+    /// ```
+    ///
+    /// A condition is evaluated before a single declaration exists, so a function or a class name cannot be written
+    /// there: the vocabulary is the preprocessor's, not the program's.
+    Condition {
+        /// What has been typed of the name at the cursor.
+        written: String,
+        /// The span `written` covers, which is what a client replaces.
+        range: SourceRange,
+    },
     /// **Inside a `#define`'s replacement list** — where the answer is the macro's own parameters, and then the
     /// macros already defined.
     ///
@@ -483,10 +499,16 @@ fn directive_at(root: &CppSyntaxNode, offset: usize) -> Option<CompletionContext
         // (names being *declared* — nothing to offer) and its replacement list (where the parameters and the macros
         // already defined are the vocabulary).
         "define" => Some(define_at(rest, start, before.len(), offset)),
-        "include" | "include_next" | "if" | "elif" | "ifdef" | "ifndef" | "undef" | "pragma" | "line"
-        | "error" | "warning" | "assert" | "unassert" => {
-            Some(header_or_name(name, rest, start, before.len(), offset))
-        }
+        // **A condition completes macros**, not the program's names: `#if` is decided before any declaration exists,
+        // so a function or a class name there is a word the condition can never mean.
+        "if" | "elif" | "ifdef" | "ifndef" | "undef" => Some(condition_argument(
+            rest,
+            start + before.len() - rest.len(),
+            before.len(),
+            offset,
+        )),
+        "include" | "include_next" | "pragma" | "line" | "error" | "warning" | "assert"
+        | "unassert" => Some(header_or_name(name, rest, start, before.len(), offset)),
         // Every other directive — `#else`, `#endif`, the null directive — takes no argument, and a list there is
         // a list of names that cannot follow it.
         _ => Some(CompletionContext::Nothing),
@@ -509,7 +531,6 @@ fn define_at(
     let name_length = rest
         .find(|character: char| !(character.is_alphanumeric() || character == '_'))
         .unwrap_or(rest.len());
-    let name = &rest[..name_length];
 
     let after_the_name = &rest[name_length..];
     let Some(open) = after_the_name.find('(') else {
@@ -904,4 +925,29 @@ mod tests {
             );
         }
     }
+}
+
+/// **The name being typed in a condition** — `#if VERS|`, `#if defined(VERS|`, or the blank after the operator.
+///
+/// `segment_written` is handed the text from the argument`s start to the cursor and answers the word the cursor is
+/// in; the `>`/`<`/`!`/`(`/`)` of an expression are not name characters, so a condition like
+/// `#if VERSION >= 3 && defined(FEATURE|)` needs no special case — the word is whatever follows the last one.
+fn condition_argument(rest: &str, at: usize, written_before_cursor: usize, offset: usize) -> CompletionContext {
+    let _ = written_before_cursor;
+    let trimmed = rest.trim_start();
+    let skipped = rest.len() - trimmed.len();
+
+    // **The word the cursor is in**, which is not the first word of the argument: `defined(FEATU|)` has `defined`
+    // in front of it, and answering with that word would offer the operators for a name being typed.
+    let word_start = trimmed
+        .rfind(|character: char| {
+            !(character.is_alphanumeric()
+                || character == '_'
+                || character == '.'
+                || character == '/'
+                || character == '-')
+        })
+        .map_or(0, |found| found + 1);
+    let (written, range) = segment_written(&trimmed[word_start..], at + skipped + word_start, offset);
+    CompletionContext::Condition { written, range }
 }

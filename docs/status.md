@@ -1640,3 +1640,23 @@ derived_from              原来先拼字符串再判 → 现在 `Type::Named` �
       三个概念用例(重构成事实驱动后仍然通过)
 套件  cpp_code_analysis 全部(completion 33、checks 63…)、cpp_ls lib 85
 ```
+
+## 二十九、`#if` / `#elif` / `#ifdef` / `#undef` 的补全（2026）
+
+之前 `#if` 走的是"指令参数"那条路 —— 它补的是**程序里的名字**(函数、变量、类型)。这在 `#if` 里是错的:
+条件在任何声明存在之前就被预处理器求值,那里只可能是宏、`defined` 这类运算符、以及字面量。
+
+```cpp
+#if VERSION > 2 && defined(FEATU|)     →  FEATURE(只按已打的 FEATU 过滤)
+#if |                                  →  defined、__has_include、__has_include_next、FEATURE、VERSION
+```
+
+- 新增 `CompletionContext::Condition`,与 `MacroBody` 一起走**文件坐标**那条路(指令行不在渲染里)。
+- 宏的名单从 `macro_names` 来(本文件 + 直接包含的头),与 `#define` 体共用同一个函数。
+- 取"光标所在的那个词"而不是"参数里的第一个词":`defined(FEATU` 的第一个词是 `defined`,用它去过滤等于
+  给一个正在打的名字补运算符 —— 这是这条路径上唯一一个不明显的地方。
+
+### 一个还没做的
+
+`#define` 的替换列表在**指令节点提前结束**时,前缀过滤会退化成全量列表(上一节记过)。根因在解析器:
+`PreprocessorDirective` 的节点范围在形参表处收尾,而不覆盖整行。修它要动解析器,留作下一件。

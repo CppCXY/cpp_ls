@@ -372,6 +372,10 @@ pub fn completion_with(
             range,
             parameters,
         } => macro_body(index, path, &written, range, &parameters),
+        // **A preprocessor condition** — `#if`, `#elif`, `#ifdef`, `#undef`: the macros, and the operators on them.
+        CompletionContext::Condition { written, range } => {
+            condition(index, path, &written, range)
+        }
         // **Inside a documentation comment**: Doxygen's vocabulary, or the name the command takes. Both are read
         // from the file's own text rather than from a scope, so neither needs the index — see
         // [`doc_comment_at`].
@@ -925,28 +929,81 @@ fn macro_body(
         items.push(item);
     }
 
-    if let Some(summary) = index.summary(path) {
-        let mut macros: Vec<&str> = summary.macros.iter().map(|fact| fact.name.as_str()).collect();
-        for include in &summary.includes {
-            let Some(resolved) = &include.resolved else {
-                continue;
-            };
-            let Some(included) = index.summary(resolved) else {
-                continue;
-            };
-            macros.extend(included.macros.iter().map(|fact| fact.name.as_str()));
+    for name in macro_names(index, path) {
+        if matching::quality(name, written) == matching::NONE {
+            continue;
         }
-        macros.sort_unstable();
-        macros.dedup();
+        let mut item = CompletionItem::word(name, ItemKind::Macro, "a macro");
+        item.replace = range;
+        items.push(item);
+    }
 
-        for name in macros {
-            if matching::quality(name, written) == matching::NONE {
-                continue;
-            }
-            let mut item = CompletionItem::word(name, ItemKind::Macro, "a macro");
-            item.replace = range;
-            items.push(item);
+    CompletionSet {
+        scope: String::new(),
+        prefix: written.to_string(),
+        replace: range,
+        truncated: false,
+        items,
+    }
+}
+
+/// **The macros this file can see** — its own and those of the headers it includes directly, sorted and deduplicated.
+///
+/// The list a *preprocessor position* completes from: a `#define`'s body, `#if`, `#elif`, `#ifdef`, `#undef`. A macro
+/// two headers away is reachable only through the macro environment, which is the hover's question, not this one's —
+/// so the boundary is the direct includes, the same one `names` uses for the same reason.
+fn macro_names<'a>(index: &'a ProjectIndex, path: &Path) -> Vec<&'a str> {
+    let Some(summary) = index.summary(path) else {
+        return Vec::new();
+    };
+
+    let mut macros: Vec<&str> = summary.macros.iter().map(|fact| fact.name.as_str()).collect();
+    for include in &summary.includes {
+        let Some(resolved) = &include.resolved else {
+            continue;
+        };
+        let Some(included) = index.summary(resolved) else {
+            continue;
+        };
+        macros.extend(included.macros.iter().map(|fact| fact.name.as_str()));
+    }
+    macros.sort_unstable();
+    macros.dedup();
+    macros
+}
+
+/// **`#if`, `#elif`, `#ifdef`, `#ifndef`, `#undef`** — the vocabulary is the macros, and the operator on them.
+///
+/// ```cpp
+/// #if |                 the macros this file can see, and `defined`
+/// #if defined(|         the same: `defined` takes a macro name
+/// #elif VERSION >= |    …and again, because the right-hand side of a comparison is a macro's value
+/// ```
+///
+/// Nothing else belongs here. An `#if` expression is evaluated by the preprocessor before a single declaration
+/// exists, so a function or a class name is not a candidate — offering the program's names, which is what a directive
+/// argument used to do there, is offering words the condition can never mean.
+fn condition(index: &ProjectIndex, path: &Path, written: &str, range: SourceRange) -> CompletionSet {
+    let mut items: Vec<CompletionItem> = Vec::new();
+
+    // **`defined` first**: the one operator a condition is written with, and a word of the preprocessor rather than a
+    // macro anyone defined.
+    for operator in ["defined", "__has_include", "__has_include_next"] {
+        if matching::quality(operator, written) == matching::NONE {
+            continue;
         }
+        let mut item = CompletionItem::word(operator, ItemKind::Keyword, "a preprocessor operator");
+        item.replace = range;
+        items.push(item);
+    }
+
+    for name in macro_names(index, path) {
+        if matching::quality(name, written) == matching::NONE {
+            continue;
+        }
+        let mut item = CompletionItem::word(name, ItemKind::Macro, "a macro");
+        item.replace = range;
+        items.push(item);
     }
 
     CompletionSet {
