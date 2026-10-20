@@ -1595,3 +1595,48 @@ handle(n);   // `int` does not satisfy `std::derived_from<Base>`
         a_constraint_declared_in_a_header_is_checked_at_the_call
 套件    cpp_code_analysis 全部(checks 64)、cpp_ls lib 85 / handshake 31(已知抖动除外)
 ```
+
+## 二十八、"基于字符串的判断"这一批评,以及 `#define` 体里的宏补全（2026）
+
+### 批评是对的,分三种情况
+
+```text
+① 树里有结构,却去扫字符串        —— 错。已改
+② 数据本身就是文本(类型拼写、宏写的基类) —— 合理,但只能有一处
+③ 比较标识符的名字                 —— 合理,名字就是文本
+```
+
+具体改了什么:
+
+```text
+`template <…>` 头         原来是自己写扫描器找 `<`/`>` 再按逗号切 → 现在走 `TemplateParameter` 节点
+形参与模板参数的配对       原来在检查里用字符串匹配 → 现在在**建事实的地方**做一次,存成"每个形参一条约束"
+`Type` 的形状             原来 `contains('*')`/`contains('&')` → 现在 match `Type::Pointer`/`Reference`/`Array`
+derived_from              原来先拼字符串再判 → 现在 `Type::Named` 才去查基类,其余直接 `Some(false)`
+```
+
+配对搬进 `declared_constraints_with` 之后,检查里只剩一句 `constraints.get(at)`,同文件和跨文件**走同一份数据**
+(文件自己的 summary / 索引),不可能再出现"两条路径结论不同"。
+
+### `#define` 体里的补全(新)
+
+```cpp
+#define MAX3(a, b, c) MAX(MAX(a, b), c)
+                       ↑ 这里补全 a、b、c(宏自己的形参),以及已定义的 MAX、MAX3
+```
+
+形参是**只存在于这一行**的名字:索引没听说过它,scope 树也没有 —— 所以它必须由补全自己提供。
+`#define` 有三个位置,现在分开处理:宏名(补名字)、形参表(声明位置,不补)、替换列表(形参 + 已有宏)。
+
+实测:在 `#define MAX3(a, b, c) MAX(MAX(a, |` 处得到 `["a", "b", "c", "MAX", "MAX3"]`。
+
+已知一个限制:指令节点有时在形参表就结束,替换列表的文本要另外从行里取 —— 现在还是按"行"的回答,
+光标落在词尾时前缀过滤依赖 `segment_written`,位置在形参表刚结束时前缀为空(列表全出)。这条记在测试注释里。
+
+### 验收
+
+```text
+测试  a_macro_body_offers_its_own_parameters
+      三个概念用例(重构成事实驱动后仍然通过)
+套件  cpp_code_analysis 全部(completion 33、checks 63…)、cpp_ls lib 85
+```

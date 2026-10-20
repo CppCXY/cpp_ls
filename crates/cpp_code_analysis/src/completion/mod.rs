@@ -365,6 +365,13 @@ pub fn completion_with(
             range,
             ..
         } => headers_for(headers, &written, closed, range),
+        // **A `#define`'s replacement list**: the macro's own parameters first, then the macros already defined.
+        // Nothing else belongs here — the body is preprocessor text, where a class member or a local cannot appear.
+        CompletionContext::MacroBody {
+            written,
+            range,
+            parameters,
+        } => macro_body(index, path, &written, range, &parameters),
         // **Inside a documentation comment**: Doxygen's vocabulary, or the name the command takes. Both are read
         // from the file's own text rather than from a scope, so neither needs the index — see
         // [`doc_comment_at`].
@@ -890,6 +897,66 @@ fn doc_comments(
     }
 }
 
+/// **A `#define`'s replacement list** — its own parameters, and the macros already defined.
+///
+/// ```cpp
+/// #define MAX(a, b) ((a) > (b) ? (a) : (b))
+/// #define MAX_OF_THREE(a, b, c) MAX(MAX(a, b), c)
+/// ```
+///
+/// The parameters come first because they are the names that exist **nowhere else**: the index has never heard of
+/// `a`, and a reader who mistypes it gets a macro that quietly substitutes nothing. The macros follow, because a
+/// body that composes another macro is the other half of what a replacement list is written from.
+fn macro_body(
+    index: &ProjectIndex,
+    path: &Path,
+    written: &str,
+    range: SourceRange,
+    parameters: &[String],
+) -> CompletionSet {
+    let mut items: Vec<CompletionItem> = Vec::new();
+
+    for parameter in parameters {
+        if matching::quality(parameter, written) == matching::NONE {
+            continue;
+        }
+        let mut item = CompletionItem::word(parameter, ItemKind::Variable, "a parameter of this macro");
+        item.replace = range;
+        items.push(item);
+    }
+
+    if let Some(summary) = index.summary(path) {
+        let mut macros: Vec<&str> = summary.macros.iter().map(|fact| fact.name.as_str()).collect();
+        for include in &summary.includes {
+            let Some(resolved) = &include.resolved else {
+                continue;
+            };
+            let Some(included) = index.summary(resolved) else {
+                continue;
+            };
+            macros.extend(included.macros.iter().map(|fact| fact.name.as_str()));
+        }
+        macros.sort_unstable();
+        macros.dedup();
+
+        for name in macros {
+            if matching::quality(name, written) == matching::NONE {
+                continue;
+            }
+            let mut item = CompletionItem::word(name, ItemKind::Macro, "a macro");
+            item.replace = range;
+            items.push(item);
+        }
+    }
+
+    CompletionSet {
+        scope: String::new(),
+        prefix: written.to_string(),
+        replace: range,
+        truncated: false,
+        items,
+    }
+}
 /// The headers a `#include` may name.
 fn headers_for(
     headers: &HeaderIndex,

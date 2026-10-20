@@ -5140,8 +5140,12 @@ impl<F: FileProvider + Clone> Session<F> {
                         context,
                     );
                 }
+                // **`MacroBody` is here too**: a `#define` line is in the file and not in the rendering, and the
+                // answer needs no reading position at all — the parameters come from the line, the macros from the
+                // summary.
                 context @ (crate::completion::CompletionContext::DirectiveName { .. }
-                | crate::completion::CompletionContext::Include { .. }) => {
+                | crate::completion::CompletionContext::Include { .. }
+                | crate::completion::CompletionContext::MacroBody { .. }) => {
                     return crate::completion::completion_with(
                         self.store.index(),
                         &view.scopes,

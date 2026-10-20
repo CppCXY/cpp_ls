@@ -1885,25 +1885,84 @@ fn declared_template_parameters_with(shapes: &DeclarationShapes, binding: &Bindi
         .map(|(_, list)| crate::sema::types::template_parameter_names(list))
         .unwrap_or_default()
 }
-/// **The constraint in front of each template parameter**, aligned with [`declared_template_parameters_with`].
+/// **The constraint that applies to each *parameter*** — `["std::integral", ""]` for
+/// `template <std::integral T> T twice(T a, int n)`.
 ///
-/// The same table walk, the same innermost `template <…>`: the two answers are one head split two ways, and a second
-/// scan would be a second place for the two to disagree about which template introduced the name.
+/// One entry per parameter of the declaration, because that is the pairing a call site asks about ("does this
+/// argument satisfy what *its* parameter was constrained by"). It is decided here, once, from the tree — so a file's
+/// own answer and the index's answer cannot disagree, and no consumer has to re-derive the pairing by matching names
+/// in raw text.
 fn declared_constraints_with(shapes: &DeclarationShapes, binding: &Binding) -> Vec<String> {
     let at = binding.name_range.start_offset;
 
-    shapes
+    let Some((_, head)) = shapes
         .templates
         .iter()
         .rev()
         .find(|(introduced, _)| introduced.start_offset <= at && at <= introduced.end_offset())
-        .map(|(_, list)| {
-            crate::sema::types::template_parameters_in(list)
-                .into_iter()
-                .map(|(_, constraint)| constraint)
-                .collect()
-        })
-        .unwrap_or_default()
+    else {
+        return Vec::new();
+    };
+    let constrained: Vec<(String, String)> = crate::sema::types::template_parameters_in(head)
+        .into_iter()
+        .filter(|(_, constraint)| !constraint.is_empty())
+        .collect();
+    if constrained.is_empty() {
+        return Vec::new();
+    }
+
+    let mut found = None;
+    shapes.on_the_path(at, |shape| {
+        if let Some(declarator) = &shape.declarator {
+            found = Some(declarator.clone());
+        }
+    });
+    let Some(declarator) = found else {
+        return Vec::new();
+    };
+
+    let Some(list) = declarator
+        .descendants()
+        .find(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::ParameterList)
+    else {
+        return Vec::new();
+    };
+
+    let mut per_parameter = Vec::new();
+    for parameter in list.children() {
+        if CppSyntaxKind::from(parameter.kind()) != CppSyntaxKind::Parameter {
+            continue;
+        }
+        // **The type is the template parameter**, compared as an identifier — which is what a name is. The
+        // *structure* comes from the tree: `const T& a` and `T a` count, `T::value_type a` does not.
+        let written = parameter.text().to_string();
+        let constraint = constrained
+            .iter()
+            .find(|(name, _)| mentions_the_word(&written, name))
+            .map(|(_, constraint)| constraint.clone())
+            .unwrap_or_default();
+        per_parameter.push(constraint);
+    }
+
+    per_parameter
+}
+
+/// Does this parameter spelling name the template parameter `T`? — as a word, so that `Total` is not `T`.
+fn mentions_the_word(spelling: &str, word: &str) -> bool {
+    let mut rest = spelling;
+    while let Some(at) = rest.find(word) {
+        let before = rest[..at].chars().next_back();
+        let after = rest[at + word.len()..].chars().next();
+        let before_is_a_word =
+            before.is_some_and(|character| character.is_alphanumeric() || character == '_');
+        let after_is_a_word =
+            after.is_some_and(|character| character.is_alphanumeric() || character == '_');
+        if !before_is_a_word && !after_is_a_word {
+            return true;
+        }
+        rest = &rest[at + word.len()..];
+    }
+    false
 }
 /// The base classes a class-like declaration was written with, in declaration order.
 ///

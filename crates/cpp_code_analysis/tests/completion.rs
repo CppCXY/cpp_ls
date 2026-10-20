@@ -1820,3 +1820,39 @@ struct Widget { int size; };
         "a member of a later class is not a parameter of this function: {labels:?}"
     );
 }
+
+/// **`#define` 的替换列表里补全它自己的形参** —— 那些名字只存在于这一行,索引和 scope 都不知道它们。
+#[test]
+fn a_macro_body_offers_its_own_parameters() {
+    let source = "#define MAX(a, b) ((a) > (b) ? (a) : (b))\n#define MAX3(a, b, c) MAX(MAX(a, b), c)\n";
+    let files = MemoryFiles::new().with_file("/p/a.cpp", source);
+    let providers = SessionFiles::new(OpenDocuments::new(), files);
+    let mut session = Session::with_config(
+        "/p",
+        providers,
+        WatchFilter::new("/p"),
+        CompilerConfig::default(),
+    );
+    session.add_project_files([std::path::PathBuf::from("/p/a.cpp")]);
+    let view = cooked_view(&mut session, "/p/a.cpp");
+
+    // Inside the second replacement list, on the `b` of `MAX(a, b)`.
+    let at = source
+        .find("MAX3(a, b, c) MAX(MAX(a, b)")
+        .expect("the fixture")
+        + "MAX3(a, b, c) MAX(MAX(a, ".len();
+    let offered = session.completions(
+        &view,
+        cpp_code_analysis::file::coordinates::FileOffset::new(at),
+    );
+    let labels: Vec<&str> = offered.items.iter().map(|item| item.label.as_str()).collect();
+    println!("prefix {:?} → {labels:?}", offered.prefix);
+    // **The macro's parameters first**, then the macros already defined — at the start of the replacement list,
+    // which is where a reader begins to write one.
+    assert_eq!(labels, vec!["a", "b", "c", "MAX", "MAX3"], "{labels:?}");
+    assert_eq!(
+        offered.replace.length,
+        0,
+        "nothing is typed yet, so the range is where the caret is"
+    );
+}

@@ -70,6 +70,25 @@ pub enum CompletionContext {
     /// the index by name answers nothing (a module name is not a `DeclFact`), and a reader had to type the whole
     /// name from memory. `written` is the part already typed (`ma`), and `range` is what a client replaces.
     ModuleName { written: String, range: SourceRange },
+    /// **Inside a `#define`'s replacement list** — where the answer is the macro's own parameters, and then the
+    /// macros already defined.
+    ///
+    /// ```cpp
+    /// #define MAX(a, b) ((a) > (b) ? (a) : (b))
+    ///                         ↑ typing here offers `a` and `b`
+    /// ```
+    ///
+    /// A parameter is a name that exists **only inside this line**, and it is the name a reader reaches for when
+    /// writing a macro body — nothing else in the file declares it, so the scope walk and the index both answer
+    /// nothing about it. `parameters` is the list as written, in order.
+    MacroBody {
+        /// What has been typed of the name at the cursor.
+        written: String,
+        /// The span `written` covers, which is what a client replaces.
+        range: SourceRange,
+        /// The macro's own parameter names, in the order the definition wrote them.
+        parameters: Vec<String>,
+    },
     /// **Inside a documentation comment** — where the answer is Doxygen's own vocabulary, and then the name that
     /// command takes.
     ///
@@ -460,8 +479,12 @@ fn directive_at(root: &CppSyntaxNode, offset: usize) -> Option<CompletionContext
     };
 
     match name {
-        "include" | "include_next" | "if" | "elif" | "ifdef" | "ifndef" | "undef" | "define"
-        | "pragma" | "line" | "error" | "warning" | "assert" | "unassert" => {
+        // **A `#define` has three positions, not one**: the macro's name (a name to complete), its parameter list
+        // (names being *declared* — nothing to offer) and its replacement list (where the parameters and the macros
+        // already defined are the vocabulary).
+        "define" => Some(define_at(rest, start, before.len(), offset)),
+        "include" | "include_next" | "if" | "elif" | "ifdef" | "ifndef" | "undef" | "pragma" | "line"
+        | "error" | "warning" | "assert" | "unassert" => {
             Some(header_or_name(name, rest, start, before.len(), offset))
         }
         // Every other directive — `#else`, `#endif`, the null directive — takes no argument, and a list there is
@@ -470,6 +493,81 @@ fn directive_at(root: &CppSyntaxNode, offset: usize) -> Option<CompletionContext
     }
 }
 
+/// **Where the cursor is in a `#define`** — the name, the parameter list, or the replacement list.
+///
+/// `rest` is everything after `#define `, `directive_start` is the `#`, `written_before_cursor` is how much of the
+/// directive is behind the cursor, and `offset` is the cursor.
+fn define_at(
+    rest: &str,
+    directive_start: usize,
+    written_before_cursor: usize,
+    offset: usize,
+) -> CompletionContext {
+    let argument_at = directive_start + written_before_cursor - rest.len();
+
+    // The macro's name: the first identifier of the directive.
+    let name_length = rest
+        .find(|character: char| !(character.is_alphanumeric() || character == '_'))
+        .unwrap_or(rest.len());
+    let name = &rest[..name_length];
+
+    let after_the_name = &rest[name_length..];
+    let Some(open) = after_the_name.find('(') else {
+        // An object-like macro has no parameter list, so everything after the name is the body.
+        if rest.len() <= name_length {
+            let (written, range) = segment_written(rest, argument_at, offset);
+            return CompletionContext::DirectiveArgument { written, range };
+        }
+        let parameters = Vec::new();
+        let (written, range) = segment_written(&rest[name_length..], argument_at + name_length, offset);
+        return CompletionContext::MacroBody {
+            written,
+            range,
+            parameters,
+        };
+    };
+
+    // The parameter list, if the parenthesis really follows the name: `#define F (x)` is an object-like macro whose
+    // body starts with a parenthesis, and the space before it is what tells the two apart.
+    let space_before_the_paren = after_the_name[..open]
+        .chars()
+        .any(|character| character.is_whitespace());
+    if space_before_the_paren {
+        let parameters = Vec::new();
+        let (written, range) = segment_written(&rest[name_length..], argument_at + name_length, offset);
+        return CompletionContext::MacroBody {
+            written,
+            range,
+            parameters,
+        };
+    }
+
+    let Some(close) = after_the_name.find(')') else {
+        // Typing the parameter list: the names are being declared, so there is nothing to offer.
+        return CompletionContext::Nothing;
+    };
+    let parameters: Vec<String> = after_the_name[open + 1..close]
+        .split(',')
+        .map(|parameter| parameter.trim().to_string())
+        .filter(|parameter| !parameter.is_empty() && parameter != "...")
+        .collect();
+
+    // Inside the parameter list itself: nothing to complete.
+    if written_before_cursor <= name_length + close + 1 {
+        return CompletionContext::Nothing;
+    }
+
+    let (written, range) = segment_written(
+        &rest[name_length + close + 1..],
+        argument_at + name_length + close + 1,
+        offset,
+    );
+    CompletionContext::MacroBody {
+        written,
+        range,
+        parameters,
+    }
+}
 /// What follows a directive's name: a header name for `#include`, and an ordinary name for the rest.
 fn header_or_name(
     directive: &str,
