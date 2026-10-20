@@ -1137,3 +1137,63 @@ void f() {
         "a subscript is `operator[]`, whose return type is the class's `T&` at `int`"
     );
 }
+
+/// **从 `std::map` 的范围里解构出来的名字,类型是 `pair` 的元素** —— 报告是 hover 显示 `int() value;`。
+///
+/// `for (auto [key, value] : map)` 里的名字没有写出来的类型,所以"声明的类型"这一层没有答案:元素的类型由
+/// **范围**决定,`map<K, V>` 的元素是 `pair<const K, V>`,于是 `key` 是 `const K`、`value` 是 `V`。
+#[test]
+fn a_structured_binding_in_a_range_for_has_the_paired_type() {
+    let source = "\
+#include <map>
+#include <string>
+int f() {
+    std::map<int, std::string> myMap;
+    for (auto [key, value] : myMap) {
+        value.size();
+        int k = key;
+        (void)k;
+    }
+    return 0;
+}
+";
+    let header = "namespace std { template <class K, class V> struct map { }; template <class C> struct basic_string { }; }\n";
+    let files = MemoryFiles::new()
+        .with_file("/p/map", header)
+        .with_file("/p/string", header)
+        .with_file("/p/a.cpp", source);
+    let providers = SessionFiles::new(OpenDocuments::new(), files);
+    let mut session = Session::with_config(
+        "/p",
+        providers,
+        WatchFilter::new("/p"),
+        CompilerConfig::default(),
+    );
+    session.add_project_files([std::path::PathBuf::from("/p/a.cpp")]);
+    session.want_cooked_reading(std::path::Path::new("/p/a.cpp"));
+    session.index_everything();
+
+    let view = session.view("/p/a.cpp").expect("a view");
+    let type_of = |needle: &str| {
+        let at = source.find(needle).expect("the fixture writes it")
+            + needle.len().saturating_sub(needle.trim_start_matches(|c: char| c == '=' || c == ' ' || c == '(' || c == ')').len());
+        let reading = view
+            .reading_offset_of(cpp_code_analysis::file::coordinates::FileOffset::new(at))
+            .expect("the cursor is in the rendering");
+        match session.type_at(&view, reading) {
+            cpp_code_analysis::Known::Yes(found) => found.type_of,
+            other => panic!("`{needle}` has a type: {other:?}"),
+        }
+    };
+
+    assert_eq!(
+        type_of("value.size"),
+        "std::string",
+        "the second component of `map<int, std::string>`"
+    );
+    assert_eq!(
+        type_of("= key"),
+        "const int",
+        "and the key is the first, `const` as a map's key is"
+    );
+}

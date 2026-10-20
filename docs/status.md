@@ -1660,3 +1660,62 @@ derived_from              原来先拼字符串再判 → 现在 `Type::Named` �
 
 `#define` 的替换列表在**指令节点提前结束**时,前缀过滤会退化成全量列表(上一节记过)。根因在解析器:
 `PreprocessorDirective` 的节点范围在形参表处收尾,而不覆盖整行。修它要动解析器,留作下一件。
+
+## 三十、结构化绑定的元素类型（2026）
+
+报告:hover `for (auto [key, value] : myMap)` 里的 `value` 显示 **`int() value;`**。
+
+```text
+类型层     `type_at(value)` 答 `int()` —— 一个**函数类型**
+事实层     `DeclFact { kind: Variable, type_of: None }` —— 名字没有写出来的类型
+```
+
+`int()` 的来源是"`auto` 占位符"那条推断路径:它把这条声明当成一个 `auto` 返回的函数,再去函数体里找 `return`
+推出返回类型 —— 而这个函数体是外层的 `int f()`,于是 `int` + 空形参表 = `int()`。结构化绑定的名字本来就没有
+写出来的类型:元素的类型由**范围**决定。
+
+### 修法:新增一条"结构化绑定"的类型规则
+
+在名字规则之前:
+
+```text
+名字 → 它绑定的声明 → 该声明所在的结构化绑定模式 → 它是模式里的第几个名字
+     → 外面那个 range-for 的范围表达式(或 `=` 后的初始化器)的类型
+     → 按标准库的形状取第 i 个分量
+```
+
+```text
+map<K, V> / unordered_map          元素是 pair<const K, V> → 第 0 个 const K,第 1 个 V
+vector<T> / list<T> / set<T> …     元素是 T
+pair<A, B> / tuple<A, B, …>        元素是第 i 个实参
+T[N] / std::array<T, N>            元素是 T
+```
+
+实测(`std::map<int, std::string>`):
+
+```text
+value → std::string
+key   → const int
+```
+
+### hover 上的另一半
+
+弹窗里那行代码是按**事实**拼的,而事实的 `type_of` 只要不是 `None`/`auto` 就直接用。`int()` 这种拼写因此被
+照搬到了弹窗。改法:变量的类型若以 `)` 结尾,就当它没有类型、去问分析层 —— 函数类型不可能是变量的类型,这条
+规则比"信任事实"更早成立。
+
+### 两个踩到的坑(值得记)
+
+```text
+① 规则最初挂在"使用处"的祖先链上 —— `value.size()` 里的 `value` 没有结构化绑定祖先,
+   它必须从**绑定的声明**往回找模式。
+② 编辑后 `cargo test` 报 `Finished in 0.19s`,根本没重编 —— 又是 mtime 不触发重编;
+   必须 touch 文件或 `cargo clean -p`。这条已经踩过一次,记在这里。
+```
+
+### 验收
+
+```text
+新测试  a_structured_binding_in_a_range_for_has_the_paired_type(value → std::string,key → const int)
+套件    cpp_code_analysis 全部、cpp_ls lib 85 / handshake 31
+```

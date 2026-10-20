@@ -2629,6 +2629,18 @@ pub(crate) fn type_of_expression(
     // entity, and the chain is part of its *spelling* — a scope to descend through, not an expression around a name.
     // Read the other way (a bare name only) every qualified name in every file was `UnknownType`: `lib::global`,
     // `std::cin`, `ns::make()` — measured, `a_qualified_name_in_this_file_has_the_type_its_declaration_wrote`.
+    // **A name a structured binding introduced** — `for (auto [key, value] : map)`, `auto [a, b] = pair;`.
+    //
+    // The name is a variable with no written type, so the name rule below has nothing to read: the declaration says
+    // `auto`, and the elementâ€™s type is whatever the *range* (or the initializer) produces. The answer is that
+    // type's position-th component, which is the language's rule rather than an inference: `[a, b]` over a
+    // `pair<A, B>` binds `a` to `A` and `b` to `B`, and a `map<K, V>`'s elements are `pair<const K, V>`.
+    if let Some(answer) =
+        structured_binding_type(index, declaring, scopes, root, path, expression, depth)
+    {
+        return answer;
+    }
+
     if writes_a_name(written) {
         return match declaration_of_expression(index, scopes, root, path, expression) {
             Known::Yes(named) => {
@@ -4038,6 +4050,198 @@ fn written_like_a_macro(word: &str) -> bool {
 ///
 /// Two identifiers in a row cannot be two segments of one name in C++ and cannot be two expressions either, so
 /// accepting the pair costs nothing: the reading it admits is the one the parser has already made.
+/// **The type of one name a structured binding declared** — `value` in `for (auto [key, value] : map)`.
+///
+/// `None` when the name is not one: the ordinary case, and the one that must stay cheap. The check is the **binding**
+/// the name resolves to, not the syntax around the *use* — `value.size()` is a `NameExpr` with no pattern above it,
+/// and looking for one there answered nothing for exactly the position a reader hovers.
+///
+/// The element type comes from the **range** (or the initializer), decomposed by the standard library's own shapes:
+///
+/// ```text
+///   map<K, V> / unordered_map<K, V>     the element is `pair<const K, V>`, so [key, value] is const K, V
+///   vector<T> / list<T> / set<T> …      the element is `T`
+///   pair<A, B> / tuple<A, B, …>         the element is the i-th argument
+///   T[N] / std::array<T, N>             the element is `T`
+/// ```
+///
+/// Anything else answers `None`: a class that specializes `tuple_size`/`tuple_element` is the language's extension
+/// point, and this layer has no way to read a specialization it has not been taught.
+fn structured_binding_type(
+    index: &ProjectIndex,
+    declaring: &mut dyn FnMut(&Path) -> Option<crate::FileView>,
+    scopes: &crate::ScopeTree,
+    root: &cpp_parser::CppSyntaxNode,
+    path: &Path,
+    expression: &cpp_parser::CppSyntaxNode,
+    depth: usize,
+) -> Option<Known<(Type, PathBuf)>> {
+    // **The declaration the name resolves to**, and then the pattern it was declared in.
+    let at = end_of_the_written_name(expression);
+    let Known::Yes(binding) = crate::sema::resolve::definition_at(scopes, root, at) else {
+        return None;
+    };
+    if binding.kind != crate::BindingKind::Variable {
+        return None;
+    }
+
+    let declared_at = binding.name_range.start_offset;
+    let pattern = cpp_parser::token_at(root, declared_at)?
+        .parent_ancestors()
+        .find(|node| {
+            cpp_parser::CppSyntaxKind::from(node.kind())
+                == cpp_parser::CppSyntaxKind::StructuredBinding
+        })?;
+
+    // **Which name of the pattern this is**, by position — the order maps into the components, and the names
+    // themselves mean nothing (`[first, second]` and `[a, b]` are the same binding).
+    let mut position = None;
+    let mut seen = 0usize;
+    for child in pattern.children() {
+        if cpp_parser::CppSyntaxKind::from(child.kind()) != cpp_parser::CppSyntaxKind::NameExpr {
+            continue;
+        }
+        let range = cpp_parser::source_range(child.text_range());
+        if range.start_offset == declared_at {
+            position = Some(seen);
+            break;
+        }
+        seen += 1;
+    }
+    let position = position?;
+
+    // The container: the range of the `for` this pattern is a binding of, or the initializer of a plain declaration.
+    let container = match range_expression_of_the_pattern(&pattern) {
+        Some(range) => type_of_expression(index, declaring, scopes, root, path, &range, depth + 1),
+        None => {
+            let initializer = initializer_of_the_pattern(&pattern)?;
+            type_of_expression(index, declaring, scopes, root, path, &initializer, depth + 1)
+        }
+    };
+    let Known::Yes((container, file)) = container else {
+        return Some(container);
+    };
+
+    Some(match element_of(&container, position) {
+        Some(element) => Known::Yes((crate::sema::types::parse_type_spelling(&element), file)),
+        None => Known::Unknown(UnknownReason::UnknownType(Box::from(container.to_string()))),
+    })
+}
+
+/// The expression after the `:` of the range-based `for` this pattern is a binding of.
+fn range_expression_of_the_pattern(
+    binding: &cpp_parser::CppSyntaxNode,
+) -> Option<cpp_parser::CppSyntaxNode> {
+    use cpp_parser::CppTokenKind;
+
+    let loop_node = binding.ancestors().find(|node| {
+        cpp_parser::CppSyntaxKind::from(node.kind()) == cpp_parser::CppSyntaxKind::RangeForStat
+    })?;
+
+    let mut after_the_colon = false;
+    for child in loop_node.children_with_tokens() {
+        match child {
+            cpp_parser::CppSyntaxElement::Token(token) => {
+                if CppTokenKind::from(token.kind()) == CppTokenKind::Colon {
+                    after_the_colon = true;
+                }
+            }
+            cpp_parser::CppSyntaxElement::Node(node) => {
+                if after_the_colon && node != *binding {
+                    return Some(node);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// The initializer of `auto [a, b] = pair;` — the expression after the `=`.
+fn initializer_of_the_pattern(
+    pattern: &cpp_parser::CppSyntaxNode,
+) -> Option<cpp_parser::CppSyntaxNode> {
+    use cpp_parser::CppTokenKind;
+
+    let declaration = pattern.ancestors().find(|node| {
+        cpp_parser::CppSyntaxKind::from(node.kind()) == cpp_parser::CppSyntaxKind::Declaration
+    })?;
+
+    let mut after_the_equals = false;
+    for child in declaration.children_with_tokens() {
+        match child {
+            cpp_parser::CppSyntaxElement::Token(token) => {
+                if CppTokenKind::from(token.kind()) == CppTokenKind::Assign {
+                    after_the_equals = true;
+                }
+            }
+            cpp_parser::CppSyntaxElement::Node(node) if after_the_equals => return Some(node),
+            cpp_parser::CppSyntaxElement::Node(_) => {}
+        }
+    }
+    None
+}
+
+/// **The type of the `position`-th component** of a container's elements, as a spelling.
+///
+/// The standard library's shapes, by name: `map`'s element is a `pair`, a sequence's element is its argument, and
+/// `tuple`'s is the i-th. A name this does not recognise answers `None` — `tuple_size`/`tuple_element` specializations
+/// are a language feature with no reader here.
+fn element_of(container: &Type, position: usize) -> Option<String> {
+    let Type::Named { name, arguments } = container else {
+        // An array's element is its own type: `int[4]` binds `int`.
+        return match container {
+            Type::Array { of, .. } => Some(of.to_string()),
+            _ => None,
+        };
+    };
+
+    let plain = name.rsplit("::").next().unwrap_or(name);
+
+    // A `map`'s element is `pair<const K, V>`: the key is `const`, and the position picks the side.
+    if matches!(
+        plain,
+        "map" | "unordered_map" | "multimap" | "unordered_multimap"
+    ) && arguments.len() == 2
+    {
+        return match position {
+            0 => Some(format!("const {}", arguments[0])),
+            _ => Some(arguments[1].to_string()),
+        };
+    }
+
+    if matches!(plain, "array") && arguments.len() == 2 {
+        return Some(arguments[0].to_string());
+    }
+
+    // A sequence, a set, or a span: one argument, and the element is it.
+    if arguments.len() == 1
+        && matches!(
+            plain,
+            "vector"
+                | "list"
+                | "deque"
+                | "forward_list"
+                | "set"
+                | "unordered_set"
+                | "multiset"
+                | "unordered_multiset"
+                | "basic_string"
+                | "string"
+                | "span"
+                | "initializer_list"
+                | "valarray"
+        )
+    {
+        return Some(arguments[0].to_string());
+    }
+
+    // `pair` and `tuple` are the components themselves.
+    if matches!(plain, "pair" | "tuple") {
+        return arguments.get(position).map(|component| component.to_string());
+    }
+
+    None
+}
 fn writes_a_name(written: &str) -> bool {
     let spelling = written.strip_prefix("::").unwrap_or(written);
 

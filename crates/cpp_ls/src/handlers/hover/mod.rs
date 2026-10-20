@@ -864,7 +864,15 @@ fn declaration_text(
     // all and the analysis is asked. That distinction was got wrong first time round — `auto n = 1;` keeps
     // `Some("auto")`, the fallback was written for `None`, and the popup went on showing the initializer.
     if matches!(fact.kind, DeclKind::Variable) {
-        let from_the_fact = fact.type_of.as_deref().filter(|type_of| *type_of != "auto");
+        // **A function type is never a variable's type**, and a structured binding is where the two got mixed up:
+        // `for (auto [key, value] : map)` records no written type for either name, `declared_type_of` answered the
+        // enclosing function's `int()`, and the popup showed `int() value;` for a `std::string`. `int()` cannot be a
+        // variable, so a spelling that ends in `)` is treated as no spelling at all and the analysis is asked — which
+        // is where the element type of a binding lives now.
+        let from_the_fact = fact
+            .type_of
+            .as_deref()
+            .filter(|type_of| *type_of != "auto" && !type_of.trim_end().ends_with(')'));
         let written_type = match from_the_fact {
             Some(type_of) => Some(type_of.to_string()),
             // The file's own bindings carry no `type_of` at all, and the offset to ask at is the fact's own name —
