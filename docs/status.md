@@ -1299,3 +1299,66 @@ offset 直接就是客户端的坐标系,不需要映射。
 #define STD std::  →  `STD s|`  scope "std"  prefix "s"  →  cin / cout / size(实测)
 `auto x = a|` / 语句位置 `a|`               →  prefix "a"/"an",replace 覆盖已打的字(上一节的坐标修复)
 ```
+
+## 二十一、关键词与 Doxygen 命令的文案:一份 yaml,编译进二进制（2026）
+
+两件事都缺,而且缺的是**文字**而不是逻辑:
+
+```text
+constexpr / noexcept / friend 之类的关键词   没有 hover
+@param / @return 之类的命令                   没有 hover;命令本身也没有描述
+```
+
+### 做法:文案进 `locales/en.yml`,`rust-i18n` 在编译期嵌进去
+
+项目已经有 `rust-i18n`(解析器的报错就是 `t!("expected primary expression")` 这套 message-as-key),
+所以没有再引入 yaml 解析器:`rust_i18n::i18n!("./locales", fallback = "en")` 会把 `locales/en.yml`
+**编译进二进制**,一张表就是一份译文,加语言是加文件而不是加代码路径。
+
+```yaml
+keyword:
+  constexpr: "**`constexpr`** — the value or function may be evaluated at compile time. …"
+command:
+  param: "**`@param`** — document one parameter: `@param name description`. …"
+```
+
+```rust
+// cpp_ls/src/handlers/hover/vocabulary.rs
+pub fn keyword_hover(token) -> Option<String>   // key 取自 token 的**拼写**(bool 是 BoolLiteral 变体,不能按变体取名)
+pub fn command_hover(name)  -> Option<String>
+fn known(key) -> Option<String>                  // rust-i18n 缺 key 时返回 key 本身 —— 这就是"没有"
+```
+
+内容:51 个关键词 + 48 个 Doxygen 命令,每条一句"是什么"加一句"要知道的事"。表里没有的命令就**不弹**(八十几条
+冷门命令配一句泛泛的话只是噪声)。
+
+### 顺序:词汇表是**最后**一个问题,不是第一个
+
+第一版把它放在最前面,结果 `this` 在成员函数里弹出的是关键词释义 —— 而分析层知道它是"指向本对象的指针",
+那是更好的答案。改成:先问程序(`declarations`/`types`/`expressions`/`headers`/`macros`),没有答案再问词汇表。
+
+还有一条:**只有光标真的在那个词上才答**。渲染把空行和注释删掉了,空行上的光标会映射到下一个 token ——
+实测在 `void f()` 上一行空白处 hover 得到了 `void` 的解释。用 token 的区间映射回文件坐标再比较,越界就不答。
+
+### signatureHelp:文件说明在上,`@param` 各归各位
+
+```text
+之前  documentation = 整段注释(含 @param 行)      parameters[i].documentation = None
+现在  documentation = 去掉 @param/@tparam 行的正文  parameters[i].documentation = 该参数的 @param 正文
+```
+
+`@param value the value` 是**关于一个实参**的句子,它该出现在那个实参下面;放在签名上方是同一句话说了两遍,
+而且第二遍还说错了地方。过滤按 `DocCommandKind::Parameter` 而不是按拼写,所以 `@param[in] x`、`\param x` 一起去掉;
+`@note`/`@return` 这类"正文型"命令保留。
+
+参数名匹配用的是语法树已经切好的 argument(`@param x  desc` 两个空格、描述续行都成立),不是再切一次文本。
+
+### 验收
+
+```text
+测试  a_keyword_and_a_doc_command_explain_themselves（关键词/命令都有文案；`// @param` 不算）
+      a_doc_comment_is_split_between_the_signature_and_its_parameters
+handshake  a_signature_is_shown_while_the_arguments_are_typed（正文无 @param，第一个参数有 "the count"，第二个是 null）
+           a_client_...hover（空行仍然答 null —— 词汇表加了区间检查）
+套件  cpp_ls lib 83 / handshake 30(+5 ignored) / cpp_code_analysis lib 650
+```

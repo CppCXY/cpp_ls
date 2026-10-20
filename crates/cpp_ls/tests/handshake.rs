@@ -2785,11 +2785,29 @@ fn a_signature_is_shown_while_the_arguments_are_typed() {
         .collect();
     assert_eq!(spans, vec!["int count", "double factor"]);
 
+    // **The function's own text above the signature, and the `@param` line under the parameter it names.**
+    //
+    // Reported from an editor: "the function's popup should be synthesized from the doc and not include the
+    // `@param` lines, and the parameters themselves should get their own". The whole comment shown twice said the
+    // same sentence twice, the second time in the wrong place.
     let documentation = signature["documentation"]["value"]
         .as_str()
         .unwrap_or_else(|| panic!("the documentation above the declaration: {answer}"));
     assert!(documentation.contains("Scales a count."), "{documentation}");
-    assert!(documentation.contains("@param count"), "{documentation}");
+    assert!(
+        !documentation.contains("@param"),
+        "the parameter's own sentence is not repeated above the signature: {documentation}"
+    );
+
+    let parameter_documentation = signature["parameters"][0]["documentation"]["value"]
+        .as_str()
+        .unwrap_or_else(|| panic!("`@param count the count` belongs to the first parameter: {answer}"));
+    assert_eq!(parameter_documentation, "the count");
+    assert_eq!(
+        signature["parameters"][1]["documentation"],
+        Value::Null,
+        "a parameter with no `@param` line has no documentation rather than somebody else's: {answer}"
+    );
 
     server.request(999, "shutdown", Value::Null);
     server.notify("exit", Value::Null);

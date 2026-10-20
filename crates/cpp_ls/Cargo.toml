@@ -21,6 +21,11 @@ serde_json.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 
+# The two vocabularies a reader hovers over -- C++'s keywords and Doxygen's commands -- are text, not logic: they
+# live in `locales/en.yml` and are embedded at build time by `rust_i18n::i18n!`. The same crate carries the
+# parser's own messages, so a translation is a second YAML file and not a second code path.
+rust-i18n.workspace = true
+
 # A `file:` URI is percent-encoded, and a Windows path is not.
 percent-encoding.workspace = true
 

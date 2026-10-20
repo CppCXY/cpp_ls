@@ -37,7 +37,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::RegisterCapabilities;
 use crate::context::{RequestOutcome, ServerContextSnapshot, snapshot_query};
-use crate::handlers::hover::documentation_text;
+use cpp_parser::CppDocComment;
 use crate::util::{offset_at_position, uri_to_file_path};
 
 pub async fn on_signature_help(
@@ -98,10 +98,15 @@ pub fn signature_help_of(
         .iter()
         .map(|signature| SignatureInformation {
             label: signature.label.clone(),
+            // **The function's own text, without its parameter entries.**
+            //
+            // The protocol draws this above the signature, and `@param value the value` is a sentence about *one*
+            // argument — it belongs under that argument, which is where `parameters[..].documentation` goes below.
+            // The whole comment shown twice said the same thing twice, and the second time in the wrong place.
             documentation: signature
                 .documentation
                 .as_ref()
-                .and_then(documentation_text)
+                .and_then(brief_of)
                 .map(|value| {
                     Documentation::MarkupContent(MarkupContent {
                         kind: MarkupKind::Markdown,
@@ -112,12 +117,23 @@ pub fn signature_help_of(
                 signature
                     .parameters
                     .iter()
-                    .map(|(range, _)| ParameterInformation {
+                    .map(|(range, written)| ParameterInformation {
                         // Offsets inside the label rather than a substring: the protocol's two shapes are
                         // equivalent, and offsets keep the parameter's *own* text in the label where the reader sees
                         // the declaration's spelling.
                         label: ParameterLabel::LabelOffsets([range.start as u32, range.end as u32]),
-                        documentation: None,
+                        // **The `@param` line for this parameter**, when the declaration has one — the reason a
+                        // reader opens this popup at all: the parameter being typed is the one documented.
+                        documentation: signature
+                            .documentation
+                            .as_ref()
+                            .and_then(|comment| parameter_documentation(comment, written))
+                            .map(|value| {
+                                Documentation::MarkupContent(MarkupContent {
+                                    kind: MarkupKind::Markdown,
+                                    value,
+                                })
+                            }),
                     })
                     .collect(),
             ),
@@ -138,8 +154,69 @@ pub fn signature_help_of(
     }
 }
 
-pub struct SignatureHelpCapabilities;
+/// **The documentation above a declaration, minus the sentences about its parameters.**
+///
+/// `@param value the value` documents one argument, and it is shown under that argument (see
+/// [`parameter_documentation`]). Kept in the comment as well, the same sentence appeared twice — once in the block a
+/// reader skims and once where they need it — and the block is the wrong place for it: what belongs above a
+/// signature is what the *function* does.
+///
+/// The filter is by command kind rather than by spelling, so `@param[in] x` and `\\param x` go too. The rest of the
+/// comment is kept exactly as written, including the commands that are prose (`@note`, `@warning`): a reader of
+/// `@note` wants it in the block.
+fn brief_of(comment: &CppDocComment) -> Option<String> {
+    if !comment.is_documentation() {
+        return None;
+    }
 
+    use cpp_parser::DocCommandKind;
+
+    // The text with those lines taken out. Line-shaped rather than character-shaped because a doc comment *is*
+    // line-shaped: every command starts a line's content, and removing one means removing that line.
+    let text = comment.get_comment_text();
+    let mut kept = String::with_capacity(text.len());
+    for line in text.lines() {
+        let content = line.trim_start().trim_start_matches("///").trim_start();
+        let content = content.strip_prefix("*").map_or(content, |rest| rest.trim_start());
+        let name = content.strip_prefix(['@', '\\']).map(|rest| {
+            rest.chars()
+                .take_while(|character| character.is_ascii_alphanumeric())
+                .collect::<String>()
+        });
+        let is_a_parameter_line = name.as_deref().and_then(cpp_parser::command_kind)
+            == Some(DocCommandKind::Parameter);
+
+        if !is_a_parameter_line {
+            kept.push_str(line);
+            kept.push('\n');
+        }
+    }
+
+    let kept = kept.trim();
+    (!kept.is_empty()).then(|| kept.to_string())
+}
+
+/// **What one parameter is documented to be** — the body of the `@param`/`@tparam` line that names it.
+///
+/// The name is matched against the argument the grammar already split out of the command rather than against the
+/// text, so `@param x  desc` (two spaces) and a description continued on the next line both work. `written` is the
+/// parameter as the declaration spells it — `const Widget& widget` — and the *name* is its last word, which is what
+/// a `@param` names.
+fn parameter_documentation(comment: &CppDocComment, written: &str) -> Option<String> {
+    use cpp_parser::DocCommandKind;
+
+    let name = written.split_whitespace().last()?;
+    let name = name.trim_matches(['*', '&']);
+
+    comment
+        .get_commands_of_kind(DocCommandKind::Parameter)
+        .find(|command| command.get_argument_text().as_deref() == Some(name))
+        .and_then(|command| command.get_body_text())
+        .map(|body| body.trim().to_string())
+        .filter(|body| !body.is_empty())
+}
+
+pub struct SignatureHelpCapabilities;
 impl RegisterCapabilities for SignatureHelpCapabilities {
     fn register_capabilities(server_capabilities: &mut ServerCapabilities, _: &ClientCapabilities) {
         server_capabilities.signature_help_provider = Some(SignatureHelpOptions {
@@ -177,6 +254,65 @@ mod tests {
             declared_at: 7,
             documentation: None,
         }
+    }
+
+    /// **The documentation is split in two**: the function's own text above the signature, and each `@param` under
+    /// the parameter it names.
+    ///
+    /// Reported from an editor: "the function's own popup should be synthesized from the doc and not include the
+    /// `@param` lines, and the parameters themselves should get their own". Before this the whole comment was shown
+    /// above the signature and every parameter had `documentation: None` — the same sentence twice, the second time
+    /// nowhere.
+    #[test]
+    fn a_doc_comment_is_split_between_the_signature_and_its_parameters() {
+        use cpp_parser::CppAstNode as _;
+
+        let text = "\
+/// Scales a value by a factor, keeping the sign.
+///
+/// @param count how many times to scale
+/// @param factor what to multiply by
+/// @return the scaled value
+double scale(int count, double factor);
+";
+        let tree = cpp_parser::CppParser::parse(text, cpp_parser::ParserConfig::default());
+        let root = tree.get_red_root();
+        let comment = root
+            .descendants()
+            .find(|node| {
+                cpp_parser::CppSyntaxKind::from(node.kind()) == cpp_parser::CppSyntaxKind::DocComment
+            })
+            .and_then(CppDocComment::cast)
+            .expect("the fixture writes a doc comment");
+
+        let brief = brief_of(&comment).expect("there is prose");
+        println!("brief: {brief:?}");
+        assert!(
+            brief.contains("Scales a value by a factor"),
+            "the function's own sentence is kept: {brief:?}"
+        );
+        assert!(
+            !brief.contains("@param"),
+            "and the parameter lines are not repeated above the signature: {brief:?}"
+        );
+        assert!(
+            brief.contains("@return"),
+            "a command that is prose stays: {brief:?}"
+        );
+
+        assert_eq!(
+            parameter_documentation(&comment, "int count").as_deref(),
+            Some("how many times to scale")
+        );
+        assert_eq!(
+            parameter_documentation(&comment, "double factor").as_deref(),
+            Some("what to multiply by")
+        );
+        assert_eq!(
+            parameter_documentation(&comment, "int missing"),
+            None,
+            "a parameter with no `@param` line has no documentation rather than somebody else's"
+        );
     }
 
     /// **The parameter spans are offsets into the label**, and they say what the declaration said — checked by

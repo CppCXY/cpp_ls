@@ -46,6 +46,9 @@ use super::RegisterCapabilities;
 use crate::context::{RequestOutcome, ServerContextSnapshot, snapshot_query};
 use crate::util::{file_offset_at_position, offset_at_position, uri_to_file_path};
 
+/// The two vocabularies a popup has an answer for and the analysis does not: keywords, and Doxygen's commands.
+mod vocabulary;
+
 /// How much of a declaration's text is shown before it is elided.
 ///
 /// A hover is a popup, and a declaration can be a whole class body or a 40-line function. The cut is at a line
@@ -121,11 +124,134 @@ pub async fn on_hover(
     .await
 }
 
+/// **The Doxygen command at `offset`**, when the cursor is on one inside a documentation comment.
+///
+/// Read from the file's text and line by line, for the reason the completion's version is: a comment is trivia, so
+/// no rendering contains it, and the cursor lands at a doc line's end after a keystroke.
+///
+/// Only a *documentation* comment answers: `// note to self: @param` is prose with an `@` in it.
+fn doc_command_at(text: &str, offset: usize) -> Option<String> {
+    let offset = offset.min(text.len());
+    let before = text.get(..offset)?;
+    let line_start = before.rfind('\n').map_or(0, |at| at + 1);
+
+    // **The whole line, not the text before the caret**: a cursor inside `@param` has only `@pa` in front of it,
+    // and the word it is in is the whole one. The caret is a position in the line, tested against each word's span.
+    let line_end = text[offset..]
+        .find('\n')
+        .map_or(text.len(), |at| offset + at);
+    let line = text.get(line_start..line_end)?;
+    let caret = offset - line_start;
+
+    let trimmed = line.trim_start();
+    let is_a_documentation_line = trimmed.starts_with("///")
+        || trimmed.starts_with("//!")
+        || trimmed.starts_with("/**")
+        || trimmed.starts_with("/*!");
+    let inside_a_documentation_block = if is_a_documentation_line {
+        true
+    } else {
+        match (before.rfind("/*"), before.rfind("*/")) {
+            (Some(opened), closed) => {
+                let still_open = closed.is_none_or(|closed| closed < opened);
+                still_open
+                    && (before[opened..].starts_with("/**") || before[opened..].starts_with("/*!"))
+            }
+            _ => false,
+        }
+    };
+    if !inside_a_documentation_block {
+        return None;
+    }
+
+    // **The word under the cursor**, or the one it is just past: a cursor anywhere inside `@param` — including at
+    // its end, where a keystroke leaves it — is a question about `param`.
+    let bytes = line.as_bytes();
+    let mut at = 0usize;
+    while at < bytes.len() {
+        if !matches!(bytes[at], b'@' | b'\\') {
+            at += 1;
+            continue;
+        }
+        let mut end = at + 1;
+        while end < bytes.len() && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_') {
+            end += 1;
+        }
+        let word_start = at + 1;
+        // The caret must be **on** the word: inside it, or just past its last letter.
+        if end > word_start && word_start <= caret && caret <= end {
+            return Some(line[word_start..end].to_string());
+        }
+        at = end.max(at + 1);
+    }
+
+    None
+}
+
 /// What the name at `offset` is — `None` when it does not name anything the analysis can answer about.
 ///
 /// `None` is the answer for punctuation, for whitespace, and for a name the analysis cannot place: a client shows
 /// nothing, and "there is nothing to say here" is true, where an empty popup would not be.
 pub fn hover(
+    session: &Session<DiskFiles>,
+    view: &FileView,
+    offset: cpp_code_analysis::file::coordinates::ReadingOffset,
+    in_the_file: cpp_code_analysis::file::coordinates::FileOffset,
+) -> Option<Hover> {
+    if let Some(found) = hover_of_the_program(session, view, offset, in_the_file) {
+        return Some(found);
+    }
+
+    // **The two vocabularies are the last questions, not the first.**
+    //
+    // `this` is a keyword *and* a value with a type in this context, and `nullptr` is a literal with one; the analysis
+    // has the better answer for both, and asking the vocabulary first shadowed it. Measured: hovering `this` inside
+    // a member function showed the keyword's meaning instead of "a pointer to the object", which is the sentence a
+    // reader on `this->size` is looking for.
+    //
+    // A keyword the analysis has nothing to say about — `constexpr`, `noexcept`, `friend` — reaches here, which is
+    // the case that had no popup at all before.
+    //
+    // **Only when the cursor is on the word in the file.** The rendering drops blank lines and comments, so a cursor
+    // on a blank line maps into the next token in it: measured, hovering the empty line above `void f()` was
+    // answered with what `void` means. The token's own span, mapped back to the file, is what says whether the reader
+    // is looking at it.
+    if let Some(token) = cpp_parser::token_at(&view.root, offset.get()) {
+        let in_the_rendering = cpp_parser::source_range(token.text_range());
+        let start = view
+            .file_offset_of(cpp_code_analysis::file::coordinates::ReadingOffset::new(
+                in_the_rendering.start_offset,
+            ))
+            .map(|at| at.get());
+        let end = view
+            .file_offset_of_end(cpp_code_analysis::file::coordinates::ReadingOffset::new(
+                in_the_rendering.end_offset(),
+            ))
+            .map(|at| at.get());
+        let covers_the_cursor = match (start, end) {
+            (Some(start), Some(end)) => start <= in_the_file.get() && in_the_file.get() <= end,
+            _ => false,
+        };
+
+        if covers_the_cursor && let Some(text) = vocabulary::keyword_hover(&token) {
+            return Some(markdown(text));
+        }
+    }
+
+    // **A Doxygen command**, asked of the file's own text: a comment is trivia, so the rendering has none of it —
+    // the same reason the completion and the doc tokens read the written text. `@param` is a word the reader cannot
+    // look up anywhere else in the editor.
+    if let Some(name) = doc_command_at(view.written_text().unwrap_or(&view.source), in_the_file.get())
+        && let Some(text) = vocabulary::command_hover(&name)
+    {
+        return Some(markdown(text));
+    }
+
+    None
+}
+
+/// **The program's own answer** — declarations, types, expressions, headers, macros — and `None` when it has none.
+fn hover_of_the_program(
     session: &Session<DiskFiles>,
     view: &FileView,
     offset: cpp_code_analysis::file::coordinates::ReadingOffset,
@@ -137,6 +263,7 @@ pub fn hover(
     if session.project_config().config.hover.enable == Some(false) {
         return None;
     }
+
 
     // **A header name before a declaration**, for the reason the jump asks it first: `#include <vector>` declares
     // nothing, so every question below answers "nothing to say" for a name whose answer is a file on disk. The
@@ -937,6 +1064,62 @@ impl RegisterCapabilities for HoverCapabilities {
 mod tests {
     use super::*;
 
+    /// **The two vocabularies answer, and the file they live in is the one that was embedded.**
+    ///
+    /// `rust-i18n` answers a missing key with the key itself, so "the popup says `keyword.constexpr`" and "the popup
+    /// is empty" are the two failure modes this test is written to catch. Both tables are read from
+    /// `locales/en.yml` at build time — the point of the whole arrangement is that the text is *data*, so a test
+    /// that only called `t!` directly would not prove the file was found.
+    #[test]
+    fn a_keyword_and_a_doc_command_explain_themselves() {
+        let tree = cpp_parser::CppParser::parse(
+            "constexpr int f(int value);\n",
+            cpp_parser::ParserConfig::default(),
+        );
+        let root = tree.get_red_root();
+        let token = root
+            .descendants_with_tokens()
+            .filter_map(|element| element.into_token())
+            .find(|token| token.text() == "constexpr")
+            .expect("the fixture writes it");
+
+        let keyword = vocabulary::keyword_hover(&token).expect("`constexpr` is in the keyword table");
+        assert!(
+            keyword.contains("constexpr"),
+            "the popup names the word it is about: {keyword}"
+        );
+        assert!(
+            !keyword.starts_with("keyword."),
+            "and it is text, not the key that was not found: {keyword}"
+        );
+
+        let command = vocabulary::command_hover("param").expect("`@param` is in the command table");
+        assert!(command.contains("@param"), "{command}");
+
+        // **A command is a word in a comment**, and only in a *documentation* comment.
+        let text = "/// @param value the value\n// @param not documentation\nint f(int value);\n";
+        let at = text.find("@param").expect("the fixture") + 3;
+        assert_eq!(
+            doc_command_at(text, at).as_deref(),
+            Some("param"),
+            "a cursor inside `@param` in a `///` line"
+        );
+        let end = text.find("@param").expect("the fixture") + "@param".len();
+        assert_eq!(
+            doc_command_at(text, end).as_deref(),
+            Some("param"),
+            "and a cursor just past it, which is where a keystroke leaves it"
+        );
+
+        // `rfind`, because `//` occurs inside the `///` line as well — a `find` would land there and pass for the
+        // wrong reason.
+        let plain = text.rfind("// @param").expect("the fixture") + "// @param".len();
+        assert_eq!(
+            doc_command_at(text, plain),
+            None,
+            "a `//` comment is prose with an `@` in it"
+        );
+    }
     #[test]
     fn a_long_declaration_is_cut_at_a_line_and_says_how_much_is_missing() {
         let text = (0..20)
