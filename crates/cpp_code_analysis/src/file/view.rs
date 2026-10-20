@@ -335,6 +335,27 @@ impl FileView {
                     .find(|span| span.reported.end_offset() > in_the_file)
             })?;
 
+        // **A cursor exactly after a token, with deleted text after it, is still after that token.**
+        //
+        // The commonest position a completion is asked at is the one a keystroke leaves the caret in: `auto x = a|`.
+        // The newline that follows it produced no token, so the cursor is in a *gap* — and the gap rule below
+        // answers with the **next** token's start, which here is `return` on the next line. Everything downstream
+        // then reads the position as "a name has not been typed": the list came back unfiltered (`a|` offered every
+        // name in scope), narrower (`an|` offered only the keywords, because the prefix had become the last `n`), and
+        // accepting an item wrote `a` + `anotherVec` — the item's replace range was empty, so the client inserted
+        // after the letter already there.
+        //
+        // The rule is deliberately exact — the cursor must sit **at the end of a token's written range**, with no
+        // file bytes of its own — so a caret on a blank line, or in the middle of a comment, keeps the answer it had.
+        if let Some(previous) = self
+            .reading
+            .iter()
+            .rev()
+            .find(|span| span.reported.end_offset() == in_the_file)
+        {
+            return Some(ReadingOffset::new(previous.cooked.end_offset()));
+        }
+
         // **A cursor in a gap is a question about the text that was deleted, and the answer is not the next token.**
         //
         // The spans do not tile the file: a comment, a `#define`, an `#include` line and the branch of an `#if`

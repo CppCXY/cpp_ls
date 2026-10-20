@@ -496,14 +496,58 @@ pub fn name_position_at(root: &CppSyntaxNode, offset: usize) -> Option<NamePosit
             return None;
         }
 
-        return match cpp_parser::token_at(root, offset) {
-            Some(token) if inside_a_comment_or_a_literal(&token) => None,
-            _ => Some(NamePosition {
+        if let Some(token) = cpp_parser::token_at(root, offset) {
+            if inside_a_comment_or_a_literal(&token) {
+                return None;
+            }
+        }
+
+        // **The word being typed is read from the token stream when no name node holds it.**
+        //
+        // A statement that is still being written is what a completion is *for*, and the parser's recovery does not
+        // always put the half-written name inside a `NameExpr`:
+        //
+        // ```cpp
+        //     auto x = a|          // no `;` yet — the declaration is incomplete
+        // ```
+        //
+        // Here `name_node_around` answers `None`, and the position below was a **blank** one: an empty prefix and a
+        // zero-length range. Measured on that line, with two `#include`s above it: `a|` offered every name in scope
+        // (nothing filtered), `an|` offered nothing but keywords (the prefix had become the last letter only, so
+        // `anotherVec` did not match), and accepting the item at `a|` wrote **`aanotherVec`** — the range to replace
+        // was empty, so the client inserted after the `a` that was already there.
+        //
+        // So the token under the cursor — or the one whose last character the cursor is just past, which is where a
+        // client puts it after a keystroke — answers both halves: its text up to the cursor is the prefix, and the
+        // whole word is the range, so that accepting the item replaces what has been typed rather than appending to it.
+        let word = cpp_parser::token_at(root, offset)
+            .filter(|token| cpp_parser::CppTokenKind::from(token.kind()) == cpp_parser::CppTokenKind::Identifier)
+            .or_else(|| {
+                cpp_parser::token_at(root, offset.saturating_sub(1)).filter(|token| {
+                    cpp_parser::CppTokenKind::from(token.kind()) == cpp_parser::CppTokenKind::Identifier
+                })
+            });
+
+        if let Some(token) = word {
+            let range = cpp_parser::source_range(token.text_range());
+            let written = token
+                .text()
+                .chars()
+                .take(offset.saturating_sub(range.start_offset))
+                .collect();
+
+            return Some(NamePosition {
                 scope: String::new(),
-                written: String::new(),
-                range: SourceRange::new(offset, 0),
-            }),
-        };
+                written,
+                range,
+            });
+        }
+
+        return Some(NamePosition {
+            scope: String::new(),
+            written: String::new(),
+            range: SourceRange::new(offset, 0),
+        });
     };
 
     let mut segments: Vec<String> = Vec::new();

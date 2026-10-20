@@ -1202,3 +1202,55 @@ cpp_code_analysis/tests/checks.rs       1 条（一个已解析为 neither side 
 cpp_code_analysis/src/index/project.rs  1 条（一个测量型用例）
 cpp_ls/tests/handshake.rs               5 条（3 条 needing the release profile / a reading, 2 条 probe）
 ```
+
+## 十九、补全的三个症状，一个坐标缺陷（2026）
+
+用户报的是三件事，其实是同一处：
+
+```text
+`auto x = a|`    列表里出现**所有**作用域里的名字(没过滤)
+`auto x = an|`   列表只剩关键字(`anotherVec` 不见了)
+接受 `anotherVec`  写出来是 **`aanotherVec`**
+```
+
+三个都由"**替换区间为空**"解释：服务端告诉客户端的 `replace` 是 `cursor..cursor`，客户端于是把补全项插在光标处 ——
+已经打出来的 `a` 留在前面；而服务端算 `prefix` 时也读到空串(没过滤)，`an` 那次读到的是最后一个 `n`(所以只剩关键字)。
+
+### 根因：光标在"一个 token 的末尾、文件里原文已被删掉"的位置
+
+`auto x = a` 后面是换行,而渲染里换行不产生 token —— 于是光标(file 75)落在 span 之间的**空隙**里。
+`reading_offset_of` 对空隙的既有规则是"回答**下一个** token 的起点",这里就是下一行的 `return`:渲染偏移 53。
+
+```text
+file      ... auto x = a|\n    return 0; ...
+rendering ... auto x = a    return 0; ...     ← 换行变成分隔空白，光标被映射到 `return` 的起点
+```
+
+于是 `name_position_at` 看到的是"光标落在 `return` 上",前缀为空、区间为空。
+
+### 修法
+
+`reading_offset_of` 增加一条**精确**规则:光标恰好等于某个 span 的 `reported` 末尾(即"刚打
+完一个 token"、文件里其后没有自己的字节)时,回答该 span 的 **cooked 末尾**,而不是下一个 token 的起点。
+
+```rust
+if let Some(previous) = self.reading.iter().rev().find(|span| span.reported.end_offset() == in_the_file) {
+    return Some(ReadingOffset::new(previous.cooked.end_offset()));
+}
+```
+
+"精确"是刻意的:空行上的光标、注释中间的光标都不满足这条,保持原来的答案。
+
+`name_position_at` 也加了一层兜底:名字节点找不到时(正在打、解析器恢复没把它放进 `NameExpr`),从
+**token 流**里读:光标所在或光标前一个字符所在的 Identifier,token 起点到光标之间的文本是前缀,token
+整体是替换区间。
+
+### 验收
+
+```text
+`a|`   prefix "a"  replace 51..52(1 字符)  首项 anotherVec
+`an|`  prefix "an" replace 51..53(2 字符)  首项 anotherVec
+```
+
+测试 `the_typed_prefix_is_the_word_being_replaced`(一个词一个 session —— 词是文件的一部分),
+`cpp_code_analysis` 全套 650+ 全绿,`cpp_ls` 80 + handshake 30 全绿。

@@ -1577,3 +1577,76 @@ fn a_macro_is_not_shown_with_a_signature() {
             .map(|fact| (&fact.kind, &fact.returns, &fact.parameter_list))
     );
 }
+
+/// **The typed word is the range the client replaces, and the prefix the server filters on** — one report, both
+/// halves.
+///
+/// From an editor, with `#include`s above the cursor:
+///
+/// ```text
+///   auto x = a|        the list has every name in scope          ← no prefix, so nothing was filtered
+///   auto x = an|       the list has only the keywords            ← the prefix was "n", and `anotherVec` does not
+///                                                                  begin with "n"
+///   accepting the item at `a|` wrote `aanotherVec`               ← the replace range was empty
+/// ```
+///
+/// The three follow from one thing: the range the analysis answers with is in the **rendering's** coordinates,
+/// while the client is looking at the file — and the two differ by everything the cook removed, which here is two
+/// `#include` lines. See `text_edit` in the server, which converts; this test pins what the analysis answers, so
+/// that a conversion with nothing to convert is not mistaken for the answer.
+#[test]
+fn the_typed_prefix_is_the_word_being_replaced() {
+    let header = "namespace std { template <class T> struct vector { void push_back(const T&); }; }\n";
+
+    // **One session per typed word**, because the word is part of the file: the cursor at `a|` and the cursor at
+    // `an|` are two different texts, and a fixture that writes only `a` cannot be asked the second.
+    for typed in ["a", "an"] {
+        let source = format!(
+            "#include \"v.h\"\nint main()\n{{\n    std::vector<int> anotherVec;\n    auto x = {typed}\n    return 0;\n}}\n"
+        );
+        let files = MemoryFiles::new()
+            .with_file("/p/v.h", header)
+            .with_file("/p/a.cpp", &source);
+        let providers = SessionFiles::new(OpenDocuments::new(), files);
+        let mut session = Session::with_config(
+            "/p",
+            providers,
+            WatchFilter::new("/p"),
+            CompilerConfig::default(),
+        );
+        session.add_project_files([
+            std::path::PathBuf::from("/p/v.h"),
+            std::path::PathBuf::from("/p/a.cpp"),
+        ]);
+        let view = cooked_view(&mut session, "/p/a.cpp");
+
+        let at = source.find("auto x = ").expect("the fixture") + "auto x = ".len() + typed.len();
+        let offered = session.completions(
+            &view,
+            cpp_code_analysis::file::coordinates::FileOffset::new(at),
+        );
+        let labels: Vec<&str> = offered.items.iter().map(|item| item.label.as_str()).collect();
+        println!(
+            "`{typed}|`: prefix {:?} replace {}..{} (len {}) → {:?}",
+            offered.prefix,
+            offered.replace.start_offset,
+            offered.replace.end_offset(),
+            offered.replace.length,
+            &labels[..labels.len().min(10)]
+        );
+        assert_eq!(
+            offered.prefix, typed,
+            "the prefix is what is being typed, so that the server filters on it"
+        );
+        assert_eq!(
+            offered.replace.length,
+            typed.len(),
+            "and the range covers exactly that word, so that accepting an item replaces it"
+        );
+        assert!(
+            labels.contains(&"anotherVec"),
+            "`anotherVec` begins with `{typed}`: {:?}",
+            &labels[..labels.len().min(12)]
+        );
+    }
+}
