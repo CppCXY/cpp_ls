@@ -185,6 +185,13 @@ pub struct DeclFact {
     /// is right for it and wrong for the primary template — see [`crate::ProjectIndex::template_parameters_of`],
     /// which takes the first *template* it finds rather than the first declaration.
     pub parameters: Vec<String>,
+    /// **The constraint written in front of each template parameter**, in the same order as [`DeclFact::parameters`]
+    /// — `["std::integral"]` for `template <std::integral T>`, and an empty string for an unconstrained one.
+    ///
+    /// Stored because a *check* needs it and the index is all it has: `template <std::integral T> T twice(T)`
+    /// declared in a header is the ordinary shape, and a call site in another file can only ask the summary. The
+    /// names alone cannot answer *is this argument's type constrained, and by what*.
+    pub constraints: Vec<String>,
     /// **The class's own name as the declaration wrote it, when that name carries a pattern** — `shared_ptr<_Ty>`
     /// for `struct atomic<shared_ptr<_Ty>>`, and `None` for anything whose name is a single identifier.
     ///

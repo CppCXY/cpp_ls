@@ -2028,3 +2028,118 @@ fn the_project_config_turns_rules_off_and_on() {
         "`enable` is `only these`: {only:?}"
     );
 }
+
+/// **`std::derived_from` 走索引里的基类**,`std::copyable` 这类"对象概念"只在实参是**引用**时才给答案。
+#[test]
+fn a_concept_over_the_class_hierarchy_and_over_objectness() {
+    let hierarchy = "\
+struct Base { virtual ~Base(); };
+struct Derived : public Base { };
+
+template <std::derived_from<Base> T>
+void handle(T& value);
+
+void f(Derived d, int n) {
+    handle(d);
+    handle(n);
+}
+";
+    let messages = messages_of(hierarchy);
+    println!("{messages:?}");
+    let concept_findings: Vec<&(DiagnosticCode, String)> = messages
+        .iter()
+        .filter(|(code, _)| *code == DiagnosticCode::ConceptNotSatisfied)
+        .collect();
+    assert_eq!(
+        concept_findings.len(),
+        1,
+        "`handle(n)` is not derived from `Base`: {messages:?}"
+    );
+    assert!(
+        concept_findings[0].1.contains("derived_from"),
+        "{concept_findings:?}"
+    );
+
+    // **An object concept against a reference.** `copyable<int&>` is false because the concept asks for an object
+    // type; `copyable<int>` is not this layer's question (it needs the constructors), so only the reference reports.
+    let objectness = "\
+template <std::copyable T>
+T copy_of(T value) { return value; }
+
+int f(int n) {
+    copy_of(n);
+    return 0;
+}
+";
+    let messages = messages_of(objectness);
+    println!("{messages:?}");
+    assert!(
+        !messages
+            .iter()
+            .any(|(code, _)| *code == DiagnosticCode::ConceptNotSatisfied),
+        "`int` is copyable and the check must not guess about a class: {messages:?}"
+    );
+}
+
+/// **声明在头文件里的约束,从调用处的源文件也能查出来** —— 走 summary 里的
+/// `DeclFact::parameters` / `DeclFact::constraints` / `parameter_list`。
+#[test]
+fn a_constraint_declared_in_a_header_is_checked_at_the_call() {
+    let header = "\
+#pragma once
+struct Base { virtual ~Base(); };
+struct Derived : public Base { };
+
+template <std::derived_from<Base> T>
+void handle(T& value);
+";
+    let source = "\
+#include \"b.h\"
+void f(Derived d, int n) {
+    handle(d);
+    handle(n);
+}
+";
+    let files = MemoryFiles::new()
+        .with_file("/p/b.h", header)
+        .with_file("/p/a.cpp", source);
+    let providers = SessionFiles::new(OpenDocuments::new(), files);
+    let mut session = Session::with_config(
+        "/p",
+        providers,
+        WatchFilter::new("/p"),
+        CompilerConfig::default(),
+    );
+    session.add_project_files([
+        std::path::PathBuf::from("/p/b.h"),
+        std::path::PathBuf::from("/p/a.cpp"),
+    ]);
+    session.want_cooked_reading(std::path::Path::new("/p/a.cpp"));
+    session.index_everything();
+
+    let messages: Vec<(DiagnosticCode, String)> = session
+        .diagnostics(std::path::Path::new("/p/a.cpp"))
+        .map(|found| {
+            found
+                .checks
+                .iter()
+                .map(|finding| (finding.code, finding.message.clone()))
+                .collect()
+        })
+        .unwrap_or_default();
+    println!("{messages:?}");
+
+    let concept_findings: Vec<&(DiagnosticCode, String)> = messages
+        .iter()
+        .filter(|(code, _)| *code == DiagnosticCode::ConceptNotSatisfied)
+        .collect();
+    assert_eq!(
+        concept_findings.len(),
+        1,
+        "`handle(n)` is reported from the header's constraint: {messages:?}"
+    );
+    assert!(
+        concept_findings[0].1.contains("derived_from"),
+        "{concept_findings:?}"
+    );
+}

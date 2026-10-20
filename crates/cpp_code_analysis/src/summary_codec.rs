@@ -247,6 +247,10 @@ pub fn encode(summary: &FileSummary) -> Vec<u8> {
         for parameter in &fact.parameters {
             put_str(&mut out, parameter);
         }
+        put_u32(&mut out, fact.constraints.len() as u32);
+        for constraint in &fact.constraints {
+            put_str(&mut out, constraint);
+        }
         put_opt_str(&mut out, fact.parameter_list.as_deref());
         put_opt_str(&mut out, fact.pattern.as_deref());
         put_range(&mut out, fact.range);
@@ -642,6 +646,13 @@ pub fn decode(bytes: &[u8]) -> Result<FileSummary, DecodeError> {
                     parameters.push(reader.string()?);
                 }
                 parameters
+            },
+            constraints: {
+                let mut constraints = Vec::new();
+                for _ in 0..reader.count()? {
+                    constraints.push(reader.string()?);
+                }
+                constraints
             },
             parameter_list: reader.optional_string()?,
             pattern: reader.optional_string()?,
@@ -1255,6 +1266,7 @@ mod tests {
                     returns: Some("ns::Container<int>".to_string()),
                     bases: Vec::new(),
                     parameters: Vec::new(),
+                    constraints: Vec::new(),
                     pattern: None,
                     // The one field a completion's detail line reads: a function with no parameters is written
                     // `()`, which is an answer, and `None` would be "nobody looked".
@@ -1278,6 +1290,7 @@ mod tests {
                     returns: None,
                     bases: Vec::new(),
                     parameters: Vec::new(),
+                    constraints: Vec::new(),
                     pattern: None,
                     parameter_list: None,
                     access: None,

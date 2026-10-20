@@ -1101,7 +1101,23 @@ impl ArgumentSplit for str {
 /// constrained parameter (`template <SomeConcept T>`) has words in front of the name that are not it. Taking the
 /// **last** identifier before the `=` gets every shape above right and is what this does.
 pub fn template_parameter_names(list: &CppSyntaxNode) -> Vec<String> {
-    let mut names = Vec::new();
+    template_parameters_in(list)
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect()
+}
+
+/// **Each template parameter's name and the constraint written in front of it** — `("T", "std::integral")` for
+/// `template <std::integral T>`, and `("U", "")` for an unconstrained one.
+///
+/// One walk for both answers, because they are one question with two consumers: [`template_parameter_names`] wants
+/// the names alone, and the concept check needs the constraint beside the name — "this argument does not satisfy what
+/// the declaration asked of its parameter" cannot be answered by either half on its own.
+///
+/// The constraint is what stands **before** the name, with `class`/`typename`/`template` and any `...` taken off, so
+/// `class... Ts` is unconstrained and `std::integral T` is `std::integral`.
+pub fn template_parameters_in(list: &CppSyntaxNode) -> Vec<(String, String)> {
+    let mut found = Vec::new();
 
     for parameter in list.children() {
         if CppSyntaxKind::from(parameter.kind()) != CppSyntaxKind::TemplateParameter {
@@ -1117,12 +1133,36 @@ pub fn template_parameter_names(list: &CppSyntaxNode) -> Vec<String> {
             .split(|character: char| !character.is_alphanumeric() && character != '_')
             .rfind(|word| !word.is_empty());
 
-        if let Some(name) = name {
-            names.push(name.to_string());
+        let Some(name) = name else {
+            continue;
+        };
+
+        // Everything before the name, minus the spellings that are not a constraint.
+        let before = before_a_default
+            .rfind(name)
+            .map(|at| before_a_default[..at].trim())
+            .unwrap_or("");
+        let mut constraint = before.to_string();
+        loop {
+            let mut trimmed = constraint.trim().trim_end_matches("...").trim().to_string();
+            for keyword in ["class", "typename", "template", "struct"] {
+                if let Some(rest) = trimmed.strip_prefix(keyword) {
+                    trimmed = rest.trim().to_string();
+                }
+            }
+            trimmed = trimmed.trim().to_string();
+            if trimmed == constraint || trimmed.is_empty() {
+                constraint = trimmed;
+                break;
+            }
+            constraint = trimmed;
         }
+
+        // A pack whose name came first (`Ts...`) leaves nothing in front, and so does an unconstrained parameter.
+        found.push((name.to_string(), constraint));
     }
 
-    names
+    found
 }
 
 /// **The declarator that declares the name at `range`** — the innermost one whose text holds it.

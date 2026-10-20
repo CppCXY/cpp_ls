@@ -25,14 +25,16 @@
 //! type the analysis cannot work out. That is not a gap to be apologised for but the rule every check here follows —
 //! a finding is a claim, and a claim about a concept nobody evaluated would be a guess dressed as an error.
 //!
-//! # Why a finding needs the argument and the constraint to be in one file
+//! # Where the constraint is read from
 //!
-//! The constraint is read from the declaration's **`template <…>` head**, and the parameter it constrains is matched
-//! by name against the parameter list's spellings. Both are read from the tree of the file the declaration is in. A
-//! callee from another file is reachable — the index holds its parameter list — but not its template head, and a
-//! parameter list without the head cannot say *which* parameter is constrained. So a call into a header is not
-//! checked here; `param-type-check` covers the argument's type against such a declaration, and that is the question
-//! this check is not.
+//! From the declaration's **`template <…>` head**, in one of two places: this file's tree when the declaration is
+//! here, and the **summary** when it is not — `DeclFact::constraints` is the head's other half, stored beside the
+//! parameter names for exactly this question. The constrained index is then found by matching the type parameter's
+//! name against the parameter list's spellings, so `T value` and `const T& value` are both "the parameter `T`
+//! constrains".
+//!
+//! Two declarations of a name are an **overload set** and are skipped: which overload's constraint applies is
+//! overload resolution, and a check that guessed would be reporting on a declaration the call may not use.
 
 use cpp_parser::{CppAstNode, CppCallExpr};
 
@@ -52,9 +54,15 @@ impl Check for ConceptNotSatisfied {
         let mut constrained: std::collections::HashMap<String, Vec<(usize, Concept)>> =
             std::collections::HashMap::new();
 
+        // **A declaration as well as a definition.** A constrained template is *declared* in a header and
+        // defined somewhere else, so requiring a body would leave the ordinary shape unchecked — the first test of
+        // this check used a definition and the second a declaration, and only the second failed.
         for function in context
             .own_syntax_nodes()
-            .filter(|node| super::is_a_function_definition(node))
+            .filter(|node| {
+                super::name_declared_by(node).is_some()
+                    && !super::parameter_spellings_of(node).is_empty()
+            })
             .collect::<Vec<_>>()
         {
             let Some(name) = super::name_declared_by(&function) else {
@@ -75,10 +83,16 @@ impl Check for ConceptNotSatisfied {
             };
             // **One declaration, or nothing is said.** Two declarations of a name are an overload set, and which
             // overload's constraint applies is overload resolution — not a question a check answers by position.
-            if declared.get(&name) != Some(&1) {
-                continue;
-            }
-            let Some(constraints) = constrained.get(&name) else {
+            //
+            // The constraint is read from this file's tree when the declaration is here, and from the **summary**
+            // when it is not: `DeclFact::parameters` and `DeclFact::constraints` are the template head, split into the
+            // two things a call site needs, and `parameter_list` is the declaration's own spelling — which is where a
+            // header's `template <std::integral T> T twice(T)` is reachable from a source file that only includes it.
+            let same_file = (declared.get(&name) == Some(&1))
+                .then(|| constrained.get(&name))
+                .flatten()
+                .cloned();
+            let Some(constraints) = same_file.or_else(|| from_the_index(context, &name)) else {
                 continue;
             };
 
@@ -89,7 +103,7 @@ impl Check for ConceptNotSatisfied {
                 let crate::Known::Yes((passed, _)) = context.type_of(argument.syntax()) else {
                     continue;
                 };
-                if concept.is_satisfied_by(&passed) != Some(false) {
+                if concept.is_satisfied_by(&passed, context) != Some(false) {
                     continue;
                 }
 
@@ -248,6 +262,15 @@ enum Concept {
     SameAs(String),
     /// `std::convertible_to<From, To>`.
     ConvertibleTo(String),
+    /// `std::derived_from<B>` — decided through the index, which is where a class's bases are.
+    DerivedFrom(String),
+    /// **The object family**: `std::default_initializable`, `move_constructible`, `copy_constructible`,
+    /// `movable`, `copyable`, `semiregular`, `regular`.
+    ///
+    /// A class's answer needs its constructors and its assignment operators, which this layer does not read — so the
+    /// only type it can answer *definitely* about is a **reference**, which satisfies none of them (`copyable<int&>`
+    /// is false for the same reason `std::copyable` asks for an object type). A value type answers `None`.
+    NeedsAnObjectType(&'static str),
 }
 
 impl Concept {
@@ -268,8 +291,22 @@ impl Concept {
             }
             "convertible_to" => {
                 let arguments = split_at_top_level_commas(arguments?);
-                Some(Concept::ConvertibleTo(arguments.get(1)?.trim().to_string()))
+                Some(Concept::ConvertibleTo(arguments.first()?.trim().to_string()))
             }
+            "derived_from" => {
+                let arguments = split_at_top_level_commas(arguments?);
+                Some(Concept::DerivedFrom(arguments.first()?.trim().to_string()))
+            }
+            "default_initializable" | "move_constructible" | "copy_constructible" | "movable" | "copyable"
+            | "semiregular" | "regular" => Some(Concept::NeedsAnObjectType(match name {
+                "default_initializable" => "std::default_initializable",
+                "move_constructible" => "std::move_constructible",
+                "copy_constructible" => "std::copy_constructible",
+                "movable" => "std::movable",
+                "copyable" => "std::copyable",
+                "semiregular" => "std::semiregular",
+                _ => "std::regular",
+            })),
             _ => None,
         }
     }
@@ -280,12 +317,18 @@ impl Concept {
             Concept::FloatingPoint => "std::floating_point".to_string(),
             Concept::SameAs(other) => format!("std::same_as<{other}>"),
             Concept::ConvertibleTo(other) => format!("std::convertible_to<{other}>"),
+            Concept::DerivedFrom(other) => format!("std::derived_from<{other}>"),
+            Concept::NeedsAnObjectType(spelling) => spelling.to_string(),
         }
     }
 
     /// `Some(false)` only when the type **definitely** does not satisfy it; `Some(true)` and `None` both keep the
     /// check quiet, and `None` is what every type the analysis cannot work out answers.
-    fn is_satisfied_by(&self, passed: &crate::sema::types::Type) -> Option<bool> {
+    fn is_satisfied_by(
+        &self,
+        passed: &crate::sema::types::Type,
+        context: &CheckContext<'_>,
+    ) -> Option<bool> {
         match self {
             Concept::Integral => Some(is_an_integer(passed)),
             Concept::FloatingPoint => Some(is_a_floating_point(passed)),
@@ -296,6 +339,19 @@ impl Concept {
                     crate::Known::Yes(()) => Some(passed.to_string() == declared.to_string()),
                     crate::Known::Unknown(_) => None,
                 }
+            }
+            Concept::DerivedFrom(base) => {
+                // `derived_from<D, B>` also requires `is_base_of_v<B, D>`, and a pointer or a builtin is not a
+                // class at all — the two answers before the index is asked.
+                if passed.to_string().contains('*') || plain_type_spelling(passed).is_none() {
+                    return Some(false);
+                }
+                derives_from(context, &passed.to_string(), base)
+            }
+            Concept::NeedsAnObjectType(_) => {
+                // **A reference satisfies none of them**, and that is the whole of what this answers: a value type
+                // needs its constructors, which this layer does not read.
+                Some(!passed.to_string().contains('&'))
             }
             Concept::ConvertibleTo(target) => {
                 let target = crate::sema::types::parse_type_spelling(target);
@@ -395,4 +451,111 @@ fn plain_type_spelling(passed: &crate::sema::types::Type) -> Option<String> {
         return None;
     }
     Some(spelling.to_string())
+}
+
+/// **Is `derived` a class derived from `base`?** — through the index, which is where a class's bases are recorded.
+///
+/// `None` when the walk cannot answer: a class nobody has described, a base that is itself a template parameter, a
+/// chain deeper than the bound. `Some(false)` only when every class on the way was read and none of them is the base.
+fn derives_from(context: &CheckContext<'_>, derived: &str, base: &str) -> Option<bool> {
+    // **A builtin is not a class**, and saying so is what turns `handle(1)` into a finding rather than into a
+    // walk of the index that finds nothing and answers "not known".
+    let as_a_type = crate::sema::types::parse_type_spelling(derived);
+    if is_an_integer(&as_a_type)
+        || is_a_floating_point(&as_a_type)
+        || matches!(derived.trim(), "void" | "auto" | "nullptr_t" | "std::nullptr_t")
+    {
+        return Some(false);
+    }
+
+    let index = context.model.index();
+    let base = base.trim();
+    let base = base.rsplit("::").next().unwrap_or(base);
+
+    let mut waiting = vec![derived.to_string()];
+    let mut seen = std::collections::HashSet::new();
+    let mut answered = true;
+
+    while let Some(class) = waiting.pop() {
+        let class = class.rsplit("::").next().unwrap_or(&class).to_string();
+        if !seen.insert(class.clone()) {
+            continue;
+        }
+        if class == base {
+            return Some(true);
+        }
+
+        let mut facts = index
+            .files_declaring(&class, context.path)
+            .into_iter()
+            .filter(|found| found.fact.kind == crate::DeclKind::Type);
+        let Some(found) = facts.next() else {
+            // A class nobody has read: the answer is not "no", it is "not known".
+            answered = false;
+            continue;
+        };
+        if facts.next().is_some() {
+            answered = false;
+            continue;
+        }
+
+        for written in &found.fact.bases {
+            // `public: std::iostream` and `private Widget` are both written with an access keyword, and a virtual
+            // base with `virtual`; none of it changes which class the name is.
+            let written = written.trim();
+            let name = written
+                .split_whitespace()
+                .next_back()
+                .unwrap_or(written)
+                .trim_end_matches('<');
+            waiting.push(name.to_string());
+        }
+    }
+
+    answered.then_some(false)
+}
+
+/// **The constrained parameter positions of a declaration in another file** — from the summary, which is where a
+/// template's head is once the file has been read.
+///
+/// `None` when the index holds no such declaration, holds two, or holds one whose constraints are all empty — the
+/// three cases where the honest answer is "this is not a question the index can answer".
+fn from_the_index(
+    context: &CheckContext<'_>,
+    name: &str,
+) -> Option<Vec<(usize, Concept)>> {
+    let index = context.model.index();
+    let found = index.files_declaring(name, context.path);
+    if found.len() != 1 {
+        return None;
+    }
+    let fact = &found[0].fact;
+    if fact.kind != crate::DeclKind::Function {
+        return None;
+    }
+
+    let constrained: Vec<(&str, Concept)> = fact
+        .parameters
+        .iter()
+        .zip(fact.constraints.iter())
+        .filter(|(_, constraint)| !constraint.is_empty())
+        .filter_map(|(parameter, constraint)| {
+            Concept::from_constraint(constraint).map(|concept| (parameter.as_str(), concept))
+        })
+        .collect();
+    if constrained.is_empty() {
+        return None;
+    }
+
+    let spellings = crate::sema::overload::parameters_in(fact.parameter_list.as_deref()?).0;
+    let mut positions = Vec::new();
+    for (at, spelling) in spellings.iter().enumerate() {
+        for (parameter, concept) in &constrained {
+            if mentions_the_word(spelling, parameter) {
+                positions.push((at, concept.clone()));
+            }
+        }
+    }
+
+    (!positions.is_empty()).then_some(positions)
 }

@@ -5500,6 +5500,7 @@ fn fact_from_binding(
         // A member list's facts carry no parameters: this path answers *which members* a class has, and substitution
         // is the caller's step — it is the caller that knows the arguments. See [DeclFact::parameters].
         parameters: Vec::new(),
+        constraints: Vec::new(),
         // …and no pattern, for the same reason: this path looks a member up **by the class the object already has**,
         // rather than choosing between classes that share a scope. See [`DeclFact::pattern`].
         pattern: None,
@@ -8995,6 +8996,7 @@ impl ProjectDefinition {
                 returns: None,
                 bases: Vec::new(),
                 parameters: Vec::new(),
+        constraints: Vec::new(),
                 // Nor a pattern: this fact is a place to jump to, and the class it names is already the one the
                 // caller asked about. See [`DeclFact::pattern`].
                 pattern: None,

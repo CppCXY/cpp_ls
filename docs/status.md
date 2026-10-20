@@ -1544,3 +1544,54 @@ enable  = ["param-type-check"]        # 只报点名的这些(空 = 默认全开
 套件  cpp_code_analysis 全部（checks 61、style_checks 15、lib 650…）
       cpp_ls lib 85 / handshake 31（那个已知抖动除外）
 ```
+
+## 二十七、概念检查补全:类型概念一族 + 跨文件的约束（2026）
+
+### 判定范围扩到"标准库能由类型决定的概念"
+
+```text
+类型                                       integral / signed_integral / unsigned_integral / floating_point
+                                          same_as<A, B>、convertible_to<From, To>
+类层次                                     derived_from<B> —— 走索引里记的 `bases`,逐层向上
+"对象概念"                                 default_initializable / move_constructible / copy_constructible
+                                          movable / copyable / semiregular / regular
+                                          —— 只对**引用**给答案(`int&` 全部不满足),值类型沉默
+```
+
+最后一条是刻意的:`copyable<int>` 要看构造函数和赋值运算符,这一层不读类体,所以值类型一律 `None`
+(沉默)。引用则是语言定义上就确定不满足 —— `copyable<int&>` 为假,因为概念要的是对象类型。
+
+`derived_from` 的走法是 `files_declaring` 拿 `DeclFact::bases`,逐层向上,并且**只有每一层都读到**才回答
+`Some(false)` —— 有一个类没人读过,答案就是"不知道"。
+
+### 约束可以来自另一个文件
+
+`DeclFact` 新增 `constraints: Vec<String>`,与 `parameters` **同序对齐**,记录每个模板参数前面写的约束
+(`template <std::integral T>` → `["std::integral"]`)。于是:
+
+```cpp
+// b.h
+template <std::derived_from<Base> T> void handle(T& value);
+
+// a.cpp
+handle(n);   // `int` does not satisfy `std::derived_from<Base>`
+```
+
+这条路径的关键是**两半都要有**:名字(`parameters`)回答"哪个参数",约束(`constraints`)回答"要求什么",
+`parameter_list` 回答"声明怎么写的" —— 三者拼起来才能把实参位置对上被约束的参数。
+
+同文件时读树(快,且不依赖索引),跨文件时读 summary;名字声明两次就是重载集,两种路径都跳过。
+
+### 一个实测出来的解析错误
+
+`template <std::derived_from<Base> T>` 里**只写了一个实参**:被约束的参数填的是概念的第一个形参,写出来的那个
+填第二个。所以取的是 `arguments.first()` 而不是 `get(1)` —— 第一版写成 `get(1)` 时,单实参的约束解析成
+`None`,检查安静得像没实现。
+
+### 验收
+
+```text
+新测试  a_concept_over_the_class_hierarchy_and_over_objectness
+        a_constraint_declared_in_a_header_is_checked_at_the_call
+套件    cpp_code_analysis 全部(checks 64)、cpp_ls lib 85 / handshake 31(已知抖动除外)
+```

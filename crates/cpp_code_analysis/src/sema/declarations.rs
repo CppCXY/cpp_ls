@@ -1885,6 +1885,26 @@ fn declared_template_parameters_with(shapes: &DeclarationShapes, binding: &Bindi
         .map(|(_, list)| crate::sema::types::template_parameter_names(list))
         .unwrap_or_default()
 }
+/// **The constraint in front of each template parameter**, aligned with [`declared_template_parameters_with`].
+///
+/// The same table walk, the same innermost `template <…>`: the two answers are one head split two ways, and a second
+/// scan would be a second place for the two to disagree about which template introduced the name.
+fn declared_constraints_with(shapes: &DeclarationShapes, binding: &Binding) -> Vec<String> {
+    let at = binding.name_range.start_offset;
+
+    shapes
+        .templates
+        .iter()
+        .rev()
+        .find(|(introduced, _)| introduced.start_offset <= at && at <= introduced.end_offset())
+        .map(|(_, list)| {
+            crate::sema::types::template_parameters_in(list)
+                .into_iter()
+                .map(|(_, constraint)| constraint)
+                .collect()
+        })
+        .unwrap_or_default()
+}
 /// The base classes a class-like declaration was written with, in declaration order.
 ///
 /// Public for the same reason [`declared_type_of`] is: the query layer needs it for a class in the file being
@@ -2017,6 +2037,10 @@ fn fact_for(
     // shapes like the four questions above it, and on a unit read it is the reason they are all asked of a table
     // rather than of the tree — see [`declared_template_parameters_of`].
     let parameters = { declared_template_parameters_with(shapes, binding) };
+    // **The constraint in front of each of those names**, from the same head — see [`DeclFact::constraints`]. A
+    // check at another file`s call site can only ask the summary, and names without their constraints cannot say
+    // whether an argument satisfied what the declaration asked for.
+    let constraints = { declared_constraints_with(shapes, binding) };
     // **Who may name it.** Recorded on the shape the binding's name sits in, which the pass that built this table
     // already knows — see [`Shape::access`]. `None` for a name no class body contains.
     let access = shapes.access_at(the_offset_to_descend_by(binding));
@@ -2079,6 +2103,7 @@ fn fact_for(
         returns,
         bases,
         parameters,
+        constraints,
         pattern,
         parameter_list,
         access,
