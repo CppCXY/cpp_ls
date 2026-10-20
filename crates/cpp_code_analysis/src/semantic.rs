@@ -801,6 +801,10 @@ fn kind_of_index(found: IndexedKind) -> Option<NameKind> {
         DeclKind::Type => NameKind::Type,
         DeclKind::Function if found.scope.is_some() => NameKind::Method,
         DeclKind::Function => NameKind::Function,
+        // **An enumerator is not a variable to a reader.** The index has one kind for both — and says which is
+        // which on [`IndexedKind::enumerator`] — while a theme draws an enumerator with its enumeration. Drawn as a
+        // plain variable, `Color::Red` read as a global constant that happened to live inside a type.
+        DeclKind::Variable if found.enumerator => NameKind::EnumMember,
         DeclKind::Variable => NameKind::Variable,
         DeclKind::Namespace => NameKind::Namespace,
         DeclKind::MacroLike => NameKind::Macro,

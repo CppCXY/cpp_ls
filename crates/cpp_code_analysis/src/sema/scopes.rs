@@ -750,7 +750,22 @@ impl ScopeWalker<'_> {
     /// which is a second binding rather than a different one, and is left to the lookup step to model, because
     /// adding it here would make the enum scope report names it does not own.
     fn enum_like(&mut self, node: &CppSyntaxNode, outer: ScopeId, inner: ScopeId) {
-        let declared = declared_name(node);
+        // **The name is read by the parser's own enum node**, not by [`declared_name`]: an enumeration has no
+        // declarator, so that function falls back to a node's *last* identifier — which for `enum class E { Yes, No };`
+        // is `No`, the last enumerator. Measured on a header declaring
+        // `enum class IsTriviallyCopyConstructible { Yes, No };`: the enum's scope came out **unnamed**
+        // (`name None`), every enumerator's fact was recorded with `scope: None` — as if it were a file-scope
+        // variable — so `E::Yes` could not be resolved from another file, `Yes` was drawn as a variable rather than
+        // as an enum member, and a bare `Yes` was reachable from anywhere in the project.
+        let from_the_parser = cpp_parser::CppEnumDef::cast(node.clone())
+            .and_then(|definition| definition.get_name())
+            .and_then(|token| {
+                use cpp_parser::CppAstToken as _;
+                let text = token.syntax().text().to_string();
+                let range = cpp_parser::source_range(token.syntax().text_range());
+                name_from_text(&text, node).map(|name| (name, range))
+            });
+        let declared = from_the_parser.or_else(|| declared_name(node));
         let declared_text = declared.as_ref().map(|(name, _)| name.kind.text());
 
         let scope = self.table.create_named_scope(
@@ -1597,8 +1612,16 @@ impl ScopeWalker<'_> {
             _ => ScopeKind::Class,
         };
 
-        let named = declared_name(specifier);
+        // **The specifier names the entity itself, and `declared_name` cannot see it.** `enum class Color { … }` is
+        // a `BuiltinType` specifier whose children are the keywords, a `NameExpr` and the body: there is no
+        // declarator to walk, and the fallback — a node's last *direct token* identifier — finds nothing, because
+        // every identifier here is inside a child node. So the name is read from the `NameExpr` the specifier
+        // holds, and the scope below is created **named**: an unnamed enum scope is what made every enumerator's
+        // fact `scope: None`, which is why `E::Yes` never resolved, `Yes` was drawn as a variable rather than as an
+        // enum member, and a bare `Yes` was reachable from anywhere in the project.
+        let named = specifier_name(specifier).or_else(|| declared_name(specifier));
         let named_here = named.is_some();
+        let named_text = named.as_ref().map(|(name, _)| name.kind.text());
 
         if let Some((name, name_range)) = named {
             self.bind(outer, name, binding, specifier, name_range);
@@ -1614,10 +1637,11 @@ impl ScopeWalker<'_> {
             return named_here;
         }
 
-        let scope = self.table.create_scope(
+        let scope = self.table.create_named_scope(
             scope_kind,
             Some(inner),
             Some(cpp_parser::source_range(specifier.text_range())),
+            named_text.as_deref(),
         );
 
         // The enumerators, for an enum written with a body. A plain `enum Color { Red };` reaches here with
@@ -2172,6 +2196,39 @@ fn declarators(node: &CppSyntaxNode) -> Vec<CppSyntaxNode> {
 /// A **qualified** name is refused: `int ns::count;` declares something in `ns`, and splitting it here would
 /// bind `count` in the enclosing scope, where it cannot be used. A using-declaration is the one construct that
 /// *does* want the last component, and it reads it itself.
+/// **The name a class-like specifier declares itself** — `Color` for `enum class Color { … }`.
+///
+/// The two spellings are not the same shape in this grammar:
+///
+/// ```text
+/// enum class Color { Red };   DeclSpecifierSeq > BuiltinType > [EnumKeyword, ClassKeyword, NameExpr, CompoundStat]
+/// class Widget { … };         the name is in the *declarator*, which the caller reads
+/// ```
+///
+/// so this answers only the first: it looks for the `NameExpr` before the body and stops at the body, which is what
+/// keeps an enumerator's identifier from being read as the enumeration's name. `None` means the specifier names
+/// nothing — a forward declaration, or an anonymous `enum { A };` — and then the caller has nothing to bind.
+fn specifier_name(specifier: &CppSyntaxNode) -> Option<(Name, cpp_parser::SourceRange)> {
+    for element in specifier.descendants_with_tokens() {
+        let Some(node) = element.as_node() else {
+            let Some(token) = element.as_token() else {
+                continue;
+            };
+            if CppTokenKind::from(token.kind()) != CppTokenKind::Identifier {
+                continue;
+            }
+            let text = token.text();
+            let name = name_from_text(text, specifier)?;
+            return Some((name, cpp_parser::source_range(token.text_range())));
+        };
+        if CppSyntaxKind::from(node.kind()) == CppSyntaxKind::CompoundStat {
+            return None;
+        }
+    }
+
+    None
+}
+
 fn declared_name(node: &CppSyntaxNode) -> Option<(Name, cpp_parser::SourceRange)> {
     // The name is looked for *only* along the declarator-to-name path. That restriction is the whole
     // correctness of this function: a search that descends freely finds the first identifier anywhere, which
@@ -2699,8 +2756,7 @@ fn is_qualified(node: &CppSyntaxNode) -> bool {
 ///
 /// **The name node's own tokens only**, so it answers `None` for a name whose segments are child nodes
 /// (`Outer<T>::grow`) — see [`qualified_name`], which reads the subtree instead and says why.
-fn last_identifier(node: &CppSyntaxNode) -> Option<cpp_parser::CppSyntaxToken> {
-    node.children_with_tokens()
+fn last_identifier(node: &CppSyntaxNode) -> Option<cpp_parser::CppSyntaxToken> {    node.children_with_tokens()
         .filter_map(|child| child.into_token())
         .filter(|token| CppTokenKind::from(token.kind()) == CppTokenKind::Identifier)
         .last()

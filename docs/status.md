@@ -1068,3 +1068,85 @@ public:
 ①和③都是"查询不建渲染/不读闭包，先用已知的回答"的产物 —— 这个决定本身是对的（否则每个请求几百毫秒），
 错的是**没有人再告诉客户端可以重问了**。①现在有了 `semanticTokens/refresh`，③有 `inlayHint/refresh`；
 两者都是"答案变了而文档没变"这一个协议盲区，而这类答案在这个服务器里还有几处（诊断已经是 pull）。
+
+## 十六、`enum` 的作用域没有名字 —— 四个症状，一个根因（2026）
+
+用户报了三件事，其中两件是同一个缺陷：
+
+```text
+① 类里写自己的名字（injected-class-name），hover 显示的是构造函数
+② IsTriviallyCopyConstructible::Yes 是枚举值：没有 hover、不能跳转、也不渲染成 EnumMember
+③ is_trivially_assignable_v 是变量模板，hover 却给 Ambiguous
+```
+
+### 根因：枚举的作用域创建时**没带名字**
+
+`enum class E { Yes, No };` 在语法树里是 `DeclSpecifierSeq > BuiltinType > [EnumKeyword, ClassKeyword,
+NameExpr, CompoundStat]` —— **没有 declarator**。而作用域构建用的 `declared_name` 在没有 declarator 时退化成
+"节点最后一个**直接** token 里的标识符"，这里一个都没有（名字在 `NameExpr` 子节点里），于是 `named = None`：
+
+```text
+create_scope(ScopeKind::Enum, …)      ← 无名作用域
+fact(Yes).scope = None                ← 于是枚举值被当成文件作用域的变量
+```
+
+后果一路串起来：`fact.qualified_name()` 是 `Yes` 而不是 `std::E::Yes`；跨文件 `E::Yes` 找不到（qualified
+lookup 按作用域找）；语义高亮把它画成 `variable`(真正的变量色)；而且裸 `Yes` 在工程里到处可见。
+
+**修法**：`bare_class_like` 改用新的 `specifier_name`（读 `NameExpr`，遇到 `CompoundStat` 就停，所以不会把
+枚举值当名字），并用 `create_named_scope` —— 作用域带名字了。`enum_like`（`enum Plain { … }` 那条路）也改成
+读解析器自己的 `CppEnumDef::get_name`。测试 `an_enum_holds_its_enumerators` 现在断言
+`qualified_name_of(enum_scope) == Some("std::E")`（之前只断言了 shape，名字根本没被检查）。
+
+`IndexedKind` 增加了 `enumerator` 一位（`Variable` + 有 scope + 没有 `type_of`），于是高亮把它画成
+`enumMember`；索引里没有新 `DeclKind` 变体，摘要格式不变。
+
+### 另外两个
+
+```text
+injected-class-name   bindings_named 不再把 Constructor/Destructor 当作名字查找的答案：
+                      struct X { X(); } 里的 X 是**类**（C++ 的 injected-class-name），不是构造函数。
+                      构造函数调用不受影响 —— callees_of_a_call 本来就需要类，再由它给出构造函数集合。
+using 声明是"同义词"   C++ 原文：using 声明 "does not introduce a new declaration"。
+                      definitions 在**还有真实声明**时丢掉 DeclKind::Other 的 using fact：
+                      using std::E; + enum class E 不再 Ambiguous；变量模板同理。
+qualifier 解析        through_an_alias 现在也会把"前缀本身就是一个实体"的情形改写为它的 qualified_name
+                      （using 声明的枚举/类型），不再只跟 alias 的 target。
+```
+
+### 一个已有偏好，被测试钉住
+
+用户说 "我更喜欢 auto、const 这种非控制流关键词用蓝色" —— 这本来就是设计：`kind_of_keyword` 把 `auto`/
+`const`/`constexpr` 归为 `TypeKind::Modifier`，控制流（`return`/`for`）才是 `Keyword`。
+`a_keyword_is_drawn_as_what_it_is` 现在把 `auto` 与 `const int` 的 `const` 也断言成 `Modifier`。
+
+## 十七、`push_back(const value_type&)` —— 别名参数的两处断点（2026）
+
+上一节 ④ 记录的 `std::vector<int>::push_back("123131")` 不报，修好了，两个断点各一处：
+
+```text
+① members_of 的替换根本跑不到（所有 check 走的都是 SemanticModel）
+   它把类实参替换进成员的 type_of/returns/parameter_list，但模板参数名是从**文件文本**里读的，
+   用的却是 fact 的 offset（fact 的 offset 是文件的，view.source 可能是渲染的）——
+   Session::members_of 传的是 written view 所以对，SemanticModel 传的是渲染，于是 names 为空、静默跳过。
+   修法：名字取自 **fact 的 parameters**（`declared_template_parameters_with` 早已记录），不需要任何文件。
+
+② 类自己的别名没有展开
+   libstdc++ 写 `void push_back(const value_type& __x);` 且 `using value_type = _Tp;`。
+   只替换 `_Tp → int` 会留下 `value_type`，`convertible_to(char*, const value_type&)` 答 Unknown → 检查沉默。
+   修法：替换前先把该类的别名成员展开一遍（别名目标就在它自己的 fact.type_of 里），再替换模板参数。
+
+③ 带默认形参的模板：写出来的实参比形参少
+   `std::vector<int>` 只写一个，而 `template <class _Tp, class _Alloc = …>` 有两个名字；
+   `substituted_spelling` 在两边不等长时**原样返回**。修法：两边按较短的截断（位置替换本来就只覆盖写出来的那些）。
+```
+
+实测（真实 libstdc++ `<vector>`）：
+
+```text
+main.cpp:10  [param-type-check]  this passes `"123131"` where `const int&` is declared for `push_back`
+```
+
+测试：`a_member_of_a_class_template_is_checked_after_substitution`（`const _Tp&`，本来就过）与
+`a_member_parameter_written_with_the_classs_alias_is_checked`（`const value_type&`，上一节被 `#[ignore]` 的那条，
+现在通过）。

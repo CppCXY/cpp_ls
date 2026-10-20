@@ -7289,7 +7289,25 @@ impl ProjectIndex {
 
         match self.definitions(name, visible_from) {
             Known::Yes(mut found) if found.found.len() == 1 => Known::Yes(found.found.remove(0)),
-            Known::Yes(_) => Known::Unknown(UnknownReason::Ambiguous(Box::from(name))),
+            // **A `using`-declaration is a synonym, not a second entity.** C++ says so in as many words: a
+            // using-declaration "does not introduce a new declaration; it introduces a synonym". The index stores a
+            // fact for it anyway (kind `Other`, the coarsest thing this vocabulary has), so a name that one file
+            // *declares* and another *uses* arrives here as two declarations and this query refused with
+            // `Ambiguous` — measured on `using std::IsTriviallyCopyConstructible;` over an `enum class` in a header:
+            // every hover on the enumerator's qualifier answered `Ambiguous`, and the enumerator itself could then
+            // not be looked up at all.
+            //
+            // Dropping the synonyms is not a guess about which declaration is meant: after the drop either exactly
+            // one entity remains (the answer) or the name really does have several, and `Ambiguous` stays honest.
+            Known::Yes(mut found) => {
+                found
+                    .found
+                    .retain(|declaration| declaration.fact.kind != DeclKind::Other);
+                match found.found.len() {
+                    1 => Known::Yes(found.found.remove(0)),
+                    _ => Known::Unknown(UnknownReason::Ambiguous(Box::from(name))),
+                }
+            }
             Known::Unknown(reason) => Known::Unknown(reason),
             Known::No => Known::No,
         }
@@ -7432,6 +7450,21 @@ impl ProjectIndex {
             certain.truncate(1);
         }
 
+        // **A `using`-declaration is a synonym, not a second entity.** C++ says so in as many words: it "does not
+        // introduce a new declaration". The index stores a fact for it anyway (kind `Other`, the coarsest thing this
+        // vocabulary has), so a name that one file declares and another uses arrives as two declarations — measured
+        // on `using std::IsTriviallyCopyConstructible;` over an `enum class` in a header, where every hover on the
+        // enum's name answered `Ambiguous` and the enumerator's qualified lookup died behind it.
+        //
+        // The synonyms go **only when a real declaration remains**: a name that is nothing but a using-declaration
+        // still points a reader at that line, which is better than "not declared".
+        if certain
+            .iter()
+            .any(|found| found.fact.kind != DeclKind::Other)
+        {
+            certain.retain(|found| found.fact.kind != DeclKind::Other);
+        }
+
         Known::Yes(ProjectDefinitions {
             found: certain
                 .into_iter()
@@ -7556,10 +7589,7 @@ impl ProjectIndex {
 
         let mut kinds: Vec<IndexedKind> = certain
             .into_iter()
-            .map(|found| IndexedKind {
-                kind: found.fact.kind,
-                scope: found.fact.scope.map(Box::from),
-            })
+            .map(|found| IndexedKind::of(&found.fact))
             .collect();
         kinds.sort_unstable();
         kinds.dedup();
@@ -7674,10 +7704,22 @@ impl ProjectIndex {
             // answering a different question from the one the caller asked.
             let substituted = (1..segments.len()).rev().find_map(|take| {
                 let prefix = segments[..take].join("::");
-                let alias = self
-                    .files_declaring(&prefix, visible_from)
-                    .into_iter()
-                    .next()?;
+                // **The entity the prefix names**, preferring a declaration over a synonym: a file that writes both
+                // `using std::E;` and (through the header) the `enum class E` has two facts for `E`, and the
+                // synonym is the one that says nothing about where `E` really lives.
+                let mut candidates = self.files_declaring(&prefix, visible_from);
+                candidates.sort_by_key(|found| found.fact.kind == DeclKind::Other);
+                let alias = candidates.into_iter().next()?;
+
+                // A prefix that names the entity **itself** — an `enum class` reached through a `using`, a class
+                // reached through a typedef from a namespace — is rewritten to the entity's own qualified name, so
+                // the member is looked for in the scope that actually declares it. This is the half that was
+                // missing: only *aliases* were followed (`type_of` is an alias's target), while a `using`-declared
+                // enum has no target at all and its `qualified_name` is the only spelling its members are stored
+                // under.
+                if let Some(qualified) = self.qualified_name_of_the_entity(&alias.fact, &prefix) {
+                    return Some(format!("{qualified}::{}", segments[take..].join("::")));
+                }
 
                 if alias.fact.kind != DeclKind::Type {
                     return None;
@@ -7710,6 +7752,31 @@ impl ProjectIndex {
         }
 
         None
+    }
+
+    /// **The qualified name of the entity a spelling names**, when that is not the spelling itself.
+    ///
+    /// `E` for an `enum class` declared in `std` and reached through `using std::E;` is the measured case: the
+    /// spelling the file writes has no `std::`, while every member of the enum is stored under
+    /// `std::E::…`. `None` when the fact's own qualified name *is* the spelling (an ordinary name, which is most
+    /// of them) — the caller has nothing to rewrite then, and rewriting to the same string only costs a lookup.
+    ///
+    /// Only a declaration that can **own** members is rewritten: a type or a namespace. A variable or a function
+    /// reached through a `using` names no scope, and a rewrite built from it would be a spelling nothing declares.
+    fn qualified_name_of_the_entity(&self, fact: &DeclFact, prefix: &str) -> Option<String> {
+        if !matches!(fact.kind, DeclKind::Type | DeclKind::Namespace) {
+            return None;
+        }
+
+        let qualified = fact.qualified_name();
+        if qualified == prefix || qualified.is_empty() {
+            return None;
+        }
+        // **The tail has to be the same name.** `using std::E;` introduces `E`, and the entity's trailing segment is
+        // `E`; a fact whose tail differs is a rewrite that changes what is being looked for.
+        let tail = qualified.rsplit("::").next().unwrap_or_default();
+        let written = prefix.rsplit("::").next().unwrap_or_default();
+        (tail == written).then_some(qualified)
     }
 
     /// What the macro name `name` is at `offset` in the file at `visible_from`.
@@ -8699,6 +8766,30 @@ pub struct IndexedKind {
     /// from `::size`), and it is also why this type is ordered — two candidates are one answer only when both
     /// fields agree.
     pub scope: Option<Box<str>>,
+    /// **Is this an enumerator?** — a `Variable` fact written inside an enumeration.
+    ///
+    /// The index has one kind for "a name that holds a value", and an enumerator is one: `DeclKind` cannot tell it
+    /// from a variable without a field, and adding a variant is a summary-format change. What it *can* tell is that
+    /// an enumerator records **no type** — `enum class Color { Red };` declares `Red` with the enumeration's type
+    /// implied, while every variable records the spelling it was written with — and that it always has a scope.
+    ///
+    /// So this is read off the fact rather than guessed: a `Variable` in a scope with no written type is an
+    /// enumerator. A highlighter draws it as `enumMember` (a theme colours it with the enum's own), and a reader
+    /// hovering it sees the enumerator rather than a variable that claims no type.
+    pub enumerator: bool,
+}
+
+impl IndexedKind {
+    /// The answer for one declaration.
+    fn of(found: &DeclFact) -> IndexedKind {
+        IndexedKind {
+            kind: found.kind,
+            scope: found.scope.clone().map(Box::from),
+            enumerator: found.kind == DeclKind::Variable
+                && found.type_of.is_none()
+                && found.scope.is_some(),
+        }
+    }
 }
 
 /// The answer to a cross-file definition question.

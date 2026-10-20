@@ -324,6 +324,12 @@ fn a_forward_declaration_declares_the_name() {
 }
 
 /// An enum opens a scope, and its enumerators are in it.
+///
+/// **And the scope is *named***, which the shape alone cannot show: the name is what makes an enumerator's fact
+/// `Color::Red` rather than a bare `Red` at file scope. Measured on a header declaring
+/// `enum class IsTriviallyCopyConstructible { Yes, No };` — its scope came out unnamed, so every enumerator was
+/// recorded as a file-scope variable: `E::Yes` could not be resolved from another file, the enumerator was drawn
+/// as a variable rather than as an enum member, and a bare `Yes` was reachable from anywhere.
 #[test]
 fn an_enum_holds_its_enumerators() {
     let table = scopes("enum class Color { Red, Green = 2 };\n");
@@ -334,6 +340,12 @@ fn an_enum_holds_its_enumerators() {
     let enumeration = table.scope(file).unwrap().children[0];
 
     assert_eq!(
+        table.qualified_name_of(enumeration).as_deref(),
+        Some("Color"),
+        "the enumerators belong to `Color`, not to the file"
+    );
+
+    assert_eq!(
         kind_of(&table, enumeration, "Red"),
         Some(BindingKind::Enumerator)
     );
@@ -341,6 +353,17 @@ fn an_enum_holds_its_enumerators() {
         kind_of(&table, file, "Red"),
         None,
         "an enumerator is not in the file scope"
+    );
+
+    // The same inside a namespace, which is where the standard library's traits live: the qualified name is what
+    // the index stores a fact under, so this is the spelling `E::Yes` has to be resolved through.
+    let nested = scopes("namespace std { enum class E { Yes }; }\n");
+    let file = nested.root().unwrap();
+    let namespace = nested.scope(file).unwrap().children[0];
+    let enumeration = nested.scope(namespace).unwrap().children[0];
+    assert_eq!(
+        nested.qualified_name_of(enumeration).as_deref(),
+        Some("std::E")
     );
 }
 

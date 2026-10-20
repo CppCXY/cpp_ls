@@ -1201,6 +1201,20 @@ fn scopes_to_search(scopes: &ScopeTree, innermost: ScopeId) -> Vec<ScopeId> {
 fn bindings_named<'a>(scope: &'a Scope, name: &Name) -> Vec<&'a Binding> {
     scope
         .bindings_of(name)
+        // **A constructor is never the answer to a name lookup — the class is.** Inside `struct X { X(); }` the word
+        // `X` denotes the class (the *injected-class-name*), while the constructor is a binding called `X` in the
+        // class's own scope, so it is found first. Measured: in a class named `TrivialityTester`, the parameter of
+        // `TrivialityTester(const TrivialityTester& other)` resolved to the **constructor** — hovering the type
+        // showed `TrivialityTester()` and a jump on the type went to the constructor's declaration.
+        //
+        // A constructor *call* is unaffected: `X(1, 2)` is resolved by `callees_of_a_call`, which wants the class
+        // here precisely so that it can answer with the class's constructors.
+        .filter(|binding| {
+            !matches!(
+                binding.kind,
+                BindingKind::Constructor | BindingKind::Destructor
+            )
+        })
         .filter(|binding| binding.kind != BindingKind::UsingDirective)
         .collect()
 }

@@ -1343,18 +1343,18 @@ constexpr bool is_assignable_v = __is_assignable(To, From);
     /// pointing at different words.
     #[test]
     fn a_keyword_is_drawn_as_what_it_is() {
-        let text = "constexpr bool ready() const { this->x = nullptr; return true; }\n";
+        // **`auto` is in the fixture on purpose**: a reader asked for "`auto`, `const` and their kind in the blue a
+        // type has, not the keyword colour" — a control-flow word says something about the syntax, while these say
+        // something about a declaration, which is what a theme's `modifier` colour is for. `return` and `for` are
+        // the other side of the same line.
+        let text = "constexpr bool ready() const { this->x = nullptr; return true; }\n\
+                    auto y = 1; const int z = 2;\n";
         let (session, path) = a_held_file(text);
         let view = session.view_of_the_file(&path).expect("a view");
         let file = session.files().held(&path).expect("the file is held");
         let names = session.classified_names(&view);
         let tokens = encode(file, Some(&view), &names, &None, false);
         let at_type = by_offset(text, &tokens);
-        eprintln!("PROBE text={text:?}");
-        for (off, kind) in &at_type {
-            let word = &text[*off..(*off + 12).min(text.len())];
-            eprintln!("PROBE  {off} -> {kind:?}  {word:?}");
-        }
 
         for (word, expected, why) in [
             ("bool", TypeKind::Type, "`bool` names a type"),
@@ -1380,6 +1380,16 @@ constexpr bool is_assignable_v = __is_assignable(To, From);
                 "`return` is about the syntax, which is what `keyword` means",
             ),
             ("const", TypeKind::Modifier, "the trailing `const` too"),
+            (
+                "auto",
+                TypeKind::Modifier,
+                "a declaration's placeholder is a property of the declaration, not a statement keyword",
+            ),
+            (
+                "const int",
+                TypeKind::Modifier,
+                "and the leading `const` of `const int z`",
+            ),
         ] {
             let at = text[..text.find(word).expect("the fixture writes it")].len();
             assert_eq!(
