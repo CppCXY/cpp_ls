@@ -1055,3 +1055,47 @@ fn known_unparsed_set_is_accurate() {
         );
     }
 }
+
+/// **I5 — a query offset outside the tree is answered, not asserted.**
+///
+/// `rowan`'s `token_at_offset` panics with "Bad offset: range 0..N offset M" for `M > N`, and that panic reached a
+/// language server as an internal error on `textDocument/signatureHelp`: the request carried a file offset where the
+/// tree was a rendering (`#if` branches and comments removed), so 1311 stood where the rendering had 953 bytes. A
+/// query that cannot place its offset has no token, and saying so is this layer's answer.
+#[test]
+fn a_query_past_the_end_of_the_tree_has_no_token() {
+    let text = "int main() { return 0; }\n";
+    let tree = CppParser::parse(text, ParserConfig::default());
+    let root = tree.get_red_root();
+
+    assert!(cpp_parser::token_at(&root, 0).is_some());
+    assert!(
+        cpp_parser::token_at(&root, text.len() + 358).is_none(),
+        "an offset from another text's coordinates is not a token here"
+    );
+    assert!(cpp_parser::token_at(&root, usize::MAX).is_none());
+}
+
+/// **I6 — a column read at an offset inside a character does not panic.**
+///
+/// The byte offsets this layer is handed come from ranges that other layers computed, and a range end two bytes into
+/// `译` (bytes 376..379 of the file) made `&source_text[376..378]` panic — an internal error on
+/// `textDocument/diagnostic`. The column of such an offset is the column of the character it is in.
+#[test]
+fn a_column_read_inside_a_multibyte_character_is_the_character_before_it() {
+    let text = "// 汉字译 the word\nint x;\n";
+    let index = cpp_parser::LineIndex::parse(text);
+    let inside = text.find('译').expect("the fixture") + 1;
+
+    assert!(!text.is_char_boundary(inside), "the offset is inside the character");
+    assert_eq!(
+        index.position_of(inside, text),
+        Some((0, "// 汉字".chars().count())),
+        "the column of the character the offset is in, not a panic"
+    );
+    assert_eq!(
+        index.position_of(text.len(), text),
+        Some((2, 0)),
+        "and an offset at the very end is still a real position"
+    );
+}

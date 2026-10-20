@@ -290,6 +290,16 @@ pub fn significant_children(node: &CppSyntaxNode) -> impl Iterator<Item = CppSyn
 /// an editor wants: a cursor at the end of a word is at the start of whatever comes next, and the word it just left
 /// is the one the user can see.
 pub fn token_at(node: &CppSyntaxNode, offset: usize) -> Option<CppSyntaxToken> {
+    // **An offset past the tree is not a token, and rowan asserts rather than answering.** `token_at_offset`
+    // panics with "Bad offset: range 0..N offset M" for `M > N`, and that panic reached a language server as an
+    // internal error on `textDocument/signatureHelp`: the request carried an offset in the file's coordinates while
+    // the tree was a rendering (`#if` branches removed), so 1311 stood where the rendering had 953 bytes. A query
+    // that cannot place its offset has no token to report, which is `None` — the same answer as an offset in the
+    // middle of nothing.
+    if offset > usize::from(node.text_range().end()) {
+        return None;
+    }
+
     let at = TextSize::from(u32::try_from(offset).ok()?);
     node.token_at_offset(at).right_biased()
 }

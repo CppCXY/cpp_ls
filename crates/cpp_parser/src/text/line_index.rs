@@ -88,7 +88,12 @@ impl LineIndex {
         if self.is_line_only_ascii(line.try_into().unwrap()) {
             Some(usize::from(offset - start_offset))
         } else {
-            let text = &source_text[usize::from(start_offset)..usize::from(offset)];
+            // **An offset that lands inside a character has no column, and slicing there panics.** This reached a
+            // language server as an internal error on `textDocument/diagnostic`: a range whose end was two bytes
+            // into `译` (bytes 376..379) made `&source_text[376..378]` panic. The floor is the character the offset
+            // is in, which is what a column meant at that byte.
+            let end = floor_char_boundary(source_text, usize::from(offset));
+            let text = &source_text[usize::from(start_offset)..end];
             Some(text.chars().count())
         }
     }
@@ -99,7 +104,9 @@ impl LineIndex {
         if self.is_line_only_ascii(line.try_into().unwrap()) {
             Some((line, usize::from(offset - start_offset)))
         } else {
-            let text = &source_text[usize::from(start_offset)..usize::from(offset)];
+            // The same floor as [`LineIndex::get_col`], for the same crash.
+            let end = floor_char_boundary(source_text, usize::from(offset));
+            let text = &source_text[usize::from(start_offset)..end];
             Some((line, text.chars().count()))
         }
     }
@@ -166,4 +173,15 @@ impl LineIndex {
             Some(start_offset + TextSize::from(offset as u32))
         }
     }
+}
+/// **The nearest character boundary at or before `at`**, so a slice ending there cannot panic.
+///
+/// `str::floor_char_boundary` is nightly, and this is the whole of it: an offset inside a multi-byte character
+/// belongs to that character, and a reader asking for its column is asking about the character it is in.
+fn floor_char_boundary(text: &str, at: usize) -> usize {
+    let mut at = at.min(text.len());
+    while at > 0 && !text.is_char_boundary(at) {
+        at -= 1;
+    }
+    at
 }

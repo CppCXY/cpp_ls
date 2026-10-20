@@ -1846,3 +1846,51 @@ members_of("Money") → [("cents", None)]
 ```
 
 不把标着 ignore 的测试说成通过 —— 它记录的是**目标行为**,而当前行为是落回其它规则。
+
+## 三十四、两处崩溃：越界访问与字符边界（2026）
+
+### ① `textDocument/signatureHelp` — rowan 的越界断言
+
+```text
+panicked at rowan-0.17.0/cursor.rs:497
+Bad offset: range 0..953 offset 1311
+```
+
+`cpp_parser::token_at` 直接调用 `node.token_at_offset`,而它在 `offset > 树的长度` 时是 **panic** 而不是返回 None。
+953 是**渲染**的长度(`#if` 分支/注释被去掉),1311 是**文件**坐标 —— 一次坐标混用就这样到了 rowan 里。
+
+```rust
+if offset > usize::from(node.text_range().end()) {
+    return None;   // 无法定位的偏移量没有 token,这就是答案
+}
+```
+
+### ② `textDocument/diagnostic` — 切片落在多字节字符中间
+
+```text
+panicked at crates\cpp_parser\src\text\line_index.rs:102
+end byte index 378 is not a char boundary; it is inside '译' (bytes 376..379)
+```
+
+`get_col`/`get_line_col` 做 `&source_text[start..offset]`,而传进来的偏移量(376..379 之间)不是字符边界。
+修法是**向下取到字符边界**(`str::floor_char_boundary` 是 nightly,所以自己写了十行):
+
+```text
+An offset inside a multi-byte character belongs to that character,
+and a reader asking for its column is asking about the character it is in.
+```
+
+### 回归测试(cpp_parser,`tests/invariants.rs`)
+
+```text
+I5  a_query_past_the_end_of_the_tree_has_no_token        文本末尾之后 / usize::MAX → None,不 panic
+I6  a_column_read_inside_a_multibyte_character_is_…      偏移量在一个汉字中间 → 返回该汉字所在列,不 panic
+```
+
+### 两处仍在的"上游"问题(没有假装解决)
+
+- **signatureHelp 的坐标混用**:守卫让它不再崩溃,但 1311 这个文件偏移量是怎么进到渲染坐标里的,我没能定位到
+  (handler 走的是 `offset_at_position` → `reading_offset_of`,按代码应当有界)。现在的行为是"答不出签名",不是崩溃。
+- **diagnostic 的 378**:我拿用户那个 `std_module_demo.cpp` 复现了一遍 —— 解析错误 0、检查 0、only 一条 module
+  note 在 900..913(字符边界正常)。所以那次很可能是**编辑中的缓冲**与已建的行索引不同步,378 落在旧文本的某个
+  汉字中间。守卫把这种情况降级为"列取该字符所在位",不再崩溃。
