@@ -1944,6 +1944,23 @@ fn is_unnamed_declaration(node: &CppSyntaxNode) -> bool {
         return false;
     }
 
+    // **An operator declaration names something and has no identifier.** `int operator*() const;` is a declaration
+    // the AST calls nameless (`get_name_text` answers `None`, the same answer `f(x);` gives), so it was skipped
+    // before any name was read — and a class's operators were never members of it. Measured: `members_of("Money")`
+    // listed only the data member, and every operator rule was looking for a fact that had never been built.
+    //
+    // The keyword is looked for **outside the initializer**, because `int y = x.operator+();` holds one as a call
+    // and names `y`: what makes the declaration an operator's is that the keyword is in its own declarator.
+    let declares_an_operator = node
+        .children()
+        .filter(|child| CppSyntaxKind::from(child.kind()) != CppSyntaxKind::Initializer)
+        .flat_map(|child| child.descendants_with_tokens())
+        .filter_map(|element| element.into_token())
+        .any(|token| CppTokenKind::from(token.kind()) == CppTokenKind::OperatorKeyword);
+    if declares_an_operator {
+        return false;
+    }
+
     match cpp_parser::CppDeclaration::cast(node.clone()) {
         Some(declaration) => declaration.get_name_text().is_none(),
         // Not castable, so the AST layer has no opinion and this layer should not invent one.
@@ -2240,6 +2257,33 @@ fn declared_name(node: &CppSyntaxNode) -> Option<(Name, cpp_parser::SourceRange)
         // that cannot be used unqualified — and collide with every other `count`.
         if is_qualified(&name_node) {
             return None;
+        }
+
+        // **An operator declaration has no identifier to find** — `operator*`, `operator[]`, `operator()` are the
+        // keyword plus a token, and a conversion (`operator int`) is the keyword plus a type. Its spelling is still
+        // a name every lookup can be keyed on (`std::vector::operator[]`), and it is what the operator rules read:
+        // without this, `int operator*() const;` declared **nothing**, so a class's operators were not members at
+        // all and `*money` could not find one.
+        if name_node
+            .descendants_with_tokens()
+            .filter_map(|child| child.into_token())
+            .any(|token| CppTokenKind::from(token.kind()) == CppTokenKind::OperatorKeyword)
+        {
+            let spelling = name_node.text().to_string();
+            let spelling = spelling.trim();
+            // **The symbol, not the whole spelling.** The name node's text *includes* the keyword
+            // (`operator*`), and `Name::operator` writes the keyword back — so passing the text whole produced
+            // `operator operator*`, which no lookup for `operator*` matches.
+            let symbol = spelling
+                .strip_prefix("operator")
+                .map(str::trim)
+                .unwrap_or(spelling);
+            if !symbol.is_empty() {
+                return Some((
+                    Name::operator(symbol),
+                    cpp_parser::source_range(name_node.text_range()),
+                ));
+            }
         }
 
         let token = first_identifier_in_name(&name_node)?;

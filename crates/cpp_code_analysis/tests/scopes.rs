@@ -2395,3 +2395,15 @@ fn a_local_declared_with_a_qualified_type_is_bound() {
     );
     assert!(body.contains("line"), "and so is the next one: {body}");
 }
+
+/// **一个 operator 声明是有名字的声明** —— 它没有标识符(`operator*` 是关键字加一个记号),
+/// 但它仍然在类的作用域里绑一个名字,否则"类的 operator 是不是成员"这个问题的答案永远是"不是"。
+#[test]
+fn operators_bind_a_name() {
+    let table = scopes("struct M { int operator*() const; int operator[](int at); int cents; };\n");
+    let shape = shape(&table);
+
+    assert!(shape.contains("operator*"), "{shape}");
+    assert!(shape.contains("operator[]"), "{shape}");
+    assert!(shape.contains("cents"), "{shape}");
+}

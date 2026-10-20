@@ -1363,3 +1363,71 @@ int f() {
         other => panic!("`element` has a type: {other:?}"),
     }
 }
+
+/// **类自己定义的 operator** —— `operator+`、`operator*`、`operator[]`、`operator()` 的返回类型就是表达式类型。
+///
+/// 还差最后一步:operator 成员目前**不在** `members_of` 的名单里(事实层没有给它建名字),所以查找永远返回 None,
+/// 表达式落回"操作数类型相同"或迭代器模型。规则和接线都已完成,缺的是事实层的名字 —— 见下一节的记录。
+#[test]
+#[ignore = "operator members are not in the fact list yet: `declared_name` answers nothing for them"]
+fn a_classs_own_operators_have_their_declared_return_type() {
+    let source = "\
+struct Money {
+    int cents;
+    Money operator+(const Money& other) const;
+    int operator*() const;
+    int operator[](int at) const;
+    int operator()(int times) const;
+    Money operator-() const;
+};
+int f() {
+    Money a;
+    Money sum = a + a;
+    int deref = *a;
+    int at = a[0];
+    int times = a(3);
+    Money neg = -a;
+    (void)sum; (void)deref; (void)at; (void)times; (void)neg;
+    return 0;
+}
+";
+    let files = MemoryFiles::new().with_file("/p/a.cpp", source);
+    let providers = SessionFiles::new(OpenDocuments::new(), files);
+    let mut session = Session::with_config(
+        "/p",
+        providers,
+        WatchFilter::new("/p"),
+        CompilerConfig::default(),
+    );
+    session.add_project_files([std::path::PathBuf::from("/p/a.cpp")]);
+    session.want_cooked_reading(std::path::Path::new("/p/a.cpp"));
+    session.index_everything();
+
+    let view = session.view("/p/a.cpp").expect("a view");
+    let type_of = |needle: &str| {
+        let at = source.find(needle).expect("the fixture writes it") + needle.len();
+        let reading = view
+            .reading_offset_of(cpp_code_analysis::file::coordinates::FileOffset::new(at))
+            .expect("the cursor is in the rendering");
+        match session.type_at(&view, reading) {
+            cpp_code_analysis::Known::Yes(found) => found.type_of,
+            other => panic!("`{needle}` has a type: {other:?}"),
+        }
+    };
+
+    match session.members_of(&view, "Money") {
+        cpp_code_analysis::Known::Yes(list) => println!(
+            "members of Money: {:?}",
+            list.members
+                .iter()
+                .map(|member| (member.fact.name.clone(), member.fact.returns.clone()))
+                .collect::<Vec<_>>()
+        ),
+        other => println!("members of Money: {other:?}"),
+    }
+    assert_eq!(type_of("Money sum = "), "Money", "operator+ returns Money");
+    assert_eq!(type_of("int deref = "), "int", "operator* returns int");
+    assert_eq!(type_of("int at = "), "int", "operator[] returns int");
+    assert_eq!(type_of("int times = "), "int", "operator() returns int");
+    assert_eq!(type_of("Money neg = "), "Money", "unary operator- returns Money");
+}

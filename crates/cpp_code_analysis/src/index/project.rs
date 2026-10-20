@@ -2746,6 +2746,32 @@ pub(crate) fn type_of_expression(
     //   would then have to keep right for every platform's widths; a wrong type shown for an `auto` is worse than
     //   `auto`, because the second says the file did not spell it and the first says it did.
     if let Some((operator, left, right)) = binary_operands_of(expression) {
+        // **A class's own operator** — `a + b` on a type that declares `operator+`, `a == b` on one that declares
+        // `operator==`. It is tried **before** the builtin rules below, because those are answers about arithmetic
+        // and a class that overloads an operator has said what it means: `Money + Money` is `Money`, not "the two
+        // operands agree"; `Matrix == Matrix` is whatever `operator==` returns, not necessarily `bool`.
+        //
+        // Assignments are left out: `a = b` is the left operand's type, which the rule below already answers, and a
+        // user `operator=` that returns something else is a spelling nobody relies on for `auto`.
+        if !matches!(
+            operator.as_str(),
+            "=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>="
+        ) && let Known::Yes((left_class, file)) =
+            type_of_expression(index, declaring, scopes, root, path, &left, depth + 1)
+            && matches!(left_class, Type::Named { .. })
+            && let Some(returns) = operator_returns_of(
+                index,
+                declaring,
+                scopes,
+                root,
+                path,
+                &left_class,
+                &format!("operator{operator}"),
+            )
+        {
+            return Known::Yes((crate::sema::types::parse_type_spelling(&returns), file));
+        }
+
         if matches!(
             operator.as_str(),
             "==" | "!=" | "<" | ">" | "<=" | ">=" | "&&" | "||"
@@ -2810,19 +2836,45 @@ pub(crate) fn type_of_expression(
             // **A `*` is the type model's own operation.** `Widget**` gives `Widget*`, an array gives its
             // element, and a class with an `operator*` gives nothing — that one needs the class's members and
             Known::Yes((type_of, file)) => match type_of.pointee() {
-                Some(pointee) => Known::Yes(((*pointee).clone(), file)),
-                // **A class with no `*` on it: the iterator model.** An iterator-producing call is typed as its
-                // container's *element* (see [`iterator_element_type`]), so `*it` asks for the thing the element
-                // already is. A class with a real `operator*` is not handled here and answers `Unknown` — this
-                // arm exists for the model, not as a guess about user types.
-                None => match &type_of {
-                    Type::Named { .. } | Type::TemplateParameter { .. } => {
-                        Known::Yes((type_of, file))
+                // **Only a pointer's or an array's `*` is the model's own operation.** A class goes to the arms
+                // below even though `pointee()` answers for it too: what `*` means for a class is what the class
+                // declared, and a class that declared nothing is the iterator model's case.
+                Some(pointee)
+                    if !matches!(
+                        type_of,
+                        Type::Named { .. } | Type::TemplateParameter { .. }
+                    ) =>
+                {
+                    Known::Yes(((*pointee).clone(), file))
+                }
+                // **A class's own `operator*`** — `*it` on a user iterator, whose return type is the element the
+                // operator promises. Tried first: a class that defines it has said what `*` means for itself.
+                Some(_) | None => {
+                    if let Some(returns) = operator_returns_of(
+                        index,
+                        declaring,
+                        scopes,
+                        root,
+                        path,
+                        &type_of,
+                        "operator*",
+                    ) {
+                        return Known::Yes((
+                            crate::sema::types::parse_type_spelling(&returns),
+                            file,
+                        ));
                     }
-                    // An operand whose type has no `*` on it: the program is ill-formed, and a type invented
-                    // here would be a wrong answer rather than a missing one.
-                    _ => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
-                },
+                    // **The iterator model**, for a class with no `operator*` that came from `begin()`: it is a
+                    // view of its container's element, so `*it` is the element the type already is.
+                    match &type_of {
+                        Type::Named { .. } | Type::TemplateParameter { .. } => {
+                            Known::Yes((type_of, file))
+                        }
+                        // An operand whose type has no `*` on it: the program is ill-formed, and a type invented
+                        // here would be a wrong answer rather than a missing one.
+                        _ => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
+                    }
+                }
             },
             Known::Unknown(reason) => Known::Unknown(reason),
             Known::No => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
@@ -2902,40 +2954,24 @@ pub(crate) fn type_of_expression(
                 Some(element) if matches!(type_of, Type::Array { .. }) => {
                     Known::Yes(((*element).clone(), file))
                 }
-                _ => {
-                    // **The class case, which this arm used to leave alone.** A `std::vector<int>`'s `operator[]` returns
-                    // `T&`, and `members_of` has already substituted the argument — so the answer is the member's own return
-                    // type rather than a guess from the first template argument (which is what the note above rightly
-                    // refuses: `vector` wants `T`, `map` wants `mapped_type`). The member lookup is what knows which.
-                    // **The member list belongs to the file that declares the class.** Measured: with this file's `root` and
-                    // `scopes`, `direct_members("std::vector")` found the scope and it had **zero bindings**, and the index
-                    // answered zero as well — because neither is keyed by a class declared in a *different* file than the one
-                    // the expression is written in. `declaring` is the resolver for exactly that, and it is what
-                    // `declared_type` already uses.
-                    let class = type_of.class_name().unwrap_or_default();
-                    let class_file = index
-                        .files_declaring(&class, path)
-                        .first()
-                        .map(|declared| declared.file.clone());
-                    let class_view = class_file
-                        .as_deref()
-                        .and_then(|at| (declaring)(at));
-                    let (class_scopes, class_root, class_path) = match &class_view {
-                        Some(view) => (&view.scopes, &view.root, view.path.as_path()),
-                        None => (scopes, root, path),
-                    };
-                    if let Known::Yes(list) =
-                        members_of(index, class_scopes, class_root, class_path, &type_of.to_string())
-                        && let Some(subscript) = list
-                            .members
-                            .iter()
-                            .find(|member| member.fact.name == "operator[]")
-                        && let Some(returns) = subscript.fact.returns.as_deref()
-                    {
-                        return Known::Yes((crate::sema::types::parse_type_spelling(returns), file));
+                // **The class case**: a `std::vector<int>`'s `operator[]` returns `T&`, and `members_of` has already
+                // substituted the argument — so the answer is the member's own return type rather than a guess from
+                // the first template argument (which would be right for a `vector` and wrong for a `map`).
+                _ => match operator_returns_of(
+                    index,
+                    declaring,
+                    scopes,
+                    root,
+                    path,
+                    &type_of,
+                    "operator[]",
+                ) {
+                    Some(returns) => {
+                        Known::Yes((crate::sema::types::parse_type_spelling(&returns), file))
                     }
-                    Known::Unknown(UnknownReason::UnknownType(Box::from(written)))
-                }
+                    // A class with no `operator[]`: nothing this layer can say, and saying nothing is the rule.
+                    None => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
+                },
             },
             Known::Unknown(reason) => Known::Unknown(reason),
             Known::No => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
@@ -3273,6 +3309,58 @@ fn binary_operands_of(
         (Some(operator), [left, right]) => Some((operator, left.clone(), right.clone())),
         _ => None,
     }
+}
+
+/// **What a class's `operator<name>` returns** — the member's own return type, read from the file that declares the
+/// class, which is the only place its member list can be read from.
+///
+/// `None` for a class that declares no such operator, for one nobody declared (a template parameter, a name from a
+/// header the project never read), and for an operator whose declaration did not spell a return type. Every `None`
+/// means "this layer has no answer", never "the program has no answer".
+fn operator_returns_of(
+    index: &ProjectIndex,
+    declaring: &mut dyn FnMut(&Path) -> Option<crate::FileView>,
+    scopes: &crate::ScopeTree,
+    root: &cpp_parser::CppSyntaxNode,
+    path: &Path,
+    class_type: &Type,
+    operator: &str,
+) -> Option<String> {
+    let class = class_type.class_name()?.to_string();
+    let class_file = index
+        .files_declaring(&class, path)
+        .first()
+        .map(|declared| declared.file.clone());
+    let class_view = class_file.as_deref().and_then(|at| (declaring)(at));
+    let (class_scopes, class_root, class_path) = match &class_view {
+        Some(view) => (&view.scopes, &view.root, view.path.as_path()),
+        None => (scopes, root, path),
+    };
+
+    let Known::Yes(list) =
+        members_of(index, class_scopes, class_root, class_path, &class_type.to_string())
+    else {
+        return None;
+    };
+
+    // **The spelling is normalised**: the name a declaration records is whatever the declarator's tokens said, and
+    // `operator *` and `operator*` are the same operator with a space in it. Comparing without whitespace makes the
+    // two spellings one question, and the bare symbol is accepted as well because a reader that recorded only the
+    // operator's own token answered `*`.
+    let wanted: String = operator.chars().filter(|character| !character.is_whitespace()).collect();
+    let symbol = wanted.strip_prefix("operator").unwrap_or(&wanted);
+    list.members
+        .iter()
+        .find(|member| {
+            let name: String = member
+                .fact
+                .name
+                .chars()
+                .filter(|character| !character.is_whitespace())
+                .collect();
+            name == wanted || name == symbol
+        })
+        .and_then(|member| member.fact.returns.clone())
 }
 
 fn unary_operand_with(
@@ -4707,6 +4795,24 @@ fn type_of_a_call(
     } else {
         Vec::new()
     };
+
+    // **A call of an object** — `f(1)` where `f`'s type declares `operator()`. The callee is not a function
+    // declaration at all, so the lookup below would answer `No`; what the call has is what the operator returns.
+    if let Known::Yes((callee_type, file)) =
+        type_of_expression(index, declaring, scopes, root, path, &callee, 0)
+        && matches!(callee_type, Type::Named { .. })
+        && let Some(returns) = operator_returns_of(
+            index,
+            declaring,
+            scopes,
+            root,
+            path,
+            &callee_type,
+            "operator()",
+        )
+    {
+        return Known::Yes((crate::sema::types::parse_type_spelling(&returns), file));
+    }
 
     match declaration_of_a_callee(index, declaring, scopes, root, path, &callee, written) {
         Known::Yes(named) => match named.what_a_call_has(

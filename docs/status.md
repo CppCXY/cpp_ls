@@ -1805,3 +1805,44 @@ Type::TemplateParameter→ 它自己(同一个理由:不知道它是什么,但 `
         dereferencing_an_iterator_yields_the_element
 套件    cpp_code_analysis 全部、cpp_ls lib 85 / handshake 31(已知抖动除外)
 ```
+
+## 三十三、类自己定义的 operator：接线完成，事实层还差一步（2026）
+
+这一轮把 **operator 的语义规则**接上了,也发现了它一直没生效的真正原因。
+
+### 已完成:四条表达式规则
+
+```text
+运算符            规则                                   实现
+a + b 等二元      左边是类 → 查它的 `operator+`,用返回类型   二元规则之前,先于内建的算术规则
+*a                类是类 → 查 `operator*`;没有 → 迭代器模型  一元 `*`,先于 `pointee()`
+a[i]              类 → 查 `operator[]`                      原来内联在 subscript 里,现在共用
+a(...)            类 → 查 `operator()`                      调用规则之前
+```
+
+共用的查询是 `operator_returns_of`:解析类所在的文件 → `members_of` → 找名字匹配的成员 → 它的 `returns`。
+名字比较做了归一化(`operator *` / `operator*` / `*` 都认),因为事实里的拼写来自声明记号。
+
+### 发现:operator 成员**不在**成员名单里
+
+```text
+members_of("Money") → [("cents", None)]
+```
+
+`operator*` / `operator+` / `operator[]` / `operator()` 全都缺席。原因是**事实层没有给它们建名字**:
+`declared_name` 只在 declarator-to-name 路径上找 `Identifier`,而 operator 声明没有标识符 ——
+`operator*` 是 `OperatorKeyword` + `Star` 两个记号。
+
+已做:在 `declared_name` 里,当名字节点含 `OperatorKeyword` 时直接用它自己的拼写作名字(`Name::operator(...)`)。
+作用域测试全绿(73 个),但**成员事实仍然没有出现** —— 说明成员名单不是从这个函数建的,事实层还有另一处
+名字读取(在 `declarations.rs`)。这就是下一件要做的:让事实层用同一个读法,然后 `operator_returns_of` 立刻生效。
+
+### 状态
+
+```text
+规则与接线    完成并通过编译;`operator[]` 的原有路径也改成共用查询
+测试          表达式测试标了 `#[ignore]`,附原因(operator 成员不在事实名单里)
+套件          cpp_code_analysis 全绿(含 73 个作用域测试)
+```
+
+不把标着 ignore 的测试说成通过 —— 它记录的是**目标行为**,而当前行为是落回其它规则。
