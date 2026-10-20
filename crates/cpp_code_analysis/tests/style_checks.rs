@@ -32,7 +32,7 @@ fn the_style_codes_are_named_and_round_trip() {
         assert_eq!(DiagnosticCode::from_name(name), Some(code));
         assert!(DiagnosticCode::ALL.contains(&code), "{name} is in ALL");
     }
-    assert_eq!(DiagnosticCode::ALL.len(), 23, "the nine are in the list");
+    assert_eq!(DiagnosticCode::ALL.len(), 24, "the nine are in the list");
 }
 
 /// `readability-braces-around-statements`: a one-statement body should be a block.

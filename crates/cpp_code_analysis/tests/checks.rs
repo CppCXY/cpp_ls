@@ -1885,3 +1885,146 @@ fn a_diagnostic_follows_the_locale() {
         unused(&chinese)
     );
 }
+/// **`concept-not-satisfied`** —— 实参的类型不满足形参上的概念。
+///
+/// 能判定的是"类型概念"这一族(`std::integral`、`std::floating_point`、`std::same_as`、`std::convertible_to`),
+/// 因为它们的含义只是类型的一个性质;用户自己写的概念、`requires` 子句、类型未知的情形一律**沉默** ——
+/// 一个诊断是一个断言,不是猜。
+#[test]
+fn an_argument_that_does_not_satisfy_its_concept_is_reported() {
+    let source = "\
+template <std::integral T>
+T twice(T value) { return value + value; }
+
+int f() {
+    twice(2);
+    twice(\"text\");
+    return 0;
+}
+";
+    let messages = messages_of(source);
+    println!("{messages:?}");
+    let finding = messages
+        .iter()
+        .find(|(code, _)| *code == DiagnosticCode::ConceptNotSatisfied)
+        .unwrap_or_else(|| panic!("the `const char*` call is reported: {messages:?}"));
+    assert!(finding.1.contains("std::integral"), "{finding:?}");
+    assert!(
+        finding.1.contains("char"),
+        "the message names the type that was passed: {finding:?}"
+    );
+    assert_eq!(
+        messages
+            .iter()
+            .filter(|(code, _)| *code == DiagnosticCode::ConceptNotSatisfied)
+            .count(),
+        1,
+        "`twice(2)` satisfies it and is silent: {messages:?}"
+    );
+}
+
+/// **A concept the analysis cannot decide is silence**, not a guess: `requires` clauses and user-written concepts
+/// are exactly the cases where a finding would be the check's opinion rather than the language's.
+#[test]
+fn an_undecidable_concept_says_nothing() {
+    let source = "\
+template <class T>
+concept Small = sizeof(T) <= 4;
+
+template <Small T>
+T keep(T value) { return value; }
+
+int f() {
+    keep(1.0);
+    return 0;
+}
+";
+    let messages = messages_of(source);
+    assert!(
+        !messages
+            .iter()
+            .any(|(code, _)| *code == DiagnosticCode::ConceptNotSatisfied),
+        "{messages:?}"
+    );
+}
+
+/// The codes and messages a fixture produces.
+fn messages_of(source: &str) -> Vec<(DiagnosticCode, String)> {
+    let files = MemoryFiles::new().with_file("/p/a.cpp", source);
+    let providers = SessionFiles::new(OpenDocuments::new(), files);
+    let mut session = Session::with_config(
+        "/p",
+        providers,
+        WatchFilter::new("/p"),
+        CompilerConfig::default(),
+    );
+    session.add_project_files([std::path::PathBuf::from("/p/a.cpp")]);
+    session.want_cooked_reading(std::path::Path::new("/p/a.cpp"));
+    session.index_everything();
+
+    session
+        .diagnostics(std::path::Path::new("/p/a.cpp"))
+        .map(|found| {
+            found
+                .checks
+                .iter()
+                .map(|finding| (finding.code, finding.message.clone()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// **`.cppls.toml` 的 `[diagnostics] disable` 真的关掉一条规则,`enable` 只打开点名的那些。**
+///
+/// 这套机制之前在类型上就有(`CheckConfig`),但没有人把它接进一次真正运行的检查 —— 一个用户相信已经关掉的规则
+/// 仍然在报,是这套配置最坏的失败方式,所以两个方向都要测。
+#[test]
+fn the_project_config_turns_rules_off_and_on() {
+    let source = "int f() { int unused_local = 1; return 0; }\n";
+
+    let messages_with = |config: &str| {
+        let files = MemoryFiles::new()
+            .with_file("/p/a.cpp", source)
+            .with_file("/p/.cppls.toml", config);
+        let providers = SessionFiles::new(OpenDocuments::new(), files);
+        let mut session = Session::with_config(
+            "/p",
+            providers,
+            WatchFilter::new("/p"),
+            CompilerConfig::default(),
+        );
+        session.add_project_files([std::path::PathBuf::from("/p/a.cpp")]);
+        session.want_cooked_reading(std::path::Path::new("/p/a.cpp"));
+        session.index_everything();
+        session
+            .diagnostics(std::path::Path::new("/p/a.cpp"))
+            .map(|found| {
+                found
+                    .checks
+                    .iter()
+                    .map(|finding| finding.code)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    };
+
+    // Default: the unused local is reported.
+    assert!(
+        messages_with("").contains(&DiagnosticCode::Unused),
+        "the rule is on by default"
+    );
+
+    // `disable`: it is not.
+    let disabled = messages_with("[diagnostics]\ndisable = [\"unused\"]\n");
+    assert!(
+        !disabled.contains(&DiagnosticCode::Unused),
+        "`disable` turns it off: {disabled:?}"
+    );
+
+    // `enable` naming one rule: only that one may report.
+    let only = messages_with("[diagnostics]\nenable = [\"param-type-check\"]\n");
+    assert!(
+        !only.contains(&DiagnosticCode::Unused),
+        "`enable` is `only these`: {only:?}"
+    );
+}

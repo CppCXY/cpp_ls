@@ -108,6 +108,7 @@ pub mod diagnostic_code;
 // the tree rather than deleted, because their reasoning (and the measured 119-findings defect they record) is what
 // the ported versions have to preserve.
 mod braces_around_statements;
+pub mod concept_not_satisfied;
 mod cstyle_cast;
 mod else_after_return;
 mod implicit_bool_conversion;
@@ -236,7 +237,7 @@ pub struct CheckContext<'a> {
     /// thing [`CheckContext`]'s own documentation says this layer must not be able to do.
     pub view: &'a FileView,
     /// Which codes may be reported — see [`CheckConfig`].
-    pub config: &'a CheckConfig,
+    pub config: CheckConfig,
     /// **The language this file is compiled as** — `-std=c++17`, `-std=gnu89`, or "not told".
     ///
     /// A rule is not always a rule in both languages: a C program has no `static_cast`, so a C-style cast is the only cast
@@ -256,7 +257,7 @@ impl<'a> CheckContext<'a> {
         written: &'a str,
         errors: &'a [cpp_parser::CppParseError],
         view: &'a FileView,
-        config: &'a CheckConfig,
+        config: CheckConfig,
         language: cpp_parser::features::LanguageConfig,
     ) -> Self {
         CheckContext {
@@ -1415,6 +1416,7 @@ pub fn run(context: CheckContext<'_>) -> Vec<Finding> {
     // They are registered and do nothing yet: a rule with a name, a code and a test is what the next pass fills in.
     run_check::<braces_around_statements::BracesAroundStatements>(&mut context);
     run_check::<use_nullptr::UseNullptr>(&mut context);
+    run_check::<concept_not_satisfied::ConceptNotSatisfied>(&mut context);
     run_check::<use_override::UseOverride>(&mut context);
     run_check::<simplify_boolean_expr::SimplifyBooleanExpr>(&mut context);
     run_check::<else_after_return::ElseAfterReturn>(&mut context);

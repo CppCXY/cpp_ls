@@ -88,6 +88,44 @@ impl CheckConfig {
         config
     }
 
+    /// **The rules a project's `.cppls.toml` asks for** — `enable` is "only these", `disable` is "not these".
+    ///
+    /// `disable` wins, and that is the pair a project actually wants: `enable` for one that starts from nothing,
+    /// `disable` for the single rule that is noise in its code base. An empty `enable` means "whatever the defaults
+    /// say", which is every rule.
+    ///
+    /// One pass, so that the `unknown` list has each miss once and in the order the file wrote them.
+    pub fn from_names(enable: &[String], disable: &[String]) -> Self {
+        let mut config = if enable.is_empty() {
+            CheckConfig::default()
+        } else {
+            let mut config = CheckConfig {
+                enabled: Vec::new(),
+                unknown: Vec::new(),
+            };
+            for name in enable {
+                match DiagnosticCode::from_name(name) {
+                    Some(code) => {
+                        if !config.enabled.contains(&code) {
+                            config.enabled.push(code);
+                        }
+                    }
+                    None => config.unknown.push(name.clone()),
+                }
+            }
+            config
+        };
+
+        for name in disable {
+            match DiagnosticCode::from_name(name) {
+                Some(code) => config.enabled.retain(|enabled| *enabled != code),
+                None => config.unknown.push(name.clone()),
+            }
+        }
+
+        config
+    }
+
     /// May this code be reported?
     ///
     /// Linear over a list of at most eleven, which is faster than a hash of the same size and has no allocation —

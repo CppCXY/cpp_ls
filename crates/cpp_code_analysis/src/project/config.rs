@@ -497,6 +497,19 @@ pub struct DiagnosticsSection {
     /// How long a file's diagnostics wait for the typing to stop, in milliseconds.
     #[serde(default)]
     pub on_change_ms: Option<u64>,
+    /// **Only these rules** — the codes of `DiagnosticCode`, by their kebab-case names.
+    ///
+    /// Empty means "whatever the defaults say", which is every rule: a project that wants three rules and nothing
+    /// else lists all three here.
+    #[serde(default)]
+    pub enable: Vec<String>,
+    /// **Not these rules**, whether or not `enable` also names them.
+    ///
+    /// `disable` wins, so the two can be read together as "everything except …" and "these few" without a project
+    /// having to think about which section wins. A name this build does not have is reported to the user rather than
+    /// ignored — a rule believed to be on and that never runs is the failure this pair exists to prevent.
+    #[serde(default)]
+    pub disable: Vec<String>,
 }
 
 /// `[hover]` — read by the language server.

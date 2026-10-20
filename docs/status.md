@@ -1493,3 +1493,54 @@ Cargo 不知道 `locales/*.yml` 是输入,改完翻译**不会触发重编** —
 ```
 
 顺带:`where_clause` 的 `file:line` 也因此对宏是对的(此前按渲染的行数数,少算掉上面的指令行)。
+
+## 二十六、概念检查,以及一条规则怎么被关掉（2026）
+
+### `concept-not-satisfied`
+
+```cpp
+template <std::integral T>
+T twice(T value);
+
+twice(2);          // 安静
+twice("text");     // `const char*` does not satisfy `std::integral`
+```
+
+判定的是**能由类型决定的**那一族标准概念 —— 它们的含义只是类型的一个性质:
+
+```text
+std::integral / signed_integral / unsigned_integral    内建整数类型(不是指针、不是引用、不是类)
+std::floating_point                                    float / double / long double
+std::same_as<A, B>                                     同一个类型
+std::convertible_to<From, To>                          可转换性,走 `sema::convert` 那一个答案
+```
+
+其余一律**沉默**:用户自己写的概念、`requires` 子句、读不到的头文件、类型未知的实参。这不是缺口,是这里每条
+检查的规则 —— 一个诊断是一个断言,对没有人求值过的概念做断言就是猜。
+
+约束从声明的 `template <…>` 头里读,形参按**名字**匹配(`T value`、`const T& value` 都算提到 `T`);
+名字在文件里声明了两次就是重载集,按位置对号入座不是这件事能回答的,于是跳过。另一个文件里的声明读不到
+模板头(索引只存形参表),所以跨文件的调用交给 `param-type-check` —— 那是它在回答的问题。
+
+### `[diagnostics]` 的 enable / disable
+
+```toml
+[diagnostics]
+disable = ["unused", "cstyle-cast"]   # 任何情况下都不报这几条
+enable  = ["param-type-check"]        # 只报点名的这些(空 = 默认全开)
+```
+
+`disable` 覆盖 `enable`,所以两种读法都成立:"除了这几条都开"和"只开这几条"。名字解析成
+`DiagnosticCode` 的 kebab-case 码;**不认识的名字会被记下来并警告**,而不是被忽略 —— 用户以为开着、实际
+从不运行的规则,正是这套配置存在的理由。实现上 `CheckConfig` 早就在,缺的是把它接到真正跑的那一次检查上
+(之前每次都是 `CheckConfig::default()`)。
+
+### 验收
+
+```text
+测试  an_argument_that_does_not_satisfy_its_concept_is_reported
+      an_undecidable_concept_says_nothing（用户写的概念 → 沉默）
+      the_project_config_turns_rules_off_and_on（默认报 / disable 关掉 / enable 只留一条）
+套件  cpp_code_analysis 全部（checks 61、style_checks 15、lib 650…）
+      cpp_ls lib 85 / handshake 31（那个已知抖动除外）
+```

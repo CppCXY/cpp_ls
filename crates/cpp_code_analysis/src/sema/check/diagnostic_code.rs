@@ -60,6 +60,9 @@ pub enum DiagnosticCode {
     ReturnTypeMismatch,
     /// A macro defined twice with different replacement lists — see [`super::macro_redefined`].
     MacroRedefined,
+    /// An argument whose type does not satisfy the concept constraining its parameter — see
+    /// [`super::concept_not_satisfied`].
+    ConceptNotSatisfied,
     /// A `#include` that names a file nobody can find — see [`super::include_not_found`].
     ///
     /// Separate from [`DiagnosticCode::SyntaxError`] for the reason a reader needs it separate: the file parses
@@ -104,7 +107,7 @@ impl DiagnosticCode {
     /// what it says about types, then what it says about a whole body, then the two that are about the reading
     /// rather than the program. A consumer that shows a settings screen, or a test that asserts every rule has a
     /// name and a module, iterates this.
-    pub const ALL: [DiagnosticCode; 23] = [
+    pub const ALL: [DiagnosticCode; 24] = [
         DiagnosticCode::SyntaxError,
         DiagnosticCode::ParamTypeCheck,
         DiagnosticCode::AssignTypeCheck,
@@ -128,6 +131,7 @@ impl DiagnosticCode {
         DiagnosticCode::UseAuto,
         DiagnosticCode::MacroParentheses,
         DiagnosticCode::ImplicitBoolConversion,
+        DiagnosticCode::ConceptNotSatisfied,
     ];
 
     /// **The code a client is shown**, and the spelling a config file uses: kebab case, and the module's file name
@@ -160,6 +164,7 @@ impl DiagnosticCode {
             DiagnosticCode::UseAuto => "use-auto",
             DiagnosticCode::MacroParentheses => "macro-parentheses",
             DiagnosticCode::ImplicitBoolConversion => "implicit-bool-conversion",
+            DiagnosticCode::ConceptNotSatisfied => "concept-not-satisfied",
         }
     }
 
@@ -191,6 +196,7 @@ impl DiagnosticCode {
             DiagnosticCode::UndefinedField => RuleSeverity::Error,
             DiagnosticCode::ArgumentCount => RuleSeverity::Error,
             DiagnosticCode::ReturnTypeMismatch => RuleSeverity::Error,
+            DiagnosticCode::ConceptNotSatisfied => RuleSeverity::Error,
             // **A judgement rather than a law.** A macro redefined with a different body is legal in some
             // translation units and a bug in most; a branch that cannot run is dead code rather than a mistake.
             // Both draw attention without claiming the program is broken.

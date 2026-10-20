@@ -3343,10 +3343,21 @@ impl<F: FileProvider + Clone> Session<F> {
         // function's own frame.
         let model = self.semantic_model(view);
 
-        // **The config, and the run.** A session with no configuration runs every rule - see
-        // `CheckConfig::default` - and the filtering itself lives in `CheckContext::add`, so that no check has to
-        // know a rule was switched off.
-        let config = crate::sema::check::CheckConfig::default();
+        // **The config, and the run.** The rules come from `.cppls.toml`'s `[diagnostics]` section when a project
+        // writes one, and every rule is on otherwise — see `CheckConfig::default`. The filtering lives in
+        // `CheckContext::add`, so that no check has to know a rule was switched off.
+        //
+        // `enable` is "only these" and `disable` is "not these", with `disable` winning: the pair a project wants —
+        // `enable` for one that starts from nothing, `disable` for the single rule that is noise. Unknown names are
+        // logged rather than ignored: a rule a user believes is on and that never runs is the failure this
+        // mechanism exists to prevent.
+        let config = crate::sema::check::CheckConfig::from_names(
+            &self.project_config().config.diagnostics.enable,
+            &self.project_config().config.diagnostics.disable,
+        );
+        for name in config.unknown() {
+            log::warn!("`[diagnostics]` names a rule this build does not have: `{name}`");
+        }
         crate::sema::check::run(crate::sema::check::CheckContext::new(
             key,
             summary,
@@ -3357,7 +3368,7 @@ impl<F: FileProvider + Clone> Session<F> {
             view.written_text().unwrap_or(&view.source),
             view.tree.get_errors(),
             view,
-            &config,
+            config,
             // **The language this file is compiled as**, which is what makes a C-only rule quiet in C: the compile flags say
             // `-std=c11`, and `cstyle_cast` is then not a rule about this file at all.
             self.config_for(&key).language_for(&key),
