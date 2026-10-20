@@ -2160,3 +2160,20 @@ pending_work() != 0  ⇒  不发布任何 module note
 **SAL 注解**(`extern "C++" _Check_return_ _CRT_INSECURE_DEPRECATE(…) inline int …`)。上一轮试的放宽会让
 `typeof(1) n = 1;` 在严格 C++20 下也解析成功,打破差分测试;按要求先修其它三件,这条留到下一轮并把
 "名字之后的注解"的**三处**入口(specifier 循环、`extern "C++"` 之后的单条声明、参数声明)一起列清再改。
+
+## 三十九、没有 `compile_commands.json` 的项目（设计笔记）
+
+MSVC 的 Visual Studio 生成器**永远不会**产出 `compile_commands.json`（CMake 文档：只有 Makefile/Ninja 生成器实现），
+所以它不能作为前提。按 clangd 的做法（头文件借用包含者的命令、`compile_flags.txt` 兜底、`--query-driver`、
+索引按文件归档）整理了一份可执行的方案，写在 **[`docs/no-build-database.md`](no-build-database.md)**：
+
+```text
+① 配置阶梯   .cppls.toml → compile_flags.txt → CMakeCache.txt → 项目布局推断 → 编译器自身
+② 归档      facts 按“来源文件”归档（一次 TU 解析，头文件拿到宏展开后的正确摘要）
+③ 限定名    分离定义也建 fact，声明与定义是同一条符号的两个位置
+④ 成本      closure 上限、同头多 TU 的合并与缓存
+```
+
+本机实测支撑：EmmyLuaCodeStyle 的 `out/build/x64-Debug` 只有 `CMakeCache.txt`（连 `.vcxproj` 都没有，是 Ninja 生成的），
+而我们目前既没读那份 cache，也没有"来源归档"，`xstring` 的类因此被吞进 `_String_val` 的作用域（`members_of("std::string")`
+= `NotDeclaredHere`）。三件事的验收用例都写在那份笔记里。
