@@ -70,6 +70,27 @@ pub enum CompletionContext {
     /// the index by name answers nothing (a module name is not a `DeclFact`), and a reader had to type the whole
     /// name from memory. `written` is the part already typed (`ma`), and `range` is what a client replaces.
     ModuleName { written: String, range: SourceRange },
+    /// **Inside a documentation comment** — where the answer is Doxygen's own vocabulary, and then the name that
+    /// command takes.
+    ///
+    /// ```cpp
+    /// /// @par|              the commands, filtered by what is typed
+    /// /// @param |           the parameter names of the declaration being documented
+    /// ```
+    ///
+    /// The two are one variant because they are one position: a comment is prose to every other question here, and
+    /// which of the two a reader wants is decided by the word before the cursor, not by a second context.
+    DocComment {
+        /// What has been typed of the name being completed: `par` for `@par`, `val` for `@param val`.
+        written: String,
+        /// The span `written` covers, which is what a client replaces.
+        range: SourceRange,
+        /// **Which name the command takes**, when the cursor is past a command that takes one.
+        ///
+        /// `None` while a command's own name is being typed — the vocabulary is the answer there — and `Some` after
+        /// `@param `, `@tparam ` or `@exception `, where a name is.
+        wants: Option<cpp_parser::DocCommandKind>,
+    },
     /// Prose, or a position where nothing can be written.
     Nothing,
 }
@@ -82,6 +103,14 @@ pub enum CompletionContext {
 pub fn context_at(root: &CppSyntaxNode, offset: usize) -> CompletionContext {
     // **A comment or a literal is prose.** Asked first because everything below would otherwise answer: a `w.`
     // inside a comment is a member access as far as the tree is concerned.
+    //
+    // **A documentation comment is the one exception**, and it is not prose to a Doxygen reader: `@param` is
+    // vocabulary and the name after it is a parameter of the declaration below. Asked before the refusal below,
+    // because the refusal is what made the whole of a comment unanswerable.
+    if let Some(comment) = doc_comment_at(root, offset) {
+        return comment;
+    }
+
     if inside_a_comment_or_a_literal(root, offset) {
         return CompletionContext::Nothing;
     }
@@ -113,6 +142,116 @@ pub fn context_at(root: &CppSyntaxNode, offset: usize) -> CompletionContext {
         Some(position) => CompletionContext::Qualified(position),
         None => CompletionContext::Nothing,
     }
+}
+
+/// **The Doxygen position at `offset`**, or `None` when the cursor is not inside a documentation comment.
+///
+/// ```cpp
+/// /// @par|              → the command vocabulary, filtered by `par`
+/// /// @param |           → the parameter names of the documented declaration
+/// /// @param co|         → the same, filtered
+/// ```
+///
+/// Read from the **text**, and for two reasons. The first is [`module_name_from_the_text`]'s: a comment is being
+/// typed at, so the word under the cursor may be a half-written command the grammar has not made a node of — and
+/// that is exactly the position that must answer.
+///
+/// The second is measured. A `///` line is trivia, and the cursor after a keystroke sits at the **end of the run**,
+/// where the very next token is the newline — whose ancestors include nothing. A tree walk from the cursor therefore
+/// found the doc block for `@par` (cursor inside the last comment's text) and answered `None` one keystroke later
+/// (cursor past it), which is the worst possible pair of behaviours for a completion.
+///
+/// Only a *documentation* comment answers. `// note to self: @param` is prose with an `@` in it, and offering
+/// Doxygen's vocabulary there would be wrong twice: it is not documentation, and a plain `//` comment is not what
+/// Doxygen reads.
+pub fn doc_comment_at(root: &CppSyntaxNode, offset: usize) -> Option<CompletionContext> {
+    let text = root.text().to_string();
+    let before = text.get(..offset.min(text.len()))?;
+    let line_start = before.rfind('\n').map_or(0, |at| at + 1);
+    let line = before.get(line_start..)?;
+
+    // **Is this line documentation?** `///` and `//!` mark one line; `/**` and `/*!` open a block that continues
+    // until its `*/`, so a line inside one is documentation without carrying a marker of its own. A `/*` or `//`
+    // with no `!` and no second `/` is a comment and not documentation.
+    let trimmed = line.trim_start();
+    let is_a_documentation_line = trimmed.starts_with("///")
+        || trimmed.starts_with("//!")
+        || trimmed.starts_with("/**")
+        || trimmed.starts_with("/*!");
+    let inside_a_documentation_block = if is_a_documentation_line {
+        true
+    } else {
+        // The block form: the nearest `/*`/`*/` before the cursor decides which side of the comment this line is
+        // on, and `/**`/`/*!` is what makes it documentation.
+        match (before.rfind("/*"), before.rfind("*/")) {
+            (Some(opened), closed) => {
+                let still_open = closed.map_or(true, |closed| closed < opened);
+                still_open
+                    && (before[opened..].starts_with("/**") || before[opened..].starts_with("/*!"))
+            }
+            _ => false,
+        }
+    };
+    if !inside_a_documentation_block {
+        return None;
+    }
+
+    // **A command's own name**: an `@` (or Doxygen's `\`) and the word after it, with the cursor still in it.
+    let last_introducer = line.rfind(['@', '\\']);
+    if let Some(at) = last_introducer {
+        let after = line[at + 1..].to_string();
+        if after.chars().all(|c| c.is_ascii_alphanumeric()) {
+            let start = line_start + at + 1;
+            return Some(CompletionContext::DocComment {
+                written: after.to_string(),
+                range: SourceRange::new(start, after.len()),
+                wants: None,
+            });
+        }
+
+        // **The name a command takes**, after the command and its space: `@param |`, `@param[in] x|`.
+        //
+        // Decided by the *last* introducer on the line, so that a body already written (`@param x the value @ref`)
+        // does not turn a later `@` into this position. The word after the command may carry Doxygen's bracketed
+        // direction (`@param[in] x`), which is part of the command's spelling rather than of the name.
+        //
+        // Everything after the command, trimmed, must be **a partial word and nothing else**: `@param x the value`
+        // has a body, so the spaces in it say this is prose rather than a name, and the answer is nothing.
+        let rest = after.trim_start();
+        let rest = match rest.strip_prefix('[').and_then(|_| rest.find(']')) {
+            Some(close) => rest[close + 1..].trim_start(),
+            None => rest,
+        };
+
+        let command = rest.split_whitespace().next().unwrap_or("");
+        let argument = rest[command.len()..].trim_start();
+        let is_a_word = |text: &str| {
+            text.chars()
+                .all(|character| character.is_ascii_alphanumeric() || character == '_')
+        };
+        if is_a_word(command)
+            && is_a_word(argument)
+            && let Some(kind) = cpp_parser::command_kind(command)
+            && matches!(
+                cpp_parser::command_args(command),
+                cpp_parser::DocCommandArgs::NameAndBody
+                    | cpp_parser::DocCommandArgs::DirectionalNameAndBody
+                    | cpp_parser::DocCommandArgs::ReferenceAndBody
+            )
+        {
+            // The name starts where the argument starts, which is **the cursor less what has been written** — the
+            // same answer before and after the space that separates the command from its argument.
+            let start = line_start + line.len().saturating_sub(argument.len());
+            let length = argument.len();
+            return Some(CompletionContext::DocComment {
+                written: argument.to_string(),
+                range: SourceRange::new(start, length),
+                wants: Some(kind),
+            });
+        }
+    }
+
+    None
 }
 
 /// **The module name being typed at `offset`**, or `None` — read from the text on the cursor's own line.

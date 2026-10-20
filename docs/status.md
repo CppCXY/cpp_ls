@@ -1254,3 +1254,48 @@ if let Some(previous) = self.reading.iter().rev().find(|span| span.reported.end_
 
 测试 `the_typed_prefix_is_the_word_being_replaced`(一个词一个 session —— 词是文件的一部分),
 `cpp_code_analysis` 全套 650+ 全绿,`cpp_ls` 80 + handshake 30 全绿。
+
+## 二十、宏的补全项、注释里的补全、以及从未被画过的 doc 命令（2026）
+
+### ① 宏的"签名"是 `int ()` —— 身份位置不是它自己的
+
+上一轮把宏补全项的克隆字段清空了,用户又报了一次:`FULL_NAME_FORMAT` 的详情还是 `int ()`。
+根因在**另一个字段**:客户端回传 `completionItem/resolve` 的是一对 `(file, offset)`,那个 offset 取自
+`DeclFact::name_range` —— 而克隆保留的是模板声明的 range,于是它指向 `int main()`。
+
+```text
+修法  收集宏时把 fact.range 一起带上,克隆里 name_range/range/scope/in_namespace 都改成宏自己的
+结果  resolve 在该位置找不到声明 → 没有 detail(而不是错的 detail);注释写在 #define 上方时文档也能读到
+```
+
+### ② 注释里的两次补全
+
+```text
+/// @par|         → 命令词表(param、paragraph …),按已打的字母过滤
+/// @param |       → **被注释的那个声明**的参数名
+```
+
+第二个的名单来自 fact(`parameters` 是模板头,`parameter_list` 是形参表),形参名用 inlay 的同一条
+`parameter_names_from_text` 解析 —— 一处实现,两处使用。
+
+一个坑:`///` 行在渲染里**不存在**(注释是 trivia,cook 先删掉才解析),所以这个位置只能从**文件文本**判断。
+第一版用树的 `DocComment` 节点,结果 `@par` 能答、`@param ` 答不出 —— 因为后者光标正好落在注释块**末尾的换行**上,
+那个 token 的祖先里什么都没有。改成按行读文本(`///`、`//!`、`/**`、`/*!`),同一个规则也顺便分清了
+`// note` 不是文档注释。
+
+### ③ doc 命令的语义高亮:从来没有画过
+
+`push_doc_commands` 遍历 `view.root.descendants()` 找 `DocCommand` 节点 —— 而渲染里一个注释都没有,
+所以这个循环在**任何文件**上都找不到东西。改成从文件文本按行扫描(`@`/`\` + 已知命令名),
+offset 直接就是客户端的坐标系,不需要映射。
+
+```text
+测试  `@param`/`@return` 得到 DocCommand;`// a plain comment with @param` 与 `someone@example.com` 不得到
+```
+
+### ④ 宏展开后的补全(图 3)与"打了 a 却不过滤"(图 1)
+
+```text
+#define STD std::  →  `STD s|`  scope "std"  prefix "s"  →  cin / cout / size(实测)
+`auto x = a|` / 语句位置 `a|`               →  prefix "a"/"an",replace 覆盖已打的字(上一节的坐标修复)
+```

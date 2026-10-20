@@ -5062,11 +5062,38 @@ impl<F: FileProvider + Clone> Session<F> {
         }
 
         if let Some(written) = view.written_text() {
+            // **A documentation comment is prose to the renderer and a language of its own to a reader.**
+            //
+            // The refusal below is right for every other question — a `w.` in a comment is a member access only to
+            // a tree — but a comment produces **no tokens at all** in the rendering (the cook removes it before the
+            // parse), so the doc-comment position cannot be read from the reading at any offset. It is asked of the
+            // written text instead, and the offset it answers with is the **file's**, which is the buffer the reader
+            // is editing: same shortcut as a `#include`, and for the same reason.
+            //
+            // Asked before `in_prose`, which is the line that would otherwise turn the whole of a comment away.
+            let tree = cpp_parser::CppParser::parse(written, cpp_parser::ParserConfig::default());
+            let written_root = tree.get_red_root();
+            if let Some(context @ crate::completion::CompletionContext::DocComment { .. }) =
+                crate::completion::doc_comment_at(&written_root, offset.get())
+            {
+                return crate::completion::completion_with(
+                    self.store.index(),
+                    &view.scopes,
+                    &view.root,
+                    &view.path,
+                    offset.get(),
+                    &self
+                        .headers
+                        .read()
+                        .map(|headers| headers.clone())
+                        .unwrap_or_default(),
+                    context,
+                );
+            }
+
             if crate::file::view::in_prose(written, offset.get()) {
                 return crate::CompletionSet::default();
             }
-            let tree = cpp_parser::CppParser::parse(written, cpp_parser::ParserConfig::default());
-            let written_root = tree.get_red_root();
             let context = crate::completion::context_at(&written_root, offset.get());
             match context {
                 // **The program is in the rendering; the buffer is in the file.** The `replace` range is carried by

@@ -183,7 +183,7 @@ where
 ///
 /// `None` for a list with no parameter (a `()`), which is also the answer for a declaration whose fact was written
 /// before the field existed.
-fn parameter_names_from_text(parameter_list: &str) -> Option<Vec<Option<String>>> {
+pub(crate) fn parameter_names_from_text(parameter_list: &str) -> Option<Vec<Option<String>>> {
     let text = format!("void __hint{parameter_list};");
     let tree = cpp_parser::CppParser::parse(&text, cpp_parser::ParserConfig::default());
     let root = tree.get_red_root();

@@ -65,7 +65,7 @@ use std::sync::Arc;
 
 use cpp_parser::{CppSyntaxNode, SourceRange};
 
-pub use context::{CompletionContext, context_at};
+pub use context::{CompletionContext, context_at, doc_comment_at};
 pub use includes::{Header, HeaderIndex, HeaderKind, SharedHeaders};
 pub use table::{
     BUILTIN_TYPES, DIRECTIVES, DirectiveName, KEYWORDS, Keyword, KeywordUse, SNIPPETS, Snippet,
@@ -365,6 +365,14 @@ pub fn completion_with(
             range,
             ..
         } => headers_for(headers, &written, closed, range),
+        // **Inside a documentation comment**: Doxygen's vocabulary, or the name the command takes. Both are read
+        // from the file's own text rather than from a scope, so neither needs the index — see
+        // [`doc_comment_at`].
+        CompletionContext::DocComment {
+            written,
+            range,
+            wants,
+        } => doc_comments(index, path, &written, range, wants),
     };
 
     answer
@@ -770,6 +778,108 @@ fn directives(written: &str, range: SourceRange) -> CompletionSet {
             item
         })
         .collect();
+
+    CompletionSet {
+        scope: String::new(),
+        prefix: written.to_string(),
+        replace: range,
+        truncated: false,
+        items,
+    }
+}
+
+/// **Inside a documentation comment** — Doxygen's vocabulary, and then the name that command takes.
+///
+/// ```cpp
+/// /// @par|              → `param`, `paragraph`, … (filtered, and by the same quality rule as every other list)
+/// /// @param |           → the parameter names of the declaration below the comment
+/// /// @tparam |          → its template parameters
+/// ```
+///
+/// The commands come from the **parser's own table** ([`cpp_parser::every_command`]), which is the single list of
+/// what may follow an `@`: a completion carrying its own copy would be a second source of truth, free to disagree
+/// about `@retval` the day one of them is updated.
+///
+/// The names come from the **facts**, not from the tree: the declaration a comment documents is the first one after
+/// it, and the index already says what its parameters are called (`DeclFact::parameters` for the template head and
+/// `parameter_list` for the parameter list). A comment above a declaration in *another* file cannot be reached from
+/// here, and does not need to be — a completion is asked in the file being written.
+fn doc_comments(
+    index: &ProjectIndex,
+    path: &Path,
+    written: &str,
+    range: SourceRange,
+    wants: Option<cpp_parser::DocCommandKind>,
+) -> CompletionSet {
+    use cpp_parser::DocCommandKind;
+
+    let mut items: Vec<CompletionItem> = Vec::new();
+    match wants {
+        // **The name the command takes.** `@param`/`@tparam` want a parameter of the documented declaration, and
+        // `@exception`/`@ref` want a name this layer has no better answer for than the ones in scope — so those
+        // are answered with nothing rather than with a wrong list.
+        Some(DocCommandKind::Parameter) => {
+            let Some(summary) = index.summary(path) else {
+                return CompletionSet {
+                    prefix: written.to_string(),
+                    replace: range,
+                    ..CompletionSet::default()
+                };
+            };
+
+            // **The declaration the comment documents** — the first one that starts after the comment. `range`
+            // here is the span of the *typed name*, so the comment is what precedes it on an earlier line; the
+            // fact's own start is after the comment's text either way.
+            let documented = summary
+                .declarations
+                .iter()
+                .filter(|fact| fact.range.start_offset > range.start_offset)
+                .min_by_key(|fact| fact.range.start_offset);
+
+            if let Some(fact) = documented {
+                // A **template parameter** is documented with `@tparam` and a function's parameter with `@param`,
+                // and the fact separates the two: `parameters` is the template head, `parameter_list` the
+                // parameter list. Both are offered, because which command the reader typed is a spelling and the
+                // name they want is a name.
+                let mut names: Vec<String> = fact.parameters.to_vec();
+                if let Some(list) = &fact.parameter_list
+                    && let Some(found) = crate::inlay::parameter_names_from_text(list)
+                {
+                    names.extend(found.into_iter().flatten());
+                }
+
+                for name in names {
+                    if matching::quality(&name, written) == matching::NONE {
+                        continue;
+                    }
+                    let mut item = CompletionItem::word(&name, ItemKind::Variable, "a parameter");
+                    item.replace = range;
+                    items.push(item);
+                }
+            }
+        }
+        Some(_) => {}
+        // **A command's own name**: the whole vocabulary, filtered by what has been typed.
+        None => {
+            for spec in cpp_parser::every_command() {
+                if matching::quality(spec.name, written) == matching::NONE {
+                    continue;
+                }
+                let detail = match spec.kind {
+                    DocCommandKind::Description => "describe",
+                    DocCommandKind::Parameter => "a parameter",
+                    DocCommandKind::Exception => "an exception",
+                    DocCommandKind::Reference => "a reference",
+                    DocCommandKind::Advisory => "a note",
+                    DocCommandKind::Structural => "structure",
+                    DocCommandKind::Callout => "a callout",
+                };
+                let mut item = CompletionItem::word(spec.name, ItemKind::Keyword, detail);
+                item.replace = range;
+                items.push(item);
+            }
+        }
+    }
 
     CompletionSet {
         scope: String::new(),

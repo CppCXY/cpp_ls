@@ -1603,9 +1603,17 @@ pub fn name_completions_at(
         // file, so the index half of this query cannot see either — and a header's macros are the common case: a project's
         // `config.h` defines the names its sources use. The direct includes are the boundary: a macro two headers away is
         // reachable only through the macro environment, which is the hover's query, not this one's.
-        let mut offered_macros: Vec<(&str, bool)> = Vec::new();
+        // **The position is carried, not just the name.**
+        //
+        // The item's identity — the `(file, offset)` a client echoes back to `completionItem/resolve` — is the
+        // declaration's **name range**, and a macro has no declaration fact: the item is built from a clone of the
+        // file's first declaration (see the loop below). Without the macro's own range in hand the clone kept the
+        // template's, so resolve looked up `int main()` and the popup showed `FULL_NAME_FORMAT` with the detail
+        // **`int ()`**. Measured twice: once before the clone's fields were cleared, and again after they were,
+        // because the range was the field nobody had replaced. See `docs/status.md` §十五 and §二十.
+        let mut offered_macros: Vec<(&str, bool, cpp_parser::SourceRange)> = Vec::new();
         for fact in &summary.macros {
-            offered_macros.push((fact.name.as_str(), fact.function_like));
+            offered_macros.push((fact.name.as_str(), fact.function_like, fact.range));
         }
         for include in &summary.includes {
             let Some(resolved) = &include.resolved else {
@@ -1615,13 +1623,13 @@ pub fn name_completions_at(
                 continue;
             };
             for fact in &included.macros {
-                offered_macros.push((fact.name.as_str(), fact.function_like));
+                offered_macros.push((fact.name.as_str(), fact.function_like, fact.range));
             }
         }
         offered_macros.sort_by(|left, right| left.0.cmp(right.0));
         offered_macros.dedup_by(|left, right| left.0 == right.0);
 
-        for (name, function_like) in offered_macros {
+        for (name, function_like, range) in offered_macros {
             if !position.written.is_empty() && !name.starts_with(&position.written) {
                 continue;
             }
@@ -1648,6 +1656,17 @@ pub fn name_completions_at(
             declaration.bases.clear();
             declaration.parameters.clear();
             declaration.local = false;
+            // **The clone's position is the macro's own.** This is the field that decided what the popup *said*
+            // about the macro: the identity a client echoes back to `completionItem/resolve` is a `(file, offset)`
+            // pair, and with the template's range it named `int main()` — so resolving the item read `main`'s
+            // declaration and the detail line under `FULL_NAME_FORMAT` was **`int ()`**. Clearing the clone's other
+            // fields did not help, because the offset was never the macro's.
+            //
+            // A `#define` is at file scope and in no namespace of its own, whatever the template happened to be.
+            declaration.name_range = range;
+            declaration.range = range;
+            declaration.scope = None;
+            declaration.in_namespace = None;
             // **A function-like macro is offered with its parenthesis**, which is the only hint a completion item can carry
             // about how it is used: `MAX(` tells the reader the name takes arguments, and `MAX` alone does not.
             declaration.parameter_list = function_like.then(|| "(".to_string());

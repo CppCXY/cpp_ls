@@ -445,40 +445,84 @@ fn kind_of_keyword(kind: cpp_parser::CppTokenKind) -> Option<TypeKind> {
 ///
 /// The command's own token is the whole `@param` and not the `param` the parser stores: `DocCommandName` is the
 /// name **without its introducer**, and the introducer is half of what a reader recognises.
+///
+/// **Read from the written text, because the rendering has none of it.** A comment is trivia, and the cook removes
+/// trivia before the program is parsed — so this pass walked `view.root` and found no `DocCommand` node in any file,
+/// ever: the doc grammar's own reading of a comment was reachable only from a parse of the *file*, and nothing asked
+/// for one. Measured from an editor: `@param` in a `///` block was drawn as plain comment text.
+///
+/// The text is the file's, which is also the coordinate system a client paints in, so the offsets need no mapping.
+/// A line scan rather than a parse: what has to be decided is which lines are documentation and where a command's
+/// spelling ends, and both are line-shaped questions — a second parse of every file on every keystroke would be a
+/// far higher price than the answer is worth.
 fn push_doc_commands(builder: &mut Builder<'_>, view: Option<&FileView>) {
-    use cpp_parser::{CppAstNode, CppAstToken, CppDocCommand, CppSyntaxKind};
-
     let Some(view) = view else {
         return;
     };
-    let source: &str = view.source.as_ref();
+    let source: &str = view.written_text().unwrap_or(&view.source);
 
-    for node in view.root.descendants() {
-        if CppSyntaxKind::from(node.kind()) != CppSyntaxKind::DocCommand {
-            continue;
-        }
-        let Some(command) = CppDocCommand::cast(node) else {
-            continue;
+    // **Where a documentation block is**, line by line: `///` and `//!` open one for their own line, `/**` and
+    // `/*!` until their `*/`. A plain `//` or `/*` is a comment and not documentation, which is Doxygen's own rule.
+    let mut in_a_block = false;
+    let mut line_start = 0usize;
+    for line in source.split_inclusive('\n') {
+        let trimmed = line.trim_start();
+        let indentation = line.len() - trimmed.len();
+
+        let is_a_documentation_line = if in_a_block {
+            true
+        } else {
+            trimmed.starts_with("///")
+                || trimmed.starts_with("//!")
+                || trimmed.starts_with("/**")
+                || trimmed.starts_with("/*!")
         };
-        let Some(name) = command.get_name_token() else {
-            continue;
-        };
 
-        let range = name.syntax().text_range();
-        let start = usize::from(range.start());
-        let mut end = usize::from(range.end());
-
-        // The introducer, which is the character just before the name: `@` or `\`. Widened by one only when that
-        // character really is there — a command written without one is a command this grammar accepted, and
-        // claiming the character before it would take the space or the comment's own text.
-        if start > 0 && matches!(source.as_bytes().get(start - 1), Some(b'@' | b'\\')) {
-            end = end.max(start);
-            let widened = start - 1;
-            builder.push_range(widened, end, TypeKind::DocCommand, Modifier::none());
-            continue;
+        if is_a_documentation_line {
+            // Every `@name` or `\name` on the line, introducer included.
+            let bytes = line.as_bytes();
+            let mut at = 0usize;
+            while at < bytes.len() {
+                if !matches!(bytes[at], b'@' | b'\\') {
+                    at += 1;
+                    continue;
+                }
+                let word_start = at;
+                let mut word_end = at + 1;
+                while word_end < bytes.len()
+                    && (bytes[word_end].is_ascii_alphanumeric() || bytes[word_end] == b'_')
+                {
+                    word_end += 1;
+                }
+                // A name, and a command this parser knows: `@` in an e-mail address or a `\` in a path is not one.
+                if word_end > word_start + 1 {
+                    let name = &line[word_start + 1..word_end];
+                    if cpp_parser::command_kind(name).is_some() {
+                        builder.push_range(
+                            line_start + word_start,
+                            line_start + word_end,
+                            TypeKind::DocCommand,
+                            Modifier::none(),
+                        );
+                    }
+                }
+                at = word_end.max(at + 1);
+            }
         }
 
-        builder.push_range(start, end, TypeKind::DocCommand, Modifier::none());
+        // The block state for the next line, decided after this line was scanned.
+        if in_a_block {
+            if trimmed.contains("*/") {
+                in_a_block = false;
+            }
+        } else if (trimmed.starts_with("/**") || trimmed.starts_with("/*!"))
+            && !trimmed.contains("*/")
+        {
+            in_a_block = true;
+        }
+
+        let _ = indentation;
+        line_start += line.len();
     }
 }
 
@@ -1378,6 +1422,59 @@ constexpr bool is_assignable_v = __is_assignable(To, From);
     ///
     /// The offsets are found with `find` rather than written down, so a fixture edit cannot leave the assertions
     /// pointing at different words.
+
+    /// **A doc command is drawn from the written text** — the rendering has no comments in it at all.
+    ///
+    /// Measured from an editor: `@param` inside a `///` block was plain comment text, and the pass that was written
+    /// to paint it walked the rendering's tree for `DocCommand` nodes — of which there are none, because a comment is
+    /// trivia and the cook removes trivia before the parse. The `///` line lives only in the file, so that is where
+    /// the tokens are read from, and the offsets need no mapping because a client paints in the file's coordinates.
+    ///
+    /// Both halves are asserted: a command **is** sent, and prose with an `@` in it (a `//` comment, an e-mail
+    /// address) is not — otherwise every `@` in a licence header would be a decorator.
+    #[test]
+    fn a_doc_command_is_drawn_where_the_file_wrote_it() {
+        let text = "\
+/// @param value the value
+/// @return nothing
+// a plain comment with @param in it
+int f(int value);
+// mail me at someone@example.com
+";
+        let (session, path) = a_held_file(text);
+        let view = session.view_of_the_file(&path).expect("a view");
+        let file = session.files().held(&path).expect("the file is held");
+        let names = session.classified_names(&view);
+        let tokens = encode(file, Some(&view), &names, &None, false);
+        let at_type = by_offset(text, &tokens);
+        for (offset, kind) in &at_type {
+            let word = &text[*offset..(*offset + 12).min(text.len())];
+            println!("DOC  {offset} -> {kind:?}  {word:?}");
+        }
+
+        for word in ["@param", "@return"] {
+            let at = text.find(word).expect("the fixture writes it");
+            assert_eq!(
+                at_type.get(&at),
+                Some(&index_of(TypeKind::DocCommand)),
+                "`{word}` is a command this parser knows, and it is drawn with its introducer"
+            );
+        }
+
+        let plain = text.find("// a plain comment").expect("the fixture") + "// a plain comment with ".len();
+        assert_eq!(
+            at_type.get(&plain),
+            None,
+            "a `//` comment is a comment, not documentation"
+        );
+        let mail = text.find("someone@example.com").expect("the fixture") + "someone".len();
+        assert_eq!(
+            at_type.get(&mail),
+            None,
+            "an `@` in prose is not a command — `example` is not one either"
+        );
+    }
+
     #[test]
     fn a_keyword_is_drawn_as_what_it_is() {
         // **`auto` is in the fixture on purpose**: a reader asked for "`auto`, `const` and their kind in the blue a

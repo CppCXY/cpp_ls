@@ -1576,6 +1576,23 @@ fn a_macro_is_not_shown_with_a_signature() {
             .as_ref()
             .map(|fact| (&fact.kind, &fact.returns, &fact.parameter_list))
     );
+
+    // **And its identity is the macro's own position.** The item a client resolves is a `(file, offset)` pair taken
+    // from `name_range`, while the fact behind it is a clone of the file's first declaration — so a clone that kept
+    // the template's range named `int main()`, and the popup showed `FULL_NAME_FORMAT` with the detail **`int ()`**.
+    // Asserted on the offset rather than on the detail because the detail is read back by the server
+    // (`completionItem/resolve`) from this offset: this layer is what has to give it the right one.
+    let fact = item.fact.as_ref().expect("a macro item carries its fact");
+    let at = source.find("FULL_NAME_FORMAT").expect("the fixture");
+    assert_eq!(
+        fact.name_range.start_offset, at,
+        "the item's identity is the macro's name, not the template declaration's"
+    );
+    assert_eq!(
+        fact.range.start_offset, at,
+        "and its declaration range is the same place"
+    );
+    assert_eq!(fact.scope, None, "a `#define` is at file scope");
 }
 
 /// **The typed word is the range the client replaces, and the prefix the server filters on** — one report, both
@@ -1649,4 +1666,157 @@ fn the_typed_prefix_is_the_word_being_replaced() {
             &labels[..labels.len().min(12)]
         );
     }
+}
+
+#[test]
+fn a_statement_position_prefix_is_read_too() {
+    for typed in ["a", "an"] {
+        let source = format!(
+            "int main()\n{{\n    int anotherVec = 1;\n    {typed}\n    return 0;\n}}\n"
+        );
+        let files = MemoryFiles::new().with_file("/p/a.cpp", &source);
+        let providers = SessionFiles::new(OpenDocuments::new(), files);
+        let mut session = Session::with_config(
+            "/p",
+            providers,
+            WatchFilter::new("/p"),
+            CompilerConfig::default(),
+        );
+        session.add_project_files([std::path::PathBuf::from("/p/a.cpp")]);
+        let view = cooked_view(&mut session, "/p/a.cpp");
+
+        let at = source
+            .find(&format!("    {typed}\n"))
+            .expect("the fixture")
+            + 4
+            + typed.len();
+        let offered = session.completions(
+            &view,
+            cpp_code_analysis::file::coordinates::FileOffset::new(at),
+        );
+        let labels: Vec<&str> = offered.items.iter().map(|item| item.label.as_str()).collect();
+        println!(
+            "statement `{typed}|`: prefix {:?} replace {}..{} (len {}) → {:?}",
+            offered.prefix,
+            offered.replace.start_offset,
+            offered.replace.end_offset(),
+            offered.replace.length,
+            &labels[..labels.len().min(10)]
+        );
+        assert_eq!(offered.prefix, typed, "the statement position reads the word too");
+        assert_eq!(offered.replace.length, typed.len());
+        assert!(labels.contains(&"anotherVec"), "{:?}", &labels[..labels.len().min(12)]);
+    }
+}
+
+#[test]
+fn a_macro_that_expands_to_a_scope_offers_its_members() {
+    let source = "\
+#define STD std::
+namespace std { int cout; int cin; int size; }
+int main()
+{
+    STD s
+    return 0;
+}
+";
+    let files = MemoryFiles::new().with_file("/p/a.cpp", source);
+    let providers = SessionFiles::new(OpenDocuments::new(), files);
+    let mut session = Session::with_config(
+        "/p",
+        providers,
+        WatchFilter::new("/p"),
+        CompilerConfig::default(),
+    );
+    session.add_project_files([std::path::PathBuf::from("/p/a.cpp")]);
+    let view = cooked_view(&mut session, "/p/a.cpp");
+    println!("rendering: {:?}", view.source);
+
+    let at = source.find("    STD s").expect("the fixture") + "    STD s".len();
+    let offered = session.completions(
+        &view,
+        cpp_code_analysis::file::coordinates::FileOffset::new(at),
+    );
+    let labels: Vec<&str> = offered.items.iter().map(|item| item.label.as_str()).collect();
+    println!(
+        "after the macro `STD s|`: prefix {:?} scope {:?} replace {}..{} → {:?}",
+        offered.prefix,
+        offered.scope,
+        offered.replace.start_offset,
+        offered.replace.end_offset(),
+        &labels[..labels.len().min(8)]
+    );
+
+    // **The macro is expanded before the question is asked**, which is the point: `STD` is `std::` in the cook, so
+    // the position is a *qualified* name with `s` written — the scope is `std` and the names are its members.
+    assert_eq!(offered.scope, "std", "the expansion made this a qualified name");
+    assert_eq!(offered.prefix, "s");
+    assert_eq!(offered.replace.length, 1, "the range covers the `s` that was typed");
+    assert!(labels.contains(&"size"), "{labels:?}");
+    assert!(
+        !labels.contains(&"main"),
+        "and the file own names are not in `std`: {labels:?}"
+    );
+}
+
+/// **A documentation comment answers two questions**: the command vocabulary after `@`, and the name the command
+/// takes after `@param`.
+///
+/// Reported from an editor: "in comments there is no completion for doxygen commands, and if the command is
+/// `param`, no completion for the parameter names". Before this the whole of a comment was refused — a `//` is
+/// prose to every other question `context_at` asks, and the refusal was one line above every answer.
+///
+/// The parameter names come from the **fact of the declaration below the comment**, which is why the fixture writes
+/// one: `DeclFact::parameter_list` is the spelling, and the names are read out of it the same way the inlay hints
+/// read them, so a default argument and a `const T&` are the same question here as there.
+#[test]
+fn a_documentation_comment_offers_its_commands_and_their_names() {
+    let source = "\
+/// Frobnicates the widget.
+/// @par
+/// @param 
+int frobnicate(const Widget& widget, int count);
+
+struct Widget { int size; };
+";
+    let files = MemoryFiles::new().with_file("/p/a.cpp", source);
+    let providers = SessionFiles::new(OpenDocuments::new(), files);
+    let mut session = Session::with_config(
+        "/p",
+        providers,
+        WatchFilter::new("/p"),
+        CompilerConfig::default(),
+    );
+    session.add_project_files([std::path::PathBuf::from("/p/a.cpp")]);
+    let view = cooked_view(&mut session, "/p/a.cpp");
+
+    // **After `@par`** — the vocabulary, filtered by what was typed.
+    let after_par = source.find("/// @par").expect("the fixture") + "/// @par".len();
+    let offered = session.completions(
+        &view,
+        cpp_code_analysis::file::coordinates::FileOffset::new(after_par),
+    );
+    let labels: Vec<&str> = offered.items.iter().map(|item| item.label.as_str()).collect();
+    println!("after `@par`: prefix {:?} → {:?}", offered.prefix, &labels[..labels.len().min(8)]);
+    assert_eq!(offered.prefix, "par", "the command's name is what is being typed");
+    assert!(
+        labels.contains(&"param"),
+        "`param` is a command that begins with `par`: {labels:?}"
+    );
+
+    // **After `@param `** — the parameters of the declaration the comment documents, and nothing else.
+    let after_param = source.find("/// @param ").expect("the fixture") + "/// @param ".len();
+    let offered = session.completions(
+        &view,
+        cpp_code_analysis::file::coordinates::FileOffset::new(after_param),
+    );
+    let labels: Vec<&str> = offered.items.iter().map(|item| item.label.as_str()).collect();
+    println!("after `@param `: prefix {:?} → {:?}", offered.prefix, labels);
+    assert_eq!(offered.prefix, "", "nothing is typed yet");
+    assert!(labels.contains(&"widget"), "{labels:?}");
+    assert!(labels.contains(&"count"), "{labels:?}");
+    assert!(
+        !labels.contains(&"size"),
+        "a member of a later class is not a parameter of this function: {labels:?}"
+    );
 }

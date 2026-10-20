@@ -7,7 +7,9 @@ mod symbols;
 mod syntax;
 mod text;
 
-pub use grammar::doc::{DocCommandArgs, DocCommandKind, command_args, command_kind};
+pub use grammar::doc::{
+    DocCommandArgs, DocCommandKind, DocCommandSpec, command_args, command_kind, every_command,
+};
 pub use kind::*;
 pub use lexer::{
     CppLexer, CppTokenData, DocCommentStyle, DocToken, DocTokenKind, LexerConfig, is_block_comment,

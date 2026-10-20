@@ -99,6 +99,16 @@ pub const END_CODE_COMMAND: &str = "endcode";
 /// Deliberately long rather than minimal: a command that is missing from the table still parses, but
 /// its *arguments* are guessed, and `@param` without its name is the difference between a parameter
 /// being documented and a `<dd>` full of prose.
+/// **Every command the parser knows**, for a client that offers them.
+///
+/// The table is the answer to "what may be written after an `@`", and it is the *only* such list: a completion that
+/// carried its own copy would be a second source of truth, free to disagree with the parser about `@retval` the day
+/// one of them is updated. A caller filters by name and never by position, because which command a reader means is
+/// not something this layer can know.
+pub fn every_command() -> &'static [DocCommandSpec] {
+    DOC_COMMANDS
+}
+
 const DOC_COMMANDS: &[DocCommandSpec] = &[
     // ---- Descriptions ----
     spec("brief", DocCommandArgs::Body, DocCommandKind::Description),

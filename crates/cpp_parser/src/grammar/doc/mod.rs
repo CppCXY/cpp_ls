@@ -38,7 +38,7 @@ use crate::{
 };
 
 pub use commands::{
-    DocCommandArgs, DocCommandKind, END_CODE_COMMAND, UNKNOWN_COMMAND_ARGS, lookup,
+    DocCommandArgs, DocCommandKind, DocCommandSpec, END_CODE_COMMAND, UNKNOWN_COMMAND_ARGS, every_command, lookup,
 };
 
 /// What a command is for, or `None` when the name is not one this parser knows.
