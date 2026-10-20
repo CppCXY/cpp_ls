@@ -1,0 +1,9 @@
+# 中文 —— 解析错误的文案。key 是**英文原文本身**，所以 `en` 不需要文件：缺 key 时返回 key，那正是英文。
+#
+# 一张表只覆盖已经走 `t!("…")` 的句子；解析器里仍有大量消息是直接 `format!("expected …")` 拼出来的，
+# 那些要一条条改成 `t!` 才能翻译 —— 见 docs/status.md §二十二 的清单。
+"expected primary expression": "这里需要一个表达式"
+"unexpected token": "这里不该出现这个符号"
+"expected %{token}, but get %{current}": "这里需要 `%{token}`，实际是 `%{current}`"
+"expected a name after `template`": "`template` 后面需要一个名字"
+"expected identifier after member access operator": "成员访问运算符后面需要一个标识符"

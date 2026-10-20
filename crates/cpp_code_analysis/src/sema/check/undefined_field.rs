@@ -118,10 +118,10 @@ impl Check for UndefinedField {
                 DiagnosticCode::UndefinedField,
                 access.member_range,
                 access.member.clone(),
-                format!(
-                    "`{}` has no member `{}`",
-                    access.object.text().to_string().trim(),
-                    access.member
+                t!(
+                    "`%{object}` has no member `%{member}`",
+                    object = access.object.text().to_string().trim(),
+                    member = access.member
                 ),
             );
         }

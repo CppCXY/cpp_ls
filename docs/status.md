@@ -1362,3 +1362,60 @@ handshake  a_signature_is_shown_while_the_arguments_are_typed（正文无 @param
            a_client_...hover（空行仍然答 null —— 词汇表加了区间检查）
 套件  cpp_ls lib 83 / handshake 30(+5 ignored) / cpp_code_analysis lib 650
 ```
+
+## 二十二、地区设置:`.cppls` 优先,然后客户端,然后英文（2026）
+
+```text
+locale = "zh-CN"        .cppls.toml 里的一行        ← 最具体,所以优先
+"locale": "zh-cn"       initialize 参数(VS Code 的显示语言)
+"en"                    默认,也是所有翻译缺失时的回落
+```
+
+`rust-i18n` 的当前 locale 是**进程级**的,所以一次 `cpp_parser::set_locale` 就同时切换解析器、诊断和服务器自己
+的消息 —— 语言是**会话**的属性,不是某个模块的。`set_locale` 先规范化标签(`zh-cn`/`zh_CN`/`zh-CN` → `zh-CN`),
+因为客户端三种写法都会出现,而文件只能有一个名字。
+
+应用顺序也因此固定:客户端在 `initialize` 时先设,项目自己的 `.cppls.toml` 在**打开工程时**后设(由
+`Session::open` 做),后者覆盖前者。`locale` 是 `.cppls.toml` 里**唯一不带 section 的键**,因为它说的是编辑器偏好
+而不是工程结构;`[locale]` 这种写法会得到一条"这个 section 不认识"的提示。
+
+## 二十三、文案进表:key 就是英文原文（2026）
+
+三张表,一个原则:**没有任何 `en.yml`**。`rust-i18n` 在缺 key 时返回 key 本身,而 key 就是英文句子 ——
+于是英文永远正确、永远不会漏,翻译表只需要写**目标语言**那一张。
+
+```text
+crates/cpp_ls/locales/zh-CN.yml              119 条(51 关键词 + 48 Doxygen 命令 + 20 条杂项)
+crates/cpp_code_analysis/locales/zh-CN.yml   诊断
+crates/cpp_parser/locales/zh-CN.yml          解析错误
+```
+
+占位符用 rust-i18n 的 `%{name}`:
+
+```rust
+t!("`%{name}` is declared here and never used", name = fact.name)
+```
+
+实测(同一个文件,同一个检查):
+
+```text
+en     `unused_local` is declared here and never used
+zh-CN  `unused_local` 在这里声明，之后从未使用
+```
+
+### 覆盖到哪儿了,以及为什么不再往下堆
+
+已经走 `t!` 的:**4 条检查**(unused / missing_return / use_override / undefined_field)、
+**5 条解析错误**(`expected primary expression`、`unexpected token`、`expected %{token}, but get %{current}` 等)、
+以及全部词表。
+
+还没走的(机械工作,模式已定):其余 ~17 条检查消息、解析器里直接 `format!("expected …")` 拼出来的大量消息。
+每一条的改法就是这条:
+
+```rust
+format!("`{name}` overrides …")                        →  t!("`%{name}` overrides …", name = name)
+```
+
+值得记的一条:两张表**不能放混** —— 每个 `i18n!` 只读自己 crate 的 `locales/`,所以解析器的 key 必须在
+`crates/cpp_parser/locales/` 下,诊断的在 `crates/cpp_code_analysis/locales/` 下。放错了同样"安静地回英文",
+和 key 拼错一模一样。

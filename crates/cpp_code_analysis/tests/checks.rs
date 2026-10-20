@@ -1828,3 +1828,60 @@ void f() {
         "an `int` is not a `std::string`: {found:?}"
     );
 }
+
+/// **中文诊断** —— 一条检查消息跟着 `set_locale` 走,而不是跟着编辑器走。
+///
+/// 这张表最容易出的错是 key 和英文模板**差一个字符**:那样 `t!` 会安静地返回英文,看起来像"翻译没生效"。
+/// 所以这条测试不检查"有没有翻译文件",而是直接看一条真的诊断在两种 locale 下的文字。
+/// **中文诊断** —— 一条检查消息跟着 `set_locale` 走,而不是跟着编辑器走。
+///
+/// 这张表最容易出的错是 key 和英文模板**差一个字符**:那样 `t!` 会安静地返回英文,看起来像"翻译没生效"。
+/// 所以这条测试不看"有没有翻译文件",而是直接看一条真的诊断在两种 locale 下的文字。
+#[test]
+fn a_diagnostic_follows_the_locale() {
+    let source = "int f() { int unused_local = 1; return 0; }\n";
+
+    let messages = |locale: &str| {
+        cpp_parser::set_locale(locale);
+        let files = MemoryFiles::new().with_file("/p/a.cpp", source);
+        let providers = SessionFiles::new(OpenDocuments::new(), files);
+        let mut session = Session::with_config(
+            "/p",
+            providers,
+            WatchFilter::new("/p"),
+            CompilerConfig::default(),
+        );
+        session.add_project_files([std::path::PathBuf::from("/p/a.cpp")]);
+        session.want_cooked_reading(std::path::Path::new("/p/a.cpp"));
+        session.index_everything();
+        session
+            .diagnostics(std::path::Path::new("/p/a.cpp"))
+            .map(|found| {
+                found
+                    .checks
+                    .iter()
+                    .map(|finding| finding.message.clone())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    };
+
+    let english = messages("en");
+    let chinese = messages("zh-CN");
+    cpp_parser::set_locale("en");
+
+    println!("en: {english:?}\nzh: {chinese:?}");
+    let unused = |list: &[String]| {
+        list.iter()
+            .find(|message| message.contains("unused_local"))
+            .cloned()
+            .unwrap_or_else(|| panic!("the unused check reports it: {list:?}"))
+    };
+
+    assert!(unused(&english).contains("never used"), "{:?}", unused(&english));
+    assert!(
+        unused(&chinese).contains("从未使用"),
+        "the message is translated: {:?}",
+        unused(&chinese)
+    );
+}

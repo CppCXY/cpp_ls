@@ -3,6 +3,7 @@ use std::error::Error;
 use tokio::sync::oneshot;
 
 use crate::context;
+use crate::util::set_locale;
 
 use super::connection::AsyncConnection;
 use super::message_processor::ServerMessageProcessor;
@@ -21,6 +22,16 @@ impl LspServer {
         params: &InitializeParams,
         init_rx: oneshot::Receiver<()>,
     ) -> Self {
+        // **The language, before anything is parsed.** `initialize.locale` is the client's own setting — VS Code
+        // sends `"locale": "zh-cn"` from `--locale`/the display language — and it is applied here because the very
+        // first parse error of the session is a message a reader may have to read.
+        //
+        // A project's `.cppls.toml` overrides it, and that override is applied when that file is read (see
+        // `AnalysisState`): the file in the repository is more specific than the editor's global preference.
+        if let Some(locale) = params.locale.as_deref() {
+            set_locale(locale);
+        }
+
         let server_context =
             context::ServerContext::new(connection.connection.clone(), params.capabilities.clone());
 

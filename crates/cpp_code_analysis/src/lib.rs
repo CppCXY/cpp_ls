@@ -42,6 +42,15 @@
 // It puts our token stream beside a real `-E`'s and reports where they differ, by mechanism; see its module
 // documentation for why that is the measurement every other module is judged by. It is first in this list because
 // everything below it is a claim, and it is the way to check one.
+#[macro_use]
+extern crate rust_i18n;
+
+// **The diagnostics speak the reader's language.** The keys are the English templates themselves
+// (`t!("`{}` is declared here and never used")`), so `en` needs no file — a missing key answers with the key, which
+// *is* the English message — and `locales/zh-CN.yml` carries the translations. `cpp_parser` loads its own table the
+// same way, and one call to `cpp_parser::set_locale` switches both: rust-i18n's current locale is process-wide.
+rust_i18n::i18n!("./locales", fallback = "en");
+
 pub mod align;
 pub mod cache;
 pub mod completion;

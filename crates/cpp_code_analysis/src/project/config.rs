@@ -110,6 +110,12 @@ pub struct ProjectConfig {
     pub index: IndexSection,
     pub diagnostics: DiagnosticsSection,
     pub hover: HoverSection,
+    /// **The language this project's messages are written in** — `locale = "zh-CN"`.
+    ///
+    /// The one key that stands alone rather than in a section, because it is a preference about the *editor*: what
+    /// the diagnostics, the parse errors and the hover popups say. Read by the server at start-up and whenever the
+    /// file changes; a project that names it wins over the locale the client sent at `initialize`.
+    pub locale: Option<String>,
 }
 
 /// `[workspace]` — what the project is made of.
@@ -656,9 +662,28 @@ pub fn parse_config(text: &str, path: &Path) -> ConfigReport {
                 Ok(decoded) => report.config.hover = decoded,
                 Err(problem) => report.problems.push(problem),
             },
+            // **[locale]** — the language this project's messages are written in.
+            //
+            // A bare key rather than a section, because it is about the *editor*: `locale = "zh-CN"` is the same
+            // kind of statement as `hover.enable = false`. A project that names it wins over the locale the client
+            // sent at `initialize`, which is what a reader expects — the file in the repository is more specific
+            // than the editor's global setting.
+            "locale" => match section.as_str() {
+                Some(locale) if !locale.trim().is_empty() => {
+                    report.config.locale = Some(locale.trim().to_string());
+                }
+                Some(_) => report.problems.push(ConfigProblem::warning(
+                    "`locale` is empty, so the language is the one the client asked for".to_string(),
+                )),
+                None => report.problems.push(ConfigProblem::error(
+                    "`locale` holds a language tag written as a string — `locale = \"zh-CN\"` — so the value here \
+                     is not in effect"
+                        .to_string(),
+                )),
+            },
             unknown => report.problems.push(ConfigProblem::error(format!(
                 "[{unknown}] is not a section this server reads (workspace, compile, index, diagnostics, hover), \
-                 so nothing under it is in effect"
+                 and `locale` is the one key that stands alone, so nothing under it is in effect"
             ))),
         }
     }

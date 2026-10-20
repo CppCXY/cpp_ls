@@ -1,0 +1,10 @@
+# 中文诊断 —— key 是**英文模板本身**（含 `%{…}` 占位符），所以 `en` 不需要文件：缺 key 时 rust-i18n 返回 key，
+# 那正是英文原文。这张表可以逐条补齐。
+#
+# 体例：先说"哪里不对"，再说"该写什么"。诊断是给正在写这行代码的人看的，第二句比第一句更有用。
+
+# ---- 检查（sema/check） ----
+"`%{name}` is declared here and never used": "`%{name}` 在这里声明，之后从未使用"
+"this function is declared to return `%{declared}` and its body has no `return`": "这个函数声明返回 `%{declared}`，但函数体里没有 `return`"
+"`%{name}` overrides a base's virtual and does not say so — write `override`, which turns a silent non-override into a compile error": "`%{name}` 覆盖了基类的虚函数却没有声明 —— 写 `override`，它能把「以为覆盖了其实没有」变成编译错误"
+"`%{object}` has no member `%{member}`": "`%{object}` 没有成员 `%{member}`"

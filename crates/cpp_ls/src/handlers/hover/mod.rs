@@ -1064,6 +1064,25 @@ impl RegisterCapabilities for HoverCapabilities {
 mod tests {
     use super::*;
 
+
+    /// **中文表加载成功，而且和英文表用的是同一组 key。**
+    ///
+    /// 一张译文表最容易出的错不是翻译错，而是 key 拼错或漏了 —— 那样 rust-i18n 会安静地回落成英文，看起来像
+    /// "翻译没生效"。所以这条测试直接比较两种语言下同一个 key 的结果：不同、且都不等于 key 本身。
+    #[test]
+    fn the_chinese_table_translates_the_same_keys() {
+        let english = (t!("keyword.constexpr"), t!("command.param"));
+        rust_i18n::set_locale("zh-CN");
+        let chinese = (t!("keyword.constexpr"), t!("command.param"));
+        rust_i18n::set_locale("en");
+
+        assert_ne!(english.0, chinese.0, "`keyword.constexpr` has a translation");
+        assert_ne!(english.1, chinese.1, "`command.param` has a translation");
+        assert!(chinese.0.starts_with("**`constexpr`**"), "{chinese:?}");
+        assert!(chinese.1.contains("@param"), "{chinese:?}");
+        println!("en: {english:?}\nzh: {chinese:?}");
+    }
+
     /// **The two vocabularies answer, and the file they live in is the one that was embedded.**
     ///
     /// `rust-i18n` answers a missing key with the key itself, so "the popup says `keyword.constexpr`" and "the popup

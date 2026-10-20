@@ -151,7 +151,12 @@ impl Check for Unused {
                 DiagnosticCode::Unused,
                 fact.name_range,
                 fact.name.as_str(),
-                format!("`{}` is declared here and never used", fact.name),
+                // **A translated message**: the key is the English template, `%{…}` is rust-i18n's placeholder, and
+                // a language that has not translated it answers with the key — which *is* the English sentence.
+                t!(
+                    "`%{name}` is declared here and never used",
+                    name = fact.name
+                ),
             );
         }
     }

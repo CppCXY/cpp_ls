@@ -96,9 +96,10 @@ impl Check for UseOverride {
                     DiagnosticCode::UseOverride,
                     cpp_parser::SourceRange::new(offset, name.len()),
                     name.clone(),
-                    format!(
-                        "`{name}` overrides a base's virtual and does not say so — write `override`, which turns a \
-                         silent non-override into a compile error"
+                    t!(
+                        "`%{name}` overrides a base's virtual and does not say so — write `override`, which turns a \
+                         silent non-override into a compile error",
+                        name = name
                     ),
                 );
             }

@@ -201,8 +201,9 @@ impl Check for MissingReturn {
                 DiagnosticCode::MissingReturn,
                 at,
                 name,
-                format!(
-                    "this function is declared to return `{declared}` and its body has no `return`"
+                t!(
+                    "this function is declared to return `%{declared}` and its body has no `return`",
+                    declared = declared
                 ),
             );
         }

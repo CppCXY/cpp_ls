@@ -636,6 +636,16 @@ impl Session<DiskFiles> {
         // what flags it is asked about.
         let discovery = crate::project::discover(&files, &root, config_file);
         let project_config = discovery.config.clone();
+
+        // **The project's own language wins.** `locale = "zh-CN"` in `.cppls.toml` is a statement about this
+        // repository, and the editor's setting (`initialize.locale`) is a statement about the editor — so the file is
+        // applied here, after the client's has already been applied. Applying it in the *analysis* rather than in the
+        // server is what keeps the two in one order: whoever opens a project gets that project's messages, including
+        // the messages produced while it is being indexed.
+        if let Some(locale) = project_config.config.locale.as_deref() {
+            cpp_parser::set_locale(locale);
+        }
+
         let filter = apply_project_config(filter, &project_config);
 
         let for_file = discovery

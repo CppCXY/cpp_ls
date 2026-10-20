@@ -30,8 +30,66 @@ extern crate rust_i18n;
 
 rust_i18n::i18n!("./locales", fallback = "en");
 
+/// **Use `locale` for every message from now on** — the parser's, the analysis's and the server's.
+///
+/// `rust-i18n`'s current locale is **process-wide**, so this one call changes every `t!` in every crate that loaded
+/// a table — which is the point: a language is a property of the session, not of a module.
+///
+/// The tag is normalised first, because a client spells it three ways — `zh-cn` (the protocol's own example),
+/// `zh_CN`, `zh-CN` — while a translation file has one name. See [`normalise_locale`].
 pub fn set_locale(locale: &str) {
-    rust_i18n::set_locale(locale);
+    rust_i18n::set_locale(&normalise_locale(locale));
+}
+
+/// **The tag a locale file is named with** — `zh-cn`/`zh_CN`/`ZH-CN` all answer `zh-CN`.
+///
+/// Only the *shape* of a language tag is handled (a language, then an optional region): anything else is passed
+/// through, and `rust-i18n` then falls back to English — the right answer for a language nobody has translated yet,
+/// and better than silently pretending the request was honoured.
+pub fn normalise_locale(locale: &str) -> String {
+    let trimmed = locale.trim().replace('_', "-");
+    let mut parts = trimmed.split('-');
+
+    let Some(language) = parts.next() else {
+        return String::from("en");
+    };
+    if language.is_empty() {
+        return String::from("en");
+    }
+
+    let mut normalised = language.to_ascii_lowercase();
+    if let Some(region) = parts.next()
+        && !region.is_empty()
+    {
+        normalised.push('-');
+        normalised.push_str(&region.to_ascii_uppercase());
+    }
+
+    normalised
+}
+
+#[cfg(test)]
+mod locale_tests {
+    use super::normalise_locale;
+
+    /// **The spellings a client sends are one tag**, which is what makes one file per language enough.
+    #[test]
+    fn a_locale_tag_is_normalised_to_the_name_of_its_file() {
+        for (written, expected) in [
+            ("zh-CN", "zh-CN"),
+            ("zh-cn", "zh-CN"),
+            ("zh_CN", "zh-CN"),
+            ("ZH-CN", "zh-CN"),
+            ("en", "en"),
+            ("en-US", "en-US"),
+            ("pt_BR", "pt-BR"),
+            ("ja", "ja"),
+            ("", "en"),
+            ("  ", "en"),
+        ] {
+            assert_eq!(normalise_locale(written), expected, "{written:?}");
+        }
+    }
 }
 
 /// **The syntax a parse accepts**, as a set of standards and vendors — see [eatures].

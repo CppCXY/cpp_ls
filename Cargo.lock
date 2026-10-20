@@ -220,6 +220,7 @@ dependencies = [
  "cpp_parser",
  "glob",
  "log",
+ "rust-i18n",
  "serde",
  "toml",
 ]
