@@ -72,6 +72,15 @@ pub enum TypeKind {
     /// `decorator` from this server as `keyword.doxygen`", which is what the cppls extension does. Sending a
     /// *custom* type instead would make the server's answer unreadable to every client but that one.
     DocCommand,
+    /// **A variable template** — `template <class T> constexpr bool is_trivially_assignable_v = …`.
+    ///
+    /// The protocol has no such type, and this is the one place this server sends a **custom** name. It earns the
+    /// exception because a reader sees a difference worth colouring: a variable template is a *family* of values
+    /// (you write `is_trivially_assignable_v<A, B>`, not `is_trivially_assignable_v`), and drawing it exactly like a
+    /// `constexpr bool` says the bare name is a value that can be used. A client that does not know the name cannot
+    /// draw it — [`Builder::push_range`] drops a type the client did not advertise — so the pass falls back to
+    /// `variable`, which is what that client showed before this existed.
+    VariableTemplate,
 }
 
 impl TypeKind {
@@ -94,6 +103,7 @@ impl TypeKind {
             TypeKind::Modifier => 13,
             TypeKind::Operator => 14,
             TypeKind::DocCommand => 15,
+            TypeKind::VariableTemplate => 16,
         }
     }
 
@@ -116,6 +126,11 @@ impl TypeKind {
             TypeKind::Modifier => SemanticTokenType::MODIFIER,
             TypeKind::Operator => SemanticTokenType::OPERATOR,
             TypeKind::DocCommand => SemanticTokenType::DECORATOR,
+            // **A custom type**, and the only one this server sends: the protocol has no `variableTemplate`, while a
+            // theme has every reason to colour one differently from a value. A client that does not know the name
+            // cannot draw it — `Builder::push_range` drops it — so the caller falls back to `variable`, which is what
+            // that client would have shown before this existed. See `push_names`.
+            TypeKind::VariableTemplate => SemanticTokenType::new("variableTemplate"),
         }
     }
 
@@ -137,6 +152,7 @@ impl TypeKind {
         TypeKind::Modifier,
         TypeKind::Operator,
         TypeKind::DocCommand,
+        TypeKind::VariableTemplate,
     ];
 }
 

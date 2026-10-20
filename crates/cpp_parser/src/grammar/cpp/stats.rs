@@ -1325,7 +1325,15 @@ fn parse_for_statement(p: &mut CppParser) -> ParseResult {
             m.set_kind(p, CppSyntaxKind::RangeForStat);
 
             p.bump();
-            parse_expr(p)?;
+            // **The range may be a braced-init-list**: `for (int x : {1, 2, 3})`. A `{` where an expression would
+            // be cannot begin one — every other place that means a list already reads it as one (an argument, an
+            // assignment's right side, a declaration's initializer) — so this is the same rule in the one position
+            // it was missing, and not a second reading of braces.
+            if p.current_token() == CppTokenKind::LeftBrace {
+                decls::parse_braced_initializer(p)?;
+            } else {
+                parse_expr(p)?;
+            }
             expect_token(p, CppTokenKind::RightParen)?;
             parse_statement_body(p)?;
 
@@ -1522,6 +1530,32 @@ const THE_KEYWORD_TRY_IS_SPELLED: &str = "__try";
 /// The same, for `catch` — see [`THE_KEYWORD_TRY_IS_SPELLED`].
 const THE_KEYWORD_CATCH_IS_SPELLED: &str = "__catch";
 
+/// MSVC's two handlers for a `__try` block — see [`parse_try_statement`].
+///
+/// `__except` takes a **filter expression** in parentheses (`__except (EXCEPTION_EXECUTE_HANDLER)`), `__finally`
+/// takes none; both are followed by a block. They are identifiers rather than keywords, like `__try` itself, so the
+/// spelling is what tells them from a call.
+const THE_KEYWORD_EXCEPT_IS_SPELLED: &str = "__except";
+const THE_KEYWORD_FINALLY_IS_SPELLED: &str = "__finally";
+
+/// Is the cursor on one of the handlers MSVC's `__try` can take?
+fn at_the_implementations_handler(p: &CppParser) -> bool {
+    p.current_token() == CppTokenKind::Identifier
+        && matches!(
+            p.current_token_text(),
+            THE_KEYWORD_EXCEPT_IS_SPELLED | THE_KEYWORD_FINALLY_IS_SPELLED
+        )
+}
+
+/// `__except (…)` — the filter, which is an expression rather than a parameter list.
+fn parse_parenthesized_filter(p: &mut CppParser) -> ParseResult {
+    let m = p.mark(CppSyntaxKind::ParenExpr);
+    expect_token(p, CppTokenKind::LeftParen)?;
+    crate::grammar::cpp::exprs::parse_expr(p)?;
+    expect_token(p, CppTokenKind::RightParen)?;
+    Ok(m.complete(p))
+}
+
 /// Is the cursor on `__try`, with a block to follow?
 ///
 /// The block is required because `__try` is *also* an MSVC keyword for structured exception handling
@@ -1587,6 +1621,44 @@ fn parse_try_statement(p: &mut CppParser) -> ParseResult {
     if let Err(err) = eat_preprocessor_directives(p) {
         p.close_marks_above(base);
         return Err(err);
+    }
+
+    // **MSVC's structured exception handling**: `__try { … } __except (filter) { … }` and
+    // `__try { … } __finally { … }`.
+    //
+    // They are the same statement shape as `try`/`catch` — a block and one or more handler blocks — and they are
+    // written by every Windows driver and by MSVC's own headers. The handler's *filter* is an expression
+    // (`__except (GetExceptionCode() == …)`), not a parameter list, which is the one difference that matters to
+    // this rule. The two spellings are identifiers rather than keywords, so they are matched by text, exactly as
+    // `__try` already is.
+    while at_the_implementations_handler(p) {
+        let handler = p.mark(CppSyntaxKind::CatchStat);
+        let is_a_filter = p.current_token_text() == THE_KEYWORD_EXCEPT_IS_SPELLED;
+        p.bump();
+
+        if is_a_filter
+            && p.current_token() == CppTokenKind::LeftParen
+            && let Err(err) = parse_parenthesized_filter(p)
+        {
+            p.close_marks_above(base);
+            return Err(err);
+        }
+
+        if let Err(err) = eat_preprocessor_directives(p) {
+            p.close_marks_above(base);
+            return Err(err);
+        }
+
+        if let Err(err) = parse_compound_stat(p) {
+            p.close_marks_above(base);
+            return Err(err);
+        }
+        handler.complete(p);
+
+        if let Err(err) = eat_preprocessor_directives(p) {
+            p.close_marks_above(base);
+            return Err(err);
+        }
     }
 
     while p.current_token() == CppTokenKind::CatchKeyword || at_the_implementations_catch(p) {

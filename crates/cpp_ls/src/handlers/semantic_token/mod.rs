@@ -85,6 +85,9 @@ fn type_of_a_name_kind(kind: NameKind) -> Option<TypeKind> {
         NameKind::Function => TypeKind::Function,
         NameKind::Method => TypeKind::Method,
         NameKind::Variable => TypeKind::Variable,
+        // **A custom type**, and the one place this server sends one — see [`TypeKind::VariableTemplate`]. A client
+        // that cannot draw it is answered with `variable` by [`push_names`], which is what it showed before.
+        NameKind::VariableTemplate => TypeKind::VariableTemplate,
         NameKind::Parameter => TypeKind::Parameter,
         NameKind::Macro => TypeKind::Macro,
     })
@@ -118,12 +121,25 @@ fn push_names(builder: &mut Builder<'_>, names: &[Name]) {
         let Some(kind) = type_of_a_name_kind(name.kind) else {
             continue;
         };
-        builder.push_range(
+        let pushed = builder.push_range(
             name.range.start_offset,
             name.range.end_offset(),
             kind,
             modifiers_of(name),
         );
+
+        // **A custom type the client cannot draw falls back to the standard one it can.** The legend this server
+        // advertises is its own, so a client only draws the names it lists in `tokenTypes` — and `variableTemplate`
+        // is not part of the protocol's standard set. A client that does not know it would otherwise get *no* token
+        // for the declaration, which is worse than the colour it had before: it would lose the grammar's own.
+        if !pushed && kind == TypeKind::VariableTemplate {
+            builder.push_range(
+                name.range.start_offset,
+                name.range.end_offset(),
+                TypeKind::Variable,
+                modifiers_of(name),
+            );
+        }
     }
 }
 
@@ -587,22 +603,26 @@ mod tests {
     };
     use cpp_parser::SourceRange;
 
-    /// **A template parameter is a `typeParameter`, and a variable template is a `variable`.**
+    /// **A template parameter is a `typeParameter`, and a variable template is a `variableTemplate`.**
     ///
     /// Two questions asked from an editor, and both are about what the *server* sends rather than about colour:
     ///
     /// * *"some template parameters are not a reasonable colour"* — a parameter is not a type, and a theme draws
     ///   `typeParameter` separately for exactly that reason: `template <class T>` names a parameter, and drawing it
     ///   as `int` is what `entity.name.type.cpp` means.
-    /// * *"is a variable template a type's colour or a variable's?"* — **a variable's.** `is_assignable_v` is a
-    ///   variable like any other; the `template <…>` header changes how it is *written*, not what it *is*, and the
-    ///   analysis already records it as a `Variable` — the thing being asserted is that the classification reaches
-    ///   the wire unchanged.
+    /// * *"is a variable template a type's colour or a variable's?"* — this server first answered **a variable's**,
+    ///   on the argument that `is_assignable_v` is a variable and the `template <…>` header changes only how it is
+    ///   written. A reader disagreed with the consequence: the bare name of a variable template is **not a value**
+    ///   (`is_assignable_v<A, B>` is), so drawing it exactly like a `constexpr bool` says it can be used as one.
+    ///
+    /// The protocol has no such type, so this is the one place the legend carries a **custom** name —
+    /// `variableTemplate` — and the pass falls back to `variable` for a client that does not advertise it, which is
+    /// the second half of this test.
     ///
     /// Asserted on the encoded tokens rather than on `classified_names`, because the wire is what a colour comes
     /// from and a mapping in between could still lose it.
     #[test]
-    fn a_template_parameter_is_a_type_parameter_and_a_variable_template_is_a_variable() {
+    fn a_template_parameter_is_a_type_parameter_and_a_variable_template_is_a_variable_template() {
         let text = "\
 template <class T>
 constexpr bool is_trivially_destructible_v = __is_trivially_destructible(T);
@@ -628,10 +648,10 @@ constexpr bool is_assignable_v = __is_assignable(To, From);
             ("From", TypeKind::TypeParameter, "nor this"),
             (
                 "is_trivially_destructible_v",
-                TypeKind::Variable,
-                "a variable template is a variable — the `template` header changes how it is written",
+                TypeKind::VariableTemplate,
+                "a variable template names a family of values, not one",
             ),
-            ("is_assignable_v", TypeKind::Variable, "and so is this one"),
+            ("is_assignable_v", TypeKind::VariableTemplate, "and so does this one"),
         ] {
             let at = text[..text.find(word).expect("the fixture writes it")].len();
             assert_eq!(
@@ -640,6 +660,23 @@ constexpr bool is_assignable_v = __is_assignable(To, From);
                 "`{word}`: {why}"
             );
         }
+
+        // **A client that does not advertise the custom type gets `variable`** — the same colour it had before the
+        // type existed, rather than no token at all (which would take away the grammar's colour too).
+        let standard = Some(vec![
+            lsp_types::SemanticTokenType::VARIABLE,
+            lsp_types::SemanticTokenType::TYPE_PARAMETER,
+        ]);
+        let fallback = by_offset(text, &encode(file, Some(&view), &names, &standard, false));
+        let at = text[..text
+            .find("is_trivially_destructible_v")
+            .expect("the fixture writes it")]
+            .len();
+        assert_eq!(
+            fallback.get(&at),
+            Some(&index_of(TypeKind::Variable)),
+            "a client that cannot draw `variableTemplate` is answered with `variable`"
+        );
 
         // **The declaration is coloured and the uses inside a macro's argument list are not**, which is a separate
         // defect and is recorded rather than asserted away. Measured: `T` in `__is_trivially_destructible(T)` gets no

@@ -45,12 +45,21 @@ fn every_clang_extension_parses_without_an_error() {
     assert_all_parse("Clang", CONSTRUCTS);
 }
 
-/// **A block** — `^(int n) { … }` — is Clang's closure syntax and does not parse.
+/// **A block** — `void (^block)(int) = ^(int n) { … };` — Clang's closure syntax, in its declaration and its
+/// literal.
 ///
-/// It is the extension the whole of Apple's C API is written with, and it fails with `expected primary expression` at the
-/// `^`. A block *type* (`void (^handler)(void)`) parses, which is why the table above can state one and not the other.
+/// It is the extension the whole of Apple's C API is written with, and both halves used to fail:
+///
+/// ```text
+///   void (^handler)(void)         a block *declaration* — the same shape a function pointer has, with `^` where
+///                                 the `*` would be; it reported ``expected `;` after expression`` at the `)`
+///   ^(int n) { (void)n; }         a block *literal* — a caret where an expression begins
+/// ```
+///
+/// The declarator is read as the pointer-shaped node the `^` really is, and the literal as a `LambdaExpr`: a block
+/// is an anonymous function with no capture list, which is the closest thing this grammar has. Nothing is invented
+/// — the `^`, the parameter list and the body are the file's own tokens.
 #[test]
-#[ignore = "a block literal does not parse; a block type does"]
 fn a_block_literal_parses() {
     assert_all_parse(
         "Clang blocks",

@@ -116,6 +116,12 @@ pub enum NameKind {
     /// A function declared in a class — a member function, a constructor, a destructor, an operator.
     Method,
     Variable,
+    /// **A variable template** — `template <class T> constexpr bool is_trivially_assignable_v = …`.
+    ///
+    /// A kind of its own because a reader sees one: the bare name is not a value (`is_trivially_assignable_v<A, B>`
+    /// is), and a theme that draws it exactly like a `constexpr bool` says it can be used as one. A *use* that
+    /// resolves to the template is drawn with it too — the name refers to the template either way.
+    VariableTemplate,
     /// A function parameter, which the scope model can tell from a local (see [`classified_names`]).
     Parameter,
     /// A name this file `#define`s.
@@ -772,6 +778,13 @@ fn kind_of_binding(binding: &Binding, view: &FileView, is_a_parameter: bool) -> 
         BindingKind::Variable => {
             if is_a_parameter {
                 NameKind::Parameter
+            } else if !crate::sema::declarations::declared_template_parameters_of(&view.root, binding)
+                .is_empty()
+            {
+                // **`template <class T> constexpr bool v = …;`** — the declaration introduces a family of values,
+                // while the scope model records a variable because that is all a binding can say. The template head
+                // is in the tree, and this is what asks it.
+                NameKind::VariableTemplate
             } else {
                 NameKind::Variable
             }
@@ -805,6 +818,9 @@ fn kind_of_index(found: IndexedKind) -> Option<NameKind> {
         // which on [`IndexedKind::enumerator`] — while a theme draws an enumerator with its enumeration. Drawn as a
         // plain variable, `Color::Red` read as a global constant that happened to live inside a type.
         DeclKind::Variable if found.enumerator => NameKind::EnumMember,
+        // A variable **template**'s declaration: a family of values rather than one — the distinction the buffer
+        // path reads from its tree and this path reads from the fact's recorded template parameters.
+        DeclKind::Variable if found.template => NameKind::VariableTemplate,
         DeclKind::Variable => NameKind::Variable,
         DeclKind::Namespace => NameKind::Namespace,
         DeclKind::MacroLike => NameKind::Macro,

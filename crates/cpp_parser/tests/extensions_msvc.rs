@@ -36,15 +36,17 @@ fn every_msvc_extension_parses_without_an_error() {
     assert_all_parse("MSVC", CONSTRUCTS);
 }
 
-/// **The MSVC constructs the grammar does not parse**: structured exception handling and `__interface`.
+/// **The MSVC constructs that used to be gaps** — structured exception handling and `__interface`.
 ///
 /// ```text
-///   __try { } __except (1) { }     expected `;` after expression
-///   __try { } __finally { }        expected `;` after expression
-///   __interface I : IUnknown { };  expected `;` after expression
+///   __try { } __except (1) { }     a block and a handler, like `try`/`catch` — the filter is an expression
+///   __try { } __finally { }        the other handler, with no filter at all
+///   __interface I : IUnknown { };  a class key spelled as an identifier: name, base clause, body
 /// ```
+///
+/// All three are written by every Windows driver and by MSVC's own headers. `__try`, `__except` and `__interface`
+/// are identifiers rather than keywords, so each is recognised by its spelling — the reading `catch` already gets.
 #[test]
-#[ignore = "`__try`/`__except`, `__try`/`__finally` and `__interface` do not parse"]
 fn the_msvc_gaps_are_named() {
     assert_all_parse(
         "MSVC gaps",

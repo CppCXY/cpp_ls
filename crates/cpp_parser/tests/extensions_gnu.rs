@@ -39,18 +39,20 @@ fn every_gnu_extension_parses_without_an_error() {
     assert_all_parse("GNU", CONSTRUCTS);
 }
 
-/// **The GNU constructs the grammar does not parse**, kept as evidence rather than dropped.
-///
-/// A statement expression, `typeof` and the elvis operator are three of the most-used GNU extensions in real headers
-/// (glibc's macros are built on the first two), and each produces a parse error:
+/// **The GNU constructs that used to be gaps** — now part of the table, kept as their own test because each was a
+/// deliberate decision rather than a spelling.
 ///
 /// ```text
-///   int n = ({ int a = 1; a; });   expected primary expression, at `({`
-///   typeof(1) n = 1;               was a gap, **fixed**: `typeof` is now lexed as `decltype`
-///   int n = a ?: b;                expected primary expression, at `?:`
+///   int n = ({ int a = 1; a; });   statement expression: a compound statement where an expression would be
+///   typeof(1) n = 1;               `typeof` is lexed as `decltype`
+///   int n = a ?: b;                the elvis operator: the middle operand is the condition, written once
 /// ```
+///
+/// The first and the third are what glibc's and the Linux headers' macros are built on, so a parse of a real
+/// project on a GNU toolchain meets them. The statement expression is read as the **compound statement it is**, and
+/// the elvis keeps its two operands with no middle one — nothing is synthesised into the tree, because the value
+/// `a ?: b` yields is `a` and a copy of its tokens would be text the file wrote once.
 #[test]
-#[ignore = "statement expressions, `typeof` and `?:` do not parse — three GNU gaps"]
 fn the_gnu_gaps_are_named() {
     assert_all_parse(
         "GNU gaps",

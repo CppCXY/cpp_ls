@@ -52,13 +52,14 @@ fn every_cpp11_construct_parses_without_an_error() {
     assert_all_parse("C++11", CONSTRUCTS);
 }
 
-/// **A braced range** — `for (int x : {1, 2, 3})` — is C++11 and does not parse.
+/// **A braced range** — `for (int x : {1, 2, 3})` — is C++11, and it used to be the one position where a
+/// braced-init-list was not read as one.
 ///
 /// Found by the table above, which used it as the range's source and reported `expected primary expression` at the
-/// opening brace. Kept as its own case rather than dropped: the ordinary range (`values`) is the mainstream spelling and
-/// is in the table, and this one is a real gap that a reader of modern code will meet.
+/// opening brace. Kept as its own case rather than folded into the table: the ordinary range (`values`) is the
+/// mainstream spelling and is in the table, and this one pins the rule — a `{` where an expression would be is a
+/// list, exactly as it is in an argument, on an assignment's right side and in a declaration's initializer.
 #[test]
-#[ignore = "a braced-init-list as a range does not parse; see the C++11 table's history"]
 fn a_braced_range_parses() {
     let tree = cpp_parser::CppParser::parse(
         "void f() { for (int x : {1, 2, 3}) { (void)x; } }",

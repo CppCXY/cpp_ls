@@ -494,7 +494,17 @@ fn parse_ternary_expr(p: &mut CppParser) -> ParseResult {
         let m = expr.precede(p, CppSyntaxKind::TernaryExpr);
         p.bump(); // consume '?'
 
-        parse_expr(p)?; // true expression
+        // **The GNU elvis operator, `a ?: b`** — the middle operand is the condition, written once. It is not C++,
+        // and glibc and the Linux headers use it heavily (`#define min(a, b) ((a) < (b) ?: (b))`), so a parse of
+        // those files has to accept it: a `:` where the true expression would be means the true expression is
+        // absent, and the `:` is asked for below as it always is.
+        //
+        // Nothing is synthesised into the tree. A consumer that reads the middle operand finds none, which is the
+        // honest shape of the syntax — the value `a ?: b` yields is `a`, and a duplicate of the condition's tokens
+        // would be a second copy of text the file wrote once.
+        if p.current_token() != CppTokenKind::Colon {
+            parse_expr(p)?; // true expression
+        }
 
         // **A directive between the two branches**, which is the seam every other list rule already has, in the
         // one position a *conditional* is conditioned in — and the standard library writes it that way, because
@@ -2614,6 +2624,14 @@ fn parse_primary_expr(p: &mut CppParser, fold_operand: bool) -> ParseResult {
         // qualifier, while an index has an expression in front of it and an operator after.
         CppTokenKind::LeftBracket if starts_a_lambda(p) => parse_lambda(p),
 
+        // **A Clang block literal**: `^(int n) { … }` — the closure syntax Apple's APIs are written with.
+        //
+        // A `^` in *operand* position can only be this: the XOR operator has a left operand, so a caret where an
+        // expression begins is the block's own token. The node is a `LambdaExpr` — a block is an anonymous function
+        // with no capture list, which is the closest thing this grammar has, and the analysis then treats it as the
+        // closure it is. Nothing is invented: the `^`, the parameter list and the body are the file's own tokens.
+        CppTokenKind::Caret => parse_block_literal(p),
+
         // `this`
         CppTokenKind::ThisKeyword => {
             let m = p.mark(CppSyntaxKind::ThisExpr);
@@ -2698,9 +2716,34 @@ fn parse_functional_payload(p: &mut CppParser) -> ParseResult {
     Ok(m.complete(p))
 }
 
+/// **A parenthesized expression**, and the GNU statement expression that is written the same way.
+///
+/// ```text
+/// (a + b)                      a parenthesised expression
+/// ({ int a = 1; a; })          GNU: **a compound statement as an expression** — the value is the last statement
+/// ```
+///
+/// The second is not C++ and is everywhere in C: glibc's `assert` on some targets, the Linux headers' `__safe_…`
+/// macros, and any header written with `#define max(a, b) ({ … })`. A `{` where the expression would be can only be
+/// that statement, so it is read as one — the node keeps the braces and the statements, and a consumer that wants the
+/// value reads the last statement, which is what the extension means.
 fn parse_parenthesized_expression(p: &mut CppParser) -> ParseResult {
     let m = p.mark(CppSyntaxKind::ParenExpr);
     expect_token(p, CppTokenKind::LeftParen)?;
+
+    // **The GNU statement expression**, decided at the one token that tells it apart.
+    if p.current_token() == CppTokenKind::LeftBrace {
+        if let Err(err) = crate::grammar::cpp::stats::parse_compound_stat(p) {
+            m.undo(p);
+            return Err(err);
+        }
+        if let Err(err) = expect_token(p, CppTokenKind::RightParen) {
+            m.undo(p);
+            return Err(err);
+        }
+        return Ok(m.complete(p));
+    }
+
     if let Err(err) = parse_expr_up_to(p, Level::Full, true) {
         m.undo(p);
         return Err(err);
@@ -2709,6 +2752,44 @@ fn parse_parenthesized_expression(p: &mut CppParser) -> ParseResult {
         m.undo(p);
         return Err(err);
     }
+    Ok(m.complete(p))
+}
+
+/// **A Clang block literal** — `^(int n) { … }` — as a `LambdaExpr`.
+///
+/// ```text
+/// ^(int n) { return n; }        a block with parameters
+/// ^{ return 1; }                one that takes nothing
+/// ```
+///
+/// The parameter list is optional and its parentheses are the ones the declaration grammar already knows, so this
+/// reads them with `parse_parameter_list` rather than with a second copy of that rule. A block *type*
+/// (`void (^handler)(void)`) is a different construct and was already parseable — it is a declarator, not an
+/// expression — which is why only the literal needed this.
+fn parse_block_literal(p: &mut CppParser) -> ParseResult {
+    let m = p.mark(CppSyntaxKind::LambdaExpr);
+    p.bump(); // `^`
+
+    if p.current_token() == CppTokenKind::LeftParen
+        && let Err(err) = crate::grammar::cpp::decls::parse_parameter_list(p)
+    {
+        m.undo(p);
+        return Err(err);
+    }
+
+    // The same directive seam a lambda body has: `#if` between the head and the body is a real spelling.
+    while p.current_token() == CppTokenKind::Hash {
+        if let Err(err) = crate::grammar::cpp::stats::parse_preprocessor_directive(p) {
+            m.undo(p);
+            return Err(err);
+        }
+    }
+
+    if let Err(err) = crate::grammar::cpp::stats::parse_compound_stat(p) {
+        m.undo(p);
+        return Err(err);
+    }
+
     Ok(m.complete(p))
 }
 

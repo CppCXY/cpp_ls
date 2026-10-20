@@ -1293,6 +1293,12 @@ fn parse_decl_specifier_seq_with(
     Ok(m.complete(p))
 }
 
+/// The spelling MSVC gives a class key: `__interface I : IUnknown { … };`.
+///
+/// It is an identifier rather than a keyword, so every rule that recognises it matches on text — the same reading
+/// `__try` gets in the statement grammar.
+const THE_KEYWORD_INTERFACE_IS_SPELLED: &str = "__interface";
+
 /// Which kind of class-like declaration does this keyword introduce?
 pub fn class_like_kind(kind: CppTokenKind) -> Option<CppSyntaxKind> {
     match kind {
@@ -1491,6 +1497,21 @@ fn parse_one_decl_specifier_inner(
             }
 
             return Ok(m.complete(p));
+        }
+
+        // **MSVC's `__interface`** — a class key spelled as an identifier, and structurally a class: a name, an
+        // optional base clause, a body. (The compiler adds rules about the members — every one public and pure
+        // virtual — and none of them changes how the declaration is *written*.) So the spelling is all this arm is
+        // about: `parse_class_like_head` is the rule that already reads `class Name : Base { … }`, and it names the
+        // node `ClassDef` because `class_like_kind` has no entry for an identifier.
+        //
+        // Without it the word is read as a name and the declaration becomes an expression:
+        // `__interface I : IUnknown { … };` reported ``expected `;` after expression`` at the `:`.
+        CppTokenKind::Identifier
+            if p.current_token_text() == THE_KEYWORD_INTERFACE_IS_SPELLED
+                && a_body_follows_the_class_head(p) =>
+        {
+            return parse_class_like_head(p);
         }
 
         // A class-like *definition* head: `class Foo : public Bar { ... };`.
@@ -3956,6 +3977,23 @@ pub fn parse_abstract_declarator_with(
                 eat_cv_qualifiers(p);
                 op.complete(p);
             }
+            // **A Clang block declarator**: `void (^handler)(void)`, `void (^block)(int) = ^(int n) { … };`.
+            //
+            // A block is a pointer-shaped thing whose operator is `^` rather than `*` — the grammar of a block
+            // declaration is the function-pointer declaration with one token changed, which is why it is read here
+            // as the same node a `*` produces. Before this, `void (^block)(int)` was a declaration with no name:
+            // the `(` group failed to read as a declarator and the statement fell back to an expression, reporting
+            // ``expected `;` after expression`` at the `)`.
+            //
+            // Only in declarator position: `^` is also the XOR operator, and an expression's `^` never reaches this
+            // function (the expression grammar owns it).
+            CppTokenKind::Caret => {
+                let _ = container!();
+                let op = p.mark(CppSyntaxKind::PointerType);
+                p.bump();
+                eat_cv_qualifiers(p);
+                op.complete(p);
+            }
             // **A pointer to member written after the type**: `int C::*p;`, `int (C::*h)(int);`,
             // `void g(int (C::*)(int));`.
             //
@@ -4487,7 +4525,10 @@ fn a_parenthesised_declarator_with_a_name_follows(p: &CppParser) -> bool {
     if matches!(
         p.peek_token_kind_at(1..4).as_slice(),
         [
-            CppTokenKind::Star | CppTokenKind::Ampersand | CppTokenKind::LogicalAnd,
+            CppTokenKind::Star
+                | CppTokenKind::Ampersand
+                | CppTokenKind::LogicalAnd
+                | CppTokenKind::Caret,
             CppTokenKind::Identifier,
             CppTokenKind::RightParen
         ]

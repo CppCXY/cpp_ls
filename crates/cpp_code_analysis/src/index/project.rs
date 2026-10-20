@@ -8777,6 +8777,13 @@ pub struct IndexedKind {
     /// enumerator. A highlighter draws it as `enumMember` (a theme colours it with the enum's own), and a reader
     /// hovering it sees the enumerator rather than a variable that claims no type.
     pub enumerator: bool,
+    /// **Is this a variable template?** — `template <class T> constexpr bool v = …;`.
+    ///
+    /// `DeclFact::parameters` is the template head's parameter names, recorded by
+    /// `declared_template_parameters_with` when the fact was built, so a variable whose list is non-empty was written
+    /// with a `template <…>` in front of it and names a *family* of values rather than one. A highlighter draws that
+    /// apart from a plain variable — see `TypeKind::VariableTemplate` in the server.
+    pub template: bool,
 }
 
 impl IndexedKind {
@@ -8788,6 +8795,7 @@ impl IndexedKind {
             enumerator: found.kind == DeclKind::Variable
                 && found.type_of.is_none()
                 && found.scope.is_some(),
+            template: !found.parameters.is_empty(),
         }
     }
 }

@@ -1150,3 +1150,55 @@ main.cpp:10  [param-type-check]  this passes `"123131"` where `const int&` is de
 测试：`a_member_of_a_class_template_is_checked_after_substitution`（`const _Tp&`，本来就过）与
 `a_member_parameter_written_with_the_classs_alias_is_checked`（`const value_type&`，上一节被 `#[ignore]` 的那条，
 现在通过）。
+
+## 十八、`variableTemplate`：一个自定义语义类型，和六个当时不支持的扩展语法（2026）
+
+### ① 变量模板不再是 `variable`
+
+用户第二次提这件事（截图里 token 检查器显示 `variable`）。上一轮的答复是"LSP 没有这个类型"，这仍然成立 ——
+但"没有标准类型"不等于"只能发 `variable`"：协议的 legend 是**服务器自己声明**的字符串表，自定义名字是允许的，
+只是客户端不认识就画不出来。
+
+```text
+TypeKind::VariableTemplate  ->  SemanticTokenType::new("variableTemplate")
+分类  声明处：缓冲区里有 template head（declared_template_parameters_of）
+      索引处：fact.parameters 非空（declared_template_parameters_with 早就记录了）
+兜底  builder.push_range 返回 false（客户端没有这个类型）→ 再发一次 Variable
+```
+
+兜底那一步是关键：**不发比发错更糟** —— 客户端不认识时若不兜底，这个 token 会直接消失，连语法高亮都没有了。
+测试 `a_template_parameter_is_a_type_parameter_and_a_variable_template_is_a_variable_template` 同时钉住
+"默认发 custom"和"只声明 `variable` 的客户端拿到 `variable`"。
+
+要给它上色（VS Code，任选其一）：
+
+```json
+"editor.semanticTokenColors": { "variableTemplate": { "foreground": "#4FC1FF" } }
+```
+
+### ② `cpp_parser` 里六个 `#[ignore]` 全部修好，现在一个都不剩
+
+```text
+GNU     `({ int a = 1; a; })`      语句表达式：`(` 后跟 `{` 就是复句语句，读成 CompoundStat
+        `a ?: b`                   elvis：`?` 后直接是 `:`，中位操作数缺省 —— 不合成任何节点，两个操作数照旧
+MSVC    `__try { } __except (1) { }`  __try/__except：与 try/catch 同形，filter 是**表达式**不是形参表
+        `__try { } __finally { }`      __finally：同一循环里的另一种 handler
+        `__interface I : IUnknown { }` 类关键字用标识符拼写：名字 + 基类子句 + 体，就是 class 的读法
+Clang   `^(int n) { … }`           块字面量：操作数位置的 `^` 只能是它，读成 LambdaExpr（无捕获的闭包）
+        `void (^block)(int)`       块**声明**：`^` 就是函数指针的 `*`，在 declarator 里读成 PointerType
+C++11   `for (int x : {1, 2, 3})`  花括号初始化作为 range：`{` 在表达式位置就是列表
+```
+
+其中 Clang 那半条值得记一笔：**测试的注释原本写着"块类型能解析"**，实际上不能 —— `void (^handler)(void)`
+报 `expected `;` after expression`。所以修的时候两半都要做：declarator 里的 `^` 和操作数位置的 `^`。
+
+验收：`cargo test -p cpp_parser` 全绿，且 `grep -r '#\[ignore' crates/cpp_parser` 已无结果。
+
+### 剩下的 ignored 测试（不在 cpp_parser）
+
+```text
+cpp_code_analysis/tests/types.rs        3 条（known regression / root cause，各自记了原因）
+cpp_code_analysis/tests/checks.rs       1 条（一个已解析为 neither side 的形参）
+cpp_code_analysis/src/index/project.rs  1 条（一个测量型用例）
+cpp_ls/tests/handshake.rs               5 条（3 条 needing the release profile / a reading, 2 条 probe）
+```
