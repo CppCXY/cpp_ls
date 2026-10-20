@@ -3768,6 +3768,17 @@ fn declared_type(
     // The **written** spelling, with the qualifiers the reader drops: `const auto& r = x;` has to deduce a `const`
     // type, and `Type` models no qualifiers — so the spelling is carried beside the shape rather than inside it.
     // See `deduction_inputs`, which is the one place that reads a declaration's text for this reason.
+    // **A range-based `for` head** — `for (auto x : range)`: the type is the range's **element**, not the range,
+    // and there is no initializer for `deduction_inputs` to find. This is the ordinary spelling of a loop over a
+    // container, and without it every such variable had no type: hovering `x` in `for (auto x : v)` answered "a
+    // variable, declared in a function body" and nothing else, and `it->first` in `for (auto it : map)` could not
+    // be resolved. See [`range_for_element_type`].
+    if let Some(element) =
+        range_for_element_type(index, declaring, scopes, root, path, named, depth)
+    {
+        return element;
+    }
+
     let Some((as_written, _)) = deduction_inputs(root, named) else {
         return unknown();
     };
@@ -3817,6 +3828,97 @@ fn writes_auto(written: &str) -> bool {
     written
         .split(|character: char| !character.is_alphanumeric() && character != '_')
         .any(|word| word == "auto")
+}
+
+/// **The element type of the range a `for` head binds** — `for (auto x : v)` answers `int` for a `vector<int>`.
+///
+/// `None` when the declaration is not a range-based `for`'s, which is the ordinary case. The head is the one shape
+/// whose declared variable has **no initializer**: `auto x = v[0]` has one and goes through [`initializer_type`],
+/// while `for (auto x : v)` states the range in the loop's own syntax.
+fn range_for_element_type(
+    index: &ProjectIndex,
+    declaring: &mut dyn FnMut(&Path) -> Option<crate::FileView>,
+    scopes: &crate::ScopeTree,
+    root: &cpp_parser::CppSyntaxNode,
+    path: &Path,
+    named: &NamedDeclaration,
+    depth: usize,
+) -> Option<Known<Type>> {
+    let NamedDeclaration::Here(binding) = named else {
+        return None;
+    };
+
+    let declared_at = binding.name_range.start_offset;
+    let loop_node = cpp_parser::token_at(root, declared_at)?
+        .parent_ancestors()
+        .find(|node| {
+            cpp_parser::CppSyntaxKind::from(node.kind()) == cpp_parser::CppSyntaxKind::RangeForStat
+        })?;
+
+    let range = range_expression_of_the_pattern(&loop_node)?;
+    let Known::Yes((container, _)) =
+        type_of_expression(index, declaring, scopes, root, path, &range, depth + 1)
+    else {
+        return Some(Known::Unknown(UnknownReason::UnknownType(Box::from("auto"))));
+    };
+
+    Some(match range_element_of(&container) {
+        Some(element) => Known::Yes(crate::sema::types::parse_type_spelling(&element)),
+        None => Known::Unknown(UnknownReason::UnknownType(Box::from(container.to_string()))),
+    })
+}
+
+/// **The element a range yields** — the whole element, where [`element_of`] answers one *component* of it.
+///
+/// The difference is what the two spellings ask: `for (auto x : map)` binds the `pair` itself, while
+/// `for (auto [key, value] : map)` binds its two halves.
+fn range_element_of(container: &Type) -> Option<String> {
+    let Type::Named { name, arguments } = container else {
+        return match container {
+            Type::Array { of, .. } => Some(of.to_string()),
+            _ => None,
+        };
+    };
+
+    let plain = name.rsplit("::").next().unwrap_or(name);
+
+    if matches!(
+        plain,
+        "map" | "unordered_map" | "multimap" | "unordered_multimap"
+    ) && arguments.len() == 2
+    {
+        return Some(format!(
+            "std::pair<const {}, {}>",
+            arguments[0], arguments[1]
+        ));
+    }
+
+    if arguments.len() == 1
+        && matches!(
+            plain,
+            "vector"
+                | "list"
+                | "deque"
+                | "forward_list"
+                | "set"
+                | "unordered_set"
+                | "multiset"
+                | "unordered_multiset"
+                | "basic_string"
+                | "string"
+                | "span"
+                | "initializer_list"
+                | "valarray"
+        )
+    {
+        return Some(arguments[0].to_string());
+    }
+
+    if matches!(plain, "array") && !arguments.is_empty() {
+        return Some(arguments[0].to_string());
+    }
+
+    None
 }
 
 /// The type of what the declaration is initialized with.
@@ -4036,20 +4138,6 @@ fn written_like_a_macro(word: &str) -> bool {
                 .all(|character| !character.is_alphabetic() || character.is_uppercase()))
 }
 
-///
-/// The test the type layer asks before it treats an expression as a name, and it is deliberately about the
-/// *spelling* rather than about the node's kind: a qualified name and a member access are different nodes and
-/// different questions — the second is an object and a member of it, the first is one entity with a scope.
-///
-/// **A macro prefix is part of the spelling**, and that is the whole of the second clause: `_STD f` is one name
-/// written as two words, because `_STD` is `::std::` to a compiler and an ordinary identifier to a file that has not
-/// read `<yvals.h>`. Without it every expression the standard library writes through a macro was not a name at all
-/// — the reading fell through to "not a name" and answered `UnknownType("_STD f")`, which is **the error's own
-/// spelling and the tell**: measured, `auto a = _STD f();` was refused while `auto a = f();` gave `int`, and 413 of
-/// the 609 `auto` declarations this analysis cannot deduce are these two shapes.
-///
-/// Two identifiers in a row cannot be two segments of one name in C++ and cannot be two expressions either, so
-/// accepting the pair costs nothing: the reading it admits is the one the parser has already made.
 /// **The type of one name a structured binding declared** — `value` in `for (auto [key, value] : map)`.
 ///
 /// `None` when the name is not one: the ordinary case, and the one that must stay cheap. The check is the **binding**
@@ -4580,6 +4668,17 @@ fn type_of_a_call(
     // and thrown away: `_Convert_size<size_type>(_Length)` names the type it returns, and nothing was pairing that
     // name with the declaration's parameters. Read from the **syntax** rather than from the text, for the reason
     // `read_template_arguments` gives — an argument's text can contain commas a splitter would get wrong.
+
+    // **An iterator-producing member call is a view of its container's element** — `v.begin()`, `m.find(k)`.
+    //
+    // The standard library's iterator types are class templates this layer cannot instantiate, so their own
+    // members are not readable; what a reader writes next is `it->first`, `it->second` and `*it`, and all three are
+    // questions about the **element**. Answering the element type is what makes them work — and the declared
+    // `iterator` type, whose members are `operator*` and four typedefs, is both harder to compute and less useful.
+    if let Some(element) = iterator_element_type(index, declaring, scopes, root, path, &callee) {
+        return element;
+    }
+
     let written_arguments = written_template_arguments(&callee);
 
     // **The types of the arguments the call passed**, which is the other way a function template is told what its
@@ -4624,6 +4723,38 @@ fn type_of_a_call(
 /// An empty list is what both "no argument list" and "an argument list this could not read" give, and the caller's
 /// only use for it is a positional substitution — substituting nothing is what it already does when there is nothing
 /// to substitute, so the two need not be told apart.
+/// **The element type an iterator-producing member call yields** — `v.begin()`, `m.find(k)`, `m.lower_bound(k)`.
+///
+/// `None` for every other call, which is the ordinary case and stays cheap: one member lookup and a name test.
+fn iterator_element_type(
+    index: &ProjectIndex,
+    declaring: &mut dyn FnMut(&Path) -> Option<crate::FileView>,
+    scopes: &crate::ScopeTree,
+    root: &cpp_parser::CppSyntaxNode,
+    path: &Path,
+    callee: &cpp_parser::CppSyntaxNode,
+) -> Option<Known<(Type, PathBuf)>> {
+    let member = crate::sema::resolve::member_access_at(root, end_of_the_written_name(callee))?;
+    if !matches!(
+        member.member.as_str(),
+        "begin" | "cbegin" | "rbegin" | "end" | "cend" | "rend" | "find" | "lower_bound" | "upper_bound"
+    ) {
+        return None;
+    }
+
+    let Known::Yes((object, file)) =
+        type_of_expression(index, declaring, scopes, root, path, &member.object, 0)
+    else {
+        return None;
+    };
+
+    let element = range_element_of(&object)?;
+    Some(Known::Yes((
+        crate::sema::types::parse_type_spelling(&element),
+        file,
+    )))
+}
+
 fn written_template_arguments(callee: &cpp_parser::CppSyntaxNode) -> Vec<Type> {
     let Some(list) = callee
         .descendants()

@@ -1197,3 +1197,115 @@ int f() {
         "and the key is the first, `const` as a map's key is"
     );
 }
+
+/// **`for (auto x : v)` 里 `x` 的类型是元素的类型** —— 这个声明没有初始化器,所以"由初始化器推导"那条路没有答案。
+///
+/// 两张报告图是同一个缺陷:`x` / `it` 的 hover 只有 "a variable, declared in a function body",没有类型。
+#[test]
+fn a_range_for_variable_has_the_element_type() {
+    let source = "\
+#include <vector>
+#include <map>
+#include <string>
+int f() {
+    std::vector<int> values;
+    for (auto x : values) {
+        int k1 = x;
+        (void)k1;
+    }
+    std::map<int, std::string> myMap;
+    for (auto it : myMap) {
+        int k2 = it;
+        (void)k2;
+    }
+    return 0;
+}
+";
+    let vector = "namespace std { template <class T> struct vector { }; }\n";
+    let map = "namespace std { template <class K, class V> struct map { }; template <class A, class B> struct pair { }; }\n";
+    let string = "namespace std { template <class C> struct basic_string { }; typedef basic_string<char> string; }\n";
+    let files = MemoryFiles::new()
+        .with_file("/p/vector", vector)
+        .with_file("/p/map", map)
+        .with_file("/p/string", string)
+        .with_file("/p/a.cpp", source);
+    let providers = SessionFiles::new(OpenDocuments::new(), files);
+    let mut session = Session::with_config(
+        "/p",
+        providers,
+        WatchFilter::new("/p"),
+        CompilerConfig::default(),
+    );
+    session.add_project_files([std::path::PathBuf::from("/p/a.cpp")]);
+    session.want_cooked_reading(std::path::Path::new("/p/a.cpp"));
+    session.index_everything();
+
+    let view = session.view("/p/a.cpp").expect("a view");
+    let type_of = |needle: &str| {
+        let at = source.find(needle).expect("the fixture writes it") + needle.len();
+        let reading = view
+            .reading_offset_of(cpp_code_analysis::file::coordinates::FileOffset::new(at))
+            .expect("the cursor is in the rendering");
+        match session.type_at(&view, reading) {
+            cpp_code_analysis::Known::Yes(found) => found.type_of,
+            other => panic!("`{needle}` has a type: {other:?}"),
+        }
+    };
+
+    assert_eq!(type_of("k1 = "), "int", "the element of a `vector<int>`");
+    let pair = type_of("k2 = ");
+    assert!(
+        pair.contains("pair<const int, std::string>"),
+        "the element of a `map<int, std::string>` is that pair: {pair}"
+    );
+}
+
+/// **`auto it = v.begin();` 的 `it` 是元素的视图** —— 迭代器类型是这一层无法实例化的类模板,
+/// 而读者接下来写的是 `it->first`、`it.second`、`*it`,这三件都是关于**元素**的问题。
+#[test]
+fn an_iterator_call_has_the_element_type() {
+    let source = "\
+#include <map>
+#include <string>
+int f() {
+    std::map<int, std::string> myMap;
+    auto it = myMap.begin();
+    int k = it;
+    (void)k;
+    return 0;
+}
+";
+    let map = "namespace std { template <class K, class V> struct map { }; template <class A, class B> struct pair { }; }\n";
+    let string = "namespace std { template <class C> struct basic_string { }; typedef basic_string<char> string; }\n";
+    let files = MemoryFiles::new()
+        .with_file("/p/map", map)
+        .with_file("/p/string", string)
+        .with_file("/p/a.cpp", source);
+    let providers = SessionFiles::new(OpenDocuments::new(), files);
+    let mut session = Session::with_config(
+        "/p",
+        providers,
+        WatchFilter::new("/p"),
+        CompilerConfig::default(),
+    );
+    session.add_project_files([std::path::PathBuf::from("/p/a.cpp")]);
+    session.want_cooked_reading(std::path::Path::new("/p/a.cpp"));
+    session.index_everything();
+
+    let view = session.view("/p/a.cpp").expect("a view");
+    let at = source.find("k = it").expect("the fixture") + "k = ".len();
+    let reading = view
+        .reading_offset_of(cpp_code_analysis::file::coordinates::FileOffset::new(at))
+        .expect("the cursor is in the rendering");
+    match session.type_at(&view, reading) {
+        cpp_code_analysis::Known::Yes(found) => {
+            println!("it: {}", found.type_of);
+            assert!(
+                found.type_of.contains("pair<const int, std::string>"),
+                "`begin()` yields the map's element: {}",
+                found.type_of
+            );
+        }
+        other => panic!("`it` has a type: {other:?}"),
+    }
+}

@@ -1719,3 +1719,45 @@ key   → const int
 新测试  a_structured_binding_in_a_range_for_has_the_paired_type(value → std::string,key → const int)
 套件    cpp_code_analysis 全部、cpp_ls lib 85 / handshake 31
 ```
+
+## 三十一、`for (auto x : range)` 与迭代器的类型（2026）
+
+三张报告图,两个缺陷:
+
+```text
+图 1  for (auto x : anotherVec)   hover `x` 只显示 "a variable, declared in a function body",没有类型
+图 2  for (auto it : myMap)       同上
+图 3  auto it = myMap.begin();     `it` 没有类型,`it->` 补不出成员,`*it` 也推不出
+```
+
+### 范围的元素类型
+
+`for (auto x : range)` 的声明**没有初始化器** —— 类型由 range 决定,"由初始化器推导"那条路根本没有入口。
+新增 `range_for_element_type`:从绑定找到外层 `RangeForStat` 的 range 表达式,取它的类型,再按元素规则化简:
+
+```text
+map<K, V> / unordered_map → std::pair<const K, V>   (整元素;结构化绑定才拆成两半)
+vector<T> / list<T> / set<T> … → T
+T[N] / std::array<T, N> → T
+```
+
+实测:`for (auto x : vector<int>)` → `int`;`for (auto it : map<int, string>)` → `std::pair<const int, std::string>`。
+
+### 迭代器:当作元素的视图
+
+迭代器类型(`std::map<int, string>::iterator`)是这一层无法实例化的类模板,它自己的成员是 `operator*` 和几个
+typedef —— 读者接下来写的 `it.first`、`it->second`、`*it` 都是关于**元素**的问题。所以:
+
+```text
+begin / cbegin / rbegin / end / cend / rend / find / lower_bound / upper_bound
+→ 元素类型(与 range-for 同一个 range_element_of)
+```
+
+实测:`auto it = myMap.begin();` → `it` 的类型是 `std::pair<const int, std::string>`,`it.first` / `it.second`
+因此可解析。
+
+### 还没做的(下一件)
+
+- `it->` 的成员补全:光标停在**半写完的 `->`** 上时解析器给的恢复形状不是成员访问,补全因此没有上下文。
+  这是补全的恢复问题,不是类型问题 —— 类型已经答对了(`it` 是 pair)。
+- `*it`:[`auto zz1 = *it;`] 需要"对类做一元 `*`"的规则,和上面的迭代器模型配套。
