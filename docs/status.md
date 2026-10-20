@@ -1761,3 +1761,47 @@ begin / cbegin / rbegin / end / cend / rend / find / lower_bound / upper_bound
 - `it->` 的成员补全:光标停在**半写完的 `->`** 上时解析器给的恢复形状不是成员访问,补全因此没有上下文。
   这是补全的恢复问题,不是类型问题 —— 类型已经答对了(`it` 是 pair)。
 - `*it`:[`auto zz1 = *it;`] 需要"对类做一元 `*`"的规则,和上面的迭代器模型配套。
+
+## 三十二、`it->` 与 `*it`（2026）
+
+上一节留下的两件,都做完了 —— 其中一件根本不是缺陷。
+
+### `it->` 的成员补全:产品是对的,夹具错了
+
+实测(`std::map<int, std::string>`,`auto it = myMap.begin()`):
+
+```text
+context: Member(MemberAccess { object: it, arrow: true })
+after `it->`: ["first", "second"]
+```
+
+`->` 的"半写完"位置由 `member_access_from_the_text` 从文本恢复,类型来自上一节的迭代器规则,**一直都在**。
+我第一版夹具写的是 `#include <map>` —— 尖括号的头文件走 include 路径搜索,`/p` 不在其中,`std::pair` 的
+声明因此从没被读到,members 查询如实回答"`std::pair` 不在这个文件里,它的声明在另一个没读过的文件里"。
+换成 `#include "map.h"`(引号头文件按相邻文件解析)之后立刻通过。
+
+值得记一条:**"No suggestions" 有两种原因** —— 没有上下文,或者有上下文但声明没读到。补全的 `why_no_members`
+会把第二种说出来,这次正是靠它定位的。
+
+### `*it`:元素就是元素
+
+一元 `*` 的规则原来只有"指针取所指"。迭代器模型里 `it` 的类型**就是元素**,所以 `*it` 应当原样返回它:
+
+```text
+Type::Pointer          → 所指(原规则)
+Type::Named            → 它自己(迭代器模型)
+Type::TemplateParameter→ 它自己(同一个理由:不知道它是什么,但 `*` 不改变它)
+```
+
+实测:`auto element = *it;` → `std::pair<const int, std::string>`。
+
+一个诚实的边界:真的定义了 `operator*` 的用户类走不到这条规则(它需要成员查找),这里仍然是 `Unknown` ——
+这一条是为**模型**存在的,不是对用户类型的猜测。
+
+### 验收
+
+```text
+新测试  a_half_typed_arrow_still_offers_the_members(quoted include 的夹具)
+        dereferencing_an_iterator_yields_the_element
+套件    cpp_code_analysis 全部、cpp_ls lib 85 / handshake 31(已知抖动除外)
+```

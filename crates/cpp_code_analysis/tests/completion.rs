@@ -1909,3 +1909,67 @@ int neither;
         "a variable is not a word a condition can mean: {labels:?}"
     );
 }
+
+/// **半写完的 `it->` 也要有成员补全** —— 解析器在 `->` 后面没有名字时报错,补全必须从文本恢复这个访问。
+#[test]
+fn a_half_typed_arrow_still_offers_the_members() {
+    let source = "\
+#include \"map.h\"
+#include \"string.h\"
+int f() {
+    std::map<int, std::string> myMap;
+    auto it = myMap.begin();
+    it->
+    return 0;
+}
+";
+    let map = "namespace std { template <class K, class V> struct map { }; template <class A, class B> struct pair { A first; B second; }; }\n";
+    let string = "namespace std { template <class C> struct basic_string { }; typedef basic_string<char> string; }\n";
+    let files = MemoryFiles::new()
+        .with_file("/p/map.h", map)
+        .with_file("/p/string.h", string)
+        .with_file("/p/a.cpp", source);
+    let providers = SessionFiles::new(OpenDocuments::new(), files);
+    let mut session = Session::with_config(
+        "/p",
+        providers,
+        WatchFilter::new("/p"),
+        CompilerConfig::default(),
+    );
+    session.add_project_files([
+        std::path::PathBuf::from("/p/map.h"),
+        std::path::PathBuf::from("/p/string.h"),
+        std::path::PathBuf::from("/p/a.cpp"),
+    ]);
+    session.index_everything();
+    let view = cooked_view(&mut session, "/p/a.cpp");
+
+    let at = source.find("it->\n").expect("the fixture") + "it->".len();
+    let reading = view
+        .reading_offset_of(cpp_code_analysis::file::coordinates::FileOffset::new(at))
+        .expect("the cursor is in the rendering");
+    println!(
+        "context: {:?}",
+        cpp_code_analysis::completion::context_at(&view.root, reading.get())
+    );
+    let offered = session.completions(
+        &view,
+        cpp_code_analysis::file::coordinates::FileOffset::new(at),
+    );
+    let labels: Vec<&str> = offered.items.iter().map(|item| item.label.as_str()).collect();
+    println!(
+        "why: {}",
+        cpp_code_analysis::completion::why_no_members(
+            session.index(),
+            &view.scopes,
+            &view.root,
+            &view.path,
+            reading
+        )
+    );
+    println!("after `it->`: {labels:?}");
+    assert!(
+        labels.contains(&"first") && labels.contains(&"second"),
+        "the element's members: {labels:?}"
+    );
+}

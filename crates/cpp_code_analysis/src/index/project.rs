@@ -2809,12 +2809,20 @@ pub(crate) fn type_of_expression(
         return match operand_type {
             // **A `*` is the type model's own operation.** `Widget**` gives `Widget*`, an array gives its
             // element, and a class with an `operator*` gives nothing — that one needs the class's members and
-            // therefore the index, and inventing a pointee would be a wrong answer rather than a missing one.
             Known::Yes((type_of, file)) => match type_of.pointee() {
                 Some(pointee) => Known::Yes(((*pointee).clone(), file)),
-                // An operand whose type has no `*` on it: the program is ill-formed, and a type invented here
-                // would be a wrong answer rather than a missing one.
-                None => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
+                // **A class with no `*` on it: the iterator model.** An iterator-producing call is typed as its
+                // container's *element* (see [`iterator_element_type`]), so `*it` asks for the thing the element
+                // already is. A class with a real `operator*` is not handled here and answers `Unknown` — this
+                // arm exists for the model, not as a guess about user types.
+                None => match &type_of {
+                    Type::Named { .. } | Type::TemplateParameter { .. } => {
+                        Known::Yes((type_of, file))
+                    }
+                    // An operand whose type has no `*` on it: the program is ill-formed, and a type invented
+                    // here would be a wrong answer rather than a missing one.
+                    _ => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
+                },
             },
             Known::Unknown(reason) => Known::Unknown(reason),
             Known::No => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),

@@ -1309,3 +1309,57 @@ int f() {
         other => panic!("`it` has a type: {other:?}"),
     }
 }
+
+/// **`*it` 就是元素本身** —— 迭代器被当作元素的视图(`begin()` 的类型就是元素),所以 `*it` 问的正是那个东西。
+#[test]
+fn dereferencing_an_iterator_yields_the_element() {
+    let source = "\
+#include \"map.h\"
+#include \"string.h\"
+int f() {
+    std::map<int, std::string> myMap;
+    auto it = myMap.begin();
+    auto element = *it;
+    int k = element;
+    (void)k;
+    return 0;
+}
+";
+    let map = "namespace std { template <class K, class V> struct map { }; template <class A, class B> struct pair { A first; B second; }; }\n";
+    let string = "namespace std { template <class C> struct basic_string { }; typedef basic_string<char> string; }\n";
+    let files = MemoryFiles::new()
+        .with_file("/p/map.h", map)
+        .with_file("/p/string.h", string)
+        .with_file("/p/a.cpp", source);
+    let providers = SessionFiles::new(OpenDocuments::new(), files);
+    let mut session = Session::with_config(
+        "/p",
+        providers,
+        WatchFilter::new("/p"),
+        CompilerConfig::default(),
+    );
+    session.add_project_files([
+        std::path::PathBuf::from("/p/map.h"),
+        std::path::PathBuf::from("/p/string.h"),
+        std::path::PathBuf::from("/p/a.cpp"),
+    ]);
+    session.want_cooked_reading(std::path::Path::new("/p/a.cpp"));
+    session.index_everything();
+
+    let view = session.view("/p/a.cpp").expect("a view");
+    let at = source.find("k = element").expect("the fixture") + "k = ".len();
+    let reading = view
+        .reading_offset_of(cpp_code_analysis::file::coordinates::FileOffset::new(at))
+        .expect("the cursor is in the rendering");
+    match session.type_at(&view, reading) {
+        cpp_code_analysis::Known::Yes(found) => {
+            println!("element: {}", found.type_of);
+            assert!(
+                found.type_of.contains("pair<const int, std::string>"),
+                "`*it` is the element: {}",
+                found.type_of
+            );
+        }
+        other => panic!("`element` has a type: {other:?}"),
+    }
+}
