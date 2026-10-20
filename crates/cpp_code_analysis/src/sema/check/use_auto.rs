@@ -61,10 +61,9 @@ impl Check for UseAuto {
                 context.add_in_the_file(
                     DiagnosticCode::UseAuto,
                     cpp_parser::SourceRange::new(start, at + spelling.len() - start),
-                    format!("{spelling} {name}"),
-                    format!(
-                        "`{name}` is declared by its full iterator spelling — write `auto {name}`, which is the same type \
-                         and does not need editing when the container's element type changes"
+                    t!("%{spelling} %{name}", spelling = spelling, name = name),
+                    t!(
+                        "`%{name}` is declared by its full iterator spelling — write `auto %{name}`, which is the same type and does not need editing when the container's element type changes", name = name
                     ),
                 );
             }

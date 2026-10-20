@@ -1546,7 +1546,7 @@ fn parse_a_type_here(p: &mut CppParser) -> ParseResult {
     types::parse_type_id_for_an_allocation(p)?;
     if p.current_token_index() == before {
         return Err(CppParseError::syntax_error_from(
-            "expected a type to allocate",
+            &t!("expected a type to allocate"),
             p.current_token_range(),
         ));
     }
@@ -2372,7 +2372,7 @@ fn parse_primary_expr(p: &mut CppParser, fold_operand: bool) -> ParseResult {
                     _ => {
                         p.close_marks_above(base);
                         return Err(CppParseError::syntax_error_from(
-                            "expected a name after `::`",
+                            &t!("expected a name after `::`"),
                             p.current_token_range(),
                         ));
                     }
@@ -2892,7 +2892,7 @@ fn parse_requires_expression(p: &mut CppParser) -> ParseResult {
     if p.current_token() != CppTokenKind::LeftBrace {
         p.close_marks_above(base);
         return Err(CppParseError::syntax_error_from(
-            "expected `{` after `requires`",
+            &t!("expected `{` after `requires`"),
             p.current_token_range(),
         ));
     }
@@ -2947,7 +2947,7 @@ fn parse_requires_expression(p: &mut CppParser) -> ParseResult {
     if p.current_token() != CppTokenKind::RightBrace {
         p.close_marks_above(base);
         return Err(CppParseError::syntax_error_from(
-            "expected `}`",
+            &t!("expected `}`"),
             p.current_token_range(),
         ));
     }

@@ -1,10 +1,25 @@
 # 中文诊断 —— key 是**英文模板本身**（含 `%{…}` 占位符），所以 `en` 不需要文件：缺 key 时 rust-i18n 返回 key，
-# 那正是英文原文。这张表可以逐条补齐。
+# 那正是英文原文。
 #
 # 体例：先说"哪里不对"，再说"该写什么"。诊断是给正在写这行代码的人看的，第二句比第一句更有用。
+#
+# 这张表有两类 key：带 `%{name}` 的（已经走 `t!`，可以翻译）和还带 `{}` 的（仍是 `format!` 拼的，翻不了 ——
+# 它们留在这儿没有意义，所以只列前者）。见 docs/status.md §二十四 的清单。
 
 # ---- 检查（sema/check） ----
 "`%{name}` is declared here and never used": "`%{name}` 在这里声明，之后从未使用"
-"this function is declared to return `%{declared}` and its body has no `return`": "这个函数声明返回 `%{declared}`，但函数体里没有 `return`"
+"`%{name}` takes %{written} argument(s) and this call passes more": "`%{name}` 只收 %{written} 个实参，这次调用给多了"
+"`%{name}` needs %{required} argument(s) and this call passes fewer": "`%{name}` 需要 %{required} 个实参，这次调用给少了"
+"`%{name}` is %{how} with a value that does not convert to `%{written}`": "`%{name}` 是 %{how}，而这里赋的值不能转换成 `%{written}`"
+"`%{text}` assigns rather than compares: `=` in a condition is almost always a `==`": "`%{text}` 是赋值而不是比较：条件里的 `=` 几乎总是想写 `==`"
+"`(%{inner})` is a C-style cast: it tries `const_cast`, `static_cast` and `reinterpret_cast` in that order and takes the first that compiles, so it can remove `const` without saying so — name the one you meant": "`(%{inner})` 是 C 风格转换：它按 `const_cast`、`static_cast`、`reinterpret_cast` 的顺序试，取第一个能编过的，所以它可能在不声不响之间去掉 `const` —— 写清你要的是哪一个"
+"`%{written}` is converted to `bool` here — write the comparison the reader is being asked to make: `%{written} != 0`": "这里把 `%{written}` 转成了 `bool` —— 把读者要做的比较写出来：`%{written} != 0`"
+"`%{name}`'s replacement list is not parenthesised, so a caller's expression is spliced in without its precedence — write `#define %{name}(…) (…)`": "`%{name}` 的替换列表没有加括号，调用方的表达式会被原样拼进来、丢掉优先级 —— 写成 `#define %{name}(…) (…)`"
+"`%{name}` is declared by its full iterator spelling — write `auto %{name}`, which is the same type and does not need editing when the container's element type changes": "`%{name}` 用了迭代器的完整写法声明 —— 写 `auto %{name}`，类型完全一样，而且容器元素类型变化时不用改这里"
 "`%{name}` overrides a base's virtual and does not say so — write `override`, which turns a silent non-override into a compile error": "`%{name}` 覆盖了基类的虚函数却没有声明 —— 写 `override`，它能把「以为覆盖了其实没有」变成编译错误"
+"`return;` in a function declared to return `%{declared}`": "函数的返回类型是 `%{declared}`，这里却是 `return;`"
+"`%{returned_text}` returns a value that does not convert to `%{declared}`, the type this function is declared to return": "`%{returned_text}` 返回的值不能转换成 `%{declared}`，而那是这个函数声明的返回类型"
+"this branch cannot run: the condition `%{condition}` is a literal false": "这个分支永远走不到：条件 `%{condition}` 是字面量 false"
+"this branch always runs: the condition `%{condition}` is a literal true, so the `if` decides nothing": "这个分支永远会走：条件 `%{condition}` 是字面量 true，这个 `if` 什么也没决定"
+"this function is declared to return `%{declared}` and its body has no `return`": "这个函数声明返回 `%{declared}`，但函数体里没有 `return`"
 "`%{object}` has no member `%{member}`": "`%{object}` 没有成员 `%{member}`"

@@ -1419,3 +1419,56 @@ format!("`{name}` overrides …")                        →  t!("`%{name}` over
 值得记的一条:两张表**不能放混** —— 每个 `i18n!` 只读自己 crate 的 `locales/`,所以解析器的 key 必须在
 `crates/cpp_parser/locales/` 下,诊断的在 `crates/cpp_code_analysis/locales/` 下。放错了同样"安静地回英文",
 和 key 拼错一模一样。
+
+## 二十四、把 `format!` 换成 `t!`:46 条解析错误 + 17 条检查（2026）
+
+上一节只把已经走 `t!` 的句子翻译了。这一节把**消息本身**改成可翻译的。
+
+### 解析器:57 处一次性改完
+
+`CppParseError::syntax_error_from(` 的第一个参数一律是从字面量,形如:
+
+```rust
+CppParseError::syntax_error_from(
+    "expected `;` after a class definition",
+```
+
+一次正则替换成 `&t!("…")`,57 处,零编译错误、`cpp_parser` 全绿 —— 因为形状完全一致。
+`expect_token` 那条路本来就走 `t!("expected %{token}, but get %{current}")`。
+
+### 检查:13 处按占位符自动命名
+
+```rust
+format!("`{name}` takes {written} argument(s) …")     →  t!("`%{name}` takes %{written} argument(s) …", name = name, written = written)
+```
+
+三个地方需要 `.to_string()`(函数返回 `String`,而 `t!` 给的是 `Cow<str>`)。
+顺带把那些用 `\` 折行的长字符串**接成一行**(`\` + 换行 + 缩进 在 Rust 里等于空,但作为 YAML 的 key 就没法写了)。
+
+### 两张表
+
+```text
+crates/cpp_parser/locales/zh-CN.yml          46 条解析错误
+crates/cpp_code_analysis/locales/zh-CN.yml   17 条检查
+```
+
+实测:
+
+```text
+en     expected `;`
+zh-CN  这里需要 `;`
+```
+
+### 一个必须记住的坑:`i18n!` 在**编译期**读文件
+
+Cargo 不知道 `locales/*.yml` 是输入,改完翻译**不会触发重编** —— 表现是"翻译不生效",和 key 拼错一模一样。
+实测:改完 YAML 跑测试,`zh-CN` 仍然输出英文,直到 `touch src/lib.rs`(或 `cargo clean -p <crate>`)才生效。
+
+### 还没转的
+
+```text
+检查里仍有 6 条用位置参数的消息（`{}` 而非 `{name}`）—— 转换要先给每个实参起名字,留到下一批
+解析器里少数 `format!("…")` 拼出来的消息（带数字/偏移量的那些）
+```
+
+两张表都是"缺 key 就回英文",所以没转的部分不会退化 —— 只是还没中文。

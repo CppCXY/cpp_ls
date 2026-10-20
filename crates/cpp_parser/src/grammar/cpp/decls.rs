@@ -140,7 +140,7 @@ fn parse_concept_declaration(p: &mut CppParser) -> ParseResult {
     } else {
         p.close_marks_above(base);
         return Err(CppParseError::syntax_error_from(
-            "expected a concept name",
+            &t!("expected a concept name"),
             p.current_token_range(),
         ));
     }
@@ -354,7 +354,7 @@ pub fn parse_template_parameter_list(p: &mut CppParser) -> ParseResult {
             _ => {
                 p.close_marks_above(base);
                 return Err(CppParseError::syntax_error_from(
-                    "expected `,` or `>` in template parameter list",
+                    &t!("expected `,` or `>` in template parameter list"),
                     p.current_token_range(),
                 ));
             }
@@ -1152,7 +1152,7 @@ fn parse_declaration_here(p: &mut CppParser) -> ParseResult {
         } else if a_declaration_cannot_follow(p) {
             p.close_marks_above(base);
             return Err(CppParseError::syntax_error_from(
-                "expected `;` after a class definition",
+                &t!("expected `;` after a class definition"),
                 p.current_token_range(),
             ));
         }
@@ -1598,7 +1598,7 @@ fn finish_init_declarator(p: &mut CppParser, m: Marker, declarator_from: usize) 
     if an_initializer_needs_a_name(p, declarator_from) {
         m.undo(p);
         return Err(CppParseError::syntax_error_from(
-            "expected a declarator name",
+            &t!("expected a declarator name"),
             p.current_token_range(),
         ));
     }
@@ -1872,7 +1872,7 @@ fn finish_init_declarator(p: &mut CppParser, m: Marker, declarator_from: usize) 
         {
             m.undo(p);
             return Err(CppParseError::syntax_error_from(
-                "a declarator takes only one initializer",
+                &t!("a declarator takes only one initializer"),
                 p.current_token_range(),
             ));
         }
@@ -2627,7 +2627,7 @@ pub(super) fn parse_balanced_token_group(p: &mut CppParser, kind: CppSyntaxKind)
             CppTokenKind::Eof | CppTokenKind::None => {
                 p.close_marks_above(base);
                 return Err(CppParseError::syntax_error_from(
-                    "unterminated argument list",
+                    &t!("unterminated argument list"),
                     p.current_token_range(),
                 ));
             }
@@ -3598,7 +3598,7 @@ pub fn parse_for_init_declaration(p: &mut CppParser) -> ParseResult {
     if !a_name_was_parsed(p, declarator_from) {
         p.close_marks_above(base);
         return Err(CppParseError::syntax_error_from(
-            "expected a declaration that names something",
+            &t!("expected a declaration that names something"),
             p.current_token_range(),
         ));
     }
@@ -3655,7 +3655,7 @@ pub fn parse_condition_declaration(p: &mut CppParser) -> ParseResult {
     if !named || !initialised {
         p.close_marks_above(base);
         return Err(CppParseError::syntax_error_from(
-            "a condition declaration needs one variable with an initializer",
+            &t!("a condition declaration needs one variable with an initializer"),
             p.current_token_range(),
         ));
     }
@@ -3663,7 +3663,7 @@ pub fn parse_condition_declaration(p: &mut CppParser) -> ParseResult {
     if p.current_token() == CppTokenKind::Comma {
         p.close_marks_above(base);
         return Err(CppParseError::syntax_error_from(
-            "a condition declares one variable, not a list",
+            &t!("a condition declares one variable, not a list"),
             p.current_token_range(),
         ));
     }
@@ -3689,7 +3689,7 @@ pub fn parse_condition_declaration(p: &mut CppParser) -> ParseResult {
     if p.current_token() != CppTokenKind::RightParen {
         p.close_marks_above(base);
         return Err(CppParseError::syntax_error_from(
-            "a condition declaration ends at the `)` that closes the condition",
+            &t!("a condition declaration ends at the `)` that closes the condition"),
             p.current_token_range(),
         ));
     }
@@ -4604,7 +4604,7 @@ pub fn expect_semicolon(p: &mut CppParser) -> ParseResult {
 
     p.emit_missing_node();
     Err(CppParseError::syntax_error_from(
-        "expected `;`",
+        &t!("expected `;`"),
         p.current_token_range(),
     ))
 }

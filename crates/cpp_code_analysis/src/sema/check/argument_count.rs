@@ -256,7 +256,12 @@ fn callees_in_this_file(
 }
 
 fn at_most(name: &str, written: usize) -> String {
-    format!("`{name}` takes {written} argument(s) and this call passes more")
+    t!(
+        "`%{name}` takes %{written} argument(s) and this call passes more",
+        name = name,
+        written = written
+    )
+    .to_string()
 }
 
 /// **A callee the index knows** — its declaration is in another file, and its parameter list is a **fact**.
@@ -401,7 +406,12 @@ fn closest(candidates: &[Callee], passed: usize) -> Option<&Callee> {
 }
 
 fn at_least(name: &str, required: usize) -> String {
-    format!("`{name}` needs {required} argument(s) and this call passes fewer")
+    t!(
+        "`%{name}` needs %{required} argument(s) and this call passes fewer",
+        name = name,
+        required = required
+    )
+    .to_string()
 }
 /// **Is there a `...` in this parameter that the language would call one?**
 ///

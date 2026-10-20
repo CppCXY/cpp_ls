@@ -2161,7 +2161,7 @@ mod tests {
 
         let lost: Option<()> = parser.try_parse(|p| {
             p.push_error(CppParseError::syntax_error_from(
-                "a reading that did not fit",
+                &t!("a reading that did not fit"),
                 p.current_token_range(),
             ));
             None
@@ -2184,7 +2184,7 @@ mod tests {
 
         let kept: Option<()> = parser.try_parse(|p| {
             p.push_error(CppParseError::syntax_error_from(
-                "a reading that fit, with a problem in it",
+                &t!("a reading that fit, with a problem in it"),
                 p.current_token_range(),
             ));
             Some(())
@@ -2213,7 +2213,7 @@ mod tests {
         parser.note_declaration_type_name("Widget".to_string());
         parser.note_qualified_declaration_type();
         parser.push_error(CppParseError::syntax_error_from(
-            "reported inside the region",
+            &t!("reported inside the region"),
             parser.current_token_range(),
         ));
         parser.bump();

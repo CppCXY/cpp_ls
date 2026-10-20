@@ -587,7 +587,7 @@ impl<'a> CppLexer<'a> {
             _ => {
                 self.reader.bump();
                 self.errors.push(CppParseError::syntax_error_from(
-                    "stray `\\` outside of a string or line splice",
+                    &t!("stray `\\` outside of a string or line splice"),
                     self.reader.saved_range(),
                 ));
                 CppTokenKind::Unknown
@@ -670,7 +670,7 @@ impl<'a> CppLexer<'a> {
         }
 
         self.errors.push(CppParseError::syntax_error_from(
-            "unfinished block comment",
+            &t!("unfinished block comment"),
             self.reader.saved_range(),
         ));
         CppTokenKind::BlockComment
@@ -713,7 +713,7 @@ impl<'a> CppLexer<'a> {
                 'R' => {
                     if !self.lexer_config.supports_raw_strings() {
                         self.errors.push(CppParseError::syntax_error_from(
-                            "raw string literals require C++11",
+                            &t!("raw string literals require C++11"),
                             self.reader.saved_range(),
                         ));
                     }
@@ -734,7 +734,7 @@ impl<'a> CppLexer<'a> {
             self.reader.bump(); // `u` or `U`
             if !self.lex_universal_character_name() {
                 self.errors.push(CppParseError::syntax_error_from(
-                    "invalid universal character name in identifier",
+                    &t!("invalid universal character name in identifier"),
                     self.reader.saved_range(),
                 ));
                 return CppTokenKind::Unknown;
@@ -814,7 +814,7 @@ impl<'a> CppLexer<'a> {
             }
 
             self.errors.push(CppParseError::syntax_error_from(
-                "invalid universal character name in identifier",
+                &t!("invalid universal character name in identifier"),
                 self.reader.saved_range(),
             ));
             return false;
@@ -874,7 +874,7 @@ impl<'a> CppLexer<'a> {
                     // A newline cannot appear in an ordinary literal; report and stop here so the
                     // rest of the line is still lexed normally.
                     self.errors.push(CppParseError::syntax_error_from(
-                        "unterminated string literal",
+                        &t!("unterminated string literal"),
                         self.reader.saved_range(),
                     ));
                     return CppTokenKind::StringLiteral;
@@ -887,7 +887,7 @@ impl<'a> CppLexer<'a> {
 
         // Reached EOF without finding closing quote
         self.errors.push(CppParseError::syntax_error_from(
-            "unterminated string literal",
+            &t!("unterminated string literal"),
             self.reader.saved_range(),
         ));
         CppTokenKind::StringLiteral
@@ -941,7 +941,7 @@ impl<'a> CppLexer<'a> {
             if ch == '\\' || ch == '\0' || ch == ')' || ch.is_whitespace() || delimiter.len() >= 16
             {
                 self.errors.push(CppParseError::syntax_error_from(
-                    "malformed raw string delimiter",
+                    &t!("malformed raw string delimiter"),
                     self.reader.saved_range(),
                 ));
                 return CppTokenKind::StringLiteral;
@@ -955,7 +955,7 @@ impl<'a> CppLexer<'a> {
         loop {
             if self.reader.is_eof() {
                 self.errors.push(CppParseError::syntax_error_from(
-                    "unterminated raw string literal",
+                    &t!("unterminated raw string literal"),
                     self.reader.saved_range(),
                 ));
                 return CppTokenKind::StringLiteral;
@@ -1001,7 +1001,7 @@ impl<'a> CppLexer<'a> {
                 '\n' | '\r' => {
                     // Unterminated character literal
                     self.errors.push(CppParseError::syntax_error_from(
-                        "unterminated character literal",
+                        &t!("unterminated character literal"),
                         self.reader.saved_range(),
                     ));
                     return CppTokenKind::CharLiteral;
@@ -1014,7 +1014,7 @@ impl<'a> CppLexer<'a> {
 
         // Reached EOF without finding closing quote
         self.errors.push(CppParseError::syntax_error_from(
-            "unterminated character literal",
+            &t!("unterminated character literal"),
             self.reader.saved_range(),
         ));
         CppTokenKind::CharLiteral
@@ -1055,7 +1055,7 @@ impl<'a> CppLexer<'a> {
                         .support(crate::features::Feature::BinaryLiterals)
                     {
                         self.errors.push(CppParseError::syntax_error_from(
-                            "binary literals require C++14",
+                            &t!("binary literals require C++14"),
                             self.reader.saved_range(),
                         ));
                     }

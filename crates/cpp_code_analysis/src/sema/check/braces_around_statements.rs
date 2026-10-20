@@ -40,8 +40,7 @@ impl Check for BracesAroundStatements {
                 DiagnosticCode::BracesAroundStatements,
                 cpp_parser::source_range(then_branch.syntax().text_range()),
                 written.to_string(),
-                "a body that is one statement should be a block — `if (…) { … }` — because `if (a) if (b) f(); else g();` \
-                 binds the `else` to the inner `if`"
+                "a body that is one statement should be a block — `if (…) { … }` — because `if (a) if (b) f(); else g();`  binds the `else` to the inner `if`"
                     .to_string(),
             );
         }

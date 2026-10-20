@@ -70,7 +70,7 @@ impl Check for ReturnTypeMismatch {
                                 DiagnosticCode::ReturnTypeMismatch,
                                 cpp_parser::source_range(returned.text_range()),
                                 String::new(),
-                                format!("`return;` in a function declared to return `{declared}`"),
+                                t!("`return;` in a function declared to return `%{declared}`", declared = declared),
                             );
                         }
                     }
@@ -101,9 +101,8 @@ impl Check for ReturnTypeMismatch {
                             DiagnosticCode::ReturnTypeMismatch,
                             cpp_parser::source_range(expression.text_range()),
                             String::new(),
-                            format!(
-                                "`{returned_text}` returns a value that does not convert to `{declared}`, the type \
-                                 this function is declared to return"
+                            t!(
+                                "`%{returned_text}` returns a value that does not convert to `%{declared}`, the type this function is declared to return", returned_text = returned_text, declared = declared
                             ),
                         );
                     }

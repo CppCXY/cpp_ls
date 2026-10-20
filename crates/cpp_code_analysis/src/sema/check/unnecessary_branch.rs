@@ -72,17 +72,20 @@ impl Check for UnnecessaryBranch {
             let (range, message) = if decided {
                 (
                     cpp_parser::source_range(statement.get_range()),
-                    format!(
-                        "this branch always runs: the condition `{condition}` is a literal true, so the `if` \
-                         decides nothing"
-                    ),
+                    t!(
+                        "this branch always runs: the condition `%{condition}` is a literal true, so the `if` decides nothing",
+                        condition = condition
+                    )
+                    .to_string(),
                 )
             } else {
                 (
                     cpp_parser::source_range(statement.get_range()),
-                    format!(
-                        "this branch cannot run: the condition `{condition}` is a literal false"
-                    ),
+                    t!(
+                        "this branch cannot run: the condition `%{condition}` is a literal false",
+                        condition = condition
+                    )
+                    .to_string(),
                 )
             };
 

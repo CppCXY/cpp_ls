@@ -79,7 +79,7 @@ pub(crate) fn parse_compound_stat(p: &mut CppParser) -> ParseResult {
         // reported, or the editor has no way to tell the user about it.
         p.emit_missing_node();
         p.push_error(CppParseError::syntax_error_from(
-            "expected `}`",
+            &t!("expected `}`"),
             p.current_token_range(),
         ));
         return Ok(m.complete(p));
@@ -411,7 +411,7 @@ fn parse_asm_statement(p: &mut CppParser) -> ParseResult {
         _ => {
             p.close_marks_above(base);
             return Err(CppParseError::syntax_error_from(
-                "expected `(` after `asm`",
+                &t!("expected `(` after `asm`"),
                 p.current_token_range(),
             ));
         }
@@ -437,7 +437,7 @@ fn parse_asm_statement(p: &mut CppParser) -> ParseResult {
     if depth != 0 {
         p.close_marks_above(base);
         return Err(CppParseError::syntax_error_from(
-            "unterminated `asm` payload",
+            &t!("unterminated `asm` payload"),
             p.current_token_range(),
         ));
     }
@@ -447,7 +447,7 @@ fn parse_asm_statement(p: &mut CppParser) -> ParseResult {
     } else if !closes_itself {
         p.emit_missing_node();
         p.push_error(CppParseError::syntax_error_from(
-            "expected `;`",
+            &t!("expected `;`"),
             p.current_token_range(),
         ));
     }
@@ -993,7 +993,7 @@ fn parse_expression_statement(p: &mut CppParser) -> ParseResult {
     p.emit_missing_node();
     p.end_marks_to(base);
     Err(CppParseError::syntax_error_from(
-        "expected `;` after expression",
+        &t!("expected `;` after expression"),
         p.current_token_range(),
     ))
 }
@@ -1777,7 +1777,7 @@ fn parse_keyword_statement(p: &mut CppParser, kind: CppSyntaxKind) -> ParseResul
     } else {
         p.close_marks_above(base);
         return Err(CppParseError::syntax_error_from(
-            "expected `;`",
+            &t!("expected `;`"),
             p.current_token_range(),
         ));
     }

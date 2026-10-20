@@ -1285,7 +1285,7 @@ fn parse_decl_specifier_seq_with(
     if specifiers == 0 {
         p.close_marks_above(base);
         return Err(CppParseError::syntax_error_from(
-            "expected a type specifier",
+            &t!("expected a type specifier"),
             p.current_token_range(),
         ));
     }
@@ -1786,7 +1786,7 @@ fn parse_one_decl_specifier_inner(
             // C<T> = default;` has no type at all — the specifier sequence ends where the clause begins.
             if has_a_clause_after_a_parameter_list(p) {
                 return Err(CppParseError::syntax_error_from(
-                    "expected a declarator name",
+                    &t!("expected a declarator name"),
                     p.current_token_range(),
                 ));
             }
@@ -1809,7 +1809,7 @@ fn parse_one_decl_specifier_inner(
                 a_class_definition_was_written,
             ) {
                 return Err(CppParseError::syntax_error_from(
-                    "expected a declarator name",
+                    &t!("expected a declarator name"),
                     p.current_token_range(),
                 ));
             }
@@ -1864,7 +1864,7 @@ fn parse_one_decl_specifier_inner(
     }
 
     Err(CppParseError::syntax_error_from(
-        "expected a type specifier",
+        &t!("expected a type specifier"),
         p.current_token_range(),
     ))
 }
@@ -2893,7 +2893,7 @@ fn parse_class_like_head(p: &mut CppParser) -> ParseResult {
         if a_declaration_cannot_follow_here(p) {
             p.close_marks_above(base_marks);
             return Err(CppParseError::syntax_error_from(
-                "expected `;` after a class definition",
+                &t!("expected `;` after a class definition"),
                 p.current_token_range(),
             ));
         }
@@ -3310,7 +3310,7 @@ pub fn parse_name(p: &mut CppParser) -> ParseResult {
             ) {
                 p.close_marks_above(base);
                 return Err(CppParseError::syntax_error_from(
-                    "expected a name after `template`",
+                    &t!("expected a name after `template`"),
                     p.current_token_range(),
                 ));
             }
@@ -3357,7 +3357,7 @@ pub fn parse_name(p: &mut CppParser) -> ParseResult {
             _ => {
                 p.close_marks_above(base);
                 return Err(CppParseError::syntax_error_from(
-                    "expected a name",
+                    &t!("expected a name"),
                     p.current_token_range(),
                 ));
             }
@@ -3846,7 +3846,7 @@ fn parse_operator_name(p: &mut CppParser) -> ParseResult {
         }
         _ => {
             let err = CppParseError::syntax_error_from(
-                "expected an operator name after `operator`",
+                &t!("expected an operator name after `operator`"),
                 p.current_token_range(),
             );
             p.close_marks_above(base);
@@ -4912,7 +4912,7 @@ pub fn parse_declarator_with(p: &mut CppParser, allow_structured_binding: bool) 
     if !clause_ahead && a_bare_template_id_is_here(p) {
         p.close_marks_above(base);
         return Err(CppParseError::syntax_error_from(
-            "a declarator's name cannot have template arguments",
+            &t!("a declarator's name cannot have template arguments"),
             p.current_token_range(),
         ));
     }
@@ -4995,7 +4995,7 @@ pub fn parse_declarator_with(p: &mut CppParser, allow_structured_binding: bool) 
                             // caller reads the statement as the expression it was.
                             p.close_marks_above(base);
                             return Err(CppParseError::syntax_error_from(
-                                "expected a parameter list or an initializer",
+                                &t!("expected a parameter list or an initializer"),
                                 p.current_token_range(),
                             ));
                         }
@@ -5356,7 +5356,7 @@ fn parse_template_argument_list_inner(p: &mut CppParser) -> ParseResult {
                         argument.undo(p);
                         p.close_marks_above(base);
                         return Err(CppParseError::syntax_error_from(
-                            "expected a template argument",
+                            &t!("expected a template argument"),
                             p.current_token_range(),
                         ));
                     }
@@ -5410,7 +5410,7 @@ fn parse_template_argument_list_inner(p: &mut CppParser) -> ParseResult {
             argument.undo(p);
             p.close_marks_above(base);
             return Err(CppParseError::syntax_error_from(
-                "expected a template argument",
+                &t!("expected a template argument"),
                 p.current_token_range(),
             ));
         }
@@ -5422,7 +5422,7 @@ fn parse_template_argument_list_inner(p: &mut CppParser) -> ParseResult {
         if p.current_token_index() == before {
             p.close_marks_above(base);
             return Err(CppParseError::syntax_error_from(
-                "expected a template argument",
+                &t!("expected a template argument"),
                 p.current_token_range(),
             ));
         }
@@ -5464,7 +5464,7 @@ fn parse_template_argument_list_inner(p: &mut CppParser) -> ParseResult {
 
     p.close_marks_above(base);
     Err(CppParseError::syntax_error_from(
-        "unterminated template argument list",
+        &t!("unterminated template argument list"),
         p.current_token_range(),
     ))
 }
@@ -6100,7 +6100,7 @@ fn parse_single_bracket_attribute(p: &mut CppParser) -> ParseResult {
 
     p.close_marks_above(base);
     Err(CppParseError::syntax_error_from(
-        "unterminated attribute",
+        &t!("unterminated attribute"),
         p.current_token_range(),
     ))
 }
@@ -6150,7 +6150,7 @@ pub fn parse_attribute_specifier(p: &mut CppParser) -> ParseResult {
 
     p.close_marks_above(base);
     Err(CppParseError::syntax_error_from(
-        "unterminated attribute specifier",
+        &t!("unterminated attribute specifier"),
         p.current_token_range(),
     ))
 }

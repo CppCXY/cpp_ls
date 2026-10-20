@@ -7371,3 +7371,31 @@ fn a_comparison_inside_parentheses_is_not_an_angle_bracket() {
         ],
     );
 }
+
+#[test]
+fn a_parse_error_follows_the_locale() {
+    let source = "int f() { return 1 }\n";
+    let errors = |locale: &str| {
+        cpp_parser::set_locale(locale);
+        let tree = cpp_parser::CppParser::parse(source, cpp_parser::ParserConfig::default());
+        tree.get_errors()
+            .iter()
+            .map(|error| error.message.clone())
+            .collect::<Vec<_>>()
+    };
+
+    let english = errors("en");
+    let chinese = errors("zh-CN");
+    cpp_parser::set_locale("en");
+
+    println!("en: {english:?}\nzh: {chinese:?}");
+    assert!(!english.is_empty(), "the fixture is a syntax error");
+    assert!(
+        english.iter().any(|message| message.contains("expected")),
+        "{english:?}"
+    );
+    assert!(
+        chinese.iter().any(|message| message.contains("需要")),
+        "the parse error is translated: {chinese:?}"
+    );
+}

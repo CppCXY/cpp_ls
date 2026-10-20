@@ -42,8 +42,7 @@ impl Check for SimplifyBooleanExpr {
                 cpp_parser::source_range(condition.syntax().text_range()),
                 written.to_string(),
                 format!(
-                    "`{written}` compares against a literal that is already the value — write the expression, or its \
-                     negation: `if ({})` or `if (!({}))`",
+                    "`{written}` compares against a literal that is already the value — write the expression, or its negation: `if ({})` or `if (!({}))`",
                     written
                         .replace("== true", "")
                         .replace("== false", "")

@@ -83,9 +83,8 @@ impl Check for ImplicitBoolConversion {
                 DiagnosticCode::ImplicitBoolConversion,
                 cpp_parser::SourceRange::new(offset, length),
                 written.clone(),
-                format!(
-                    "`{written}` is converted to `bool` here — write the comparison the reader is being asked to make: \
-                     `{written} != 0`"
+                t!(
+                    "`%{written}` is converted to `bool` here — write the comparison the reader is being asked to make: `%{written} != 0`", written = written
                 ),
             );
         }

@@ -59,9 +59,8 @@ impl Check for MacroParentheses {
                 DiagnosticCode::MacroParentheses,
                 cpp_parser::SourceRange::new(start, end - start),
                 name.clone(),
-                format!(
-                    "`{name}`'s replacement list is not parenthesised, so a caller's expression is spliced in without its \
-                     precedence — write `#define {name}(…) (…)`"
+                t!(
+                    "`%{name}`'s replacement list is not parenthesised, so a caller's expression is spliced in without its precedence — write `#define %{name}(…) (…)`", name = name
                 ),
             );
         }

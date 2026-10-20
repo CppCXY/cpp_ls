@@ -90,8 +90,8 @@ impl Check for AssignmentInCondition {
                 DiagnosticCode::AssignmentInCondition,
                 cpp_parser::source_range(condition.text_range()),
                 String::new(),
-                format!(
-                    "`{text}` assigns rather than compares: `=` in a condition is almost always a `==`"
+                t!(
+                    "`%{text}` assigns rather than compares: `=` in a condition is almost always a `==`", text = text
                 ),
             );
         }

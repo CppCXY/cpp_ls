@@ -37,8 +37,7 @@ impl Check for UseNullptr {
                 cpp_parser::source_range(range),
                 "NULL".to_string(),
                 format!(
-                    "`NULL` is `0` in every standard header, so this picks an `int` overload where one exists — write \
-                     `nullptr`, which has the pointer type.{}{}",
+                    "`NULL` is `0` in every standard header, so this picks an `int` overload where one exists — write `nullptr`, which has the pointer type.{}{}",
                     context
                         .source
                         .get(offset..usize::from(range.end()))

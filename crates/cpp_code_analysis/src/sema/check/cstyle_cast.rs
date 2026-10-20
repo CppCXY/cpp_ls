@@ -116,11 +116,9 @@ impl Check for CStyleCast {
             context.add_in_the_file(
                 DiagnosticCode::CStyleCast,
                 cpp_parser::SourceRange::new(open, close + 1 - open),
-                format!("({inner})"),
-                format!(
-                    "`({inner})` is a C-style cast: it tries `const_cast`, `static_cast` and `reinterpret_cast` in that \
-                     order and takes the first that compiles, so it can remove `const` without saying so — name the one \
-                     you meant"
+                t!("(%{inner})", inner = inner),
+                t!(
+                    "`(%{inner})` is a C-style cast: it tries `const_cast`, `static_cast` and `reinterpret_cast` in that order and takes the first that compiles, so it can remove `const` without saying so — name the one you meant", inner = inner
                 ),
             );
         }

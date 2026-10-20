@@ -147,7 +147,7 @@ pub fn parse_module_declaration(p: &mut CppParser) -> ParseResult {
     if !is_contextual(p, "module") {
         p.close_marks_above(base);
         return Err(CppParseError::syntax_error_from(
-            "expected `module`",
+            &t!("expected `module`"),
             p.current_token_range(),
         ));
     }
@@ -173,7 +173,7 @@ pub fn parse_import_declaration(p: &mut CppParser) -> ParseResult {
     if !is_contextual(p, "import") {
         p.close_marks_above(base);
         return Err(CppParseError::syntax_error_from(
-            "expected `import`",
+            &t!("expected `import`"),
             p.current_token_range(),
         ));
     }
@@ -234,7 +234,7 @@ pub fn parse_global_module_fragment(p: &mut CppParser) -> ParseResult {
     if !is_contextual(p, "module") {
         p.close_marks_above(base);
         return Err(CppParseError::syntax_error_from(
-            "expected `module`",
+            &t!("expected `module`"),
             p.current_token_range(),
         ));
     }
@@ -252,7 +252,7 @@ pub fn parse_private_module_fragment(p: &mut CppParser) -> ParseResult {
     if !is_contextual(p, "module") {
         p.close_marks_above(base);
         return Err(CppParseError::syntax_error_from(
-            "expected `module`",
+            &t!("expected `module`"),
             p.current_token_range(),
         ));
     }
@@ -263,7 +263,7 @@ pub fn parse_private_module_fragment(p: &mut CppParser) -> ParseResult {
     if !is_contextual(p, "private") && p.current_token() != CppTokenKind::PrivateKeyword {
         p.close_marks_above(base);
         return Err(CppParseError::syntax_error_from(
-            "expected `private`",
+            &t!("expected `private`"),
             p.current_token_range(),
         ));
     }
