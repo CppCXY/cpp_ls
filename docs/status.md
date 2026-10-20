@@ -2089,3 +2089,74 @@ clang 18 项目(597 文件)  有解析错误的文件 1(同上)
 归约到一条:`_Success_(return < _MaxCount) int b(...)` —— SAL 注解宏的**参数不是表达式**,要按平衡记号组读;
 `_Success_(return == 0)` 能过、`_Success_(return < _MaxCount)` 不能过,是因为 `<` 后面跟标识符时被当成了模板实参表。
 `_In_range_(<=, 2147483647)` 同源。下一条就修这个。
+
+## 三十八、三件可测量的缺陷（2026）
+
+### ③ 打开 `<ostream>` 后 CPU 持续占用、诊断闪现又消失
+
+先在 session 层量了三次 `diagnostics` 调用(同一个 `ostream`,已 cook):
+
+```text
+round 0: view=true (346µs) diagnostics=3.1ms pending=0
+round 1: view=true (344µs) diagnostics=2.5ms pending=0
+round 2: view=true (391µs) diagnostics=2.7ms pending=0
+```
+
+session 层是**廉价的**,所以问题在服务层。读 `prepare_for_a_diagnostic`:
+
+```text
+快路径   try_read 成功 且 summary 与 view 都在 ⇒ 直接返回 true
+慢路径   写锁 + load + add_project_files + advance(切片) + cook
+```
+
+pump 在**任何有活的时候都持有写锁**,于是"这次 pull 其实什么都不用做"也会掉进慢路径:
+`load` → 排空队列 → **再 cook 一次 `ostream`**(宏展开一个上百 KB 的头),而 cook 又让 pump 更忙 →
+下一次 pull 更拿不到读锁 → 又一次 cook。这就是那个自激循环。
+
+修法:在慢路径的**写锁内**先问一句 —— summary 与 view 都在就直接返回,`load`/排空/cook 一步都不做。
+一个已经 cook 过的文件,它的渲染就在 `renderings` 里(session 层已确认没有淘汰),所以这句话就是答案。
+
+`add_project_files` 的条件**保持原样**(文件不在项目列表里才登记):第一次 pull 一个外部头仍然要登记一次,
+否则 `cook` 没有队列入口;但**第二次** pull 会因为上面的写锁内检查而完全跳过它。我一度按"文件是否在项目根下"
+收紧,结果让 `a_second_pull_does_not_take_the_analysis_for_writing` 失败 —— 那个用例是一个**在根之外**的 overlay
+文件,它确实需要登记。判据保留为"项目列表里有没有",这条边界是量出来的,不是猜的。
+
+### ① 打开工程时报告 "no file this project contains declares module `std`"
+
+模块 note 在**索引还没读完**时就发布了:"没有文件声明它"关于已读的部分是真的,关于整个项目是假的。
+现在和检查走同一条时间规则:
+
+```text
+pending_work() != 0  ⇒  不发布任何 module note
+```
+
+这不是隐藏信息:索引安静之后的下一次 pull 会照常给出结论,而那时结论才有依据。modules 测试(44 个)全绿。
+
+### ② `<ostream>` 里 `endl` 的注释不显示
+
+```cpp
+  /**
+   *  @brief  Write a newline and flush the stream.
+   */
+  template<typename _CharT, typename _Traits>
+    inline basic_ostream<_CharT, _Traits>&
+    endl(basic_ostream<_CharT, _Traits>& __os)
+```
+
+`might_be_documented` 是"要不要为此解析整个头"的廉价判断,它的契约是 **false 即最终答案**。它只看 name 上面
+**一行**,而那一行是 `inline basic_ostream<…>&` —— 于是 `false`,注释永远读不到。现在它沿**声明的头部**
+继续向上走(最多 12 行),遇到注释返回 true,遇到上一个声明的结尾(`;`、`{`、`}`)返回 false。
+
+新测试 `a_comment_above_a_multi_line_head_is_found`(`<ostream>` 的原样形状)。
+
+### 验收
+
+```text
+套件  cpp_code_analysis 全绿、cpp_ls lib 85 全绿(含两个 pull 相关用例)
+```
+
+### 仍未完成
+
+**SAL 注解**(`extern "C++" _Check_return_ _CRT_INSECURE_DEPRECATE(…) inline int …`)。上一轮试的放宽会让
+`typeof(1) n = 1;` 在严格 C++20 下也解析成功,打破差分测试;按要求先修其它三件,这条留到下一轮并把
+"名字之后的注解"的**三处**入口(specifier 循环、`extern "C++"` 之后的单条声明、参数声明)一起列清再改。

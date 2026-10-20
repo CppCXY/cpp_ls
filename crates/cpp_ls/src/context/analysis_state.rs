@@ -484,6 +484,23 @@ impl AnalysisState {
         }
 
         self.update_session("prepare a file a pull request named", move |session| {
+            // **Already cooked: nothing to do, even though the read lock was unavailable a moment ago.**
+            //
+            // The fast path above needs the *read* lock, and the pump holds the write lock in slices whenever there
+            // is work — so on a busy session a pull that would need no work at all fell through to this closure,
+            // loaded the file, drained the queue and cooked it **again**. Cooking a system header is a macro
+            // expansion of a hundred kilobytes: the header of a real standard-library file costs tens of
+            // milliseconds, which is why opening `<ostream>` turned into a core at 100 %, with the diagnostics
+            // flashing because every pull re-queued work that the next pull then waited on.
+            //
+            // Asking the question *inside* the write lock costs nothing and settles it: a view that is already
+            // there means this request has all it needs.
+            if session.index().summary(&to_prepare).is_some()
+                && session.view(&to_prepare).is_some()
+            {
+                return true;
+            }
+
             session.load(&to_prepare);
 
             // **`index_everything`, but `add_project_files` only for a file the index has never heard of.**
@@ -500,10 +517,6 @@ impl AnalysisState {
             // reaches it" that the pull path exists for. Dropping the re-queue removes the project-wide work and
             // changes nothing about which file gets read.
             //
-            // The exception is a file that is **not a project file at all** — one the index has never discovered,
-            // which is the first pull after a session opens. There is no summary for it and nothing queued it, so
-            // discovery is the only thing that can make it readable, and it is done once rather than per request.
-            //
             // Measured from the budget warning before this, on every keystroke rather than once:
             //
             // ```text
@@ -511,6 +524,11 @@ impl AnalysisState {
             // 17:54:20   … 2068 ms
             // 17:54:49   … 7018 ms
             // ```
+            // **Discovery is for a file the session has not been told about yet**, and the test for that is the
+            // project list rather than the file's location: a buffer the client opened from outside the folder (a
+            // header `Go to definition` reached, an untitled buffer) still has to be queued once before it can be
+            // cooked, and a system header a reader opens is *one* such file, not one per pull — the in-lock check
+            // above is what keeps the second pull out of here entirely.
             if !session
                 .project_files()
                 .iter()

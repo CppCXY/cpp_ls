@@ -269,3 +269,42 @@ fn a_directive_above_a_declaration_does_not_hide_a_comment() {
         source.find("int x").expect("the fixture")
     ));
 }
+
+/// **A declaration written over several lines before its name** — the comment is above the whole head.
+///
+/// `<ostream>`:2511 is the shape, and hovering `endl` showed no documentation because the first line above the
+/// declarator is `inline basic_ostream<…>&`, not a comment. The check now walks over the declaration's own head and
+/// stops at the end of the previous declaration.
+#[test]
+fn a_comment_above_a_multi_line_head_is_found() {
+    let text = "\
+_GLIBCXX_BEGIN_NAMESPACE_VERSION
+  /**
+   *  @brief  Write a newline and flush the stream.
+   *
+   *  This manipulator is often mistakenly used when a simple newline is desired.
+   */
+  template<typename _CharT, typename _Traits>
+    inline basic_ostream<_CharT, _Traits>&
+    endl(basic_ostream<_CharT, _Traits>& __os)
+    { return flush(__os.put(__os.widen('\n'))); }
+
+  int size;
+";
+    let at = text.find("endl(basic_ostream").expect("the fixture");
+
+    assert!(
+        might_be_documented(text, at),
+        "the comment sits above the template head, and the check has to walk over it"
+    );
+    assert_eq!(
+        documentation_at(
+            &cpp_parser::CppParser::parse(text, cpp_parser::ParserConfig::default()).get_red_root(),
+            at
+        )
+        .map(|comment| comment.get_comment_text().to_string()),
+        Some(" @brief  Write a newline and flush the stream.\n\n This manipulator is often mistakenly used when a simple newline is desired.".to_string()),
+        "and the comment the parser finds is that one"
+    );
+
+}

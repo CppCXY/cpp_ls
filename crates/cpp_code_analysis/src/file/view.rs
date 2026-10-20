@@ -570,8 +570,25 @@ pub fn might_be_documented(text: &str, offset: usize) -> bool {
         }
     };
 
+    // **A declaration may be written over several lines before the name**, and its comment sits above the whole
+    // of it:
+    //
+    // ```cpp
+    //   /**
+    //    *  @brief  Write a newline and flush the stream.
+    //    */
+    //   template<typename _CharT, typename _Traits>
+    //     inline basic_ostream<_CharT, _Traits>&
+    //     endl(basic_ostream<_CharT, _Traits>& __os)
+    // ```
+    //
+    // Asked at `endl`, the first non-blank line above is `inline basic_ostream<…>&` — not a comment — and the old
+    // answer was `false`, which this filter's contract makes *final*: hovering `endl` in `<ostream>` showed no
+    // documentation while the comment above it said exactly what the reader wanted. The walk therefore continues
+    // over the declaration's own head and stops where a comment would belong to something else: at the end of the
+    // previous declaration (`;`, `{`, `}`).
     let mut rest = before;
-    loop {
+    for _ in 0..12 {
         let line = match rest.rfind('\n') {
             Some(newline) => &rest[newline + 1..],
             None => rest,
@@ -579,15 +596,24 @@ pub fn might_be_documented(text: &str, offset: usize) -> bool {
         let line = line.trim();
 
         if !line.is_empty() && !line.starts_with('#') {
-            return line.starts_with("//") || line.contains("*/");
+            if line.starts_with("//") || line.contains("*/") {
+                return true;
+            }
+
+            // The head of this declaration is over, so a comment above it belongs to another one.
+            if line.ends_with(';') || line.ends_with('{') || line.ends_with('}') {
+                return false;
+            }
         }
 
-        // Only blank and directive lines so far: the previous line, or no comment at all.
+        // Only blank, directive and declaration-head lines so far: the previous line.
         match rest.rfind('\n') {
             Some(newline) => rest = &rest[..newline],
             None => return false,
         }
     }
+
+    false
 }
 
 impl FileView {

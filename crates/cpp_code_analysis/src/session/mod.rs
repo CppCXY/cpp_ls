@@ -3279,7 +3279,18 @@ impl<F: FileProvider + Clone> Session<F> {
             };
             if let Some(view) = &view {
                 let _t = DiagTrace::new("module notes");
-                notes = self.notes_about_the_modules(view);
+                // **A note about a module says what the session has *read*, so it waits for the reading.**
+                //
+                // `no file this project contains declares module `std`` was published on the first pull after a
+                // window opened and gone by the next edit, because on that pull the index had not yet read the
+                // project`s module units — the answer "no file declares it" was true of what had been read and
+                // false of the project. The same timing rule the checks already obey applies: nothing is said
+                // while the session still has work, because absence of evidence is not evidence here.
+                notes = if self.pending_work() == 0 {
+                    self.notes_about_the_modules(view)
+                } else {
+                    Vec::new()
+                };
             }
             let checks = match &view {
                 Some(view) => self.checks_about(&key, view),
