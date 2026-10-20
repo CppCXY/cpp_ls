@@ -1984,3 +1984,49 @@ template<class C, size_t N> struct F; struct F<C[N], C> …            通过
 
 判据没有变:`cook_errors` 现在同时打印每个错误的**写下来的文本**和**渲染文本**,并在最后给出
 "客户端实际看到什么"。下次直接从这两条开始。
+
+## 三十六、受约束的模板参数"是类型" —— `<format>` 的最后两个错误（2026）
+
+上一节留下的两条(`<format>`:2511 的 `expected a template argument`、2536 附近的 `expected primary expression`),
+这一轮从渲染文本里定位到了**同一个根因**。
+
+### 定位方法
+
+`cook_errors` 把渲染写进文件后,用 `cpp_dump` 逐次解析,并在 `parse_template_argument_list` 里临时打印"这个实参
+列表从哪个记号开始、现在停在哪个记号"。第一次打印就把问题钉死了:
+
+```text
+TA error: list at 16032 ["<", "_CharT", "[", "_Nm", "]", ",", " ", "_CharT", ">", " ", "{", ...]
+          now 16034 "["
+```
+
+也就是说:实参读取器在 `_CharT` 之后**停在 `[` 上** —— 它不知道 `_CharT` 是类型,所以 `_CharT[_Nm]` 读不成数组类型,
+退化成表达式又读到 `[` 就放弃了。第二个错误是它的级联。
+
+### 根因与修法
+
+```cpp
+template<__format::__char _CharT, size_t _Nm>
+  struct formatter<_CharT[_Nm], _CharT>
+```
+
+`a_type_parameter_name` 只认 `typename T` / `class T` 两种拼法,**受约束参数** `Concept T` 的名字从来没被记成
+模板参数。于是 `parse_template_parameter` 里补一段:参数以**名字**开头(不是 `int`/`auto` 这样的关键字)时,
+declarator 读出的名字也 `declare_template_parameter`。
+
+```text
+以名字开头  __format::__char _CharT、MyConcept U   → 记录(它是类型参数)
+关键字开头  int N、auto N                          → 不记录(它是值参数)
+```
+
+新测试:`a_constrained_template_parameter_declares_a_type`(三种拼法,含一个成员模板;并保留 `int N` 的值参数读法)。
+
+### 结果
+
+```text
+GCC 15 闭包(478 文件)   有解析错误的文件:3 → 1(<bits/text_encoding-data.h>,只发布它自己的 #error)
+<cpp/format>             0 个解析错误
+<combaseapi.h>           0 个(上一节修的 attribute)
+<limits> / <numbers>     0 个(上一节修的 F16 后缀)
+客户端可见             1 条消息:"This is not a public header, do not include it directly"
+```

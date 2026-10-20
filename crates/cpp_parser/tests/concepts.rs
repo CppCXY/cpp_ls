@@ -649,3 +649,27 @@ fn a_requires_expression_is_read_inside_any_expression() {
         "two requires-expressions, conjoined"
     );
 }
+
+/// **受约束的模板参数名字组也是一个类型** —— `template<__format::__char _CharT, size_t _Nm>` 里的 `_CharT`
+/// 是类型参数,所以 `formatter<_CharT[_Nm], _CharT>` 的第一个实参是"它的数组"。
+///
+/// `a_type_parameter_name` 只认 `typename`/`class` 拼法,受约束参数的名字因此没被记录;实参读取器于是把 `_CharT`
+/// 当表达式,在 `[` 处拒绝 —— GCC 15 的 `<format>` 里 2 个错误就是这么来的(修好后它归零)。
+#[test]
+fn a_constrained_template_parameter_declares_a_type() {
+    for text in [
+        "namespace __format { template<class T> concept __char = true; }\n\
+         template<class C, unsigned long N> struct formatter;\n\
+         template<__format::__char C, unsigned long N> struct formatter<C[N], C> { };\n",
+        // …and the value-parameter spelling keeps working: `int N` is *not* a type.
+        "template<class C, int N> struct A1;\n\
+         template<class C, int N> struct A1<C[N], C> { };\n",
+        // A constrained parameter inside a member template, which is where the header writes it.
+        "template<class T> concept Small = true;\n\
+         struct S { template<Small U, int N> void f(U[N]); };\n",
+    ] {
+        let tree = cpp_parser::CppParser::parse(text, cpp_parser::ParserConfig::default());
+        let errors = tree.get_errors();
+        assert!(errors.is_empty(), "{text}: {errors:?}");
+    }
+}

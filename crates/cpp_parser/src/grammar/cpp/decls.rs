@@ -467,6 +467,19 @@ fn parse_template_parameter(p: &mut CppParser) -> ParseResult {
     // The parameter itself is a declaration: `typename T`, `int N`, `auto N`, and a constrained
     // parameter is a type followed by a name. Reusing the declaration machinery keeps the shapes
     // the same as everywhere else.
+    //
+    // **A constrained parameter declares a *type* as well**, and `a_type_parameter_name` above only knows the
+    // `typename`/`class` spellings. The spelling here is a *name* and then the parameter's own name —
+    // `template<__format::__char _CharT, size_t _Nm>` — so unless it is recorded, `_CharT` is not a template
+    // parameter as far as the argument reader is concerned, and `formatter<_CharT[_Nm], _CharT>` (whose first
+    // argument is an array *of* it) reads `_CharT` as an expression and refuses at the `[`. Measured: 2 of the 3
+    // remaining errors in GCC 15's `<format>`, and the same shape is how every concept-constrained parameter is
+    // written.
+    //
+    // The specifier must **start with a name** for this to apply: `int N` and `auto N` declare values, and a
+    // keyword is what tells them apart.
+    let a_name_precedes_the_parameter =
+        matches!(p.current_token(), CppTokenKind::Identifier | CppTokenKind::Scope);
     if let Err(err) = parse_decl_specifier_seq(p) {
         p.close_marks_above(base);
         return Err(err);
@@ -474,12 +487,21 @@ fn parse_template_parameter(p: &mut CppParser) -> ParseResult {
 
     // The element name, and a pack expansion marker. The ellipsis is excluded because a parameter can end in
     // one with no name before it — `int... Ns` — and the declarator rule has nothing to read there.
+    let declarator_from = p.current_event_count();
     if !ends_a_template_parameter_head(p.current_token())
         && p.current_token() != CppTokenKind::Ellipsis
         && let Err(err) = parse_declarator(p)
     {
         p.close_marks_above(base);
         return Err(err);
+    }
+
+    // **The constrained parameter's name, recorded now that the declarator has produced it.** See the note above
+    // the specifier sequence for why this spelling needs its own line.
+    if a_name_precedes_the_parameter
+        && let Some(name) = p.the_name_a_declarator_introduced(declarator_from)
+    {
+        p.declare_template_parameter(&name);
     }
 
     if p.current_token() == CppTokenKind::Ellipsis {
