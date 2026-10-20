@@ -250,14 +250,18 @@ fn a_class_with_a_destructor_in_its_body_keeps_its_own_name() {
 /// look in the **name node**, and a class body holding `operator+` put that keyword in the declaration's
 /// descendants. Pinned separately because the two searches are separate calls and fixing one does not fix the
 /// other.
+///
+/// **And the operator is a member of the class**, which the old answer got wrong in the other direction: an
+/// operator declares a name the language lets you call, and a class whose operators are invisible to every lookup
+/// cannot answer `a + b`. The class keeps its own name *and* the operator is bound inside it.
 #[test]
 fn a_class_with_an_operator_in_its_body_keeps_its_own_name() {
     let table = scopes("struct Widget {\n  Widget& operator+(const Widget&);\n  int size;\n};\n");
 
     assert_eq!(
         shape(&table),
-        "File{Widget}(Class{size})",
-        "the class is `Widget`; the class body does not make it an operator"
+        "File{Widget}(Class{size,operator+}(Fn))",
+        "the class is `Widget`, and the operator is a member of it"
     );
 }
 

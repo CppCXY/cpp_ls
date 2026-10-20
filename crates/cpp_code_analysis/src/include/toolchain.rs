@@ -492,15 +492,64 @@ fn candidates_in(directory: &Path, name: &str, extensions: &[String]) -> Vec<Pat
 /// A condition like `#if __cplusplus >= 202002L` would then come out wrong — not unknown, *wrong*, which is the
 /// failure mode this whole layer is built to avoid. So the standard comes from the same place the include paths do:
 /// the compile database's entry for the file.
+/// **The flags that change which directories a compiler searches**, in the order the command wrote them.
+///
+/// A compile database entry is more than a compiler and a standard: a project built for another target, or against
+/// another library, says so in its own command, and those flags decide the search list completely.
+///
+/// ```text
+/// clang++ --target=x86_64-w64-mingw32 --gcc-toolchain=C:/mingw64 -std=c++23   ← a MinGW build
+/// ```
+///
+/// Asked without them, that clang answers with its **default** target's directories — on Windows the MSVC ones — and
+/// the analysis then reads a standard library the project's build never sees. Measured on this machine: a project
+/// whose command names clang++ for MinGW was configured with cl, `<vector>` resolved to MSVC's, and the include list
+/// had none of the eight libstdc++ directories. Only these flags are taken: an `-I` is the project's own search path
+/// and travels with the file's configuration, not with the compiler's answer.
+///
+/// The list is deliberately small and each entry is a *flag family* rather than a spelling this layer invents.
+fn search_list_flags(arguments: &[String]) -> Vec<String> {
+    let mut taken: Vec<String> = Vec::new();
+    let mut rest = arguments.iter().skip(1).peekable();
+
+    while let Some(argument) = rest.next() {
+        let takes_a_separate_value = matches!(
+            argument.as_str(),
+            "-target" | "--target" | "-isystem" | "-isysroot" | "-B" | "-stdlib"
+        );
+
+        let starts_with = [
+            "--target=",
+            "--gcc-toolchain=",
+            "--sysroot=",
+            "-stdlib=",
+            "-march=",
+            "-mtune=",
+        ]
+        .iter()
+        .any(|prefix| argument.starts_with(prefix));
+
+        if starts_with || takes_a_separate_value {
+            taken.push(argument.clone());
+            if takes_a_separate_value && let Some(value) = rest.next() {
+                taken.push(value.clone());
+            }
+        }
+    }
+
+    taken
+}
+
 pub fn search_paths(
     runner: &impl CommandRunner,
     compiler: &Path,
     standard: Option<&str>,
+    flags: &[String],
 ) -> Option<Toolchain> {
     // **What the project stated, or the newest the compiler takes.** See [`ASSUMED_STANDARDS_GNU`]: the last
     // candidate is "no flag at all", so a compiler that knows neither spelling is still asked rather than skipped.
     for candidate in standards_to_try(standard, &ASSUMED_STANDARDS_GNU) {
-        if let Some(found) = search_paths_with(runner, compiler, candidate, standard.is_none()) {
+        if let Some(found) = search_paths_with(runner, compiler, candidate, standard.is_none(), flags) {
             return Some(found);
         }
     }
@@ -514,12 +563,18 @@ fn search_paths_with(
     compiler: &Path,
     standard: Option<&str>,
     assumed: bool,
+    flags: &[String],
 ) -> Option<Toolchain> {
     // `-E` stops after preprocessing, `-v` prints what the driver is doing, `-x c++` says which language's
     // directories to list (without it, `g++` would still list C++'s, but `gcc` would list C's), and `-` reads an
     // empty translation unit from standard input. `-dM` adds the predefined macros to that output.
+    //
+    // **The project's own search-list flags go with them**, before the language: `--target` and `--gcc-toolchain`
+    // are what decide which compiler and which library this project builds against — see [`search_list_flags`].
     let language = standard.map(|standard| format!("-std={standard}"));
-    let mut arguments = vec!["-dM", "-E", "-v", "-x", "c++"];
+    let mut arguments: Vec<&str> = vec!["-dM", "-E", "-v"];
+    arguments.extend(flags.iter().map(String::as_str));
+    arguments.extend(["-x", "c++"]);
     if let Some(language) = &language {
         arguments.push(language);
     }
@@ -734,6 +789,14 @@ pub fn discover_with(
     // [`ASSUMED_STANDARD_MSVC`] for why the last case is not left to the compiler's own default.
     let standard = statement.standard_for(for_file, &mut |path| files.read(path));
 
+    // **What the project`s own command says about its compiler`s search list** — a target, a GCC toolchain, a
+    // sysroot. See [`search_list_flags`] for the measurement that made this necessary.
+    let search_flags: Vec<String> = statement
+        .commands
+        .and_then(|commands| commands.command_for(for_file))
+        .map(|command| search_list_flags(&command.arguments))
+        .unwrap_or_default();
+
     // 1. The project's own answers.
     for (name, source) in named {
         if let Some(toolchain) = ask(
@@ -743,6 +806,7 @@ pub fn discover_with(
             environment,
             layout,
             standard.as_deref(),
+            &search_flags,
             for_file,
         ) {
             return Some(toolchain.claiming(*source));
@@ -761,6 +825,7 @@ pub fn discover_with(
             environment,
             layout,
             standard.as_deref(),
+            &search_flags,
             for_file,
         ) {
             return Some(toolchain.claiming(ToolchainSource::Environment));
@@ -796,6 +861,7 @@ pub fn discover_with(
             environment,
             layout,
             standard.as_deref(),
+            &search_flags,
             for_file,
         ) {
             return Some(toolchain.claiming(ToolchainSource::Path));
@@ -858,6 +924,7 @@ fn ask(
     environment: &Environment,
     layout: &crate::include::msvc::WindowsLayout,
     standard: Option<&str>,
+    flags: &[String],
     for_file: &Path,
 ) -> Option<Toolchain> {
     let found = locate(files, name, environment)?;
@@ -866,7 +933,7 @@ fn ask(
         return ask_msvc(runner, layout, standard, Some(found), for_file);
     }
 
-    search_paths(runner, &found, standard)
+    search_paths(runner, &found, standard, flags)
 }
 
 /// Is this Microsoft's compiler?

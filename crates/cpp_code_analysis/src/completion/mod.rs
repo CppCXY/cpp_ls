@@ -1322,6 +1322,7 @@ mod tests {
             returns: returns.map(str::to_string),
             bases: Vec::new(),
             parameters: Vec::new(),
+            constraints: Vec::new(),
             pattern: None,
             parameter_list: parameter_list.map(str::to_string),
             range: cpp_parser::SourceRange::new(0, 0),

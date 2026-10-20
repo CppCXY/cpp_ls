@@ -2030,3 +2030,62 @@ GCC 15 闭包(478 文件)   有解析错误的文件:3 → 1(<bits/text_encoding
 <limits> / <numbers>     0 个(上一节修的 F16 后缀)
 客户端可见             1 条消息:"This is not a public header, do not include it directly"
 ```
+
+## 三十七、clang:先把工具链问对,再修语法（2026）
+
+### ① 一个真实的缺陷:工具链**没问对**
+
+`compile_commands.json` 里写着:
+
+```text
+"C:/Program Files/LLVM/bin/clang++.exe" --target=x86_64-w64-mingw32 --gcc-toolchain=C:/Users/zc/Desktop/mingw/mingw64 …
+```
+
+而 `discover` 的答案是 **cl.exe / MSVC 14.51 / dialect Msvc**,8 条 include 全是 MSVC 与 Windows SDK 的 ——
+因为发现流程只把**编译器和标准**带给了 `clang++` 的询问,把决定"用哪个库"的 `--target`、`--gcc-toolchain` 丢了。
+clang++ 于是按它自己的默认目标回答,项目真正编译用的 libstdc++ 一条都没有。
+
+修法:新增 `search_list_flags`(只取 `--target`、`--gcc-toolchain`、`--sysroot`、`-stdlib`、`-isystem` 这类改变搜索路径的开关,
+不取 `-I`),由 `discover_with` 从该文件的命令里取出,传给 `search_paths`。修复后:
+
+```text
+compiler      C:/Program Files/LLVM/bin/clang++.exe   (named by the compile database)
+include paths 6,第一条 = …/include/c++(MinGW 15.1.0 的 libstdc++)
+dialect       Gnu
+```
+
+新测试:`the_search_list_flags_of_a_command_are_taken_and_nothing_else`。
+
+### ② clang 的闭包里唯一的语法错误:`tr1/random.h`
+
+```cpp
+template<typename _UIntType, int __w,
+         bool = __w < std::numeric_limits<_UIntType>::digits>
+  struct _Shift { … };
+```
+
+模板参数的**默认实参是一个比较**:`<` 是比较、那个 `>` 关闭的是参数表本身。读成 `__w<…>` 之后参数表没有终止符,
+错误落在后面的 `struct` 上。修法:模板实参表读完之后,如果后面那个记号是**声明/语句关键字**(`struct`、`class`、
+`return`、`if` …),那它前面的 `<…>` 不可能是模板实参表 —— 表达式后面不会接这些词。约束子句里要排除
+(`requires C<T> struct S { }` 的 `struct` 正是子句的结尾),所以这条只在"不在约束里"时生效。
+
+新测试:`a_template_parameter_default_may_be_a_comparison`(含 `requires C<T> struct` 的反例)。
+
+### 结果
+
+```text
+GCC 15 项目(478 文件)   有解析错误的文件 1(bits/text_encoding-data.h,只发布它自己的 #error)
+clang 18 项目(597 文件)  有解析错误的文件 1(同上)
+```
+
+### 顺手量了 MSVC(下一个目标)
+
+`C:\Users\zc\Desktop\test_msvc`(无 compile database → 平台默认 MSVC 14.51 + Windows SDK):
+
+```text
+171 文件、56 个错误,全在 Windows SDK 的 C 头里(stdio.h 47、corecrt_wio.h 4、corecrt_wtime.h 3、string.h 2)
+```
+
+归约到一条:`_Success_(return < _MaxCount) int b(...)` —— SAL 注解宏的**参数不是表达式**,要按平衡记号组读;
+`_Success_(return == 0)` 能过、`_Success_(return < _MaxCount)` 不能过,是因为 `<` 后面跟标识符时被当成了模板实参表。
+`_In_range_(<=, 2147483647)` 同源。下一条就修这个。

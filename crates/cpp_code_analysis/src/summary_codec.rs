@@ -1235,6 +1235,8 @@ mod tests {
                     // And a parameter list, which is the other list-shaped field: a class template's parameter
                     // names, in the order the declaration wrote them.
                     parameters: vec!["_Ty".to_string(), "_Alloc".to_string()],
+                    // The constraint in front of each parameter — empty here, and carried by the round trip.
+                    constraints: vec![String::new(), "Integral".to_string()],
                     // **A pattern**, so the round trip carries one: the field a member lookup uses to tell a partial
                     // specialization from its primary template. The `None` branch is covered by the two facts below.
                     pattern: Some("Widget<_Ty, _Alloc>".to_string()),

@@ -673,3 +673,27 @@ fn a_constrained_template_parameter_declares_a_type() {
         assert!(errors.is_empty(), "{text}: {errors:?}");
     }
 }
+
+/// **模板参数的默认实参可以是一个比较** —— `bool = __w < std::numeric_limits<T>::digits>` 里的 `<` 是比较,
+/// 不是模板实参表;那个 `>` 关闭的是参数表本身。
+///
+/// GCC 15 的 `tr1/random.h` 这么写,而 clang 的闭包会读到它(它是 `tr1/<random>` 的一部分)。读成 `__w<…>`
+/// 之后参数表就没有终止符,错误落在后面的 `struct` 上:`expected , or > in template parameter list`。
+#[test]
+fn a_template_parameter_default_may_be_a_comparison() {
+    for text in [
+        "namespace std { template<class T> struct numeric_limits { static const int digits = 0; }; }\n\
+         template<typename _UIntType, int __w,\n         bool = __w < std::numeric_limits<_UIntType>::digits>\n\
+           struct _Shift { static const _UIntType __value = 0; };\n",
+        "template<typename T, int N, bool = N < 3> struct A { };\n",
+        // …and the spellings that were already read: a qualified value, and parentheses.
+        "template<typename T, bool = T::value> struct B { };\n",
+        "template<typename T, int N, bool = (N < 3)> struct C { };\n",
+        // A constraint still ends with a declaration keyword, which is *not* a comparison.
+        "template <typename T> requires C<T> struct S { };\n",
+    ] {
+        let tree = cpp_parser::CppParser::parse(text, cpp_parser::ParserConfig::default());
+        let errors = tree.get_errors();
+        assert!(errors.is_empty(), "{text}: {errors:?}");
+    }
+}

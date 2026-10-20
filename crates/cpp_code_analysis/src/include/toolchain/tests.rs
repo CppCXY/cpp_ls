@@ -1,4 +1,6 @@
-    use super::{Dialect, Environment, Output, parse_search_list, parse_version};
+    use super::{
+    Dialect, Environment, Output, parse_search_list, parse_version, search_list_flags,
+};
 
     /// GCC 15.1.0 (MinGW-w64), trimmed to three entries — the shape is verbatim, including the `..` segments
     /// and the `#include "..."` block that precedes it.
@@ -521,7 +523,7 @@ End of search list.
         };
 
         let toolchain =
-            search_paths(&runner, Path::new("/usr/bin/g++"), None).expect("the fixture answers");
+            search_paths(&runner, Path::new("/usr/bin/g++"), None, &[]).expect("the fixture answers");
 
         assert_eq!(
             toolchain.compiler.as_deref(),
@@ -549,7 +551,7 @@ End of search list.
             program: "g++",
             output: "usage: g++ [options] file\n",
         };
-        assert_eq!(search_paths(&runner, Path::new("/usr/bin/g++"), None), None);
+        assert_eq!(search_paths(&runner, Path::new("/usr/bin/g++"), None, &[]), None);
     }
 
     #[test]
@@ -600,7 +602,7 @@ End of search list.
         };
 
         // The fixture's `run` asserts the arguments, so reaching this line at all means `-std=c++20` was passed.
-        let toolchain = search_paths(&runner, Path::new("/usr/bin/g++"), Some("c++20"))
+        let toolchain = search_paths(&runner, Path::new("/usr/bin/g++"), Some("c++20"), &[])
             .expect("the fixture answers");
         assert_eq!(
             toolchain.compiler.as_deref(),
@@ -1023,3 +1025,54 @@ End of search list.
 
         let _ = std::fs::remove_dir_all(&scratch);
     }
+
+/// **Which of a command's flags change the compiler's search list** — and which do not.
+///
+/// The measurement behind this: a project whose compile database names clang++ for MinGW was configured with cl and
+/// answered with MSVC's include paths, because the flags that say *which* library this build uses
+/// (`--target`, `--gcc-toolchain`) were dropped before the compiler was asked. `-I` is deliberately not taken: that
+/// is the project's own search path and travels with the file's configuration.
+#[test]
+fn the_search_list_flags_of_a_command_are_taken_and_nothing_else() {
+    let flags = |arguments: &[&str]| -> Vec<String> {
+        search_list_flags(&arguments.iter().map(|a| a.to_string()).collect::<Vec<_>>())
+    };
+
+    assert_eq!(
+        flags(&[
+            "clang++",
+            "--target=x86_64-w64-mingw32",
+            "--gcc-toolchain=C:/mingw64",
+            "-std=c++23",
+            "-Iproj",
+            "-c",
+            "src/main.cpp",
+            "-o",
+            "build/main.o",
+        ]),
+        vec![
+            "--target=x86_64-w64-mingw32".to_string(),
+            "--gcc-toolchain=C:/mingw64".to_string()
+        ],
+        "the two flags that decide which library, and nothing else"
+    );
+
+    assert_eq!(
+        flags(&[
+            "clang++",
+            "-target",
+            "aarch64-linux-gnu",
+            "-isystem",
+            "/opt/inc",
+            "-c",
+            "a.cpp",
+        ]),
+        vec![
+            "-target".to_string(),
+            "aarch64-linux-gnu".to_string(),
+            "-isystem".to_string(),
+            "/opt/inc".to_string(),
+        ],
+        "a flag whose value is the next token takes that token with it"
+    );
+}

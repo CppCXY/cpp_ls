@@ -1165,6 +1165,42 @@ fn is_a_type_in_parentheses(p: &CppParser) -> bool {
 /// disagree about which `<` is a template-id.
 ///
 /// The `false` answer is not "it did not parse": `n < 0 || n > 100000` parses perfectly well as `n<0 || n>`, so
+
+/// **Can this token not follow an expression?** — `N<3> struct`, where the `struct` proves the `<` was a comparison.
+///
+/// A template-id in an expression is followed by something that can continue one: an operator, a `(` of a call, a
+/// `.`, a `;`, a `)`. A **declaration or statement keyword** cannot, and that is the whole of this test. Measured:
+/// `template<typename _UIntType, int __w, bool = __w < std::numeric_limits<_UIntType>::digits>` in GCC 15`s
+/// `tr1/random.h` — a *comparison* whose `>` closes the template parameter list — was read as `__w<…>`, leaving the
+/// list without a terminator: `expected , or > in template parameter list` at the `struct` after it.
+fn cannot_follow_an_expression(p: &CppParser) -> bool {
+    matches!(
+        p.current_token(),
+        CppTokenKind::StructKeyword
+            | CppTokenKind::ClassKeyword
+            | CppTokenKind::UnionKeyword
+            | CppTokenKind::EnumKeyword
+            | CppTokenKind::NamespaceKeyword
+            | CppTokenKind::TemplateKeyword
+            | CppTokenKind::TypedefKeyword
+            | CppTokenKind::UsingKeyword
+            | CppTokenKind::ExternKeyword
+            | CppTokenKind::StaticAssertKeyword
+            | CppTokenKind::StaticKeyword
+            | CppTokenKind::FriendKeyword
+            | CppTokenKind::InlineKeyword
+            | CppTokenKind::VirtualKeyword
+            | CppTokenKind::ExplicitKeyword
+            | CppTokenKind::ReturnKeyword
+            | CppTokenKind::IfKeyword
+            | CppTokenKind::ForKeyword
+            | CppTokenKind::WhileKeyword
+            | CppTokenKind::PublicKeyword
+            | CppTokenKind::PrivateKeyword
+            | CppTokenKind::ProtectedKeyword
+    )
+}
+
 /// what settles it is the token **after** the list — an operand there cannot follow a template-id. See
 /// [`starts_an_operand`], which is where that rule is written.
 fn read_a_template_id_here(p: &mut CppParser) -> bool {
@@ -1175,7 +1211,13 @@ fn read_a_template_id_here(p: &mut CppParser) -> bool {
     // still open — see [`an_operand_is_decisive`], which is the same question the cast rule asks about its own `)`.
     let an_operand_ends_the_constraint = an_operand_is_decisive(p) && starts_an_operand(p, 0);
 
-    if read.is_err() || an_operand_ends_the_constraint {
+    // **…and only outside a constraint.** Inside one, a declaration keyword after the id is exactly what follows:
+    // `template <typename T> requires C<T> struct S { };` ends the clause with `struct`, so the keyword guard would
+    // refuse the template-id the clause is made of.
+    if read.is_err()
+        || an_operand_ends_the_constraint
+        || (an_operand_is_decisive(p) && cannot_follow_an_expression(p))
+    {
         p.rollback(before_the_arguments);
         return false;
     }
