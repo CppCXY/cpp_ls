@@ -175,6 +175,18 @@ const MACRO_SLICE: usize = 1;
 /// closure took. Sixty-four covers the layer under every MSVC header that is a thin wrapper over another
 /// (`<string>` → `<xstring>`, `<vector>` → `<xmemory>`, `<map>` → `<xtree>`); a translation unit that includes
 /// the whole library wants [`Session::want_everything_cooked`], which is the caller's decision and not a default.
+/// **How many files the second level beyond a file`s includes may cook** — see [`Session::want_the_closure_cooked`].
+///
+/// The first level (`COOK_ONE_LEVEL_FURTHER`, 64) reaches the headers a file includes; this one reaches the headers
+/// *those* include, which is where a class a header uses is declared: MSVC`s `<string>` is a thin layer over
+/// `<xstring>`, and `basic_string` is in `xstring`. Measured: cooking `xstring` took **2.17 s**, and without it
+/// `std::string` answered `NotDeclaredHere` in a file that includes the header that includes the header that
+/// declares it.
+///
+/// Smaller than the first level because it is further from the file being edited and is reached only when the first
+/// level does not already answer.
+const COOK_TWO_LEVELS_FURTHER: usize = 24;
+
 const COOK_ONE_LEVEL_FURTHER: usize = 64;
 
 /// How many files a project scan will list before it stops.
@@ -1522,6 +1534,7 @@ impl<F: FileProvider + Clone> Session<F> {
         // because the unbounded version is the 11.7 s above: a translation unit that includes all of the standard
         // library has hundreds of files at this depth, and cooking is a render and an index per file.
         let mut budget = COOK_ONE_LEVEL_FURTHER;
+        let mut nested_files: Vec<PathBuf> = Vec::new();
         for included in &direct {
             for nested in self.direct_includes_of(included) {
                 if budget == 0 {
@@ -1530,7 +1543,42 @@ impl<F: FileProvider + Clone> Session<F> {
                 if already_read(self, &nested) {
                     continue;
                 }
+                if !nested_files.contains(&nested) {
+                    nested_files.push(nested.clone());
+                }
                 self.cooking.want(&nested);
+                budget -= 1;
+            }
+        }
+
+        // **And one level beyond that**, which is where a class a header *uses* is declared.
+        //
+        // The level above reaches the headers a file includes; the class those headers talk about is often one more
+        // `#include` down. MSVC's `<string>` is the ordinary case: it is a thin layer over `<xstring>`, and
+        // `basic_string` — and therefore `std::string` — is declared in `xstring`. Measured on EmmyLuaCodeStyle's
+        // `LuaParser/src/File/LuaSource.cpp` (whose `LuaSource.h` includes `<string>`):
+        //
+        // ```text
+        //                    std::string before   after cooking `xstring` by hand
+        //   members_of        NotDeclaredHere      Yes(222 members)
+        // ```
+        //
+        // — so `std::string` was unknown in a file that includes the header that includes the header that declares
+        // it, and the same reading left `std::basic_string` and `std::size_t` unknown. The cook of `xstring` costs
+        // **2.17 s** and happens once per session.
+        //
+        // Bounded like the level above, and for the same reason: this is a queue of work for the pump, and a
+        // translation unit that includes the standard library has hundreds of files at every depth.
+        let mut budget = COOK_TWO_LEVELS_FURTHER;
+        for nested in &nested_files {
+            for deeper in self.direct_includes_of(nested) {
+                if budget == 0 {
+                    break;
+                }
+                if already_read(self, &deeper) {
+                    continue;
+                }
+                self.cooking.want(&deeper);
                 budget -= 1;
             }
         }
