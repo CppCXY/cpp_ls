@@ -2835,6 +2835,20 @@ impl<F: FileProvider + Clone> Session<F> {
         self.cooking.len()
     }
 
+    /// **Drop everything the cook queue is waiting for, and say how much it was.**
+    ///
+    /// For the pump`s breaker: a file the cook claims and cannot build leaves the queue`s count where it was, and
+    /// a loop that keeps taking it never goes idle (measured once as `2 to cook, 0 left` once a second for as long
+    /// as a window stayed open). Dropping is safe rather than lossy: every query that needs one of these files asks
+    /// for it again (`want_cooked_reading`, [`Session::want_the_closure_cooked`]), and the next drain takes it with
+    /// whatever has changed since.
+    ///
+    /// Nothing is forgotten about the *files* — only the want. A dropped file that could be built will be built the
+    /// next time something names it, and one that could not will not spin the loop meanwhile.
+    pub fn abandon_the_cooking_queue(&mut self) -> usize {
+        self.cooking.abandon()
+    }
+
     /// **Write the sharing cache** next to the summaries, so that the next run starts warm — §8 step 4.
     ///
     /// One file, `<cache>/sharing.bin`. Its entries carry their own identity (the file's fingerprint and the projection
@@ -6440,6 +6454,17 @@ impl Cooking {
 
     fn len(&self) -> usize {
         self.wanted.len()
+    }
+
+    /// **Drop the whole queue, and say how many files it held** — see [`Session::abandon_the_cooking_queue`].
+    ///
+    /// Both halves: the order and the membership set, which is what `want` consults before pushing. Clearing only one
+    /// would leave the queue claiming a file it no longer holds.
+    fn abandon(&mut self) -> usize {
+        let held = self.wanted.len();
+        self.wanted.clear();
+        self.held.clear();
+        held
     }
 }
 

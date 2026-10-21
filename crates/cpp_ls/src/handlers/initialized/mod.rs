@@ -309,6 +309,11 @@ async fn index_in_background(context: ServerContextSnapshot) {
         // What the last slice left to do — see the drain below, which is the moment a file's **cooked** reading
         // changes hands.
         let mut was_pending = false;
+        // **How many slices in a row changed nothing** — see the breaker after the commit. A slice that claims a file
+        // and cannot build it leaves the queue's count where it was, and a loop that keeps taking it is a pump that
+        // never goes idle: measured once as `index slice: … 2 to cook, 0 left` once a second for as long as a window
+        // stayed open, with every diagnostic pull answered 1.4 s late because the pump held the lock it waited for.
+        let mut no_progress = 0usize;
 
         // **The wave the pump is asking for**, adjusted after every slice (see below). It starts small because the first
         // wave of a cold start is the expensive one — measured: a fixed cap of 32 held the writer for 3309 ms on the
@@ -419,6 +424,11 @@ async fn index_in_background(context: ServerContextSnapshot) {
             // the lock a query waits for.
             // …and the same for the drain and the cooking slice: a rendering is 9–269 ms per file and a unit walk is
             // 150 ms, so this phase is the longest remaining uninterrupted span of CPU in the loop.
+            //
+            // **Taken before the closures consume them**, for the breaker below: what a slice *asked for* is half of
+            // "did it achieve anything", and the other half comes back from the commit.
+            let drain_was_empty = drain.is_empty();
+            let claimed_count = claimed.len();
             let (prepared_drain, rendered_cooks) = context
                 .analysis()
                 .run_blocking(move |session| {
@@ -434,7 +444,7 @@ async fn index_in_background(context: ServerContextSnapshot) {
             // **And the insert, under the write lock** — one `insert` per re-read summary and one `insert_cooked` per
             // cooked file, and nothing else. Both halves are timed, because the count is not the number a caller
             // feels: what makes this product slow is a write lock held for long, and this line says which half did it.
-            context
+            let (re_read, cooked) = context
                 .analysis()
                 .update_session("index slice", |session| {
                     let started = std::time::Instant::now();
@@ -450,8 +460,37 @@ async fn index_in_background(context: ServerContextSnapshot) {
                             held = drained + inserted
                         );
                     }
+                    (re_read, cooked)
                 })
-                .await;
+                .await
+                .unwrap_or((0, 0));
+
+            // **A slice that changed nothing must not be repeated for ever.** A file the cook claims and cannot build
+            // — no summary, no unit, a rendering that declines — leaves `pending` where it was, and a pump that keeps
+            // taking it never goes idle. Measured once on a real project: `index slice: … 2 to cook, 0 left` once a
+            // second for as long as a window stayed open, and every diagnostic pull answered **1.4 s** late because
+            // the pump held the write lock it was waiting for.
+            //
+            // Eight consecutive slices is not a heuristic about speed: an ordinary slice that finds the queue full of
+            // files it must *re-read* always reports `prepared > 0`, and one that only cooks always reports `cooked`.
+            // Eight in a row with nothing at all is a state, not a phase — so the files that cannot be built are
+            // dropped from the queue (the next request that names one puts it back) and the pump is allowed to idle.
+            let progressed = prepared_count > 0 || !drain_was_empty || claimed_count > 0 || re_read > 0 || cooked > 0;
+            no_progress = if progressed { 0 } else { no_progress + 1 };
+            if no_progress >= 8 {
+                let dropped = context
+                    .analysis()
+                    .update_session("drop the files that cannot be built", |session| {
+                        session.abandon_the_cooking_queue()
+                    })
+                    .await
+                    .unwrap_or(0);
+                log::warn!(
+                    "the pump made no progress in {no_progress} slices with {pending} file(s) left: \
+                     {dropped} queued file(s) were dropped (they are asked for again by the query that names one)"
+                );
+                no_progress = 0;
+            }
 
             if pending > 0 {
                 context.status_bar().update_progress_task(
