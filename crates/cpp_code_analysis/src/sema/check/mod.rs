@@ -1457,6 +1457,14 @@ pub fn run(context: CheckContext<'_>) -> Vec<Finding> {
     run_check::<assign_type_check::AssignTypeCheck>(&mut context);
     run_check::<return_type_mismatch::ReturnTypeMismatch>(&mut context);
 
+    if crate::probes::timing() {
+        let (ran, nanos) = context.model.inference_cost();
+        eprintln!(
+            "[checks] inference: {ran} question(s) in {} ms",
+            nanos / 1_000_000
+        );
+    }
+
     context.into_findings()
 }
 

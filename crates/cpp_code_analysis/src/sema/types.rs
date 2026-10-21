@@ -1171,6 +1171,23 @@ pub fn template_parameters_in(list: &CppSyntaxNode) -> Vec<(String, String)> {
 /// `void f(Widget* p)` has a `Declarator` for `f` whose text contains `p`, and the one that declares `p` is the
 /// parameter's own. The shortest match is the innermost, and it is also the only one whose specifiers are the
 /// *parameter's* specifiers.
+///
+/// # Why this descends instead of walking the tree
+///
+/// It used to be `root.descendants()`, filtered by "a declaration kind that contains this name and holds a
+/// declarator somewhere in its subtree" — **two nested walks of the whole tree per question**, asked once per
+/// declaration whose type the model reads. Every node whose range contains the name is on **one chain** — the
+/// ancestors of the token the name is written in — so the innermost is the deepest, and descending into the child
+/// that contains the name finds it in O(depth × children) visits. The subtree scan the old filter did is only needed
+/// for a node that does not hold its declarator directly, which is the rare shape rather than the common one. The
+/// answers are the same, including the one that is `None`: a node with a declarator *somewhere* but none it can name
+/// directly is the node the old code chose, and it answered `None` rather than looking further outward.
+///
+/// **What it is worth, measured.** On the four-file audit of `EmmyLuaCodeStyle` this is **1 958 ms → 1 895 ms** —
+/// small, and it was *not* what made the inference slow: the 5 923 ms a profile attributed to this area was the
+/// engine re-asking the same declarations because its recursion had no memo (see
+/// [`crate::index::project::type_of_expression_memoed`]). The descent is kept as the smaller walk with the same
+/// answers rather than as a fix for a measured defect.
 pub fn declarator_declaring(
     root: &cpp_parser::CppSyntaxNode,
     name: cpp_parser::SourceRange,
@@ -1184,51 +1201,75 @@ pub fn declarator_declaring(
     //
     // This is the same shape the reader's own tests use, and it is not a coincidence: the declaration is where a
     // type is written down.
-    let declaration = root
-        .descendants()
-        .filter(|node| {
-            // **Three more kinds declare a name than the one called `Declaration`.** `typedef` and `using` are
-            // their own nodes, and a **parameter** is a `Parameter` — so a search for `Declaration` alone found
-            // none of them: a function-pointer typedef came back with no type at all, and `void f(Widget* p)`'s
-            // `p` was read from the *function's* declaration, which is why a parameter answered `UnknownType`
-            // while the same spelling declared at the top of a body worked.
-            matches!(
-                CppSyntaxKind::from(node.kind()),
-                CppSyntaxKind::Declaration
-                    | CppSyntaxKind::TypedefDecl
-                    | CppSyntaxKind::UsingDecl
-                    | CppSyntaxKind::Parameter
-            ) && node
-                .descendants()
-                .any(|inner| CppSyntaxKind::from(inner.kind()) == CppSyntaxKind::Declarator)
-                && {
-                    let own = node.text_range();
-                    usize::from(own.start()) <= name.start_offset
-                        && usize::from(own.end()) >= name.end_offset()
-                }
-        })
-        // **The innermost declaration containing the name.** Declarations nest — a parameter is declared inside a
-        // function's declaration — so the outermost one is the *function*, and reading it would answer about `f`
-        // when the question was `p`. `void f(Widget* p)` is the shape this is for, and it is the same
-        // innermost-wins rule the shapes walk uses.
-        .min_by_key(|node| {
-            usize::from(node.text_range().end()) - usize::from(node.text_range().start())
-        })?;
 
-    let init = declaration
-        .children()
-        .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::InitDeclarator);
+    // **One descent, and the chain it leaves behind.** Every node whose range holds the name is an ancestor of the
+    // token the name is written in, so the innermost one is the deepest node the descent reaches.
+    let mut chain: Vec<cpp_parser::CppSyntaxNode> = Vec::new();
+    let mut current = root.clone();
+    loop {
+        chain.push(current.clone());
+        let next = current.children().find(|child| {
+            let own = child.text_range();
+            usize::from(own.start()) <= name.start_offset
+                && usize::from(own.end()) >= name.end_offset()
+        });
+        match next {
+            Some(child) => current = child,
+            None => break,
+        }
+    }
 
-    init.as_ref()
-        .and_then(|init| {
-            init.children()
-                .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::Declarator)
-        })
-        .or_else(|| {
-            declaration
-                .children()
-                .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::Declarator)
-        })
+    // **Deepest first**, which is the old `min_by_key(span)`: the nodes that can hold the name are all on the chain,
+    // and the one with the shortest span is the one furthest down it.
+    for node in chain.iter().rev() {
+        // **Three more kinds declare a name than the one called `Declaration`.** `typedef` and `using` are
+        // their own nodes, and a **parameter** is a `Parameter` — so a search for `Declaration` alone found
+        // none of them: a function-pointer typedef came back with no type at all, and `void f(Widget* p)`'s
+        // `p` was read from the *function's* declaration, which is why a parameter answered `UnknownType`
+        // while the same spelling declared at the top of a body worked.
+        if !matches!(
+            CppSyntaxKind::from(node.kind()),
+            CppSyntaxKind::Declaration
+                | CppSyntaxKind::TypedefDecl
+                | CppSyntaxKind::UsingDecl
+                | CppSyntaxKind::Parameter
+        ) {
+            continue;
+        }
+        let own = node.text_range();
+        if usize::from(own.start()) > name.start_offset || usize::from(own.end()) < name.end_offset() {
+            continue;
+        }
+
+        let init = node
+            .children()
+            .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::InitDeclarator);
+        let declarator = init
+            .as_ref()
+            .and_then(|init| {
+                init.children()
+                    .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::Declarator)
+            })
+            .or_else(|| {
+                node.children()
+                    .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::Declarator)
+            });
+        if declarator.is_some() {
+            return declarator;
+        }
+
+        // **A node that holds a declarator somewhere but none it can name directly is the node this function used
+        // to choose — and it answered `None`.** Keeping that answer rather than looking further outward is what
+        // makes this rewrite equivalent; the scan is here only for that shape, so the common case never pays it.
+        if node
+            .descendants()
+            .any(|inner| CppSyntaxKind::from(inner.kind()) == CppSyntaxKind::Declarator)
+        {
+            return None;
+        }
+    }
+
+    None
 }
 /// **Read a declared type from a declaration's syntax** — the specifier sequence plus the declarator around a name.
 ///

@@ -1522,6 +1522,23 @@ impl<F: FileProvider> SummaryStore<F> {
             .unwrap_or_default()
     }
 
+    /// **How many guarded `#define`s the unit walks have decided about** — `(files, offsets)`.
+    ///
+    /// The instrument behind the question the second pass's cost hinges on: a timeline walk records which
+    /// `#define`s under a conditional a compiler would not have read ([`SummaryStore::dead_macros`]), and the only
+    /// reason the pass cannot skip its walks is that recording. If a project has no such decisions, the recording is
+    /// a no-op and the walk is paying for something it never produces — which is what this answers, rather than
+    /// assumes.
+    pub fn dead_macro_decisions(&self) -> (usize, usize) {
+        let Ok(dead) = self.dead_macros.lock() else {
+            return (0, 0);
+        };
+        (
+            dead.len(),
+            dead.values().map(|offsets| offsets.len()).sum(),
+        )
+    }
+
     fn read_into(&self, sources: &mut std::collections::HashMap<String, String>, path: &Path) {
         let key = normalize_path(path, cfg!(windows));
         if sources.contains_key(&key) {

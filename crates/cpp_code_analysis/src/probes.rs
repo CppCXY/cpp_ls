@@ -68,6 +68,8 @@ switch! {
     attributes => "CPPLS_TRACE_ATTR", "Attribute questions, as the walk asks them.";
     units => "CPPLS_TRACE_UNITS", "Which units the session walked, and how often each root.";
     diagnostics => "CPPLS_TRACE_DIAGNOSTICS", "The stage table, printed when a run ends.";
+    timing => "CPPLS_TRACE_TIME", "Every type inference, and every file a question had to read to answer one.";
+    no_inference => "CPPLS_NO_INFERENCE", "Answer every type question `Unknown`, so that a rule's own walk can be measured apart from the inference.";
 }
 
 /// Where [`completion`]'s report goes: stderr rather than the default sink, for a client whose stdout is the protocol.

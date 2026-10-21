@@ -70,11 +70,23 @@ impl Check for AccessInvisible {
     const CODES: &'static [DiagnosticCode] = &[DiagnosticCode::AccessInvisible];
 
     fn check(context: &mut CheckContext<'_>) {
+        // **Only a name this file declares can be judged.** Both sides of this rule have to be in the file being
+        // checked (see the module documentation), so a member whose name no fact of this file records cannot produce
+        // a finding — and finding out that it is not there costs an inference per access. Measured on
+        // `LuaSyntaxTree.cpp`: the rule is the most expensive one at ~230 ms, and almost every access it looked at
+        // was `tokens.size()`, `e.U.Start.Kind` — members of classes from other files, which this rule never judges.
+        let declared_here: std::collections::HashSet<&str> = context
+            .summary
+            .declarations
+            .iter()
+            .map(|fact| fact.name.as_str())
+            .collect();
+
         // **Every member access in this file's own text**, by the sema layer's definition — see
         // `CheckContext::member_accesses` for why the node kind cannot be trusted for this question, and why this
         // check found nothing at all until it stopped filtering on `MemberExpr`.
         for (node, access) in context.member_accesses() {
-            if access.member.is_empty() {
+            if access.member.is_empty() || !declared_here.contains(access.member.as_str()) {
                 continue;
             }
 
@@ -98,12 +110,23 @@ impl Check for AccessInvisible {
 
             // **The declaration of that member, in this file** — found by the range the member list reports, which
             // is the name's. A member declared in another file is not here, and this check does not judge it, so the
-            // search runs over this file's own nodes rather than over the whole rendering.
-            let Some(declaration) = context.own_syntax_nodes().find(|node| {
-                usize::from(node.text_range().start()) == member.fact.range.start_offset
-            }) else {
+            // node must also be one this file wrote (see `own_syntax_nodes`).
+            //
+            // **Not `own_syntax_nodes().find(..)`**, which is what this was: that iterator walks the whole file's
+            // tree, and it did so **once per member access**. Measured on `LuaSyntaxTree.cpp` — a 2 800-line file
+            // with several hundred accesses — the rule cost **234 ms**, and the walk is hidden behind the type gate:
+            // `CPPLS_NO_INFERENCE=1` makes the rule answer before it ever gets here, so the A/B that attributed
+            // 96% of the layer to inference did not see it. A token at the offset and its ancestors reach the same
+            // node in O(depth).
+            let Some(declaration) = declaration_starting_at(context, member.fact.range.start_offset) else {
                 continue;
             };
+            if !context
+                .view
+                .was_written_here(cpp_parser::source_range(declaration.text_range()))
+            {
+                continue;
+            }
             let Some(class) = enclosing_definition(&declaration) else {
                 continue;
             };
@@ -148,6 +171,22 @@ fn enclosing_definition(node: &CppSyntaxNode) -> Option<CppSyntaxNode> {
         current = ancestor.parent();
     }
     None
+}
+
+/// **The outermost node of the tree that starts at `offset`** — the declaration a member fact's range names.
+///
+/// The token at that offset and its ancestors are the only nodes that can start there, so this is O(depth) where
+/// [`super::CheckContext::own_syntax_nodes`] is O(the file). Ancestors come innermost first, and the old walk
+/// answered with the first node in *pre-order* — the outermost — so the last match is the one to keep.
+fn declaration_starting_at(
+    context: &super::CheckContext<'_>,
+    offset: usize,
+) -> Option<CppSyntaxNode> {
+    let token = cpp_parser::token_at(context.tree(), offset)?;
+    token
+        .parent_ancestors()
+        .filter(|node| usize::from(node.text_range().start()) == offset)
+        .last()
 }
 
 /// Whether two handles are the same node — by range, because a node is a handle and two handles to one node are not

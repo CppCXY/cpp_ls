@@ -231,6 +231,7 @@ pub fn member_definitions_across_files(
     path: &Path,
     offset: usize,
 ) -> Known<ProjectDefinitions> {
+    let memo = TypeMemo::default();
     let Some(access) = crate::sema::resolve::member_access_at(root, offset) else {
         return Known::Unknown(UnknownReason::UnparsableName);
     };
@@ -240,10 +241,10 @@ pub fn member_definitions_across_files(
     }
 
     let Known::Yes((object_type, _)) =
-        type_of_expression(index, declaring, scopes, root, path, &access.object, 0)
+        type_of_expression_memoed(&memo, index, declaring, scopes, root, path, &access.object, 0)
     else {
         let Known::Unknown(reason) =
-            type_of_expression(index, declaring, scopes, root, path, &access.object, 0)
+            type_of_expression_memoed(&memo, index, declaring, scopes, root, path, &access.object, 0)
         else {
             unreachable!("the first match established that this is an `Unknown`")
         };
@@ -650,7 +651,32 @@ pub struct ProjectIndex {
     /// `macros_at`/`macro_environment` state, one walk per file with conditions answered as they are reached,
     /// which removes the per-edge cost instead of the invalidation.
     visibility_answers: std::sync::Mutex<HashMap<(String, u32), crate::Visibility>>,
+    /// **The member lists already built, by `(class, the file whose tree was used)`** — see
+    /// [`ProjectIndex::cached_member_list`] for the measurement and for how an entry is invalidated.
+    ///
+    /// This is the one cache here that outlives a request on purpose: a class's members do not change when a reader
+    /// types a character somewhere else, and every diagnostics pull asks for the same handful of classes.
+    member_lists: std::sync::Mutex<HashMap<(String, PathBuf), CachedMemberList>>,
 }
+
+/// One entry of [`ProjectIndex::member_lists`]: the members, and **what the answer was made of**.
+///
+/// The contributors are the files whose facts the list holds — every member's own file. An entry is dropped when one
+/// of them changes, which is the narrowest invalidation that is sound without recording which *bases* were walked:
+/// a base's members are in the list and carry the base's file.
+#[derive(Debug)]
+struct CachedMemberList {
+    contributors: Vec<PathBuf>,
+    list: MemberList,
+}
+
+
+/// How many member lists [`ProjectIndex::member_lists`] may hold before it is emptied.
+///
+/// A list is a few hundred [`ProjectMember`]s, each with a `DeclFact`, so an entry is tens to a hundred kilobytes and
+/// this is a few tens of megabytes at worst. Cleared whole rather than evicted one at a time: the sets that matter
+/// are "the classes this file mentions", which are asked together.
+const MAX_CACHED_MEMBER_LISTS: usize = 96;
 
 /// Which member a `obj.member` or `ptr->member` at `offset` names.
 ///
@@ -686,6 +712,7 @@ pub fn member_across_files(
     path: &Path,
     offset: usize,
 ) -> Known<ProjectDefinition> {
+    let memo = TypeMemo::default();
     let Some(access) = crate::sema::resolve::member_access_at(root, offset) else {
         return Known::Unknown(UnknownReason::UnparsableName);
     };
@@ -700,10 +727,10 @@ pub fn member_across_files(
 
     // The type of the object, which is what decides which class the member is looked for in.
     let Known::Yes((written, _)) =
-        type_of_expression(index, declaring, scopes, root, path, &access.object, 0)
+        type_of_expression_memoed(&memo, index, declaring, scopes, root, path, &access.object, 0)
     else {
         let Known::Unknown(reason) =
-            type_of_expression(index, declaring, scopes, root, path, &access.object, 0)
+            type_of_expression_memoed(&memo, index, declaring, scopes, root, path, &access.object, 0)
         else {
             unreachable!("the first match established that this is an `Unknown`")
         };
@@ -983,14 +1010,27 @@ pub fn own_members_of(
 /// * No conditional region. A member of a class in the buffer comes back with [`FactGuard::Unconditional`]
 ///   whatever `#if` it is really in — see `fact_from_binding`. A class from the index does carry its regions.
 pub fn members_of(
-
     index: &ProjectIndex,
     scopes: &crate::ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
     class: &str,
 ) -> Known<MemberList> {
+    // **A class's members do not change because a reader typed a character somewhere else.** Every diagnostics pull
+    // asks for the same handful of classes — `std::vector`, `std::basic_string`, the file's own types — and each
+    // answer costs 4–16 ms (`direct_members`, measured) because it reads the class's facts and walks its bases.
+    // Measured on `LuaSource.cpp`: 17 lists, 82 ms of a 157 ms pull, every keystroke. The cache is invalidated by
+    // *which files the list was made of*, so an edit to a file that contributes members drops exactly those lists
+    // (see [`CachedMemberList`]).
+    let key = (class.to_string(), path.to_path_buf());
+    if let Some(known) = index.cached_member_list(&key) {
+        return known;
+    }
+
     let listed = members_of_inner(index, scopes, root, path, class);
+    if let Known::Yes(list) = &listed {
+        index.remember_member_list(key, list);
+    }
 
     // The diagnostic that found why `std::ios::` offered nothing: whether a member is *present* and at what depth,
     // which is the difference between "the base walk worked" and "the list happens to be long". Off unless asked
@@ -1008,6 +1048,67 @@ pub fn members_of(
         );
     }
     listed
+}
+
+impl ProjectIndex {
+    /// **A member list already built for this class and this file's tree**, if one is held.
+    fn cached_member_list(&self, key: &(String, PathBuf)) -> Option<Known<MemberList>> {
+        let known = self.member_lists.lock().ok()?;
+        known.get(key).map(|cached| {
+            if crate::probes::members() {
+                eprintln!("members_of({}) -> {} member(s), cached", key.0, cached.list.members.len());
+            }
+            Known::Yes(cached.list.clone())
+        })
+    }
+
+    /// **Remember one member list**, with the files it was made of.
+    ///
+    /// A list with an `unlisted` base is not remembered: the gap is a statement about a file nobody has read, and a
+    /// file arriving is not a change to any contributor. An empty list is not remembered either — `direct_members`
+    /// answers one for a class whose declaration is not in the index yet, and the contributor set would be empty, so
+    /// nothing could invalidate it.
+    fn remember_member_list(&self, key: (String, PathBuf), list: &MemberList) {
+        if list.members.is_empty() || !list.unlisted.is_empty() {
+            return;
+        }
+
+        let mut contributors: Vec<PathBuf> = Vec::new();
+        for member in &list.members {
+            if !contributors.contains(&member.file) {
+                contributors.push(member.file.clone());
+            }
+        }
+
+        if let Ok(mut known) = self.member_lists.lock() {
+            if known.len() >= MAX_CACHED_MEMBER_LISTS {
+                known.clear();
+            }
+            known.insert(
+                key,
+                CachedMemberList {
+                    contributors,
+                    list: list.clone(),
+                },
+            );
+        }
+    }
+
+    /// **Drop every member list one of whose contributors is `path`** — called wherever the index changes for it.
+    ///
+    /// The comparison is by [`normalize`], for the reason every path comparison in this file is: a summary is filed
+    /// under the resolver's spelling (`c:/…`) while an edit arrives with the client's (`C:\…`).
+    fn forget_member_lists(&self, path: &Path) {
+        let wanted = normalize(path);
+        if let Ok(mut known) = self.member_lists.lock() {
+            known.retain(|_, cached| {
+                !cached
+                    .contributors
+                    .iter()
+                    .any(|file| normalize(file) == wanted)
+            });
+        }
+    }
 }
 
 fn members_of_inner(
@@ -1396,6 +1497,7 @@ pub fn member_completions_at(
     path: &Path,
     offset: usize,
 ) -> Known<MemberCompletions> {
+    let memo = TypeMemo::default();
     // **The shape comes from the completion context, which is the one reader of it.** This used to call
     // `sema::resolve::member_access_at`, which reads the access out of the tree alone, and the two disagree about
     // one offset a client really sends: with the caret drawn **on** the operator's own column (`full2|.`), the
@@ -1412,7 +1514,7 @@ pub fn member_completions_at(
         return Known::Unknown(UnknownReason::UnparsableName);
     };
 
-    let written = match type_of_expression(index, declaring, scopes, root, path, &access.object, 0)
+    let written = match type_of_expression_memoed(&memo, index, declaring, scopes, root, path, &access.object, 0)
     {
         Known::Yes((written, _)) => written,
         Known::Unknown(reason) => return Known::Unknown(reason),
@@ -2536,7 +2638,142 @@ fn new_expression_allocates(expression: &cpp_parser::CppSyntaxNode) -> Option<St
 /// dereference (`(*p).size`), a subscript, an arithmetic expression. Each of those needs a type *computed* rather
 /// than read off a declaration, which is a different and much larger problem — and answering `Unknown` is what
 /// keeps this layer from being wrong in a way a consumer cannot see.
+///
+/// # One entry point, one memo — and the recursion shares it
+///
+/// The engine used to be **stateless** below its caller: this function called itself for every sub-expression, so a
+/// question already answered was answered again — a `2 800`-line file asked 382 top-level questions and spent
+/// **5 923 ms**, because one `e.U.Start.Kind` re-deduced the `auto` declaration behind `e` eleven times. The memo is
+/// now a parameter ([`type_of_expression_memoed`]), so every recursive question hits it; a caller with many questions
+/// to ask — [`crate::sema::model::SemanticModel`] — passes one map for the whole request.
 pub(crate) fn type_of_expression(
+    index: &ProjectIndex,
+    declaring: &mut dyn FnMut(&Path) -> Option<crate::FileView>,
+    scopes: &crate::ScopeTree,
+    root: &cpp_parser::CppSyntaxNode,
+    path: &Path,
+    expression: &cpp_parser::CppSyntaxNode,
+    depth: usize,
+) -> Known<(Type, PathBuf)> {
+    // **One memo per entry point**, which is the smallest scope that already removes the duplication: the questions
+    // asked *inside* one expression are the ones that repeat. A caller that asks about many expressions shares a
+    // larger memo by calling [`type_of_expression_memoed`] itself — see `SemanticModel`.
+    let memo = TypeMemo::default();
+    type_of_expression_memoed(&memo, index, declaring, scopes, root, path, expression, depth)
+}
+
+/// **What an expression's type was, and what a member lookup answered** — the memo one request shares.
+///
+/// The engine was recursive over the tree and **stateless**, so every sub-expression it had already answered was
+/// answered again: on a 2 800-line file, one `e.U.Start.Kind` re-deduced the `auto` declaration behind `e` eleven
+/// times, and the whole file was 382 top-level questions but **5 923 ms**. A memo keyed by the node's range is sound
+/// for the same reason [`crate::sema::model::SemanticModel`]'s is: a range is unique within one tree, and a tree is
+/// not mutated while a query runs.
+///
+/// The second map answers the other repeated question. A member lookup is keyed by the **class spelling and the
+/// member's name**, which is the whole of its input, and one file asks the same pair many times — `size()` on one
+/// string is three lines in one file, and every rule that reads a member access asks the same question. It is a
+/// memo of the *lookup*, not of the answer's use: each caller still gets its own `DeclFact` clone.
+#[derive(Default)]
+pub(crate) struct TypeMemo {
+    types: std::cell::RefCell<std::collections::HashMap<(u32, u32), Known<(Type, PathBuf)>>>,
+    members: std::cell::RefCell<
+        std::collections::HashMap<(String, String), Known<(DeclFact, PathBuf)>>,
+    >,
+    /// How long the engine has spent, in nanoseconds — the attribution these measurements need.
+    spent: std::cell::Cell<u64>,
+    /// How many inferences ran.
+    ran: std::cell::Cell<u64>,
+}
+
+impl TypeMemo {
+    /// **Has this node's type already been asked for?** — the model's own count of its hits, so that
+    /// [crate::sema::model::SemanticModel::inference_stats] keeps meaning what it says.
+    /// What the engine has cost so far: (inferences, nanoseconds) — see [TypeMemo].
+    pub(crate) fn spent(&self) -> (u64, u64) {
+        (self.ran.get(), self.spent.get())
+    }
+
+    pub(crate) fn remembers(&self, key: &(u32, u32)) -> bool {
+        self.types.borrow().contains_key(key)
+    }
+
+    /// **The type of a node already asked about, if it was.**
+    fn remembered_type(&self, key: &(u32, u32)) -> Option<Known<(Type, PathBuf)>> {
+        self.types.borrow().get(key).cloned()
+    }
+
+    /// **One member lookup, remembered by what it was asked.**
+    ///
+    /// The lookup is taken as a closure so that the memo owns both the key and the miss path in one place; a caller
+    /// that wanted to skip the closure on a hit would have to write the map's shape at every call site.
+    fn member(
+        &self,
+        class: &str,
+        member: &str,
+        look: impl FnOnce() -> Known<(DeclFact, PathBuf)>,
+    ) -> Known<(DeclFact, PathBuf)> {
+        let key = (class.to_string(), member.to_string());
+        // Taken out of the borrow before the miss path runs: a `match` on `borrow()` holds the `Ref` for the whole
+        // match, and the `borrow_mut()` inside it panics with `RefCell already borrowed` — the same shape that bit
+        // the members-free memo this one replaces.
+        if let Some(known) = self.members.borrow().get(&key).cloned() {
+            return known;
+        }
+        let answer = look();
+        self.members.borrow_mut().insert(key, answer.clone());
+        answer
+    }
+}
+
+/// [`type_of_expression`] with the caller's memo — no new map, and every question asked below shares it.
+pub(crate) fn type_of_expression_memoed(
+    memo: &TypeMemo,
+    index: &ProjectIndex,
+    declaring: &mut dyn FnMut(&Path) -> Option<crate::FileView>,
+    scopes: &crate::ScopeTree,
+    root: &cpp_parser::CppSyntaxNode,
+    path: &Path,
+    expression: &cpp_parser::CppSyntaxNode,
+    depth: usize,
+) -> Known<(Type, PathBuf)> {
+    let range = expression.text_range();
+    let key = (
+        u32::try_from(usize::from(range.start())).unwrap_or(u32::MAX),
+        u32::try_from(usize::from(range.end())).unwrap_or(u32::MAX),
+    );
+    if let Some(known) = memo.remembered_type(&key) {
+        return known;
+    }
+
+    let started = std::time::Instant::now();
+    let answer = type_of_expression_inner(
+        memo, index, declaring, scopes, root, path, expression, depth,
+    );
+    if crate::probes::timing() && started.elapsed().as_millis() > 5 {
+        eprintln!(
+            "[type_of] {:>5} ms  depth {depth}  {:?}",
+            started.elapsed().as_millis(),
+            expression
+                .text()
+                .to_string()
+                .lines()
+                .next()
+                .unwrap_or_default()
+        );
+    }
+    memo.types
+        .borrow_mut()
+        .insert(key, answer.clone());
+    memo.spent.set(memo.spent.get() + started.elapsed().as_nanos() as u64);
+    memo.ran.set(memo.ran.get() + 1);
+    answer
+}
+
+/// The body of the inference — one arm per expression shape, and **every recursive question goes back through
+/// [`type_of_expression_memoed`]** so that an answer already computed is never computed again.
+fn type_of_expression_inner(
+    memo: &TypeMemo,
     index: &ProjectIndex,
     declaring: &mut dyn FnMut(&Path) -> Option<crate::FileView>,
     scopes: &crate::ScopeTree,
@@ -2692,7 +2929,7 @@ pub(crate) fn type_of_expression(
     // type's position-th component, which is the language's rule rather than an inference: `[a, b]` over a
     // `pair<A, B>` binds `a` to `A` and `b` to `B`, and a `map<K, V>`'s elements are `pair<const K, V>`.
     if let Some(answer) =
-        structured_binding_type(index, declaring, scopes, root, path, expression, depth)
+        structured_binding_type(memo, index, declaring, scopes, root, path, expression, depth)
     {
         return answer;
     }
@@ -2700,7 +2937,8 @@ pub(crate) fn type_of_expression(
     if writes_a_name(written) {
         return match declaration_of_expression(index, scopes, root, path, expression) {
             Known::Yes(named) => {
-                match declared_type(index, declaring, scopes, root, path, &named, depth) {
+                let dt = declared_type(memo, index, declaring, scopes, root, path, &named, depth);
+                match dt {
                     Known::Yes(type_of) => Known::Yes((
                         substituted_at_the_use(
                             index, scopes, root, path, expression, &named, type_of,
@@ -2728,7 +2966,7 @@ pub(crate) fn type_of_expression(
             return Known::Unknown(UnknownReason::UnknownType(Box::from(written)));
         };
 
-        return match type_of_expression(index, declaring, scopes, root, path, &first, depth + 1) {
+        return match type_of_expression_memoed(memo, index, declaring, scopes, root, path, &first, depth + 1) {
             // The named type is a class, and a class has no `type_of` of its own — so the *spelling* is the answer,
             // which is what the initializer wrote.
             Known::Yes((type_of, file)) => Known::Yes((type_of, file)),
@@ -2744,7 +2982,7 @@ pub(crate) fn type_of_expression(
 
     // A **call**: what the callee returns, or a temporary of the class it names.
     if cpp_parser::CppSyntaxKind::from(expression.kind()) == cpp_parser::CppSyntaxKind::CallExpr {
-        return type_of_a_call(index, declaring, scopes, root, path, expression);
+        return type_of_a_call(memo, index, declaring, scopes, root, path, expression);
     }
 
     // **A named cast has the type it names**, and that is C++'s own rule rather than an inference: `static_cast<T>`,
@@ -2780,7 +3018,7 @@ pub(crate) fn type_of_expression(
     if cpp_parser::CppSyntaxKind::from(expression.kind()) == cpp_parser::CppSyntaxKind::ParenExpr {
         return match expression.children().next() {
             Some(inner) => {
-                type_of_expression(index, declaring, scopes, root, path, &inner, depth + 1)
+                type_of_expression_memoed(memo, index, declaring, scopes, root, path, &inner, depth + 1)
             }
             None => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
         };
@@ -2813,7 +3051,7 @@ pub(crate) fn type_of_expression(
             operator.as_str(),
             "=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>="
         ) && let Known::Yes((left_class, file)) =
-            type_of_expression(index, declaring, scopes, root, path, &left, depth + 1)
+            type_of_expression_memoed(memo, index, declaring, scopes, root, path, &left, depth + 1)
             && matches!(left_class, Type::Named { .. })
             && let Some(returns) = operator_returns_of(
                 index,
@@ -2835,7 +3073,7 @@ pub(crate) fn type_of_expression(
             return Known::Yes((Type::named("bool"), path.to_path_buf()));
         }
 
-        let left_type = type_of_expression(index, declaring, scopes, root, path, &left, depth + 1);
+        let left_type = type_of_expression_memoed(memo, index, declaring, scopes, root, path, &left, depth + 1);
         if matches!(
             operator.as_str(),
             "=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>="
@@ -2850,7 +3088,7 @@ pub(crate) fn type_of_expression(
             };
         };
 
-        return match type_of_expression(index, declaring, scopes, root, path, &right, depth + 1) {
+        return match type_of_expression_memoed(memo, index, declaring, scopes, root, path, &right, depth + 1) {
             Known::Yes((right_type, _)) if right_type == left_type => {
                 // **Two pointers subtracted are not a pointer.** `p - q` is a *count of elements*, and C++ spells
                 // it `ptrdiff_t` — so "the operands agree, therefore the answer is their type" holds for
@@ -2887,7 +3125,7 @@ pub(crate) fn type_of_expression(
     // already spells the pointee, and the `*` is arithmetic on that spelling.
     if let Some(operand) = unary_operand_with(expression, "*") {
         let operand_type =
-            type_of_expression(index, declaring, scopes, root, path, &operand, depth + 1);
+            type_of_expression_memoed(memo, index, declaring, scopes, root, path, &operand, depth + 1);
         return match operand_type {
             // **A `*` is the type model's own operation.** `Widget**` gives `Widget*`, an array gives its
             // element, and a class with an `operator*` gives nothing — that one needs the class's members and
@@ -2942,7 +3180,7 @@ pub(crate) fn type_of_expression(
     // whose object is this, and the `->` already knows what to do with a pointer.
     if let Some(operand) = unary_operand_with(expression, "&") {
         let operand_type =
-            type_of_expression(index, declaring, scopes, root, path, &operand, depth + 1);
+            type_of_expression_memoed(memo, index, declaring, scopes, root, path, &operand, depth + 1);
         return match operand_type {
             Known::Yes((type_of, file)) => {
                 // `&x` is a pointer to `x`, and the decay first is what makes `&arr` a pointer to the array's
@@ -2976,9 +3214,9 @@ pub(crate) fn type_of_expression(
             return Known::Unknown(UnknownReason::UnknownType(Box::from(written)));
         };
         let then_type =
-            type_of_expression(index, declaring, scopes, root, path, then_arm, depth + 1);
+            type_of_expression_memoed(memo, index, declaring, scopes, root, path, then_arm, depth + 1);
         let else_type =
-            type_of_expression(index, declaring, scopes, root, path, else_arm, depth + 1);
+            type_of_expression_memoed(memo, index, declaring, scopes, root, path, else_arm, depth + 1);
 
         return match (then_type, else_type) {
             (Known::Yes((then_type, file)), Known::Yes((else_type, _)))
@@ -3000,7 +3238,7 @@ pub(crate) fn type_of_expression(
     // with an `operator[]` — `v[0]` on a `std::vector` — needs the template instantiated, and this answers
     // `Unknown` for the same reason it does everywhere else: see [`element_type_name`].
     if let Some(base) = subscript_base(expression) {
-        let base_type = type_of_expression(index, declaring, scopes, root, path, &base, depth + 1);
+        let base_type = type_of_expression_memoed(memo, index, declaring, scopes, root, path, &base, depth + 1);
         return match base_type {
             // **An array's element is the model's own operation**, and a *class* with an `operator[]` is the case
             // this arm deliberately leaves alone: `v[0]` on a `std::vector` gives the template's `reference`, which
@@ -3036,7 +3274,12 @@ pub(crate) fn type_of_expression(
 
     // A member access: the type of the member, which is a fact on its declaration.
     if let Some(inner) = crate::sema::resolve::member_access_of(expression) {
-        let Known::Yes((inner_type, declared_in)) = type_of_expression(
+        // **One question, one answer, and the shared memo.** This arm used to call the *entry point* twice — once
+        // for the `Yes` and once again to get the `Unknown`'s reason — which both bypassed the memo (a fresh map per
+        // call) and paid for the inference twice. On `LuaSource.cpp` this is the arm every `x.y` and `x.y()` goes
+        // through, so it is the one that has to be a single memoised question.
+        let (inner_type, declared_in) = match type_of_expression_memoed(
+            memo,
             index,
             declaring,
             scopes,
@@ -3044,19 +3287,16 @@ pub(crate) fn type_of_expression(
             path,
             &inner.object,
             depth + 1,
-        ) else {
-            let Known::Unknown(reason) = type_of_expression(
-                index,
-                declaring,
-                scopes,
-                root,
-                path,
-                &inner.object,
-                depth + 1,
-            ) else {
-                unreachable!("the first match established that this is an `Unknown`")
-            };
-            return Known::Unknown(reason);
+        ) {
+            Known::Yes((inner_type, declared_in)) => (inner_type, declared_in),
+            Known::Unknown(reason) => return Known::Unknown(reason),
+            // Not "no": a `Known::No` is this layer's answer for a name it cannot place at all, and the caller is
+            // told which spelling it was — the same answer the `unreachable!` this replaces would have panicked on.
+            Known::No => {
+                return Known::Unknown(UnknownReason::UnknownType(Box::from(
+                    inner.object.text().to_string().trim(),
+                )));
+            }
         };
 
         let Some(class) = member_access_class(&inner_type) else {
@@ -3091,30 +3331,36 @@ pub(crate) fn type_of_expression(
             .iter()
             .map(|argument| argument.to_string())
             .collect();
-        let found = member_fact(
-            index,
-            scopes,
-            root,
-            path,
-            &class,
-            &inner.member,
-            Some(&written_arguments),
-        );
+        let found = memo.member(&class, &inner.member, || {
+            member_fact(
+                index,
+                scopes,
+                root,
+                path,
+                &class,
+                &inner.member,
+                Some(&written_arguments),
+            )
+        });
         let found = match found {
             Known::Yes(found) => Known::Yes(found),
             Known::Unknown(reason) => match declared_class(index, &declared_in, &class) {
-                Some(qualified) => match member_fact(
-                    index,
-                    scopes,
-                    root,
-                    path,
-                    &qualified,
-                    &inner.member,
-                    Some(&written_arguments),
-                ) {
-                    Known::Yes(found) => Known::Yes(found),
-                    Known::Unknown(_) | Known::No => Known::Unknown(reason),
-                },
+                Some(qualified) => {
+                    match memo.member(&qualified, &inner.member, || {
+                        member_fact(
+                            index,
+                            scopes,
+                            root,
+                            path,
+                            &qualified,
+                            &inner.member,
+                            Some(&written_arguments),
+                        )
+                    }) {
+                        Known::Yes(found) => Known::Yes(found),
+                        Known::Unknown(_) | Known::No => Known::Unknown(reason),
+                    }
+                }
                 None => Known::Unknown(reason),
             },
             Known::No => Known::No,
@@ -3936,6 +4182,7 @@ fn finish_a_nested_name(
 ///   is `Unknown` rather than a guess.
 /// * **a chain longer than [`MAX_TYPE_DEPTH`]** — see the guard in [`type_of_expression`].
 fn declared_type(
+    memo: &TypeMemo,
     index: &ProjectIndex,
     declaring: &mut dyn FnMut(&Path) -> Option<crate::FileView>,
     scopes: &crate::ScopeTree,
@@ -3944,7 +4191,8 @@ fn declared_type(
     named: &NamedDeclaration,
     depth: usize,
 ) -> Known<Type> {
-    let Some(declaration) = named.type_of(root, scopes) else {
+    let declaration = named.type_of(root, scopes);
+    let Some(declaration) = declaration else {
         return Known::No;
     };
 
@@ -3975,7 +4223,7 @@ fn declared_type(
     // variable, declared in a function body" and nothing else, and `it->first` in `for (auto it : map)` could not
     // be resolved. See [`range_for_element_type`].
     if let Some(element) =
-        range_for_element_type(index, declaring, scopes, root, path, named, depth)
+        range_for_element_type(memo, index, declaring, scopes, root, path, named, depth)
     {
         return element;
     }
@@ -3993,7 +4241,7 @@ fn declared_type(
     //
     // `Known::No` still means the walk declined to take the question at all, which is what the placeholder reason is
     // for; only a walk that *tried and failed* has a better answer to give.
-    let deduced = match initializer_type(index, declaring, scopes, root, path, named, depth + 1) {
+    let deduced = match initializer_type(memo, index, declaring, scopes, root, path, named, depth + 1) {
         Known::Yes((deduced, _)) => deduced,
         Known::Unknown(reason) => return Known::Unknown(reason),
         Known::No => return unknown(),
@@ -4037,6 +4285,7 @@ fn writes_auto(written: &str) -> bool {
 /// whose declared variable has **no initializer**: `auto x = v[0]` has one and goes through [`initializer_type`],
 /// while `for (auto x : v)` states the range in the loop's own syntax.
 fn range_for_element_type(
+    memo: &TypeMemo,
     index: &ProjectIndex,
     declaring: &mut dyn FnMut(&Path) -> Option<crate::FileView>,
     scopes: &crate::ScopeTree,
@@ -4058,7 +4307,7 @@ fn range_for_element_type(
 
     let range = range_expression_of_the_pattern(&loop_node)?;
     let Known::Yes((container, _)) =
-        type_of_expression(index, declaring, scopes, root, path, &range, depth + 1)
+        type_of_expression_memoed(memo, index, declaring, scopes, root, path, &range, depth + 1)
     else {
         return Some(Known::Unknown(UnknownReason::UnknownType(Box::from("auto"))));
     };
@@ -4128,6 +4377,7 @@ fn range_element_of(container: &Type) -> Option<String> {
 /// declarator (`n = count()` is the `InitDeclarator`), and the initializer is one of that node's children — the
 /// shape the parser gives every initialized declaration, `int x = 0;` and `auto x = f();` alike.
 fn initializer_type(
+    memo: &TypeMemo,
     index: &ProjectIndex,
     declaring: &mut dyn FnMut(&Path) -> Option<crate::FileView>,
     scopes: &crate::ScopeTree,
@@ -4143,7 +4393,7 @@ fn initializer_type(
         return Known::Unknown(UnknownReason::UnknownType(Box::from("auto")));
     };
 
-    type_of_expression(index, declaring, scopes, root, path, &expression, depth)
+    type_of_expression_memoed(memo, index, declaring, scopes, root, path, &expression, depth)
 }
 
 /// The spelling `auto` stands for, and the expression that decides it.
@@ -4357,6 +4607,7 @@ fn written_like_a_macro(word: &str) -> bool {
 /// Anything else answers `None`: a class that specializes `tuple_size`/`tuple_element` is the language's extension
 /// point, and this layer has no way to read a specialization it has not been taught.
 fn structured_binding_type(
+    memo: &TypeMemo,
     index: &ProjectIndex,
     declaring: &mut dyn FnMut(&Path) -> Option<crate::FileView>,
     scopes: &crate::ScopeTree,
@@ -4401,10 +4652,10 @@ fn structured_binding_type(
 
     // The container: the range of the `for` this pattern is a binding of, or the initializer of a plain declaration.
     let container = match range_expression_of_the_pattern(&pattern) {
-        Some(range) => type_of_expression(index, declaring, scopes, root, path, &range, depth + 1),
+        Some(range) => type_of_expression_memoed(memo, index, declaring, scopes, root, path, &range, depth + 1),
         None => {
             let initializer = initializer_of_the_pattern(&pattern)?;
-            type_of_expression(index, declaring, scopes, root, path, &initializer, depth + 1)
+            type_of_expression_memoed(memo, index, declaring, scopes, root, path, &initializer, depth + 1)
         }
     };
     let Known::Yes((container, file)) = container else {
@@ -4744,6 +4995,7 @@ fn declaration_of_expression(
     let written = written.trim();
 
     let asked = crate::sema::resolve::definition_at(scopes, root, offset);
+
     match asked {
         Known::Yes(binding) => Known::Yes(NamedDeclaration::Here(binding)),
         Known::Unknown(UnknownReason::NotDeclaredHere(name)) => {
@@ -4851,6 +5103,7 @@ fn declaration_of_expression(
 /// parameter whose type is not known here. Each of those needs a type *computed* rather than read off a
 /// declaration, which is the same boundary the rest of this function has.
 fn type_of_a_call(
+    memo: &TypeMemo,
     index: &ProjectIndex,
     declaring: &mut dyn FnMut(&Path) -> Option<crate::FileView>,
     scopes: &crate::ScopeTree,
@@ -4876,7 +5129,7 @@ fn type_of_a_call(
     // members are not readable; what a reader writes next is `it->first`, `it->second` and `*it`, and all three are
     // questions about the **element**. Answering the element type is what makes them work — and the declared
     // `iterator` type, whose members are `operator*` and four typedefs, is both harder to compute and less useful.
-    if let Some(element) = iterator_element_type(index, declaring, scopes, root, path, &callee) {
+    if let Some(element) = iterator_element_type(memo, index, declaring, scopes, root, path, &callee) {
         return element;
     }
 
@@ -4891,7 +5144,7 @@ fn type_of_a_call(
             .unwrap_or_default()
             .iter()
             .filter_map(|argument| {
-                match type_of_expression(index, declaring, scopes, root, path, argument, 0) {
+                match type_of_expression_memoed(memo, index, declaring, scopes, root, path, argument, 0) {
                     Known::Yes((type_of, _)) => Some(type_of),
                     _ => None,
                 }
@@ -4904,7 +5157,7 @@ fn type_of_a_call(
     // **A call of an object** — `f(1)` where `f`'s type declares `operator()`. The callee is not a function
     // declaration at all, so the lookup below would answer `No`; what the call has is what the operator returns.
     if let Known::Yes((callee_type, file)) =
-        type_of_expression(index, declaring, scopes, root, path, &callee, 0)
+        type_of_expression_memoed(memo, index, declaring, scopes, root, path, &callee, 0)
         && matches!(callee_type, Type::Named { .. })
         && let Some(returns) = operator_returns_of(
             index,
@@ -4919,7 +5172,7 @@ fn type_of_a_call(
         return Known::Yes((crate::sema::types::parse_type_spelling(&returns), file));
     }
 
-    match declaration_of_a_callee(index, declaring, scopes, root, path, &callee, written) {
+    match declaration_of_a_callee(memo, index, declaring, scopes, root, path, &callee, written) {
         Known::Yes(named) => match named.what_a_call_has(
             index,
             declaring,
@@ -4946,6 +5199,7 @@ fn type_of_a_call(
 ///
 /// `None` for every other call, which is the ordinary case and stays cheap: one member lookup and a name test.
 fn iterator_element_type(
+    memo: &TypeMemo,
     index: &ProjectIndex,
     declaring: &mut dyn FnMut(&Path) -> Option<crate::FileView>,
     scopes: &crate::ScopeTree,
@@ -4962,7 +5216,7 @@ fn iterator_element_type(
     }
 
     let Known::Yes((object, file)) =
-        type_of_expression(index, declaring, scopes, root, path, &member.object, 0)
+        type_of_expression_memoed(memo, index, declaring, scopes, root, path, &member.object, 0)
     else {
         return None;
     };
@@ -5011,6 +5265,7 @@ fn qualified_from_the_index(index: &ProjectIndex, from: &Path, class: &str) -> O
 /// `written` is the **call's** spelling rather than the callee's, and it is what the `Unknown` answers carry: a
 /// consumer reporting "not known" should name the code the user wrote, not the half of it the lookup started at.
 fn declaration_of_a_callee(
+    memo: &TypeMemo,
     index: &ProjectIndex,
     declaring: &mut dyn FnMut(&Path) -> Option<crate::FileView>,
     scopes: &crate::ScopeTree,
@@ -5022,7 +5277,7 @@ fn declaration_of_a_callee(
     // A member call: the object's type, then the member's declaration.
     if let Some(access) = crate::sema::resolve::member_access_of(callee) {
         let object =
-            match type_of_expression(index, declaring, scopes, root, path, &access.object, 0) {
+            match type_of_expression_memoed(memo, index, declaring, scopes, root, path, &access.object, 0) {
                 Known::Yes((type_of, _)) => type_of,
                 Known::Unknown(reason) => return Known::Unknown(reason),
                 Known::No => return Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
@@ -5112,6 +5367,7 @@ pub(crate) fn callees_of_a_call(
     path: &Path,
     call: &cpp_parser::CppSyntaxNode,
 ) -> Known<Vec<Callee>> {
+    let memo = TypeMemo::default();
     let written = call.text().to_string();
     let written = written.trim();
 
@@ -5120,7 +5376,7 @@ pub(crate) fn callees_of_a_call(
     };
 
     if let Some(access) = crate::sema::resolve::member_access_of(&callee) {
-        let members = member_callees(index, declaring, scopes, root, path, &access);
+        let members = member_callees(&memo, index, declaring, scopes, root, path, &access);
 
         // A member whose set could not be listed — the object's type is unknown, the class is not declared
         // anywhere the index can see — falls back to the singular path, which reports *why* rather than an empty
@@ -5193,6 +5449,7 @@ pub(crate) fn callees_of_a_call(
 /// [`UnknownReason`] — rather than as an empty list, for the reason the plural name lookup gives: "there are no
 /// members" and "this analysis cannot say" are different answers and a caller shows them differently.
 fn member_callees(
+    memo: &TypeMemo,
     index: &ProjectIndex,
     declaring: &mut dyn FnMut(&Path) -> Option<crate::FileView>,
     scopes: &crate::ScopeTree,
@@ -5200,7 +5457,7 @@ fn member_callees(
     path: &Path,
     access: &crate::sema::resolve::MemberAccess,
 ) -> Known<Vec<Callee>> {
-    let object = match type_of_expression(index, declaring, scopes, root, path, &access.object, 0) {
+    let object = match type_of_expression_memoed(memo, index, declaring, scopes, root, path, &access.object, 0) {
         Known::Yes((type_of, _)) => type_of,
         Known::Unknown(reason) => return Known::Unknown(reason),
         Known::No => {
@@ -5263,6 +5520,7 @@ pub(crate) fn callee_of_a_call(
     path: &Path,
     call: &cpp_parser::CppSyntaxNode,
 ) -> Known<Callee> {
+    let memo = TypeMemo::default();
     let written = call.text().to_string();
     let written = written.trim();
 
@@ -5270,7 +5528,7 @@ pub(crate) fn callee_of_a_call(
         return Known::Unknown(UnknownReason::UnknownType(Box::from(written)));
     };
 
-    match declaration_of_a_callee(index, declaring, scopes, root, path, &callee, written) {
+    match declaration_of_a_callee(&memo, index, declaring, scopes, root, path, &callee, written) {
         Known::Yes(named) => Known::Yes(Callee {
             file: named.file(path),
             name_offset: named.name_offset(),
@@ -5287,6 +5545,26 @@ pub(crate) fn callee_of_a_call(
 /// *is*: the file being edited is asked first through its scope tree, and the index second — the same two-layer
 /// split [`definition_across_files`] makes, and for the same reason.
 fn member_fact(
+    index: &ProjectIndex,
+    scopes: &crate::ScopeTree,
+    root: &cpp_parser::CppSyntaxNode,
+    path: &Path,
+    class: &str,
+    member: &str,
+    arguments: Option<&[String]>,
+) -> Known<(DeclFact, PathBuf)> {
+    let started = std::time::Instant::now();
+    let answer = member_fact_inner(index, scopes, root, path, class, member, arguments);
+    if crate::probes::timing() && started.elapsed().as_millis() > 10 {
+        eprintln!(
+            "[member_fact] {:>5} ms  {class}::{member}",
+            started.elapsed().as_millis()
+        );
+    }
+    answer
+}
+
+fn member_fact_inner(
     index: &ProjectIndex,
     scopes: &crate::ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
@@ -5367,10 +5645,18 @@ fn member_fact(
     //
     // As in `members_of`, each base is carried with the class whose base-clause wrote it, because that decides the
     // scope an unqualified base name is looked up in — `struct map : _Tree<…>` in `std` names `std::_Tree`.
+    //
+    // **And a template parameter is not a base**, for the same reason and with the same measurement as
+    // [`members_of`]'s filter: `_Vector_base<_Tp, _Alloc>` contributes `_Tp` and `_Alloc` as "names a class can be
+    // looked up by", and asking "who declares `_Tp`" is a whole-index name query. Measured on `LuaSyntaxTree.cpp`,
+    // `member_fact(std::vector, size_t)` — a member the class does not have — cost **370–389 ms** per call, eight
+    // times, which was 2 280 ms of the file's inference.
+    let parameters = class_template_parameters(index, scopes, root, path, class);
     let mut level: Vec<(String, String)> = bases_of(index, scopes, root, path, class)
         .value()
         .unwrap_or_default()
         .into_iter()
+        .filter(|base| !names_a_template_parameter(base, &parameters))
         .map(|base| (base, class.to_string()))
         .collect();
     let mut visited: Vec<String> = vec![class.to_string()];
@@ -5398,6 +5684,9 @@ fn member_fact(
                     .value()
                     .unwrap_or_default()
                     .into_iter()
+                    .filter(|base_of_base| {
+                        !names_a_template_parameter(base_of_base, &parameters)
+                    })
                     .map(|base_of_base| (base_of_base, base.clone())),
             );
         }
@@ -6503,6 +6792,9 @@ impl ProjectIndex {
         if let Ok(mut walks) = self.visibility.lock() {
             walks.clear();
         }
+        // …and every member list this file contributed to, which is the narrow invalidation: a class whose members
+        // live in another file keeps its answer. See [ProjectIndex::member_lists].
+        self.forget_member_lists(path);
         let mut summary = summary;
         summary.path = path.to_path_buf();
 
@@ -6607,6 +6899,9 @@ impl ProjectIndex {
             return false;
         };
 
+        // A file that is gone is a contributor that changed: every member list it was made of is dropped.
+        self.forget_member_lists(Path::new(&path));
+
         for target in include_targets(&summary) {
             if let Some(includers) = self.included_by.get_mut(&target) {
                 includers.remove(&path);
@@ -6695,6 +6990,18 @@ impl ProjectIndex {
     /// did) must not keep the old reading's declarations beside the new one's.
     pub fn insert_cooked(&mut self, path: &Path, reading: CookedFile) {
         let path = normalize(path);
+        // **A cooked reading is a second set of facts, and member lists union both — but only a *changed* one can
+        // change a list.** A file is cooked again with the same text and the same environment on every pump slice
+        // (the edited file, and the closure want_the_closure_cooked asks for), and invalidating on every insert
+        // made the cross-request member cache useless: measured on LuaSyntaxTree.cpp, 15 hits against 59
+        // computations over three keystrokes — and 37/37 once this comparison was in place.
+        let changed = self
+            .cooked
+            .get(&path)
+            .is_none_or(|previous| previous.declarations != reading.declarations);
+        if changed {
+            self.forget_member_lists(Path::new(&path));
+        }
         // The memo keyed by `(file, region)` is cleared for the same reason `insert` clears it: an answer about
         // visibility can only change when what the index holds changes.
         self.visibility_answers
@@ -6744,6 +7051,7 @@ impl ProjectIndex {
     /// honest answer there, and the reading comes back one drain later.
     pub fn forget_cooked(&mut self, path: &Path) {
         let path = normalize(path);
+        self.forget_member_lists(Path::new(&path));
         if let Some(cooked) = self.cooked.remove(&path)
             && let Some(&sequence) = self.sequence.get(&path)
         {

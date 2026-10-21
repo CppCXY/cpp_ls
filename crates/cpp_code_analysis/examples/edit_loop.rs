@@ -96,7 +96,19 @@ fn main() {
     let files = SessionFiles::new(documents.clone(), DiskFiles);
 
     let started = Instant::now();
-    let mut session = Session::open(root.clone(), files.clone(), WatchFilter::new(&root));
+    // **A configuration file, when the caller names one.** `CPPLS_PROJECT_CONFIG` is how a probe asks for a
+    // *scratch cache*: the project's own `.cppls.toml` plus `[index] cache_dir = ".cppls-cold"` is a faithful
+    // configuration whose summaries start empty, which is the only way to measure a cold start without deleting
+    // the cache the user's editor is using.
+    let mut session = match std::env::var_os("CPPLS_PROJECT_CONFIG") {
+        Some(config) => Session::open_with_config_file(
+            root.clone(),
+            files.clone(),
+            WatchFilter::new(&root),
+            Some(Path::new(&config)),
+        ),
+        None => Session::open(root.clone(), files.clone(), WatchFilter::new(&root)),
+    };
     let opened = started.elapsed();
     println!("project: {}", root.display());
     println!(
@@ -133,8 +145,10 @@ fn main() {
         session.cache_sizes()
     );
     println!(
-        "  second-pass backlog after `index_everything`: {} file(s)",
-        session.re_read_backlog()
+        "  second-pass backlog after `index_everything`: {} file(s), dead-macro decisions {} file(s) / {} offset(s)",
+        session.re_read_backlog(),
+        session.dead_macro_decisions().0,
+        session.dead_macro_decisions().1
     );
 
     // **The tail of the start-up, drained before the keystrokes are measured.** `index_everything` stops when the

@@ -1181,6 +1181,15 @@ impl<F: FileProvider + Clone> Session<F> {
         self.store.stats()
     }
 
+    /// **How many guarded `#define`s the second pass has decided about** — `(files, offsets)`.
+    ///
+    /// The one output of the second pass that a caller cannot get from an answer, and the one that decides whether
+    /// the pass's unit walks are buying anything: a walk that records nothing and rebuilds nothing is a walk that can
+    /// be skipped. See [`crate::SummaryStore::dead_macro_decisions`].
+    pub fn dead_macro_decisions(&self) -> (usize, usize) {
+        self.store.dead_macro_decisions()
+    }
+
     /// **Where this session writes the summaries it can reuse**, so that a caller can say what a *second* run costs.
     ///
     /// Exposed because "the second time is fast" is a claim about a directory, and a caller measuring the first time
@@ -2808,7 +2817,15 @@ impl<F: FileProvider + Clone> Session<F> {
                 committed
             };
 
-            if read == 0 && cooked == 0 {
+            // **The second pass is work, and this loop used to return while it was owed.** `advance` drains up to
+            // [`RE_READ_SLICE`] of the backlog per call, and the backlog is filled by a cold start; the loop below
+            // ended at `read 0, cooked 0`, which is exactly the state a session is in while it still owes re-reads.
+            // Measured on `EmmyLuaCodeStyle` (cold summary cache): `index_everything` returned with **1 205 files**
+            // owed, 302 slices and **27.3 s** of work left — and every one of those slices reported `nothing bodied`,
+            // so the value it bought was not visible in any answer. The cost *was* visible: the next keystroke's pump
+            // slice took four of those files and four unit walks, and typing was **65 ms instead of 10** for about
+            // three hundred keystrokes. A caller that says "index everything" is owed this too.
+            if read == 0 && cooked == 0 && self.parsed_since_the_last_pass.is_empty() {
                 if tracing {
                     // **The cache as the pump leaves it.** If this is non-zero and a request still misses, the key
                     // the writer used and the key the reader computes are two different keys — which is the one
@@ -2845,13 +2862,24 @@ impl<F: FileProvider + Clone> Session<F> {
         self.queue.pending()
     }
 
-    /// **Everything the session has left to do**: the index queue plus the cooking backlog.
+    /// **Everything the session has left to do**: the index queue, the cooking backlog, and the second pass.
     ///
     /// What a pump loops on. A caller looping on [`Session::pending`] alone would stop while the files it has open
     /// still have no cooked reading — which is the state the closure marking exists to leave, not the state a
     /// finished session is in.
+    ///
+    /// **The second pass is in here, and it was not.** A cold start parses a file before its includes are in the
+    /// index, so its reading has to be built again once the closure is in hand — the backlog
+    /// [`Session::re_read_backlog`] counts. That backlog used to be invisible to this count, so a pump stopped with
+    /// **1 205 files and 27 s still owed** and the next keystroke's slice paid for four of them: typing measured
+    /// **65 ms a keystroke instead of 10** until the debt was gone. A session that owes a re-read is not idle.
+    ///
+    /// The visibility gate that reads this — `checks_may_be_trusted` in the server, which withholds check findings
+    /// until the index has settled — therefore withholds them until the second pass has run. That is the same
+    /// argument that put the cooking backlog here: a summary the pass is about to revise is not a summary a check may
+    /// call a fact.
     pub fn pending_work(&self) -> usize {
-        self.queue.pending() + self.cooking.len()
+        self.queue.pending() + self.cooking.len() + self.parsed_since_the_last_pass.len()
     }
 
     /// Is everything the session knows about already **read**?
@@ -3702,7 +3730,18 @@ fn error_directive_line(text: &str) -> Option<(usize, usize, String)> {
             if let Some(known) = seen.borrow().get(path) {
                 return known.clone();
             }
+            let started = std::time::Instant::now();
             let made = session.view_of_the_file(path);
+            if crate::probes::timing() {
+                eprintln!(
+                    "[resolver] {:>5} ms  {} ({})",
+                    started.elapsed().as_millis(),
+                    path.file_name()
+                        .map(|name| name.to_string_lossy().to_string())
+                        .unwrap_or_else(|| path.display().to_string()),
+                    if made.is_some() { "read" } else { "none" }
+                );
+            }
             seen.borrow_mut().insert(path.to_path_buf(), made.clone());
             made
         });
@@ -3827,7 +3866,11 @@ fn error_directive_line(text: &str) -> Option<(usize, usize, String)> {
                 (std::sync::Arc::new(unit), false)
             }
             None => {
+                let read_started = std::time::Instant::now();
                 let (closure, closure_by_key) = { self.closure_with_text(path) };
+                let read_took = read_started.elapsed();
+                let closure_bytes: usize = closure.iter().map(|(_, text)| text.len()).sum();
+                let walk_started = std::time::Instant::now();
 
                 // **The session's own definition cache**, not a fresh one: the walk reads back every `#define` a
                 // file sees, and the same definition reaches hundreds of files — `<vector>` and `<string>` both see
@@ -3882,15 +3925,19 @@ fn error_directive_line(text: &str) -> Option<(usize, usize, String)> {
                             !provisional && std::env::var_os("CPPLS_NO_SHARE").is_none(),
                         )
                     });
+                    let walk_took = walk_started.elapsed();
 
                     // **Is this timeline of the whole program, or of as much of it as has been read?** A file the
                     // closure could not offer is either outside the analysis — the permanent reading, and the one
                     // the walk's own early return documents — or *not yet read*, which is a fact about the queue and
                     // not about the file. See [`HeldUnit`] for what storing the second kind cost.
 
+                    let mut put_took = std::time::Duration::ZERO;
                     if !provisional {
                         // Written for the **next run**.
+                        let put_started = std::time::Instant::now();
                         let _ = cache.put(path, context, &walked, &self.files, root_key);
+                        put_took = put_started.elapsed();
 
                         // …and offered to the **rest of this one**, under the same condition: a provisional
                         // timeline is one the queue will make obsolete, and handing it to a second root would
@@ -3907,6 +3954,20 @@ fn error_directive_line(text: &str) -> Option<(usize, usize, String)> {
                     // …and counted **by root**, which the total above cannot say. See [`Session::walks_by_root`].
                     if let Ok(mut walks) = self.walks_by_root.lock() {
                         *walks.entry(queue_key(path)).or_insert(0) += 1;
+                    }
+
+                    if crate::probes::timing() {
+                        eprintln!(
+                            "[unit] read {:>4} ms, walk {:>4} ms, put {:>4} ms, {} file(s) / {} bytes  {}",
+                            read_took.as_millis(),
+                            walk_took.as_millis(),
+                            put_took.as_millis(),
+                            closure.len(),
+                            closure_bytes,
+                            path.file_name()
+                                .map(|name| name.to_string_lossy().to_string())
+                                .unwrap_or_else(|| path.display().to_string())
+                        );
                     }
 
                     (walked, provisional)

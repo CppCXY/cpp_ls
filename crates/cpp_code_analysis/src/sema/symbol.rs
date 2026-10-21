@@ -767,6 +767,13 @@ pub struct ScopeTree {
     /// step that stores a summary takes the table apart anyway. Sorted by position, which is the order the walk
     /// meets them in, so two walks of the same text produce the same list.
     pub macro_readings: Vec<MacroScopeReading>,
+    /// **The named scopes, by their `::`-qualified spelling** — what [`ScopeTree::scope_with_qualified_name`] answers
+    /// from. Filled as the scopes are created, so the walk that joins the segments is paid once per scope rather than
+    /// once per scope per query: see that function for the measurement.
+    by_qualified_name: std::collections::HashMap<String, ScopeId>,
+    /// **Every scope that carries a range, in creation order** — which is pre-order, so this is sorted by start.
+    /// What [`ScopeTree::scope_at`] binary-searches; see that function for why it was not a scan.
+    by_start: Vec<(usize, ScopeId)>,
 }
 
 impl ScopeTree {
@@ -857,6 +864,24 @@ impl ScopeTree {
                     self.root = Some(id);
                 }
             }
+        }
+
+        // **The table's own index, kept as the scopes are made.** The lookup this serves used to scan every scope and
+        // join its segments into a fresh `String`, per query: on a 2 800-line file a member query asked it once and
+        // paid **780 ms** — the whole cost of typing `currentPos`, a local name. A map filled here is the same total
+        // walk (one per scope, once per parse) and turns the query into a hash.
+        if name.is_some()
+            && let Some(qualified) = self.qualified_name_of(id)
+        {
+            // The **first** scope with a spelling wins, which is what the scan returned: a reopened namespace
+            // (`namespace a { } namespace a { }`) has two scopes with one name.
+            self.by_qualified_name.entry(qualified).or_insert(id);
+        }
+
+        // …and the position index [`ScopeTree::scope_at`] reads. Scopes are created in pre-order, so a scope's start
+        // is never before the start of the one created just before it — the vector is sorted by construction.
+        if let Some(range) = range {
+            self.by_start.push((range.start_offset, id));
         }
 
         id
@@ -971,18 +996,27 @@ impl ScopeTree {
     /// cursor position needs. `None` when the table has no scope covering the offset — an offset past the end
     /// of the file, or a table built from a different source.
     pub fn scope_at(&self, offset: usize) -> Option<ScopeId> {
-        self.scopes
-            .iter()
-            .enumerate()
-            .filter(|(_, scope)| {
-                scope.range.is_some_and(|range| {
-                    offset >= range.start_offset && offset <= range.end_offset()
-                })
-            })
-            // Smallest range wins: the innermost scope containing the offset. Equal ranges cannot happen for
-            // distinct scopes, because each comes from a distinct node.
-            .min_by_key(|(_, scope)| scope.range.map(|range| range.length))
-            .map(|(index, _)| ScopeId(index))
+        // **The latest-started scope, then its parents.** Every scope containing the offset is on the ancestry chain
+        // of the scope started last but not after it, so walking up from that one finds the innermost in
+        // O(log n + depth) instead of the O(scopes) scan this used to be — and it was asked once per name lookup in
+        // the inference, which on a 2 800-line file is thousands of times per diagnostics pull.
+        let at = self
+            .by_start
+            .partition_point(|(start, _)| *start <= offset);
+        let mut current = at.checked_sub(1).map(|index| self.by_start[index].1);
+        while let Some(id) = current {
+            let Some(scope) = self.scopes.get(id.index()) else {
+                return None;
+            };
+            if let Some(range) = scope.range
+                && offset >= range.start_offset
+                && offset <= range.end_offset()
+            {
+                return Some(id);
+            }
+            current = scope.parent;
+        }
+        None
     }
 
     /// The chain from a scope outward to the file scope, innermost first.
@@ -1020,15 +1054,19 @@ impl ScopeTree {
     /// spelling is compared against the joined segments rather than parsed, so `namespace a::b {` and
     /// `namespace a { namespace b {` — which produce the same spelling — are found by the same query.
     ///
-    /// A linear scan, which is what a per-file table of a few hundred scopes can afford: a query asks this once
-    /// per segment of one name, and building an index for it would cost more than the scans it saves.
+    /// # Why this is a map rather than a scan
+    ///
+    /// It was `(0..len).find(|id| self.qualified_name_of(*id).as_deref() == Some(name))` — a scan of every scope in
+    /// the file, each one joining its ancestors into a **fresh `String`**. That is a per-file table's worth of work
+    /// per *query*, and a member query asks it once: measured on `LuaSyntaxTree.cpp` (2 800 lines), typing the local
+    /// `currentPos` cost **780 ms**, and one member access `_nodeOrTokens.size()` **2 340 ms** over the file — both
+    /// almost entirely this function. The map is built as the scopes are created, so the same joining happens once
+    /// per scope per parse; a query is a hash and a copy of the id.
     ///
     /// `None` when no scope bears that name — including for the empty spelling, which no scope records: the file
     /// scope has no name of its own and is reached through [`ScopeTree::root`].
     pub fn scope_with_qualified_name(&self, name: &str) -> Option<ScopeId> {
-        (0..self.scopes.len())
-            .map(ScopeId)
-            .find(|id| self.qualified_name_of(*id).as_deref() == Some(name))
+        self.by_qualified_name.get(name).copied()
     }
 
     /// Is a declaration written in this scope **local** — nameable only from inside the body it sits in?

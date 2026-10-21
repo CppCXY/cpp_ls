@@ -42,6 +42,13 @@ impl Check for ImplicitBoolConversion {
             let Some(inner) = condition.syntax().children().next() else {
                 return;
             };
+            // **A comparison is `bool` by syntax, so this rule has nothing to say about it** — and asking the
+            // inference for its type is the expensive half of this rule: `if (a == b)` is a `BinaryExpr` whose type
+            // is `bool` for the built-in operators and a *class* for an overloaded one, and a class is not
+            // arithmetic either way. Skipping it costs nothing and is measured below.
+            if the_question_answers_itself(&inner) {
+                return;
+            }
             let crate::Known::Yes((type_of, _)) = context.type_of(&inner) else {
                 return;
             };
@@ -89,4 +96,49 @@ impl Check for ImplicitBoolConversion {
             );
         }
     }
+}
+
+/// **Is this condition `bool` by its own syntax?** — a comparison, a logical operator, or a `!`.
+///
+/// The four rules that make it true are C++'s own: `a == b`, `a < b`, `p && q` and `!x` have type `bool` for the
+/// built-in operators, and a *class* when the operator is overloaded — and a class is not arithmetic, so this rule
+/// answers nothing for it either. The one shape that would be missed is an overloaded operator returning an
+/// arithmetic non-`bool` (`bool operator==` returning `int&`), which is not a shape real code has; the direction is
+/// this layer's: a missed finding, never a false one. The check is a node kind and one spelling, which is what makes
+/// it worth doing before an inference that resolves names through the index.
+///
+/// Parentheses are unwrapped because a reader writes `if ((a == b))` and the condition node is the same one.
+fn the_question_answers_itself(expression: &cpp_parser::CppSyntaxNode) -> bool {
+    let mut node = expression.clone();
+    while cpp_parser::CppSyntaxKind::from(node.kind()) == cpp_parser::CppSyntaxKind::ParenExpr {
+        match node.children().next() {
+            Some(inner) => node = inner,
+            None => return false,
+        }
+    }
+
+    if let Some(binary) = cpp_parser::CppBinaryExpr::cast(node.clone()) {
+        return matches!(
+            binary.get_operator_text().as_deref(),
+            Some("==" | "!=" | "<" | ">" | "<=" | ">=" | "&&" | "||")
+        );
+    }
+
+    // A logical `!` has the same answer and no typed accessor, so the operator is read from the first token — the
+    // same reading `assign_type_check`'s `unary_operand_with` makes, and for the same reason.
+    if cpp_parser::CppSyntaxKind::from(node.kind()) == cpp_parser::CppSyntaxKind::UnaryExpr {
+        return node
+            .children_with_tokens()
+            .filter_map(|element| element.into_token())
+            .find(|token| {
+                !matches!(
+                    cpp_parser::CppTokenKind::from(token.kind()),
+                    cpp_parser::CppTokenKind::Whitespace
+                        | cpp_parser::CppTokenKind::Newline
+                )
+            })
+            .is_some_and(|token| token.text() == "!");
+    }
+
+    false
 }

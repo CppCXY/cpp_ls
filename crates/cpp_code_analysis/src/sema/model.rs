@@ -54,13 +54,6 @@ use crate::index::project::{self, MemberList, ProjectIndex};
 use crate::sema::types::Type;
 use crate::{Known, ScopeTree};
 
-/// One node's identity: its range in the file the model was built for.
-///
-/// A range rather than the node itself, because a node is a cheap handle into the tree and *not* a stable key —
-/// two handles to one node are not `Eq` in any useful sense — while a range is. It is unique within one file
-/// because the tree is a tree: two nodes cannot occupy the same span.
-type NodeKey = (u32, u32);
-
 /// **A file, the index, and a way to read another file** — see the module documentation.
 pub struct SemanticModel<'a> {
     index: &'a ProjectIndex,
@@ -78,7 +71,7 @@ pub struct SemanticModel<'a> {
     /// What this model has already been asked, by node. `RefCell` because the queries are `&self` — a caller with a
     /// shared model is the ordinary case, and a check that had to hold `&mut` would not be able to ask two questions
     /// while iterating the file.
-    types: RefCell<BTreeMap<NodeKey, Known<(Type, PathBuf)>>>,
+    types: crate::index::project::TypeMemo,
     /// **What `members_of` was asked, and what it answered** — a class's members do not change during one file's checks, and
     /// the same class is asked once per member access. See `members_of` for the measurement that made this necessary.
     members: RefCell<BTreeMap<String, Known<MemberList>>>,
@@ -110,7 +103,7 @@ impl<'a> SemanticModel<'a> {
             source,
             path,
             resolver: RefCell::new(resolver),
-            types: RefCell::new(BTreeMap::new()),
+            types: crate::index::project::TypeMemo::default(),
             members: RefCell::new(BTreeMap::new()),
             inferred: std::cell::Cell::new(0),
             reused: std::cell::Cell::new(0),
@@ -122,23 +115,38 @@ impl<'a> SemanticModel<'a> {
     /// Cached by the node's **range**, not by its text: two occurrences of one spelling are two different types
     /// when they stand in different scopes, so a text key would answer about the wrong one. A range is unique
     /// within the file the model was built for, which is the only file it is asked about.
+    ///
+    /// **The memo is the engine's, not a cache in front of it.** This used to answer the top-level question from a
+    /// map and pass the recursion through unfiltered — so `e.U.Start.Kind` re-deduced the `auto` declaration behind
+    /// `e` eleven times, and a 2 800-line file was 382 questions that cost 5 923 ms. The map is now the same one
+    /// [`project::type_of_expression_memoed`] consults for every sub-expression.
     pub fn type_of(&self, expression: &CppSyntaxNode) -> Known<(Type, PathBuf)> {
+        // **A/B switch, kept**: `CPPLS_NO_INFERENCE=1` answers every question `Unknown`, which is the only way to
+        // measure what the rules cost *without* the inference they do — the difference between this and the normal
+        // run is the inference layer's share of a diagnostics pull, and it is what says whether the next work is in
+        // the engine or in the walks. It is not a mode: the analysis it produces is deliberately wrong.
+        if crate::probes::no_inference() {
+            return Known::Unknown(crate::UnknownReason::UnknownType(Box::from(
+                expression.text().to_string().trim(),
+            )));
+        }
         let range = cpp_parser::source_range(expression.text_range());
         let key = (range.start_offset as u32, range.end_offset() as u32);
-
-        if let Some(known) = self.types.borrow().get(&key) {
+        let asked_before = self.types.remembers(&key);
+        if asked_before {
             self.reused.set(self.reused.get() + 1);
-            return known.clone();
+        } else {
+            self.inferred.set(self.inferred.get() + 1);
         }
 
-        self.inferred.set(self.inferred.get() + 1);
         let answer = {
             // One borrow of the resolver for the whole inference, so a question that reaches into another file —
             // and the question *inside* that answer, recursively — all go through the same memo and the same
             // resolver. The `RefCell` is borrowed as a *field*, not as `self`, which is what keeps a second query
             // on this model possible while this one runs.
             let mut resolver = self.resolver.borrow_mut();
-            project::type_of_expression(
+            project::type_of_expression_memoed(
+                &self.types,
                 self.index,
                 &mut **resolver,
                 self.scopes,
@@ -148,8 +156,6 @@ impl<'a> SemanticModel<'a> {
                 0,
             )
         };
-
-        self.types.borrow_mut().insert(key, answer.clone());
         answer
     }
 
@@ -242,6 +248,15 @@ impl<'a> SemanticModel<'a> {
     /// mistake this crate has already made once (see `docs/status.md` §6.1).
     pub fn inference_stats(&self) -> (usize, usize) {
         (self.inferred.get(), self.reused.get())
+    }
+
+    /// **What the engine has cost this model so far**: `(questions answered, nanoseconds)`.
+    ///
+    /// The split a diagnostics pull needs — the rules' own walks against the inference they ask for. Measured on
+    /// `LuaSyntaxTree.cpp`: `CPPLS_NO_INFERENCE=1` (every answer `Unknown`) takes the whole check layer from
+    /// **695 ms to 25 ms**, so this is the number that says whether the next work is in the engine.
+    pub fn inference_cost(&self) -> (u64, u64) {
+        self.types.spent()
     }
 
     /// The file this model is about.
