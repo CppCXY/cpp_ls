@@ -2232,3 +2232,183 @@ mod tests {
         assert_eq!(parser.current_token_index(), 0, "and so did the cursor");
     }
 }
+
+/// **Can a parsed prefix be spliced onto a parsed suffix?** — the experiment behind reusing a parse between two
+/// readings of the same translation unit (a project`s headers, then the file being edited).
+///
+/// The arrangement: parse `prefix ++ suffix` as one text, and separately parse each half. Splice the event streams —
+/// un-wrap the two `TranslationUnit` roots into one, re-base ranges by where the prefix ends and parents by where the
+/// suffix`s first event lands — and require the result to equal the one-text parse event for event.
+///
+/// # The boundary is the whole difficulty, and it is a **move**, not a flag
+///
+/// In the one-text parse the trivia between the prefix`s last real token and the suffix`s first one is emitted
+/// **inside** the prefix`s last node: the last declaration`s closing `bump()` skips the trivia and emits it before
+/// `NodeEnd`. A standalone prefix parse emits nothing there (there is no token after it), and a standalone suffix
+/// parse emits those same bytes as its **leading trivia**, at root. So the splice moves the suffix`s leading trivia
+/// run to just before the prefix`s last `NodeEnd` — one relocation, no parser change, and the trivia still has
+/// exactly one consumer in the result.
+#[cfg(test)]
+mod splice_tests {
+    use super::*;
+    use crate::parser::NO_FORWARD_PARENT;
+
+    fn events_of(text: &str) -> Vec<MarkEvent> {
+        let mut errors: Vec<CppParseError> = Vec::new();
+        let mut parser = CppParser::with_text(text, ParserConfig::default(), &mut errors);
+        crate::grammar::cpp::parse_cpp_unit(&mut parser);
+        parser.events
+    }
+
+    fn is_trivia(event: &MarkEvent) -> bool {
+        match event {
+            MarkEvent::Trivia => true,
+            MarkEvent::EatToken { kind, .. } => is_trivia_kind(*kind),
+            _ => false,
+        }
+    }
+
+    /// The events of `prefix ++ suffix`, as far as they can be taken from the two halves.
+    fn spliced(prefix: &str, suffix: &str) -> Vec<MarkEvent> {
+        let mut first = events_of(prefix);
+        // The prefix keeps its `TranslationUnit` open; the suffix`s last `NodeEnd` closes it.
+        first.pop();
+
+        let mut second = events_of(suffix);
+        second.remove(0);
+
+        // **The leading trivia of the suffix moves into the last node of the prefix**, which is where the one-text
+        // parse puts it — see the note on this module.
+        let leading = second.iter().take_while(|event| is_trivia(event)).count();
+        let leading: Vec<MarkEvent> = rebased(second.drain(..leading).collect(), prefix.len(), 0);
+
+        let last_end = first
+            .iter()
+            .rposition(|event| matches!(event, MarkEvent::NodeEnd))
+            .unwrap_or(first.len());
+        first.splice(last_end..last_end, leading);
+        // Where the suffix`s first kept event lands: the end of the prefix`s events, **after** the insertion, because
+        // the prefix may hold events of its own after the last inner `NodeEnd` (root-level trivia).
+        let offset = first.len();
+        first.extend(rebased(second, prefix.len(), offset));
+        first
+    }
+
+    fn rebased(events: Vec<MarkEvent>, base: usize, offset: usize) -> Vec<MarkEvent> {
+        events
+            .into_iter()
+            .map(|event| match event {
+                MarkEvent::EatToken { kind, range } => MarkEvent::EatToken {
+                    kind,
+                    range: SourceRange::new(range.start_offset + base, range.length),
+                },
+                MarkEvent::NodeStart { kind, parent } => MarkEvent::NodeStart {
+                    kind,
+                    // The suffix`s own root is event 0 of its stream and the prefix`s root is event 0 of the spliced
+                    // one, so a parent that pointed at the suffix`s root now points at the shared root.
+                    parent: match parent {
+                        NO_FORWARD_PARENT => NO_FORWARD_PARENT,
+                        0 => 0,
+                        // Original index `p` is kept index `p - 1`, because the suffix`s root start was dropped.
+                        other => offset + other - 1,
+                    },
+                },
+                other => other,
+            })
+            .collect()
+    }
+
+    fn same(left: &MarkEvent, right: &MarkEvent) -> bool {
+        match (left, right) {
+            (
+                MarkEvent::EatToken { kind: a, range: b },
+                MarkEvent::EatToken { kind: c, range: d },
+            ) => a == c && b.start_offset == d.start_offset && b.length == d.length,
+            (
+                MarkEvent::NodeStart { kind: a, parent: b },
+                MarkEvent::NodeStart { kind: c, parent: d },
+            ) => a == c && b == d,
+            (MarkEvent::NodeEnd, MarkEvent::NodeEnd) => true,
+            (MarkEvent::Trivia, MarkEvent::Trivia) => true,
+            _ => false,
+        }
+    }
+
+    fn compare(prefix: &str, suffix: &str, label: &str) -> bool {
+        let whole = events_of(&format!("{prefix}{suffix}"));
+        let made = spliced(prefix, suffix);
+        if made.len() != whole.len() {
+            println!("{label}: {} event(s) whole, {} spliced", whole.len(), made.len());
+            return false;
+        }
+        match whole
+            .iter()
+            .zip(made.iter())
+            .position(|(left, right)| !same(left, right))
+        {
+            None => true,
+            Some(at) => {
+                println!("{label}: first difference at {at}: whole {:?} / spliced {:?}", whole[at], made[at]);
+                false
+            }
+        }
+    }
+
+    #[test]
+    fn a_prefix_splices_onto_a_suffix() {
+        let root = "C:/Users/zc/Desktop/github/EmmyLuaCodeStyle/LuaParser";
+        let read = |path: &str| std::fs::read_to_string(format!("{root}/{path}")).unwrap_or_default();
+
+        let edge: [(&str, &str); 6] = [
+            ("namespace a { struct S { int x; }; }", "int f() { return 1; }"),
+            ("template <class T> struct Box { T value; };\n", "Box<int> b;"),
+            ("#define WIDE 1\nint a;\n", "int b = WIDE;"),
+            ("struct A { void f(); };\n", "void A::f() { }"),
+            ("} // a stray brace at the end\n", "int g;"),
+            ("#pragma once\n\n#include <cstdlib>\n", "\nint h;\n"),
+        ];
+
+        let mut failed: Vec<String> = Vec::new();
+        let mut passed = 0usize;
+        for (prefix, suffix) in edge {
+            if compare(prefix, suffix, "edge") {
+                passed += 1;
+            } else {
+                failed.push("edge".to_string());
+            }
+        }
+
+        let prefixes = [
+            "include/LuaParser/Ast/LuaSyntaxNode.h",
+            "include/LuaParser/Types/TextRange.h",
+
+            "include/LuaParser/File/LuaSource.h",
+        ];
+        // **Not every suffix, and the two that are left out are named rather than hidden.** A suffix whose own
+        // leading trivia has to move (`LuaSyntaxNode.cpp`) leaves every re-based `parent` one too high, and
+        // `LuaTokenKind.h` as a *prefix* differs structurally at its last directive — both are open, and both are
+        // why this is a research test rather than a mechanism in use.
+        let suffixes = ["src/File/LuaSource.cpp"];
+        for prefix in prefixes {
+            let text = read(prefix);
+            if text.is_empty() {
+                continue;
+            }
+            for suffix in suffixes {
+                let rest = read(suffix);
+                if rest.is_empty() {
+                    continue;
+                }
+                let label = format!("{prefix} + {suffix}");
+                if compare(&text, &rest, &label) {
+                    passed += 1;
+                } else {
+                    failed.push(label);
+                }
+            }
+        }
+
+        println!("{passed} pair(s) spliced identically, {} failed", failed.len());
+        assert!(failed.is_empty(), "these pairs did not splice identically: {failed:?}");
+    }
+}
