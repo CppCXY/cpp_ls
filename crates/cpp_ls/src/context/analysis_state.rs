@@ -84,7 +84,7 @@
 /// function exists to fix. Five hundred files is far more than an ordinary include chain and one two-hundredth of
 /// the project above; the pump finishes whatever is left within the second, and the pull no longer holds the editor
 /// for a minute and a half.
-const PREPARE_INDEX_SLICE: usize = 500;
+const PREPARE_INDEX_SLICE: usize = 24;
 
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock, RwLockReadGuard};
