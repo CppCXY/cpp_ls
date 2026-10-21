@@ -3360,10 +3360,28 @@ fn operator_returns_of(
     operator: &str,
 ) -> Option<String> {
     let class = class_type.class_name()?.to_string();
-    let class_file = index
-        .files_declaring(&class, path)
-        .first()
-        .map(|declared| declared.file.clone());
+
+    // **A name that is an alias is not a class, and asking for its operator parses a file.**
+    //
+    // `files_declaring` answers with the declarations of the *name*, and the next step asks the session for the view
+    // of the file the first one is in — a parse of that file. For `std::size_t` that declaration is a typedef in a
+    // system header, so every binary expression with a `std::size_t` operand paid for that header's tree before the
+    // answer ("a typedef has no `operator>`") was known.
+    //
+    // [`DeclFact::type_of`] is what tells the two apart: a class definition declares no type of its own, an alias
+    // does. An alias's operators are its target's, which this cannot answer without resolving the target first — and
+    // the callers answer a comparison `bool` and an arithmetic its operand's type, which is right for every
+    // arithmetic alias.
+    //
+    // Measured on EmmyLuaCodeStyle's `LuaParser/src/File/LuaSource.cpp`: `implicit-bool-conversion` **265 → 93 ms**.
+    // `assign-type-check` did **not** move (963–1 131 ms), so this was not the whole of its cost — see the note in
+    // `docs/status.md` §四十 ② for what is excluded next.
+    let declared = index.files_declaring(&class, path);
+    let first = declared.first()?;
+    if first.fact.type_of.is_some() {
+        return None;
+    }
+    let class_file = Some(first.file.clone());
     let class_view = class_file.as_deref().and_then(|at| (declaring)(at));
     let (class_scopes, class_root, class_path) = match &class_view {
         Some(view) => (&view.scopes, &view.root, view.path.as_path()),
