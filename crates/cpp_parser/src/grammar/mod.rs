@@ -1,6 +1,6 @@
 use crate::{parser::CompleteMarker, parser_error::CppParseError};
 
-pub(crate) mod cpp;
+mod cpp;
 pub mod doc;
 
 /// Outcome of parsing one construct.
