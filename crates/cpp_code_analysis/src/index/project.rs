@@ -8107,6 +8107,23 @@ impl ProjectIndex {
             Err(reason) => return Known::Unknown(reason),
         };
 
+        // **A member's declaration cannot be what a bare spelling means.** `class TextRange { TextRange(); … }` files
+        // three facts whose bare name is `TextRange` — the class, and its two constructors — so this question came
+        // back `Ambiguous`, and the *token* `TextRange` then got no colour at all.
+        //
+        // Measured on EmmyLuaCodeStyle's `LuaParser/include/LuaParser/Ast/LuaSyntaxNode.h`: `LuaSyntaxTree` was
+        // classified `Type` and `TextRange` was not, and the difference was exactly this — `LuaSyntaxTree` is only
+        // forward-declared in that header, while `TextRange`'s class declares constructors. `files_declaring` takes
+        // the **bare** name, so the constructors — whose qualified name is `TextRange::TextRange` — were counted as
+        // other meanings of it.
+        //
+        // A fact whose own qualified name is longer than the one asked about is a member, and a qualified request
+        // (`TextRange::StartOffset`) still matches: its qualified name is the name asked for.
+        let certain: Vec<_> = certain
+            .into_iter()
+            .filter(|found| found.fact.scope.is_none() || found.fact.qualified_name() == name)
+            .collect();
+
         let mut kinds: Vec<IndexedKind> = certain
             .into_iter()
             .map(|found| IndexedKind::of(&found.fact))
