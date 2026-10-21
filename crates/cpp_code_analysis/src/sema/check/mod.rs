@@ -1181,6 +1181,18 @@ pub fn a_class_can_be_built_from(
     class: &str,
     value: &crate::sema::types::Type,
 ) -> Option<bool> {
+    // **A target that names no class is a question this cannot answer**, and asking it is not free: the name goes to
+    // the index, which resolves it, finds nothing, and falls back to a definition query and a member walk. Measured on
+    // EmmyLuaCodeStyle's `LuaParser/src/File/LuaSource.cpp` — a file whose assignments are all to `int`/`size_t`
+    // locals — `assign-type-check` took **963 ms**, and the calls that took it there were the ones with an empty
+    // class name: `assign-type-check` asks with `class_name().unwrap_or_default()`, which is `""` for a builtin.
+    //
+    // `None` is the honest answer: a builtin type has no constructors to ask about, and this facility is only about
+    // "does this class have a constructor that could take this value".
+    if class.is_empty() {
+        return None;
+    }
+
     // **The class's own members, not its whole inheritance graph.** `members_of` answers the question a *reader*
     // asks — what can be written after `.` — and walks the base chain to do it: measured on `test_module`'s
     // `import std;` file, `members_of("std::vector")` is **ten bases and 583 ms of walking**, while the class's own
