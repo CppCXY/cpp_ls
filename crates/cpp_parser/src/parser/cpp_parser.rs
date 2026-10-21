@@ -2414,4 +2414,104 @@ mod splice_tests {
         println!("{passed} pair(s) spliced identically, {} failed", failed.len());
         assert!(failed.is_empty(), "these pairs did not splice identically: {failed:?}");
     }
+    /// **Which prefixes splice, and which do not** — the census behind the note on this module.
+    ///
+    /// The arrangement this exists to judge: a project`s headers as prefixes, a real source as the suffix. If the
+    /// class that does not splice is rare, an implementation can fall back to parsing the whole text for those and
+    /// keep the fast path for the rest.
+    #[test]
+    fn a_census_of_prefixes() {
+        let root = "C:/Users/zc/Desktop/github/EmmyLuaCodeStyle";
+        let suffix = std::fs::read_to_string(format!("{root}/LuaParser/src/File/LuaSource.cpp")).unwrap_or_default();
+        if suffix.is_empty() {
+            println!("no project to census");
+            return;
+        }
+
+        let mut files: Vec<std::path::PathBuf> = Vec::new();
+        let mut stack = vec![std::path::PathBuf::from(format!("{root}/LuaParser/include"))];
+        while let Some(directory) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&directory) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path
+                    .extension()
+                    .map(|extension| extension == "h" || extension == "hpp")
+                    .unwrap_or(false)
+                {
+                    files.push(path);
+                }
+            }
+        }
+        files.sort();
+
+        let mut identical = 0usize;
+        let mut shifted = 0usize;
+        let mut other = 0usize;
+        let mut shifted_names: Vec<String> = Vec::new();
+        let mut other_names: Vec<String> = Vec::new();
+        for path in &files {
+            let Ok(prefix) = std::fs::read_to_string(path) else {
+                continue;
+            };
+            if prefix.is_empty() {
+                continue;
+            }
+            let name = path
+                .strip_prefix(root)
+                .unwrap_or(path)
+                .to_string_lossy()
+                .to_string();
+            let whole = events_of(&format!("{prefix}{suffix}"));
+            let made = spliced(&prefix, &suffix);
+            if made.len() != whole.len() {
+                // **The shapes that do not splice, and they are one family**: a prefix whose last bytes are a trailing
+                // comment (`}// namespace detail`, with no newline after it), or a five-line generated header. The
+                // comment is re-lexed into a `DocComment` node at EOF, which the one-text parse attaches elsewhere —
+                // a structural difference rather than a position one, so it is counted apart from a shift.
+                other += 1;
+                other_names.push(name);
+                continue;
+            }
+            match whole
+                .iter()
+                .zip(made.iter())
+                .position(|(left, right)| !same(left, right))
+            {
+                None => identical += 1,
+                Some(at) => {
+                    // A **shift**: the same events in a different order around the boundary, which is what a trivia
+                    // that lands one node too early looks like.
+                    let trivia = matches!(whole[at], MarkEvent::Trivia)
+                        || matches!(&whole[at], MarkEvent::EatToken { kind, .. } if is_trivia_kind(*kind))
+                        || matches!(whole.get(at + 1), Some(MarkEvent::NodeEnd));
+                    if trivia {
+                        shifted += 1;
+                        shifted_names.push(name);
+                    } else {
+                        other += 1;
+                        other_names.push(name);
+                    }
+                }
+            }
+        }
+
+        println!(
+            "{} header(s): {identical} identical, {shifted} trivia-shifted, {other} other",
+            files.len()
+        );
+        println!("  shifted: {shifted_names:?}");
+        println!("  other: {other_names:?}");
+        // Three quarters is the guard, not the goal: measured 19 of 22 on this project, and the three that do not
+        // splice are named above. A change that drops the ratio is a change to the boundary rules.
+        assert!(
+            identical * 4 >= files.len() * 3,
+            "the splice must keep working for most prefixes: {identical} of {}",
+            files.len()
+        );
+    }
 }
