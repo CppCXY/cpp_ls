@@ -467,6 +467,41 @@ async fn index_in_background(context: ServerContextSnapshot) {
                 continue;
             }
 
+            // **`import std;` — the interface unit nothing in the project includes.** libstdc++ ships it as
+            // `<c++ include>/bits/std.cc`, MSVC as `<VC>/Tools/MSVC/<version>/modules/std.ixx`; unless it is read,
+            // every name the module exports is unknown, and the diagnostic that says so is right about the index and
+            // wrong about the project.
+            //
+            // It happens **here**, in the pump, for two reasons that are both about who is allowed to write:
+            //
+            //   * a diagnostic is a read. It may be asked from several threads at once and must not add files to
+            //     the index, take the analysis for writing, or cook a translation unit on the way to an answer;
+            //   * the read is the whole STL closure (6 151 ms measured for `std` on a cold machine), and no request
+            //     may hold the write lock for that. Queued as ordinary work, it is read over the same slices as
+            //     every other file, and the request handlers keep the option of paying for it themselves when a
+            //     reader is already waiting (`handlers::read_the_modules`).
+            //
+            // Only when the queue has drained: while it is filling, the modules are not what the answer is waiting
+            // for, and queueing them would crowd out the project's own files.
+            if first_pass || was_pending {
+                let queued = context
+                    .analysis()
+                    .update_session("queue the modules the open files import", |session| {
+                        session.queue_the_modules_the_open_files_import()
+                    })
+                    .await
+                    .unwrap_or(0);
+
+                if queued > 0 {
+                    log::info!("{queued} module interface unit(s) queued for reading");
+                    // Go round again rather than publish an answer computed before they were read: the next pass
+                    // reads them in slices, and the end-of-drain refresh below runs once they are in.
+                    was_pending = true;
+                    tokio::task::yield_now().await;
+                    continue;
+                }
+            }
+
             // Nothing to read. The first time that happens the project is loaded, and the diagnostics that were
             // waiting for it are published — after that the loop waits for the next edit.
             if first_pass {

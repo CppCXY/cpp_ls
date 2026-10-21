@@ -1796,3 +1796,152 @@ fn an_import_makes_the_modules_names_visible() {
 
     let _ = DiskFiles;
 }
+
+/// **GCC's standard module is a source file inside the include tree** — `<c++ include>/bits/std.cc`.
+///
+/// MSVC ships `modules/std.ixx` beside its include directory; libstdc++ ships the module *source* as
+/// `bits/std.cc` **inside** it, and nothing in the project includes that file, so without this read `import std;`
+/// resolves to nothing and every name it exports is unknown.
+///
+/// The layout is the machine's (`lib/gcc/x86_64-w64-mingw32/15.1.0/include/c++/bits/std.cc` on this one): the
+/// include path is the `c++` root, `bits/` is inside it, and the importing file is in another directory altogether.
+/// The file's own shape is the real one — a global module fragment, `export module std;`, then exported names.
+#[test]
+fn the_gcc_standard_module_is_found_at_bits_std_cc() {
+    use cpp_code_analysis::{DiskFiles, Known, OpenDocuments, Session, SessionFiles, WatchFilter};
+
+    let files = MemoryFiles::new()
+        .with_file(
+            "gcc/include/c++/bits/std.cc",
+            "module;\n#define _GLIBCXX_USE_TBB_PAR_BACKEND 0\n\
+             export module std;\n\n\
+             export namespace std { class string {}; }\n\
+             export namespace std::inline literals::inline chrono_literals { int size(); }\n",
+        )
+        .with_file("src/main.cpp", "import std;\nstd::string greeting;\n");
+
+    let config = CompilerConfig::new().with_include_path("gcc/include/c++");
+    let providers = SessionFiles::new(OpenDocuments::new(), files);
+    let mut session = Session::with_config(".", providers, WatchFilter::new("."), config);
+    session.add_project_files([std::path::PathBuf::from("src/main.cpp")]);
+    session.index_everything();
+
+    assert!(
+        !matches!(
+            session
+                .index()
+                .definition("std::string", Path::new("src/main.cpp")),
+            Known::Yes(_)
+        ),
+        "before the read, nothing has seen `bits/std.cc`"
+    );
+
+    assert_eq!(
+        session.read_the_modules_a_file_imports(Path::new("src/main.cpp")),
+        1,
+        "one interface unit: the module source"
+    );
+
+    assert_eq!(
+        session.index().interface_unit_of("std"),
+        Some("gcc/include/c++/bits/std.cc"),
+        "and the index now knows which file `import std;` reaches"
+    );
+
+    assert!(
+        matches!(
+            session
+                .index()
+                .definition("std::string", Path::new("src/main.cpp")),
+            Known::Yes(_)
+        ),
+        "`std::string` is declared inside the exported namespace the module source writes"
+    );
+
+    assert_eq!(
+        session.read_the_modules_a_file_imports(Path::new("src/main.cpp")),
+        0,
+        "the second ask costs nothing — the property the request-driven design rests on"
+    );
+
+    let _ = DiskFiles;
+}
+/// **The pump's half of the same story**: the interface unit is *queued*, not read, so a long closure is paid for in
+/// slices rather than in one write hold.
+///
+/// [`Session::read_the_modules_a_file_imports`] reads the whole closure before it returns — the right trade for a
+/// request that is already waiting on an answer, and the wrong one for the pump (whose write holds are measured in
+/// milliseconds) or for a *diagnostic*, which is a read and must not add files to the index at all.
+#[test]
+fn the_interface_unit_of_an_imported_module_can_be_queued_instead_of_read() {
+    use cpp_code_analysis::{DiskFiles, Known, OpenDocuments, Session, SessionFiles, WatchFilter};
+
+    let files = MemoryFiles::new()
+        .with_file(
+            "gcc/include/c++/bits/std.cc",
+            "module;\nexport module std;\nexport namespace std { class string {}; }\n",
+        )
+        .with_file("src/main.cpp", "import std;\nstd::string greeting;\n");
+
+    let config = CompilerConfig::new().with_include_path("gcc/include/c++");
+    let providers = SessionFiles::new(OpenDocuments::new(), files);
+    let mut session = Session::with_config(".", providers, WatchFilter::new("."), config);
+    session.add_project_files([std::path::PathBuf::from("src/main.cpp")]);
+    session.index_everything();
+
+    // The pump's question is about **open** documents — the ones a reader is looking at and whose imports are worth
+    // paying for — so nothing is queued until the file is open.
+    assert_eq!(
+        session.queue_the_modules_the_open_files_import(),
+        0,
+        "no open document imports anything yet"
+    );
+
+    session.did_open(
+        std::path::Path::new("src/main.cpp"),
+        "import std;\nstd::string greeting;\n",
+    );
+    // The pump asks after a drain, so the file has a summary again by then — an edit drops it, and a summary is what
+    // names the modules a file imports.
+    session.index_everything();
+
+    assert_eq!(
+        session.queue_the_modules_the_open_files_import(),
+        1,
+        "the open file's `import std;` names one interface unit"
+    );
+    assert!(
+        session.pending_work() > 0,
+        "queued rather than read: the unit is work for the pump, not a write hold taken here"
+    );
+    assert_eq!(
+        session.index().interface_unit_of("std"),
+        None,
+        "and the index does not know it yet — that is what the slices are for"
+    );
+
+    session.index_everything();
+
+    assert_eq!(
+        session.index().interface_unit_of("std"),
+        Some("gcc/include/c++/bits/std.cc"),
+        "after the drain the module is in the index"
+    );
+    assert!(
+        matches!(
+            session
+                .index()
+                .definition("std::string", Path::new("src/main.cpp")),
+            Known::Yes(_)
+        ),
+        "and the names it exports resolve from the importing file"
+    );
+
+    assert_eq!(
+        session.queue_the_modules_the_open_files_import(),
+        0,
+        "the second ask finds the module already in the index and queues nothing"
+    );
+
+    let _ = DiskFiles;
+}

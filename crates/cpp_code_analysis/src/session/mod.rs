@@ -4096,6 +4096,44 @@ fn error_directive_line(text: &str) -> Option<(usize, usize, String)> {
         reading
     }
 
+    /// **Queue the interface units of the modules the open files import**, for the pump to read like any other file.
+    ///
+    /// The counterpart of [`Session::read_the_modules_a_file_imports`], and the difference is who pays. That one
+    /// reads the whole closure **now**, holding the write lock from the first interface unit to the last file it
+    /// drags in — measured at **6 151 ms** for `std` on a cold machine. A request that is already waiting on an
+    /// answer can afford that; the pump cannot, because its design is that the write lock is held for milliseconds at
+    /// a time — and a *diagnostic* cannot either, because a diagnostic is a read and must not mutate the index.
+    ///
+    /// So this only **queues**: the unit lands in the project and asks to be cooked, and the ordinary slices read it
+    /// with the budget the loop already applies. It is called from the pump when the queue has drained, so the files
+    /// it adds are read before the end-of-drain refresh rather than after it.
+    ///
+    /// `std` is the ordinary case and the reason this exists: libstdc++ ships its interface unit as
+    /// `<c++ include>/bits/std.cc`, MSVC as `<VC>/Tools/MSVC/<version>/modules/std.ixx`, and neither is part of any
+    /// include closure — nothing in the project includes it, so nothing would ever read it on its own.
+    ///
+    /// Returns how many units were queued, so the caller can go round the loop again instead of publishing an answer
+    /// computed before they were read.
+    pub fn queue_the_modules_the_open_files_import(&mut self) -> usize {
+        let mut queued = 0;
+        for path in self.documents.paths() {
+            let wanted = self.modules_the_index_cannot_name(&path);
+            if wanted.is_empty() {
+                continue;
+            }
+
+            for unit in self.module_interface_units_of(&wanted, &path) {
+                // **Cooked as well as read**: the names a module exports are in its *rendering* — `bits/std.cc`
+                // opens with `#include <bits/stdc++.h>` — and a summary of the raw text is the reading without a
+                // macro expansion, which for a module source is the reading without most of the names.
+                self.add_project_files([unit.clone()]);
+                self.want_cooked_reading(&unit);
+                queued += 1;
+            }
+        }
+        queued
+    }
+
     /// **The module interface units `path` imports, read in** — the files behind `import m;` that are not part of
     /// the project.
     ///
