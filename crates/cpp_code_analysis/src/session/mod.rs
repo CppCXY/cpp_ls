@@ -1481,9 +1481,23 @@ impl<F: FileProvider + Clone> Session<F> {
         let already_read =
             |session: &Self, path: &Path| session.store.index().cooked_declarations(path).is_some();
 
+        // **A file the index cannot describe is not a file to want.** `Session::cooking_materials` answers `None`
+        // for it — the summary lookup is the first thing a cook needs — so wanting it is a queue entry that can never
+        // be served: the slice claims it, gathers no materials, commits nothing, and the call that wanted it (this
+        // one, per drain) wants it again. Measured on `import std;` in a real project, that is a **livelock**: the
+        // server log showed `index slice: prepared 0, committed 0, write lock held 0 ms, 2 to cook, 0 left` once a
+        // second for as long as the window stayed open, and every diagnostic pull — which waits for
+        // `pending_work() == 0` — took **1.4 s** to be answered by an index that had nothing left to do.
+        //
+        // The two files in that measurement were the standard module's source and its companion, wanted by a file
+        // that says `import std;`: they are reachable through the *module* graph, not through `#include`, so no read
+        // ever filed a summary for them under the path this walk knows.
+        let can_be_cooked =
+            |session: &Self, path: &Path| session.store.index().summary(path).is_some();
+
         let direct = self.direct_includes_of(root);
         for included in &direct {
-            if !already_read(self, included) {
+            if !already_read(self, included) && can_be_cooked(self, included) {
                 self.cooking.want(included);
             }
         }
