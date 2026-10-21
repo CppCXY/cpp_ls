@@ -81,9 +81,19 @@
 ///
 /// **The number is larger than the pump's own slice on purpose.** A file cannot be cooked until its include chain
 /// has been read, so a pull that stops too early cannot answer at all — and an empty answer is the defect this
-/// function exists to fix. Five hundred files is far more than an ordinary include chain and one two-hundredth of
-/// the project above; the pump finishes whatever is left within the second, and the pull no longer holds the editor
-/// for a minute and a half.
+/// function exists to fix. The pump finishes whatever is left within the second, and the pull no longer holds the
+/// editor for a minute and a half.
+///
+/// **Twenty-four, and it was five hundred** — a number about a *project*, applied to a queue that is not the file's
+/// include chain: while a module was being read the queue held the standard library's four hundred files, and every
+/// pull drained them. Measured on `test_module` with `src/std_module_demo.cpp` open (`import std;`):
+///
+/// ```text
+///                                              500        24
+/// first pull after opening the file            1.95 s     271 ms
+/// longest update hold in the session           1 815 ms   86 ms
+/// the completion that follows                  153 ms     30 ms
+/// ```
 const PREPARE_INDEX_SLICE: usize = 24;
 
 use std::path::PathBuf;
