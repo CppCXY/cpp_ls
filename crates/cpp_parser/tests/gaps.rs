@@ -4891,21 +4891,17 @@ fn constructs_the_parser_does_not_read_yet() {
         )],
     );
 
-    // Found while writing the attribute rule below, and left as a record rather than fixed: the `inline` of a
-    // **nested** namespace definition. C++20 writes it after the enclosing specifier
-    // (`nested-namespace-definition: enclosing-namespace-specifier :: inline(opt) identifier`), so
-    // `namespace a::b::inline c { }` is valid — and `parse_name` wants an identifier where the `inline` is, giving
-    // ``expected a name``. Nothing in the three toolchains on this machine writes it (searched the MSVC STL, the
-    // Windows SDK, and libstdc++ 15), so it is a gap with no corpus bill attached — the entry is here so that the
-    // next person to wonder does not have to search for it again.
-    assert_does_not_read_yet(
-        Where::File,
-        &[(
-            "namespace a::b::inline c { }",
-            "an `inline` inside a nested-namespace-specifier: `parse_name` stops at the keyword. No corpus on \
-             this machine writes it, so the fix would be an unmeasured arm",
-        )],
-    );
+    // `namespace a::b::inline c { }` used to be here: the `inline` of a **nested** namespace definition, which
+    // `parse_name` stopped at with "expected a name". The note said "nothing in the three toolchains on this
+    // machine writes it", and that search missed a file — **`bits/std.cc`**, the `std` module source of GCC 15,
+    // writes it four times:
+    //
+    // ```cpp
+    // export namespace std::inline literals::inline chrono_literals      // std.cc:837, 935, 2748, 2772
+    // ```
+    //
+    // It is read now (the name stays one flat `NameExpr`, as `parse_name` builds it for `A::B`), and the shapes
+    // are pinned in `constructs_are_read_as_the_right_node`.
 
     // `decltype` in **type position** used to be here, and the record of what it looked like is worth keeping
     // because the symptom pointed at the wrong thing entirely:
@@ -7398,4 +7394,51 @@ fn a_parse_error_follows_the_locale() {
         chinese.iter().any(|message| message.contains("需要")),
         "the parse error is translated: {chinese:?}"
     );
+}
+
+/// **A nested namespace definition with `inline` on an inner segment** — `bits/std.cc` of GCC 15 writes it four
+/// times, and the parser refused the whole declaration each time (`parse_name` stopped at the `inline`).
+///
+/// The name stays **one flat `NameExpr`**, which is the shape `parse_name` builds for `A::B` — so every consumer
+/// that reads a namespace`s name (the scope walker, the index) reads `std::literals::chrono_literals` and not
+/// just `std`. The `inline` tokens are inside it and are skipped by readers that only look for identifiers,
+/// exactly as they are for a name written without them.
+#[test]
+fn a_nested_namespace_definition_may_spell_inline_on_an_inner_segment() {
+    for (source, name) in [
+        ("namespace a::b::inline c { }", "a::b::c"),
+        ("namespace a::inline b::inline c { int x; }", "a::b::c"),
+        ("export namespace std::inline literals::inline chrono_literals { }", "std::literals::chrono_literals"),
+        // The ordinary spellings keep working, and the innermost `inline` alone is the header's own first line.
+        ("namespace a::b::c { }", "a::b::c"),
+        ("inline namespace a::b { }", "a::b"),
+    ] {
+        let tree = cpp_parser::CppParser::parse(source, cpp_parser::ParserConfig::default());
+        assert!(tree.get_errors().is_empty(), "{source}: {:?}", tree.get_errors());
+
+        let root = tree.get_red_root();
+        let declaration = root
+            .descendants()
+            .find(|node| {
+                cpp_parser::CppSyntaxKind::from(node.kind()) == cpp_parser::CppSyntaxKind::NamespaceDecl
+            })
+            .unwrap_or_else(|| panic!("{source}: no NamespaceDecl"));
+
+        // The name's identifiers, in order — `inline` is not part of the name, and the body is not the name.
+        let name_node = declaration
+            .children()
+            .find(|node| {
+                cpp_parser::CppSyntaxKind::from(node.kind()) == cpp_parser::CppSyntaxKind::NameExpr
+            })
+            .unwrap_or_else(|| panic!("{source}: no NameExpr"));
+        let written: Vec<String> = name_node
+            .descendants_with_tokens()
+            .filter_map(|element| element.into_token())
+            .filter(|token| {
+                cpp_parser::CppTokenKind::from(token.kind()) == cpp_parser::CppTokenKind::Identifier
+            })
+            .map(|token| token.text().to_string())
+            .collect();
+        assert_eq!(written.join("::"), name, "{source}");
+    }
 }

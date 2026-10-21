@@ -5432,7 +5432,22 @@ pub fn parse_namespace_declaration(p: &mut CppParser) -> ParseResult {
         // `inline` before the name is part of the declaration; the parser reaches this with it
         // already consumed as a specifier, so an identifier here is the name.
         if p.current_token() == CppTokenKind::Identifier {
-            parse_name(p)?;
+            // **A nested namespace definition may spell `inline` on an inner segment.** C++17's grammar
+            // (`namespace A::B`) allows `inline` only in front of the whole name, but GCC's own `std` module
+            // writes it on every segment —
+            //
+            // ```cpp
+            // export namespace std::inline literals::inline chrono_literals { … }      // bits/std.cc:837
+            // ```
+            //
+            // — and GCC accepts it. `parse_name` stops at the `inline` with "expected a name", so the whole
+            // declaration failed, and each of the four such blocks in `bits/std.cc` was a parse error (measured:
+            // 4 errors in that file, all of them here).
+            if a_segment_below_is_inline(p) {
+                parse_a_nested_namespace_name(p);
+            } else {
+                parse_name(p)?;
+            }
         }
     }
 
@@ -5451,6 +5466,45 @@ pub fn parse_namespace_declaration(p: &mut CppParser) -> ParseResult {
 
     let _ = expect_semicolon(p);
     Ok(m.complete(p))
+}
+
+/// **Is there an `inline` in front of an inner segment of a nested namespace definition** — `A::inline B`?
+///
+/// The scan is the name grammar itself (`Identifier (:: Identifier)*`), so a `::` that starts something else —
+/// `namespace A::B` where `B` is missing — is not claimed, and the ordinary name rule reports it as before.
+fn a_segment_below_is_inline(p: &CppParser) -> bool {
+    let mut at = 1usize; // past the first segment, which the caller has in hand
+    while p.peek_token_kind_at(at..at + 1).as_slice() == [CppTokenKind::Scope] {
+        at += 1;
+        if p.peek_token_kind_at(at..at + 1).as_slice() == [CppTokenKind::InlineKeyword] {
+            return true;
+        }
+        if p.peek_token_kind_at(at..at + 1).as_slice() != [CppTokenKind::Identifier] {
+            return false;
+        }
+        at += 1;
+    }
+    false
+}
+
+/// Read a nested namespace name as **one flat `NameExpr`** — the shape `parse_name` builds for `A::B` — while
+/// accepting an `inline` in front of any segment. See the call site for the file this comes from.
+fn parse_a_nested_namespace_name(p: &mut CppParser) {
+    let name = p.mark(CppSyntaxKind::NameExpr);
+    loop {
+        if p.current_token() == CppTokenKind::InlineKeyword {
+            p.bump();
+        }
+        if p.current_token() != CppTokenKind::Identifier {
+            break;
+        }
+        p.bump();
+        if p.current_token() != CppTokenKind::Scope {
+            break;
+        }
+        p.bump();
+    }
+    name.complete(p);
 }
 
 /// Read the macro-shaped tokens that may sit between a namespace's name and its `{`.

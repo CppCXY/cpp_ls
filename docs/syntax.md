@@ -232,3 +232,46 @@ to be rediscovered:
 compile_commands.json  →  CompilerConfig::language_for(file)  →  ParserConfig::with_language(..)  →  LexerConfig.language
      ✓                        ✓                                     ✗ not yet                            ✓
 ```
+## A gap that a corpus search missed: `bits/std.cc`
+
+The `inline` of a **nested** namespace definition was recorded as a gap with "nothing in the three toolchains on this
+machine writes it" — the search covered the MSVC STL, the Windows SDK and libstdc++'s **headers**. It missed one file:
+`bits/std.cc`, the `std` module source of GCC 15, which writes it four times:
+
+```cpp
+// lib/gcc/x86_64-w64-mingw32/15.1.0/include/c++/bits/std.cc:837, 935, 2748, 2772
+export namespace std::inline literals::inline chrono_literals
+{ … }
+```
+
+`parse_name` wants an identifier where the `inline` is, so each of the four declarations failed — and the file has a
+module header of its own worth knowing about:
+
+```cpp
+module;                                             // global module fragment
+#define _GLIBCXX_USE_TBB_PAR_BACKEND 0
+#include <bits/stdc++.h>
+export module std;                                  // the module interface
+export namespace std { using std::all_of; … }       // the exported repertoire
+```
+
+Both are read now. The name stays **one flat `NameExpr`** (`a :: inline b :: inline c` is one name node with the
+`inline` tokens inside it), which is the shape `parse_name` builds for `a::b::c`, so the scope walker and the index see
+`std::literals::chrono_literals` and not just `std`.
+
+Measured, cooking each file through a session whose toolchain is GCC 15.1.0 (MinGW):
+
+```text
+bits/std.cc         4 errors → 0        module reading: std, interface, no imports
+bits/std.compat.cc  0 errors            module reading: std.compat, interface, imports ["std"]
+```
+
+`interface_unit_of("std")` answers the path of `bits/std.cc` as soon as that file is in the index — which is the other
+half of the module story: a project that says `import std;` only stops being told "no file here declares module `std`"
+once the compiler's own module source has been read. Nothing reads it unless the reader opens it or the project lists
+it, and the file is a good candidate for a **toolchain-derived** entry: for libstdc++ it is
+`<c++ include>/bits/std.cc` (and `std.compat.cc`), for MSVC `…/VC/Tools/MSVC/<ver>/modules/std.ixx`.
+
+Tests: `a_nested_namespace_definition_may_spell_inline_on_an_inner_segment` (five spellings, each asserted to be one
+`NamespaceDecl` whose name is the joined identifiers), and the entry moved out of
+`constructs_the_parser_does_not_read_yet` in `tests/gaps.rs`.
