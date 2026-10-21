@@ -595,6 +595,23 @@ pub struct Session<F: FileProvider = DiskFiles> {
             std::sync::Arc<crate::preprocess::cooked::RenderedCooked>,
         >,
     >,
+    /// **The files a cook has already refused**, by the queue's own key.
+    ///
+    /// `cooking_materials` answers `None` for a file whose unit is provisional, whose summary is not in the index, or
+    /// whose render declines — and the caller that wanted it (`want_the_closure_cooked`, once per drain) wants it
+    /// again. Measured on a real session, that is a loop: the server's own log repeated
+    ///
+    /// ```text
+    /// index slice: prepared 0, committed 0, write lock held 0 ms, 4 to cook, 1 left
+    /// index slice: prepared 0, committed 0, write lock held 0 ms, 4 to cook, 2 left
+    /// index slice: prepared 0, committed 0, write lock held 0 ms, 2 to cook, 0 left
+    /// ```
+    ///
+    /// every second for as long as the window stayed open, at 28 % of a core and 916 MB.
+    ///
+    /// A refusal is not a conclusion about the file, only about *this* moment: [`Session::want_cooked_reading`] — a
+    /// query that names the file — clears it and queues again, so nothing is lost but the retry.
+    cooking_refused: std::sync::Mutex<std::collections::HashSet<String>>,
     /// **What this session's units have cost it** — see [`UnitStats`], which says what the three numbers mean.
     ///
     /// Atomics rather than one `Mutex<UnitStats>`: `translation_unit_of` takes `&self` and runs on the pump's read
@@ -1007,6 +1024,7 @@ impl<F: FileProvider + Clone> Session<F> {
             macro_environments: std::sync::Mutex::new(std::collections::HashMap::new()),
             macro_work: std::sync::Mutex::new(Cooking::default()),
             renderings: std::sync::Mutex::new(std::collections::HashMap::new()),
+            cooking_refused: std::sync::Mutex::new(std::collections::HashSet::new()),
             unit_from_memory: std::sync::atomic::AtomicUsize::new(0),
             unit_from_disk: std::sync::atomic::AtomicUsize::new(0),
             unit_walked: std::sync::atomic::AtomicUsize::new(0),
@@ -1571,8 +1589,23 @@ impl<F: FileProvider + Clone> Session<F> {
             |session: &Self, path: &Path| session.store.index().summary(path).is_some();
 
         let direct = self.direct_includes_of(root);
+        // **And a file a cook has already refused is not wanted again.** The guard above covers the file the index
+        // cannot describe; a file whose *materials* cannot be gathered — a provisional unit, a render that declines —
+        // passes it, is claimed, builds nothing, and is wanted again by the next drain. Measured on a real session:
+        // `4 to cook, 1 left` / `2 left` / `0 left` every second, forever, at 28 % of a core.
+        let refused = |session: &Self, path: &Path| {
+            session
+                .cooking_refused
+                .lock()
+                .map(|refused| refused.contains(&queue_key(path)))
+                .unwrap_or(false)
+        };
+
         for included in &direct {
-            if !already_read(self, included) && can_be_cooked(self, included) {
+            if !already_read(self, included)
+                && can_be_cooked(self, included)
+                && !refused(self, included)
+            {
                 self.cooking.want(included);
             }
         }
@@ -1603,7 +1636,7 @@ impl<F: FileProvider + Clone> Session<F> {
                 if budget == 0 {
                     break;
                 }
-                if already_read(self, &nested) {
+                if already_read(self, &nested) || refused(self, &nested) {
                     continue;
                 }
                 if !nested_files.contains(&nested) {
@@ -1638,7 +1671,7 @@ impl<F: FileProvider + Clone> Session<F> {
                 if budget == 0 {
                     break;
                 }
-                if already_read(self, &deeper) {
+                if already_read(self, &deeper) || refused(self, &deeper) {
                     continue;
                 }
                 self.cooking.want(&deeper);
@@ -1737,6 +1770,11 @@ impl<F: FileProvider + Clone> Session<F> {
             .collect()
     }
     pub fn want_cooked_reading(&mut self, path: &Path) {
+        // **A request clears a refusal**, because it is a statement that someone needs the answer now. The pump's
+        // closure walk does not clear it — that is the retry loop this exists to break (see `cooking_refused`).
+        if let Ok(mut refused) = self.cooking_refused.lock() {
+            refused.remove(&queue_key(path));
+        }
         // **And read it, if nothing has.** A reading is built out of a summary ([`Session::cook`] answers `None`
         // without one), and a file a request names may be one no pump has reached — a header outside every
         // translation unit, a file the workspace scan did not list. Wanting it cooked and not reading it is a
@@ -4723,6 +4761,22 @@ fn error_directive_line(text: &str) -> Option<(usize, usize, String)> {
     /// A file the cook queue names but the index cannot describe is dropped rather than re-queued:
     /// `want_cooked_reading` and the closure sweep both ask for it again, and a queue that re-adds its own failures
     /// is a queue that never empties — the note on `want_the_closure_cooked` records that hang.
+    /// **Remember the files a cooking slice could not build**, so the closure walk stops asking for them.
+    ///
+    /// `asked` is what the slice claimed and `built` is what `materials_for` could gather from it; the difference is
+    /// the set that would otherwise be wanted again on every drain. See [`Session::cooking_refused`], and
+    /// [`Session::want_cooked_reading`] for the one caller that clears a refusal.
+    pub fn refuse_the_cooks_that_built_nothing(&mut self, asked: &[PathBuf], built: &[PathBuf]) {
+        let Ok(mut refused) = self.cooking_refused.lock() else {
+            return;
+        };
+        for path in asked {
+            if !built.iter().any(|made| made == path) {
+                refused.insert(queue_key(path));
+            }
+        }
+    }
+
     pub fn materials_for(&self, paths: Vec<PathBuf>) -> Vec<CookingMaterials> {
         paths
             .into_iter()

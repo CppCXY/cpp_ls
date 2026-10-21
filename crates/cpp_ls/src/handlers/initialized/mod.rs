@@ -425,17 +425,23 @@ async fn index_in_background(context: ServerContextSnapshot) {
             // …and the same for the drain and the cooking slice: a rendering is 9–269 ms per file and a unit walk is
             // 150 ms, so this phase is the longest remaining uninterrupted span of CPU in the loop.
             //
-            // **Taken before the closures consume them**, for the breaker below: what a slice *asked for* is half of
-            // "did it achieve anything", and the other half comes back from the commit.
+            // **Taken before the closures consume them**, for the breaker below and for the refusals: what a slice
+            // *asked for* is half of "did it achieve anything", and the other half comes back from the commit.
             let drain_was_empty = drain.is_empty();
-            let claimed_count = claimed.len();
-            let (prepared_drain, rendered_cooks) = context
+            let asked: Vec<std::path::PathBuf> = claimed.clone();
+            let claimed_count = asked.len();
+            let (prepared_drain, rendered_cooks, built) = context
                 .analysis()
                 .run_blocking(move |session| {
                     let materials = session.materials_for(claimed);
+                    // Which of the asked files could actually be built — the difference is what would otherwise be
+                    // resumed on every drain, which is the loop this round is about.
+                    let built: Vec<std::path::PathBuf> =
+                        materials.iter().map(|material| material.path.clone()).collect();
                     Some((
                         session.prepare_the_drain(drain),
                         session.render_them(materials),
+                        built,
                     ))
                 })
                 .await
@@ -447,6 +453,12 @@ async fn index_in_background(context: ServerContextSnapshot) {
             let (re_read, cooked) = context
                 .analysis()
                 .update_session("index slice", |session| {
+                    // **The files this slice could not build are not asked for again by the closure walk**, which is
+                    // what turned a cook that can never succeed into a loop: measured on a real session, the log
+                    // repeated `4 to cook, 1 left` / `2 left` / `0 left` every second for as long as the window
+                    // stayed open, at 28 % of a core. A query that names one of them clears its refusal
+                    // (`Session::want_cooked_reading`), so nothing is lost but the retry.
+                    session.refuse_the_cooks_that_built_nothing(&asked, &built);
                     let started = std::time::Instant::now();
                     let re_read = session.commit_the_drain(prepared_drain);
                     let drained = started.elapsed().as_millis();
