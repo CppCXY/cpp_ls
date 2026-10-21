@@ -241,14 +241,17 @@ fn a_header_the_user_never_opened_is_cooked_when_a_request_names_it() {
         "the level under a direct include is where the library keeps what a reader asks for"
     );
 
-    // **And no further than that.** `deep.h` is three levels down, which is the closure again — the bound is a
-    // number of levels and not a distance, and this is the assertion that says so.
+    // **And one level more than that.** `deep.h` is the third level down, which
+    // [`COOK_TWO_LEVELS_FURTHER`] reaches: the class a header *uses* is often one `#include` below the header the
+    // file writes — MSVC's `<string>` is a thin layer over `<xstring>`, where `basic_string` lives — and measured on
+    // EmmyLuaCodeStyle, `std::string` answered `NotDeclaredHere` for a file whose header includes the header that
+    // includes the one that declares it. Past that bound a file still has no reading until something names it.
     assert!(
         session
             .index()
             .cooked_declarations(Path::new("/p/deep.h"))
-            .is_none(),
-        "past the bound a file has no reading until something looks at it"
+            .is_some(),
+        "the third level is where a header's own class is declared, and it is cooked"
     );
 
     // A request naming it — the shell's `prepare` does this for every file a request is about — is what makes it.
@@ -571,10 +574,11 @@ fn a_unit_read_reads_the_whole_program_once() {
     session.index_everything();
 
     // **The per-file policy has a bound, and this is it.** `handle.h` is the level under a direct include, which
-    // [`COOK_ONE_LEVEL_FURTHER`] reaches on purpose (`<string>` → `<xstring>`, where `std::string` lives);
-    // `deep.h` is past it and has no reading until something looks at it. The rest of this test is what the
-    // session does when a caller asks for the **program** instead of for one file, and the contrast is the
-    // point: a unit read has no bound at all.
+    // [`COOK_ONE_LEVEL_FURTHER`] reaches on purpose (`<string>` → `<xstring>`); `deep.h` is the level under *that*,
+    // which [`COOK_TWO_LEVELS_FURTHER`] reaches for the reason `std::string` needed it — measured on
+    // EmmyLuaCodeStyle, `members_of` answered `NotDeclaredHere` for a file whose header includes the header that
+    // includes the one that declares the class. The rest of this test is what the session does when a caller asks
+    // for the **program** instead of for one file, and the contrast is the point: a unit read has no bound at all.
     assert!(
         session
             .index()
@@ -586,8 +590,8 @@ fn a_unit_read_reads_the_whole_program_once() {
         session
             .index()
             .cooked_declarations(Path::new("/p/deep.h"))
-            .is_none(),
-        "and the level under that is not"
+            .is_some(),
+        "and the level under that is cooked too — the bound moved when `std::string` needed it"
     );
 
     let reading = session
