@@ -2280,7 +2280,8 @@ mod splice_tests {
         // **The leading trivia of the suffix moves into the last node of the prefix**, which is where the one-text
         // parse puts it — see the note on this module.
         let leading = second.iter().take_while(|event| is_trivia(event)).count();
-        let leading: Vec<MarkEvent> = rebased(second.drain(..leading).collect(), prefix.len(), 0);
+        let moved = leading;
+        let leading: Vec<MarkEvent> = rebased(second.drain(..moved).collect(), prefix.len(), 0);
 
         let last_end = first
             .iter()
@@ -2290,7 +2291,9 @@ mod splice_tests {
         // Where the suffix`s first kept event lands: the end of the prefix`s events, **after** the insertion, because
         // the prefix may hold events of its own after the last inner `NodeEnd` (root-level trivia).
         let offset = first.len();
-        first.extend(rebased(second, prefix.len(), offset));
+        // The kept events start at `offset`, and their original index `p` is `p - moved` in that stream (the moved
+        // trivia left it), so a parent is `offset - moved + p - 1`.
+        first.extend(rebased(second, prefix.len(), offset - moved));
         first
     }
 
