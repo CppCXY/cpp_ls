@@ -595,21 +595,6 @@ pub struct Session<F: FileProvider = DiskFiles> {
             std::sync::Arc<crate::preprocess::cooked::RenderedCooked>,
         >,
     >,
-    /// **Parsed views, by `(path, content hash)`** — because parsing one is what a query was paying for.
-    ///
-    /// [`Session::view`] parses the file's rendering every time it is asked, and a rendering is the whole preprocessed
-    /// text: on EmmyLuaCodeStyle, `type_of` over a `std::size_t` expression took **55 ms**, most of it the parse of the
-    /// header that declares `size_t`, repeated for every expression in the file because the view was dropped after
-    /// the question was answered.
-    ///
-    /// Bounded ([`MAX_VIEWS`]) because a view holds a tree and a scope table: this is a cache of the last few
-    /// questions, not of the project.
-    views: std::sync::Mutex<std::collections::HashMap<(PathBuf, u64), std::sync::Arc<FileView>>>,
-    /// **The same, for [`Session::view_of_the_file`]** — the file`s own tokens read with its macro environment, which
-    /// is what the semantic model`s resolver asks for and what every `type_of` about another file pays. Keyed by the
-    /// content and whether an environment was present; cleared when one is rebuilt.
-    views_of_files:
-        std::sync::Mutex<std::collections::HashMap<(PathBuf, u64, bool), std::sync::Arc<FileView>>>,
     /// **What this session's units have cost it** — see [`UnitStats`], which says what the three numbers mean.
     ///
     /// Atomics rather than one `Mutex<UnitStats>`: `translation_unit_of` takes `&self` and runs on the pump's read
@@ -1022,8 +1007,6 @@ impl<F: FileProvider + Clone> Session<F> {
             macro_environments: std::sync::Mutex::new(std::collections::HashMap::new()),
             macro_work: std::sync::Mutex::new(Cooking::default()),
             renderings: std::sync::Mutex::new(std::collections::HashMap::new()),
-            views: std::sync::Mutex::new(std::collections::HashMap::new()),
-            views_of_files: std::sync::Mutex::new(std::collections::HashMap::new()),
             unit_from_memory: std::sync::atomic::AtomicUsize::new(0),
             unit_from_disk: std::sync::atomic::AtomicUsize::new(0),
             unit_walked: std::sync::atomic::AtomicUsize::new(0),
@@ -2389,7 +2372,6 @@ impl<F: FileProvider + Clone> Session<F> {
                 known.insert(key, rendered);
             }
         }
-        self.forget_the_views();
 
         match prepared.re_read {
             Some(plan) => self.store.commit_the_re_read(plan),
@@ -2991,25 +2973,7 @@ impl<F: FileProvider + Clone> Session<F> {
         // next query about it finds the rendering built. The same "not now, next time" the diagnostics channel
         // states through `isIncomplete`.
         match self.known_rendering_of(&file.path, &file.text) {
-            Some(rendered) => {
-                // **A parsed view is remembered, by the same key the rendering is.** Parsing the rendering is the
-                // expensive half of this call — `type_of` on EmmyLuaCodeStyle paid **55 ms** for the header that
-                // declares `std::size_t`, once per expression, because the view was dropped after each answer.
-                let key = (file.path.clone(), crate::cache::content_hash(&file.text));
-                if let Ok(known) = self.views.lock()
-                    && let Some(view) = known.get(&key)
-                {
-                    return Some((**view).clone());
-                }
-                let view = FileView::parse_rendering(file, &rendered);
-                if let Ok(mut known) = self.views.lock() {
-                    if known.len() >= MAX_VIEWS {
-                        known.clear();
-                    }
-                    known.insert(key, std::sync::Arc::new(view.clone()));
-                }
-                Some(view)
-            }
+            Some(rendered) => Some(FileView::parse_rendering(file, &rendered)),
             None => {
                 if crate::probes::cooking() {
                     // **The two halves of the lookup, printed.** The key is `(path, content_hash(text))`, and a
@@ -3084,38 +3048,10 @@ impl<F: FileProvider + Clone> Session<F> {
         //
         // The environment is the one **already read** for this content - `known_macros_of` is a hash and a lookup -
         // and an empty one otherwise, which is the honest answer for a file whose include closure has not been walked.
-        let known_macros = self.known_macros_of(&file.path, &file.text);
-        let has_macros = known_macros.is_some();
-        let macros = known_macros.unwrap_or_default();
-
-        // **A parse is the whole cost of this call, and it is a function of the text and the environment.** The
-        // semantic model's resolver is this method, and a check asks it once per declaration's file: measured on
-        // EmmyLuaCodeStyle's `LuaParser/src/File/LuaSource.cpp`, `type_of` took **55 ms** per expression and the
-        // parse of the header that declares `std::size_t` was most of it, repeated for every expression because the
-        // view was dropped.
-        //
-        // Keyed by the content and **whether an environment was there** — the environment itself is not in the key,
-        // so any event that rebuilds one clears this cache (`Session::commit_a_cooked`, `commit_them`,
-        // `commit_the_drain`). Answering a question about the previous environment for one query is the failure a
-        // stale view would be, and clearing on those three events is what rules it out.
-        let key = (
-            file.path.clone(),
-            crate::cache::content_hash(&file.text),
-            has_macros,
-        );
-        if let Ok(known) = self.views_of_files.lock()
-            && let Some(view) = known.get(&key)
-        {
-            return Some((**view).clone());
-        }
-        let view = FileView::parse_with(&file, macros.as_ref());
-        if let Ok(mut known) = self.views_of_files.lock() {
-            if known.len() >= MAX_VIEWS {
-                known.clear();
-            }
-            known.insert(key, std::sync::Arc::new(view.clone()));
-        }
-        Some(view)
+        let macros = self
+            .known_macros_of(&file.path, &file.text)
+            .unwrap_or_default();
+        Some(FileView::parse_with(&file, macros.as_ref()))
     }
 
     /// **The view of a file that a compiler's parser would see**, built if it has to be.
@@ -3685,8 +3621,26 @@ fn error_directive_line(text: &str) -> Option<(usize, usize, String)> {
         // mutation of the analysis), so it does not conflict with the index reference taken beside it.
         let session: &'s Session<F> = self;
         let index: &'s crate::ProjectIndex = session.store.index();
-        let resolver =
-            Box::new(move |path: &Path| -> Option<FileView> { session.view_of_the_file(path) });
+
+        // **The views this model has already been given, by path.** The resolver parses the file it is asked about,
+        // and one diagnostic pass asks about the same few headers again and again: measured on EmmyLuaCodeStyle's
+        // `LuaParser/src/File/LuaSource.cpp`, `type_of` took **55 ms** per expression and the parse of the header
+        // that declares `std::size_t` was most of it — repeated for every expression, because the view was dropped
+        // after the answer.
+        //
+        // Kept **here and not in the session**: a `FileView` holds rowan nodes, which are not `Send`, and a session
+        // is shared across threads. This closure lives as long as the model — one diagnostic pass — which is exactly
+        // the lifetime in which the repetition happens, and no other thread can see these readings.
+        let seen: std::cell::RefCell<std::collections::HashMap<PathBuf, Option<FileView>>> =
+            std::cell::RefCell::new(std::collections::HashMap::new());
+        let resolver = Box::new(move |path: &Path| -> Option<FileView> {
+            if let Some(known) = seen.borrow().get(path) {
+                return known.clone();
+            }
+            let made = session.view_of_the_file(path);
+            seen.borrow_mut().insert(path.to_path_buf(), made.clone());
+            made
+        });
 
         crate::sema::model::SemanticModel::new(
             index,
@@ -4734,24 +4688,7 @@ fn error_directive_line(text: &str) -> Option<(usize, usize, String)> {
         {
             self.store.index_mut().insert_cooked(&path, indexed.into());
         }
-        self.forget_the_views();
         reading
-    }
-
-    /// **Drop the parsed views** — see [`Session::view_of_the_file`] for why a cook invalidates them.
-    ///
-    /// A view is a function of a file's text and the macro environment it is read under, and a cook **rebuilds
-    /// environments**: the closure's definitions, the branches that are compiled, the spelling that a `_STD_BEGIN`
-    /// expands to. A view kept across one would answer the next query with the previous environment's reading, which
-    /// is the failure a cache must not have. It costs a re-parse per file the next query asks about, and a query asks
-    /// about a handful.
-    fn forget_the_views(&mut self) {
-        if let Ok(mut known) = self.views.lock() {
-            known.clear();
-        }
-        if let Ok(mut known) = self.views_of_files.lock() {
-            known.clear();
-        }
     }
 
     /// **Which files the next cooking slice is for** — the queue pop, and the only part of taking a slice that needs
@@ -6333,12 +6270,6 @@ pub struct CookedReading {
 /// holds the rest ([`crate::TranslationUnitCache`]) and a unit that falls out of here is one decode away. Sixteen is
 /// enough for the units a reader is working in (the open files' roots and the headers they name) and small enough
 /// that a project of a thousand sources does not hold a thousand timelines.
-/// **How many parsed views are kept** — see [`Session::view`].
-///
-/// Eight, because each holds a tree and a scope table for one file, and the questions that repeat are about the
-/// few headers a file`s expressions reach (`std::size_t` is declared in one, `std::string` in another).
-const MAX_VIEWS: usize = 8;
-
 const MAX_UNITS: usize = 16;
 
 /// How many rounds [`Session::read_the_modules_a_file_imports`] may read module interface units in.
