@@ -4148,6 +4148,36 @@ fn error_directive_line(text: &str) -> Option<(usize, usize, String)> {
         queued
     }
 
+    /// **Queue the interface units of the modules `path` imports** — the cheap half of
+    /// [`Session::read_the_modules_a_file_imports`], for a caller on a request path.
+    ///
+    /// The read that method does is the **whole closure**, and it is not small: measured on a real project
+    /// (`test_module`, `src/std_module_demo.cpp`, `import std;`), it held the analysis's write lock for **1 717 ms**
+    /// — `bits/std.cc` → `bits/stdc++.h`, four hundred files — and every diagnostic pull behind it was answered
+    /// **1.4 s** late by an index with nothing left to do.
+    ///
+    /// A query may not spend that. It does not have to: the unit only has to be **queued**, and the pump reads it in
+    /// slices under the budget it applies to every other file. The answer to the query that asked is then "not yet",
+    /// which is what the protocol's `isIncomplete` is for and is true.
+    ///
+    /// Returns how many units were queued.
+    pub fn queue_the_modules_a_file_imports(&mut self, path: &Path) -> usize {
+        let wanted = self.modules_the_index_cannot_name(path);
+        if wanted.is_empty() {
+            return 0;
+        }
+
+        let found = self.module_interface_units_of(&wanted, path);
+        for unit in &found {
+            // The project list is what the pump's scan reads; the cooking queue is what makes the *rendering* be
+            // built, and a module source's names are in its rendering (`bits/std.cc` writes `#include
+            // <bits/stdc++.h>`, and its `export namespace std { using std::… }` blocks after it).
+            self.add_project_files([unit.clone()]);
+            self.want_cooked_reading(unit);
+        }
+        found.len()
+    }
+
     /// **The module interface units `path` imports, read in** — the files behind `import m;` that are not part of
     /// the project.
     ///

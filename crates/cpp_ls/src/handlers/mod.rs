@@ -118,7 +118,11 @@ pub async fn read_the_modules(
                 session.catch_up(&read);
             }
 
-            session.read_the_modules_a_file_imports(&read)
+            // **Queued, not read.** `read_the_modules_a_file_imports` would answer this request with the names the
+            // module exports, at the price of the whole closure under the write lock — measured, **1 717 ms** for
+            // `std` on a real project, with every diagnostic pull behind it answered 1.4 s late. A request may not
+            // spend that: the pump reads the file in slices, and this answer is marked incomplete until it has.
+            session.queue_the_modules_a_file_imports(&read)
         })
         .await;
 }
