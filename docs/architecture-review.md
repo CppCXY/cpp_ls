@@ -163,3 +163,14 @@ P2-6  给 unit 加一条断言/测试：导入者的宏表不包含被导入模�
 ---
 
 审核同时修正了一处：`PREPARE_INDEX_SLICE` 的注释（500 → 24，附实测对比）。
+
+## 6. 之后：P1-3 按建议做完了一半（2026-10-22）
+
+P1-3 的下一步是"先按规则计时"，`CPPLS_TIME_CHECKS=1` 已经在 `run_check` 里，量出来的形状是
+**一条规则占 78%**：`assign-type-check` 15.4 s / `param-type-check` 2.2 s / `implicit-bool-conversion` 1.1 s。
+三条放大项（每个成员重建一次 shape 表、为找一个 operator 建整张成员表、把模板参数当基类）修完后，
+同一个文件的整次诊断是 **0.34 s**，四个真实工程文件是 284.6 s → 6.6 s，findings 逐条不变。
+
+**另外量到一项不在本审核里的东西**：`index_everything` 返回时第二遍还欠 **1 205 个文件 / 27 s**，
+而且每一片都是 `nothing bodied`（一个摘要都不重建）——这笔账由下一次按键还。
+细节、复现命令和还没做的入口（大文件仍是秒级）见 [`edit-latency.md`](edit-latency.md)。

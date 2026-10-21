@@ -1074,9 +1074,20 @@ fn members_of_inner(
     // `#if defined(_DLL_CPPLIB)`), an ambiguous name answers no base list, and the members inherited from
     // `basic_ios` — `eof`, `fail`, `clear`, … — vanished from the list while `unlisted` stayed **empty**, so the
     // answer did not say it was incomplete.
+    // **A template parameter is not a base class.** A base clause is read into *names a class can be looked up by*,
+    // and `_Vector_base<_Tp, _Alloc>` produces three of them — the class and both of its arguments — because a base
+    // written as `conditional_t<…>` really is one of the names *inside* it (see [`lookup_names`]). The arguments of an
+    // ordinary class template are not, and treating them as bases is expensive: `_Tp` is the name of a parameter in
+    // hundreds of declarations in a standard-library closure, so the walk asked "who declares `_Tp`" over the whole
+    // index — measured on `LuaSource.cpp`, `members_of("std::vector")` called that question twice for **251 ms and
+    // 88 ms**, 96% of a member list whose own members cost 1 ms. The rule that removes them is not a heuristic: C++
+    // makes a template parameter shadow any name of its class, so a parameter of *this* class can never be its base.
+    let parameters = class_template_parameters(index, scopes, root, path, class);
+
     let mut level: Vec<(String, String)> = match bases_of(index, scopes, root, path, class) {
         Known::Yes(bases) => bases
             .into_iter()
+            .filter(|base| !names_a_template_parameter(base, &parameters))
             .map(|base| (base, class.to_string()))
             .collect(),
         Known::Unknown(reason) => {
@@ -1101,19 +1112,20 @@ fn members_of_inner(
             }
 
             let members = match direct_members(index, scopes, root, path, &base) {
-                Known::Yes(members) => members,
-                // A base nothing here can resolve. Its members are **missing from the list** rather than absent
-                // from the type, and naming the base is what makes the gap actionable — the fix is an include
-                // path or a file that was never indexed, not a different query.
-                Known::Unknown(reason) => {
-                    list.unlisted.push(UnlistedBase {
-                        spelling: base,
-                        reason,
-                    });
-                    continue;
-                }
-                Known::No => continue,
-            };
+                        Known::Yes(members) => members,
+                        // A base nothing here can resolve. Its members are **missing from the list** rather than absent
+                        // from the type, and naming the base is what makes the gap actionable — the fix is an include
+                        // path or a file that was never indexed, not a different query.
+                        Known::Unknown(reason) => {
+                            list.unlisted.push(UnlistedBase {
+                                spelling: base,
+                                reason,
+                            });
+                            continue;
+                        }
+                        Known::No => continue,
+                    };
+            let further = bases_of(index, scopes, root, path, &base);
 
             found.extend(members.into_iter().map(|(file, fact)| ProjectMember {
                 file,
@@ -1123,10 +1135,13 @@ fn members_of_inner(
                 ambiguous: false,
             }));
 
-            match bases_of(index, scopes, root, path, &base) {
-                Known::Yes(further) => next.extend(
-                    further
+            match further {
+                Known::Yes(found) => next.extend(
+                    found
                         .into_iter()
+                        .filter(|base_of_base| {
+                            !names_a_template_parameter(base_of_base, &parameters)
+                        })
                         .map(|base_of_base| (base_of_base, base.clone())),
                 ),
                 Known::Unknown(reason) => list.unlisted.push(UnlistedBase {
@@ -1180,10 +1195,18 @@ fn direct_members(
     if let Some(scope) = scopes.scope_with_qualified_name(class)
         && let Some(data) = scopes.scope(scope)
     {
+        // **The file's shapes once, not once per member.** See [`fact_from_binding_with`] for the measurement: this
+        // list is 151 members of `std::vector` on libstdc++, and the per-member form built the table 151 times.
+        let shapes = crate::sema::declarations::DeclarationShapes::of(root);
         return Known::Yes(
             data.bindings
                 .iter()
-                .map(|binding| (path.to_path_buf(), fact_from_binding(root, class, binding)))
+                .map(|binding| {
+                    (
+                        path.to_path_buf(),
+                        fact_from_binding_with(&shapes, root, class, binding),
+                    )
+                })
                 .collect(),
         );
     }
@@ -3382,6 +3405,39 @@ fn operator_returns_of(
         return None;
     }
     let class_file = Some(first.file.clone());
+
+    // **The single member first, and the whole list only as a fallback.** What this question wants is one
+    // declaration's `returns`, and a member list is a far more expensive way to find it: building one reads every
+    // member of the class and walks its bases, while `member_fact` asks the index's own scope postings. Measured on
+    // `LuaSource.cpp`, where fourteen subscript expressions ask about `std::vector<…>::operator[]`: the member list
+    // was **24 ms** each and the listing repeated fourteen times, for **340 ms of a 376 ms** `assign-type-check`
+    // pull. The list stays as the fallback because it also answers for a member whose name the postings spell
+    // differently (a base's, an operator's without its `operator` prefix).
+    //
+    // The two spellings are the two a fact can carry for an operator: the declarator's own (`operator[]`) and the
+    // bare symbol a reader that recorded only the operator token answered with (`[]`).
+    //
+    // **A `Yes` ends the question, `None` or not.** The list below is built in the same order this query walks —
+    // the class's own declarations first, then each level of bases — so the declaration this found is the one the
+    // list's own `find` would return first, and asking the list again can only produce the same `returns`. That is
+    // what makes the whole list unnecessary whenever the narrow query hits, which is every operator on every class
+    // the index has read.
+    let wanted: String = operator.chars().filter(|character| !character.is_whitespace()).collect();
+    let symbol = wanted.strip_prefix("operator").unwrap_or(&wanted);
+    for spelling in [wanted.as_str(), symbol] {
+        if let Known::Yes((fact, _)) = member_fact(
+            index,
+            scopes,
+            root,
+            path,
+            &class_type.to_string(),
+            spelling,
+            None,
+        ) {
+            return fact.returns;
+        }
+    }
+
     let class_view = class_file.as_deref().and_then(|at| (declaring)(at));
     let (class_scopes, class_root, class_path) = match &class_view {
         Some(view) => (&view.scopes, &view.root, view.path.as_path()),
@@ -3398,8 +3454,6 @@ fn operator_returns_of(
     // `operator *` and `operator*` are the same operator with a space in it. Comparing without whitespace makes the
     // two spellings one question, and the bare symbol is accepted as well because a reader that recorded only the
     // operator's own token answered `*`.
-    let wanted: String = operator.chars().filter(|character| !character.is_whitespace()).collect();
-    let symbol = wanted.strip_prefix("operator").unwrap_or(&wanted);
     list.members
         .iter()
         .find(|member| {
@@ -5968,7 +6022,38 @@ fn fact_from_binding(
     class: &str,
     binding: &crate::Binding,
 ) -> DeclFact {
+    fact_from_binding_with(
+        &crate::sema::declarations::DeclarationShapes::of(root),
+        root,
+        class,
+        binding,
+    )
+}
+
+/// **One binding as a fact, given the file's shape table** — the form a caller with a *list* of bindings uses.
+///
+/// Every field below is read out of the tree by a reader that wants a
+/// [`DeclarationShapes`](crate::sema::declarations::DeclarationShapes) table, and that table is a pass over the whole
+/// tree. Asking `fact_from_binding` per member therefore built the table once per member, which is quadratic in a
+/// class: measured on `std::vector` in libstdc++'s `<bits/stl_vector.h>` (151 members), a member list cost **927 ms**
+/// and the answers are a lookup each. Passing the table in makes the whole list cost one pass — the same defect, and
+/// the same fix, that [`DeclarationShapes`](crate::sema::declarations::DeclarationShapes) records for the index
+/// builder.
+fn fact_from_binding_with(
+    shapes: &crate::sema::declarations::DeclarationShapes,
+    root: &cpp_parser::CppSyntaxNode,
+    class: &str,
+    binding: &crate::Binding,
+) -> DeclFact {
+    let _ = root;
     DeclFact {
+        // **An empty name for a declaration that has no identifier**, and the reason is **hiding** rather than storage:
+        // `~Derived` and `~Base` are not one name, and a list that compared two spellings this path cannot produce
+        // would either hide one or invent a name. The index builder does store the spelling (`fact_for` →
+        // `Name::text`), and the two agree by design only for a declaration that has an identifier — the ignored test
+        // `the_index_still_lists_a_destructor_under_the_empty_name` is that gap. A caller that needs the spelling of an
+        // operator reads it from the **index**, which is what `operator_returns_of` does before it ever asks for a
+        // list.
         name: binding
             .name
             .identifier_text()
@@ -5992,11 +6077,11 @@ fn fact_from_binding(
         // was made with the scopes in hand. See [`DeclFact::in_namespace`].
         in_namespace: None,
         kind: crate::DeclKind::from_binding_kind(binding.kind),
-        type_of: crate::sema::declarations::declared_type_of(root, binding),
+        type_of: crate::sema::declarations::declared_type_of_with(shapes, binding),
         // Answered here as well, because **members** are exactly where a call happens: `fac.build().size` needs the
         // return type of a member function that the file being edited declares. See [`DeclFact::returns`].
-        returns: crate::sema::declarations::declared_returns_of(root, binding),
-        bases: crate::sema::declarations::declared_bases_of(root, binding),
+        returns: crate::sema::declarations::declared_returns_of_in(shapes, root, binding),
+        bases: crate::sema::declarations::declared_bases_of_with(shapes, binding),
         // A member list's facts carry no parameters: this path answers *which members* a class has, and substitution
         // is the caller's step — it is the caller that knows the arguments. See [DeclFact::parameters].
         parameters: Vec::new(),
@@ -6015,27 +6100,37 @@ fn fact_from_binding(
             | crate::BindingKind::ConversionFunction
             | crate::BindingKind::OperatorFunction
             | crate::BindingKind::LiteralOperator => {
-                crate::sema::declarations::parameter_list_at(root, binding.name_range.start_offset)
+                crate::sema::declarations::declared_parameters_with(shapes, binding)
             }
             _ => None,
         },
         // **Who may name it**, read the same way and for the same reason: a member list built from the buffer is
         // what a completion after `.` offers, and a `private:` member must not be in it. See [DeclFact::access].
-        access: crate::sema::declarations::declared_access_at(
-            root,
-            binding.name_range.start_offset,
-        ),
+        access: shapes.access_at(binding.name_range.start_offset),
         // …and whether an importer may, which is the same kind of question about the same position — see
         // [DeclFact::exported]. A buffer's file is very often the module interface unit being edited.
-        exported: crate::sema::declarations::declared_exported_at(
-            root,
-            binding.name_range.start_offset,
-        ),
+        exported: shapes.exported_at(binding.name_range.start_offset),
         range: binding.range,
         name_range: binding.name_range,
         clean: true,
         guard: FactGuard::Unconditional,
     }
+}
+
+/// **Is this base spelling one of the class's own template parameters?** — the filter [`members_of`] applies.
+///
+/// The head of the spelling is what is compared, because that is the name a class is looked up by: `_Tp` and `_Tp<T>`
+/// are the same parameter, while `_Vector_base<_Tp, _Alloc>` is a class whose arguments happen to be parameters. A
+/// destructor or a qualified spelling answers `false`, which is the direction that keeps a base.
+fn names_a_template_parameter(spelling: &str, parameters: &[String]) -> bool {
+    if parameters.is_empty() {
+        return false;
+    }
+    let head = without_arguments(spelling.trim());
+    let head = head.strip_prefix("::").unwrap_or(head);
+    parameters
+        .iter()
+        .any(|parameter| parameter == head || parameter == head.rsplit("::").next().unwrap_or(head))
 }
 
 /// The base classes `class` was written with, from this file or from the index.

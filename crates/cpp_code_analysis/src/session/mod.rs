@@ -2873,6 +2873,19 @@ impl<F: FileProvider + Clone> Session<F> {
         self.cooking.len()
     }
 
+    /// **How many files the second pass has still to re-read** — the backlog `advance` drains four at a time.
+    ///
+    /// A third kind of pending work, and the one no count used to name: [`Session::pending`] is the index queue and
+    /// [`Session::pending_cooking`] the cook queue, while the `parsed_since_the_last_pass` backlog is drained only by
+    /// a slice's tail and only while the index queue is empty. Measured on `EmmyLuaCodeStyle` right after
+    /// `index_everything` returned, on a cold summary cache: **1 205 files**, which took **302 slices and 27.3 s** to
+    /// clear — and every one of those slices reported `nothing bodied`, so the whole tail rebuilt no summary at all.
+    /// Until it was cleared, the next keystroke's slice paid for four of those files and four unit walks: measured
+    /// **65 ms a keystroke** instead of 10, for about three hundred keystrokes. See `docs/edit-latency.md`.
+    pub fn re_read_backlog(&self) -> usize {
+        self.parsed_since_the_last_pass.len()
+    }
+
     /// **Drop everything the cook queue is waiting for, and say how much it was.**
     ///
     /// For the pump`s breaker: a file the cook claims and cannot build leaves the queue`s count where it was, and

@@ -178,7 +178,7 @@ fn reaches_the_name(node: &CppSyntaxNode, name: cpp_parser::SourceRange) -> bool
     usize::from(span.start()) <= name.start_offset && usize::from(span.end()) >= name.start_offset
 }
 
-fn declared_type_of_with(shapes: &DeclarationShapes, binding: &Binding) -> Option<String> {
+pub(crate) fn declared_type_of_with(shapes: &DeclarationShapes, binding: &Binding) -> Option<String> {
     // **The kinds that name a type.** A field and a parameter are `Variable` too — they are what a member access is
     // asked *from* — and so is an **alias**, which is the kind this list was missing: `typedef _Ty& reference;`
     // records nothing under a rule that only allows `Variable`, so every member a class declares with its own
@@ -1507,7 +1507,30 @@ fn parameter_type(name: &CppSyntaxNode, declaration: &CppSyntaxNode) -> Option<S
 }
 
 /// [`declared_returns_of`] for a caller that has the file's shapes already.
-fn declared_returns_of_with(shapes: &DeclarationShapes, binding: &Binding) -> Option<String> {
+///
+/// The whole of that function except the shapes: the written return type first, and the deduced one — which needs the
+/// tree rather than the table — only for a function that writes none. The split is what makes a caller with many
+/// declarations to read pass its table once; see [`crate::index::project`]'s `fact_from_binding_with`.
+pub(crate) fn declared_returns_of_in(
+    shapes: &DeclarationShapes,
+    root: &CppSyntaxNode,
+    binding: &Binding,
+) -> Option<String> {
+    let written = declared_returns_of_with(shapes, binding);
+    if written.is_some() {
+        return written;
+    }
+    deduced_returns_of(root, binding)
+}
+
+pub(crate) fn declared_returns_of_with(shapes: &DeclarationShapes, binding: &Binding) -> Option<String> {
+    // **A `Function` and nothing else, and the operator case is why.** An operator does declare a return type, and
+    // recording it here was tried and measured: `std::vector<Token>::operator[]` says `reference`, and `reference` is
+    // a *typedef inside the class* — so the fact carried the unsubstituted name, `tokens[i]` typed as a class called
+    // `reference`, and `undefined-field` reported **60 false positives over four files** of a real project
+    // (`tokens[index]` has no member `TokenType`). A return type written with the class's own names means nothing
+    // before substitution, which this layer does for a *member list* and not for a fact; until those are one reader,
+    // an operator answers `None` here, which is the refusal that keeps the layer quiet.
     if binding.kind != BindingKind::Function {
         return None;
     }
@@ -1777,7 +1800,7 @@ pub fn parameter_list_at(root: &CppSyntaxNode, offset: usize) -> Option<String> 
 ///
 /// Measured together with [`enclosing_namespaces_of`]: the two were **1576 ms of a 4562 ms `Facts` stage** over 126
 /// files of MSVC's standard library.
-fn declared_parameters_with(shapes: &DeclarationShapes, binding: &Binding) -> Option<String> {
+pub(crate) fn declared_parameters_with(shapes: &DeclarationShapes, binding: &Binding) -> Option<String> {
     let mut found = None;
     shapes.on_the_path(binding.name_range.start_offset, |shape| {
         if let Some(declarator) = &shape.declarator {
@@ -1979,7 +2002,7 @@ pub fn declared_bases_of(root: &CppSyntaxNode, binding: &Binding) -> Vec<String>
 }
 
 /// [`declared_bases_of`] for a caller that has the file's shapes already.
-fn declared_bases_of_with(shapes: &DeclarationShapes, binding: &Binding) -> Vec<String> {
+pub(crate) fn declared_bases_of_with(shapes: &DeclarationShapes, binding: &Binding) -> Vec<String> {
     if binding.kind != BindingKind::Class {
         return Vec::new();
     }
