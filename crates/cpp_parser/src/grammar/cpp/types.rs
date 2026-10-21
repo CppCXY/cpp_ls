@@ -3111,6 +3111,22 @@ fn parse_base_clause(p: &mut CppParser) -> ParseResult {
             return Err(err);
         }
 
+        // **A template-id base is one base.** `parse_name` reads `Base` and stops at the `<`, so without this the
+        // rest of a base clause — `<T, U>` — was read as further bases: a class with one templated base reported
+        // three, and the two "bases" were the template's own arguments.
+        //
+        // Measured on `std::vector` in libstdc++ (`class vector : protected _Vector_base<_Tp, _Alloc>`): the base
+        // list came back as `_Vector_base`, `_Tp`, `_Alloc`, and `members_of` walked three bases — each one an
+        // `index.definition` and a `direct_members` — for a class that inherits from one. With the raw summaries a
+        // standard-library class has, that walk was **97% of a member query** (583 ms of 600 ms) and the members it
+        // was looking for were never there.
+        if p.current_token() == CppTokenKind::Less
+            && let Err(err) = parse_template_argument_list(p)
+        {
+            p.close_marks_above(base_marks);
+            return Err(err);
+        }
+
         // A pack expansion: `class D : Bases...`.
         if p.current_token() == CppTokenKind::Ellipsis {
             p.bump();

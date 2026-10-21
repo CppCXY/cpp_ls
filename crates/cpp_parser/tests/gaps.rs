@@ -7442,3 +7442,37 @@ fn a_nested_namespace_definition_may_spell_inline_on_an_inner_segment() {
         assert_eq!(written.join("::"), name, "{source}");
     }
 }
+
+/// **A templated base is one base** — `class vector : protected _Vector_base<_Tp, _Alloc>`.
+///
+/// The base-clause rule read a base with `parse_name`, which stops at the `<`; the clause loop then saw no `,`,
+/// ended, and the rest of the template-id was read as part of the class head. The parser recovers, so nothing
+/// failed — but the *facts* the index records for the class listed **three** bases: `_Vector_base`, `_Tp` and
+/// `_Alloc`. Measured on `std::vector` in libstdc++, that made every member query walk three bases where the class
+/// inherits from one, and each step is an `index.definition` plus a `direct_members` — 10 bases and 583 ms for a
+/// `members_of("std::vector")` whose answer was empty either way.
+#[test]
+fn a_templated_base_is_one_base_specifier() {
+    for (source, expected) in [
+        ("struct D : B<T, U> { };", 1usize),
+        ("struct D : A, B<T> { };", 2),
+        ("struct D : protected B<T, U>, public C { };", 2),
+        ("template<class T> struct D : B<T, T*> { };", 1),
+        // The spellings that were already right keep their answers.
+        ("struct D : B { };", 1),
+        ("struct D : virtual public B { };", 1),
+        ("struct D { };", 0),
+    ] {
+        let tree = cpp_parser::CppParser::parse(source, cpp_parser::ParserConfig::default());
+        assert!(tree.get_errors().is_empty(), "{source}: {:?}", tree.get_errors());
+
+        let bases = tree
+            .get_red_root()
+            .descendants()
+            .filter(|node| {
+                cpp_parser::CppSyntaxKind::from(node.kind()) == cpp_parser::CppSyntaxKind::BaseSpecifier
+            })
+            .count();
+        assert_eq!(bases, expected, "{source}");
+    }
+}
