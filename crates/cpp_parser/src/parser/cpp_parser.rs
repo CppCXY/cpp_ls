@@ -2515,3 +2515,198 @@ mod splice_tests {
         );
     }
 }
+/// **A parse of the front of a translation unit, kept so the next piece does not re-parse it.**
+///
+/// The arrangement this exists for: a file`s headers are the same text on every keystroke, and only the file itself
+/// changes. A parse of the whole unit costs 399 ms on a real project (1 991 163 bytes, 590 135 tokens), of which
+/// 99.6 % is that fixed prefix; a parse of the file alone costs 1.2 ms. Keeping the prefix`s tokens and events turns
+/// the per-edit cost into a splice — see `splice_tests` for the rules, and [`ParsedPrefix::splice`] for what they cost.
+pub struct ParsedPrefix {
+    text: String,
+    tokens: Vec<CppTokenData>,
+    events: Vec<MarkEvent>,
+    errors: Vec<CppParseError>,
+}
+
+impl ParsedPrefix {
+    /// Parse `text` and keep what a splice needs: its tokens, its events, and its errors.
+    pub fn of(text: &str) -> Self {
+        let mut errors: Vec<CppParseError> = Vec::new();
+        let mut parser = CppParser::with_text(text, ParserConfig::default(), &mut errors);
+        crate::grammar::cpp::parse_cpp_unit(&mut parser);
+        ParsedPrefix {
+            text: text.to_string(),
+            tokens: parser.tokens,
+            events: parser.events,
+            errors,
+        }
+    }
+
+    /// The text this piece was parsed from.
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    /// How many tokens the piece has — the number that says what a splice avoids re-lexing.
+    pub fn token_count(&self) -> usize {
+        self.tokens.len()
+    }
+
+    /// **Can this piece be spliced?** A piece that ends **inside a trailing comment** cannot.
+    ///
+    /// A comment is not emitted as a token: the doc layer re-lexes it into a `DocComment` node with events of its
+    /// own, and at the end of a piece that node closes at EOF. In the whole text the same comment is attached
+    /// elsewhere, so the spliced stream and the whole parse differ by a *node*, not by a position — measured over a
+    /// project`s own headers, that is 3 of 22 pieces (`}// namespace detail` as the last bytes, twice, and a
+    /// five-line generated header).
+    pub fn spliceable(&self) -> bool {
+        let last_real = self
+            .tokens
+            .iter()
+            .rposition(|token| !is_trivia_kind(token.kind));
+        let last_comment = self.tokens.iter().rposition(|token| is_comment_kind(token.kind));
+        match (last_real, last_comment) {
+            // A comment after the last real token is the shape that does not splice.
+            (Some(real), Some(comment)) => comment < real,
+            _ => true,
+        }
+    }
+
+    /// **Parse `suffix` and splice it onto this piece** — or `None` when the piece cannot be spliced.
+    ///
+    /// The four rules, each of which `splice_tests` measures: the prefix keeps its `TranslationUnit` open and gives up
+    /// its final `NodeEnd`; the suffix gives up its own root start and keeps its final `NodeEnd`; ranges are re-based
+    /// by the prefix`s byte length and parents by where the suffix`s first kept event lands; and **the suffix`s
+    /// leading trivia moves** to just before the prefix`s last inner `NodeEnd`, which is where a one-text parse
+    /// emits it.
+    pub fn splice(&self, suffix: &str) -> Option<CppSyntaxTree> {
+        if !self.spliceable() {
+            return None;
+        }
+
+        // The suffix's own parse: its events, tokens and errors.
+        let mut errors = self.errors.clone();
+        let mut parser = CppParser::with_text(suffix, ParserConfig::default(), &mut errors);
+        crate::grammar::cpp::parse_cpp_unit(&mut parser);
+        let mut second = parser.events;
+        let suffix_tokens = parser.tokens;
+        if second.is_empty() {
+            return None;
+        }
+        second.remove(0);
+
+        let mut first = self.events.clone();
+        if matches!(first.last(), Some(MarkEvent::NodeEnd)) {
+            first.pop();
+        }
+
+        let moved = second.iter().take_while(|event| is_trivia_event(event)).count();
+        let leading = rebase(second.drain(..moved).collect(), self.text.len(), 0);
+        let last_end = first
+            .iter()
+            .rposition(|event| matches!(event, MarkEvent::NodeEnd))
+            .unwrap_or(first.len());
+        first.splice(last_end..last_end, leading);
+        let offset = first.len();
+        first.extend(rebase(second, self.text.len(), offset - moved));
+
+        // The tokens tile the whole text the same way the events do: the prefix's own, then the suffix's moved past
+        // it. Both parses re-based nothing in their tokens — a splice is a concatenation of two streams that were
+        // each produced from their own text.
+        let mut tokens = self.tokens.clone();
+        tokens.extend(suffix_tokens.into_iter().map(|token| CppTokenData {
+            kind: token.kind,
+            range: SourceRange::new(token.range.start_offset + self.text.len(), token.range.length),
+        }));
+
+        let mut text = self.text.clone();
+        text.push_str(suffix);
+
+        let mut builder = crate::syntax::CppTreeBuilder::new(&text, first, None);
+        builder.build();
+        let root = builder.finish();
+        Some(CppSyntaxTree::new(root, errors, tokens))
+    }
+}
+
+fn is_trivia_event(event: &MarkEvent) -> bool {
+    match event {
+        MarkEvent::Trivia => true,
+        MarkEvent::EatToken { kind, .. } => is_trivia_kind(*kind),
+        _ => false,
+    }
+}
+
+/// Move every position in `events` past `base` bytes and `parent_base` events — see [`ParsedPrefix::splice`].
+fn rebase(events: Vec<MarkEvent>, base: usize, parent_base: usize) -> Vec<MarkEvent> {
+    events
+        .into_iter()
+        .map(|event| match event {
+            MarkEvent::EatToken { kind, range } => MarkEvent::EatToken {
+                kind,
+                range: SourceRange::new(range.start_offset + base, range.length),
+            },
+            MarkEvent::NodeStart { kind, parent } => MarkEvent::NodeStart {
+                kind,
+                parent: match parent {
+                    crate::parser::NO_FORWARD_PARENT => crate::parser::NO_FORWARD_PARENT,
+                    0 => 0,
+                    other => parent_base + other - 1,
+                },
+            },
+            other => other,
+        })
+        .collect()
+}
+#[cfg(test)]
+mod prefix_reuse {
+    use super::*;
+
+    fn read(relative: &str) -> String {
+        std::fs::read_to_string(format!(
+            "C:/Users/zc/Desktop/github/EmmyLuaCodeStyle/LuaParser/{relative}"
+        ))
+        .unwrap_or_default()
+    }
+
+    /// **The splice builds the tree a one-text parse builds** — compared by what a reader can see: the token stream,
+    /// the text the root covers, and the problems reported.
+    #[test]
+    fn a_parsed_prefix_builds_the_same_tree() {
+        let prefix = read("include/LuaParser/File/LuaSource.h");
+        let suffix = read("src/File/LuaSource.cpp");
+        if prefix.is_empty() || suffix.is_empty() {
+            println!("no project to measure");
+            return;
+        }
+
+        let whole = format!("{prefix}{suffix}");
+        let reference = CppParser::parse(&whole, ParserConfig::default());
+
+        let piece = ParsedPrefix::of(&prefix);
+        assert!(piece.spliceable(), "a header must be spliceable");
+        let made = piece.splice(&suffix).expect("the splice must build");
+
+        assert_eq!(
+            made.get_tokens().len(),
+            reference.get_tokens().len(),
+            "the spliced tree must hold every token"
+        );
+        assert_eq!(
+            made.get_red_root().text().to_string(),
+            reference.get_red_root().text().to_string(),
+            "and cover the same text"
+        );
+        assert_eq!(
+            made.get_errors().len(),
+            reference.get_errors().len(),
+            "and report the same number of problems"
+        );
+        println!(
+            "prefix {} token(s), whole {} byte(s), {} error(s)",
+            piece.token_count(),
+            whole.len(),
+            made.get_errors().len()
+        );
+    }
+}

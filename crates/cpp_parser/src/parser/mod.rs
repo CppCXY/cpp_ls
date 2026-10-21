@@ -3,7 +3,7 @@ mod marker;
 mod parser_config;
 mod type_names;
 
-pub use cpp_parser::{Checkpoint, CppParser, EventStreamAudit, ParseAnchor};
+pub use cpp_parser::{Checkpoint, CppParser, EventStreamAudit, ParseAnchor, ParsedPrefix};
 #[allow(unused)]
 pub use marker::*;
 #[allow(unused)]
