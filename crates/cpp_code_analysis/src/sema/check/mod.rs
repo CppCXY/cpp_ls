@@ -1181,25 +1181,34 @@ pub fn a_class_can_be_built_from(
     class: &str,
     value: &crate::sema::types::Type,
 ) -> Option<bool> {
-    let crate::Known::Yes(members) = context.model.members_of(class) else {
+    // **The class's own members, not its whole inheritance graph.** `members_of` answers the question a *reader*
+    // asks — what can be written after `.` — and walks the base chain to do it: measured on `test_module`'s
+    // `import std;` file, `members_of("std::vector")` is **ten bases and 583 ms of walking**, while the class's own
+    // list is 16 ms and comes back empty. This check wants one thing from the class — whether one of *its own*
+    // constructors could take this value, inherited ones explicitly excluded below — so that walk is work for an
+    // answer it discards.
+    //
+    // Measured on the same file, `assign-type-check` was **1 221 ms of a 1 497 ms diagnostic pass**, two calls of
+    // this function at ~600 ms each, and a diagnostic runs on every pull: that is the latency a reader feels.
+    let crate::Known::Yes(members) = context.model.own_members_of(class) else {
         return None;
     };
 
-    // **An empty member list is not "no constructors".** `members_of` answers from this file's scopes and the index,
-    // so a class it knows of but has no members recorded for — a forward declaration, a class whose defining file the
-    // index has not read — comes back **empty**, and reading that as "nothing can build it" is how this rule reported
-    // a class that has exactly the constructor its value needs: measured, `Widget(int size)` in a second project file
-    // produced `0 members []` and a finding. `unlisted` is the field that says whether a list is complete, and it is
-    // what makes "unknown" distinguishable from "nothing".
-    if members.members.is_empty() {
+    // **An empty member list is not "no constructors".** `own_members_of` answers from this file's scopes and the
+    // index, so a class it knows of but has no members recorded for — a forward declaration, a class whose defining
+    // file the index has not read, a class template whose members are filed under a scope this reading cannot see —
+    // comes back **empty**, and reading that as "nothing can build it" is how this rule reported a class that has
+    // exactly the constructor its value needs: measured, `Widget(int size)` in a second project file produced
+    // `0 members []` and a finding.
+    if members.is_empty() {
         return None;
     }
 
-    // **The members declared in the class itself**: an inherited constructor is not this class's, and `depth` is
-    // what says so — the same field a completion groups by.
+    // **The members declared in the class itself**: an inherited constructor is not this class's, which is the other
+    // half of why the base walk was not needed — nothing it adds can be a constructor of this class.
     let mut constructors = 0usize;
-    for member in members.own() {
-        let name = member.fact.name.as_str();
+    for (_, fact) in &members {
+        let name = fact.name.as_str();
         let is_a_constructor = name == class.rsplit("::").next().unwrap_or(class);
         // **A conversion operator is a way to build the class that has no parameter list to compare against** —
         // `operator Widget()` — so its presence means this question is not decided here.
@@ -1209,7 +1218,7 @@ pub fn a_class_can_be_built_from(
         if !is_a_constructor {
             continue;
         }
-        let Some(parameters) = member.fact.parameter_list.as_deref() else {
+        let Some(parameters) = fact.parameter_list.as_deref() else {
             continue;
         };
         constructors += 1;

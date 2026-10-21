@@ -160,6 +160,7 @@ impl<'a> SemanticModel<'a> {
     /// gives (`docs/status.md` §十五 ④: it was not, because this call passed the rendering to a function reading the
     /// file's own text at the fact's offsets).
     pub fn members_of(&self, class: &str) -> Known<MemberList> {
+
         // **Memoised, because the same class is asked dozens of times per file.** Measured on one header of a real project:
         // `std::vector<heap_entry>` was asked **64 times** and each answer cost about **589 ms** — 37 seconds of a file that
         // took 45, and the reason five different rules all looked slow. The memo is the same shape as the `types` one beside
@@ -176,6 +177,16 @@ impl<'a> SemanticModel<'a> {
         let listed = project::members_of(self.index, self.scopes, self.root, self.path, class);
         // **The class's arguments, written through its members** — see [`project::substituted_members`].
         project::substituted_members(self.index, &self.path, class, listed)
+    }
+
+    /// **The members written in the class itself** — no base walk, no substitution.
+    ///
+    /// [`SemanticModel::members_of`] is the reader's question (what can be written after `.`), and it walks the base
+    /// chain: measured on `test_module`'s `import std;` file, `members_of("std::vector")` is **ten bases and 583 ms**
+    /// of walking for a class whose own list is empty. A check that only needs the class's own constructors —
+    /// `assign-type-check` — was paying that on every pull. See [`project::own_members_of`].
+    pub fn own_members_of(&self, class: &str) -> Known<Vec<(std::path::PathBuf, crate::DeclFact)>> {
+        project::own_members_of(self.index, self.scopes, self.root, self.path, class)
     }
 
     /// **Does `name` name a template parameter *where it is used*** — the `C` of `template <class C>`?

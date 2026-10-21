@@ -960,9 +960,30 @@ pub(crate) fn classes_the_cursor_is_in(
 ///   [`DeclFact::bases`] — and filtering on a guess would hide members a consumer can legitimately see.
 /// * No instantiation. A template class lists the members it was written with; a base written `Base<int>` is
 ///   looked up as the class `Base`.
+/// **The members written in the class itself** — [`members_of`]'s first step, and nothing else.
+///
+/// [`members_of`] answers the question a *reader* asks ("what can I write after `.`"), and it walks the base chain
+/// to do it. Measured on `test_module`'s `import std;` file: `members_of("std::vector")` is **ten bases and 583 ms
+/// of walking**, while the class's own list costs 16 ms and comes back empty — so the walk was 97% of the answer
+/// for a class it could not name a single member of.
+///
+/// A *check* that only needs the class's own constructors asked that question and paid for the walk on **every
+/// pull** (`assign-type-check`: 1 221 ms of a 1 497 ms diagnostic pass, two classes). This is the same first step,
+/// exposed: one `direct_members`, measured at 4–16 ms.
+pub fn own_members_of(
+    index: &ProjectIndex,
+    scopes: &crate::ScopeTree,
+    root: &cpp_parser::CppSyntaxNode,
+    path: &Path,
+    class: &str,
+) -> Known<Vec<(PathBuf, DeclFact)>> {
+    direct_members(index, scopes, root, path, class)
+}
+
 /// * No conditional region. A member of a class in the buffer comes back with [`FactGuard::Unconditional`]
 ///   whatever `#if` it is really in — see `fact_from_binding`. A class from the index does carry its regions.
 pub fn members_of(
+
     index: &ProjectIndex,
     scopes: &crate::ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
