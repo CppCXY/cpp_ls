@@ -1137,7 +1137,20 @@ impl ScopeWalker<'_> {
         //
         // The AST layer cannot tell these apart from a call statement — `get_name_text` answers `None` for both —
         // which is why the question is asked here and in this shape.
-        if declaration_is_qualified(node) {
+        let specifier_is_qualified = first_child(node, CppSyntaxKind::DeclSpecifierSeq)
+            .map(|specifiers| mentions_a_qualified_name(&specifiers, true))
+            .unwrap_or(false);
+        // **A constructor is the same shape and this guard did not see it.** `LuaSource::LuaSource(std::string
+        // &&fileText) : _source(fileText), … { … }` spells its name in the specifiers like every out-of-line
+        // definition, and `is_unnamed_declaration` is **true** for it — its declarator holds the parameter list, not
+        // a name. `declaration_is_qualified` requires both halves and its second half (`named_in_a_declarator`)
+        // answered `true` here, so the declaration went down the unnamed branch and the constructor`s parameters
+        // were bound by nothing: `fileText` had no hover and no completion inside the body.
+        //
+        // The second condition is the precise form of the same question: a qualified specifier on a declaration with
+        // **no declarator name at all**. `Widget w;` (a qualified type, a plain declarator) is not unnamed and is
+        // unaffected.
+        if declaration_is_qualified(node) || (specifier_is_qualified && is_unnamed_declaration(node)) {
             if !self.names_a_scope_this_file_has(node) {
                 // **The name is not this file's — the body is.** `size_t LuaSource::GetLine(size_t offset) const
                 // { … }` declares nothing at file scope: the class is in a header this file only includes. That
