@@ -434,15 +434,17 @@ async fn index_in_background(context: ServerContextSnapshot) {
                 .analysis()
                 .run_blocking(move |session| {
                     let materials = session.materials_for(claimed);
-                    // Which of the asked files could actually be built — the difference is what would otherwise be
-                    // resumed on every drain, which is the loop this round is about.
-                    let built: Vec<std::path::PathBuf> =
-                        materials.iter().map(|material| material.path.clone()).collect();
-                    Some((
-                        session.prepare_the_drain(drain),
-                        session.render_them(materials),
-                        built,
-                    ))
+                    let rendered = session.render_them(materials);
+                    // **What actually came back, not what was asked for.** `materials_for` answering with a file is
+                    // only half the question — the render is the other half, and it declines on its own grounds
+                    // (`Session::render_them`). Measured from a reader's log: `4 to cook` every second with
+                    // `committed 0`, because the four files gathered materials and then rendered nothing, so nothing
+                    // was ever refused and the closure walk wanted them again on the next drain.
+                    let built: Vec<std::path::PathBuf> = rendered
+                        .iter()
+                        .map(|(indexed, _)| indexed.summary.path.clone())
+                        .collect();
+                    Some((session.prepare_the_drain(drain), rendered, built))
                 })
                 .await
                 .unwrap_or_default();
