@@ -370,6 +370,23 @@ enum Which {
 /// The provider chain is owned rather than borrowed, which is what lets a long-lived caller — a language server —
 /// hold a session in a field. See the module documentation: the caller keeps a handle to the same chain by cloning
 /// it before the session takes it, and a clone of a provider is a second handle on the same files.
+/// What a session is holding — see [`Session::cache_sizes`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CacheSizes {
+    /// Cached renderings, by `(path, content hash)`. **Unbounded** — see [`Session::cache_sizes`].
+    pub renderings: usize,
+    /// The text of those renderings, in bytes.
+    pub rendering_bytes: usize,
+    /// Translation units held (bounded by `MAX_UNITS`).
+    pub units: usize,
+    /// Summaries in the index.
+    pub summaries: usize,
+    /// Declaration facts across them.
+    pub facts: usize,
+    /// Macro facts across them.
+    pub macros: usize,
+}
+
 pub struct Session<F: FileProvider = DiskFiles> {
     root: PathBuf,
     config: CompilerConfig,
@@ -1063,6 +1080,52 @@ impl<F: FileProvider + Clone> Session<F> {
     /// Every summary loaded so far — what the session currently knows, as opposed to what it will.
     pub fn index(&self) -> &ProjectIndex {
         self.store.index()
+    }
+
+    /// **What the session is holding** — the instrument for a report that says the server grew to gigabytes.
+    ///
+    /// Each field is a thing a cache *adds* to the process, and the numbers are the ones a report has to name before
+    /// anything can be called a leak. Measured shape of the question this answers: a reader edited
+    /// `EmmyLuaCodeStyle`'s `LuaSource.cpp` for a few minutes and the server sat at **3.3 GB** and 26% of a core.
+    ///
+    /// `rendering_bytes` is the text of every cached rendering, which is the cache with **no cap** — its key is
+    /// `(path, content hash)`, so a keystroke adds an entry and nothing ever removes one. `summaries` and `facts`
+    /// are the index, which is bounded by the project and is the part that is supposed to be large.
+    pub fn cache_sizes(&self) -> CacheSizes {
+        let (renderings, rendering_bytes) = self
+            .renderings
+            .lock()
+            .map(|known| {
+                let bytes = known
+                    .values()
+                    .map(|rendering| rendering.text.len())
+                    .sum::<usize>();
+                (known.len(), bytes)
+            })
+            .unwrap_or((0, 0));
+
+        let summaries = self.store.index().summaries().count();
+        let facts = self
+            .store
+            .index()
+            .summaries()
+            .map(|summary| summary.declarations.len())
+            .sum();
+        let macros = self
+            .store
+            .index()
+            .summaries()
+            .map(|summary| summary.macros.len())
+            .sum();
+
+        CacheSizes {
+            renderings,
+            rendering_bytes,
+            units: self.held_units().held.len(),
+            summaries,
+            facts,
+            macros,
+        }
     }
 
     /// **What a name is at one position in one file** — see [`crate::MacroAt`] for why this exists and what the
