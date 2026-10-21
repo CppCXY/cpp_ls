@@ -1139,6 +1139,21 @@ impl ScopeWalker<'_> {
         // which is why the question is asked here and in this shape.
         if declaration_is_qualified(node) {
             if !self.names_a_scope_this_file_has(node) {
+                // **The name is not this file's — the body is.** `size_t LuaSource::GetLine(size_t offset) const
+                // { … }` declares nothing at file scope: the class is in a header this file only includes. That
+                // rule stays (see `a_qualified_declaration_binds_nothing_here`), and this used to `return` on it,
+                // which dropped the **whole** declaration — including the function's own parameters and locals,
+                // which have nothing to do with the class.
+                //
+                // Measured on EmmyLuaCodeStyle's `LuaParser/src/File/LuaSource.cpp` (a file of nothing but
+                // out-of-line definitions): the scope tree was one `TranslationUnit` with **zero bindings**, and a
+                // completion inside `GetLine` offered `_lineOffsetVec` — a member, which the index answers — and
+                // neither `offset` nor `maxLine`. Every `.cpp` of that project is written this way, so the whole
+                // file was unsearchable from the inside.
+                //
+                // What is read is only what the function owns: its parameter names, and the names its body
+                // declares, in an unnamed scope that belongs to no class.
+                self.read_the_inside_of_a_foreign_definition(node, outer);
                 return;
             }
         } else if is_unnamed_declaration(node) {
@@ -1455,6 +1470,33 @@ impl ScopeWalker<'_> {
     ///
     /// Returns the function scope it opened, when it opened one, so that the caller can walk a body the grammar
     /// placed beside the declarator rather than inside it.
+    /// **The parameters and the body of a definition whose qualifier names nothing here** — see the call site.
+    ///
+    /// Opens the one scope the function owns and binds nothing into the file: the function's *name* belongs to the
+    /// class in another file, and a body is not a place a name can be found from.
+    fn read_the_inside_of_a_foreign_definition(&mut self, node: &CppSyntaxNode, outer: ScopeId) {
+        let Some(body) = function_body(node) else {
+            return;
+        };
+        let Some(declarator) = declarators(node).into_iter().next() else {
+            return;
+        };
+
+        let range = span_of(
+            cpp_parser::source_range(declarator.text_range()),
+            cpp_parser::source_range(body.text_range()),
+        );
+        let function = self
+            .table
+            .create_scope(ScopeKind::Function, Some(outer), Some(range));
+
+        for parameter_list in parameter_lists(&declarator) {
+            self.parameters(&parameter_list, function);
+        }
+
+        self.items(&body, function);
+    }
+
     fn declarator_as(
         &mut self,
         declarator: &CppSyntaxNode,
