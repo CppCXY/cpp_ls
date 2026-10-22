@@ -589,6 +589,10 @@ pub struct Session<F: FileProvider = DiskFiles> {
     /// and a preprocess, a query cannot pay it, and the file it is asked about does not change between two
     /// keystrokes. Keyed by the **content hash** rather than the path, because a buffer being typed in has a new
     /// text on every keystroke and a rendering of the old text would be a wrong answer rather than a stale one.
+    /// **The fuzzy index of the whole project** — see [`crate::browse`]. `None` until something asks for it, and
+    /// rebuilt per file by whoever is looking: a scan of one file is ~0.3 ms, so there is no reason to keep it in
+    /// step with the queue the way summaries must be.
+    browse: std::sync::Mutex<Option<std::sync::Arc<crate::browse::BrowseIndex>>>,
     renderings: std::sync::Mutex<
         std::collections::HashMap<
             (PathBuf, u64),
@@ -1023,6 +1027,10 @@ impl<F: FileProvider + Clone> Session<F> {
             headers,
             macro_environments: std::sync::Mutex::new(std::collections::HashMap::new()),
             macro_work: std::sync::Mutex::new(Cooking::default()),
+            // **The browse index starts empty and is filled by whoever asks** — see `Session::browse_everything`.
+            // Building it is 2 s over a real project's 1 761 files, against the exact index's 131 s, which is the
+            // whole reason it exists (`docs/clangd-model.md` §十二).
+            browse: std::sync::Mutex::new(None),
             renderings: std::sync::Mutex::new(std::collections::HashMap::new()),
             cooking_refused: std::sync::Mutex::new(std::collections::HashSet::new()),
             unit_from_memory: std::sync::atomic::AtomicUsize::new(0),
@@ -4284,6 +4292,84 @@ fn error_directive_line(text: &str) -> Option<(usize, usize, String)> {
     /// `None` when the file has no summary or the walk cannot be built — nothing has read it yet, which is a state
     /// and not an error. A caller with a path the index spells differently should hand over the index's own spelling;
     /// [`Session::read_the_unit`] is the one that has to do that, because it puts the result in the index.
+    /// **Scan every file the exact index knows into the fuzzy one** — see [`crate::browse`].
+    ///
+    /// This is the clangd/VS split, measured: 1 761 files of a real project (79.5 MB, 13.2 M tokens) in **2.07 s**,
+    /// where building the exact index for the same files is 131 s. What it answers is names, kinds, the scopes they
+    /// were *written* in, and where — enough for an outline, a workspace symbol search, and a member list, and not
+    /// enough (by design) for a type-checked answer. The file a reader has open keeps its exact reading
+    /// ([`Session::view`]).
+    ///
+    /// Replacing a file is one scan of that file (~0.3 ms), so a caller never has to rebuild the whole thing.
+    pub fn browse_everything(&mut self) -> usize {
+        // **Everything the queue has heard of, plus whatever the exact index has already read.** The queue holds the
+        // project's files from the moment they are registered and headers as discovery finds them, so this works
+        // before a single file has been parsed — which is the point: the fuzzy index must not wait for the exact one.
+        let mut paths: Vec<PathBuf> = self.queue.known();
+        for summary in self.store.index().summaries() {
+            paths.push(summary.path.clone());
+        }
+        paths.sort();
+        paths.dedup();
+
+        let mut index = crate::browse::BrowseIndex::new();
+        let hints = crate::browse::Hints::standard();
+        for path in &paths {
+            let Some(text) = self.files.read(path) else {
+                continue;
+            };
+            index.insert(crate::browse::browse(path, &text, &hints));
+        }
+        let files = index.files();
+        *self.browse.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(std::sync::Arc::new(index));
+        files
+    }
+
+    /// **One file`s browse scan**, from the index if it is there and by scanning it now if it is not (~0.3 ms).
+    pub fn browse_of(&self, path: &Path) -> Option<std::sync::Arc<crate::browse::BrowseFile>> {
+        let mut held = self.browse.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(file) = held.as_ref().and_then(|index| index.file(path)) {
+            return Some(std::sync::Arc::clone(file));
+        }
+        let text = self.files.read(path)?;
+        let scanned = std::sync::Arc::new(crate::browse::browse(
+            path,
+            &text,
+            &crate::browse::Hints::standard(),
+        ));
+        let index = held.get_or_insert_with(|| std::sync::Arc::new(crate::browse::BrowseIndex::new()));
+        if let Some(index) = std::sync::Arc::get_mut(index) {
+            index.insert(crate::browse::BrowseFile {
+                path: scanned.path.clone(),
+                entries: scanned.entries.clone(),
+                tokens: scanned.tokens,
+                skipped: scanned.skipped,
+            });
+        }
+        Some(scanned)
+    }
+
+    /// **The whole project's names, by prefix** — what a workspace symbol search answers with.
+    pub fn browse_named(&self, name: &str) -> Vec<(PathBuf, crate::browse::BrowseEntry)> {
+        self.browse
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .map(|index| index.named(name))
+            .unwrap_or_default()
+    }
+
+    /// **The names under a scope** — `members_of("std")` is a `std::` completion's list.
+    pub fn browse_members_of(&self, scope: &str) -> Vec<(PathBuf, crate::browse::BrowseEntry)> {
+        self.browse
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .map(|index| index.members_of(scope))
+            .unwrap_or_default()
+    }
+
+    /// **Scan every file the exact index knows into the fuzzy one** — see [`crate::browse`].
     pub fn render_the_unit(&mut self, root: &Path) -> Option<crate::RenderedUnit> {
         let unit = self.translation_unit_of(root)?;
 
@@ -6899,6 +6985,16 @@ impl Work {
     }
 
     /// Has this path already been worked?
+    /// **Every path the queue has heard of**, in any state — what a caller that wants to look at the whole project
+    /// without indexing it needs. The spellings are the queue
+//'s own (normalized), which is what a file provider
+    /// reads by.
+    fn known(&self) -> Vec<PathBuf> {
+        let mut paths: Vec<PathBuf> = self.standing.keys().map(PathBuf::from).collect();
+        paths.sort();
+        paths
+    }
+
     fn is_worked(&self, path: &Path) -> bool {
         matches!(self.standing.get(&queue_key(path)), Some(Standing::Worked))
     }
