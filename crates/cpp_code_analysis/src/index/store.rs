@@ -65,7 +65,7 @@ use crate::cache::{SummaryKey, content_hash, fnv1a64};
 use crate::file::paths::{DiskFiles, FileProvider, normalize_path};
 use crate::include::config::CompilerConfig;
 use crate::index::project::ProjectIndex;
-use crate::index::{FileIndexer, read_summary, write_summary};
+use crate::index::FileIndexer;
 use crate::summary::{FileSummary, IncludeFact};
 
 /// A project's summaries on disk and in memory, and the rule for when each is rebuilt.
@@ -662,11 +662,12 @@ impl<F: FileProvider> SummaryStore<F> {
 
         {
             let reading = std::time::Instant::now();
-            let stored = match self.summary_database().and_then(|database| database.summary(key)) {
-                Some(stored) => Ok(stored),
-                None => read_summary(&key.path_under(&self.cache)),
-            };
-            let decoded = reading.elapsed();
+            // (the decode is the database's, so the two timers it fed are zero — see `note_a_prepared_file`)
+            // **The database, and only the database.**
+            let stored = self
+                .summary_database()
+                .and_then(|database| database.summary(key))
+                .map_or(Err(()), Ok);
             if let Ok(stored) = stored
                 && stored.key == key
             {
@@ -678,7 +679,7 @@ impl<F: FileProvider> SummaryStore<F> {
                 if tracing {
                     note_a_prepared_file(
                         read,
-                        decoded,
+                        reading.elapsed(),
                         verifying.elapsed(),
                         std::time::Duration::ZERO,
                     );
@@ -697,7 +698,7 @@ impl<F: FileProvider> SummaryStore<F> {
             } else if tracing {
                 note_a_prepared_file(
                     read,
-                    decoded,
+                        reading.elapsed(),
                     std::time::Duration::ZERO,
                     std::time::Duration::ZERO,
                 );
@@ -742,15 +743,16 @@ impl<F: FileProvider> SummaryStore<F> {
         // nothing in the key would notice the header appearing. See the module documentation.
         let stored = !has_unresolved_includes(&summary);
         if stored {
-            // A failed write is not a failed lookup: the answer is in hand and in the index. Reporting it would
-            // turn a read-only checkout — a perfectly ordinary way to work — into a broken editor.
+            // **The database, and only the database** — the per-directory `summaries/*.bin` files are gone with
+            // `cache.redb` taking their place (see `docs/refactor-cache-and-startup.md` M1/M5).
+            //
+            // A failed write is not a failed lookup: the answer is in hand and in the index. Reporting it would turn
+            // a read-only checkout — a perfectly ordinary way to work — into a broken editor.
             if let Some(database) = self.summary_database() {
                 database.put(key, &summary);
                 // **And what the summary belongs to.** A summary no `files` row references is what a collection
                 // deletes, so the pair is written together (`SummaryCache` batches both into one transaction).
                 database.note_file(path, key.content_hash, key.context_hash, 0, self.generation);
-            } else {
-                let _ = write_summary(&summary, &self.cache);
             }
         }
 
@@ -1520,7 +1522,10 @@ impl<F: FileProvider> SummaryStore<F> {
 
             let stored = !truncated && !has_unresolved_includes(&made);
             if stored {
-                let _ = write_summary(&made, &self.cache);
+                if let Some(database) = self.summary_database() {
+                    database.put(made.key, &made);
+                    database.note_file(&made.path, made.key.content_hash, made.key.context_hash, made.key.env_hash, self.generation);
+                }
             }
             rebuilt.push((made, stored));
         }
@@ -1551,7 +1556,10 @@ impl<F: FileProvider> SummaryStore<F> {
 
             let stored = !truncated && !has_unresolved_includes(&rebuilt);
             if stored {
-                let _ = write_summary(&rebuilt, &self.cache);
+                if let Some(database) = self.summary_database() {
+                    database.put(rebuilt.key, &rebuilt);
+                    database.note_file(&rebuilt.path, rebuilt.key.content_hash, rebuilt.key.context_hash, rebuilt.key.env_hash, self.generation);
+                }
             }
             Some((rebuilt, stored))
         });

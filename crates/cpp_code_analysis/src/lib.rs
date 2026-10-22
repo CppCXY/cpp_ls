@@ -82,8 +82,8 @@ pub mod summary_codec;
 // * `project`  — what the project says about itself: `.cppls.toml`, the build system, the toolchain
 // * `sema`     — names, scopes, the index's declaration facts, and C++20 modules
 pub use cache::{
-    CACHE_BUDGET_BYTES, CACHE_DIRECTORY, FORMAT_VERSION, PruneReport, READING_FINGERPRINT,
-    SummaryKey, content_hash, fnv1a64, prune,
+    CACHE_DIRECTORY, FORMAT_VERSION, READING_FINGERPRINT,
+    SummaryKey, content_hash, fnv1a64,
 };
 // The alignment layer, flattened like the rest: a consumer that wants to check a reading against a compiler needs
 // `Report::of` and `tokenize_preprocessed`, and reaching them through the module hop says nothing a reader benefits
@@ -110,9 +110,9 @@ pub use preprocess::{condition, cooked, directive, expand, guards, macros};
 pub use sema::check::{CheckConfig, CheckContext, DiagnosticCode, Finding};
 pub use sema::declarations::{build_facts, by_name, declared_type_of, scope_of};
 pub use sema::{check, module_info, modules, parser_symbols, scopes, symbol};
-mod tu_cache;
+// `tu_cache` is gone: a built `TranslationUnit` is not persisted any more — see `Session::translation_unit_of`.
 
-pub use tu_cache::{RootKey, TRANSLATION_UNITS_DIRECTORY, TranslationUnitCache};
+
 
 pub use summary::ConditionalBody;
 pub use summary::{
@@ -174,7 +174,7 @@ pub use index::{
     StoreStats, SummaryReadError, SummaryStore, SymbolReferences, SymbolToFind, UnlistedBase,
     UnresolvedEdge, VisibleDeclaration, WatchFilter, Worklist, definition_across_files, header_at,
     macro_across_files, macro_references, member_across_files, member_completions_at, members_of,
-    name_completions_at, outcome_of, read_summary, summarize, symbol_references, write_summary,
+    name_completions_at, outcome_of, summarize, symbol_references,
 };
 pub use macros::{MacroBody, MacroDef, MacroTable, Parameter, ParameterKind};
 pub use module_info::{ImportDeclaration, ImportTarget, ModuleInfo, ModuleUnit};

@@ -1449,6 +1449,7 @@ fn include_fact<F: FileProvider>(
 ///
 /// `cache_directory` is the directory the summaries live in (`<root>/.cppls` unless a project renamed it); the key
 /// names the file inside it, and nothing else about the project's layout is involved.
+#[allow(dead_code)]
 pub fn write_summary(summary: &FileSummary, cache_directory: &Path) -> std::io::Result<PathBuf> {
     let path = summary.key.path_under(cache_directory);
     let bytes = crate::summary_codec::encode(summary);
@@ -1476,6 +1477,7 @@ pub fn write_summary(summary: &FileSummary, cache_directory: &Path) -> std::io::
 /// Every failure is the caller's cue to rebuild: a missing file, a corrupt one, and one written by a different
 /// format version are the same decision, and the distinctions are kept because only the last two are worth
 /// logging.
+#[allow(dead_code)]
 pub fn read_summary(path: &Path) -> Result<FileSummary, SummaryReadError> {
     let bytes = std::fs::read(path).map_err(SummaryReadError::Io)?;
     crate::summary_codec::decode(&bytes).map_err(SummaryReadError::Decode)

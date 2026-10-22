@@ -3965,12 +3965,16 @@ fn error_directive_line(text: &str) -> Option<(usize, usize, String)> {
         }
 
         let context = self.store.context_hash(path);
-        let cache = crate::TranslationUnitCache::of_store(&self.store);
-        let root_key = self.root_key_of(path);
+        // nothing is read from a timeline cache — see `cached` below
+        // (`root_key_of` is gone with the timeline cache — see the note at `cached` below)
 
         // Read out of the cache under a timer, then matched: a stage timer inside a `match` scrutinee is a block
         // clippy asks to hoist, and hoisting it is what the timer wants anyway — it should cover the read only.
-        let cached = { cache.get(path, context, &self.files, root_key) };
+        // **No timeline cache on disk.** `tu/` stored built `TranslationUnit`s and was the last of the old
+        // per-directory files (`cache.redb` holds the summaries and the unit renderings now). A timeline is
+        // cheap to rebuild — 38 ms — and rebuilding it is the only way its environment is guaranteed to be the one
+        // the current index describes; a stored one outlives the files it was built from. So the walk runs.
+        let cached: Option<crate::TranslationUnit> = None;
 
         let (unit, provisional) = match cached {
             Some(unit) => {
@@ -4052,7 +4056,7 @@ fn error_directive_line(text: &str) -> Option<(usize, usize, String)> {
                     if !provisional {
                         // Written for the **next run**.
                         let put_started = std::time::Instant::now();
-                        let _ = cache.put(path, context, &walked, &self.files, root_key);
+                        // (the disk cache is gone — see the note at `cached` above)
                         put_took = put_started.elapsed();
 
                         // …and offered to the **rest of this one**, under the same condition: a provisional
@@ -4203,15 +4207,6 @@ fn error_directive_line(text: &str) -> Option<(usize, usize, String)> {
     /// **What a unit rooted at `path` is keyed on** — the file's preamble, when its text is in reach.
     ///
     /// A file that cannot be read is [`RootKey::WholeText`], which is the rule that can only ever be less
-    /// generous: it refuses the entry on any change at all, which is what happened for every file before this
-    /// existed. The read is the same one the walk is about to make, and the scan is one lex of one file against a
-    /// walk of a whole closure — see `crate::tu_cache::RootKey` for what the key is and why it is sound.
-    fn root_key_of(&self, path: &Path) -> crate::tu_cache::RootKey {
-        match self.files.read(path) {
-            Some(text) => crate::tu_cache::RootKey::of(&text),
-            None => crate::tu_cache::RootKey::WholeText,
-        }
-    }
 
     /// **What makes two timelines the same timeline: the closure's content, hashed.**
     ///

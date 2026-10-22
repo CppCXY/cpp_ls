@@ -909,43 +909,10 @@
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    #[test]
-    fn a_summary_stored_by_another_build_is_not_trusted() {
-        // The entry's own key is checked against the one just computed, so a file that happens to be sitting at the
-        // right name — a hash collision, or a directory copied from a build with a different idea of the key — is a
-        // miss rather than an answer. Written by hand rather than produced, because the point is a *disagreement*
-        // between the name and the contents.
-        let files = MemoryFiles::new().with_file("/p/a.cpp", "int x;\n");
-        let (mut store, root) = store("mismatched-entry", &files);
-
-        let key = crate::SummaryKey::new(
-            crate::cache::content_hash("int x;\n"),
-            store.context_hash(Path::new("/p/a.cpp")),
-        );
-        let elsewhere = crate::SummaryKey::new(crate::cache::content_hash("int x;\n"), 999);
-        let impostor = crate::index::summarize(Path::new("/p/a.cpp"), "int x;\n", elsewhere);
-        super::write_summary(&impostor, &root).expect("the write must succeed");
-
-        store.get(Path::new("/p/a.cpp")).expect("the file reads");
-        assert_eq!(
-            store.stats().reused,
-            0,
-            "an entry whose key disagrees with its name is not an answer"
-        );
-        assert_eq!(store.stats().rebuilt, 1);
-        assert_eq!(
-            store
-                .index()
-                .summary(Path::new("/p/a.cpp"))
-                .map(|held| held.key),
-            Some(key),
-            "and the entry is replaced by one that does agree"
-        );
-
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    // -------------------------------------------------------------------------------------------
+    // **`a_summary_stored_by_another_build_is_not_trusted` is gone, and its property is structural now.** It
+    // wrote a summary to the path one key derives and read it back under another, which the directory let happen and
+    // the database does not: the key *is* the row key, so an entry filed under another key cannot be answered for
+    // this one. `a_summary_is_built_once_and_then_read_from_disk` covers the reuse the test was next to.
     // Indexing a file's includes
     //
     // The fixtures are shaped like a real project: a `.cpp` that includes a header, which includes another, with
