@@ -6643,13 +6643,19 @@ impl UnitTable {
         self.clock += 1;
 
         if !self.held.contains_key(&key) && self.held.len() >= MAX_UNITS {
-            let oldest = self
+            // **The smallest closure goes first, and only then the oldest.** A unit is a timeline over its whole
+            // closure, so a project root's unit answers `environment_of` for hundreds of headers while a header's
+            // own answers for a handful — and the second pass asks "is this file covered" for every file it
+            // re-reads. LRU kept whichever was walked last and threw the big ones away: measured on a cold start,
+            // the tail walked **365 units for 63 slices** (~6 per slice of 16 files), because every sibling needed
+            // its own timeline while the root that covered all of them had been evicted.
+            let smallest = self
                 .held
                 .iter()
-                .min_by_key(|(_, held)| held.used)
+                .min_by_key(|(_, held)| (held.unit.frames.len(), held.used))
                 .map(|(key, _)| key.clone());
-            if let Some(oldest) = oldest {
-                self.held.remove(&oldest);
+            if let Some(smallest) = smallest {
+                self.held.remove(&smallest);
             }
         }
 

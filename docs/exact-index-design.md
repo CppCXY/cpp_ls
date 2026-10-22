@@ -96,23 +96,24 @@ format summarize                 86 ms             58 ms
 剩下的同类问题（未修，收益小）：`parameter_type` 对每个 `return` 做一次声明子树的 `descendants()`，
 所以一个 `auto` 函数是 O(返回数 × 函数体)；现在被声明边界挡住了，在 `<ranges>` 上不足 10 ms。
 
-### 2.2 冷启动剩下的 70% 在第二遍，而第二遍来自一个循环依赖（2026-10-23 实测，未做）
+### 2.2 冷启动剩下的 70% 在第二遍，而第二遍来自一个循环依赖（2026-10-23 实测）
 
-修完 2.1 之后，本机（Windows、16 核、`.cppls` 删除、`build-cppls/compile_commands.json` 存在）的完整账：
+修完 2.1 之后，本机（Windows、16 核、`.cppls` 删除、`build-cppls/compile_commands.json` 存在）的完整账。
+下面两列是 2.3 的两个修复之前与之后：
 
 ```text
-冷启动（`examples/edit_loop`，1 273 个被索引文件）
-  第一遍 index_everything      4.21 s   1 470 次解析（2.9 ms/文件）
-  返回时第二遍欠账             1 001 个文件
-  尾巴                        10.47 s   63 个 slice
-    ├── 单元走查              ≈4.5 s    365 次 walk（read 0.95 + walk 3.83）
-    └── 第二遍本身            ≈5.8 s    81 次调用，一次 16 个文件
-  合计                        ≈14.7 s
-热启动（同一二进制第二次，1 255 个摘要从库命中）   1.92 s，欠账 0，82 次走查
+冷启动（`examples/edit_loop`，1 273 个被索引文件）        改前        改后
+  第一遍 index_everything      1 470 次解析              4.21 s      3.64 s
+  返回时第二遍欠账                                       1 001 个文件
+  尾巴                        63 个 slice                10.47 s     6.86 s
+    ├── 单元走查                                         ≈4.5 s      ≈3.0 s（320 次 walk）
+    └── 第二遍本身                                       ≈5.8 s      ≈3.9 s（81 次调用）
+  合计                                                   ≈14.7 s     ≈10.5 s   （−29%）
+热启动（同一二进制第二次，1 255 个摘要从库命中）          1.92 s      1.82 s
 ```
 
-第二遍的 5.8 s 里，贵的不是"重解析 1 001 个文件"，而是每个 slice 的**候选扫描**。按相位拆开
-（临时插桩，`CPPLS_TRACE_COOKING=1`，52 次进入重解析的调用）：
+第二遍的 5.8 s 里，贵的不是"重解析 1 001 个文件"，而是**每个 slice 的 `UnitDefinitions` 重建**和**候选扫描**。
+按相位拆开（临时插桩，`CPPLS_TRACE_COOKING=1`，52 次进入重解析的调用）：
 
 ```text
 读文本 + 取 mentioned 词集        51 ms
@@ -121,22 +122,33 @@ format summarize                 86 ms             58 ms
 ＋ 另外 29 次"nothing bodied"的调用（在扫描阶段就返回，没进上面的计时）≈ 3.1 s
 ```
 
-那 3.1 s 就是 `closure_environment` 回退：一个候选（定义者）没有被本 slice 的任何 unit 覆盖时，
-这趟为它单独走一遍闭包——一次调用最多读 876 个文件的文本（`sources` 按调用重建）。也就是：
-
-```text
-第二遍 ≈ 3.7 s 候选扫描+回退 + 2.0 s 重解析
-  回退的触发条件：`bodies_of(&environments, ...)` 在当前 slice 的 unit 里找不到覆盖该定义者的 timeline
-  能修的形态（不需要换模型）：把会话已持有的 unit（上限 `MAX_UNITS = 64`）也交给 pass 做覆盖判断，
-  但 `bodies_of` 需要每个 unit 的 `UnitDefinitions`，而 `definitions()` 是按 unit 分配的——
-  所以要么按 unit 缓存 `UnitDefinitions`（它是 unit 的纯函数），要么让回退结果按定义者缓存并按 revision 失效。
-  两者都不改变任何答案，可以单独验收。
-```
+那 3.1 s 里最大的一笔是 `Unit::definitions()`：`bodies_of` 需要每个 unit 的 `UnitDefinitions`，而
+`definitions()` 每调用一次就走一遍事件、每个定义分配一个 `Arc`——同一个 unit 在每个复用它 slice 上重建一次
+（~8 个 unit/slice × 2.6 ms × 81 slice ≈ **1.7 s**）。它和"回退走闭包"一起在 2.3 里处理。
 
 **为什么它不能靠"再找一个热点"解决。** `TranslationUnit::walk` 的闭包回调要求
 `index.summary(file)` 对闭包里每个文件都有值（`closure_with_text` / `walk` 的 `wanted` 回调）——
 **环境只有在闭包已经索引完之后才拿得到**。于是第一遍必然 provisional，第二遍必然存在；第二遍的候选扫描与回退
 是这个循环依赖的下游。`docs/clangd-model.md` §九把它列为"根因 4"，这一节补上它的**实测形状**和解除办法。
+
+### 2.3 已修：两笔下游成本（2026-10-23，实测）
+
+```text
+① `TranslationUnit::definitions_cached()`：`UnitDefinitions` 是 unit 的纯函数（walk 之后 unit 不再变），
+   缓存进 unit 自己的 `OnceLock<Arc<UnitDefinitions>>`；`bodies_of` 拿共享的 Arc。
+   收益：尾巴 10.47 s → 8.15 s（第二遍 5.8 s → 4.1 s）。
+
+② 持有时间线的淘汰策略：原来按 LRU，谁最近走过谁留下；改成**先淘汰闭包最小的**，再按 LRU。
+   一个 project root 的 timeline 对几百个头文件回答 `environment_of`，而一个头文件自己的只覆盖它的闭包——
+   第二遍问"这个文件被覆盖了吗"时，留下大闭包才有用。
+   收益：单元走查 365 → 320 次，走查时间 3.83 s → 3.08 s；尾巴 8.15 s → 6.86 s。
+
+   `MAX_UNITS` 从 64 提到 128 测过：走查 320 → 290、尾巴没有变化（6.93 → 7.04 s，噪声内），
+   所以没有提——多出来的是内存，不是时间。
+```
+
+两项都不改变任何答案：四个 LuaParser 文件的 findings 18 → 18、diff 为空，测试失败集合与 HEAD 相同。
+下面 §2.2 的"解除顺序"仍然是把冷启动压到 5 s 量级的唯一路径（第二遍和 3 s 的走查都还在）。
 
 解除顺序（每一步都可独立验收，不改语义的先做）：
 
