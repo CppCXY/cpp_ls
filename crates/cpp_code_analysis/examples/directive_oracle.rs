@@ -196,34 +196,6 @@ fn includes_differ(
     "includes: equal under comparison".to_string()
 }
 
-fn guards_differ(
-    left: &cpp_code_analysis::SummaryGuards,
-    right: &cpp_code_analysis::SummaryGuards,
-) -> String {
-    // Which *field* differs, not just the counts: a region list of the same length can differ in one range, and the
-    // first version of this printed two identical-looking lines for every mismatch.
-    let fields: [(&str, bool); 4] = [
-        ("regions", left.regions == right.regions),
-        ("conditionals", left.conditionals == right.conditionals),
-        ("own_guard", left.own_guard == right.own_guard),
-        ("visit_once", left.visit_once == right.visit_once),
-    ];
-    let differing: Vec<&str> = fields
-        .iter()
-        .filter(|(_, same)| !same)
-        .map(|(name, _)| *name)
-        .collect();
-    format!(
-        "guards differ in {differing:?} (regions {} vs {}, conditionals {} vs {}, own_guard {:?} vs {:?})",
-        left.regions.len(),
-        right.regions.len(),
-        left.conditionals.len(),
-        right.conditionals.len(),
-        left.own_guard,
-        right.own_guard
-    )
-}
-
 fn walk(dir: &Path, files: &mut Vec<PathBuf>, depth: usize) {
     if depth > 16 || files.len() > 20_000 {
         return;
