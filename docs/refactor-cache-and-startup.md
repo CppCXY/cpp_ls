@@ -7,7 +7,8 @@
    取代 1 768 个摘要文件 + 85 个 .tu + sharing.bin 的目录树
 2. 索引单位从"文件"改成"TU(root)"：一次解析、facts 按来源归档 —— 删掉第二遍（1 621 次走查 / 120 s）
 3. 冷启动分三段预算：扫描 ≤150 ms → 打开文件的 TU ≤800 ms → 后台建库（不可见）
-4. 缓存键保持"解析前可算"（content_hash, context_hash），但 context 里必须含**宏环境指纹**
+4. 缓存键 = (content_hash, config_hash, **relevant_env_hash**)：环境取的是"这个文件能观测到的宏"的投影，
+   不是整个宏环境（实测 43–408 个名字 vs 9 401 个），见 §三之二
 5. 体积目标 160.6 MB → ≤25 MB（宏体去重 + zstd）
 ```
 
@@ -120,9 +121,66 @@ tu/ 整份不再存储（85.6 MB → 0）：渲染按文件存，环境按 env_h
 
 ### 一个必须写进实现说明的细节
 
-同一个头文件在不同 root 下可能有**不同**的 summary（不同宏环境），所以 `summaries` 的主键是
-`(content, context)`，`files` 只记录"路径 → 当前 content/context"。**多行是正确，不是冗余**；
-GC 按引用保留，不能按路径去重。
+同一个头文件在不同 root 下可能有**不同**的 summary（不同宏环境），所以 `summaries` 的主键要能表达"环境"。
+但**不能是整个环境**——见 §三之二。
+
+## 三之二、键里的"环境"必须是**投影**，不是整个宏环境
+
+用整个宏环境进键是纯粹膨胀：同一个标准库头文件因为 include 顺序不同就有一份新摘要，缓存永远不命中。
+实测这个担心有多大：
+
+```text
+工具链里的宏名（MSVC 14.51 include/，全部 #define）        9 401
+某个头的**自身文本**里出现、且确实是宏名的标识符数量：
+  xstring        1 082 个标识符 →  101 个是宏名（9.3 %）
+  vector         1 135 个标识符 →  101 个（8.9 %）
+  string           221 个标识符 →   43 个（19.5 %）
+  vcruntime.h      350 个标识符 →   84 个（24.0 %）
+  yvals_core.h   2 451 个标识符 →  408 个（16.6 %，一个专讲宏的头）
+```
+
+一个头文件能观测到的宏是**它自己文本里出现的名字**（对象宏、函数宏、`#if` 条件里的名字），不是环境里的全部。
+所以键里的环境部分应该是：
+
+```text
+relevant_env(file) = { name → body_hash | name 出现在该文件自身 token 流里 } 的传递闭包
+                     （闭包 = 这些宏的 body 里出现的宏名，再取它们的 body，直到不动）
+relevant_env_hash  = hash(按 name 排序的 (name, body_hash) 序列)
+summary_key        = (content_hash, config_hash, relevant_env_hash)
+```
+
+为什么这解决了膨胀：
+
+```text
+· 投影是 43–408 个名字，环境是 9 401 个 —— 少 20–200 倍
+· 这些名字的定义来自工具链自身（_STD_BEGIN、_NODISCARD、_HAS_CXX20 …），
+  不同 include 顺序**不改变它们的定义**，所以同一个头在 10 个 root 下通常只有 1 份摘要
+· 真正会变的是 /std: 级别与用户在自己代码里 #define 的覆盖值 —— 变体数是"几种编译配置"，不是"几种顺序"
+· 投影为空的文件（不提及任何宏、也没有 #if）→ 键退化为 (content, config)，命中率最高
+```
+
+三个附加好处：
+
+```text
+① 失效是**精确**的：改一个没有文件提及的 #define，什么也不用失效；改 _STD_BEGIN，
+   失效的正好是提到它的那些文件（不是整个 generation）
+② 泛型化：同一个投影哈希可以算出"还要渲染吗"——渲染键同样用 (content, relevant_env_hash)
+③ 可以在解析前算：投影的**名字集合**只依赖文本（一次词法扫描，100 KB 的头约 1 ms），
+   body 从环境里查（每个 root 一次），所以"键必须解析前可算"这条约束仍然成立
+```
+
+表结构相应调整（替换 §二 里的 summaries / environments）：
+
+```text
+projections   (content_hash) -> zstd(该文件提到的宏名集合)      ← 只依赖文本，跨 root 复用
+summaries     (content_hash, config_hash, relevant_env_hash) -> zstd(bytes)
+renderings    (content_hash, relevant_env_hash) -> zstd(渲染文本)
+environments  (root_hash) -> { 名字 -> body_hash, 配置指纹 }     ← 按 root 一份，供投影求值
+```
+
+**实现注意**：`config_hash`（编译器、dialect、include 目录）与 `relevant_env_hash` 要分开存，
+前者决定"能不能用"，后者决定"内容对不对"。合并成一个哈希会让诊断无法回答"为什么没命中"。
+
 
 ## 四、性能目标与验收
 
