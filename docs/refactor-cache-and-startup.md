@@ -181,6 +181,21 @@ environments  (root_hash) -> { 名字 -> body_hash, 配置指纹 }     ← 按 r
 **实现注意**：`config_hash`（编译器、dialect、include 目录）与 `relevant_env_hash` 要分开存，
 前者决定"能不能用"，后者决定"内容对不对"。合并成一个哈希会让诊断无法回答"为什么没命中"。
 
+### 投影过大时的退路（按文件选择键的种类）
+
+传递闭包并不总有界：一个头若把宏名收敛到上千个（`yvals_core.h` 已经 408 个，且它是专讲宏的头），
+继续用投影换来的收益就抵不上算它的成本。所以**按文件选**，用一个明确的阈值：
+
+```text
+投影名字数 ≤ 512   → 键 = (content, config, relevant_env_hash)      ← 默认，跨 root 复用最好
+投影名字数 >  512   → 键 = (content, config, root_env_hash)          ← 该文件按"整个环境"存，命中少但可预期
+```
+
+判定发生在投影求值时（一次词法扫描 + 闭包），结果连同 `projections` 行一起记下，
+所以"这个文件用的是哪种键"是可查的事实，不是隐式规则。阈值取 512 的理由是可量：
+它大于实测最大的真实投影（408），又远小于环境（9 401），所以退路的触发是**例外**而不是常态；
+实现完成后用 `yvals_core.h` 与 STL 的 `_MSVC_STL_*` 系列头各测一次，确认触发的文件数占比。
+
 
 ## 四、性能目标与验收
 
@@ -245,3 +260,33 @@ docs/no-build-database.md §② facts 按来源归档 —— M2 的理论依据
 docs/prefix-reuse.md     M4 的解析复用；事件流复用已实测为负收益，必须走绿树共享
 docs/architecture-review.md  层与写锁预算
 ```
+
+## 九、M1 进度：存储层骨架与实测（2026-10-22）
+
+`crates/cpp_code_analysis/src/cache_db.rs` 已落地：redb 单文件数据库，七张表（`meta` / `files` / `projections` /
+`summaries` / `renderings` / `environments` / `macros`），`CacheKey = (content, config, env)` 三段分开存，
+`FileRow` 记录每个文件的 content/config/env/mtime/size/generation，`collect()` 按"有没有 files 行引用"删除，
+`compact()` 归还文件空间；版本或 `reading_fingerprint` 不匹配时**删除重建**（缓存非权威）。
+
+**这一层还没接进索引**（M1 的后半段），但已经能把现有文件缓存整个导入并量出差别。用项目自己的
+1 768 份摘要（69.0 MB 的 `.bin` 文件）实测：
+
+```text
+文件缓存            1 768 个文件，69.0 MB
+数据库              16.6 MB，1 768 行                    ← 4.2× 更小
+写入（逐行事务）     8.2 s（4.6 ms/行）
+写入（批量事务）     0.97 s                              ← 批量是必须的，不是优化
+读回 1 768 份        170 ms（10 384 份/秒，解压后 72.4 MB）
+collect（全删）      21 ms
+compact              123 ms，24.6 MB → 3.5 MB            ← 删除后必须 compact，否则文件变大
+```
+
+两条写进实现的结论：
+
+```text
+① 写入必须批量：一次事务写多行，泵在一次切片结束时提交一批
+② 删除之后必须 compact：redb 不会自动回收文件页；collect 与 compact 一起放在空闲步骤
+```
+
+**还没验证的**：多实例（写者单例）与 Windows 文件锁、`renderings`/`projections` 的实际压缩比、
+以及 `CacheDb` 与现有 `SummaryStore` 的接线（M1 后半段）。
