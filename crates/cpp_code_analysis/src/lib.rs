@@ -70,6 +70,7 @@ pub mod session;
 pub mod signature;
 pub mod summary;
 pub mod summary_codec;
+pub mod surface;
 
 // The folders above are the *organisation*; the modules inside them keep their own names, and they are
 // re-exported here so that every path written before the reorganisation still resolves — `crate::directive::…`
