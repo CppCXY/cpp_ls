@@ -589,6 +589,10 @@ pub struct Session<F: FileProvider = DiskFiles> {
     /// and a preprocess, a query cannot pay it, and the file it is asked about does not change between two
     /// keystrokes. Keyed by the **content hash** rather than the path, because a buffer being typed in has a new
     /// text on every keystroke and a rendering of the old text would be a wrong answer rather than a stale one.
+    /// **Surfaces already scanned**, shared by every effect walk — see [`crate::effect::Surfaces`].
+    surfaces: std::sync::Mutex<crate::effect::Surfaces>,
+    /// **Effects already computed**, shared by every walk — the other half of what makes a walk hash lookups.
+    effects: std::sync::Mutex<HashMap<u64, crate::effect::Effect>>,
     renderings: std::sync::Mutex<
         std::collections::HashMap<
             (PathBuf, u64),
@@ -1048,6 +1052,8 @@ impl<F: FileProvider + Clone> Session<F> {
             headers,
             macro_environments: std::sync::Mutex::new(std::collections::HashMap::new()),
             macro_work: std::sync::Mutex::new(Cooking::default()),
+            surfaces: std::sync::Mutex::new(crate::effect::Surfaces::new()),
+            effects: std::sync::Mutex::new(HashMap::new()),
             renderings: std::sync::Mutex::new(std::collections::HashMap::new()),
             cooking_refused: std::sync::Mutex::new(std::collections::HashSet::new()),
             unit_from_memory: std::sync::atomic::AtomicUsize::new(0),
@@ -4329,9 +4335,20 @@ fn error_directive_line(text: &str) -> Option<(usize, usize, String)> {
             files: &self.files,
             index: self.store.index(),
         };
-        let mut cache: HashMap<u64, crate::effect::Effect> = HashMap::new();
+        // **Both caches are shared between walks.** Without the surfaces every walk re-lexes every file (measured:
+        // 1.05 s against the 38 ms timeline walk this would replace); without the effects every condition is
+        // re-evaluated, which is the rest of it.
+        let mut cache = self
+            .effects
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let seed = crate::effect::Macros::new();
+        let surfaces = self
+            .surfaces
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let (signatures, walked) = crate::effect::Chain::new(&reads, &mut cache)
+            .with_surfaces(&surfaces)
             .at_signatures(root, &seed);
         Some((signatures, walked))
     }

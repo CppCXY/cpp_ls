@@ -321,6 +321,41 @@ pub fn condition_tokens(tokens: &[Token]) -> &[Token] {
     tokens
 }
 
+/// **The surfaces a walk has already scanned**, keyed by the file`s content.
+///
+/// A walk has to lex every file it enters to know what its directives are, and without this the lex is paid again
+/// on every walk: measured, 266 files took 1.05 s per walk and the same files` surfaces cost 0.5 ms each to build
+/// *once*. Content-hashed rather than path-keyed, because a path with new text is a different surface.
+#[derive(Default)]
+pub struct Surfaces {
+    held: std::sync::Mutex<HashMap<u64, std::sync::Arc<Surface>>>,
+}
+
+impl Surfaces {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The surface of `text`, scanned once per distinct content.
+    pub fn of(&self, path: &std::path::Path, text: &str) -> std::sync::Arc<Surface> {
+        let key = crate::cache::content_hash(text);
+        let mut held = self.held.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(found) = held.get(&key) {
+            return std::sync::Arc::clone(found);
+        }
+        let made = std::sync::Arc::new(crate::surface::surface_of(path, text));
+        held.insert(key, std::sync::Arc::clone(&made));
+        made
+    }
+
+    pub fn len(&self) -> usize {
+        self.held
+            .lock()
+            .map(|held| held.len())
+            .unwrap_or(0)
+    }
+}
+
 /// **How the chain reads files**: a provider and an include resolver, both as plain functions so that a caller can
 /// hand over a session, a test's memory files, or a probe.
 pub trait Reads {
@@ -362,6 +397,8 @@ pub struct Chain<'a, R: Reads> {
     /// table per file. A table is the whole closure`s macros; cloning it once per file is quadratic in a project`s
     /// size, which is what the first measurement showed (1.14 s for 266 files, almost all of it cloning).
     signatures: HashMap<std::path::PathBuf, u64>,
+    /// **The surfaces already scanned**, when a caller has one to share across walks.
+    surfaces: Option<&'a Surfaces>,
     /// Whether to keep the tables themselves, which only a comparison test needs.
     keep_tables: bool,
     walked: Walked,
@@ -375,6 +412,7 @@ impl<'a, R: Reads> Chain<'a, R> {
             tables: HashMap::new(),
             signatures: HashMap::new(),
             keep_tables: true,
+            surfaces: None,
             walked: Walked::default(),
         }
     }
@@ -382,6 +420,12 @@ impl<'a, R: Reads> Chain<'a, R> {
     /// **Without a copy of the tables** — the signatures only, which is what a caller asking "did this file`s
     /// environment change?" needs. Cloning a table per file is quadratic: the first measurement of this walk on a
     /// real program (266 files) was 1.14 s, and almost all of it was those clones.
+    /// **Share the surfaces between walks** — see [`Surfaces`].
+    pub fn with_surfaces(mut self, surfaces: &'a Surfaces) -> Self {
+        self.surfaces = Some(surfaces);
+        self
+    }
+
     pub fn without_tables(mut self) -> Self {
         self.keep_tables = false;
         self
@@ -416,7 +460,10 @@ impl<'a, R: Reads> Chain<'a, R> {
             return;
         };
         self.walked.files += 1;
-        let surface = crate::surface::surface_of(path, &text);
+        let surface = match self.surfaces {
+            Some(surfaces) => surfaces.of(path, &text),
+            None => std::sync::Arc::new(crate::surface::surface_of(path, &text)),
+        };
         if surface.events.is_empty() {
             return;
         }
