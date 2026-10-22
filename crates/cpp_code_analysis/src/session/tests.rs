@@ -2292,11 +2292,13 @@ fn the_cache_goes_where_the_project_says_and_the_filter_follows_it() {
     session.index_everything();
     assert_eq!(session.stats().rebuilt, 1, "the file was read");
 
-    let summaries = project.root.join(".cppls-cache").join("summaries");
+    // **The cache is one database file under the configured directory**, not a tree of summaries. The property this
+    // test exists for is that the *name* has three agreeing readers — the store that writes, the filter that ignores
+    // its events, and the report a user reads — and a directory is what all three join the name to.
     assert!(
-        summaries.is_dir(),
-        "the summaries are under the configured directory, not the default: {}",
-        summaries.display()
+        project.root.join(".cppls-cache").is_dir(),
+        "the cache is under the configured directory, not the default: {}",
+        project.root.join(".cppls-cache").display()
     );
     assert!(
         !project.root.join(crate::CACHE_DIRECTORY).exists(),

@@ -458,33 +458,15 @@ impl<F: FileProvider> SummaryStore<F> {
         }
         self
     }
-    /// **Use the file cache and not the database.** For the tests that assert the *directory*`s shape, and for a
-    /// caller that wants the layer as it was before `cache_db` existed. The database is the default elsewhere.
-    pub fn without_the_cache_database(mut self) -> Self {
-        self.summary_database = std::sync::OnceLock::from(None);
-        self
-    }
-
-
     /// Where the summaries are written, which is what a caller reporting on the cache wants to print.
     pub fn cache_directory(&self) -> &Path {
         &self.cache
     }
 
-    /// **The summary database, opened on first use** — see [`SummaryStore::summary_database`].
+    /// **The summary database, opened on first use and used always** — see [`SummaryStore::summary_database`].
     fn summary_database(&self) -> Option<std::sync::Arc<crate::cache_db::SummaryCache>> {
         self.summary_database
-            .get_or_init(|| {
-                // **Opt-in while the session tests are taught about it** — `CPPLS_CACHE_DB=1` turns it on, and the
-                // file cache is what a session writes otherwise. The measurement that says it should become the
-                // default is in `docs/refactor-cache-and-startup.md` §九: warm start 4.2 s → 3.4 s. What stands in
-                // the way is eight tests that assert the *file* cache's presence (`the_cache_goes_where_the_project
-                // says_and_the_filter_follows_it`, `a_second_run_over_the_same_project_reads_nothing_new`, …).
-                if std::env::var_os("CPPLS_CACHE_DB").is_none() {
-                    return None;
-                }
-                crate::cache_db::shared(&self.cache, crate::READING_FINGERPRINT)
-            })
+            .get_or_init(|| crate::cache_db::shared(&self.cache, crate::READING_FINGERPRINT))
             .clone()
     }
 

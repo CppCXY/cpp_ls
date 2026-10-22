@@ -662,9 +662,10 @@ const BATCH: usize = 32;
 
 /// **The handles this process holds, by directory.** See the note on [`SummaryCache`]: two stores over one cache must
 /// be one writer, or a summary written through one is invisible to the other until a flush that may never come.
-fn open_handles() -> &'static std::sync::Mutex<std::collections::HashMap<PathBuf, std::sync::Arc<SummaryCache>>> {
+fn open_handles() -> &'static std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<SummaryCache>>>
+{
     static HANDLES: std::sync::OnceLock<
-        std::sync::Mutex<std::collections::HashMap<PathBuf, std::sync::Arc<SummaryCache>>>,
+        std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<SummaryCache>>>,
     > = std::sync::OnceLock::new();
     HANDLES.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
@@ -672,11 +673,14 @@ fn open_handles() -> &'static std::sync::Mutex<std::collections::HashMap<PathBuf
 /// **The one handle for a cache directory**, opened on first use. `None` when it cannot be opened — the file cache is
 /// still there, so a cache that cannot open is not a session that cannot start.
 pub fn shared(directory: &Path, reading_fingerprint: u64) -> Option<std::sync::Arc<SummaryCache>> {
-    let key = std::fs::canonicalize(directory).unwrap_or_else(|_| directory.to_path_buf());
+    // **Lexically, not canonically**: the first caller may be holding a directory that does not exist yet, so
+    // `canonicalize` would fail for it and succeed for the next caller — which is exactly the two-handles bug this
+    // function exists to prevent (measured as twenty failing tests, each asking the same question with two stores).
+    let key = directory.to_string_lossy().to_lowercase();
     let Ok(mut handles) = open_handles().lock() else {
         return None;
     };
-    if let Some(handle) = handles.get(&key) {
+    if let Some(handle) = handles.get(key.as_str()) {
         return Some(std::sync::Arc::clone(handle));
     }
     let opened = std::sync::Arc::new(SummaryCache::open(directory, reading_fingerprint)?);
@@ -701,16 +705,33 @@ impl SummaryCache {
     }
 
     /// The summary for a key, decoded. A miss is `None` and never an error.
+    ///
+    /// **The batch is read before the database**, because a summary that has been written but not yet committed is
+    /// still a summary this process must answer with: a query for a file the pump has just read would otherwise
+    /// re-parse it — and the store's own tests are exactly that question asked with two stores, where the answer was
+    /// twenty failures until the buffer became readable.
     pub fn summary(&self, key: crate::cache::SummaryKey) -> Option<crate::FileSummary> {
-        let bytes = self
-            .database
-            .summary(CacheKey {
-                content: key.content_hash,
-                config: key.context_hash,
-                env: 0,
-            })
+        let cache_key = CacheKey {
+            content: key.content_hash,
+            config: key.context_hash,
+            env: 0,
+        };
+        let buffered = self
+            .pending
+            .lock()
             .ok()
-            .flatten()?;
+            .and_then(|pending| {
+                pending
+                    .0
+                    .iter()
+                    .rev()
+                    .find(|(held, _)| *held == cache_key)
+                    .map(|(_, bytes)| bytes.clone())
+            });
+        let bytes = match buffered {
+            Some(bytes) => bytes,
+            None => self.database.summary(cache_key).ok().flatten()?,
+        };
         match crate::summary_codec::decode(&bytes) {
             Ok(summary) => Some(summary),
             Err(error) => {

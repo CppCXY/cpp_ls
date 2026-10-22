@@ -13,10 +13,10 @@
         let root = std::env::temp_dir().join("cppls-store-tests").join(name);
         let _ = std::fs::remove_dir_all(&root);
 
-        // **The file cache, on purpose**: these tests are about the shape of the directory, and the database has
-        // its own tests (`cache_db::tests`) and its own measurement in `docs/refactor-cache-and-startup.md`.
-        let store = SummaryStore::with_provider(&root, CompilerConfig::default(), files.clone())
-            .without_the_cache_database();
+        // **The database, like every other caller.** These tests used to assert the shape of the *file* cache;
+        // what they are about is a hit — a second store that does not parse again — and the database answers that
+        // question the same way the directory did (see `docs/refactor-cache-and-startup.md` M1).
+        let store = SummaryStore::with_provider(&root, CompilerConfig::default(), files.clone());
         (store, root)
     }
 
@@ -361,12 +361,11 @@
             "two files, two entries"
         );
 
-        // And both are really on disk, each holding the facts of the file that wrote it — which is what a
-        // collision would have made impossible to notice from the outside.
-        let stored_one =
-            super::read_summary(&one.key.path_under(store.cache_directory())).expect("written");
-        let stored_two =
-            super::read_summary(&two.key.path_under(store.cache_directory())).expect("written");
+        // And both are really stored, each holding the facts of the file that wrote it — which is what a
+        // collision would have made impossible to notice from the outside. Read through the database the store
+        // writes to (`SummaryStore::summary_database` is private, so this asks the same question a query does).
+        let stored_one = store.get(Path::new("/p/one.h")).expect("written").clone();
+        let stored_two = store.get(Path::new("/p/two.h")).expect("written").clone();
         assert_eq!(stored_one.path, std::path::Path::new("/p/one.h"));
         assert_eq!(stored_two.path, std::path::Path::new("/p/two.h"));
         assert!(
@@ -498,9 +497,13 @@
         assert_eq!(store.stats().unstored, 1);
         assert_eq!(store.stats().reused, 0);
         assert_eq!(store.stats().rebuilt, 1);
-        assert!(
-            !root.join(crate::CACHE_DIRECTORY).exists(),
-            "nothing under the root that a summary could have been written to"
+        // **The question is whether a *summary* was stored, and the database answers it directly.** A cache
+        // directory that exists proves nothing — the database file is created when the handle opens — where a summary
+        // row would.
+        assert_eq!(
+            store.summary_database_sizes().map(|sizes| sizes.summaries),
+            Some(0),
+            "no summary row: a search that failed must not be cached"
         );
 
         // A later store builds again rather than reading an entry that recorded a search which has since been
