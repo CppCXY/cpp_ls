@@ -111,12 +111,26 @@ format summarize                 86 ms             58 ms
 热启动（同一二进制第二次，1 255 个摘要从库命中）   1.92 s，欠账 0，82 次走查
 ```
 
-第二遍的 5.8 s 里，贵的不是"重解析 1 001 个文件"（那部分约 6 ms/文件），而是每个 slice 的**候选扫描**：
+第二遍的 5.8 s 里，贵的不是"重解析 1 001 个文件"，而是每个 slice 的**候选扫描**。按相位拆开
+（临时插桩，`CPPLS_TRACE_COOKING=1`，52 次进入重解析的调用）：
 
 ```text
-candidates = 定义了"本 slice 的文本提到的宏名"的文件（一次冷启动累计 2 545 个）
-  每个候选要判"它的 body 是否影响读法"：plain shape 能定的直接定，定不了的才要环境
-  定不了的时候走 `closure_environment` 回退：一次调用读最多 876 个文件的文本（`sources` 按调用重建）
+读文本 + 取 mentioned 词集        51 ms
+候选扫描（判每具 body 是否影响读法）  601 ms
+重解析（带环境）                 2 046 ms
+＋ 另外 29 次"nothing bodied"的调用（在扫描阶段就返回，没进上面的计时）≈ 3.1 s
+```
+
+那 3.1 s 就是 `closure_environment` 回退：一个候选（定义者）没有被本 slice 的任何 unit 覆盖时，
+这趟为它单独走一遍闭包——一次调用最多读 876 个文件的文本（`sources` 按调用重建）。也就是：
+
+```text
+第二遍 ≈ 3.7 s 候选扫描+回退 + 2.0 s 重解析
+  回退的触发条件：`bodies_of(&environments, ...)` 在当前 slice 的 unit 里找不到覆盖该定义者的 timeline
+  能修的形态（不需要换模型）：把会话已持有的 unit（上限 `MAX_UNITS = 64`）也交给 pass 做覆盖判断，
+  但 `bodies_of` 需要每个 unit 的 `UnitDefinitions`，而 `definitions()` 是按 unit 分配的——
+  所以要么按 unit 缓存 `UnitDefinitions`（它是 unit 的纯函数），要么让回退结果按定义者缓存并按 revision 失效。
+  两者都不改变任何答案，可以单独验收。
 ```
 
 **为什么它不能靠"再找一个热点"解决。** `TranslationUnit::walk` 的闭包回调要求
