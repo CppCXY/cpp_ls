@@ -52,6 +52,7 @@ const SUMMARIES: TableDefinition<(u64, u64, u64), &[u8]> = TableDefinition::new(
 const RENDERINGS: TableDefinition<(u64, u64), &[u8]> = TableDefinition::new("renderings");
 const ENVIRONMENTS: TableDefinition<u64, &[u8]> = TableDefinition::new("environments");
 const MACROS: TableDefinition<u64, &[u8]> = TableDefinition::new("macros");
+const UNITS: TableDefinition<u64, &[u8]> = TableDefinition::new("units");
 
 const KEY_SCHEMA: &str = "schema_version";
 const KEY_GENERATION: &str = "generation";
@@ -143,6 +144,7 @@ pub struct DatabaseSizes {
     pub projections: usize,
     pub environments: usize,
     pub macros: usize,
+    pub units: usize,
     pub bytes: u64,
 }
 
@@ -289,6 +291,7 @@ impl CacheDb {
             write.open_table(RENDERINGS)?;
             write.open_table(ENVIRONMENTS)?;
             write.open_table(MACROS)?;
+            write.open_table(UNITS)?;
         }
         write.commit()?;
 
@@ -509,6 +512,32 @@ impl CacheDb {
         Ok(())
     }
 
+    // ---- units -------------------------------------------------------------------------------------
+
+    /// **One translation unit's rendering**, by the key `Session::render_the_unit` computes over the closure — see
+    /// [`crate::unit_codec`]. Stored compressed like the rest: the record is about 20 bytes per token of a program,
+    /// and a real one is 14 MB before zstd.
+    pub fn unit(&self, key: u64) -> Result<Option<crate::RenderedUnit>> {
+        let read = self.database.begin_read()?;
+        let units = read.open_table(UNITS)?;
+        let Some(value) = units.get(key)? else {
+            return Ok(None);
+        };
+        let bytes = decompress(value.value())?;
+        Ok(crate::unit_codec::decode(&bytes).ok())
+    }
+
+    pub fn put_unit(&self, key: u64, unit: &crate::RenderedUnit) -> Result<()> {
+        let packed = compress(&crate::unit_codec::encode(unit));
+        let write = self.database.begin_write()?;
+        {
+            let mut units = write.open_table(UNITS)?;
+            units.insert(key, &packed[..])?;
+        }
+        write.commit()?;
+        Ok(())
+    }
+
     // ---- environments and macros -------------------------------------------------------------------
 
     pub fn put_environment(&self, env: u64, bytes: &[u8]) -> Result<()> {
@@ -527,6 +556,7 @@ impl CacheDb {
         let write = self.database.begin_write()?;
         {
             let mut macros = write.open_table(MACROS)?;
+            write.open_table(UNITS)?;
             macros.insert(body_hash, &packed[..])?;
         }
         write.commit()?;
@@ -631,6 +661,7 @@ impl CacheDb {
             projections: count(read.open_table(PROJECTIONS)?.len()? as usize),
             environments: count(read.open_table(ENVIRONMENTS)?.len()? as usize),
             macros: count(read.open_table(MACROS)?.len()? as usize),
+            units: count(read.open_table(UNITS)?.len()? as usize),
             bytes: std::fs::metadata(self.directory.join(DATABASE_FILE))
                 .map(|metadata| metadata.len())
                 .unwrap_or(0),
@@ -804,6 +835,15 @@ impl SummaryCache {
     pub fn collect(&self) -> Option<Collected> {
         self.flush();
         self.database.collect().ok()
+    }
+
+    /// **A unit rendering, by its closure key** — see [`CacheDb::unit`].
+    pub fn unit(&self, key: u64) -> Result<Option<crate::RenderedUnit>> {
+        self.database.unit(key)
+    }
+
+    pub fn put_unit(&self, key: u64, unit: &crate::RenderedUnit) -> Result<()> {
+        self.database.put_unit(key, unit)
     }
 
     /// Start a new generation, and answer it — see [`CacheDb::begin_generation`].

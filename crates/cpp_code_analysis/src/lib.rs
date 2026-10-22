@@ -54,6 +54,7 @@ rust_i18n::i18n!("./locales", fallback = "en");
 pub mod align;
 pub mod cache;
 pub mod cache_db;
+pub mod unit_codec;
 pub mod completion;
 pub mod file;
 pub mod folding;

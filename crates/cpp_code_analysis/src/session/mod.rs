@@ -4335,6 +4335,16 @@ fn error_directive_line(text: &str) -> Option<(usize, usize, String)> {
             return Some(cached.clone());
         }
 
+        // **The database may already have this program.** The key is a hash over every `(path, content)` the closure
+        // entered, so a rendering filed under it is this rendering — and reading it back is a decode instead of a
+        // cook. Measured: the cook is **899 ms** for a 1 991 163-byte program, which is the whole reason a unit read
+        // could not be repeated; the decode is the difference between a second unit read costing a second and
+        // costing a moment. See `docs/refactor-cache-and-startup.md` M4.
+        if let Some(cached) = self.store.cached_unit(key) {
+            self.rendered_unit = Some((key, cached.clone()));
+            return Some(cached);
+        }
+
         let definitions = unit.definitions();
         let seed = MacroTable::from_marked(self.store.index().macros());
         // **The include search, so `__has_include` is answerable.** Without it the operator answers `Unknown`, which
@@ -4345,6 +4355,11 @@ fn error_directive_line(text: &str) -> Option<(usize, usize, String)> {
         let stream =
             { unit.cook_the_unit(&sources, &definitions, Some(&seed), true, Some(&search)) };
 
+        // **Kept under the key, provisionally or not — the key is what makes that safe.** It folds every `(path,
+        // content)` the walk entered, so a rendering of a closure that was still filling has a key the finished
+        // closure cannot repeat: the row is never hit again, it is merely wasted, and a collection drops it once no
+        // file references it.
+        self.store.remember_unit(key, &stream);
         self.rendered_unit = Some((key, stream.clone()));
         Some(stream)
     }

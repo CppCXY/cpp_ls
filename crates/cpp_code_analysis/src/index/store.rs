@@ -479,6 +479,21 @@ impl<F: FileProvider> SummaryStore<F> {
         }
     }
 
+    /// **A unit rendering the database already has**, by the closure key `Session::render_the_unit` computes.
+    ///
+    /// `None` is "not cached" — never an error: a record from another version decodes to nothing and the caller
+    /// cooks the unit again, which is the answer for a cache that is not authoritative.
+    pub fn cached_unit(&self, key: u64) -> Option<crate::RenderedUnit> {
+        self.summary_database()?.unit(key).ok().flatten()
+    }
+
+    /// Remember a unit rendering — see [`SummaryStore::cached_unit`].
+    pub fn remember_unit(&self, key: u64, unit: &crate::RenderedUnit) {
+        if let Some(database) = self.summary_database() {
+            let _ = database.put_unit(key, unit);
+        }
+    }
+
     /// **Collect the rows nothing references** — the idle step, never a query.
     ///
     /// A write transaction like any other, so it runs beside a reader and needs no exclusive handle. **Compaction
