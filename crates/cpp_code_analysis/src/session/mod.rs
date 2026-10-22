@@ -2514,7 +2514,44 @@ impl<F: FileProvider + Clone> Session<F> {
         // The sequential loop is also the one that walks **fewer** timelines: it skips a candidate an earlier unit
         // already covers, which is roughly 541 of 1729 on that project and is exactly what running first gives up.
         let mut units: Vec<std::sync::Arc<crate::TranslationUnit>> = Vec::new();
-        for (candidate, unit) in self.walk_the_timelines(candidates) {
+
+        // **A unit already in memory may cover this file, and then there is nothing to walk.**
+        //
+        // `translation_unit_of` builds a closure timeline per root (~38 ms), and `MAX_UNITS` of them are held. The
+        // files a re-read slice names are usually headers of the root that was just walked — the same closure, one
+        // step up the graph — so asking the held table first turns "walk this header's own timeline" into "reuse the
+        // timeline that already contains it". Only units known to be **complete** are offered: a provisional one is
+        // a closure still missing files, and an environment read from it is the defect the pass exists to repair.
+        //
+        // The key carries the environment (`SummaryKey::env_hash`), so a summary built from one root's environment is
+        // filed under it: reusing a unit can produce a *different* entry, never a wrong one.
+        let held: Vec<std::sync::Arc<crate::TranslationUnit>> = {
+            let table = self.held_units();
+            table
+                .held
+                .values()
+                .filter(|held| !held.provisional)
+                .map(|held| std::sync::Arc::clone(&held.unit))
+                .collect()
+        };
+        let mut still_to_walk: Vec<PathBuf> = Vec::new();
+        for candidate in candidates {
+            if let Some(unit) = held
+                .iter()
+                .find(|unit| unit.environment_of(&candidate).is_some())
+            {
+                if !units
+                    .iter()
+                    .any(|known| std::sync::Arc::ptr_eq(known, unit))
+                {
+                    units.push(std::sync::Arc::clone(unit));
+                }
+                continue;
+            }
+            still_to_walk.push(candidate);
+        }
+
+        for (candidate, unit) in self.walk_the_timelines(still_to_walk) {
             if units
                 .iter()
                 .any(|unit| unit.environment_of(&candidate).is_some())
