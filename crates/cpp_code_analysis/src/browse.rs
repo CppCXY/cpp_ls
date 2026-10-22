@@ -231,7 +231,6 @@ pub fn browse(path: &Path, text: &str, hints: &Hints) -> BrowseFile {
         entries: Vec::new(),
         skipped: 0,
         previous: None,
-        last_identifier: None,
     };
     scan.run();
 
@@ -261,9 +260,6 @@ struct Scan<'a> {
     entries: Vec<BrowseEntry>,
     skipped: usize,
     previous: Option<CppTokenKind>,
-    /// The last identifier the scan passed, with where it was written — a data member is only ever "the name
-    /// before the `;`", which is what a fuzzy parser can honestly say (VS`s browse parser says the same).
-    last_identifier: Option<(String, SourceRange)>,
 }
 
 impl Scan<'_> {
@@ -432,48 +428,8 @@ impl Scan<'_> {
             }
             CppTokenKind::Semicolon => {
                 self.pending.clear();
-                // **A data member, a global, a local at namespace scope** — the name before the `;`. Functions were
-                // recorded at their `(`, and a `};` closes a type whose members were already recorded.
-                if self.previous == Some(CppTokenKind::Identifier)
-                    && self.scope.last().is_some_and(|open| !open.name.is_empty())
-                    && let Some((name, range)) = self.last_identifier.clone()
-                {
-                    self.entries.push(BrowseEntry {
-                        name,
-                        kind: BrowseKind::Variable,
-                        scope: self.scope_names(),
-                        range,
-                        bases: Vec::new(),
-                        signature: None,
-                    });
-                }
-            }
-            CppTokenKind::Comma => {
-                // **`int a, b;`** — every name but the last is followed by a comma.
-                if self.previous == Some(CppTokenKind::Identifier)
-                    && self.scope.last().is_some_and(|open| !open.name.is_empty())
-                    && let Some((name, range)) = self.last_identifier.clone()
-                {
-                    self.entries.push(BrowseEntry {
-                        name,
-                        kind: BrowseKind::Variable,
-                        scope: self.scope_names(),
-                        range,
-                        bases: Vec::new(),
-                        signature: None,
-                    });
-                }
             }
             CppTokenKind::Identifier | CppTokenKind::OperatorKeyword => {
-                if self.kind_at(self.at) == CppTokenKind::Identifier {
-                    self.last_identifier = Some((
-                        self.text_at(self.at).to_string(),
-                        self.tokens
-                            .get(self.at)
-                            .map(|token| token.range)
-                            .unwrap_or_else(|| SourceRange::new(0, 0)),
-                    ));
-                }
                 if self.kind_at(self.at + 1) == CppTokenKind::LeftParen
                     && !matches!(
                         self.previous,
@@ -789,208 +745,6 @@ impl Scan<'_> {
     }
 }
 
-/// **The browse index of a whole project**: every file's names, addressable by name and by scope.
-///
-/// The map is built once from the per-file scans (387 082 entries over the measured project took 2.07 s to *scan*;
-/// building the maps on top of that is tens of milliseconds), and the per-file answers are the same data — a
-/// completion asking "what is called `push_back`" and a document-outline asking "what does this file declare" read
-/// the same entries.
-#[derive(Debug, Default)]
-pub struct BrowseIndex {
-    files: std::collections::HashMap<PathBuf, std::sync::Arc<BrowseFile>>,
-    /// Lowercased name → where it is declared. A completion filters this by prefix.
-    by_name: std::collections::HashMap<String, Vec<(PathBuf, u32)>>,
-    /// `scope::name` exactly as written → where it is declared. A member list is this, with the scope as the key.
-    by_qualified: std::collections::HashMap<String, Vec<(PathBuf, u32)>>,
-    entries: usize,
-    skipped: usize,
-    tokens: usize,
-}
-
-impl BrowseIndex {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Add one file's scan, replacing whatever was there — an edit is one file out, one in.
-    pub fn insert(&mut self, file: BrowseFile) {
-        let path = file.path.clone();
-        if let Some(previous) = self.files.get(&path) {
-            for entry in &previous.entries {
-                let key = entry.name.to_lowercase();
-                if let Some(at) = self.by_name.get_mut(&key) {
-                    at.retain(|(held, _)| held != &path);
-                }
-                let key = entry.qualified().to_lowercase();
-                if let Some(at) = self.by_qualified.get_mut(&key) {
-                    at.retain(|(held, _)| held != &path);
-                }
-            }
-            self.entries -= previous.entries.len();
-            self.skipped -= previous.skipped;
-            self.tokens -= previous.tokens;
-        }
-
-        self.entries += file.entries.len();
-        self.skipped += file.skipped;
-        self.tokens += file.tokens;
-        for (at, entry) in file.entries.iter().enumerate() {
-            self.by_name
-                .entry(entry.name.to_lowercase())
-                .or_default()
-                .push((path.clone(), at as u32));
-            self.by_qualified
-                .entry(entry.qualified().to_lowercase())
-                .or_default()
-                .push((path.clone(), at as u32));
-        }
-        self.files.insert(path, std::sync::Arc::new(file));
-    }
-
-    pub fn file(&self, path: &Path) -> Option<&std::sync::Arc<BrowseFile>> {
-        self.files
-            .get(path)
-            .or_else(|| {
-                self.files
-                    .get(Path::new(&crate::normalize_path(path, cfg!(windows))))
-            })
-    }
-
-    pub fn paths(&self) -> impl Iterator<Item = &PathBuf> {
-        self.files.keys()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.files.is_empty()
-    }
-
-    pub fn files(&self) -> usize {
-        self.files.len()
-    }
-
-    pub fn entries(&self) -> usize {
-        self.entries
-    }
-
-    /// How many tokens were skipped as block content — the cost model, in one number.
-    pub fn skipped(&self) -> usize {
-        self.skipped
-    }
-
-    pub fn tokens(&self) -> usize {
-        self.tokens
-    }
-
-    /// **Every name called `name`**, in any scope — what a completion with no qualifier shows.
-    pub fn named(&self, name: &str) -> Vec<(PathBuf, BrowseEntry)> {
-        self.collect(self.by_name.get(&name.to_lowercase()))
-    }
-
-    /// **Every name called `name` under `scope`** — `members_of("std")` for a `std::` completion.
-    pub fn members_of(&self, scope: &str) -> Vec<(PathBuf, BrowseEntry)> {
-        let prefix = if scope.is_empty() {
-            String::new()
-        } else {
-            format!("{}::", scope.to_lowercase())
-        };
-        let mut found = Vec::new();
-        for (qualified, at) in &self.by_qualified {
-            if qualified.starts_with(&prefix) {
-                found.extend(self.collect(Some(at)));
-            }
-        }
-        found
-    }
-
-    /// The names declared in one file, in scan order — a document outline without parsing.
-    pub fn declared_in(&self, path: &Path) -> Vec<BrowseEntry> {
-        self.file(path)
-            .map(|file| file.entries.clone())
-            .unwrap_or_default()
-    }
-
-    fn collect(&self, at: Option<&Vec<(PathBuf, u32)>>) -> Vec<(PathBuf, BrowseEntry)> {
-        let Some(at) = at else {
-            return Vec::new();
-        };
-        let mut found = Vec::with_capacity(at.len());
-        for (path, index) in at {
-            if let Some(file) = self.files.get(path)
-                && let Some(entry) = file.entries.get(*index as usize)
-            {
-                found.push((path.clone(), entry.clone()));
-            }
-        }
-        found
-    }
-}
-#[cfg(test)]
-mod index_tests {
-    use super::*;
-
-    fn scanned(path: &str, text: &str) -> BrowseFile {
-        browse(Path::new(path), text, &Hints::standard())
-    }
-
-    #[test]
-    fn a_member_list_is_the_scope_as_written() {
-        let mut index = BrowseIndex::new();
-        index.insert(scanned(
-            "/p/a.h",
-            "namespace std {\nclass string {\nvoid push_back(char c);\n};\n}\n",
-        ));
-        let members = index.members_of("std");
-        assert!(
-            members
-                .iter()
-                .any(|(_, entry)| entry.qualified() == "std::string"),
-            "{members:?}"
-        );
-        assert!(
-            index
-                .members_of("std::string")
-                .iter()
-                .any(|(_, entry)| entry.name == "push_back"),
-            "the member of a member is under its own scope"
-        );
-    }
-
-    #[test]
-    fn a_name_is_found_in_every_scope_it_appears_in() {
-        let mut index = BrowseIndex::new();
-        index.insert(scanned("/p/a.h", "namespace one { void open(); }\n"));
-        index.insert(scanned("/p/b.h", "namespace two { void open(); }\n"));
-        let found = index.named("open");
-        assert_eq!(found.len(), 2, "{found:?}");
-    }
-
-    #[test]
-    fn scanning_a_file_again_replaces_it_rather_than_doubling() {
-        let mut index = BrowseIndex::new();
-        let before = scanned("/p/a.h", "void old();\n");
-        let entries = before.entries.len();
-        index.insert(before);
-        index.insert(scanned("/p/a.h", "void fresh();\n"));
-        assert_eq!(index.entries(), 1, "one name, not two");
-        assert!(index.named("old").is_empty(), "the old name is gone");
-        assert_eq!(index.named("fresh").len(), 1);
-        assert!(entries > 0);
-    }
-
-    #[test]
-    fn a_whole_project_of_two_files_answers_by_scope_and_by_name() {
-        let mut index = BrowseIndex::new();
-        index.insert(scanned(
-            "/p/include/math.h",
-            "namespace math { struct point { double x; double y; }; }\n",
-        ));
-        index.insert(scanned("/p/src/main.cpp", "int main() { return 0; }\n"));
-        assert_eq!(index.files(), 2);
-        assert_eq!(index.members_of("math::point").len(), 2);
-        assert_eq!(index.named("point").len(), 1);
-        assert_eq!(index.declared_in(Path::new("/p/src/main.cpp")).len(), 1);
-    }
-}
 #[cfg(test)]
 mod tests {
     use super::*;
