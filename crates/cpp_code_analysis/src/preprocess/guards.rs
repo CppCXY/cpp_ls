@@ -107,16 +107,6 @@ pub fn analyse_guards(preprocessing: &FilePreprocessing, root: &CppSyntaxNode) -
 }
 
 /// Recognise a file's guard, given its directives in source order.
-/// Does the file write a **macro guard** — `#ifndef NAME` with its `#define NAME` immediately inside?
-///
-/// The question [`detect_guard`] cannot answer for a file that also writes `#pragma once`: it reports the pragma
-/// (the stronger answer, and the right one for "may the file be skipped next time"), while a caller asking
-/// "which region is this file's own guard" needs the *region*. Kept beside `detect_guard` so the two cannot
-/// disagree about what a guard is.
-pub(crate) fn has_a_macro_guard(directives: &[SpannedDirective], root: &CppSyntaxNode) -> bool {
-    detect_macro_guard(directives, root).is_some()
-}
-
 pub fn detect_guard(directives: &[SpannedDirective], root: &CppSyntaxNode) -> Guard {
     if has_pragma_once(directives) {
         return Guard::PragmaOnce;
@@ -249,15 +239,27 @@ fn detect_macro_guard_if(
 /// something, which is itself a child, so looking one level down is enough — and looking further would
 /// count the declarations *inside* the guard region, which is the opposite of the question.
 fn declares_something_before(root: &CppSyntaxNode, offset: usize) -> bool {
-    root.children().any(|child| {
-        let kind = CppSyntaxKind::from(child.kind());
-        let is_not_code = matches!(
-            kind,
-            CppSyntaxKind::PreprocessorDirective | CppSyntaxKind::DocComment
-        );
-        let starts_before = (u32::from(child.text_range().start()) as usize) < offset;
+    // **A wrapper is not code; what it wraps may be.** Two measured reasons, both from a header that opens with a
+    // comment:
+    //
+    // * a leading comment arrives inside a **nested `TranslationUnit`** node (this grammar wraps a file that starts
+    //   with a comment), and a kind test that only exempted `DocComment` saw a `TranslationUnit` child and called it
+    //   code — so the file's own `#ifndef` guard looked like an ordinary conditional and every declaration in
+    //   `3rd/utf8/include/utf8.h` and `mimalloc/src/bitmap.c` was `ConditionalCompilation`;
+    // * and the doc comment *itself* must stay exempt by kind: its tokens are `LineComment`/`DocText`, which are not
+    //   trivia, so a token test alone calls a copyright banner code.
+    // So the question is asked recursively: a `TranslationUnit` is as much code as its children, a comment or a
+    // directive is none, anything else is code.
+    fn is_code(node: &CppSyntaxNode) -> bool {
+        match CppSyntaxKind::from(node.kind()) {
+            CppSyntaxKind::DocComment | CppSyntaxKind::PreprocessorDirective => false,
+            CppSyntaxKind::TranslationUnit => node.children().any(|child| is_code(&child)),
+            _ => true,
+        }
+    }
 
-        !is_not_code && starts_before
+    root.children().any(|child| {
+        (u32::from(child.text_range().start()) as usize) < offset && is_code(&child)
     })
 }
 

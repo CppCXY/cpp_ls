@@ -735,7 +735,14 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
             // rule every `#include` written inside a header is "conditional" and every declaration reached through one
             // is `ConditionalCompilation` — measured on the closure of `<string>`, that is *every* cross-file answer
             // there is. See `deguard_the_files_own_guard` for why calling it unconditional is the honest reading.
-            let own_guard = own_guard_region(&preprocessing, &root);
+            //
+            // **Read from the tokens, not from the tree** — and the measurement that moved it: `3rd/utf8/include/
+            // utf8.h` and `mimalloc/src/bitmap.c` open with a comment, their parse produces a nested `TranslationUnit`
+            // and a misplaced `Declaration`, and the tree rule ("is there a top-level child before the `#ifndef` that
+            // looks like code") then saw code before a guard that has none — so every declaration in two guarded
+            // headers was `ConditionalCompilation`. The token rule is the text's own answer, and the directive
+            // summary uses the same one, which is what `examples/directive_oracle.rs` compares.
+            let own_guard = own_guard_region_from_tokens(&preprocessing, tree.get_tokens());
 
             // Stored, not just used here: a *walk* evaluating a condition needs the same rule, and it has only the
             // summary. See `SummaryGuards::own_guard` — a file's own guard is not a condition on anything.
@@ -1171,27 +1178,7 @@ fn own_guard_region_from_tokens(
     }
 }
 
-fn own_guard_region(
-    preprocessing: &crate::FilePreprocessing,
-    root: &cpp_parser::CppSyntaxNode,
-) -> Option<usize> {
-    match crate::guards::detect_guard(&preprocessing.directives, root) {
-        // The macro form: region 0 **is** the file's guard.
-        crate::guards::Guard::Macro(_) => Some(0),
-        // `#pragma once` alone opens no region, so there is nothing to de-guard. But it is usually written
-        // **above** the `#ifndef` guard — every MSVC header starts `#pragma once` then `#ifndef _STRING_` —
-        // and `detect_guard` reports the pragma first, which lost the macro guard entirely. The cost was
-        // measured and it is the whole library: without `own_guard`, the walk evaluated `#ifndef _STRING_` at
-        // `<string>`'s own `#include` (where `_STRING_` is defined by the line above), answered `Inactive`, and
-        // **dropped every include of the file** — so `_STL_COMPILER_PREPROCESSOR` was never defined, region 1
-        // (`#if _STL_COMPILER_PREPROCESSOR`) never held, and every query in MSVC's STL answered
-        // `ConditionalCompilation`.
-        crate::guards::Guard::PragmaOnce => {
-            crate::guards::has_a_macro_guard(&preprocessing.directives, root).then_some(0)
-        }
-        crate::guards::Guard::None => None,
-    }
-}
+
 
 /// Treat everything inside a file's own include guard as **unconditional**.
 ///
