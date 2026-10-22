@@ -125,6 +125,58 @@ pub fn detect_guard(directives: &[SpannedDirective], root: &CppSyntaxNode) -> Gu
     detect_macro_guard(directives, root).unwrap_or(Guard::None)
 }
 
+/// **[`detect_guard`] for a caller with no tree** — the *directive summary*, which is a file's `#include`s and
+/// `#define`s read without a parse (see `FileIndexer::directive_summary`).
+///
+/// The only place the tree was used was "is there code before the `#ifndef`", and a token stream answers it: a
+/// token that is not trivia and does not sit inside a directive is code. The token-based answer is *stricter* where
+/// the two differ at all — a stray `;` before a guard is code to both — which is the safe direction (a file wrongly
+/// judged guarded would be treated as unconditional; one wrongly judged unguarded simply keeps its condition).
+pub fn detect_guard_from_tokens(
+    directives: &[SpannedDirective],
+    tokens: &[cpp_parser::CppTokenData],
+) -> Guard {
+    if has_pragma_once(directives) {
+        return Guard::PragmaOnce;
+    }
+
+    detect_macro_guard_if(directives, |offset| {
+        declares_something_before_tokens(tokens, directives, offset)
+    })
+    .unwrap_or(Guard::None)
+}
+
+/// [has_a_macro_guard] for a caller with no tree — see [detect_guard_from_tokens].
+pub fn has_a_macro_guard_from_tokens(
+    directives: &[SpannedDirective],
+    tokens: &[cpp_parser::CppTokenData],
+) -> bool {
+    detect_macro_guard_if(directives, |offset| {
+        declares_something_before_tokens(tokens, directives, offset)
+    })
+    .is_some()
+}
+
+/// Is there **code** before `offset` — for a caller holding tokens rather than a tree?
+///
+/// Trivia is not code (a copyright banner above a guard is the ordinary spelling of a header) and neither is a
+/// directive (a `#include` above the guard is legal and does not make the guard conditional). A token is in a
+/// directive when it sits inside one of the directive ranges, which begin at the `#`.
+pub fn declares_something_before_tokens(
+    tokens: &[cpp_parser::CppTokenData],
+    directives: &[SpannedDirective],
+    offset: usize,
+) -> bool {
+    tokens.iter().any(|token| {
+        let at = token.range.start_offset;
+        at < offset
+            && !crate::token::is_trivia(token.kind)
+            && !directives
+                .iter()
+                .any(|spanned| spanned.range.start_offset <= at && at < spanned.range.end_offset())
+    })
+}
+
 fn has_pragma_once(directives: &[SpannedDirective]) -> bool {
     directives.iter().any(|spanned| match &spanned.directive {
         Directive::Pragma { tokens } => tokens.first().is_some_and(|token| token.text() == "once"),
@@ -145,13 +197,22 @@ fn has_pragma_once(directives: &[SpannedDirective]) -> bool {
 /// closes the region, is the preprocessor's business: a file that leaves a region unclosed is one being
 /// edited, and its guard still works for as long as the `#ifndef` is false.
 fn detect_macro_guard(directives: &[SpannedDirective], root: &CppSyntaxNode) -> Option<Guard> {
+    detect_macro_guard_if(directives, |offset| declares_something_before(root, offset))
+}
+
+/// [`detect_macro_guard`] with the one question the tree answered handed in — see
+/// [`detect_guard_from_tokens`].
+fn detect_macro_guard_if(
+    directives: &[SpannedDirective],
+    has_code_before: impl Fn(usize) -> bool,
+) -> Option<Guard> {
     let opener = directives.iter().position(|spanned| {
         spanned.condition_depth == 0 && matches!(spanned.directive.kind(), DirectiveKind::Ifndef)
     })?;
 
     // Code before the opener is outside the guard. Comments and directives are not code: a copyright banner
     // above a guard is the ordinary spelling of a header.
-    if declares_something_before(root, directives[opener].range.start_offset) {
+    if has_code_before(directives[opener].range.start_offset) {
         return None;
     }
 

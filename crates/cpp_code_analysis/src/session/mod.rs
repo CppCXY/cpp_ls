@@ -1132,6 +1132,18 @@ impl<F: FileProvider + Clone> Session<F> {
         self.store.index()
     }
 
+    /// **What the file directs, without parsing it** — the reading a timeline walk needs, available *before* a file
+    /// is indexed. See [`crate::index::FileIndexer::directive_summary`].
+    pub fn directive_summary(&self, path: &Path) -> Option<crate::FileSummary> {
+        self.store.directive_summary(path)
+    }
+
+    /// **Parse one file now, from its own text** — see [`SummaryStore::parsed_summary`]: the raw reading, whatever
+    /// the index holds (after a cook it holds the *rendering's* reading).
+    pub fn parsed_summary(&self, path: &Path) -> Option<crate::FileSummary> {
+        self.store.parsed_summary(path)
+    }
+
     /// **What the session is holding** — the instrument for a report that says the server grew to gigabytes.
     ///
     /// Each field is a thing a cache *adds* to the process, and the numbers are the ones a report has to name before

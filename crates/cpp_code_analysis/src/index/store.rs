@@ -551,6 +551,39 @@ impl<F: FileProvider> SummaryStore<F> {
         &self.index
     }
 
+    /// **What the file directs, without parsing it** — see [`FileIndexer::directive_summary`](crate::index::FileIndexer::directive_summary).
+    ///
+    /// `None` when the file cannot be read. The indexer is built the way every summary this store builds is: the
+    /// configuration, the seed the index has collected, and nothing else — a directive reading has no use for macro
+    /// bodies or for a scanned include list.
+    pub fn directive_summary(&self, path: &Path) -> Option<crate::FileSummary> {
+        let source = self.files.read(path)?;
+        Some(
+            crate::index::FileIndexer::new(&self.files, &self.config)
+                .with_seed(self.index.macros())
+                .directive_summary(path, &source),
+        )
+    }
+
+    /// **Parse one file now, from its own text** — the *raw* summary, whatever the index happens to hold.
+    ///
+    /// Not the same question as [`ProjectIndex::summary`](crate::ProjectIndex::summary): the index holds what was
+    /// read there and then, and once a file has been cooked it holds the **rendering's** reading (which is the right
+    /// answer for "what does the compiler see" and the wrong one for "what does this file say"). This builds the
+    /// raw reading from the text as it stands, with the same seed every other build in this store uses — which is
+    /// what makes it comparable with [`SummaryStore::directive_summary`] field by field.
+    ///
+    /// Nothing is stored; a parse paid for by a caller that wants to look at it and nothing else.
+    pub fn parsed_summary(&self, path: &Path) -> Option<crate::FileSummary> {
+        let source = self.files.read(path)?;
+        let key = crate::SummaryKey::new(crate::content_hash(&source), self.context_hash(path));
+        Some(
+            crate::index::FileIndexer::new(&self.files, &self.config)
+                .with_seed(self.index.macros())
+                .index(path, &source, key),
+        )
+    }
+
     /// The index, for a caller that **read a file and has something to add to it** — the cooked reading
     /// ([`crate::Session::cook`]).
     ///

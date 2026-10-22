@@ -178,6 +178,28 @@ format summarize                 86 ms             58 ms
 先做 ①②：它们不改变任何答案，只把"环境"从 `summary` 依赖里解出来并建立验收基线。
 ③④ 是在 ①② 的数字背书之后才动的部分。
 
+#### 2.2.1 ② 已落地：`directive_summary` + oracle（2026-10-23）
+
+`FileIndexer::directive_summary(path, source)` 用**一次词法 + 指令扫描**产出 `FileSummary` 形状的读数，
+其中 `macros` / `includes` / `guards` 与解析出来的摘要同源；`declarations` 为空。`examples/directive_oracle.rs`
+把"指令读数"与"同一份文本的新鲜解析"逐字段对比，在 EmmyLuaCodeStyle 的 **1 963** 个文件上：
+
+```text
+宏事实（macros）          1 963 个文件全部相同
+包含（includes）          1 963 中 1 961 相同（2 个 asio 的 .ipp：指令读数多找到末尾一个 #include，
+                          是解析在语法恢复处丢掉的那个——文档里"扫描严格更完整"的那条，方向是解析缺）
+own_guard                 1 963 中 1 961 相同（bitmap.c、utf8.h：守卫前只有一个块注释，树的
+                          "守卫前有代码吗"把注释节点算成了代码，指令读数的 token 规则答对了）
+visit_once                全部相同
+regions / conditionals    全部相同（同一 seed 下——之前 271 个文件的差异是 seed 不同，不是读数不同）
+```
+
+成本：**1.70 ms/文件、3.34 s / 1 963 文件 / 31.8 MB**（冷，包含路径搜索按文件重做）。
+这就是 ② 的代价：比解析便宜约 2 倍（第一遍 3.6 s 对 1.7 s/千文件的量级），而且它是 ③ 的输入。
+
+两个副产品是精度问题的真实答案：`utf8.h`/`bitmap.c` 的守卫解析读错了（它们的声明被当成条件编译），
+两个 asio 文件丢了一个 include。**③ 之前要决定这两处用哪一方的答案**（指令读数更完整，但会改变今天的摘要）。
+
 ## 三、要删掉的东西（删了才叫换了模型）
 
 ```text

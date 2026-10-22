@@ -796,6 +796,128 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
             modules,
         }
     }
+
+    /// **What a file *directs*, with no parse behind it** — the `#include`s, `#define`s and conditional regions of
+    /// a file, in the shape [`crate::TranslationUnit::walk`] reads them.
+    ///
+    /// # What it is for
+    ///
+    /// A timeline walk needs, per file, exactly three things: `macros`, `includes`, and `guards` (grepped: the walk
+    /// reads nothing else from a [`FileSummary`]). None of the three needs a parse — they come from the lexer and
+    /// the directive scanner — so this is the summary a caller can have **before** the file is parsed.
+    ///
+    /// That is the piece the cold start is missing. `TranslationUnit::walk` requires `index.summary(file)` for every
+    /// file of the closure, so an environment exists only *after* the closure is indexed, which is why the first
+    /// parse is provisional and why a second pass has to re-read 1 001 files. With this, the walk can run *first* and
+    /// the parse can be given its environment — the plan is `docs/exact-index-design.md` §2.2 ③④, and this function
+    /// is ②.
+    ///
+    /// # The one thing that is not from the directives
+    ///
+    /// `guards.own_guard` — "is this file's own `#ifndef` its guard" — was answered from the tree, because "is there
+    /// code before the `#ifndef`" is a question about declarations. [`crate::guards::detect_guard_from_tokens`]
+    /// answers it from the token stream instead: code is a token that is neither trivia nor inside a directive.
+    ///
+    /// # Why a `FileSummary` and not a smaller type
+    ///
+    /// Because the walk is written against `&FileSummary` and a second type would mean a second walk. Every field
+    /// this function cannot fill is **empty**, and empty is the honest value: no declarations were read, so there
+    /// are none. `examples/directive_oracle.rs` compares the three fields the walk uses against the real summary for
+    /// every file of a project — that comparison is what says the two readings agree.
+    pub fn directive_summary(&self, path: &Path, source: &str) -> FileSummary {
+        let (mut tokens, _) = cpp_parser::lex(source, &cpp_parser::LexerConfig::default());
+        // **The one thing the parser does to a token stream that a bare lex does not.** A quoted header name is a
+        // string literal to the lexer and a header name to a directive, so `scan_directives` never sees
+        // `#include "x.h"` unless the name is folded first — found by `examples/directive_oracle.rs`, which reported
+        // every quoted include missing and every angled one present. `scan_includes` makes the same call for the
+        // same reason.
+        fold_quoted_header_names(source, &mut tokens);
+        let preprocessing = match self.seed {
+            Some(seed) => crate::preprocess::preprocess_with_a_seed(source, &tokens, seed),
+            None => crate::preprocess::preprocess(source, &tokens),
+        };
+
+        let mut interner = PathInterner::new(cfg!(windows));
+        let resolver = IncludeResolver::new(self.files, self.config);
+        let directory = path.parent().unwrap_or(Path::new("."));
+
+        let (mut macros, mut includes) = {
+            let macros: Vec<MacroFact> = preprocessing
+                .directives
+                .iter()
+                .filter_map(macro_fact)
+                .collect();
+            let includes: Vec<IncludeFact> = preprocessing
+                .directives
+                .iter()
+                .filter_map(|spanned| {
+                    include_fact(
+                        &spanned.directive,
+                        spanned.range,
+                        directory,
+                        &resolver,
+                        &mut interner,
+                        self.scanned,
+                    )
+                })
+                .collect();
+            (macros, includes)
+        };
+
+        // The order `index_tree` does them in, and it matters: the guards are assigned to the facts *before* the
+        // file's own guard de-guards them, and the settling rule reads what that left.
+        macros.sort_by_key(|fact| fact.range.start_offset);
+        includes.sort_by_key(|fact| fact.range.start_offset);
+
+        let mut guards = crate::summary::SummaryGuards::default();
+        let mut guarded: Vec<(&mut FactGuard, usize)> = macros
+            .iter_mut()
+            .map(|fact| (&mut fact.guard, fact.range.start_offset))
+            .chain(
+                includes
+                    .iter_mut()
+                    .map(|fact| (&mut fact.guard, fact.range.start_offset)),
+            )
+            .collect();
+        guarded.sort_by_key(|(_, at)| *at);
+
+        assign_guards(&mut guarded, &preprocessing, &mut guards);
+
+        let own_guard = own_guard_region_from_tokens(&preprocessing, &tokens);
+        guards.own_guard = own_guard.map(|region| region as u32);
+        guards.visit_once = preprocessing.directives.iter().any(|spanned| {
+            matches!(
+                &spanned.directive,
+                crate::directive::Directive::Pragma { tokens }
+                    if tokens.first().is_some_and(|token| token.text() == "once")
+            )
+        });
+
+        if let Some(region) = own_guard {
+            let mut all: Vec<&mut FactGuard> = macros
+                .iter_mut()
+                .map(|fact| &mut fact.guard)
+                .chain(includes.iter_mut().map(|fact| &mut fact.guard))
+                .collect();
+            deguard_the_files_own_guard(&mut all, region);
+        }
+
+        mark_settling_macro_facts(&preprocessing, own_guard, &mut macros);
+
+        FileSummary {
+            path: path.to_path_buf(),
+            // No content or context hash goes in: this summary is never stored or looked up, and a key that looked
+            // like a real one would invite exactly that. The walk does not read it.
+            key: SummaryKey::new(0, 0),
+            declarations: Vec::new(),
+            macros,
+            includes,
+            guards,
+            macro_readings: Vec::new(),
+            use_filter: Vec::new(),
+            modules: crate::ModuleReading::default(),
+        }
+    }
 }
 
 /// **What a file declares about modules**, read from its tree.
@@ -1033,6 +1155,22 @@ fn macro_alias(definition: &crate::preprocess::macros::MacroDef) -> Option<Box<s
 /// the file's **first** conditional, at depth 0, with no declaration before it — so when there is a guard, the
 /// first region in the list is the one it opens. `#pragma once` is a guard with no region at all, which is why
 /// the answer is an index rather than a boolean.
+/// [own_guard_region] for a caller with **no tree** — see [FileIndexer::directive_summary].
+fn own_guard_region_from_tokens(
+    preprocessing: &crate::FilePreprocessing,
+    tokens: &[cpp_parser::CppTokenData],
+) -> Option<usize> {
+    match crate::guards::detect_guard_from_tokens(&preprocessing.directives, tokens) {
+        crate::guards::Guard::Macro(_) => Some(0),
+        crate::guards::Guard::PragmaOnce => crate::guards::has_a_macro_guard_from_tokens(
+            &preprocessing.directives,
+            tokens,
+        )
+        .then_some(0),
+        crate::guards::Guard::None => None,
+    }
+}
+
 fn own_guard_region(
     preprocessing: &crate::FilePreprocessing,
     root: &cpp_parser::CppSyntaxNode,
