@@ -4412,12 +4412,22 @@ fn error_directive_line(text: &str) -> Option<(usize, usize, String)> {
             // sources including `<future>` all render to the same 617 607 tokens, and this turns the second and
             // later of them from a parse-and-sweep of the whole program into a clone of the facts.
             Some((seen, cached)) if *seen == program => cached.clone(),
-            _ => {
-                let indexer = FileIndexer::new(&self.files, &self.config);
-                let indexed = indexer.index_unit_rendering(&root, &stream, key);
-                self.unit_index = Some((program, indexed.clone()));
-                indexed
-            }
+            // **And the database may have it from a previous run.** The parse and the sweep are a pure function of
+            // `stream.text`, whose hash is `program` — so the facts filed under it are these facts, and reading them
+            // back is a decode instead of 399 ms of parsing plus ≈3.8 s of sweeping.
+            _ => match self.store.cached_indexed_unit(program) {
+                Some(cached) => {
+                    self.unit_index = Some((program, cached.clone()));
+                    cached
+                }
+                None => {
+                    let indexer = FileIndexer::new(&self.files, &self.config);
+                    let indexed = indexer.index_unit_rendering(&root, &stream, key);
+                    self.store.remember_indexed_unit(program, &indexed);
+                    self.unit_index = Some((program, indexed.clone()));
+                    indexed
+                }
+            },
         };
 
         // **The gate is gone, and what replaced it is a repair rather than a refusal.** A parse error is filed

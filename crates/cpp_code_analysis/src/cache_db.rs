@@ -53,6 +53,7 @@ const RENDERINGS: TableDefinition<(u64, u64), &[u8]> = TableDefinition::new("ren
 const ENVIRONMENTS: TableDefinition<u64, &[u8]> = TableDefinition::new("environments");
 const MACROS: TableDefinition<u64, &[u8]> = TableDefinition::new("macros");
 const UNITS: TableDefinition<u64, &[u8]> = TableDefinition::new("units");
+const UNIT_INDICES: TableDefinition<u64, &[u8]> = TableDefinition::new("unit_indices");
 
 const KEY_SCHEMA: &str = "schema_version";
 const KEY_GENERATION: &str = "generation";
@@ -145,6 +146,7 @@ pub struct DatabaseSizes {
     pub environments: usize,
     pub macros: usize,
     pub units: usize,
+    pub unit_indices: usize,
     pub bytes: u64,
 }
 
@@ -292,6 +294,7 @@ impl CacheDb {
             write.open_table(ENVIRONMENTS)?;
             write.open_table(MACROS)?;
             write.open_table(UNITS)?;
+            write.open_table(UNIT_INDICES)?;
         }
         write.commit()?;
 
@@ -532,7 +535,34 @@ impl CacheDb {
         let write = self.database.begin_write()?;
         {
             let mut units = write.open_table(UNITS)?;
+            write.open_table(UNIT_INDICES)?;
             units.insert(key, &packed[..])?;
+        }
+        write.commit()?;
+        Ok(())
+    }
+
+    /// **A unit's facts**, by the hash of the rendering they were read from — see
+    /// [`crate::unit_codec::encode_indexed_unit`].
+    ///
+    /// This is the half of a unit read that costs the most (the sweep is ≈3.8 s of a 4.4 s read) and the half that is
+    /// a pure function of the text, so it is the one worth keeping.
+    pub fn indexed_unit(&self, program: u64) -> Result<Option<crate::IndexedUnit>> {
+        let read = self.database.begin_read()?;
+        let table = read.open_table(UNIT_INDICES)?;
+        let Some(value) = table.get(program)? else {
+            return Ok(None);
+        };
+        let bytes = decompress(value.value())?;
+        Ok(crate::unit_codec::decode_indexed_unit(&bytes).ok())
+    }
+
+    pub fn put_indexed_unit(&self, program: u64, unit: &crate::IndexedUnit) -> Result<()> {
+        let packed = compress(&crate::unit_codec::encode_indexed_unit(unit));
+        let write = self.database.begin_write()?;
+        {
+            let mut table = write.open_table(UNIT_INDICES)?;
+            table.insert(program, &packed[..])?;
         }
         write.commit()?;
         Ok(())
@@ -557,6 +587,7 @@ impl CacheDb {
         {
             let mut macros = write.open_table(MACROS)?;
             write.open_table(UNITS)?;
+            write.open_table(UNIT_INDICES)?;
             macros.insert(body_hash, &packed[..])?;
         }
         write.commit()?;
@@ -662,6 +693,7 @@ impl CacheDb {
             environments: count(read.open_table(ENVIRONMENTS)?.len()? as usize),
             macros: count(read.open_table(MACROS)?.len()? as usize),
             units: count(read.open_table(UNITS)?.len()? as usize),
+            unit_indices: count(read.open_table(UNIT_INDICES)?.len()? as usize),
             bytes: std::fs::metadata(self.directory.join(DATABASE_FILE))
                 .map(|metadata| metadata.len())
                 .unwrap_or(0),
@@ -844,6 +876,15 @@ impl SummaryCache {
 
     pub fn put_unit(&self, key: u64, unit: &crate::RenderedUnit) -> Result<()> {
         self.database.put_unit(key, unit)
+    }
+
+    /// **A unit's facts, by its program hash** — see [`CacheDb::indexed_unit`].
+    pub fn indexed_unit(&self, program: u64) -> Result<Option<crate::IndexedUnit>> {
+        self.database.indexed_unit(program)
+    }
+
+    pub fn put_indexed_unit(&self, program: u64, unit: &crate::IndexedUnit) -> Result<()> {
+        self.database.put_indexed_unit(program, unit)
     }
 
     /// Start a new generation, and answer it — see [`CacheDb::begin_generation`].

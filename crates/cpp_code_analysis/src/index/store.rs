@@ -487,6 +487,18 @@ impl<F: FileProvider> SummaryStore<F> {
         self.summary_database()?.unit(key).ok().flatten()
     }
 
+    /// **A unit's facts**, by the hash of the rendering they were read from — see [`SummaryStore::cached_unit`].
+    pub fn cached_indexed_unit(&self, program: u64) -> Option<crate::IndexedUnit> {
+        self.summary_database()?.indexed_unit(program).ok().flatten()
+    }
+
+    /// Remember a unit's facts — see [`SummaryStore::cached_indexed_unit`].
+    pub fn remember_indexed_unit(&self, program: u64, unit: &crate::IndexedUnit) {
+        if let Some(database) = self.summary_database() {
+            let _ = database.put_indexed_unit(program, unit);
+        }
+    }
+
     /// Remember a unit rendering — see [`SummaryStore::cached_unit`].
     pub fn remember_unit(&self, key: u64, unit: &crate::RenderedUnit) {
         if let Some(database) = self.summary_database() {

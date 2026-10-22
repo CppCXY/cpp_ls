@@ -340,3 +340,163 @@ mod tests {
         assert!(matches!(decode(&bytes), Err(DecodeError::Truncated)));
     }
 }
+
+// ---- a unit's index ---------------------------------------------------------------------------------
+
+/// A second magic, because an `IndexedUnit` is not a rendering: the two live under different keys in the same
+/// database and a decoder that confused them would answer with the other one.
+const INDEX_MAGIC: [u8; 4] = [b'U', b'I', b'D', b'X'];
+
+/// **A unit's facts, as bytes** — the sweep's output for every file the parse covered.
+///
+/// `read_the_unit` costs a render (now cached), a parse of the whole program (399 ms) and `index_unit_rendering`
+/// (≈3.8 s on a real project) — and the last two are a pure function of the rendered text, which is what `key` is a
+/// hash of. So the facts are stored under that hash, and the second read of a unit is a decode.
+///
+/// Each file's facts go through [`crate::summary_codec`] — the same encoder a summary uses, with the fields a
+/// `CookedFile` does not carry (includes, guards, module readings) left empty rather than invented: those are the
+/// per-file pass's output, and a unit read does not produce them.
+pub fn encode_indexed_unit(unit: &crate::IndexedUnit) -> Vec<u8> {
+    let mut out: Vec<u8> = Vec::with_capacity(64 + unit.files.len() * 512);
+    out.extend_from_slice(&INDEX_MAGIC);
+    put_u32(&mut out, UNIT_CODEC_VERSION);
+
+    put_u32(&mut out, unit.files.len() as u32);
+    for (path, cooked) in &unit.files {
+        put_path(&mut out, path);
+        put_bytes(&mut out, &crate::summary_codec::encode(&as_a_summary(path, cooked)));
+        put_u32(&mut out, cooked.unplaced as u32);
+        put_u32(&mut out, cooked.diagnostics.len() as u32);
+        for diagnostic in &cooked.diagnostics {
+            put_u32(&mut out, diagnostic.range.start_offset as u32);
+            put_u32(&mut out, diagnostic.range.length as u32);
+            put_bytes(&mut out, diagnostic.message.as_bytes());
+        }
+    }
+
+    put_u32(&mut out, unit.unplaced as u32);
+    put_u32(&mut out, unit.tokens as u32);
+    put_u32(&mut out, unit.files_with_tokens as u32);
+    put_u32(&mut out, unit.missing as u32);
+    put_u32(&mut out, unit.unbalanced.len() as u32);
+    for path in &unit.unbalanced {
+        put_path(&mut out, path);
+    }
+    put_u32(&mut out, unit.braces as u32);
+    put_u32(&mut out, unit.errors as u32);
+    out
+}
+
+pub fn decode_indexed_unit(bytes: &[u8]) -> Result<crate::IndexedUnit, DecodeError> {
+    let mut reader = Reader::new(bytes);
+    if reader.take(4)? != INDEX_MAGIC {
+        return Err(DecodeError::NotAUnit);
+    }
+    if reader.u32()? != UNIT_CODEC_VERSION {
+        return Err(DecodeError::UnsupportedVersion);
+    }
+
+    let file_count = reader.count(MAX_FILES)?;
+    let mut files: Vec<(PathBuf, crate::CookedFile)> = Vec::with_capacity(file_count);
+    for _ in 0..file_count {
+        let path = reader.path()?;
+        let summary = crate::summary_codec::decode(&reader.bytes(MAX_TEXT)?)
+            .map_err(|_| DecodeError::Truncated)?;
+        let unplaced = reader.u32()? as usize;
+        let diagnostic_count = reader.count(MAX_SPANS)?;
+        let mut diagnostics: Vec<crate::CookedDiagnostic> = Vec::with_capacity(diagnostic_count);
+        for _ in 0..diagnostic_count {
+            let range = SourceRange::new(reader.u32()? as usize, reader.u32()? as usize);
+            let message =
+                String::from_utf8(reader.bytes(MAX_TEXT)?).map_err(|_| DecodeError::Truncated)?;
+            diagnostics.push(crate::CookedDiagnostic { range, message });
+        }
+        files.push((
+            path,
+            crate::CookedFile {
+                declarations: summary.declarations,
+                macros: summary.macros,
+                diagnostics,
+                unplaced,
+            },
+        ));
+    }
+
+    let unplaced = reader.u32()? as usize;
+    let tokens = reader.u32()? as usize;
+    let files_with_tokens = reader.u32()? as usize;
+    let missing = reader.u32()? as usize;
+    let unbalanced_count = reader.count(MAX_FILES)?;
+    let mut unbalanced: Vec<PathBuf> = Vec::with_capacity(unbalanced_count);
+    for _ in 0..unbalanced_count {
+        unbalanced.push(reader.path()?);
+    }
+    let braces = reader.u32()? as i64;
+    let errors = reader.u32()? as usize;
+
+    Ok(crate::IndexedUnit {
+        files,
+        unplaced,
+        tokens,
+        files_with_tokens,
+        missing,
+        unbalanced,
+        braces,
+        errors,
+    })
+}
+
+/// The fields a `FileSummary` needs and a `CookedFile` does not have, filled with the empty answer — see
+/// [`encode_indexed_unit`].
+fn as_a_summary(path: &PathBuf, cooked: &crate::CookedFile) -> crate::FileSummary {
+    crate::FileSummary {
+        path: path.clone(),
+        key: crate::SummaryKey::new(0, 0),
+        declarations: cooked.declarations.clone(),
+        macros: cooked.macros.clone(),
+        includes: Vec::new(),
+        guards: crate::SummaryGuards::default(),
+        macro_readings: Vec::new(),
+        use_filter: Vec::new(),
+        modules: crate::ModuleReading::default(),
+    }
+}
+
+#[cfg(test)]
+mod index_tests {
+    use super::*;
+
+    #[test]
+    fn an_indexed_unit_survives_a_round_trip() {
+        let unit = crate::IndexedUnit {
+            files: vec![(
+                PathBuf::from("/p/a.h"),
+                crate::CookedFile {
+                    declarations: Vec::new(),
+                    macros: Vec::new(),
+                    diagnostics: vec![crate::CookedDiagnostic {
+                        range: SourceRange::new(3, 4),
+                        message: "missing ;".to_string(),
+                    }],
+                    unplaced: 2,
+                },
+            )],
+            unplaced: 1,
+            tokens: 42,
+            files_with_tokens: 1,
+            missing: 0,
+            unbalanced: vec![PathBuf::from("/p/a.h")],
+            braces: 3,
+            errors: 1,
+        };
+        let decoded = decode_indexed_unit(&encode_indexed_unit(&unit)).expect("decodes");
+        assert_eq!(decoded.files.len(), 1);
+        assert_eq!(decoded.files[0].0, PathBuf::from("/p/a.h"));
+        assert_eq!(decoded.files[0].1.diagnostics.len(), 1);
+        assert_eq!(decoded.files[0].1.diagnostics[0].message, "missing ;");
+        assert_eq!(decoded.files[0].1.unplaced, 2);
+        assert_eq!(decoded.tokens, 42);
+        assert_eq!(decoded.braces, 3);
+        assert_eq!(decoded.unbalanced.len(), 1);
+    }
+}
