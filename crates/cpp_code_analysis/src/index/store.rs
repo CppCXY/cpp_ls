@@ -112,6 +112,11 @@ pub struct SummaryStore<F: FileProvider = DiskFiles> {
     /// every summary built after it — [`SummaryStore::prepare_telling`] consults this map — so the record is made
     /// where it was always made, at the start of the pass, and the lock is what makes that legal from `&self`.
     dead_macros: std::sync::Mutex<std::collections::HashMap<PathBuf, Vec<usize>>>,
+    /// **The summaries in one database** — `CPPLS_CACHE_DB=1`, and `docs/refactor-cache-and-startup.md` M1.
+    ///
+    /// Opened on first use rather than in `with_provider`, because the cache directory is only final after
+    /// `with_cache_directory` and a store that opened the wrong directory would be a store with two caches.
+    summary_database: std::sync::OnceLock<Option<crate::cache_db::SummaryCache>>,
     /// **One entry per distinct include search**, for the life of the store — see
     /// [`SummaryStore::resolution_still_holds`].
     ///
@@ -433,6 +438,7 @@ impl<F: FileProvider> SummaryStore<F> {
             stats: StoreStats::default(),
             revision: std::sync::atomic::AtomicU64::new(0),
             dead_macros: std::sync::Mutex::new(std::collections::HashMap::new()),
+            summary_database: std::sync::OnceLock::new(),
             include_searches: std::sync::Mutex::new(std::collections::HashMap::new()),
         }
     }
@@ -452,6 +458,30 @@ impl<F: FileProvider> SummaryStore<F> {
     /// Where the summaries are written, which is what a caller reporting on the cache wants to print.
     pub fn cache_directory(&self) -> &Path {
         &self.cache
+    }
+
+    /// **The summary database, opened on first use** — see [`SummaryStore::summary_database`].
+    fn summary_database(&self) -> Option<&crate::cache_db::SummaryCache> {
+        self.summary_database
+            .get_or_init(|| {
+                if std::env::var_os("CPPLS_CACHE_DB").is_none() {
+                    return None;
+                }
+                crate::cache_db::SummaryCache::open(&self.cache, crate::READING_FINGERPRINT)
+            })
+            .as_ref()
+    }
+
+    /// Commit whatever the database is holding — the end of a slice.
+    pub fn flush_summaries(&self) {
+        if let Some(database) = self.summary_database() {
+            database.flush();
+        }
+    }
+
+    /// Rows and bytes of the summary database, when it is in use.
+    pub fn summary_database_sizes(&self) -> Option<crate::cache_db::DatabaseSizes> {
+        self.summary_database().and_then(|database| database.sizes())
     }
 
     pub fn stats(&self) -> StoreStats {
@@ -594,7 +624,10 @@ impl<F: FileProvider> SummaryStore<F> {
 
         {
             let reading = std::time::Instant::now();
-            let stored = read_summary(&key.path_under(&self.cache));
+            let stored = match self.summary_database().and_then(|database| database.summary(key)) {
+                Some(stored) => Ok(stored),
+                None => read_summary(&key.path_under(&self.cache)),
+            };
             let decoded = reading.elapsed();
             if let Ok(stored) = stored
                 && stored.key == key
@@ -673,7 +706,11 @@ impl<F: FileProvider> SummaryStore<F> {
         if stored {
             // A failed write is not a failed lookup: the answer is in hand and in the index. Reporting it would
             // turn a read-only checkout — a perfectly ordinary way to work — into a broken editor.
-            let _ = write_summary(&summary, &self.cache);
+            if let Some(database) = self.summary_database() {
+                database.put(key, &summary);
+            } else {
+                let _ = write_summary(&summary, &self.cache);
+            }
         }
 
         if tracing {

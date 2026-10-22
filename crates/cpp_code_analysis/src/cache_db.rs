@@ -525,6 +525,15 @@ impl CacheDb {
             (summaries, renderings, contents)
         };
 
+        // **Nothing referenced means nothing to collect.** The first run has no `files` rows yet — the store
+        // writes summaries before it records what they belong to — and a collection that read that as "every
+        // summary is garbage" would empty a database that had just been filled. A collection is only meaningful
+        // once some file says what it is, and this is the guard that makes the difference a rule rather than an
+        // accident of ordering.
+        if live_summaries.is_empty() && live_renderings.is_empty() {
+            return Ok(Collected::default());
+        }
+
         let mut collected = Collected::default();
         let write = self.database.begin_write()?;
         {
@@ -591,6 +600,97 @@ impl CacheDb {
                 .map(|metadata| metadata.len())
                 .unwrap_or(0),
         })
+    }
+}
+
+/// **The summary cache as the store uses it**: a database, plus the batch a slice is still holding.
+///
+/// The batch is the reason this type exists at all. Measured on the project's own 1 768 summaries: one transaction
+/// per row cost **8.2 s**, and the same rows in one transaction **0.97 s** — so a caller writing a slice's worth of
+/// summaries must not be handed a per-row `put`. The buffer flushes when it is full and when the store says so
+/// (`Session` does, at the end of a slice), and a half-full buffer loses nothing that is not recomputable.
+pub struct SummaryCache {
+    database: CacheDb,
+    pending: std::sync::Mutex<Vec<(CacheKey, Vec<u8>)>>,
+}
+
+/// How many rows one transaction takes — the wave sizes this store writes in are 8–32, and the measured cost of a
+/// commit at that size is noise next to the parse it follows.
+const BATCH: usize = 32;
+
+impl SummaryCache {
+    /// Open the database next to the file cache it replaces, and answer `None` when it cannot be opened — the file
+    /// cache is still there, so a cache that cannot open is not a session that cannot start.
+    pub fn open(directory: &Path, reading_fingerprint: u64) -> Option<SummaryCache> {
+        match CacheDb::open(directory, reading_fingerprint) {
+            Ok(database) => Some(SummaryCache {
+                database,
+                pending: std::sync::Mutex::new(Vec::new()),
+            }),
+            Err(error) => {
+                log::warn!("the summary database could not be opened: {error}");
+                None
+            }
+        }
+    }
+
+    /// The summary for a key, decoded. A miss is `None` and never an error.
+    pub fn summary(&self, key: crate::cache::SummaryKey) -> Option<crate::FileSummary> {
+        let bytes = self
+            .database
+            .summary(CacheKey {
+                content: key.content_hash,
+                config: key.context_hash,
+                env: 0,
+            })
+            .ok()
+            .flatten()?;
+        match crate::summary_codec::decode(&bytes) {
+            Ok(summary) => Some(summary),
+            Err(error) => {
+                log::debug!("a stored summary could not be decoded: {error}");
+                None
+            }
+        }
+    }
+
+    /// Buffer a summary, and commit the batch when it is full.
+    pub fn put(&self, key: crate::cache::SummaryKey, summary: &crate::FileSummary) {
+        let bytes = crate::summary_codec::encode(summary);
+        let cache_key = CacheKey {
+            content: key.content_hash,
+            config: key.context_hash,
+            env: 0,
+        };
+        let Ok(mut pending) = self.pending.lock() else {
+            return;
+        };
+        pending.push((cache_key, bytes));
+        if pending.len() >= BATCH {
+            flush(&self.database, &mut pending);
+        }
+    }
+
+    /// Commit whatever the buffer holds — the end of a slice.
+    pub fn flush(&self) {
+        if let Ok(mut pending) = self.pending.lock() {
+            flush(&self.database, &mut pending);
+        }
+    }
+
+    /// Rows and bytes, for the probes.
+    pub fn sizes(&self) -> Option<DatabaseSizes> {
+        self.database.sizes().ok()
+    }
+}
+
+fn flush(database: &CacheDb, pending: &mut Vec<(CacheKey, Vec<u8>)>) {
+    if pending.is_empty() {
+        return;
+    }
+    let rows = std::mem::take(pending);
+    if let Err(error) = database.put_summaries(&rows) {
+        log::warn!("a batch of summaries could not be written: {error}");
     }
 }
 
@@ -711,13 +811,32 @@ mod tests {
             })
             .collect();
         database.put_summaries(&rows).unwrap();
+        // One file row, so the collection below means something: with no rows at all the database is new rather than
+        // garbage, and `collect` deliberately does nothing.
+        database
+            .put_file(
+                Path::new("C:/p/wanted.cpp"),
+                FileRow {
+                    content: 0,
+                    config: 1,
+                    env: 2,
+                    mtime: 1,
+                    size: 1,
+                    generation: 1,
+                },
+            )
+            .unwrap();
         assert_eq!(database.sizes().unwrap().summaries, 256);
         assert_eq!(database.summary(rows[7].0).unwrap().unwrap(), rows[7].1);
 
         // Nothing references them, so a collection drops the lot — and compaction is what gives the file back.
         let collected = database.collect().unwrap();
-        assert_eq!(collected.summaries, 256);
-        assert_eq!(database.sizes().unwrap().summaries, 0);
+        assert_eq!(collected.summaries, 255, "every summary but the referenced one");
+        assert_eq!(
+            database.sizes().unwrap().summaries,
+            1,
+            "the one a file references stays"
+        );
         let before = database.sizes().unwrap().bytes;
         assert!(database.compact().unwrap());
         let after = database.sizes().unwrap().bytes;

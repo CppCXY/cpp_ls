@@ -1109,6 +1109,20 @@ impl<F: FileProvider + Clone> Session<F> {
     /// `rendering_bytes` is the text of every cached rendering, which is the cache with **no cap** — its key is
     /// `(path, content hash)`, so a keystroke adds an entry and nothing ever removes one. `summaries` and `facts`
     /// are the index, which is bounded by the project and is the part that is supposed to be large.
+    /// **The summary database, when `CPPLS_CACHE_DB` turned it on** — rows and bytes.
+    ///
+    /// `None` is the file cache, which is still the default until the database is measured on a real project; see
+    /// `docs/refactor-cache-and-startup.md` M1.
+    pub fn summary_database_sizes(&self) -> Option<crate::cache_db::DatabaseSizes> {
+        self.store.summary_database_sizes()
+    }
+
+    /// Commit whatever summaries the database is holding — the end of a slice.
+    pub fn flush_summaries(&self) {
+        self.store.flush_summaries();
+    }
+
+
     pub fn cache_sizes(&self) -> CacheSizes {
         let (renderings, rendering_bytes) = self
             .renderings
