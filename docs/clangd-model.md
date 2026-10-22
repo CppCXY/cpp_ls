@@ -336,3 +336,78 @@ D. 不值得的：`skip_bodies` 早测过（neutral），不要再试
 目标：sweep 3 200 ms → 300 ms 量级，TU 读 4.5 s → 约 1.6 s；
 而**编辑后**（B 生效）一个 TU 的增量 sweep ≈ 0。
 到那时再谈 parser 一遍化（把 1.6 s 里的 1.3 s 变成 0.6 s），顺序不能反。
+
+## 十二、正确的方向：索引是一份"浏览数据库"，不是一份"精确语义"
+
+### 12.1 微软自己的文档说明了 IntelliSense 为什么快
+
+Visual Studio 的索引用的是 **C++ Browsing Database Parser**，微软的文档写得很直白
+（[Hint Files](https://learn.microsoft.com/en-us/cpp/build/reference/hint-files)）：
+
+```text
+"The C++ Browsing Database Parser is a fuzzy parser that can parse large amounts of code in a short amount
+ of time. One reason it's fast is because it skips the content of blocks. For instance, it only records the
+ location and parameters of a function, and ignores its contents."
+```
+
+它**按源文件逐个解析**（不按 include 闭包），**不展开宏**，**跳过函数体**，并且在解析不了的地方
+"uses error recovery techniques to ignore indecipherable source code"。
+`_STD_BEGIN`、`BEGIN`、`NOEXCEPT` 这类宏带来的问题，用一个**固定的 hint 文件**解决 ——
+里面只有 `#define X` 这样的替换，一次写好、随工具链走，不是每个文件算一遍环境。
+
+CLion 的 stub index 与此同构：每个文件一份 stub（只有声明、没有函数体），可增量重建；
+cpptools 的 tag parser 也是每个文件一次模糊扫描，加上一个 browse.path。
+
+**三家的共同点：索引是"名字 + 位置 + 类别"的堆，允许缺失，从不为一个文件做编译器级的预处理。**
+
+### 12.2 我们违反了其中每一条
+
+```text
+· 按 include 闭包展开宏（每个文件一次 render，17 ms）
+· 要求 facts 的 scope 精确（`std::` 必须正确）→ 拿不到就 provisional → 第二遍
+· 不跳过函数体（我们连 body 的语法树都建）
+· 索引建完才敢出检查项
+```
+
+### 12.3 实测：按微软的方式做，这个项目 0.77 秒
+
+临时探针：1 761 个文件、79.5 MB、13 242 088 个 token，只做"词法 + 一个花括号计数器 +
+`标识符` 后跟 `(`/`;`/`{` 记一条声明"的模糊扫描：
+
+```text
+token scan: 772 ms, 312 082 条"声明样"
+对比今天的索引路径：131 s
+```
+
+**170 倍。** 而且这 772 ms 里绝大部分是词法（13.2M token × 0.04 µs）。真实的浏览索引器要加
+作用域启发式、类别、基类子句，按 2–4 倍估：**全项目 2–3 秒**，简单项目几十毫秒。
+每编辑一个文件重扫一个文件 ≈ **0.5 ms**。
+
+### 12.4 因此：正确的架构是"两个索引 + 一个精确视图"
+
+```text
+浏览索引（新）    每文件一次 token 扫描，无树、无宏、跳过 body；产出 (名字, 类别, 写出来的作用域, 位置)
+                  宏的问题由 hint 表解决：工具链一份内置 hint（_STD_BEGIN → namespace std { 之类），
+                  用户可加自己的；错的地方就是错，允许缺失
+                  盘上按 (文件内容, hint 版本) 缓存，编辑只重扫一个文件
+
+精确视图（已有）  打开的文件：cook + parse（17 ms/次编辑）+ FileView —— 补全、跳转、语义着色、诊断
+                  它对索引的依赖只是"名字 → 位置"，索引缺了就是"未解析"，不是"等它建完"
+
+删除（不再需要）  第二遍、闭包走查、provisional summary、env 键、全局 pending 门控、
+                  `index_tree` 与 `FileIndexer` 在索引路径上的地位（它们留给精确视图用）
+```
+
+### 12.5 为什么这条路能解释三家的性能
+
+| | VS browse parser | CLion stub index | cpptools tag parser | 我们（现在） | 我们（12.4 之后） |
+|---|---|---|---|---|---|
+| 单位 | 每个源文件 | 每个文件 | 每个文件 | 每个文件 + 闭包 | **每个文件** |
+| 建树 | 否（模糊） | 否（stub） | 否 | **是（CST）** | 否 |
+| 宏 | hint 文件 | 有限展开 + 启发 | 不展开 | **完整展开 + 闭包环境** | hint 表 |
+| 函数体 | 跳过 | 跳过 | 跳过 | **建树 + 抽 facts** | 跳过 |
+| 冷建 1761 文件 | 秒级 | 秒级 | 秒级 | **131 s** | **预估 2–3 s** |
+| 每编辑 | 一个文件 | 一个文件 | 一个文件 | 一个文件 + **闭包 + 第二遍** | 一个文件 ~0.5 ms |
+
+这就是"为什么 VS/cpptools/CLion 快"的答案：**它们的索引根本没有做我们正在做的事**。
+我们不是慢在实现上，是慢在要求上——要求索引具备编译器级的精确度，于是每一行索引都要付预处理和解析的代价。
