@@ -13,7 +13,10 @@
         let root = std::env::temp_dir().join("cppls-store-tests").join(name);
         let _ = std::fs::remove_dir_all(&root);
 
-        let store = SummaryStore::with_provider(&root, CompilerConfig::default(), files.clone());
+        // **The file cache, on purpose**: these tests are about the shape of the directory, and the database has
+        // its own tests (`cache_db::tests`) and its own measurement in `docs/refactor-cache-and-startup.md`.
+        let store = SummaryStore::with_provider(&root, CompilerConfig::default(), files.clone())
+            .without_the_cache_database();
         (store, root)
     }
 

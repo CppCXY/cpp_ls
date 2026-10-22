@@ -34,7 +34,9 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use redb::{Database, ReadableTable, ReadableTableMetadata, TableDefinition};
+use redb::{
+    Database, ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition,
+};
 
 /// The name of the database file inside the cache directory.
 pub const DATABASE_FILE: &str = "cache.redb";
@@ -642,6 +644,13 @@ impl CacheDb {
 /// per row cost **8.2 s**, and the same rows in one transaction **0.97 s** — so a caller writing a slice's worth of
 /// summaries must not be handed a per-row `put`. The buffer flushes when it is full and when the store says so
 /// (`Session` does, at the end of a slice), and a half-full buffer loses nothing that is not recomputable.
+///
+/// # One handle per directory, process-wide
+///
+/// A database file has one writer, and a process that opened it twice would be two writers of the same rows with two
+/// buffers — a summary written by one store would be invisible to the other until either flushed. Measured as seven
+/// failing tests, each of the shape "write with one store, read with the next". [`shared`] is the answer: the second
+/// caller gets the same handle, and therefore the same batch.
 pub struct SummaryCache {
     database: CacheDb,
     pending: std::sync::Mutex<(Vec<(CacheKey, Vec<u8>)>, Vec<(String, FileRow)>)>,
@@ -650,6 +659,30 @@ pub struct SummaryCache {
 /// How many rows one transaction takes — the wave sizes this store writes in are 8–32, and the measured cost of a
 /// commit at that size is noise next to the parse it follows.
 const BATCH: usize = 32;
+
+/// **The handles this process holds, by directory.** See the note on [`SummaryCache`]: two stores over one cache must
+/// be one writer, or a summary written through one is invisible to the other until a flush that may never come.
+fn open_handles() -> &'static std::sync::Mutex<std::collections::HashMap<PathBuf, std::sync::Arc<SummaryCache>>> {
+    static HANDLES: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<PathBuf, std::sync::Arc<SummaryCache>>>,
+    > = std::sync::OnceLock::new();
+    HANDLES.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// **The one handle for a cache directory**, opened on first use. `None` when it cannot be opened — the file cache is
+/// still there, so a cache that cannot open is not a session that cannot start.
+pub fn shared(directory: &Path, reading_fingerprint: u64) -> Option<std::sync::Arc<SummaryCache>> {
+    let key = std::fs::canonicalize(directory).unwrap_or_else(|_| directory.to_path_buf());
+    let Ok(mut handles) = open_handles().lock() else {
+        return None;
+    };
+    if let Some(handle) = handles.get(&key) {
+        return Some(std::sync::Arc::clone(handle));
+    }
+    let opened = std::sync::Arc::new(SummaryCache::open(directory, reading_fingerprint)?);
+    handles.insert(key, std::sync::Arc::clone(&opened));
+    Some(opened)
+}
 
 impl SummaryCache {
     /// Open the database next to the file cache it replaces, and answer `None` when it cannot be opened — the file
@@ -757,6 +790,15 @@ impl SummaryCache {
     /// Rows and bytes, for the probes.
     pub fn sizes(&self) -> Option<DatabaseSizes> {
         self.database.sizes().ok()
+    }
+}
+
+/// **A batch is flushed when the handle goes away.** A store that wrote a summary and was then dropped would
+/// otherwise lose it, and a cache whose last writes are lost re-parses them on the next start — the cost it exists
+/// to avoid. The pump still flushes at the end of a slice, so this is the backstop rather than the mechanism.
+impl Drop for SummaryCache {
+    fn drop(&mut self) {
+        self.flush();
     }
 }
 

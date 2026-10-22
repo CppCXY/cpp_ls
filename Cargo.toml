@@ -32,7 +32,7 @@ chrono = "0.4.45"
 # **The cache is one embedded database, not 1 800 files** — see `docs/refactor-cache-and-startup.md`.
 # Pure Rust, single file, MVCC, ordered keys: reading does not take the lock writing takes, and a
 # range delete is how a generation is collected.
-redb = "2.4"
+redb = "4.4.0"
 # Compresses the summaries and the renderings. Level 3 rather than 9: these are small blobs read on
 # the interactive path, and the difference measured at 9 was bytes we do not have (0.6 % on a summary).
 zstd = "0.13"

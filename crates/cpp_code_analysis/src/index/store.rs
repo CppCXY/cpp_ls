@@ -116,7 +116,7 @@ pub struct SummaryStore<F: FileProvider = DiskFiles> {
     ///
     /// Opened on first use rather than in `with_provider`, because the cache directory is only final after
     /// `with_cache_directory` and a store that opened the wrong directory would be a store with two caches.
-    summary_database: std::sync::OnceLock<Option<crate::cache_db::SummaryCache>>,
+    summary_database: std::sync::OnceLock<Option<std::sync::Arc<crate::cache_db::SummaryCache>>>,
     /// The generation a write is recorded under — bumped when the store opens, so a collection can tell this run's
     /// rows from the previous one's.
     generation: u64,
@@ -458,6 +458,13 @@ impl<F: FileProvider> SummaryStore<F> {
         }
         self
     }
+    /// **Use the file cache and not the database.** For the tests that assert the *directory*`s shape, and for a
+    /// caller that wants the layer as it was before `cache_db` existed. The database is the default elsewhere.
+    pub fn without_the_cache_database(mut self) -> Self {
+        self.summary_database = std::sync::OnceLock::from(None);
+        self
+    }
+
 
     /// Where the summaries are written, which is what a caller reporting on the cache wants to print.
     pub fn cache_directory(&self) -> &Path {
@@ -465,18 +472,20 @@ impl<F: FileProvider> SummaryStore<F> {
     }
 
     /// **The summary database, opened on first use** — see [`SummaryStore::summary_database`].
-    fn summary_database(&self) -> Option<&crate::cache_db::SummaryCache> {
+    fn summary_database(&self) -> Option<std::sync::Arc<crate::cache_db::SummaryCache>> {
         self.summary_database
             .get_or_init(|| {
-                // **Opt-in while the store tests are taught about it** — `CPPLS_CACHE_DB=1` turns it on, and the file
-                // cache is what a session writes otherwise. The measurement that says it should become the default
-                // is in `docs/refactor-cache-and-startup.md` §九: warm start 4.2 s → 3.4 s.
+                // **Opt-in while the session tests are taught about it** — `CPPLS_CACHE_DB=1` turns it on, and the
+                // file cache is what a session writes otherwise. The measurement that says it should become the
+                // default is in `docs/refactor-cache-and-startup.md` §九: warm start 4.2 s → 3.4 s. What stands in
+                // the way is eight tests that assert the *file* cache's presence (`the_cache_goes_where_the_project
+                // says_and_the_filter_follows_it`, `a_second_run_over_the_same_project_reads_nothing_new`, …).
                 if std::env::var_os("CPPLS_CACHE_DB").is_none() {
                     return None;
                 }
-                crate::cache_db::SummaryCache::open(&self.cache, crate::READING_FINGERPRINT)
+                crate::cache_db::shared(&self.cache, crate::READING_FINGERPRINT)
             })
-            .as_ref()
+            .clone()
     }
 
     /// **Start a generation**, so a collection can tell this run's rows from the last one's.
@@ -489,10 +498,13 @@ impl<F: FileProvider> SummaryStore<F> {
     }
 
     /// **Collect and compact the database** — the idle step, never a query: both are rewrites of the file.
+    ///
+    /// Only when this store holds the **only** handle: the compactor rewrites the file for everyone, and a handle
+    /// another store is still using is not one to rewrite under it.
     pub fn collect_the_cache(&mut self) -> Option<(crate::cache_db::Collected, bool)> {
-        let database = self.summary_database.get_mut()?.as_mut()?;
+        let database = self.summary_database.get_mut()?.clone()?;
         database.flush();
-        database.collect_and_compact()
+        std::sync::Arc::into_inner(database)?.collect_and_compact()
     }
 
     /// Commit whatever the database is holding — the end of a slice.
