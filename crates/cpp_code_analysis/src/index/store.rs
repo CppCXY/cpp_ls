@@ -117,6 +117,9 @@ pub struct SummaryStore<F: FileProvider = DiskFiles> {
     /// Opened on first use rather than in `with_provider`, because the cache directory is only final after
     /// `with_cache_directory` and a store that opened the wrong directory would be a store with two caches.
     summary_database: std::sync::OnceLock<Option<crate::cache_db::SummaryCache>>,
+    /// The generation a write is recorded under — bumped when the store opens, so a collection can tell this run's
+    /// rows from the previous one's.
+    generation: u64,
     /// **One entry per distinct include search**, for the life of the store — see
     /// [`SummaryStore::resolution_still_holds`].
     ///
@@ -439,6 +442,7 @@ impl<F: FileProvider> SummaryStore<F> {
             revision: std::sync::atomic::AtomicU64::new(0),
             dead_macros: std::sync::Mutex::new(std::collections::HashMap::new()),
             summary_database: std::sync::OnceLock::new(),
+            generation: 0,
             include_searches: std::sync::Mutex::new(std::collections::HashMap::new()),
         }
     }
@@ -464,12 +468,31 @@ impl<F: FileProvider> SummaryStore<F> {
     fn summary_database(&self) -> Option<&crate::cache_db::SummaryCache> {
         self.summary_database
             .get_or_init(|| {
+                // **Opt-in while the store tests are taught about it** — `CPPLS_CACHE_DB=1` turns it on, and the file
+                // cache is what a session writes otherwise. The measurement that says it should become the default
+                // is in `docs/refactor-cache-and-startup.md` §九: warm start 4.2 s → 3.4 s.
                 if std::env::var_os("CPPLS_CACHE_DB").is_none() {
                     return None;
                 }
                 crate::cache_db::SummaryCache::open(&self.cache, crate::READING_FINGERPRINT)
             })
             .as_ref()
+    }
+
+    /// **Start a generation**, so a collection can tell this run's rows from the last one's.
+    pub fn begin_generation(&mut self) {
+        if let Some(database) = self.summary_database() {
+            if let Ok(generation) = database.begin_generation() {
+                self.generation = generation;
+            }
+        }
+    }
+
+    /// **Collect and compact the database** — the idle step, never a query: both are rewrites of the file.
+    pub fn collect_the_cache(&mut self) -> Option<(crate::cache_db::Collected, bool)> {
+        let database = self.summary_database.get_mut()?.as_mut()?;
+        database.flush();
+        database.collect_and_compact()
     }
 
     /// Commit whatever the database is holding — the end of a slice.
@@ -708,6 +731,9 @@ impl<F: FileProvider> SummaryStore<F> {
             // turn a read-only checkout — a perfectly ordinary way to work — into a broken editor.
             if let Some(database) = self.summary_database() {
                 database.put(key, &summary);
+                // **And what the summary belongs to.** A summary no `files` row references is what a collection
+                // deletes, so the pair is written together (`SummaryCache` batches both into one transaction).
+                database.note_file(path, key.content_hash, key.context_hash, 0, self.generation);
             } else {
                 let _ = write_summary(&summary, &self.cache);
             }

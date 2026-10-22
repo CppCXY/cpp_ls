@@ -392,6 +392,39 @@ impl CacheDb {
         Ok(())
     }
 
+    /// **Summaries and file rows in one transaction.** The two belong together: a summary no `files` row references
+    /// is exactly what a collection deletes, so a batch that wrote only half of the pair would create garbage on
+    /// every commit — and a slice writes both.
+    pub fn put_rows(&self, summaries: &[(CacheKey, Vec<u8>)], files: &[(String, FileRow)]) -> Result<()> {
+        if summaries.is_empty() && files.is_empty() {
+            return Ok(());
+        }
+        let packed: Vec<((u64, u64, u64), Vec<u8>)> = summaries
+            .iter()
+            .map(|(key, bytes)| ((key.content, key.config, key.env), compress(bytes)))
+            .collect();
+        let rows: Vec<(String, Vec<u8>)> = files
+            .iter()
+            .map(|(path, row)| (normalise(Path::new(path)), row.encode()))
+            .collect();
+
+        let write = self.database.begin_write()?;
+        {
+            let mut table = write.open_table(SUMMARIES)?;
+            for (key, bytes) in &packed {
+                table.insert(*key, &bytes[..])?;
+            }
+        }
+        {
+            let mut table = write.open_table(FILES)?;
+            for (path, bytes) in &rows {
+                table.insert(&path[..], &bytes[..])?;
+            }
+        }
+        write.commit()?;
+        Ok(())
+    }
+
     /// **Write many summaries in one transaction.** Measured on the project's own file cache: 1 768 single-row
     /// writes took **8.2 s** (4.6 ms each, almost all of it transaction overhead), and the same rows written
     /// together take well under a tenth of that. A cold build writes thousands of rows, so this is the shape the
@@ -611,7 +644,7 @@ impl CacheDb {
 /// (`Session` does, at the end of a slice), and a half-full buffer loses nothing that is not recomputable.
 pub struct SummaryCache {
     database: CacheDb,
-    pending: std::sync::Mutex<Vec<(CacheKey, Vec<u8>)>>,
+    pending: std::sync::Mutex<(Vec<(CacheKey, Vec<u8>)>, Vec<(String, FileRow)>)>,
 }
 
 /// How many rows one transaction takes — the wave sizes this store writes in are 8–32, and the measured cost of a
@@ -625,7 +658,7 @@ impl SummaryCache {
         match CacheDb::open(directory, reading_fingerprint) {
             Ok(database) => Some(SummaryCache {
                 database,
-                pending: std::sync::Mutex::new(Vec::new()),
+                pending: std::sync::Mutex::new((Vec::new(), Vec::new())),
             }),
             Err(error) => {
                 log::warn!("the summary database could not be opened: {error}");
@@ -665,8 +698,39 @@ impl SummaryCache {
         let Ok(mut pending) = self.pending.lock() else {
             return;
         };
-        pending.push((cache_key, bytes));
-        if pending.len() >= BATCH {
+        pending.0.push((cache_key, bytes));
+        if pending.0.len() >= BATCH {
+            flush(&self.database, &mut *pending);
+        }
+    }
+
+    /// **Record what a file is**, so a collection can ask whether a summary is still reachable — and so a later
+    /// start can compare `content` without reading the file.
+    pub fn note_file(&self, path: &Path, content: u64, config: u64, env: u64, generation: u64) {
+        let (mtime, size) = std::fs::metadata(path)
+            .map(|metadata| {
+                let mtime = metadata
+                    .modified()
+                    .ok()
+                    .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|since| since.as_millis() as u64)
+                    .unwrap_or(0);
+                (mtime, metadata.len())
+            })
+            .unwrap_or((0, 0));
+        let row = FileRow {
+            content,
+            config,
+            env,
+            mtime,
+            size,
+            generation,
+        };
+        let Ok(mut pending) = self.pending.lock() else {
+            return;
+        };
+        pending.1.push((path.to_string_lossy().to_string(), row));
+        if pending.0.len() + pending.1.len() >= BATCH {
             flush(&self.database, &mut pending);
         }
     }
@@ -674,8 +738,20 @@ impl SummaryCache {
     /// Commit whatever the buffer holds — the end of a slice.
     pub fn flush(&self) {
         if let Ok(mut pending) = self.pending.lock() {
-            flush(&self.database, &mut pending);
+            flush(&self.database, &mut *pending);
         }
+    }
+
+    /// Start a new generation, and answer it — see [`CacheDb::begin_generation`].
+    pub fn begin_generation(&self) -> Result<u64> {
+        self.database.begin_generation()
+    }
+
+    /// **Collect and compact** — the idle step: both rewrite the file, so neither belongs to a query.
+    pub fn collect_and_compact(&mut self) -> Option<(Collected, bool)> {
+        let collected = self.database.collect().ok()?;
+        let compacted = self.database.compact().ok()?;
+        Some((collected, compacted))
     }
 
     /// Rows and bytes, for the probes.
@@ -684,12 +760,15 @@ impl SummaryCache {
     }
 }
 
-fn flush(database: &CacheDb, pending: &mut Vec<(CacheKey, Vec<u8>)>) {
-    if pending.is_empty() {
+fn flush(
+    database: &CacheDb,
+    pending: &mut (Vec<(CacheKey, Vec<u8>)>, Vec<(String, FileRow)>),
+) {
+    if pending.0.is_empty() && pending.1.is_empty() {
         return;
     }
-    let rows = std::mem::take(pending);
-    if let Err(error) = database.put_summaries(&rows) {
+    let (summaries, files) = std::mem::take(pending);
+    if let Err(error) = database.put_rows(&summaries, &files) {
         log::warn!("a batch of summaries could not be written: {error}");
     }
 }

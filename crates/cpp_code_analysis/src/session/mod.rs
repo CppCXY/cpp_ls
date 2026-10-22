@@ -1117,6 +1117,11 @@ impl<F: FileProvider + Clone> Session<F> {
         self.store.summary_database_sizes()
     }
 
+    /// **Collect and compact the summary database** — the idle step, never a query.
+    pub fn collect_the_cache(&mut self) -> Option<(crate::cache_db::Collected, bool)> {
+        self.store.collect_the_cache()
+    }
+
     /// Commit whatever summaries the database is holding — the end of a slice.
     pub fn flush_summaries(&self) {
         self.store.flush_summaries();
@@ -2795,6 +2800,12 @@ impl<F: FileProvider + Clone> Session<F> {
     /// on every slice. That case is real and is recorded at that function ("a queue that refills with files that
     /// have readings never empties… a hang, not a slowdown"). One round that neither read a file nor cooked one is
     /// the end of the work there is.
+    /// **The cache database, one generation later** — called once by [`Session::open`] and by tests that open a
+    /// store directly, so a collection can tell this run's rows from the last one's.
+    pub fn begin_the_cache_generation(&mut self) {
+        self.store.begin_generation();
+    }
+
     pub fn index_everything(&mut self) -> usize {
         let mut total = 0;
         let tracing = crate::probes::cooking();
