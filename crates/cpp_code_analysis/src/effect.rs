@@ -709,7 +709,6 @@ mod tests {
     /// **The oracle**: the same fixture, read two ways — the effect chain, and the compiler-shaped walk that the
     /// index uses today. Every macro the chain says a file sees must be what the walk says it sees.
     #[test]
-    #[ignore = "the walk does not surface conditional facts of nested files — see the note above"]
     fn the_chain_agrees_with_the_walk_on_every_file() {
         use crate::summary::MacroDefinitions;
         use crate::{CompilerConfig, FileIndexer, MemoryFiles, SummaryKey, TranslationUnit};

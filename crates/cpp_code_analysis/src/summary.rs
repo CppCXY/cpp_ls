@@ -2444,15 +2444,23 @@ impl<'unit> MacroView<'unit> {
     /// *definition* is `None`. See [`cpp_parser::IncludedMacro::undefined_at`], which is where that distinction
     /// lives.
     fn the_binding(&self, name: &str) -> Option<(usize, &'unit TuEvent)> {
-        let (at, index) = self.last_visible_of(name, |event| event.unconditional)?;
+        // **The same predicate as [`MacroView::visible_binding`], and for the same reason.** This asked for
+        // `event.unconditional` alone, so a `#define` behind an `#if` that the walk *decided true* was invisible to
+        // the parser's view — it is a conditional fact, and being conditional is not the same as being out of force.
+        // The cook path was fixed long ago (`visible_binding`, whose note is the measurement); this one was not, and
+        // it is the inherited half of the defect `tests/nested_conditional.rs` reproduces: a file could not see what
+        // another file defined behind a guard that held.
+        let (at, index) =
+            self.last_visible_of(name, |event| event.unconditional || event.body.is_some())?;
         Some((at, &self.unit.events[index as usize]))
     }
 
     /// The **in-force** channel: the last visible fact whose replacement list this file can read.
+    ///
+    /// Any fact with a body text, whether or not it was written inside a condition: only facts the walk decided *in
+    /// force* are recorded at all, so `unconditional` is not the question here — having a body is.
     fn the_body_in_force(&self, name: &str) -> Option<&'unit TuEvent> {
-        let (_, index) = self.last_visible_of(name, |event| {
-            !event.unconditional && event.body_text.is_some()
-        })?;
+        let (_, index) = self.last_visible_of(name, |event| event.body_text.is_some())?;
         Some(&self.unit.events[index as usize])
     }
 
