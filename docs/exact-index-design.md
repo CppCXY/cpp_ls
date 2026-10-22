@@ -67,6 +67,35 @@ sweep（抽 facts + 按文件归属）      3 200 ms
 **注意 ①② 的键必须包含环境**，否则宁可不用：同样的文本在不同宏状态下是不同的程序，
 缓存错了就是"精确"的反面。这一点我们已经在 summary 上踩过一次（`env_hash`）。
 
+### 2.1 sweep 里最大的一笔不是分配，是一处遍历缺陷（2026-10-23 实测，已修）
+
+`sweep` 的 3.2 s 一直被归因为"306 000 条声明 × 若干 String 的分配"。在 MinGW 闭包上量到的事实不是这样：
+
+```text
+<ranges>（307 KB / 92 654 token / 2 017 声明）   summarize 660–672 ms
+    parse 42 ms │ preprocess 0 ms │ scopes 14 ms │ facts 602 ms
+    facts = tables 18 ms + per-fact walk 587 ms          ← 291 µs/声明
+windows.foundation.h                                facts 17 ms = tables 10 + walk 7   （3.3 µs/声明）
+```
+
+per-fact walk 里 291 µs/声明 的那一笔是 **`deduced_returns_of` → `declaration_of`**：它为每个不写返回类型的函数
+做一次 `root.descendants()` 全文件过滤（`<ranges>` 上 **173 次 × 69 267 节点 ≈ 1 200 万次访问**）。改动只有一处：
+从名字的 token 沿祖先链找最内层的 `Declaration`/`FunctionDef`（O(深度)），body 的搜索因此也从"整份文件"缩到"这个声明"。
+
+```text
+                                改前              改后
+<ranges> summarize              660–672 ms        105 ms      （6.4×）
+format summarize                 86 ms             58 ms
+冷索引一轮（1 357 步）         8 329 / 8 310 ms  7 674 ms      （−7.8%）
+  最慢单步                       654 / 646 ms      147 ms
+  最贵 10 步                     1 599 / 1 588     1 019 ms
+端到端冷启动（edit_loop）        第一遍 4.70 s     4.21 s
+                                第二遍尾巴 10.91 s 10.47 s
+```
+
+剩下的同类问题（未修，收益小）：`parameter_type` 对每个 `return` 做一次声明子树的 `descendants()`，
+所以一个 `auto` 函数是 O(返回数 × 函数体)；现在被声明边界挡住了，在 `<ranges>` 上不足 10 ms。
+
 ## 三、要删掉的东西（删了才叫换了模型）
 
 ```text

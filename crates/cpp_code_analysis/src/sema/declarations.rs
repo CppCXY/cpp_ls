@@ -1221,22 +1221,26 @@ fn body_of(declaration: &CppSyntaxNode) -> Option<CppSyntaxNode> {
 /// A function *definition* is not a node of its own here. Measured on `auto mixed(int* _First) { … }`, the ancestors
 /// of the name are `TranslationUnit → Declaration → InitDeclarator → Declarator → NameExpr`, so a search for a
 /// `FunctionDef` finds nothing and every deduced return type is refused for a reason that has nothing to do with the
-/// deduction. The innermost is the **last** containing node in document order, because a pre-order walk visits a
-/// parent before its children: among the nodes whose range contains the name, the last is the smallest.
+/// deduction.
+///
+/// # Why this descends from the name's token rather than walking the file
+///
+/// It used to be `root.descendants()`, filtered to declarations containing the name, and the last one kept — a walk
+/// of the **whole file** per question. The question is asked once per function that writes no return type, so the
+/// cost was `(auto-return functions) × (file size)`: measured on GCC 15's `<ranges>` (92 654 tokens, 69 267 nodes,
+/// 2 017 declarations), **173 such walks ≈ 570 ms of that file's 672 ms summary**, and 650 ms of a cold index of
+/// this project (8 329 → 7 689 ms with the walk removed; the heaviest file's step 654 → 145 ms).
+///
+/// A token and its ancestors are the only nodes that can hold the name, so this is O(depth). `parent_ancestors`
+/// is innermost-first, which is the "last containing node in document order" the old walk was after.
 fn declaration_of(root: &CppSyntaxNode, binding: &Binding) -> Option<CppSyntaxNode> {
-    let at = binding.name_range.start_offset;
-    root.descendants()
-        .filter(|node| {
-            matches!(
-                CppSyntaxKind::from(node.kind()),
-                CppSyntaxKind::Declaration | CppSyntaxKind::FunctionDef
-            )
-        })
-        .filter(|node| {
-            let range = cpp_parser::source_range(node.text_range());
-            range.start_offset <= at && at < range.end_offset()
-        })
-        .last()
+    let token = cpp_parser::token_at(root, binding.name_range.start_offset)?;
+    token.parent_ancestors().find(|node| {
+        matches!(
+            CppSyntaxKind::from(node.kind()),
+            CppSyntaxKind::Declaration | CppSyntaxKind::FunctionDef
+        )
+    })
 }
 
 /// Every expression a `return` statement in this body returns, in document order.
