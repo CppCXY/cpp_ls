@@ -128,7 +128,7 @@ pub fn diagnose_file(session: &Session<DiskFiles>, path: &Path) -> Option<(Uri, 
         // — the index queue plus the cooking backlog, both of which have to be empty before a member list is the
         // whole truth. The withholding ends by itself: the pump drains, this becomes zero, and the client's next
         // pull carries the checks. Withholding costs a moment; publishing costs a claim the reader cannot check.
-        .chain(if checks_may_be_trusted(session) {
+        .chain(if checks_may_be_trusted(session, &path) {
             check_findings(&found.checks, held).collect::<Vec<Diagnostic>>()
         } else {
             Vec::new()
@@ -153,10 +153,17 @@ pub fn diagnose_file(session: &Session<DiskFiles>, path: &Path) -> Option<(Uri, 
 ///
 /// A named function rather than the expression at the call site, because it is the *decision* and it should be
 /// readable and testable as one — the session state that drives it is not something a fixture can hold still.
-pub fn checks_may_be_trusted(session: &Session<DiskFiles>) -> bool {
+pub fn checks_may_be_trusted(session: &Session<DiskFiles>, path: &std::path::Path) -> bool {
     // The index queue **plus** the cooking backlog: a summary can be read before its rendering is built, and a
     // check that walks scopes wants both.
-    session.pending_work() == 0
+    // **The file`s own closure, not the whole project.** `pending_work()` now counts the second pass, and the
+    // second pass is the whole project`s backlog: gating on it withheld every finding for the ~120 s the backlog took
+    // on a real project, while the answers those findings need were already in the index. A check about *this* file
+    // reads this file and its includes, so that is the question — and `its_closure_is_owed` is the same walk the
+    // cross-file queries already pay.
+    session.pending() == 0
+        && session.pending_cooking() == 0
+        && !session.its_closure_is_owed(path)
 }
 
 /// **What the semantic checks found** — one diagnostic per finding, with the rule's own code and severity.

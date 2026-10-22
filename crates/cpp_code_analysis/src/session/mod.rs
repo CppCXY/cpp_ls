@@ -2962,6 +2962,39 @@ impl<F: FileProvider + Clone> Session<F> {
 
     /// **Drop everything the cook queue is waiting for, and say how much it was.**
     ///
+
+    /// **Is this file`s summary about to be revised?** — the second pass has it queued for a re-read.
+    ///
+    /// A summary parsed before its include closure was indexed has no macro environment, so the facts in it are the
+    /// shape-only reading: `_STD` is a name rather than `::std::`, and a class declared under a macro is at the wrong
+    /// scope. The second pass repairs that, and until it runs, a **check** reading this summary is reading an answer
+    /// that is about to change.
+    pub fn is_owed_a_re_read(&self, path: &Path) -> bool {
+        let key = crate::file::paths::normalize_path(path, cfg!(windows));
+        self.parsed_since_the_last_pass
+            .iter()
+            .any(|queued| crate::file::paths::normalize_path(queued, cfg!(windows)) == key)
+    }
+
+    /// **Does anything this file can see wait for the second pass?** — the closure question behind
+    /// [`Session::is_owed_a_re_read`].
+    ///
+    /// A check about this file resolves names through the headers it includes, so a provisional summary among those
+    /// is as misleading as a provisional summary of the file itself. The walk is [`ProjectIndex::visible_files`],
+    /// which is the memoized one every cross-file query already pays.
+    pub fn its_closure_is_owed(&self, path: &Path) -> bool {
+        if self.parsed_since_the_last_pass.is_empty() {
+            return false;
+        }
+        if self.is_owed_a_re_read(path) {
+            return true;
+        }
+        self.store
+            .index()
+            .visible_files(path)
+            .iter()
+            .any(|(file, _)| self.is_owed_a_re_read(Path::new(file)))
+    }
     /// For the pump`s breaker: a file the cook claims and cannot build leaves the queue`s count where it was, and
     /// a loop that keeps taking it never goes idle (measured once as `2 to cook, 0 left` once a second for as long
     /// as a window stayed open). Dropping is safe rather than lossy: every query that needs one of these files asks
