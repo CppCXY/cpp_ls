@@ -289,6 +289,153 @@ pub fn condition_tokens(tokens: &[Token]) -> &[Token] {
     tokens
 }
 
+/// **How the chain reads files**: a provider and an include resolver, both as plain functions so that a caller can
+/// hand over a session, a test's memory files, or a probe.
+pub trait Reads {
+    /// The text of a file, or `None` when it cannot be read (a missing include is a hole, not an error).
+    fn read(&self, path: &std::path::Path) -> Option<String>;
+    /// Where an `#include` written in `from` resolves to, or `None` when it does not.
+    fn resolve(&self, from: &std::path::Path, spelling: &str) -> Option<std::path::PathBuf>;
+}
+
+/// What one walk of an include tree cost, and how often the effect cache answered.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Walked {
+    /// Files entered.
+    pub files: usize,
+    /// Inclusions, counting repeats — a guarded header included four times counts four.
+    pub inclusions: usize,
+    /// Effect evaluations that had to run.
+    pub evaluated: usize,
+    /// Effect lookups answered by the cache.
+    pub reused: usize,
+    /// Effects that could not be trusted (`Effect::certain == false`).
+    pub uncertain: usize,
+    /// Include edges that did not resolve.
+    pub unresolved: usize,
+}
+
+/// **The macro table a translation unit has**, built by folding effects instead of cooking.
+///
+/// This is the step the whole design exists for: a file's contribution is its effect, an effect is a function of the
+/// few names it tests, and a fold is a hash lookup — so building the environment for a program is `|includes|`
+/// lookups, not a closure walk per file.
+pub struct Chain<'a, R: Reads> {
+    reader: &'a R,
+    /// `Effect::key` → effect. Shared across roots by a caller that wants the project-wide reuse.
+    effects: &'a mut HashMap<u64, Effect>,
+    /// Where each file's table ended up, for a caller that wants to read a file's environment afterwards.
+    tables: HashMap<std::path::PathBuf, Macros>,
+    walked: Walked,
+}
+
+impl<'a, R: Reads> Chain<'a, R> {
+    pub fn new(reader: &'a R, effects: &'a mut HashMap<u64, Effect>) -> Self {
+        Self {
+            reader,
+            effects,
+            tables: HashMap::new(),
+            walked: Walked::default(),
+        }
+    }
+
+    /// **Enter a program at `root`** and answer the table every file in it was read under.
+    pub fn at(mut self, root: &std::path::Path, seed: &Macros) -> (HashMap<std::path::PathBuf, Macros>, Walked) {
+        let mut table = seed.clone();
+        self.enter(root, &mut table, 0);
+        (self.tables, self.walked)
+    }
+
+    fn enter(&mut self, path: &std::path::Path, table: &mut Macros, depth: usize) {
+        // A cycle or an absurdly deep chain: a compiler refuses at its own depth limit, and a walk that does not
+        // stop here does not stop at all.
+        if depth > 64 {
+            return;
+        }
+        let Some(text) = self.reader.read(path) else {
+            return;
+        };
+        self.walked.files += 1;
+        let surface = crate::surface::surface_of(path, &text);
+
+        // **Is this file`s own effect a suffix?** The common shape by far — a header includes what it needs and then
+        // defines — is what makes the whole-file effect cacheable: `effect_of(surface)` computed once for a given
+        // environment, then applied after the includes are folded. A file that defines a macro *before* an include
+        // reads the include under a table this file has already changed, so it is folded in order and not cached.
+        let first_own = surface.events.iter().position(|event| {
+            matches!(
+                event,
+                crate::surface::Event::Define { .. } | crate::surface::Event::Undef { .. }
+            )
+        });
+        let interleaved = first_own.is_some_and(|at| {
+            surface.events[at..].iter().any(|event| {
+                matches!(event, crate::surface::Event::Include { .. })
+            })
+        });
+
+        if interleaved {
+            let mut regions: Vec<(bool, bool, bool)> = Vec::new();
+            let _ = &mut regions;
+            self.walked.evaluated += 1;
+            for event in &surface.events {
+                match event {
+                    crate::surface::Event::Include { spelling, .. } => {
+                        self.walked.inclusions += 1;
+                        match self.reader.resolve(path, spelling) {
+                            Some(included) => {
+                                let included = included.clone();
+                                self.enter(&included, table, depth + 1);
+                            }
+                            None => self.walked.unresolved += 1,
+                        }
+                    }
+                    crate::surface::Event::Define { definition } => table.define(definition.clone()),
+                    crate::surface::Event::Undef { name, .. } => table.undefine(name),
+                    _ => {}
+                }
+            }
+            return;
+        }
+
+        // Fold the includes first, in the order written.
+        for event in &surface.events {
+            let crate::surface::Event::Include { spelling, .. } = event else {
+                continue;
+            };
+            self.walked.inclusions += 1;
+            match self.reader.resolve(path, spelling) {
+                Some(included) => {
+                    let included = included.clone();
+                    self.enter(&included, table, depth + 1);
+                }
+                None => self.walked.unresolved += 1,
+            }
+        }
+
+        let values = values_for(&surface, table);
+        let values: Vec<Option<&str>> = values.iter().map(|value| value.as_deref()).collect();
+        let key = Effect::key(surface.signature(), &values);
+        let effect = match self.effects.get(&key) {
+            Some(known) => {
+                self.walked.reused += 1;
+                known.clone()
+            }
+            None => {
+                let made = effect_of(&surface, table);
+                self.walked.evaluated += 1;
+                self.effects.insert(key, made.clone());
+                made
+            }
+        };
+        if !effect.certain {
+            self.walked.uncertain += 1;
+        }
+        // **What this file saw when its own directives ran** — after its leading includes, before its own effect.
+        self.tables.insert(path.to_path_buf(), table.clone());
+        effect.apply(table);
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -388,6 +535,95 @@ mod tests {
         let surface = surface("#if __has_include(<vector>)\n#define A 1\n#endif\n");
         let effect = effect_of(&surface, &Macros::new());
         assert!(!effect.certain, "the condition cannot be decided here");
+    }
+
+    /// A small include graph, in memory: the reader and resolver a chain needs.
+    struct Fixture(std::collections::HashMap<std::path::PathBuf, String>);
+
+    impl Fixture {
+        fn new(files: &[(&str, &str)]) -> Self {
+            let mut held = std::collections::HashMap::new();
+            for (path, text) in files {
+                held.insert(std::path::PathBuf::from(*path), text.to_string());
+            }
+            Self(held)
+        }
+    }
+
+    impl Reads for Fixture {
+        fn read(&self, path: &std::path::Path) -> Option<String> {
+            self.0.get(path).cloned()
+        }
+
+        fn resolve(&self, _from: &std::path::Path, spelling: &str) -> Option<std::path::PathBuf> {
+            // Every fixture is in one directory, so the spelling names the file: `"a.h"` and `<a.h>` alike.
+            let name = spelling.trim_matches(|c| c == '"' || c == '<' || c == '>');
+            let path = std::path::PathBuf::from("/p").join(name);
+            self.0.contains_key(&path).then_some(path)
+        }
+    }
+
+    #[test]
+    fn a_chain_folds_what_the_includes_define() {
+        let files = Fixture::new(&[
+            ("/p/a.h", "#define A 1\n"),
+            ("/p/b.h", "#include \"a.h\"\n#ifdef A\n#define B 2\n#endif\n"),
+        ]);
+        let mut cache = std::collections::HashMap::new();
+        let chain = Chain::new(&files, &mut cache);
+        let (tables, walked) = chain.at(std::path::Path::new("/p/b.h"), &Macros::new());
+
+        let at_b = tables.get(std::path::Path::new("/p/b.h")).expect("b was entered");
+        assert!(at_b.get("A").is_some(), "a.h`s define is in b.h`s table");
+        assert_eq!(walked.files, 2, "a.h and b.h");
+        assert_eq!(walked.inclusions, 1);
+    }
+
+    #[test]
+    fn a_guarded_header_included_twice_exports_once() {
+        let files = Fixture::new(&[
+            (
+                "/p/g.h",
+                "#ifndef G_H\n#define G_H\n#define INSIDE 1\n#endif\n",
+            ),
+            ("/p/root.cpp", "#include \"g.h\"\n#include \"g.h\"\n"),
+        ]);
+        let mut cache = std::collections::HashMap::new();
+        let chain = Chain::new(&files, &mut cache);
+        let (tables, walked) = chain.at(std::path::Path::new("/p/root.cpp"), &Macros::new());
+
+        let at_root = tables
+            .get(std::path::Path::new("/p/root.cpp"))
+            .expect("root was entered");
+        assert!(at_root.get("G_H").is_some());
+        assert_eq!(walked.inclusions, 2, "both includes are walked");
+        // **Not a cache hit, and that is the point**: the guard is defined by the first inclusion, so the second
+        // inclusion tests `G_H` against a different value — a different key, a different effect, and that effect has
+        // nothing to do. The cheapness here comes from the effect being empty, not from a shared entry.
+        assert_eq!(
+            walked.evaluated, 3,
+            "the root and both inclusions — two different environments for g.h, one effect each"
+        );
+        assert_eq!(walked.reused, 0);
+    }
+
+    #[test]
+    fn a_define_before_an_include_is_in_the_table_that_include_reads() {
+        // **The interleaved shape**: the include is read under a table this file has already changed, so a chain
+        // that folded "all includes, then all defines" would answer `C` undefined here.
+        let files = Fixture::new(&[
+            ("/p/c.h", "#ifdef C\n#define SEEN 1\n#endif\n"),
+            ("/p/root.cpp", "#define C 1\n#include \"c.h\"\n"),
+        ]);
+        let mut cache = std::collections::HashMap::new();
+        let chain = Chain::new(&files, &mut cache);
+        let (tables, _) = chain.at(std::path::Path::new("/p/root.cpp"), &Macros::new());
+
+        let at_c = tables.get(std::path::Path::new("/p/c.h")).expect("c was entered");
+        assert!(
+            at_c.get("C").is_some(),
+            "the host`s define comes before the include that reads it"
+        );
     }
 
     #[test]
