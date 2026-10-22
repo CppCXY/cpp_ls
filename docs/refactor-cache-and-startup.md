@@ -372,3 +372,39 @@ M2 的原计划是"按 root 解析 + facts 按来源归档，删掉第二遍"。
 **这一步没有做的事，以及为什么不做**：把 3 做成"缓存 IndexedUnit"要动 `IndexedUnit` 与 `CookedFile` 的
 序列化（它们不是 `FileSummary`，是一棵按文件的 facts 集合），那是又一轮 400 行的编码工作；
 半途而废会把 `read_the_unit` 留在"有时命中、有时不命中"的中间态。所以停在这里，把成本写清楚。
+
+### 「Load workspace」那 54 秒：拆开与处置（2026-10-22 下午）
+
+用户的截图里状态栏停在 `Load workspace: 1420 files to read`。从服务端自己的日志（565 个切片，14:29:25 →
+14:30:19）和本地复现拆开：
+
+```text
+第一遍（摘要装进索引）              ≈ 17 s
+第二遍（重读 + 闭包走查）            ≈ 36 s（947 次走查 × ~38 ms + 再解码一遍摘要）
+状态栏                             = 两遍之和，因为 pending_work() 从 8e976e1 起包含第二遍
+```
+
+每次切片的分段计时（`CPPLS_TRACE_COOKING=1`）说清了成本在哪：
+
+```text
+prepare: 4 file(s) in 53 ms | text 7 ms, decode 8 ms, verify 7 ms
+prepare: 4 file(s) in 68 ms | text 2 ms, decode 73 ms, verify 72 ms   ← 大摘要的解码是主项
+```
+
+**处置**：状态栏现在跟随 `Session::pending()`（队列），不是 `pending_work()` —— 进度条是关于
+"你的项目文件"的承诺，而它兑现于"索引知道有哪些文件"，第二遍只是让答案更好。泵仍然把两遍都做完
+（`was_pending` 仍读 `pending_work`）。
+
+**试过并回退的**：让第二遍等第一遍队列空后再跑。实测更慢（探针 73.6 s vs 原地 54 s），因为走查次数没变，
+只是把它挪到了后面。代码已回退，这里记下来避免重复。
+
+**还没做的两个杠杆**：
+
+```text
+1. 懒加载摘要（最大）：启动只建"路径 → (content, config)"目录，摘要首次被查询到才解码。
+   首屏从 17 s 降到 ~1 s，代价是第一次跨文件查询解码它需要的那些文件（几十个）。
+   要动 ProjectIndex 的"有摘要"语义（`summary()` 返回 &FileSummary，改惰性需要返回 Arc 或复制），
+   是一次 100+ 调用点的重构。
+2. 第二遍按 root 复用时间线（中等）：947 次走查里多数文件的闭包同属一个 project source，
+   按"切片是否被同一个 root 覆盖"选 root 能压到几百次。
+```

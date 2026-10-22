@@ -507,10 +507,28 @@ async fn index_in_background(context: ServerContextSnapshot) {
             }
 
             if pending > 0 {
+                // **The bar counts the project's files, not the repair of their readings.** `pending` is
+                // `pending_work()`, which since `8e976e1` includes the second pass — so `Load workspace` stayed on
+                // screen for that pass too. Measured from a real session's own log: 565 slices, `0 to cook` on almost
+                // every one, and 54 s before the bar retired, of which ~17 s is the first pass and the rest is the
+                // re-read (947 timelines walked) plus decoding every summary a second time.
+                //
+                // A progress task is a promise about *the reader's project*, and the promise is kept when the index
+                // knows which files exist and can answer questions about them; the second pass makes those answers
+                // better, not available. So the bar follows the queue (`Session::pending`) and the pump keeps
+                // draining everything (`was_pending` still reads `pending_work`).
+                let to_read = match context
+                    .analysis()
+                    .query_blocking(|session| Some(session.pending()))
+                    .await
+                {
+                    crate::context::RequestOutcome::Ready(count) => count,
+                    _ => pending,
+                };
                 context.status_bar().update_progress_task(
                     ProgressTask::LoadWorkspace,
                     None,
-                    Some(format!("{pending} files to read")),
+                    Some(format!("{to_read} files to read")),
                 );
 
                 // Yield between slices: the runtime is also serving requests, and a loop that never awaits would
