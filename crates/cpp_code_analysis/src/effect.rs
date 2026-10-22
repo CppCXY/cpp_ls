@@ -64,12 +64,14 @@ impl Macros {
         self.definitions.is_empty()
     }
 
-    /// **The signature of the environment an effect is read in**, over the names that matter — see
-    /// [`Effect::key`].
-    pub fn values_of(&self, names: &[String]) -> Vec<Option<&str>> {
+    /// **The values of the names an effect is read through**, one `Option` per name — `None` for "not defined".
+    ///
+    /// Owned strings rather than borrows: the value is the body's *text*, which is assembled from the definition's
+    /// tokens, and a key only needs it for the length of one hash.
+    pub fn values_of(&self, names: &[String]) -> Vec<Option<String>> {
         names
             .iter()
-            .map(|name| self.definitions.get(name).map(body_text))
+            .map(|name| self.definitions.get(name).map(|held| body_text(held)))
             .collect()
     }
 }
@@ -261,14 +263,16 @@ fn decide(flavour: ConditionFlavour, tokens: &[Token], environment: &Macros) -> 
 }
 
 /// The spelling of a definition's body — what a name's *value* is for a condition, and for the key.
-fn body_text(definition: &MacroDef) -> &str {
-    definition
-        .body
-        .tokens
-        .iter()
-        .find(|token| !crate::token::is_trivia(token.kind))
-        .map(|token| token.text.as_ref())
-        .unwrap_or("")
+fn body_text(definition: &MacroDef) -> String {
+    // **Every token of the body, as written.** The first version returned the *first* token only, and the oracle test
+    // in `docs/exact-index-design.md` §七 caught it at once: `#define WITH_ARGS(x) ((x) + 1)` answered `"("`.
+    // Whitespace is kept because `#define A (1)` and `#define A(1)` are different macros, and a caller comparing two
+    // readings should see the text it wrote.
+    let mut out = String::new();
+    for token in &definition.body.tokens {
+        out.push_str(&token.text);
+    }
+    out.trim().to_string()
 }
 
 /// The names a surface tests, with the values they hold in an environment — the key's material.
@@ -535,6 +539,23 @@ mod tests {
         let surface = surface("#if __has_include(<vector>)\n#define A 1\n#endif\n");
         let effect = effect_of(&surface, &Macros::new());
         assert!(!effect.certain, "the condition cannot be decided here");
+    }
+
+    #[test]
+    fn the_value_of_a_macro_is_its_whole_body() {
+        // The oracle found this: the value of `F(x)` answered `"("` because only the first token of the body was read.
+        // A condition that asks `#if F(1) == 2` would then have been decided from a parenthesis.
+        let surface = surface("#define WITH_ARGS(x) ((x) + 1)\n#define PLAIN (1)\n");
+        let mut applied = Macros::new();
+        effect_of(&surface, &Macros::new()).apply(&mut applied);
+        assert_eq!(
+            applied.get("WITH_ARGS").map(|held| body_text(held)),
+            Some("((x) + 1)".to_string())
+        );
+        assert_eq!(
+            applied.get("PLAIN").map(|held| body_text(held)),
+            Some("(1)".to_string())
+        );
     }
 
     /// A small include graph, in memory: the reader and resolver a chain needs.

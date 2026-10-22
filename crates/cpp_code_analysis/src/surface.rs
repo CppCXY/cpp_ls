@@ -233,9 +233,12 @@ pub fn surface_of(path: &Path, text: &str) -> Surface {
             "define" => {
                 // `parse_define` wants the tokens **from the name on**, and the whole directive's range — the same
                 // reader the preprocessor uses, so a definition here is the definition a cook would get.
-                let from_the_name: Vec<Token> = code
+                // **Trivia is kept here, unlike everywhere else in this module.** `parse_body` keeps whitespace
+                // because it is load-bearing: `#define F(x) +x` and `#define F(x) + x` expand differently, and the
+                // body`s text is what a condition reads as a value. The `code` list above is for *finding* the name;
+                // this one is for reading the body.
+                let from_the_name: Vec<Token> = tokens[at + 2..end]
                     .iter()
-                    .skip(2)
                     .map(|token| Token::new(token.kind, spelling(text, token), token.range))
                     .collect();
                 if let Some(definition) = crate::preprocess::macros::parse_define(&from_the_name, range) {
