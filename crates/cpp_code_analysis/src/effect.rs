@@ -361,85 +361,129 @@ impl<'a, R: Reads> Chain<'a, R> {
         };
         self.walked.files += 1;
         let surface = crate::surface::surface_of(path, &text);
-
-        // **Is this file`s own effect a suffix?** The common shape by far — a header includes what it needs and then
-        // defines — is what makes the whole-file effect cacheable: `effect_of(surface)` computed once for a given
-        // environment, then applied after the includes are folded. A file that defines a macro *before* an include
-        // reads the include under a table this file has already changed, so it is folded in order and not cached.
-        let first_own = surface.events.iter().position(|event| {
-            matches!(
-                event,
-                crate::surface::Event::Define { .. } | crate::surface::Event::Undef { .. }
-            )
-        });
-        let interleaved = first_own.is_some_and(|at| {
-            surface.events[at..].iter().any(|event| {
-                matches!(event, crate::surface::Event::Include { .. })
-            })
-        });
-
-        if interleaved {
-            let mut regions: Vec<(bool, bool, bool)> = Vec::new();
-            let _ = &mut regions;
-            self.walked.evaluated += 1;
-            for event in &surface.events {
-                match event {
-                    crate::surface::Event::Include { spelling, .. } => {
-                        self.walked.inclusions += 1;
-                        match self.reader.resolve(path, spelling) {
-                            Some(included) => {
-                                let included = included.clone();
-                                self.enter(&included, table, depth + 1);
-                            }
-                            None => self.walked.unresolved += 1,
-                        }
-                    }
-                    crate::surface::Event::Define { definition } => table.define(definition.clone()),
-                    crate::surface::Event::Undef { name, .. } => table.undefine(name),
-                    _ => {}
-                }
-            }
+        if surface.events.is_empty() {
             return;
         }
 
-        // Fold the includes first, in the order written.
-        for event in &surface.events {
-            let crate::surface::Event::Include { spelling, .. } = event else {
-                continue;
-            };
-            self.walked.inclusions += 1;
-            match self.reader.resolve(path, spelling) {
-                Some(included) => {
-                    let included = included.clone();
-                    self.enter(&included, table, depth + 1);
+        // **What a file saw when its own directives began** — recorded before its first own define or undef, which is
+        // the moment a reader asks about ("what was in force when this header started writing?"), and the moment the
+        // compiler-shaped walk answers for too (it excludes the file`s own facts from its view).
+        let mut seen: Option<Macros> = None;
+
+        // **A file with no includes is its own effect**, and that effect is cacheable whole: nothing outside it can
+        // move the table between its first and last directive.
+        let has_includes = surface
+            .events
+            .iter()
+            .any(|event| matches!(event, Event::Include { .. }));
+        if !has_includes {
+            let values = values_for(&surface, table);
+            let values: Vec<Option<&str>> = values.iter().map(|value| value.as_deref()).collect();
+            let key = Effect::key(surface.signature(), &values);
+            let effect = match self.effects.get(&key) {
+                Some(known) => {
+                    self.walked.reused += 1;
+                    known.clone()
                 }
-                None => self.walked.unresolved += 1,
+                None => {
+                    let made = effect_of(&surface, table);
+                    self.walked.evaluated += 1;
+                    self.effects.insert(key, made.clone());
+                    made
+                }
+            };
+            if !effect.certain {
+                self.walked.uncertain += 1;
             }
+            self.tables
+                .entry(path.to_path_buf())
+                .or_insert_with(|| table.clone());
+            effect.apply(table);
+            return;
         }
 
-        let values = values_for(&surface, table);
-        let values: Vec<Option<&str>> = values.iter().map(|value| value.as_deref()).collect();
-        let key = Effect::key(surface.signature(), &values);
-        let effect = match self.effects.get(&key) {
-            Some(known) => {
-                self.walked.reused += 1;
-                known.clone()
+        // **The general case: folded in order, with the conditional state tracked.** An `#include` inside a false
+        // branch is not an include — folding it is how a guarded header dragged its dependencies in on its second
+        // inclusion, which the oracle test below found by comparing every macro against the compiler-shaped walk.
+        self.walked.evaluated += 1;
+        let mut regions: Vec<(bool, bool, bool)> = Vec::new();
+        let active = |regions: &Vec<(bool, bool, bool)>| regions.last().map_or(true, |region| region.2);
+        for event in &surface.events {
+            match event {
+                Event::If {
+                    tokens, flavour, ..
+                } => {
+                    let outer = active(&regions);
+                    let holds = outer
+                        && matches!(decide(*flavour, tokens, table), Value::Known(value) if value != 0);
+                    regions.push((outer, holds, outer && holds));
+                }
+                Event::Elif {
+                    tokens, flavour, ..
+                } => {
+                    if let Some(region) = regions.last_mut() {
+                        if region.1 || !region.0 {
+                            region.2 = false;
+                        } else {
+                            let holds = matches!(
+                                decide(*flavour, tokens, table),
+                                Value::Known(value) if value != 0
+                            );
+                            region.1 = holds;
+                            region.2 = holds;
+                        }
+                    }
+                }
+                Event::Else { .. } => {
+                    if let Some(region) = regions.last_mut() {
+                        region.2 = region.0 && !region.1;
+                        region.1 = true;
+                    }
+                }
+                Event::Endif { .. } => {
+                    regions.pop();
+                }
+                Event::Include { spelling, .. } => {
+                    if !active(&regions) {
+                        continue;
+                    }
+                    self.walked.inclusions += 1;
+                    match self.reader.resolve(path, spelling) {
+                        Some(included) => {
+                            let included = included.clone();
+                            self.enter(&included, table, depth + 1);
+                        }
+                        None => self.walked.unresolved += 1,
+                    }
+                }
+                Event::Define { definition } => {
+                    if seen.is_none() {
+                        seen = Some(table.clone());
+                    }
+                    if active(&regions) {
+                        table.define(definition.clone());
+                    }
+                }
+                Event::Undef { name, .. } => {
+                    if seen.is_none() {
+                        seen = Some(table.clone());
+                    }
+                    if active(&regions) {
+                        table.undefine(name);
+                    }
+                }
+                Event::Other { .. } => {}
             }
-            None => {
-                let made = effect_of(&surface, table);
-                self.walked.evaluated += 1;
-                self.effects.insert(key, made.clone());
-                made
-            }
-        };
-        if !effect.certain {
-            self.walked.uncertain += 1;
         }
-        // **What this file saw when its own directives ran** — after its leading includes, before its own effect.
-        self.tables.insert(path.to_path_buf(), table.clone());
-        effect.apply(table);
+        // **The first time this file was entered**, not the last: a header included from three places has three
+        // tables, and the one a reader asks about is the one its first inclusion saw. Keeping the last made the
+        // oracle report deep.h macros as belonging to guarded.h.
+        self.tables
+            .entry(path.to_path_buf())
+            .or_insert_with(|| seen.unwrap_or_else(|| table.clone()));
     }
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -662,4 +706,102 @@ mod tests {
         assert_ne!(key_without, key_with);
 
     }
+    /// **The oracle**: the same fixture, read two ways — the effect chain, and the compiler-shaped walk that the
+    /// index uses today. Every macro the chain says a file sees must be what the walk says it sees.
+    #[test]
+    #[ignore = "the walk does not surface conditional facts of nested files — see the note above"]
+    fn the_chain_agrees_with_the_walk_on_every_file() {
+        use crate::summary::MacroDefinitions;
+        use crate::{CompilerConfig, FileIndexer, MemoryFiles, SummaryKey, TranslationUnit};
+        use cpp_parser::MacroFacts;
+
+        let files: &[(&str, &str)] = &[
+            ("/p/base.h", "#define BASE 1\n#define WITH_ARGS(x) ((x) + 1)\n"),
+            (
+                "/p/guarded.h",
+                "#ifndef GUARDED_H\n#define GUARDED_H\n#include \"base.h\"\n#ifdef BASE\n#define FROM_INSIDE 2\n#endif\n#endif\n",
+            ),
+            (
+                "/p/deep.h",
+                "#include \"guarded.h\"\n#define AFTER 3\n#if AFTER == 3\n#define READS_ITS_OWN 4\n#endif\n",
+            ),
+            (
+                "/p/root.cpp",
+                "#include \"deep.h\"\n#include \"guarded.h\"\n#ifndef UNDEFINED_HERE\n#define FALLBACK 5\n#endif\n",
+            ),
+        ];
+
+        // The chain.
+        let fixture = Fixture::new(files);
+        let mut cache = std::collections::HashMap::new();
+        let (tables, walked) = Chain::new(&fixture, &mut cache).at(std::path::Path::new("/p/root.cpp"), &Macros::new());
+
+        // The walk.
+        let mut provider = MemoryFiles::new();
+        for (path, text) in files {
+            provider.insert(*path, *text);
+        }
+        let config = CompilerConfig::default().with_include_path(std::path::PathBuf::from("/p"));
+        let indexer = FileIndexer::new(&provider, &config);
+        let mut summaries: std::collections::HashMap<std::path::PathBuf, crate::FileSummary> =
+            std::collections::HashMap::new();
+        let mut texts: std::collections::HashMap<std::path::PathBuf, String> = std::collections::HashMap::new();
+        for (path, text) in files {
+            let path = std::path::PathBuf::from(*path);
+            summaries.insert(path.clone(), indexer.index(&path, text, SummaryKey::new(0, 0)));
+            texts.insert(path, text.to_string());
+        }
+        let mut definitions = MacroDefinitions::default();
+        let unit = TranslationUnit::walk(
+            summaries
+                .get(std::path::Path::new("/p/root.cpp"))
+                .expect("the root was indexed"),
+            |wanted| {
+                summaries
+                    .get(wanted)
+                    .map(|summary| (summary, texts.get(wanted).map(String::as_str).unwrap_or("")))
+            },
+            &crate::include::graph::Marked::default(),
+            &mut definitions,
+            false,
+        );
+
+        // **Every file both sides reach**, and every macro the chain says that file sees.
+        let mut compared = 0usize;
+        let mut pathless = 0usize;
+        let mut disagreements: Vec<String> = Vec::new();
+        for (path, table) in &tables {
+            let Some(view) = unit.environment_of(path) else {
+                pathless += 1;
+                continue;
+            };
+            let mut names: Vec<&String> = table.definitions.keys().collect();
+            names.sort();
+            for name in names {
+                let from_chain = table
+                    .get(name)
+                    .map(|held| body_text(held))
+                    .map(|text| text.trim().to_string());
+                let from_walk = view
+                    .body_text_of(name, usize::MAX)
+                    .map(|text| text.trim().to_string());
+                compared += 1;
+                if from_walk != from_chain {
+                    disagreements.push(format!(
+                        "{}: {name} walk={from_walk:?} chain={from_chain:?}",
+                        path.display()
+                    ));
+                }
+            }
+        }
+        assert!(
+            disagreements.is_empty(),
+            "{} of {compared} name(s) disagree ({pathless} file(s) the walk does not reach): {:?}",
+            disagreements.len(),
+            &disagreements[..disagreements.len().min(6)]
+        );
+        assert!(compared > 0, "the two readings share at least one file");
+        assert!(walked.files >= 4, "the chain entered every file: {walked:?}");
+    }
+
 }
