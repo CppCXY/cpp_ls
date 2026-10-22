@@ -31,7 +31,6 @@ use std::path::PathBuf;
 
 /// The seam the two readings share: the unit's `MacroView` and the closure path's owned `MacroEnvironment` are
 /// asked the same questions through this trait — see where `environment` is bound.
-use cpp_code_analysis::RootKey;
 use cpp_parser::MacroFacts;
 
 fn main() {
@@ -138,13 +137,6 @@ fn main() {
         .position(|argument| argument == "--render-to")
         .and_then(|at| std::env::args().nth(at + 1))
         .map(PathBuf::from);
-    // `--tu-cache <dir>`: keep the translation unit's walk between runs, and reuse it while the closure is
-    // byte-for-byte the same (see `cpp_code_analysis::TranslationUnitCache` for the key and why it is the content).
-    let tu_cache: Option<cpp_code_analysis::TranslationUnitCache> = std::env::args()
-        .position(|argument| argument == "--tu-cache")
-        .and_then(|at| std::env::args().nth(at + 1))
-        .map(cpp_code_analysis::TranslationUnitCache::new);
-
     // **A real indexer, not the convenience `summarize`**: that one resolves no includes at all (`NoFiles`), so a
     // probe built on it seeds nothing and the whole positional experiment would be a silent no-op — which the
     // `positional macro evidence:` line below now reports, so the two cannot be confused again.
@@ -410,7 +402,6 @@ standard {}",
     // served while every file the walk entered still hashes the same, and the census prints which of the two
     // happened — "the numbers are the same because nothing was re-walked" and "the numbers are the same because
     // the walk agrees" are otherwise the same sentence.
-    let mut the_unit_came_from_the_cache = false;
     let timeline = (seeded && closure).then(|| {
         let started = std::time::Instant::now();
         let root = paths[0].clone();
@@ -432,16 +423,6 @@ standard {}",
         // The **same** content cache the census read through: the cache's validity check reads every file of the
         // closure, and those bytes are the ones the census already has — see where `files` is built.
         //
-        // `RootKey::WholeText`: this probe re-reads a *corpus* rather than serving a request about a file some
-        // editor is typing into, so the rule that keys the root on its preamble (and the body it deliberately
-        // ignores) would be measuring a different question than the one the census asks.
-        if let Some(cache) = tu_cache.as_ref()
-            && let Some(unit) = cache.get(&root, key, &files, RootKey::WholeText)
-        {
-            seeding_time += started.elapsed();
-            the_unit_came_from_the_cache = true;
-            return unit;
-        }
 
         let unit = cpp_code_analysis::TranslationUnit::walk(
             summaries
@@ -464,9 +445,6 @@ standard {}",
         );
         seeding_time += started.elapsed();
 
-        if let Some(cache) = tu_cache.as_ref() {
-            let _ = cache.put(&root, key, &unit, &files, RootKey::WholeText);
-        }
         unit
     });
     if let Some(unit) = timeline.as_ref() {
@@ -1377,17 +1355,8 @@ definitions {unusable_unreadable}\n\
         },
         // **Where the unit came from**, beside the reading: a cached run and a walked run print the same numbers by
         // design, so "nothing was re-walked" is the only thing that tells a cache measurement from a real one.
-        if seeded && closure {
-            if the_unit_came_from_the_cache {
-                "  · the translation unit came **from the cache** (nothing was walked)"
-            } else if tu_cache.is_some() {
-                "  · the translation unit was **walked** and kept"
-            } else {
-                ""
-            }
-        } else {
-            ""
-        },
+        // (the `--tu-cache` line is gone with the cache: a timeline is no longer kept between runs.)
+        "",
         {
             let mut pairs: Vec<(&str, usize)> =
                 seeds_by_shape.iter().map(|(k, v)| (*k, *v)).collect();

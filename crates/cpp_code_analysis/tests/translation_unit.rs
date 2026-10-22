@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 use cpp_code_analysis::graph::Marked;
 use cpp_code_analysis::{
     CompilerConfig, FileIndexer, FileSummary, MacroBindings, MacroDefinitions, MemoryFiles,
-    RootKey, SummaryKey, TranslationUnit, TranslationUnitCache,
+    SummaryKey, TranslationUnit,
 };
 use cpp_parser::MacroFacts;
 
@@ -471,119 +471,9 @@ fn the_unit_walks_its_files_once() {
 ///    slightly different timeline produces a *reading*, not a diagnostic, and every rule downstream would then
 ///    answer about a header nobody has;
 /// 3. a file in the closure whose contents moved **refuses** the entry, which is the whole validity key.
-#[test]
-fn a_walked_unit_can_be_kept_and_read_back() {
-    let files = [
-        (
-            "/p/config.h",
-            "#ifndef _CONFIG_H_\n#define _CONFIG_H_\n#define SA(id) id\n#endif\n",
-        ),
-        (
-            "/p/api.h",
-            "#include \"config.h\"\n#define API_CALL __cdecl\nAPI_CALL void f(SA(int) value);\n",
-        ),
-        (
-            "/p/main.cpp",
-            "#include \"api.h\"\nint before = API_CALL;\n",
-        ),
-    ];
-
-    let unit = Unit::new(&files);
-    let mut definitions = MacroDefinitions::default();
-    let walked = unit.timeline_of("/p/main.cpp", &mut definitions);
-
-    let directory = std::env::temp_dir().join(format!(
-        "cppls-tu-kept-{}-{}",
-        std::process::id(),
-        cpp_code_analysis::fnv1a64(b"a_walked_unit_can_be_kept_and_read_back")
-    ));
-    let _ = std::fs::remove_dir_all(&directory);
-    let cache = TranslationUnitCache::new(&directory);
-
-    let root = Path::new("/p/main.cpp");
-    let main_cpp = unit.sources.get(root).cloned().unwrap_or_default();
-    // **Keyed the way a session keys the file a person is typing into**: on its preamble. See
-    // [`cpp_code_analysis::RootKey`] for why the body of the root is not part of its own unit's key.
-    let key = RootKey::of(&main_cpp);
-    cache
-        .put(root, 11, &walked, &unit.files, key)
-        .expect("the entry writes");
-    let served = cache
-        .get(root, 11, &unit.files, key)
-        .expect("the entry is served while the closure is unchanged");
-
-    assert_eq!(
-        served.len(),
-        walked.len(),
-        "every fact came back, so the views below are answering about the same timeline"
-    );
-    assert_eq!(
-        served.files().count(),
-        walked.files().count(),
-        "…and every frame"
-    );
-    assert_eq!(
-        (served.conditional_facts, served.facts_in_force),
-        (walked.conditional_facts, walked.facts_in_force),
-        "the two counters the census prints came back too"
-    );
-
-    // The answers, question by question, on the file whose environment is the point of the exercise.
-    let source = unit.sources.get(Path::new("/p/api.h")).expect("read");
-    let from_disk = served
-        .environment_of(Path::new("/p/api.h"))
-        .expect("the served unit reaches api.h");
-    let from_the_walk = walked
-        .environment_of(Path::new("/p/api.h"))
-        .expect("the walked unit reaches api.h");
-    for name in ["SA", "API_CALL", "_CONFIG_H_", "f", "value"] {
-        for offset in (0..source.len()).step_by(5) {
-            assert_eq!(
-                answers(&from_disk, name, offset),
-                answers(&from_the_walk, name, offset),
-                "`{name}` at offset {offset}: the decoded unit answers differently from the walked one"
-            );
-        }
-    }
-
-    // **A header in the closure changes** — the entry is refused, not served with the old macros.
-    let mut changed = MemoryFiles::new();
-    for (path, text) in &files {
-        let text = if *path == "/p/config.h" {
-            "#ifndef _CONFIG_H_\n#define _CONFIG_H_\n#define SA(id) SA_##id\n#endif\n"
-        } else {
-            *text
-        };
-        changed.insert(path, text);
-    }
-    assert!(
-        cache.get(root, 11, &changed, key).is_none(),
-        "an edited header in the closure refuses the entry"
-    );
-
-    // **And a body edit to the root itself does not** — the case the preamble key exists for, on a real walk
-    // rather than on the hand-built frames `tu_cache`'s own tests use. Nothing is added to the file that a walk
-    // could read, so the timeline it produced is still the timeline this file has.
-    let typed_main = format!("{main_cpp}\nint typed_a_line() {{ return 0; }}\n");
-    let mut typed = MemoryFiles::new();
-    for (path, text) in &files {
-        let text = if *path == "/p/main.cpp" {
-            typed_main.as_str()
-        } else {
-            *text
-        };
-        typed.insert(path, text);
-    }
-    assert!(
-        cache
-            .get(root, 11, &typed, RootKey::of(&typed_main))
-            .is_some(),
-        "a body edit to the root keeps the entry: the key is everything a walk can read out of it"
-    );
-
-    let _ = std::fs::remove_dir_all(&directory);
-}
-
+    // **`a_walked_unit_can_be_kept_and_read_back` is gone, with the cache it tested.** A built timeline is no
+    // longer persisted: it outlives the files it was built from, and rebuilding one is 38 ms — see
+    // `Session::translation_unit_of`. The other tests in this file are about the walk itself, which is unchanged.
 /// **The unit cooks as one program**, not as a pile of headers.
 ///
 /// Cooking one file at a time answers "does this header read on its own" — it cannot answer "does the program

@@ -52,22 +52,29 @@ fn main() {
         .filter(|fact| !fact.bases.is_empty())
         .count();
 
+    // **The encode+write / read+decode pair, against the database the server uses.** The file cache this measured
+    // (`write_summary`/`read_summary` to `<cache>/summaries/…`) is gone — one `cache.redb` holds the summaries now,
+    // and it is `SummaryCache` that writes and reads them.
+    let database = cpp_code_analysis::cache_db::SummaryCache::open(
+        &cache,
+        cpp_code_analysis::READING_FINGERPRINT,
+    )
+    .expect("the database opens");
+
     let started = std::time::Instant::now();
     let mut bytes = 0usize;
-    let mut encoded = Vec::new();
     for summary in &summaries {
-        let file = cpp_code_analysis::write_summary(summary, &cache).expect("the summary writes");
-        bytes += std::fs::metadata(&file)
-            .map(|meta| meta.len() as usize)
-            .unwrap_or(0);
-        encoded.push(file);
+        database.put(summary.key, summary);
+        bytes += cpp_code_analysis::summary_codec::encode(summary).len();
     }
+    database.flush();
     let written = started.elapsed();
+    let bytes = bytes;
 
     let started = std::time::Instant::now();
     let mut read_back = 0usize;
-    for file in &encoded {
-        if cpp_code_analysis::read_summary(file).is_ok() {
+    for summary in &summaries {
+        if database.summary(summary.key).is_some() {
             read_back += 1;
         }
     }
