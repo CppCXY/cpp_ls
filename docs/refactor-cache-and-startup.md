@@ -290,3 +290,31 @@ compact              123 ms，24.6 MB → 3.5 MB            ← 删除后必须 
 
 **还没验证的**：多实例（写者单例）与 Windows 文件锁、`renderings`/`projections` 的实际压缩比、
 以及 `CacheDb` 与现有 `SummaryStore` 的接线（M1 后半段）。
+
+### M1 闭环：默认就是数据库（2026-10-22 更晚）
+
+开关全部删除（`CPPLS_CACHE_DB` 与 `without_the_cache_database()` 都不在了），
+文件缓存只是 miss 时的回落；`index_everything` 结束时跑一次 `collect`（空闲步骤）。
+在 `EmmyLuaCodeStyle`（1 761 文件）上，同一个探针：
+
+```text
+                     文件缓存        数据库（现在）
+冷启动                15.4–15.8 s     11.7 s
+热启动                4.2 s           3.1 s / 2.0 s（连跑两次）
+缓存体积              69 MB / 1 768 文件   32 MB / 1 个文件
+```
+
+**两个在收尾时修掉的缺陷**（都是"两个写者"或"批次不可见"这一类）：
+
+```text
+① shared() 原来用 canonicalize 做键：第一个调用者目录还不存在（canonicalize 失败），
+   第二个成功 → 两个句柄、两个缓冲 → 20 个测试失败。改成词法键。
+② 批次只在写路径可见：泵刚建好的摘要被下一个查询重新解析。
+   SummaryCache::summary 现在先查批次再查数据库。
+```
+
+**还没做的一件事：compaction。** `collect` 只删不可达行，文件不会因此变小——
+实测一次收集后文件从 22 MB 长到 32 MB（redb 不回收页）。compaction 需要 `&mut Database`，
+而句柄是进程级共享的 `Arc`，所以它必须是一个**独占时刻**的任务（例如一个独立的
+`cpp_ls --compact-cache` 子命令，或下次启动、打开数据库之前）。在那之前：
+数据库会随世代缓慢增长，这是已知且可量的一点欠账。

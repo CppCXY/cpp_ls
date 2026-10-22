@@ -1118,7 +1118,7 @@ impl<F: FileProvider + Clone> Session<F> {
     }
 
     /// **Collect and compact the summary database** — the idle step, never a query.
-    pub fn collect_the_cache(&mut self) -> Option<(crate::cache_db::Collected, bool)> {
+    pub fn collect_the_cache(&mut self) -> Option<crate::cache_db::Collected> {
         self.store.collect_the_cache()
     }
 
@@ -2873,6 +2873,22 @@ impl<F: FileProvider + Clone> Session<F> {
                     eprintln!(
                         "cooking: stopping with read 0, cooked 0, backlog {} | cache {cached:?}",
                         self.pending_cooking()
+                    );
+                }
+                // **The idle step, and this is the idle.** A session that has just finished indexing is the one
+                // moment when collecting the cache is free of a reader: rows nothing references (a file that changed
+                // while the last run was writing it, a deleted file, a summary from a previous generation) are
+                // dropped, and the file is compacted — measured, a collection left a database *larger* than it
+                // started (16.6 MB → 24.6 MB) until compaction returned the pages.
+                //
+                // Once per call rather than once per loop: `index_everything` is the "index it all" entry point, and
+                // a caller that calls it twice is asking twice.
+                if let Some(collected) = self.collect_the_cache() {
+                    log::debug!(
+                        "cache: collected {} summar(ies), {} rendering(s), {} projection(s)",
+                        collected.summaries,
+                        collected.renderings,
+                        collected.projections
                     );
                 }
                 return total;

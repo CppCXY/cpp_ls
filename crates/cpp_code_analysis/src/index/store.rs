@@ -479,14 +479,15 @@ impl<F: FileProvider> SummaryStore<F> {
         }
     }
 
-    /// **Collect and compact the database** — the idle step, never a query: both are rewrites of the file.
+    /// **Collect the rows nothing references** — the idle step, never a query.
     ///
-    /// Only when this store holds the **only** handle: the compactor rewrites the file for everyone, and a handle
-    /// another store is still using is not one to rewrite under it.
-    pub fn collect_the_cache(&mut self) -> Option<(crate::cache_db::Collected, bool)> {
-        let database = self.summary_database.get_mut()?.clone()?;
-        database.flush();
-        std::sync::Arc::into_inner(database)?.collect_and_compact()
+    /// A write transaction like any other, so it runs beside a reader and needs no exclusive handle. **Compaction
+    /// is not here**, and the reason is worth keeping: it rewrites the file and takes `&mut`, while the handle this
+    /// store holds comes from [`crate::cache_db::shared`] and is shared with every other store in the process. A
+    /// collection is what stops the database growing with rows nothing references; compaction is a separate job for
+    /// a moment when nobody else holds the handle.
+    pub fn collect_the_cache(&mut self) -> Option<crate::cache_db::Collected> {
+        self.summary_database().and_then(|database| database.collect())
     }
 
     /// Commit whatever the database is holding — the end of a slice.

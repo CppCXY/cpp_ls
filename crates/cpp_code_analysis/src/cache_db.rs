@@ -796,6 +796,16 @@ impl SummaryCache {
         }
     }
 
+    /// **Drop the rows nothing references**, after committing the batch — the idle step.
+    ///
+    /// Reading nothing into memory and taking no exclusive ownership: `collect` is a write transaction like any
+    /// other, so it runs beside a reader. Compaction is a different matter and stays off this path — it rewrites the
+    /// file and needs `&mut`, which a handle shared through [`shared`] cannot promise.
+    pub fn collect(&self) -> Option<Collected> {
+        self.flush();
+        self.database.collect().ok()
+    }
+
     /// Start a new generation, and answer it — see [`CacheDb::begin_generation`].
     pub fn begin_generation(&self) -> Result<u64> {
         self.database.begin_generation()
