@@ -347,3 +347,28 @@ M2 的原计划是"按 root 解析 + facts 按来源归档，删掉第二遍"。
 一次 TU 读取（LuaSource.cpp 的闭包）：渲染 899 ms + 解析 399 ms + 索引 3.8 s ≈ 5.1 s
 198 个 root × 5.1 s 不可接受 —— 除非渲染、解析、sweep 三项都变成增量的（见 §六 的 M4）
 ```
+
+### M4 的三项：1 做了，3 和 4 没做（以及为什么）
+
+**1（done）**：TU 渲染进数据库 —— `render_the_unit` 899 ms → **55 ms**（跨会话），同会话内 17 ms（2 MB 克隆）。
+见上文的实测与 `unit_codec`。
+
+**3（未做）**：sweep 增量。实测 `read_the_unit` 仍是 4.4–5.5 s，其中解析 399 ms、
+`index_unit_rendering` 的 sweep ≈3.9 s。sweep 是**对整棵树按 span 归属**的遍历，所以"跳过没变的文件"不是
+一个 if：流里任一文件改动都会移动后面所有 span，缓存的 per-file facts 不能直接复用。
+
+可行的做法（下一次的第一步，成本可估）：
+
+```text
+把 IndexedUnit 本身按 program hash 存进数据库（与 unit 渲染同一个套路）：
+  read_the_unit = 解码 103 个文件的 facts + tokens 统计
+  重复读同一个 closure：4.4 s → 估计 50–100 ms（解码 103 份 facts）
+它不解决"闭包里有一个文件改了"的情况——那仍要整段 sweep——但重复读是常见情形（每次拉诊断都会读打开的文件的 TU）
+```
+
+**4（未做）**：TU 索引。它依赖 3：按 root 一次 TU 解析的代价是 parse + sweep，sweep 不变成增量，
+198 个 root 就是 198 × 4.4 s ≈ 15 分钟。顺序不能颠倒。
+
+**这一步没有做的事，以及为什么不做**：把 3 做成"缓存 IndexedUnit"要动 `IndexedUnit` 与 `CookedFile` 的
+序列化（它们不是 `FileSummary`，是一棵按文件的 facts 集合），那是又一轮 400 行的编码工作；
+半途而废会把 `read_the_unit` 留在"有时命中、有时不命中"的中间态。所以停在这里，把成本写清楚。
