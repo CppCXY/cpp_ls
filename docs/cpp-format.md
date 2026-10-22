@@ -126,9 +126,10 @@ struct FormatToken {
 }
 ```
 
-渲染时输入是 `&str`，输出是 `String`：按 token 顺序把 `[上一个 token 的 text_range.end, 本 token
-的 space_range.start)` 之后的一段替换成"决定的空白"，token 自身的文本**原样搬运**。于是
+渲染时输入是 `&str`，输出是 `String`：按 token 顺序走一遍，每到一处先把 `space_range`（两个 token
+之间那段 trivia）替换成**决定的空白**，再把 token 自身的 `text_range` 原文搬运。于是
 "只改空白"不是测试出来的性质，而是渲染器唯一的代码路径——token 保全由构造保证。
+（骨架现在用的是 `src/main.rs`；P0 把它改成 `src/bin/cppfmt.rs` 或给 `[[bin]]` 起名 `cppfmt`。）
 
 ### 4.2 行模型：`UnwrappedLine`
 
