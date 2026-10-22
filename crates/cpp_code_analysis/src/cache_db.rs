@@ -119,13 +119,6 @@ impl FileRow {
         })
     }
 
-    fn key(self) -> CacheKey {
-        CacheKey {
-            content: self.content,
-            config: self.config,
-            env: self.env,
-        }
-    }
 }
 
 /// What a garbage collection did — the numbers a probe prints and a test asserts on.

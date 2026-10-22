@@ -811,7 +811,8 @@ impl Session<DiskFiles> {
         };
 
         let session = Session::assemble(root, files, filter, config, toolchain, discovery);
-        session.sweep_the_cache_in_the_background();
+        // (the file-cache sweep is gone with the file cache: `cache.redb` collects its own generations —
+        // `SummaryStore::collect_the_cache`.)
         session
     }
 }
@@ -1298,22 +1299,6 @@ impl<F: FileProvider + Clone> Session<F> {
     // What changed
     // ---------------------------------------------------------------------------------------------
 
-    /// **Sweep the summary cache on a thread of its own**, once, when a project is opened.
-    ///
-    /// What it removes is only what could never be served again — see [`crate::cache::prune`] — so it changes no
-    /// answer and needs nothing from the session but the directory's name. It is the product path only
-    /// ([`Session::open`]), not [`Session::with_config`]: a test that counts the files in a cache directory does
-    /// not want a second party deleting them, and a session over a provider that is not the disk has no directory
-    /// to sweep. The thread is detached and its result unread: a sweep that fails has left a cache that is larger
-    /// than it should be, which is where it started.
-    fn sweep_the_cache_in_the_background(&self) {
-        let cache = self.store.cache_directory().to_path_buf();
-        let _ = std::thread::Builder::new()
-            .name("cppls-cache-sweep".to_string())
-            .spawn(move || {
-                crate::cache::prune(&cache, crate::cache::CACHE_BUDGET_BYTES);
-            });
-    }
 
     /// The client opened a document, or said what its buffer now contains.
     ///

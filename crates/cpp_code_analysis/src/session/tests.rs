@@ -1791,17 +1791,21 @@ fn a_configuration_change_re_seeds_the_project_and_the_open_buffers() {
 }
 
 #[test]
-#[ignore = "the summary database changed this read path: after a configuration change the second read is Built, not Reused — see docs/refactor-cache-and-startup.md M1 remaining"]
-fn a_change_to_a_file_that_was_already_worked_is_queued_and_then_reused() {
-    // A configuration change re-arms files the queue had already finished, which is the one thing `add` refuses
-    // to do. The work is still cheap: the key is computed from the text, so a file whose text did not change is
-    // a hit, and "ask again" costs a read rather than a parse.
+#[test]
+fn a_configuration_change_re_arms_a_worked_file_and_it_is_rebuilt() {
+    // **This asserted `Reused` and could not**: the configuration is part of every summary`s key
+    // (`SummaryKey::context_hash`), so a `compile_commands.json` that changed is a different reading of the same
+    // text. The neighbour above pins the same fact for the whole project — "one `-I` added makes every stored
+    // summary a miss" — and this test was written before that became true. What is worth pinning instead is that
+    // re-arming costs one read rather than a lost file: the queue takes it back, the rebuild is counted, and the
+    // index holds the same one summary afterwards.
     let files = MemoryFiles::new().with_file("/p/a.cpp", "int a;\n");
     let fixture = Memory::new("rearm", &files);
     let mut session = fixture.session();
 
     session.add_project_files([PathBuf::from("/p/a.cpp")]);
     session.index_everything();
+    assert_eq!(session.index().summaries().count(), 1);
 
     let before = session.stats();
     session.changed([FileEvent::modified(
@@ -1809,12 +1813,17 @@ fn a_change_to_a_file_that_was_already_worked_is_queued_and_then_reused() {
     )]);
 
     let steps = session.advance(4);
-    assert_eq!(paths(&steps), ["/p/a.cpp"]);
-    assert_eq!(steps[0].outcome, StepOutcome::Reused);
+    assert_eq!(paths(&steps), ["/p/a.cpp"], "the file is work again");
     assert_eq!(
-        session.stats().since(before).rebuilt,
-        0,
-        "a configuration change costs reads, not parses"
+        steps[0].outcome,
+        StepOutcome::Built,
+        "a different configuration is a different reading, so the text alone cannot answer for it"
+    );
+    assert_eq!(session.stats().since(before).rebuilt, 1);
+    assert_eq!(
+        session.index().summaries().count(),
+        1,
+        "and the index is the same size: a rebuild is not a second file"
     );
 }
 
