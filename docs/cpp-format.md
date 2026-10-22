@@ -95,12 +95,12 @@ N5 不追求与 clang-format 不同版本一致。版本漂移是已知风险，
 
 ## 四、我们的架构
 
-新 crate `crates/cpp_format`（lib + `cppfmt` bin），只依赖 `cpp_parser`（取 token 与结构）与
+新 crate `crates/cpp_formatter`（lib + `cppfmt` bin；仓库里已经有这个空骨架，本设计沿用它的名字），只依赖 `cpp_parser`（取 token 与结构）与
 `clap`（CLI）。不改 `cpp_code_analysis`：格式化是**文本层**的工作，绝不走 cooked 读数，
 也不碰 `ReadingOffset` 那套渲染坐标。
 
 ```text
-crates/cpp_format/src/
+crates/cpp_formatter/src/
   config.rs      .clang-format 的 YAML 子集解析、preset 表、BasedOnStyle 解析、键校验、错误信息
   presets.rs     7 个 preset 的**生成**表（见 §五），与 -dump-config 的 golden 对比测试
   tokens.rs      从 CppSyntaxTree 取 token + 取 trivia 区间；display column 计算（tab/UTF-8）
@@ -390,7 +390,7 @@ R6 语料的许可：EmmyLuaCodeStyle 与 libstdc++ 只作为**测试输入**在
 ## 十二、与现有仓库的关系
 
 ```text
-· 新 crate `crates/cpp_format`，`crates/*` 已被 workspace 收进来，无需改根 Cargo.toml 的 members
+· 新 crate `crates/cpp_formatter`，`crates/*` 已被 workspace 收进来，无需改根 Cargo.toml 的 members
 · 只依赖 `cpp_parser`（lossless CST、lexer、trivia）与 `clap`；不依赖 `cpp_code_analysis`
 · 复用 `cpp_parser` 的测试夹具作为"坏代码/宏/`#if`"用例来源
 · 格式化是文本层：不读 cooked 读数、不碰 `ReadingOffset`、不写摘要缓存
