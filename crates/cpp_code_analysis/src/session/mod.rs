@@ -4445,6 +4445,10 @@ fn error_directive_line(text: &str) -> Option<(usize, usize, String)> {
         let mut placed = 0usize;
         for (path, cooked) in indexed.files {
             placed += 1;
+            // **And the queue is told, so no per-file step reads it again.** A unit read files the facts of every
+            // file in the program; the per-file queue would otherwise parse each of them a second time — the
+            // measurement is the whole of `docs/clangd-model.md` §二.
+            self.queue.mark_worked(&path);
             self.store.index_mut().insert_cooked(&path, cooked);
         }
 
@@ -6898,6 +6902,29 @@ impl Work {
     fn is_worked(&self, path: &Path) -> bool {
         matches!(self.standing.get(&queue_key(path)), Some(Standing::Worked))
     }
+
+    /// **Mark a file read without popping it** — what a translation-unit read does for every file it covered.
+    ///
+    /// A unit read parses one program and files the facts of every file in it, so the per-file queue must not read
+    /// those files again. The queue entry (if any) is left where it is and skipped by `pop`, which asks `standing`
+    /// rather than the deque; the count is what a caller sees, so it comes down here.
+    ///
+    /// A path the queue has never heard of is recorded as worked rather than ignored: a later `add` then leaves it
+    /// alone, which is the honest answer — the unit read covered it.
+    fn mark_worked(&mut self, path: &Path) {
+        let key = queue_key(path);
+        match self.standing.get(&key) {
+            Some(Standing::Queued(_)) => {
+                self.standing.insert(key, Standing::Worked);
+                self.queued -= 1;
+            }
+            Some(Standing::Worked) => {}
+            None => {
+                self.standing.insert(key, Standing::Worked);
+            }
+        }
+    }
+
 
     /// The next `how_many` files [`Work::pop`] would answer with, **without taking them** — in the order it would.
     ///
