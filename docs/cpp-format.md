@@ -243,18 +243,23 @@ preset 的实际差异（`-dump-config` 实测，抽样）：
 
 ```text
                            LLVM    Google  Chromium  Mozilla  WebKit  Microsoft  GNU
-IndentWidth                2       2       2         4        2       2          4
-ColumnLimit                80      79      80        0        80      80         120
-BreakBeforeBraces          Attach  GNU     Mozilla   WebKit   Attach  Attach     Custom
-PointerAlignment           Left    Right   Left      Left     Left    Right      Right
-AccessModifierOffset       -1      -2      -2        -4       -1      -2         -2
-ContinuationIndentWidth    4       4       2         4        4       4          4
-BinPackParameters          false   true    false     true     true    true       true
-AlignAfterOpenBracket      Align   Align   Align     DontAlign Align  Align      Align
-BreakBeforeBinaryOperators None    All     None      All      None    None       None
+IndentWidth                2       2       2         2        4       4          2
+ColumnLimit                80      80      80        80       0       120        79
+BreakBeforeBraces          Attach  Attach  Attach    Mozilla  WebKit  Custom     GNU
+PointerAlignment           Right   Left    Left      Left     Left    Right      Right
+AccessModifierOffset       -2      -1      -1        -2       -4      -2         -2
+ContinuationIndentWidth    4       4       4         2        4       4          4
+BinPackParameters          true    true    false     false    true    true       true
+AlignAfterOpenBracket      Align   Align   Align     Align    DontAlign Align    Align
+BreakBeforeBinaryOperators None    None    None      None     All     None       All
 SpaceBeforeParens          Control Control Control   Control  Control Control    Always
-AllowShortFunctions…       Inline  All     Inline    All      All     All        None
+AllowShortFunctions…       All     All     Inline    Inline   All     None       All
+DerivePointerAlignment     false   true    false     false    false   false      false
+IndentCaseLabels           false   true    true      true     false   false      false
 ```
+
+这张表的第一版是**错的**：生成脚本把七个 preset 塞进一个无序的 `@{}`，列头却按固定顺序打印，于是整张表错位
+（把 Google 的 79 列、GNU 的 120 列写反了）。现在这张是逐 preset 单独 dump、按固定列序生成的。
 
 ## 六、精度：oracle、语料与指标
 
@@ -388,6 +393,47 @@ R6 语料的许可：EmmyLuaCodeStyle 与 libstdc++ 只作为**测试输入**在
    golden 语料用合成用例 + 仓库自己的测试夹具，避免把第三方代码签进来。
 ```
 
+## 十三、P0a 已落地（2026-10-23，实测）
+
+`crates/cpp_formatter` 现在能跑：`.clang-format` 子集 + 7 preset、token/trivia 模型、从语法树取角色
+（模板尖括号 / 声明符 / 块括号）、行内空白规则、只替换空白的渲染器、`cppfmt` CLI、
+以及 `examples/spacing_audit.rs`（对着 clang-format 逐 gap 比）。
+
+**做什么、不做什么。** P0a 只重写**同一行内、且不含注释的** gap；换行、缩进、注释周围的一切原样复制。
+于是"一次只动一个变量"：行结构的问题留给 layout（P0b），这里量的是空白规则本身。
+
+**指标与数字**（`spacing_audit`：同一文件分别用我们和 clang-format 格式化，逐 token 对 gap 宽度，
+两边都在同一行且无注释的 gap 才计入）：
+
+```text
+工程自身 106 个文件 / 58 156 个 gap      **99.71%** 相同（57 985 / 58 156）
+整个仓库 774 个文件（含 3rd）/ 632 565    98.8%
+```
+
+剩下的差距按成因分成四类，前三类是**已知的下一段**，不是缺陷：
+
+```text
+· `AlignArrayOfStructures: Left`（工程配置开着）：`{6,  6 }` 这种列对齐 —— P1 的对齐后处理
+· `SortIncludes`：clang-format 会重排 `#include`，token 顺序因此不同 —— P3（审计里这几份文件被跳过）
+· `#` 行与宏体：P0a 原样复制，clang-format 会规范化 `#  define` 和宏参数里的逗号 —— P4
+· 少量 token 角色判错（`>`/`<` 在解析失败的代码里、函数指针的 `(`）—— 逐条消
+```
+
+**两个在这一段里被抓到的真实缺陷**，都值得记住：
+
+```text
+① preset 生成器的键名正则 `^[A-Za-z_]+` 丢掉了 `Cpp11BracedListStyle` 和
+   `SpaceBeforeCpp11BracedList`（键名里有数字）→ 工程自己的 `.clang-format` 解析失败 →
+   审计静默回退到 LLVM 默认值，整轮数字都建立在一个错的配置上。现在正则允许数字，并且
+   审计在配置解析失败时会把它打印出来（不再静默回退）。
+② 删掉一个空格可能把两个 token 粘成一个：`> >` → `>>`（右移）、`+ +` → `++`、`/ /` → 注释。
+   这不是规则能避免的，是词法的性质。所以渲染器最后**重新词法**并比对 token 序列，不一致就
+   原样返回整个文件——"拒绝格式化"是格式化器唯一诚实的失败方式，I1 由此由构造保证。
+   实测触发：`LuaParseError.h`。
+```
+
+**测试**：22 个单元测试（配置、preset、token/gap、角色、空白规则、渲染、token 保全、幂等）；
+`spacing_audit` 作为可重复的测量工具。
 ## 十二、与现有仓库的关系
 
 ```text

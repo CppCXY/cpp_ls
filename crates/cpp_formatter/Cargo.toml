@@ -3,4 +3,14 @@ name = "cpp_formatter"
 version = "0.1.0"
 edition = "2024"
 
+[[bin]]
+name = "cppfmt"
+path = "src/main.rs"
+
+[lib]
+name = "cpp_formatter"
+path = "src/lib.rs"
+
 [dependencies]
+# The token stream and the tree that settles what a token *is* (`int *p` vs `a * b`).
+cpp_parser.workspace = true

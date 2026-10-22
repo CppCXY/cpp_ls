@@ -232,6 +232,9 @@ dependencies = [
 [[package]]
 name = "cpp_formatter"
 version = "0.1.0"
+dependencies = [
+ "cpp_parser",
+]
 
 [[package]]
 name = "cpp_ls"
