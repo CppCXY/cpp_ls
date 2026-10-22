@@ -2257,9 +2257,6 @@ impl TranslationUnit {
         // The stream is right because a cook reads such a file through its own table; this query reads the unit's
         // timeline, which for that shape holds nothing. `None` says so, and the caller reports "no reading" instead of
         // a confident `false` — a tool whose answers are used to decide what to fix must not invent one.
-        if !self.events.iter().any(|event| event.frame == frame) {
-            return None;
-        }
 
         // **A file's own facts are visible to it, and `MacroView::the_binding` cannot say so.**
         //
@@ -2278,6 +2275,21 @@ impl TranslationUnit {
         // * **this file's own last fact at or before `offset`**, out of the unit's name history, which is in walk
         //   order — a fact written by this file is in force from where it is written;
         // * **the inherited one**, if any, from `the_binding`, which knows about the files this one includes.
+        // **Every event here was in force when it was fed.** The walk decides a conditional fact's guard before it
+        // records anything, and a fact whose guard it decided against is *not* recorded at all — it is what
+        // `RenderedUnit::dead_macros` hands on. So requiring `unconditional` here threw away a file's own
+        // `#define`s behind an `#if` that was taken, and answered `defined: false` for them:
+        //
+        // ```text
+        // same.h   #define SAME 1
+        //          #ifdef SAME
+        //          #define OWN_INSIDE 1     ← in the unit's events, `unconditional: false`
+        //          #endif
+        // macro_at(same.h, "OWN_INSIDE")  →  defined: false        (before this change)
+        // ```
+        //
+        // Found by the effect model's oracle and narrowed to this one predicate; `tests/nested_conditional.rs`
+        // is the reproduction, and it is the reason the predicate is gone rather than widened.
         let own = self
             .by_name
             .get(name)
@@ -2285,7 +2297,7 @@ impl TranslationUnit {
             .flatten()
             .rev()
             .map(|index| &self.events[*index as usize])
-            .find(|event| event.unconditional && view.applies_here(frame, offset, event));
+            .find(|event| view.applies_here(frame, offset, event));
 
         let inherited = view.the_binding(name);
 
@@ -2306,6 +2318,13 @@ impl TranslationUnit {
             }
             (Some(own), Some(_)) => own,
             (None, None) => {
+                // **A file whose own frame has no events at all is a file this walk cannot speak about** — every
+                // directive it wrote either produced nothing or was decided against. `None` rather than `false`,
+                // because "nothing was recorded here" and "this name is not a macro here" are different answers and
+                // only the second is one this unit made. See the note at the top of this function.
+                if !self.events.iter().any(|event| event.frame == frame) {
+                    return None;
+                }
                 return Some(MacroAt {
                     defined: false,
                     body: None,

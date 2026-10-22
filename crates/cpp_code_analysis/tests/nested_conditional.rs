@@ -64,7 +64,7 @@ fn unit_of(files: &[(&str, &str)], root: &str) -> TranslationUnit {
 /// order. A `#define` guarded by `#ifdef` on a name the *same file* defined one line earlier is judged out of
 /// force too — so the name the condition asks about is answered from somewhere narrower than the file`s own table.
 #[test]
-#[ignore = "a guarded define is judged out of force even when its condition was defined in the same file"]
+
 fn a_guarded_define_in_the_same_file_is_in_force_too() {
     let unit = unit_of(
         &[(
@@ -82,7 +82,7 @@ fn a_guarded_define_in_the_same_file_is_in_force_too() {
 }
 
 #[test]
-#[ignore = "the walk decides `#ifdef BASE` false after `#include \"base.h\"` defined it — see the module note"]
+
 fn a_guarded_define_is_in_force_after_the_include_that_defines_its_condition() {
     let unit = unit_of(
         &[
