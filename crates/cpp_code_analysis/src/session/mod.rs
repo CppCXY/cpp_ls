@@ -2825,7 +2825,12 @@ impl<F: FileProvider + Clone> Session<F> {
             // so the value it bought was not visible in any answer. The cost *was* visible: the next keystroke's pump
             // slice took four of those files and four unit walks, and typing was **65 ms instead of 10** for about
             // three hundred keystrokes. A caller that says "index everything" is owed this too.
-            if read == 0 && cooked == 0 && self.parsed_since_the_last_pass.is_empty() {
+            // **The second pass is owed, and this loop does not pay it.** `8e976e1` folded it in here, and the
+            // measurement is `docs/edit-latency.md` §「冷启动的第二遍」: a cold start of `EmmyLuaCodeStyle` went from
+            // **12.6 s to 135.6 s**, because the pass walks a unit per re-read file — **1 621 walks** for 1 761
+            // files, at ~75 ms each. The pump already drains it, four files a slice, and `pending_work` counts it, so
+            // the work still happens; what the loop bought was paying for it *before* the session answered anything.
+            if read == 0 && cooked == 0 {
                 if tracing {
                     // **The cache as the pump leaves it.** If this is non-zero and a request still misses, the key
                     // the writer used and the key the reader computes are two different keys — which is the one

@@ -510,3 +510,56 @@ $env:CPPLS_PROJECT_CONFIG="E:\cpp_ls\target\cold.toml"; …edit_loop…; Remove-
 **一个容易踩的坑**：摘要缓存的名字里含 `READING_FINGERPRINT`——读者源码的哈希。
 所以**任何一次改动 `cpp_code_analysis` 的读取代码，整份缓存都不可达**，下一次启动必然是冷启动
 （`cache::prune` 会把它们扫掉）。上面所有"冷"数字都是这种状态；要量"热"，同一个二进制连跑两次。
+
+---
+
+## 七、冷启动的第二遍：135.6 s 里 120 s 是它（2026-10-22）
+
+`8e976e1` 把第二遍的欠账折进了 `index_everything` 的退出条件，理由是"一个 owes 一个 re-read 的会话不是 idle"。
+理由本身是对的，代价没有量：**它对整个第二遍是阻塞的**。
+
+在 `EmmyLuaCodeStyle`（1761 个文件、冷摘要缓存）上逐提交测：
+
+```text
+提交                                    index_everything（冷）
+356eacc  本次会话的最后一个提交            15.4 s
+9eb923c  refactor many                    13.6 s
+8e976e1  fix some perf                   188.2 s      ← 回归在这一个提交里
+8e976e1 + 去掉第二遍的退出条件              12.4 s      ← 回归全部来自这里
+```
+
+`edit_loop` 的仪器把 135.6 s 拆开（冷缓存、无头编译数据库）：
+
+```text
+indexed 1761 files in 135.6 s — 2255 parsed, 0 from disk, 61 not stored
+  units: 157 memory, 14 disk, **1621 walked**
+```
+
+**1621 次单元走查，每次约 75 ms，合计约 120 s。** 第二遍的重读是"每个文件一遍它自己的闭包时间线"
+（`units_for_the_pass` 的注释说明了为什么不能复用 project root），所以 1205 个欠账文件 ≈ 1205 次走查，
+再加上第一遍补的，就是 1621。
+
+两个常量都不是主因，也都量过（冷启动总耗时）：
+
+```text
+RE_READ_SLICE  4 → 64      188.2 s → 147.6 s
+MAX_UNITS     16 → 256     147.6 s → 133.0 s
+去掉阻塞的第二遍（常量复原）            12.4 s
+```
+
+### 现在的处理
+
+`index_everything` 回到 `read == 0 && cooked == 0` 就返回；第二遍的欠账仍然算在 `pending_work()` 里，
+所以泵会继续用切片把它做完（`RE_READ_SLICE = 4`），只是**不再挡住启动**。
+`Session::re_read_backlog()` 的仪器保留，任何人都能看见还有多少欠账。
+
+### 还没做的（按收益排序）
+
+```text
+1. 让第二遍跳过"读数不可能改变"的文件：第一遍是 provisional 的只有宏表，
+   若一个文件的文本里没有出现任何在force的宏名，它的读数与宏环境无关，重读没有意义
+   （`dead_macro_decisions` 现在给出 1331 文件 / 93 271 offset，可以用来标定这条规则）
+2. 第二遍按"读到的 root"去重：走查的键是文件自己的闭包，但闭包相同的文件很多
+3. 门控从"全局 pending_work == 0"改成"这个文件的读数已经重读过"，
+   这样诊断不必等整个项目的第二遍
+```
