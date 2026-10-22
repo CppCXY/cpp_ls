@@ -1,77 +1,83 @@
-//! **A file's directives, and therefore its *export surface*** — what it defines, what it undefines, what it
-//! includes, and **which macro names it reads its environment through**.
+//! **A file's directives as data**: what it defines, what it undefines, what it includes, and the conditions it
+//! reads its environment through — with the tokens needed to evaluate them.
 //!
-//! # Why this is the foundation rather than an optimisation
+//! # Why this exists
 //!
-//! The index we have treats a file's reading as a function of its whole macro environment, and computes that
-//! environment by cooking the include closure. That is 131 s per project and it recomputes the same environments
-//! hundreds of times, because a header's contribution to a translation unit is **not its text** — the text never
-//! enters the including file — it is the macro table it leaves behind.
+//! The index we have treats a file's reading as a function of its whole macro environment and computes that
+//! environment by cooking the include closure: 131 s per project, recomputing the same environments hundreds of
+//! times. But a file's contribution to a translation unit is **not its text** — the text never enters the including
+//! file — it is the macro table it leaves behind, and that table is a function of **the few macro names its
+//! conditionals read** (measured: median 5, p90 25, and 311 of 1 761 files read none at all).
 //!
-//! So the useful object is not "the file as a compiler reads it" but:
+//! So the useful object is the directive list itself:
 //!
 //! ```text
-//! surface(file) = { events:      #if / #define / #undef / #include, in order
-//!                   tests:       the macro names its conditionals read
-//!                   exports:     the names it can define
-//!                   includes:    what it pulls in }
-//! effect(file, environment) = surface's events interpreted against that environment
+//! surface(file)     = events in order: #if/#elif (with their condition tokens), #define, #undef, #include, other
+//! effect(file, env) = those events interpreted against that environment
 //! ```
 //!
-//! A file's effect is a **function of the few names it tests**, not of the whole table. Measured on a real project
-//! (1 761 files, EmmyLuaCodeStyle): a file tests a median of **5** macro names (p90 25), and **312 of 1 761** test
-//! none at all — so the cache key is tiny and the same key recurs across translation units. The whole project's
-//! surfaces are built by this module in **867 ms**, against 131 s for the exact index.
+//! This module produces the first; [`crate::effect`] interprets it. Scanning the whole project (1 761 files) costs
+//! **888 ms**, and its export names agree with what a parse reports for all 80 files sampled.
 //!
-//! # What this module does not do
+//! # What it does not do
 //!
-//! It does not evaluate anything. Deciding whether `#if` holds needs a macro table, and that belongs to
-//! [`crate::surface::effect`]'s future caller (`docs/exact-index-design.md` §八). Here a condition is kept as its
-//! own spelling and its `tests`, which is what a key needs.
+//! It does not evaluate a condition. `#if` needs a macro table and an evaluator, and both live elsewhere
+//! ([`crate::effect`]); what is kept here is the condition's own tokens, taken from the file so that evaluating it
+//! later needs no re-lexing.
 
 use std::path::{Path, PathBuf};
 
 use cpp_parser::{CppTokenData, CppTokenKind, LexerConfig, SourceRange};
 
+use crate::macros::MacroDef;
+use crate::token::Token;
+
+/// **What a conditional asks.** `#ifdef X` is not the expression `#if X`: the first asks whether the name is
+/// defined at all, the second reads its *value*. Folding the first into the second is how `#ifdef X` with
+/// `X` defined as nothing becomes false.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConditionFlavour {
+    /// `#if` / `#elif` — an expression, evaluated with the macro table.
+    Expression,
+    /// `#ifdef` / `#elifdef` — is the name defined?
+    Defined,
+    /// `#ifndef` / `#elifndef` — is the name *not* defined?
+    NotDefined,
+}
+
 /// One directive, in the order it was written.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
-    /// `#if <condition>` / `#ifdef NAME` / `#ifndef NAME`.
+    /// `#if <condition>` / `#ifdef NAME` / `#ifndef NAME`, with the condition's tokens.
     If {
-        spelling: String,
+        tokens: Vec<Token>,
+        flavour: ConditionFlavour,
         /// The names the condition reads: `#if A && defined(B)` tests `A` and `B`.
         tests: Vec<String>,
         range: SourceRange,
     },
     /// `#elif <condition>`.
     Elif {
-        spelling: String,
+        tokens: Vec<Token>,
+        flavour: ConditionFlavour,
         tests: Vec<String>,
         range: SourceRange,
     },
     /// `#else` / `#endif` — carried so that a condition's scope is known without re-lexing.
     Else { range: SourceRange },
     Endif { range: SourceRange },
-    /// `#define NAME body` — the export.
-    Define {
-        name: String,
-        /// `#define F(x)` rather than `#define F`.
-        function_like: bool,
-        /// The body as written, trimmed. Empty for a bare `#define NAME`.
-        body: String,
-        range: SourceRange,
-    },
+    /// `#define` — the export, parsed by the same reader the preprocessor uses.
+    Define { definition: MacroDef },
     /// `#undef NAME` — the anti-export, and why a surface is a sequence rather than a set.
     Undef { name: String, range: SourceRange },
     /// `#include "x"` / `#include <x>`.
     Include {
-        /// As written: `"x.h"` or `<vector>`.
+        /// As written: `"x.h"`, `<vector>`, or a macro name a caller has to expand.
         spelling: String,
         angled: bool,
         range: SourceRange,
     },
-    /// `#pragma`, `#error`, `#line`, and anything else — kept in sequence so a caller that evaluates conditions can
-    /// see it, and ignored by [`Surface::tests`] and [`Surface::exports`].
+    /// `#pragma`, `#error`, `#include_next`, `#import`, anything else — kept in sequence so an interpreter sees it.
     Other { spelling: String, range: SourceRange },
 }
 
@@ -110,7 +116,17 @@ impl Surface {
         self.events
             .iter()
             .filter_map(|event| match event {
-                Event::Define { name, .. } => Some(name.as_str()),
+                Event::Define { definition } => Some(definition.name.as_ref()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    pub fn undefinitions(&self) -> Vec<&str> {
+        self.events
+            .iter()
+            .filter_map(|event| match event {
+                Event::Undef { name, .. } => Some(name.as_str()),
                 _ => None,
             })
             .collect()
@@ -126,13 +142,61 @@ impl Surface {
             .collect()
     }
 
-    /// How many conditionals the file has — the shape of the effect interpreter's work.
+    /// How many conditionals the file has — the shape of the interpreter's work.
     pub fn conditionals(&self) -> usize {
         self.events
             .iter()
             .filter(|event| matches!(event, Event::If { .. } | Event::Elif { .. }))
             .count()
     }
+
+    /// **A hash of the directives and nothing else** — the edit-time question "can this file's *effect* have
+    /// changed?".
+    ///
+    /// A function body, a comment, a statement: none of them is an event, so none of them moves this number. A
+    /// define, an undef, an include or a condition does.
+    pub fn signature(&self) -> u64 {
+        // FNV-1a, the same arithmetic `cache::fnv1a64` uses — inlined here because this hash is over a *sequence*
+        // and the shared helper takes bytes.
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        for event in &self.events {
+            let (tag, text) = match event {
+                Event::If { tokens, .. } => (1u8, spellings(tokens)),
+                Event::Elif { tokens, .. } => (2, spellings(tokens)),
+                Event::Else { .. } => (3, String::new()),
+                Event::Endif { .. } => (4, String::new()),
+                Event::Define { definition } => (
+                    5,
+                    format!(
+                        "{}|{}|{}",
+                        definition.name,
+                        definition.is_function_like(),
+                        spellings(&definition.body.tokens)
+                    ),
+                ),
+                Event::Undef { name, .. } => (6, name.clone()),
+                Event::Include { spelling, .. } => (7, spelling.clone()),
+                Event::Other { spelling, .. } => (8, spelling.clone()),
+            };
+            for byte in text.as_bytes().iter().chain(std::iter::once(&tag)) {
+                hash ^= u64::from(*byte);
+                hash = hash.wrapping_mul(0x100_0000_01b3);
+            }
+        }
+        hash
+    }
+}
+
+fn spellings(tokens: &[Token]) -> String {
+    let mut out = String::new();
+    for token in tokens {
+        if crate::token::is_trivia(token.kind) {
+            continue;
+        }
+        out.push_str(&token.text);
+        out.push(' ');
+    }
+    out
 }
 
 /// **Scan one file's directives.** A lexer pass and one walk over its tokens — no tree, no expansion, no I/O.
@@ -150,47 +214,36 @@ pub fn surface_of(path: &Path, text: &str) -> Surface {
             at += 1;
             continue;
         }
-        // **A directive is a `#` and the rest of its line.** A line splice continues it; a newline ends it before
-        // the newline token itself is looked at, which is why the walk stops *on* it.
+        // **A directive is a `#` and the rest of its line.** The walk stops *on* the newline token rather than
+        // past it, so the next `#` starts the next directive.
         let mut end = at + 1;
         while end < tokens.len() && tokens[end].kind != CppTokenKind::Newline {
             end += 1;
         }
-        let line = &tokens[at..end];
-        // **Trivia is dropped first**: the lexer keeps the spaces, so `line[2]` would be a `Whitespace` token.
-        let code: Vec<&CppTokenData> = line
+        // Trivia is dropped before anything is indexed: the lexer keeps the spaces, so a raw `line[2]` would be a
+        // `Whitespace` rather than the macro's name.
+        let code: Vec<&CppTokenData> = tokens[at..end]
             .iter()
-            .filter(|token| token.kind != CppTokenKind::Whitespace)
+            .filter(|token| !crate::token::is_trivia(token.kind))
             .collect();
-        let line = &code[..];
 
-        let word = line.get(1).map(|token| spelling(text, token)).unwrap_or("");
+        let word = code.get(1).map(|token| spelling(text, token)).unwrap_or("");
         let range = tokens[at].range;
         match word {
             "define" => {
-                if let Some(name_token) = line.get(2) {
-                    let name = spelling(text, name_token).to_string();
-                    // `#define F(x)` is function-like only when the `(` touches the name: `#define F (x)` is an
-                    // object-like macro whose body starts with a parenthesis, and telling the two apart is what
-                    // every consumer of a macro table has to get right.
-                    let next = line.get(3);
-                    let function_like = next.is_some_and(|token| {
-                        token.kind == CppTokenKind::LeftParen
-                            && name_token.range.start_offset + name_token.range.length
-                                == token.range.start_offset
-                    });
-                    let body_start = if function_like { 4 } else { 3 };
-                    let body = body_of(text, &line[body_start.min(line.len())..]);
-                    surface.events.push(Event::Define {
-                        name,
-                        function_like,
-                        body,
-                        range: name_token.range,
-                    });
+                // `parse_define` wants the tokens **from the name on**, and the whole directive's range — the same
+                // reader the preprocessor uses, so a definition here is the definition a cook would get.
+                let from_the_name: Vec<Token> = code
+                    .iter()
+                    .skip(2)
+                    .map(|token| Token::new(token.kind, spelling(text, token), token.range))
+                    .collect();
+                if let Some(definition) = crate::preprocess::macros::parse_define(&from_the_name, range) {
+                    surface.events.push(Event::Define { definition });
                 }
             }
             "undef" => {
-                if let Some(name_token) = line.get(2) {
+                if let Some(name_token) = code.get(2) {
                     surface.events.push(Event::Undef {
                         name: spelling(text, name_token).to_string(),
                         range: name_token.range,
@@ -202,27 +255,39 @@ pub fn surface_of(path: &Path, text: &str) -> Surface {
                 // `Greater` to this lexer rather than one header-name token, and a `#include MACRO` is a name a
                 // caller has to expand — so what is kept is the text after `include`, which is what a resolver wants
                 // and what a reader sees.
-                let body = body_of(text, &line[2.min(line.len())..]);
+                let body = body_of(text, &code[2.min(code.len())..]);
                 surface.events.push(Event::Include {
                     spelling: body.clone(),
                     angled: body.starts_with('<'),
-                    range: line.get(2).map(|token| token.range).unwrap_or(range),
+                    range: code.get(2).map(|token| token.range).unwrap_or(range),
                 });
             }
-            "if" | "ifdef" | "ifndef" => {
-                let (tests, spelling_text) = condition_of(text, line.get(1..).unwrap_or(&[]));
-                surface.events.push(Event::If {
-                    spelling: spelling_text,
-                    tests,
-                    range,
-                });
-            }
-            "elif" => {
-                let (tests, spelling_text) = condition_of(text, line.get(1..).unwrap_or(&[]));
-                surface.events.push(Event::Elif {
-                    spelling: spelling_text,
-                    tests,
-                    range,
+            "if" | "ifdef" | "ifndef" | "elif" => {
+                let condition: Vec<Token> = code
+                    .iter()
+                    .skip(2)
+                    .map(|token| Token::new(token.kind, spelling(text, token), token.range))
+                    .collect();
+                let tests = names_in(&condition);
+                let flavour = match word {
+                    "ifdef" => ConditionFlavour::Defined,
+                    "ifndef" => ConditionFlavour::NotDefined,
+                    _ => ConditionFlavour::Expression,
+                };
+                surface.events.push(if word == "elif" {
+                    Event::Elif {
+                        tokens: condition,
+                        flavour,
+                        tests,
+                        range,
+                    }
+                } else {
+                    Event::If {
+                        tokens: condition,
+                        flavour,
+                        tests,
+                        range,
+                    }
                 });
             }
             "else" => surface.events.push(Event::Else { range }),
@@ -233,8 +298,6 @@ pub fn surface_of(path: &Path, text: &str) -> Surface {
             }),
         }
 
-        // Past the newline, so that a `#` inside a comment or a string is never mistaken for a directive: the lexer
-        // produces comment and string tokens whole, and this walk only ever starts at a real `#`.
         at = if end < tokens.len() { end + 1 } else { tokens.len() };
     }
 
@@ -246,7 +309,7 @@ fn spelling<'a>(text: &'a str, token: &CppTokenData) -> &'a str {
     text.get(start..start + token.range.length).unwrap_or("")
 }
 
-/// The text of a body: everything after the name, trimmed, with the file's own line breaks kept out.
+/// The text of a body: everything after the name, trimmed.
 fn body_of(text: &str, tokens: &[&CppTokenData]) -> String {
     let Some(first) = tokens.first() else {
         return String::new();
@@ -257,27 +320,22 @@ fn body_of(text: &str, tokens: &[&CppTokenData]) -> String {
     text.get(start..end).unwrap_or("").trim().to_string()
 }
 
-/// **A condition, and the names it reads.** `#if A && defined(B)` answers `["A", "B"]`, and the spelling is kept
-/// for the interpreter: `defined` is removed from the tests (it is an operator here, not a name), and the words of
-/// the directive itself (`if`, `ifdef`, `ifndef`, `elif`) are excluded.
-fn condition_of(text: &str, tokens: &[&CppTokenData]) -> (Vec<String>, String) {
+/// **The names a condition reads.** `defined` is an operator here rather than a name, and the directive's own word
+/// never appears: `#if`/`#elif` were removed before the tokens were taken.
+pub fn names_in(tokens: &[Token]) -> Vec<String> {
     let mut names: Vec<String> = Vec::new();
-    let mut words: Vec<String> = Vec::new();
     for token in tokens {
-        let written = spelling(text, token);
-        words.push(written.to_string());
         if token.kind != CppTokenKind::Identifier {
             continue;
         }
-        if matches!(written, "defined" | "if" | "ifdef" | "ifndef" | "elif") {
+        let written = token.text.as_ref();
+        if written == "defined" || names.iter().any(|held| held == written) {
             continue;
         }
-        if !names.iter().any(|held| held == written) {
-            names.push(written.to_string());
-        }
+        names.push(written.to_string());
     }
     names.sort();
-    (names, words.join(" "))
+    names
 }
 
 #[cfg(test)]
@@ -291,8 +349,8 @@ mod tests {
     #[test]
     fn directives_keep_the_order_they_were_written_in() {
         let surface = scanned("#define A 1\n#undef A\n#define B 2\n");
-        let exports: Vec<&str> = surface.exports();
-        assert_eq!(exports, vec!["A", "B"]);
+        assert_eq!(surface.exports(), vec!["A", "B"]);
+        assert_eq!(surface.undefinitions(), vec!["A"]);
         assert!(
             matches!(&surface.events[1], Event::Undef { name, .. } if name == "A"),
             "the #undef is an event of its own, between the two defines: {:?}",
@@ -303,23 +361,19 @@ mod tests {
     #[test]
     fn a_function_like_macro_is_told_from_an_object_like_one() {
         let surface = scanned("#define F(x) ((x) + 1)\n#define G (1)\n");
-        let f = surface
+        let defined: Vec<&MacroDef> = surface
             .events
             .iter()
-            .find(|event| matches!(event, Event::Define { name, .. } if name == "F"))
-            .expect("F is an event");
-        let g = surface
-            .events
-            .iter()
-            .find(|event| matches!(event, Event::Define { name, .. } if name == "G"))
-            .expect("G is an event");
+            .filter_map(|event| match event {
+                Event::Define { definition } => Some(definition),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(defined.len(), 2, "{:?}", surface.events);
+        assert!(defined[0].is_function_like(), "F(x) takes an argument");
         assert!(
-            matches!(f, Event::Define { function_like: true, body, .. } if body.contains("+ 1")),
-            "{f:?}"
-        );
-        assert!(
-            matches!(g, Event::Define { function_like: false, body, .. } if body == "(1)"),
-            "a space before the parenthesis makes it object-like: {g:?}"
+            !defined[1].is_function_like(),
+            "a space before the parenthesis makes G object-like"
         );
     }
 
@@ -361,22 +415,25 @@ mod tests {
     }
 
     #[test]
+    fn a_hash_that_is_not_a_directive_is_not_an_event() {
+        // A `#` inside a string or a comment is no directive; the lexer keeps both whole, so the scan sees neither.
+        let surface = scanned("const char* s = \"#define X\";\n// #define Y\n/* #define Z */\n");
+        assert!(surface.events.is_empty(), "{:?}", surface.events);
+    }
+
+    #[test]
     fn the_exports_are_the_macro_facts_a_parse_reports() {
         // **The crossing that makes this module worth having**: what the directive scan says a file defines must be
         // what a parse of the same text reports as macro facts. Checked on a file whose defines are all
-        // unconditional, because a define inside an inactive `#if` is a define a parse does not report and this
-        // scan cannot yet drop — that is the interpreter`s job (`docs/exact-index-design.md` §八).
+        // unconditional, because a define inside an inactive `#if` is a define a parse does not report and this scan
+        // cannot drop it yet — that is the interpreter's job.
         let text = "#define A 1\n#define F(x) ((x) + 1)\nint x;\n#undef A\n#define B\n";
         let surface = surface_of(Path::new("/p/a.h"), text);
         let mut from_surface: Vec<&str> = surface.exports();
         from_surface.sort();
         from_surface.dedup();
 
-        let summary = crate::index::summarize(
-            Path::new("/p/a.h"),
-            text,
-            crate::SummaryKey::new(0, 0),
-        );
+        let summary = crate::index::summarize(Path::new("/p/a.h"), text, crate::SummaryKey::new(0, 0));
         let mut from_parse: Vec<&str> = summary
             .macros
             .iter()
@@ -390,9 +447,21 @@ mod tests {
     }
 
     #[test]
-    fn a_hash_that_is_not_a_directive_is_not_an_event() {
-        // A `#` inside a string or a comment is no directive; the lexer keeps both whole, so the scan sees neither.
-        let surface = scanned("const char* s = \"#define X\";\n// #define Y\n/* #define Z */\n");
-        assert!(surface.events.is_empty(), "{:?}", surface.events);
+    fn a_body_edit_does_not_move_the_signature_and_a_define_does() {
+        let before = scanned("#define A 1\nstruct S { int x; };\n");
+        let body_changed = scanned("#define A 1\nstruct S { int x; int y; };\n");
+        assert_eq!(
+            before.signature(),
+            body_changed.signature(),
+            "a declaration in the file's body is not an event"
+        );
+        let macro_changed = scanned("#define A 2\nstruct S { int x; };\n");
+        assert_ne!(
+            before.signature(),
+            macro_changed.signature(),
+            "a different body for the same macro is a different effect"
+        );
+        let include_added = scanned("#define A 1\n#include <vector>\nstruct S { int x; };\n");
+        assert_ne!(before.signature(), include_added.signature());
     }
 }
