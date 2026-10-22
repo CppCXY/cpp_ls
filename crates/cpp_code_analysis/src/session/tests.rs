@@ -1155,17 +1155,21 @@ fn a_file_read_back_through_its_own_unit_is_not_read_again_by_the_second_pass() 
 /// once, so the queue empties with a backlog still standing.
 #[test]
 fn a_wave_with_nothing_to_parse_still_carries_the_drains_timelines() {
-    let files = (0..8).fold(MemoryFiles::new(), |files, at| {
+    // **Four more than the second pass takes at once**, so the queue empties with a backlog still standing — the
+    // state this test is about. The fixture used to be eight, which was "one more than four".
+    let count = crate::session::RE_READ_SLICE + 4;
+    let files = (0..count).fold(MemoryFiles::new(), |files, at| {
         files.with_file(format!("/p/f{at}.cpp"), format!("int value_{at} = {at};\n"))
     });
     let fixture = Memory::new("a-wave-carries-its-drain-timelines", &files);
     let mut session = fixture.session();
-    session.add_project_files((0..8).map(|at| PathBuf::from(format!("/p/f{at}.cpp"))));
+    session.add_project_files((0..count).map(|at| PathBuf::from(format!("/p/f{at}.cpp"))));
 
-    // One wave over all eight: the parse happens here, and the commit takes the second pass's slice of four,
+    // One wave over all of them: the parse happens here, and the commit takes the second pass`s slice, leaving
+    // four behind — the queue-empty, backlog-not-empty state.
     // leaving four behind — the queue-empty, backlog-not-empty state.
-    let wave = session.prepare_a_wave(8);
-    session.commit_a_wave(wave, 8);
+    let wave = session.prepare_a_wave(count);
+    session.commit_a_wave(wave, count);
     assert_eq!(
         session.pending(),
         0,

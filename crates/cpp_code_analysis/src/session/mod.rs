@@ -156,7 +156,7 @@ impl Drop for DiagTrace {
 /// writer for **1003 ms**. That is `units_for_the_pass` — the unit walk, which is one indivisible step because a
 /// translation unit is built for a closure rather than for a file. It is the next thing to cut, and the budget
 /// warning is what will say when it has been.
-const RE_READ_SLICE: usize = 4;
+const RE_READ_SLICE: usize = 16;
 /// **How many macro environments one drain builds.**
 ///
 /// One, where [`COOK_SLICE`] is four, and the difference is **measured**: a cook is a unit walk over one file's
@@ -6606,7 +6606,7 @@ pub struct CookedReading {
 /// holds the rest ([`crate::TranslationUnitCache`]) and a unit that falls out of here is one decode away. Sixteen is
 /// enough for the units a reader is working in (the open files' roots and the headers they name) and small enough
 /// that a project of a thousand sources does not hold a thousand timelines.
-const MAX_UNITS: usize = 16;
+const MAX_UNITS: usize = 64;
 
 /// How many rounds [`Session::read_the_modules_a_file_imports`] may read module interface units in.
 ///
