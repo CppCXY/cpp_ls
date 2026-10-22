@@ -385,12 +385,12 @@ mod tests {
         );
 
         assert_eq!(
-            checks_may_be_trusted(&session),
+            checks_may_be_trusted(&session, &path),
             session.pending_work() == 0,
             "the gate is `pending_work() == 0` and nothing else"
         );
         assert!(
-            checks_may_be_trusted(&session),
+            checks_may_be_trusted(&session, &path),
             "this fixture's index is settled, so its checks are trusted"
         );
 
