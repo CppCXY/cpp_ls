@@ -60,6 +60,27 @@ fn unit_of(files: &[(&str, &str)], root: &str) -> TranslationUnit {
     )
 }
 
+/// **The same question without an include at all**, which narrows the defect: it is not about frames or include
+/// order. A `#define` guarded by `#ifdef` on a name the *same file* defined one line earlier is judged out of
+/// force too — so the name the condition asks about is answered from somewhere narrower than the file`s own table.
+#[test]
+#[ignore = "a guarded define is judged out of force even when its condition was defined in the same file"]
+fn a_guarded_define_in_the_same_file_is_in_force_too() {
+    let unit = unit_of(
+        &[(
+            "/p/same.h",
+            "#define SAME 1\n#ifdef SAME\n#define OWN_INSIDE 1\n#endif\n",
+        ), ("/p/root.cpp", "#include \"same.h\"\nint x;\n")],
+        "/p/root.cpp",
+    );
+    let own = unit.macro_at(std::path::Path::new("/p/same.h"), "OWN_INSIDE", usize::MAX);
+    assert_eq!(
+        own.map(|found| found.defined),
+        Some(true),
+        "`SAME` is defined one line above the `#ifdef SAME` that asks about it"
+    );
+}
+
 #[test]
 #[ignore = "the walk decides `#ifdef BASE` false after `#include \"base.h\"` defined it — see the module note"]
 fn a_guarded_define_is_in_force_after_the_include_that_defines_its_condition() {
