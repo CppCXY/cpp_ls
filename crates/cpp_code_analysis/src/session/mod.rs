@@ -890,6 +890,31 @@ pub struct PreparedDrain {
     )>,
 }
 
+/// **How the effect chain reads files**: the session`s own provider, and the include graph the index resolved.
+struct SessionReads<'a, F: FileProvider> {
+    files: &'a F,
+    index: &'a crate::ProjectIndex,
+}
+
+impl<F: FileProvider> crate::effect::Reads for SessionReads<'_, F> {
+    fn read(&self, path: &std::path::Path) -> Option<String> {
+        self.files.read(path)
+    }
+
+    fn resolve(&self, from: &std::path::Path, spelling: &str) -> Option<PathBuf> {
+        // **The resolution the index already made.** A summary records where each `#include` resolved to, so the
+        // chain does not re-run the search: a second search would be a different answer to the same question, which
+        // is the reason `IncludeFact::resolved` is stored at all.
+        let wanted = spelling.trim_matches(|c| c == '"' || c == '<' || c == '>');
+        let summary = self.index.summary(from)?;
+        summary
+            .includes
+            .iter()
+            .find(|include| include.spelling.trim() == wanted)
+            .and_then(|include| include.resolved.clone())
+    }
+}
+
 impl<F: FileProvider + Clone> Session<F> {
     /// A session with the configuration the caller already has: no compile database is read and no compiler is run.
     ///
@@ -4284,6 +4309,33 @@ fn error_directive_line(text: &str) -> Option<(usize, usize, String)> {
     /// `None` when the file has no summary or the walk cannot be built — nothing has read it yet, which is a state
     /// and not an error. A caller with a path the index spells differently should hand over the index's own spelling;
     /// [`Session::read_the_unit`] is the one that has to do that, because it puts the result in the index.
+    /// **A translation unit`s macro tables, built by folding effects** — see [`crate::effect`].
+    ///
+    /// This is the model`s alternative to cooking an include closure: every file in the program contributes its
+    /// *effect*, an effect is a function of the few macro names the file tests, and folding them is a hash lookup
+    /// per include. What it answers is the table each file was read under, which is what the second pass has been
+    /// walking timelines to reconstruct.
+    ///
+    /// `None` when the root has no summary — nothing has read it, which is a state rather than an error.
+    pub fn effect_walk(
+        &self,
+        root: &Path,
+    ) -> Option<(
+        HashMap<PathBuf, u64>,
+        crate::effect::Walked,
+    )> {
+        self.store.index().summary(root)?;
+        let reads = SessionReads {
+            files: &self.files,
+            index: self.store.index(),
+        };
+        let mut cache: HashMap<u64, crate::effect::Effect> = HashMap::new();
+        let seed = crate::effect::Macros::new();
+        let (signatures, walked) = crate::effect::Chain::new(&reads, &mut cache)
+            .at_signatures(root, &seed);
+        Some((signatures, walked))
+    }
+
     pub fn render_the_unit(&mut self, root: &Path) -> Option<crate::RenderedUnit> {
         let unit = self.translation_unit_of(root)?;
 

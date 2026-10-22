@@ -37,6 +37,11 @@ use crate::token::Token;
 #[derive(Debug, Clone, Default)]
 pub struct Macros {
     definitions: HashMap<String, MacroDef>,
+    /// **A running signature of the table**, updated as it changes — the answer to "is this the same environment as
+    /// when that file was read?" without copying the table. Kept in step in `define`/`undefine` rather than computed
+    /// on demand, because computing it would be a walk of thousands of macros per file, which is the quadratic cost
+    /// that made the first measurement of the chain 1.14 s for 266 files.
+    signature: u64,
 }
 
 impl Macros {
@@ -45,11 +50,20 @@ impl Macros {
     }
 
     pub fn define(&mut self, definition: MacroDef) {
-        self.definitions.insert(definition.name.to_string(), definition);
+        let name = definition.name.to_string();
+        self.signature = fold(self.signature, 1, &name);
+        self.signature = fold(self.signature, 2, &body_text(&definition));
+        self.definitions.insert(name, definition);
     }
 
     pub fn undefine(&mut self, name: &str) {
+        self.signature = fold(self.signature, 3, name);
         self.definitions.remove(name);
+    }
+
+    /// **The environment's fingerprint**, order-sensitive and cheap: every define and undef moves it.
+    pub fn signature(&self) -> u64 {
+        self.signature
     }
 
     pub fn get(&self, name: &str) -> Option<&MacroDef> {
@@ -275,6 +289,20 @@ fn body_text(definition: &MacroDef) -> String {
     out.trim().to_string()
 }
 
+/// **One step of the table`s fingerprint** — FNV-1a over a tag and a string.
+fn fold(mut hash: u64, tag: u8, text: &str) -> u64 {
+    let mut eat = |byte: u8| {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x100_0000_01b3);
+    };
+    eat(tag);
+    for byte in text.as_bytes() {
+        eat(*byte);
+    }
+    eat(0xff);
+    hash
+}
+
 /// The names a surface tests, with the values they hold in an environment — the key's material.
 pub fn values_for(surface: &Surface, environment: &Macros) -> Vec<Option<String>> {
     surface
@@ -330,6 +358,12 @@ pub struct Chain<'a, R: Reads> {
     effects: &'a mut HashMap<u64, Effect>,
     /// Where each file's table ended up, for a caller that wants to read a file's environment afterwards.
     tables: HashMap<std::path::PathBuf, Macros>,
+    /// **Each file`s environment as a signature** — the same information as `tables`, without a copy of the macro
+    /// table per file. A table is the whole closure`s macros; cloning it once per file is quadratic in a project`s
+    /// size, which is what the first measurement showed (1.14 s for 266 files, almost all of it cloning).
+    signatures: HashMap<std::path::PathBuf, u64>,
+    /// Whether to keep the tables themselves, which only a comparison test needs.
+    keep_tables: bool,
     walked: Walked,
 }
 
@@ -339,11 +373,33 @@ impl<'a, R: Reads> Chain<'a, R> {
             reader,
             effects,
             tables: HashMap::new(),
+            signatures: HashMap::new(),
+            keep_tables: true,
             walked: Walked::default(),
         }
     }
 
+    /// **Without a copy of the tables** — the signatures only, which is what a caller asking "did this file`s
+    /// environment change?" needs. Cloning a table per file is quadratic: the first measurement of this walk on a
+    /// real program (266 files) was 1.14 s, and almost all of it was those clones.
+    pub fn without_tables(mut self) -> Self {
+        self.keep_tables = false;
+        self
+    }
+
     /// **Enter a program at `root`** and answer the table every file in it was read under.
+    /// **The same walk, answering signatures only** — see [`Chain::without_tables`].
+    pub fn at_signatures(
+        mut self,
+        root: &std::path::Path,
+        seed: &Macros,
+    ) -> (HashMap<std::path::PathBuf, u64>, Walked) {
+        self.keep_tables = false;
+        let mut table = seed.clone();
+        self.enter(root, &mut table, 0);
+        (self.signatures, self.walked)
+    }
+
     pub fn at(mut self, root: &std::path::Path, seed: &Macros) -> (HashMap<std::path::PathBuf, Macros>, Walked) {
         let mut table = seed.clone();
         self.enter(root, &mut table, 0);
@@ -478,9 +534,14 @@ impl<'a, R: Reads> Chain<'a, R> {
         // **The first time this file was entered**, not the last: a header included from three places has three
         // tables, and the one a reader asks about is the one its first inclusion saw. Keeping the last made the
         // oracle report deep.h macros as belonging to guarded.h.
-        self.tables
+        self.signatures
             .entry(path.to_path_buf())
-            .or_insert_with(|| seen.unwrap_or_else(|| table.clone()));
+            .or_insert_with(|| seen.as_ref().unwrap_or(table).signature());
+        if self.keep_tables {
+            self.tables
+                .entry(path.to_path_buf())
+                .or_insert_with(|| seen.unwrap_or_else(|| table.clone()));
+        }
     }
 }
 
