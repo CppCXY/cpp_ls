@@ -277,3 +277,62 @@ read_the_unit 6.5 s ≈ 渲染 899 ms + 解析 399 ms + sweep 3.8 s + 其余
 
 **在那之前**，任何"把 131 s 调成 110 s"的改动都不值得做 —— 这一轮我做的四个实验（切片大小、第二遍延后、
 includer 取根、并发度）全部没有收益，就是这句话的实证。
+
+## 十一、把预处理并进 parser：怎么做，以及为什么它不该是第一步
+
+### 11.1 现在的四遍
+
+```text
+lex 原文                     24 ms / 594k tokens
+render：宏展开 + 生成新文本    913 ms / TU   ← `preprocess::cooked`，产出 (text, 594k spans)
+lex 渲染文本（parse 内部）     24 ms
+parse 渲染文本                363 ms
+sweep：抽 facts + 按文件归属   约 3 200 ms / TU
+```
+
+### 11.2 parser 一遍化要长出来的东西
+
+```text
+① 词法层之上加一个 `TokenStream`，`current_token()` / `bump()` 的语义不变（几千个调用点不动）：
+   它在内部负责：跳过指令、求值条件、展开宏、跨文件入栈。
+② `#if/#ifdef/#elif/#else/#endif`：用一个条件求值器（`preprocess::condition` 已有）在当前宏表上求值，
+   取一个分支，其余 token 直接跳过 —— 不产生节点，也不进流。
+③ `#define/#undef`：写进**活的**宏表（`MacroTable` 已有），位置就是当前 token 的 offset。
+④ `#include`：把被包含文件的 (text, tokens, cursor) **压栈**，返回时弹栈；
+   文件边界、`#pragma once`、include guard 都变成栈上的状态，`with_file_boundaries` 可以删掉。
+⑤ 宏展开：解析器取下一个 token 时，如果它是宏就按需展开到一个小队列里（带递归 hideset，
+   处理 `##`/`#`、`__LINE__`）；解析器随后像读源码一样读这个队列。
+⑥ **坐标**：展开出来的 token 直接带"写在哪个文件、哪个 offset"，所以 `RenderedCooked.spans`
+   和 `ReadingOffset ↔ FileOffset` 的映射整套消失 —— 这是最大的简化，也是现在很多 bug 的来源。
+```
+
+风险与工作量：`peek_token_kind_at`、`joined_operator_at_the_cursor`、`split_closing_angle`、
+`is_a_known_type_name` 这些按**下标**前看的地方都要改成按流前看（展开会改变"第 n 个 token"的含义）。
+这是 1–2 周、且几乎每个语法规则都要回归的工作。
+
+### 11.3 但测量说：它只值 20 %
+
+```text
+一次 TU 读 4 551 ms = render 913 + parse 387 + sweep 约 3 200 + 其余
+parser 一遍化能省下：render 的文本生成与 span（约 500–700 ms）+ 一次 lex（24 ms）
+省不掉的：解析本身 363 ms、sweep 3 200 ms
+```
+
+**所以第一步不是 parser，而是 sweep。** 3 200 ms 里做的是：
+`index_tree` 把整棵树走一遍、为**每条声明**造一个带多个 `String` 的 `DeclFact`；
+然后 `file_what_was_found` 再走一遍，按 span 把它们归属到文件。
+
+### 11.4 sweep 的四刀（按收益）
+
+```text
+A. 归属合并进同一次遍历：现在两遍（造 facts、按文件归属）本可以一遍，省约一半
+B. 只为"内容变了的文件"重建 facts：树是按渲染流建的，而每个文件在流里的区段已知
+   （`RenderedUnit.files` + `file_lengths`），所以可以按区段遍历（rowan 的 range 查询），
+   整个文件跳过而不是重新归属 —— 这是**编辑后**也能快的关键
+C. 字符串 interning/arena：306k facts 里 `std`、`size_t` 这类名字重复几万次，
+   改成 `Arc<str>` 或 per-TU arena，分配量能降一个数量级
+D. 不值得的：`skip_bodies` 早测过（neutral），不要再试
+
+目标：sweep 3 200 ms → 300 ms 量级，TU 读 4.5 s → 约 1.6 s；
+而**编辑后**（B 生效）一个 TU 的增量 sweep ≈ 0。
+到那时再谈 parser 一遍化（把 1.6 s 里的 1.3 s 变成 0.6 s），顺序不能反。
