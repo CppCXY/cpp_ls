@@ -1259,11 +1259,16 @@ impl<F: FileProvider> SummaryStore<F> {
         // `re-env` 3 363 ms). A unit is cached — on disk by the content of its whole closure, in memory by
         // `Session::translation_unit_of` — so the pass pays for one walk and then asks positions in it.
         let seed = crate::macros::MacroTable::from_marked(self.index.macros());
-        let unit_definitions: Vec<crate::UnitDefinitions> =
-            units.iter().map(|unit| unit.definitions()).collect();
+        // **Built once per timeline, not once per slice.** definitions() walks every event and allocates an
+        // Arc per definition; the pass used to pay that again for every slice that reused the same unit —
+        // measured at ~2.6 ms per unit, ~8 units per slice, 81 slices, **1.7 s of a 5.8 s pass**.
+        let unit_definitions: Vec<std::sync::Arc<crate::UnitDefinitions>> = units
+            .iter()
+            .map(|unit| unit.definitions_cached())
+            .collect();
         let environments: Vec<(
             &std::sync::Arc<crate::TranslationUnit>,
-            crate::UnitDefinitions,
+            std::sync::Arc<crate::UnitDefinitions>,
         )> = units.iter().zip(unit_definitions).collect();
 
         // **The names the files being re-read could possibly need** — the filter's own filter, and the one that
@@ -1969,7 +1974,7 @@ impl<F: FileProvider> SummaryStore<F> {
 fn bodies_of<'pass>(
     environments: &'pass [(
         &std::sync::Arc<crate::TranslationUnit>,
-        crate::UnitDefinitions,
+        std::sync::Arc<crate::UnitDefinitions>,
     )],
     seed: &'pass crate::macros::MacroTable,
     path: &Path,

@@ -1432,6 +1432,13 @@ pub struct TranslationUnit {
     /// Derived state, like [`TranslationUnit::paths`]: it is a function of `events`, so it is built by the
     /// constructors rather than stored in the cache format.
     pub(crate) by_name: std::collections::HashMap<std::sync::Arc<str>, Vec<u32>>,
+    /// **The unit's [UnitDefinitions], built at most once** — the second pass asks for them again for every slice
+    /// that reuses this timeline, and building them is a walk of every event with an Arc per definition.
+    ///
+    /// A pure function of the unit, which is why it can live here: nothing in the unit changes after the walk.
+    /// Measured: the pass asked for ~8 units' definitions per slice, 81 slices, ~2.6 ms each — 1.7 s of a 5.8 s
+    /// second pass.
+    definitions_cache: std::sync::OnceLock<std::sync::Arc<UnitDefinitions>>,
     /// **The frame paths**: for each frame, the frames it is nested in, each with the offset in that ancestor at
     /// which this frame's text becomes live — `(outermost include's ancestor, offset)`, nearest ancestor first.
     ///
@@ -1696,6 +1703,7 @@ impl TranslationUnit {
             // about the walk: the decision belongs to the environment that made it, and a decode has no environment.
             // A caller that needs it re-walks — which is what the store does when it rebuilds a summary.
             dead_macros: std::collections::HashMap::new(),
+            definitions_cache: std::sync::OnceLock::new(),
         }
     }
 
@@ -1727,6 +1735,14 @@ impl TranslationUnit {
     /// ([`crate::macros::MacroFile::Frame`]), and a consumer can act on the answer instead of on an offset in a
     /// line this crate wrote. Definitions that arrive without a position ([`crate::macros::MacroFile`]'s third
     /// case) still exist — the closure path's `MacroEnvironment` carries text only — and they say so.
+    /// **[TranslationUnit::definitions], built once and shared.** The second pass asks every slice that reuses
+    /// this timeline, and the answer cannot change.
+    pub fn definitions_cached(&self) -> std::sync::Arc<UnitDefinitions> {
+        self.definitions_cache
+            .get_or_init(|| std::sync::Arc::new(self.definitions()))
+            .clone()
+    }
+
     pub fn definitions(&self) -> UnitDefinitions {
         let mut by_event: Vec<Option<std::sync::Arc<crate::macros::MacroDef>>> =
             vec![None; self.events.len()];
