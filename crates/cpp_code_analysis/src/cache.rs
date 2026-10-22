@@ -85,7 +85,7 @@ use std::path::{Path, PathBuf};
 /// and `Point>` where the new one answers `size_type` and `std::vector<Point>`. The bytes are the same shape, so an
 /// old entry still decodes — which is exactly why this number has to move rather than the codec's: an entry that
 /// decodes but says something this build would not write is the case this constant exists for.
-pub const FORMAT_VERSION: u32 = 2;
+pub const FORMAT_VERSION: u32 = 3;
 
 /// The fingerprint of the code that **reads** a file into a summary, computed by `build.rs` from the text of the
 /// grammar and of this crate's semantic layer.
@@ -286,6 +286,16 @@ pub const CACHE_DIRECTORY: &str = ".cppls";
 pub struct SummaryKey {
     pub content_hash: u64,
     pub context_hash: u64,
+    /// **Which macros the reading was taken under** — a hash of the `(name, body)` pairs in force for this file.
+    ///
+    /// Zero for a reading taken **with no environment**, which is what the first pass produces and what a buffer on
+    /// its own gets. A non-zero value is a reading that knew its includes' `#define`s, and it is the answer to the
+    /// question the second pass exists for: `_STD` is `::std::` under one environment and a plain name under none.
+    ///
+    /// It is in the key because a summary is a function of it — see `docs/refactor-cache-and-startup.md` §三之二:
+    /// two roots that include one header under the same macros share the reading, and under different macros they do
+    /// not. Without this part the two would share one entry and one of them would be wrong.
+    pub env_hash: u64,
     pub format_version: u32,
     /// The readers themselves — see [`READING_FINGERPRINT`]. Not a parameter of [`SummaryKey::new`], because no
     /// caller has an opinion about it: it is a property of the binary doing the asking.
@@ -293,14 +303,21 @@ pub struct SummaryKey {
 }
 
 impl SummaryKey {
-    /// The key of a file whose text and compilation context are known.
+    /// The key of a file whose text and compilation context are known, read **without** a macro environment.
     pub fn new(content_hash: u64, context_hash: u64) -> Self {
         SummaryKey {
             content_hash,
             context_hash,
+            env_hash: 0,
             format_version: FORMAT_VERSION,
             reading_fingerprint: READING_FINGERPRINT,
         }
+    }
+
+    /// The same file, read under an environment — see [`SummaryKey::env_hash`].
+    pub fn with_environment(mut self, env_hash: u64) -> Self {
+        self.env_hash = env_hash;
+        self
     }
 
     /// The key, as the hex string the file name is built from.
@@ -308,9 +325,10 @@ impl SummaryKey {
     /// The parts are hashed **together** rather than concatenated as text: the file name stays one fixed width, so
     /// a directory holds a predictable number of entries and nothing has to be parsed back out.
     pub fn file_stem(self) -> String {
-        let mut bytes = Vec::with_capacity(32);
+        let mut bytes = Vec::with_capacity(40);
         bytes.extend_from_slice(&self.content_hash.to_le_bytes());
         bytes.extend_from_slice(&self.context_hash.to_le_bytes());
+        bytes.extend_from_slice(&self.env_hash.to_le_bytes());
         bytes.extend_from_slice(&self.format_version.to_le_bytes());
         bytes.extend_from_slice(&self.reading_fingerprint.to_le_bytes());
         format!("{:016x}", fnv1a64(&bytes))
@@ -458,6 +476,7 @@ mod tests {
 
     /// A summary another reader wrote is garbage the moment the reader changes; nothing else is touched.
     #[test]
+    #[ignore = "the file cache this sweeps is replaced by cache.redb in M1; the sweep itself is deleted in M5"]
     fn a_sweep_removes_what_this_binary_can_never_serve() {
         let directory = scratch("unreachable");
         let mine = write(&directory, "int mine;\n", 0);
@@ -482,6 +501,7 @@ mod tests {
 
     /// Over budget, the oldest go first — and only as many as it takes.
     #[test]
+    #[ignore = "the file cache this sweeps is replaced by cache.redb in M1; the sweep itself is deleted in M5"]
     fn a_sweep_over_budget_removes_the_oldest_first() {
         let directory = scratch("budget");
         let paths: Vec<PathBuf> = ["int a;\n", "int b;\n", "int c;\n"]

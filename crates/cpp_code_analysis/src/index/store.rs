@@ -638,7 +638,12 @@ impl<F: FileProvider> SummaryStore<F> {
             return Prepared(PreparedOutcome::Unreadable);
         };
         let read = entered.elapsed();
-        let key = { SummaryKey::new(content_hash(&source), self.context_hash(path)) };
+        // **The key knows which environment the reading is under** — see [`SummaryKey::env_hash`]. Without it the
+        // second pass would write over the first pass's entry and a later reader could get either one.
+        let mut key = SummaryKey::new(content_hash(&source), self.context_hash(path));
+        if let Some((_, facts)) = environment {
+            key = key.with_environment(environment_hash(facts));
+        }
 
         {
             let reading = std::time::Instant::now();
@@ -2034,3 +2039,23 @@ fn has_unresolved_includes(summary: &FileSummary) -> bool {
 
 #[cfg(test)]
 mod tests;
+/// **What a reading was taken under**, as one number — the `(name, body)` pairs in force, sorted and hashed.
+///
+/// Sorted first, so two environments that differ only in the order a walk met the definitions hash the same: the
+/// whole point of the number is that a header included by two roots shares one summary when it sees the same macros,
+/// and only then. See [`SummaryKey::env_hash`].
+fn environment_hash(facts: &dyn cpp_parser::MacroFacts) -> u64 {
+    let mut pairs: Vec<(String, String)> = Vec::new();
+    facts.for_each_body_in_force(&mut |body| {
+        pairs.push((body.name.to_string(), body.body.to_string()));
+    });
+    pairs.sort();
+    let mut bytes: Vec<u8> = Vec::new();
+    for (name, body) in &pairs {
+        bytes.extend_from_slice(name.as_bytes());
+        bytes.push(0);
+        bytes.extend_from_slice(body.as_bytes());
+        bytes.push(0);
+    }
+    crate::cache::fnv1a64(&bytes)
+}

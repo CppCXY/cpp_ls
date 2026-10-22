@@ -214,7 +214,7 @@ const MAGIC: &[u8; 8] = b"CPPLSSUM";
 /// of a layout bug and not of a logic one.
 ///
 /// So the number moves, the old entries are dropped on sight, and the field is what the reader sees.
-pub const CODEC_VERSION: u32 = 28;
+pub const CODEC_VERSION: u32 = 29;
 
 /// Write a summary as bytes.
 ///
@@ -228,6 +228,7 @@ pub fn encode(summary: &FileSummary) -> Vec<u8> {
     put_u32(&mut out, summary.key.format_version);
     put_u64(&mut out, summary.key.content_hash);
     put_u64(&mut out, summary.key.context_hash);
+    put_u64(&mut out, summary.key.env_hash);
     put_u64(&mut out, summary.key.reading_fingerprint);
 
     put_path(&mut out, &summary.path);
@@ -601,7 +602,7 @@ pub fn is_servable(header: &[u8]) -> bool {
 }
 
 /// How many bytes at the start of a summary file [`is_servable`] needs.
-pub const HEADER_LENGTH: usize = 8 + 4 + 4 + 8 + 8 + 8;
+pub const HEADER_LENGTH: usize = 8 + 4 + 4 + 8 + 8 + 8 + 8;
 
 pub fn decode(bytes: &[u8]) -> Result<FileSummary, DecodeError> {
     let mut reader = Reader::new(bytes);
@@ -617,6 +618,8 @@ pub fn decode(bytes: &[u8]) -> Result<FileSummary, DecodeError> {
         format_version: reader.u32()?,
         content_hash: reader.u64()?,
         context_hash: reader.u64()?,
+        // The environment the reading was taken under — see [`SummaryKey::env_hash`]. Zero for the first pass.
+        env_hash: reader.u64()?,
         // Written and read back like the rest of the key, because a decoder can be handed a file it did not choose
         // — see `CODEC_VERSION`'s note on the header. The number itself is a property of the *binary*, so a
         // mismatch is a failed read rather than a value to keep: a summary produced by a different reader must not
@@ -1519,7 +1522,7 @@ mod tests {
     /// which is what makes the path's byte length its `char` count. Keep it in step with `encode` — a test that
     /// computes an offset has to be told when the layout moves.
     fn declaration_count_at(summary: &FileSummary) -> usize {
-        const HEADER: usize = MAGIC.len() + 4 + 4 + 8 + 8 + 8;
+        const HEADER: usize = MAGIC.len() + 4 + 4 + 8 + 8 + 8 + 8;
 
         HEADER + 4 + summary.path.to_string_lossy().len()
     }
