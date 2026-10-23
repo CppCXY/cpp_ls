@@ -1493,3 +1493,34 @@ printed 超长行： 51 → **50**
 
 **结论**：尾注释要真正对齐，需要用 clang-format 的 `WhitespaceManager` 语义做实验矩阵（组边界、最小间隔、
 `AlignTrailingComments.Kind` 三个维度），而不是从两个样例推公式。这不在本轮预算内。
+## 五十三、语言服务器接入：`textDocument/formatting` · `rangeFormatting` · `onTypeFormatting`
+
+新模块 `crates/cpp_ls/src/handlers/formatting/mod.rs`，按本仓库既有的三段式接入（模块、dispatch 行、capability 行）：
+
+```text
+capabilities:  document_formatting_provider = true
+               document_range_formatting_provider = true
+               document_on_type_formatting_provider = { first: "}", more: [";"] }
+dispatch:      Formatting => on_formatting
+               RangeFormatting => on_range_formatting
+               OnTypeFormatting => on_type_formatting
+```
+
+实现要点：
+
+```text
+· 取文本：session.view(path) → files().held() → VfsFile.text（VFS 里就是用户未保存的缓冲区）
+· 样式：style_for(path) 向上找最近的 .clang-format，用 cpp_formatter::config::parse；找不到用默认样式
+· 格式化：cpp_formatter::format_file(path, text, &style)
+· 编辑列表：edits_between(old, new) —— 行级最小差分，只把变化的那一段行作为一个 TextEdit
+  （命中"整行替换"之外什么都不动，客户端的光标/选中/撤销粒度才不会被整文件替换破坏）
+· rangeFormatting：整文件格式化后**按行范围过滤**编辑，而不是把片段单独格式化
+  （片段单独格式化会从第 0 列开始缩进——格式化器需要整文件才能判断语句缩进）
+· onTypeFormatting：同一份编辑只保留与当前行相交的那一条（触发字符 `}` 与 `;`）
+```
+
+测试：`edits_between` 的三条单测（无变化 → 空；单行变化 → 只覆盖该行；跨范围相交判定）。
+`cargo test -p cpp_ls --lib` = **88 passed + 1 ignored**；`cpp_formatter` = **70 passed + 3 ignored**。
+
+尚未做（下一步）：用真实 LSP 会话端到端验证（initialize 后发 `textDocument/formatting` 断言返回编辑）；
+以及 `rangeFormatting` 的"只格式化范围内"精化（现在是整文件格式化后过滤，语义正确但会做多余工作）。

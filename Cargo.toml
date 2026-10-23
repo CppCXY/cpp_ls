@@ -11,6 +11,7 @@ members = [
 [workspace.dependencies]
 # local
 cpp_parser = { path = "crates/cpp_parser" }
+    cpp_formatter = { path = "crates/cpp_formatter" }
 cpp_code_analysis = { path = "crates/cpp_code_analysis" }
 
 # external

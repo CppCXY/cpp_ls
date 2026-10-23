@@ -243,6 +243,7 @@ dependencies = [
  "chrono",
  "clap",
  "cpp_code_analysis",
+ "cpp_formatter",
  "cpp_parser",
  "emmy_lsp_types",
  "fern",

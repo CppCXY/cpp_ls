@@ -6,6 +6,8 @@ edition = "2024"
 [dependencies]
 # The engine: the parser and the analysis layer are the two crates this server exists to serve.
 cpp_parser.workspace = true
+# The formatter: `textDocument/formatting` is this server handing the file to `cpp_formatter` and diffing the result.
+cpp_formatter.workspace = true
 cpp_code_analysis.workspace = true
 
 # The protocol. `lsp-server` is the transport-and-framing half (stdio/TCP, JSON-RPC, the initialize

@@ -38,7 +38,8 @@ use log::error;
 use lsp_server::{Request, Response};
 use lsp_types::request::{
     CodeActionRequest, Completion, DocumentDiagnosticRequest, DocumentHighlightRequest,
-    DocumentLinkRequest, DocumentSymbolRequest, FoldingRangeRequest, GotoDefinition,
+    DocumentLinkRequest, DocumentSymbolRequest, FoldingRangeRequest, Formatting, GotoDefinition,
+    OnTypeFormatting, RangeFormatting,
     GotoImplementation, HoverRequest, InlayHintRequest, PrepareRenameRequest, References, Rename,
     Request as LspRequest, ResolveCompletionItem, SelectionRangeRequest, SemanticTokensFullRequest,
     SignatureHelpRequest, WorkspaceSymbolRequest,
@@ -54,6 +55,7 @@ use super::{
     document_highlight::on_document_highlight,
     document_link::on_document_link,
     document_symbol::on_document_symbol,
+    formatting::{on_formatting, on_range_formatting, on_type_formatting},
     folding_range::on_folding_range,
     hover::on_hover,
     implementation::on_goto_implementation,
@@ -118,6 +120,9 @@ pub async fn on_request_handler(
     DocumentHighlightRequest => on_document_highlight,
     DocumentLinkRequest => on_document_link,
     DocumentSymbolRequest => on_document_symbol,
+    Formatting => on_formatting,
+    RangeFormatting => on_range_formatting,
+    OnTypeFormatting => on_type_formatting,
     FoldingRangeRequest => on_folding_range,
     InlayHintRequest => on_inlay_hint,
     References => on_references,

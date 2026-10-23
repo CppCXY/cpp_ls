@@ -28,6 +28,7 @@ pub mod diagnostic;
 mod document_highlight;
 mod document_link;
 mod document_symbol;
+mod formatting;
 mod folding_range;
 mod hover;
 mod implementation;
@@ -168,6 +169,7 @@ capabilities!(modules: {
     document_highlight => DocumentHighlightCapabilities,
     document_link => DocumentLinkCapabilities,
     document_symbol => DocumentSymbolCapabilities,
+    formatting => FormattingCapabilities,
     folding_range => FoldingRangeCapabilities,
     implementation => ImplementationCapabilities,
     inlay_hint => InlayHintCapabilities,
