@@ -859,3 +859,23 @@ other 3    LuaCheck.cpp:49、LuaLexer.cpp:11（AlignArrayOfStructures: Left，P1
            LuaTokenTypeDetail.h:31（尾注释对齐的**分组规则**，不是最小值）
 跳过 3     token 流不同（include 排序 / 宏展开，P3/P4）
 ```
+## 二十七、36 → 37 / 43：`AlignArrayOfStructures: Left` 落地
+
+```text
+规则（用 LuaLexer.cpp 的真实表反推，并逐个字符核对）：
+  第 0 列起点 = 1（`{` 之后）
+  第 k 列起点 = 第 k-1 列起点 + 该列最宽单元格 + 2（逗号 + 一个空格）
+  闭括号列   = 最后一列起点 + 该列最宽单元格（闭括号不自带空格）
+  行的定义：行首是 `{`，配对的 `}` 之后是 `,` 或直接行尾（**表的最后一行可以没有逗号**，这是第一次尝试漏掉的）
+实现：crates/formatter/src/rows.rs（独立模块，3 个单测），render 只在同线 gap 上叠加 padding
+结果：LuaLexer.cpp 整文件一致；37 / 43
+```
+
+**仍在的 6 个**
+
+```text
+indent 2  LuaDefine.h:19（列表内行首注释：该 gap 里同时有上一行的尾注释与列表注释，条件已放宽但仍未命中）
+          LuaLexer.cpp:478（三元运算符 `?` 的对齐：AlignOperands 对条件表达式有单独规则，尚未掌握）
+other 1   LuaCheck.cpp:49（表里嵌套花括号的行，列宽计算未覆盖）
+跳过 3    token 流不同（include 排序 / 宏展开，P3/P4）
+```
