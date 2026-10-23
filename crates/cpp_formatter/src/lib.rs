@@ -27,6 +27,7 @@ pub mod options;
 pub mod roles;
 pub mod space;
 pub mod tokens;
+pub mod trailing;
 
 pub use config::{ConfigError, Style};
 

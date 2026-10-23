@@ -113,7 +113,11 @@ pub fn stream(source: &str) -> Stream<'_> {
                 if let Some(previous) = comments.last_mut() {
                     previous.ends_line = newlines > 0;
                 }
-                let own_line = newlines > 0 || comments.is_empty() && gap_end == gap_start;
+                // **On its own line** means a line break came before it *in this gap*, or it opens the file. A comment
+                // that directly follows code (`int solo;// alone`) is a *trailing* one, even though nothing but the
+                // comment itself is in the gap — testing `gap_end == gap_start` here marked those as own-line, which
+                // made the trailing-comment alignment unreachable.
+                let own_line = newlines > 0 || (start == 0 && comments.is_empty());
                 comments.push(Comment {
                     kind: token.kind,
                     text,

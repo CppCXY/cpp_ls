@@ -1366,3 +1366,31 @@ clang-format 的输出喂回来原样返回： 42 → **43 / 43** ✓
 clang-format 会改动的 10 个文件里，我们复现了 9 个
 剩余 1 个：LuaTokenTypeDetail.h（尾注释分组）
 ```
+## 四十八、尾注释对齐：模块做对了，接线**全面回归**（88.37%），已回退
+
+这轮把 `AlignTrailingComments` 的规则用真实 clang-format 测明白了：
+
+```text
+SpacesBeforeTrailingComments: N 下：
+  · 连续几行都带行尾注释 → 一个"组"，所有注释起点 = max(各行代码结尾列) + N
+  · 只有一行带注释 → 它自成一"组"，起点 = 该行代码结尾列 + N
+  实测（N=0）：`    A,   // one` / `    BB,  // two` / `    CCCC,// three`；`int solo;// alone`
+```
+
+`crates/cpp_formatter/src/trailing.rs` 按这个模型算好了每处注释的目标列（4 个单测通过），
+并把 `tokens.rs` 里一个真正的 bug 修好了：`own_line` 原来把"紧跟代码的注释"也标成行首注释
+（`int solo;// alone` 被判成 own_line），导致尾注释逻辑根本走不到。
+
+**但把它接进 render 后实测回归**：
+
+```text
+41 → 38 / 43；clang-format 输出喂回后的稳定性 42 → 38
+原因：目标列是按"源码的代码结尾列"算的，而我们的输出列在少数行与源码不同（重排后），
+      两者混用会在若干行上加错空格；另外组内包含"代码结尾列"受我们重排影响的行时同样错位。
+```
+
+已把 render 的接线回退（保留 `trailing.rs` 模块、单测与 `tokens.rs` 的 own_line 修复），
+基线回到 **42 / 43（97.67%）**、稳定性 **43 / 43**、68 tests 全绿。
+
+要正确接线，目标列必须按**渲染出的列**计算，而不是源码列——这要求把尾注释对齐放到 render 的
+第二次扫描（或让 render 记录每行代码结尾列后回填）。这是下一步，不再用源码列近似。
