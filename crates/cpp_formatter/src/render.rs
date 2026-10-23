@@ -23,6 +23,9 @@ pub fn format(source: &str, style: &Style) -> String {
     let stream = tokens::stream(source);
     let roles = roles::of(source);
     let blocks = layout::blocks(&stream, &roles, style);
+    // **Lines inside a braced initializer are continuations**, not block lines: `= {` at column 0 puts its elements
+    // at `ContinuationIndentWidth`, which the block rules have no way to know.
+    let init_depths = layout::init_depths(&stream, &roles);
     let columns = Columns::new(style);
     let max_empty = style.count(StyleOption::MaxEmptyLinesToKeep);
     let line_ending = tokens::line_ending(source);
@@ -61,7 +64,7 @@ pub fn format(source: &str, style: &Style) -> String {
             && gap.comments.is_empty()
             && gap.newlines > 0
             && index > 0
-            && let Some((indent, is_block_line)) = planned_indent(index, &stream, &blocks, &stack, statement_indent, style, in_ctor_init, ctor_column)
+            && let Some((indent, is_block_line)) = planned_indent(index, &stream, &blocks, &stack, statement_indent, style, in_ctor_init, ctor_column, init_depths[index] > 0)
         {
             // **A line that starts here**, with nothing in the gap but whitespace: the break count collapses to
             // `MaxEmptyLinesToKeep` and the column is the layout's. Everything else — a comment, a directive — is
@@ -287,6 +290,7 @@ fn planned_indent(
     style: &Style,
     in_ctor_init: bool,
     ctor_column: Option<usize>,
+    in_initializer: bool,
 ) -> Option<(usize, bool)> {
     let first = stream.tokens[index].kind;
     if std::env::var_os("CPPFMT_DEBUG").is_some() {
@@ -303,6 +307,14 @@ fn planned_indent(
     );
     if in_ctor_init && !is_a_brace {
         return Some((ctor_column.unwrap_or(statement_indent), false));
+    }
+    // **Inside a braced initializer the block rules do not apply**: the element is a continuation, indented by
+    // `ContinuationIndentWidth` from the declaration (measured: clang-format writes 8 for a table declared at 0).
+    if in_initializer && !is_a_brace {
+        return Some((
+            layout::continuation(stack, statement_indent, first, style),
+            false,
+        ));
     }
     if let Some(indent) = blocks[index] {
         return Some((indent, true));

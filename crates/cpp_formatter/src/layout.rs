@@ -399,6 +399,22 @@ mod tests {
     }
 
     #[test]
+    fn an_initializer_list_is_counted_as_a_depth() {
+        let source = "int a[] = {\n  1,\n  2,\n};\n";
+        let stream = tokens::stream(source);
+        let roles = roles::of(source);
+        let depths = init_depths(&stream, &roles);
+        let at_second = stream.tokens.iter().position(|token| token.text == "2").expect("2");
+        assert_eq!(depths[at_second], 1, "the element is inside the list: {depths:?}");
+        let real = "std::array<unsigned char, 260> X = {\n        0x00,\n        0x00,\n};\n";
+        let s2 = tokens::stream(real);
+        let r2 = roles::of(real);
+        let d2 = init_depths(&s2, &r2);
+        let at2 = s2.tokens.iter().position(|token| token.text == "0x00").expect("0x00");
+        assert_eq!(d2[at2], 1, "real shape: {d2:?}");
+    }
+
+    #[test]
     fn a_function_body_indents_and_its_close_does_not() {
         let found = columns("void f()\n{\nreturn;\n}\n", &llvm());
         assert_eq!(found[0], ("void".to_string(), Some(0)));
@@ -516,4 +532,37 @@ mod tests {
         // A constructor initializer list uses its own option: 4 from the signature's indent.
         assert_eq!(continuation(&[], 4, CppTokenKind::Colon, &style), 8);
     }
+}
+
+/// **How many braced initializer lists are open at each token**, which is what tells the block rules to keep out:
+/// the lines inside `= { … }` are continuations (`ContinuationIndentWidth` from the declaration), not block lines.
+///
+/// `classify_braces` already decides which braces are initializers; this is the depth that follows from it, kept as
+/// its own pass so that the two rules stay independent.
+pub fn init_depths(stream: &Stream<'_>, roles: &Roles) -> Vec<isize> {
+    let mut depths = vec![0isize; stream.tokens.len()];
+    let mut open: Vec<bool> = Vec::new();
+    let mut depth: isize = 0;
+    for (index, token) in stream.tokens.iter().enumerate() {
+        depths[index] = depth;
+        match token.kind {
+            CppTokenKind::LeftBrace => {
+                let is_initializer =
+                    !roles.block_brace.contains(&token.start) && roles.init_brace.contains(&token.start);
+                open.push(is_initializer);
+                if is_initializer {
+                    depth += 1;
+                }
+            }
+            CppTokenKind::RightBrace => {
+                if let Some(is_initializer) = open.pop()
+                    && is_initializer
+                {
+                    depth -= 1;
+                }
+            }
+            _ => {}
+        }
+    }
+    depths
 }
