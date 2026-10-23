@@ -68,6 +68,18 @@ pub async fn on_type_formatting(
         .await
 }
 
+/// Format the document that is about to be written (`textDocument/willSaveWaitUntil`).
+///
+/// The same answer as `textDocument/formatting`: the client applies it before saving, which is what makes "format on
+/// save" work without the editor having to run a format command first.
+pub async fn on_will_save_wait_until(
+    context: ServerContextSnapshot,
+    params: lsp_types::WillSaveTextDocumentParams,
+    cancel_token: CancellationToken,
+) -> RequestOutcome<Vec<TextEdit>> {
+    format_request(context, params.text_document.uri, None, cancel_token).await
+}
+
 /// The one implementation the three methods share: format, diff, filter.
 async fn format_request(
     context: ServerContextSnapshot,

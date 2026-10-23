@@ -521,6 +521,23 @@ fn a_formatting_request_returns_edits_for_the_whole_file() {
         response["result"].is_array(),
         "on-type formatting answers with a list: {response}"
     );
+
+    // --- willSaveWaitUntil: the edits the client applies before saving --------------------------------------
+    let response = server.request(
+        5,
+        "textDocument/willSaveWaitUntil",
+        json!({
+            "textDocument": { "uri": main_uri },
+            "reason": 1,
+        }),
+    );
+    let edits = response["result"]
+        .as_array()
+        .unwrap_or_else(|| panic!("the save-time edits are a list: {response}"));
+    assert!(
+        !edits.is_empty(),
+        "the file is still unformatted, so saving must offer the edits: {response}"
+    );
 }
 
 #[test]

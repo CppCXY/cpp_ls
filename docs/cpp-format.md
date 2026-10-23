@@ -1648,3 +1648,28 @@ handshake 端到端      格式化用例仍通过
 尾注释列的四次反推都失败，已全部回退；42/43 保持。需要你在三条路里选一条
 （移植 clang-format 的 `WhitespaceManager` 算法 / 接受 42/43 / 审计口径忽略行尾注释空格），
 我下轮会按你的选择执行；若没有选择，我会继续做 (B) 的 `willSaveWaitUntil`。
+## 五十九、按 clang-format 源码实现尾注释对齐 —— 仍然不成立（42 → 39）
+
+按你的要求联网取了 LLVM 的 `WhitespaceManager.cpp`，读到了真正的算法：
+
+```cpp
+// WhitespaceManager::alignTrailingComments()
+· 每条尾注释有"最小列" ChangeMinColumn = C.StartOfTokenColumn（代码结尾 + 该样式要求的空格）
+· 连续带注释的行构成一段；段列 = 段内最小列的**最大值**（MinColumn = max(...)）
+· 只向右移：`Shift = Column - StartOfTokenColumn; if (Shift <= 0) continue;`
+· 序列在空行处断开（NewLineThreshold）、在 `AlignTrailingComments.Kind == Never/Leave` 时整段跳过
+```
+
+按这个结构实现（段列 = max(代码结尾 + N)，只向右补齐），接进 `format_file` 后实测 **42 → 39**，
+稳定性 43 → 39，已回退。
+
+**卡在哪**：`C.StartOfTokenColumn` 的"最小列"里那个空格，不是简单的 `SpacesBeforeTrailingComments`：
+同一条配置（`0`）下，`Next();// Global` 的注释在代码结尾 + 0，而 `unsigned char right; /* … */` 在 +1。
+也就是说 `getSpacesRequiredBefore` 对不同前导 token 给出不同值（`;` 之后有时 0、有时 1），
+这一层在 `FormatToken::SpacesRequiredBefore` / `ContinuationIndenter::addTokenOnCurrentLine` 里，
+还要再取一份源码（`ContinuationIndenter.cpp` 中 `Current.Spaces = ...` 那段）才能确定。
+
+本轮成果：算法主体已确定（段列 = 最小列的最大值、只向右移），缺的只有"最小列里那个空格"的取值规则。
+下一轮我会取 `ContinuationIndenter.cpp` 与 `FormatToken.cpp` 里 `SpacesRequiredBefore` 的定义，把它定下来。
+
+（同时：`textDocument/willSaveWaitUntil` 已接上并通过端到端用例，见下一个提交。）
