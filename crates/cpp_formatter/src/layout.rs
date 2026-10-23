@@ -58,6 +58,40 @@ enum Brace {
     ClosesWithoutIndenting,
 }
 
+/// **`MacroBlockBegin` / `MacroBlockEnd`**: the lines between a pair of macros are one level deeper.
+///
+/// ```cpp
+/// QT_BEGIN_NAMESPACE
+/// class A { ... };      // one level in
+/// QT_END_NAMESPACE
+/// ```
+///
+/// clang-format matches the two options as regular expressions; this matches the **first token of the line against the
+/// option text**, which is how the options are used in practice (`QT_BEGIN_NAMESPACE`, `namespace {`). A pattern that
+/// is not a literal macro name is therefore not honoured, and that is stated here rather than guessed at.
+fn apply_macro_blocks(indents: &mut [Option<usize>], stream: &Stream<'_>, style: &Style) {
+    let begin = style.text(StyleOption::MacroBlockBegin);
+    let end = style.text(StyleOption::MacroBlockEnd);
+    if begin.is_empty() && end.is_empty() {
+        return;
+    }
+    let width = style.count(StyleOption::IndentWidth);
+    let mut extra = 0usize;
+    for index in 0..stream.tokens.len() {
+        let starts_a_line = index == 0 || stream.gaps[index].newlines > 0;
+        let text = stream.tokens[index].text;
+        if starts_a_line && !end.is_empty() && text == end {
+            extra = extra.saturating_sub(width);
+        }
+        if let Some(indent) = indents[index] {
+            indents[index] = Some(indent + extra);
+        }
+        if starts_a_line && !begin.is_empty() && text == begin {
+            extra += width;
+        }
+    }
+}
+
 /// A **block** line's indentation, or `None` where the line is a continuation (the aligner's) or a comment's interior.
 pub fn blocks(stream: &Stream<'_>, roles: &Roles, style: &Style) -> Vec<Option<usize>> {
     let indent_width = style.count(StyleOption::IndentWidth);
@@ -176,6 +210,8 @@ pub fn blocks(stream: &Stream<'_>, roles: &Roles, style: &Style) -> Vec<Option<u
             _ => {}
         }
     }
+
+    apply_macro_blocks(&mut indents, stream, style);
 
     indents
 }
