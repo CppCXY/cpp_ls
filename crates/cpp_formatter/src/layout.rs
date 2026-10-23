@@ -68,24 +68,32 @@ pub fn blocks(stream: &Stream<'_>, roles: &Roles, style: &Style) -> Vec<Option<u
     let indent_case_blocks = style.flag(StyleOption::IndentCaseBlocks);
     let indent_case_labels = style.flag(StyleOption::IndentCaseLabels);
     let braces = classify_braces(stream, roles, &namespace_indentation, indent_case_blocks);
-    let mut level: isize = 0;
+
+    // **The level bookkeeping is in statement indent levels, not brace depth.** `base` is the level statements in the
+    // current context sit at and `case_extra` is the label depth (0 or 1); a brace pushes the pair, so a `switch`
+    // inside a `case` body accumulates instead of losing a level — measured before this change: the inner labels came
+    // out at 12 where clang-format has 16.
+    let mut base: isize = 0;
+    let mut case_extra: isize = 0;
+    // One entry per open brace: the pair to restore, and the level of the line that opened it (what its `}` sits at).
+    let mut open: Vec<(isize, isize, isize)> = Vec::new();
+    // The level of the line currently being written, which is what a brace opened on that line closes back to.
+    let mut line_level: isize = 0;
     let mut paren_depth: isize = 0;
-    // **A `case` label's statements sit one level in** — it is not a brace, so it is tracked separately.
-    // **`IndentCaseLabels` decides where a label sits**: true puts it at the switch body`s level and its statements
-    // one deeper; false puts the label at the *switch* level and its statements at the body level. Both were measured
-    // against 22.1.3 — the corpus asks for `true` and writes `case` at the body level with the body one deeper.
-    let mut case_body: isize = 0;
-    // **The level the label was opened at**, so that only a close that leaves that level ends the label`s depth:
-    // a block nested inside the case (`if (...) { ... }`) closes at its own level and must not end it.
-    let mut case_level: Option<isize> = None;
     let mut indents = vec![None; stream.tokens.len()];
 
     for index in 0..stream.tokens.len() {
         let token = stream.tokens[index];
         let brace = braces[index];
+        let level = base + case_extra;
+        let closing_level = match brace {
+            Brace::Closes | Brace::ClosesWithoutIndenting => {
+                open.last().map(|(_, _, opener)| *opener)
+            }
+            _ => None,
+        };
 
-        // The column of a line that starts here, from the level *before* this token's own effect: a `}` sits at the
-        // level of the lines it closes.
+        // The column of a line that starts here.
         indents[index] = if paren_depth > 0 || (index > 0 && starts_a_continuation(stream, index)) {
             // The aligner's decision, made in `render` where the columns are known.
             None
@@ -95,46 +103,67 @@ pub fn blocks(stream: &Stream<'_>, roles: &Roles, style: &Style) -> Vec<Option<u
                 _ => (level.max(0) as usize) * indent_width,
             })
         } else if is_an_access_specifier(stream, index) {
-            let column = level * indent_width as isize + access_offset;
+            let column = if let Some(closer) = closing_level {
+                closer
+            } else {
+                level
+            } * indent_width as isize
+                + access_offset;
             Some(column.max(0) as usize)
         } else {
-            let at = if brace == Brace::Closes {
-                // **A closer sits at its opener's column**: one level out, plus the label depth its opener counted —
-                // except for the close that ends the labels themselves, which sits at the switch's own level.
-                let ends_the_cases = case_level.is_some_and(|opened| level - 1 < opened);
-                level - 1 + if ends_the_cases { 0 } else { case_body }
-            } else if brace == Brace::ClosesWithoutIndenting {
-                // A braced `case` body closes at its label's column.
-                level - 1 + case_body
+            let at = if let Some(closer) = closing_level {
+                // **A closer sits at the level of the line that opened it.**
+                closer
+            } else if is_a_goto_label(stream, index) {
+                // **A `goto` label is one level out of its block, or at column 0.** Measured against 22.1.3: with
+                // `IndentGotoLabels: true` (the default, and what the corpus has) `endLoop:` sits at the level of the
+                // line that opened the block, and with `false` it sits at column 0 — not at the block's level.
+                if style.flag(StyleOption::IndentGotoLabels) {
+                    base - 1
+                } else {
+                    0
+                }
             } else if is_a_case_label(stream, index) {
                 // **The label itself**: at the body's level when labels are indented, at the switch's level otherwise.
-                if indent_case_labels { level } else { level - 1 }
+                // It is computed from `base` alone — `case_extra` is the *label's* depth, and adding it here is what
+                // put every label one level too deep (measured: `case` at 12 where clang-format has 8).
+                base + if indent_case_labels { 0 } else { -1 }
             } else {
-                level + case_body
+                level
             };
             Some((at.max(0) as usize) * indent_width)
         };
+        // **Only a token that starts a line sets the line's level** — every other token on that line would overwrite
+        // it with the statement's level, and the brace at the end of a `case X: {` line would then close a level out.
+        if index == 0 || stream.gaps[index].newlines > 0 {
+            line_level = match indents[index] {
+                Some(column) => column as isize / indent_width.max(1) as isize,
+                None => line_level,
+            };
+        }
 
-        // **A label opens its own depth**, whose size is `IndentCaseLabels`: true puts the label at the body's level
-        // and its statements one deeper; false puts the label at the switch's level and its statements at the body's.
-        // Only a close that *leaves* the label's level ends that depth; a block nested inside the case closes at its
-        // own level and must not (measured: `if (...) { }` inside a case reset the depth and put `break;` a level out).
+        // A label opens the label depth (its statements are one level in) — and a nested brace's `{` suspends it,
+        // because the brace's own level already includes it.
         if is_a_case_label(stream, index) {
-            case_body = if indent_case_labels { 1 } else { 0 };
-            case_level = Some(level);
+            case_extra = if indent_case_labels { 1 } else { 0 };
         }
 
         match brace {
-            Brace::Opens => level += 1,
-            Brace::Closes => {
-                level -= 1;
-                // A close that leaves the label's level ends the label depth; a nested one does not.
-                if case_level.is_some_and(|opened| level < opened) {
-                    case_body = 0;
-                    case_level = None;
+            Brace::Opens => {
+                open.push((base, case_extra, line_level));
+                base = base + case_extra + 1;
+                case_extra = 0;
+            }
+            Brace::OpensWithoutIndenting => {
+                open.push((base, case_extra, line_level));
+            }
+            Brace::Closes | Brace::ClosesWithoutIndenting => {
+                if let Some((previous_base, previous_case, _)) = open.pop() {
+                    base = previous_base;
+                    case_extra = previous_case;
                 }
             }
-            Brace::OpensWithoutIndenting | Brace::ClosesWithoutIndenting | Brace::Nothing => {}
+            Brace::Nothing => {}
         }
         match token.kind {
             CppTokenKind::LeftParen | CppTokenKind::LeftBracket => paren_depth += 1,
@@ -311,6 +340,25 @@ fn is_an_access_specifier(stream: &Stream<'_>, index: usize) -> bool {
         .tokens
         .get(index + 1)
         .is_some_and(|token| token.kind == Colon)
+}
+
+/// A `goto` label: an identifier, a colon, and the statement after it on the next line.
+fn is_a_goto_label(stream: &Stream<'_>, index: usize) -> bool {
+    use CppTokenKind::*;
+    if stream.tokens[index].kind != Identifier {
+        return false;
+    }
+    let Some(colon) = stream.tokens.get(index + 1) else {
+        return false;
+    };
+    if colon.kind != Colon {
+        return false;
+    }
+    // The statement after the colon starts a new line, or the block ends there.
+    stream
+        .gaps
+        .get(index + 2)
+        .is_some_and(|gap| gap.newlines > 0 || gap.at_end)
 }
 
 /// `case` / `default` — labels of the switch body rather than statements inside it.
