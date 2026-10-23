@@ -424,11 +424,12 @@ async fn index_in_background(context: ServerContextSnapshot) {
                             report,
                         );
 
-                        // **And the pages go back.** The queue just drained, which is the one moment when the
-                        // index's freed working set can be handed to the operating system for free. Measured:
-                        // 791 MB resident against 276 MB of live tables, and the trim takes it to 0.2 MB —
-                        // see [`crate::context::analysis_state::release_free_memory`].
-                        crate::context::release_free_memory();
+                        // **The pages are deliberately not handed back.** The measurement says the resident set
+                        // is ~515 MB of free pages the allocator holds (`docs/memory-audit.md` §M1 之后), and the
+                        // decision is to keep them: the next index burst, the next cook and the next keystroke ask
+                        // for exactly that memory, and a working-set trim would only make them fault it back in.
+                        // What was worth having is the *number* — `MemoryReport` in the file above — and the
+                        // budgets that keep the live tables bounded.
                     }
                     if taken > 0 || prepared_count > 0 || !drain.is_empty() || !claimed.is_empty() {
                         // inside the slice that was. The numbers here are the split — prepared under the read lock,

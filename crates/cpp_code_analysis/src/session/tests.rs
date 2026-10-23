@@ -108,14 +108,15 @@ fn the_sharing_cache_survives_a_restart() {
     );
 
     // **A restart**: the memory is empty, the disk is not.
-    crate::index::walk_cache::clear();
-    assert_eq!(crate::index::walk_cache::held(), 0, "everything is cleared");
+    // A restart: the store a session opens has its own table, empty.
+    let empty = fixture.session();
+    assert_eq!(empty.walk_contributions_held(), 0, "a new store holds nothing");
 
     let session = fixture.session();
     let restored = session.load_the_sharing();
     assert_eq!(restored, written, "what was written is what is read back");
     assert_eq!(
-        crate::index::walk_cache::held(),
+        session.walk_contributions_held(),
         restored,
         "and it is in the cache the walk consults, not merely counted"
     );

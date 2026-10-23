@@ -881,6 +881,7 @@ mod tests {
             &crate::include::graph::Marked::default(),
             &mut definitions,
             false,
+            &crate::WalkCache::new(),
         );
 
         // **Every file both sides reach**, and every macro the chain says that file sees.

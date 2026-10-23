@@ -55,10 +55,17 @@ fn distinct() -> &'static Mutex<HashSet<u64>> {
     SEEN.get_or_init(|| Mutex::new(HashSet::new()))
 }
 
-thread_local! {
-    /// The names each file's conditions mention, keyed by path and a cheap fingerprint — see [`projection_of`].
-    static PROJECTIONS: std::cell::RefCell<HashMap<std::path::PathBuf, (u64, Arc<Vec<(Box<str>, u64)>>)>> =
-        std::cell::RefCell::new(HashMap::new());
+/// The names each file's conditions mention, keyed by path and a cheap fingerprint — see [`projection_of`].
+///
+/// **A process-wide memo, not a thread-local one.** It was `thread_local! { RefCell<HashMap<…>> }`, which meant one
+/// copy of every file's projection per thread that ever walked — unbounded in threads, and `forget_projections`
+/// could only clear the calling thread's. The census is a diagnostic that is off unless `CPPLS_WALK_CENSUS` is set,
+/// so a single mutex-guarded map is both correct and small; the rule it follows is the one
+/// `docs/memory-audit.md` §3.2 states: no `thread_local!`, because state belongs to an owner, not to a thread.
+fn projections() -> &'static Mutex<HashMap<std::path::PathBuf, (u64, Arc<Vec<(Box<str>, u64)>>)>> {
+    static PROJECTIONS: OnceLock<Mutex<HashMap<std::path::PathBuf, (u64, Arc<Vec<(Box<str>, u64)>>)>>> =
+        OnceLock::new();
+    PROJECTIONS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 /// **One file entered** — count it, and print the running totals.
@@ -131,27 +138,30 @@ pub(crate) fn projection_of(path: &std::path::Path, source: &str) -> Arc<Vec<(Bo
     }
 
     let fingerprint = fingerprint_of(source);
-    let hit = PROJECTIONS.with(|held| {
-        held.borrow()
-            .get(path)
-            .filter(|(known, _)| *known == fingerprint)
-            .map(|(_, names)| names.clone())
-    });
+    let hit = projections()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(path)
+        .filter(|(known, _)| *known == fingerprint)
+        .map(|(_, names)| names.clone());
     if let Some(hit) = hit {
         return hit;
     }
 
     let names = Arc::new(scan(source));
-    PROJECTIONS.with(|held| {
-        held.borrow_mut()
-            .insert(path.to_path_buf(), (fingerprint, names.clone()));
-    });
+    projections()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(path.to_path_buf(), (fingerprint, names.clone()));
     names
 }
 
 /// **Forget the memo** — called with the contributions, because the same edits invalidate both.
 pub(crate) fn forget_projections() {
-    PROJECTIONS.with(|held| held.borrow_mut().clear());
+    projections()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clear();
 }
 
 /// A length-and-edges fingerprint: O(1) in the file's size, and enough to notice a change a *cheap* check can see.

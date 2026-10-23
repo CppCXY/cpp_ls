@@ -133,6 +133,14 @@ pub struct SummaryStore<F: FileProvider = DiskFiles> {
     include_searches: std::sync::Mutex<
         std::collections::HashMap<(IncludeForm, bool, Box<str>, PathBuf), Option<PathBuf>>,
     >,
+    /// **What each file contributed to a walk**, shared between this store's units — see
+    /// [`crate::index::walk_cache`].
+    ///
+    /// A field rather than a process-wide table: the contributions are keyed by this store's `revision`, so their
+    /// owner is the store whose summaries they were made from. A second store over another project used to answer
+    /// from the first one's table (cleared on open, which hid the bug rather than fixing it), and a
+    /// [`crate::MemoryReport`] could not account for it at all.
+    walk_cache: crate::index::walk_cache::WalkCache,
 }
 
 /// **How many include questions are remembered** — the cache inside [`SummaryStore`], cleared when it fills.
@@ -439,10 +447,8 @@ impl<F: FileProvider> SummaryStore<F> {
     ) -> SummaryStore<F> {
         let root = root.into();
 
-        // **A new store starts with no contributions.** The table is process-wide now (it used to be a
-        // `thread_local`, which made it per-session by accident), so a second session — a workspace reload, or the
-        // next test in the same binary — would otherwise answer from a walk made under a different macro seed.
-        crate::index::walk_cache::clear();
+        // A new store's own contribution table starts empty — it is the store's, not the process's (it used to be a
+        // `thread_local`, then a global, and either way a store could answer from another project's walks).
 
         SummaryStore {
             cache: root.join(crate::CACHE_DIRECTORY),
@@ -456,6 +462,7 @@ impl<F: FileProvider> SummaryStore<F> {
             summary_database: std::sync::OnceLock::new(),
             generation: 0,
             include_searches: std::sync::Mutex::new(std::collections::HashMap::new()),
+            walk_cache: crate::index::walk_cache::WalkCache::new(),
         }
     }
 
@@ -567,6 +574,15 @@ impl<F: FileProvider> SummaryStore<F> {
     /// [`crate::MemoryReport`] for who asks.
     pub fn include_search_count(&self) -> Option<usize> {
         self.include_searches.lock().ok().map(|held| held.len())
+    }
+
+    /// **The walk contributions this store holds** — see [`crate::index::walk_cache::WalkCache`].
+    ///
+    /// Exposed for the two places that are *about* the table rather than about a walk: the memory report, and the
+    /// save/restore of the unit cache. A walk receives it by parameter — see [`crate::TranslationUnit::walk`] — so
+    /// that the store, not a static, is what owns it.
+    pub(crate) fn contributions(&self) -> &crate::index::walk_cache::WalkCache {
+        &self.walk_cache
     }
 
     /// **What the file directs, without parsing it** — see [`FileIndexer::directive_summary`](crate::index::FileIndexer::directive_summary).
@@ -1788,7 +1804,7 @@ impl<F: FileProvider> SummaryStore<F> {
     fn a_summary_was_dropped(&self) {
         self.revision
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        crate::index::walk_cache::clear();
+        self.contributions().clear();
     }
 
     pub fn forget(&mut self, path: &Path) -> bool {

@@ -114,6 +114,7 @@ impl Unit {
             &self.seed,
             definitions,
             false,
+            &cpp_code_analysis::WalkCache::new(),
         )
     }
 }
@@ -447,6 +448,7 @@ fn the_unit_walks_its_files_once() {
         &seed,
         &mut definitions,
         false,
+        &cpp_code_analysis::WalkCache::new(),
     );
 
     // `a.h` is included twice (`c.h` and `b.h` both take it) and walked once: the guard idiom means a second read

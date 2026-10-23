@@ -9,7 +9,7 @@ mod status_bar;
 mod update_queue;
 mod workspace_manager;
 mod workspace_state;
-pub use analysis_state::{AnalysisState, release_free_memory};
+pub use analysis_state::AnalysisState;
 pub use client::ClientProxy;
 pub use client_id::{ClientId, get_client_id};
 pub use lsp_features::LspFeatures;

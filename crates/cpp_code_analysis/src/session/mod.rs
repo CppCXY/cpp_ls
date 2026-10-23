@@ -1227,6 +1227,12 @@ impl<F: FileProvider + Clone> Session<F> {
     /// [`Session::cache_sizes`] answers "how many entries", which is the wrong unit for the question a five-gigabyte
     /// report asks: an entry is a `#define` or a rendering, and the two differ by six orders of magnitude. This is
     /// the same inventory in bytes, one field per table, and it is the instrument `docs/memory-audit.md` is built on.
+    /// **How many walk contributions this session's store holds** — a diagnostic, and the number the sharing test
+    /// asserts. The table itself is the store's; see [`crate::index::walk_cache::WalkCache`].
+    pub fn walk_contributions_held(&self) -> usize {
+        self.store.contributions().held()
+    }
+
     pub fn memory_report(&self) -> crate::MemoryReport {
         let (vfs_files, vfs_text_bytes, vfs_line_index_bytes) = self.vfs.accounting();
         let (summaries, summary_bytes, cooked_files, cooked_bytes) =
@@ -1236,16 +1242,8 @@ impl<F: FileProvider + Clone> Session<F> {
             .lock()
             .map(|definitions| definitions.accounting())
             .unwrap_or((0, 0));
-        let (units, unit_bytes) = {
-            let table = self.held_units();
-            let bytes = table
-                .held
-                .values()
-                .map(|held| held.unit.heap_bytes())
-                .sum::<usize>()
-                + table.held.len() * std::mem::size_of::<HeldUnit>();
-            (table.held.len(), bytes)
-        };
+        // The table keeps its own byte total, so the report does not walk every unit's events on every ask.
+        let (units, unit_bytes) = self.held_units().accounting();
         let (renderings, rendering_bytes) = self
             .renderings
             .lock()
@@ -1258,7 +1256,7 @@ impl<F: FileProvider + Clone> Session<F> {
             })
             .unwrap_or((0, 0));
         let (dead_macro_files, dead_macro_offsets) = self.dead_macro_decisions();
-        let (walk_cache_entries, walk_cache_bytes) = crate::index::walk_cache::accounting();
+        let (walk_cache_entries, walk_cache_bytes) = self.store.contributions().accounting();
         let (walks_by_content_entries, walks_by_content_bytes) = self
             .walked_by_content
             .lock()
@@ -3162,9 +3160,9 @@ impl<F: FileProvider + Clone> Session<F> {
     /// One file, `<cache>/sharing.bin`. Its entries carry their own identity (the file's fingerprint and the projection
     /// of its conditions), so a stale file cannot answer a different question — it simply fails to hit.
     pub fn save_the_sharing(&self) -> std::io::Result<usize> {
-        use crate::index::{walk_cache, walk_cache_codec};
+        use crate::index::walk_cache_codec;
 
-        let entries = walk_cache::saved();
+        let entries = self.store.contributions().saved();
         let written = entries.len();
         std::fs::write(
             self.store.cache_directory().join(SHARING_FILE),
@@ -3179,7 +3177,7 @@ impl<F: FileProvider + Clone> Session<F> {
     /// correct without it. Say how many entries were restored, because "it loaded nothing" and "it did not run" are
     /// different facts and only one of them is interesting.
     pub fn load_the_sharing(&self) -> usize {
-        use crate::index::{walk_cache, walk_cache_codec};
+        use crate::index::walk_cache_codec;
 
         let Ok(bytes) = std::fs::read(self.store.cache_directory().join(SHARING_FILE)) else {
             return 0;
@@ -3188,7 +3186,7 @@ impl<F: FileProvider + Clone> Session<F> {
             return 0;
         };
         let restored = entries.len();
-        walk_cache::restore(entries);
+        self.store.contributions().restore(entries);
         restored
     }
 
@@ -4160,6 +4158,7 @@ fn error_directive_line(text: &str) -> Option<(usize, usize, String)> {
                             // against a wall clock from an older build is how a 103 s figure got quoted for a code
                             // base it no longer described.
                             !provisional && std::env::var_os("CPPLS_NO_SHARE").is_none(),
+                            self.store.contributions(),
                         )
                     });
                     let walk_took = walk_started.elapsed();

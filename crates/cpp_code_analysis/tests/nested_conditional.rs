@@ -57,6 +57,7 @@ fn unit_of(files: &[(&str, &str)], root: &str) -> TranslationUnit {
         &cpp_code_analysis::include::graph::Marked::default(),
         &mut MacroDefinitions::default(),
         false,
+        &cpp_code_analysis::WalkCache::new(),
     )
 }
 

@@ -10360,6 +10360,7 @@ mod tests {
             &crate::Marked::default(),
             &mut definitions,
             false,
+            &crate::WalkCache::new(),
         );
         let (tokens, _) = cpp_parser::lex(source, &cpp_parser::LexerConfig::default());
         let unit_definitions = unit.definitions();

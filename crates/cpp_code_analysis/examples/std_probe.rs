@@ -442,6 +442,7 @@ standard {}",
             &seed,
             &mut macro_definitions,
             false,
+            &cpp_code_analysis::WalkCache::new(),
         );
         seeding_time += started.elapsed();
 

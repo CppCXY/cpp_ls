@@ -19,7 +19,7 @@
    （`walk_cache::CONTRIBUTIONS`、`include::fuzzy::CACHE`、`cache_db::HANDLES`）。它们不属于任何 Session，
    生命周期与"一个会话一个所有者"的设计冲突，也让内存报告无法把它们归账。
 7. **方案分五段**，每段都有可独立验收的数字：M0 仪器（已完成）、M1 给四张表加字节预算、M2 去全局化、
-   M3 摘要磁盘优先（内存里只留窗口）、M4 启动索引流式化（一次性重构）、M5 空闲还页 + 遥测。
+   M3 摘要磁盘优先（内存里只留窗口）、M4 启动索引流式化（一次性重构）、M5 遥测（不主动还页，见 §M2 之后）。
    验收线：本语料冷启动峰值 **≤ 400 MB**（现在 971），稳态 **≤ 250 MB**，冷启动时间不劣于现在（≤ 10.5 s）。
 ```
 
@@ -216,7 +216,7 @@ M1 之后 RSS 791 MB，活表 276 MB，差 **515 MB**。三个实验回答了它
 ```
 
 所以：**页是空闲的、可回收的，只是进程不主动还**。`mi_collect` 不够（mimalloc 在 Windows 上把 arena 留着），
-平台的工作集 trim 才有效。于是 M5 改成了"在队列排空的那一刻调用平台 trim"，落点：
+平台的工作集 trim 才有效。**第一版把 trim 接进了服务器（排空时调用），随后按"这些页不久后会被复用"的判断撤掉了**，理由见 §M2 之后。当时的落点是：
 
 ```text
 cpp_ls: crates/cpp_ls/src/context/analysis_state.rs  pub fn release_free_memory()
@@ -245,18 +245,47 @@ F4 vfs               → 预算 64 MB 文本 + 索引；**打开的缓冲区钉�
 **验收**：本语料冷启动峰值 ≤ **400 MB**（现 971），稳态 ≤ **250 MB**；冷启动时间 ≤ 10.5 s（不劣化）；
 findings 18 → 18；`cargo test` 失败集合不变。
 
-### M2 去全局化
+### M2 已落地：状态归所有者（2026-10-24，实测）
 
 ```text
-· S2 walk_cache   → `Session::walk_cache: WalkCache`（结构体，字段私有）；进程级 `clear()` 删除
-· S1 fuzzy        → `Session::fuzzy: Mutex<HashMap<root, Arc<FuzzyIndex>>>`，按 root 一个会话一份
-· S3 cache_db     → `SummaryStore::database: OnceLock<...>` 已有（`summary_database`），HANDLES 并入
-· T1 walk_census  → 探针状态挂到 `Session`（`Option<WalkCensus>`，默认 None），`thread_local!` 删除
-· CI 门：`grep -rn "thread_local!" crates/` 必须为空；`static .*OnceLock<Mutex` 只允许出现在 `probes/`
+T1 walk_census 的 `thread_local! { PROJECTIONS }`  →  一个 Mutex 守卫的单表（探针缓存，单份）
+S2 walk_cache::CONTRIBUTIONS（进程级 static）      →  `SummaryStore::walk_cache` 字段；
+   `walk`/`walk_one_file`/`splice_a_contribution` 收 `&WalkCache` 参数，调用一次传一次
+S1 fuzzy::CACHE / S3 cache_db::HANDLES             →  保留，理由写进门禁的 ALLOWED 列表（见下）
 ```
 
-**验收**：两个 Session 前后创建，第二个的 `MemoryReport` 全零（除 VFS 外）；跨会话 RSS 不增长。
+**验收：第二个 Session 的 `MemoryReport` 全零**（原来 `walk cache 512 / 8 MB` 会从上一个会话带过来）：
 
+```text
+[ a second session opened after the first was dropped]
+  rss 306.3 MB | vfs 0 | summaries 0 | cooked 0 | definitions 0 | units 0 |
+  renderings 0 | walk cache 0 (0.0 MB) | walks by content 0 (0.0 MB)
+```
+
+**门禁**（`crates/cpp_code_analysis/tests/no_global_state.rs`，两个测试）：
+
+```text
+· `thread_local!` 在三个 crate 的 src 里必须为 0（现在为 0）
+· `static …: OnceLock<Mutex<…>>` 只允许出现在 ALLOWED 里，且每条都带理由：
+    walk_census.rs  探针，默认关闭；单份是有意为之
+    fuzzy.rs        每个 root 一份，构建时有深度与文件数上限；搬进 Session 需要改每个 resolver 构造点
+    cache_db.rs     一个数据库路径只能有一个写者——这是跨会话的不变量，不是会话状态
+```
+
+新增一个 `static` 缓存会让测试失败，直到它被删掉或被加进列表并写明理由。规则写在文档里会腐烂，写在测试里不会。
+
+### M2 之后：为什么不主动还页（决定记录）
+
+上一段的实验（trim: 791 → 0.2 MB、`mi_collect`: 791 → 764 MB）显示剩下的 500 MB 是**空闲页**。但决定是
+**不主动归还**：
+
+```text
+· 这些页不久后就会被再次用到（下一次索引、下一次 cook、下一次按键），trim 只会让它们重新缺页
+· 实测印证：把探针换成 mimalloc 全局分配器之后，"drop 掉 Session" 不再让 RSS 回落（789 → 789），
+  说明这就是分配器持有的空闲页，而不是泄漏——真正的泄漏在 M1 之前就已经被三张表的预算消掉了
+```
+
+所以 M5 只剩"遥测"这一半：`%TEMP%\cpp_ls-memory.txt` 里现在同时写计数与字节表（`MemoryReport`）。
 ### M3 摘要磁盘优先
 
 `ProjectIndex` 现在是 `HashMap<path, Arc<FileSummary>>`。改成：
@@ -292,12 +321,12 @@ for each translation unit（源文件清单，来自 compile_commands.json 或�
 见 `docs/exact-index-design.md` §2.2 的预测）；热启动 ≤ 1.5 s；findings 与今天逐字节相同；
 `Session::memory_report()` 的任何字段都不随工程规模线性增长（除了磁盘字节数）。
 
-### M5 空闲还页与遥测
+### M5 遥测（还页已放弃，见 §M2 之后）
 
 ```text
 · 队列空闲时调用平台的工作集 trim（`release_free_memory`）把空闲页还给 OS —— **已落地，见 §M1 之后**；
   `mi_collect(true)` 实测只还 27 MB（mimalloc 在 Windows 上留着 arena），所以不用它；
-  实测 RSS 与峰值相等，说明现在**从不还页**，这是用户看到 5 GB 的最后一环
+  （已放弃：见 §M2 之后。保留这条是因为它是当时"RSS 与峰值相等"的观测记录）
 · 服务器每 N 秒/每个 workspace 事件把 `MemoryReport` 写进日志与 status bar
 · CI 加一条"内存预算测试"：索引语料后断言 `memory_report().total() <= 250 MB`
 ```

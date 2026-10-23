@@ -170,6 +170,7 @@ pub use cooked::{
     Configuration, CookedStream, RenderedCooked, RenderedSpan, configuration_from_environment,
     configuration_from_environment_with, cook, cook_with,
 };
+pub use index::walk_cache::WalkCache;
 pub use index::{
     ChangeBatch, CookedFile, EventKind, FileEvent, FileIndexer, FileReferences, HeaderTarget,
     IncludeBudget, IncludeIndex, IncludeVisibility, MacroReferences, MemberCompletions, MemberList,

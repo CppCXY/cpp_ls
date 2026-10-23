@@ -1441,7 +1441,12 @@ pub fn macros_from_the_closure_with_bodies<'a>(
     seed: &Marked,
     definitions: &mut MacroDefinitions,
 ) -> ClosureEvidence {
-    walk_the_translation_unit(summary, None, None, look_up, seed, definitions)
+    {
+        // This path builds no unit (it only collects evidence), so its contributions are never shared: a fresh
+        // table per call is the honest owner, and nothing is kept beyond it.
+        let cache = crate::index::walk_cache::WalkCache::new();
+        walk_the_translation_unit(summary, None, None, look_up, seed, definitions, &cache)
+    }
 }
 
 /// The macros in force in a translation unit **before the point where it includes this file** — what a *header*
@@ -1464,7 +1469,10 @@ pub fn macros_in_force_before_the_include<'a>(
     seed: &Marked,
     definitions: &mut MacroDefinitions,
 ) -> ClosureEvidence {
-    walk_the_translation_unit(includer, Some(before), Some(0), look_up, seed, definitions)
+    {
+        let cache = crate::index::walk_cache::WalkCache::new();
+        walk_the_translation_unit(includer, Some(before), Some(0), look_up, seed, definitions, &cache)
+    }
 }
 
 /// Walk a file's includes — or, with `only_before`, only the ones written **before** that offset — and collect what
@@ -1494,6 +1502,7 @@ fn walk_the_translation_unit<'a>(
     mut look_up: impl FnMut(&std::path::Path) -> Option<(&'a FileSummary, &'a str)>,
     seed: &Marked,
     definitions_of: &mut MacroDefinitions,
+    cache: &crate::index::walk_cache::WalkCache,
 ) -> ClosureEvidence {
     let mut walked = Walked::default();
     let mut unit = UnitState {
@@ -1526,6 +1535,7 @@ fn walk_the_translation_unit<'a>(
             &mut unit,
             &mut walked,
             false, /* this path builds no unit, so nothing to share */
+            cache,
         );
     }
 
@@ -1765,6 +1775,7 @@ impl TranslationUnit {
         seed: &Marked,
         definitions_of: &mut MacroDefinitions,
         share: bool,
+        cache: &crate::index::walk_cache::WalkCache,
     ) -> Self {
         let mut walked = Walked {
             timeline: Some(TimelineBuilder::default()),
@@ -1791,6 +1802,7 @@ impl TranslationUnit {
             &mut unit,
             &mut walked,
             share,
+            cache,
         );
 
         let timeline = walked.timeline.take().expect("just built");
@@ -3445,6 +3457,7 @@ fn walk_one_file<'a>(
     unit: &mut UnitState,
     walked: &mut Walked<'a>,
     share: bool,
+    cache: &crate::index::walk_cache::WalkCache,
 ) -> Option<u64> {
     // Each file is read once per walk. A preprocessor would re-read one that is included twice, but the guard
     // idiom (`#ifndef X / #define X`) is what every header in this corpus uses, and a second read of a guarded
@@ -3509,7 +3522,7 @@ fn walk_one_file<'a>(
         )
     });
     if let Some(key) = sharing
-        && crate::index::walk_cache::lookup(key).is_some()
+        && cache.lookup(key).is_some()
         && !walked.spliced.contains(path)
     {
         crate::index::walk_census::a_splice();
@@ -3523,6 +3536,7 @@ fn walk_one_file<'a>(
             unit,
             walked,
             0,
+            cache,
         ) {
             return Some(key);
         }
@@ -3768,6 +3782,7 @@ fn walk_one_file<'a>(
                 unit,
                 walked,
                 share,
+                cache,
             )
         });
         if let Some(child) = child_key {
@@ -3847,7 +3862,7 @@ fn walk_one_file<'a>(
 
         crate::index::walk_census::a_fresh_walk();
 
-        crate::index::walk_cache::store(bases.key, contribution);
+        cache.store(bases.key, contribution);
 
         return Some(bases.key);
     }
@@ -3873,6 +3888,7 @@ fn splice_a_contribution<'a>(
     unit: &mut UnitState,
     walked: &mut Walked<'a>,
     depth: usize,
+    cache: &crate::index::walk_cache::WalkCache,
 ) -> bool {
     /// A guard against a contribution graph that somehow points into itself. A unit's include graph is a DAG, and this
     /// is a cheap bound rather than an argument about it.
@@ -3881,7 +3897,7 @@ fn splice_a_contribution<'a>(
     if depth > MAX_SPLICE_DEPTH {
         return false;
     }
-    let Some(contribution) = crate::index::walk_cache::lookup(key) else {
+    let Some(contribution) = cache.lookup(key) else {
         return false;
     };
 
@@ -3988,7 +4004,7 @@ fn splice_a_contribution<'a>(
             // **The include-guard rule, on the recursion too.** The walk enters a file once per unit; a splice that
             // re-entered one would duplicate its evidence, which is a different unit. Measured: this is what kept
             // `a_declaration_only_a_macro_makes_is_found_once_the_session_has_cooked_the_file` red.
-            let already_entered = crate::index::walk_cache::lookup(child).is_some_and(|child| {
+            let already_entered = cache.lookup(child).is_some_and(|child| {
                 seen.contains(child.file.as_path()) || walked.spliced.contains(&child.file)
             });
             if !already_entered {
@@ -4002,6 +4018,7 @@ fn splice_a_contribution<'a>(
                     unit,
                     walked,
                     depth + 1,
+                    cache,
                 );
             }
             next_edge += 1;

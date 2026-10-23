@@ -33,7 +33,7 @@
 //! The table is process-wide (see [`Contributions`]: it used to be a `thread_local`, which multiplied it by the
 //! size of the index pool) and bounded, because it is a memo: a miss costs one re-walk of one file.
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::Arc;
 
 
 use crate::macros::MacroDef;
@@ -143,27 +143,51 @@ pub(crate) struct CachedFrame {
     pub(crate) tout: u32,
 }
 
-/// **The contributions this process has recorded**, keyed by [`key`], oldest first in `order`.
+/// **How many contributions a session keeps** — 512 files worth of walk work, against a project of thousands of
+/// files. It used to be unbounded, and every file the index walked left its events, state changes and guarded bodies
+/// in the table for the life of the process.
+const MAX_CONTRIBUTIONS: usize = 512;
+
+/// **The identities a contribution is filed under.**
 ///
-/// # Why this is not a `thread_local`
+/// Four things, and each is a way the answer could differ: the file, the contents of the file, the values of the
+/// names its conditions read (the projection), and the store's revision — which stands for the contents of every file
+/// the subtree reaches, because it moves whenever any summary is dropped.
+pub(crate) fn key(file: &std::path::Path, content: u64, projection: u64) -> u64 {
+    let mut hash = crate::index::walk_census::hash(file.to_string_lossy().as_bytes());
+    for part in [content, projection] {
+        hash = hash.rotate_left(7) ^ part;
+    }
+    hash
+}
+
+/// **The contributions one session has recorded**, keyed by [`key`], oldest first in `order`.
 ///
-/// It was one, and that was the reason a project could sit at gigabytes with the analysis idle: the index runs on a
-/// **pool of threads**, each one walked a share of the files, and a `thread_local` table means **one copy of every
-/// file's timeline per thread**. Nothing ever merged them, so the same file could be held four, eight or sixteen
-/// times over, and a `saved()` for the disk cache cloned the whole thing again. A contribution is a value like any
-/// other; the only thing the table needs is a lock.
+/// # Why this is a session's table and not a process-wide one
+///
+/// It was a `thread_local` (one copy of every file's timeline per thread), then a `static Mutex` (one copy for the
+/// whole process, outliving the session it was built for). Both say the same wrong thing: a memo whose owner is
+/// nobody. `docs/memory-audit.md` §3.2 states the rule this now follows — **state belongs to an owner** — so the
+/// table is a field of [`crate::index::store::SummaryStore`], the store whose `revision` keys it, and a second
+/// session over another project has its own.
 ///
 /// # Why its size is bounded
 ///
 /// It is a **memo**: a file whose contribution is gone is walked again, exactly as on a cold start, and no answer
 /// depends on it. [`MAX_CONTRIBUTIONS`] is what keeps "the analysis remembers every file it ever walked" from
 /// becoming "the analysis keeps a second copy of the project for ever".
-struct Contributions {
+#[derive(Default)]
+pub struct WalkCache {
+    table: std::sync::Mutex<Table>,
+}
+
+#[derive(Default)]
+struct Table {
     held: HashMap<u64, Arc<Contribution>>,
     order: std::collections::VecDeque<u64>,
 }
 
-impl Contributions {
+impl Table {
     /// Drop the oldest until the table is within its bound.
     fn evict(&mut self) {
         while self.held.len() > MAX_CONTRIBUTIONS {
@@ -175,122 +199,93 @@ impl Contributions {
     }
 }
 
-fn contributions() -> &'static Mutex<Contributions> {
-    static CONTRIBUTIONS: OnceLock<Mutex<Contributions>> = OnceLock::new();
-    CONTRIBUTIONS.get_or_init(|| {
-        Mutex::new(Contributions {
-            held: HashMap::new(),
-            order: std::collections::VecDeque::new(),
-        })
-    })
-}
-
-/// A poisoned lock is not a reason to lose an answer: the table is a memo, and a thread that panicked while holding
-/// it did not leave a fact half-written — every mutation is one `insert` or one `remove`.
-fn locked() -> std::sync::MutexGuard<'static, Contributions> {
-    contributions()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-}
-
-/// **How many contributions the process keeps** — 512 files worth of walk work, about twenty-five megabytes, against a
-/// project of thousands of files.
-///
-/// It used to be unbounded, and every file the index walked left its events, state changes and guarded bodies in the
-/// table for the life of the process.
-const MAX_CONTRIBUTIONS: usize = 512;
-
-/// **The identities a contribution is filed under.**
-///
-/// Four things, and each is a way the answer could differ: the file, the contents of the file, the values of the names
-/// its conditions read (the projection), and the store's revision — which stands for the contents of every file the
-/// subtree reaches, because it moves whenever any summary is dropped.
-pub(crate) fn key(file: &std::path::Path, content: u64, projection: u64) -> u64 {
-    let mut hash = crate::index::walk_census::hash(file.to_string_lossy().as_bytes());
-    for part in [content, projection] {
-        hash = hash.rotate_left(7) ^ part;
+impl WalkCache {
+    pub fn new() -> WalkCache {
+        WalkCache::default()
     }
-    hash
-}
 
-/// **The contribution filed under this key**, if the process has one.
-pub(crate) fn lookup(key: u64) -> Option<Arc<Contribution>> {
-    locked().held.get(&key).cloned()
-}
-
-/// **File a contribution**, replacing whatever was there.
-pub(crate) fn store(key: u64, contribution: Contribution) {
-    let mut table = locked();
-    table.held.insert(key, Arc::new(contribution));
-    table.order.push_back(key);
-    table.evict();
-}
-
-/// **What the process-wide table is holding** — `(entries, estimated bytes)` for `MemoryReport`.
-///
-/// It is a `static`, not the session's, which is half of why `docs/memory-audit.md` asks for it to go: a table that
-/// outlives the session it was built for is memory no owner accounts for. [`MAX_CONTRIBUTIONS`] bounds the entries;
-/// nothing bounds their size, and a contribution keeps every event, state change and conditional body of its file.
-pub(crate) fn accounting() -> (usize, usize) {
-    let table = locked();
-    let mut bytes = 0usize;
-    for contribution in table.held.values() {
-        bytes += std::mem::size_of::<Contribution>() + contribution.file.as_os_str().len();
-        for event in &contribution.events {
-            bytes += std::mem::size_of::<crate::summary::TuEvent>()
-                + event.name.len()
-                + event.body_text.as_ref().map_or(0, |text| text.len())
-                + event.parameters.as_ref().map_or(0, |text| text.len());
-        }
-        bytes += contribution.changes.len() * std::mem::size_of::<StateChange>();
-        bytes += contribution.edges.len() * std::mem::size_of::<(usize, u64)>();
-        bytes += contribution.bodies.len() * std::mem::size_of::<crate::ConditionalBody>();
-        bytes += contribution.dead.len() * std::mem::size_of::<usize>();
+    /// A poisoned lock is not a reason to lose an answer: the table is a memo, and a thread that panicked while
+    /// holding it did not leave a fact half-written — every mutation is one `insert` or one `remove`.
+    fn locked(&self) -> std::sync::MutexGuard<'_, Table> {
+        self.table
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
-    (table.held.len(), bytes)
-}
 
-/// **Forget everything.** Called when the store's revision moves, so that a stale contribution cannot outlive the
-/// summaries it was made from even if its key were somehow reused.
-pub(crate) fn clear() {
-    let mut table = locked();
-    table.held.clear();
-    table.order.clear();
-    drop(table);
-    // The projection memo is invalidated by the same edits, and keeping them together is the only way they cannot
-    // disagree about which state of a file they describe.
-    crate::index::walk_census::forget_projections();
-}
+    /// **The contribution filed under this key**, if this session has one.
+    pub(crate) fn lookup(&self, key: u64) -> Option<Arc<Contribution>> {
+        self.locked().held.get(&key).cloned()
+    }
 
-/// **Everything the process holds**, for the codec to write.
-pub(crate) fn saved() -> Vec<(u64, Contribution)> {
-    locked()
-        .held
-        .iter()
-        .map(|(key, contribution)| (*key, (**contribution).clone()))
-        .collect()
-}
-
-/// **Put a decoded cache back** — a warm start, and nothing else.
-pub(crate) fn restore(entries: Vec<(u64, Contribution)>) {
-    let mut table = locked();
-    table.held.clear();
-    table.order.clear();
-    for (key, contribution) in entries {
+    /// **File a contribution**, replacing whatever was there.
+    pub(crate) fn store(&self, key: u64, contribution: Contribution) {
+        let mut table = self.locked();
         table.held.insert(key, Arc::new(contribution));
         table.order.push_back(key);
+        table.evict();
     }
-    // **The bound applies to a restored table too**: a cache file written before the bound existed can name more files
-    // than the table should hold, and restoring all of them would put back what the bound removed.
-    table.evict();
-}
 
-/// **How many contributions the process holds** — the number a probe reports, so that "the cache is on" is not
-/// something to infer from a wall clock.
-pub(crate) fn held() -> usize {
-    locked().held.len()
-}
+    /// **What the table is holding** — `(entries, estimated bytes)` for `MemoryReport`.
+    pub fn accounting(&self) -> (usize, usize) {
+        let table = self.locked();
+        let mut bytes = 0usize;
+        for contribution in table.held.values() {
+            bytes += std::mem::size_of::<Contribution>() + contribution.file.as_os_str().len();
+            for event in &contribution.events {
+                bytes += std::mem::size_of::<crate::summary::TuEvent>()
+                    + event.name.len()
+                    + event.body_text.as_ref().map_or(0, |text| text.len())
+                    + event.parameters.as_ref().map_or(0, |text| text.len());
+            }
+            bytes += contribution.changes.len() * std::mem::size_of::<StateChange>();
+            bytes += contribution.edges.len() * std::mem::size_of::<(usize, u64)>();
+            bytes += contribution.bodies.len() * std::mem::size_of::<crate::ConditionalBody>();
+            bytes += contribution.dead.len() * std::mem::size_of::<usize>();
+        }
+        (table.held.len(), bytes)
+    }
 
+    /// **Forget everything.** Called when the store's revision moves, so that a stale contribution cannot outlive the
+    /// summaries it was made from even if its key were somehow reused.
+    pub(crate) fn clear(&self) {
+        let mut table = self.locked();
+        table.held.clear();
+        table.order.clear();
+        drop(table);
+        // The projection memo is invalidated by the same edits, and keeping them together is the only way they
+        // cannot disagree about which state of a file they describe.
+        crate::index::walk_census::forget_projections();
+    }
+
+    /// **Everything this session holds**, for the codec to write.
+    pub(crate) fn saved(&self) -> Vec<(u64, Contribution)> {
+        self.locked()
+            .held
+            .iter()
+            .map(|(key, contribution)| (*key, (**contribution).clone()))
+            .collect()
+    }
+
+    /// **Put a decoded cache back** — a warm start, and nothing else.
+    pub(crate) fn restore(&self, entries: Vec<(u64, Contribution)>) {
+        let mut table = self.locked();
+        table.held.clear();
+        table.order.clear();
+        for (key, contribution) in entries {
+            table.held.insert(key, Arc::new(contribution));
+            table.order.push_back(key);
+        }
+        // **The bound applies to a restored table too**: a cache file written before the bound existed can name more
+        // files than the table should hold, and restoring all of them would put back what the bound removed.
+        table.evict();
+    }
+
+    /// **How many contributions are held** — the number a probe reports, so that "the cache is on" is not something
+    /// to infer from a wall clock.
+    pub(crate) fn held(&self) -> usize {
+        self.locked().held.len()
+    }
+}
 /// **The frame and events a splice puts in the timeline**, rebased onto the site's indices.
 ///
 /// A contribution is one file, so this is one frame: the site supplies the parent and the offset inside it, and the
