@@ -231,7 +231,6 @@ fn is_a_value(kind: CppTokenKind) -> bool {
             | FloatingLiteral
             | CharLiteral
             | StringLiteral
-            | BoolLiteral
             | NullptrLiteral
             | ThisKeyword
             | RightParen
@@ -294,9 +293,12 @@ fn a_space_before_a_paren(previous: CppTokenKind, style: &Style) -> bool {
                 // is glued the same way a call is; so is `sizeof`'s operand. Measured: 371 + 336 gaps.
                 let a_type = matches!(
                     previous,
-                    // There is no `BoolKeyword` in this lexer: `bool` is an `Identifier` (and a `bool` before `(`
-                    // is a function type anyway, which the identifier rule already glues).
-                    IntKeyword
+                    // **`bool` is a `BoolLiteral` in this lexer**, not a keyword: `cpp_lexer` maps `"bool"` to the same
+                    // token as `true`/`false`, so a `bool` before `(` fell through to "not a call, not a type" and got
+                    // a space — `std::function<bool (T)>` in two headers. A `true`/`false` before `(` is not C++ at all,
+                    // so treating the literal kind as a type name here costs nothing.
+                    BoolLiteral
+                        | IntKeyword
                         | CharKeyword
                         | LongKeyword
                         | ShortKeyword
