@@ -62,7 +62,7 @@ fn main() {
         };
         // **Both sides under the same limit**: the corpus sets `ColumnLimit: 0`, which makes the measurement
         // meaningless (nothing is supposed to break), so the style is built here with an explicit limit.
-        let ours = cpp_formatter::format(&source, &style);
+        let ours = cpp_formatter::format_file(std::path::Path::new(file), &source, &style);
         let Some(theirs) = run(&clang_format, file) else {
             continue;
         };

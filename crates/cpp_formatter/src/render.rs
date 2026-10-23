@@ -19,7 +19,11 @@ use crate::space;
 use crate::tokens;
 
 /// Format `source`, keeping its line structure and deciding the indentation.
-pub fn format(source: &str, style: &Style) -> String {
+pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
+    // **P3 sorts includes before anything else**: it moves tokens, so it is a source transformation, not a
+    // whitespace decision (see `includes.rs`). `stem` is the file's own name without its extension, which is how the
+    // main header is recognised; with `SortIncludes.Enabled: false` the text is returned untouched.
+    let source = &crate::includes::sorted(source, stem, style);
     let stream = tokens::stream(source);
     let roles = roles::of(source);
     let blocks = layout::blocks(&stream, &roles, style);
@@ -359,19 +363,19 @@ mod tests {
     #[test]
     fn only_the_spaces_inside_a_line_are_rewritten() {
         let source = "int  x  =  1;\n";
-        assert_eq!(format(source, &llvm()), "int x = 1;\n");
+        assert_eq!(format(source, None, &llvm()), "int x = 1;\n");
     }
 
     #[test]
     fn comments_and_their_whitespace_are_left_alone() {
         let source = "int  x = 1;  //  keep   me\n";
-        assert_eq!(format(source, &llvm()), "int x = 1;  //  keep   me\n");
+        assert_eq!(format(source, None, &llvm()), "int x = 1;  //  keep   me\n");
     }
 
     #[test]
     fn a_constructor_initializer_list_and_the_class_body_after_it() {
         let source = "class T {\npublic:\n  T(const T &t)\n      : a(t.a),\n        b(t.b) {\n  }\n\nprivate:\n  int a;\n  int b;\n};\n";
-        let formatted = format(source, &llvm());
+        let formatted = format(source, None, &llvm());
         assert_eq!(formatted, source, "already formatted input must come back unchanged");
     }
 
@@ -379,7 +383,7 @@ mod tests {
     #[ignore = "an own-line comment inside a braced initializer keeps the source column: the line-start path is blocked by the comment, and the condition meant to allow it does not fire"]
     fn an_own_line_comment_inside_an_initializer_is_an_element() {
         let source = "static int table[] = {\n  /* note */\n  1,\n  2,\n};\n";
-        let formatted = format(source, &llvm());
+        let formatted = format(source, None, &llvm());
         assert_eq!(formatted, "static int table[] = {\n        /* note */\n        1,\n        2,\n};\n", "elements line up, the comment with them");
     }
 
@@ -390,7 +394,7 @@ mod tests {
         // LLVM's `IndentWidth` is 2, so the body sits at 2 and the statement's first `<<` at 12; the continuation's
         // `<<` goes to the same column.
         let source = "void f()\n{\n  std::cerr << util::format(\"x\", y)\n            << std::endl;\n}\n";
-        let formatted = format(source, &llvm());
+        let formatted = format(source, None, &llvm());
         assert_eq!(
             formatted, source,
             "the `<<` of the continuation lines up with the statement's first `<<`"
@@ -408,7 +412,7 @@ mod tests {
         style.set_from_text("ColumnLimit", "0");
         let source = "static const struct\n{\n    unsigned char left;  /* left */\n    unsigned char right; /* right */\n} priority[] = {\n  /* ORDER OPR */\n        {10, 10},\n        {11, 11},\n};\n";
         let expected = "static const struct\n{\n    unsigned char left;  /* left */\n    unsigned char right; /* right */\n} priority[] = {\n        /* ORDER OPR */\n        {10, 10},\n        {11, 11},\n};\n";
-        assert_eq!(format(source, &style), expected);
+        assert_eq!(format(source, None, &style), expected);
     }
 
     #[test]
@@ -416,14 +420,14 @@ mod tests {
         // **The line breaks stay the input's; the column is now decided** (P0b): `IndentWidth: 2` puts the body at 2,
         // and the spacing rules still apply inside the line.
         let source = "void f() {\n      int  x = 1;\n}\n";
-        assert_eq!(format(source, &llvm()), "void f() {\n  int x = 1;\n}\n");
+        assert_eq!(format(source, None, &llvm()), "void f() {\n  int x = 1;\n}\n");
     }
 
     #[test]
     fn the_token_stream_is_preserved() {
         // The rule the module exists to keep: only whitespace changes.
         let source = "#include <vector>\n\ntemplate <class T>\nT  f(T  x) { return x; }\n";
-        let formatted = format(source, &llvm());
+        let formatted = format(source, None, &llvm());
         let before: Vec<_> = tokens::stream(source)
             .tokens
             .iter()
@@ -440,7 +444,7 @@ mod tests {
     #[test]
     fn a_braced_initializer_keeps_its_shape() {
         let source = "std::vector<int> v = { 1,2,3 };\n";
-        assert_eq!(format(source, &llvm()), "std::vector<int> v = {1, 2, 3};\n");
+        assert_eq!(format(source, None, &llvm()), "std::vector<int> v = {1, 2, 3};\n");
     }
 
     #[test]
@@ -448,7 +452,7 @@ mod tests {
         // `> >` must not become `>>`: the tree keeps the two `>` separate, and merging them would change the
         // reading of the file. The formatter declines the file instead of writing something else than it read.
         let source = "std::vector<std::vector<int> > v;\n";
-        let formatted = format(source, &llvm());
+        let formatted = format(source, None, &llvm());
         let before: Vec<_> = tokens::stream(source).tokens.iter().map(|t| t.text).collect();
         let after: Vec<_> = tokens::stream(&formatted).tokens.iter().map(|t| t.text).collect();
         assert_eq!(before, after);

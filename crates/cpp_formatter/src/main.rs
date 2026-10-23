@@ -96,7 +96,7 @@ fn main() {
             failed = true;
             continue;
         };
-        let formatted = cpp_formatter::format(&source, &style);
+        let formatted = cpp_formatter::format_file(Path::new(file), &source, &style);
         if in_place {
             if formatted != source
                 && let Err(error) = std::fs::write(file, &formatted)

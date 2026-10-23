@@ -1232,3 +1232,28 @@ P4  宏处理（`#define` 体内重排、`MacroBlockBegin/End`、`StatementMacro
 未完成：完全重排（忽略源码断行）实测 97，比 56 差 —— 因为我们的候选集/惩罚模型弱于 clang-format 已有的断行；
         要超过 56，需要补齐 BreakableToken 级别的候选（实参中间、`?`/`:` 两侧、字符串内部）与注释重排
 ```
+## 四十二、P3 的第一步：include 排序 → **41 / 43（95.35%）**
+
+`crates/cpp_formatter/src/includes.rs`（新模块，6 个单测）：
+
+```text
+· 一个"块" = 两行空行之间的连续 `#include` 行；块内排序，块之间不动（`IncludeBlocks: Preserve`）
+· 文件自己的头文件排最前（clang-format 的 main-header 规则：`Mark.cpp` 里的 `"…/Mark.h"`）
+· 其次引号包含、再其次尖括号；各自按路径排序，大小写按 `SortIncludes.IgnoreCase`
+· `SortIncludes.Enabled: false` 时原样返回；`#pragma`/`#define` 等其它行一个字节都不动
+```
+
+接线：`format(source, stem, style)` 新增 `stem`（文件名去扩展名），`lib::format_file(path, …)` 从路径取；
+CLI 与三个审计都改用 `format_file`（这正是之前 3 个文件"token 流不同"的原因——它们只差 include 顺序）。
+
+**实测**
+
+```text
+整文件一致： 38 → **41 / 43（95.35%）**   ← 3 个 skipped 文件全部转正（FormatContext.cpp / Util.h / LuaParseError.h
+                                            以及 Mark.cpp / TextReader.cpp / LuaFormat.cpp 的排序）
+间距一致：   **19989 / 19989（100.00%）**（gap 总数从 18879 增加到 19989，因为多了排序后的文件）
+幂等：       43 / 43（这次用"保留同名文件"的方式复核；先前 3 个失败是 harness 改名的假象）
+单测：       62 → **64 passed + 3 ignored**
+P2：         printed 56 / logical 105 —— 未回退
+剩余 2 个：LuaTokenTypeDetail.h:31（尾注释分组）、LuaLexer.cpp:478（三元 `?`，属 P2 断行期列决策）
+```

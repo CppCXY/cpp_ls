@@ -57,7 +57,7 @@ fn main() {
         if let Some(note) = config_note {
             eprintln!("spacing_audit: {note}");
         }
-        let ours = cpp_formatter::format(&source, &style);
+        let ours = cpp_formatter::format_file(std::path::Path::new(file), &source, &style);
 
         let Some(theirs) = run(&clang_format, file) else {
             eprintln!("spacing_audit: clang-format failed on {file}");

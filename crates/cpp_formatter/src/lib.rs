@@ -21,6 +21,7 @@ pub mod config;
 pub mod presets;
 pub mod render;
 pub mod rows;
+pub mod includes;
 pub mod layout;
 pub mod options;
 pub mod roles;
@@ -31,7 +32,13 @@ pub use config::{ConfigError, Style};
 
 /// Format `source` with `style`, keeping the source's line structure.
 pub fn format(source: &str, style: &Style) -> String {
-    render::format(source, style)
+    render::format(source, None, style)
+}
+
+/// Format `source` as the file at `path`, which is what lets the include sorter put the file's own header first
+/// (`clang-format`'s main-header rule; see `includes.rs`).
+pub fn format_file(path: &std::path::Path, source: &str, style: &Style) -> String {
+    render::format(source, path.file_stem().and_then(|stem| stem.to_str()), style)
 }
 
 /// Format `source` with the style that `text` (a `.clang-format`) describes.
