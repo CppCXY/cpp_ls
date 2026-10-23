@@ -136,9 +136,14 @@ fn start_spaces(code: &str, comment: &str, minimum: usize) -> usize {
     if code.trim_start().starts_with('{') && code.trim_end().ends_with(',') {
         return minimum + 1;
     }
-    if comment.starts_with("/*") { minimum + 1 } else { minimum }
+        // **A block comment asks for *at least* one space, not one more than the minimum**: with
+        // `SpacesBeforeTrailingComments: 1` clang-format writes `a = 1; /* inline */` on a lone line, and with 0 it
+        // writes the same one — so the rule is `max(minimum, 1)`, not `minimum + 1` (measured on the snippet
+        // corpus, where `minimum + 1` produced two spaces).
+    if comment.starts_with("/*") { minimum.max(1) } else { minimum }
 }
 /// Split one line into (code, comment) when it has a trailing comment; `None` for a line that has none.
+
 ///
 /// The scan skips string and character literals so that `const char *s = "// not a comment";` stays code, and a line
 /// whose first non-space characters are the comment is not a trailing one (it is an own-line comment).
