@@ -1067,3 +1067,33 @@ render 只负责"按行写 token + 已在同一行的 gap"
 ```
 
 这与 P2 的断行器是同一套设施（逻辑行 + 列计算），所以重构一次可以让 37→38 和 P2 的"重排已有断行"同时受益。
+## 三十六、P2 的"重排已有断行"原型：113 → **6**（未提交，原型已验证后回退）
+
+这轮试了把**行结构完全交给 breaker**（`ColumnLimit > 0` 时）：
+
+```text
+每一逻辑行从新行开始，行内的其余 token 一律"同一行"（忽略源码的换行）；
+breaker 给出的断点额外插换行。`ColumnLimit: 0` 时这条路径完全不启用。
+实测（column_audit，同一套样式 ColumnLimit: 80）：
+  printed 超长行： 113 → **6**
+  语料整文件一致： 37/43 不变 ✓
+```
+
+也就是说，"只增断行"（已提交，56）与"完全重排"（原型，6）之间差的正是"忽略源码换行"这一步。
+**但原型没落地**：我在改 render 的测试辅助函数时误删了文件里的一段真实代码（`RemoveRange` 截到了
+`planned_indent` 附近的实现），导致两个既有测试输出被拆成"每个 token 一行"；已整体回退，
+工作区保持 37/43、56 tests 全绿。
+
+**落地的正确做法（下次照做即可）**
+
+```text
+1. 不动既有测试的 `llvm()`；新增 `zero_limit()` 只给需要"源码断行"契约的测试用
+2. render 循环里加两条分支（都在 `reflow == true` 时）：
+     if reflow && starts_a_line[index] { 换行 + 块列 }
+     else if reflow && gap.comments.is_empty() { 同行空格 }
+   `reflow = style.count(ColumnLimit) > 0`
+3. `starts_a_line` = 每条逻辑行的首 token ∪ `breaks::break_line` 返回的断点（已实现并验证）
+4. 验收：column_audit printed 应到 ~6；layout_audit 必须仍是 37/43
+```
+
+这个原型把 P2 的目标从"再写一个引擎"变成了"把已有引擎接上去并保住既有契约"，剩下的只是接线与测试整理。
