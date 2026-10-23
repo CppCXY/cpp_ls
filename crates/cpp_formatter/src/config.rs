@@ -179,6 +179,10 @@ impl Style {
     pub fn knows(key: &str) -> bool {
         LOADER_KEYS.contains(&key)
             || StyleOption::from_key(key).is_some()
+            // **A key clang-format still parses but no longer dumps.** Its `-dump-config` is the authority on what a
+            // style *has*, not on what a document may *write*: the corpus's `.clang-format` sets
+            // `AllowAllConstructorInitializersOnNextLine`, and 22.1.3 formats happily with it while never printing it.
+            || presets::PARSED_BUT_NOT_DUMPED.contains(&key)
             // **A struct-valued option is known by its name too.** `-dump-config` prints `BraceWrapping:` followed by
             // its children and never prints a `BraceWrapping` line of its own, so the parent exists only as a prefix;
             // a document writing `BraceWrapping:` and indenting under it is writing the shape the dump writes.

@@ -630,38 +630,52 @@ which is exactly the -2 files.
    repository has decided not to keep (§十四, §十六).
 
 **State:** reverted to 30/43, 26 tests, working tree clean.
-## 十九、presets 重新生成：223 个键，结构体选项就位，以及 22.1.3 的 dump 是坏的
+## 十九、presets 按 22.1.3 重生成：268 个键，旧键仍被接受（30/43 保持）
 
-`presets.rs` 最初是按 **15.0.1** 生成的。这一轮按 **19.1.7**（`PATH` 上的那份）重生成：
-
-```text
-188 → 223 个键
-结构体选项首次进入表里（15 的 dump 里它们是 bool）：
-  AlignTrailingComments.Kind / .OverEmptyLines / .AlignPPAndNotPP
-  AlignConsecutiveAssignments.{Enabled,AcrossEmptyLines,AcrossComments,AlignCompound,PadOperators,…}
-  SpacesInLineCommentPrefix.{Minimum,Maximum}
-```
-
-随之而来的两处必要改动：`SpacesInParentheses` 在 19 里**已不存在**（17 改名为 `SpacesInParens`，枚举，
-`Never` 即旧的 `false`）；结构体选项在 dump 里**没有自己的那一行**，所以 `Style::knows("BraceWrapping")` 原本是
-false、写 `BraceWrapping:` 加子键的文档会被拒绝——现在把"是某个已知键的前缀"也算已知。
-
-**为什么不用 22.1.3 的 dump 生成：它把值整体错位了一个键。**
+上一轮我误判了：以为 22.1.3 的 `-dump-config` "值整体错位"。**是错的判断，已经在下面更正。** 实测
+（把可疑的值写进配置再 dump 回来）：
 
 ```text
-AlignAfterOpenBracket: true                （19 打印：Align）
-Cpp11BracedListStyle: AlignFirstComment    （这个值属于 SortIncludes）
-BinPackParameters: BinPack                 （这个值属于 BinPackArguments）
+$ cat .clang-format
+Cpp11BracedListStyle: AlignFirstComment
+BinPackParameters: BinPack
 ReflowComments: Always
-SortIncludes                              （22 里缺失）
+AlignAfterOpenBracket: false
+
+$ clang-format -style=file -dump-config a.cpp
+AlignAfterOpenBracket: false        ← 回显
+BinPackParameters: BinPack          ← 回显
+Cpp11BracedListStyle: AlignFirstComment   ← 回显
+ReflowComments:  Always             ← 回显
 ```
 
-所以 22.1.3 的 dump 不能决定默认值；输出比较仍然对 22.1.3（文档的 oracle），表来自 19.1.7，另加一张
-`CORRECTIONS` 处理"两者**行为**不同"的键——目前一条：`SpaceBeforeRangeBasedForLoopColon: false`（22 写
-`for (auto pattern: patterns)`，19 的默认写 `pattern : patterns`）。
+这些是 **22 里真实的新拼写/新类型**，不是错位：
 
-**实测，而且是一个尚未解释的退步**：整文件一致 **30/43 → 27/43**（indent 2、空行 2、other 9）。表结构现在是对的，
-但空白规则是按 15 的默认值校准的。下一步是逐个核对默认值变了的空白键（已接线规则会读的：
-`SpaceBeforeParens`、`SpaceBeforeCpp11BracedList`、`SpacesInAngles`、`SpacesInConditionalStatement`、
-`SpaceAroundPointerQualifiers`、`SpacesInSquareBrackets`），像找 `SpaceBeforeRangeBasedForLoopColon` 那样
-一次一个、用审计说话。这里记下的是数字本身：**更好的输入，暂时是更差的输出**。
+```text
+AlignAfterOpenBracket     bool（true = 旧 Align，false = 旧 DontAlign）
+BinPackParameters         枚举（BinPack / OnePerLine）
+ReflowComments            枚举（Never / IndentOnly / Always）
+Cpp11BracedListStyle      枚举（含 AlignFirstComment）
+SortIncludes              22 的 dump 里不再出现
+```
+
+所以表按 22.1.3 生成：**268 个键**（15 时代是 188），`options.rs` 同步（268 个变体）。
+
+**一个关键发现：22 仍然接受、但不再 dump 的键有 38 个。** 语料自己的 `.clang-format` 第 8 行就是
+`AllowAllConstructorInitializersOnNextLine` —— 我们的加载器因此拒绝了整份配置，审计**静默回退到 LLVM 默认值**，
+数字从 30 掉到 27。这是"配置没生效"而不是"规则变差"：
+
+```text
+拒绝语料配置 → LLVM 默认   27 / 43   （SpaceBeforeRangeBasedForLoopColon 变回 true，
+                                      于是输出 `for (auto pattern : patterns)`）
+接受旧键        → 语料配置  30 / 43
+```
+
+修法：`presets::PARSED_BUT_NOT_DUMPED`（38 个键，含 `AllowAllConstructorInitializersOnNextLine`、
+`SpacesInParentheses`、`SortIncludes`、`BraceWrapping` 等容器）——**接受但暂不映射**：`SpacesInParentheses`
+实际是 `SpacesInParens`，`SortIncludes` 已是枚举，宏列表搬到了 `Macros` 之类的新键。接受它让文档可读，
+映射它另算一步；在那之前，用旧键的风格会得到新键的 22 默认值。
+
+**结果**：整文件一致 **30 / 43（69.77%）**，与使用 15 表时相同，但底层是**正确的 22 键集与新类型**；
+分类仍是 indent 2、空行 3、other 5。另外记一条审计自身的教训：`style_for` 的回退必须**显式打印**
+（它确实打印了，`fallback` 那行就是找到问题的入口），否则"配置没生效"会被误读成"规则退步"。
