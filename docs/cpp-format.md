@@ -500,3 +500,29 @@ std::function<bool (T)> 的空格      vs  bool(T)                    角色规�
 **关于 trailing comment 的一个教训**（写下来省一次弯路）：把 `SpacesBeforeTrailingComments: 0` 实现成
 "注释前固定 0 个空格"让数字从 30 掉到 28——因为同一份配置还开着 `AlignTrailingComments`，
 注释的列是**对齐器**决定的，不是单点空格数。它属于 P1，不属于 P0b。
+docs: what the indentation pass learned, and why it is not wired in yet
+
+A second attempt at P0b's indentation, this time with the rule the first attempt was missing
+(`namespace` bodies do not indent), and with `layout.rs` written and tested in isolation — five tests: a function
+body indents, a namespace body does not, an access specifier sits at its offset, a braced initializer does not move
+the level, a continuation line is left alone.
+
+Wired into the renderer it took whole-file agreement from **30 of 43 to 16 of 43**, and the audit says why: of the 27
+differing files, **18 diverge at a continuation line**, and those lines are exactly the ones the new pass declines to
+decide. clang-format re-indents them — a constructor initializer list to `ContinuationIndentWidth`, a chained call to
+the open parenthesis under `AlignAfterOpenBracket: Align` — while the pass copies the source's columns. So on a file
+whose line structure clang-format would change, half-right is worse than honest: leaving indentation alone happened
+to preserve the files the source had already formatted.
+
+Two smaller things were measured and are worth keeping:
+
+* `case` labels: dropping a level (`IndentCaseLabels: false` read as "outdent") put them at 4 where clang-format has
+  8 — on this corpus the label sits at the body's level. Fixed in the draft; it changed no file's verdict, which says
+  the case-label rule is not where the remaining error is.
+* the indentation of a line inside a multi-line block comment, and of a macro body's continuation, are both this
+  pass's to decide or neither's — the audit's samples include `/* ORDER OPR */` at 2 where clang-format has 8.
+
+**State:** `layout.rs` is reverted along with the renderer change (the repository does not carry an unwired module —
+see the note in §十四 about the same decision for the earlier draft). The next attempt starts where this one stopped:
+decide continuation lines in the same pass, from `ContinuationIndentWidth` / `AlignAfterOpenBracket`, because they
+are 18 of the 27 remaining files.
