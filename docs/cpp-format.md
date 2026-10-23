@@ -1711,3 +1711,34 @@ int solo;/* one */                    → int solo; /* one */     注释 = 代�
 **建议（仍需你选）**：① 继续找那处逻辑（需要再读 `Format.cpp`/`WhitespaceManager.h` 的
 `StartOfTokenColumn` 赋值链）；② 接受 42/43；③ 审计口径忽略行尾注释空格。
 本轮不再继续该线，避免继续消耗。
+## 六十一、`ContinuationIndenter.cpp` 读完：`StartOfTokenColumn = State.Column + Spaces`，但 `Spaces` 的基准仍对不上
+
+22.1.3 的 `ContinuationIndenter::addTokenOnCurrentLine`：
+
+```cpp
+unsigned Spaces = Current.SpacesRequiredBefore + ExtraSpaces;   // ExtraSpaces 所有调用点都是 0
+Whitespaces.replaceWhitespace(Current, /*Newlines=*/0, Spaces,
+                              State.Column + Spaces + PPColumnCorrection, ...);
+```
+
+也就是"最小列 = 代码结尾 + SpacesBeforeTrailingComments(0)"。但真实输出的定点实验仍然自相矛盾：
+
+```text
+同一 --style（含 SpacesBeforeTrailingComments: 0/1/3 都试过，输出完全相同）：
+  int aaaa;/* one */           → int aaaa; /* one */     组列 = max(代码结尾) + 1
+  int b;/* two */              → int b;    /* two */
+  int c;/* three */            → int c;    /* three */
+  int dddd;/* four */          → int dddd; /* four */
+
+  void f() { Next();// G
+             if (x)// opt
+                 return a;// b }  → 三行组列 = max(代码结尾) + 0
+```
+
+两组的唯一差别是"组内最深缩进那一行"是否为组内最宽行——但两组的输出分别是 +1 与 +0，
+而 `SpacesBeforeTrailingComments` 在 0/1/3 下**输出完全一致**。这说明这个选项在我的实验里根本没生效，
+或者最小列另有一处来源（`State.Column` 在 `moveStateToNextToken` 里的推进方式）。
+
+**结论**：`(A)` 需要把 `State.Column` 的推进（`moveStateToNextToken`、`ColumnWidth`、`SpacesRequiredBefore`
+之间的相互赋值）也核对一遍；这已经超出"读两个函数"的范围，且六次实现尝试全部回退（42 → 39/39/38/39/…）。
+`(B)` 已完成并有端到端用例。据此把该目标标为 blocked，理由写为这一具体条件。
