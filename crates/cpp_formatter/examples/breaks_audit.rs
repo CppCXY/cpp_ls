@@ -62,6 +62,7 @@ fn main() {
     let mut categories: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
     let mut total_tokens = 0usize;
     let mut displaced = 0usize;
+    let mut stable_files = 0usize;
     let mut same_line_count = 0usize;
     let mut counted = 0usize;
 
@@ -78,6 +79,13 @@ fn main() {
         let ours = cpp_formatter::format(&source, &style);
         counted += 1;
 
+        // **The self-consistent half**: clang-format`s own 80-column output fed back through us. The corpus is
+        // formatted at `ColumnLimit: 0`, so "we keep its breaks" cannot match a re-flow at 80 — but a text that is
+        // *already* 80 columns wide is the fair input, and any token we move on it is a real disagreement.
+        let stable = cpp_formatter::format(&theirs, &style);
+        if stable == theirs {
+            stable_files += 1;
+        }
         if ours.lines().count() == theirs.lines().count() {
             same_line_count += 1;
         }
@@ -123,6 +131,7 @@ fn main() {
     for (key, count) in top.iter().take(10) {
         println!("  {count:>6}  {key}");
     }
+    println!("feeding clang-format`s own 80-column output back through us: {stable_files} of {counted} unchanged");
     println!("files whose line count matches: {same_line_count} of {counted}");
     std::fs::remove_dir_all(&scratch).ok();
 }

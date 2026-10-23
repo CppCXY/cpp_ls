@@ -2069,3 +2069,32 @@ LuaSyntaxTree.cpp:41 [                for (auto rIt = parents.rbegin(); rIt != p
 ```
 
 本轮实验（收敛式再断：49 → 50）已回退，基线不变。
+## 七十三、P2 换口径后第一刀：**只搜源码行**，自洽口径下 15 → **30 / 43**
+
+新增的自洽指标（`breaks_audit` 第三行）：把 clang-format 自己的 80 列输出喂回我们，看是否原样返回。
+初始只有 **15 / 43** 不动。取样后发现原因：
+
+```text
+clang-format（80 列）：
+    LuaSyntaxNode GetChildToken(std::function<bool(LuaTokenKind)> predicated,
+                                const LuaSyntaxTree &t) const;
+我们：
+    LuaSyntaxNode GetChildToken(std::function
+                                <bool(LuaTokenKind)> predicated,
+                                const LuaSyntaxTree &t) const;
+```
+
+我们**多断了一次**：`break_line` 按"整条逻辑行的长度"搜索，而这条语句已经跨两行、每行都不长，
+于是 DP 认为它超长、加了一个 clang-format 不会加的断点。修法：**只对源码行（分段）搜索**，去掉整行搜索。
+
+```text
+                        改前        改后
+自洽口径稳定性（43 文件）  15 / 43  →  **30 / 43**
+断行一致率               17.9%     →  **25.2%**
+超长行（不一致口径，80 列）  49     →  51   （失去了一些"整行搜索"带来的断点）
+语料 43/43 · 稳定性 43/43 · 间距 100%  均未变
+```
+
+净收益：自洽口径 +15 个文件、一致率 +7.3pp，代价是不一致口径下 +2 行超长——按"自洽口径才是 P2 的真指标"这一结论，接受。
+
+下一轮：同样的方法处理剩下 13 个不稳定文件（先取样它们的首处分歧）。

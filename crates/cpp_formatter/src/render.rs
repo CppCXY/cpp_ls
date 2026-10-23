@@ -76,14 +76,9 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
     let mut forced_breaks = vec![false; stream.tokens.len()];
     if style.count(StyleOption::ColumnLimit) > 0 {
         for line in crate::breaks::logical_lines(&stream) {
-            let column = blocks.get(line.start).copied().flatten().unwrap_or(0);
-            if let Some(breaks) = crate::breaks::break_line(&stream, &roles, style, &line, column) {
-                for at in breaks {
-                    forced_breaks[at] = true;
-                }
-            }
-            // **And a source line that is itself too long gets its own search**: the whole-statement search cannot see
-            // that this piece is already broken out and still overflows.
+            // **Only the source lines are searched**: a statement that is already spread over several lines is
+            // short per line, and breaking it by its *whole* length adds breaks clang-format never makes (measured:
+            // 28 of 43 files changed when clang-format`s own 80-column output was fed back through us).
             for at in crate::breaks::break_over_long_pieces(&stream, &roles, style, &line, &blocks) {
                 forced_breaks[at] = true;
             }
