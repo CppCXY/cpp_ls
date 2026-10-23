@@ -52,7 +52,7 @@ fn main() {
     let mut printed_ours = 0usize;
     let mut printed_theirs = 0usize;
     let mut logical_ours = 0usize;
-    let mut logical_theirs = 0usize;
+
 
     for file in &files {
         let Ok(source) = std::fs::read_to_string(file) else {
@@ -66,16 +66,15 @@ fn main() {
         };
         printed_ours += ours.lines().filter(|line| width(line) > limit).count();
         printed_theirs += theirs.lines().filter(|line| width(line) > limit).count();
-        logical_ours += too_wide_logical_lines(&ours, limit);
-        logical_theirs += too_wide_logical_lines(&theirs, limit);
+        logical_ours += too_wide_logical_lines(&source, &style);
+
     }
 
     println!(
         "printed: {printed_ours} line(s) over {limit} in our output, {printed_theirs} in clang-format's"
     );
     println!(
-        "logical (approximate): {logical_ours} statement(s) whose printed form would not fit (ours), \
-         {logical_theirs} (clang-format's)"
+        "logical: {logical_ours} logical line(s) exceed the limit — the units a breaker has to split"
     );
 }
 
@@ -100,27 +99,27 @@ fn width(line: &str) -> usize {
     column
 }
 
-/// The logical lines (statement boundaries: `;`, `{`, `}`) longer than the limit, measured on the *source* line they
-/// start on: a logical line is broken when its tokens, printed on one line, would not fit.
-fn too_wide_logical_lines(text: &str, limit: usize) -> usize {
+/// **The logical lines that would not fit**, measured with the real splitter (`cpp_formatter::breaks`): each one's
+/// printed width is its tokens plus the gaps between them, and one that overflows the limit is one the breaker would
+/// have to split.
+fn too_wide_logical_lines(source: &str, style: &cpp_formatter::config::Style) -> usize {
+    let stream = cpp_formatter::tokens::stream(source);
+    let roles = cpp_formatter::roles::of(source);
     let mut over = 0usize;
-    let mut column = 0usize;
-    for line in text.lines() {
-        let trimmed = line.trim();
-        let starts_a_statement = !trimmed.is_empty();
-        if starts_a_statement {
-            column += width(line);
-        }
-        if trimmed.ends_with(';') || trimmed.ends_with('{') || trimmed.ends_with('}') {
-            if column > limit {
-                over += 1;
+    for line in cpp_formatter::breaks::logical_lines(&stream) {
+        let mut width = 0usize;
+        for index in line.clone() {
+            if index > line.start {
+                width += cpp_formatter::space::between(&stream, index, &roles, style);
             }
-            column = 0;
+            width += stream.tokens[index].text.chars().count();
+        }
+        if width > 80 {
+            over += 1;
         }
     }
     over
 }
-
 fn style_for(path: &Path) -> cpp_formatter::config::Style {
     let mut directory = path.parent().map(Path::to_path_buf);
     while let Some(current) = directory {
