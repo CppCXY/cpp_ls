@@ -714,3 +714,31 @@ access specifier 的空行规则        29 → 32   ← 越过基线
 
 **剩余 11 个文件**：indent 4（`<<` 链操作数对齐、行首块注释、初始化列表元素、lambda 体层级）、
 other 4、跳过 3（token 流不同，属 include 排序/宏展开，P3/P4）。
+## 二十二、P0b 之后的两个 P1/P0 修补：33 → 35 / 43（81.40%）
+
+```text
+33 / 43  +  AlignOperands（`<<` 链对齐）                          → 33（机制就位，LuaCheck.cpp 的该行修好）
+         +  `bool` 的类型规则                                     → **35 / 43**
+```
+
+**`bool (` 之谜（两个头文件，一次修掉）：**
+
+```text
+`std::function<bool (LuaTokenKind)>` 多了一个空格。
+根因不在调用规则，在词法：`cpp_lexer` 把 `"bool"` 映成 **BoolLiteral**（和 true/false 同一 kind），
+于是 `(` 前的 `bool` 既不是"调用"（Identifier）也不是"类型关键字"，落到兜底的"两个 token 之间给一个空格"。
+修法：`a_type` 里加入 BoolLiteral —— `true`/`false` 后面接 `(` 本来就不是合法 C++，代价为零。
+```
+
+**`<<` 链对齐的根因**同样在词法：`<<` 是**单个 `LeftShift` token**，不是两个 `Less`。
+前几轮把 `Less` 写进谓词，于是记录永远为 None；测试打印 token 流才看出来。
+
+**仍未解决（8 个文件）**
+
+```text
+· 初始化列表里的行首注释（LuaDefine.h:19，2 vs 8）—— 行首路径被注释挡住
+· 嵌套初始化行（LuaCheck.cpp:48，4 vs 12）——"列表里的 `{` 元素行"既不是块行也不被当续行；
+  再试一次 `in_initializer` 覆盖花括号：35 不变但 other 从 2 涨到 3，按测量回退
+· lambda 体层级（LuaSyntaxTree.cpp:455，8 vs 16）—— 块开在续行上时，body 层级应基于该行实际列
+· other 2、跳过 3（include 排序/宏，P3/P4 范围）
+```
