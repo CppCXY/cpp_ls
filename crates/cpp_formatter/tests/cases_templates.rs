@@ -43,3 +43,87 @@ fn templates_04_alias() {
         r#"using Alias = std::map<int, int>;"#,
     );
 }
+
+/// `07_function_block`
+#[test]
+fn templates_07_function_block() {
+    check(
+        r#"template <typename T>
+T id(T v) {
+    return v;
+}"#,
+        r#"template <typename T>
+T id(T v) {
+    return v;
+}"#,
+    );
+}
+
+/// `08_struct_block`
+#[test]
+fn templates_08_struct_block() {
+    check(
+        r#"template <typename T, int N=3>
+struct B {
+    T a[N];
+};"#,
+        r#"template <typename T, int N = 3>
+struct B {
+    T a[N];
+};"#,
+    );
+}
+
+/// `09_alias_block`
+#[test]
+fn templates_09_alias_block() {
+    check(
+        r#"using Alias = std::map<int,int>;"#,
+        r#"using Alias = std::map<int, int>;"#,
+    );
+}
+
+/// `10_variadic_block`
+#[test]
+fn templates_10_variadic_block() {
+    check(
+        r#"template <typename... Args>
+void v(Args &&...args) {
+    (void)sizeof...(args);
+}"#,
+        r#"template <typename... Args>
+void v(Args &&...args) {
+    (void)sizeof...(args);
+}"#,
+    );
+}
+
+/// `11_concept_block`
+#[test]
+fn templates_11_concept_block() {
+    check(
+        r#"template <typename T>
+concept C = requires(T t) {
+    t.size();
+};"#,
+        r#"template <typename T>
+concept C = requires(T t) {
+    t.size();
+};"#,
+    );
+}
+
+/// `12_specialization_block`
+#[test]
+fn templates_12_specialization_block() {
+    check(
+        r#"template <>
+struct B<int,1> {
+    int a;
+};"#,
+        r#"template <>
+struct B<int, 1> {
+    int a;
+};"#,
+    );
+}

@@ -2810,3 +2810,25 @@ tests/cases_comments.rs                             6 例（行尾行注释/块�
 语料        43/43 · 稳定性 43/43 · 间距 19989/19989
 测试        cpp_formatter lib 88 + 分类用例 34（8 个测试目标）· 工作区构建零警告
 ```
+### 补记：用例扩到 54 个（8 类）
+
+第一版只有 34 个（很多单行输入会被 clang-format 重排，因而不收录）。补了 **20 个"块状"候选**——已经按
+clang-format 的形状分行、只留一处空白缺陷（`int  x;`、`a>0`、`return  0;`），这样两边都能逐字节一致，
+用例才有意义：
+
+```text
+cases_spacing       10 例
+cases_types          6 例
+cases_templates      7 例（函数/结构/别名/可变参数/concept/特化/默认实参）
+cases_statements     7 例（if/for/switch/while/return/三元 + 单行）
+cases_classes        6 例（成员/构造/继承/枚举/运算符/模板成员）
+cases_functions      7 例（lambda/noexcept/默认实参/重载/转发/static inline）
+cases_preprocessor   6 例（#define/#if/#include/续行/pragma/undef）
+cases_comments       6 例（行尾行注释/块注释/独立注释/doc/字符串里的 //）
+```
+
+`cargo test -p cpp_formatter` 现在跑：lib 88 + 分类用例 **54**；工作区构建零警告；
+语料 43/43 · 稳定性 43/43 · 间距 19989/19989；语言服务器 lib 87 + handshake 32 未受影响。
+
+用例的生产方式是 `tests/gen_cases.ps1`：把候选分别交给 clang-format 与本实现，**只收录两边一致的**
+（54 个），有重排差异的 18 个不收录。测试运行时不需要 clang-format，也不读 `.cpp`。

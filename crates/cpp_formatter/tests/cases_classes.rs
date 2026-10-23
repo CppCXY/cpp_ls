@@ -34,3 +34,103 @@ fn style() -> Style {
     style.set_from_text("ColumnLimit", "0");
     style
 }
+
+/// `07_members_block`
+#[test]
+fn classes_07_members_block() {
+    check(
+        r#"class A {
+public:
+    int  x;
+
+private:
+    int  y;
+};"#,
+        r#"class A {
+  public:
+    int x;
+
+  private:
+    int y;
+};"#,
+    );
+}
+
+/// `08_ctor_block`
+#[test]
+fn classes_08_ctor_block() {
+    check(
+        r#"class B {
+public:
+    B() : x_(0) {}
+
+    int x_;
+};"#,
+        r#"class B {
+  public:
+    B() : x_(0) {}
+
+    int x_;
+};"#,
+    );
+}
+
+/// `09_inherit_block`
+#[test]
+fn classes_09_inherit_block() {
+    check(
+        r#"class C : public A {
+public:
+    void f() override;
+};"#,
+        r#"class C : public A {
+  public:
+    void f() override;
+};"#,
+    );
+}
+
+/// `10_enum_block`
+#[test]
+fn classes_10_enum_block() {
+    check(
+        r#"enum class E {
+    A,
+    B,
+};"#,
+        r#"enum class E {
+    A,
+    B,
+};"#,
+    );
+}
+
+/// `11_operator_block`
+#[test]
+fn classes_11_operator_block() {
+    check(
+        r#"struct S {
+    S &operator=(const S &) = default;
+};"#,
+        r#"struct S {
+    S &operator=(const S &) = default;
+};"#,
+    );
+}
+
+/// `12_template_member`
+#[test]
+fn classes_12_template_member() {
+    check(
+        r#"class D {
+public:
+    template <typename T>
+    void f(T v);
+};"#,
+        r#"class D {
+  public:
+    template <typename T>
+    void f(T v);
+};"#,
+    );
+}

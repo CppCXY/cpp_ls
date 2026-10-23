@@ -43,3 +43,107 @@ fn statements_05_return() {
         r#"int f() { return; }"#,
     );
 }
+
+/// `07_if_block`
+#[test]
+fn statements_07_if_block() {
+    check(
+        r#"void f(int x) {
+    if (x>0) {
+        g();
+    } else {
+        h();
+    }
+}"#,
+        r#"void f(int x) {
+    if (x > 0) {
+        g();
+    } else {
+        h();
+    }
+}"#,
+    );
+}
+
+/// `08_for_block`
+#[test]
+fn statements_08_for_block() {
+    check(
+        r#"void f() {
+    for (int i=0; i<3; ++i) {
+        g(i);
+    }
+}"#,
+        r#"void f() {
+    for (int i = 0; i < 3; ++i) {
+        g(i);
+    }
+}"#,
+    );
+}
+
+/// `09_switch_block`
+#[test]
+fn statements_09_switch_block() {
+    check(
+        r#"void f(int k) {
+    switch (k) {
+    case 1:
+        break;
+    default:
+        break;
+    }
+}"#,
+        r#"void f(int k) {
+    switch (k) {
+    case 1:
+        break;
+    default:
+        break;
+    }
+}"#,
+    );
+}
+
+/// `10_while_block`
+#[test]
+fn statements_10_while_block() {
+    check(
+        r#"void f() {
+    while (x>0) {
+        --x;
+    }
+}"#,
+        r#"void f() {
+    while (x > 0) {
+        --x;
+    }
+}"#,
+    );
+}
+
+/// `11_return_block`
+#[test]
+fn statements_11_return_block() {
+    check(
+        r#"int f() {
+    return  0;
+}"#,
+        r#"int f() {
+    return 0;
+}"#,
+    );
+}
+
+/// `12_ternary_block`
+#[test]
+fn statements_12_ternary_block() {
+    check(
+        r#"int f(int a) {
+    return a>0 ? a : -a;
+}"#,
+        r#"int f(int a) {
+    return a > 0 ? a : -a;
+}"#,
+    );
+}

@@ -70,3 +70,33 @@ fn functions_06_static() {
         r#"static inline int f() { return 1; }"#,
     );
 }
+
+/// `07_lambda_block`
+#[test]
+fn functions_07_lambda_block() {
+    check(
+        r#"void f() {
+    auto g = []() {
+        return 1;
+    };
+}"#,
+        r#"void f() {
+    auto g = []() {
+        return 1;
+    };
+}"#,
+    );
+}
+
+/// `08_static_block`
+#[test]
+fn functions_08_static_block() {
+    check(
+        r#"static inline int f() {
+    return  1;
+}"#,
+        r#"static inline int f() {
+    return 1;
+}"#,
+    );
+}
