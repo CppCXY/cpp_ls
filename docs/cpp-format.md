@@ -2319,3 +2319,48 @@ s5  `enum class Color : unsigned char { Red,` 之后，clang-format 把后续枚
 
 下一轮：把 s5 这类"花括号列表内续行对齐"补上（`AlignAfterOpenBracket` 对 `{` 的处理），
 并把样例集固化成仓库里的回归夹具（`tests/snippets/` + 一个 `snippet_audit` 例子）。
+## 八十、样例集落地 + 第一轮修补（`tests/snippets/` · `examples/snippet_audit.rs`）
+
+按建议把 26 个小文件固化进仓库，并写了一个可当门禁用的审计例子：
+
+```text
+crates/cpp_formatter/tests/snippets/   26 个 .cpp + 自己的 .clang-format
+  （模板/变参/概念约束、运算符重载、语句、类/继承、枚举、lambda、结构化绑定、attributes、
+    异常、字符串与转义、指针、初始化列表、命名空间、宏、constexpr、tuple、ranges、协程、union、注释、移动语义）
+cargo run --release -p cpp_formatter --example snippet_audit -- <clang-format> crates/cpp_formatter/tests/snippets
+  退出码 = 稳定性失败数，可直接当门禁
+```
+
+它量两件事：`layout`（我们 vs clang-format 逐字节）与 `stability`（clang-format 自己的输出喂回来是否不变）。
+后者才是硬指标——输入已是标准答案，任何差异都是我们的 bug。
+
+### 当前实测（诚实数字）
+
+```text
+layout:    0 / 26 一致
+stability: 8 / 26 一致
+语料       43 / 43 · 稳定性 43 / 43 · 84 tests   全部未回退
+```
+
+`layout` 为 0 是**预期**：clang-format 会重排短语句/短 if 体（`if (a_) { b_ = 2; }` 展开成多行），
+我们保留源码行结构，这一类差异在任何输入上都会出现，不是空白规则的问题。
+
+### 已修（本轮提交）
+
+```text
+① `auto [a, b]` / `struct [[nodiscard]]` 的 `[` 前空格（声明符与属性）
+② lambda 尾置返回：`[]() -> int`、`[]() noexcept -> int`（`->` 前是 `)` 或说明符时两侧留空格）
+③ `typename... Args`、`Args &&...args`、`sizeof...(args)` 的省略号粘连
+```
+
+### stability 仍失败的 18 个文件，按类型分（已逐个看首处分歧）
+
+```text
+· 12 个是"重排差异"：clang-format 拆短体/拆长行、或把 `=` 后的初始化拆行，我们保留单行
+· 3 个是"列表/枚举续行对齐"：`enum class Color { Red,` 之后的对齐列（AlignAfterOpenBracket 对 `{`）
+· 2 个是"requires 子句缩进"（4 vs 8 列）
+· 1 个是"指针/引用对齐"：`const Money& o` 应写成 `const Money &o`（PointerAlignment: Right 在声明符位置）
+```
+
+下一步按这个顺序做：指针/引用对齐 → 花括号列表续行对齐 → requires 缩进；每修一类重跑
+`snippet_audit` + `layout_audit`，用两个数字一起判断。

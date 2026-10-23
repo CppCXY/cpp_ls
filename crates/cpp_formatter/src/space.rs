@@ -72,6 +72,13 @@ pub fn between(stream: &Stream<'_>, index: usize, roles: &Roles, style: &Style) 
                     _ => {}
                 }
             }
+            // A specifier may sit between the parameter list and the arrow: `[]() noexcept -> int`.
+            if matches!(
+                stream.tokens[index - 1].text,
+                "noexcept" | "const" | "mutable" | "override" | "final" | "constexpr"
+            ) {
+                return 1;
+            }
 if opener.is_some_and(|at| at > 0 && stream.tokens[at - 1].kind == RightBracket) {
                 return 1;
             }
