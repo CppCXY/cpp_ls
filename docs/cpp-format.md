@@ -6,7 +6,7 @@
 1. 不做 AST pretty-printer。clang-format 自己就不是：它是 token 流 → UnwrappedLine → 标注 →
    带惩罚的贪心换行器 → WhitespaceManager → 输出。我们要"效果一样"，就必须用同一个模型；
    AST 只用来消除歧义（这个 `{}` 是块还是初始化列表），永远不做"唯一真相"。
-2. 参照物钉死在 clang-format **15.0.1**（本机 VS 2022 自带的 x64 构建）。clang-format 的
+2. 参照物钉死在 clang-format **22.1.3**（本机 VS 2026 / 18 自带：`C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\Llvm\x64\bin\clang-format.exe`）。文档早先写的是 15.0.1（VS 2022 自带），那台构建已经不在这台机器上；数字按 22.1.3 重测。clang-format 的
    输出随版本变化，不钉版本就没有"一样"这个目标。
 3. 精度靠差分测量，不靠读风格文档：oracle 就是 clang-format 本身，语料是真实工程
    （EmmyLuaCodeStyle 自身 198 个 C++ 文件；整个仓库 1 138 个 / 12.9 MB / 339 081 行）+ 模板重的 libstdc++ 头。
@@ -456,3 +456,47 @@ R6 语料的许可：EmmyLuaCodeStyle 与 libstdc++ 只作为**测试输入**在
 3. 量一遍 render 的形态：把源文本按 token 切成 (token, space) 对，再拼回去，断言
    == 原文（这是 I1 的实现是否正确的第一道检查，先于任何格式化逻辑）。
 ```
+
+## 十四、P0b：整文件对比与"操作符不能被拆开"（2026-10-23，实测）
+
+P0a 只测**同一行内的 gap 宽度**，看不到"行结构/缩进"的差异。P0b 起用一个整文件审计
+`examples/layout_audit.rs`：同一个文件两边各格式化一次，逐字节比，并给出**第一处不同的行**的分类
+（缩进 / 断行 / 空行 / 其它）。这比"相同文件数"更有用——一个文件只要改对那一类，它就从"不同"变成"相同"。
+
+**oracle 换成 clang-format 22.1.3**（见 §六）；语料是工程自身的 43 个 C++ 文件
+（`LuaParser` + `CodeFormat` + `Common`，工程自带 `.clang-format`，ColumnLimit 0）。
+
+```text
+起点（P0a 之后）   28 / 43 逐字节相同（65.12%）
+                   分类：缩进 1、空行 3、其它 8、跳过 3（token 流不同）
+
+现在               30 / 43（69.77%）
+                   分类：缩进 2、空行 3、其它 5、跳过 3
+```
+
+**改对的那一条：lexer 拆开的多字符操作符仍然是同一个操作符。**
+`cpp_parser` 的词法把 `>=` 拆成 `Greater` + `Assign`、`&&` 拆成两个 `Ampersand`（parser 自己按上下文再拼回去）。
+只按 token kind 看的空白规则于是把两个"二元运算符"分开，写出 `if (end > = start)` 和 `char * *argv`。
+判据来自源文本：**一个字节都没有的 gap 不是谁写空格的地方**，而这类相邻对在 clang-format 眼里是一个操作符，
+所以保持贴合；这条同时修掉了审计里被标为"token 流不同"的两个文件，以及 `LuaSyntaxNode.cpp` / `LuaSource.cpp`
+里的 `> =` 行。
+
+**试过并回退的：整行重排（缩进 + 空行折叠）。**
+按块括号层级算缩进的想法在语料上从 30 掉到 **1 / 43**，分类里 34 个是缩进——原因很具体：
+**`namespace` 的花括号不增加缩进**（`NamespaceIndentation: None` 是默认值），而这份语料的代码到处是
+`namespace X {`。所以 P0b 的缩进必须先把"这个 `{` 是 namespace / class / 语句块"分开，而不是只数括号层数。
+这次尝试已完整回退（`render.rs`/`lib.rs` 回到 P0a 状态），没有留下半成品。
+
+**剩下的 13 个文件由谁负责**（审计样本给的分类）：
+
+```text
+AlignArrayOfStructures: Left       {"and",      TK_AND     },      P1 对齐后处理
+AlignTrailingComments              TK_GLOBAL,// global            P1 对齐后处理
+std::function<bool (T)> 的空格      vs  bool(T)                    角色规则（P0b 内可单独修）
+块注释续行的缩进                                                     P0b，且要有 namespace 规则之后
+空行折叠到 MaxEmptyLinesToKeep                                      P0b，和缩进同一趟
+```
+
+**关于 trailing comment 的一个教训**（写下来省一次弯路）：把 `SpacesBeforeTrailingComments: 0` 实现成
+"注释前固定 0 个空格"让数字从 30 掉到 28——因为同一份配置还开着 `AlignTrailingComments`，
+注释的列是**对齐器**决定的，不是单点空格数。它属于 P1，不属于 P0b。
