@@ -906,3 +906,30 @@ gap idx=43 token="{" comments=1 last_own=Some(true) init=0
 **下轮的具体任务（一条，已定位到行）**
 `render.rs` 的 `comment_in_this_gap` 分支：写前缀时不要再发 `keep` 个换行，并且在该行是初始化列表元素时
 不要叠加 `row_paddings`（注释行不是表的一行）。改完后 `LuaDefine.h` 应转绿 → 38/43，即 goal 门槛。
+## 二十九、P2 的基线测量（断行引擎尚未开始）
+
+`ColumnLimit: 0` 的语料里，我们的整文件一致率是 37/43；一旦把 `ColumnLimit` 设成 80，
+差距立刻显现 —— 这既是 P2 的动机，也是它的验收指标：
+
+```text
+语料 43 个文件，配置 `ColumnLimit: 80`（IndentWidth 4）：
+  我们输出里长度 > 80 的行： **111**
+  clang-format 输出里长度 > 80 的行： **0**
+```
+
+原因很直接：当前的 P0b 只决定"行的列"，不决定"在哪里断行"——源码的断行被原样保留，
+于是所有 clang-format 会主动折断的长行，我们都留着。
+
+**P2 的最小实现路线**（`docs/cpp-format.md` §十 的 P2，与 clang-format 的 `UnwrappedLineParser` +
+`BreakableToken` 一致）：
+
+```text
+1. 先把 token 流切成 UnwrappedLine（逻辑行，而不是物理行）：`;`、`{`、`}`、控制语句头都是边界
+2. 对每个 UnwrappedLine 做贪心 + penalty 的断行搜索：
+     PenalyExcessCharacter / PenaltyBreakBeforeFirstCallParameter / PenaltyBreakAssignment /
+     PenaltyBreakString / PenaltyBreakComment 都在 presets 里（22.1.3 的值已在表中）
+3. 断开的位置交给现有的 render（它已经能按"列"排版），WhitespaceManager 的角色由 layout 承担
+4. 验收：上面那条 `ColumnLimit: 80` 的测量必须从 111 降到接近 0，且 `ColumnLimit: 0` 的 37/43 不回退
+```
+
+在那之前，P0b/P1 能做的只剩 6 个文件（见 §二十七/§二十八），其中 3 个是 token 流差异（P3/P4 范围）。
