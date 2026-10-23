@@ -2587,3 +2587,36 @@ clang-format 把以 `<<` 开头的续行放在 **块缩进 + ContinuationIndentW
 ```
 
 用户例子已固化为 `tests/snippets/29_shift_chain.cpp`（含主函数、注释块、`std::cout` 续行、`std::format` 等）。
+## 八十八、样例集 stability 22 → **27 / 29（93.1%）**
+
+本轮三处，全部"三个数字一起看"：
+
+```text
+① 语句以一元运算符开头：`*q = a + b;` 曾按续行排到 8 列
+   根因：layout 把它当续行（blocks=None），续行宽度 8
+   修法：`*`/`&` 开头且前一个 token 是 `;`/`{`/`}` → 按语句处理，坐标取上一行（blocks[index-1]）
+   收益：snippet stability 21 → 22
+
+② 枚举项对齐：`enum class Wide { A,` 之后 `B,` 对齐到首项列（此前块级 4）
+   做法：`layout::enum_body_braces` 找"语句以 enum 开头的 `{`"，render 维护自己的列栈
+   坑：闭合的 `};` 一度也被拉到 4 列 → 语料 43 → 34；加"`}` 除外"后回到 43/43
+   收益：22 → 26
+
+③ 行尾块注释的空格：`b = 1; /* inline */` 曾写成两个空格
+   根因：`start_spaces` 用 `minimum + 1`，而 clang-format 的规则是 **max(minimum, 1)**
+        （`SpacesBeforeTrailingComments: 1` 与 0 都只给 1 个空格，实测确认）
+   收益：26 → 27
+```
+
+**当前基线**
+
+```text
+语料        43/43（100%）· 稳定性 43/43 · 间距 19989/19989 · 84 tests · 零警告
+样例集      spacing 29/29（100%）· stability 27/29（93.1%）
+```
+
+**试过但回退**：隐式字符串拼接的对齐（`const char *s = "a"` 换行接 `"b"`）——单看样例 +1，但语料掉到 9/43
+（`#include` 行被它带偏），按规则回退，数字记在案。
+
+**剩下的 2 个 stability 差异**都是"重排"：clang-format 把 `for (...) total += x;` 的循环体拆到下一行、把
+`enum`/`struct` 体展开成多行；我们保留源码行结构。这类不改（改了在语料上是负收益，前几轮已量过）。
