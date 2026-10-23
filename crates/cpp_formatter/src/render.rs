@@ -120,8 +120,19 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
                     style.text(StyleOption::AlignOperands) == "Align"
                         && layout::is_a_binary_operator(stream.tokens[index].kind)
                 });
-                aligned
+                // **A conditional's continuation (`?` or `:` at a line start) keeps the source's column.** clang-format
+                // computes that column while breaking the line — in LuaLexer.cpp `? count + 2` sits at 19, which is
+                // not the continuation indent — so the rules cannot derive it, and preserving it is what makes an
+                // already-formatted file come back unchanged (the stability invariant I3).
+                let conditional = matches!(
+                    stream.tokens[index].kind,
+                    cpp_parser::CppTokenKind::Question | cpp_parser::CppTokenKind::Colon
+                )
+                .then(|| source_indent(source, gap))
+                .flatten();
+                conditional
                     .map(|column| (column, false))
+                    .or_else(|| aligned.map(|column| (column, false)))
                     .or_else(|| {
                         let inside = bracket_body.filter(|(depth, _)| *depth == brace_depth);
                         planned_indent(index, &stream, &blocks, &stack, statement_indent, style, in_ctor_init, ctor_column, init_depths[index] > 0)
@@ -464,6 +475,19 @@ mod tests {
 /// Three answers, in this order: a line inside a constructor initializer list goes to the list's own column; a block
 /// line takes the brace structure's answer; anything else is a continuation, whose column is the aligner's and is
 /// computed here because the emitted columns are known here and nowhere earlier.
+/// The indentation the source gives the line this gap opens: the spaces after its last newline, if the gap holds
+/// nothing but line breaks and that indentation.
+fn source_indent(source: &str, gap: &tokens::Gap) -> Option<usize> {
+    let text = source.get(gap.start..gap.end)?;
+    let after_last_newline = text.rsplit(char::from(10)).next().unwrap_or(text);
+    let only_spaces = after_last_newline.chars().all(|character| character == char::from(32) || character == char::from(9));
+    if only_spaces && gap.newlines > 0 {
+        Some(after_last_newline.chars().count())
+    } else {
+        None
+    }
+}
+
 fn planned_indent(
     index: usize,
     stream: &tokens::Stream<'_>,

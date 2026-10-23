@@ -1335,3 +1335,34 @@ layout_audit 现在打印三行：
 结论：现有 41/43 的口径是对的（对 clang-format 输出），并且现在审计会自己暴露"语料有多少本来就没格式化"
 以及"我们的输出对 clang-format 结果是否稳定"。剩下的差距也定位得更清楚：只有 `LuaTokenTypeDetail.h`
 （尾注释分组）和 `LuaLexer.cpp`（三元列）两处。
+## 四十七、条件表达式的续行列：**保留源码列** → 42/43，且对 clang-format 结果 **43/43 稳定**
+
+用小实验矩阵问了真实的 clang-format（`ColumnLimit: 0`）：
+
+```text
+    int x = aaa == bbb        `?` 在 20 = 表达式起始列(12) + ContinuationIndentWidth(8)
+                    ? 1
+                    : 2;
+    y = ccc ? 3               `:` 在 12 = 与同一行的 `?` 对齐
+            : 4;
+    return _reader... == ch   `?` 在 19 = 表达式起始列(11) + 8
+                   ? count + 2
+           : (count == 0) ? 1   `:` 在 11 —— 与上面两条又不一致（clang-format 在断行时逐行决定）
+```
+
+结论：这个列**不是**可以由缩进规则推出的常量，它是 clang-format 在换行搜索里定的。所以实现改成：
+
+```text
+`?` / `:` 出现在行首时，**保留源码里该行的缩进列**（`render::source_indent`）。
+对"已经由 clang-format 格式化过的文件"这是恒等操作，从而满足 I3（稳定性）；
+对未格式化的语料，则保持了作者那行的列，这正是 clang-format 通常会保留的位置。
+```
+
+**实测**
+
+```text
+整文件一致： 41 → **42 / 43（97.67%）**
+clang-format 的输出喂回来原样返回： 42 → **43 / 43** ✓
+clang-format 会改动的 10 个文件里，我们复现了 9 个
+剩余 1 个：LuaTokenTypeDetail.h（尾注释分组）
+```
