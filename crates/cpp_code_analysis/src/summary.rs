@@ -1040,6 +1040,108 @@ pub struct MacroDefinitions {
         std::collections::HashMap<(std::path::PathBuf, usize), Option<std::sync::Arc<MacroDef>>>,
 }
 
+impl DeclFact {
+    /// The bytes one declaration fact holds: the struct and the strings it owns.
+    pub fn heap_bytes(&self) -> usize {
+        std::mem::size_of::<DeclFact>()
+            + self.name.len()
+            + self.scope.as_ref().map_or(0, String::len)
+            + self.in_namespace.as_ref().map_or(0, String::len)
+    }
+}
+
+impl MacroFact {
+    /// The bytes one macro fact holds. The body is a range into the file's own text, not a copy of it.
+    pub fn heap_bytes(&self) -> usize {
+        std::mem::size_of::<MacroFact>()
+            + self.name.len()
+            + self.value.as_ref().map_or(0, |text| text.len())
+            + self.alias.as_ref().map_or(0, |text| text.len())
+    }
+}
+
+impl IncludeFact {
+    /// The bytes one include fact holds.
+    pub fn heap_bytes(&self) -> usize {
+        std::mem::size_of::<IncludeFact>()
+            + self.spelling.len()
+            + self
+                .resolved
+                .as_ref()
+                .map_or(0, |path| path.as_os_str().len())
+    }
+}
+
+impl FileSummary {
+    /// **What this summary costs in memory** — the struct, its facts, and the strings they own.
+    ///
+    /// The estimate every consumer of [`crate::MemoryReport`] is built on: it counts the vectors' *contents*, not
+    /// their spare capacity, so it is a lower bound. Measured against the resident set, the difference is the
+    /// allocator's slack — which is itself worth seeing, and is why the report prints both.
+    pub fn heap_bytes(&self) -> usize {
+        std::mem::size_of::<FileSummary>()
+            + self.path.as_os_str().len()
+            + self
+                .declarations
+                .iter()
+                .map(DeclFact::heap_bytes)
+                .sum::<usize>()
+            + self.macros.iter().map(MacroFact::heap_bytes).sum::<usize>()
+            + self.includes.iter().map(IncludeFact::heap_bytes).sum::<usize>()
+            + self.guards.regions.len() * std::mem::size_of::<cpp_parser::SourceRange>()
+            + self
+                .macro_readings
+                .iter()
+                .map(|reading| {
+                    std::mem::size_of::<MacroScopeReading>()
+                        + reading.name.len()
+                        + reading.body.len()
+                })
+                .sum::<usize>()
+            + self.use_filter.len()
+            + self
+                .modules
+                .module
+                .as_ref()
+                .map_or(0, |name| name.len())
+            + self
+                .modules
+                .partition
+                .as_ref()
+                .map_or(0, |name| name.len())
+            + self
+                .modules
+                .imports
+                .iter()
+                .map(|name| name.len())
+                .sum::<usize>()
+            + (self.modules.header_units.len() + self.modules.partitions.len())
+                * std::mem::size_of::<std::path::PathBuf>()
+    }
+}
+
+impl MacroDefinitions {
+    /// **What the definition cache is holding** — `(entries, bytes)`.
+    ///
+    /// The map has **no cap**: every `#define` ever read back for an evaluation stays, keyed by
+    /// `(path, offset)` — and the key owns the path, so one entry per definition is a path per definition. It is
+    /// invalidated per file ([`MacroDefinitions::forget`]), never evicted. See `docs/memory-audit.md`.
+    pub fn accounting(&self) -> (usize, usize) {
+        let mut bytes = 0usize;
+        for (key, definition) in &self.parsed {
+            bytes += std::mem::size_of::<((std::path::PathBuf, usize), Option<std::sync::Arc<MacroDef>>)>();
+            bytes += key.0.as_os_str().len();
+            if let Some(definition) = definition {
+                bytes += std::mem::size_of::<MacroDef>() + definition.name.len();
+                if let Some(params) = &definition.params {
+                    bytes += params.len() * std::mem::size_of::<crate::preprocess::macros::Parameter>();
+                }
+            }
+        }
+        (self.parsed.len(), bytes)
+    }
+}
+
 impl MacroDefinitions {
     /// The definition behind one fact, read from the file that wrote it.
     ///
@@ -1589,6 +1691,31 @@ impl TimelineBuilder {
 }
 
 impl TranslationUnit {
+    /// **What this unit costs in memory** — frames, events, the name index, and the definitions cache.
+    ///
+    /// A unit is a *timeline*: one event per `#define`/`#undef` in the whole closure, each holding shared name and
+    /// body strings. It is kept whole in the unit table (`MAX_UNITS` of them), which is what makes the number worth
+    /// measuring: on a header-heavy closure it is megabytes, and sixty-four of them is not a number to guess.
+    pub fn heap_bytes(&self) -> usize {
+        let mut bytes = std::mem::size_of::<TranslationUnit>();
+        for frame in &self.frames {
+            bytes += std::mem::size_of::<TuFrame>() + frame.file.as_os_str().len();
+        }
+        for event in &self.events {
+            bytes += std::mem::size_of::<TuEvent>()
+                + event.name.len()
+                + event.body_text.as_ref().map_or(0, |text| text.len())
+                + event.parameters.as_ref().map_or(0, |text| text.len());
+        }
+        for key in self.entered.keys() {
+            bytes += key.len() + std::mem::size_of::<u32>();
+        }
+        if let Some(definitions) = self.definitions_cache.get() {
+            bytes += definitions.heap_bytes();
+        }
+        bytes
+    }
+
     /// Walk a translation unit **once**, from the file that starts it.
     ///
     /// `look_up` answers for a path with the file's summary and its text, the same contract the per-file walks
@@ -2156,6 +2283,20 @@ pub struct UnitDefinitions {
 }
 
 impl UnitDefinitions {
+    /// The bytes this table holds: one slot per event, and the definitions the slots point at.
+    pub fn heap_bytes(&self) -> usize {
+        let mut bytes = std::mem::size_of::<UnitDefinitions>()
+            + self.by_event.capacity()
+                * std::mem::size_of::<Option<std::sync::Arc<crate::macros::MacroDef>>>();
+        for definition in self.by_event.iter().flatten() {
+            bytes += std::mem::size_of::<crate::macros::MacroDef>() + definition.name.len();
+            if let Some(params) = &definition.params {
+                bytes += params.len() * std::mem::size_of::<crate::preprocess::macros::Parameter>();
+            }
+        }
+        bytes
+    }
+
     /// The definition the fact at `index` spells, when it spells one.
     pub(crate) fn of(&self, index: u32) -> Option<&std::sync::Arc<crate::macros::MacroDef>> {
         self.by_event.get(index as usize)?.as_ref()

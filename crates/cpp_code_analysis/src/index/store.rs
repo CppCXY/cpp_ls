@@ -563,6 +563,12 @@ impl<F: FileProvider> SummaryStore<F> {
         &self.index
     }
 
+    /// How many include searches the store is remembering — see [`MAX_INCLUDE_SEARCHES`] for the bound and
+    /// [`crate::MemoryReport`] for who asks.
+    pub fn include_search_count(&self) -> Option<usize> {
+        self.include_searches.lock().ok().map(|held| held.len())
+    }
+
     /// **What the file directs, without parsing it** — see [`FileIndexer::directive_summary`](crate::index::FileIndexer::directive_summary).
     ///
     /// `None` when the file cannot be read. The indexer is built the way every summary this store builds is: the

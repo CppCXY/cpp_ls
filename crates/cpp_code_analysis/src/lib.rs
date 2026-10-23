@@ -63,6 +63,7 @@ pub mod folding;
 pub mod include;
 pub mod index;
 pub mod inlay;
+pub mod memory;
 pub mod preprocess;
 pub mod probes;
 pub mod project;
@@ -117,6 +118,7 @@ pub use sema::{check, module_info, modules, parser_symbols, scopes, symbol};
 
 
 
+pub use memory::MemoryReport;
 pub use summary::ConditionalBody;
 pub use summary::{
     ClosureEvidence, ConditionAt, ConditionalRegion, CookedDiagnostic, DeclFact, DeclKind,

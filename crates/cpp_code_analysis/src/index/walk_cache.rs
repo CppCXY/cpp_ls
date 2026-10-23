@@ -226,6 +226,30 @@ pub(crate) fn store(key: u64, contribution: Contribution) {
     table.evict();
 }
 
+/// **What the process-wide table is holding** — `(entries, estimated bytes)` for `MemoryReport`.
+///
+/// It is a `static`, not the session's, which is half of why `docs/memory-audit.md` asks for it to go: a table that
+/// outlives the session it was built for is memory no owner accounts for. [`MAX_CONTRIBUTIONS`] bounds the entries;
+/// nothing bounds their size, and a contribution keeps every event, state change and conditional body of its file.
+pub(crate) fn accounting() -> (usize, usize) {
+    let table = locked();
+    let mut bytes = 0usize;
+    for contribution in table.held.values() {
+        bytes += std::mem::size_of::<Contribution>() + contribution.file.as_os_str().len();
+        for event in &contribution.events {
+            bytes += std::mem::size_of::<crate::summary::TuEvent>()
+                + event.name.len()
+                + event.body_text.as_ref().map_or(0, |text| text.len())
+                + event.parameters.as_ref().map_or(0, |text| text.len());
+        }
+        bytes += contribution.changes.len() * std::mem::size_of::<StateChange>();
+        bytes += contribution.edges.len() * std::mem::size_of::<(usize, u64)>();
+        bytes += contribution.bodies.len() * std::mem::size_of::<crate::ConditionalBody>();
+        bytes += contribution.dead.len() * std::mem::size_of::<usize>();
+    }
+    (table.held.len(), bytes)
+}
+
 /// **Forget everything.** Called when the store's revision moves, so that a stale contribution cannot outlive the
 /// summaries it was made from even if its key were somehow reused.
 pub(crate) fn clear() {

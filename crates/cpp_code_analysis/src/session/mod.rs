@@ -1213,6 +1213,84 @@ impl<F: FileProvider + Clone> Session<F> {
             cooked_declarations,
         }
     }
+
+    /// **What every table the session owns is holding, in bytes** — see [`crate::MemoryReport`].
+    ///
+    /// [`Session::cache_sizes`] answers "how many entries", which is the wrong unit for the question a five-gigabyte
+    /// report asks: an entry is a `#define` or a rendering, and the two differ by six orders of magnitude. This is
+    /// the same inventory in bytes, one field per table, and it is the instrument `docs/memory-audit.md` is built on.
+    pub fn memory_report(&self) -> crate::MemoryReport {
+        let (vfs_files, vfs_text_bytes, vfs_line_index_bytes) = self.vfs.accounting();
+        let (summaries, summary_bytes, cooked_files, cooked_bytes) =
+            self.store.index().accounting();
+        let (definitions, definition_bytes) = self
+            .definitions
+            .lock()
+            .map(|definitions| definitions.accounting())
+            .unwrap_or((0, 0));
+        let (units, unit_bytes) = {
+            let table = self.held_units();
+            let bytes = table
+                .held
+                .values()
+                .map(|held| held.unit.heap_bytes())
+                .sum::<usize>()
+                + table.held.len() * std::mem::size_of::<HeldUnit>();
+            (table.held.len(), bytes)
+        };
+        let (renderings, rendering_bytes) = self
+            .renderings
+            .lock()
+            .map(|known| {
+                let bytes = known
+                    .values()
+                    .map(|rendering| rendering.text.len())
+                    .sum::<usize>();
+                (known.len(), bytes)
+            })
+            .unwrap_or((0, 0));
+        let (dead_macro_files, dead_macro_offsets) = self.dead_macro_decisions();
+        let (walk_cache_entries, walk_cache_bytes) = crate::index::walk_cache::accounting();
+        let (walks_by_content_entries, walks_by_content_bytes) = self
+            .walked_by_content
+            .lock()
+            .map(|held| {
+                let bytes = held
+                    .values()
+                    .map(|unit| unit.heap_bytes())
+                    .sum::<usize>();
+                (held.len(), bytes)
+            })
+            .unwrap_or((0, 0));
+
+        crate::MemoryReport {
+            vfs_files,
+            vfs_text_bytes,
+            vfs_line_index_bytes,
+            summaries,
+            summary_bytes,
+            cooked_files,
+            cooked_bytes,
+            definitions,
+            definition_bytes,
+            units,
+            unit_bytes,
+            renderings,
+            rendering_bytes,
+            dead_macro_decisions: dead_macro_files,
+            dead_macro_bytes: dead_macro_offsets * std::mem::size_of::<usize>(),
+            directive_signatures: self.directive_signatures.len(),
+            include_searches: self
+                .store
+                .include_search_count()
+                .unwrap_or(0),
+            units_read: self.units_read.len(),
+            walk_cache_entries,
+            walk_cache_bytes,
+            walks_by_content_entries,
+            walks_by_content_bytes,
+        }
+    }
     /// **What a name is at one position in one file** — see [`crate::MacroAt`] for why this exists and what the
     /// offset is for.
     ///

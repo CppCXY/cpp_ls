@@ -7052,6 +7052,36 @@ impl ProjectIndex {
         (self.cooked.len(), declarations)
     }
 
+    /// **What the index is holding** — `(summaries, summary bytes, cooked files, cooked bytes)`.
+    ///
+    /// The per-entry estimate is [`FileSummary::heap_bytes`], which counts the facts and the strings they own; a
+    /// map's spare capacity is not counted, so this is a lower bound on what the index costs. See
+    /// [`crate::MemoryReport`] for why an estimate with a stated method beats a total with none.
+    pub fn accounting(&self) -> (usize, usize, usize, usize) {
+        let summary_bytes = self
+            .summaries
+            .values()
+            .map(FileSummary::heap_bytes)
+            .sum::<usize>();
+        let mut cooked_bytes = 0usize;
+        for reading in self.cooked.values() {
+            cooked_bytes += std::mem::size_of::<CookedFile>()
+                + reading
+                    .declarations
+                    .iter()
+                    .map(DeclFact::heap_bytes)
+                    .sum::<usize>()
+                + reading.macros.iter().map(MacroFact::heap_bytes).sum::<usize>()
+                + reading.diagnostics.len() * std::mem::size_of::<crate::CookedDiagnostic>();
+        }
+        (
+            self.summaries.len(),
+            summary_bytes,
+            self.cooked.len(),
+            cooked_bytes,
+        )
+    }
+
     pub fn cooked_declarations(&self, path: &Path) -> Option<&[DeclFact]> {
         Some(self.cooked_reading(path)?.declarations.as_slice())
     }
