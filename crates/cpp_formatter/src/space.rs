@@ -62,6 +62,13 @@ pub fn between(stream: &Stream<'_>, index: usize, roles: &Roles, style: &Style) 
     if current.kind == Arrow || previous.kind == Arrow {
         // The token on the *other* side of the arrow from the gap being asked about.
         let before_arrow = if current.kind == Arrow { index - 1 } else { index - 2 };
+        // A requirement block arrow is spaced on both sides: `{ c.size() } -> T`.
+        if before_arrow < stream.tokens.len()
+            && stream.tokens[before_arrow].kind == RightBrace
+            && closes_a_requirement_block(stream, before_arrow)
+        {
+            return 1;
+        }
         // A specifier may sit between the parameter list and the arrow: `[]() noexcept -> int`.
         if matches!(
             stream.tokens[before_arrow].text,
@@ -287,8 +294,10 @@ pub fn between(stream: &Stream<'_>, index: usize, roles: &Roles, style: &Style) 
         // (`{1, 2}`), and an empty block is `{}`. **An enumeration or class body counts as a block here** even when
         // the roles call it an initializer list: clang-format writes `enum class E { A, B };` with the space
         // (measured against 22.1.3), and that single-line case is what the 80-column stability check still reports.
+        // **The closing brace of a requirement block keeps its space too**: `{ c.size() } -> T`.
+        let requirement_close = closes_a_requirement_block(stream, index);
         if previous.kind != LeftBrace
-            && (roles.block_brace.contains(&offset) || closes_a_declaration_body(stream, index))
+            && (roles.block_brace.contains(&offset) || closes_a_declaration_body(stream, index) || requirement_close)
         {
             return 1;
         }
@@ -299,7 +308,10 @@ pub fn between(stream: &Stream<'_>, index: usize, roles: &Roles, style: &Style) 
         // (`requires(T t) { t.size(); }`, `f() { g(); }`), and the roles call some of those list initializers, so the
         // parenthesis decides first.
         let body = index >= 2 && stream.tokens[index - 2].kind == CppTokenKind::RightParen;
-        if (roles.block_brace.contains(&previous.start) || body) && current.kind != RightBrace {
+        // **A requirement block is a block too**: `{ c.size() } -> std::convertible_to<size_t>` — the brace
+        // is followed by `->`, and the spaces inside it are the block`s (`{ c.size() }`, not `{c.size()}`).
+        let requirement = is_a_requirement_block(stream, index - 1);
+        if (roles.block_brace.contains(&previous.start) || body || requirement) && current.kind != RightBrace {
             return 1;
         }
         return 0;
@@ -462,6 +474,56 @@ fn is_a_mark(kind: CppTokenKind) -> bool {
 ///
 /// `(void)x`, `(int)y`, `(const char *)p`: the opener is found by matching, and the inside must be one of the built-in
 /// type names (the lexer has no semantic information, so a user type inside parentheses is left alone).
+/// Is the `{` at `open` a *requirement block* — `{ expr } -> Type` inside a `requires` expression?
+///
+/// Its closing brace is followed by `->`, which is what tells a requirement block from a braced initializer (nothing
+/// follows a list with an arrow) — measured on `concept Container = requires(T c) { { c.size() } -> ... }`, where we
+/// wrote `{c.size()}->…`.
+fn is_a_requirement_block(stream: &Stream<'_>, open: usize) -> bool {
+    if stream.tokens.get(open).is_none_or(|token| token.kind != CppTokenKind::LeftBrace) {
+        return false;
+    }
+    let mut depth = 0isize;
+    for cursor in open..stream.tokens.len() {
+        match stream.tokens[cursor].kind {
+            CppTokenKind::LeftBrace => depth += 1,
+            CppTokenKind::RightBrace => {
+                depth -= 1;
+                if depth == 0 {
+                    return stream
+                        .tokens
+                        .get(cursor + 1)
+                        .is_some_and(|token| token.kind == CppTokenKind::Arrow);
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+/// Does the `}` at `close` end a *requirement block* — the `}` of `{ expr }` followed by `->`?
+///
+/// The opener is found by matching back, and the requirement test is the arrow that follows it.
+fn closes_a_requirement_block(stream: &Stream<'_>, close: usize) -> bool {
+    let mut depth = 0isize;
+    let mut opener: Option<usize> = Option::None;
+    for cursor in (0..close).rev() {
+        match stream.tokens[cursor].kind {
+            CppTokenKind::RightBrace => depth += 1,
+            CppTokenKind::LeftBrace => {
+                if depth == 0 {
+                    opener = Some(cursor);
+                    break;
+                }
+                depth -= 1;
+            }
+            _ => {}
+        }
+    }
+    opener.is_some_and(|open| is_a_requirement_block(stream, open))
+}
+
 fn is_a_cast_expression(stream: &Stream<'_>, close: usize) -> bool {
     let mut depth = 0isize;
     let mut opener: Option<usize> = Option::None;
