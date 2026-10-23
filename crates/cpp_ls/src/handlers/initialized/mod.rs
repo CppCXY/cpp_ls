@@ -390,19 +390,18 @@ async fn index_in_background(context: ServerContextSnapshot) {
                     if pending_now == 0 && taken > 0 {
                         log::info!(
                             "index drained: cache {} rendering(s) ({} KB), {} translation unit(s), {} summar(ies), \\
-                             {} fact(s), {} macro(s)",
+                             {} fact(s), {} macro(s), {} cooked file(s) / {} cooked declaration(s)",
                             sizes.renderings,
                             sizes.rendering_bytes / 1024,
                             sizes.units,
                             sizes.summaries,
                             sizes.facts,
-                            sizes.macros
+                            sizes.macros,
+                            sizes.cooked_files,
+                            sizes.cooked_declarations
                         );
                     }
                     if taken > 0 || prepared_count > 0 || !drain.is_empty() || !claimed.is_empty() {
-                        // **`info!`, not `debug!`.** The budget warning above names the label but not the work, and
-                        // the work is what a reader has to change: on a real project the log showed
-                        // `index slice held the analysis for 1323 ms` with nothing beside it saying which stage
                         // inside the slice that was. The numbers here are the split — prepared under the read lock,
                         // committed under the write one — so the next reader sees whether it was the parse, the
                         // insert or the queueing without re-instrumenting. `docs/cold-start-cpu.md` asks for exactly

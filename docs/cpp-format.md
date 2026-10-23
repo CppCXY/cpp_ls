@@ -2937,3 +2937,46 @@ index drained: cache 3 rendering(s) (12 288 KB), 16 translation unit(s), 5 231 s
 
 **验证**：`cpp_code_analysis` 676+63+36+… 全绿，`cpp_ls` lib 87 + handshake 32，工作区 `--all-targets` 零警告
 （顺手删掉了 `option_matrix` 里那个已经用不上的常量）。
+## 九十六、3.4 GB 的下一个目标：**cooked 读数**（按"打开文件的闭包"增长）
+
+继续读代码。这次找到的量级匹配项是 `ProjectIndex::cooked`：
+
+```text
+谁写它    Session 的 cook 阶段，对**每个打开文件的整个 include 闭包**都做一次
+          一个包含标准库的项目，闭包 ≈ 上千个头文件
+每个值    CookedFile { declarations: Vec<DeclFact>, macros: Vec<MacroFact>, diagnostics, … }
+          声明列表和该文件自己的 summary 一样大
+谁读它    cooked_declarations / 成员列表 / 诊断的"编译器视角"
+```
+
+它**本来就设计成稀疏的**——代码自己的注释写着 "a file with no entry here is one nobody cooked"，
+缺失时的回退路径（读文件自身的 summary）已经存在。所以按插入顺序淘汰最旧的是**安全**的。
+
+### 改动
+
+```text
+cooked: HashMap<String, CookedFile>   加上 cooked_order: VecDeque<String>
+MAX_COOKED_FILES = 512                 超出时按插入顺序淘汰最旧的（最近 cook 的留下）
+CacheSizes                            新增 cooked_files / cooked_declarations 两个计数
+index drained 日志                    现在同时报告 cooked 文件数与声明数
+```
+
+于是每次索引跑完的那一行会变成：
+
+```text
+index drained: cache 3 rendering(s) (12288 KB), 16 translation unit(s), 5231 summar(ies),
+               812004 fact(s), 61233 macro(s), 902 cooked file(s) / 140233 cooked declaration(s)
+```
+
+哪个数字跟着 3.4 GB 涨，一眼就能看出来。
+
+**验证**：`cpp_code_analysis` 676+63+36+… 全绿，`cpp_ls` 通过，工作区 `--all-targets` 零警告。
+
+### 下一个候选（按可疑度排序，等日志确认再动）
+
+```text
+1. summar(ies)/fact(s)  —— 5000+ 文件的索引本身。要动就得改"摘要驻留策略"（按需重读 + 磁盘 cache），
+                            是这一层里最大的一块，也是唯一没有上限的
+2. translation unit(s)  —— 已从 64 降到 16；如果日志显示 16 个仍占 GB 级，就要动 UnitDefinitions 的按需构建
+3. rendering(s)         —— 已限 8 条 / 64 MB，日志会显示实际占用
+```

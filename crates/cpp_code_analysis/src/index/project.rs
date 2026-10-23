@@ -477,6 +477,10 @@ pub fn macro_across_files(
 /// and dropped the errors would make the index answer "nothing is wrong with this file" for a rendering the parser
 /// had something to say about, and a caller that replaced the declarations without replacing the errors would
 /// publish the *old* file's errors beside the new file's names.
+/// **How many cooked readings are kept** — the map is sparse by design, so this only bounds the closure of the
+/// open files, not what a query can answer: a miss falls back to the file`s own reading.
+const MAX_COOKED_FILES: usize = 512;
+
 #[derive(Debug, Clone, Default)]
 pub struct CookedFile {
     /// The declarations the rendering read as, every range mapped back into the file.
@@ -597,6 +601,8 @@ pub struct ProjectIndex {
     /// **Sparse on purpose**: cooking needs the translation unit's environment, so a caller has this for the files
     /// it actually read rather than for the whole project, and a file with no entry here is one nobody cooked.
     cooked: HashMap<String, CookedFile>,
+    /// **The cooked files in the order they arrived** — what [`ProjectIndex::insert_cooked`] evicts from.
+    cooked_order: std::collections::VecDeque<String>,
     /// A visibility walk's answer, by the file it was asked about.
     ///
     /// **The whole-walk memo, beside the per-condition one**, and it exists for the reason the numbers say: the walk
@@ -7021,10 +7027,31 @@ impl ProjectIndex {
             self.names
                 .add_declarations(sequence, true, &reading.declarations);
         }
-        self.cooked.insert(path, reading);
+        self.cooked.insert(path.clone(), reading);
+        // **Bounded**: cooking runs for the closure of every open file — a thousand headers on a project that
+        // includes the standard library — and each reading is a declaration list as large as the file`s own
+        // summary. The map is *sparse by design* ("a file with no entry here is one nobody cooked", so a miss falls
+        // back to the file`s own reading), which is what makes evicting the oldest sound.
+        self.cooked_order.push_back(path);
+        while self.cooked.len() > MAX_COOKED_FILES {
+            let Some(oldest) = self.cooked_order.pop_front() else {
+                break;
+            };
+            self.cooked.remove(&oldest);
+        }
     }
 
     /// The declarations the file at `path` was **cooked** into, when it was cooked at all.
+    /// **How much the cooked readings are holding** — files and declarations, what a memory report asks.
+    pub fn cooked_size(&self) -> (usize, usize) {
+        let declarations = self
+            .cooked
+            .values()
+            .map(|cooked| cooked.declarations.len())
+            .sum();
+        (self.cooked.len(), declarations)
+    }
+
     pub fn cooked_declarations(&self, path: &Path) -> Option<&[DeclFact]> {
         Some(self.cooked_reading(path)?.declarations.as_slice())
     }

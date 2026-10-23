@@ -385,6 +385,9 @@ pub struct CacheSizes {
     pub facts: usize,
     /// Macro facts across them.
     pub macros: usize,
+    /// **Cooked readings held**: files, and the declarations in them.
+    pub cooked_files: usize,
+    pub cooked_declarations: usize,
 }
 
 pub struct Session<F: FileProvider = DiskFiles> {
@@ -1198,6 +1201,7 @@ impl<F: FileProvider + Clone> Session<F> {
             .map(|summary| summary.macros.len())
             .sum();
 
+        let (cooked_files, cooked_declarations) = self.store.index().cooked_size();
         CacheSizes {
             renderings,
             rendering_bytes,
@@ -1205,9 +1209,10 @@ impl<F: FileProvider + Clone> Session<F> {
             summaries,
             facts,
             macros,
+            cooked_files,
+            cooked_declarations,
         }
     }
-
     /// **What a name is at one position in one file** — see [`crate::MacroAt`] for why this exists and what the
     /// offset is for.
     ///
