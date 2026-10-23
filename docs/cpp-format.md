@@ -2098,3 +2098,41 @@ clang-format（80 列）：
 净收益：自洽口径 +15 个文件、一致率 +7.3pp，代价是不一致口径下 +2 行超长——按"自洽口径才是 P2 的真指标"这一结论，接受。
 
 下一轮：同样的方法处理剩下 13 个不稳定文件（先取样它们的首处分歧）。
+## 七十四、自洽口径剩 13 个文件的两类差异（取样得到）
+
+`breaks_audit` 现在会打印每个不稳定文件的首处分歧：
+
+```text
+FormatContext.cpp:38 ours="        LuaEditorConfig::OpenFile(...)"      clang-format="                LuaEditorConfig::OpenFile(...)"
+Util.h:18          ours="enum class WorkMode { File, Stdin, Workspace};" clang-format="enum class WorkMode { File, Stdin, Workspace };"
+LuaSyntaxTree.cpp:200 ours=".......Data.TokenIndex];"                    clang-format=".........Data.TokenIndex]"
+```
+
+归成两类：
+
+```text
+① 枚举/类体的**单行**写法：clang-format 在 `}` 前留空格（`{ File, Stdin, Workspace };`），我们没有
+   —— 我们把枚举体的花括号当成 C++11 初始化列表（`{1, 2}` 无空格），而 clang-format 把它当"块"
+   影响 7 个文件（Util.h / NodeOrToken.h / LuaOperatorType.h / LuaParseError.h / Mark.h / …）
+② 续行的对齐列：`LuaEditorConfig::OpenFile(...)` 这类语句的续行，我们 8 列、clang-format 16 列
+   影响 3 个文件（FormatContext.cpp / LuaCheck.cpp / LuaFormat.cpp）
+```
+
+定点实验（`ColumnLimit: 0`）确认了第 ①类：
+
+```text
+输入              clang-format                我们
+enum class E { A, B };   →  enum class E { A,      →  enum class E { A, B};
+                            B };
+struct S { int a; };     →  struct S {              →  struct S { int a; };
+                              int a;
+                            };
+int x[] = {1, 2};        →  不变（无空格）      →  不变（无空格）
+void f() { g(); }        →  不变（有空格）      →  不变（有空格）
+```
+
+注意：`enum`/`struct` 体在 clang-format 里还会被**展开成多行**（`AllowShortEnumsOnASingleLine` 默认 false），
+这属于"重排"，不在本轮的空白规则内；单行场景下只剩"`}` 前要有空格"这一条。
+
+**下一轮**：给 `space::between` 加"枚举体/类体的 `}` 前留空格"（需要一个 `is_enum_or_class_body` 判定，
+可复用 `layout::in_declaration_body` 的扫描），然后看自洽口径 30 → ~37。

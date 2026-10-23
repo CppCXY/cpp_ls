@@ -62,6 +62,7 @@ fn main() {
     let mut categories: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
     let mut total_tokens = 0usize;
     let mut displaced = 0usize;
+    let mut samples: Vec<String> = Vec::new();
     let mut stable_files = 0usize;
     let mut same_line_count = 0usize;
     let mut counted = 0usize;
@@ -85,6 +86,23 @@ fn main() {
         let stable = cpp_formatter::format(&theirs, &style);
         if stable == theirs {
             stable_files += 1;
+        } else if samples.len() < 10 {
+            // **The first line where feeding clang-format`s output back to us changes something**, so that the
+            // remaining files can be grouped instead of guessed at.
+            let steady: Vec<&str> = stable.lines().collect();
+            let given: Vec<&str> = theirs.lines().collect();
+            for line in 0..steady.len().min(given.len()) {
+                if steady[line] != given[line] {
+                    samples.push(format!(
+                        "{}:{} ours={:?} clang-format={:?}",
+                        file.rsplit('\\').next().unwrap_or(file),
+                        line + 1,
+                        steady[line],
+                        given[line]
+                    ));
+                    break;
+                }
+            }
         }
         if ours.lines().count() == theirs.lines().count() {
             same_line_count += 1;
@@ -132,6 +150,9 @@ fn main() {
         println!("  {count:>6}  {key}");
     }
     println!("feeding clang-format`s own 80-column output back through us: {stable_files} of {counted} unchanged");
+    for sample in &samples {
+        println!("  {sample}");
+    }
     println!("files whose line count matches: {same_line_count} of {counted}");
     std::fs::remove_dir_all(&scratch).ok();
 }
