@@ -60,7 +60,15 @@ pub fn between(stream: &Stream<'_>, index: usize, roles: &Roles, style: &Style) 
     }
     match previous.kind {
         LeftParen => {
-            return if style.flag(StyleOption::SpacesInParentheses) { 1 } else { 0 };
+            // **`SpacesInParentheses` became `SpacesInParens` in clang-format 17**, and the preset table now comes
+            // from 19.1.7's dump, where the old key does not exist at all. The value is an enum (`Never` by default)
+            // rather than a flag, so the question is what it is *not*: `Never` is the only spelling that puts nothing
+            // inside the parentheses.
+            return if style.text(StyleOption::SpacesInParens) == "Never" {
+                0
+            } else {
+                1
+            };
         }
         LeftBracket => {
             return if style.flag(StyleOption::SpacesInSquareBrackets) { 1 } else { 0 };

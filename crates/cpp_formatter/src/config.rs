@@ -177,7 +177,17 @@ impl Style {
 
     /// Is `key` one of the keys this style knows? (Used by the loader to reject typos.)
     pub fn knows(key: &str) -> bool {
-        LOADER_KEYS.contains(&key) || StyleOption::from_key(key).is_some()
+        LOADER_KEYS.contains(&key)
+            || StyleOption::from_key(key).is_some()
+            // **A struct-valued option is known by its name too.** `-dump-config` prints `BraceWrapping:` followed by
+            // its children and never prints a `BraceWrapping` line of its own, so the parent exists only as a prefix;
+            // a document writing `BraceWrapping:` and indenting under it is writing the shape the dump writes.
+            || StyleOption::ALL.iter().any(|option| {
+                let name = option.key();
+                name.len() > key.len()
+                    && name.starts_with(key)
+                    && name.as_bytes()[key.len()] == b'.'
+            })
     }
 
     /// Every option, as `-dump-config` prints them: sorted, `key: value`, nested keys flattened the way the table
