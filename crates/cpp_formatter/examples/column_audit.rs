@@ -49,6 +49,7 @@ fn main() {
     }
     files.sort();
 
+    let mut unreachable_lines = 0usize;
     let mut printed_ours = 0usize;
     let mut printed_theirs = 0usize;
     let mut logical_ours = 0usize;
@@ -67,6 +68,7 @@ fn main() {
             continue;
         };
         printed_ours += ours.lines().filter(|line| width(line) > limit).count();
+        unreachable_lines += lines_without_candidates(&ours, &style, limit);
         printed_theirs += theirs.lines().filter(|line| width(line) > limit).count();
         logical_ours += too_wide_logical_lines(&source, &style);
         let (fits, overflow) = what_a_breaker_would_do(&source, &style);
@@ -81,6 +83,7 @@ fn main() {
     println!(
         "logical: {logical_ours} logical line(s) exceed the limit — the units a breaker has to split"
     );
+    println!("  of the over-long lines, {unreachable_lines} contain no candidate break at all");
     println!(
         "breaker: {breakable} of them can be laid out under the limit by the search in `breaks::break_line`, \
          {still_over} would still overflow"
@@ -131,6 +134,45 @@ fn too_wide_logical_lines(source: &str, style: &cpp_formatter::config::Style) ->
 }
 /// **What the break search would do with this file**: the over-long logical lines it can split so that every piece
 /// fits, and the ones where even the search leaves a piece too long (a single token wider than the limit, say).
+/// **How many of our over-long lines the search cannot help at all**: a line with no candidate break position.
+///
+/// A candidate is a position `breaks::is_breakable` accepts (after a comma, before an operator, before a member access,
+/// after an opening bracket). A line without one is a line only a *token-level* break — inside a string, inside a
+/// comment, inside a template argument list — could shorten, and that is a different piece of work.
+fn lines_without_candidates(text: &str, style: &cpp_formatter::config::Style, limit: usize) -> usize {
+    let stream = cpp_formatter::tokens::stream(text);
+    let lines = cpp_formatter::breaks::logical_lines(&stream);
+    let _ = lines;
+    let mut without = 0usize;
+    let mut index = 0usize;
+    let mut line_start = 0usize;
+    let mut candidates = 0usize;
+    while index < stream.tokens.len() {
+        if index > line_start && cpp_formatter::breaks::is_breakable(&stream, index) {
+            candidates += 1;
+        }
+        let ends = index + 1 == stream.tokens.len() || stream.gaps[index + 1].newlines > 0;
+        if ends {
+            // Measure this physical line the way the formatter prints it.
+            let mut width = 0usize;
+            for inside in line_start..=index {
+                if inside > line_start {
+                    width += 1;
+                }
+                width += stream.tokens[inside].text.chars().count();
+            }
+            if width > limit && candidates == 0 {
+                without += 1;
+            }
+            line_start = index + 1;
+            candidates = 0;
+        }
+        index += 1;
+    }
+    let _ = style;
+    without
+}
+
 fn what_a_breaker_would_do(source: &str, style: &cpp_formatter::config::Style) -> (usize, usize) {
     use cpp_formatter::options::StyleOption;
     let limit = style.count(StyleOption::ColumnLimit);

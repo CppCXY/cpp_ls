@@ -306,7 +306,7 @@ pub fn break_line(
 }
 
 /// May a break go before the token at `index`?
-fn is_breakable(stream: &Stream<'_>, index: usize) -> bool {
+pub fn is_breakable(stream: &Stream<'_>, index: usize) -> bool {
     use CppTokenKind::*;
     let previous = stream.tokens[index - 1].kind;
     let current = stream.tokens[index].kind;

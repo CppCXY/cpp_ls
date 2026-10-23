@@ -2008,3 +2008,33 @@ cpp_ls --test handshake 32 passed + 5 ignored（含新的范围断言）
 ```
 
 P3 的三项（off/on、`DisableFormat`、`format_range` 复用、replacements XML）至此全部完成。
+## 七十一、超长行的成分普查：49 行里只有 **6 行** 是"搜索看不见"的
+
+给 `column_audit` 加了一项统计：我们输出里每一行超长行中，`breaks::is_breakable` 是否至少给出一个断点。
+
+```text
+printed: 49 line(s) over 80 in our output, 0 in clang-format's
+  of the over-long lines, **6** contain no candidate break at all
+```
+
+含义与下一步：
+
+```text
+· 只有 6 行（长字符串/长注释）是"候选集看不到"的，需要 token 级断点（改 token 流），是另一件事
+· 其余 43 行**有候选断点却仍然超长** —— 问题在搜索/代价模型，不在候选集
+```
+
+据此又试了一个具体假设：续行片段在 `break_over_long_pieces` 里用 `blocks[start]`（续行是 `None` → 列 0），
+于是片段"看起来不够长"、不会断。改成用源码缩进测量后实测**仍是 49**，无收益，已回退（`breaks.rs` / `render.rs` 复原）。
+
+**当前基线**（未回退项：普查统计 + `is_breakable` 公开）
+
+```text
+cpp_formatter  83 passed + 3 ignored
+语料           43 / 43（100%）· 稳定性 43 / 43
+P2             printed 49 · 其中 6 行无可选断点 · 一致率 17.9%
+```
+
+下一轮的方向因此改变：不再扩候选集，而是**看那 43 行为什么断了也没变短**——最可能是
+`break_line` 的段代价里，`start_column` 与实际渲染列不一致（同样低估），以及"只切一次就停"。
+我会先给 `break_line` 加一个可选的回调/参数让调用方传入真实起始列，再测。
