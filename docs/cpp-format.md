@@ -2832,3 +2832,37 @@ cases_comments       6 例（行尾行注释/块注释/独立注释/doc/字符�
 
 用例的生产方式是 `tests/gen_cases.ps1`：把候选分别交给 clang-format 与本实现，**只收录两边一致的**
 （54 个），有重排差异的 18 个不收录。测试运行时不需要 clang-format，也不读 `.cpp`。
+## 九十四、全选项矩阵：工具 + 目标文本 + 覆盖率报告
+
+新工具 `examples/option_matrix.rs`：
+
+```text
+对 StyleOption::ALL（275 项）逐项：
+  1. 先让 clang-format 把 sink 格式化一遍，作为"规范化输入"（此后只有被测选项能改变它）
+  2. 依次尝试候选值，直到 clang-format 接受且**输出确实变化**
+  3. 用同一份配置跑本实现，逐字节比较
+  4. 一致 → 记成测试（期望值就是 clang-format 的文本）；不一致 → 记录首处分歧
+产物：crates/cpp_formatter/tests/options.rs   docs/option-matrix.md
+```
+
+sink 共 50 个：6 个按选项家族手写（main/short/align/spacing/preprocessor/comments），
+加 `tests/snippets/` 的 44 个既有样例（每个隔离一类语言特性）。
+
+**实测（22.1.3）**
+
+```text
+options: 275 · 记成测试: 5 · 可观测但不一致: 34 · 在 sink 上没有效果: 236 · 被拒绝的候选值: 15 247
+tests/options.rs   5 个用例全部通过（期望文本即 clang-format 输出）
+docs/option-matrix.md   275 行：选项 / 是否一致 / sink+取值+首处分歧
+```
+
+**为什么只有 5 个**：候选值表是"猜"的（15k 次被 clang-format 拒绝），而每个选项的合法取值集合未知；
+另外 sink 不可能覆盖所有构造（例如 Objective-C/Java/JS/Proto/Verilog/C#/TableGen 的选项对 C++ 文件本就无作用，
+这类占了 236 里的大半）。工具与报告把这些如实列出来，不粉饰。
+
+**下一步（要明显提高数字的两条路）**：
+
+1. 给每个选项补**合法取值表**（来源：clang-format 文档 `ClangFormatStyleOptions.rst`，或按枚举名穷举探测）；
+2. 给每个选项补**靶向 sink**（像 `tests/cases_*.rs` 那样，一个构造一个用例），而不是共用大文件。
+
+`tests/cases_*.rs` 的 54 个用例已经是"靶向"路线，覆盖的是我们确实实现并验证过的规则；这份矩阵是它的补集视角。

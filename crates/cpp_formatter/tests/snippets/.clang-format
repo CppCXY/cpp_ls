@@ -1,6 +1,0 @@
-BasedOnStyle: LLVM
-IndentWidth: 4
-ContinuationIndentWidth: 8
-ColumnLimit: 0
-MacroBlockBegin: 'QT_BEGIN_NAMESPACE'
-MacroBlockEnd: 'QT_END_NAMESPACE'
