@@ -42,7 +42,12 @@ pub fn between(stream: &Stream<'_>, index: usize, roles: &Roles, style: &Style) 
     //
     // Measured on the project corpus: this class alone is 3 files that the audit had to skip as "the token streams
     // differ", plus the `> =` lines in `LuaSyntaxNode.cpp` and `LuaSource.cpp`.
+    //
+    // The exception is a mark that belongs to a declarator: `const std::vector<int> &v` was written `>&v` in the source,
+    // and gluing it is right for the *characters* but wrong for the *reference*, so the pointer rule below has to see it.
+    let declarator_after_a_template = previous.kind == Greater && roles.is_template_angle(previous.start);
     if stream.gaps[index].is_empty()
+        && !declarator_after_a_template
         && is_operator_punctuation(previous.kind)
         && is_operator_punctuation(current.kind)
     {
@@ -55,11 +60,19 @@ pub fn between(stream: &Stream<'_>, index: usize, roles: &Roles, style: &Style) 
     // `]` — which is what clang-format 22.1.3 writes and what keeps `find(text)->second` glued (measured: without the
     // `]` test the corpus lost a file to `return LuaReserved.find(text) -> second;`).
     if current.kind == Arrow || previous.kind == Arrow {
-        let closes = if current.kind == Arrow { index - 1 } else { index - 2 };
-        if closes < stream.tokens.len() && stream.tokens[closes].kind == RightParen {
+        // The token on the *other* side of the arrow from the gap being asked about.
+        let before_arrow = if current.kind == Arrow { index - 1 } else { index - 2 };
+        // A specifier may sit between the parameter list and the arrow: `[]() noexcept -> int`.
+        if matches!(
+            stream.tokens[before_arrow].text,
+            "noexcept" | "const" | "mutable" | "override" | "final" | "constexpr"
+        ) {
+            return 1;
+        }
+        if before_arrow < stream.tokens.len() && stream.tokens[before_arrow].kind == RightParen {
             let mut depth = 0isize;
             let mut opener: Option<usize> = Option::None;
-            for cursor in (0..closes).rev() {
+            for cursor in (0..before_arrow).rev() {
                 match stream.tokens[cursor].kind {
                     RightParen => depth += 1,
                     LeftParen => {
@@ -72,17 +85,17 @@ pub fn between(stream: &Stream<'_>, index: usize, roles: &Roles, style: &Style) 
                     _ => {}
                 }
             }
-            // A specifier may sit between the parameter list and the arrow: `[]() noexcept -> int`.
-            if matches!(
-                stream.tokens[index - 1].text,
-                "noexcept" | "const" | "mutable" | "override" | "final" | "constexpr"
-            ) {
-                return 1;
-            }
-if opener.is_some_and(|at| at > 0 && stream.tokens[at - 1].kind == RightBracket) {
+            if opener.is_some_and(|at| at > 0 && stream.tokens[at - 1].kind == RightBracket) {
                 return 1;
             }
         }
+    }
+
+    // **A cast takes no space after its parenthesis**: `(void)x`, `(int)y`. clang-format writes them glued
+    // (measured on `(void)i;`, which this wrote as `(void) i;`). The parenthesis holds a type name and nothing else,
+    // which is what separates a cast from a call followed by a value.
+    if previous.kind == RightParen && is_a_cast_expression(stream, index - 1) {
+        return 0;
     }
 
     // 1. Tokens that are glued to what they follow.
@@ -306,14 +319,22 @@ if opener.is_some_and(|at| at > 0 && stream.tokens[at - 1].kind == RightBracket)
     }
 
     // 5. `*` and `&`: a declarator follows `PointerAlignment`, an operator is a binary operator.
-    if is_a_mark(current.kind) && roles.is_declarator(offset) {
+    //
+    // **After a template argument list the mark is part of the declarator even when the tree does not say so**:
+    // `const std::vector<int> &v` is a reference, and the parser leaves `&` unannotated there (measured: we wrote
+    // `std::vector<int>&v`). A `>` that closes a template argument list is the evidence.
+    let after_a_template = previous.kind == Greater && roles.is_template_angle(previous.start);
+    let mark_after_a_template = index >= 2
+        && stream.tokens[index - 2].kind == Greater
+        && roles.is_template_angle(stream.tokens[index - 2].start);
+    if is_a_mark(current.kind) && (roles.is_declarator(offset) || after_a_template) {
         return match style.text(StyleOption::PointerAlignment) {
             "Left" => 0,
             "Middle" => 1,
             _ => 1,
         };
     }
-    if is_a_mark(previous.kind) && roles.is_declarator(previous.start) {
+    if is_a_mark(previous.kind) && (roles.is_declarator(previous.start) || mark_after_a_template) {
         return match style.text(StyleOption::PointerAlignment) {
             "Left" => 1,
             "Middle" => 1,
