@@ -58,6 +58,111 @@ pub fn columns(source: &str, stream: &Stream<'_>, style: &Style) -> Vec<Option<u
     targets
 }
 
+/// **The second scan: align the trailing comments of the rendered output.**
+///
+/// The first scan writes the code; this one reads the result back and only touches the spaces in front of a trailing
+/// comment. That order matters: the first attempt computed target columns from the *source* and regressed 42 → 38,
+/// because the formatter's own columns differ from the source's on the lines it re-indents. Here the code end is read
+/// off the line that was actually written, so the two can never disagree.
+///
+/// A *trailing* comment is one with code before it on the same line. A run of consecutive lines that each have one is
+/// a group (the measure in this module's header), and every comment in a group starts at `max(code end) + N`.
+pub fn align(output: &str, style: &Style) -> String {
+    let minimum = style.count(StyleOption::SpacesBeforeTrailingComments);
+    let mut lines: Vec<&str> = output.split_inclusive('\n').collect();
+    if lines.is_empty() {
+        return output.to_string();
+    }
+
+    // (line index, code, comment) for every line that has a trailing comment.
+    let mut found: Vec<(usize, &str, &str)> = Vec::new();
+    for (index, line) in lines.iter().enumerate() {
+        if let Some((code, comment)) = split_trailing_comment(line) {
+            // The code is measured **without** the spaces in front of the comment: those are what this pass rewrites.
+            found.push((index, code.trim_end(), comment));
+        }
+    }
+
+    // Rewrite in place: one pass per group.
+    let mut rewritten: Vec<Option<String>> = vec![None; lines.len()];
+    let mut start = 0usize;
+    while start < found.len() {
+        let mut end = start + 1;
+        while end < found.len() && found[end].0 == found[end - 1].0 + 1 {
+            end += 1;
+        }
+        let widest = found[start..end]
+            .iter()
+            .map(|(_, code, _)| width(code))
+            .max()
+            .unwrap_or(0);
+        let target = widest + minimum;
+        for (index, code, comment) in &found[start..end] {
+            let padding = target.saturating_sub(width(code));
+            rewritten[*index] = Some(format!("{code}{}{comment}", " ".repeat(padding)));
+        }
+        start = end;
+    }
+
+    let mut out = String::with_capacity(output.len());
+    for (index, line) in lines.iter().enumerate() {
+        match &rewritten[index] {
+            Some(replacement) => out.push_str(replacement),
+            None => out.push_str(line),
+        }
+    }
+    out
+}
+
+/// Split one line into (code, comment) when it has a trailing comment; `None` for a line that has none.
+///
+/// The scan skips string and character literals so that `const char *s = "// not a comment";` stays code, and a line
+/// whose first non-space characters are the comment is not a trailing one (it is an own-line comment).
+fn split_trailing_comment(line: &str) -> Option<(&str, &str)> {
+    let bytes = line.as_bytes();
+    let mut index = 0usize;
+    let mut quote: Option<u8> = None;
+    let mut seen_code = false;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if let Some(open) = quote {
+            if byte == b'\\' {
+                index += 2;
+                continue;
+            }
+            if byte == open {
+                quote = None;
+            }
+            index += 1;
+            continue;
+        }
+        match byte {
+            b'"' | b'\'' => {
+                quote = Some(byte);
+                seen_code = true;
+                index += 1;
+            }
+            b'/' if index + 1 < bytes.len() && (bytes[index + 1] == b'/' || bytes[index + 1] == b'*') => {
+                if !seen_code {
+                    return None;
+                }
+                return Some((&line[..index], &line[index..]));
+            }
+            b' ' | b'\t' | b'\r' | b'\n' => index += 1,
+            _ => {
+                seen_code = true;
+                index += 1;
+            }
+        }
+    }
+    None
+}
+
+/// The display width of a piece of code (tabs to the next multiple of eight, wide characters two columns).
+fn width(text: &str) -> usize {
+    crate::columns::Columns::new(&Style::default_style()).advance(0, text)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -92,6 +197,27 @@ mod tests {
     fn the_minimum_is_added_once() {
         let found = targets("int solo; // alone\n", "2");
         assert_eq!(found, vec![Some(11)]);
+    }
+
+    #[test]
+    fn a_run_is_aligned_and_a_lone_comment_is_not() {
+        let output = "enum E {\n    A, // one\n    CCCC,// two\n};\nint solo; // alone\n";
+        let mut style = Style::default_style();
+        style.set_from_text("SpacesBeforeTrailingComments", "1");
+        // `    CCCC,` ends at 9, so both comments in the run start at 10; `int solo;` ends at 9 and is alone, so
+        // its comment starts at 10 as well — the source already had that.
+        assert_eq!(
+            align(output, &style),
+            "enum E {\n    A,    // one\n    CCCC, // two\n};\nint solo; // alone\n"
+        );
+    }
+
+    #[test]
+    fn a_comment_inside_a_string_is_not_a_comment() {
+        let mut style = Style::default_style();
+        style.set_from_text("SpacesBeforeTrailingComments", "0");
+        let output = "const char *s = \"// not a comment\";\n";
+        assert_eq!(align(output, &style), output);
     }
 
     #[test]

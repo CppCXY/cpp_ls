@@ -42,7 +42,6 @@ pub fn format_file(path: &std::path::Path, source: &str, style: &Style) -> Strin
     render::format(source, path.file_stem().and_then(|stem| stem.to_str()), style)
 }
 
-/// Format `source` with the style that `text` (a `.clang-format`) describes.
 pub fn format_with_config(source: &str, config: &str) -> Result<String, ConfigError> {
     let style = config::parse(config, None)?;
     Ok(format(source, &style))
