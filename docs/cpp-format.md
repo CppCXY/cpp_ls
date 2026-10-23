@@ -1008,3 +1008,19 @@ P0b/P1：37 / 43（86.05%），44→56 个测试全绿
 P2：  已开工并有可测收益（113 → 56），纯函数 + 搜索 + 接线 + 两套测量工具（layout_audit / column_audit）
 P3/P4：未动（include 排序、宏展开），3 个 skipped 文件正是它们的范围
 ```
+## 三十三、goal 续跑 r1：把"行内 row 缩进"推进到可验证的一步（未提交，已回退）
+
+这轮把 LuaDefine 那个用例拆开来试，得到两个**确定的新事实**：
+
+```text
+① layout 里给"初始化列表元素行"单独算缩进（开列行的层级 × IndentWidth + ContinuationIndentWidth）是可行的：
+   新增单测 a_table_row_after_a_row_indents_from_the_list 直接断言 blocks() 给出 8/8 —— **通过**
+② 但 fixture（整文件路径）里那些行根本没有走到 planned_indent：
+   CPPFMT_DEBUG 只打了 4 行（结构体成员），表行一次都没进 planned_indent，也没有任何 forced break
+   → 它们的 gap 在 render 的分支链里没被 `comments.is_empty() && newlines>0 && index>0` 接受，
+     具体是哪一条不满足**尚未测得**（调试输出只加在 forced 分支上，没覆盖到这条链的入口）
+```
+
+也就是说：问题已经从"缩进算错"缩小到"render 的分支链对这几行没有进入缩进路径"。
+下一步只需在该链入口加一条调试（打印 gap.newlines / comments.len / index），一次就能定位。
+本轮时间不够，已把 layout/render 恢复成提交状态（37/43、56 tests 全绿、工作区干净）。
