@@ -1673,3 +1673,41 @@ handshake 端到端      格式化用例仍通过
 下一轮我会取 `ContinuationIndenter.cpp` 与 `FormatToken.cpp` 里 `SpacesRequiredBefore` 的定义，把它定下来。
 
 （同时：`textDocument/willSaveWaitUntil` 已接上并通过端到端用例，见下一个提交。）
+## 六十、联网读了 `TokenAnnotator.cpp`（tag 22.1.3）后的新证据，但仍未闭合
+
+取了 `llvmorg-22.1.3` 的 `TokenAnnotator.cpp` 与 `ContinuationIndenter.cpp`：
+
+```cpp
+// TokenAnnotator.cpp:4184（22.1.3 与 main 相同）
+if (Current->is(TT_LineComment)) {
+  ...
+  Current->SpacesRequiredBefore = Style.SpacesBeforeTrailingComments;   // 语料里是 0
+}
+// WhitespaceManager::alignTrailingComments()
+· 段列 = 段内 (代码结尾 + SpacesRequiredBefore) 的**最大值**
+· 只向右移（Shift > 0 才写）
+```
+
+按这个实现（= max(code_end + 0)，只右移）实测 42 → 39，回退。
+
+然后用真实 clang-format 做了定点实验，得到**互相矛盾**的两组：
+
+```text
+（N = 0，同一次运行）
+int solo;/* one */                    → int solo; /* one */     注释 = 代码结尾 + 1
+    int a;/* one */（结构体成员）      →     int a; /* one */     +1
+    int a;/* */ 与 int bb;/* */（两行）→ 列 = max(代码结尾) + 1
+    Next();// Global
+    if (x)// optional
+        return a;// b                 → 列 = max(代码结尾) + 0    （三行成段）
+```
+
+也就是说 `SpacesRequiredBefore`（0）只是**初始**空格，而"孤立注释"那一支还会多出 1 格；
+成段时则严格按"段内最大值、只右移"。
+
+结论：算法主体（段列 = 最小列最大值、只右移）已经与源码核对一致，但"最小列"在 22.1.3 里还受
+另一处逻辑影响（孤立注释 +1），那一处我还没定位到。这已是第五次尝试，全部回退，42/43 保持。
+
+**建议（仍需你选）**：① 继续找那处逻辑（需要再读 `Format.cpp`/`WhitespaceManager.h` 的
+`StartOfTokenColumn` 赋值链）；② 接受 42/43；③ 审计口径忽略行尾注释空格。
+本轮不再继续该线，避免继续消耗。
