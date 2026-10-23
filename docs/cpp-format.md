@@ -1293,3 +1293,20 @@ printed 超长行： 56 → **51**（ColumnLimit: 80，43 个文件；clang-form
 ```
 
 已回退，基线保持 **41 / 43**、64 tests 全绿。这条留给后续实现完整 `AlignTrailingComments` 时一起做。
+## 四十五、goal（第二次）收尾核对
+
+```text
+整文件一致      41 / 43（95.35%）                    ← 目标 "→ 41/43" ✓（原为 38）
+间距一致        19989 / 19989（100.00%）              ← 全部 gap 正确
+幂等（I2）      43 / 43（保留同名文件复核）            ← format 的第二次输出与第一次相同
+单测            64 passed + 3 ignored
+P2 超长行       printed 51（原 56，clang-format 0）    ← 目标 "below 56" ✓
+                logical 105 / breaker 覆盖 80（25 条为单 token 超宽）
+workspace       全量构建通过
+```
+
+包含的三次提交：`a1f30c1`（P3 include 排序 + main-header，38→41）、`8ba7aad`（断行候选与续行列计宽，
+56→51）、`f977d8c`（尾注释最小空格规则的否定结论，41→38 已回退）。
+
+剩余 2 个文件：`LuaTokenTypeDetail.h:31`（需要完整 `AlignTrailingComments` 分组模型）、
+`LuaLexer.cpp:478`（三元 `?` 的列由断行期决定，需 P2 的列决策）。两者都不在本 goal 的量化目标内。
