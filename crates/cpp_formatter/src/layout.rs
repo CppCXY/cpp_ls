@@ -551,6 +551,10 @@ mod tests {
 /// `classify_braces` already decides which braces are initializers; this is the depth that follows from it, kept as
 /// its own pass so that the two rules stay independent.
 pub fn init_depths(stream: &Stream<'_>, roles: &Roles) -> Vec<isize> {
+    // **The same classification `blocks` uses**: an initializer brace is one `classify_braces` calls `Nothing`. Two
+    // copies of this predicate drifted once already — the roles miss `} priority[] = {`, and the depth stayed 0, so
+    // the elements of that table never saw a list. Deriving it from the classifier keeps one answer.
+    let braces = classify_braces(stream, roles, "None", false);
     let mut depths = vec![0isize; stream.tokens.len()];
     let mut open: Vec<bool> = Vec::new();
     let mut depth: isize = 0;
@@ -558,8 +562,7 @@ pub fn init_depths(stream: &Stream<'_>, roles: &Roles) -> Vec<isize> {
         depths[index] = depth;
         match token.kind {
             CppTokenKind::LeftBrace => {
-                let is_initializer =
-                    !roles.block_brace.contains(&token.start) && roles.init_brace.contains(&token.start);
+                let is_initializer = braces[index] == Brace::Nothing;
                 open.push(is_initializer);
                 if is_initializer {
                     depth += 1;
