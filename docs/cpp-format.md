@@ -2866,3 +2866,43 @@ docs/option-matrix.md   275 行：选项 / 是否一致 / sink+取值+首处分�
 2. 给每个选项补**靶向 sink**（像 `tests/cases_*.rs` 那样，一个构造一个用例），而不是共用大文件。
 
 `tests/cases_*.rs` 的 54 个用例已经是"靶向"路线，覆盖的是我们确实实现并验证过的规则；这份矩阵是它的补集视角。
+## 九十五、`cpp_ls` 启动后 5 GB：先看代码，把三处**无界缓存**改成有界
+
+按你的要求不测量，直接读代码定位。结论是四个按 `(路径, 内容哈希)` 作键的缓存**只增不减**，而其中两个的
+值是"整个 include 闭包"量级：
+
+```text
+renderings          HashMap<(PathBuf, u64), Arc<RenderedCooked>>
+                    一个 RenderedCooked = 闭包渲染出的全部文本 + 每个 token 一个 RenderedSpan
+                    键含内容哈希 ⇒ **每敲一个字符就多一条**，且文档自己写着 "no cap"
+macro_environments  HashMap<(PathBuf, u64), Arc<MacroEnvironment>>
+                    一个环境 = 闭包里见过的全部宏名（头文件重的时候是几千个名字）
+                    同样按内容哈希 ⇒ 每次击键一条
+surfaces            HashMap<u64, Arc<Surface>>（按内容哈希）⇒ 同上
+effects             HashMap<u64, Effect>（按 (文件, 环境) 哈希）⇒ 同上
+MAX_UNITS = 64      每个 TranslationUnit = 闭包时间线（events + frames + by_name + 按需构建的 definitions）
+                    64 个闭包量级的时间线，是会话里最大的单体对象
+```
+
+### 改法
+
+1. 新模块 `cache_lru::Cache`（LRU + 权重上限，6 个单测）：`insert` 时按"最近最少使用"淘汰，
+   权重由调用方给（渲染的文本 + span 数；环境的宏名数；effect 记 1）。
+2. `renderings` → `Cache::renderings()`：**8 条 / 64 MB**。新增 `RenderedCooked::weight()` 把 span 也算进去
+   （600k token 的闭包，span 和文本一样大）。
+3. `macro_environments` → `Cache::macro_environments()`：**16 条 / 64k 宏名**。
+4. `surfaces`：满 `SURFACES_HELD = 512` 条就清空（surface 重建只要一次文件扫描，0.5 ms）。
+5. `effects`：满 `EFFECT_ENTRIES = 4096` 条就清空（每个 effect 只是一小组 fold）。
+6. `MAX_UNITS` 64 → **16**（文件里那段文档本来就写着 "Sixteen is enough"，常量却已经涨到 64）。
+
+### 验证
+
+```text
+cpp_code_analysis  676 passed · 63 · 36 · 25 · 32 · 1 · 13 · 42 …（除既有那条语义失败）
+cpp_ls             lib 87 passed + 1 ignored · handshake 32 passed
+工作区             --all-targets 零警告
+```
+
+按你的要求**没有做内存测量**：这次只到"读代码 + 改 + 编译/单测通过"为止。下一步（需要你点头再动）：
+把 `ProjectIndex` / `SummaryStore` 的常驻结构也过一遍（`include_searches` 也是无界 Map，只是键很小），
+以及确认 `UnitDefinitions` 是否值得在单位淘汰时真正释放。

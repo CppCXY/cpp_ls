@@ -321,11 +321,15 @@ pub fn condition_tokens(tokens: &[Token]) -> &[Token] {
     tokens
 }
 
-/// **The surfaces a walk has already scanned**, keyed by the file`s content.
+/// **The surfaces a walk has already scanned**, keyed by the file's content.
 ///
 /// A walk has to lex every file it enters to know what its directives are, and without this the lex is paid again
-/// on every walk: measured, 266 files took 1.05 s per walk and the same files` surfaces cost 0.5 ms each to build
+/// on every walk: measured, 266 files took 1.05 s per walk and the same files' surfaces cost 0.5 ms each to build
 /// *once*. Content-hashed rather than path-keyed, because a path with new text is a different surface.
+///
+/// **How many are kept**: one per distinct content, the table cleared when it fills — see [`Surfaces::of`].
+pub const SURFACES_HELD: usize = 512;
+
 #[derive(Default)]
 pub struct Surfaces {
     held: std::sync::Mutex<HashMap<u64, std::sync::Arc<Surface>>>,
@@ -340,6 +344,12 @@ impl Surfaces {
     pub fn of(&self, path: &std::path::Path, text: &str) -> std::sync::Arc<Surface> {
         let key = crate::cache::content_hash(text);
         let mut held = self.held.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        // **Bounded**: one surface per distinct content, and content changes on every keystroke — a session
+        // left open while typing would keep a scan of every buffer state it ever saw. Cleared rather than
+        // evicted because a surface is cheap to rebuild (one scan of one file) and the table is only a warm start.
+        if held.len() >= SURFACES_HELD {
+            held.clear();
+        }
         if let Some(found) = held.get(&key) {
             return std::sync::Arc::clone(found);
         }

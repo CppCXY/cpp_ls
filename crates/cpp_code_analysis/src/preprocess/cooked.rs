@@ -263,6 +263,17 @@ pub struct RenderedCooked {
     pub spans: Vec<RenderedSpan>,
 }
 
+impl RenderedCooked {
+    /// **What this rendering costs a cache that wants to bound itself**: its text and one span per token.
+    ///
+    /// The session keeps a few of these and drops the least recently used when the total passes
+    /// [`crate::cache_lru::RENDERING_BYTES`], so the number has to include the spans: a closure of 600 000 tokens is
+    /// 600 000 `RenderedSpan`s, which is as much as the text itself.
+    pub fn weight(&self) -> usize {
+        self.text.len() + self.spans.len() * std::mem::size_of::<RenderedSpan>()
+    }
+}
+
 /// **Would writing these two spellings with nothing between them produce a different first token?**
 ///
 /// The whole of the decision about whether the renderer may leave a space out, asked rather than guessed: the two

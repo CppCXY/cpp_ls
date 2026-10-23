@@ -574,7 +574,7 @@ pub struct Session<F: FileProvider = DiskFiles> {
     /// Behind a lock because the queries that want it hold a read on the session, and an environment is only ever
     /// added (§[`Session::view_with_macros`] takes `&self`).
     macro_environments: std::sync::Mutex<
-        std::collections::HashMap<(PathBuf, u64), std::sync::Arc<cpp_parser::MacroEnvironment>>,
+        crate::cache_lru::Cache<(PathBuf, u64), std::sync::Arc<cpp_parser::MacroEnvironment>>,
     >,
     /// **Files whose macros something has asked for and not yet got.**
     ///
@@ -594,12 +594,11 @@ pub struct Session<F: FileProvider = DiskFiles> {
     /// **Effects already computed**, shared by every walk — the other half of what makes a walk hash lookups.
     effects: std::sync::Mutex<HashMap<u64, crate::effect::Effect>>,
     renderings: std::sync::Mutex<
-        std::collections::HashMap<
+        crate::cache_lru::Cache<
             (PathBuf, u64),
             std::sync::Arc<crate::preprocess::cooked::RenderedCooked>,
         >,
     >,
-    /// **The files a cook has already refused**, by the queue's own key.
     ///
     /// `cooking_materials` answers `None` for a file whose unit is provisional, whose summary is not in the index, or
     /// whose render declines — and the caller that wanted it (`want_the_closure_cooked`, once per drain) wants it
@@ -1051,11 +1050,11 @@ impl<F: FileProvider + Clone> Session<F> {
             directive_signatures: std::collections::HashMap::new(),
             prefetched: HashMap::new(),
             headers,
-            macro_environments: std::sync::Mutex::new(std::collections::HashMap::new()),
             macro_work: std::sync::Mutex::new(Cooking::default()),
+            macro_environments: std::sync::Mutex::new(crate::cache_lru::Cache::macro_environments()),
             surfaces: std::sync::Mutex::new(crate::effect::Surfaces::new()),
             effects: std::sync::Mutex::new(HashMap::new()),
-            renderings: std::sync::Mutex::new(std::collections::HashMap::new()),
+            renderings: std::sync::Mutex::new(crate::cache_lru::Cache::renderings()),
             cooking_refused: std::sync::Mutex::new(std::collections::HashSet::new()),
             unit_from_memory: std::sync::atomic::AtomicUsize::new(0),
             unit_from_disk: std::sync::atomic::AtomicUsize::new(0),
@@ -2463,7 +2462,8 @@ impl<F: FileProvider + Clone> Session<F> {
     pub fn commit_the_drain(&mut self, prepared: PreparedDrain) -> usize {
         for (key, rendered) in prepared.rendered {
             if let Ok(mut known) = self.renderings.lock() {
-                known.insert(key, rendered);
+                let weight = rendered.weight();
+                known.insert(key, rendered, weight);
             }
         }
 
@@ -3423,10 +3423,14 @@ impl<F: FileProvider + Clone> Session<F> {
                 .with_bodies_in_force(evidence.conditional_bodies),
         );
 
+        // **Bounded**: typing in one file changes its content hash on every keystroke, so an unbounded map here is
+        // one environment per keystroke — and an environment of a header-heavy closure is thousands of names.
+        let weight = cpp_parser::MacroFacts::len(made.as_ref());
         if let Ok(mut known) = self.macro_environments.lock() {
             known.insert(
                 (path.to_path_buf(), crate::cache::content_hash(text)),
                 made.clone(),
+                weight,
             );
         }
         Some(made)
@@ -4339,6 +4343,12 @@ fn error_directive_line(text: &str) -> Option<(usize, usize, String)> {
             .effects
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // **The effect table is bounded by count, not by bytes**: each effect is a small list of folds, and the
+        // map outlives every walk, so a long session over a big project would otherwise keep one entry per
+        // (file, environment) pair it ever saw — see [`crate::cache_lru::EFFECT_ENTRIES`].
+        if cache.len() >= crate::cache_lru::EFFECT_ENTRIES {
+            cache.clear();
+        }
         let seed = crate::effect::Macros::new();
         let surfaces = self
             .surfaces
@@ -4997,7 +5007,8 @@ fn error_directive_line(text: &str) -> Option<(usize, usize, String)> {
         {
             let key = (path.clone(), crate::cache::content_hash(&text));
             let before = known.len();
-            known.insert(key, std::sync::Arc::clone(&indexed.rendered));
+            let weight = indexed.rendered.weight();
+            known.insert(key, std::sync::Arc::clone(&indexed.rendered), weight);
             if crate::probes::cooking() {
                 eprintln!(
                     "commit_a_cooked: inserted {} | cache {} -> {}",
@@ -6618,7 +6629,7 @@ pub struct CookedReading {
 /// holds the rest ([`crate::TranslationUnitCache`]) and a unit that falls out of here is one decode away. Sixteen is
 /// enough for the units a reader is working in (the open files' roots and the headers they name) and small enough
 /// that a project of a thousand sources does not hold a thousand timelines.
-const MAX_UNITS: usize = 64;
+const MAX_UNITS: usize = 16;
 
 /// How many rounds [`Session::read_the_modules_a_file_imports`] may read module interface units in.
 ///
