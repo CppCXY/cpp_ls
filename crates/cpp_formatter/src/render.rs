@@ -65,7 +65,11 @@ pub fn format(source: &str, style: &Style) -> String {
             out.push_str(&" ".repeat(spaces));
             column += spaces;
         } else if !in_directive
-            && gap.comments.is_empty()
+            && (gap.comments.is_empty()
+                // **A comment on its own line inside a braced initializer is an element of the table**: it lines up
+                // with the elements around it (measured: `/* ORDER OPR */` belongs at the elements' column, not at the
+                // one the source happens to have).
+                || (gap.comments.len() == 1 && gap.comments[0].own_line && init_depths[index] > 0))
             && gap.newlines > 0
             && index > 0
             && let Some((indent, is_block_line)) = {
@@ -121,6 +125,28 @@ pub fn format(source: &str, style: &Style) -> String {
             }
             out.push_str(&" ".repeat(indent));
             column = indent;
+            // **The comment that made this gap non-empty is a line of the block**: its text and everything after it
+            // come from the source, written once, after the column this pass decided.
+            if let Some(comment) = gap.comments.first() {
+                out.push_str(comment.text);
+                // What follows the comment is a break to the token's own line: its newlines are kept (capped) and its
+                // indentation is replaced by the column — the same one, because both lines are elements of the list.
+                let tail = source.get(comment.end..gap.end).unwrap_or("");
+                let breaks = tail
+                    .chars()
+                    .filter(|character| *character == '\n')
+                    .count()
+                    .min(max_empty + 1);
+                for _ in 0..breaks {
+                    out.push_str(line_ending);
+                }
+                if breaks > 0 {
+                    out.push_str(&" ".repeat(indent));
+                    column = indent;
+                } else {
+                    column = columns.advance(column, comment.text);
+                }
+            }
             if is_block_line {
                 statement_indent = indent;
                 ctor_column = None;
