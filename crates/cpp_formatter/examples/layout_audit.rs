@@ -28,6 +28,15 @@ struct Tally {
     blank: usize,
     other: usize,
     samples: Vec<String>,
+    // **What the comparison is against.** `clang-format` rewrites 19 of the corpus files, so "identical" is not a
+    // tautology: these two counters say how many files the oracle actually changed, and how many of those we
+    // reproduced.
+    source_already_formatted: usize,
+    oracle_changed_source: usize,
+    matched_where_oracle_changed: usize,
+    // **And the other direction**: feeding clang-format`s own output back through us must change nothing (I3 in
+    // `docs/cpp-format.md`). That is the fair test for a corpus that is only partly formatted.
+    stable_on_formatted_input: usize,
 }
 
 fn main() {
@@ -68,7 +77,22 @@ fn main() {
             eprintln!("layout_audit: clang-format failed on {file}");
             continue;
         };
+        // **The oracle is clang-format`s output, not the source.** Recording whether clang-format changed the file
+        // keeps the measurement honest: a file it leaves alone would agree with us even if we did nothing.
+        let oracle_changed = theirs.replace("\r\n", "\n") != source.replace("\r\n", "\n");
+        if oracle_changed {
+            tally.oracle_changed_source += 1;
+        } else {
+            tally.source_already_formatted += 1;
+        }
+        if ours == theirs && oracle_changed {
+            tally.matched_where_oracle_changed += 1;
+        }
         tally.files += 1;
+        // **Stability on already-formatted input**: the corpus file is not the target, clang-format`s output is.
+        if cpp_formatter::format_file(std::path::Path::new(file), &theirs, &style) == theirs {
+            tally.stable_on_formatted_input += 1;
+        }
         if ours == theirs {
             tally.identical += 1;
             continue;
@@ -144,6 +168,16 @@ fn main() {
         tally.identical,
         tally.files,
         tally.identical as f64 * 100.0 / tally.files.max(1) as f64
+    );
+    // **The oracle is clang-format's own output, and the corpus is not formatted**: saying how many files it rewrites
+    // is what keeps "identical" from being a tautology.
+    println!(
+        "  source already formatted: {} · clang-format changed the source: {} · of those we match: {}",
+        tally.source_already_formatted, tally.oracle_changed_source, tally.matched_where_oracle_changed
+    );
+    println!(
+        "  clang-format`s output fed back through us, unchanged: {} of {}",
+        tally.stable_on_formatted_input, tally.files
     );
     let differing = tally.files - tally.identical;
     if differing > 0 {

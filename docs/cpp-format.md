@@ -1310,3 +1310,28 @@ workspace       全量构建通过
 
 剩余 2 个文件：`LuaTokenTypeDetail.h:31`（需要完整 `AlignTrailingComments` 分组模型）、
 `LuaLexer.cpp:478`（三元 `?` 的列由断行期决定，需 P2 的列决策）。两者都不在本 goal 的量化目标内。
+## 四十六、把对比口径写进审计：语料本身只有一部分是格式化过的
+
+按要求核对了对比方式，并把"对比对象是什么"变成审计自己打印的数字：
+
+```text
+layout_audit 现在打印三行：
+  whole file: 41 of 43 identical to clang-format (95.35%)
+    source already formatted: 33 · clang-format changed the source: 10 · of those we match: 8
+    clang-format`s output fed back through us, unchanged: 42 of 43
+```
+
+三行各是什么：
+
+```text
+1. 我们是把 `clang-format -style=file <file>` 的输出当 oracle（layout_audit.rs 里 `run(&clang_format, file)`），
+   **不是**拿语料源码当标准；
+2. 43 个文件里有 33 个已经是 clang-format 的结果（clang-format 对它们无操作），10 个会被 clang-format 改动；
+   这 10 个里我们复现了 8 个 —— 说明"一致"不是"两边都等于源码"的同义反复；
+3. 反过来把 clang-format 的输出喂给我们，43 个里 42 个原样返回（I3 稳定性）；
+   唯一不稳定的是 `LuaLexer.cpp`，正是三元 `?` 那个文件（clang-format 在断行期决定它的列，我们不重排）。
+```
+
+结论：现有 41/43 的口径是对的（对 clang-format 输出），并且现在审计会自己暴露"语料有多少本来就没格式化"
+以及"我们的输出对 clang-format 结果是否稳定"。剩下的差距也定位得更清楚：只有 `LuaTokenTypeDetail.h`
+（尾注释分组）和 `LuaLexer.cpp`（三元列）两处。
