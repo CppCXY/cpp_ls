@@ -2662,3 +2662,35 @@ int c_function();      ← clang-format 顶格；我们缩进 4
 原因是 clang-format 会**解析所有预处理分支**、跨分支的花括号配对因此错位（连后面 `namespace` 的内容都不缩进了）。
 我们按"人希望的样子"缩进，不模仿这个行为：要模仿得引入 MacroBlock / `#if` 区域的整套模型（P4 的另一半），
 收益存疑（它的输出在这类文件上本身就不自洽）。
+## 九十、P4 第二件：预处理指令回到第 0 列（`IndentPPDirectives: None`）
+
+源码里写
+
+```cpp
+int g() {
+    #if DEBUG          ← 缩进 4
+    return 1;
+    #endif
+```
+
+我们原来**照抄了那个缩进**（行首 `#` 也被 planned_indent 当普通语句处理）；clang-format 的默认
+（`IndentPPDirectives: None`）是把指令放回第 0 列：
+
+```text
+int g() {
+#if DEBUG
+    return 1;
+#endif
+```
+
+修法：`planned_indent` 里首 token 是 `#` 时直接返回 0。已固化为 `tests/snippets/37_pp_indent.cpp`。
+
+**实测**
+
+```text
+语料        43/43 · 稳定性 43/43 · 间距 19989/19989 · 88 tests
+样例集      spacing 37/37（100%）· stability 34/37（91.9%）
+```
+
+顺带记录：`IndentPPDirectives: AfterHash` 在 22.1.3 上对这份输入**没有效果**（仍然第 0 列），
+所以我们按 None 的行为实现，配置文件里写 AfterHash 也不会改变结果——与本机 clang-format 一致。

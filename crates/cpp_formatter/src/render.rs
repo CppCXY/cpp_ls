@@ -634,6 +634,11 @@ fn planned_indent(
             stack.len()
         );
     }
+    // **A preprocessor directive starts at column 0** (`IndentPPDirectives: None`, which is clang-format`s
+    // default): `#if` inside a function body belongs against the margin, and the source`s own column is not kept.
+    if first == cpp_parser::CppTokenKind::Hash {
+        return Some((0, true));
+    }
     let is_a_brace = matches!(
         first,
         cpp_parser::CppTokenKind::LeftBrace | cpp_parser::CppTokenKind::RightBrace
