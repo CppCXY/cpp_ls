@@ -364,6 +364,16 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "the elements of a table whose list brace the roles do not mark stay at the source column; the fix is to
+                derive the initializer depth from `classify_braces` (one predicate) and to indent list elements from the
+                line that opened the list"]
+    fn a_table_after_a_struct_body_indents_from_the_line_that_opened_it() {
+        let source = "static const struct\n{\n    unsigned char left;  /* left */\n    unsigned char right; /* right */\n} priority[] = {\n  /* ORDER OPR */\n        {10, 10},\n        {11, 11},\n};\n";
+        let expected = "static const struct\n{\n    unsigned char left;  /* left */\n    unsigned char right; /* right */\n} priority[] = {\n        /* ORDER OPR */\n        {10, 10},\n        {11, 11},\n};\n";
+        assert_eq!(format(source, &llvm()), expected);
+    }
+
+    #[test]
     fn the_line_structure_is_kept_and_the_indentation_is_the_layout_s() {
         // **The line breaks stay the input's; the column is now decided** (P0b): `IndentWidth: 2` puts the body at 2,
         // and the spacing rules still apply inside the line.
