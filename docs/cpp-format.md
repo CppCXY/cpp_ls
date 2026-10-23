@@ -933,3 +933,26 @@ gap idx=43 token="{" comments=1 last_own=Some(true) init=0
 ```
 
 在那之前，P0b/P1 能做的只剩 6 个文件（见 §二十七/§二十八），其中 3 个是 token 流差异（P3/P4 范围）。
+## 三十、P2 的第一步：`column_audit`（把"要断多少行"变成一个数字）
+
+`examples/column_audit.rs` 用**同一套样式**（`BasedOnStyle: LLVM, ColumnLimit: 80, IndentWidth: 4`）跑两边，
+把 P2 的工作量变成两个可复现的数字：
+
+```text
+语料 43 个文件（LuaParser + CodeFormat + Common）：
+  printed: 113 行超过 80（我们） vs 0（clang-format）
+  logical: 199 个语句打印后会超宽（我们） vs 193（clang-format）   ← 近似值
+```
+
+第一行就是 P2 的存在理由：在 `ColumnLimit > 0` 时，clang-format 会主动折断，而我们要么保留源码断行、要么写出超长行。
+第二行给出"断行决策的量级"：约 200 处语句需要参与 penalty 搜索（我们与 oracle 的 6 之差来自近似算法，
+不是已实现的断行）。
+
+**未实现的部分**（`docs/cpp-format.md` §十 P2）：
+
+```text
+1. UnwrappedLine 切分（逻辑行：`;`/`{`/`}`/控制语句头是边界）
+2. 每个逻辑行做 penalty 贪心断行（PenaltyExcessCharacter、PenaltyBreakBeforeFirstCallParameter、
+   PenaltyBreakAssignment、PenaltyBreakString、PenaltyBreakComment 都在 22.1.3 的表里）
+3. 断点交给现有 render（它已经能按列排版）；验收：上面 printed 从 113 → 0，且 ColumnLimit: 0 的 37/43 不回退
+```
