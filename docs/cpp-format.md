@@ -1024,3 +1024,23 @@ P3/P4：未动（include 排序、宏展开），3 个 skipped 文件正是它�
 也就是说：问题已经从"缩进算错"缩小到"render 的分支链对这几行没有进入缩进路径"。
 下一步只需在该链入口加一条调试（打印 gap.newlines / comments.len / index），一次就能定位。
 本轮时间不够，已把 layout/render 恢复成提交状态（37/43、56 tests 全绿、工作区干净）。
+## 三十四、goal 续跑 r2：fixture 逼近到"统一差 4 列"
+
+这轮把 `a_table_after_a_struct_body_indents_from_the_line_that_opened_it` 从"三处各不相同"逼到了
+**整表统一差 4 列**（注释 14 vs 8、两行 12 vs 8），说明机制已经对了，只剩一个偏移。被测到的因果链：
+
+```text
+① layout 里加"初始化列表栈"（Opens/OpensWithoutIndenting 压 None，初始化花括号压 Some(开列行层级)）——
+   classify_braces 现在把 `= {` 与"初始化列表中的 {` 都判成 Nothing（引入者是 Assign/ReturnKeyword，
+   或外层就是初始化列表），于是 rows 的 blocks() 给出 8（用 layout 调试打印确认：block=Some(8)）
+② render 侧两个坑都定位并单独验证过：
+   · 同一行"既写源码前缀又发 keep 个换行"会多一个空行 —— 把 own-line 注释的换行数置 0 后空行消失
+   · 注释行前缀要 trim 掉行尾空格，否则源码的 2 格会叠在计算列上
+③ 剩下的统一 +4：`line_level` 在"以 `}` 开头、后面还跟着 `priority[] = {`"的那一行被记成了 1 而不是 0，
+   于是开列行层级 = 1，元素缩进 = 1*4+8 = 12
+```
+
+也就是说，下一轮只需让"以闭括号开头的行"把它闭合后的层级作为该行的 line_level（现在取到了闭合前的值），
+fixture 就会转绿，然后才能验证 LuaDefine.h 是否整文件一致。
+
+本轮改动全部回退（工作区 37/43、56 tests 全绿），因为差一列时留着会造成"看起来更对"的假象。
