@@ -1550,3 +1550,24 @@ cpp_formatter --lib     70 passed + 3 ignored
 
 注意：`a_completion_sees_a_change_to_an_included_header` 在**并行跑整个 handshake 套件**时偶发失败、
 单独跑通过；本轮两次整套重跑都是 32 passed，判定为与本次改动无关的抖动（未修，记录在此）。
+## 五十五、尾注释规则的第三轮实验：**"孤立 → 最小值"被证否**（42 → 38）
+
+用真实 clang-format 做了两组实验，结论比之前更清楚：
+
+```text
+同一配置（SpacesBeforeTrailingComments: 0），同一形状，组列不同：
+  struct { unsigned char left;  … }  两行 → 注释列 = max(代码结尾) + **1**
+  enum   { A, … CCCC, … }            两行 → 注释列 = max(代码结尾) + **0**
+  int a;// / int bb;//               两行 → max + 0
+  int g(int);// / int h(int long_name);//  两行 → max + 0
+而且：把 struct 那两行的空格从 0/0、13/4、2/1 三种写法喂进去，输出**都变成** max+1 的同一结果。
+```
+
+也就是说 clang-format 的列不是 `max + N`，也不是"已对齐就保留"；它还有一层我没测出来的判据
+（可能与 `AlignTrailingComments.Kind` 与"列是否需要被 *推* 到某个位置"有关，LLVM 默认值是 `Leave`）。
+把"孤立注释 → 最小值"接进 render 后实测：**42 → 38**，稳定性 43 → 39 → 整体回退（`lone.rs` 一并删除）。
+
+**结论（A 的现状）**：42/43 是我们能稳定复现的最好结果；最后那个文件
+（`TK_GLOBAL,// global lua5.5`）的差异属于 clang-format 尾注释对齐的实现细节，
+在没有它的源码级真值的前提下，靠小样例反推已经三次失败（§四十四、§五十二、本节）。
+该项建议单独立项：以 clang-format 的 `WhitespaceManager::alignTrailingComments` 源码为准，做逐分支的实验矩阵。
