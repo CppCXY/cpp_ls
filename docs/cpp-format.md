@@ -2694,3 +2694,35 @@ int g() {
 
 顺带记录：`IndentPPDirectives: AfterHash` 在 22.1.3 上对这份输入**没有效果**（仍然第 0 列），
 所以我们按 None 的行为实现，配置文件里写 AfterHash 也不会改变结果——与本机 clang-format 一致。
+## 九十一、P4 第三件：`MacroBlockBegin` / `MacroBlockEnd`（Qt 那类成对宏）
+
+对照（22.1.3，`MacroBlockBegin: 'QT_BEGIN_NAMESPACE'` / `MacroBlockEnd: 'QT_END_NAMESPACE'`）：
+
+```text
+QT_BEGIN_NAMESPACE
+    class A {          ← 整体缩进一级
+        int x;
+    };
+QT_END_NAMESPACE
+```
+
+做法（`layout::apply_macro_blocks`）：在 blocks 算完之后遍历一次，**行首第一个 token 的文本**等于 begin → 之后
+整体 +`IndentWidth`；等于 end → 之前整体 −`IndentWidth`。与 clang-format **逐字节一致**。
+
+**实现边界（写在函数文档里）**：clang-format 把这两个选项当作**正则**；我们只做"行首 token 文本等于选项文本"，
+Qt 式的成对宏够用，正则不模拟。
+
+**实测**
+
+```text
+语料        43/43 · 稳定性 43/43 · 间距 19989/19989 · 88 tests
+样例集      spacing 38/38（100%）· stability 35/38（92.1%）
+```
+
+顺带试了"隐式字符串拼接对齐"（`const char *s = "a"` 换行接 `"b"`，clang-format 对齐到首个字面量的列）：
+第一版把语料打到 9/43（`#include` 行被带偏），加了"不在指令内"的守卫后语料回到 43/43，但第二个用例仍未对齐，
+而反复改这段代码时把 `render.rs` 改乱了两次——按"不划算就停"的原则整段回退，记在这里，下一轮若要再做，
+直接重写成一个小模块（像 `macros.rs` 那样）而不是继续在 render 里打补丁。
+
+**P4 目前覆盖**：`AlignEscapedNewlines`（Right/Left/DontAlign）· `IndentPPDirectives: None` · `MacroBlockBegin/End`。
+未覆盖：`#if` 分支的括号平衡（clang-format 解析所有分支产生的怪癖，见 §八十九）、正则形式的 MacroBlock 匹配。
