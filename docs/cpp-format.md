@@ -1908,3 +1908,44 @@ P2             一致率 17.9%（16/43 行数相同）· 超长行 49
 
 下一轮：按 `breaks_audit` 的逐 token 差异，挑**差异最集中的一类**（先统计 last-token/位置类型）扩候选集，
 一次只加一类，用"一致率上升且超长行不增"作为提交条件。
+## 六十八、断行差异的分类：**全部是 "extra"**——这是设计差异，不是缺陷
+
+给 `breaks_audit` 加了分类（按"我们行的起始 token 的前一个 token 类型" + 方向）：
+
+```text
+files: 43 · tokens: 23194 · 不同行 19042（17.9%）
+  5547  extra after Identifier        ← 我们断行、clang-format 不断
+  1825  extra after RightParen
+  1822  extra after LeftParen
+  1444  extra after Semicolon
+   865  extra after LeftBrace
+   856  extra after RightBrace
+   772  extra after Scope（::）
+   765  extra after Dot
+   660  extra after Comma
+   403  extra after ReturnKeyword
+```
+
+前 10 名**全是 `extra`**（没有一条 `missing`）。含义很直接：
+
+```text
+我们的格式化器保留源码的换行（这是 ColumnLimit 0 语料下的正确行为），
+而 clang-format 在 ColumnLimit 80 下会把能放下的行"合并"回去。
+所以 17.9% 这个数字度量的是"设计差异"，不是"我们少断了多少"。
+```
+
+据此又试了"能放下的逻辑行合并"（并修掉了漏算尾注释宽度的问题），实测仍是 **4.7% / 194 超长行** ——
+因为合并后的行宽还取决于 render 实际用的续行缩进，`breaks` 侧估不准；继续按这个方向做只会把两个指标都做坏。
+
+**结论（P2 的诚实定位）**
+
+```text
+· 一致率 17.9% 不能作为 P2 的目标函数（它主要由"保留 vs 重排"决定，而保留是语料配置要求的）
+· 真正可改善、且与用户价值一致的指标仍是**超长行数（49）**：只在必要时加断点
+· 要把 49 降下去，只能扩候选断点（实参中间、`?`/`:` 两侧、字符串内部、注释重排），
+  而这属于"给 breaker 更多位置"，不是"换谁重排"——三次实验（完全重排 1.5%/102、合并 4.7%/194、
+  只增断行 17.9%/49）都支持这一点
+```
+
+基线回退并保持：79 tests、43/43、一致性 17.9%（16/43 行数相同）、超长行 49。
+`breaks_audit` 的分类输出保留，它是后续挑候选断点的依据。

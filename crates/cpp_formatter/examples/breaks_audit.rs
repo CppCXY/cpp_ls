@@ -59,6 +59,7 @@ fn main() {
     }
     files.sort();
 
+    let mut categories: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
     let mut total_tokens = 0usize;
     let mut displaced = 0usize;
     let mut same_line_count = 0usize;
@@ -89,11 +90,22 @@ fn main() {
         }
         let our_lines = line_numbers(&our_tokens);
         let their_lines = line_numbers(&their_tokens);
-        for (mine, other) in our_lines.iter().zip(their_lines.iter()) {
+        for (index, (mine, other)) in our_lines.iter().zip(their_lines.iter()).enumerate() {
             total_tokens += 1;
-            if mine != other {
-                displaced += 1;
+            if mine == other {
+                continue;
             }
+            displaced += 1;
+            // **Where the disagreement comes from**: the kind of the token that starts our line and the kind before it,
+            // and whether clang-format broke *later* than us (a break we are missing) or *earlier* (one we added).
+            let direction = if other > mine { "missing" } else { "extra" };
+            let previous = if index == 0 {
+                "start".to_string()
+            } else {
+                format!("{:?}", our_tokens.tokens[index - 1].kind)
+            };
+            let key = format!("{direction:>7} after {previous}");
+            *categories.entry(key).or_insert(0) += 1;
         }
     }
 
@@ -105,6 +117,12 @@ fn main() {
     println!(
         "files: {counted} · tokens: {total_tokens} · on a different line: {displaced} ({agreement:.1}% agreement)"
     );
+    let mut top: Vec<(&String, &usize)> = categories.iter().collect();
+    top.sort_by(|left, right| right.1.cmp(left.1));
+    println!("the ten largest disagreements:");
+    for (key, count) in top.iter().take(10) {
+        println!("  {count:>6}  {key}");
+    }
     println!("files whose line count matches: {same_line_count} of {counted}");
     std::fs::remove_dir_all(&scratch).ok();
 }
