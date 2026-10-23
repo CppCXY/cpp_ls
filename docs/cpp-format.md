@@ -1280,3 +1280,16 @@ printed 超长行： 56 → **51**（ColumnLimit: 80，43 个文件；clang-form
 
 剩余 51 行里，`breaker` 统计显示 25 条属"单个 token 就超宽"（长字符串/长注释，需要 `BreakStringLiterals`
 与注释重排），其余是候选集仍缺的位置：`?`/`:` 两侧的精确处理、模板参数内部、字符串内部。
+## 四十四、尾注释"最小空格"规则：实测**不成立**，已回退
+
+`LuaTokenTypeDetail.h:31` 的唯一差异是 `TK_GLOBAL,// global lua5.5`（clang-format 0 空格）对我们的 1 空格。
+按语料配置 `SpacesBeforeTrailingComments: 0`，我实现了"孤立尾注释（前后行都没有尾注释）→ 用最小值 0"：
+
+```text
+结果：41 → **38 / 43**（5 个文件在 `other` 上出现新分歧）
+结论：这条规则在 clang-format 里不是"孤立即最小值"——大多数独立尾注释仍保持 1 空格以上，
+      0 只出现在它决定不对齐、且把最小值当作"直接拼接"的情形。
+      要复现它必须实现真正的分组/对齐模型（`AlignTrailingComments` 的 Kind 与组内列），成本与收益不成比例。
+```
+
+已回退，基线保持 **41 / 43**、64 tests 全绿。这条留给后续实现完整 `AlignTrailingComments` 时一起做。
