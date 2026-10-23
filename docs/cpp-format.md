@@ -630,3 +630,38 @@ which is exactly the -2 files.
    repository has decided not to keep (§十四, §十六).
 
 **State:** reverted to 30/43, 26 tests, working tree clean.
+## 十九、presets 重新生成：223 个键，结构体选项就位，以及 22.1.3 的 dump 是坏的
+
+`presets.rs` 最初是按 **15.0.1** 生成的。这一轮按 **19.1.7**（`PATH` 上的那份）重生成：
+
+```text
+188 → 223 个键
+结构体选项首次进入表里（15 的 dump 里它们是 bool）：
+  AlignTrailingComments.Kind / .OverEmptyLines / .AlignPPAndNotPP
+  AlignConsecutiveAssignments.{Enabled,AcrossEmptyLines,AcrossComments,AlignCompound,PadOperators,…}
+  SpacesInLineCommentPrefix.{Minimum,Maximum}
+```
+
+随之而来的两处必要改动：`SpacesInParentheses` 在 19 里**已不存在**（17 改名为 `SpacesInParens`，枚举，
+`Never` 即旧的 `false`）；结构体选项在 dump 里**没有自己的那一行**，所以 `Style::knows("BraceWrapping")` 原本是
+false、写 `BraceWrapping:` 加子键的文档会被拒绝——现在把"是某个已知键的前缀"也算已知。
+
+**为什么不用 22.1.3 的 dump 生成：它把值整体错位了一个键。**
+
+```text
+AlignAfterOpenBracket: true                （19 打印：Align）
+Cpp11BracedListStyle: AlignFirstComment    （这个值属于 SortIncludes）
+BinPackParameters: BinPack                 （这个值属于 BinPackArguments）
+ReflowComments: Always
+SortIncludes                              （22 里缺失）
+```
+
+所以 22.1.3 的 dump 不能决定默认值；输出比较仍然对 22.1.3（文档的 oracle），表来自 19.1.7，另加一张
+`CORRECTIONS` 处理"两者**行为**不同"的键——目前一条：`SpaceBeforeRangeBasedForLoopColon: false`（22 写
+`for (auto pattern: patterns)`，19 的默认写 `pattern : patterns`）。
+
+**实测，而且是一个尚未解释的退步**：整文件一致 **30/43 → 27/43**（indent 2、空行 2、other 9）。表结构现在是对的，
+但空白规则是按 15 的默认值校准的。下一步是逐个核对默认值变了的空白键（已接线规则会读的：
+`SpaceBeforeParens`、`SpaceBeforeCpp11BracedList`、`SpacesInAngles`、`SpacesInConditionalStatement`、
+`SpaceAroundPointerQualifiers`、`SpacesInSquareBrackets`），像找 `SpaceBeforeRangeBasedForLoopColon` 那样
+一次一个、用审计说话。这里记下的是数字本身：**更好的输入，暂时是更差的输出**。
