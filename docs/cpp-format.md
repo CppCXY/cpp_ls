@@ -2567,3 +2567,23 @@ OUT:        << ...
 
 `<<`（`LessLess`）不在 `starts_a_continuation` 的清单里，所以那一行按块级缩进；clang-format 按
 "块级 + ContinuationIndentWidth"（本样例 8+4/4+4 都吻合）。下一轮把它加进续行判定并量三个数。
+## 八十七、`<<` 续行缩进：用户例子**整份文件与 clang-format 逐字节一致**
+
+```text
+std::cout
+<< "Key: " << ...;     ← 我们按块级缩进
+```
+clang-format 把以 `<<` 开头的续行放在 **块缩进 + ContinuationIndentWidth**（函数体 0+8=8；循环体 4+8=12）。
+
+修法（`render::planned_indent`）：`<<`/`>>` 开头且另起一行时，`base = blocks[index].unwrap_or(statement_indent)`，
+返回 `base + ContinuationIndentWidth`。
+
+**实测**
+
+```text
+用户例子            60 行，与 clang-format **IDENTICAL**（此前 4 处 → 3 处 → 0 处）
+语料                43/43 · 稳定性 43/43 · 间距 19989/19989 · 84 tests
+样例集              spacing 28/28（100%）· stability 20/28
+```
+
+用户例子已固化为 `tests/snippets/29_shift_chain.cpp`（含主函数、注释块、`std::cout` 续行、`std::format` 等）。

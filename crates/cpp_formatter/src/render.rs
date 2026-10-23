@@ -641,6 +641,16 @@ fn planned_indent(
     // **A `requires` clause is a continuation of the declaration**, indented by `IndentWidth` (not
     // `ContinuationIndentWidth`): clang-format writes `    ~T()` then `        requires(...)` — measured on the
     // snippet corpus, where we put it at the block level instead.
+    // **A `<<` chain that continues on the next line** starts a continuation of the *block*, not of the previous
+    // line: clang-format writes the `<<` at the block`s indent plus `ContinuationIndentWidth` (measured on
+    // `std::cout` split over two lines: 8 in a function body, 12 inside a loop at 4).
+    if matches!(
+        stream.tokens[index].kind,
+        cpp_parser::CppTokenKind::LeftShift | cpp_parser::CppTokenKind::RightShift
+    ) {
+        let base = blocks[index].unwrap_or(statement_indent);
+        return Some((base + style.count(StyleOption::ContinuationIndentWidth), false));
+    }
     if stream.tokens[index].text == "requires" {
         return Some((statement_indent + style.count(StyleOption::IndentWidth), false));
     }
