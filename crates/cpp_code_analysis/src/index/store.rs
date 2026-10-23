@@ -439,6 +439,11 @@ impl<F: FileProvider> SummaryStore<F> {
     ) -> SummaryStore<F> {
         let root = root.into();
 
+        // **A new store starts with no contributions.** The table is process-wide now (it used to be a
+        // `thread_local`, which made it per-session by accident), so a second session — a workspace reload, or the
+        // next test in the same binary — would otherwise answer from a walk made under a different macro seed.
+        crate::index::walk_cache::clear();
+
         SummaryStore {
             cache: root.join(crate::CACHE_DIRECTORY),
             root,
