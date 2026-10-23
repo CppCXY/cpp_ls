@@ -82,6 +82,11 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
                     forced_breaks[at] = true;
                 }
             }
+            // **And a source line that is itself too long gets its own search**: the whole-statement search cannot see
+            // that this piece is already broken out and still overflows.
+            for at in crate::breaks::break_over_long_pieces(&stream, &roles, style, &line, &blocks) {
+                forced_breaks[at] = true;
+            }
         }
     }
 

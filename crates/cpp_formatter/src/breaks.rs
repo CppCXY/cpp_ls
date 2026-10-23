@@ -323,6 +323,41 @@ fn is_breakable(stream: &Stream<'_>, index: usize) -> bool {
     }
 }
 
+/// **The breaks an over-long *source line* needs.** The pass keeps the source's line breaks, so a piece that is
+/// already on its own line is only too long if that line is: running the search on such a piece adds breaks where they
+/// help, and leaves every other piece alone.
+pub fn break_over_long_pieces(
+    stream: &Stream<'_>,
+    roles: &crate::roles::Roles,
+    style: &crate::config::Style,
+    line: &Range<usize>,
+    blocks: &[Option<usize>],
+) -> Vec<usize> {
+    let limit = style.count(crate::options::StyleOption::ColumnLimit);
+    let mut breaks = Vec::new();
+    let mut start = line.start;
+    for index in line.start..line.end {
+        let ends_a_line = index + 1 == line.end || stream.gaps[index + 1].newlines > 0;
+        if !ends_a_line {
+            continue;
+        }
+        let column = blocks.get(start).copied().flatten().unwrap_or(0);
+        let mut width = column;
+        for inside in start..=index {
+            if inside > start {
+                width += crate::space::between(stream, inside, roles, style);
+            }
+            width += stream.tokens[inside].text.chars().count();
+        }
+        if width > limit
+            && let Some(found) = break_line(stream, roles, style, &(start..index + 1), column)
+        {
+            breaks.extend(found);
+        }
+        start = index + 1;
+    }
+    breaks
+}
 /// The fixed cost of breaking before the token at `index`.
 fn break_at(stream: &Stream<'_>, index: usize, penalties: &Penalties) -> i64 {
     use CppTokenKind::*;
