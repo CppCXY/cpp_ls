@@ -46,6 +46,10 @@ pub fn format(source: &str, style: &Style) -> String {
     // onto lines that *start with an identifier* and end with a comma, so "does this line start with `,`" misses them
     // (measured: `Start(token.Start),` went to the brace level instead of the list`s column).
     let mut in_ctor_init = false;
+    // **`AlignOperands: Align`**: the column of the first binary operator of the current statement, which is where a
+    // continuation line that starts with one belongs (measured: `std::cerr << …` puts the first `<<` at 14 and the
+    // next line's `<<` at 14 too).
+    let mut operand_operator: Option<usize> = None;
 
     // **A `#` line is copied, not spaced.** Its internal spacing is the preprocessor's (`#  include` is legal,
     // `#include <a/b.h>` is the usual), and `docs/cpp-format.md` leaves `#define` bodies to P4 — a P0 that re-spaced
@@ -64,7 +68,17 @@ pub fn format(source: &str, style: &Style) -> String {
             && gap.comments.is_empty()
             && gap.newlines > 0
             && index > 0
-            && let Some((indent, is_block_line)) = planned_indent(index, &stream, &blocks, &stack, statement_indent, style, in_ctor_init, ctor_column, init_depths[index] > 0)
+            && let Some((indent, is_block_line)) = {
+                // **A continuation line that starts with a binary operator aligns with the statement's first one**
+                // (`AlignOperands: Align`), and that column beats the block rules.
+                let aligned = operand_operator.filter(|_| {
+                    style.text(StyleOption::AlignOperands) == "Align"
+                        && layout::is_a_binary_operator(stream.tokens[index].kind)
+                });
+                aligned
+                    .map(|column| (column, false))
+                    .or_else(|| planned_indent(index, &stream, &blocks, &stack, statement_indent, style, in_ctor_init, ctor_column, init_depths[index] > 0))
+            }
         {
             // **A line that starts here**, with nothing in the gap but whitespace: the break count collapses to
             // `MaxEmptyLinesToKeep` and the column is the layout's. Everything else — a comment, a directive — is
@@ -123,6 +137,22 @@ pub fn format(source: &str, style: &Style) -> String {
                 Some(at) => columns.advance(0, &gap_text[at + 1..]),
                 None => columns.advance(column, gap_text),
             };
+        }
+
+        // **The first binary operator of a statement records its column**, and the end of a statement forgets it.
+        if operand_operator.is_none()
+            && stream.gaps[index].newlines == 0
+            && layout::is_a_binary_operator(stream.tokens[index].kind)
+        {
+            operand_operator = Some(column);
+        }
+        if matches!(
+            stream.tokens[index].kind,
+            cpp_parser::CppTokenKind::Semicolon
+                | cpp_parser::CppTokenKind::LeftBrace
+                | cpp_parser::CppTokenKind::RightBrace
+        ) {
+            operand_operator = None;
         }
 
         // **The bracket a token closes leaves the stack before the token is written**, and one it opens is pushed
@@ -230,6 +260,28 @@ mod tests {
         let source = "class T {\npublic:\n  T(const T &t)\n      : a(t.a),\n        b(t.b) {\n  }\n\nprivate:\n  int a;\n  int b;\n};\n";
         let formatted = format(source, &llvm());
         assert_eq!(formatted, source, "already formatted input must come back unchanged");
+    }
+
+    #[test]
+    #[ignore = "an own-line comment inside a braced initializer keeps the source column: the line-start path is blocked by the comment, and the condition meant to allow it does not fire"]
+    fn an_own_line_comment_inside_an_initializer_is_an_element() {
+        let source = "static int table[] = {\n  /* note */\n  1,\n  2,\n};\n";
+        let formatted = format(source, &llvm());
+        assert_eq!(formatted, "static int table[] = {\n        /* note */\n        1,\n        2,\n};\n", "elements line up, the comment with them");
+    }
+
+
+
+    #[test]
+    fn a_continuation_that_starts_with_an_operator_aligns_with_the_first_one() {
+        // LLVM's `IndentWidth` is 2, so the body sits at 2 and the statement's first `<<` at 12; the continuation's
+        // `<<` goes to the same column.
+        let source = "void f()\n{\n  std::cerr << util::format(\"x\", y)\n            << std::endl;\n}\n";
+        let formatted = format(source, &llvm());
+        assert_eq!(
+            formatted, source,
+            "the `<<` of the continuation lines up with the statement's first `<<`"
+        );
     }
 
     #[test]

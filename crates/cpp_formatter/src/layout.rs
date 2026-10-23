@@ -347,6 +347,17 @@ pub fn is_an_access_specifier(stream: &Stream<'_>, index: usize) -> bool {
         .is_some_and(|token| token.kind == Colon)
 }
 
+/// Does this token kind act as a binary operator, i.e. one a continuation line may start with?
+pub fn is_a_binary_operator(kind: cpp_parser::CppTokenKind) -> bool {
+    use cpp_parser::CppTokenKind::*;
+    matches!(
+        kind,
+        Plus | Minus | Star | Slash | Percent | Ampersand | Pipe | Caret | Less | Greater | LessEqual
+            | GreaterEqual | Equal | NotEqual | LogicalAnd | LogicalOr | Spaceship | Assign | LeftShift
+            | RightShift
+    )
+}
+
 /// A `goto` label: an identifier, a colon, and the statement after it on the next line.
 fn is_a_goto_label(stream: &Stream<'_>, index: usize) -> bool {
     use CppTokenKind::*;
