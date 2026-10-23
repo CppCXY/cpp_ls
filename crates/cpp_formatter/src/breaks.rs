@@ -241,6 +241,7 @@ pub fn break_line(
         return None;
     }
     let penalties = Penalties::of(style);
+    let continuation = style.count(crate::options::StyleOption::ContinuationIndentWidth);
 
     // **The candidate positions**: the first token of the line, plus every token a break may precede.
     let mut positions: Vec<usize> = vec![line.start];
@@ -276,7 +277,10 @@ pub fn break_line(
             if best[start] == i64::MAX {
                 continue;
             }
-            let piece = width(positions[start], positions[end], start_column);
+            // **A piece after the first one starts at the continuation column**, not at the statement`s: charging the
+            // statement column made the search believe pieces fitted when they did not.
+            let indent = if start == 0 { start_column } else { start_column + continuation };
+            let piece = width(positions[start], positions[end], indent);
             let excess = piece.saturating_sub(limit) as i64 * penalties.excess_character;
             let break_cost = if start == 0 { 0 } else { break_at(stream, positions[start], &penalties) };
             let cost = best[start] + excess + break_cost;

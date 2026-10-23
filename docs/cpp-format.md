@@ -1257,3 +1257,26 @@ CLI 与三个审计都改用 `format_file`（这正是之前 3 个文件"token �
 P2：         printed 56 / logical 105 —— 未回退
 剩余 2 个：LuaTokenTypeDetail.h:31（尾注释分组）、LuaLexer.cpp:478（三元 `?`，属 P2 断行期列决策）
 ```
+## 四十三、P2：候选集扩展 + 续行列计宽 → printed **56 → 51**
+
+两处改动（都在 `breaks.rs`，`ColumnLimit: 0` 时完全不生效）：
+
+```text
+① 候选断点补两类：
+   · 二元运算符**之后**（右操作数长时 clang-format 也断在那里；此前只能断在运算符之前）
+   · 括号后/逗号后（已有）
+② 动态规划的片段计宽：第 2 段起用"续行列"（statem　ent 列 + ContinuationIndentWidth）作为起点，
+   此前一律用语句列 → 搜索以为放得下、实际放不下，这正是"加了断行还是超长"的原因之一
+```
+
+**实测**
+
+```text
+printed 超长行： 56 → **51**（ColumnLimit: 80，43 个文件；clang-format 仍为 0）
+语料整文件一致： 41 / 43（未回退）
+间距一致：      19989 / 19989（100.00%，未回退）
+单测：          64 passed + 3 ignored
+```
+
+剩余 51 行里，`breaker` 统计显示 25 条属"单个 token 就超宽"（长字符串/长注释，需要 `BreakStringLiterals`
+与注释重排），其余是候选集仍缺的位置：`?`/`:` 两侧的精确处理、模板参数内部、字符串内部。
