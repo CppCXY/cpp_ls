@@ -336,7 +336,7 @@ fn opens_a_namespace(stream: &Stream<'_>, index: usize) -> bool {
 }
 
 /// `public:` / `private:` / `protected:` — clang-format places them at `AccessModifierOffset` from the class body.
-fn is_an_access_specifier(stream: &Stream<'_>, index: usize) -> bool {
+pub fn is_an_access_specifier(stream: &Stream<'_>, index: usize) -> bool {
     use CppTokenKind::*;
     matches!(
         stream.tokens[index].kind,

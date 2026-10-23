@@ -77,6 +77,28 @@ pub fn format(source: &str, style: &Style) -> String {
             {
                 keep = 1;
             }
+            // **`EmptyLineBeforeAccessModifier`**: `Always` wants a blank line, `LogicalBlock` wants one when the
+            // modifier starts a new group of declarations, `Never` wants none. Measured on the corpus: clang-format
+            // writes a blank line before a `private:` that follows declarations.
+            if layout::is_an_access_specifier(&stream, index) {
+                let policy = style.text(StyleOption::EmptyLineBeforeAccessModifier);
+                let after_declarations = matches!(
+                    stream.tokens[index - 1].kind,
+                    cpp_parser::CppTokenKind::Semicolon | cpp_parser::CppTokenKind::RightBrace
+                );
+                let at_block_start = stream.tokens[index - 1].kind == cpp_parser::CppTokenKind::LeftBrace;
+                if !at_block_start
+                    && (policy == "Always" || (policy == "LogicalBlock" && after_declarations))
+                {
+                    keep = keep.max(2);
+                }
+            }
+            // **`EmptyLineAfterAccessModifier: Never`**: nothing blank between the modifier and the next line.
+            if style.text(StyleOption::EmptyLineAfterAccessModifier) == "Never"
+                && stream.tokens[index - 1].kind == cpp_parser::CppTokenKind::Colon
+            {
+                keep = 1;
+            }
             for _ in 0..keep {
                 out.push_str(line_ending);
             }
