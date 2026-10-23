@@ -247,7 +247,7 @@ pub fn between(stream: &Stream<'_>, index: usize, roles: &Roles, style: &Style) 
         }
         // An initializer list: `= {`, `, {`, `({` read as a value; `T{` as a construction.
         return match previous.kind {
-            Assign | Comma | LeftParen | LeftBracket | ReturnKeyword | Equal => 1,
+            Assign | Comma | LeftParen | LeftBracket | ReturnKeyword | Equal | Colon => 1,
             _ => {
                 if style.flag(StyleOption::SpaceBeforeCpp11BracedList) {
                     1
@@ -347,6 +347,12 @@ pub fn between(stream: &Stream<'_>, index: usize, roles: &Roles, style: &Style) 
         return 0;
     }
 
+    // **`&& requires(...)`**: the constraint operator, not an rvalue-reference declarator — a constraint chain is
+    // `Iterable<T> && requires(T t) { ... }` and the space belongs there (measured on the concept snippet, where the
+    // parser tagged the `&&` as a declarator and the reference rule glued it to the keyword).
+    if previous.kind == CppTokenKind::LogicalAnd && current.text == "requires" {
+        return 1;
+    }
     // 5. `*` and `&`: a declarator follows `PointerAlignment`, an operator is a binary operator.
     //
     // **After a template argument list the mark is part of the declarator even when the tree does not say so**:
