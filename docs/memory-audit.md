@@ -38,6 +38,8 @@
   `TranslationUnit::heap_bytes()`、`LineIndex::heap_bytes()`、`walk_cache::accounting()`
 · `examples/memory_report.rs`：按阶段打印 **RSS / 峰值 RSS / MemoryReport**，并做两次"编辑同一批文件"
   的对照实验、drop 后复测、第二个 Session 复测
+· 服务器侧已经有一个把 cache report 写到 `%TEMP%\cpp_ls-memory.txt` 的钩子（`ed5b02f`）；
+  本次的 `MemoryReport` 是同一批表的**字节版**，两者应当合并成一份报告
 ```
 
 估算方法写在 `memory.rs` 的模块文档里：`size_of` + 结构自己拥有的堆字符串长度；**不算** HashMap 的空闲容量与
@@ -80,17 +82,36 @@ drop 掉 Session             42.3 MB          ← 全部还回去了：不是泄
 
 ```text
 10 000 个文件的工程：
-  summaries     46 KB/文件            ≈ 460 MB
-  walked_by_content  2 110 个 root × 0.58 MB ≈ 1.2 GB   （2110 是仓库文档里实测过的 root 数）
-  units         16 × 6.2 MB          ≈ 100 MB
-  vfs           文本量线性            ≈ 200 MB
-  definitions   ≈ 9 KB/文件           ≈ 90 MB
-  临时工作集 × 分配器水位              ≈ 1–2 GB
+  summaries          46 KB/文件                     ≈ 460 MB
+  walked_by_content  786 个不同闭包 × 0.58 MB       ≈ 456 MB
+                     （仓库自己的测量：2 110 个 root 去重后 786 个闭包；编辑会让它继续涨）
+  units              16 × 6.2 MB                   ≈ 100 MB
+  vfs                文本量线性                     ≈ 200 MB
+  definitions        ≈ 9 KB/文件                    ≈ 90 MB
+  临时工作集 × 分配器水位（实测 544 MB / 1 273 文件，按规模放大） ≈ 1–2 GB
   ─────────────────────────────────────────────
-  合计                                  3–4 GB，编辑一小时就到 5 GB
+  合计                                             ≈ 2.3–3.3 GB；编辑一小时到 5 GB
 ```
 
 ## 三、逐项审核
+
+### 3.0 已经落地的界（不要重复修）
+
+过去 20 小时里团队已经把一批"最大保留对象"按条数限住了，本次审核以它们为前提：
+
+```text
+68ba1c9  renderings / macro_environments → cache_lru::Cache（条数+字节双上限）
+         Surfaces → 512 条，满了整个清空（surface 重建只要一次扫描）
+         effects  → 按条数限
+         MAX_UNITS 64 → 16（条数）
+31115e8  cooked readings（每个打开文件的闭包）→ 有界，并在 drain 行里报告大小
+3f04dc7  include_searches → 8192 条
+ed5b02f  walk_cache::CONTRIBUTIONS → 512 条（进程级，仍然不属于任何 Session，见 S2）
+         + 服务器把 cache report 写到 `%TEMP%\cpp_ls-memory.txt`
+```
+
+所以一个"六张表全是无界的"的旧描述已经不准了。**剩下的无界项是 F1/F3/F4**，以及"按条数而不是按字节"
+这一条（F2）——一条单元 6.2 MB，16 条就是 99 MB，条数上限没有约束住字节。
 
 ### 3.1 无界表（按危害排序）
 
@@ -100,8 +121,8 @@ drop 掉 Session             42.3 MB          ← 全部还回去了：不是泄
 | F2 | `UnitTable`（`units`） | 16 **条** | 路径/内容 | 16 条 / 99 MB，单条 6.2 MB | 条数不变而内存翻倍，预算形同虚设 |
 | F3 | `MacroDefinitions::parsed` | **无** | `(PathBuf, offset)` | 34k 条 / 11.6 MB | 键里每条一份 PathBuf；随项目规模线性 |
 | F4 | `Vfs` | **无** | 路径 | 1 273 文件 / 25 MB | 读过的每个头文件都留着文本 + 行索引；大工程 = GB |
-| F5 | `effect::Surfaces::held` | **无** | 内容哈希 | 未计入 | **一次编辑一条**；长会话按编辑次数涨 |
-| F6 | `Session::effects` | **无** | effect 哈希 | 未计入 | 同上 |
+| F5 | `effect::Surfaces::held` | 512 条，满了**整个清空** | 内容哈希 | 未计入 | 已有界（`68ba1c9`），只按条数 |
+| F6 | `Session::effects` | 按条数（`68ba1c9`） | effect 哈希 | 未计入 | 已有界；每条约几十字节 |
 | F7 | `ProjectIndex::summaries` | 按工程 | 路径 | 59 MB / 1 273 | 不是泄漏，但"全部常驻"是设计选择（见 §四） |
 | F8 | `include::fuzzy::CACHE` | **无**（全局） | 根路径 | 未计入 | 进程级，跨会话不释放；每个根一份模糊索引 |
 | F9 | `walk_cache::CONTRIBUTIONS` | 512 条（全局） | 文件+内容 | 8 MB | 进程级；`clear()` 只在 revision 变时调用 |
@@ -156,7 +177,7 @@ P3 "单元表按条数限就够了"
 
 `MemoryReport` + `memory_report` example + 各表 accounting。**验收**：一条命令打印出上面那张表。
 
-### M1 给四张表加字节预算（不改变答案）
+### M1 给剩下的三张表加字节预算（不改变答案）
 
 ```text
 F1 walked_by_content → 改成 `cache_lru::Cache`（已有实现），上限 64 MB；
@@ -164,7 +185,8 @@ F1 walked_by_content → 改成 `cache_lru::Cache`（已有实现），上限 64
 F2 units             → 预算从"16 条"改成 `128 MB`，同时保留条数上限作兜底
 F3 definitions       → 预算 32 MB；键改 `(Arc<Path>, u32)`（路径共享，不再每条一份 PathBuf）
 F4 vfs               → 预算 64 MB 文本 + 索引；**打开的缓冲区钉住不淘汰**；淘汰按 LRU
-F5/F6 surfaces/effects → 预算 16 MB / 8 MB
+（F5/F6 已由 `68ba1c9` 按条数限住，值很小，不动）
+
 ```
 
 实现方式：`cache_lru::Cache` 已有 `(entries, weight)` 双上限和按 weight 淘汰，`renderings`/`macro_environments`
