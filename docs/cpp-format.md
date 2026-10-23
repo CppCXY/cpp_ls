@@ -1767,3 +1767,33 @@ LuaTokenTypeDetail.h:  "    TK_GLOBAL, // global lua5.5"  →  clang-format: "  
 **结论**：(A) 达到 43/43 需要把 22.1.3 的 `TokenAnnotator` 里 `SpacesRequiredBefore` 的全部分支
 （`TT_LineComment` / `BK_BracedInit` / 序列拆分 / `CreateReplacement`）逐条移植——这已不是"读一个函数"，
 而是移植一个子系统。六次实现尝试（39/38/39/39/39…）全部回退，42/43 与 43/43 稳定性保持。
+## 六十三、找到那条分支：`spaceRequiredBefore` 把空格从 0 抬到 1
+
+22.1.3 的 `TokenAnnotator.cpp:4208`：
+
+```cpp
+} else if (!Current->Finalized && Current->SpacesRequiredBefore == 0 &&
+           spaceRequiredBefore(Line, *Current)) {
+  Current->SpacesRequiredBefore = 1;
+}
+```
+
+也就是说行尾注释的空格 = `SpacesBeforeTrailingComments`（0），**除非** `spaceRequiredBefore` 认为需要空格
+（典型就是 `;` 之后）——而 `,` 之后不需要，所以 `TK_GLOBAL,//` 是 0 空格。
+
+定点实验（同一文件、同一配置）：
+
+```text
+    int solo;// x      → 0 空格
+    Next();  // y      → 对齐到 max(代码结尾)=13（补 2 格）
+    return a;// z      → 0 空格
+```
+
+**同缩进的组 = max(代码结尾) + 0、只向右补** —— 这正是 `alignTrailingComments` 的段列公式。
+而之前我测到的 `+1`（tc7）出现在"组内缩进深浅不一"的样例里，说明那种情况下段被拆开了（每段各自对齐）。
+
+下一步（下一轮）：把 `trailing::align` 改成
+① 段列 = max(代码结尾) + N，只向右；
+② 段在**缩进不同**处断开（同缩进才成段）；
+③ 只对"行尾注释所在行"改写。
+然后跑三个审计，期望 43/43。
