@@ -1167,3 +1167,28 @@ P2：              printed 56 / logical 105 / breaker 覆盖 80（ColumnLimit: 8
 
 已回退（37/43、56 tests 全绿）。这是第 5 次在这个用例上收敛失败，但它每次都在**缩小**：
 现在的未知量只剩"哪条入口条件拒绝这些行"和"基数取开列行"两个，且都有明确的定位方法。
+## 四十、37 → **38 / 43（88.37%）**：初始化列表的缩进基数与"多注释 gap"一起修好了
+
+三处改动，缺一不可（前两轮各自单独试都失败，这次一起上）：
+
+```text
+① classify_braces：`=`/`return`/`,`/`(`/`[` 之后的 `{` 与"列表内的 `{`"判为初始化列表
+   （roles 在 `} priority[] = {` 处漏标，之前列表根本没被识别）
+② render 的 in_initializer 分支：基数改为"开列那一行"的列
+   （原来是 statement_indent，被 struct 成员行的 4 污染；现在从 blocks 回溯到上一行首 token 取列）
+③ 多注释 gap 的两处修正：
+   · 行首注释自己带换行 → `breaks_to_emit = 0`（否则多一个空行）
+   · 源码前缀 trim 掉行尾缩进（否则源码的 2 格叠在计算列上）
+```
+
+**实测**（全部同一条命令可复核）
+
+```text
+整文件一致： 37 → **38 / 43（88.37%）**       ← 达到 goal 的 38 门槛
+间距一致：   99.51% → **100.00%**（18879 / 18879）
+单测：       56 → **58 passed + 3 ignored**（表 fixture 转正，另一个 ignore 也随之解除）
+P2（ColumnLimit 80）：printed 仍 56、logical 105、breaker 覆盖 80（未回退）
+```
+
+剩余 5 个文件：`LuaTokenTypeDetail.h`（尾注释分组）、`LuaLexer.cpp:478`（三元 `?` 对齐，属 clang-format 的
+断行期列决策）、以及 3 个 token 流不同的跳过项（include 排序 / 宏展开，P3/P4 范围）。

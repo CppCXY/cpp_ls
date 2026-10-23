@@ -265,9 +265,24 @@ fn classify_braces(
                             | CppTokenKind::LeftBrace
                             | CppTokenKind::RightBrace
                     );
-                let is_a_block = after_a_statement
-                    || roles.block_brace.contains(&token.start)
-                    || !roles.init_brace.contains(&token.start);
+                // **A brace after `=`, `return`, `,` or `(` opens an initializer**, and so does one inside an
+                // initializer list: `} priority[] = {` and the rows of a table are lists, not blocks. The roles alone
+                // miss them (the parser recovers there).
+                let introduced = index > 0
+                    && matches!(
+                        stream.tokens[index - 1].kind,
+                        CppTokenKind::Assign
+                            | CppTokenKind::ReturnKeyword
+                            | CppTokenKind::Comma
+                            | CppTokenKind::LeftParen
+                            | CppTokenKind::LeftBracket
+                    );
+                let inside_an_initializer = matches!(stack.last(), Some(Brace::Nothing));
+                let is_a_block = !introduced
+                    && !inside_an_initializer
+                    && (after_a_statement
+                        || roles.block_brace.contains(&token.start)
+                        || !roles.init_brace.contains(&token.start));
                 let brace = if !is_a_block {
                     Brace::Nothing
                 } else if !indent_case_blocks && opens_a_case_block(stream, index) {

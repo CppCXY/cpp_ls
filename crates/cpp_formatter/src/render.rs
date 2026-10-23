@@ -170,7 +170,16 @@ pub fn format(source: &str, style: &Style) -> String {
             {
                 keep = 1;
             }
-            for _ in 0..keep {
+            // **A comment that starts a line replaces the break**: its own prefix carries the newline, so emitting the
+            // breaks here as well was one blank line too many (measured on LuaDefine.h).
+            let breaks_to_emit = if gap.comments.last().is_some_and(|comment| comment.own_line)
+                && init_depths[index] > 0
+            {
+                0
+            } else {
+                keep
+            };
+            for _ in 0..breaks_to_emit {
                 out.push_str(line_ending);
             }
             // **A trailing comment of the previous line is written first, from the source**: it belongs to that line,
@@ -180,7 +189,10 @@ pub fn format(source: &str, style: &Style) -> String {
                 .last()
                 .filter(|comment| comment.own_line && init_depths[index] > 0);
             if let Some(comment) = comment_in_this_gap {
-                out.push_str(source.get(gap.start..comment.start).unwrap_or(""));
+                // The prefix keeps its breaks but not its trailing indentation, which the computed column replaces:
+                // keeping it stacked the source's two spaces onto the column (measured: 10 where 8 belongs).
+                let prefix = source.get(gap.start..comment.start).unwrap_or("");
+                out.push_str(prefix.trim_end_matches([' ', '\t']));
             }
             out.push_str(&" ".repeat(indent));
             column = indent;
@@ -386,13 +398,17 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "the elements of a table whose list brace the roles do not mark stay at the source column; the fix is to
-                derive the initializer depth from `classify_braces` (one predicate) and to indent list elements from the
-                line that opened the list"]
+    #[test]
     fn a_table_after_a_struct_body_indents_from_the_line_that_opened_it() {
+        // The corpus`s widths and `ColumnLimit: 0`: the members sit at 4, the table`s comment and rows at 8
+        // (measured against clang-format 22.1.3 on LuaDefine.h, which this shape is taken from).
+        let mut style = llvm();
+        style.set_from_text("IndentWidth", "4");
+        style.set_from_text("ContinuationIndentWidth", "8");
+        style.set_from_text("ColumnLimit", "0");
         let source = "static const struct\n{\n    unsigned char left;  /* left */\n    unsigned char right; /* right */\n} priority[] = {\n  /* ORDER OPR */\n        {10, 10},\n        {11, 11},\n};\n";
         let expected = "static const struct\n{\n    unsigned char left;  /* left */\n    unsigned char right; /* right */\n} priority[] = {\n        /* ORDER OPR */\n        {10, 10},\n        {11, 11},\n};\n";
-        assert_eq!(format(source, &llvm()), expected);
+        assert_eq!(format(source, &style), expected);
     }
 
     #[test]
@@ -474,10 +490,15 @@ fn planned_indent(
     // **Inside a braced initializer the block rules do not apply**: the element is a continuation, indented by
     // `ContinuationIndentWidth` from the declaration (measured: clang-format writes 8 for a table declared at 0).
     if in_initializer && first != cpp_parser::CppTokenKind::RightBrace {
-        return Some((
-            layout::continuation(stack, statement_indent, first, style),
-            false,
-        ));
+        // **The base is the line that opened the list**, not whatever block line came last: a struct body`s members
+        // leave `statement_indent` at their level (4), while the table that follows belongs at 0 + the continuation
+        // width (measured on LuaDefine.h: clang-format writes those rows and their comment at 8).
+        let base = (0..index)
+            .rev()
+            .find(|earlier| !stream.gaps[*earlier].newlines.eq(&0) && blocks[*earlier].is_some())
+            .and_then(|earlier| blocks[earlier])
+            .unwrap_or(statement_indent);
+        return Some((layout::continuation(stack, base, first, style), false));
     }
     if let Some(indent) = blocks[index] {
         return Some((indent, true));
