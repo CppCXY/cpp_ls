@@ -349,26 +349,36 @@ mod tests {
         assert_eq!(found[5], ("}".to_string(), Some(0)), "{found:?}");
     }
 
-    #[test]
-    fn debug_case_with_a_nested_block() {
-        let mut style = Style::default_style();
-        style.set_from_text("IndentWidth", "4");
-        style.set_from_text("IndentCaseLabels", "true");
-        let found = columns("void f()\n{\nswitch (x) {\ncase 1: {\nif (y) {\nreturn;\n}\nbreak;\n}\n}\n}\n", &style);
-        assert_eq!(found[7], ("break".to_string(), Some(12)), "{found:?}");
-    }
+
 
     #[test]
     fn a_switch_body_is_a_block_and_its_case_statements_are_one_deeper() {
+        // LLVM's `IndentCaseLabels` is false: the label sits at the **switch's** level and its statements at the body's.
         let found = columns("void f()\n{\nswitch (x) {\ncase 1:\nbreak;\n}\n}\n", &llvm());
         assert_eq!(found[2], ("switch".to_string(), Some(2)), "{found:?}");
-        assert_eq!(found[3], ("case".to_string(), Some(4)), "{found:?}");
-        assert_eq!(
-            found[4],
-            ("break".to_string(), Some(4)),
-            "Open item: clang-format puts this at 6 (one level under the label) and this pass does not yet"
+        assert_eq!(found[3], ("case".to_string(), Some(2)), "{found:?}");
+        assert_eq!(found[4], ("break".to_string(), Some(4)), "{found:?}");
+        assert_eq!(found[5], ("}".to_string(), Some(2)), "the switch`s own close: {found:?}");
+    }
+
+    #[test]
+    fn an_indented_case_label_puts_its_statements_one_level_deeper() {
+        // The corpus asks for `IndentCaseLabels: true`: label at the body's level, statements one deeper, and a block
+        // nested inside the case does not end that depth.
+        let mut style = Style::default_style();
+        style.set_from_text("IndentWidth", "4");
+        style.set_from_text("IndentCaseLabels", "true");
+        let found = columns(
+            "void f()\n{\nswitch (x) {\ncase 1: {\nif (y) {\nreturn;\n}\nbreak;\n}\n}\n}\n",
+            &style,
         );
-        assert_eq!(found[5], ("}".to_string(), Some(2)), "{found:?}");
+        assert_eq!(found[3], ("case".to_string(), Some(8)), "{found:?}");
+        assert_eq!(found[4], ("if".to_string(), Some(12)), "{found:?}");
+        assert_eq!(found[5], ("return".to_string(), Some(16)), "{found:?}");
+        assert_eq!(found[6], ("}".to_string(), Some(12)), "{found:?}");
+        assert_eq!(found[7], ("break".to_string(), Some(12)), "{found:?}");
+        assert_eq!(found[8], ("}".to_string(), Some(8)), "{found:?}");
+        assert_eq!(found[9], ("}".to_string(), Some(4)), "{found:?}");
     }
 
     #[test]
@@ -390,16 +400,7 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_braced_case_body_does_not_add_a_level() {
-        let mut style = Style::default_style();
-        style.set_from_text("IndentWidth", "4");
-        let found = columns("void f()\n{\nswitch (x) {\ncase 1: {\nreturn;\n}\nbreak;\n}\n}\n", &style);
-        assert_eq!(found[3], ("case".to_string(), Some(8)), "{found:?}");
-        // Open item: the braced body sits at the label's level here; clang-format puts it one deeper.
-        assert_eq!(found[4], ("return".to_string(), Some(8)), "{found:?}");
-        assert_eq!(found[6], ("break".to_string(), Some(8)), "{found:?}");
-    }
+
 
     fn a_multi_line_initializer_list_keeps_the_class_level() {
         let found = columns("class T {\npublic:\n  T(const T &t)\n      : a(t.a),\n        b(t.b) {\n  }\n\nprivate:\n  int a;\n};\n", &llvm());
