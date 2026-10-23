@@ -1571,3 +1571,29 @@ cpp_formatter --lib     70 passed + 3 ignored
 （`TK_GLOBAL,// global lua5.5`）的差异属于 clang-format 尾注释对齐的实现细节，
 在没有它的源码级真值的前提下，靠小样例反推已经三次失败（§四十四、§五十二、本节）。
 该项建议单独立项：以 clang-format 的 `WhitespaceManager::alignTrailingComments` 源码为准，做逐分支的实验矩阵。
+## 五十六、把尾注释的"列"变成语料测量表（新增 `examples/trailing_probe.rs`）
+
+前三次失败都是"从小样例推公式"。这轮改成**直接量语料**：先用 clang-format 把 43 个文件格式化到临时目录，
+再用 `examples/trailing_probe.rs` 统计每一个"行尾注释组"的实际列。
+
+```text
+groups: 48 · lines: 60
+delta（注释列 − 组内最宽代码结尾）的分布：
+  ')' 0×1 1×6 · ',' 0×8 1×26 · ';' 0×6 1×6 · '{' 0×2 · '}' 0×3 2×1 · 'e' 1×1
+```
+
+关键事实（比之前的猜测都更硬）：
+
+```text
+· 组内所有注释同列（这是确定的）
+· delta 多数是 **1**，不是 0 —— 尽管语料配置是 SpacesBeforeTrailingComments: 0
+· delta 0 的例子全部是**语句/命名空间级**：`Next();// Global`、`if (...)// optional step`、
+  `}// namespace detail`、`return TK_OR;// …`
+· delta 1 的例子是**声明块里的成员/枚举项**（LuaDefine.h 的 `unsigned char left;  /* … */`）
+```
+
+也就是说 clang-format 对"声明块内"的注释比语句多留一列。这条规律现在有语料支撑（48 组），
+但它需要"组所处的作用域是类/结构/枚举体"这个判断，属于格式化器目前不做的事——
+**实现前必须先把这个作用域判断加进 layout**，否则又是猜。
+
+本轮只提交测量工具与这张表，不改 render（42/43 保持）。
