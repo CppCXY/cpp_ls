@@ -562,3 +562,28 @@ break decisions are the aligner's (P1), not the indenter's.
 **State:** reverted again — `render.rs` and `lib.rs` are at the committed state, `layout.rs` is not in the tree, the
 audit is 30/43 and 26 tests pass. The next attempt should come **after** P1's aligner, not before it: the columns a
 continuation line needs are the columns the aligner produces.
+docs: the trailing-comment aligner, measured, and the two numbers that sent it back
+
+Built `align.rs` — a post-pass computing, for each trailing comment, the column its *run* agrees on: replay what the
+renderer is about to emit (the source's line breaks and indentation, `space::between`'s gaps), take the widest code
+end in a run of consecutive lines, add `SpacesBeforeTrailingComments`. Five tests; the whole-file audit says:
+
+```text
+no aligner                                      30 / 43
+runs of two or more aligned                     29 / 43
+every trailing comment (singletons too)         28 / 43
+```
+
+So it is not kept, and the reason is a measurement rather than a bug in the idea: the corpus's configuration has
+`SpacesBeforeTrailingComments: 0` and no `AlignTrailingComments` key (clang-format's default), and on the files where
+the aligner changed something it mostly changed the **wrong** thing — `TK_GLOBAL, // global` became `TK_GLOBAL,//` on
+one file while other files' one-space comments stayed as they were and are what clang-format produces. That is the
+signature of a simulation whose columns are not the emitted columns: `SpacesInLineCommentPrefix`, tabs, and CJK text
+all move a column, and this replay counts `chars`.
+
+**What the next attempt must do first**: make the column model one shared thing — display width (tabs to the next
+tab stop, East-Asian wide = 2, as `docs/cpp-format.md` §七 I6 requires), used by the aligner *and* by the indenter —
+because the indenter's continuation lines (18 of 27 remaining files) need exactly the same numbers. Two independent
+column models is how both attempts ended up worse than doing nothing.
+
+**State:** reverted; `align.rs` and `layout.rs` are not in the tree, the audit is 30/43, 26 tests pass.
