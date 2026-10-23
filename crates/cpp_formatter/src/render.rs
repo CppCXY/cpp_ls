@@ -11,15 +11,34 @@
 //! measures; a file formatted by this pass can never lose a comment or a token.
 
 use crate::config::Style;
+use crate::columns::Columns;
+use crate::options::StyleOption;
+use crate::layout;
 use crate::roles;
 use crate::space;
 use crate::tokens;
 
-/// Format `source`, keeping its line structure.
+/// Format `source`, keeping its line structure and deciding the indentation.
 pub fn format(source: &str, style: &Style) -> String {
     let stream = tokens::stream(source);
     let roles = roles::of(source);
+    let blocks = layout::blocks(&stream, &roles, style);
+    let columns = Columns::new(style);
+    let max_empty = style.count(StyleOption::MaxEmptyLinesToKeep);
+    let line_ending = tokens::line_ending(source);
     let mut out = String::with_capacity(source.len() + source.len() / 16);
+
+    // **The columns of what has been written**, which is what a continuation line needs: `AlignAfterOpenBracket`
+    // puts it under the first token after the open bracket, and that token's column was decided by the spacing rules
+    // a moment ago. `stack` holds one entry per open bracket; `statement_indent` is the column of the line the current
+    // statement started on.
+    let mut column = 0usize;
+    let mut stack: Vec<usize> = Vec::new();
+    let mut statement_indent = 0usize;
+    // **Where a constructor initializer list`s packed members line up**: clang-format packs them after the `:` of the
+    // first initializer, so a line starting with `,` continues at that column rather than at a fixed offset. Measured
+    // on `TokenNode`: the `:` line at 8 puts `Kind` at 10, and the next `Start(...)` is at 10 as well.
+    let mut ctor_column: Option<usize> = None;
 
     // **A `#` line is copied, not spaced.** Its internal spacing is the preprocessor's (`#  include` is legal,
     // `#include <a/b.h>` is the usual), and `docs/cpp-format.md` leaves `#define` bodies to P4 — a P0 that re-spaced
@@ -31,12 +50,76 @@ pub fn format(source: &str, style: &Style) -> String {
         let gap = &stream.gaps[index];
         let same_line = gap.newlines == 0 && gap.comments.is_empty() && !gap.at_end;
         if same_line && index > 0 && !in_directive {
-            out.push_str(&" ".repeat(space::between(&stream, index, &roles, style)));
+            let spaces = space::between(&stream, index, &roles, style);
+            out.push_str(&" ".repeat(spaces));
+            column += spaces;
+        } else if !in_directive
+            && gap.comments.is_empty()
+            && gap.newlines > 0
+            && index > 0
+            && let Some(indent) = blocks[index].or_else(|| {
+                // A line the block rules do not own: a continuation. Its column is the aligner's, computed here
+                // because the emitted columns are known here and nowhere earlier.
+                (!stack.is_empty() || layout::starts_a_continuation(&stream, index))
+                    .then(|| {
+                    let first = stream.tokens[index].kind;
+                    if first == cpp_parser::CppTokenKind::Comma
+                        && let Some(column) = ctor_column
+                    {
+                        return column;
+                    }
+                    layout::continuation(&stack, statement_indent, first, style)
+                })
+            })
+        {
+            // **A line that starts here**, with nothing in the gap but whitespace: the break count collapses to
+            // `MaxEmptyLinesToKeep` and the column is the layout's. Everything else — a comment, a directive — is
+            // still copied, which keeps this pass's blast radius to the lines it can decide.
+            for _ in 0..gap.newlines.min(max_empty + 1) {
+                out.push_str(line_ending);
+            }
+            out.push_str(&" ".repeat(indent));
+            column = indent;
+            if blocks[index].is_some() {
+                statement_indent = indent;
+            }
         } else {
             // Verbatim: the gap's own bytes (newlines, indentation, comments) are not ours to change in this pass.
-            out.push_str(source.get(gap.start..gap.end).unwrap_or(""));
+            let gap_text = source.get(gap.start..gap.end).unwrap_or("");
+            out.push_str(gap_text);
+            column = match gap_text.rfind('\n') {
+                Some(at) => columns.advance(0, &gap_text[at + 1..]),
+                None => columns.advance(column, gap_text),
+            };
         }
-        out.push_str(stream.tokens[index].text);
+
+        // **The bracket a token closes leaves the stack before the token is written**, and one it opens is pushed
+        // after — with its column filled in by the next token, if that token is on the same line.
+        if matches!(
+            stream.tokens[index].kind,
+            cpp_parser::CppTokenKind::RightParen | cpp_parser::CppTokenKind::RightBracket
+        ) {
+            stack.pop();
+        }
+        let text = stream.tokens[index].text;
+        if let Some(top) = stack.last_mut()
+            && *top == usize::MAX
+            && !matches!(
+                stream.tokens[index].kind,
+                cpp_parser::CppTokenKind::LeftParen | cpp_parser::CppTokenKind::LeftBracket
+            )
+        {
+            *top = column;
+        }
+        out.push_str(text);
+        column = columns.advance(column, text);
+        if matches!(
+            stream.tokens[index].kind,
+            cpp_parser::CppTokenKind::LeftParen | cpp_parser::CppTokenKind::LeftBracket
+        ) {
+            // `usize::MAX` = "the token after this bracket has not been written yet".
+            stack.push(usize::MAX);
+        }
 
         // A `#` that starts a line opens a directive; the first newline after it closes the directive.
         if stream.tokens[index].kind == cpp_parser::CppTokenKind::Hash
@@ -100,9 +183,11 @@ mod tests {
     }
 
     #[test]
-    fn the_line_structure_and_indentation_are_untouched() {
+    fn the_line_structure_is_kept_and_the_indentation_is_the_layout_s() {
+        // **The line breaks stay the input's; the column is now decided** (P0b): `IndentWidth: 2` puts the body at 2,
+        // and the spacing rules still apply inside the line.
         let source = "void f() {\n      int  x = 1;\n}\n";
-        assert_eq!(format(source, &llvm()), "void f() {\n      int x = 1;\n}\n");
+        assert_eq!(format(source, &llvm()), "void f() {\n  int x = 1;\n}\n");
     }
 
     #[test]

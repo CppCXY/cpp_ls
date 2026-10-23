@@ -15,9 +15,11 @@
 //! sits. Until then [`format`] keeps the input's line structure, which makes the tool safe to run on a file and
 //! lets the spacing decisions be audited against clang-format on their own (`examples/spacing_audit.rs`).
 
+pub mod columns;
 pub mod config;
 pub mod presets;
 pub mod render;
+pub mod layout;
 pub mod options;
 pub mod roles;
 pub mod space;
