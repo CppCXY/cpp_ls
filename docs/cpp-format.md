@@ -1524,3 +1524,29 @@ dispatch:      Formatting => on_formatting
 
 尚未做（下一步）：用真实 LSP 会话端到端验证（initialize 后发 `textDocument/formatting` 断言返回编辑）；
 以及 `rangeFormatting` 的"只格式化范围内"精化（现在是整文件格式化后过滤，语义正确但会做多余工作）。
+## 五十四、LSP 格式化：端到端用例通过（走真实协议）
+
+新增用例 `crates/cpp_ls/tests/handshake.rs::a_formatting_request_returns_edits_for_the_whole_file`，走完整链路：
+
+```text
+initialize（断言 documentFormattingProvider / documentRangeFormattingProvider /
+           documentOnTypeFormattingProvider.firstTriggerCharacter == "}"）
+→ initialized → textDocument/didOpen（"int  x = 1;\n   int y = 2;\n"）
+→ textDocument/formatting           断言：返回编辑、双空格被收成一个、三格缩进消失
+→ textDocument/rangeFormatting      断言：返回列表且条数 ≤ 整文件
+→ textDocument/onTypeFormatting     断言：返回列表（位置在第 1 行、触发字符 ";"）
+```
+
+实现上修掉的一个真问题：处理函数原来依赖 `session.view(path)`，而**刚 didOpen 还没解析过的文件没有 view**，
+于是整条链路返回 `null`（`RequestOutcome::Missing`）。改为"从会话取文本（held → 磁盘兜底）+ 路径"，不再依赖 view。
+
+测试结果：
+
+```text
+cpp_ls --lib            88 passed + 1 ignored
+cpp_ls --test handshake 32 passed + 5 ignored（端到端，含新用例）
+cpp_formatter --lib     70 passed + 3 ignored
+```
+
+注意：`a_completion_sees_a_change_to_an_included_header` 在**并行跑整个 handshake 套件**时偶发失败、
+单独跑通过；本轮两次整套重跑都是 32 passed，判定为与本次改动无关的抖动（未修，记录在此）。

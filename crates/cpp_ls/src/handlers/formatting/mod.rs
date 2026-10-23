@@ -82,11 +82,12 @@ async fn format_request(
 
     snapshot_query(context.analysis(), cancel_token, move |session| {
         let path = uri_to_file_path(&uri)?;
-        let view = session.view(&path)?;
-        let held = session.files().held(&view.path)?;
-        let style = style_for(&view.path);
-        let formatted = cpp_formatter::format_file(&view.path, &held.text, &style);
-        let edits = edits_between(&held.text, &formatted);
+        // **No `session.view` here**: formatting needs the text and the path, not the file`s index entry — and a
+        // view is exactly what a file that was opened but never parsed does not have yet.
+        let text = read_text(session, &path)?;
+        let style = style_for(&path);
+        let formatted = cpp_formatter::format_file(&path, &text, &style);
+        let edits = edits_between(&text, &formatted);
         let edits: Vec<TextEdit> = match only {
             Some(range) => edits.into_iter().filter(|edit| touches(edit, range)).collect(),
             None => edits,
@@ -132,6 +133,17 @@ pub fn edits_between(old: &str, formatted: &str) -> Vec<TextEdit> {
         },
         new_text: new_middle,
     }]
+}
+/// **The text of a file as the session has it**: the held copy when it has read one, the file on disk otherwise.
+///
+/// `held` is what a formatting request usually finds (the buffer was opened and the analysis read it); the disk read is
+/// the fallback for a file that is open but not yet read, which is the state a client that formats right after
+/// `didOpen` can put the server in.
+fn read_text(session: &cpp_code_analysis::Session<cpp_code_analysis::DiskFiles>, path: &Path) -> Option<String> {
+    if let Some(held) = session.files().held(path) {
+        return Some(held.text.to_string());
+    }
+    std::fs::read_to_string(path).ok()
 }
 fn touches(edit: &TextEdit, range: Range) -> bool {
     edit.range.start.line <= range.end.line && range.start.line <= edit.range.end.line

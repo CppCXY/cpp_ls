@@ -419,6 +419,111 @@ fn a_client_can_open_a_file_and_get_diagnostics_a_definition_and_a_hover() {
 /// (`Session::project_config`). Hover is the setting with an observable answer: with `hover.enable = false` the
 /// same request that answers with a declaration in the test above answers `null`, and nothing else changes.
 #[test]
+fn a_formatting_request_returns_edits_for_the_whole_file() {
+    let project = Project::new("formatting");
+    // The file the server must be able to format: two spaces where one belongs, and a line indented with three.
+    project.write("main.cpp", "int  x = 1;\n   int y = 2;\n");
+
+    let mut server = Server::start(project.root());
+    let main_uri = uri_of(&project.root().join("main.cpp"));
+
+    let initialized = server.request(
+        1,
+        "initialize",
+        json!({
+            "processId": std::process::id(),
+            "rootUri": uri_of(project.root()),
+            "capabilities": { "textDocument": { "formatting": { "dynamicRegistration": false } } },
+        }),
+    );
+    let capabilities = &initialized["result"]["capabilities"];
+    assert_eq!(
+        capabilities["documentFormattingProvider"],
+        json!(true),
+        "the server advertises whole-file formatting: {capabilities}"
+    );
+    assert_eq!(capabilities["documentRangeFormattingProvider"], json!(true));
+    assert_eq!(
+        capabilities["documentOnTypeFormattingProvider"]["firstTriggerCharacter"],
+        json!("}"),
+        "typing a closing brace is the trigger that re-indents: {capabilities}"
+    );
+
+    server.notify("initialized", json!({}));
+    server.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": {
+                "uri": main_uri,
+                "languageId": "cpp",
+                "version": 1,
+                "text": "int  x = 1;\n   int y = 2;\n",
+            }
+        }),
+    );
+
+    let response = server.request(
+        2,
+        "textDocument/formatting",
+        json!({
+            "textDocument": { "uri": main_uri },
+            "options": { "tabSize": 4, "insertSpaces": true },
+        }),
+    );
+
+    let edits = response["result"]
+        .as_array()
+        .unwrap_or_else(|| panic!("edits were expected, got {response}"));
+    assert!(!edits.is_empty(), "the file is not formatted, so there is work: {response}");
+    let text = edits
+        .iter()
+        .filter_map(|edit| edit["newText"].as_str())
+        .collect::<String>();
+    assert!(
+        text.contains("int x = 1;"),
+        "the double space between `int` and `x` is closed up: {response}"
+    );
+    assert!(
+        !text.contains("   int y"),
+        "and the three spaces before `int y` are gone: {response}"
+    );
+
+    // --- the same file, a range that covers only the first line ------------------------------------
+    let response = server.request(
+        3,
+        "textDocument/rangeFormatting",
+        json!({
+            "textDocument": { "uri": main_uri },
+            "range": { "start": { "line": 0, "character": 0 }, "end": { "line": 0, "character": 5 } },
+            "options": { "tabSize": 4, "insertSpaces": true },
+        }),
+    );
+    let ranged = response["result"]
+        .as_array()
+        .unwrap_or_else(|| panic!("a range answer is a list, possibly empty: {response}"));
+    assert!(
+        ranged.len() <= edits.len(),
+        "a range never returns more than the whole file did: {response}"
+    );
+
+    // --- on-type: the line the user is typing on ----------------------------------------------
+    let response = server.request(
+        4,
+        "textDocument/onTypeFormatting",
+        json!({
+            "textDocument": { "uri": main_uri },
+            "position": { "line": 1, "character": 12 },
+            "ch": ";",
+            "options": { "tabSize": 4, "insertSpaces": true },
+        }),
+    );
+    assert!(
+        response["result"].is_array(),
+        "on-type formatting answers with a list: {response}"
+    );
+}
+
+#[test]
 fn a_project_configuration_reaches_the_servers_behaviour() {
     let project = Project::new("configured");
     project.write("widget.h", WIDGET_H);
