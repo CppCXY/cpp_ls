@@ -2906,3 +2906,34 @@ cpp_ls             lib 87 passed + 1 ignored · handshake 32 passed
 按你的要求**没有做内存测量**：这次只到"读代码 + 改 + 编译/单测通过"为止。下一步（需要你点头再动）：
 把 `ProjectIndex` / `SummaryStore` 的常驻结构也过一遍（`include_searches` 也是无界 Map，只是键很小），
 以及确认 `UnitDefinitions` 是否值得在单位淘汰时真正释放。
+### 补记：三处收尾
+
+**1. `include_searches` 也加了上限**（`MAX_INCLUDE_SEARCHES = 8192`，满了清空）。键很小、答案是"一次目录探测"，
+清空的代价可以忽略；项目带 vendored 树时这个表确实会一直长。
+
+**2. 让服务器的日志说出内存去哪了。**
+
+`Session::cache_sizes()` 早就有——**但服务器从来没调用过**。现在 `index slice` 的写锁窗口里，队列一清空就打一行：
+
+```text
+index drained: cache 3 rendering(s) (12 288 KB), 16 translation unit(s), 5 231 summar(ies), 812 004 fact(s), 61 233 macro(s)
+```
+
+- `rendering(s)`/`KB`：渲染缓存（现在上限 8 条 / 64 MB）
+- `translation unit(s)`：闭包时间线（上限 16）
+- `summar(ies)`/`fact(s)`/`macro(s)`：索引本身，**这是唯一"应该大"的一项**
+
+下次启动到 5 GB 时，这一行会直接指出是渲染缓存、时间线还是索引在涨——不需要 profiler。
+
+**3. 两个"怀疑项"的结论（查过，不改）**
+
+```text
+· UnitDefinitions 不会泄漏：它挂在 TranslationUnit 的 OnceLock 上，单位被淘汰时一起释放；
+  definitions_cached() 只把 Arc 借给调用方，没有谁长期持有。
+· renderings 的键（路径 + 内容哈希）不再值得改：缓存已经是 8 条 / 64 MB 的 LRU，
+  击键产生的新条目会立刻把旧条目顶掉；改成"路径 + 脏标记"会引入"头文件变了但包含者文本没变"
+  这类失效问题，收益为零、风险不为零。
+```
+
+**验证**：`cpp_code_analysis` 676+63+36+… 全绿，`cpp_ls` lib 87 + handshake 32，工作区 `--all-targets` 零警告
+（顺手删掉了 `option_matrix` 里那个已经用不上的常量）。

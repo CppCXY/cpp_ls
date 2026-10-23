@@ -383,6 +383,22 @@ async fn index_in_background(context: ServerContextSnapshot) {
                     let claimed = session.claim_cooking(COOK_A_SLICE);
 
                     let pending_now = session.pending_work();
+                    // **Where the memory is, at the one moment somebody looks**: when the queue drains, the
+                    // session reports what it is holding. These numbers were already collectable — `Session::cache_sizes`
+                    // existed and no caller used it — and a run that reports 5 GB without them says only "it is big".
+                    let sizes = session.cache_sizes();
+                    if pending_now == 0 && taken > 0 {
+                        log::info!(
+                            "index drained: cache {} rendering(s) ({} KB), {} translation unit(s), {} summar(ies), \\
+                             {} fact(s), {} macro(s)",
+                            sizes.renderings,
+                            sizes.rendering_bytes / 1024,
+                            sizes.units,
+                            sizes.summaries,
+                            sizes.facts,
+                            sizes.macros
+                        );
+                    }
                     if taken > 0 || prepared_count > 0 || !drain.is_empty() || !claimed.is_empty() {
                         // **`info!`, not `debug!`.** The budget warning above names the label but not the work, and
                         // the work is what a reader has to change: on a real project the log showed

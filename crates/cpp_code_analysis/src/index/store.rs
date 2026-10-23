@@ -126,10 +126,17 @@ pub struct SummaryStore<F: FileProvider = DiskFiles> {
     /// The key is the question, not the file: `(form, is_next, spelling, directory)`. A quoted include is relative to
     /// the including file's directory and so keeps that in the key; an angled one is not, and gives the key an empty
     /// directory, because `<vector>` asked from four hundred headers is one search.
+    ///
+    /// **Bounded** ([`MAX_INCLUDE_SEARCHES`]): a project with a vendored tree asks a new question for every directory
+    /// it searches, and the answer is one directory probe — cheap enough that the table is cleared rather than
+    /// evicted when it fills.
     include_searches: std::sync::Mutex<
         std::collections::HashMap<(IncludeForm, bool, Box<str>, PathBuf), Option<PathBuf>>,
     >,
 }
+
+/// **How many include questions are remembered** — the cache inside [`SummaryStore`], cleared when it fills.
+const MAX_INCLUDE_SEARCHES: usize = 8192;
 
 /// **The second pass, planned but not applied** — what [`SummaryStore::prepare_the_re_read`] worked out.
 ///
@@ -1855,6 +1862,9 @@ impl<F: FileProvider> SummaryStore<F> {
             .map(|found| found.path.clone());
 
         if let Ok(mut searches) = self.include_searches.lock() {
+            if searches.len() >= MAX_INCLUDE_SEARCHES {
+                searches.clear();
+            }
             searches.insert(key, resolved.clone());
         }
 
