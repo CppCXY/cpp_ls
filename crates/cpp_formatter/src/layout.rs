@@ -76,7 +76,7 @@ pub fn blocks(stream: &Stream<'_>, roles: &Roles, style: &Style) -> Vec<Option<u
     let mut base: isize = 0;
     let mut case_extra: isize = 0;
     // One entry per open brace: the pair to restore, and the level of the line that opened it (what its `}` sits at).
-    let mut open: Vec<(isize, isize, isize)> = Vec::new();
+    let mut open: Vec<(isize, isize, isize, isize)> = Vec::new();
     // The level of the line currently being written, which is what a brace opened on that line closes back to.
     let mut line_level: isize = 0;
     let mut paren_depth: isize = 0;
@@ -88,7 +88,7 @@ pub fn blocks(stream: &Stream<'_>, roles: &Roles, style: &Style) -> Vec<Option<u
         let level = base + case_extra;
         let closing_level = match brace {
             Brace::Closes | Brace::ClosesWithoutIndenting => {
-                open.last().map(|(_, _, opener)| *opener)
+                open.last().map(|(_, _, opener, _)| *opener)
             }
             _ => None,
         };
@@ -150,17 +150,22 @@ pub fn blocks(stream: &Stream<'_>, roles: &Roles, style: &Style) -> Vec<Option<u
 
         match brace {
             Brace::Opens => {
-                open.push((base, case_extra, line_level));
+                open.push((base, case_extra, line_level, paren_depth));
                 base = base + case_extra + 1;
                 case_extra = 0;
+                // **A brace ends the bracket context.** A lambda body opened inside `f(` is block-indented, not
+                // aligned to the bracket (measured: the lambda's body came out at the call's column, not a level in).
+                paren_depth = 0;
             }
             Brace::OpensWithoutIndenting => {
-                open.push((base, case_extra, line_level));
+                open.push((base, case_extra, line_level, paren_depth));
+                paren_depth = 0;
             }
             Brace::Closes | Brace::ClosesWithoutIndenting => {
-                if let Some((previous_base, previous_case, _)) = open.pop() {
+                if let Some((previous_base, previous_case, _, previous_parens)) = open.pop() {
                     base = previous_base;
                     case_extra = previous_case;
+                    paren_depth = previous_parens;
                 }
             }
             Brace::Nothing => {}
