@@ -140,9 +140,15 @@ pub fn between(stream: &Stream<'_>, index: usize, roles: &Roles, style: &Style) 
         };
     }
     if previous.kind == Ellipsis {
-        return 0;
+        // **Only a template parameter list keeps the space**: `typename... Args` is spaced, `Args &&...args` and
+        // `f(int...args)` are not. The keyword before the ellipsis is what tells them apart.
+        let after_a_pack_declaration = index >= 2
+            && matches!(
+                stream.tokens[index - 2].kind,
+                CppTokenKind::TypenameKeyword | CppTokenKind::ClassKeyword
+            );
+        return usize::from(after_a_pack_declaration);
     }
-
     // 2. Template angle brackets: `vector<int>`, `map<int, string>` — no space on either side, and the comma inside
     //    still gets one after it (handled above). The gap *after* a closing `>` is **not** glued (`vector<int> v`):
     //    only a `>` as the current token, or a `<` as the previous one, belongs to the brackets.
@@ -667,6 +673,9 @@ fn is_prefix_operator(stream: &Stream<'_>, index: usize, roles: &Roles) -> bool 
             | Pipe
             | Caret
             | Tilde
+            // **A compound assignment before a unary operator**: `total += *it`, `n -= -1`. Measured on a
+            // statement snippet, where the dereference came out as `+= * it`.
+            | PlusAssign | MinusAssign | StarAssign | SlashAssign | PercentAssign
     )
 }
 
