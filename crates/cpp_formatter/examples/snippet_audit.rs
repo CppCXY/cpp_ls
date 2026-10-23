@@ -42,8 +42,13 @@ fn main() {
         .unwrap_or_else(|error| panic!("{}: {error}", directory.display()))
         .filter_map(|entry| entry.ok().map(|entry| entry.path()))
         .filter(|path| {
-            path.extension()
-                .is_some_and(|extension| extension == "cpp" || extension == "h")
+            // The captured outputs (`*.expected.cpp`) are the Rust gate`s business (`tests/snippets.rs`), not this
+            // tool`s: comparing them with clang-format again would only report the line-break design choice.
+            let name = path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+            if name.ends_with(".expected.cpp") {
+                return false;
+            }
+            path.extension().is_some_and(|extension| extension == "cpp" || extension == "h")
         })
         .collect();
     files.sort();

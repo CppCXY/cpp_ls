@@ -2726,3 +2726,48 @@ Qt 式的成对宏够用，正则不模拟。
 
 **P4 目前覆盖**：`AlignEscapedNewlines`（Right/Left/DontAlign）· `IndentPPDirectives: None` · `MacroBlockBegin/End`。
 未覆盖：`#if` 分支的括号平衡（clang-format 解析所有分支产生的怪癖，见 §八十九）、正则形式的 MacroBlock 匹配。
+## 九十二、测试内化：`tests/snippets.rs` + 44 份 golden，不再依赖 clang-format
+
+按"用 Rust 测试系统锁住效果"的要求，样例集变成了**纯 Rust 门禁**：
+
+```text
+tests/snippets/NN_name.cpp            输入（44 份，已统一为 LF）
+tests/snippets/NN_name.expected.cpp   本格式化的输出（golden，捕获自通过审计的版本）
+cargo test -p cpp_formatter --test snippets
+```
+
+两个断言，逐个文件：
+
+```text
+format(input)    == expected    未格式化输入的输出不会漂移
+format(expected) == expected    输出是固定点（再跑一遍不变）—— 用户真正会感觉到的性质
+```
+
+`examples/snippet_audit.rs` 保留为**开发期差分工具**（它需要 clang-format），并已跳过 `*.expected.cpp`；
+测试门禁本身不再调用 clang-format。
+
+### 顺带：LF 统一后 `layout` 指标变得可读
+
+样例输入原来由 PowerShell 写成 CRLF，导致"逐字节比较"永远不同；统一成 LF 后：
+
+```text
+layout     15 / 44 与 clang-format **逐字节一致**（34.1%）   ← 之前恒为 0，是口径噪声
+stability  40 / 44（90.9%）
+spacing    44 / 44（100%）
+语料       43 / 43 · 稳定性 43 / 43
+测试       cpp_formatter lib 88 passed + 2 ignored · snippets 2 passed
+```
+
+### 本轮新增的 6 类样例（并修掉它们抓到的问题）
+
+```text
+39_includes.cpp         #include 分组（引号/尖括号/本文件）
+40_extern_c.cpp         extern "C" 守卫
+41_await_chain.cpp      co_await / co_return 链
+42_decltype_auto.cpp    decltype(auto) 返回、尾置类型
+43_spaceship.cpp        operator<=> 与默认比较
+44_constexpr_if.cpp     if constexpr
+
+抓到并修好：`sizeof(int) == 4` 被当成 cast 粘住 `==`
+  → cast 规则加"后面不是二元运算符"的守卫（语料 43/43、spacing 44/44 保持）
+```
