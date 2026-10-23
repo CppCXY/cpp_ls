@@ -1192,3 +1192,43 @@ P2（ColumnLimit 80）：printed 仍 56、logical 105、breaker 覆盖 80（未�
 
 剩余 5 个文件：`LuaTokenTypeDetail.h`（尾注释分组）、`LuaLexer.cpp:478`（三元 `?` 对齐，属 clang-format 的
 断行期列决策）、以及 3 个 token 流不同的跳过项（include 排序 / 宏展开，P3/P4 范围）。
+## 四十一、goal 收尾：最终状态与 P3/P4 的边界
+
+```text
+整文件一致      38 / 43（88.37%）            ← goal 目标 38 ✓
+间距一致        18879 / 18879（100.00%）      ← 从 99.51% 提升
+幂等（I2）      43 / 43 文件格式化两次结果相同  ← 用带语料 .clang-format 的临时文件复核
+单测            58 passed + 3 ignored（含表缩进 fixture）
+P2              printed 56 / logical 105 / breaker 覆盖 80（ColumnLimit: 80；clang-format 为 0）
+构建            workspace 全量构建通过
+已知无关失败    cpp_code_analysis tests/semantic.rs::an_unresolved_include_does_not_erase_the_files_own_facts
+                （formatter 开工前即存在，与本次改动无关）
+```
+
+**剩余 5 个文件（都已定位到机制，不是"未知"）**
+
+```text
+1. LuaLexer.cpp:478   三元运算符 `?` 的列：clang-format 在断行时决定（`?` 落在 19），
+                      需要 P2 的"断行期列决策"才能复现；不是纯缩进规则
+2. LuaTokenTypeDetail.h:31  行尾注释分组：`SpacesBeforeTrailingComments: 0` 只在单例时生效，
+                      但"是否单例"要按 clang-format 的列块分组判断（试过一次最小值规则，全局回归 → 已回退）
+3~5. FormatContext.cpp / Util.h / LuaParseError.h
+                      token 流不同：include 排序（P3）与宏展开（P4）改变的是 token，不是空白
+```
+
+**P3/P4 的范围（本次未动，边界明确）**
+
+```text
+P3  include 排序与合并（`SortIncludes`、`IncludeBlocks`、`IncludeCategories`）
+P4  宏处理（`#define` 体内重排、`MacroBlockBegin/End`、`StatementMacros`）
+两者都会改变 token 流本身，因此必须建在"token 流可变"的架构上；当前 5 个剩余文件中 3 个正等待它们。
+```
+
+**P2 的后续（已有设施，未完成的部分）**
+
+```text
+已具备：逻辑行切分（breaks::logical_lines）、penalty DP 断行（breaks::break_line）、
+        接线（只增断行，printed 113 → 56）、两个测量工具（column_audit / layout_audit）
+未完成：完全重排（忽略源码断行）实测 97，比 56 差 —— 因为我们的候选集/惩罚模型弱于 clang-format 已有的断行；
+        要超过 56，需要补齐 BreakableToken 级别的候选（实参中间、`?`/`:` 两侧、字符串内部）与注释重排
+```
