@@ -587,3 +587,46 @@ because the indenter's continuation lines (18 of 27 remaining files) need exactl
 column models is how both attempts ended up worse than doing nothing.
 
 **State:** reverted; `align.rs` and `layout.rs` are not in the tree, the audit is 30/43, 26 tests pass.
+docs: the column model is right, the aligner is still wrong — clang-format 22's `AlignTrailingComments` is a struct
+
+Third measurement of the trailing-comment aligner, this time on top of a proper column model
+(`columns.rs`: tabs to the next `TabWidth` stop, East Asian wide = 2, combining marks = 0 — six tests), so the
+arithmetic that the first version got wrong is not the explanation any more:
+
+```text
+no aligner                                      30 / 43
+aligner on `char` columns                       29 / 43   (round 1)
+aligner on the column model                     28 / 43   (round 2, with singletons aligned too)
+```
+
+**What the oracle's own dump says**, and it changes the shape of the fix:
+
+```text
+$ clang-format -style=file -dump-config … | grep -A4 AlignTrailingComments
+AlignTrailingComments:
+  AlignPPAndNotPP: true
+  Kind:            Always
+  OverEmptyLines:  0
+SpacesBeforeTrailingComments: 0
+SpacesInLineCommentPrefix:
+  Minimum:         1
+```
+
+So on `22.1.3` the option is a **struct** (`Kind`, `OverEmptyLines`, `AlignPPAndNotPP`), not the `bool` our
+`presets.rs` carries — the preset table was generated from 15.0.1, where it was a bool. `Kind: Always` means
+alignment *is* on, so the behaviour is not "no alignment"; what is still missing is clang-format's **group-breaking
+rule** (`WhitespaceManager::alignTrailingComments` splits a run when the next comment's column exceeds the current
+maximum by more than the alignment allows, and it never aligns across a line without a comment or across
+`OverEmptyLines` empty lines). Building "align every run" without that rule moves comments clang-format leaves alone,
+which is exactly the -2 files.
+
+**Two things this round establishes for the next one:**
+
+1. `presets.rs` is 15.0.1's, and `AlignTrailingComments` is one of the keys whose *type* changed. The preset generator
+   has to be re-run against 22.1.3 and the key parser taught the struct form (`AlignTrailingComments: {Kind: …}`),
+   otherwise every alignment option is read as a bool that no longer exists.
+2. The column model is now written and measured (it was the shared prerequisite for both the aligner and the
+   indenter); it is **not committed** because nothing in the tree consumes it yet — an unwired module is what this
+   repository has decided not to keep (§十四, §十六).
+
+**State:** reverted to 30/43, 26 tests, working tree clean.
