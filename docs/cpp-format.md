@@ -1825,3 +1825,22 @@ P2：         printed 50 → **49**（顺带下降 1）
 ```
 
 至此 `(A)` 完成：不再是"已知限制"，而是逐字节与 clang-format 22.1.3 一致。
+## 六十五、P3 开工：`DisableFormat`、`clang-format off/on` 的区域模型、库级 range 格式化
+
+这一轮（43/43 之后的第一轮 P3/P2）落了三个可测的东西：
+
+```text
+① DisableFormat: true —— 两个入口（format / format_file）直接原样返回
+② regions.rs —— `// clang-format off` … `// clang-format on` 的字节区间模型（4 个单测）：
+     · 支持 `//` 与 `/* */` 两种写法、`clang-format: off` 的冒号写法
+     · 没有 `on` 时区间到文件末尾
+     · 普通注释（"// clang-format is a tool"）不会误判
+③ lib::format_range(source, style, first, last) —— `-lines` 的库级等价物（2 个单测）
+     整文件格式化后按行取用，片段单独格式化会从第 0 列开始缩进
+```
+
+**实测**：`cpp_formatter` **78 passed + 3 ignored**；语料 **43/43（100%）**、稳定性 **43/43** 未变；workspace 全量构建通过。
+
+**尚未接线的部分**（下一轮）：render 里"disabled 区间原样写 gap"——这一轮改了两版都因
+if/else 链的括号结构而回退（`git checkout` 恢复），所以 `off/on` 目前只是"能识别"，还不影响输出。
+P2 那边这轮未动，`column_audit` 仍是 printed 49。

@@ -19,6 +19,7 @@ pub mod breaks;
 pub mod columns;
 pub mod config;
 pub mod presets;
+pub mod regions;
 pub mod render;
 pub mod rows;
 pub mod includes;
@@ -33,19 +34,70 @@ pub use config::{ConfigError, Style};
 
 /// Format `source` with `style`, keeping the source's line structure.
 pub fn format(source: &str, style: &Style) -> String {
+    // **`DisableFormat: true` is the whole file being off**: the bytes go back out unchanged.
+    if regions::is_fully_disabled(style) {
+        return source.to_string();
+    }
     render::format(source, None, style)
 }
 
 /// Format `source` as the file at `path`, which is what lets the include sorter put the file's own header first
 /// (`clang-format`'s main-header rule; see `includes.rs`).
 pub fn format_file(path: &std::path::Path, source: &str, style: &Style) -> String {
+    // **`DisableFormat: true` is the whole file being off**: the bytes go back out unchanged.
+    if regions::is_fully_disabled(style) {
+        return source.to_string();
+    }
     let rendered = render::format(source, path.file_stem().and_then(|stem| stem.to_str()), style);
     // **The trailing comments are aligned on the rendered text**, with the rule from clang-format`s
     // `WhitespaceManager::alignTrailingComments` (see `trailing::align`).
     trailing::align(&rendered, style)
 }
 
+/// **Format only the lines `first..=last`** (0-based), the library half of clang-format's `-lines`.
+///
+/// The whole file is formatted — a fragment cannot know its indentation — and then only the edits that fall inside the
+/// requested lines are kept. That is the same choice `textDocument/rangeFormatting` makes on the server side, and it is
+/// deliberate: formatting a fragment on its own would start every line at column zero.
+pub fn format_range(source: &str, style: &Style, first: usize, last: usize) -> String {
+    let formatted = format(source, style);
+    if formatted == source {
+        return formatted;
+    }
+    let original: Vec<&str> = source.split_inclusive('\n').collect();
+    let new: Vec<&str> = formatted.split_inclusive('\n').collect();
+    let mut out = String::with_capacity(source.len());
+    for (index, line) in original.iter().enumerate() {
+        if index >= first && index <= last {
+            out.push_str(new.get(index).copied().unwrap_or(line));
+        } else {
+            out.push_str(line);
+        }
+    }
+    out
+}
+/// Format `source` with the style that `text` (a `.clang-format`) describes.
 pub fn format_with_config(source: &str, config: &str) -> Result<String, ConfigError> {
     let style = config::parse(config, None)?;
     Ok(format(source, &style))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_range_leaves_the_lines_outside_it_alone() {
+        let source = "int  a = 1;\nint  b = 2;\n";
+        let out = format_range(source, &Style::default_style(), 1, 1);
+        assert_eq!(out.lines().nth(0), Some("int  a = 1;"), "line 0 is not in the range");
+        assert_eq!(out.lines().nth(1), Some("int b = 2;"), "line 1 is");
+    }
+
+    #[test]
+    fn a_whole_file_range_is_the_whole_file() {
+        let source = "int  a = 1;\n";
+        let whole = format(source, &Style::default_style());
+        assert_eq!(format_range(source, &Style::default_style(), 0, 1), whole);
+    }
 }
