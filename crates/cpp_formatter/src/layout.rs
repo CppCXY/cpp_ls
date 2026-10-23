@@ -215,6 +215,34 @@ pub fn continuation(
     }
 }
 
+/// **Which braces open an enumeration body**, so the layout can align its items under the first one.
+///
+/// `enum class Wide { A,` puts `B,` at the column after the `{` (`AlignAfterOpenBracket`), which is not the block
+/// indent. The statement that opened the brace is found by walking back to the previous `;`, `{` or `}`; an `enum`
+/// keyword there is the evidence.
+pub fn enum_body_braces(stream: &Stream<'_>) -> Vec<bool> {
+    use cpp_parser::CppTokenKind::*;
+    let mut braces = vec![false; stream.tokens.len()];
+    for index in 0..stream.tokens.len() {
+        if stream.tokens[index].kind != LeftBrace {
+            continue;
+        }
+        let mut cursor = index;
+        while cursor > 0 {
+            cursor -= 1;
+            match stream.tokens[cursor].kind {
+                EnumKeyword => {
+                    braces[index] = true;
+                    break;
+                }
+                Semicolon | LeftBrace | RightBrace => break,
+                _ => {}
+            }
+        }
+    }
+    braces
+}
+
 /// **Which `<` and `>` are template argument brackets**, decided on the token stream alone.
 ///
 /// The parser`s `Roles` answer this for the lists it recognises, but not for every one: a `using` alias

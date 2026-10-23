@@ -47,6 +47,9 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
     // `layout::template_angles` is the lexical test, because the parser does not mark every list (`using` aliases).
     let template_angles = layout::template_angles(&stream, &roles);
     let mut angles: Vec<usize> = Vec::new();
+    // **An enumeration body keeps a column of its own**: `enum class Wide { A,` puts `B,` under `A`.
+    let enum_bodies = layout::enum_body_braces(&stream);
+    let mut enums: Vec<(usize, usize)> = Vec::new();
     let mut statement_indent = 0usize;
     // **Where a constructor initializer list`s packed members line up**: clang-format packs them after the `:` of the
     // first initializer, so a line starting with `,` continues at that column rather than at a fixed offset. Measured
@@ -165,6 +168,7 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
                             ctor_column,
                             init_depths[index] > 0,
                             angles.last().copied().filter(|column| *column != usize::MAX),
+                            enums.last().map(|(_, column)| *column).filter(|column| *column != usize::MAX),
                         )
                             .map(|(indent, is_block_line)| {
                                 let closing = stream.tokens[index].kind == cpp_parser::CppTokenKind::RightBrace;
@@ -362,6 +366,11 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
         if template_angles[index] && stream.tokens[index].kind == cpp_parser::CppTokenKind::Greater {
             angles.pop();
         }
+        if stream.tokens[index].kind == cpp_parser::CppTokenKind::RightBrace
+            && enums.last().is_some_and(|(depth, _)| *depth == brace_depth)
+        {
+            enums.pop();
+        }
         match stream.tokens[index].kind {
             cpp_parser::CppTokenKind::LeftBrace => {
                 brace_depth += 1;
@@ -393,6 +402,11 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
         {
             *top = column;
         }
+        if let Some((_, top)) = enums.last_mut()
+            && *top == usize::MAX
+        {
+            *top = column;
+        }
         out.push_str(text);
         column = columns.advance(column, text);
         if matches!(
@@ -406,6 +420,9 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
         // can align after the `<` (the parentheses`s stack would otherwise be the only one consulted).
         if template_angles[index] && stream.tokens[index].kind == cpp_parser::CppTokenKind::Less {
             angles.push(usize::MAX);
+        }
+        if enum_bodies[index] {
+            enums.push((brace_depth, usize::MAX));
         }
 
         // **A `{` ends the initializer list and a `;` ends the declaration.** Without this the flag stayed set past
@@ -606,6 +623,7 @@ fn planned_indent(
     ctor_column: Option<usize>,
     in_initializer: bool,
     angle_column: Option<usize>,
+    enum_column: Option<usize>,
 ) -> Option<(usize, bool)> {
     let first = stream.tokens[index].kind;
     if std::env::var_os("CPPFMT_DEBUG").is_some() {
@@ -644,6 +662,23 @@ fn planned_indent(
     // **A `<<` chain that continues on the next line** starts a continuation of the *block*, not of the previous
     // line: clang-format writes the `<<` at the block`s indent plus `ContinuationIndentWidth` (measured on
     // `std::cout` split over two lines: 8 in a function body, 12 inside a loop at 4).
+    // **A statement may start with a unary operator**: `*q = a + b;` after `int *q = p;` is a new statement,
+    // not a continuation of the line above — the previous token is a `;`, and the block rules own the column.
+    if matches!(
+        first,
+        cpp_parser::CppTokenKind::Star | cpp_parser::CppTokenKind::Ampersand
+    ) && index > 0
+        && matches!(
+            stream.tokens[index - 1].kind,
+            cpp_parser::CppTokenKind::Semicolon
+                | cpp_parser::CppTokenKind::LeftBrace
+                | cpp_parser::CppTokenKind::RightBrace
+        )
+    {
+        if let Some(indent) = blocks[index - 1] {
+            return Some((indent, true));
+        }
+    }
     if matches!(
         stream.tokens[index].kind,
         cpp_parser::CppTokenKind::LeftShift | cpp_parser::CppTokenKind::RightShift
@@ -653,6 +688,15 @@ fn planned_indent(
     }
     if stream.tokens[index].text == "requires" {
         return Some((statement_indent + style.count(StyleOption::IndentWidth), false));
+    }
+    // **An item of an enumeration written on the opening line aligns under the first item**:
+    // `enum class Wide { A,` then `B,` at the column after the `{ ` (not the block indent).
+    if let Some(column) = enum_column
+        && blocks[index].is_some()
+        // The `}` that closes the body goes back to the declaration`s own column, not the items`.
+        && stream.tokens[index].kind != cpp_parser::CppTokenKind::RightBrace
+    {
+        return Some((column, false));
     }
     if let Some(column) = angle_column
         && blocks[index].is_some()
