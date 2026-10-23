@@ -136,7 +136,13 @@ pub fn between(stream: &Stream<'_>, index: usize, roles: &Roles, style: &Style) 
         };
     }
     if current.kind == LeftBracket {
-        return 0;
+        // **Not always glued**: `auto f = [&](int a)` needs the space after `=`, and gluing it wrote `auto f =[&]`,
+        // which clang-format never produces (found by feeding its own output back through us). A `[` after an
+        // operator, a keyword or an opening bracket keeps that space; everything else (`a[i]`, `[[attr]]`) glues.
+        return match previous.kind {
+            Assign | Equal | ReturnKeyword | Comma | LeftParen | LeftBrace => 1,
+            _ => 0,
+        };
     }
 
     // 4. Braces.
@@ -214,8 +220,11 @@ pub fn between(stream: &Stream<'_>, index: usize, roles: &Roles, style: &Style) 
         return 0;
     }
     if previous.kind == LeftBrace {
-        // The other side of the same rule.
-        if roles.block_brace.contains(&previous.start) && current.kind != RightBrace {
+        // The other side of the same rule, and the same exception: a `{` that follows a `)` opens a body
+        // (`requires(T t) { t.size(); }`, `f() { g(); }`), and the roles call some of those list initializers, so the
+        // parenthesis decides first.
+        let body = index >= 2 && stream.tokens[index - 2].kind == CppTokenKind::RightParen;
+        if (roles.block_brace.contains(&previous.start) || body) && current.kind != RightBrace {
             return 1;
         }
         return 0;
