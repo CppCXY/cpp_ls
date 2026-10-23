@@ -93,9 +93,11 @@ fn main() {
         match first_divergence(&ours, &theirs) {
             Divergence::Indent { line, mine, other } => {
                 tally.indent += 1;
-                if tally.samples.len() < 10 {
+                // Every file prints its first divergence: clustering needs all of them, not ten (the samples are
+                // what turns "17 indent divergences" into "four mechanisms").
+                {
                     tally.samples.push(format!(
-                        "{file}:{line} indent {mine} -> {other}\n      ours:   {:?}\n      theirs: {:?}",
+                        "{file}:{line} indent {mine} -> {other}   ours={:?}   theirs={:?}",
                         trimmed_at(&ours, line),
                         trimmed_at(&theirs, line),
                     ));
@@ -103,7 +105,9 @@ fn main() {
             }
             Divergence::Lines { line, ours_len, theirs_len } => {
                 tally.lines += 1;
-                if tally.samples.len() < 10 {
+                // Every file prints its first divergence: clustering needs all of them, not ten (the samples are
+                // what turns "17 indent divergences" into "four mechanisms").
+                {
                     tally.samples.push(format!(
                         "{file}:{line} line structure (ours has {ours_len} line(s), clang-format {theirs_len})\n      \
                          ours:   {:?}\n      theirs: {:?}",
@@ -114,13 +118,17 @@ fn main() {
             }
             Divergence::Blank { line } => {
                 tally.blank += 1;
-                if tally.samples.len() < 10 {
+                // Every file prints its first divergence: clustering needs all of them, not ten (the samples are
+                // what turns "17 indent divergences" into "four mechanisms").
+                {
                     tally.samples.push(format!("{file}:{line} blank line count"));
                 }
             }
             Divergence::Other { line } => {
                 tally.other += 1;
-                if tally.samples.len() < 10 {
+                // Every file prints its first divergence: clustering needs all of them, not ten (the samples are
+                // what turns "17 indent divergences" into "four mechanisms").
+                {
                     tally.samples.push(format!(
                         "{file}:{line} other\n      ours:   {:?}\n      theirs: {:?}",
                         trimmed_at(&ours, line),
