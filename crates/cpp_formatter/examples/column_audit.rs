@@ -52,6 +52,8 @@ fn main() {
     let mut printed_ours = 0usize;
     let mut printed_theirs = 0usize;
     let mut logical_ours = 0usize;
+    let mut breakable = 0usize;
+    let mut still_over = 0usize;
 
 
     for file in &files {
@@ -67,6 +69,9 @@ fn main() {
         printed_ours += ours.lines().filter(|line| width(line) > limit).count();
         printed_theirs += theirs.lines().filter(|line| width(line) > limit).count();
         logical_ours += too_wide_logical_lines(&source, &style);
+        let (fits, overflow) = what_a_breaker_would_do(&source, &style);
+        breakable += fits;
+        still_over += overflow;
 
     }
 
@@ -75,6 +80,10 @@ fn main() {
     );
     println!(
         "logical: {logical_ours} logical line(s) exceed the limit — the units a breaker has to split"
+    );
+    println!(
+        "breaker: {breakable} of them can be laid out under the limit by the search in `breaks::break_line`, \
+         {still_over} would still overflow"
     );
 }
 
@@ -120,6 +129,53 @@ fn too_wide_logical_lines(source: &str, style: &cpp_formatter::config::Style) ->
     }
     over
 }
+/// **What the break search would do with this file**: the over-long logical lines it can split so that every piece
+/// fits, and the ones where even the search leaves a piece too long (a single token wider than the limit, say).
+fn what_a_breaker_would_do(source: &str, style: &cpp_formatter::config::Style) -> (usize, usize) {
+    use cpp_formatter::options::StyleOption;
+    let limit = style.count(StyleOption::ColumnLimit);
+    let stream = cpp_formatter::tokens::stream(source);
+    let roles = cpp_formatter::roles::of(source);
+    let mut fits = 0usize;
+    let mut overflow = 0usize;
+    for line in cpp_formatter::breaks::logical_lines(&stream) {
+        let mut width = 0usize;
+        for index in line.clone() {
+            if index > line.start {
+                width += cpp_formatter::space::between(&stream, index, &roles, style);
+            }
+            width += stream.tokens[index].text.chars().count();
+        }
+        if width <= limit {
+            continue;
+        }
+        match cpp_formatter::breaks::break_line(&stream, &roles, style, &line, 0) {
+            Some(breaks) => {
+                let mut worst = 0usize;
+                let mut start = line.start;
+                for at in breaks.iter().copied().chain(std::iter::once(line.end)) {
+                    let mut piece = 0usize;
+                    for index in start..at {
+                        if index > start {
+                            piece += cpp_formatter::space::between(&stream, index, &roles, style);
+                        }
+                        piece += stream.tokens[index].text.chars().count();
+                    }
+                    worst = worst.max(piece);
+                    start = at;
+                }
+                if worst > limit {
+                    overflow += 1;
+                } else {
+                    fits += 1;
+                }
+            }
+            None => overflow += 1,
+        }
+    }
+    (fits, overflow)
+}
+
 fn style_for(path: &Path) -> cpp_formatter::config::Style {
     let mut directory = path.parent().map(Path::to_path_buf);
     while let Some(current) = directory {

@@ -956,3 +956,31 @@ gap idx=43 token="{" comments=1 last_own=Some(true) init=0
    PenaltyBreakAssignment、PenaltyBreakString、PenaltyBreakComment 都在 22.1.3 的表里）
 3. 断点交给现有 render（它已经能按列排版）；验收：上面 printed 从 113 → 0，且 ColumnLimit: 0 的 37/43 不回退
 ```
+## 三十一、P2 的第二步：断行搜索（`breaks::break_line`）与它的实测覆盖率
+
+`breaks.rs` 现在除了逻辑行切分，还有一个**基于 penalty 的动态规划断行搜索**：
+
+```text
+候选断点：逗号后、二元运算符前、`?` 前、`(`/`[` 后、`.`/`->` 前
+代价：Σ max(0, 片段宽 - ColumnLimit) × PenaltyExcessCharacter + 每个断点的固定代价
+      （断在赋值处用 PenaltyBreakAssignment，断在调用首个实参前用 PenaltyBreakBeforeFirstCallParameter，
+        其余记 1 —— 权重全部来自 22.1.3 的表）
+DP：best[i] = min over j<i { best[j] + 片段代价(j..i) + 断点代价 }，O(n²) 但 n 只是一行里的候选点
+```
+
+4 个单测钉住语义：放得下就不动、长参数表在逗号后断、长加法在运算符前断、结果确定。
+
+**实测效果**（`column_audit`，同一套样式 `ColumnLimit: 80`，43 个文件）：
+
+```text
+printed: 113 行超 80（我们） vs 0（clang-format）
+logical: 105 条逻辑行超限 —— 需要断的单位
+breaker: 其中 **80 条**能被这个搜索排到 80 列以内，**25 条**仍会溢出
+```
+
+那 25 条里包含"单个 token 就超宽"的情况（长字符串、长注释），clang-format 对它们也无能为力
+（它靠 `BreakStringLiterals`/注释重排，属于后续细化）；80/105 说明候选断点集合已经覆盖了绝大多数真实语句。
+
+**尚未接线**：`break_line` 目前只被 `column_audit` 调用（作为测量），未接入 `render`。
+接线点已经明确：render 在写一条逻辑行之前调用它，按返回的 token 索引插入换行——
+那一步会改变 `ColumnLimit: 0` 下的输出（必须为 0 时不调用），是下一轮的收尾工作。

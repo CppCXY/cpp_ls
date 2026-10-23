@@ -187,3 +187,202 @@ mod tests {
         assert_eq!(covered, stream.tokens.len(), "{lines:?}");
     }
 }
+
+// ---------------------------------------------------------------------------------------------------------------
+// The break search (P2's second half): where to split one logical line so that it fits.
+// ---------------------------------------------------------------------------------------------------------------
+
+/// The penalties of one style that the search uses (`docs/cpp-format.md` §十 P2).
+#[derive(Debug, Clone, Copy)]
+pub struct Penalties {
+    /// Per column a line runs past the limit — clang-format's `PenaltyExcessCharacter`.
+    pub excess_character: i64,
+    /// A break before the first parameter of a call — `PenaltyBreakBeforeFirstCallParameter`.
+    pub break_before_first_parameter: i64,
+    /// A break at an assignment — `PenaltyBreakAssignment`.
+    pub break_assignment: i64,
+    /// Any other break.
+    pub plain: i64,
+}
+
+impl Penalties {
+    /// The weights of a style, read from its own keys.
+    pub fn of(style: &crate::config::Style) -> Penalties {
+        use crate::options::StyleOption;
+        Penalties {
+            excess_character: style.number(StyleOption::PenaltyExcessCharacter).max(1),
+            break_before_first_parameter: style
+                .number(StyleOption::PenaltyBreakBeforeFirstCallParameter),
+            break_assignment: style.number(StyleOption::PenaltyBreakAssignment),
+            plain: 1,
+        }
+    }
+}
+
+/// **Where to break one logical line** so that it fits the limit, as token indices that start a new line.
+///
+/// A dynamic program over the *breakable* positions of the line: breaking after a comma, before a binary operator,
+/// before a `?`, after an opening bracket, or before a member access. The cost of a layout is the excess of every
+/// over-long piece times [`Penalties::excess_character`] plus a fixed cost per break, which is clang-format's model
+/// with the weights it actually uses — the search is exact for the candidate set, and the candidate set is the part
+/// this module deliberately keeps small.
+///
+/// `None` when there is nothing to do (the line fits) and `Some(vec![])` never happens: a caller that gets `Some` can
+/// print the line in pieces, one per returned index plus the rest.
+pub fn break_line(
+    stream: &Stream<'_>,
+    roles: &crate::roles::Roles,
+    style: &crate::config::Style,
+    line: &Range<usize>,
+    start_column: usize,
+) -> Option<Vec<usize>> {
+    let limit = style.count(crate::options::StyleOption::ColumnLimit);
+    if limit == 0 {
+        return None;
+    }
+    let penalties = Penalties::of(style);
+
+    // **The candidate positions**: the first token of the line, plus every token a break may precede.
+    let mut positions: Vec<usize> = vec![line.start];
+    for index in line.start + 1..line.end {
+        if is_breakable(stream, index) {
+            positions.push(index);
+        }
+    }
+    positions.push(line.end);
+    if positions.len() <= 2 {
+        return None;
+    }
+
+    // The width of a piece `a..b` when printed after the previous piece's end.
+    let width = |a: usize, b: usize, indent: usize| -> usize {
+        let mut column = indent;
+        for index in a..b {
+            if index > a {
+                column += crate::space::between(stream, index, roles, style);
+            }
+            column += stream.tokens[index].text.chars().count();
+        }
+        column
+    };
+
+    // `best[i]` = the cheapest way to lay out `positions[0..=i]`, with the last piece ending at `positions[i]`.
+    let count = positions.len();
+    let mut best = vec![i64::MAX; count];
+    let mut from = vec![0usize; count];
+    best[0] = 0;
+    for end in 1..count {
+        for start in 0..end {
+            if best[start] == i64::MAX {
+                continue;
+            }
+            let piece = width(positions[start], positions[end], start_column);
+            let excess = piece.saturating_sub(limit) as i64 * penalties.excess_character;
+            let break_cost = if start == 0 { 0 } else { break_at(stream, positions[start], &penalties) };
+            let cost = best[start] + excess + break_cost;
+            if cost < best[end] {
+                best[end] = cost;
+                from[end] = start;
+            }
+        }
+    }
+
+    // Reconstruct: every chosen position except the first and the end is a line break.
+    let mut chosen = Vec::new();
+    let mut cursor = count - 1;
+    while cursor > 0 {
+        let previous = from[cursor];
+        if previous > 0 {
+            chosen.push(positions[previous]);
+        }
+        cursor = previous;
+    }
+    chosen.reverse();
+    if chosen.is_empty() { None } else { Some(chosen) }
+}
+
+/// May a break go before the token at `index`?
+fn is_breakable(stream: &Stream<'_>, index: usize) -> bool {
+    use CppTokenKind::*;
+    let previous = stream.tokens[index - 1].kind;
+    let current = stream.tokens[index].kind;
+    match current {
+        // After a comma: the classic argument break.
+        _ if previous == Comma => true,
+        // Before a binary operator (`a + b` broken before the `+`).
+        Plus | Minus | Star | Slash | Percent | Ampersand | Pipe | Caret | Less | Greater | LessEqual
+        | GreaterEqual | Equal | NotEqual | LogicalAnd | LogicalOr | LeftShift | RightShift | Question => true,
+        // Before a member access and after an opening bracket.
+        Dot | Arrow => true,
+        _ if matches!(previous, LeftParen | LeftBracket) => true,
+        _ => false,
+    }
+}
+
+/// The fixed cost of breaking before the token at `index`.
+fn break_at(stream: &Stream<'_>, index: usize, penalties: &Penalties) -> i64 {
+    use CppTokenKind::*;
+    match stream.tokens[index].kind {
+        Assign => penalties.break_assignment,
+        _ if stream.tokens[index - 1].kind == LeftParen => penalties.break_before_first_parameter,
+        _ => penalties.plain,
+    }
+}
+
+#[cfg(test)]
+mod break_tests {
+    use super::*;
+    use crate::config::Style;
+
+    fn broken(source: &str, limit: &str) -> Option<Vec<String>> {
+        let mut style = Style::default_style();
+        style.set_from_text("ColumnLimit", limit);
+        let stream = crate::tokens::stream(source);
+        let roles = crate::roles::of(source);
+        let lines = logical_lines(&stream);
+        let line = lines.first().expect("a line").clone();
+        let breaks = break_line(&stream, &roles, &style, &line, 0)?;
+        // Print the pieces, so that a test can read them.
+        let mut pieces = Vec::new();
+        let mut start = line.start;
+        for at in breaks.iter().copied().chain(std::iter::once(line.end)) {
+            let mut text = String::new();
+            for index in start..at {
+                if index > start {
+                    text.push(' ');
+                }
+                text.push_str(stream.tokens[index].text);
+            }
+            pieces.push(text);
+            start = at;
+        }
+        Some(pieces)
+    }
+
+    #[test]
+    fn a_line_that_fits_is_not_broken() {
+        assert_eq!(broken("int a = 1;", "80"), None);
+    }
+
+    #[test]
+    fn a_long_argument_list_breaks_after_the_commas() {
+        let pieces = broken("f(aaaaaaaaaa, bbbbbbbbbb, cccccccccc);", "20").expect("broken");
+        assert!(pieces.len() > 1, "{pieces:?}");
+        for piece in &pieces {
+            assert!(piece.chars().count() <= 20, "{piece:?} in {pieces:?}");
+        }
+    }
+
+    #[test]
+    fn a_long_sum_breaks_before_the_operator() {
+        let pieces = broken("int x = aaaaaaaaaa + bbbbbbbbbb + cccccccccc;", "25").expect("broken");
+        assert!(pieces.iter().any(|piece| piece.starts_with('+')), "{pieces:?}");
+    }
+
+    #[test]
+    fn the_search_is_deterministic() {
+        let first = broken("f(aaaaaaaaaa, bbbbbbbbbb, cccccccccc);", "20");
+        let second = broken("f(aaaaaaaaaa, bbbbbbbbbb, cccccccccc);", "20");
+        assert_eq!(first, second);
+    }
+}
