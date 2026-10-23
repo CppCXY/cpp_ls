@@ -806,3 +806,27 @@ other 3    空白/间距细则（含 SpacesBeforeTrailingComments 的边界）
 
 **P2 仍未开始**（断行引擎：penalty 搜索、ColumnLimit>0 时的换行决策），文档 §十 的阶段表未变；
 本次里程碑交付的是"在 ColumnLimit: 0 下把列算对"，P2 是让本工具能在 ColumnLimit>0 的工程上工作。
+## 二十五、继续攻剩余 8 个文件（goal 第二轮启动后的三个尝试）
+
+```text
+起点 35 / 43（81.40%），三个尝试都做了实测，都回退了（工作区仍干净）：
+
+① 统一"花括号是不是块"的判据（classify_braces 与 init_depths 各有一份，已经漂移）
+   抽出 brace_is_a_block() 复用；修复方向对（`} priority[] = {` 的行内 `{` 应算初始化列表），
+   但把 `LeftBrace`/`Comma`/`Colon` 也当成"引入初始化列表"后，`class X : Base {` 和块中块都被判成初始化，
+   实测 35 → 31，整体回退。结论：判据要**按上一 token 的类别细分**，而不是一张扁平表。
+
+② 尾注释的最小间距（SpacesBeforeTrailingComments: 0，单条注释不参与对齐）
+   实现后 35 → 33：语料里大多数尾注释本来就被 clang-format 对齐过，只给最小值反而破坏成对齐列。
+
+③ lambda 体层级（LuaSyntaxTree.cpp:455）
+   引入"这一行是**括号规则**放置的"标记，body 缩进 = 该行列 + IndentWidth：
+   第一次实现 body 从 8 → 16 ✓（正确），但闭括号 `});` 被一起移位（16，应为 12）；
+   收紧闭括号规则后 body 又回到 8 —— 两次的差异没能在本轮定位（状态清零时机与 closer 判定互相影响）。
+   两次尝试均回退，未留半成品。
+```
+
+**结论**：剩下的 8 个文件里，`LuaDefine.h:19`（列表内注释）、`LuaSyntaxTree.cpp:455`（lambda 体 + 闭括号）、
+`LuaCheck.cpp:49` 与 `LuaTokenTypeDetail.h:31`、`LuaLexer.cpp:11`（AlignArrayOfStructures / 尾注释对齐）
+分别需要：① 细分的花括号判据；② 括号放置的 body 状态与闭括号分开处理；③ AlignArrayOfStructures（P1 未做）；
+④ 尾注释对齐的**分组规则**（不是最小值）。这四项都不是"再调一个常量"能解决的，已各自记录条件。
