@@ -49,6 +49,35 @@ pub fn between(stream: &Stream<'_>, index: usize, roles: &Roles, style: &Style) 
         return 0;
     }
 
+    // **`->` is two different tokens in C++**, and the parenthesis before it tells them apart: a member access
+    // (`it->second`, `find(text)->second`, glued) and a lambda's trailing return type (`[](int a) -> int`, one space
+    // on each side). "Trailing" means the `)` closes a *lambda* introducer's parameter list — the `(` that follows a
+    // `]` — which is what clang-format 22.1.3 writes and what keeps `find(text)->second` glued (measured: without the
+    // `]` test the corpus lost a file to `return LuaReserved.find(text) -> second;`).
+    if current.kind == Arrow || previous.kind == Arrow {
+        let closes = if current.kind == Arrow { index - 1 } else { index - 2 };
+        if closes < stream.tokens.len() && stream.tokens[closes].kind == RightParen {
+            let mut depth = 0isize;
+            let mut opener: Option<usize> = Option::None;
+            for cursor in (0..closes).rev() {
+                match stream.tokens[cursor].kind {
+                    RightParen => depth += 1,
+                    LeftParen => {
+                        if depth == 0 {
+                            opener = Some(cursor);
+                            break;
+                        }
+                        depth -= 1;
+                    }
+                    _ => {}
+                }
+            }
+            if opener.is_some_and(|at| at > 0 && stream.tokens[at - 1].kind == LeftBracket) {
+                return 1;
+            }
+        }
+    }
+
     // 1. Tokens that are glued to what they follow.
     match current.kind {
         Comma | Semicolon | RightParen | RightBracket | Dot | Arrow | DotStar | ArrowStar => {
