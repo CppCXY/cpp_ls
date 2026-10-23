@@ -18,6 +18,7 @@
 //! "pending space" state to keep.
 
 use crate::config::Style;
+use crate::options::StyleOption;
 use crate::roles::Roles;
 use crate::tokens::Stream;
 use cpp_parser::CppTokenKind;
@@ -59,10 +60,10 @@ pub fn between(stream: &Stream<'_>, index: usize, roles: &Roles, style: &Style) 
     }
     match previous.kind {
         LeftParen => {
-            return if style.flag("SpacesInParentheses", false) { 1 } else { 0 };
+            return if style.flag(StyleOption::SpacesInParentheses) { 1 } else { 0 };
         }
         LeftBracket => {
-            return if style.flag("SpacesInSquareBrackets", false) { 1 } else { 0 };
+            return if style.flag(StyleOption::SpacesInSquareBrackets) { 1 } else { 0 };
         }
         Scope | Dot | Arrow | DotStar | ArrowStar => return 0,
         Comma | Semicolon => return 1,
@@ -78,7 +79,7 @@ pub fn between(stream: &Stream<'_>, index: usize, roles: &Roles, style: &Style) 
         // says otherwise — the project's own config sets it to false, and that one key is **1 882** gaps on the
         // corpus.
         if previous.kind == TemplateKeyword {
-            return if style.flag("SpaceAfterTemplateKeyword", true) { 1 } else { 0 };
+            return if style.flag(StyleOption::SpaceAfterTemplateKeyword) { 1 } else { 0 };
         }
         return 0;
     }
@@ -117,7 +118,7 @@ pub fn between(stream: &Stream<'_>, index: usize, roles: &Roles, style: &Style) 
         return match previous.kind {
             Assign | Comma | LeftParen | LeftBracket | ReturnKeyword | Equal => 1,
             _ => {
-                if style.flag("SpaceBeforeCpp11BracedList", false) {
+                if style.flag(StyleOption::SpaceBeforeCpp11BracedList) {
                     1
                 } else {
                     0
@@ -158,14 +159,14 @@ pub fn between(stream: &Stream<'_>, index: usize, roles: &Roles, style: &Style) 
 
     // 5. `*` and `&`: a declarator follows `PointerAlignment`, an operator is a binary operator.
     if is_a_mark(current.kind) && roles.is_declarator(offset) {
-        return match style.string("PointerAlignment", "Right") {
+        return match style.text(StyleOption::PointerAlignment) {
             "Left" => 0,
             "Middle" => 1,
             _ => 1,
         };
     }
     if is_a_mark(previous.kind) && roles.is_declarator(previous.start) {
-        return match style.string("PointerAlignment", "Right") {
+        return match style.text(StyleOption::PointerAlignment) {
             "Left" => 1,
             "Middle" => 1,
             _ => 0,
@@ -199,7 +200,7 @@ pub fn between(stream: &Stream<'_>, index: usize, roles: &Roles, style: &Style) 
         }
         // A range-based `for (auto &x : v)` has its own key, and the project's config sets it to false.
         if in_a_for_head(stream, index) {
-            return if style.flag("SpaceBeforeRangeBasedForLoopColon", true) { 1 } else { 0 };
+            return if style.flag(StyleOption::SpaceBeforeRangeBasedForLoopColon) { 1 } else { 0 };
         }
         // An inheritance clause, a constructor initializer and a bitfield all keep the space; their keys
         // (`SpaceBeforeInheritanceColon`, …) default to true and the corpus does not turn them off.
@@ -253,7 +254,7 @@ fn is_a_mark(kind: CppTokenKind) -> bool {
 
 fn a_space_before_a_paren(previous: CppTokenKind, style: &Style) -> bool {
     use CppTokenKind::*;
-    match style.string("SpaceBeforeParens", "ControlStatements") {
+    match style.text(StyleOption::SpaceBeforeParens) {
         "Always" => true,
         "Never" => false,
         // `ControlStatements`: a space after the keywords that take a condition, never after a name.
@@ -496,7 +497,8 @@ pub fn text(stream: &Stream<'_>, index: usize, roles: &Roles, style: &Style) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::Style;
+use crate::config::Style;
+use crate::options::StyleOption;
     use crate::roles;
     use crate::tokens;
 

@@ -18,6 +18,7 @@
 pub mod config;
 pub mod presets;
 pub mod render;
+pub mod options;
 pub mod roles;
 pub mod space;
 pub mod tokens;

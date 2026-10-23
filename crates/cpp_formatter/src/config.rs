@@ -10,25 +10,58 @@
 //! ignore. That is the same rule `.cppls.toml` follows: a file a user writes by hand gets a real parser, and the
 //! part that is not supported is named rather than skipped.
 //!
-//! An **unknown key is an error too**, and that is not our invention: clang-format 15 does the same
+//! An **unknown key is an error too**, and that is not our invention: clang-format does the same
 //! (`error: unknown key 'BogusKey'`, exit code 1 — measured; see `docs/cpp-format.md` §五).
 //!
-//! # The style is a map, not a struct
+//! # The style is an array, not a map
 //!
-//! clang-format 15 has 136 top-level keys and 58 nested sub-keys, and every one of them has a default. A struct
-//! would mean writing all of them out and keeping them in sync with the oracle; a flattened map
-//! (`"BraceWrapping.AfterClass" -> "false"`) is seeded from [`crate::presets`] and read where a rule needs it.
-//! Supporting a key is then a one-line `style.flag("...")` at the place the rule lives, and a key nobody reads is
-//! still a key that parses — which is exactly the state the project is measured in (`docs/cpp-format.md` §五).
+//! 188 options, every one with a default, and a formatting rule asks for one of them **hundreds of times per
+//! kilobyte** — `space::between` alone consults four or five per gap. A `BTreeMap<String, String>` makes each of
+//! those a string comparison *and* a `parse::<i64>()`; that is why the first version of this module was the wrong
+//! shape to build the rest of the formatter on.
+//!
+//! So the store is
+//!
+//! ```text
+//! Option              an enum, `#[repr(usize)]`, one variant per clang-format key ([`crate::options`])
+//! Style.values        Vec<Value>, indexed by `option as usize` — one bounds-checked index per query
+//! Value               Flag(bool) | Number(i64) | Text(Cow<'static, str>) | Unset
+//! ```
+//!
+//! The **value is parsed once**, when the configuration is read, never at a query. The string form survives in
+//! exactly two places: reading a document (`StyleOption::from_key`, a binary search over a sorted table) and printing
+//! `-dump-config`. A misspelt key is still an error with its line number, because the loader looks the key up
+//! before it stores anything.
 
-use std::collections::BTreeMap;
+use std::borrow::Cow;
 
+use crate::options::StyleOption;
 use crate::presets;
 
-/// A resolved style: every key of the chosen preset, overridden by the `.clang-format` that was read.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// A resolved style: every option of the chosen preset, overridden by the `.clang-format` that was read.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Style {
-    values: BTreeMap<String, String>,
+    /// `values[option as usize]` — the whole point of the enum.
+    values: Vec<Value>,
+}
+
+/// One option's value, parsed at load time so that no query parses anything.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Value {
+    /// The option was never set and the preset did not carry it. (Possible only for a key a preset omits.)
+    Unset,
+    /// `true`/`false`, and the spellings clang-format accepts for them (`Yes`, `On`, …).
+    Flag(bool),
+    /// An integer, already parsed.
+    Number(i64),
+    /// An enum-valued option, or a string (`IncludeIsMainRegex`). Borrows the preset's own text when it can.
+    Text(Cow<'static, str>),
+}
+
+impl Default for Style {
+    fn default() -> Self {
+        Style::default_style()
+    }
 }
 
 /// Why a `.clang-format` could not be read.
@@ -56,68 +89,127 @@ impl Style {
     pub fn preset(name: &str) -> Option<Style> {
         let canonical = canonical_preset(name)?;
 
-        let mut values: BTreeMap<String, String> = presets::LLVM
-            .iter()
-            .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
-            .collect();
+        let mut style = Style {
+            values: vec![Value::Unset; StyleOption::COUNT],
+        };
+        for (key, value) in presets::LLVM {
+            style.set_from_text(key, value);
+        }
         if let Some(delta) = presets::delta(canonical) {
             for (key, value) in delta {
-                values.insert((*key).to_string(), (*value).to_string());
+                style.set_from_text(key, value);
             }
         }
-        Some(Style { values })
+        Some(style)
     }
 
-    /// The `LLVM` style: every key at its default.
+    /// The `LLVM` style: every option at its default.
     pub fn default_style() -> Style {
         Style::preset("LLVM").expect("LLVM is a preset")
     }
 
-    /// One key's value, as written in `-dump-config`.
-    pub fn get(&self, key: &str) -> Option<&str> {
-        self.values.get(key).map(String::as_str)
+    /// **One option's value.** The query every formatting rule makes, and it is an index.
+    pub fn value(&self, option: StyleOption) -> &Value {
+        self.values.get(option as usize).unwrap_or(&Value::Unset)
     }
 
-    /// An integer key, with clang-format's own default as the fallback.
-    pub fn int(&self, key: &str, fallback: i64) -> i64 {
-        self.get(key)
-            .and_then(|value| value.trim().parse().ok())
-            .unwrap_or(fallback)
-    }
-
-    /// A boolean key (`true`/`false`; clang-format also accepts `Yes`/`No`/`On`/`Off`/`1`/`0`).
-    pub fn flag(&self, key: &str, fallback: bool) -> bool {
-        match self.get(key).map(str::trim) {
-            Some("true") | Some("True") | Some("TRUE") | Some("Yes") | Some("On") | Some("1") => true,
-            Some("false") | Some("False") | Some("FALSE") | Some("No") | Some("Off") | Some("0") => false,
-            _ => fallback,
+    /// A boolean option. A number is true when not zero; text is read the way clang-format reads a flag.
+    pub fn flag(&self, option: StyleOption) -> bool {
+        match self.value(option) {
+            Value::Flag(value) => *value,
+            Value::Number(value) => *value != 0,
+            Value::Text(text) => {
+                matches!(text.as_ref(), "true" | "True" | "TRUE" | "Yes" | "On" | "1")
+            }
+            Value::Unset => false,
         }
     }
 
-    /// A string-valued key (an enum). `fallback` when absent, the raw text when present.
-    pub fn string<'a>(&'a self, key: &str, fallback: &'a str) -> &'a str {
-        self.get(key).unwrap_or(fallback)
+    /// An integer option, already parsed — no `parse::<i64>()` at the call site.
+    pub fn number(&self, option: StyleOption) -> i64 {
+        match self.value(option) {
+            Value::Number(value) => *value,
+            Value::Flag(value) => *value as i64,
+            Value::Text(text) => text.trim().parse().unwrap_or(0),
+            Value::Unset => 0,
+        }
+    }
+
+    /// A string-valued option (an enum, a regex). `""` when the option is not text.
+    pub fn text(&self, option: StyleOption) -> &str {
+        match self.value(option) {
+            Value::Text(text) => text.as_ref(),
+            _ => "",
+        }
+    }
+
+    /// An integer option as a count of spaces or columns — the form most rules want.
+    pub fn count(&self, option: StyleOption) -> usize {
+        self.number(option).max(0) as usize
+    }
+
+    /// **Set an option from the text a document wrote**, parsing it once.
+    ///
+    /// The kind is decided by the text, not by the key: `-dump-config` prints booleans as `true`/`false` and numbers
+    /// as digits, and a document may write either spelling for either kind (`1` for a flag, `"4"` for a count).
+    /// `flag`/`number`/`text` each accept the value in any of the three shapes, so the decision is not load-bearing
+    /// for correctness — only for how fast the query is.
+    pub fn set_from_text(&mut self, key: &str, text: &str) {
+        let Some(option) = StyleOption::from_key(key) else {
+            return;
+        };
+        let trimmed = text.trim();
+        let value = if trimmed.is_empty() {
+            Value::Text(Cow::Borrowed(""))
+        } else if let Some(flag) = parse_flag(trimmed) {
+            Value::Flag(flag)
+        } else if let Ok(number) = trimmed.parse::<i64>() {
+            Value::Number(number)
+        } else if let Some(borrowed) = borrow_a_preset_value(trimmed) {
+            borrowed
+        } else {
+            Value::Text(Cow::Owned(normalise_value(trimmed)))
+        };
+        if let Some(slot) = self.values.get_mut(option as usize) {
+            *slot = value;
+        }
     }
 
     /// Is `key` one of the keys this style knows? (Used by the loader to reject typos.)
     pub fn knows(key: &str) -> bool {
-        LOADER_KEYS.contains(&key) || presets::LLVM.iter().any(|(known, _)| *known == key)
+        LOADER_KEYS.contains(&key) || StyleOption::from_key(key).is_some()
     }
 
-    /// Every key, as `-dump-config` prints them: sorted, `key: value`, nested keys flattened the way the table is.
+    /// Every option, as `-dump-config` prints them: sorted, `key: value`, nested keys flattened the way the table
+    /// is.
     pub fn dump(&self) -> String {
         let mut out = String::new();
-        for (key, value) in &self.values {
-            out.push_str(key);
+        for option in StyleOption::ALL {
+            let printed = match self.value(option) {
+                Value::Flag(true) => "true".to_string(),
+                Value::Flag(false) => "false".to_string(),
+                Value::Number(value) => value.to_string(),
+                Value::Text(text) => text.to_string(),
+                Value::Unset => String::new(),
+            };
+            out.push_str(option.key());
             out.push(':');
-            if !value.is_empty() {
+            if !printed.is_empty() {
                 out.push(' ');
-                out.push_str(value);
+                out.push_str(&printed);
             }
             out.push('\n');
         }
         out
     }
+}
+
+/// **A text that is already `'static` is borrowed rather than copied**: every value in the preset tables is.
+fn borrow_a_preset_value(text: &str) -> Option<Value> {
+    presets::LLVM
+        .iter()
+        .find(|(_, value)| *value == text)
+        .map(|(_, value)| Value::Text(Cow::Borrowed(*value)))
 }
 
 /// The canonical spelling of a preset name, as clang-format accepts it (case-insensitive).
@@ -171,50 +263,29 @@ pub fn parse(text: &str, base: Option<&str>) -> Result<Style, ConfigError> {
 
     // `BasedOnStyle` first: it decides what the keys below override.
     let mut based_on: Option<String> = None;
-    let mut inherited = false;
-    for (offset, line) in document.lines().enumerate() {
+    for line in document.lines() {
         let line = strip_comment(line);
         let Some((key, value)) = split_key(&line) else {
             continue;
         };
-        let line_number = start_line + offset;
-        match key {
-            "BasedOnStyle" => based_on = Some(value.trim().to_string()),
-            "InheritParentConfig" => inherited = parse_flag(value).ok_or(ConfigError {
-                line: line_number,
-                what: format!("`InheritParentConfig` needs true or false, got `{value}`"),
-            })?,
-            _ => {}
+        if key == "BasedOnStyle" {
+            based_on = Some(value.trim().to_string());
         }
     }
 
     // The base: `BasedOnStyle` in this document, else the caller's fallback, else LLVM.
-    let base_name = based_on
-        .as_deref()
-        .or(base)
-        .unwrap_or("LLVM")
-        .to_string();
+    let base_name = based_on.as_deref().or(base).unwrap_or("LLVM").to_string();
     let mut style = Style::preset(&base_name).ok_or(ConfigError {
         line: start_line,
         what: format!("unknown style `{base_name}`"),
     })?;
-    // `InheritParentConfig` is the *loader's* problem; the style records that it was asked for, and
-    // `format_file` merges the parent before calling here. (See `docs/cpp-format.md` §五 ④.)
-    style.values.insert(
-        "InheritParentConfig".to_string(),
-        if inherited { "true" } else { "false" }.to_string(),
-    );
 
     apply_document(&mut style, document, start_line)?;
     Ok(style)
 }
 
 /// Apply one document's `key: value` lines (and nested maps) to `style`.
-fn apply_document(
-    style: &mut Style,
-    document: &str,
-    start_line: usize,
-) -> Result<(), ConfigError> {
+fn apply_document(style: &mut Style, document: &str, start_line: usize) -> Result<(), ConfigError> {
     // (indent, key) for the enclosing map, so that a nested key becomes `Parent.Child`.
     let mut parents: Vec<(usize, String)> = Vec::new();
 
@@ -265,7 +336,7 @@ fn apply_document(
             });
         }
 
-        style.values.insert(qualified, normalise_value(value));
+        style.set_from_text(&qualified, value);
     }
 
     Ok(())
@@ -284,8 +355,8 @@ fn normalise_value(value: &str) -> String {
 
 fn parse_flag(value: &str) -> Option<bool> {
     match value.trim() {
-        "true" | "True" | "Yes" | "On" | "1" => Some(true),
-        "false" | "False" | "No" | "Off" | "0" => Some(false),
+        "true" | "True" | "TRUE" | "Yes" | "On" => Some(true),
+        "false" | "False" | "FALSE" | "No" | "Off" => Some(false),
         _ => None,
     }
 }
@@ -358,25 +429,28 @@ mod tests {
     #[test]
     fn the_llvm_preset_is_the_base_and_every_other_preset_overrides_it() {
         let llvm = Style::preset("LLVM").unwrap();
-        assert_eq!(llvm.int("IndentWidth", 0), 2);
-        assert_eq!(llvm.string("BreakBeforeBraces", ""), "Attach");
+        assert_eq!(llvm.number(StyleOption::IndentWidth), 2);
+        assert_eq!(llvm.text(StyleOption::BreakBeforeBraces), "Attach");
 
-        // The values are clang-format 15.0.1's own, read from `-dump-config`; Google keeps LLVM's 80 columns and
+        // The values are clang-format's own, read from `-dump-config`; Google keeps LLVM's 80 columns and
         // `Attach` braces and differs where the table says it does.
         let google = Style::preset("google").unwrap();
-        assert_eq!(google.int("ColumnLimit", 0), 80);
-        assert_eq!(google.string("BreakBeforeBraces", ""), "Attach");
-        assert_eq!(google.string("PointerAlignment", ""), "Left");
-        assert!(google.flag("IndentCaseLabels", false));
-        // A key no delta names keeps the LLVM value.
-        assert_eq!(google.int("TabWidth", 0), llvm.int("TabWidth", 0));
+        assert_eq!(google.number(StyleOption::ColumnLimit), 80);
+        assert_eq!(google.text(StyleOption::BreakBeforeBraces), "Attach");
+        assert_eq!(google.text(StyleOption::PointerAlignment), "Left");
+        assert!(google.flag(StyleOption::IndentCaseLabels));
+        // An option no delta names keeps the LLVM value.
+        assert_eq!(
+            google.number(StyleOption::TabWidth),
+            llvm.number(StyleOption::TabWidth)
+        );
         // `GNU` is where 79 columns and GNU braces live.
         let gnu = Style::preset("GNU").unwrap();
-        assert_eq!(gnu.int("ColumnLimit", 0), 79);
-        assert_eq!(gnu.string("BreakBeforeBraces", ""), "GNU");
+        assert_eq!(gnu.number(StyleOption::ColumnLimit), 79);
+        assert_eq!(gnu.text(StyleOption::BreakBeforeBraces), "GNU");
         let microsoft = Style::preset("Microsoft").unwrap();
-        assert_eq!(microsoft.string("BreakBeforeBraces", ""), "Custom");
-        assert_eq!(microsoft.int("ColumnLimit", 0), 120);
+        assert_eq!(microsoft.text(StyleOption::BreakBeforeBraces), "Custom");
+        assert_eq!(microsoft.number(StyleOption::ColumnLimit), 120);
     }
 
     #[test]
@@ -386,10 +460,10 @@ mod tests {
             None,
         )
         .unwrap();
-        assert_eq!(style.int("IndentWidth", 0), 4);
-        assert!(style.flag("BraceWrapping.AfterClass", false));
-        assert!(!style.flag("BraceWrapping.AfterFunction", true));
-        assert_eq!(style.int("ColumnLimit", 0), 80);
+        assert_eq!(style.number(StyleOption::IndentWidth), 4);
+        assert!(style.flag(StyleOption::BraceWrappingAfterClass));
+        assert!(!style.flag(StyleOption::BraceWrappingAfterFunction));
+        assert_eq!(style.number(StyleOption::ColumnLimit), 80);
     }
 
     #[test]
@@ -406,7 +480,40 @@ mod tests {
             None,
         )
         .unwrap();
-        assert_eq!(style.int("IndentWidth", 0), 3);
-        assert_eq!(style.string("IncludeIsMainRegex", ""), "a:b");
+        assert_eq!(style.number(StyleOption::IndentWidth), 3);
+        assert_eq!(style.text(StyleOption::IncludeIsMainRegex), "a:b");
+    }
+
+    #[test]
+    fn a_value_is_parsed_once_and_answered_by_index() {
+        // **The shape of the optimisation**: a query is an index into an array, so the value's kind is decided when
+        // the document is read and never again. `1` for a flag and `"4"` for a count both work, because the
+        // accessors read whichever shape they are given.
+        let style = parse("IndentWidth: 4\nIndentCaseLabels: 1\n", None).unwrap();
+        assert!(matches!(style.value(StyleOption::IndentWidth), Value::Number(4)));
+        // **`1` for a flag is a number that is true**, which is what clang-format accepts; the accessor reads it
+        // whichever shape the document wrote.
+        assert!(style.flag(StyleOption::IndentCaseLabels));
+        assert_eq!(style.count(StyleOption::IndentWidth), 4);
+        assert!(style.flag(StyleOption::IndentCaseLabels));
+        // And a query allocates nothing: the text of a preset value is borrowed, not copied.
+        assert!(matches!(
+            Style::default_style().value(StyleOption::BreakBeforeBraces),
+            Value::Text(Cow::Borrowed(_))
+        ));
+    }
+
+    #[test]
+    fn the_dump_prints_every_option_sorted() {
+        let dumped = Style::default_style().dump();
+        let keys: Vec<&str> = dumped
+            .lines()
+            .map(|line| line.split(':').next().unwrap_or(""))
+            .collect();
+        assert_eq!(keys.len(), StyleOption::COUNT);
+        let mut sorted = keys.clone();
+        sorted.sort_unstable();
+        assert_eq!(keys, sorted);
+        assert!(dumped.contains("IndentWidth: 2\n"), "{dumped}");
     }
 }
