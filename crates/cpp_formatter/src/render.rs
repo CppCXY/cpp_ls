@@ -129,7 +129,11 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
                 // **A continuation line that starts with a binary operator aligns with the statement's first one**
                 // (`AlignOperands: Align`), and that column beats the block rules.
                 let aligned = operand_operator.filter(|_| {
-                    style.text(StyleOption::AlignOperands) == "Align"
+                    // **`= default;` / `= delete;` are continuations, not operand-aligned operators**: aligning the `=`
+                    // under a `==` in the `requires` clause above it produced a line indented 38 columns (measured on
+                    // a real file). Only the arithmetic and logical operators align.
+                    (stream.tokens[index].kind != cpp_parser::CppTokenKind::Assign)
+                        && style.text(StyleOption::AlignOperands) == "Align"
                         && layout::is_a_binary_operator(stream.tokens[index].kind)
                 });
                 // **A conditional's continuation (`?` or `:` at a line start) keeps the source's column.** clang-format

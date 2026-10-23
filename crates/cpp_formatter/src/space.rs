@@ -113,10 +113,23 @@ pub fn between(stream: &Stream<'_>, index: usize, roles: &Roles, style: &Style) 
         return 0;
     }
 
+    // **After `operator` the punctuator is glued**: `operator=(T &&)`, `operator==(const T &)`, `operator[]`.
+    // Measured against 22.1.3: the space before `=` turned `operator = (` into something clang-format never writes.
+    if matches!(previous.kind, CppTokenKind::OperatorKeyword) {
+        return 0;
+    }
+    // The `(` of an operator function is glued to the punctuator (`operator=(`), which is the token after the
+    // `operator` keyword — not a call parenthesis.
+    if current.kind == CppTokenKind::LeftParen
+        && index >= 2
+        && stream.tokens[index - 2].kind == CppTokenKind::OperatorKeyword
+    {
+        return 0;
+    }
     // 3. An opening parenthesis: a control statement's parenthesis has a space before it (`if (x)`), a call's does
     //    not (`f(x)`), and `SpaceBeforeParens` decides whether that rule applies at all.
     if current.kind == LeftParen {
-        return if a_space_before_a_paren(previous.kind, style) {
+        return if a_space_before_a_paren(previous.kind, previous.text, style) {
             1
         } else {
             0
@@ -353,7 +366,18 @@ fn is_a_mark(kind: CppTokenKind) -> bool {
     )
 }
 
-fn a_space_before_a_paren(previous: CppTokenKind, style: &Style) -> bool {
+fn a_space_before_a_paren(previous: CppTokenKind, previous_text: &str, style: &Style) -> bool {
+    use CppTokenKind::*;
+    // **These names glue to their parenthesis** the way a call does: `static_assert(x)`, `sizeof(x)`,
+    // `alignas(8)`, `decltype(x)`, `noexcept(true)`, `requires(C c)`. clang-format writes all of them without the
+    // space (measured against 22.1.3), and they are identifiers to this lexer, not keywords.
+    if matches!(
+        previous_text,
+        "static_assert" | "_Static_assert" | "alignas" | "alignof" | "decltype" | "sizeof" | "noexcept"
+            | "typeid" | "requires"
+    ) {
+        return false;
+    }
     use CppTokenKind::*;
     match style.text(StyleOption::SpaceBeforeParens) {
         "Always" => true,

@@ -2246,3 +2246,34 @@ cpp_formatter  84 passed + 2 ignored · cpp_ls 87 passed + 1 ignored · handshak
 语料           43 / 43（100%）· 稳定性 43 / 43
 构建           workspace --all-targets 零警告
 ```
+## 七十八、按截图修的三个问题（`static_assert` / `operator=` / `= default;`）
+
+用户截图暴露的四处问题，先修好三处；两处仍需布局改造（列在末尾）。
+
+### 已修
+
+```text
+① `static_assert (x)` → `static_assert(x)`
+   a_space_before_a_paren 现在接收"前一个 token 的文本"，assert/sizeof/alignas/alignof/decltype/noexcept/
+   typeid/requires 这些"长得像关键字、其实是标识符"的名字一律与括号粘连（clang-format 22.1.3 就是这样）
+② `operator = (T &&)` → `operator=(T &&)`；`operator == (const T &)` → `operator==(const T &)`
+   ① operator 关键字后的标点粘连；② operator 标点后的 `(` 也粘连
+③ `= default;` 曾被排到第 38 列（对齐到 requires 子句里的 `==`）
+   operand 对齐现在排除 `Assign`：`= default;`/`= delete;` 是续行，不参与算子对齐
+```
+
+**实测**：`cpp_formatter` 84 passed + 2 ignored；语料 **43/43（100%）**、稳定性 43/43、间距 19989/19989 全部未变。
+
+### 仍待处理（已定位，需要布局层改动）
+
+```text
+④ requires 子句的缩进：clang-format 写 8 列（声明行 +4），我们写 4 列（当成块级）
+   需要把 `requires(...)` 识别为"声明的续行"，属于 layout 的 statement/continuation 判定
+⑤ 模板实参列表的续行掉到第 0 列：
+     using S2 = Scenario
+              <A::Not, B::Not,
+     C::Not,                     ← 应为 20 列（对齐到 `Scenario<` 之后）
+     D::Not>;
+   根因：layout 只把 `(`/`[` 当括号上下文，模板的 `<...>` 不算，于是这些行被当成块级 0
+   注意：语料里的模板续行都在类体内（块级 1），改这条必须同时验证 43/43 不回退
+```
