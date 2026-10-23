@@ -65,12 +65,34 @@ pub fn format(source: &str, style: &Style) -> String {
     // `#include <a/b.h>` is the usual), and `docs/cpp-format.md` leaves `#define` bodies to P4 — a P0 that re-spaced
     // a directive would be a formatter that breaks macros. Measured before this guard: **143** gaps on the LuaParser
     // corpus where `#` and the directive name were pulled apart.
+    // **P2: the breaks a column limit forces.** With `ColumnLimit: 0` — what the corpus asks for — nothing here
+    // runs and the output is exactly what P0b/P1 produce. With a real limit, `breaks::break_line` says where a long
+    // logical line has to break, and those breaks are inserted (existing source breaks are kept: this pass adds
+    // breaks, it does not re-flow).
+    let mut forced_breaks = vec![false; stream.tokens.len()];
+    if style.count(StyleOption::ColumnLimit) > 0 {
+        for line in crate::breaks::logical_lines(&stream) {
+            let column = blocks.get(line.start).copied().flatten().unwrap_or(0);
+            if let Some(breaks) = crate::breaks::break_line(&stream, &roles, style, &line, column) {
+                for at in breaks {
+                    forced_breaks[at] = true;
+                }
+            }
+        }
+    }
+
     let mut in_directive = false;
 
     for index in 0..stream.tokens.len() {
         let gap = &stream.gaps[index];
-        let same_line = gap.newlines == 0 && gap.comments.is_empty() && !gap.at_end;
-        if same_line && index > 0 && !in_directive {
+        let forced = forced_breaks[index];
+        if forced && index > 0 && !in_directive {
+            // **A break the column limit asked for**: the line continues at the continuation column.
+            let indent = layout::continuation(&stack, statement_indent, stream.tokens[index].kind, style);
+            out.push_str(line_ending);
+            out.push_str(&" ".repeat(indent));
+            column = indent;
+        } else if gap.newlines == 0 && gap.comments.is_empty() && !gap.at_end && index > 0 && !in_directive {
             let spaces = space::between(&stream, index, &roles, style) + row_paddings[index];
             out.push_str(&" ".repeat(spaces));
             column += spaces;

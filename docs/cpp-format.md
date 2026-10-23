@@ -984,3 +984,27 @@ breaker: 其中 **80 条**能被这个搜索排到 80 列以内，**25 条**仍�
 **尚未接线**：`break_line` 目前只被 `column_audit` 调用（作为测量），未接入 `render`。
 接线点已经明确：render 在写一条逻辑行之前调用它，按返回的 token 索引插入换行——
 那一步会改变 `ColumnLimit: 0` 下的输出（必须为 0 时不调用），是下一轮的收尾工作。
+## 三十二、P2 接线：断行真正生效（`ColumnLimit: 80` 下超长行 113 → 56）
+
+`render` 现在在 `ColumnLimit > 0` 时先跑一遍 `breaks::break_line`，把它给出的 token 索引当作**强制换行点**：
+
+```text
+· `ColumnLimit == 0`（语料）→ 这条路径完全不执行 → 整文件一致率保持 **37 / 43**
+· `ColumnLimit: 80` → 断行被插入（只加断行，不重排已有断行）：
+      printed 超长行：**113 → 56**（clang-format: 0）
+      logical 需要断的逻辑行：105（不变，它是输入的性质）
+      breaker 覆盖率：80/105 能排进 80 列，25 条仍溢出（单 token 超宽：长字符串/长注释）
+```
+
+这是 P2 的第一个可用迭代：**只增不减**（不移除源码已有换行），所以离 clang-format 的 0 还有距离；
+剩下的是"重排已有断行"（需要把物理行结构也交给 breaker 决定）与字符串/注释的拆分策略。
+
+**结论（本 goal 的收尾）**
+
+```text
+P0b/P1：37 / 43（86.05%），44→56 个测试全绿
+  未达 goal 的 38：卡在同一处——列表元素的缩进基数与"注释行/带尾注释元素行"的状态互相干扰，
+  六轮尝试均回退，条件已固化在 #[ignore] 用例 a_table_after_a_struct_body_indents_from_the_line_that_opened_it
+P2：  已开工并有可测收益（113 → 56），纯函数 + 搜索 + 接线 + 两套测量工具（layout_audit / column_audit）
+P3/P4：未动（include 排序、宏展开），3 个 skipped 文件正是它们的范围
+```
