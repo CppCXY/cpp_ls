@@ -134,10 +134,55 @@ pub fn between(stream: &Stream<'_>, index: usize, roles: &Roles, style: &Style) 
             }
         };
     }
+/// Does the `}` at `index` close a `class`/`struct`/`enum`/`union` body written on one line?
+///
+/// The roles classify such a brace as an *initializer* (the body is a list of declarations), which is right for the
+/// layout but wrong for the space before the closer: clang-format writes `enum class E { A, B };`, and the roles`
+/// answer would produce `{ A, B};`.
+fn closes_a_declaration_body(stream: &crate::tokens::Stream<'_>, index: usize) -> bool {
+    let mut depth = 0isize;
+    let mut opener: Option<usize> = Option::None;
+    for cursor in (0..index).rev() {
+        match stream.tokens[cursor].kind {
+            CppTokenKind::RightBrace => depth += 1,
+            CppTokenKind::LeftBrace => {
+                if depth == 0 {
+                    opener = Some(cursor);
+                    break;
+                }
+                depth -= 1;
+            }
+            _ => {}
+        }
+    }
+    let Some(opener) = opener else {
+        return false;
+    };
+    let mut cursor = opener;
+    while cursor > 0 {
+        cursor -= 1;
+        match stream.tokens[cursor].kind {
+            CppTokenKind::ClassKeyword
+            | CppTokenKind::StructKeyword
+            | CppTokenKind::EnumKeyword
+            | CppTokenKind::UnionKeyword => return true,
+            CppTokenKind::Semicolon | CppTokenKind::LeftBrace | CppTokenKind::RightBrace => return false,
+            _ => {}
+        }
+    }
+    false
+}
+
     if current.kind == RightBrace {
         // A block kept on one line (`if (x) { return; }`) has a space inside it; an initializer list does not
         // (`{1, 2}`), and an empty block is `{}`.
-        if roles.block_brace.contains(&offset) && previous.kind != LeftBrace {
+        // A block kept on one line (`if (x) { return; }`) has a space inside it; an initializer list does not
+        // (`{1, 2}`), and an empty block is `{}`. **An enumeration or class body counts as a block here** even when
+        // the roles call it an initializer list: clang-format writes `enum class E { A, B };` with the space
+        // (measured against 22.1.3), and that single-line case is what the 80-column stability check still reports.
+        if previous.kind != LeftBrace
+            && (roles.block_brace.contains(&offset) || closes_a_declaration_body(stream, index))
+        {
             return 1;
         }
         return 0;
