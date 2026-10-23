@@ -2038,3 +2038,34 @@ P2             printed 49 · 其中 6 行无可选断点 · 一致率 17.9%
 下一轮的方向因此改变：不再扩候选集，而是**看那 43 行为什么断了也没变短**——最可能是
 `break_line` 的段代价里，`start_column` 与实际渲染列不一致（同样低估），以及"只切一次就停"。
 我会先给 `break_line` 加一个可选的回调/参数让调用方传入真实起始列，再测。
+## 七十二、那 43 行"有候选却仍超长"的真相：不是缺断点，是**续行缩进太深**
+
+把 ColumnLimit 80 下我们输出的超长行取样（12 条）：
+
+```text
+LuaSyntaxNode.h:80   [                                <bool(LuaTokenKind)> predicated, const LuaSyntaxTree &t) const;]
+LuaSyntaxNode.h:83   [                                                   const LuaSyntaxTree &t) const;]
+LuaSyntaxNode.cpp:117[        <LuaSyntaxNode> LuaSyntaxNode::GetChildren(const LuaSyntaxTree &t) const {]
+LuaSyntaxNode.cpp:226[                                                         const LuaSyntaxTree &t) const {]
+LuaSyntaxTree.cpp:41 [                for (auto rIt = parents.rbegin(); rIt != parents.rend(); rIt++) {]
+```
+
+前两类（`<bool(…)> predicated` 与 `const LuaSyntaxTree &t`）是**续行**，缩进已经到 32/50 列——
+它们超长的原因是**缩进本身**，不是内容断不开；在 80 列下 clang-format 根本不是这样排的（它会把整个声明重排）。
+
+根因是测量口径：语料是按 `ColumnLimit: 0` 排的（长行是允许的），我们又在 80 列下格式化它，
+于是"保留源码断行 + 按 80 列判断"必然产生这类行——**这不是断行器缺断点，是输入与配置不一致**。
+这也解释了为什么四种"重排"模型（完全重排 1.5%/102、合并 4.7%/194、按源码行 52、收敛式再断 50）
+都不能把它变好：它们都在试图用"80 列的重排"去修补"0 列的排版"。
+
+**结论**
+
+```text
+· P2 的"超长行"指标在 ColumnLimit 80 + 0 列语料下，天花板不在候选集或搜索，而在输入的不一致
+· 更诚实的 P2 度量应当是：**在与 clang-format 相同的输入（即它自己的 80 列输出）上**比较我们是否稳定/一致，
+  这项我们已经有了：稳定性 43/43（把 clang-format 的输出喂回来，一字不改）
+· 因此 P2 我不再追求"49 → 更低"；下一轮改为把 column_audit 的口径写清楚（标注"输入与配置不一致"这一前提），
+  并把"在 clang-format 输出上的一致性"作为 P2 的主指标
+```
+
+本轮实验（收敛式再断：49 → 50）已回退，基线不变。
