@@ -448,7 +448,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn a_table_after_a_struct_body_indents_from_the_line_that_opened_it() {
         // The corpus`s widths and `ColumnLimit: 0`: the members sit at 4, the table`s comment and rows at 8
         // (measured against clang-format 22.1.3 on LuaDefine.h, which this shape is taken from).

@@ -98,8 +98,8 @@ fn width(line: &str) -> usize {
             '\t' => 8 - column % 8,
             _ => {
                 let code = character as u32;
-                if matches!(code, 0x1100..=0x115F | 0x2E80..=0xA4CF | 0xAC00..=0xD7A3 | 0x4E00..=0x9FFF
-                    | 0xFF00..=0xFF60)
+                if matches!(code, 0x1100..=0x115F | 0x2E80..=0xA4CF | 0xAC00..=0xD7A3
+                    | 0xF900..=0xFAFF | 0xFF00..=0xFF60)
                 {
                     2
                 } else {
@@ -218,19 +218,6 @@ fn what_a_breaker_would_do(source: &str, style: &cpp_formatter::config::Style) -
     (fits, overflow)
 }
 
-fn style_for(path: &Path) -> cpp_formatter::config::Style {
-    let mut directory = path.parent().map(Path::to_path_buf);
-    while let Some(current) = directory {
-        let candidate = current.join(".clang-format");
-        if let Ok(text) = std::fs::read_to_string(&candidate)
-            && let Ok(style) = cpp_formatter::config::parse(&text, None)
-        {
-            return style;
-        }
-        directory = current.parent().map(Path::to_path_buf);
-    }
-    cpp_formatter::config::Style::default_style()
-}
 
 fn run(clang_format: &str, file: &str) -> Option<String> {
     let output = Command::new(clang_format)

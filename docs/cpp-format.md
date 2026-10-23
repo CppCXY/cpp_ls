@@ -2210,3 +2210,39 @@ cpp_formatter  85 passed + 2 ignored（原 83 + 3；两条曾因旧行为而 ign
 cpp_ls         88 passed + 1 ignored
 语料           43 / 43（100%）· 稳定性 43 / 43 · 间距 19989 / 19989（100%）
 ```
+## 七十七、清理编译警告；`onTypeFormatting` 按用户反馈**移除**
+
+### 警告清零
+
+```text
+· cpp_formatter/src/columns.rs   —— 三个不可达的宽字符区间（被 0x1_F004..=0x1_F9FF 覆盖）
+· cpp_formatter/src/render.rs    —— 重复的 #[test] 属性（同时修回了被挤掉签名的表缩进用例）
+· cpp_formatter/examples/column_audit.rs —— 重复区间 + 未使用的 style_for
+· cpp_ls/handlers/formatting     —— 删掉行内注释后失用的 touches 及其测试
+· cpp_code_analysis/examples/std_probe.rs —— 未使用的 key（改名 _key）
+```
+
+`cargo build --workspace --all-targets` 现在**零警告**；`cargo test -p cpp_formatter --lib` / `-p cpp_ls --lib` 也无警告。
+
+### `textDocument/onTypeFormatting` 已移除
+
+按你的反馈（触发字符不好生效），整块撤掉而不是留着"有时能用"：
+
+```text
+· formatting 模块：删除 on_type_formatting 处理器、document_on_type_formatting_provider 能力
+· request_handler：删除 OnTypeFormatting 的 import 与 dispatch 行
+· tests/handshake.rs：删除 on-type 的断言与能力断言
+· 模块文档改写：明确写出"为什么不再宣告"（客户端只在它认可并被告知的触发字符上发请求，
+  实测不可靠；保存/按需格式化已覆盖同样的重排需求）
+```
+
+保留的格式化能力：**`textDocument/formatting`**、**`textDocument/rangeFormatting`**（走 `format_range`）、
+**`textDocument/willSaveWaitUntil`**。
+
+### 实测
+
+```text
+cpp_formatter  84 passed + 2 ignored · cpp_ls 87 passed + 1 ignored · handshake 32 passed + 5 ignored
+语料           43 / 43（100%）· 稳定性 43 / 43
+构建           workspace --all-targets 零警告
+```

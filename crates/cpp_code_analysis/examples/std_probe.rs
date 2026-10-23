@@ -407,7 +407,7 @@ standard {}",
         let root = paths[0].clone();
         // The key is the **compilation**: the list the corpus was read from, the standard, and the directories that
         // were searched. A different key is a different unit, and the two entries never overwrite each other.
-        let key = cpp_code_analysis::fnv1a64(
+        let _key = cpp_code_analysis::fnv1a64(
             format!(
                 "{}|{}|{}",
                 root.display(),

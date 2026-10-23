@@ -443,11 +443,6 @@ fn a_formatting_request_returns_edits_for_the_whole_file() {
         "the server advertises whole-file formatting: {capabilities}"
     );
     assert_eq!(capabilities["documentRangeFormattingProvider"], json!(true));
-    assert_eq!(
-        capabilities["documentOnTypeFormattingProvider"]["firstTriggerCharacter"],
-        json!("}"),
-        "typing a closing brace is the trigger that re-indents: {capabilities}"
-    );
 
     server.notify("initialized", json!({}));
     server.notify(
@@ -514,22 +509,6 @@ fn a_formatting_request_returns_edits_for_the_whole_file() {
     assert!(
         !ranged_text.contains("int y"),
         "the range formatted only line 0: {ranged_text:?}"
-    );
-
-    // --- on-type: the line the user is typing on ----------------------------------------------
-    let response = server.request(
-        4,
-        "textDocument/onTypeFormatting",
-        json!({
-            "textDocument": { "uri": main_uri },
-            "position": { "line": 1, "character": 12 },
-            "ch": ";",
-            "options": { "tabSize": 4, "insertSpaces": true },
-        }),
-    );
-    assert!(
-        response["result"].is_array(),
-        "on-type formatting answers with a list: {response}"
     );
 
     // --- willSaveWaitUntil: the edits the client applies before saving --------------------------------------

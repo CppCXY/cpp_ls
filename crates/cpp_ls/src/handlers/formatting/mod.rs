@@ -1,4 +1,4 @@
-//! # `textDocument/formatting`, `textDocument/rangeFormatting`, `textDocument/onTypeFormatting`
+//! # `textDocument/formatting`, `textDocument/rangeFormatting`, `textDocument/willSaveWaitUntil`
 //!
 //! The formatter is `cpp_formatter`, a crate of its own; this module is the protocol half — read the file's text, hand
 //! it over, and answer in `TextEdit`s.
@@ -13,23 +13,25 @@
 //!
 //! ```text
 //! formatting          the whole file, one edit list
-//! rangeFormatting     the same list, filtered to the edits that touch the requested range
-//! onTypeFormatting    the same list, filtered to the edit that touches the line being typed on
+//! rangeFormatting     `cpp_formatter::format_range` — the whole file is formatted, and only the lines inside the
+//!                     range are taken from it, so an edit can never reach past the range
+//! willSaveWaitUntil   the same as `formatting`, answered before the client writes the file
 //! ```
 //!
-//! Filtering rather than re-formatting a fragment is deliberate: `cpp_formatter` needs the whole file to know a
-//! statement's indentation, and a fragment formatted alone comes out indented from column zero. A client that formats a
-//! selection therefore gets the edits the whole-file pass would have made inside it, and nothing else moves.
+//! # On-type formatting is not advertised
+//!
+//! `textDocument/onTypeFormatting` was wired and then removed: a client only sends it for trigger characters it has been
+//! told about *and* considers worth a request, which in practice made it fire unreliably, and the same re-indentation is
+//! already covered by formatting on save or on demand. Advertising a capability that does nothing most of the time is
+//! worse than not advertising it.
 
 use std::path::Path;
 
 use lsp_types::{
-    ClientCapabilities, DocumentFormattingParams, DocumentOnTypeFormattingOptions,
-    DocumentOnTypeFormattingParams, DocumentRangeFormattingParams, OneOf, Position, Range,
-    ServerCapabilities, TextEdit,
+    ClientCapabilities, DocumentFormattingParams, DocumentRangeFormattingParams, OneOf, Position,
+    Range, ServerCapabilities, TextEdit,
 };
 use tokio_util::sync::CancellationToken;
-
 
 use super::RegisterCapabilities;
 use crate::context::{RequestOutcome, ServerContextSnapshot, snapshot_query};
@@ -53,21 +55,6 @@ pub async fn on_range_formatting(
     format_request(context, params.text_document.uri, Some(params.range), cancel_token).await
 }
 
-/// Format the line that was just typed on (`}` and `;` are the triggers this server advertises).
-pub async fn on_type_formatting(
-    context: ServerContextSnapshot,
-    params: DocumentOnTypeFormattingParams,
-    cancel_token: CancellationToken,
-) -> RequestOutcome<Vec<TextEdit>> {
-    let line = params.text_document_position.position.line;
-    let range = Range {
-        start: Position { line, character: 0 },
-        end: Position { line: line + 1, character: 0 },
-    };
-    format_request(context, params.text_document_position.text_document.uri, Some(range), cancel_token)
-        .await
-}
-
 /// Format the document that is about to be written (`textDocument/willSaveWaitUntil`).
 ///
 /// The same answer as `textDocument/formatting`: the client applies it before saving, which is what makes "format on
@@ -80,7 +67,7 @@ pub async fn on_will_save_wait_until(
     format_request(context, params.text_document.uri, None, cancel_token).await
 }
 
-/// The one implementation the three methods share: format, diff, filter.
+/// The one implementation the methods share: format, diff.
 async fn format_request(
     context: ServerContextSnapshot,
     uri: lsp_types::Uri,
@@ -93,14 +80,13 @@ async fn format_request(
 
     snapshot_query(context.analysis(), cancel_token, move |session| {
         let path = uri_to_file_path(&uri)?;
-        // **No `session.view` here**: formatting needs the text and the path, not the file`s index entry — and a
+        // **No `session.view` here**: formatting needs the text and the path, not the file's index entry — and a
         // view is exactly what a file that was opened but never parsed does not have yet.
         let text = read_text(session, &path)?;
-        // **The same rule the command-line tool uses**: the nearest `.clang-format`, else the default style.
+        // **The same rule the command-line tool uses**: the nearest `.clang-format`, else the project's fallback.
         let style = cpp_formatter::config::style_for_file(&path);
-        // **A range formats only its own lines** (`cpp_formatter::format_range`): the library formats the whole
-        // file — a fragment cannot know its indentation — and keeps the lines outside the range as they are, so the
-        // edits this produces cannot reach past it.
+        // **A range formats only its own lines** (`cpp_formatter::format_range`): the library formats the whole file —
+        // a fragment cannot know its indentation — and keeps the lines outside the range as they are.
         let formatted = match only {
             Some(range) => cpp_formatter::format_range(
                 &text,
@@ -110,13 +96,12 @@ async fn format_request(
             ),
             None => cpp_formatter::format_file(&path, &text, &style),
         };
-        let edits = edits_between(&text, &formatted);
-        Some(edits)
+        Some(edits_between(&text, &formatted))
     })
     .await
 }
 
-/// **The edits that turn `file`'s text into `formatted`**: one per run of changed lines.
+/// **The edits that turn `old` into `formatted`**: one per run of changed lines.
 ///
 /// Lines are compared as they are, terminator included, so a file whose only change is a line ending still produces an
 /// edit for that line. The common prefix and suffix are left out, which is what keeps the edit small enough for a
@@ -143,8 +128,8 @@ pub fn edits_between(old: &str, formatted: &str) -> Vec<TextEdit> {
     let old_middle = &old_lines[prefix..old_lines.len() - suffix];
     let new_middle: String = new_lines[prefix..new_lines.len() - suffix].concat();
     // The edit covers whole lines, so both ends are a line start: the number of lines before the change, and that
-    // number plus the lines the old middle had. No byte offsets and no line index, which is what makes this
-    // function testable without a file.
+    // number plus the lines the old middle had. No byte offsets and no line index, which is what makes this function
+    // testable without a file.
     vec![TextEdit {
         range: Range {
             start: Position { line: prefix as u32, character: 0 },
@@ -153,6 +138,7 @@ pub fn edits_between(old: &str, formatted: &str) -> Vec<TextEdit> {
         new_text: new_middle,
     }]
 }
+
 /// **The text of a file as the session has it**: the held copy when it has read one, the file on disk otherwise.
 ///
 /// `held` is what a formatting request usually finds (the buffer was opened and the analysis read it); the disk read is
@@ -164,37 +150,24 @@ fn read_text(session: &cpp_code_analysis::Session<cpp_code_analysis::DiskFiles>,
     }
     std::fs::read_to_string(path).ok()
 }
-fn touches(edit: &TextEdit, range: Range) -> bool {
-    edit.range.start.line <= range.end.line && range.start.line <= edit.range.end.line
-}
 
+/// The capabilities this module advertises: whole-file formatting and the range form of it.
+///
+/// The save-time request is advertised by the document-sync options (`will_save_wait_until`), because that is where the
+/// protocol puts it; this type only has to say that both formatting entry points exist.
 pub struct FormattingCapabilities;
 
 impl RegisterCapabilities for FormattingCapabilities {
     fn register_capabilities(server_capabilities: &mut ServerCapabilities, _: &ClientCapabilities) {
         server_capabilities.document_formatting_provider = Some(OneOf::Left(true));
         server_capabilities.document_range_formatting_provider = Some(OneOf::Left(true));
-        // **The two characters a C++ file is worth re-indenting after**: `}` closes a block, `;` ends a statement,
-        // and both change what the next line's indentation should be.
-        server_capabilities.document_on_type_formatting_provider = Some(DocumentOnTypeFormattingOptions {
-            first_trigger_character: "}".to_string(),
-            more_trigger_character: Some(vec![";".to_string()]),
-        });
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cpp_code_analysis::{CompilerConfig, MemoryFiles, Session};
 
-    fn held(text: &str) -> cpp_code_analysis::VfsFile {
-        use cpp_code_analysis::{OpenDocuments, SessionFiles, WatchFilter};
-        let files = MemoryFiles::new().with_file("/p/a.cpp", text);
-        let providers = SessionFiles::new(OpenDocuments::new(), files);
-        let mut session = Session::with_config("/p", providers, WatchFilter::new("/p"), CompilerConfig::default());
-        session.files().held(std::path::Path::new("/p/a.cpp")).expect("the file is held").clone()
-    }
     #[test]
     fn nothing_changes_so_there_are_no_edits() {
         assert!(edits_between("int x = 1;\n", "int x = 1;\n").is_empty());
@@ -207,26 +180,5 @@ mod tests {
         assert_eq!(edits[0].range.start.line, 0);
         assert_eq!(edits[0].range.end.line, 1);
         assert_eq!(edits[0].new_text, "int x = 1;\n");
-    }
-
-    #[test]
-    fn an_edit_that_spans_a_range_touches_it() {
-        let edit = TextEdit {
-            range: Range {
-                start: Position { line: 2, character: 0 },
-                end: Position { line: 9, character: 0 },
-            },
-            new_text: String::new(),
-        };
-        let asked = Range {
-            start: Position { line: 5, character: 0 },
-            end: Position { line: 6, character: 0 },
-        };
-        assert!(touches(&edit, asked));
-        let outside = Range {
-            start: Position { line: 20, character: 0 },
-            end: Position { line: 21, character: 0 },
-        };
-        assert!(!touches(&edit, outside));
     }
 }
