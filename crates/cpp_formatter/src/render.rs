@@ -50,6 +50,14 @@ pub fn format(source: &str, style: &Style) -> String {
     // continuation line that starts with one belongs (measured: `std::cerr << …` puts the first `<<` at 14 and the
     // next line's `<<` at 14 too).
     let mut operand_operator: Option<usize> = None;
+    let indent_width = style.count(StyleOption::IndentWidth);
+    // **A body opened on a line the bracket rules placed** (a lambda inside `f(...)`): the closer sits at that line
+    // column and the body one indent in. Only bracket-placed lines count, so constructor lists and initializer rows
+    // keep the level bookkeeping (§二十三 measured what happens when every continuation counts).
+    let mut bracket_body: Option<(usize, usize)> = None;
+    let mut brace_depth = 0usize;
+    let mut line_was_bracket_placed = false;
+    let mut line_column = 0usize;
 
     // **A `#` line is copied, not spaced.** Its internal spacing is the preprocessor's (`#  include` is legal,
     // `#include <a/b.h>` is the usual), and `docs/cpp-format.md` leaves `#define` bodies to P4 — a P0 that re-spaced
@@ -81,12 +89,25 @@ pub fn format(source: &str, style: &Style) -> String {
                 });
                 aligned
                     .map(|column| (column, false))
-                    .or_else(|| planned_indent(index, &stream, &blocks, &stack, statement_indent, style, in_ctor_init, ctor_column, init_depths[index] > 0))
+                    .or_else(|| {
+                        let inside = bracket_body.filter(|(depth, _)| *depth == brace_depth);
+                        planned_indent(index, &stream, &blocks, &stack, statement_indent, style, in_ctor_init, ctor_column, init_depths[index] > 0)
+                            .map(|(indent, is_block_line)| {
+                                let closing = stream.tokens[index].kind == cpp_parser::CppTokenKind::RightBrace;
+                                match inside {
+                                    Some((_, column)) if is_block_line && closing => (column, true),
+                                    Some((_, column)) if is_block_line => (column + indent_width, true),
+                                    _ => (indent, is_block_line),
+                                }
+                            })
+                    })
             }
         {
             // **A line that starts here**, with nothing in the gap but whitespace: the break count collapses to
             // `MaxEmptyLinesToKeep` and the column is the layout's. Everything else — a comment, a directive — is
             // still copied, which keeps this pass's blast radius to the lines it can decide.
+            line_was_bracket_placed = !is_block_line && !stack.is_empty() && init_depths[index] == 0;
+            line_column = indent;
             let mut keep = gap.newlines.min(max_empty + 1);
             // **A blank line right after `{` is not kept** unless the style asks (`KeepEmptyLinesAtStartOfBlock`,
             // false by default, and the corpus leaves it false): clang-format writes the first statement of a block
@@ -188,6 +209,22 @@ pub fn format(source: &str, style: &Style) -> String {
             cpp_parser::CppTokenKind::RightParen | cpp_parser::CppTokenKind::RightBracket
         ) {
             stack.pop();
+        }
+        match stream.tokens[index].kind {
+            cpp_parser::CppTokenKind::LeftBrace => {
+                brace_depth += 1;
+                if line_was_bracket_placed && !stack.is_empty() {
+                    bracket_body = Some((brace_depth, line_column));
+                }
+                line_was_bracket_placed = false;
+            }
+            cpp_parser::CppTokenKind::RightBrace => {
+                if let Some((depth, _)) = bracket_body && depth >= brace_depth {
+                    bracket_body = None;
+                }
+                brace_depth = brace_depth.saturating_sub(1);
+            }
+            _ => {}
         }
         let text = stream.tokens[index].text;
         if let Some(top) = stack.last_mut()
