@@ -742,3 +742,22 @@ other 4、跳过 3（token 流不同，属 include 排序/宏展开，P3/P4）�
 · lambda 体层级（LuaSyntaxTree.cpp:455，8 vs 16）—— 块开在续行上时，body 层级应基于该行实际列
 · other 2、跳过 3（include 排序/宏，P3/P4 范围）
 ```
+## 二十三、round 11：lambda 体层级的一次失败尝试（记录条件）
+
+目标：`LuaSyntaxTree.cpp:455` —— lambda 写在 `std::partition_point(` 里，lambda 行是**续行**（12 列），
+它的 body 应在 16，而层级记账给出 8。
+
+尝试：render 里跟踪 `brace_depth` 与"开在续行上的 `{`"，把该 body 的块行改成 `开括号行 + IndentWidth`。
+
+实测：**35 → 25 / 43**（indent 13）。原因具体：
+
+```text
+· 该覆盖同样作用到**闭括号**（`}` 也是块行）—— ctor 初始化列表的 body 立刻错位（`}` 到 10）
+· 而且它对"body 本来就被层级记对"的块也生效（ctor 的 `{` 在续行上，但它的 body 层级是对的）
+也就是说：判据不能是"开在续行上"，而必须是"层级记账把 body 记到了开括号行**之上**"
+（lambda：opener 12、blocks 给 8；ctor：opener 6、blocks 给 4 —— 两者都满足，所以还要区分
+ "开括号行的层级由 bracket 对齐决定 vs 由 ctor 列表列决定"）
+```
+
+已回退，35/43 与测试状态保持。下一轮若要再试，需要把"开括号行的列来自哪种续行"作为显式枚举传进来，
+而不是二值的 `last_line_was_a_continuation`。
