@@ -215,6 +215,88 @@ pub fn continuation(
     }
 }
 
+/// **Which `<` and `>` are template argument brackets**, decided on the token stream alone.
+///
+/// The parser`s `Roles` answer this for the lists it recognises, but not for every one: a `using` alias
+/// (`using S2 = Scenario<A, B>`) keeps its angle unmarked, and that is exactly where a continuation line fell to
+/// column 0. This pass is the lexical complement — conservative, because a `<` that is a comparison must stay one:
+///
+/// ```text
+/// · the `<` follows a name, a `>` or the `template` keyword, and the next token can start a type or a value (`1 < 2`
+///   fails on the number, `a < b` fails on the identifier *after* it once the matching `>` is not found)
+/// · a matching `>` is found before a `;`, a `{` or a `}` at the same depth
+/// ```
+pub fn template_angles(stream: &Stream<'_>, roles: &Roles) -> Vec<bool> {
+    let mut angles = vec![false; stream.tokens.len()];
+    for index in 0..stream.tokens.len() {
+        if stream.tokens[index].kind == cpp_parser::CppTokenKind::Less
+            && roles.is_template_angle(stream.tokens[index].start)
+        {
+            if let Some(close) = matching_angle(stream, index) {
+                angles[index] = true;
+                angles[close] = true;
+            }
+        }
+    }
+    for index in 0..stream.tokens.len() {
+        if stream.tokens[index].kind == cpp_parser::CppTokenKind::Less && !angles[index] {
+            if let Some(close) = matching_angle(stream, index) {
+                angles[index] = true;
+                angles[close] = true;
+            }
+        }
+    }
+    angles
+}
+
+/// The `>` that closes the `<` at `open`, if the tokens between look like a template argument list.
+fn matching_angle(stream: &Stream<'_>, open: usize) -> Option<usize> {
+    use cpp_parser::CppTokenKind::*;
+    let previous = stream.tokens.get(open.wrapping_sub(1))?;
+    let after = stream.tokens.get(open + 1)?;
+    let opens_a_list = matches!(
+        previous.kind,
+        Identifier | Greater | TemplateKeyword
+    ) && matches!(
+        after.kind,
+        Identifier
+            | Greater
+            | ConstKeyword
+            | AutoKeyword
+            | VoidKeyword
+            | IntKeyword
+            | CharKeyword
+            | ShortKeyword
+            | LongKeyword
+            | FloatKeyword
+            | DoubleKeyword
+            | UnsignedKeyword
+            | SignedKeyword
+            | Star
+            | Ampersand
+            | LogicalAnd
+            | Scope
+    );
+    if !opens_a_list {
+        return Option::None;
+    }
+    let mut depth = 0isize;
+    for cursor in open..stream.tokens.len() {
+        match stream.tokens[cursor].kind {
+            Less => depth += 1,
+            Greater => {
+                depth -= 1;
+                if depth == 0 {
+                    return Option::Some(cursor);
+                }
+            }
+            Semicolon | LeftBrace | RightBrace | RightParen => return Option::None,
+            _ => {}
+        }
+    }
+    Option::None
+}
+
 /// Does the line starting at `index` continue the previous one rather than start a statement?
 ///
 /// A line that begins with a member access, a constructor initializer, a comma, or a binary operator is a

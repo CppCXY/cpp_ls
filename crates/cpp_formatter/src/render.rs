@@ -43,6 +43,10 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
     // statement started on.
     let mut column = 0usize;
     let mut stack: Vec<usize> = Vec::new();
+    // **Template argument lists get their own column stack**: a continuation line inside one aligns after the `<`.
+    // `layout::template_angles` is the lexical test, because the parser does not mark every list (`using` aliases).
+    let template_angles = layout::template_angles(&stream, &roles);
+    let mut angles: Vec<usize> = Vec::new();
     let mut statement_indent = 0usize;
     // **Where a constructor initializer list`s packed members line up**: clang-format packs them after the `:` of the
     // first initializer, so a line starting with `,` continues at that column rather than at a fixed offset. Measured
@@ -151,7 +155,18 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
                     .or_else(|| aligned.map(|column| (column, false)))
                     .or_else(|| {
                         let inside = bracket_body.filter(|(depth, _)| *depth == brace_depth);
-                        planned_indent(index, &stream, &blocks, &stack, statement_indent, style, in_ctor_init, ctor_column, init_depths[index] > 0)
+                        planned_indent(
+                            index,
+                            &stream,
+                            &blocks,
+                            &stack,
+                            statement_indent,
+                            style,
+                            in_ctor_init,
+                            ctor_column,
+                            init_depths[index] > 0,
+                            angles.last().copied().filter(|column| *column != usize::MAX),
+                        )
                             .map(|(indent, is_block_line)| {
                                 let closing = stream.tokens[index].kind == cpp_parser::CppTokenKind::RightBrace;
                                 match inside {
@@ -314,6 +329,10 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
         ) {
             stack.pop();
         }
+        // The template closer pops its own stack, so a line after the list is not pulled to its column.
+        if template_angles[index] && stream.tokens[index].kind == cpp_parser::CppTokenKind::Greater {
+            angles.pop();
+        }
         match stream.tokens[index].kind {
             cpp_parser::CppTokenKind::LeftBrace => {
                 brace_depth += 1;
@@ -340,6 +359,11 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
         {
             *top = column;
         }
+        if let Some(top) = angles.last_mut()
+            && *top == usize::MAX
+        {
+            *top = column;
+        }
         out.push_str(text);
         column = columns.advance(column, text);
         if matches!(
@@ -348,6 +372,11 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
         ) {
             // `usize::MAX` = "the token after this bracket has not been written yet".
             stack.push(usize::MAX);
+        }
+        // The template opener pushes its own "column not yet known" marker, so a continuation line inside the list
+        // can align after the `<` (the parentheses`s stack would otherwise be the only one consulted).
+        if template_angles[index] && stream.tokens[index].kind == cpp_parser::CppTokenKind::Less {
+            angles.push(usize::MAX);
         }
 
         // **A `{` ends the initializer list and a `;` ends the declaration.** Without this the flag stayed set past
@@ -547,6 +576,7 @@ fn planned_indent(
     in_ctor_init: bool,
     ctor_column: Option<usize>,
     in_initializer: bool,
+    angle_column: Option<usize>,
 ) -> Option<(usize, bool)> {
     let first = stream.tokens[index].kind;
     if std::env::var_os("CPPFMT_DEBUG").is_some() {
@@ -576,6 +606,13 @@ fn planned_indent(
             .and_then(|earlier| blocks[earlier])
             .unwrap_or(statement_indent);
         return Some((layout::continuation(stack, base, first, style), false));
+    }
+    // **A line that continues a template argument list aligns after its `<`**, even where the block rules have an
+    // answer: at file scope the block answer for `using S2 = Scenario<` gives 0, which is where those lines came out.
+    if let Some(column) = angle_column
+        && blocks[index].is_some()
+    {
+        return Some((column, false));
     }
     if let Some(indent) = blocks[index] {
         return Some((indent, true));

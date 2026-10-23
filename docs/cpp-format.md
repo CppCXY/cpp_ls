@@ -2441,3 +2441,31 @@ alias 样例输出         `C::Not` 仍在 0 列      （没修好）
 snippet spacing 26/26（100%）· stability 18/26（69.2%）
 84 tests · 零警告
 ```
+## 八十三、词法层的"模板角括号"判定 + 角括号列对齐（**有净收益，保留**）
+
+上轮回退的结论是"缺一个不依赖解析器的 `<` 判定"，这轮补上了：
+
+```text
+layout::template_angles(stream, roles) -> Vec<bool>
+  · 先采纳解析器标记（roles.is_template_angle）的列表
+  · 再补词法启发式：`<` 前是名字/`>`/`template`，后是能开类型或值的 token
+    （标识符、内建类型、const/auto、`*`/`&`/`&&`、`::`、`>`）
+  · 向后找配对的 `>`，中途遇到 `;` `{` `}` `)` 就放弃（于是 `a < b` 不会被误判）
+```
+
+然后用它维护 render 里第二个列栈：`<` 压"列未知"、下一个 token 填列、`>` 弹出；`planned_indent` 在
+"该行本会落到块级、但处于角括号栈内"时改用角括号列。
+
+**实测（同一份 27 个样例，改前 / 改后）**
+
+```text
+                      无此改动        有此改动
+snippet stability      18 / 27  →  **19 / 27**（66.7% → 70.4%）
+snippet spacing        27 / 27  →  27 / 27（100%）
+语料 43/43 · 间距 19989/19989 均未变
+```
+
+`using Scenario2 = Scenario<...>` 那种续行不再掉到第 0 列（此前是 `C::Not,` 顶格，现在是按 `<` 之后对齐）。
+
+同样加入了 `tests/snippets/27_alias.cpp` 固化这个形状。下一轮把同样的机制用到花括号列表（`enum class Color { Red,`
+之后的 `Green,`），以及 requires 子句缩进（同一个 `planned_indent` 入口）。
