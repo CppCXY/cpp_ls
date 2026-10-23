@@ -77,9 +77,14 @@ pub fn format(source: &str, style: &Style) -> String {
         } else if !in_directive
             && (gap.comments.is_empty()
                 // **A comment on its own line inside a braced initializer is an element of the table**: it lines up
-                // with the elements around it (measured: `/* ORDER OPR */` belongs at the elements' column, not at the
-                // one the source happens to have).
-                || (gap.comments.len() == 1 && gap.comments[0].own_line && init_depths[index] > 0))
+                // with the elements around it (measured: `/* ORDER OPR */` belongs at the elements' column). A trailing
+                // comment of the *previous* line may share the gap (`unsigned char right; /* … */` then the table's own
+                // comment), which is why the last one is what counts, not the only one.
+                || (gap
+                    .comments
+                    .last()
+                    .is_some_and(|comment| comment.own_line)
+                    && init_depths[index] > 0))
             && gap.newlines > 0
             && index > 0
             && let Some((indent, is_block_line)) = {
@@ -146,11 +151,20 @@ pub fn format(source: &str, style: &Style) -> String {
             for _ in 0..keep {
                 out.push_str(line_ending);
             }
+            // **A trailing comment of the previous line is written first, from the source**: it belongs to that line,
+            // and only the comment that starts this line is this pass's to place.
+            let comment_in_this_gap = gap
+                .comments
+                .last()
+                .filter(|comment| comment.own_line && init_depths[index] > 0);
+            if let Some(comment) = comment_in_this_gap {
+                out.push_str(source.get(gap.start..comment.start).unwrap_or(""));
+            }
             out.push_str(&" ".repeat(indent));
             column = indent;
             // **The comment that made this gap non-empty is a line of the block**: its text and everything after it
             // come from the source, written once, after the column this pass decided.
-            if let Some(comment) = gap.comments.first() {
+            if let Some(comment) = comment_in_this_gap {
                 out.push_str(comment.text);
                 // What follows the comment is a break to the token's own line: its newlines are kept (capped) and its
                 // indentation is replaced by the column — the same one, because both lines are elements of the list.
