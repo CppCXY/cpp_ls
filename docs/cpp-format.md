@@ -1597,3 +1597,26 @@ delta（注释列 − 组内最宽代码结尾）的分布：
 **实现前必须先把这个作用域判断加进 layout**，否则又是猜。
 
 本轮只提交测量工具与这张表，不改 render（42/43 保持）。
+## 五十七、"声明体 +1 列"也**不成立**（42 → 38，回退）
+
+按上节的语料表实现：`layout::in_declaration_body`（`class`/`struct`/`enum`/`union` 体识别）+
+`trailing::align` 里 `target = max + N + (在声明体 ? 1 : 0)`，接进 `format_file`。
+
+实测 **42 → 38**，稳定性 43 → 38。四处对照（同一份输出）：
+
+```text
+ours: "unsigned char left; /* … */"      theirs: "unsigned char left;  /* … */"   ← 声明体：要 +2 不是 +1
+ours: "TK_GLOBAL, // global lua5.5"      theirs: "TK_GLOBAL,// global lua5.5"     ← 枚举项：要 +0
+ours: "0x00,          /* EOZ */"         theirs: "0x00,           /* EOZ */"      ← 初始化列表行：要 +1
+ours: "return TK_DOTS;/* '...' */"       theirs: "return TK_DOTS; /* '...' */"    ← 语句：要 +1
+```
+
+四类上下文（结构体成员、枚举项、初始化列表行、语句）需要**四种不同的列规则**，且与上一节的均值表相互矛盾
+（上一节"声明体 +1"来自对 LuaDefine 两行的观察，但同一文件里的枚举项却是 +0）。
+
+结论：**尾注释列无法用"上下文 + 常数"的模型复现**。它取决于 clang-format 的 `WhitespaceManager`
+内部的分组与推列逻辑（`AlignTrailingComments.Kind` 的 `Leave` 语义、组的边界、以及"只向右推"的规则）。
+在没有该源码的前提下，继续靠语料反推已被证否四次（§四十四、§五十二、§五十五、本节）。
+
+已全部回退：42/43、稳定性 43/43、`cpp_formatter` 70 tests 全绿。
+`examples/trailing_probe.rs`（语料测量工具）保留，它是下一步唯一有用的起点。
