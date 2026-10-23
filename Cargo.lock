@@ -221,7 +221,9 @@ version = "0.1.0"
 dependencies = [
  "cpp_parser",
  "glob",
+ "libmimalloc-sys",
  "log",
+ "mimalloc",
  "redb",
  "rust-i18n",
  "serde",

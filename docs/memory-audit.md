@@ -177,6 +177,56 @@ P3 "单元表按条数限就够了"
 
 `MemoryReport` + `memory_report` example + 各表 accounting。**验收**：一条命令打印出上面那张表。
 
+### M1 已落地：三张表的字节预算（2026-10-24，实测）
+
+```text
+F1 walked_by_content → cache_lru::Cache，64 MB + 512 条；权重是 unit.heap_bytes()
+F2 UnitTable         → 128 MB（16 条仍保留作兜底）；权重存进 HeldUnit，淘汰先按"最小的闭包"
+F3 MacroDefinitions  → 32 MB，满了整表清空（一条 #define 重读一次就是一次读行，比维护每条的权重便宜）；
+                       键从 (PathBuf, usize) 改成 (Arc<Path>, usize) —— 4 万条键里原来每一条都带一份完整路径
+```
+
+冷启动实测（1 273 文件，冷缓存，`examples/memory_report.rs`）：
+
+```text
+                         M1 之前        M1 之后
+第二遍跑完的 RSS           971.8 MB       791.3 MB      (−180 MB, −19%)
+walked_by_content        384 / 221.9 MB  265 / 62.2 MB  （预算生效）
+units 16                  99.5 MB        105.6 MB       （本语料没到 128 MB，见下）
+definitions 34k           11.6 MB        11.6 MB        （32 MB 没到）
+冷启动墙钟                 ~8.6 s         ~5.9–6.2 s    （没有变慢）
+```
+
+`units` 这一项在本语料上没有下降是**预期**的：16 × 6.2 MB = 99 MB < 128 MB，预算还没开始生效。
+它防的是"闭包更重"的工程（16 × 25 MB = 400 MB），那种情况下它才会出手。
+
+**F4（VFS 文本）推迟了，理由写在这里**：VFS 的文本是**读路径的前提**——`Session::text`、单位走查的
+`look_up`、`view_of_the_file` 都按"已持有"直接读 `vfs.held(path)`，淘汰会让它们返回 `None`，那是错误答案
+而不是慢。要给它加预算，必须先把"读路径按需加载"改出来，那是独立的一步（M2 的一部分），不是一行预算。
+
+### M1 之后：剩下的 500 MB 是什么（结论：分配器留着的空闲页）
+
+M1 之后 RSS 791 MB，活表 276 MB，差 **515 MB**。三个实验回答了它是什么：
+
+```text
+① drop 掉 Session              791 → 42 MB          → 不是泄漏，全部可释放
+② 工作集 trim（SetProcessWorkingSetSize）  791 → 0.2 MB
+   然后遍历全部摘要（222 101 条事实）        →  4.2 MB 常驻
+③ mi_collect(true)（mimalloc 自己的回收）  791 → 764 MB  ← 只还了 27 MB
+```
+
+所以：**页是空闲的、可回收的，只是进程不主动还**。`mi_collect` 不够（mimalloc 在 Windows 上把 arena 留着），
+平台的工作集 trim 才有效。于是 M5 改成了"在队列排空的那一刻调用平台 trim"，落点：
+
+```text
+cpp_ls: crates/cpp_ls/src/context/analysis_state.rs  pub fn release_free_memory()
+        crates/cpp_ls/src/handlers/initialized/mod.rs  在 `pending_now == 0 && taken > 0` 时调用
+        同一处把 `MemoryReport` 的字节表追加写进 %TEMP%\cpp_ls-memory.txt
+```
+
+**代价与边界**：trim 会把**活跃页**也换出去，下一次查询要重新缺页（微秒到毫秒级）；所以只在队列排空时做，
+不在每个 slice 做，也不用 `mi_collect` 之外的定时器。
+
 ### M1 给剩下的三张表加字节预算（不改变答案）
 
 ```text
@@ -245,7 +295,8 @@ for each translation unit（源文件清单，来自 compile_commands.json 或�
 ### M5 空闲还页与遥测
 
 ```text
-· 队列空闲时调用 mimalloc 的 `mi_collect(true)`（一次 FFI）把空闲页还给 OS；
+· 队列空闲时调用平台的工作集 trim（`release_free_memory`）把空闲页还给 OS —— **已落地，见 §M1 之后**；
+  `mi_collect(true)` 实测只还 27 MB（mimalloc 在 Windows 上留着 arena），所以不用它；
   实测 RSS 与峰值相等，说明现在**从不还页**，这是用户看到 5 GB 的最后一环
 · 服务器每 N 秒/每个 workspace 事件把 `MemoryReport` 写进日志与 status bar
 · CI 加一条"内存预算测试"：索引语料后断言 `memory_report().total() <= 250 MB`
@@ -263,8 +314,8 @@ R2 磁盘优先的查询延迟。redb 读一条摘要 ~10–40 µs（`cache_db` 
    但只在"窗口未命中"时发生；窗口按"打开文件的闭包"预热，命中率应当很高。
 R3 一遍流的正确性。环境由指令读数推导，与解析结果在 1 963 个文件上有 2 处分歧（两个 asio 的 include），
    必须先定"用哪一方"，再切；`examples/directive_oracle.rs` 是这条的验收工具（现已 2/1963）。
-R4 mimalloc 的 `mi_collect` 是否真还页，要实测；如果它只整理不还，退路是 `MIMALLOC_PURGE_DELAY=0`
-   或换回系统分配器再测。
+R4 页归还的代价：工作集 trim 会把活跃页也换出去，下一次查询重新缺页。只在队列排空时做（已落地），
+   并接受它的毫秒级代价；如果实测到查询变慢，退路是延迟 N 秒再 trim（现在没有定时器）。
 R5 预算数值本身需要按机器/工程调；把预算放进 `MemoryBudget` 常量并在报告里打印"当前值与是否命中"，
    避免又一次"条数上限看起来生效"的错觉。
 ```

@@ -145,6 +145,44 @@ pub const WRITE_BUDGET: Duration = Duration::from_millis(50);
 /// to bound it.
 pub const QUERY_BUDGET: Duration = Duration::from_millis(50);
 
+/// **Give the operating system its pages back**, after the analysis has gone idle.
+///
+/// # What this is for
+///
+/// Measured on `EmmyLuaCodeStyle` (1 273 files, cold; `examples/memory_report.rs` in `cpp_code_analysis`): after the
+/// second pass the session's own tables are **276 MB** and the resident set is **791 MB**. The difference is not a
+/// leak — dropping the session returns 384 MB of it and a working-set trim returns the rest:
+///
+/// ```text
+///   tail drained            rss 791 MB   live tables 276 MB
+///   mi_collect(true)        rss 764 MB   ← the allocator's own "release what you can" is not enough
+///   working-set trim        rss  0.2 MB  ← the platform's, and touching the tables brings back a few MB
+/// ```
+///
+/// So the pages are free and the process is holding them: a language server that has finished indexing looks like
+/// gigabytes to Task Manager while it is doing nothing. This returns them at the one moment that costs nothing —
+/// the queue is empty.
+///
+/// # Why not `mi_collect`
+///
+/// It was measured first (see the number above): mimalloc keeps its arenas resident on Windows, so its own
+/// collection releases 27 MB of 515. The platform call is what actually pages them out.
+pub fn release_free_memory() {
+    #[cfg(windows)]
+    {
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn GetCurrentProcess() -> isize;
+            fn SetProcessWorkingSetSize(process: isize, minimum: usize, maximum: usize) -> i32;
+        }
+        // SAFETY: `usize::MAX` for both sizes is the documented "trim the working set" request, and the process
+        // handle is the pseudo-handle the call expects.
+        unsafe {
+            SetProcessWorkingSetSize(GetCurrentProcess(), usize::MAX, usize::MAX);
+        }
+    }
+}
+
 impl AnalysisState {
     pub fn new() -> Self {
         let documents = OpenDocuments::new();

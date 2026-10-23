@@ -18,6 +18,11 @@
 //! what the last report already had, and it was off by an order of magnitude.
 
 use std::path::{Path, PathBuf};
+
+/// **The allocator the server uses**, so that "is this the live tables or pages the allocator holds" is measured on
+/// the same allocator the answer has to be true for.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 use std::time::Instant;
 
 use cpp_code_analysis::file::coordinates::FileOffset;
@@ -79,6 +84,48 @@ fn main() {
     // The cursor: inside a function body, which is where a reader types.
     let text = session.text(&file).unwrap_or(on_disk.clone());
     let cursor = text.find('{').map(|index| index + 1).unwrap_or(text.len());
+
+    // **Is the gap between the live tables and the resident set *free* memory?** Trim the working set and touch every
+    // live summary: if the trim takes the process to ~the accounted total and touching does not bring it back, the
+    // pages were free and the answer is "return them" (M5); if touching brings it back, the memory is live and
+    // unaccounted, and the answer is elsewhere.
+    if std::env::var_os("CPPLS_TRIM").is_some() {
+        let before = resident();
+        trim_working_set();
+        let trimmed = resident();
+        let live: usize = session
+            .index()
+            .summaries()
+            .map(|summary| summary.declarations.len() + summary.macros.len())
+            .sum();
+        let touched = resident();
+        println!(
+            "  trim: {} -> {} (touched {live} facts: {}), accounted {}",
+            kilobytes(before),
+            kilobytes(trimmed),
+            kilobytes(touched),
+            kilobytes(session.memory_report().total_with_the_process())
+        );
+    }
+
+    // **Does the allocator give the pages back?** The trim above shows the pages are free; this asks whether the
+    // allocator can release them without paging out live data (`mi_collect(true)` is mimalloc's "release what you
+    // can"), which is the call `cpp_ls` would make when the queue drains.
+    {
+        let before = resident();
+        // Declared here rather than through `libmimalloc-sys`, whose bindings for it sit behind a feature: the
+        // symbol is in the mimalloc library this probe already links as its allocator.
+        unsafe extern "C" {
+            fn mi_collect(force: bool);
+        }
+        // SAFETY: `mi_collect` takes a flag and no pointers, and is safe to call at any time.
+        unsafe { mi_collect(true) };
+        println!(
+            "  mi_collect: {} -> {}",
+            kilobytes(before),
+            kilobytes(resident())
+        );
+    }
 
     let mut buffer = text;
     let mut baseline: Option<usize> = None;
@@ -241,6 +288,23 @@ fn peak_resident() -> usize {
 fn peak_resident() -> usize {
     0
 }
+
+/// Page the working set out and back? See the trim experiment in `main`.
+#[cfg(windows)]
+fn trim_working_set() {
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetCurrentProcess() -> isize;
+        fn SetProcessWorkingSetSize(process: isize, minimum: usize, maximum: usize) -> i32;
+    }
+    // SAFETY: the arguments are documented: `-1` for both sizes means "trim the working set".
+    unsafe {
+        SetProcessWorkingSetSize(GetCurrentProcess(), usize::MAX, usize::MAX);
+    }
+}
+
+#[cfg(not(windows))]
+fn trim_working_set() {}
 
 fn kilobytes(bytes: usize) -> String {
     format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))

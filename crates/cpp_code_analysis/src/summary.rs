@@ -1036,9 +1036,27 @@ pub struct MacroDefinitions {
     /// define the same name twice (`#define WIDTH 80` above an `#undef` and a second `#define WIDTH 120`), and a
     /// cache keyed by the name would hand the second fact the first one's definition — a wrong expansion rather than
     /// a missing one. A fact is identified by the range its name is written at, which is unique in its file.
-    parsed:
-        std::collections::HashMap<(std::path::PathBuf, usize), Option<std::sync::Arc<MacroDef>>>,
+    ///
+    /// **The path is shared**, not owned per key: the same header defines hundreds of macros, and a `PathBuf` per
+    /// entry was hundreds of copies of the same path — measured at 34 000 entries on a cold start, most of them
+    /// pointing into about 400 files.
+    parsed: std::collections::HashMap<
+        (std::sync::Arc<std::path::Path>, usize),
+        Option<std::sync::Arc<MacroDef>>,
+    >,
+    /// What the map holds, in the estimate [`MacroDefinitions::accounting`] makes — the number the budget below is
+    /// deducted from.
+    bytes: usize,
 }
+
+/// **How many bytes of `#define`s the cache keeps** — see [`MacroDefinitions`].
+///
+/// Before this bound the map grew for the life of the session: every definition an evaluation touched stayed, keyed
+/// by `(path, offset)`, and a 1 273-file project reached 34 000 entries / 11.6 MB with nothing dropping them. The
+/// table is cleared rather than evicted when it fills, because a definition is one `#define` line re-read from a
+/// file that is already in memory: cheap to rebuild, and clearing is what keeps the bookkeeping honest (no weight
+/// to maintain per entry on the hot path).
+pub const MAX_DEFINITION_BYTES: usize = 32 * 1024 * 1024;
 
 impl DeclFact {
     /// The bytes one declaration fact holds: the struct and the strings it owns.
@@ -1155,7 +1173,7 @@ impl MacroDefinitions {
         source: &str,
         fact: &MacroFact,
     ) -> Option<std::sync::Arc<MacroDef>> {
-        let key = (path.to_path_buf(), fact.range.start_offset);
+        let key = (std::sync::Arc::from(path), fact.range.start_offset);
         // **The key allocates, and it stays that way because the measurement said the allocation is 1 s of a 250 s
         // index.** A counter was put here to answer "what fraction of lookups are hits" — five million lookups per
         // index at 98.7%, so the waste is real and the fix is not obvious: a pointer-keyed index would be the cheap
@@ -1167,6 +1185,21 @@ impl MacroDefinitions {
         }
 
         let definition = read_back_a_define(source, fact).map(std::sync::Arc::new);
+
+        // **The budget, checked on the way in.** A definition is one `#define` line re-read from a file already in
+        // memory, so dropping the whole table costs less than tracking a weight per entry on this path — which is
+        // the hottest path in the index (five million lookups per run are hits).
+        if self.bytes > MAX_DEFINITION_BYTES {
+            self.parsed.clear();
+            self.bytes = 0;
+        }
+        self.bytes += std::mem::size_of::<
+            ((std::sync::Arc<std::path::Path>, usize), Option<std::sync::Arc<MacroDef>>),
+        >();
+        self.bytes += std::mem::size_of::<MacroDef>();
+        if let Some(definition) = &definition {
+            self.bytes += definition.name.len();
+        }
         self.parsed.insert(key, definition.clone());
 
         definition
@@ -1179,7 +1212,13 @@ impl MacroDefinitions {
     /// definition nobody wrote. The whole file's entries go, not only the edited definition's: every offset after
     /// the edit moved.
     pub fn forget(&mut self, path: &std::path::Path) {
-        self.parsed.retain(|(held, _), _| held != path);
+        let before = self.parsed.len();
+        self.parsed.retain(|(held, _), _| held.as_ref() != path);
+        if self.parsed.len() != before {
+            // An exact subtraction is not worth a per-entry walk: the estimate is a bound, and the next
+            // `definition_of` call checks it anyway.
+            self.bytes = self.parsed.len() * 96;
+        }
     }
 
     /// How many distinct definitions have been read back — the number a caller watches to see the cache work.

@@ -550,8 +550,13 @@ pub struct Session<F: FileProvider = DiskFiles> {
     ///
     /// A `Mutex` of its own rather than the units table's: the two are read at different points of the same call, and
     /// holding one across the other is how a re-entrant lock becomes a deadlock.
+    ///
+    /// **Bounded in bytes** ([`MAX_WALKS_BY_CONTENT_BYTES`]), not in entries: a timeline measures 0.1–6.2 MB, so a
+    /// count would be a budget that says nothing about what it holds. Least recently used goes first; a unit larger
+    /// than the whole budget is still kept, because the walk that just produced it is the one a query is about to
+    /// use and rebuilding it is the most expensive thing this session can do.
     walked_by_content: std::sync::Mutex<
-        std::collections::HashMap<(u64, u64), std::sync::Arc<crate::TranslationUnit>>,
+        crate::cache_lru::Cache<(u64, u64), std::sync::Arc<crate::TranslationUnit>>,
     >,
     /// **The headers the include search path can name**, read once — what `#include` is completed from.
     ///
@@ -1046,7 +1051,10 @@ impl<F: FileProvider + Clone> Session<F> {
             cooking: Cooking::default(),
             definitions: std::sync::Mutex::new(crate::MacroDefinitions::default()),
             units: std::sync::Mutex::new(UnitTable::default()),
-            walked_by_content: std::sync::Mutex::new(std::collections::HashMap::new()),
+            walked_by_content: std::sync::Mutex::new(crate::cache_lru::Cache::new(
+                MAX_WALKS_BY_CONTENT_ENTRIES,
+                MAX_WALKS_BY_CONTENT_BYTES,
+            )),
             units_read: std::collections::HashSet::new(),
             unit_index: None,
             rendered_unit: None,
@@ -1254,13 +1262,7 @@ impl<F: FileProvider + Clone> Session<F> {
         let (walks_by_content_entries, walks_by_content_bytes) = self
             .walked_by_content
             .lock()
-            .map(|held| {
-                let bytes = held
-                    .values()
-                    .map(|unit| unit.heap_bytes())
-                    .sum::<usize>();
-                (held.len(), bytes)
-            })
+            .map(|held| (held.len(), held.weight()))
             .unwrap_or((0, 0));
 
         crate::MemoryReport {
@@ -4129,7 +4131,7 @@ fn error_directive_line(text: &str) -> Option<(usize, usize, String)> {
                     .walked_by_content
                     .lock()
                     .ok()
-                    .and_then(|held| held.get(&identity).cloned());
+                    .and_then(|mut held| held.get(&identity).cloned());
 
                 let (unit, provisional) = if let Some(shared) = shared {
                     // A shared timeline is never provisional: only a finished walk is ever stored, for the same
@@ -4177,8 +4179,13 @@ fn error_directive_line(text: &str) -> Option<(usize, usize, String)> {
                         // …and offered to the **rest of this one**, under the same condition: a provisional
                         // timeline is one the queue will make obsolete, and handing it to a second root would
                         // spread the smaller program rather than save a walk.
+                        //
+                        // The weight is the timeline's own size, because that is what the budget is about: two
+                        // roots of a header-heavy project differ in closure size by an order of magnitude and a
+                        // count would treat them the same.
+                        let weight = walked.heap_bytes();
                         if let Ok(mut held) = self.walked_by_content.lock() {
-                            held.insert(identity, std::sync::Arc::clone(&walked));
+                            held.insert(identity, std::sync::Arc::clone(&walked), weight);
                         }
                     }
 
@@ -6712,7 +6719,30 @@ pub struct CookedReading {
 /// holds the rest ([`crate::TranslationUnitCache`]) and a unit that falls out of here is one decode away. Sixteen is
 /// enough for the units a reader is working in (the open files' roots and the headers they name) and small enough
 /// that a project of a thousand sources does not hold a thousand timelines.
+///
+/// **A count is not a budget.** Measured on `EmmyLuaCodeStyle`, a unit is **6.2 MB** after the second pass — sixteen
+/// of them are 99 MB, and a header-heavier project would have sixteen units of 25 MB without this constant changing.
+/// So the table is bounded by **bytes** as well: [`MAX_UNIT_BYTES`]. See `docs/memory-audit.md`.
 const MAX_UNITS: usize = 16;
+
+/// **How many bytes of translation units the session keeps** — the budget the count above cannot express.
+///
+/// 128 MB is 16 typical units *and* room for a few heavy ones; an entry larger than the whole budget is still
+/// kept (the walk that just produced it is the one the caller is about to use), and the eviction order prefers the
+/// smallest closure first so the units that answer the most questions survive.
+const MAX_UNIT_BYTES: usize = 128 * 1024 * 1024;
+
+/// **How many timelines the closure-dedup table keeps.** The byte budget is the real bound; this is the backstop
+/// against a project of thousands of tiny closures.
+const MAX_WALKS_BY_CONTENT_ENTRIES: usize = 512;
+
+/// **How many bytes of closure timelines the dedup table keeps** — see [`Session::walked_by_content`].
+///
+/// Before this bound the table was a `HashMap` that never dropped anything: measured on a cold start it held
+/// **384 entries / 222 MB** after the second pass, and every edit of a root adds a new content identity. 64 MB is
+/// the same order as the units budget's working set and small enough that a project's whole history of closures
+/// cannot be what fills the resident set.
+const MAX_WALKS_BY_CONTENT_BYTES: usize = 64 * 1024 * 1024;
 
 /// How many rounds [`Session::read_the_modules_a_file_imports`] may read module interface units in.
 ///
@@ -6730,6 +6760,8 @@ const MAX_MODULES_READ_AT_ONCE: usize = 16;
 struct UnitTable {
     held: std::collections::HashMap<String, HeldUnit>,
     clock: u64,
+    /// The sum of `HeldUnit::weight` — what the table holds, in the same estimate the memory report prints.
+    bytes: usize,
 }
 
 impl UnitTable {
@@ -6748,7 +6780,18 @@ impl UnitTable {
     ) {
         self.clock += 1;
 
-        if !self.held.contains_key(&key) && self.held.len() >= MAX_UNITS {
+        // **Both budgets, and the byte one is the real one.** A count of sixteen says nothing when a unit is 0.1 MB
+        // in one project and 25 MB in another; the count stays as the backstop that keeps a project of tiny
+        // closures from pinning hundreds of timelines.
+        let weight = unit.heap_bytes();
+        if let Some(replaced) = self.held.remove(&key) {
+            self.bytes = self.bytes.saturating_sub(replaced.weight);
+        }
+        while self.held.len() + 1 > MAX_UNITS || self.bytes + weight > MAX_UNIT_BYTES {
+            if self.held.is_empty() {
+                // One unit larger than the whole budget is still the one the caller just asked for.
+                break;
+            }
             // **The smallest closure goes first, and only then the oldest.** A unit is a timeline over its whole
             // closure, so a project root's unit answers `environment_of` for hundreds of headers while a header's
             // own answers for a handful — and the second pass asks "is this file covered" for every file it
@@ -6758,19 +6801,24 @@ impl UnitTable {
             let smallest = self
                 .held
                 .iter()
-                .min_by_key(|(_, held)| (held.unit.frames.len(), held.used))
+                .min_by_key(|(_, held)| (held.weight, held.used))
                 .map(|(key, _)| key.clone());
-            if let Some(smallest) = smallest {
-                self.held.remove(&smallest);
+            let Some(smallest) = smallest else {
+                break;
+            };
+            if let Some(removed) = self.held.remove(&smallest) {
+                self.bytes = self.bytes.saturating_sub(removed.weight);
             }
         }
 
+        self.bytes = self.bytes.saturating_add(weight);
         self.held.insert(
             key,
             HeldUnit {
                 used: self.clock,
                 provisional,
                 unit,
+                weight,
             },
         );
     }
@@ -6781,11 +6829,19 @@ impl UnitTable {
     /// [`Session::buffer_changed`]. `clear` stays for the one case that really is whole-table — a closed buffer,
     /// whose text every unit in the table may have been built from.
     fn remove(&mut self, key: &str) {
-        self.held.remove(key);
+        if let Some(removed) = self.held.remove(key) {
+            self.bytes = self.bytes.saturating_sub(removed.weight);
+        }
     }
 
     fn clear(&mut self) {
         self.held.clear();
+        self.bytes = 0;
+    }
+
+    /// What the table holds: `(entries, bytes)`.
+    fn accounting(&self) -> (usize, usize) {
+        (self.held.len(), self.bytes)
     }
 }
 
@@ -6824,6 +6880,9 @@ struct HeldUnit {
     /// Built while a file the closure needed was still queued. See this type's documentation.
     provisional: bool,
     unit: std::sync::Arc<crate::TranslationUnit>,
+    /// What this unit costs, in the estimate [`crate::TranslationUnit::heap_bytes`] gives — the number the table's
+    /// byte budget is deducted from. Stored rather than recomputed on eviction: the estimate walks every event.
+    weight: usize,
 }
 
 /// Which of a file's two directive comparisons an edit failed — see [`Session::directives_moved`].
