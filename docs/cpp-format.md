@@ -1144,3 +1144,26 @@ cargo test --release --workspace
 P2：              printed 56 / logical 105 / breaker 覆盖 80（ColumnLimit: 80）
 单测：            cpp_formatter 56 passed + 4 ignored
 ```
+## 三十九、round 16：把列表判据只加在 classify_braces 上（无净收益，回退），并测到一条新事实
+
+```text
+改动：classify_braces 里让"`=`/`return`/`,`/`(`/`[` 之后"与"列表内的 `{`"判为初始化列表（只此一处，不动 layout 其它逻辑）
+结果：37/43 不变；但 **LuaDefine.h 的首处分歧从 `indent` 变成 `blank line`**，且注释列从 2 变成 14、行从 8 变成 12
+```
+
+新的实测事实（比之前更精确）：
+
+```text
+· 列表判据本身是对的：注释终于被当作"列表元素"处理了
+· 但 render 走的是"多注释 gap"那条老路：源码前缀（`\n  `）与 `keep` 个换行**同时**写出 → 多一个空行；
+  前缀里源码的 2 个空格又叠在计算出的 12 上 → 14
+· 行本身从 8 变 12 说明 `statement_indent` 在表前不是 0 而是 4（结构体成员行留下的）——
+  `planned_indent` 的 in_initializer 分支用 `statement_indent + ContinuationIndentWidth` 计算，
+  所以基数必须改成"开列那一行"的列
+· 用 CPPFMT_DEBUG 打印 `planned:` 只看到 `const`/`unsigned`/后续表的 `{`，
+  **LuaDefine 那张表的第一批行一次都没进 planned_indent** —— 说明它们走的是 verbatim 分支，
+  这条链的入口条件还没被打印过（下一轮只需在入口加一行打印，就能定位是哪一条不满足）
+```
+
+已回退（37/43、56 tests 全绿）。这是第 5 次在这个用例上收敛失败，但它每次都在**缩小**：
+现在的未知量只剩"哪条入口条件拒绝这些行"和"基数取开列行"两个，且都有明确的定位方法。
