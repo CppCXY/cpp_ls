@@ -761,3 +761,48 @@ other 4、跳过 3（token 流不同，属 include 排序/宏展开，P3/P4）�
 
 已回退，35/43 与测试状态保持。下一轮若要再试，需要把"开括号行的列来自哪种续行"作为显式枚举传进来，
 而不是二值的 `last_line_was_a_continuation`。
+## 二十四、P0b/P1 里程碑收尾（goal 第 12 轮）
+
+**最终实测**（语料：工程自身 43 个 C++ 文件，oracle：clang-format 22.1.3）：
+
+```text
+整文件逐字节一致      35 / 43  （81.40%）   goal 的基线是 30 / 43
+同线 gap 一致率       18787 / 18879（99.51%）
+剩余分类               indent 2、line structure 0、blank line 0、other 3、跳过 3
+测试                  44 passed + 3 ignored（3 个 ignored 都写明了未解决的原因）
+workspace             全 crate 编译通过
+```
+
+**P0b（缩进与续行列）已落地**，全部建立在 `columns.rs` 的显示列模型之上：
+
+```text
+· 语句缩进层级（不是花括号深度）：case 体里再开 switch 会累计；行级水平只在行首 token 更新
+· namespace 体不缩进、case 标签/标签下语句、access specifier 的 AccessModifierOffset、
+  goto 标签的 IndentGotoLabels 语义、`#` 行的 IndentPPDirectives
+· 续行：AlignAfterOpenBracket（22 里是 bool）、ContinuationIndentWidth、ConstructorInitializerIndentWidth、
+  花括号内重置括号上下文（lambda body）、初始化列表元素按 ContinuationIndentWidth
+· 空行：MaxEmptyLinesToKeep、KeepEmptyLinesAtStartOfBlock、
+  EmptyLineBeforeAccessModifier（Always/LogicalBlock/Never）、EmptyLineAfterAccessModifier: Never
+· 空白：`bool` 是 BoolLiteral（`bool(T)` 需要类型规则）、`<<` 是单个 LeftShift（AlignOperands 谓词）
+```
+
+**P1（对齐）按"只有测量为正才保留"执行**：
+
+```text
+保留    AlignOperands: Align —— 续行以二元运算符开头时对齐到语句首个运算符的列
+未保留  AlignTrailingComments —— 三轮实测 29/28/28（基线 30），每次回退，原因写进 §十七、§十八
+未保留  AlignArrayOfStructures —— 未实现（需要把一行识别成表，属节点问题）
+```
+
+**剩余 8 个文件与归属**（留给后续）：
+
+```text
+indent 2   LuaDefine.h:19（列表内行首注释，同一机制在真实文件里仍有一条分类路径未命中）
+           LuaSyntaxTree.cpp:455（lambda body 层级：需要"开括号行的列来自哪种续行"的显式枚举，
+           二值判据的一次尝试 35→25，已回退，见 §二十三）
+other 3    空白/间距细则（含 SpacesBeforeTrailingComments 的边界）
+跳过 3     token 流不同 —— include 排序与宏展开，属 P3/P4，不在 P0/P1 范围
+```
+
+**P2 仍未开始**（断行引擎：penalty 搜索、ColumnLimit>0 时的换行决策），文档 §十 的阶段表未变；
+本次里程碑交付的是"在 ColumnLimit: 0 下把列算对"，P2 是让本工具能在 ColumnLimit>0 的工程上工作。

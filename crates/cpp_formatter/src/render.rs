@@ -388,7 +388,7 @@ fn planned_indent(
     }
     // **Inside a braced initializer the block rules do not apply**: the element is a continuation, indented by
     // `ContinuationIndentWidth` from the declaration (measured: clang-format writes 8 for a table declared at 0).
-    if in_initializer && !is_a_brace {
+    if in_initializer && first != cpp_parser::CppTokenKind::RightBrace {
         return Some((
             layout::continuation(stack, statement_indent, first, style),
             false,
