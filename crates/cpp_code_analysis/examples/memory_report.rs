@@ -233,11 +233,14 @@ fn main() {
 fn checkpoint(session: &Session<DiskFiles>, what: &str) {
     let sizes = session.cache_sizes();
     let report = session.memory_report();
+    let (calls, distinct) = cpp_code_analysis::probes::summary_read_counts();
     println!(
-        "  [{:>52}]  rss {:>8} (peak {:>8}) | {}",
+        "  [{:>52}]  rss {:>8} (peak {:>8}) | working set {} of {} summaries ({calls} reads) | {}",
         what,
         kilobytes(resident()),
         kilobytes(peak_resident()),
+        distinct,
+        sizes.summaries,
         report,
     );
     let _ = (&sizes, report.total());

@@ -72,6 +72,45 @@ switch! {
     no_inference => "CPPLS_NO_INFERENCE", "Answer every type question `Unknown`, so that a rule's own walk can be measured apart from the inference.";
 }
 
+/// **Count how many distinct summaries a session asks for** — the working set `docs/memory-audit.md` M3 needs.
+///
+/// The question the plan turns on is not "how many files are indexed" but "how many of them a session actually reads
+/// summary by summary". A window over the redb rows is only worth its cost if that number is small compared with the
+/// index; this counter is what answers it, at the one place every reader goes through
+/// (`ProjectIndex::summary`).
+pub fn summaries() -> bool {
+    static HELD: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *HELD.get_or_init(|| is_on(std::env::var_os("CPPLS_TRACE_SUMMARIES")))
+}
+
+fn summary_reads() -> &'static std::sync::Mutex<SummaryReads> {
+    static HELD: std::sync::OnceLock<std::sync::Mutex<SummaryReads>> = std::sync::OnceLock::new();
+    HELD.get_or_init(|| std::sync::Mutex::new(SummaryReads::default()))
+}
+
+#[derive(Default)]
+struct SummaryReads {
+    calls: usize,
+    distinct: std::collections::HashSet<String>,
+}
+
+/// One call, and the file it was about.
+pub fn a_summary_was_asked_for(path: &std::path::Path) {
+    if let Ok(mut held) = summary_reads().lock() {
+        held.calls += 1;
+        if held.distinct.len() < 100_000 {
+            held.distinct.insert(path.to_string_lossy().into_owned());
+        }
+    }
+}
+
+/// `(calls, distinct files)` since the process started.
+pub fn summary_read_counts() -> (usize, usize) {
+    summary_reads()
+        .lock()
+        .map(|held| (held.calls, held.distinct.len()))
+        .unwrap_or((0, 0))
+}
 /// Where [`completion`]'s report goes: stderr rather than the default sink, for a client whose stdout is the protocol.
 pub fn completion_to_stderr() -> bool {
     static HELD: std::sync::OnceLock<bool> = std::sync::OnceLock::new();

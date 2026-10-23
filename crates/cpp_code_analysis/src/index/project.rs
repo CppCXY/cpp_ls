@@ -6942,7 +6942,18 @@ impl ProjectIndex {
     }
 
     /// The summary of the file at `path`, if it has been indexed.
+    ///
+    /// # Why the probe counter is on this line
+    ///
+    /// `docs/memory-audit.md` M3 asks whether the index has to be **resident**: 1 273 files cost 59 MB, and a
+    /// 10 000-file project would cost ~460 MB, so the plan is a bounded resident window over the redb rows. Whether
+    /// that is worth 73 call sites changing their return type depends on the **working set** — how many distinct
+    /// summaries a session actually touches — and that number can only be counted here, at the one place every
+    /// reader goes through. `CPPLS_TRACE_SUMMARIES=1` turns it on.
     pub fn summary(&self, path: &Path) -> Option<&FileSummary> {
+        if crate::probes::summaries() {
+            crate::probes::a_summary_was_asked_for(path);
+        }
         self.summaries.get(&normalize(path))
     }
 
