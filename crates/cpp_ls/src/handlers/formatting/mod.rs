@@ -21,7 +21,7 @@
 //! statement's indentation, and a fragment formatted alone comes out indented from column zero. A client that formats a
 //! selection therefore gets the edits the whole-file pass would have made inside it, and nothing else moves.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use lsp_types::{
     ClientCapabilities, DocumentFormattingParams, DocumentOnTypeFormattingOptions,
@@ -30,7 +30,6 @@ use lsp_types::{
 };
 use tokio_util::sync::CancellationToken;
 
-use cpp_formatter::config::Style;
 
 use super::RegisterCapabilities;
 use crate::context::{RequestOutcome, ServerContextSnapshot, snapshot_query};
@@ -85,7 +84,8 @@ async fn format_request(
         // **No `session.view` here**: formatting needs the text and the path, not the file`s index entry — and a
         // view is exactly what a file that was opened but never parsed does not have yet.
         let text = read_text(session, &path)?;
-        let style = style_for(&path);
+        // **The same rule the command-line tool uses**: the nearest `.clang-format`, else the default style.
+        let style = cpp_formatter::config::style_for_file(&path);
         let formatted = cpp_formatter::format_file(&path, &text, &style);
         let edits = edits_between(&text, &formatted);
         let edits: Vec<TextEdit> = match only {
@@ -147,24 +147,6 @@ fn read_text(session: &cpp_code_analysis::Session<cpp_code_analysis::DiskFiles>,
 }
 fn touches(edit: &TextEdit, range: Range) -> bool {
     edit.range.start.line <= range.end.line && range.start.line <= edit.range.end.line
-}
-
-/// **The style of a file**: the nearest `.clang-format` above it, and the default style when there is none.
-///
-/// A file that cannot be read is not an error: the default style is what `clang-format` uses for a file with no
-/// configuration either, and answering "no edits" would be a silent no-op the user cannot explain.
-pub fn style_for(path: &Path) -> Style {
-    let mut directory: Option<&Path> = path.parent();
-    while let Some(current) = directory {
-        let candidate: PathBuf = current.join(".clang-format");
-        if let Ok(text) = std::fs::read_to_string(&candidate)
-            && let Ok(style) = cpp_formatter::config::parse(&text, None)
-        {
-            return style;
-        }
-        directory = current.parent();
-    }
-    Style::default_style()
 }
 
 pub struct FormattingCapabilities;

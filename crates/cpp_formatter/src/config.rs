@@ -84,6 +84,33 @@ impl std::error::Error for ConfigError {}
 /// The keys that are **not** style options: the loader consumes them.
 const LOADER_KEYS: &[&str] = &["BasedOnStyle", "Language", "InheritParentConfig"];
 
+/// **The style of a file**: the nearest `.clang-format` at or above it, or the default style when there is none.
+///
+/// This is the rule `clang-format` itself uses, and both entry points need it: the command-line tool and the language
+/// server resolve a file's style the same way or a user sees two different answers from one machine.
+pub fn style_for_file(file: &std::path::Path) -> Style {
+    match find_config(file) {
+        Some((_, text)) => parse(&text, None).unwrap_or_else(|_| Style::default_style()),
+        None => Style::default_style(),
+    }
+}
+
+/// The nearest `.clang-format` at or above `file`, as the path it was found at and its text.
+pub fn find_config(file: &std::path::Path) -> Option<(std::path::PathBuf, String)> {
+    let mut directory = file.parent().map(std::path::Path::to_path_buf);
+    // A relative path with no parent (`a.cpp`) starts at the current directory.
+    if directory.is_none() {
+        directory = std::env::current_dir().ok();
+    }
+    while let Some(current) = directory {
+        let candidate = current.join(".clang-format");
+        if let Ok(text) = std::fs::read_to_string(&candidate) {
+            return Some((candidate, text));
+        }
+        directory = current.parent().map(std::path::Path::to_path_buf);
+    }
+    None
+}
 impl Style {
     /// **The style of a preset name** (`LLVM`, `Google`, …, case-insensitive, as clang-format names them).
     pub fn preset(name: &str) -> Option<Style> {
@@ -566,6 +593,29 @@ mod tests {
         assert!(style.flag(StyleOption::BraceWrappingAfterClass));
         assert!(!style.flag(StyleOption::BraceWrappingAfterFunction));
         assert_eq!(style.number(StyleOption::ColumnLimit), 80);
+    }
+
+    #[test]
+    fn the_nearest_configuration_wins_and_the_default_is_the_fallback() {
+        // A tree with the corpus`s widths in the middle directory: the file below it must pick those up, and a file
+        // with no `.clang-format` above it must get the default style.
+        let root = std::env::temp_dir().join(format!("cppfmt-style-{}", std::process::id()));
+        let nested = root.join("a/b");
+        std::fs::create_dir_all(&nested).expect("the tree is creatable");
+        std::fs::write(root.join(".clang-format"), "IndentWidth: 7\n").expect("the config is writable");
+        let inside = nested.join("x.cpp");
+        std::fs::write(&inside, "int x;\n").expect("the file is writable");
+
+        let style = style_for_file(&inside);
+        assert_eq!(style.count(crate::options::StyleOption::IndentWidth), 7, "the nearest `.clang-format` wins");
+
+        std::fs::remove_dir_all(&root).ok();
+        let orphan = std::env::temp_dir().join("cppfmt-style-none/x.cpp");
+        assert_eq!(
+            style_for_file(&orphan).count(crate::options::StyleOption::IndentWidth),
+            Style::default_style().count(crate::options::StyleOption::IndentWidth),
+            "with no configuration anywhere the default style is the answer"
+        );
     }
 
     #[test]

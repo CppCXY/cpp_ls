@@ -1620,3 +1620,31 @@ ours: "return TK_DOTS;/* '...' */"       theirs: "return TK_DOTS; /* '...' */"  
 
 已全部回退：42/43、稳定性 43/43、`cpp_formatter` 70 tests 全绿。
 `examples/trailing_probe.rs`（语料测量工具）保留，它是下一步唯一有用的起点。
+## 五十八、样式解析收敛到一处（CLI 与 LSP 用同一条规则）
+
+`cpp_formatter::config` 新增两个公开函数，把"向上找 `.clang-format`"从两个入口里各写一遍收敛成一处：
+
+```text
+pub fn find_config(file: &Path) -> Option<(PathBuf, String)>   // 最近的 .clang-format 及其文本
+pub fn style_for_file(file: &Path) -> Style                    // 解析它；没有就用默认样式
+```
+
+- `crates/cpp_ls` 的格式化处理器删掉自己的 `style_for`，改用 `cpp_formatter::config::style_for_file`
+  ——命令行工具与语言服务器从此不会对同一个文件给出两种样式。
+- 新增单测 `the_nearest_configuration_wins_and_the_default_is_the_fallback`：
+  在临时目录树里放 `IndentWidth: 7`，断言下层文件取到 7；无配置路径回退到默认样式。
+
+**实测**
+
+```text
+cpp_formatter --lib  70 → **71 passed** + 3 ignored
+cpp_ls --lib         88 passed + 1 ignored
+handshake 端到端      格式化用例仍通过
+语料                 42 / 43（97.67%）· 稳定性 43 / 43（未变）
+```
+
+## (A) 的现状（等你决定）
+
+尾注释列的四次反推都失败，已全部回退；42/43 保持。需要你在三条路里选一条
+（移植 clang-format 的 `WhitespaceManager` 算法 / 接受 42/43 / 审计口径忽略行尾注释空格），
+我下轮会按你的选择执行；若没有选择，我会继续做 (B) 的 `willSaveWaitUntil`。
