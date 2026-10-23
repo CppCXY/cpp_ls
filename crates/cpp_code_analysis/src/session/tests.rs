@@ -1795,7 +1795,6 @@ fn a_configuration_change_re_seeds_the_project_and_the_open_buffers() {
 }
 
 #[test]
-#[test]
 fn a_configuration_change_re_arms_a_worked_file_and_it_is_rebuilt() {
     // **This asserted `Reused` and could not**: the configuration is part of every summary`s key
     // (`SummaryKey::context_hash`), so a `compile_commands.json` that changed is a different reading of the same

@@ -32,6 +32,23 @@ pub fn between(stream: &Stream<'_>, index: usize, roles: &Roles, style: &Style) 
     let previous = stream.tokens[index - 1];
     let offset = current.start;
 
+    // **Two operator characters the source wrote together stay together.** `cpp_parser`s lexer splits `>=` into
+    // `Greater` + `Assign` (the parser re-joins them contextually), so a spacing rule that looks only at token
+    // *kinds* sees two binary operators and puts a space between them: `if (end > = start)`. Same for the runs a
+    // declarator makes — `char **argv`, `T *&value`. The source is the evidence: a gap with no bytes in it was not
+    // a place anyone wrote a space, and every one of these pairs is a *single* operator to clang-format, so keeping
+    // it joined is both the conservative and the correct answer.
+    //
+    // Measured on the project corpus: this class alone is 3 files that the audit had to skip as "the token streams
+    // differ", plus the `> =` lines in `LuaSyntaxNode.cpp` and `LuaSource.cpp`.
+    if stream.gaps[index].is_empty()
+        && is_operator_punctuation(previous.kind)
+        && is_operator_punctuation(current.kind)
+    {
+        return 0;
+    }
+
+
     // 1. Tokens that are glued to what they follow.
     match current.kind {
         Comma | Semicolon | RightParen | RightBracket | Dot | Arrow | DotStar | ArrowStar => {
@@ -210,6 +227,20 @@ fn is_a_value(kind: CppTokenKind) -> bool {
             | ThisKeyword
             | RightParen
             | RightBracket
+    )
+}
+
+/// Characters that can be part of a longer operator, or of a declarator`s run of `*`/`&`.
+fn is_operator_punctuation(kind: CppTokenKind) -> bool {
+    use CppTokenKind::*;
+    matches!(
+        kind,
+        Assign | Equal | NotEqual | Less | Greater | LessEqual | GreaterEqual
+            | Plus | Minus | Star | Slash | Percent
+            | Ampersand | Pipe | Caret | Tilde | LogicalAnd | LogicalOr | LogicalNot
+            | Question | Colon | LeftShift | RightShift | Spaceship
+            | PlusAssign | MinusAssign | StarAssign | SlashAssign | PercentAssign
+            | AmpersandAssign | PipeAssign | CaretAssign | LeftShiftAssign | RightShiftAssign
     )
 }
 

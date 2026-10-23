@@ -21,13 +21,14 @@ pub fn set_locale(locale: &str) {
     // The tag is normalised by `cpp_parser::set_locale`, which is also the function that applies it to the
     // process-wide locale — one rule, one place, and this crate does not need a second copy of it.
     cpp_parser::set_locale(locale);
-    log::info!("messages will be written in `{}`", cpp_parser::normalise_locale(locale));
+    log::info!(
+        "messages will be written in `{}`",
+        cpp_parser::normalise_locale(locale)
+    );
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     /// **The three spellings a client sends are one tag**, which is what makes a file per language enough.
     #[test]
     fn a_locale_tag_is_normalised_to_the_name_of_its_file() {
@@ -45,7 +46,11 @@ mod tests {
             ("", "en"),
             ("  ", "en"),
         ] {
-            assert_eq!(cpp_parser::normalise_locale(written), expected, "{written:?}");
+            assert_eq!(
+                cpp_parser::normalise_locale(written),
+                expected,
+                "{written:?}"
+            );
         }
     }
 }
