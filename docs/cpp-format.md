@@ -2620,3 +2620,45 @@ clang-format 把以 `<<` 开头的续行放在 **块缩进 + ContinuationIndentW
 
 **剩下的 2 个 stability 差异**都是"重排"：clang-format 把 `for (...) total += x;` 的循环体拆到下一行、把
 `enum`/`struct` 体展开成多行；我们保留源码行结构。这类不改（改了在语料上是负收益，前几轮已量过）。
+## 八十九、P4 第一件：`AlignEscapedNewlines`（宏续行的反斜杠对齐）
+
+新模块 `crates/cpp_formatter/src/macros.rs`（4 个单测），在 `lib::format_file` 末尾接在 `trailing::align` 之后。
+
+规则（对齐 22.1.3 实测）：
+
+```text
+AlignEscapedNewlines: Right（LLVM 默认）  一段连续的、以 `\` 结尾的行，反斜杠统一放到 max(代码宽) + 1
+                       Left                 每个反斜杠前恰好一个空格
+                       DontAlign            原样不动
+```
+
+对照（同一份输入）：
+
+```text
+输入：#define MISALIGNED(a, b)                 \
+clang-format 与我们**逐字节一致**：#define MISALIGNED(a, b) \
+                              do {                 \
+                                  (void)(a);       \
+```
+
+**实测**
+
+```text
+语料        43/43 · 稳定性 43/43 · 间距 19989/19989
+样例集      spacing 36/36（100%）· stability 33/36（91.7%）· 88 tests · 零警告
+```
+
+### 记录一个**不打算对齐**的 clang-format 行为
+
+新的 `31_if_nested.cpp` 揭示了 clang-format 在 `#if` 上的一个怪癖：
+
+```cpp
+#ifdef __cplusplus
+extern "C" {
+#endif
+int c_function();      ← clang-format 顶格；我们缩进 4
+```
+
+原因是 clang-format 会**解析所有预处理分支**、跨分支的花括号配对因此错位（连后面 `namespace` 的内容都不缩进了）。
+我们按"人希望的样子"缩进，不模仿这个行为：要模仿得引入 MacroBlock / `#if` 区域的整套模型（P4 的另一半），
+收益存疑（它的输出在这类文件上本身就不自洽）。

@@ -19,6 +19,7 @@ pub mod breaks;
 pub mod columns;
 pub mod config;
 pub mod presets;
+pub mod macros;
 pub mod output;
 pub mod regions;
 pub mod render;
@@ -52,7 +53,10 @@ pub fn format_file(path: &std::path::Path, source: &str, style: &Style) -> Strin
     let rendered = render::format(source, path.file_stem().and_then(|stem| stem.to_str()), style);
     // **The trailing comments are aligned on the rendered text**, with the rule from clang-format`s
     // `WhitespaceManager::alignTrailingComments` (see `trailing::align`).
-    trailing::align(&rendered, style)
+    let aligned_comments = trailing::align(&rendered, style);
+    // **`AlignEscapedNewlines`** finishes the job for the macro bodies: their gaps are verbatim, so the backslashes
+    // are aligned here, over the finished text (see `macros::align_escaped_newlines`).
+    macros::align_escaped_newlines(&aligned_comments, style)
 }
 
 /// **Format only the lines `first..=last`** (0-based), the library half of clang-format's `-lines`.
