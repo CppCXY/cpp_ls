@@ -39,6 +39,10 @@ pub fn format(source: &str, style: &Style) -> String {
     // first initializer, so a line starting with `,` continues at that column rather than at a fixed offset. Measured
     // on `TokenNode`: the `:` line at 8 puts `Kind` at 10, and the next `Start(...)` is at 10 as well.
     let mut ctor_column: Option<usize> = None;
+    // **`in_ctor_init` is the state a line-start test cannot see**: a constructor initializer list packs its members
+    // onto lines that *start with an identifier* and end with a comma, so "does this line start with `,`" misses them
+    // (measured: `Start(token.Start),` went to the brace level instead of the list`s column).
+    let mut in_ctor_init = false;
 
     // **A `#` line is copied, not spaced.** Its internal spacing is the preprocessor's (`#  include` is legal,
     // `#include <a/b.h>` is the usual), and `docs/cpp-format.md` leaves `#define` bodies to P4 — a P0 that re-spaced
@@ -57,20 +61,7 @@ pub fn format(source: &str, style: &Style) -> String {
             && gap.comments.is_empty()
             && gap.newlines > 0
             && index > 0
-            && let Some(indent) = blocks[index].or_else(|| {
-                // A line the block rules do not own: a continuation. Its column is the aligner's, computed here
-                // because the emitted columns are known here and nowhere earlier.
-                (!stack.is_empty() || layout::starts_a_continuation(&stream, index))
-                    .then(|| {
-                    let first = stream.tokens[index].kind;
-                    if first == cpp_parser::CppTokenKind::Comma
-                        && let Some(column) = ctor_column
-                    {
-                        return column;
-                    }
-                    layout::continuation(&stack, statement_indent, first, style)
-                })
-            })
+            && let Some((indent, is_block_line)) = planned_indent(index, &stream, &blocks, &stack, statement_indent, style, in_ctor_init, ctor_column)
         {
             // **A line that starts here**, with nothing in the gap but whitespace: the break count collapses to
             // `MaxEmptyLinesToKeep` and the column is the layout's. Everything else — a comment, a directive — is
@@ -80,8 +71,13 @@ pub fn format(source: &str, style: &Style) -> String {
             }
             out.push_str(&" ".repeat(indent));
             column = indent;
-            if blocks[index].is_some() {
+            if is_block_line {
                 statement_indent = indent;
+                ctor_column = None;
+            } else if stream.tokens[index].kind == cpp_parser::CppTokenKind::Colon {
+                // `: member(...)` — the packed members line up two columns past the colon (`: ` is two characters).
+                ctor_column = Some(indent + 2);
+                in_ctor_init = true;
             }
         } else {
             // Verbatim: the gap's own bytes (newlines, indentation, comments) are not ours to change in this pass.
@@ -119,6 +115,17 @@ pub fn format(source: &str, style: &Style) -> String {
         ) {
             // `usize::MAX` = "the token after this bracket has not been written yet".
             stack.push(usize::MAX);
+        }
+
+        // **A `{` ends the initializer list and a `;` ends the declaration.** Without this the flag stayed set past
+        // the constructor body and every following member line was pulled to the list`s column (measured: `private:`
+        // came out at 2 instead of 0).
+        if matches!(
+            stream.tokens[index].kind,
+            cpp_parser::CppTokenKind::LeftBrace | cpp_parser::CppTokenKind::Semicolon
+        ) {
+            in_ctor_init = false;
+            ctor_column = None;
         }
 
         // A `#` that starts a line opens a directive; the first newline after it closes the directive.
@@ -183,6 +190,13 @@ mod tests {
     }
 
     #[test]
+    fn a_constructor_initializer_list_and_the_class_body_after_it() {
+        let source = "class T {\npublic:\n  T(const T &t)\n      : a(t.a),\n        b(t.b) {\n  }\n\nprivate:\n  int a;\n  int b;\n};\n";
+        let formatted = format(source, &llvm());
+        assert_eq!(formatted, source, "already formatted input must come back unchanged");
+    }
+
+    #[test]
     fn the_line_structure_is_kept_and_the_indentation_is_the_layout_s() {
         // **The line breaks stay the input's; the column is now decided** (P0b): `IndentWidth: 2` puts the body at 2,
         // and the spacing rules still apply inside the line.
@@ -224,4 +238,47 @@ mod tests {
         let after: Vec<_> = tokens::stream(&formatted).tokens.iter().map(|t| t.text).collect();
         assert_eq!(before, after);
     }
+}
+
+/// **The column a line gets, and whether it is a block line** (which is what updates `statement_indent`).
+///
+/// Three answers, in this order: a line inside a constructor initializer list goes to the list's own column; a block
+/// line takes the brace structure's answer; anything else is a continuation, whose column is the aligner's and is
+/// computed here because the emitted columns are known here and nowhere earlier.
+fn planned_indent(
+    index: usize,
+    stream: &tokens::Stream<'_>,
+    blocks: &[Option<usize>],
+    stack: &[usize],
+    statement_indent: usize,
+    style: &Style,
+    in_ctor_init: bool,
+    ctor_column: Option<usize>,
+) -> Option<(usize, bool)> {
+    let first = stream.tokens[index].kind;
+    if std::env::var_os("CPPFMT_DEBUG").is_some() {
+        eprintln!(
+            "planned: index={index} token={:?} in_ctor_init={in_ctor_init} ctor_column={ctor_column:?} block={:?} stack={}",
+            stream.tokens[index].text,
+            blocks[index],
+            stack.len()
+        );
+    }
+    let is_a_brace = matches!(
+        first,
+        cpp_parser::CppTokenKind::LeftBrace | cpp_parser::CppTokenKind::RightBrace
+    );
+    if in_ctor_init && !is_a_brace {
+        return Some((ctor_column.unwrap_or(statement_indent), false));
+    }
+    if let Some(indent) = blocks[index] {
+        return Some((indent, true));
+    }
+    if stack.is_empty() && !layout::starts_a_continuation(stream, index) {
+        return None;
+    }
+    if first == cpp_parser::CppTokenKind::Comma && let Some(column) = ctor_column {
+        return Some((column, false));
+    }
+    Some((layout::continuation(stack, statement_indent, first, style), false))
 }
