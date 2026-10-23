@@ -609,6 +609,12 @@ fn planned_indent(
     }
     // **A line that continues a template argument list aligns after its `<`**, even where the block rules have an
     // answer: at file scope the block answer for `using S2 = Scenario<` gives 0, which is where those lines came out.
+    // **A `requires` clause is a continuation of the declaration**, indented by `IndentWidth` (not
+    // `ContinuationIndentWidth`): clang-format writes `    ~T()` then `        requires(...)` — measured on the
+    // snippet corpus, where we put it at the block level instead.
+    if stream.tokens[index].text == "requires" {
+        return Some((statement_indent + style.count(StyleOption::IndentWidth), false));
+    }
     if let Some(column) = angle_column
         && blocks[index].is_some()
     {

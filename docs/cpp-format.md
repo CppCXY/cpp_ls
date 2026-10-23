@@ -2505,3 +2505,25 @@ snippet spacing 28/28（100%）· stability 19/28（67.9%）
 
 下一步对花括号列表要**绕开表格**：只在"该列表里没有 `rows` 补齐的行"时用列表列，
 或者干脆只对 `enum` 体生效（`roles` 对枚举体有判定），先量这两条的收益再决定。
+## 八十五、requires 子句缩进：**修好，有净收益**
+
+做法：`planned_indent` 里，若该行第一个 token 是 `requires`，按"声明的续行"处理 ——
+`statement_indent + IndentWidth`（不是 `ContinuationIndentWidth`）。
+
+对照（clang-format 22.1.3 同一份输入）：
+
+```text
+    ~T()
+        requires(Scenario::DtorTriviality == IsTriviallyDestructible::Yes)
+    = default;
+```
+
+两边**逐字节一致**（此前 `requires` 行落在块级 4 列）。
+
+**实测**
+
+```text
+                      改前        改后
+snippet stability     19 / 28  →  **20 / 28**（67.9% → 71.4%）
+语料 43/43 · 间距 19989/19989 · snippet spacing 28/28 · 84 tests   均未变
+```
