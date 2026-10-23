@@ -830,3 +830,32 @@ other 3    空白/间距细则（含 SpacesBeforeTrailingComments 的边界）
 `LuaCheck.cpp:49` 与 `LuaTokenTypeDetail.h:31`、`LuaLexer.cpp:11`（AlignArrayOfStructures / 尾注释对齐）
 分别需要：① 细分的花括号判据；② 括号放置的 body 状态与闭括号分开处理；③ AlignArrayOfStructures（P1 未做）；
 ④ 尾注释对齐的**分组规则**（不是最小值）。这四项都不是"再调一个常量"能解决的，已各自记录条件。
+## 二十六、35 → 36 / 43：括号放置的 body 缩进（lambda）
+
+**成功的一条**（`LuaSyntaxTree.cpp` 现在整文件一致）：
+
+```text
+判据不是"这一行是续行"，而是"开这个 `{` 时外层括号还开着"：
+  · `std::partition_point(` 里写的 lambda，`{` 时外层 `(` 仍在 → body 缩进 = 该行列 + IndentWidth，
+    闭括号坐在该行列（16 / 12，与 clang-format 一致）
+  · 而 `if (a &&\n    b) {` 这种"条件续行的第二行"，`)` 已经把括号关掉 → 不走这条路径，
+    body 仍由层级记账给（12，正确）
+这一条差异正是前两次尝试（35→25、以及 closer 到 16）失败的原因：二值判据把两类续行混为一谈。
+```
+
+**仍失败的（均已回退，条件已记录）**
+
+```text
+· 尾注释"单条 = 最小间距"：全局 33（语料里 clang-format 把多数尾注释对齐过，我们只给最小值会打散）
+· `brace_is_a_block` 统一判据：把 `LeftBrace/Comma/Colon` 一律当"引入初始化列表"，`class X : Base {` 被判错，
+  31/43
+```
+
+**当前 7 个文件**
+
+```text
+indent 1   LuaDefine.h:19（列表内行首注释）
+other 3    LuaCheck.cpp:49、LuaLexer.cpp:11（AlignArrayOfStructures: Left，P1 唯一未实现的对齐器）
+           LuaTokenTypeDetail.h:31（尾注释对齐的**分组规则**，不是最小值）
+跳过 3     token 流不同（include 排序 / 宏展开，P3/P4）
+```
