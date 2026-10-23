@@ -90,12 +90,24 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
         }
     }
 
+    // **`// clang-format off` … `on`**: the gaps inside those spans are the user`s (`regions.rs`).
+    let disabled = crate::regions::per_token(&stream, &crate::regions::disabled_spans(source));
+
     let mut in_directive = false;
 
     for index in 0..stream.tokens.len() {
         let gap = &stream.gaps[index];
         let forced = forced_breaks[index];
-        if forced && index > 0 && !in_directive {
+        // **Inside a `// clang-format off` span the gap is the source's**, byte for byte: no re-spacing, no re-indenting.
+        // The tokens are still seen (a brace in the span still opens a block), so the indentation after `on` is right.
+        if disabled.get(index).copied().unwrap_or(false) {
+            let gap_text = source.get(gap.start..gap.end).unwrap_or("");
+            out.push_str(gap_text);
+            column = match gap_text.rfind(char::from(10)) {
+                Some(at) => columns.advance(0, &gap_text[at + 1..]),
+                None => columns.advance(column, gap_text),
+            };
+        } else if forced && index > 0 && !in_directive {
             // **A break the column limit asked for**: the line continues at the continuation column.
             let indent = layout::continuation(&stack, statement_indent, stream.tokens[index].kind, style);
             out.push_str(line_ending);
@@ -430,6 +442,17 @@ mod tests {
         let expected = "static const struct\n{\n    unsigned char left;  /* left */\n    unsigned char right; /* right */\n} priority[] = {\n        /* ORDER OPR */\n        {10, 10},\n        {11, 11},\n};\n";
         assert_eq!(format(source, None, &style), expected);
     }
+
+    #[test]
+    fn a_clang_format_off_span_is_copied_verbatim() {
+        let source = "int  a = 1;\n// clang-format off\nint   b   =   2;\n// clang-format on\nint  c = 3;\n";
+        let mut style = llvm();
+        style.set_from_text("ColumnLimit", "0");
+        let out = format(source, None, &style);
+        assert!(out.contains("int   b   =   2;"), "the disabled span keeps its own spacing: {out:?}");
+        assert!(out.contains("int a = 1;"), "the lines around it are formatted: {out:?}");
+    }
+
 
     #[test]
     fn the_line_structure_is_kept_and_the_indentation_is_the_layout_s() {

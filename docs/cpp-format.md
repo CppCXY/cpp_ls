@@ -1844,3 +1844,35 @@ P2：         printed 50 → **49**（顺带下降 1）
 **尚未接线的部分**（下一轮）：render 里"disabled 区间原样写 gap"——这一轮改了两版都因
 if/else 链的括号结构而回退（`git checkout` 恢复），所以 `off/on` 目前只是"能识别"，还不影响输出。
 P2 那边这轮未动，`column_audit` 仍是 printed 49。
+## 六十六、P3：`clang-format off/on` 接线完成，与 clang-format 逐字节一致
+
+上一轮只做了"能识别"，这轮接进了 render：
+
+```rust
+// render 的循环开头
+if disabled.get(index).copied().unwrap_or(false) {
+    // 该 gap 原样抄自源码：不重排空格、不重排缩进
+} else if forced && ... { ... }        // 原有的整条 if/else 链
+```
+
+`disabled` 来自 `regions::per_token`（上一轮的区间模型）。关键点：**token 仍然参与 layout**
+（区间里的 `{` 照样开块），所以 `on` 之后的缩进仍然正确；只是这些 gap 的字节不让动。
+
+**与真实 clang-format 对照（同一份 `.clang-format`、同一个输入）**
+
+```text
+clang-format:  int a = 1; / // clang-format off / int   b   =   2; / // clang-format on / int c = 3;
+ours:          完全相同，五个行逐字节一致
+```
+
+**实测（回归未变）**
+
+```text
+cpp_formatter  78 → **79 passed** + 3 ignored（新增 a_clang_format_off_span_is_copied_verbatim）
+语料           43 / 43（100.00%）· 稳定性 43 / 43
+间距           19989 / 19989（100.00%）
+P2             printed 49（未动）
+```
+
+P3 剩余：`-output-replacements-xml`；把 `format_range` 接到 LSP 的 rangeFormatting（目前服务器侧自己过滤）。
+P2 下一轮：加"断行一致率"指标驱动候选集扩展。
