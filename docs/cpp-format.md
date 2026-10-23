@@ -2980,3 +2980,43 @@ index drained: cache 3 rendering(s) (12288 KB), 16 translation unit(s), 5231 sum
 2. translation unit(s)  —— 已从 64 降到 16；如果日志显示 16 个仍占 GB 级，就要动 UnitDefinitions 的按需构建
 3. rendering(s)         —— 已限 8 条 / 64 MB，日志会显示实际占用
 ```
+## 九十七、5.7 GB 的最大嫌疑：**`walk_cache` 的线程局部贡献表**（无界）
+
+这次找到的是一处**进程级（thread_local）无界表**，量级与症状吻合：
+
+```rust
+thread_local! {
+    static CONTRIBUTIONS: RefCell<HashMap<u64, Arc<Contribution>>> = ...;
+}
+```
+
+- 键是 **(文件, 内容哈希, projection)** —— 同一个文件在不同条件取值下**各存一份**；
+- 值是 `Contribution`：该文件**全部** `TuEvent`s + `StateChange`s + include 边 + 条件宏体（`Box<str>` ×3）；
+- 生命周期：**整个进程**，只有 store 的 revision 变化时整体 `clear()`；
+- 而且它是 `thread_local`：索引是多线程的 ⇒ 每个线程各存一份；`saved()`（写磁盘缓存）还要再**克隆**一份。
+
+也就是说：索引走过 5000 个文件，就有 5000 份"该文件的宏时间线"常驻内存 —— 这是第二个完整的时间线副本，
+和 `MAX_UNITS` 控的 `TranslationUnit` 是两回事。
+
+### 改动
+
+```text
+MAX_CONTRIBUTIONS = 512       每线程最多留 512 份贡献，超出按到达顺序淘汰最旧
+restore()                     从磁盘缓存恢复时同样受这个上限约束（旧缓存文件可能更大）
+clear()                       顺序表一起清
+```
+
+淘汰是**安全**的：这张表是备忘（memo），缺一份就重走一个文件，和冷启动代价相同；没有任何正确性依赖它。
+
+### 另外：内存报告现在也写进文件
+
+`%TEMP%\cpp_ls-memory.txt`（每次索引 drain 时覆盖），内容就是那行数字：
+
+```text
+renderings 3 / 12288 KB | units 16 | summaries 5231 / facts 812004 / macros 61233 | cooked 512 / 140233
+```
+
+**请打开它，把内容发我**——这一行决定下一步：如果 `facts` 是大头，就得动索引驻留策略；如果 `cooked`
+仍然是大头，说明 512 还不够；如果 `units` 大，就得让 `UnitDefinitions` 真正按需构建。
+
+**验证**：`cpp_code_analysis` 676+63+36+… 全绿，`cpp_ls` lib 87 + handshake 32，工作区 `--all-targets` 零警告。

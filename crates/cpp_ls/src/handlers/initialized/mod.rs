@@ -387,6 +387,9 @@ async fn index_in_background(context: ServerContextSnapshot) {
                     // session reports what it is holding. These numbers were already collectable — `Session::cache_sizes`
                     // existed and no caller used it — and a run that reports 5 GB without them says only "it is big".
                     let sizes = session.cache_sizes();
+                    // **The same numbers in a file**, because a log line is only readable if the client shows its
+                    // output panel: `%TEMP%\cpp_ls-memory.txt` is one click away for anybody who reports "it uses
+                    // gigabytes", and the answer to "which part" is then in hand instead of guessed at.
                     if pending_now == 0 && taken > 0 {
                         log::info!(
                             "index drained: cache {} rendering(s) ({} KB), {} translation unit(s), {} summar(ies), \\
@@ -399,6 +402,21 @@ async fn index_in_background(context: ServerContextSnapshot) {
                             sizes.macros,
                             sizes.cooked_files,
                             sizes.cooked_declarations
+                        );
+                        let report = format!(
+                            "renderings {} / {} KB | units {} | summaries {} / facts {} / macros {} | cooked {} / {}",
+                            sizes.renderings,
+                            sizes.rendering_bytes / 1024,
+                            sizes.units,
+                            sizes.summaries,
+                            sizes.facts,
+                            sizes.macros,
+                            sizes.cooked_files,
+                            sizes.cooked_declarations
+                        );
+                        let _ = std::fs::write(
+                            std::env::temp_dir().join("cpp_ls-memory.txt"),
+                            report,
                         );
                     }
                     if taken > 0 || prepared_count > 0 || !drain.is_empty() || !claimed.is_empty() {

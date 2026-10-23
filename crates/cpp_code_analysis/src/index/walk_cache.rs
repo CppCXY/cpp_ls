@@ -146,7 +146,20 @@ pub(crate) struct CachedFrame {
 thread_local! {
     /// The contributions this thread has recorded, keyed by [`key`].
     static CONTRIBUTIONS: RefCell<HashMap<u64, Arc<Contribution>>> = RefCell::new(HashMap::new());
+    /// **The order the contributions arrived**, so the oldest can go when the table is full.
+    ///
+    /// It is a *memo*, not a fact: a contribution that has been evicted costs one re-walk of one file, which
+    /// is the same work the walk does on a cold cache. Nothing reads it for correctness.
+    static ORDER: RefCell<std::collections::VecDeque<u64>> = RefCell::new(std::collections::VecDeque::new());
 }
+
+/// **How many contributions one thread keeps** — 512 files worth of walk work, about twenty-five megabytes,
+/// against a project of thousands of files.
+///
+/// It used to be unbounded, and every file the index walked left its events, state changes and guarded bodies
+/// in this table for the life of the process: on a project whose closure includes the standard library that is a
+/// full copy of every file`s macro timeline, **per thread**, and the memory report said so.
+const MAX_CONTRIBUTIONS: usize = 512;
 
 /// **The identities a contribution is filed under.**
 ///
@@ -171,11 +184,27 @@ pub(crate) fn store(key: u64, contribution: Contribution) {
     CONTRIBUTIONS.with(|held| {
         held.borrow_mut().insert(key, Arc::new(contribution));
     });
+    // **The oldest goes when the table is full**: the table is a memo, and one re-walk of one file is what a
+    // miss costs — see [`MAX_CONTRIBUTIONS`].
+    ORDER.with(|order| order.borrow_mut().push_back(key));
+    loop {
+        let over = CONTRIBUTIONS.with(|held| held.borrow().len());
+        if over <= MAX_CONTRIBUTIONS {
+            break;
+        }
+        let Some(oldest) = ORDER.with(|order| order.borrow_mut().pop_front()) else {
+            break;
+        };
+        CONTRIBUTIONS.with(|held| {
+            held.borrow_mut().remove(&oldest);
+        });
+    }
 }
 
 /// **Forget everything.** Called when the store's revision moves, so that a stale contribution cannot outlive the
 /// summaries it was made from even if its key were somehow reused.
 pub(crate) fn clear() {
+    ORDER.with(|order| order.borrow_mut().clear());
     CONTRIBUTIONS.with(|held| held.borrow_mut().clear());
     // The projection memo is invalidated by the same edits, and keeping them together is the only way they cannot
     // disagree about which state of a file they describe.
@@ -195,12 +224,35 @@ pub(crate) fn saved() -> Vec<(u64, Contribution)> {
 
 /// **Put a decoded cache back** — a warm start, and nothing else.
 pub(crate) fn restore(entries: Vec<(u64, Contribution)>) {
+    // **The bound applies to a restored table too**: a cache file written before the bound existed can name more
+    // files than the table should hold, and restoring all of them would put back what the bound removed.
+    let mut keys: Vec<u64> = Vec::with_capacity(entries.len());
     CONTRIBUTIONS.with(|held| {
         let mut held = held.borrow_mut();
         for (key, contribution) in entries {
             held.insert(key, Arc::new(contribution));
+            keys.push(key);
         }
     });
+    ORDER.with(|order| {
+        let mut order = order.borrow_mut();
+        order.clear();
+        for key in keys {
+            order.push_back(key);
+        }
+    });
+    loop {
+        let over = CONTRIBUTIONS.with(|held| held.borrow().len());
+        if over <= MAX_CONTRIBUTIONS {
+            break;
+        }
+        let Some(oldest) = ORDER.with(|order| order.borrow_mut().pop_front()) else {
+            break;
+        };
+        CONTRIBUTIONS.with(|held| {
+            held.borrow_mut().remove(&oldest);
+        });
+    }
 }
 
 /// **How many contributions this thread holds** — the number a probe reports, so that "the cache is on" is not
