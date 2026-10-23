@@ -54,8 +54,16 @@ pub fn sorted(source: &str, stem: Option<&str>, style: &Style) -> String {
             .map(|line| (IncludeKey::of(line, stem, ignore_case), *line))
             .collect();
         block.sort_by(|left, right| left.0.cmp(&right.0));
-        for (_, line) in block {
+        // **A reordered block keeps a terminator on every line**: when the file`s last line has no trailing newline
+        // and sorting moves it into the middle, the lines after it would be glued to it (measured with the inline
+        // tests: `#include "local.h"#include <vector>`).
+        let line_ending = if source.contains("\r\n") { "\r\n" } else { "\n" };
+        let count = block.len();
+        for (position, (_, line)) in block.into_iter().enumerate() {
             out.push_str(line);
+            if position + 1 < count && !line.ends_with(char::from(10)) {
+                out.push_str(line_ending);
+            }
         }
     }
     out

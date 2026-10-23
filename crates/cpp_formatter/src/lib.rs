@@ -40,7 +40,18 @@ pub fn format(source: &str, style: &Style) -> String {
     if regions::is_fully_disabled(style) {
         return source.to_string();
     }
-    render::format(source, None, style)
+    finish(render::format(source, None, style), style)
+}
+
+/// **The passes that run over the finished text**, in order: the trailing comments, then the escaped newlines.
+///
+/// They live here rather than in `render` because both need the *lines* the renderer produced, not the token stream:
+/// a macro body is verbatim to the renderer, and aligning a comment needs the line it sits on. `format` and
+/// `format_file` both end with this call, so the two entry points cannot drift apart (they did: a bare `format` used to
+/// skip both passes, which the inline tests caught).
+fn finish(rendered: String, style: &Style) -> String {
+    let aligned_comments = trailing::align(&rendered, style);
+    macros::align_escaped_newlines(&aligned_comments, style)
 }
 
 /// Format `source` as the file at `path`, which is what lets the include sorter put the file's own header first
@@ -50,13 +61,7 @@ pub fn format_file(path: &std::path::Path, source: &str, style: &Style) -> Strin
     if regions::is_fully_disabled(style) {
         return source.to_string();
     }
-    let rendered = render::format(source, path.file_stem().and_then(|stem| stem.to_str()), style);
-    // **The trailing comments are aligned on the rendered text**, with the rule from clang-format`s
-    // `WhitespaceManager::alignTrailingComments` (see `trailing::align`).
-    let aligned_comments = trailing::align(&rendered, style);
-    // **`AlignEscapedNewlines`** finishes the job for the macro bodies: their gaps are verbatim, so the backslashes
-    // are aligned here, over the finished text (see `macros::align_escaped_newlines`).
-    macros::align_escaped_newlines(&aligned_comments, style)
+    finish(render::format(source, path.file_stem().and_then(|stem| stem.to_str()), style), style)
 }
 
 /// **Format only the lines `first..=last`** (0-based), the library half of clang-format's `-lines`.

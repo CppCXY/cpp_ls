@@ -2771,3 +2771,42 @@ spacing    44 / 44（100%）
 抓到并修好：`sizeof(int) == 4` 被当成 cast 粘住 `==`
   → cast 规则加"后面不是二元运算符"的守卫（语料 43/43、spacing 44/44 保持）
 ```
+## 九十三、测试改成"分类 + 字符串字面量"，不再读 `.cpp`
+
+按要求重写门禁：**一句话一个用例，输入与期望都是字符串**，按语言特性分 8 个文件：
+
+```text
+crates/cpp_formatter/tests/cases_spacing.rs        10 例（调用、指针、cast、运算符、模板实参、lambda 引导符…）
+tests/cases_types.rs                                6 例（decltype(auto)、尾置返回、引用/右值引用、指针链…）
+tests/cases_templates.rs                            2 例（默认实参、可变参数；其余因与 clang-format 有重排差异未收录）
+tests/cases_statements.rs                           1 例（if/else）
+tests/cases_classes.rs                              1 例（成员与访问修饰符）
+tests/cases_functions.rs                            4 例（lambda、noexcept、默认实参、static inline）
+tests/cases_preprocessor.rs                         6 例（#define、#if、#include、续行、pragma、undef）
+tests/cases_comments.rs                             6 例（行尾行注释/块注释、独立注释、doc 注释、字符串里的 //）
+```
+
+每个用例都做两件事：`format(input) == expected`，以及 `format(expected) == expected`（固定点）。
+**期望值是 clang-format 22.1.3 在同一风格下的输出**：生成器只收录"两边一致"的用例（34 个），
+与 clang-format 有重排差异的 18 个不收录（那是设计取舍，不是规则）。
+
+生成器留在 `crates/cpp_formatter/tests/gen_cases.ps1`（开发期用，测试时不运行、不需要 clang-format）。
+
+### 内化成字符串测试后立刻抓到的两个真 bug
+
+```text
+① `format()` 与 `format_file()` 结果不一致
+   `format` 少了 trailing 注释对齐与宏反斜杠对齐两个后处理（语言服务器的 format_range 正走 `format`）
+   修法：抽 `finish(rendered, style)`，两个入口共用
+
+② include 排序时**丢换行**：末行没有换行符、排序把它移到中间时，两行被粘成
+   `#include "local.h"#include <vector>`
+   修法：重排后的块内每行补上该文件的换行符
+```
+
+**实测**
+
+```text
+语料        43/43 · 稳定性 43/43 · 间距 19989/19989
+测试        cpp_formatter lib 88 + 分类用例 34（8 个测试目标）· 工作区构建零警告
+```
