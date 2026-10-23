@@ -75,6 +75,9 @@ pub fn blocks(stream: &Stream<'_>, roles: &Roles, style: &Style) -> Vec<Option<u
     // one deeper; false puts the label at the *switch* level and its statements at the body level. Both were measured
     // against 22.1.3 — the corpus asks for `true` and writes `case` at the body level with the body one deeper.
     let mut case_body: isize = 0;
+    // **The level the label was opened at**, so that only a close that leaves that level ends the label`s depth:
+    // a block nested inside the case (`if (...) { ... }`) closes at its own level and must not end it.
+    let mut case_level: Option<isize> = None;
     let mut indents = vec![None; stream.tokens.len()];
 
     for index in 0..stream.tokens.len() {
@@ -96,10 +99,16 @@ pub fn blocks(stream: &Stream<'_>, roles: &Roles, style: &Style) -> Vec<Option<u
             Some(column.max(0) as usize)
         } else {
             let at = if brace == Brace::Closes {
-                level - 1
+                // **A closer sits at its opener's column**: one level out, plus the label depth its opener counted —
+                // except for the close that ends the labels themselves, which sits at the switch's own level.
+                let ends_the_cases = case_level.is_some_and(|opened| level - 1 < opened);
+                level - 1 + if ends_the_cases { 0 } else { case_body }
+            } else if brace == Brace::ClosesWithoutIndenting {
+                // A braced `case` body closes at its label's column.
+                level - 1 + case_body
             } else if is_a_case_label(stream, index) {
-                // **The label itself stays at the body`s level**; only the statements under it go deeper.
-                level
+                // **The label itself**: at the body's level when labels are indented, at the switch's level otherwise.
+                if indent_case_labels { level } else { level - 1 }
             } else {
                 level + case_body
             };
@@ -108,17 +117,23 @@ pub fn blocks(stream: &Stream<'_>, roles: &Roles, style: &Style) -> Vec<Option<u
 
         // **A label opens its own depth**, whose size is `IndentCaseLabels`: true puts the label at the body's level
         // and its statements one deeper; false puts the label at the switch's level and its statements at the body's.
-        // A closing block ends that depth.
+        // Only a close that *leaves* the label's level ends that depth; a block nested inside the case closes at its
+        // own level and must not (measured: `if (...) { }` inside a case reset the depth and put `break;` a level out).
         if is_a_case_label(stream, index) {
             case_body = if indent_case_labels { 1 } else { 0 };
-        }
-        if matches!(brace, Brace::Closes | Brace::ClosesWithoutIndenting) {
-            case_body = 0;
+            case_level = Some(level);
         }
 
         match brace {
             Brace::Opens => level += 1,
-            Brace::Closes => level -= 1,
+            Brace::Closes => {
+                level -= 1;
+                // A close that leaves the label's level ends the label depth; a nested one does not.
+                if case_level.is_some_and(|opened| level < opened) {
+                    case_body = 0;
+                    case_level = None;
+                }
+            }
             Brace::OpensWithoutIndenting | Brace::ClosesWithoutIndenting | Brace::Nothing => {}
         }
         match token.kind {
@@ -332,6 +347,15 @@ mod tests {
         assert_eq!(found[2], ("class".to_string(), Some(0)), "{found:?}");
         assert_eq!(found[4], ("int".to_string(), Some(2)), "{found:?}");
         assert_eq!(found[5], ("}".to_string(), Some(0)), "{found:?}");
+    }
+
+    #[test]
+    fn debug_case_with_a_nested_block() {
+        let mut style = Style::default_style();
+        style.set_from_text("IndentWidth", "4");
+        style.set_from_text("IndentCaseLabels", "true");
+        let found = columns("void f()\n{\nswitch (x) {\ncase 1: {\nif (y) {\nreturn;\n}\nbreak;\n}\n}\n}\n", &style);
+        assert_eq!(found[7], ("break".to_string(), Some(12)), "{found:?}");
     }
 
     #[test]
