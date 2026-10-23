@@ -66,7 +66,18 @@ pub fn format(source: &str, style: &Style) -> String {
             // **A line that starts here**, with nothing in the gap but whitespace: the break count collapses to
             // `MaxEmptyLinesToKeep` and the column is the layout's. Everything else — a comment, a directive — is
             // still copied, which keeps this pass's blast radius to the lines it can decide.
-            for _ in 0..gap.newlines.min(max_empty + 1) {
+            let mut keep = gap.newlines.min(max_empty + 1);
+            // **A blank line right after `{` is not kept** unless the style asks (`KeepEmptyLinesAtStartOfBlock`,
+            // false by default, and the corpus leaves it false): clang-format writes the first statement of a block
+            // against the brace, and keeping the programmer's blank there is a whole-file difference on its own.
+            if keep > 1
+                && index > 0
+                && stream.tokens[index - 1].kind == cpp_parser::CppTokenKind::LeftBrace
+                && !style.flag(StyleOption::KeepEmptyLinesAtStartOfBlock)
+            {
+                keep = 1;
+            }
+            for _ in 0..keep {
                 out.push_str(line_ending);
             }
             out.push_str(&" ".repeat(indent));
