@@ -1742,3 +1742,28 @@ Whitespaces.replaceWhitespace(Current, /*Newlines=*/0, Spaces,
 **结论**：`(A)` 需要把 `State.Column` 的推进（`moveStateToNextToken`、`ColumnWidth`、`SpacesRequiredBefore`
 之间的相互赋值）也核对一遍；这已经超出"读两个函数"的范围，且六次实现尝试全部回退（42 → 39/39/38/39/…）。
 `(B)` 已完成并有端到端用例。据此把该目标标为 blocked，理由写为这一具体条件。
+## 六十二、决定性实验：`SpacesBeforeTrailingComments` 在 22.1.3 里**不起作用**
+
+用真实 clang-format（同一个文件、同一个 `BasedOnStyle`）分别把 `SpacesBeforeTrailingComments` 设为 0 和 3：
+
+```text
+N=0 → int aaaa; /* one */   /   int b;    /* two */
+N=3 → int aaaa; /* one */   /   int b;    /* two */     ← 输出完全相同
+```
+
+也就是说这个键在 22.1.3 的二进制里**对行尾注释没有影响**（我们的 presets 表里它仍是有效键、`-dump-config` 也照样打印，
+但实际行为不看它）。这解释了为什么"用 N 推公式"的六次尝试全部失败。
+
+再看真实文件里的两处（同一份 `.clang-format`、同一次运行）：
+
+```text
+LuaTokenTypeDetail.h:  "    TK_GLOBAL, // global lua5.5"  →  clang-format: "    TK_GLOBAL,// global lua5.5"   （去掉空格）
+构造的小样例:          "int aaaa;/* one */"              →  clang-format: "int aaaa; /* one */"              （加空格）
+```
+
+同为"代码后接注释"，一处去空格、一处加空格；且选项值无关。这已经不是"某个常量"的问题，
+而是 `FormatToken::SpacesRequiredBefore` 在 22.1.3 内部分支里的取值差异（与 token 类型、序列是否被拆开都有关）。
+
+**结论**：(A) 达到 43/43 需要把 22.1.3 的 `TokenAnnotator` 里 `SpacesRequiredBefore` 的全部分支
+（`TT_LineComment` / `BK_BracedInit` / 序列拆分 / `CreateReplacement`）逐条移植——这已不是"读一个函数"，
+而是移植一个子系统。六次实现尝试（39/38/39/39/39…）全部回退，42/43 与 43/43 稳定性保持。
