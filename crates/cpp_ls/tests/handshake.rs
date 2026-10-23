@@ -505,6 +505,16 @@ fn a_formatting_request_returns_edits_for_the_whole_file() {
         ranged.len() <= edits.len(),
         "a range never returns more than the whole file did: {response}"
     );
+    // **A range must not touch a line outside it**: line 1 (`int y`) is not in the requested range, so no edit
+    // may carry its text.
+    let ranged_text = ranged
+        .iter()
+        .filter_map(|edit| edit["newText"].as_str())
+        .collect::<String>();
+    assert!(
+        !ranged_text.contains("int y"),
+        "the range formatted only line 0: {ranged_text:?}"
+    );
 
     // --- on-type: the line the user is typing on ----------------------------------------------
     let response = server.request(

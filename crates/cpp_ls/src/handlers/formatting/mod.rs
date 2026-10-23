@@ -98,12 +98,19 @@ async fn format_request(
         let text = read_text(session, &path)?;
         // **The same rule the command-line tool uses**: the nearest `.clang-format`, else the default style.
         let style = cpp_formatter::config::style_for_file(&path);
-        let formatted = cpp_formatter::format_file(&path, &text, &style);
-        let edits = edits_between(&text, &formatted);
-        let edits: Vec<TextEdit> = match only {
-            Some(range) => edits.into_iter().filter(|edit| touches(edit, range)).collect(),
-            None => edits,
+        // **A range formats only its own lines** (`cpp_formatter::format_range`): the library formats the whole
+        // file — a fragment cannot know its indentation — and keeps the lines outside the range as they are, so the
+        // edits this produces cannot reach past it.
+        let formatted = match only {
+            Some(range) => cpp_formatter::format_range(
+                &text,
+                &style,
+                range.start.line as usize,
+                range.end.line as usize,
+            ),
+            None => cpp_formatter::format_file(&path, &text, &style),
         };
+        let edits = edits_between(&text, &formatted);
         Some(edits)
     })
     .await

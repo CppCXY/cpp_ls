@@ -1979,3 +1979,32 @@ ours:         1 条粗粒度 replacement（offset 4，覆盖变更的中间段�
 cpp_formatter  79 → **83 passed** + 3 ignored（output:: 4 个新单测）
 语料           43 / 43（100%）· 稳定性 43 / 43
 ```
+## 七十、P3 收尾：LSP 的 `rangeFormatting` 改用 `format_range`
+
+服务器侧不再"整文件格式化后按行过滤"，而是直接调用库里的 `format_range`：
+
+```rust
+let formatted = match only {
+    Some(range) => cpp_formatter::format_range(&text, &style, range.start.line as usize, range.end.line as usize),
+    None => cpp_formatter::format_file(&path, &text, &style),
+};
+```
+
+于是**编辑不可能越出范围**（`format_range` 只替换范围内的行），服务器侧那段"按行过滤"的代码也随之删掉。
+
+**端到端断言加强**（`tests/handshake.rs`）：
+
+```text
+请求 rangeFormatting（只覆盖第 0 行）后，把返回编辑的 newText 拼起来：
+  断言 **不含** "int y" —— 第 1 行不在范围内，不能被改写
+```
+
+**实测**
+
+```text
+cpp_ls --lib            88 passed + 1 ignored
+cpp_ls --test handshake 32 passed + 5 ignored（含新的范围断言）
+语料                    43 / 43（100%）· 稳定性 43 / 43（未变）
+```
+
+P3 的三项（off/on、`DisableFormat`、`format_range` 复用、replacements XML）至此全部完成。
