@@ -72,7 +72,7 @@ pub fn between(stream: &Stream<'_>, index: usize, roles: &Roles, style: &Style) 
                     _ => {}
                 }
             }
-            if opener.is_some_and(|at| at > 0 && stream.tokens[at - 1].kind == LeftBracket) {
+if opener.is_some_and(|at| at > 0 && stream.tokens[at - 1].kind == RightBracket) {
                 return 1;
             }
         }
@@ -111,10 +111,15 @@ pub fn between(stream: &Stream<'_>, index: usize, roles: &Roles, style: &Style) 
         _ => {}
     }
 
-    // **A cast takes no space after its parenthesis**: `(void)x`, `(int)y`. clang-format writes them glued (measured on
-    // `(void)i;`, which this wrote as `(void) i;`). The parenthesis holds a type name and nothing else, which is what
-    // separates a cast from a call followed by a value.
-    if previous.kind == RightParen && is_a_cast_expression(stream, index - 1) {
+    // **An ellipsis glues to what it packs**: `typename... Args`, `Args &&...args`, `sizeof...(args)`.
+    // Measured on the variadic snippet, where we wrote `typename ... Args` and `sizeof... (args)`.
+    if current.kind == Ellipsis {
+        return match previous.kind {
+            Comma | LeftParen => 1,
+            _ => 0,
+        };
+    }
+    if previous.kind == Ellipsis {
         return 0;
     }
 
@@ -175,6 +180,14 @@ pub fn between(stream: &Stream<'_>, index: usize, roles: &Roles, style: &Style) 
         // **Not always glued**: `auto f = [&](int a)` needs the space after `=`, and gluing it wrote `auto f =[&]`,
         // which clang-format never produces (found by feeding its own output back through us). A `[` after an
         // operator, a keyword or an opening bracket keeps that space; everything else (`a[i]`, `[[attr]]`) glues.
+        // **A declarator or an attribute starts with a space**: `auto [a, b] = p`, `struct [[nodiscard]] S`,
+        // `class [[attr]] C`. A subscript (`a[i]`) and an attribute on a name (`int x [[attr]]`) do not.
+        if matches!(previous.kind, StructKeyword | ClassKeyword | UnionKeyword | EnumKeyword | AutoKeyword) {
+            return 1;
+        }
+        if previous.kind == Identifier && matches!(previous.text, "auto" | "struct" | "class" | "union" | "enum") {
+            return 1;
+        }
         return match previous.kind {
             Assign | Equal | ReturnKeyword | Comma | LeftParen | LeftBrace => 1,
             _ => 0,
