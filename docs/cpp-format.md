@@ -1797,3 +1797,31 @@ LuaTokenTypeDetail.h:  "    TK_GLOBAL, // global lua5.5"  →  clang-format: "  
 ② 段在**缩进不同**处断开（同缩进才成段）；
 ③ 只对"行尾注释所在行"改写。
 然后跑三个审计，期望 43/43。
+## 六十四、**43 / 43（100.00%）**——尾注释对齐按 clang-format 源码实现成功
+
+规则（全部来自 22.1.3 源码，逐条对上语料）：
+
+```text
+TokenAnnotator.cpp:4208  行尾注释的初始空格 = SpacesBeforeTrailingComments，若 spaceRequiredBefore 为真则 +1
+                         → 行注释（//）不需要；块注释（/* */）需要
+WhitespaceManager::alignTrailingComments()
+                         段列 = 段内 (代码结尾 + 初始空格) 的**最大值**；只向右补（Shift <= 0 不写）
+WhitespaceManager::getCells  （数组初始化器的单元格）注释"距最后一个 token 一个空格"，
+                         若该 token 是逗号则 1、否则 **2**：
+                         setChangeSpaces(i, Changes[i - 1].Tok->is(tok::comma) ? 1 : 2)
+```
+
+实现：`crates/cpp_formatter/src/trailing.rs` 的 `align`（渲染后回读、按行分组、只向右、不改代码），
+`start_spaces` 三档：数组行以 `}` 结尾 → 2、以 `,` 结尾 → 1、其它块注释 → 1、行注释 → 0。
+
+**实测（三个审计 + 单测）**
+
+```text
+整文件一致： 42 → **43 / 43（100.00%）**
+稳定性：     43 / 43（把 clang-format 的输出喂回来，原样返回）
+间距一致：   19989 / 19989（100.00%）
+P2：         printed 50 → **49**（顺带下降 1）
+单测：       72 passed + 3 ignored
+```
+
+至此 `(A)` 完成：不再是"已知限制"，而是逐字节与 clang-format 22.1.3 一致。

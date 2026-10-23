@@ -68,22 +68,31 @@ pub fn columns(source: &str, stream: &Stream<'_>, style: &Style) -> Vec<Option<u
 /// A *trailing* comment is one with code before it on the same line. A run of consecutive lines that each have one is
 /// a group (the measure in this module's header), and every comment in a group starts at `max(code end) + N`.
 pub fn align(output: &str, style: &Style) -> String {
+    // **clang-format's rule, read from `TokenAnnotator.cpp:4208` and `WhitespaceManager::alignTrailingComments`**:
+    //
+    // ```text
+    // each trailing comment starts at  code end + SpacesBeforeTrailingComments, lifted by one when the comment is a
+    // block comment (`spaceRequiredBefore`: `;//` is fine, `;/*` is not);
+    // a run of consecutive lines is one sequence; the column is the maximum of those starts;
+    // a comment only ever moves right (`if (Shift <= 0) continue`).
+    // ```
+    //
+    // That one asymmetry — a line comment sits against a comma, a block comment does not — is what the earlier
+    // attempts missed: `TK_GLOBAL,// …` really is at the code's end, and `unsigned char left;  /* … */` really is two
+    // columns further out because its neighbour `right;` pushes the whole sequence there.
     let minimum = style.count(StyleOption::SpacesBeforeTrailingComments);
-    let mut lines: Vec<&str> = output.split_inclusive('\n').collect();
+    let lines: Vec<&str> = output.split_inclusive('\n').collect();
     if lines.is_empty() {
         return output.to_string();
     }
 
-    // (line index, code, comment) for every line that has a trailing comment.
     let mut found: Vec<(usize, &str, &str)> = Vec::new();
     for (index, line) in lines.iter().enumerate() {
         if let Some((code, comment)) = split_trailing_comment(line) {
-            // The code is measured **without** the spaces in front of the comment: those are what this pass rewrites.
             found.push((index, code.trim_end(), comment));
         }
     }
 
-    // Rewrite in place: one pass per group.
     let mut rewritten: Vec<Option<String>> = vec![None; lines.len()];
     let mut start = 0usize;
     while start < found.len() {
@@ -91,15 +100,15 @@ pub fn align(output: &str, style: &Style) -> String {
         while end < found.len() && found[end].0 == found[end - 1].0 + 1 {
             end += 1;
         }
-        let widest = found[start..end]
+        // The column of the sequence: the furthest start any of its comments asks for.
+        let column = found[start..end]
             .iter()
-            .map(|(_, code, _)| width(code))
+            .map(|(_, code, comment)| width(code) + start_spaces(code, comment, minimum))
             .max()
             .unwrap_or(0);
-        let target = widest + minimum;
         for (index, code, comment) in &found[start..end] {
-            let padding = target.saturating_sub(width(code));
-            rewritten[*index] = Some(format!("{code}{}{comment}", " ".repeat(padding)));
+            let spaces = column.saturating_sub(width(code));
+            rewritten[*index] = Some(format!("{code}{}{comment}", " ".repeat(spaces)));
         }
         start = end;
     }
@@ -114,6 +123,21 @@ pub fn align(output: &str, style: &Style) -> String {
     out
 }
 
+/// The spaces a comment asks for before alignment: `SpacesBeforeTrailingComments`, and one more for a block comment
+/// (`spaceRequiredBefore` in clang-format: `;//` needs no space, `;/*` does).
+fn start_spaces(code: &str, comment: &str, minimum: usize) -> usize {
+    // **A cell of a braced array initializer** is laid out by `WhitespaceManager::getCells`, which puts a trailing
+    // comment "a space past the last token", and two when that token is not a comma:
+    // `setChangeSpaces(i, Changes[i - 1].Tok->is(tok::comma) ? 1 : 2)`. That is why a row ending in `,` has one
+    // space before its comment and a row ending in `}` has two.
+    if code.trim_start().starts_with('{') && code.trim_end().ends_with('}') {
+        return minimum + 2;
+    }
+    if code.trim_start().starts_with('{') && code.trim_end().ends_with(',') {
+        return minimum + 1;
+    }
+    if comment.starts_with("/*") { minimum + 1 } else { minimum }
+}
 /// Split one line into (code, comment) when it has a trailing comment; `None` for a line that has none.
 ///
 /// The scan skips string and character literals so that `const char *s = "// not a comment";` stays code, and a line
@@ -218,6 +242,19 @@ mod tests {
         style.set_from_text("SpacesBeforeTrailingComments", "0");
         let output = "const char *s = \"// not a comment\";\n";
         assert_eq!(align(output, &style), output);
+    }
+
+    #[test]
+    fn a_line_comment_sits_against_the_code_and_a_block_comment_does_not() {
+        // The two cases the corpus needed: `TK_GLOBAL,// …` (a line comment, so no space) and the two struct members
+        // (`/* … */`, so one space, and the sequence pushes both to the wider line`s column).
+        let mut style = Style::default_style();
+        style.set_from_text("SpacesBeforeTrailingComments", "0");
+        assert_eq!(align("    TK_GLOBAL, // x\n", &style), "    TK_GLOBAL,// x\n");
+        assert_eq!(
+            align("    unsigned char left; /* a */\n    unsigned char right; /* b */\n", &style),
+            "    unsigned char left;  /* a */\n    unsigned char right; /* b */\n"
+        );
     }
 
     #[test]

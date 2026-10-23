@@ -39,7 +39,10 @@ pub fn format(source: &str, style: &Style) -> String {
 /// Format `source` as the file at `path`, which is what lets the include sorter put the file's own header first
 /// (`clang-format`'s main-header rule; see `includes.rs`).
 pub fn format_file(path: &std::path::Path, source: &str, style: &Style) -> String {
-    render::format(source, path.file_stem().and_then(|stem| stem.to_str()), style)
+    let rendered = render::format(source, path.file_stem().and_then(|stem| stem.to_str()), style);
+    // **The trailing comments are aligned on the rendered text**, with the rule from clang-format`s
+    // `WhitespaceManager::alignTrailingComments` (see `trailing::align`).
+    trailing::align(&rendered, style)
 }
 
 pub fn format_with_config(source: &str, config: &str) -> Result<String, ConfigError> {
