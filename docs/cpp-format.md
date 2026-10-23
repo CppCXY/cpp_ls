@@ -879,3 +879,30 @@ indent 2  LuaDefine.h:19（列表内行首注释：该 gap 里同时有上一行
 other 1   LuaCheck.cpp:49（表里嵌套花括号的行，列宽计算未覆盖）
 跳过 3    token 流不同（include 排序 / 宏展开，P3/P4）
 ```
+## 二十八、round 4：列表注释的诊断（未净收益，已回退）
+
+用 env-gated 打印把 `LuaDefine.h:19` 的 gap 摊开，得到两个确定的结论：
+
+```text
+gap idx=43 token="{" comments=1 last_own=Some(true) init=0
+```
+
+1. `last_own=true` —— 注释确实是"行首注释"，条件里与注释有关的部分是对的；
+2. `init=0` —— **`init_depths` 在那个 `{` 处仍是 0**：`} priority[] = {` 的 `{` 没有被算作初始化列表，
+   因为 roles 既没把它标进 `init_brace`、又（可能）标进了 `block_brace`，于是 `!block && init` 为假。
+
+修法尝试：在 `init_depths` 里让"引入者"先决定（`=`、`(`、`,`、`return`、`:` 之后是初始化列表）。
+
+```text
+· 全量引入者集合：37 → 31（`,` 之后的 lambda/braced-init 被误判，整体变差）
+· 收窄到 `Assign | ReturnKeyword`：37 不变，但 LuaDefine.h 的首处分歧从 indent 变成 blank line ——
+  注释被正确缩进了（8），但那次路径多吐了一个空行（此前缀里已含换行，又叠了 keep），
+  且 rows 的 padding 也叠在了行上（注释到 14、行到 12）
+```
+
+两条都要在"多注释 gap"那条路径上区分"从源码写前缀"与"自己发换行"才不会双写；本轮时间不够，已整体回退，
+工作区仍是 37/43、47 tests 全绿。
+
+**下轮的具体任务（一条，已定位到行）**
+`render.rs` 的 `comment_in_this_gap` 分支：写前缀时不要再发 `keep` 个换行，并且在该行是初始化列表元素时
+不要叠加 `row_paddings`（注释行不是表的一行）。改完后 `LuaDefine.h` 应转绿 → 38/43，即 goal 门槛。
