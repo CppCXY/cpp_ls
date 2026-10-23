@@ -19,6 +19,7 @@ pub mod columns;
 pub mod config;
 pub mod presets;
 pub mod render;
+pub mod rows;
 pub mod layout;
 pub mod options;
 pub mod roles;

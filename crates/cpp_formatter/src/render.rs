@@ -26,6 +26,8 @@ pub fn format(source: &str, style: &Style) -> String {
     // **Lines inside a braced initializer are continuations**, not block lines: `= {` at column 0 puts its elements
     // at `ContinuationIndentWidth`, which the block rules have no way to know.
     let init_depths = layout::init_depths(&stream, &roles);
+    // **The rows of a braced table**, which `AlignArrayOfStructures: Left` pads into columns.
+    let row_paddings = crate::rows::paddings(&stream, &roles, style);
     let columns = Columns::new(style);
     let max_empty = style.count(StyleOption::MaxEmptyLinesToKeep);
     let line_ending = tokens::line_ending(source);
@@ -69,7 +71,7 @@ pub fn format(source: &str, style: &Style) -> String {
         let gap = &stream.gaps[index];
         let same_line = gap.newlines == 0 && gap.comments.is_empty() && !gap.at_end;
         if same_line && index > 0 && !in_directive {
-            let spaces = space::between(&stream, index, &roles, style);
+            let spaces = space::between(&stream, index, &roles, style) + row_paddings[index];
             out.push_str(&" ".repeat(spaces));
             column += spaces;
         } else if !in_directive
