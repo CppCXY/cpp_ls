@@ -2469,3 +2469,39 @@ snippet spacing        27 / 27  →  27 / 27（100%）
 
 同样加入了 `tests/snippets/27_alias.cpp` 固化这个形状。下一轮把同样的机制用到花括号列表（`enum class Color { Red,`
 之后的 `Green,`），以及 requires 子句缩进（同一个 `planned_indent` 入口）。
+## 八十四、花括号列表对齐：**试过、语料从 43 掉到 34，已回退**
+
+做法（照搬角括号那套）：
+
+```text
+render 里维护 lists: Vec<(brace_depth, column)>
+  `{` 且 roles 判它不是块 → 压入（列未知），下一个 token 填列
+  与之配对深度的 `}` → 弹出
+planned_indent：该行本会落到块级、但处于某个列表内 → 用列表列
+```
+
+**实测**
+
+```text
+                      改前        改后
+语料 43/43            43/43  →  **34/43**
+snippet stability     19/28  →  18/28
+snippet spacing       28/28  →  28/28
+```
+
+语料掉 9 个文件（`LuaDefine.h` 这类**表格**）：我们的 `rows` 模块已经按表列宽补齐，再让
+`AlignAfterOpenBracket` 抢答会把整张表推到首元素列。**无净收益 → 整块回退**（`render.rs` 复原到 HEAD）。
+
+保留：新增 `tests/snippets/28_enum_list.cpp`（`enum class Wide { A,` 之后 `B,` 的形状），
+它现在仍是 stability 失败项，作为下一步的靶子。
+
+**当前基线**
+
+```text
+语料 43/43 · 稳定性 43/43 · 间距 19989/19989
+snippet spacing 28/28（100%）· stability 19/28（67.9%）
+84 tests · 零警告
+```
+
+下一步对花括号列表要**绕开表格**：只在"该列表里没有 `rows` 补齐的行"时用列表列，
+或者干脆只对 `enum` 体生效（`roles` 对枚举体有判定），先量这两条的收益再决定。
