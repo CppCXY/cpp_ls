@@ -526,3 +526,39 @@ Two smaller things were measured and are worth keeping:
 see the note in §十四 about the same decision for the earlier draft). The next attempt starts where this one stopped:
 decide continuation lines in the same pass, from `ContinuationIndentWidth` / `AlignAfterOpenBracket`, because they
 are 18 of the 27 remaining files.
+docs: the indentation pass, second attempt — three mechanisms it needs and the order to build them in
+
+The draft was written and tested twice now (`layout.rs`, five to eight tests each time), wired into the renderer both
+times, and reverted both times. What the measurements say, in the order the code has to be built:
+
+```text
+attempt 1   level from block braces only                         30/43 → 1/43
+            the rule missing: namespace bodies do not indent (NamespaceIndentation: None)
+attempt 2   + namespace rule, + access specifiers, + directives,
+            + continuations (Align / ContinuationIndentWidth),
+            + case labels at the body's level, + case statements one deeper      30/43 → 16/43
+            still 18 of 27 differing files diverge on a first indent
+```
+
+Three mechanisms were found by looking at those 18, and each is a real defect in the draft rather than a missing
+feature:
+
+```text
+① a switch body`s `{` is not in `roles.block_brace`   — every `case` label sat one level short. The fix is to treat
+   "not an initializer list" as a block (`init_brace` is the exception that is actually marked), and it moves the
+   label from 4 to 8, which is what clang-format has on this corpus.
+② a function body inside a namespace scanned back to the `namespace` keyword and was classified as a namespace body,
+   so the whole body was one level short. The fix is to stop that scan at a `)` — a parameter list ends the question.
+③ a `case` label`s statements are one level in, and the block`s `}` is not — the fix is to add the case level only
+   for lines that are not a block closer.
+```
+
+With ① and ③ applied the layout tests pass on the shapes they describe (`case` at 4, `break` at 6 in LLVM's
+IndentWidth 2), and the whole-file audit does **not** move: still 16/43. That is the honest state — the indentation
+rules are right on their fixtures and the corpus still prefers the version that does not touch indentation, because
+every file whose *line breaks* clang-format would change also needs the breaks decided, and at `ColumnLimit: 0` the
+break decisions are the aligner's (P1), not the indenter's.
+
+**State:** reverted again — `render.rs` and `lib.rs` are at the committed state, `layout.rs` is not in the tree, the
+audit is 30/43 and 26 tests pass. The next attempt should come **after** P1's aligner, not before it: the columns a
+continuation line needs are the columns the aligner produces.
