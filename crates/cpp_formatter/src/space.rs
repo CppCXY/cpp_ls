@@ -92,7 +92,18 @@ pub fn between(stream: &Stream<'_>, index: usize, roles: &Roles, style: &Style) 
                     _ => {}
                 }
             }
-            if opener.is_some_and(|at| at > 0 && stream.tokens[at - 1].kind == RightBracket) {
+            // **A lambda** (`[` `]` before the parameters) **or a declaration** (`auto f(...) -> T`): both put the
+            // arrow in a trailing return type. The declaration is recognised by the type keyword before the name.
+            let after_a_lambda = opener.is_some_and(|at| at > 0 && stream.tokens[at - 1].kind == RightBracket);
+            let after_a_declarator = opener.is_some_and(|at| {
+                at >= 2
+                    && stream.tokens[at - 1].kind == Identifier
+                    && matches!(
+                        stream.tokens[at - 2].kind,
+                        AutoKeyword | VoidKeyword | IntKeyword | CharKeyword | DoubleKeyword | FloatKeyword
+                    )
+            });
+            if after_a_lambda || after_a_declarator {
                 return 1;
             }
         }

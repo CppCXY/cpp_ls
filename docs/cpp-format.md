@@ -2364,3 +2364,38 @@ stability: 8 / 26 一致
 
 下一步按这个顺序做：指针/引用对齐 → 花括号列表续行对齐 → requires 缩进；每修一类重跑
 `snippet_audit` + `layout_audit`，用两个数字一起判断。
+## 八十一、样例集空白口径到 **26 / 26（100%）**
+
+继续按"一次一类、三个数字一起看"的节奏修，本轮两类：
+
+```text
+① `total += *it;` 曾写成 `+= * it`
+   根因：is_prefix_operator 的"前驱是运算符"清单漏了复合赋值（+= -= *= /= %=）
+② 省略号后的空格：`typename... Args`（留） vs `Args &&...args`（不留）
+   根因：之前一律留；改为看省略号前的关键字是不是 typename/class
+③ requires 的 requirement block：`{ c.size() } -> std::convertible_to<size_t>`
+   曾写成 `{c.size()}->…`（花括号内两侧、箭头两侧都少空格）
+   修法：新增 is_a_requirement_block（`{` 的配对 `}` 后跟 `->`）与 closes_a_requirement_block，
+        用于花括号内侧与箭头两侧
+④ 声明的尾置返回：`auto forward_all(Args&&... args) -> decltype(auto)`
+   根因：箭头规则只认 lambda（`(` 前是 `]`）；补上"`(` 前是名字、再前是类型关键字"的声明形态
+```
+
+**实测**
+
+```text
+                       本轮开始      现在
+spacing（净空白）       23 / 26  →  **26 / 26（100.0%）**
+stability（逐字节）     16 / 26  →  **18 / 26（69.2%）**
+语料 43/43 · 稳定性 43/43 · 间距 19989/19989 · 84 tests · 零警告   全部未回退
+```
+
+`stability` 剩余 8 个全部是**布局**差异，不再是空白规则：
+
+```text
+· clang-format 拆短体/拆长行（保留源码行结构是我们的设计）
+· 花括号列表/枚举续行对齐（AlignAfterOpenBracket 对 `{`）
+· requires 子句缩进 4 vs 8
+```
+
+下一轮从"花括号列表续行对齐"入手（它同时解释你之前图 5 的模板续行问题）。
