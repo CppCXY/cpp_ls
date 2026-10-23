@@ -91,7 +91,7 @@ const LOADER_KEYS: &[&str] = &["BasedOnStyle", "Language", "InheritParentConfig"
 pub fn style_for_file(file: &std::path::Path) -> Style {
     match find_config(file) {
         Some((_, text)) => parse(&text, None).unwrap_or_else(|_| Style::default_style()),
-        None => Style::default_style(),
+        None => Style::fallback_style(),
     }
 }
 
@@ -134,6 +134,17 @@ impl Style {
     pub fn default_style() -> Style {
         Style::preset("LLVM").expect("LLVM is a preset")
     }
+
+/// **The style used when a file has no `.clang-format`**: LLVM with a four-space indent.
+///
+/// clang-format`s own fallback is LLVM, whose `IndentWidth` is 2. This project formats C++ at four spaces, so the
+/// fallback differs on that one option and on nothing else: `-style=LLVM` still gives clang-format`s two-space file,
+/// and a `.clang-format` always wins over both.
+pub fn fallback_style() -> Style {
+    let mut style = Style::default_style();
+    style.set_from_text("IndentWidth", "4");
+    style
+}
 
     /// **One option's value.** The query every formatting rule makes, and it is an index.
     pub fn value(&self, option: StyleOption) -> &Value {
@@ -610,10 +621,11 @@ mod tests {
         assert_eq!(style.count(crate::options::StyleOption::IndentWidth), 7, "the nearest `.clang-format` wins");
 
         std::fs::remove_dir_all(&root).ok();
+        // The fallback is four spaces (this project`s convention), not clang-format`s two.
         let orphan = std::env::temp_dir().join("cppfmt-style-none/x.cpp");
         assert_eq!(
             style_for_file(&orphan).count(crate::options::StyleOption::IndentWidth),
-            Style::default_style().count(crate::options::StyleOption::IndentWidth),
+            Style::fallback_style().count(crate::options::StyleOption::IndentWidth),
             "with no configuration anywhere the default style is the answer"
         );
     }

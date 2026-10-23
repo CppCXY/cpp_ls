@@ -152,14 +152,25 @@ fn resolve(
 
 fn resolve_from_file(file: Option<&Path>, fallback: &str) -> Result<Style, String> {
     let Some(file) = file else {
-        return Style::preset(fallback).ok_or_else(|| format!("unknown fallback style `{fallback}`"));
+        // **The project`s fallback is LLVM with a four-space indent** (`config::fallback_style`); an explicit
+        // `-fallback-style` other than LLVM is honoured as given.
+        return Ok(fallback_or_default(fallback));
     };
     match find_config(file) {
         Some((path, text)) => {
             config::parse(&text, Some(fallback)).map_err(|error| format!("{}: {error}", path.display()))
         }
-        None => Style::preset(fallback).ok_or_else(|| format!("unknown fallback style `{fallback}`")),
+        None => Ok(fallback_or_default(fallback)),
     }
+}
+
+/// The style a run falls back to when no `.clang-format` decides: **LLVM with a four-space indent**, which is this
+/// project`s convention. Any other `-fallback-style` keeps clang-format`s own meaning.
+fn fallback_or_default(fallback: &str) -> Style {
+    if fallback.eq_ignore_ascii_case("LLVM") {
+        return Style::fallback_style();
+    }
+    Style::preset(fallback).unwrap_or_else(Style::fallback_style)
 }
 
 /// The nearest `.clang-format` at or above `file`.

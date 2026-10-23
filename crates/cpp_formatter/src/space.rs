@@ -49,7 +49,6 @@ pub fn between(stream: &Stream<'_>, index: usize, roles: &Roles, style: &Style) 
         return 0;
     }
 
-
     // 1. Tokens that are glued to what they follow.
     match current.kind {
         Comma | Semicolon | RightParen | RightBracket | Dot | Arrow | DotStar | ArrowStar => {
@@ -71,7 +70,11 @@ pub fn between(stream: &Stream<'_>, index: usize, roles: &Roles, style: &Style) 
             };
         }
         LeftBracket => {
-            return if style.flag(StyleOption::SpacesInSquareBrackets) { 1 } else { 0 };
+            return if style.flag(StyleOption::SpacesInSquareBrackets) {
+                1
+            } else {
+                0
+            };
         }
         Scope | Dot | Arrow | DotStar | ArrowStar => return 0,
         Comma | Semicolon => return 1,
@@ -87,7 +90,11 @@ pub fn between(stream: &Stream<'_>, index: usize, roles: &Roles, style: &Style) 
         // says otherwise — the project's own config sets it to false, and that one key is **1 882** gaps on the
         // corpus.
         if previous.kind == TemplateKeyword {
-            return if style.flag(StyleOption::SpaceAfterTemplateKeyword) { 1 } else { 0 };
+            return if style.flag(StyleOption::SpaceAfterTemplateKeyword) {
+                1
+            } else {
+                0
+            };
         }
         return 0;
     }
@@ -109,7 +116,11 @@ pub fn between(stream: &Stream<'_>, index: usize, roles: &Roles, style: &Style) 
     // 3. An opening parenthesis: a control statement's parenthesis has a space before it (`if (x)`), a call's does
     //    not (`f(x)`), and `SpaceBeforeParens` decides whether that rule applies at all.
     if current.kind == LeftParen {
-        return if a_space_before_a_paren(previous.kind, style) { 1 } else { 0 };
+        return if a_space_before_a_paren(previous.kind, style) {
+            1
+        } else {
+            0
+        };
     }
     if current.kind == LeftBracket {
         return 0;
@@ -134,44 +145,46 @@ pub fn between(stream: &Stream<'_>, index: usize, roles: &Roles, style: &Style) 
             }
         };
     }
-/// Does the `}` at `index` close a `class`/`struct`/`enum`/`union` body written on one line?
-///
-/// The roles classify such a brace as an *initializer* (the body is a list of declarations), which is right for the
-/// layout but wrong for the space before the closer: clang-format writes `enum class E { A, B };`, and the roles`
-/// answer would produce `{ A, B};`.
-fn closes_a_declaration_body(stream: &crate::tokens::Stream<'_>, index: usize) -> bool {
-    let mut depth = 0isize;
-    let mut opener: Option<usize> = Option::None;
-    for cursor in (0..index).rev() {
-        match stream.tokens[cursor].kind {
-            CppTokenKind::RightBrace => depth += 1,
-            CppTokenKind::LeftBrace => {
-                if depth == 0 {
-                    opener = Some(cursor);
-                    break;
+    /// Does the `}` at `index` close a `class`/`struct`/`enum`/`union` body written on one line?
+    ///
+    /// The roles classify such a brace as an *initializer* (the body is a list of declarations), which is right for the
+    /// layout but wrong for the space before the closer: clang-format writes `enum class E { A, B };`, and the roles`
+    /// answer would produce `{ A, B};`.
+    fn closes_a_declaration_body(stream: &crate::tokens::Stream<'_>, index: usize) -> bool {
+        let mut depth = 0isize;
+        let mut opener: Option<usize> = Option::None;
+        for cursor in (0..index).rev() {
+            match stream.tokens[cursor].kind {
+                CppTokenKind::RightBrace => depth += 1,
+                CppTokenKind::LeftBrace => {
+                    if depth == 0 {
+                        opener = Some(cursor);
+                        break;
+                    }
+                    depth -= 1;
                 }
-                depth -= 1;
+                _ => {}
             }
-            _ => {}
         }
-    }
-    let Some(opener) = opener else {
-        return false;
-    };
-    let mut cursor = opener;
-    while cursor > 0 {
-        cursor -= 1;
-        match stream.tokens[cursor].kind {
-            CppTokenKind::ClassKeyword
-            | CppTokenKind::StructKeyword
-            | CppTokenKind::EnumKeyword
-            | CppTokenKind::UnionKeyword => return true,
-            CppTokenKind::Semicolon | CppTokenKind::LeftBrace | CppTokenKind::RightBrace => return false,
-            _ => {}
+        let Some(opener) = opener else {
+            return false;
+        };
+        let mut cursor = opener;
+        while cursor > 0 {
+            cursor -= 1;
+            match stream.tokens[cursor].kind {
+                CppTokenKind::ClassKeyword
+                | CppTokenKind::StructKeyword
+                | CppTokenKind::EnumKeyword
+                | CppTokenKind::UnionKeyword => return true,
+                CppTokenKind::Semicolon | CppTokenKind::LeftBrace | CppTokenKind::RightBrace => {
+                    return false;
+                }
+                _ => {}
+            }
         }
+        false
     }
-    false
-}
 
     if current.kind == RightBrace {
         // A block kept on one line (`if (x) { return; }`) has a space inside it; an initializer list does not
@@ -195,13 +208,17 @@ fn closes_a_declaration_body(stream: &crate::tokens::Stream<'_>, index: usize) -
         return 0;
     }
     // A postfix `++`/`--` is glued to the value before it; a prefix one is glued to the operand after it.
-    if matches!(current.kind, CppTokenKind::PlusPlus | CppTokenKind::MinusMinus)
-        && is_a_value(previous.kind)
+    if matches!(
+        current.kind,
+        CppTokenKind::PlusPlus | CppTokenKind::MinusMinus
+    ) && is_a_value(previous.kind)
     {
         return 0;
     }
-    if matches!(previous.kind, CppTokenKind::PlusPlus | CppTokenKind::MinusMinus)
-        && !is_a_value(previous_before_previous(stream, index))
+    if matches!(
+        previous.kind,
+        CppTokenKind::PlusPlus | CppTokenKind::MinusMinus
+    ) && !is_a_value(previous_before_previous(stream, index))
     {
         return 0;
     }
@@ -253,7 +270,11 @@ fn closes_a_declaration_body(stream: &crate::tokens::Stream<'_>, index: usize) -
         }
         // A range-based `for (auto &x : v)` has its own key, and the project's config sets it to false.
         if in_a_for_head(stream, index) {
-            return if style.flag(StyleOption::SpaceBeforeRangeBasedForLoopColon) { 1 } else { 0 };
+            return if style.flag(StyleOption::SpaceBeforeRangeBasedForLoopColon) {
+                1
+            } else {
+                0
+            };
         }
         // An inheritance clause, a constructor initializer and a bitfield all keep the space; their keys
         // (`SpaceBeforeInheritanceColon`, …) default to true and the corpus does not turn them off.
@@ -288,12 +309,40 @@ fn is_operator_punctuation(kind: CppTokenKind) -> bool {
     use CppTokenKind::*;
     matches!(
         kind,
-        Assign | Equal | NotEqual | Less | Greater | LessEqual | GreaterEqual
-            | Plus | Minus | Star | Slash | Percent
-            | Ampersand | Pipe | Caret | Tilde | LogicalAnd | LogicalOr | LogicalNot
-            | Question | Colon | LeftShift | RightShift | Spaceship
-            | PlusAssign | MinusAssign | StarAssign | SlashAssign | PercentAssign
-            | AmpersandAssign | PipeAssign | CaretAssign | LeftShiftAssign | RightShiftAssign
+        Assign
+            | Equal
+            | NotEqual
+            | Less
+            | Greater
+            | LessEqual
+            | GreaterEqual
+            | Plus
+            | Minus
+            | Star
+            | Slash
+            | Percent
+            | Ampersand
+            | Pipe
+            | Caret
+            | Tilde
+            | LogicalAnd
+            | LogicalOr
+            | LogicalNot
+            | Question
+            | Colon
+            | LeftShift
+            | RightShift
+            | Spaceship
+            | PlusAssign
+            | MinusAssign
+            | StarAssign
+            | SlashAssign
+            | PercentAssign
+            | AmpersandAssign
+            | PipeAssign
+            | CaretAssign
+            | LeftShiftAssign
+            | RightShiftAssign
     )
 }
 
@@ -331,7 +380,12 @@ fn a_space_before_a_paren(previous: CppTokenKind, style: &Style) -> bool {
                 // space. (`x = (a + b)` is a parenthesised expression, not a call.)
                 let a_call = matches!(
                     previous,
-                    Identifier | RightParen | RightBracket | Greater | Scope | ThisKeyword
+                    Identifier
+                        | RightParen
+                        | RightBracket
+                        | Greater
+                        | Scope
+                        | ThisKeyword
                         | OperatorKeyword
                 );
                 // A *type* name before a `(` is a function type or a cast (`std::function<bool(T)>`, `int(x)`) and
@@ -415,7 +469,10 @@ fn is_a_binary_operator(kind: CppTokenKind) -> bool {
 fn is_prefix_operator(stream: &Stream<'_>, index: usize, roles: &Roles) -> bool {
     use CppTokenKind::*;
     let token = stream.tokens[index];
-    if !matches!(token.kind, Plus | Minus | Star | Ampersand | LogicalNot | Tilde) {
+    if !matches!(
+        token.kind,
+        Plus | Minus | Star | Ampersand | LogicalNot | Tilde
+    ) {
         return false;
     }
     // A declarator is neither prefix nor infix; the caller handles it first.
@@ -502,12 +559,13 @@ fn in_a_for_head(stream: &Stream<'_>, index: usize) -> bool {
             CppTokenKind::RightParen => depth += 1,
             CppTokenKind::LeftParen => {
                 if depth == 0 {
-                    return cursor > 0 && stream.tokens[cursor - 1].kind == CppTokenKind::ForKeyword;
+                    return cursor > 0
+                        && stream.tokens[cursor - 1].kind == CppTokenKind::ForKeyword;
                 }
                 depth -= 1;
             }
             CppTokenKind::Semicolon | CppTokenKind::LeftBrace | CppTokenKind::RightBrace => {
-                return false
+                return false;
             }
             _ => {}
         }
@@ -552,8 +610,7 @@ pub fn text(stream: &Stream<'_>, index: usize, roles: &Roles, style: &Style) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
-use crate::config::Style;
-use crate::options::StyleOption;
+    use crate::config::Style;
     use crate::roles;
     use crate::tokens;
 

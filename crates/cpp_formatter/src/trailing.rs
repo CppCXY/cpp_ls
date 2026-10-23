@@ -170,7 +170,21 @@ fn split_trailing_comment(line: &str) -> Option<(&str, &str)> {
                 if !seen_code {
                     return None;
                 }
-                return Some((&line[..index], &line[index..]));
+                // **A comment is a *trailing* one only when it ends the line**: `return /* c */ 1;` has code after it,
+                // and treating that as a trailing comment moved it (measured: our output gained a space before every
+                // inline block comment). A line comment always runs to the end; a block comment must close with only
+                // whitespace after it.
+                let rest = &line[index..];
+                let ends_the_line = if bytes[index + 1] == b'/' {
+                    true
+                } else {
+                    rest.find("*/")
+                        .is_some_and(|close| rest[close + 2..].trim().is_empty())
+                };
+                if !ends_the_line {
+                    return None;
+                }
+                return Some((&line[..index], rest));
             }
             b' ' | b'\t' | b'\r' | b'\n' => index += 1,
             _ => {

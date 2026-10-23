@@ -253,6 +253,29 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
                 ctor_column = Some(indent + 2);
                 in_ctor_init = true;
             }
+        } else if let Some(comment) = gap.comments.last().filter(|comment| {
+            // **A block comment in the middle of a line is spaced like a token**: one space on each side, none after an
+            // opening bracket or before a closer (`return /* c */ 1;`, `f(/* c */ 1);`). A comment that *ends* the line
+            // is the trailing kind, and that one is placed by `trailing::align` instead.
+            !comment.own_line
+                && !comment.ends_line
+                && matches!(comment.kind, cpp_parser::CppTokenKind::BlockComment)
+        }) {
+            let before = !matches!(
+                stream.tokens[index - 1].kind,
+                cpp_parser::CppTokenKind::LeftParen | cpp_parser::CppTokenKind::LeftBracket
+            );
+            let after = !matches!(
+                stream.tokens[index].kind,
+                cpp_parser::CppTokenKind::Semicolon
+                    | cpp_parser::CppTokenKind::RightParen
+                    | cpp_parser::CppTokenKind::RightBracket
+                    | cpp_parser::CppTokenKind::Comma
+            );
+            out.push_str(&" ".repeat(usize::from(before)));
+            out.push_str(comment.text);
+            out.push_str(&" ".repeat(usize::from(after)));
+            column = columns.advance(column + usize::from(before), comment.text) + usize::from(after);
         } else {
             // Verbatim: the gap's own bytes (newlines, indentation, comments) are not ours to change in this pass.
             let gap_text = source.get(gap.start..gap.end).unwrap_or("");

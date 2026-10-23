@@ -204,7 +204,10 @@ pub fn continuation(
         _ => style.flag(StyleOption::AlignAfterOpenBracket),
     };
     // **`usize::MAX` is "the token after this bracket has not been written yet"** — a bracket that ended its line.
-    match (aligns, open.last().copied().filter(|column| *column != usize::MAX)) {
+    match (
+        aligns,
+        open.last().copied().filter(|column| *column != usize::MAX),
+    ) {
         // **Align to the token after the bracket**; a bracket that ended its line has no such token, and then the line
         // continues `ContinuationIndentWidth` past the statement's indent.
         (true, Some(column)) => column,
@@ -222,15 +225,38 @@ pub fn starts_a_continuation(stream: &Stream<'_>, index: usize) -> bool {
     // rules' business.
     if matches!(
         stream.tokens[index].kind,
-        CaseKeyword | DefaultKeyword | PublicKeyword | PrivateKeyword | ProtectedKeyword | LeftBrace
+        CaseKeyword
+            | DefaultKeyword
+            | PublicKeyword
+            | PrivateKeyword
+            | ProtectedKeyword
+            | LeftBrace
             | RightBrace
     ) {
         return false;
     }
     matches!(
         stream.tokens[index].kind,
-        Dot | Arrow | Colon | Comma | Question | Ampersand | Pipe | Plus | Minus | Star | Slash | Percent
-            | Less | Greater | LessEqual | GreaterEqual | Equal | NotEqual | LogicalAnd | LogicalOr | Caret
+        Dot | Arrow
+            | Colon
+            | Comma
+            | Question
+            | Ampersand
+            | Pipe
+            | Plus
+            | Minus
+            | Star
+            | Slash
+            | Percent
+            | Less
+            | Greater
+            | LessEqual
+            | GreaterEqual
+            | Equal
+            | NotEqual
+            | LogicalAnd
+            | LogicalOr
+            | Caret
             | Spaceship
     )
 }
@@ -304,7 +330,9 @@ fn classify_braces(
                         Brace::Opens => Brace::Closes,
                         // The `}` of a body that did not indent sits where its opener sits.
                         Brace::OpensWithoutIndenting => Brace::ClosesWithoutIndenting,
-                        Brace::Closes | Brace::ClosesWithoutIndenting | Brace::Nothing => Brace::Nothing,
+                        Brace::Closes | Brace::ClosesWithoutIndenting | Brace::Nothing => {
+                            Brace::Nothing
+                        }
                     };
                 }
             }
@@ -342,8 +370,10 @@ fn opens_a_namespace(stream: &Stream<'_>, index: usize) -> bool {
         cursor -= 1;
         match stream.tokens[cursor].kind {
             NamespaceKeyword => return true,
-            ClassKeyword | StructKeyword | UnionKeyword | EnumKeyword | ExternKeyword | Semicolon
-            | LeftBrace | RightBrace | Assign | RightParen | RightBracket => return false,
+            ClassKeyword | StructKeyword | UnionKeyword | EnumKeyword | ExternKeyword
+            | Semicolon | LeftBrace | RightBrace | Assign | RightParen | RightBracket => {
+                return false;
+            }
             _ => {}
         }
     }
@@ -367,8 +397,24 @@ pub fn is_a_binary_operator(kind: cpp_parser::CppTokenKind) -> bool {
     use cpp_parser::CppTokenKind::*;
     matches!(
         kind,
-        Plus | Minus | Star | Slash | Percent | Ampersand | Pipe | Caret | Less | Greater | LessEqual
-            | GreaterEqual | Equal | NotEqual | LogicalAnd | LogicalOr | Spaceship | Assign | LeftShift
+        Plus | Minus
+            | Star
+            | Slash
+            | Percent
+            | Ampersand
+            | Pipe
+            | Caret
+            | Less
+            | Greater
+            | LessEqual
+            | GreaterEqual
+            | Equal
+            | NotEqual
+            | LogicalAnd
+            | LogicalOr
+            | Spaceship
+            | Assign
+            | LeftShift
             | RightShift
     )
 }
@@ -430,13 +476,24 @@ mod tests {
         let stream = tokens::stream(source);
         let roles = roles::of(source);
         let depths = init_depths(&stream, &roles);
-        let at_second = stream.tokens.iter().position(|token| token.text == "2").expect("2");
-        assert_eq!(depths[at_second], 1, "the element is inside the list: {depths:?}");
+        let at_second = stream
+            .tokens
+            .iter()
+            .position(|token| token.text == "2")
+            .expect("2");
+        assert_eq!(
+            depths[at_second], 1,
+            "the element is inside the list: {depths:?}"
+        );
         let real = "std::array<unsigned char, 260> X = {\n        0x00,\n        0x00,\n};\n";
         let s2 = tokens::stream(real);
         let r2 = roles::of(real);
         let d2 = init_depths(&s2, &r2);
-        let at2 = s2.tokens.iter().position(|token| token.text == "0x00").expect("0x00");
+        let at2 = s2
+            .tokens
+            .iter()
+            .position(|token| token.text == "0x00")
+            .expect("0x00");
         assert_eq!(d2[at2], 1, "real shape: {d2:?}");
     }
 
@@ -451,39 +508,48 @@ mod tests {
 
     #[test]
     fn a_namespace_body_does_not_indent_but_a_class_member_does() {
-        let found = columns("namespace lua\n{\nclass Node\n{\nint size;\n};\n}\n", &llvm());
+        let found = columns(
+            "namespace lua\n{\nclass Node\n{\nint size;\n};\n}\n",
+            &llvm(),
+        );
         assert_eq!(found[2], ("class".to_string(), Some(0)), "{found:?}");
         assert_eq!(found[4], ("int".to_string(), Some(2)), "{found:?}");
         assert_eq!(found[5], ("}".to_string(), Some(0)), "{found:?}");
     }
 
-
-
     #[test]
     fn a_switch_body_is_a_block_and_its_case_statements_are_one_deeper() {
         // LLVM's `IndentCaseLabels` is false: the label sits at the **switch's** level and its statements at the body's.
-        let found = columns("void f()\n{\nswitch (x) {\ncase 1:\nbreak;\n}\n}\n", &llvm());
+        let found = columns(
+            "void f()\n{\nswitch (x) {\ncase 1:\nbreak;\n}\n}\n",
+            &llvm(),
+        );
         assert_eq!(found[2], ("switch".to_string(), Some(2)), "{found:?}");
         assert_eq!(found[3], ("case".to_string(), Some(2)), "{found:?}");
         assert_eq!(found[4], ("break".to_string(), Some(4)), "{found:?}");
-        assert_eq!(found[5], ("}".to_string(), Some(2)), "the switch`s own close: {found:?}");
+        assert_eq!(
+            found[5],
+            ("}".to_string(), Some(2)),
+            "the switch`s own close: {found:?}"
+        );
     }
 
     #[test]
-    #[test]
-
-
     #[ignore = "the level bookkeeping does not accumulate through a case body yet: the inner switch`s labels come out one level short"]
     fn a_switch_inside_a_case_body_keeps_its_own_labels() {
         let mut style = Style::default_style();
         style.set_from_text("IndentWidth", "4");
         style.set_from_text("IndentCaseLabels", "true");
-        let found = columns("void f()\n{\nswitch (a) {\ncase 1:\nswitch (b) {\ncase 2:\nreturn;\n}\n}\n}\n}\n", &style);
+        let found = columns(
+            "void f()\n{\nswitch (a) {\ncase 1:\nswitch (b) {\ncase 2:\nreturn;\n}\n}\n}\n}\n",
+            &style,
+        );
         assert_eq!(found[5], ("switch".to_string(), Some(12)), "{found:?}");
         assert_eq!(found[6], ("case".to_string(), Some(16)), "{found:?}");
         assert_eq!(found[7], ("return".to_string(), Some(20)), "{found:?}");
     }
 
+    #[test]
     fn an_indented_case_label_puts_its_statements_one_level_deeper() {
         // The corpus asks for `IndentCaseLabels: true`: label at the body's level, statements one deeper, and a block
         // nested inside the case does not end that depth.
@@ -512,7 +578,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn debug_case_brace_kinds() {
         let stream = tokens::stream("void f()\n{\nswitch (x) {\ncase 1: {\nreturn;\n}\n}\n}\n");
         for (i, token) in stream.tokens.iter().enumerate() {
@@ -522,18 +587,28 @@ mod tests {
         }
     }
 
-
-
+    #[test]
     fn a_multi_line_initializer_list_keeps_the_class_level() {
-        let found = columns("class T {\npublic:\n  T(const T &t)\n      : a(t.a),\n        b(t.b) {\n  }\n\nprivate:\n  int a;\n};\n", &llvm());
+        let found = columns(
+            "class T {\npublic:\n  T(const T &t)\n      : a(t.a),\n        b(t.b) {\n  }\n\nprivate:\n  int a;\n};\n",
+            &llvm(),
+        );
         assert_eq!(found[6], ("private".to_string(), Some(0)), "{found:?}");
     }
 
+    #[test]
     fn a_constructor_body_returns_to_the_class_level() {
-        let found = columns("class T {\npublic:\nT() : a(1),\nb(2) {\n}\nprivate:\nint a;\n};\n", &llvm());
+        let found = columns(
+            "class T {\npublic:\nT() : a(1),\nb(2) {\n}\nprivate:\nint a;\n};\n",
+            &llvm(),
+        );
         assert_eq!(found[1], ("public".to_string(), Some(0)), "{found:?}");
         assert_eq!(found[2], ("T".to_string(), Some(2)), "{found:?}");
-        assert_eq!(found[4], ("}".to_string(), Some(2)), "the ctor body closes to the class body: {found:?}");
+        assert_eq!(
+            found[4],
+            ("}".to_string(), Some(2)),
+            "the ctor body closes to the class body: {found:?}"
+        );
         assert_eq!(found[5], ("private".to_string(), Some(0)), "{found:?}");
     }
 
