@@ -111,6 +111,13 @@ pub fn between(stream: &Stream<'_>, index: usize, roles: &Roles, style: &Style) 
         _ => {}
     }
 
+    // **A cast takes no space after its parenthesis**: `(void)x`, `(int)y`. clang-format writes them glued (measured on
+    // `(void)i;`, which this wrote as `(void) i;`). The parenthesis holds a type name and nothing else, which is what
+    // separates a cast from a call followed by a value.
+    if previous.kind == RightParen && is_a_cast_expression(stream, index - 1) {
+        return 0;
+    }
+
     // 2. Template angle brackets: `vector<int>`, `map<int, string>` — no space on either side, and the comma inside
     //    still gets one after it (handled above). The gap *after* a closing `>` is **not** glued (`vector<int> v`):
     //    only a `>` as the current token, or a `<` as the previous one, belongs to the brackets.
@@ -402,6 +409,51 @@ fn is_a_mark(kind: CppTokenKind) -> bool {
         kind,
         CppTokenKind::Star | CppTokenKind::Ampersand | CppTokenKind::LogicalAnd
     )
+}
+
+/// Does the `)` at `close` end a cast — a parenthesis holding one type name and nothing else?
+///
+/// `(void)x`, `(int)y`, `(const char *)p`: the opener is found by matching, and the inside must be one of the built-in
+/// type names (the lexer has no semantic information, so a user type inside parentheses is left alone).
+fn is_a_cast_expression(stream: &Stream<'_>, close: usize) -> bool {
+    let mut depth = 0isize;
+    let mut opener: Option<usize> = Option::None;
+    for cursor in (0..close).rev() {
+        match stream.tokens[cursor].kind {
+            CppTokenKind::RightParen => depth += 1,
+            CppTokenKind::LeftParen => {
+                if depth == 0 {
+                    opener = Some(cursor);
+                    break;
+                }
+                depth -= 1;
+            }
+            _ => {}
+        }
+    }
+    let Some(opener) = opener else {
+        return false;
+    };
+    let inside = &stream.tokens[opener + 1..close];
+    !inside.is_empty()
+        && inside.iter().all(|token| {
+            matches!(
+                token.kind,
+                CppTokenKind::VoidKeyword
+                    | CppTokenKind::IntKeyword
+                    | CppTokenKind::CharKeyword
+                    | CppTokenKind::FloatKeyword
+                    | CppTokenKind::DoubleKeyword
+                    | CppTokenKind::BoolLiteral
+                    | CppTokenKind::LongKeyword
+                    | CppTokenKind::ShortKeyword
+                    | CppTokenKind::UnsignedKeyword
+                    | CppTokenKind::SignedKeyword
+                    | CppTokenKind::Star
+                    | CppTokenKind::Ampersand
+                    | CppTokenKind::ConstKeyword
+            )
+        })
 }
 
 fn a_space_before_a_paren(previous: CppTokenKind, previous_text: &str, style: &Style) -> bool {
