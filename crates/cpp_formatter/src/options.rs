@@ -92,6 +92,7 @@ pub enum StyleOption {
     AllowShortNamespacesOnASingleLine,
     AlwaysBreakAfterDefinitionReturnType,
     AlwaysBreakBeforeMultilineStrings,
+    AttributeMacros,
     BinPackArguments,
     BinPackLongBracedList,
     BinPackParameters,
@@ -155,7 +156,10 @@ pub enum StyleOption {
     EnumTrailingComma,
     ExperimentalAutoDetectBinPacking,
     FixNamespaceComments,
+    ForEachMacros,
+    IfMacros,
     IncludeBlocks,
+    IncludeCategories,
     IncludeIsMainRegex,
     IncludeIsMainSourceRegex,
     IndentAccessModifiers,
@@ -277,16 +281,19 @@ pub enum StyleOption {
     SpacesInParensOptionsOther,
     SpacesInSquareBrackets,
     Standard,
+    StatementAttributeLikeMacros,
+    StatementMacros,
     TableGenBreakInsideDAGArg,
     TabWidth,
     UseTab,
     VerilogBreakBetweenInstancePorts,
+    WhitespaceSensitiveMacros,
     WrapNamespaceBodyWithEmptyLines,
 }
 
 impl StyleOption {
     /// How many options there are — the length of every resolved style.
-    pub const COUNT: usize = 268;
+    pub const COUNT: usize = 275;
 
     /// Every option, **sorted by key** — the order `-dump-config` prints, and the order `from_key` searches.
     pub const ALL: [StyleOption; StyleOption::COUNT] = [
@@ -368,6 +375,7 @@ impl StyleOption {
         StyleOption::AllowShortNamespacesOnASingleLine,
         StyleOption::AlwaysBreakAfterDefinitionReturnType,
         StyleOption::AlwaysBreakBeforeMultilineStrings,
+        StyleOption::AttributeMacros,
         StyleOption::BinPackArguments,
         StyleOption::BinPackLongBracedList,
         StyleOption::BinPackParameters,
@@ -431,7 +439,10 @@ impl StyleOption {
         StyleOption::EnumTrailingComma,
         StyleOption::ExperimentalAutoDetectBinPacking,
         StyleOption::FixNamespaceComments,
+        StyleOption::ForEachMacros,
+        StyleOption::IfMacros,
         StyleOption::IncludeBlocks,
+        StyleOption::IncludeCategories,
         StyleOption::IncludeIsMainRegex,
         StyleOption::IncludeIsMainSourceRegex,
         StyleOption::IndentAccessModifiers,
@@ -553,10 +564,13 @@ impl StyleOption {
         StyleOption::SpacesInParensOptionsOther,
         StyleOption::SpacesInSquareBrackets,
         StyleOption::Standard,
+        StyleOption::StatementAttributeLikeMacros,
+        StyleOption::StatementMacros,
         StyleOption::TabWidth,
         StyleOption::TableGenBreakInsideDAGArg,
         StyleOption::UseTab,
         StyleOption::VerilogBreakBetweenInstancePorts,
+        StyleOption::WhitespaceSensitiveMacros,
         StyleOption::WrapNamespaceBodyWithEmptyLines,
     ];
 
@@ -654,6 +668,7 @@ const KEYS: [&str; StyleOption::COUNT] = [
     "AllowShortNamespacesOnASingleLine",
     "AlwaysBreakAfterDefinitionReturnType",
     "AlwaysBreakBeforeMultilineStrings",
+    "AttributeMacros",
     "BinPackArguments",
     "BinPackLongBracedList",
     "BinPackParameters",
@@ -717,7 +732,10 @@ const KEYS: [&str; StyleOption::COUNT] = [
     "EnumTrailingComma",
     "ExperimentalAutoDetectBinPacking",
     "FixNamespaceComments",
+    "ForEachMacros",
+    "IfMacros",
     "IncludeBlocks",
+    "IncludeCategories",
     "IncludeIsMainRegex",
     "IncludeIsMainSourceRegex",
     "IndentAccessModifiers",
@@ -839,10 +857,13 @@ const KEYS: [&str; StyleOption::COUNT] = [
     "SpacesInParensOptions.Other",
     "SpacesInSquareBrackets",
     "Standard",
+    "StatementAttributeLikeMacros",
+    "StatementMacros",
     "TableGenBreakInsideDAGArg",
     "TabWidth",
     "UseTab",
     "VerilogBreakBetweenInstancePorts",
+    "WhitespaceSensitiveMacros",
     "WrapNamespaceBodyWithEmptyLines",
 ];
 

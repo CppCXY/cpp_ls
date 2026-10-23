@@ -350,6 +350,15 @@ fn apply_document(style: &mut Style, document: &str, start_line: usize) -> Resul
             });
         }
 
+        // **A renamed key is translated, not dropped**: the oracle still reads it, so a style that writes it must
+        // resolve the way the oracle resolves it (`successors`).
+        if let Some(mapped) = successors(&qualified, value) {
+            for (successor_key, successor_value) in mapped {
+                style.set_from_text(successor_key, successor_value);
+            }
+            continue;
+        }
+
         style.set_from_text(&qualified, value);
     }
 
@@ -401,6 +410,85 @@ fn strip_comment(line: &str) -> String {
         }
     }
     line.to_string()
+}
+
+/// **A key clang-format still accepts but renamed, and what it means now.**
+///
+/// The dump is the authority on what a style *has*; a document may still write what the oracle still *reads*. That
+/// distinction is measured, not assumed: 22.1.3 formats this corpus with `AllowAllConstructorInitializersOnNextLine`
+/// in its `.clang-format` while never printing it — and it applies the old spellings, e.g.
+/// `SpacesInParentheses: true` really does put spaces inside every pair of parentheses.
+///
+/// The mapping is the successor option in 22.1.3's own vocabulary. Where a boolean became an enum, the value is
+/// translated rather than stored: `SpacesInParentheses: true` is `SpacesInParens: Custom` with all four sub-options
+/// on (measured against 22.1.3: `Custom` + `SpacesInParensOptions.Other` reproduces the old output exactly, and
+/// `Always` is not a value of the new key at all).
+fn successors(key: &str, value: &str) -> Option<Vec<(&'static str, &'static str)>> {
+    let on = matches!(value.trim(), "true" | "True" | "Yes" | "On" | "1");
+    Some(match key {
+        "SpacesInParentheses" => {
+            if on {
+                vec![
+                    ("SpacesInParens", "Custom"),
+                    ("SpacesInParensOptions.Other", "true"),
+                    ("SpacesInParensOptions.InConditionalStatements", "true"),
+                    ("SpacesInParensOptions.InEmptyParentheses", "true"),
+                    ("SpacesInParensOptions.InCStyleCasts", "true"),
+                ]
+            } else {
+                vec![("SpacesInParens", "Never")]
+            }
+        }
+        "SpacesInConditionalStatement" | "SpacesInCStyleCastParentheses" | "SpaceInEmptyParentheses" => vec![
+            ("SpacesInParens", "Custom"),
+            (
+                match key {
+                    "SpacesInConditionalStatement" => "SpacesInParensOptions.InConditionalStatements",
+                    "SpacesInCStyleCastParentheses" => "SpacesInParensOptions.InCStyleCasts",
+                    _ => "SpacesInParensOptions.InEmptyParentheses",
+                },
+                if on { "true" } else { "false" },
+            ),
+        ],
+        "AlignTrailingComments" => vec![(
+            "AlignTrailingComments.Kind",
+            if on { "Always" } else { "Never" },
+        )],
+        "KeepEmptyLinesAtTheStartOfBlocks" => {
+            vec![("KeepEmptyLinesAtStartOfBlock", if on { "true" } else { "false" })]
+        }
+        "AlwaysBreakTemplateDeclarations" => {
+            vec![("BreakTemplateDeclarations", if on { "Yes" } else { "No" })]
+        }
+        "AlwaysBreakAfterReturnType" => vec![("BreakAfterReturnType", leak(value.trim()))],
+        "BreakBeforeInheritanceComma" => vec![("BreakInheritanceList", leak(value.trim()))],
+        "BreakConstructorInitializersBeforeComma" => {
+            vec![("BreakConstructorInitializers", leak(value.trim()))]
+        }
+        "ConstructorInitializerAllOnOneLineOrOnePerLine" => {
+            vec![("PackConstructorInitializers", if on { "BinPack" } else { "NextLine" })]
+        }
+        _ => return None,
+    })
+}
+
+/// A tiny leak for a value that has to become `'static` in the table above. Called once per document line that uses a
+/// renamed key — a handful per process, and the alternative is a `String` in the table for no gain.
+fn leak(value: &str) -> &'static str {
+    match value {
+        "Left" => "Left",
+        "Right" => "Right",
+        "BeforeComma" => "BeforeComma",
+        "AfterComma" => "AfterComma",
+        "CurrentLine" => "CurrentLine",
+        "NextLine" => "NextLine",
+        "None" => "None",
+        "All" => "All",
+        "TopLevel" => "TopLevel",
+        "AllDefinitions" => "AllDefinitions",
+        "BinPack" => "BinPack",
+        _ => "None",
+    }
 }
 
 /// `---`-separated documents, with the line number each starts on.
@@ -515,6 +603,30 @@ mod tests {
             Style::default_style().value(StyleOption::BreakBeforeBraces),
             Value::Text(Cow::Borrowed(_))
         ));
+    }
+
+    #[test]
+    fn a_renamed_key_is_translated_and_not_dropped() {
+        // **Measured against the oracle**, not guessed: 22.1.3 formats `f(1)` as `f( 1 )` when the document says
+        // `SpacesInParentheses: true`, and `SpacesInParens: Custom` with the four sub-options on is the spelling
+        // that reproduces it (`Always` is not even a value of the new key).
+        let style = parse("SpacesInParentheses: true\n", None).unwrap();
+        assert_eq!(style.text(StyleOption::SpacesInParens), "Custom");
+        assert!(style.flag(StyleOption::SpacesInParensOptionsOther));
+        assert!(style.flag(StyleOption::SpacesInParensOptionsInConditionalStatements));
+
+        let off = parse("SpacesInParentheses: false\n", None).unwrap();
+        assert_eq!(off.text(StyleOption::SpacesInParens), "Never");
+
+        // A boolean that became an enum.
+        let comments = parse("AlignTrailingComments: false\n", None).unwrap();
+        assert_eq!(comments.text(StyleOption::AlignTrailingCommentsKind), "Never");
+        let comments = parse("AlignTrailingComments: true\n", None).unwrap();
+        assert_eq!(comments.text(StyleOption::AlignTrailingCommentsKind), "Always");
+
+        // And a renamed boolean only.
+        let empty = parse("KeepEmptyLinesAtTheStartOfBlocks: true\n", None).unwrap();
+        assert!(empty.flag(StyleOption::KeepEmptyLinesAtStartOfBlock));
     }
 
     #[test]
