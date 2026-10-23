@@ -588,7 +588,6 @@ fn a_space_before_a_paren(previous: CppTokenKind, previous_text: &str, style: &S
     ) {
         return false;
     }
-    use CppTokenKind::*;
     match style.text(StyleOption::SpaceBeforeParens) {
         "Always" => true,
         "Never" => false,
