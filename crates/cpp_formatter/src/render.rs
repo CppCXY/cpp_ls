@@ -118,15 +118,14 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
             column += spaces;
         } else if !in_directive
             && (gap.comments.is_empty()
-                // **A comment on its own line inside a braced initializer is an element of the table**: it lines up
-                // with the elements around it (measured: `/* ORDER OPR */` belongs at the elements' column). A trailing
-                // comment of the *previous* line may share the gap (`unsigned char right; /* … */` then the table's own
-                // comment), which is why the last one is what counts, not the only one.
-                || (gap
+                // **A comment on its own line still leaves the line's column to this pass**: a braced table's comment
+                // lines up with its elements (measured: `/* ORDER OPR */` belongs at the elements' column), and outside
+                // a list the same rule is what fixes the *source's* indentation of the line after a comment
+                // (`      return 0;` came out at six spaces because the gap was copied verbatim).
+                || gap
                     .comments
                     .last()
-                    .is_some_and(|comment| comment.own_line)
-                    && init_depths[index] > 0))
+                    .is_some_and(|comment| comment.own_line))
             && gap.newlines > 0
             && index > 0
             && let Some((indent, is_block_line)) = {
@@ -218,9 +217,13 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
             }
             // **A comment that starts a line replaces the break**: its own prefix carries the newline, so emitting the
             // breaks here as well was one blank line too many (measured on LuaDefine.h).
-            let breaks_to_emit = if gap.comments.last().is_some_and(|comment| comment.own_line)
-                && init_depths[index] > 0
-            {
+            //
+            // **Any line-starting comment, not only one inside a braced list**: the filter used to require
+            // `init_depths[index] > 0`, and outside a list the whole gap was copied verbatim — which kept the *source's*
+            // indentation of the line after the comment (`      return 0;` stayed at six spaces when clang-format
+            // writes four). The comment's own text still comes from the source; only the column is decided here.
+            let own_line_comment = gap.comments.last().filter(|comment| comment.own_line);
+            let breaks_to_emit = if own_line_comment.is_some() {
                 0
             } else {
                 keep
@@ -230,24 +233,43 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
             }
             // **A trailing comment of the previous line is written first, from the source**: it belongs to that line,
             // and only the comment that starts this line is this pass's to place.
-            let comment_in_this_gap = gap
-                .comments
-                .last()
-                .filter(|comment| comment.own_line && init_depths[index] > 0);
-            if let Some(comment) = comment_in_this_gap {
-                // The prefix keeps its breaks but not its trailing indentation, which the computed column replaces:
-                // keeping it stacked the source's two spaces onto the column (measured: 10 where 8 belongs).
-                let prefix = source.get(gap.start..comment.start).unwrap_or("");
-                out.push_str(prefix.trim_end_matches([' ', '\t']));
+            //
+            // Inside a braced list the comment is one of the elements and takes the list's column; anywhere else it
+            // keeps the column the source gave it (a comment is not a declaration the layout can place) — but the
+            // **token** after it does get the computed column, which is what fixes `      return 0;` after a comment.
+            let in_list = init_depths[index] > 0;
+            // **A label keeps the source's column**: `no_save:` is placed by `IndentLabel` rules this pass does not
+            // implement, and overriding it with the block column moved it a level out (measured on `LuaLexer.cpp`).
+            let is_a_label = stream.tokens[index].kind == cpp_parser::CppTokenKind::Identifier
+                && stream
+                    .tokens
+                    .get(index + 1)
+                    .is_some_and(|token| token.kind == cpp_parser::CppTokenKind::Colon);
+            if let Some(comment) = own_line_comment {
+                if in_list {
+                    // The prefix keeps its breaks but not its trailing indentation, which the computed column
+                    // replaces: keeping it stacked the source's two spaces onto the column (10 where 8 belongs).
+                    let prefix = source.get(gap.start..comment.start).unwrap_or("");
+                    out.push_str(prefix.trim_end_matches([' ', '\t']));
+                    out.push_str(&" ".repeat(indent));
+                    column = indent;
+                } else {
+                    let verbatim = source.get(gap.start..comment.end).unwrap_or("");
+                    out.push_str(verbatim);
+                    column = columns.advance(0, verbatim.rsplit(char::from(10)).next().unwrap_or(""));
+                }
+            } else {
+                out.push_str(&" ".repeat(indent));
+                column = indent;
             }
-            out.push_str(&" ".repeat(indent));
-            column = indent;
             // **The comment that made this gap non-empty is a line of the block**: its text and everything after it
             // come from the source, written once, after the column this pass decided.
-            if let Some(comment) = comment_in_this_gap {
-                out.push_str(comment.text);
+            if let Some(comment) = own_line_comment {
+                if in_list {
+                    out.push_str(comment.text);
+                }
                 // What follows the comment is a break to the token's own line: its newlines are kept (capped) and its
-                // indentation is replaced by the column — the same one, because both lines are elements of the list.
+                // indentation is replaced by the column.
                 let tail = source.get(comment.end..gap.end).unwrap_or("");
                 let breaks = tail
                     .chars()
@@ -258,7 +280,14 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
                     out.push_str(line_ending);
                 }
                 if breaks > 0 {
-                    out.push_str(&" ".repeat(indent));
+                    if is_a_label {
+                        // The source's own indentation for a label, kept as it was before this pass placed columns.
+                        let tail = source.get(comment.end..gap.end).unwrap_or("");
+                        let indentation = tail.rsplit(char::from(10)).next().unwrap_or("");
+                        out.push_str(indentation);
+                    } else {
+                        out.push_str(&" ".repeat(indent));
+                    }
                     column = indent;
                 } else {
                     column = columns.advance(column, comment.text);

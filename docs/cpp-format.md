@@ -2527,3 +2527,43 @@ snippet spacing 28/28（100%）· stability 19/28（67.9%）
 snippet stability     19 / 28  →  **20 / 28**（67.9% → 71.4%）
 语料 43/43 · 间距 19989/19989 · snippet spacing 28/28 · 84 tests   均未变
 ```
+## 八十六、**注释后那一行无法格式化**——找到并修好了
+
+用户给的例子复现出 4 处差异，其中一处正是"注释下面不格式化"：
+
+```cpp
+    // printf("Full name length using length(): %zu\n", full.length());
+      return 0;          ← 源码 6 个空格
+```
+
+我们的输出**保留 6 个空格**，clang-format 是 4。
+
+**根因**：render 里"gap 里有行首注释"的分支要求 `init_depths[index] > 0`（只在花括号列表里生效）。
+列表之外，整个 gap 走 verbatim 分支——连注释后面那一行的**缩进也照抄源码**。
+
+**修法**（`render.rs`）：
+
+```text
+· 行首注释不再限定在花括号列表内：注释是列表元素时按列表列写（原行为），否则注释本身保持源码列
+· 但**注释之后那个 token 的列**由 planned_indent 决定 —— 这正是 `return 0;` 被修正的原因
+· 标签行（`no_save:`，标识符 + `:`）例外：`IndentLabel` 规则本实现没有，继续保留源码列
+  （不然 LuaLexer.cpp 的标签会外移一级、语料从 43 掉到 42）
+```
+
+**实测**
+
+```text
+语料 43/43 · 稳定性 43/43 · 间距 19989/19989 · 84 tests 全部未变
+样例集 stability 20/28 · spacing 28/28（100%）
+用户例子：4 处差异 → 3 处（剩下的都是 `<<` 续行缩进）
+```
+
+**剩下的一类：`std::cout` 换行后 `<<` 的缩进**
+
+```text
+TH:             << "Key: " ...
+OUT:        << ...
+```
+
+`<<`（`LessLess`）不在 `starts_a_continuation` 的清单里，所以那一行按块级缩进；clang-format 按
+"块级 + ContinuationIndentWidth"（本样例 8+4/4+4 都吻合）。下一轮把它加进续行判定并量三个数。
