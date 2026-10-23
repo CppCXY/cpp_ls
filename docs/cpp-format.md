@@ -1949,3 +1949,33 @@ files: 43 · tokens: 23194 · 不同行 19042（17.9%）
 
 基线回退并保持：79 tests、43/43、一致性 17.9%（16/43 行数相同）、超长行 49。
 `breaks_audit` 的分类输出保留，它是后续挑候选断点的依据。
+## 六十九、P3：`-output-replacements-xml`（与 clang-format 的 XML 同形）
+
+新模块 `crates/cpp_formatter/src/output.rs`（4 个单测）+ CLI 开关 `-output-replacements-xml`：
+
+```xml
+<?xml version='1.0'?>
+<replacements xml:space='preserve' incomplete_format='false'>
+<replacement offset='4' length='14'>a = 1;&#10;int b = </replacement>
+</replacements>
+```
+
+与 clang-format 的对照（同一份输入、同一份样式）：
+
+```text
+clang-format: 4 条细粒度 replacement（offset 3/17/18/20）
+ours:         1 条粗粒度 replacement（offset 4，覆盖变更的中间段）
+```
+
+两者**应用后的结果相同**；差别是粒度。我们选择"一条"是因为库的契约是"这些字节产出那段文本"，
+把细粒度留给 `layout_audit` / `spacing_audit` 这类需要定位的工具（模块文档里写明了这个取舍）。
+
+**已知保真度差距（记录，不修）**：CRLF 输入时，clang-format 的 replacement 文本会归一成 `&#10;`（LF），
+我们的仍保留 `\r\n`——语义等价，字节不同。
+
+**实测**
+
+```text
+cpp_formatter  79 → **83 passed** + 3 ignored（output:: 4 个新单测）
+语料           43 / 43（100%）· 稳定性 43 / 43
+```

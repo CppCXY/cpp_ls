@@ -19,6 +19,7 @@ pub mod breaks;
 pub mod columns;
 pub mod config;
 pub mod presets;
+pub mod output;
 pub mod regions;
 pub mod render;
 pub mod rows;

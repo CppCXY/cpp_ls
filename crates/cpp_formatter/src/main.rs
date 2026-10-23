@@ -6,7 +6,7 @@
 //!   -style=<preset|file>        a preset name (LLVM, Google, …) or `file` to look for `.clang-format`
 //!   -fallback-style=<preset>    what `-style=file` falls back to when no `.clang-format` is found (default LLVM)
 //!   -dump-config                print the resolved style and exit
-//!   -assume-filename=<name>     the name to use when reading stdin
+//!   -output-replacements-xml  print the edits as clang-format`s XML instead of the formatted text
 //! ```
 //!
 //! The flags are spelled the way clang-format spells them so that an editor plugin can be pointed at this binary
@@ -23,12 +23,15 @@ fn main() {
     let mut style_argument: Option<String> = None;
     let mut fallback: Option<String> = None;
     let mut dump = false;
+    let mut replacements_xml = false;
     let mut assume_filename: Option<PathBuf> = None;
     let mut files: Vec<PathBuf> = Vec::new();
 
     for argument in std::env::args().skip(1) {
         if argument == "-i" || argument == "--in-place" {
             in_place = true;
+        } else if argument == "-output-replacements-xml" {
+            replacements_xml = true;
         } else if argument == "-dump-config" {
             dump = true;
         } else if let Some(value) = argument.strip_prefix("-style=") {
@@ -77,7 +80,12 @@ fn main() {
                 std::process::exit(1);
             }
         };
-        print!("{}", cpp_formatter::format(&source, &style));
+        let formatted = cpp_formatter::format(&source, &style);
+        if replacements_xml {
+            print!("{}", cpp_formatter::output::replacements_xml(&source, &formatted, None));
+        } else {
+            print!("{formatted}");
+        }
         return;
     }
 
@@ -97,6 +105,10 @@ fn main() {
             continue;
         };
         let formatted = cpp_formatter::format_file(Path::new(file), &source, &style);
+        if replacements_xml {
+            print!("{}", cpp_formatter::output::replacements_xml(&source, &formatted, Some(Path::new(file))));
+            continue;
+        }
         if in_place {
             if formatted != source
                 && let Err(error) = std::fs::write(file, &formatted)
