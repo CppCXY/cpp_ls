@@ -1116,3 +1116,31 @@ round 14 把"完全重排"接线做完了（逻辑行切分 + 忽略源码换行
 **结论**：P2 要真正超过 56，不能只靠"忽略源码断行"，还得补齐 breaker 的候选集与惩罚模型
 （clang-format 的 `BreakableToken` 能断在 `(` 后的任意实参、`?`/`:` 两侧、字符串字面量内部；
 我们只有逗号后/运算符前/括号后几类）。在那之前，"只增断行"是更优的工程选择。
+## 三十八、round 15：把候选集放宽是**中性**的，以及一条与格式化无关的既有失败
+
+这轮试了把 `breaks::is_breakable` 的候选集放宽（不再只认"逗号后/运算符前"，而是"任何实参边界"）：
+
+```text
+printed 超长行：放宽前 56 → 放宽后 **56**（无变化）
+```
+
+原因是"只增断行"只在**已经超长的行**里插断点，候选集再宽也不会改变"哪些行超长"。
+按规则（只保留有正收益的改动）已回退。
+
+**同时发现一条与本次工作无关的既有失败**（在 `cpp_code_analysis`，不是 formatter）：
+
+```text
+cargo test --release --workspace
+  cpp_code_analysis  tests/semantic.rs  an_unresolved_include_does_not_erase_the_files_own_facts  FAILED
+本次所有提交只动了 cpp_formatter / docs，且该用例在 formatter 开始时（35/43）就已存在，
+记录在此避免后续误判为回归。
+```
+
+**当前可复现的指标**
+
+```text
+语料整文件一致：  37 / 43（86.05%）
+间距一致：        99.51%（spacing_audit）
+P2：              printed 56 / logical 105 / breaker 覆盖 80（ColumnLimit: 80）
+单测：            cpp_formatter 56 passed + 4 ignored
+```
