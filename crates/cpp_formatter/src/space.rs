@@ -112,7 +112,12 @@ pub fn between(stream: &Stream<'_>, index: usize, roles: &Roles, style: &Style) 
     // **A cast takes no space after its parenthesis**: `(void)x`, `(int)y`. clang-format writes them glued
     // (measured on `(void)i;`, which this wrote as `(void) i;`). The parenthesis holds a type name and nothing else,
     // which is what separates a cast from a call followed by a value.
-    if previous.kind == RightParen && is_a_cast_expression(stream, index - 1) {
+    // A cast glues to its *operand*: `(void)x`. A binary operator after the parenthesis is not an operand
+    // (`sizeof(int) == 4` keeps its spaces), which is why the operator check comes first.
+    if previous.kind == RightParen
+        && !crate::layout::is_a_binary_operator(current.kind)
+        && is_a_cast_expression(stream, index - 1)
+    {
         return 0;
     }
 
