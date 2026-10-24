@@ -72,3 +72,51 @@
 
 判据：`LuaParser`/`CodeFormatCLib` 里给 `_diagnosticStyle`、`_session`、`_configs` 这类成员做
 Go to Definition，每条只给一个答案（本类声明处）；`references` 不再跨类。
+## ④ operator 推断：实现过、测过、**没有留下**（2026-10-24）
+
+现状：`DeclFact::name` 对 operator 是**空**的——事实层给它建了位置，没建名字。于是
+`members_of(Widget)` 里 `operator[]` 是一个无名成员，`operator_returns_of`（所有 `v[i]`、`-v`、`a + b`
+都走它）永远找不到，`v[0]` 在"文件里声明的类"上回答 `Unknown(UnknownType("v[0]"))`
+（`tests/types.rs::a_subscript_has_the_operators_return_type` 与
+`a_classs_own_operators_have_their_declared_return_type` 两个 `#[ignore]` 就是这条）。
+
+### 做过的改动（全部通过测试，然后因为性能回滚）
+
+```text
+1. `fact_from_binding_with` 的 name 从 `identifier_text().unwrap_or_default()` 改成 `Name::text()`，
+   与索引层（`fact_for`）一致 → members_of 里出现 `operator[]`、`operator()`、`operator+`、`operator-`、
+   `~Widget`（不再是空名字）。`a_destructor_hides_nothing_in_a_base...` 的断言随之更新。
+2. `declared_returns_of_with` 允许 `OperatorFunction` 读返回类型。
+3. 引擎：给 `-`、`+`、`!`、`~` 加一元 arm（原本没有，`-a` 一律 Unknown）；
+   下标/一元/二元三个 arm 都改走 `operator_returns_memoed`（每请求按 `(class, operator)` 记忆）。
+4. `substituted_members` 的别名展开从"只对模板实参"放宽到"所有类"（`cents operator+` 这类需要），
+   并在 operator 的 `returns` 上做安全网：仍然是"类自己作用域里的名字"（如 `std::vector` 的
+   `reference`）就置 None，避免那 60 条假报重新出现。
+```
+
+验证：两个 `#[ignore]` 测试全部转绿（`v[0]`→`int`、`a(3)`→`int`、`-a`→`Money`、`a+a`→`Money`、`*a`→`int`），
+全仓测试绿。
+
+### 为什么回滚：LuaSyntaxTree.cpp 上诊断 207 → 510 ms
+
+```text
+[check] ImplicitBoolConversion    12 → 184 ms
+[check] UndefinedField            93 → 220 ms
+诊断（keystroke 2）              207 → 455–515 ms，findings 8 → 9
+```
+
+原因不是 46 次 `std::vector<…>::operator[]` 查询（试过按请求记忆，没变）。最可能是**答案变多了**：
+成员表里出现了 `operator bool` / `operator[]`，`implicit-bool-conversion` 与 `undefined-field`
+于是第一次真的往下走，而它们**每个表达式**都要再问一次类型。也就是说这不是 operator 的错，
+是这两个检查的"每个表达式一层"的成本，在答案存在之后才暴露出来。
+
+### 下一刀的顺序（判据都写好了）
+
+```text
+1. 先只落"事实层的名字"（第 1 条），`returns` 不动：operator 出现在成员表里（补全/hover 立刻受益），
+   引擎行为不变。判据：全仓测试绿、LuaSyntaxTree.cpp 的 207 ms/8 findings 不变。
+2. 再量 `implicit-bool-conversion` / `undefined-field` 在"每个表达式问一次"上的成本，
+   `[question]` 探针 + `CPPLS_TIME_CHECKS=1` 已有；把这一步变便宜（类型记忆、或按条件缓存），
+   然后把 `returns` 与一元 arm 一起打开。
+3. 最后才是 `substituted_members` 的放宽——它独立可测。
+```
