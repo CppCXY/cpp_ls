@@ -309,17 +309,34 @@ fn a_split_member_head_may_name_its_type_in_the_else_branch() {
         "both directives belong to the type's own node — the head is one sequence, not two"
     );
 
-    // …and the one variant that is **not** this rule's, pinned rather than left to be rediscovered: the branch ends
-    // with a *second* name (`MY_API C`), which needs the evidence "a name followed by a directive is not the
-    // declarator" — refused on purpose, because a declaration's **initialiser** really may be written per branch
-    // (`static const int n` / `#if X = 1; #else = 2; #endif`), and that shape reads today.
+    // **The variant that used to be pinned as unreadable now reads**, and the reason it can is the directive itself
+    // being evidence: "does a declarator still follow this name?" sees **through** a directive now
+    // (`a_declarator_still_follows_the_name` skips one by its logical line), so
+    // `static MY_API C` / `#else` / `static MY_API D` / `#endif` / `f()` is one head whose branches each end with a
+    // second name, and `f` is the declarator of the whole.
+    assert_reads(
+        Where::Class,
+        &["template<typename _Tp>\n#if X\n  static MY_API C\n#else\n  static MY_API D\n#endif\n  f() { }"],
+    );
+
+    // The shape the old note was protecting is a **different seam** and still does not read: there the directive
+    // stands between a declarator and its initialiser, which is `finish_init_declarator`'s business and not this
+    // question's. Measured rather than assumed, so the prose above is not taken for a guarantee:
+    //
+    // ```cpp
+    // static const int n
+    // #if X
+    //   = 1;
+    // #else
+    //   = 2;
+    // #endif
+    // ```
     assert_does_not_read_yet(
         Where::Class,
         &[(
-            "template<typename _Tp>\n#if X\n  static MY_API C\n#else\n  static MY_API D\n#endif\n  f() { }",
-            "a split head whose branches end with a **second** name: `C` is refused the type (the one-name allowance \
-             was spent on `MY_API`) and becomes the declarator, so the declaration ends at the `#endif` without a \
-             `;`. Reading it needs the directive itself as evidence, which the per-branch initialiser above forbids",
+            "template<typename _Tp>\n  static const int n\n#if X\n  = 1;\n#else\n  = 2;\n#endif\n  f() { }",
+            "a per-branch **initialiser**: open, and a different seam from the split head — the `=` after the \
+             directive is `finish_init_declarator`'s to read",
         )],
     );
 }
