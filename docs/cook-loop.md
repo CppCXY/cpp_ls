@@ -85,3 +85,23 @@ provisional 单元答 `None`，于是没有进展。
 冷启动：第一遍 2.9–3.7 s，尾巴 63 切片 7.7 s（与修复前同量级；advance 烤片的版本曾把它推到 8.5 s，已回退）
 诊断延迟：140–147 ms，未变
 ```
+
+## 后续：一次编辑必须在下一个请求之前被读到（2026-10-24）
+
+`tests/handshake.rs` 的 `a_completion_sees_a_change_to_an_included_header` 断言的是**同一口气**里
+"改头文件 + 立刻补全"，而且答案是改后的成员。这个用例在并行全量里三次里败一次、单独跑必过——
+检查下来是**流程**问题，不是测试问题：
+
+```text
+① `apply_buffer`（didOpen/didChange）只把文件入队然后 wake pump，summary 在 pump 下一片之前是旧的。
+   下一个请求（补全）正好落在这个窗口里，读到的是旧头文件。
+   → 现在 didOpen/didChange 在同一把写锁里 `advance(1)`：读的就是刚入队的那个文件（`Priority::Open`
+     在队头；`advance(1)` 不会带出 wave，只解析这一个），实测 2–6 ms，在预算内。pump 仍负责它的 include。
+② 修①之后暴露了第二个：pull 的快速路径只要求 `summary` 存在。文件"已读但还没 cook"时，
+   一次 pull 直接返回 true，`diagnostics` 于是退回**粗读数**，一个未闭合的 class 得到空报告——
+   `a_pulling_client_gets_a_report_and_not_null` 与 `an_error_typed_into_an_open_file_is_answered` 因此失败。
+   → 快速路径改成要求 **cooked reading**（`cooked_declarations` 存在）：这正是"这个 pull 无事可做"的状态。
+```
+
+验收：handshake 全量并行连跑 4 次全绿；`cpp_ls` 87 + 32 + idle + latency 全绿；keystroke 延迟不变
+（did_chg 2–5 ms，诊断 21–23 ms，findings 12/13/13）。

@@ -486,16 +486,22 @@ impl AnalysisState {
         // unavailable lock means "cannot answer the question yet", which is a `false` that falls through to the
         // path below rather than a wait.
         //
-        // **What counts as ready is the summary, and only the summary.** It used to require `session.view(…)` as
-        // well — a *parse of the file* — to decide whether there was any work to do, on a path whose whole purpose is
-        // to be free when there is none; the handler then parsed the file again to answer. A view is derived data
-        // built per request, so requiring one proved nothing about the index, and the summary is the honest test:
-        // **a summary exists exactly when the index has read the file's current text** (the same rule the in-lock
-        // check below applies). Measured on a keystroke loop: one parse of the open file per pull, before the
-        // request's own work.
+        // **What counts as ready is the reading, not the summary.** It used to require `session.view(…)` as well —
+        // a *parse of the file* — and requiring one to decide whether there is work to do is the wrong question on
+        // a path whose purpose is to be free when there is none. But the summary alone is the other wrong answer:
+        // a file can be **read** and not yet **cooked**, and `Session::diagnostics` answers from the cooked reading —
+        // so a pull that treated "read" as "ready" skipped the cook and answered from the coarser raw reading.
+        // Measured: `a_pulling_client_gets_a_report_and_not_null` and `an_error_typed_into_an_open_file_is_answered`
+        // both failed on an unclosed class (a report with no items is "clean" and wrong) once `didOpen` began
+        // reading the file before the handler returned. A cooked reading is the honest test — it is exactly the
+        // state in which this function has nothing left to do.
         if let Ok(session) = self.inner.try_read()
             && let Some(session) = session.as_ref()
             && session.index().summary(&to_prepare).is_some()
+            && session
+                .index()
+                .cooked_declarations(&to_prepare)
+                .is_some()
         {
             return true;
         }

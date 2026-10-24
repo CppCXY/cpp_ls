@@ -169,7 +169,20 @@ async fn apply_buffer(context: &ServerContextSnapshot, path: PathBuf, text: Stri
     let for_session = path.clone();
     let applied = analysis
         .update_session("didOpen", move |session| {
-            session.did_open(&for_session, &text)
+            session.did_open(&for_session, &text);
+            // **The edit is read before this handler returns.** `did_open` drops the file's summary and queues it,
+            // so until something reads it again the index describes the text the user just replaced — and the very
+            // next request is a completion or a hover **about that text**. Leaving it to the pump is a race the
+            // client cannot see: measured with `tests/handshake.rs`'s
+            // `a_completion_sees_a_change_to_an_included_header`, a completion asked in the same breath as the
+            // keystroke was answered from the old summary often enough that the test — which asserts the exact
+            // opposite — failed in one full run in three while passing alone.
+            //
+            // `advance(1)` and not more: it takes the file at the head of the queue, which the `did_open` above put
+            // there at `Priority::Open`, and reads **it** — a wave needs `left > 1`, so this is one parse and one
+            // insert, the same work the pump's next slice would do. Its includes stay queued for the pump, so the
+            // write lock is held for one file (measured 2-6 ms on `EmmyLuaCodeStyle`), well inside the budget.
+            session.advance(1);
         })
         .await;
 
@@ -180,7 +193,6 @@ async fn apply_buffer(context: &ServerContextSnapshot, path: PathBuf, text: Stri
         return;
     }
 
-    // The edit *dropped* this file's summary and queued it (`Session::did_open`), so the index is stale until
-    // something reads it again. That is the pump's job, and this is how it is told there is work.
+    // Anything the read above discovered — the includes it queued — is the pump's, and this is how it is told.
     analysis.wake();
 }

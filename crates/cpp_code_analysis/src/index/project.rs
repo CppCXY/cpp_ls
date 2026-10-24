@@ -1056,14 +1056,40 @@ pub fn members_of(
     // Measured on `LuaSource.cpp`: 17 lists, 82 ms of a 157 ms pull, every keystroke. The cache is invalidated by
     // *which files the list was made of*, so an edit to a file that contributes members drops exactly those lists
     // (see [`CachedMemberList`]).
+    let started = std::time::Instant::now();
     let key = (class.to_string(), path.to_path_buf());
     if let Some(known) = index.cached_member_list(&key) {
+        if crate::probes::timing() && started.elapsed().as_micros() >= 300 {
+            eprintln!(
+                "[member] {:>5.1} ms  hit   {class}",
+                started.elapsed().as_secs_f64() * 1000.0
+            );
+        }
         return known;
     }
 
     let listed = members_of_inner(index, scopes, root, path, class);
     if let Known::Yes(list) = &listed {
         index.remember_member_list(key, list);
+    }
+    if crate::probes::timing() && started.elapsed().as_micros() >= 300 {
+        let held = index
+            .member_lists
+            .lock()
+            .map(|known| known.len())
+            .unwrap_or(0);
+        eprintln!(
+            "[member] {:>5.1} ms  miss  {class}  ({} member(s), {} unlisted base(s), {held} held)",
+            started.elapsed().as_secs_f64() * 1000.0,
+            match &listed {
+                Known::Yes(list) => list.members.len(),
+                _ => 0,
+            },
+            match &listed {
+                Known::Yes(list) => list.unlisted.len(),
+                _ => 0,
+            }
+        );
     }
 
     // The diagnostic that found why `std::ios::` offered nothing: whether a member is *present* and at what depth,
@@ -7688,9 +7714,13 @@ impl ProjectIndex {
         let files = self.visible_in_order_of(visible_files);
         if crate::probes::timing() && walk_started.elapsed().as_micros() >= 500 {
             eprintln!(
-                "[visibility] {:>5.1} ms, {} file(s)",
+                "[visibility] {:>5.1} ms, {} file(s), from {}",
                 walk_started.elapsed().as_secs_f64() * 1000.0,
-                files.len()
+                files.len(),
+                visible_from
+                    .file_name()
+                    .map(|name| name.to_string_lossy().to_string())
+                    .unwrap_or_else(|| visible_from.display().to_string()),
             );
         }
         // Everything below this line is reading facts out of files that are already known to be visible: the
