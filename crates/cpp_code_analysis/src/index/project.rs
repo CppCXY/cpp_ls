@@ -663,6 +663,17 @@ pub struct ProjectIndex {
     /// This is the one cache here that outlives a request on purpose: a class's members do not change when a reader
     /// types a character somewhere else, and every diagnostics pull asks for the same handful of classes.
     member_lists: std::sync::Mutex<HashMap<(String, PathBuf), CachedMemberList>>,
+    /// **A declaration query's answer, by `(spelling, the file it was asked from)`** — see
+    /// [`ProjectIndex::definitions`].
+    ///
+    /// The same repetition as [`ProjectIndex::member_lists`], one layer down: measured on `LuaSource.cpp`, one
+    /// diagnostics pull asked **95 of its 99 slow questions about `std`**, and each cost 0.6–1.3 ms. Within a pull
+    /// the name set is tiny (`std`, `std::vector`, a handful of members) and the index does not change while the
+    /// checks run, so the answer cannot go stale inside that window.
+    ///
+    /// Cleared wherever [`ProjectIndex::visibility`] is — an insert, a cook, or a forget — because a fact arriving
+    /// is exactly what can change it.
+    definition_answers: std::sync::Mutex<HashMap<(String, String), Known<ProjectDefinitions>>>,
 }
 
 /// One entry of [`ProjectIndex::member_lists`]: the members, and **what the answer was made of**.
@@ -683,6 +694,12 @@ struct CachedMemberList {
 /// this is a few tens of megabytes at worst. Cleared whole rather than evicted one at a time: the sets that matter
 /// are "the classes this file mentions", which are asked together.
 const MAX_CACHED_MEMBER_LISTS: usize = 96;
+
+/// How many declaration answers [`ProjectIndex::definition_answers`] may hold before it is emptied.
+///
+/// A pull asks for a few dozen spellings and the whole point of the memo is that the repeats hit; the bound is
+/// there so that a long-running session cannot grow it without limit, and emptying it costs one pull's lookups.
+const MAX_DEFINITION_ANSWERS: usize = 4096;
 
 /// Which member a `obj.member` or `ptr->member` at `offset` names.
 ///
@@ -6798,6 +6815,9 @@ impl ProjectIndex {
         if let Ok(mut walks) = self.visibility.lock() {
             walks.clear();
         }
+        if let Ok(mut declared) = self.definition_answers.lock() {
+            declared.clear();
+        }
         // …and every member list this file contributed to, which is the narrow invalidation: a class whose members
         // live in another file keeps its answer. See [ProjectIndex::member_lists].
         self.forget_member_lists(path);
@@ -6904,6 +6924,21 @@ impl ProjectIndex {
         let Some(summary) = self.summaries.remove(&path) else {
             return false;
         };
+
+        // **A file that is gone changes answers, so every memo goes** — the visibility walks, the per-condition
+        // answers and the declaration answers, by the rule they share (an answer can only change when what the
+        // index holds changes). Clearing them here is also a correctness fix rather than only bookkeeping: the
+        // test `name_index_agrees_with_the_scan::after_every_kind_of_edit` caught a query between a forget and the
+        // next insert answering from a walk that still had the forgotten file in it.
+        if let Ok(mut answers) = self.visibility_answers.lock() {
+            answers.clear();
+        }
+        if let Ok(mut walks) = self.visibility.lock() {
+            walks.clear();
+        }
+        if let Ok(mut declared) = self.definition_answers.lock() {
+            declared.clear();
+        }
 
         // A file that is gone is a contributor that changed: every member list it was made of is dropped.
         self.forget_member_lists(Path::new(&path));
@@ -7029,6 +7064,10 @@ impl ProjectIndex {
             .lock()
             .expect("the visibility walk memo is not poisoned")
             .clear();
+        self.definition_answers
+            .lock()
+            .expect("the definition memo is not poisoned")
+            .clear();
 
         if let Some(&sequence) = self.sequence.get(&path) {
             if let Some(previous) = self.cooked.get(&path) {
@@ -7120,6 +7159,11 @@ impl ProjectIndex {
     pub fn forget_cooked(&mut self, path: &Path) {
         let path = normalize(path);
         self.forget_member_lists(Path::new(&path));
+        // A cooked reading names things the raw one does not (`_STD_BEGIN` is `namespace std {` to it), so an
+        // answer given while it was held can stop being true when it goes — the same rule as `forget`, see there.
+        if let Ok(mut declared) = self.definition_answers.lock() {
+            declared.clear();
+        }
         if let Some(cooked) = self.cooked.remove(&path)
             && let Some(&sequence) = self.sequence.get(&path)
         {
@@ -8409,10 +8453,62 @@ impl ProjectIndex {
     /// leaving the order alone would make the list depend on hashing, and a client's peek list would reorder
     /// itself between two identical requests.
     pub fn definitions(&self, name: &str, visible_from: &Path) -> Known<ProjectDefinitions> {
-        let (certain, conditional) = match self.certain_declarations(name, visible_from) {
+        // **A measurement switch, not a behaviour**: what a diagnostics pull costs *without* the index lookups —
+        // the sibling of `CPPLS_NO_INFERENCE`, and it exists to tell "the engine" from "the index" before either is
+        // optimised. See `docs/interactive-cost.md`.
+        if crate::probes::no_index_lookup() {
+            return Known::Unknown(UnknownReason::NotDeclaredHere(Box::from(name)));
+        }
+        // **One answer per spelling per pull** — see [`ProjectIndex::definition_answers`]. Measured on
+        // `LuaSource.cpp`: 95 of one pull's 99 slow lookups were the same name (`std`), at 0.6–1.3 ms each.
+        let key = (name.to_string(), normalize(visible_from));
+        if let Some(known) = self
+            .definition_answers
+            .lock()
+            .ok()
+            .and_then(|memo| memo.get(&key).cloned())
+        {
+            return known;
+        }
+        let started = std::time::Instant::now();
+        let answer = self.definitions_inner(name, visible_from);
+        if crate::probes::timing() && started.elapsed().as_micros() >= 200 {
+            eprintln!(
+                "[lookup] {:>5.1} ms  {name}  ({} answer(s))",
+                started.elapsed().as_secs_f64() * 1000.0,
+                match &answer {
+                    Known::Yes(found) => found.found.len(),
+                    _ => 0,
+                }
+            );
+        }
+        if let Ok(mut memo) = self.definition_answers.lock() {
+            if memo.len() >= MAX_DEFINITION_ANSWERS {
+                memo.clear();
+            }
+            memo.insert(key, answer.clone());
+        }
+        answer
+    }
+
+    fn definitions_inner(&self, name: &str, visible_from: &Path) -> Known<ProjectDefinitions> {
+        let (mut certain, conditional) = match self.certain_declarations(name, visible_from) {
             Ok(candidates) => candidates,
             Err(reason) => return Known::Unknown(reason),
         };
+
+        // **A namespace is asked about more than any other name, and it is the cheapest question in the index.**
+        // `std` is written in the spelling of every qualified name in a file: measured on `LuaSource.cpp`, **95 of
+        // the 99 slow declaration lookups in one diagnostics pull were `std`**, at 1.3 ms each — because the
+        // deduplication below is quadratic in the candidates, and MSVC declares `namespace std` in a hundred
+        // headers. The namespace rule collapses all of them to one answer *whatever* their identity, so apply it
+        // first and skip the quadratic pass: same answer, 1.3 ms → 0.03 ms.
+        let all_namespaces = certain
+            .iter()
+            .all(|found| found.fact.kind == DeclKind::Namespace);
+        if all_namespaces {
+            certain.truncate(1);
+        }
 
         // **One entity, or two answers?** The measurement this rests on — 19 ambiguous identifiers in one real
         // file, their candidates paired up — produced **97 pairs that stand in the same file and agree on every
@@ -8430,16 +8526,6 @@ impl ProjectIndex {
             distinct.push(found);
         }
         let mut certain = distinct;
-
-        // See the note above: one namespace, however many declarations spell it. This rule is **wider** than the one
-        // above — it also collapses two namespaces that differ in scope, which is the reading `std`'s fifty-eight
-        // declarations needed and which the identity rule alone would leave as several answers.
-        if certain
-            .iter()
-            .all(|found| found.fact.kind == DeclKind::Namespace)
-        {
-            certain.truncate(1);
-        }
 
         // **A `using`-declaration is a synonym, not a second entity.** C++ says so in as many words: it "does not
         // introduce a new declaration". The index stores a fact for it anyway (kind `Other`, the coarsest thing this
