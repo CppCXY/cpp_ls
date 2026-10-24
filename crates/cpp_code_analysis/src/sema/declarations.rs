@@ -1521,21 +1521,133 @@ pub(crate) fn declared_returns_of_in(
     binding: &Binding,
 ) -> Option<String> {
     let written = declared_returns_of_with(shapes, binding);
-    if written.is_some() {
-        return written;
+    if let Some(spelling) = written {
+        // **An operator's return type, when the fact's readers can resolve the spelling.** See
+        // [`an_operator_return_is_usable`]: `std::vector<Token>::operator[]` says `reference`, a typedef inside the
+        // class, and a fact that carried it typed `tokens[i]` as a class called `reference`.
+        if binding.kind != BindingKind::OperatorFunction
+            || an_operator_return_is_usable(root, binding, &spelling)
+        {
+            return Some(spelling);
+        }
+        return deduced_returns_of(root, binding);
     }
     deduced_returns_of(root, binding)
 }
 
+/// **May an operator's return spelling be stored in a fact?**
+///
+/// A fact is read by code that has the declaration and *not* the class's scope, so an unqualified name in it may mean
+/// something else than it does in the class body: `reference` is `std::vector`'s own typedef, and a fact that carried
+/// it typed `tokens[i]` as a class called `reference` — 60 false positives over four files, measured.
+///
+/// Two kinds of spelling mean the same thing everywhere and are always usable: a **builtin** (`int`, `bool`,
+/// `void*`) and a **qualified** name (`std::string`, `::Widget`). Anything else is usable only when the class body
+/// that declares the operator does **not** declare a name of its own with that spelling — which is the same rule as
+/// the language's (an unqualified name in a member's return type is looked up in the class first), asked of the tree
+/// instead of the scope table because this reader is handed the file's tree.
+fn an_operator_return_is_usable(
+    root: &CppSyntaxNode,
+    binding: &Binding,
+    spelling: &str,
+) -> bool {
+    fn means_the_same_everywhere(kind: &crate::sema::types::Type) -> bool {
+        use crate::sema::types::Type;
+        match kind {
+            Type::Builtin { .. } => true,
+            Type::Named { name, arguments } => {
+                name.contains("::") && arguments.iter().all(means_the_same_everywhere)
+            }
+            Type::Pointer { to }
+            | Type::Qualified { of: to }
+            | Type::Reference { to, .. }
+            | Type::Array { of: to, .. } => means_the_same_everywhere(to),
+            _ => false,
+        }
+    }
+
+    if means_the_same_everywhere(&crate::sema::types::parse_type_spelling(spelling)) {
+        return true;
+    }
+    let Some(head) = crate::sema::types::parse_type_spelling(spelling)
+        .class_name()
+        .map(str::to_string)
+    else {
+        return true;
+    };
+    !the_enclosing_body_declares(root, binding, &head)
+}
+
+/// **Does the class body that declares `binding` declare `name` itself?**
+///
+/// The question [`an_operator_return_is_usable`] turns on: a member's return type is looked up in its class before
+/// anything outside, so a name the body declares is not a name the fact can carry. Walked from the declaration up to
+/// the nearest `ClassBody`, then over that body's own declarations — one subtree, not the file.
+fn the_enclosing_body_declares(root: &CppSyntaxNode, binding: &Binding, name: &str) -> bool {
+    let Some(declaration) = declaration_of(root, binding) else {
+        return false;
+    };
+    let Some(body) = declaration.ancestors().find(|node| {
+        matches!(
+            CppSyntaxKind::from(node.kind()),
+            CppSyntaxKind::ClassBody
+        )
+    }) else {
+        return false;
+    };
+    // **An alias, and the name it introduces** — that is the case this gate exists for, and it is the only one read.
+    //
+    // The first version of this walked every declaration in the body and matched the word anywhere in its
+    // declarator, and that was wrong in the direction that costs semantics: `Money operator+(const Money& other)`
+    // mentions `Money` in its *parameter*, so a class whose operator returns its own name looked as if the body
+    // declared one — the return type was dropped and `a + a` answered nothing.
+    //
+    // So the shape is read: a declaration whose text starts with `using`/`typedef` introduces a name, and for
+    // `using X = …` it is the identifier right after `using` while for `typedef … X;` it is the last identifier
+    // before the `;`. A nested class or enum of the same name is **not** covered — its declaration names the
+    // enclosing scope's entity differently in this tree — and that is a known gap rather than a claim: an operator
+    // returning `Widget` where the body declares `struct Widget` keeps the spelling, and a fact's reader resolves it
+    // to the class it names, which is the same class.
+    body.descendants()
+        .filter(|node| matches!(CppSyntaxKind::from(node.kind()), CppSyntaxKind::Declaration))
+        .any(|node| {
+            let text = node.text().to_string();
+            let text = text.trim();
+            let alias = if let Some(rest) = text.strip_prefix("using ") {
+                rest.split(|c: char| !(c.is_alphanumeric() || c == '_'))
+                    .next()
+                    .unwrap_or_default()
+                    .to_string()
+            } else if text.starts_with("typedef ") {
+                let before_the_semicolon = text.trim_end_matches(';');
+                before_the_semicolon
+                    .rsplit(|c: char| !(c.is_alphanumeric() || c == '_'))
+                    .next()
+                    .unwrap_or_default()
+                    .to_string()
+            } else {
+                return false;
+            };
+            alias == name
+        })
+}
+
 pub(crate) fn declared_returns_of_with(shapes: &DeclarationShapes, binding: &Binding) -> Option<String> {
-    // **A `Function` and nothing else, and the operator case is why.** An operator does declare a return type, and
-    // recording it here was tried and measured: `std::vector<Token>::operator[]` says `reference`, and `reference` is
-    // a *typedef inside the class* — so the fact carried the unsubstituted name, `tokens[i]` typed as a class called
-    // `reference`, and `undefined-field` reported **60 false positives over four files** of a real project
-    // (`tokens[index]` has no member `TokenType`). A return type written with the class's own names means nothing
-    // before substitution, which this layer does for a *member list* and not for a fact; until those are one reader,
-    // an operator answers `None` here, which is the refusal that keeps the layer quiet.
-    if binding.kind != BindingKind::Function {
+    // **A `Function`, and an operator when the spelling cannot be a name from the class's own body.**
+    //
+    // An operator does declare a return type, and recording every one of them was measured and rejected once:
+    // `std::vector<Token>::operator[]` says `reference`, and `reference` is a *typedef inside the class* — so the
+    // fact carried the unsubstituted name, `tokens[i]` typed as a class called `reference`, and `undefined-field`
+    // reported **60 false positives over four files** of a real project (`tokens[index]` has no member `TokenType`).
+    //
+    // That measurement is about a *lookup* an unqualified name needs, not about operators: `int`, `bool` and
+    // `std::string` mean the same thing in a fact as in the class body, and `Money operator+` names a class from
+    // outside the body. So an operator records its return type here and [`an_operator_return_is_usable`] decides
+    // whether the *fact* may carry it — the typedef case is refused there, with the file's tree in hand.
+    if !matches!(
+        binding.kind,
+        BindingKind::Function | BindingKind::OperatorFunction
+    ) {
         return None;
     }
 
@@ -2116,7 +2228,16 @@ fn fact_for(
         // anything can be looked up in. What is new is that the **body** is in this function's hands, and a `return`
         // statement states a type where a specifier sequence does not. See [`deduced_returns_of`] for how little of
         // that is provable at this layer, and why the rest is refused rather than approximated.
-        declared_returns_of_with(shapes, binding).or_else(|| deduced_returns_of(root, binding))
+        //
+        // **An operator's written return type is kept only when a fact may carry it** — see
+        // [`an_operator_return_is_usable`]; this is the index's own writer, so the gate is asked here as well as in
+        // [`declared_returns_of_in`].
+        declared_returns_of_with(shapes, binding)
+            .filter(|spelling| {
+                binding.kind != BindingKind::OperatorFunction
+                    || an_operator_return_is_usable(root, binding, spelling)
+            })
+            .or_else(|| deduced_returns_of(root, binding))
     };
     let bases = { declared_bases_of_with(shapes, binding) };
     // The class template's parameter names, for the members whose types are written with them. Answered from the

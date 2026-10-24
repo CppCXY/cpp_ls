@@ -3312,6 +3312,52 @@ fn type_of_expression_inner(
         };
     }
 
+    // **A unary operator that a class may overload**: `-a`, `+a`, `~a`, `!a`.
+    //
+    // There was no arm for these at all, so `Money neg = -a;` on a class declaring `Money operator-() const` answered
+    // "not a type I know" — and it was not the class case alone: `-count` on an `int` had no answer either, because
+    // the binary arm's arithmetic rule never runs for a one-operand expression. The rules are the language's two:
+    //
+    // * a class operand goes to its own `operator-` (and `!` to `operator!`), which has said what the operator means
+    //   for it — a member list names them now (`DeclFact::name` is the spelling);
+    // * a builtin operand keeps its own type, except `!`, which is `bool`. C++ promotes `-`/`+`/`~` on an integer
+    //   narrower than `int` to `int`, and the widths are the table the binary arm refuses to keep, so the operand's
+    //   own type is the honest answer here too.
+    for symbol in ["-", "+", "~", "!"] {
+        let Some(operand) = unary_operand_with(expression, symbol) else {
+            continue;
+        };
+        let operand_type =
+            type_of_expression_memoed(memo, index, declaring, scopes, root, path, &operand, depth + 1);
+        return match operand_type {
+            Known::Yes((type_of, file)) => {
+                if matches!(type_of, Type::Named { .. } | Type::TemplateParameter { .. })
+                    && let Some(returns) = operator_returns_of(
+                        index,
+                        declaring,
+                        scopes,
+                        root,
+                        path,
+                        &type_of,
+                        &format!("operator{symbol}"),
+                    )
+                {
+                    return Known::Yes((
+                        crate::sema::types::parse_type_spelling(&returns),
+                        file,
+                    ));
+                }
+                if symbol == "!" {
+                    Known::Yes((Type::named("bool"), path.to_path_buf()))
+                } else {
+                    Known::Yes((type_of, file))
+                }
+            }
+            Known::Unknown(reason) => Known::Unknown(reason),
+            Known::No => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
+        };
+    }
+
     // A **conditional**: `c ? a : b` has the type the two arms agree on, and nothing else about it matters — the
     // condition is a `bool` and never part of the answer.
     //
@@ -3784,6 +3830,16 @@ fn operator_returns_of(
     // the index has read.
     let wanted: String = operator.chars().filter(|character| !character.is_whitespace()).collect();
     let symbol = wanted.strip_prefix("operator").unwrap_or(&wanted);
+    // **The class's own parameter names, and the arguments written at the use** — what a return spelling like `T&`
+    // has to be read through before it is a type. `member_fact` answers the *fact*, which carries the declaration's
+    // own words (`T& operator[]`); the list fallback below substitutes them, so this path has to as well or the same
+    // question answers `T&` here and `int&` there.
+    let parameter_names = &first.fact.parameters;
+    let written_arguments: Vec<String> = class_type
+        .arguments()
+        .iter()
+        .map(|argument| argument.to_string())
+        .collect();
     for spelling in [wanted.as_str(), symbol] {
         if let Known::Yes((fact, _)) = member_fact(
             index,
@@ -3794,7 +3850,12 @@ fn operator_returns_of(
             spelling,
             None,
         ) {
-            return fact.returns;
+            let returns = fact.returns?;
+            return Some(crate::sema::types::substituted_spelling(
+                &returns,
+                parameter_names,
+                &written_arguments,
+            ));
         }
     }
 

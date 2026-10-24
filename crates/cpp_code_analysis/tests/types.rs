@@ -1097,7 +1097,6 @@ void f() {
 /// `v.front()` on the same fixture **does** work (`a_member_return_type_is_substituted_through_a_template_id_use`), so the
 /// substitution itself is not in question.
 #[test]
-#[ignore = "ROOT CAUSE, measured: a class whose only member is `operator[]` answers `members_of → []`, and adding a plain-named `at` beside it answers `members_of → [\"at\"]` — the member collector skips operator overloads with punctuation names, so `operator[]` is never a member. The subscript arm is correct and blocked on that"]
 fn a_subscript_has_the_operators_return_type() {
     use cpp_code_analysis::file::coordinates::FileOffset;
     let source = "\
@@ -1369,7 +1368,6 @@ int f() {
 /// 还差最后一步:operator 成员目前**不在** `members_of` 的名单里(事实层没有给它建名字),所以查找永远返回 None,
 /// 表达式落回"操作数类型相同"或迭代器模型。规则和接线都已完成,缺的是事实层的名字 —— 见下一节的记录。
 #[test]
-#[ignore = "operator members are not in the fact list yet: `declared_name` answers nothing for them"]
 fn a_classs_own_operators_have_their_declared_return_type() {
     let source = "\
 struct Money {
@@ -1427,7 +1425,11 @@ int f() {
     }
     assert_eq!(type_of("Money sum = "), "Money", "operator+ returns Money");
     assert_eq!(type_of("int deref = "), "int", "operator* returns int");
-    assert_eq!(type_of("int at = "), "int", "operator[] returns int");
-    assert_eq!(type_of("int times = "), "int", "operator() returns int");
+    // **The cursor goes past the base name**, onto the `[`: `type_at` answers the node an offset sits in, and an
+    // offset on `a` is the *name* — whose own type is `Money`, correctly. The subscript is the expression whose type
+    // is the operator's return type.
+    assert_eq!(type_of("int at = a"), "int", "operator[] returns int");
+    // Same rule as the subscript — one character later, onto the call's own `(`.
+    assert_eq!(type_of("int times = a"), "int", "operator() returns int");
     assert_eq!(type_of("Money neg = "), "Money", "unary operator- returns Money");
 }
