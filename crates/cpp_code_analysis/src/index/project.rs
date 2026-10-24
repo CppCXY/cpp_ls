@@ -6482,18 +6482,19 @@ fn fact_from_binding_with(
 ) -> DeclFact {
     let _ = root;
     DeclFact {
-        // **An empty name for a declaration that has no identifier**, and the reason is **hiding** rather than storage:
-        // `~Derived` and `~Base` are not one name, and a list that compared two spellings this path cannot produce
-        // would either hide one or invent a name. The index builder does store the spelling (`fact_for` →
-        // `Name::text`), and the two agree by design only for a declaration that has an identifier — the ignored test
-        // `the_index_still_lists_a_destructor_under_the_empty_name` is that gap. A caller that needs the spelling of an
-        // operator reads it from the **index**, which is what `operator_returns_of` does before it ever asks for a
-        // list.
-        name: binding
-            .name
-            .identifier_text()
-            .unwrap_or_default()
-            .to_string(),
+        // **The spelling, the same one the index stores** — `operator[]`, `~Widget`, `operator int`.
+        //
+        // This path used to answer an empty name for every declaration without an identifier, on the argument that
+        // `~Derived` and `~Base` must not become one name. That argument is about *hiding*, and the spelling answers
+        // it: the two destructors have different spellings, so nothing is hidden that should not be. What the empty
+        // name cost was measured: a class whose member is `operator[]` answered `members_of → [""]`, so an operator
+        // was invisible to a member list — and a completion after `.`, a hover and every member query with it.
+        //
+        // Only the **name**, and not yet an operator's `returns`: giving the engine an operator's return type made
+        // `implicit-bool-conversion` and `undefined-field` descend per expression for the first time and cost
+        // `LuaSyntaxTree.cpp` 207 → 510 ms (measured; see `docs/semantics-todo.md` §④). The name alone is a fact
+        // about the declaration and changes no inference.
+        name: binding.name.text(),
         // `None` for an empty spelling, which is what a caller listing the names of a **body** passes: a local has
         // no qualified scope at all, and `Some("")` would be a scope that matches nothing while looking like one.
         // Every other caller passes the class or namespace the binding is in.
@@ -12594,12 +12595,14 @@ mod tests {
     }
 
     #[test]
-    fn a_member_whose_name_is_not_recorded_does_not_hide_one_in_a_base() {
-        // `virtual ~Base();` is what makes this real rather than hypothetical: the specifier sequence is what lets
-        // the declaration through the scope walker, and the name it binds is `~Base` — a destructor, whose
-        // `identifier_text()` is `None`, so the fact stores an **empty** name. Comparing two empty names made
-        // `~Derived` hide `~Base`, which is a wrong answer arrived at by treating a missing spelling as if it were
-        // a spelling: the two differ by the class they name, and neither one's spelling is in the fact.
+    fn a_destructor_hides_nothing_in_a_base_because_its_spelling_is_its_own() {
+        // `virtual ~Base();` — the name the binding holds is `~Base`, and a destructor's `identifier_text()` is
+        // `None`, so this path used to store an **empty** name. Comparing two empty names made `~Derived` hide
+        // `~Base`, which is a wrong answer arrived at by treating a missing spelling as if it were a spelling.
+        //
+        // The spelling is stored now (`DeclFact::name` is `binding.name.text()`, the same one the index files), so the
+        // two destructors are two *different* names and neither hides the other for the right reason rather than by
+        // exception — and an operator, which had the same empty name, is a member a lookup can find.
         let source = "struct Base {\n  virtual ~Base();\n  int size;\n};\n\
                       struct Derived : public Base {\n  virtual ~Derived();\n  int d;\n};\n";
         let found = members_of_class(&[], "/p/a.cpp", source, "Derived");
@@ -12608,28 +12611,39 @@ mod tests {
             panic!("`Derived` is declared in this file: {found:?}");
         };
 
-        let unnamed: Vec<&super::ProjectMember> = list
+        let destructors: Vec<&super::ProjectMember> = list
             .members
             .iter()
-            .filter(|member| member.fact.name.is_empty())
+            .filter(|member| member.fact.name.starts_with('~'))
             .collect();
         assert_eq!(
-            unnamed.len(),
+            destructors.len(),
             2,
             "both destructors are declarations that exist, and dropping one would be a silent omission: {:?}",
             names(&list)
         );
 
-        let mut classes: Vec<&str> = unnamed
+        let mut classes: Vec<&str> = destructors
             .iter()
             .map(|member| member.declared_in.as_str())
             .collect();
         classes.sort_unstable();
         assert_eq!(classes, ["Base", "Derived"]);
 
+        let mut spellings: Vec<&str> = destructors
+            .iter()
+            .map(|member| member.fact.name.as_str())
+            .collect();
+        spellings.sort_unstable();
+        assert_eq!(
+            spellings,
+            ["~Base", "~Derived"],
+            "a destructor's name is the class it destroys, so the two are not one name"
+        );
+
         assert!(
-            unnamed.iter().all(|member| !member.ambiguous),
-            "an empty name is not one name two classes contest: {unnamed:?}"
+            destructors.iter().all(|member| !member.ambiguous),
+            "two different spellings are not one contested name: {destructors:?}"
         );
         assert!(
             list.members
