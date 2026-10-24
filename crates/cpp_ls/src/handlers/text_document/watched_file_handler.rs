@@ -94,14 +94,14 @@ pub async fn process_did_change_watched_files(
         // configuration change — and the pump is what reads it.
         context.analysis().wake();
 
-        // **The answer changed and the document did not**, which is the one case a client cannot notice by itself: a
-        // watched file is not one it is editing, so nothing about the text it is showing has moved. A client that can
-        // be told is told; one that cannot is answered the next time it asks.
+        // **The answer changed and the document did not** — a watched file is not one the client is editing, so
+        // nothing about the text it is showing has moved. It used to be told (`workspace/diagnostic/refresh`).
+        //
+        // **It is not told any more, and that is the decision rather than an omission.** A pull client asks on its own
+        // rhythm, and the request made it ask inside a loop — see the note in `handlers/initialized` — so what a
+        // watched-file event does is queue the work and wake the pump, nothing else.
         if response.everything {
             log::info!("the whole project has to be read again");
-        }
-        if context.lsp_features().supports_refresh_diagnostic() {
-            context.client().refresh_workspace_diagnostics();
         }
     }
 

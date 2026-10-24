@@ -164,8 +164,10 @@ impl ClientProxy {
     /// removes the whole class of defect the push path kept having — an answer about text the user has since
     /// replaced, arriving after the edit that replaced it.
     ///
-    /// The one notification that remains is [`ClientProxy::refresh_workspace_diagnostics`], which is not an answer
-    /// but a request for one.
+    /// **`workspace/diagnostic/refresh` is deliberately not here either**, and for a reason that took a reader's log
+    /// to see: asking a client to ask again made it ask in a *loop*, because the ask produced work and the work
+    /// drained into another refresh. A pull client has its own rhythm; the server's job is to answer it. See the note
+    /// in `handlers/initialized` where this used to be called.
     pub async fn apply_edit(
         &self,
         params: ApplyWorkspaceEditParams,
@@ -187,10 +189,6 @@ impl ClientProxy {
     pub fn send_request_no_response(&self, method: &str, params: impl serde::Serialize) {
         let request_id = self.next_id();
         self.send_request_no_wait(request_id, method, params);
-    }
-
-    pub fn refresh_workspace_diagnostics(&self) {
-        self.send_request_no_response("workspace/diagnostic/refresh", ());
     }
 
     /// Ask the client to ask again for the inlay hints it is showing.

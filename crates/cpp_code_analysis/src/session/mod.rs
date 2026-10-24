@@ -1750,6 +1750,13 @@ impl<F: FileProvider + Clone> Session<F> {
                 && can_be_cooked(self, included)
                 && !refused(self, included)
             {
+                if crate::probes::cooking() {
+                    eprintln!(
+                        "want_the_closure_cooked({}): queued {} (not read, cookable, not refused)",
+                        root.display(),
+                        included.display()
+                    );
+                }
                 self.cooking.want(included);
             }
         }
@@ -1935,6 +1942,18 @@ impl<F: FileProvider + Clone> Session<F> {
         // goes on telling the client to come back for an answer that is not coming.
         if self.store.index().summary(path).is_none() {
             self.queue.add(path.to_path_buf(), Priority::Open, 0);
+        }
+        // **"Want" means "if it is not already read", and that guard was missing here.** The same rule
+        // [`Session::want_the_closure_cooked`] has had all along, and the reason it has it: a queue refilled with
+        // files that have readings never empties. Every diagnostics pull calls this for the file it is about, so
+        // without the guard **every pull cooked the open file again** — measured on a real project with
+        // `CPPLS_TRACE_COOKING`, ten pulls in 2.8 s: `cook slice: asked 1, rendered 1` ten times, each a render and a
+        // parse of a 4 000-line file, and the same again for one of its includes.
+        //
+        // The reading is dropped by [`Session::buffer_changed`] the moment the text or an included file changes, so a
+        // file that *needs* a new reading never reaches this line with a stale one.
+        if self.store.index().cooked_declarations(path).is_some() {
+            return;
         }
         self.cooking.want(path);
     }

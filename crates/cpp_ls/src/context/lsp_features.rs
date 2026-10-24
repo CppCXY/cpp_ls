@@ -83,15 +83,6 @@ impl LspFeatures {
         self.supports_pull_diagnostic()
     }
 
-    pub fn supports_refresh_diagnostic(&self) -> bool {
-        self.client_capabilities
-            .workspace
-            .as_ref()
-            .and_then(|workspace| workspace.diagnostics.as_ref())
-            .and_then(|diagnostic| diagnostic.refresh_support)
-            .unwrap_or_default()
-    }
-
     /// May the server ask the client to ask again for the inlay hints it is showing?
     ///
     /// The capability that makes a hint answer **repairable**. A request that arrives while the index is still

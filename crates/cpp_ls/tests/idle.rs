@@ -11,13 +11,15 @@
 //!
 //! ```text
 //! · while idle, the server sends no `workspace/*/refresh` and no `publishDiagnostics` at all
-//! · one edit produces a bounded number of them, not a burst every few hundred milliseconds
+//! · one edit does not send a **diagnostic** refresh either — that message is gone from the server altogether
 //! ```
 //!
 //! # Why the client advertises refresh support
 //!
-//! Because without it the server would not *want* to send a refresh, and the test would pass for the wrong reason.
-//! The capabilities below are what VSCode sends for a pull-diagnostics setup.
+//! Because it is what VSCode sends for a pull-diagnostics setup, and a test that hid the capability would prove
+//! nothing about a server that wanted to use it. The inlay-hint and semantic-token refreshes are still real, and are
+//! what the edit budget below is about; the **diagnostic** refresh is asserted to be absent, because asking a pull
+//! client to ask again is what made it ask in a loop (see `docs/cook-loop.md`).
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
@@ -36,10 +38,10 @@ const IDLE_WINDOW: Duration = Duration::from_secs(5);
 
 /// How many server-initiated messages one edit may cause.
 ///
-/// The honest set after an edit is: the diagnostics refresh (the cook changed the answer), and at most one answer
-/// refresh (hints and tokens are two methods). Four leaves room for a progress notification and nothing else; the
-/// loop this guards produced one every few slices.
-const EDIT_BUDGET: usize = 4;
+/// The honest set after an edit is: at most one *answer* refresh for the hints and one for the tokens — and **no
+/// diagnostic refresh at all**, which is asserted separately below. Three leaves room for a progress notification
+/// and nothing else; the loop this guards produced one every few slices.
+const EDIT_BUDGET: usize = 3;
 
 const MAIN_CPP: &str = r#"#include "a.h"
 
@@ -135,18 +137,21 @@ fn an_idle_session_sends_the_client_nothing() {
         }),
     );
     let after_edit = server.listen(Duration::from_secs(2));
-    let refreshes = after_edit
+    let methods: Vec<&str> = after_edit
         .iter()
-        .filter(|message| {
-            message
-                .get("method")
-                .and_then(Value::as_str)
-                .is_some_and(|method| method.contains("refresh"))
-        })
-        .count();
+        .filter_map(|message| message.get("method").and_then(Value::as_str))
+        .collect();
+    let refreshes = methods.iter().filter(|method| method.contains("refresh")).count();
     assert!(
         refreshes <= EDIT_BUDGET,
-        "one edit caused {refreshes} refresh request(s) (budget {EDIT_BUDGET})"
+        "one edit caused {refreshes} refresh request(s) (budget {EDIT_BUDGET}): {methods:?}"
+    );
+
+    // **And never this one.** `workspace/diagnostic/refresh` is not sent by this server at all: a pull client asks on
+    // its own rhythm, and the request made it ask in a loop — the reason this test exists.
+    assert!(
+        !methods.contains(&"workspace/diagnostic/refresh"),
+        "the server asked for a diagnostic refresh, which it must never do: {methods:?}"
     );
 }
 

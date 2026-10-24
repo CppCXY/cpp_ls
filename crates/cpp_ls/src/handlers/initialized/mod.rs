@@ -506,12 +506,27 @@ async fn index_in_background(context: ServerContextSnapshot) {
                     // stayed open, at 28 % of a core. A query that names one of them clears its refusal
                     // (`Session::want_cooked_reading`), so nothing is lost but the retry.
                     session.refuse_the_cooks_that_built_nothing(&asked, &built);
+                    let cook_logged = !asked.is_empty();
+                    if !asked.is_empty() {
+                        log::info!(
+                            "cook slice: asked {}, rendered {}, emptied the queue, refused {}",
+                            asked.len(),
+                            built.len(),
+                            asked.len().saturating_sub(built.len())
+                        );
+                    }
                     let started = std::time::Instant::now();
                     let re_read = session.commit_the_drain(prepared_drain);
                     let drained = started.elapsed().as_millis();
                     let started = std::time::Instant::now();
                     let cooked = session.commit_them(rendered_cooks).len();
                     let inserted = started.elapsed().as_millis();
+                    if cook_logged {
+                        log::info!(
+                            "cook slice committed: {cooked} of {} rendering(s) stored, {re_read} re-read",
+                            built.len()
+                        );
+                    }
                     if re_read > 0 || cooked > 0 {
                         log::debug!(
                             "index slice tail: re-read {re_read}, cooked {cooked}, write lock held {held} ms \
@@ -652,15 +667,23 @@ async fn index_in_background(context: ServerContextSnapshot) {
                     })
                     .await;
 
-                publish_workspace_diagnostics(&context).await;
             } else if was_pending {
-                // **The queue drained, and that is when the answers change.** A file's cooked reading is built from
-                // the environment of a complete translation unit, and it is dropped the moment the file or anything
-                // it includes changes — so between the edit and this moment the diagnostics of an open file are read
-                // off its own text, which is the coarser reading (a macro's shape is a guess there, and a branch
-                // nobody takes is missing). Nothing else would ask again: the per-change task has already published,
-                // and a push client has no reason to re-request a file it did not touch.
-                republish_open_file_diagnostics(&context).await;
+                // **The queue drained — and the server says nothing about it.**
+                //
+                // A file's cooked reading is built from the environment of a complete translation unit, so the
+                // answers for an open file *do* change here: between the edit and this moment its diagnostics are read
+                // off its own text, which is the coarser reading. The server used to announce it with
+                // `workspace/diagnostic/refresh`.
+                //
+                // **That is gone on purpose, and it is not coming back.** A pull client already asks on its own
+                // rhythm, and the server's request made it ask in a *loop*: a reader's log showed
+                // `republishing open file diagnostics` alternating with an `index slice` cycle that asked for the same
+                // nine cooks every second and committed nothing, at a full core, for as long as the window stayed
+                // open. There is no workspace diagnostic *report* in this server either
+                // (`workspace_diagnostics: false`), so the refresh named nothing to redo — it was a request to repeat
+                // work that had just been done.
+                //
+                // What replaces it is the client's own next ask, answered from the index as it stands.
 
                 // **…and the hints, for the same reason and with a measurement of their own.**
                 //
@@ -695,46 +718,6 @@ async fn index_in_background(context: ServerContextSnapshot) {
         }
     });
 }
-
-/// Re-ask for the diagnostics of the **open** files, once the index has settled.
-///
-/// The open ones and not the project: those are the files whose answers a user is looking at, and the only ones whose
-/// reading this pass can have changed — everything else has no cooked reading to gain and no client waiting on it.
-///
-/// # Why this is a refresh and not an answer
-///
-/// The index settling **changes the answer without the document changing**, which is the one case a client cannot
-/// notice by itself: a check that needs another file's facts has none until that file is read, and a pull client
-/// that already asked will not ask again for text it believes it has seen. So the server says "ask again" —
-/// `workspace/diagnostic/refresh` — and the client decides which of its files to ask about.
-///
-/// A client that does not advertise `refreshSupport` gets nothing, and that is correct rather than a gap: it has no
-/// way to be told, and its next ask is its next reason to ask — a scroll, a click, an edit.
-async fn republish_open_file_diagnostics(context: &ServerContextSnapshot) {
-    let open = context
-        .analysis()
-        .with_snapshot(|session| session.documents().paths())
-        .unwrap_or_default();
-
-    if open.is_empty() {
-        return;
-    }
-
-    if context.lsp_features().supports_refresh_diagnostic() {
-        context.client().refresh_workspace_diagnostics();
-    }
-}
-
-/// **Nothing to do, and that is the whole of this function's contract.**
-///
-/// It used to publish an answer here: a pull client was told to refresh, and a push client was given every indexed
-/// file's diagnostics directly. With the push path gone the second half has no meaning, and the first is what a pull
-/// client does by itself — it asks about the file it is showing, whenever it wants to know.
-///
-/// It is kept as a function rather than deleted so the call site still says *why* the moment after a workspace is
-/// opened needs nothing: the answer a client holds came from its own request, and a request is answered from the
-/// index as it stands.
-async fn publish_workspace_diagnostics(_context: &ServerContextSnapshot) {}
 
 /// The folders the client opened.
 ///
