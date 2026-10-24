@@ -134,6 +134,46 @@ fn main() {
             None => eprintln!("[language] __cplusplus is NOT in the index's macro table"),
         }
     }
+    // **Why a name lookup answers what it answers** — the count, and the kinds and files behind it. Written for
+    // `_Tp`, whose lookup was 167 ms of one pull (2288 answers): the question is whether those are declarations at
+    // all. See `docs/index-lookup.md`.
+    if let Some(name) = std::env::var_os("CPPLS_PRINT_LOOKUP") {
+        let name = name.to_string_lossy().into_owned();
+        let started = std::time::Instant::now();
+        let found = session.index().definitions(&name, &file);
+        let took = started.elapsed();
+        println!("lookup `{name}` in {took:?}");
+        match found {
+            cpp_code_analysis::Known::Yes(found) => {
+                let mut by_kind: std::collections::BTreeMap<String, usize> = Default::default();
+                let mut by_file: std::collections::BTreeMap<String, usize> = Default::default();
+                for entry in &found.found {
+                    *by_kind.entry(format!("{:?}", entry.fact.kind)).or_default() += 1;
+                    let name = entry
+                        .file
+                        .file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    *by_file.entry(name).or_default() += 1;
+                }
+                println!("  {} answer(s), by kind {by_kind:?}", found.found.len());
+                let mut files: Vec<(String, usize)> = by_file.into_iter().collect();
+                files.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
+                println!("  top files: {:?}", &files[..files.len().min(6)]);
+                for entry in found.found.iter().take(4) {
+                    println!(
+                        "  e.g. {:?} kind {:?} scope {:?} type {:?} in {}",
+                        entry.fact.name,
+                        entry.fact.kind,
+                        entry.fact.scope,
+                        entry.fact.type_of,
+                        entry.file.display()
+                    );
+                }
+            }
+            other => println!("  {other:?}"),
+        }
+    }
     let stats = session.stats();
     let units = session.unit_stats();
     println!(

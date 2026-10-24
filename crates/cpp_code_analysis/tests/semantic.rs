@@ -1740,3 +1740,63 @@ fn an_unresolved_include_does_not_erase_the_files_own_facts() {
         "the file's own definition survives an include nobody can resolve: {found:?}"
     );
 }
+/// **A template parameter is not a declaration in the file's scope.**
+///
+/// `template <class _Tp> struct A { _Tp value; };` used to file `_Tp` as a `Type` declaration **at file scope**, because
+/// `qualification_prefix_of` skips the parameter-list scope and the fact builder walked every scope's bindings. On a
+/// real project that was **2288** facts named `_Tp` — 492 of them in `<type_traits>` alone — and a single lookup of
+/// the name took **167–187 ms** and answered 2288 declarations, none of which is a class.
+///
+/// The parameter is not lost: it is on the class's own fact (`DeclFact::parameters`), which is where the substitution
+/// step reads it, and that is what the second half of this test pins.
+#[test]
+fn a_template_parameter_is_not_a_declaration_at_file_scope() {
+    let session = session_with(&[(
+        "/p/a.cpp",
+        "template <class _Tp>\nstruct A {\n    _Tp value;\n};\n",
+    )]);
+    let summary = session
+        .index()
+        .summary(std::path::Path::new("/p/a.cpp"))
+        .expect("indexed");
+    let names: Vec<&str> = summary
+        .declarations
+        .iter()
+        .map(|fact| &*fact.name)
+        .collect();
+    println!("facts: {names:?}");
+
+    assert!(
+        !names.contains(&"_Tp"),
+        "a template parameter is not a declaration a file-scope lookup can find: {names:?}"
+    );
+    assert!(names.contains(&"A"), "the class itself is still a fact");
+    assert!(
+        names.contains(&"value"),
+        "and its member is, with `_Tp` as its written type"
+    );
+
+    let class = summary
+        .declarations
+        .iter()
+        .find(|fact| fact.name == "A")
+        .expect("the class's own fact");
+    assert_eq!(
+        class.parameters,
+        ["_Tp"],
+        "the parameters live on the fact, which is what substitution reads"
+    );
+
+    match session.index().definitions("_Tp", std::path::Path::new("/p/a.cpp")) {
+        Known::Unknown(reason) => println!("lookup `_Tp`: {reason:?}"),
+        Known::Yes(found) => panic!(
+            "`_Tp` is a template parameter, so no declaration is findable by that name: {:?}",
+            found
+                .found
+                .iter()
+                .map(|entry| entry.fact.qualified_name())
+                .collect::<Vec<_>>()
+        ),
+        Known::No => panic!("`definitions` answers `Known`, not `No`"),
+    }
+}

@@ -2728,6 +2728,21 @@ impl<'a> DeclarationFacts<'a> {
 
         for (index, scope) in scopes.scopes().iter().enumerate() {
             let id = ScopeId(index);
+            // **A template parameter list files no declarations, and filing them was expensive in a way that had
+            // nothing to do with templates.** A parameter is visible only inside the declaration it parameterizes,
+            // which the index has no way to say: `qualification_prefix_of` skips this scope kind, so every
+            // `template <class _Tp>` in every header was stored as a `Type` declaration **at file scope**, named
+            // `_Tp`. Measured on a real project: **2288** facts named `_Tp` (492 of them in `<type_traits>` alone),
+            // and one lookup of that name — which the engine asks whenever a declaration's type is a template
+            // parameter it could not substitute — took **167–187 ms** and answered 2288 declarations, none of which
+            // is a class. That one lookup was 177 of the 199 ms `implicit-bool-conversion` gained the moment operator
+            // return types began resolving; it was never the operator's cost.
+            //
+            // The names are not lost: a class template's and a function template's parameters are on the **fact**
+            // (`DeclFact::parameters`), which is where the substitution step reads them.
+            if scope.kind == ScopeKind::TemplateParameters {
+                continue;
+            }
             // **A body answers both questions by itself**, and it is asked here rather than inside the two functions
             // because most scopes in a header are bodies. `qualification_prefix_of`'s own match lists exactly these
             // three kinds as `None` — a declaration written in a function body, a block or a lambda is qualified by
