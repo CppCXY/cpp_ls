@@ -13,6 +13,13 @@
 //! * an **error node**, counted by parsing the same text — a file with many has rubble, and each one is a declaration
 //!   that did not arrive.
 //!
+//! `--braces <file>` names the first **top-level** node whose text does not balance its braces, which is the construct
+//! that swallowed an opening one. Two caveats, both measured: a brace inside a **comment** or a string is counted, so a
+//! directive that spans a doc comment containing `@{` is the first "unbalanced" node in `experimental/bits/simd.h`
+//! without anything being wrong; and a **fragment** header — `bits/text_encoding-data.h` is `#include`d *inside* an
+//! initialiser and is nothing but `{ 3, "US-ASCII" },` lines — is rubble by construction, 893 error nodes with no
+//! declaration lost.
+//!
 //! Both are ranked, so the worst shape is the first line of the report rather than a guess.
 
 use std::path::{Path, PathBuf};
@@ -75,6 +82,33 @@ fn main() {
             shown += 1;
         }
         println!("{shown} shown");
+        return;
+    }
+
+    // `--braces <file>`: the first **top-level** node whose text does not balance its braces — the construct that
+    // swallowed an opening one, which is what leaves a file's tail as rubble.
+    if roots.len() >= 2 && roots[0] == "--braces" {
+        let path = PathBuf::from(&roots[1]);
+        let source = std::fs::read_to_string(&path).expect("the file is readable");
+        let tree = cpp_parser::CppParser::parse(&source, cpp_parser::ParserConfig::default());
+        for node in tree.get_red_root().children() {
+            let text = node.text().to_string();
+            let opens = text.matches('{').count() as isize;
+            let closes = text.matches('}').count() as isize;
+            let kind = format!("{:?}", cpp_parser::CppSyntaxKind::from(node.kind()));
+            if opens != closes {
+                println!(
+                    "  {kind} over {}..{}: {opens} open, {closes} close",
+                    usize::from(node.text_range().start()),
+                    usize::from(node.text_range().end())
+                );
+                println!(
+                    "    {:?}",
+                    text.chars().take(160).collect::<String>()
+                );
+                break;
+            }
+        }
         return;
     }
 
