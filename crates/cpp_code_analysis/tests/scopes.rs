@@ -2496,3 +2496,25 @@ fn a_nested_class_ends_where_its_brace_ends() {
         );
     }
 }
+/// **A call statement whose callee is qualified binds nothing** — the most-vexing-parse shape, at file scope.
+///
+/// `std::iter_swap(__result, __b);` parses as a `Declaration`: the specifier is `std::iter_swap` and the declarator
+/// is the parameter list `(__result, __b)`. Inside a body that went through the branch written for out-of-line
+/// definitions (`size_t LuaSource::GetLine(…) { … }` — a qualified name and no declarator name), which **bound the
+/// function**: libstdc++'s `bits/stl_algo.h` alone produced 22 `std::iter_swap` facts at namespace scope, kind
+/// `Function`, `local: false`, carrying the enclosing template's parameters.
+///
+/// A definition cannot nest inside a body, so that is the test. The `namespace std { }` in the fixture is what makes
+/// the case the interesting one: the qualified name *does* name a scope this file has, so the "binds nothing here"
+/// rule did not apply.
+#[test]
+fn a_call_to_a_qualified_name_in_a_body_binds_nothing() {
+    let source = "namespace std { }\nvoid f() {\n    std::iter_swap(a, b);\n}\n";
+    let table = scopes(source);
+    let shape = shape(&table);
+    println!("{shape}");
+    assert!(
+        !shape.contains("iter_swap"),
+        "the call is not a declaration of anything: {shape}"
+    );
+}

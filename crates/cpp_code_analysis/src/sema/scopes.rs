@@ -1150,6 +1150,29 @@ impl ScopeWalker<'_> {
         // The second condition is the precise form of the same question: a qualified specifier on a declaration with
         // **no declarator name at all**. `Widget w;` (a qualified type, a plain declarator) is not unnamed and is
         // unaffected.
+        //
+        // **A statement that looks like one of these declares nothing.** The most-vexing-parse reading of a call with
+        // a qualified callee is exactly this shape — `std::iter_swap(__result, __b);` is a `Declaration` whose
+        // specifier is `std::iter_swap` and whose declarator is the parameter list `(__result, __b)` — and inside a
+        // body it went through the branch below, bound a **function** named `iter_swap` in scope `std`, and took the
+        // enclosing function's template parameters with it. Measured on libstdc++: `bits/stl_algo.h` alone had 22
+        // `std::iter_swap` facts at namespace scope, `local: false`, all of them call statements.
+        //
+        // A definition never nests inside a body, so "inside a body" is the whole test, and it is the same one
+        // `qualified_declarations` makes for the same reason. Both halves are asked together: only a declaration of
+        // *this* shape is a statement, and every other declaration in a body — a local, a parameter, a nested type —
+        // is untouched.
+        if (declaration_is_qualified(node) || (specifier_is_qualified && is_unnamed_declaration(node)))
+            && node.ancestors().any(|ancestor| {
+                matches!(
+                    CppSyntaxKind::from(ancestor.kind()),
+                    CppSyntaxKind::CompoundStat
+                )
+            })
+        {
+            return;
+        }
+
         if declaration_is_qualified(node) || (specifier_is_qualified && is_unnamed_declaration(node)) {
             if !self.names_a_scope_this_file_has(node) {
                 // **The name is not this file's — the body is.** `size_t LuaSource::GetLine(size_t offset) const

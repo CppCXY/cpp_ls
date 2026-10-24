@@ -275,9 +275,28 @@ std::vector 的成员现在带签名：assign(size_type __n, const value_type& _
                              assign(_InputIterator __first, _InputIterator __last)、…
 ```
 
-### 剩下的 312
+### 第二个形状：限定名调用的最易解析歧义（已修）
 
-一大半是**最易解析歧义**的碎片（`std::iter_swap(__result, __b);` 在函数体里被读成声明，事实名叫 `iter_swap`、
-`local` 却是 false）。它们不是"丢失的成员"，是**多出来的事实** —— 属于另一类 bug，探针已经能分开计数（`local`）。
+`--show` 剩下的 312 条里，`bits/stl_algo.h` 的那 22 条是这样的：
 
-下一轮：`parse_loss_probe --show` 剩下的 312 条里，按 `local == false` 且名字等于自己类型段的名字筛，就是这一类。
+```text
+Declaration  std::iter_swap(__result, __b);
+  DeclSpecifierSeq  std::iter_swap        ← 类型名
+  InitDeclarator  (__result, __b)         ← 参数表当成了声明符
+```
+
+`std::iter_swap(__result, __b);` 是**调用**，被读成"类型 `std::iter_swap`、声明符 `(__result, __b)`"。作用域遍历里
+有一条分支专门为**类外定义**写的（`size_t LuaSource::GetLine(…) { … }`：限定名 + 声明符里没有名字），它把这种
+声明当成了"外来函数的定义"，于是**把函数本身绑定进了 `std` 作用域** —— 22 个 `kind Function`、`local: false`、
+还带着外层模板参数的事实。
+
+定义不可能嵌在函数体里，所以判据就是"在不在 body 里"，和 `qualified_declarations` 那条同一句话。
+
+```text
+libstdc++ 579 个文件    56 734 → 55 549 事实        （1 185 个幽灵事实消失）
+                        15 253 → 14 609 函数事实    （644 个是调用语句）
+                        没有参数表的函数 312 → 18
+CodeFormat.cpp          150 834 个事实，0 条诊断
+```
+
+剩下的 18：`experimental/bits/fs_path.h`（12）、`bits/alloc_traits.h`（6）。下一轮看它们的形状。
