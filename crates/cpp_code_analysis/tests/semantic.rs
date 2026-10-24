@@ -1830,3 +1830,57 @@ fn a_qualified_definition_carries_its_parameter_list() {
         "the declaration has a list, and the definition's own is `(int a, int b)`: {found:?}"
     );
 }
+/// **A member whose return type is separated from its name by a directive is still a member.**
+///
+/// libstdc++ writes every `erase` overload of `std::vector` this way:
+///
+/// ```cpp
+///       _GLIBCXX20_CONSTEXPR
+///       iterator
+/// #if __cplusplus >= 201103L
+///       erase(const_iterator __position)
+///       { return _M_erase(begin() + (__position - cbegin())); }
+/// #else
+///       erase(iterator __position)
+///       { return _M_erase(__position); }
+/// #endif
+/// ```
+///
+/// The index reads a file's **own text** first, where the directives still stand (a rendering resolves them — see
+/// `docs/cooked.md`), so this shape is what the facts are built from until the file is cooked. Measured before the
+/// fix: `facts_probe` on `bits/stl_vector.h` answered **0** facts for `erase` and 2 for `push_back`, so
+/// `members_of("std::vector")` said "no member `erase`" — the last false-positive diagnostic on a real project.
+///
+/// The cause was [`cpp_parser::grammar`]'s follower question ("does a declarator still follow this name?"): the
+/// follower of `iterator` was the `#`, which is neither an identifier nor a specifier, so the name was refused the
+/// type position and became the *declarator*. A directive is transparent to that question now.
+#[test]
+fn a_member_whos_return_type_a_directive_separates_is_a_member() {
+    let session = session_with(&[(
+        "/p/a.cpp",
+        "struct C {\n    int x;\n    CONSTEXPR\n    iterator\n#if __cplusplus >= 201103L\n    erase(const_iterator p)\n    { return p; }\n#else\n    erase(iterator p)\n    { return p; }\n#endif\n    int size();\n};\n",
+    )]);
+    let summary = session
+        .index()
+        .summary(std::path::Path::new("/p/a.cpp"))
+        .expect("indexed");
+    let found: Vec<(&str, Option<&str>, &str)> = summary
+        .declarations
+        .iter()
+        .filter(|fact| fact.name == "erase")
+        .map(|fact| {
+            (
+                &*fact.name,
+                fact.parameter_list.as_deref(),
+                fact.scope.as_deref().unwrap_or("<file scope>"),
+            )
+        })
+        .collect();
+    println!("facts for `erase`: {found:?}");
+    assert!(
+        found
+            .iter()
+            .any(|(_, parameters, scope)| parameters.is_some() && *scope == "C"),
+        "`erase` is a member of `C` with a parameter list: {found:?}"
+    );
+}

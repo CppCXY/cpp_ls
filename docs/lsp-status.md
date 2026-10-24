@@ -185,7 +185,7 @@ std::basic_string 27 → 257
 CodeFormat.cpp   9 条假报 → 0（服务器 pull）；批处理仍报 1 条：`std::vector::erase`
 ```
 
-#### 还没修的：`std::vector::erase`（声明被条件编译从中间劈开）
+#### `std::vector::erase`：也是解析器 bug，已修
 
 ```cpp
       _GLIBCXX20_CONSTEXPR
@@ -199,71 +199,30 @@ CodeFormat.cpp   9 条假报 → 0（服务器 pull）；批处理仍报 1 条�
 #endif
 ```
 
-`#if` 夹在**返回类型和函数名之间**。未 cook 的读数里，说明符序列把 `_GLIBCXX20_CONSTEXPR` 当成类型、把 `iterator`
-当成声明符的名字（`Declaration CONSTEXPR > InitDeclarator iterator`），然后声明在 `#` 处失败、回滚成碎片：
-`Declaration erase` 加一个 `ErrorNode` 装 `(` —— 于是 `erase` 没有参数表，也没有事实。
+`#if` 夹在**返回类型和函数名之间**。索引的第一次读取用的是文件**自身文本**（指令还在，见下一节），所以
+`iterator` 后面跟着的是 `#`；而"这个名字后面还有没有声明符"这个问题遇到 `#` 时回答"没有" —— 于是 `iterator` 被当成
+声明符的名字，声明在 `#` 处结束，`erase` 变成了另一个没有参数表的声明。`facts_probe` 在这个头文件上：
+`erase` **0 个事实**、`push_back` 2 个。
 
-两个可选修法，都还没试：
-
-```text
-说明符序列：读到 NamedType 之后再遇到 # 就把指令读掉、继续读说明符
-            （CONSTEXPR 和 iterator 都是说明符，声明符是 erase(...)）——风险是 `Type name #if` 会把名字吃掉
-声明规则：声明符之前允许一条指令（每个分支各自成为一个成员）——这是更保守的读法，但要在回滚之前生效
-```
-
-`facts_probe` 是复现命令：
+修法：那个问题（`a_declarator_still_follows_the_name`）**看穿指令**——跳过它整条**逻辑行**
+（`logical_line_end`，和 `parse_preprocessor_directive` 的边界同一个函数），再看下一个 token。于是
+`iterator` 加入类型、说明符序列自己的"两条说明符之间的指令"规则读掉 `#if`、声明符是 `erase(const_iterator)`。
 
 ```text
-target\release\examples\facts_probe.exe <mingw64>/lib/gcc/.../include/c++/bits/stl_vector.h erase
+bits/stl_vector.h    erase: 0 → 2 fact(s)，scope `std::vector`
+std::vector          303 → 285 member(s)，erase 在里面
+CodeFormat.cpp       批处理最后一条假报消失（9 → 1 → 0）
 ```
 
-## P3
+#### 为什么"已经预处理过了"还会看到 `#if`
+
+索引有**两种读数**：
 
 ```text
-callHierarchy            没有
-typeDefinition           没有（对 `auto` 有用）
-workspace/diagnostic     明确不支持，只有 pull
-semanticTokens 增量      只有 full（507 token / 26 ms，可接受）
-inlayHint/resolve        没有（可接受）
-构造函数的签名            `LuaParser p(file, std::move(...))` 仍然 0 个签名：名字解析到类，构造函数的列表要
-                          通过 `constructors_of` 读类自己的文件，而那个头文件没有渲染。下一轮。
+文件自身文本（eager）   快，不需要 include 闭包；指令、宏都还在 —— 启动时和没 cook 过的头文件用它
+渲染（cooked）          指令已解析、宏已展开；一次 cook 要走过 include 闭包，是重的那条路
 ```
 
-## 表（这一轮之后的真实运行）
-
-```text
-feature                answered n     time   note
-hover                  yes      3     20 ms  `LuaDiagnosticStyle _diagnosticStyle`
-definition (member)    yes      1     2 ms   codeformat.h:56
-definition (header)    yes      1     1 ms   codeformat.h:56
-implementation         yes      1     5 ms   CodeFormat.cpp:31
-references             yes      6     10 ms  codeformat.cpp:32
-documentHighlight      yes      6     3 ms
-prepareRename          yes      1     10 ms  placeholder `_diagnosticStyle`
-rename                 yes      2     11 ms  codeformat.h: 1 | codeformat.cpp: 6
-documentSymbol         yes      14    1 ms
-workspaceSymbol        yes      512   6 ms
-foldingRange           yes      39    1 ms
-selectionRange         yes      5     1 ms
-semanticTokens         yes      516   25 ms
-inlayHint              yes      5     23 ms
-documentLink           yes      5     2 ms
-diagnostic             yes      0     33 ms  （修复前是 9 条假报，见 ⑥）
-completion (member)    yes      2     28 ms  Editorconfig, Workspace
-signatureHelp          yes      1     0 ms   at 82:17 → SetupStyle(LuaStyle &style, …)   ← 之前 null
-codeAction             yes      0     2 ms
-rangeFormatting        yes      0     9 ms
-formatting             yes      0     1 ms
-```
-
-## 探针与环境变量
-
-这一轮把临时加的 `std::env::var` 都清了：
-
-```text
-CPPLS_TRACE_QUALIFIED   删掉（库里的 eprintln! 留在热路径上）
-CPPLS_PRINT_LANGUAGE    删掉（`__cplusplus` 已经确认在宏表里，结论在 docs/semantics-todo.md）
-CPPLS_PRINT_LOOKUP      变成 probes.rs 里的 switch：CPPLS_TRACE_ANSWERS
-CPPLS_STATUS_LOG        删掉（探针固定用 debug，和 real_project.rs 一样）
-CPPLS_REAL_PROJECT      留着：测试夹具的路径，和 real_project.rs 同一种用法
-```
+服务器后台会 cook（日志里的 `N to cook`），cook 完的摘要替换掉未 cook 的。所以 `#if` 只在**未 cook 的窗口**里存在：
+`members_real.rs` 里实测，`bits/stl_vector.h` 在被要求渲染之前 `erase` 不在，cook 之后就在（305 个成员）。
+这也意味着**解析器必须在任何位置都容忍指令**，不能指望"preprocessed 就没有 `#` 了"。

@@ -942,7 +942,7 @@ pub(super) fn parse_preprocessor_directive(p: &mut CppParser) -> ParseResult {
 /// translation phase 2 has already removed it by the time a directive's extent matters. Only the
 /// backslash immediately before the newline counts, which is what the standard says and what keeps a
 /// `\\` at the end of a line from swallowing the next one.
-fn logical_line_end(text: &str, start: usize) -> usize {
+pub(super) fn logical_line_end(text: &str, start: usize) -> usize {
     let Some(rest) = text.get(start..) else {
         return text.len();
     };

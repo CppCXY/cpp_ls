@@ -48,6 +48,31 @@ fn a_classs_member_list_and_its_postings_agree() {
     let view = session.view_of_the_file(&source).expect("and again");
     let at = ReadingOffset::new(0);
 
+    // **The question: is the `#if` in the facts because the file was read uncooked?** The eager index reads a file's
+    // own text, where directives still stand; a *rendering* has them resolved and gone. `bits/stl_vector.h` was not
+    // cooked when the lists above were read, so ask for the rendering and read the list again — the two answers tell
+    // the uncooked window apart from a cooker bug.
+    // The toolchain's header, named by the environment: a test that hardcodes one machine's libstdc++ path is a test
+    // that fails on the next machine, and the question it asks is answerable on any project that has one.
+    let vector_header = std::env::var_os("CPPLS_REAL_STD_VECTOR")
+        .map(PathBuf::from)
+        .unwrap_or_default();
+    if vector_header.exists() {
+        let _ = session.view(&vector_header);
+        session.advance(usize::MAX);
+        let cooked = session.cook(&vector_header).is_some();
+        println!("after cooking stl_vector.h: cooked = {cooked}");
+        if let Known::Yes(list) = session.members_of(&view, "std::vector") {
+            println!(
+                "  std::vector has erase after cooking: {}  ({} member(s))",
+                list.members.iter().any(|member| member.fact.name == "erase"),
+                list.members.len()
+            );
+        }
+    } else {
+        println!("stl_vector.h not found at {}", vector_header.display());
+    }
+
     for class in ["std::string", "std::basic_string", "std::vector"] {
         let listed = session.members_of(&view, class);
         let (count, names) = match &listed {
@@ -74,6 +99,14 @@ fn a_classs_member_list_and_its_postings_agree() {
                 _ => Vec::new(),
             }
         );
+        // **What the doc records as fixed**: `erase` was 0 facts in this header before the directive lookahead, and the
+        // class's member list is what a reader sees.
+        if class == "std::vector" {
+            assert!(
+                names.iter().any(|name| name == "erase"),
+                "std::vector has `erase` among its members: {names:?}"
+            );
+        }
         println!(
             "  has size: {}  has erase: {}  has begin: {}",
             names.iter().any(|name| name == "size"),

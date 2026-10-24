@@ -2232,6 +2232,27 @@ fn name_joins_the_type(
 /// instantiation fails — which is exactly what a first version of this rule did.
 pub(super) fn a_declarator_still_follows_the_name(p: &CppParser) -> bool {
     let mut after = super::decls::next_significant_index(p, p.current_token_index());
+    // **A directive between the name and its declarator is transparent to this question.** libstdc++ separates a
+    // member's return type from its name with a conditional:
+    //
+    // ```cpp
+    //       iterator                                   // bits/stl_vector.h, `erase`
+    // #if __cplusplus >= 201103L
+    //       erase(const_iterator __position)
+    // ```
+    //
+    // Read without this, the follower of `iterator` was the `#`, which is neither an identifier nor a specifier, so
+    // the name was refused the type position and became the **declarator**: the declaration then ended at the `#`,
+    // and `bits/stl_vector.h` produced **no `erase` fact at all** (`facts_probe`: 0 facts for `erase`, 2 for
+    // `push_back`). `members_of("std::vector")` therefore answered "no member `erase`" — the last false positive the
+    // status probe found on a real project.
+    //
+    // The directive is skipped by its **logical line**, which is where `parse_preprocessor_directive` ends one: a
+    // `\`-spliced directive is one line, and every token between here and there is the directive's own.
+    while p.token_kind_at(after) == CppTokenKind::Hash {
+        after = after_the_directive(p, after);
+        after = super::decls::next_significant_index(p, after);
+    }
     while p.token_kind_at(after) == CppTokenKind::Scope {
         let segment = super::decls::next_significant_index(p, after);
         if p.token_kind_at(segment) != CppTokenKind::Identifier {
@@ -6307,4 +6328,28 @@ pub(super) fn parse_an_implementation_keyword(p: &mut CppParser) -> CompleteMark
             CompleteMarker::empty()
         }
     }
+}
+/// **The token after the directive that starts at `index`** — the lookahead half of a directive that stands *inside* a
+/// declaration.
+///
+/// A directive is not a token of the declaration it sits in: the text on either side of it belongs to one
+/// declaration, and a question asked about the follower of a name has to see through it. The end is the directive's
+/// **logical line** (`stats::logical_line_end`), which is also where the directive's own rule stops, so a
+/// `\`-spliced directive is skipped whole.
+fn after_the_directive(p: &CppParser, index: usize) -> usize {
+    let Some(range) = p.token_range_at(index) else {
+        return index + 1;
+    };
+    let end = super::stats::logical_line_end(p.origin_text(), range.start_offset);
+    let mut next = index + 1;
+    while next < p.token_count() {
+        let Some(token) = p.token_range_at(next) else {
+            break;
+        };
+        if token.start_offset >= end {
+            break;
+        }
+        next += 1;
+    }
+    next
 }
