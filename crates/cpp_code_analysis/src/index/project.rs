@@ -7653,8 +7653,18 @@ impl ProjectIndex {
         // …and **which of them are in view only through a module import**: those are the files where a declaration
         // counts only if it is exported, and the distinction is per file rather than per fact because a file reached
         // by `#include` has no such restriction at all.
+        // **What the walk costs per question** — the number `docs/interactive-cost.md` needs to tell a slow pull
+        // apart: `[gather]` says how long a declaration query took, this says how much of it was the graph.
+        let walk_started = std::time::Instant::now();
         let (visible_files, through_an_import) = self.visible_files_with_modules(visible_from);
         let files = self.visible_in_order_of(visible_files);
+        if crate::probes::timing() && walk_started.elapsed().as_micros() >= 500 {
+            eprintln!(
+                "[visibility] {:>5.1} ms, {} file(s)",
+                walk_started.elapsed().as_secs_f64() * 1000.0,
+                files.len()
+            );
+        }
         // Everything below this line is reading facts out of files that are already known to be visible: the
         // filtering, the `DeclFact` clones, and the cooked-vs-raw deduplication. Timed apart from the walk because
         // the two have nothing in common — the walk is a question about the graph and this is a question about the

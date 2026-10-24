@@ -43,7 +43,17 @@ impl Check for UndefinedField {
         // `CheckContext::member_accesses`. This check used to filter on `MemberExpr`, a kind this grammar does not
         // produce for a dot: measured with `cpp_dump`, `w.secret` is an `IndexExpr`. It had therefore never reported
         // anything about `a.b` since it was written, while compiling and looking correct.
-        for (_node, access) in context.member_accesses() {
+        //
+        // **The two halves are timed apart, because they fail for different reasons.** Measured on
+        // `LuaSyntaxTree.cpp`: collecting 74 accesses takes **262 µs** and the loop over them **98 ms** — so this
+        // check is not a tree walk that got slow, it is 74 type questions (`type_of` per access, 6 inference
+        // questions each), and the work is in the engine. Cheap when off; see `docs/interactive-cost.md`.
+        let traced = crate::probes::timing();
+        let started = traced.then(std::time::Instant::now);
+        let accesses = context.member_accesses();
+        let collected = started.map(|started| started.elapsed());
+        let mut judged = 0usize;
+        for (_node, access) in accesses {
             // **Nothing after the operator** is a file being typed at — the completion path's business, not this
             // layer's: there is no name to have an opinion about yet.
             if access.member.is_empty() {
@@ -83,6 +93,7 @@ impl Check for UndefinedField {
                 continue;
             };
 
+            judged += 1;
             if members
                 .members
                 .iter()
@@ -123,6 +134,13 @@ impl Check for UndefinedField {
                     object = access.object.text().to_string().trim(),
                     member = access.member
                 ),
+            );
+        }
+        if let (true, Some(started), Some(collected)) = (traced, started, collected) {
+            eprintln!(
+                "[undefined-field] collected {collected:?}, judged {judged} access(es) with a list, \
+                 loop took {:?}",
+                started.elapsed() - collected
             );
         }
     }

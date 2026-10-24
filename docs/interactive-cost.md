@@ -29,6 +29,19 @@ LuaSyntaxTree.cpp（40 KB）       639–758 ms          177–214 ms    （find
 
 两边一起：一次 pull 的型推断 174 → 13 ms，真实文件的诊断 150 → 21 ms（6×）/ 758 → 214 ms（3.5×）。
 
+**第二刀（同一轮，之后的测量）：剩下的钱在"可见性走查"上。** 一个 40 KB、属于 617 文件闭包、并且
+`undefined-field` 报了 74 个成员访问的文件（`LuaSyntaxTree.cpp`），一次 pull 仍是 178–214 ms：
+
+```text
+[undefined-field] 收集 74 个访问 0.27 ms，循环 99 ms      ← 不是树遍历，是 74 次 type_of
+[checks] inference: 452 question(s) in 309 ms              ← 约 6 个推断问题/访问
+[visibility] 13.0 / 3.6 / 4.9 / 2.8 / 9.2 ms               ← 5 次走查（起点文件不同），合计 33.5 ms
+CPPLS_NO_INDEX_LOOKUP=1：452 问 309 → 184 ms               ← 声明查询约占 140 ms
+```
+
+走查按起点文件缓存（`ProjectIndex::visibility`），但**每次 insert 整表清空**；pull 自己先 cook（insert）
+再跑检查，所以每次都是冷的。这就是下一刀（见下）。
+
 ## 怎么找到的（这条链要留着）
 
 ```text
@@ -87,17 +100,21 @@ crates/cpp_code_analysis/src/probes.rs
 ## 下一步（都有可验证的判据）
 
 ```text
-1. `undefined-field` 仍是 LuaSyntaxTree.cpp 里最贵的一条（73–92 ms）。clone 不是原因（见上），
-   所以下一刀在 `context.member_accesses()` 的收集，或每个访问的 `type_of`；用 [question] 探针
-   看那个文件的 slow list 就能定位。
-2. 剩下 3 次慢查询里 `size_t` 有 132 个答案：一个 typedef 在标准库的每个头里都声明一次。
-   命名空间的折叠规则能不能推广到 typedef/别名（同名的多个声明如果"指向同一个实体"……
-   —— 这条要小心，不能猜）。
-3. 冷启动尾巴仍然 63 切片 / 7.7 s，和编辑延迟是两笔账；见 docs/memory-audit.md 与 docs/cook-loop.md。
-4. `tests/latency.rs` 的 steady-state 断言是边界性的：它允许"恰好一次尝试付 render 的钱"，
-   而付钱那次实测 116–124 ms，另一次偶发 51–60 ms 就会让它失败。串行连跑三次：2 过 1 败。
-   不是本轮引入的回归（改前也这样），但边界值得放宽成"至多两次、且都在 render 预算内"。
+1. **可见性走查是下一步的结构性开销**。LuaSyntaxTree.cpp 的一次 pull 里有 5 次走查（起点文件不同）：
+   13.0 / 3.6 / 4.9 / 2.8 / 9.2 ms = 33.5 ms；它按"起点文件"缓存（ProjectIndex::visibility），
+   而每次 insert 都整表清空，pull 自己先 cook（insert）再跑检查，所以每次都冷。
+   → 下一刀：一个"能跨 insert 活下来"的走查记忆（按闭包内容做键），或者把 cook 的 insert
+     和检查的走查分开——先看 [visibility] 探针在几次连续 keystroke 里的命中率。
+2. `undefined-field` 的 99 ms 不是树遍历（收集 74 个访问只要 0.27 ms），是 74 次 type_of
+   （共 452 个推断问题，约 6 个/访问）。所以下一刀在引擎的"一个对象表达式要问 6 个问题"上，
+   而不是在这个检查里。
+3. 剩下几次慢查询里 `size_t` 有 136 个答案、`std` 209 个：typedef/别名在标准库的每个头里都声明一次。
+   命名空间的折叠规则能不能推广（前提是"指向同一个实体"，不能猜）。
+4. 冷启动尾巴仍然 63 切片 / 7.7 s，和编辑延迟是两笔账；见 docs/memory-audit.md 与 docs/cook-loop.md。
 ```
+
+`tests/latency.rs` 的边界已改：原先"恰好一次尝试付 render 的钱"，实测 116–124 ms 的那次旁边
+常有 51–60 ms 的第二次，串行三次里败一次；现在允许两次（各在 render 预算内），连跑四次全绿。
 
 ## 复现命令
 
