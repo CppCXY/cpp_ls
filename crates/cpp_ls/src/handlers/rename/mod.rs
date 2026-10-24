@@ -91,12 +91,22 @@ pub async fn on_prepare_rename(
         let path = uri_to_file_path(&uri)?;
         let view = session.view_of_the_file(&path)?;
         let offset = crate::util::offset_at_position(&view, position)?;
-        let (_, name_range) = macro_at(session, &view, offset)?;
+        // **A macro first, then a symbol.** The two paths ask the same question of different layers: a macro lives in
+        // the preprocessor's table, a symbol in the index. A cursor is on one or the other, never both, so the order
+        // does not change an answer; it only decides which layer is asked first.
+        let (name, range) = match macro_at(session, &view, offset) {
+            Some(found) => found,
+            None => symbol_at(session, &view, offset)?,
+        };
+        let held = session.files().held(&view.path)?;
 
-        Some(PrepareRenameResponse::Range(lsp_types::Range::new(
-            position_in_file(session.files().held(&view.path)?, name_range.start_offset)?,
-            position_in_file(session.files().held(&view.path)?, name_range.end_offset())?,
-        )))
+        Some(PrepareRenameResponse::RangeWithPlaceholder {
+            range: lsp_types::Range::new(
+                position_in_file(held, range.start_offset)?,
+                position_in_file(held, range.end_offset())?,
+            ),
+            placeholder: name,
+        })
     })
     .await
 }
@@ -120,10 +130,190 @@ pub async fn on_rename(
         let offset = crate::util::offset_at_position(&view, position)?;
 
         workspace_edit_of_renaming_a_macro(session, &view, offset, &new_name)
+            .or_else(|| workspace_edit_of_renaming_a_symbol(session, &view, offset, &new_name))
     })
     .await
 }
 
+/// **The symbol at the cursor** — its spelling and the range it occupies in *this* file, or `None` for a cursor that
+/// is not on a name the index can resolve.
+///
+/// The range comes from the file's own text (`name_at_including_directives`), because that is the text the client's
+/// box is drawn over; `definitions` is asked only *whether* the name is a symbol, and its answer may well be a
+/// declaration in a header — which is not where the cursor is.
+pub fn symbol_at<F: cpp_code_analysis::FileProvider + Clone>(
+    session: &Session<F>,
+    view: &cpp_code_analysis::FileView,
+    offset: cpp_code_analysis::file::coordinates::ReadingOffset,
+) -> Option<(String, cpp_parser::SourceRange)> {
+    let Known::Yes(defined) = session.definitions(view, offset) else {
+        return None;
+    };
+    let (name, range) =
+        cpp_code_analysis::sema::resolve::name_at_including_directives(&view.root, offset.get())?;
+
+    // **A local is answerable only when the per-file analysis places it**, and refusing it here is what keeps the
+    // rename box and the rename from disagreeing: a box that appears and then edits nothing is worse than no box.
+    //
+    // This is a real gap rather than a precaution — measured on the handshake fixture, `int more[MAX_ITEMS];` (an
+    // array whose extent is a macro) is a fact in the index but has **no entry** in `local_references_of`. The reason
+    // is worth chasing (`docs/lsp-status.md` P2), and until it is, the honest answer for such a local is "no".
+    if defined.found.iter().any(|definition| definition.fact.local) {
+        let locals =
+            cpp_code_analysis::sema::declarations::local_references_of(&view.scopes, &view.root);
+        let placed = locals.iter().any(|entry| {
+            entry.declared_at as usize == range.start_offset
+                || entry.uses.iter().any(|at| *at as usize == range.start_offset)
+        });
+        if !placed {
+            log::debug!("refusing `{name}`: a local the per-file analysis did not place");
+            return None;
+        }
+    }
+
+    // A name that is written in a `#define` is a macro's, and the macro path answers it first; refusing it here keeps
+    // the two paths from disagreeing about what the cursor is.
+    Some((name, range))
+}
+
+/// The edits that rename the **symbol** at `offset` — the same list Find References answers, written as an edit.
+///
+/// The rule is [`crate::handlers::references::name_level_offsets`] and nothing else: a member of one class, its
+/// declaration in the header and its uses, and not another class's member of the same spelling. The refusals are the
+/// macro path's own, for the same reason and with the same finality:
+///
+/// ```text
+/// not one identifier     a rename cannot write `Widget x` into a declaration
+/// index has work         the search would be partial, and half a rename is a broken build
+/// outside the project    a header the toolchain owns is not the user's to edit
+/// ```
+pub fn workspace_edit_of_renaming_a_symbol<F: cpp_code_analysis::FileProvider + Clone>(
+    session: &Session<F>,
+    view: &cpp_code_analysis::FileView,
+    offset: cpp_code_analysis::file::coordinates::ReadingOffset,
+    new_name: &str,
+) -> Option<WorkspaceEdit> {
+    // (1) A symbol, and a name to write.
+    let (name, name_range) = symbol_at(session, view, offset)?;
+    if !is_one_identifier(new_name) {
+        log::debug!("refusing a rename to {new_name:?}: not a single identifier");
+        return None;
+    }
+
+    // (2) A complete search — the same gate the macro path states, and for the same reason.
+    if session.pending() > 0 {
+        log::debug!(
+            "refusing to rename `{name}`: {} file(s) are queued, so the search would be partial",
+            session.pending()
+        );
+        return None;
+    }
+
+    // **A local is only ever renamed inside its own file.** A local name is not visible through an include, and its
+    // spelling appears in every file — so the cross-file search below would edit `i` in files that have nothing to do
+    // with this one. The per-file answer already exists (`local_references_of`, which the highlight handler uses), and
+    // this is the same distinction `document_highlight` makes between a local and a symbol.
+    let defined = match session.definitions(view, offset) {
+        Known::Yes(defined) => defined,
+        _ => return None,
+    };
+    if defined.found.iter().any(|definition| definition.fact.local) {
+        let locals =
+            cpp_code_analysis::sema::declarations::local_references_of(&view.scopes, &view.root);
+        // **The cursor's own name starts where the entry says**, not where the client's column does: a cursor lands
+        // *inside* an identifier (`more` at column 9 is its second letter), while `local_references_of` records the
+        // first byte of the name. Comparing the two raw offsets answers "no such local" for every cursor that is not
+        // exactly on the first letter.
+        let (_, at_the_cursor) =
+            cpp_code_analysis::sema::resolve::name_at_including_directives(&view.root, offset.get())?;
+
+        let entry = locals.iter().find(|entry| {
+            entry.declared_at as usize == at_the_cursor.start_offset
+                || entry.uses.iter().any(|at| *at as usize == at_the_cursor.start_offset)
+        })?;
+        let mut ranges: Vec<u32> = vec![entry.declared_at];
+        ranges.extend(entry.uses.iter().copied());
+        let mut changes: HashMap<lsp_types::Uri, Vec<TextEdit>> = HashMap::new();
+        let held = session.files().held(&view.path)?;
+        let uri = path_to_uri(&view.path)?;
+        for at in ranges {
+            // The name's own extent at that offset — a local's use is an identifier, and the declaration's range is
+            // the identifier in its declarator.
+            let Some((_, range)) =
+                cpp_code_analysis::sema::resolve::name_at_including_directives(&view.root, at as usize)
+            else {
+                continue;
+            };
+            let (Some(start), Some(end)) = (
+                position_in_file(held, range.start_offset),
+                position_in_file(held, range.end_offset()),
+            ) else {
+                return None;
+            };
+            changes.entry(uri.clone()).or_default().push(TextEdit {
+                range: lsp_types::Range::new(start, end),
+                new_text: new_name.to_string(),
+            });
+        }
+        return Some(WorkspaceEdit {
+            changes: Some(changes),
+            document_changes: None,
+            change_annotations: None,
+        });
+    }
+
+    let found = crate::handlers::references::name_level_offsets(session, view, offset, true);
+    if found.is_empty() {
+        log::debug!("refusing to rename `{name}`: no declaration was found for it");
+        return None;
+    }
+
+    // (3) **Never outside the project**, exactly as the macro path decides it.
+    if let Some(outside) = found
+        .iter()
+        .map(|(file, _)| file)
+        .find(|file| !crate::util::is_inside(file, session.root()))
+    {
+        log::warn!(
+            "refusing to rename `{name}`: {} is outside the project",
+            outside.display()
+        );
+        return None;
+    }
+
+    // (4) Every file with an edit in it has to be spellable as ranges.
+    let mut changes: HashMap<lsp_types::Uri, Vec<TextEdit>> = HashMap::new();
+    for (file, range) in found {
+        let Some(held) = session.files().held(&file) else {
+            log::warn!(
+                "refusing to rename `{name}`: {} is not held, so its edits cannot be placed",
+                file.display()
+            );
+            return None;
+        };
+        let (Some(uri), Some(start), Some(end)) = (
+            path_to_uri(&file),
+            position_in_file(held, range.start_offset),
+            position_in_file(held, range.end_offset()),
+        ) else {
+            return None;
+        };
+        changes.entry(uri).or_default().push(TextEdit {
+            range: lsp_types::Range::new(start, end),
+            new_text: new_name.to_string(),
+        });
+    }
+
+    // The cursor's own name is in the list by construction (the declaration or the use it is on); if the search
+    // somehow answered none of them, the edit would be a rename of nothing and is refused above by `found.is_empty`.
+    let _ = name_range;
+
+    Some(WorkspaceEdit {
+        changes: Some(changes),
+        document_changes: None,
+        change_annotations: None,
+    })
+}
 /// The edits that rename the macro at `offset`, or `None` for any of the refusals the module documents.
 ///
 /// Generic over the file provider for the same reason [`crate::handlers::references::locations`] is: a test can
@@ -423,5 +613,108 @@ mod inside {
         if cfg!(windows) {
             assert!(is_inside(Path::new("/P/A.CPP"), root));
         }
+    }
+}
+#[cfg(test)]
+mod a_symbol {
+    use std::path::PathBuf;
+
+    use cpp_code_analysis::{
+        CompilerConfig, MemoryFiles, OpenDocuments, Session, SessionFiles, WatchFilter,
+    };
+
+    use super::{symbol_at, workspace_edit_of_renaming_a_symbol};
+
+    const BASE_H: &str = "\
+struct First {
+    int _value;
+    void update();
+};
+struct Second {
+    int _value;
+    void update();
+};
+";
+
+    const USE_CPP: &str = "\
+#include \"base.h\"
+void First::update() { _value = 1; }
+void Second::update() { _value = 2; }
+";
+
+    fn session() -> (Session<MemoryFiles>, PathBuf) {
+        let files = MemoryFiles::new()
+            .with_file("/p/base.h", BASE_H)
+            .with_file("/p/use.cpp", USE_CPP);
+        let providers = SessionFiles::new(OpenDocuments::new(), files);
+        let mut session = Session::with_config(
+            "/p",
+            providers,
+            WatchFilter::new("/p"),
+            CompilerConfig::default(),
+        );
+        session.add_project_files([PathBuf::from("/p/base.h"), PathBuf::from("/p/use.cpp")]);
+        session.index_everything();
+        (session, PathBuf::from("/p/use.cpp"))
+    }
+
+    /// **A member rename edits its own class and nothing else** — the promise the refusal in the module's
+    /// documentation makes, now kept by a rule instead of by refusing: the cursor's class decides which member is
+    /// meant, exactly as Find References does.
+    ///
+    /// Reported from a reader's session: Find References on `_diagnosticStyle` answered three classes' members, so a
+    /// rename built on it would have rewritten two other classes. The same list is what this test checks, in the one
+    /// place where a wrong answer edits the user's files.
+    #[test]
+    fn is_renamed_in_its_own_class_and_the_declaration_follows() {
+        let (session, path) = session();
+        let held = session.files().held(&path).expect("the file is held");
+        let view =
+            cpp_code_analysis::FileView::parse_with(held, &cpp_parser::MacroEnvironment::default());
+        let at = USE_CPP
+            .find("_value = 1")
+            .expect("the fixture writes the member in First::update");
+
+        let (name, range) = symbol_at(
+            &session,
+            &view,
+            cpp_code_analysis::file::coordinates::ReadingOffset::new(at),
+        )
+        .expect("a member is a symbol");
+        assert_eq!(name, "_value");
+        assert_eq!(&USE_CPP[range.start_offset..range.end_offset()], "_value");
+
+        let edit = workspace_edit_of_renaming_a_symbol(
+            &session,
+            &view,
+            cpp_code_analysis::file::coordinates::ReadingOffset::new(at),
+            "_renamed",
+        )
+        .expect("an indexed project can rename a member");
+        let changes = edit.changes.expect("a change map");
+        let total: usize = changes.values().map(|edits| edits.len()).sum();
+        println!(
+            "edits: {:?}",
+            changes
+                .iter()
+                .map(|(uri, edits)| (uri.path().to_string(), edits.len()))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            changes.len(),
+            2,
+            "the header's declaration and the source's use: {changes:?}"
+        );
+        assert_eq!(
+            total, 2,
+            "and not `Second`'s declaration or its use: {changes:?}"
+        );
+        assert!(
+            changes
+                .values()
+                .flatten()
+                .all(|edit| edit.new_text == "_renamed"),
+            "every edit writes the new name"
+        );
     }
 }

@@ -402,12 +402,12 @@ const NAME_REFERENCE_BUDGET: usize = 2000;
 /// ```
 ///
 /// The declarations are filtered by the same rule, which is what keeps another class's *declaration* out of the list.
-fn name_level_locations<F: cpp_code_analysis::FileProvider + Clone>(
+pub(crate) fn name_level_offsets<F: cpp_code_analysis::FileProvider + Clone>(
     session: &cpp_code_analysis::Session<F>,
     view: &cpp_code_analysis::FileView,
     offset: cpp_code_analysis::file::coordinates::ReadingOffset,
     include_declaration: bool,
-) -> Vec<Location> {
+) -> Vec<(std::path::PathBuf, cpp_parser::SourceRange)> {
     let Known::Yes(defined) = session.definitions(view, offset) else {
         return Vec::new();
     };
@@ -429,33 +429,19 @@ fn name_level_locations<F: cpp_code_analysis::FileProvider + Clone>(
     declaring.dedup();
 
 
-    let mut locations: Vec<Location> = Vec::new();
-    let push =
-        |file: &std::path::Path, range: cpp_parser::SourceRange, locations: &mut Vec<Location>| {
-            let Some(uri) = crate::util::path_to_uri(file) else {
-                return;
-            };
-            let (Some(start), Some(end)) = (
-                position_of(session, file, range.start_offset),
-                position_of(session, file, range.end_offset()),
-            ) else {
-                return;
-            };
-            let location = Location {
-                uri,
-                range: lsp_types::Range { start, end },
-            };
-            if !locations
-                .iter()
-                .any(|held| held.uri == location.uri && held.range == location.range)
-            {
-                locations.push(location);
-            }
-        };
+    let mut found: Vec<(std::path::PathBuf, cpp_parser::SourceRange)> = Vec::new();
+    let push = |file: &std::path::Path,
+                range: cpp_parser::SourceRange,
+                found: &mut Vec<(std::path::PathBuf, cpp_parser::SourceRange)>| {
+        let key = (file.to_path_buf(), range);
+        if !found.contains(&key) {
+            found.push(key);
+        }
+    };
 
     if include_declaration {
         for definition in &aimed {
-            push(&definition.file, definition.fact.name_range, &mut locations);
+            push(&definition.file, definition.fact.name_range, &mut found);
         }
     }
 
@@ -496,13 +482,37 @@ fn name_level_locations<F: cpp_code_analysis::FileProvider + Clone>(
             {
                 continue;
             }
-            push(&file, range, &mut locations);
+            push(&file, range, &mut found);
         }
     }
 
-    locations
+    found
 }
 
+/// [`name_level_offsets`], as protocol positions.
+fn name_level_locations<F: cpp_code_analysis::FileProvider + Clone>(
+    session: &cpp_code_analysis::Session<F>,
+    view: &cpp_code_analysis::FileView,
+    offset: cpp_code_analysis::file::coordinates::ReadingOffset,
+    include_declaration: bool,
+) -> Vec<Location> {
+    name_level_offsets(session, view, offset, include_declaration)
+        .into_iter()
+        .filter_map(|(file, range)| {
+            let uri = crate::util::path_to_uri(&file)?;
+            let (Some(start), Some(end)) = (
+                position_of(session, &file, range.start_offset),
+                position_of(session, &file, range.end_offset()),
+            ) else {
+                return None;
+            };
+            Some(Location {
+                uri,
+                range: lsp_types::Range { start, end },
+            })
+        })
+        .collect()
+}
 /// **The position of a byte in a file, whether or not this session is holding it.**
 ///
 /// The VFS holds what has been read into *this* run, and a header the index read from its **disk cache** is not in it

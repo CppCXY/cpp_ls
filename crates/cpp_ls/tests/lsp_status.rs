@@ -499,8 +499,22 @@ fn every_feature_answers_what_the_project_holds() {
     // the feature: measure the *best* of the first few candidates and print which line it was.
     let mut signature_row: Option<Row> = None;
     if let Some(candidates) = the_calls(&text) {
+        // **A call the project really makes first**, so the answer is about the feature rather than about the probe:
+        // `SetupStyle(style, options);` is a static member called with two arguments. The rest are the file's own
+        // candidates, in order.
+        let mut ordered = candidates.clone();
+        if let Some(line) = text.lines().position(|body| body.contains("SetupStyle(")) {
+            if let Some(column) = text.lines().nth(line).and_then(|body| body.find('(')) {
+                let mut preferred = Position {
+                    line: line as u32,
+                    character: (column + 3) as u32,
+                };
+                ordered.insert(0, preferred);
+                let _ = preferred;
+            }
+        }
         let mut best: Option<(u32, u32, usize, String)> = None;
-        for call_at in candidates.iter().take(8) {
+        for call_at in ordered.iter().take(12) {
             let answer = server.request(
                 1_100 + best.as_ref().map_or(0, |_| 0) + call_at.line as i64,
                 "textDocument/signatureHelp",

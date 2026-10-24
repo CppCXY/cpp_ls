@@ -44,7 +44,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::RegisterCapabilities;
 use crate::context::{RequestOutcome, ServerContextSnapshot, snapshot_query};
-use crate::util::{file_offset_at_position, offset_at_position, uri_to_file_path};
+use crate::util::{file_offset_at_position, uri_to_file_path};
 
 /// The two vocabularies a popup has an answer for and the analysis does not: keywords, and Doxygen's commands.
 mod vocabulary;
@@ -113,9 +113,19 @@ pub async fn on_hover(
         // the whole handler and *every* hover answered `null`; the two queries below it never ran. What is left is one
         // reading and two of its offsets: the **file's** for the two text-shaped questions, the **rendering's** for
         // everything else.
+        //
+        // **The cursor is read from the file's own text, then mapped into the rendering.** The two offsets below are
+        // different numbers and both are needed: a client sends a line and a column of the text it shows, while a
+        // rendering has the directives resolved and its lines merged — `file_offset_at_position(&view, position)` did
+        // the conversion *through* the rendering, which names a different place, and that is the defect that made
+        // `implementation` answer `null` on a real project (`docs/lsp-status.md`). The two steps are done in the order
+        // that cannot drift.
+        let written = session.view_of_the_file(&path)?;
+        let in_the_file = file_offset_at_position(&written, position)?;
         let view = session.view(&path)?;
-        let offset = offset_at_position(&view, position)?;
-        let in_the_file = file_offset_at_position(&view, position)?;
+        let offset = view.reading_offset_of(cpp_code_analysis::file::coordinates::FileOffset::new(
+            in_the_file.get(),
+        ))?;
         if let Known::Yes(header) = session.header_at(&view, in_the_file) {
             return Some(markdown(header_markdown(&header)));
         }

@@ -2124,15 +2124,22 @@ fn a_macro_is_renamed_everywhere_and_an_ordinary_name_is_refused() {
         "textDocument/prepareRename",
         json!({ "textDocument": { "uri": main_uri }, "position": at_the_use }),
     );
+    // **`RangeWithPlaceholder`**: the box starts around the name *and* with the name in it, so a reader renames
+    // `MAX_ITEMS` rather than typing over an empty box. The server used to answer a bare range — and nothing at all for
+    // a symbol.
     assert_eq!(
-        prepared["result"]["start"],
+        prepared["result"]["range"]["start"],
         json!({ "line": 2, "character": 13 }),
         "the box starts around the name itself: {prepared}"
     );
     assert_eq!(
-        prepared["result"]["end"],
+        prepared["result"]["range"]["end"],
         json!({ "line": 2, "character": 22 }),
         "{prepared}"
+    );
+    assert_eq!(
+        prepared["result"]["placeholder"], "MAX_ITEMS",
+        "and it starts with the name in it: {prepared}"
     );
 
     let renamed = server.request(
@@ -2174,10 +2181,12 @@ fn a_macro_is_renamed_everywhere_and_an_ordinary_name_is_refused() {
         "and the definition's edit covers its name: {definition_edit}"
     );
 
-    // --- the refusal, which is the other half of the feature -----------------------------------------
-    // A cursor on an ordinary name: `more` is a local variable in this file, its type is not what is being asked
-    // about, and its *uses* would need a parse of every candidate file. Both requests answer `null` — no rename box,
-    // and no edit — rather than renaming the occurrences that happen to be visible in this file.
+    // --- an ordinary name that the per-file analysis cannot place is refused, and said so --------------
+    // `more` is a local in this file — `int more[MAX_ITEMS];`, an array whose extent is a macro. It is a fact in the
+    // index, and it has **no entry** in `local_references_of` (a gap worth its own investigation, `docs/lsp-status.md`
+    // P2), so both requests answer `null`: a rename box that appears and then edits nothing would be worse than none.
+    // A name the analysis *does* place is renamed by the same rule that answers Find References (see the handler's own
+    // tests and `docs/lsp-status.md` P1 ①).
     let on_a_local = json!({ "line": 2, "character": 9 });
 
     let refused = server.request(
@@ -2187,7 +2196,7 @@ fn a_macro_is_renamed_everywhere_and_an_ordinary_name_is_refused() {
     );
     assert!(
         refused["result"].is_null(),
-        "an ordinary name has no rename box: {refused}"
+        "a local the per-file analysis did not place has no rename box: {refused}"
     );
 
     let refused = server.request(
@@ -2203,7 +2212,6 @@ fn a_macro_is_renamed_everywhere_and_an_ordinary_name_is_refused() {
         refused["result"].is_null(),
         "and renaming it edits nothing rather than half of it: {refused}"
     );
-
     // A rename to something that is not a name is refused too — two identifiers, a literal, nothing at all.
     for not_a_name in ["two words", "\"quoted\"", ""] {
         let refused = server.request(

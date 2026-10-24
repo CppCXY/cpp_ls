@@ -29,7 +29,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::RegisterCapabilities;
 use crate::context::{RequestOutcome, ServerContextSnapshot, snapshot_query};
-use crate::util::{offset_at_position, uri_to_file_path};
+use crate::util::uri_to_file_path;
 
 pub async fn on_code_action(
     context: ServerContextSnapshot,
@@ -45,8 +45,15 @@ pub async fn on_code_action(
 
     snapshot_query(context.analysis(), cancel_token, move |session| {
         let path = uri_to_file_path(&uri)?;
+        // **The cursor is read from the file's own text, then mapped into the rendering** — see hover for the
+        // measurement: a rendering has the directives resolved and its lines merged, so converting a client's
+        // position *through* it names a different place (docs/lsp-status.md, P1 ③).
+        let written = session.view_of_the_file(&path)?;
+        let in_the_file = crate::util::file_offset_at_position(&written, position)?;
         let view = session.view(&path)?;
-        let offset = offset_at_position(&view, position)?;
+        let offset = view.reading_offset_of(
+            cpp_code_analysis::file::coordinates::FileOffset::new(in_the_file.get()),
+        )?;
 
         let fixes = fixes_of(session, &view, offset);
         Some(

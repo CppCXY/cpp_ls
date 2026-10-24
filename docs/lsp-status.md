@@ -55,75 +55,93 @@ completion            成员补全 2 条（`Editorconfig`/`Workspace`）——`_
 formatting / rangeFormatting / codeAction   都回答（空数组合法：这份文件已经格式化过、区间里没有诊断）
 ```
 
-## 需要改（按影响排序）
+## P1：已完成（2026-10-24 晚）
 
-### P1 ① `rename` / `prepareRename` 只支持宏
+### ① `rename` / `prepareRename` 支持普通符号 ✅
 
-`prepareRename` 和 `rename` 在成员上回答 `null`。它们只调 `macro_at`（宏的重命名路径），普通符号没有实现。
-F2 在 VSCode 里是最常用的操作之一，而对一个成员改名正是"按类过滤的引用"已经能支撑的事 —— 引用列表有 6 条、
-归属明确，改名就是把这些位置逐个替换。缺的是：`prepareRename` 回答名字的 range（可重命名），`rename` 用
-`name_level_locations` 的结果生成 `WorkspaceEdit`，并把宏的 `MacroReferences::rename` 保持原样。
+宏的路由不变（`macro_at` 先问），没有宏时走 `symbol_at`：**拼写和 range 取自文件自身文本**
+（`name_at_including_directives`），`definitions` 只用来确认"这是个符号"——它的回答可能在头文件里，而光标不
+在那儿。编辑用的就是引用那条规则（`references::name_level_offsets`，抽出来给 rename 用，位置报告和字节偏移
+两个视图不会各算一遍），所以"一个类的成员不是另一个类的"由构造保证。
 
-判据：`_diagnosticStyle` 上 `prepareRename` 回答一个 range；`rename` 到 `_style` 只改本类那 6 处（跨 2 个文件）。
+判据（`a_symbol::is_renamed_in_its_own_class_and_the_declaration_follows`）：两个类各有 `_value`、各用一次
+→ 2 处编辑（头文件声明 + 本类用法），`Second` 的声明和用法都不在里面。
+真实项目上：`prepareRename` 回答 `_diagnosticStyle` 的 range，`rename` 回答 `codeformat.h: 1 | codeformat.cpp: 6`。
 
-### P1 ② `documentHighlight` 只支持 local
+### ② `documentHighlight` 支持成员 ✅
 
-`documentHighlight` 在成员上回答 `[]`，这是**文档里写明的设计**（"a member, a global or a macro is resolved
-through the index rather than through one file's scopes"），但对用户来说就是"光标放在成员上，VSCode 不高亮"。
-现在 `local_references_of` 之外已经有 `narrowed_to_the_cursors_class` + 接收者规则，可以复用给同一个文件里的成员。
+local 的路径不变；local 没有答案时走 `symbol_highlights`——同一个 `name_level_offsets`，限定在**当前文件**，
+声明那一条是 `Write`、其余是 `Read`。真实项目上从 `0` 变成 **6**。
 
-判据：光标在 `_diagnosticStyle` 上，同一个文件里的 6 处（或其中属于本类的）高亮出来。
+判据（`a_symbol::is_highlighted_in_this_file_and_another_classs_is_not`）。
 
-### P1 ③ 位置换算：一部分 handler 拿"渲染"的行号当"文件"的行号
+### ③ 位置换算：五个 handler 改成"先文件、再渲染" ✅
 
-`definition`、`rename`、`completion` 用的是 `view_of_the_file`（文件自己的文本）再换算；而
-`hover`、`signatureHelp`、`codeAction`、`documentHighlight`、`selectionRange` 直接
-`session.view(&path)?`（渲染）+ `offset_at_position(&view, position)`。渲染里指令被展开、**行被合并**，
-所以客户端的行号落在别处。
-
-**这次实测到的第一个受害者是 `implementation`**：`codeformat.h` 的 `void UpdateCodeStyle(…)` 在渲染里解析到
-"隔壁那个声明"，`definitions` 回答成类 `CodeFormat`，整个功能返回 `null`；改成 `view_of_the_file` 之后
-回答 `CodeFormat.cpp:31`。`signatureHelp` 的 8 个调用点全部 `null`，最可能就是同一个原因（`offset_at_position`
-在渲染上直接失败 → 闭包提前返回 → 连 `no signature yet` 的日志都没有）。
-
-**改法是一致的**：先把协议位置换算到**文件自身文本**的偏移（`file_offset_at_position`），需要渲染时再用
-`view.reading_offset_of(...)`。这五个 handler 逐个改，每个都用 `lsp_status` 表验证（answer 从 no → yes）。
-
-### P2 ④ `diagnostic` 和批处理（`edit_loop`）对同一文件给出不同结果
-
-服务器对 `CodeFormat.cpp` pull 出 **0 条**（settled true），而 `edit_loop` 在同一文件上报 1 条
-`undefined-field _configs has no member erase`。那一条是**已知的假报**（`std::vector::erase` 没进事实，
-见 `semantics-todo.md` ⑤），所以 0 反而是对的 —— 但它说明两条路径看到的**事实集不同**（cook 的闭包范围）。
-这不是"要修成一致"，而是要**说清楚**：pull 该在什么状态下看到哪些事实，并用一个真报（`else-after-return`
-之类）在两边对齐。
-
-### P2 ⑤ `signatureHelp` 的真实行为未验证
-
-见 ③：位置换算修好之前，这个功能测不出来。修好后要断言：调用点给出 1 个签名、`activeParameter` 是第几个逗号。
-
-### P3 ⑥ 缺的功能
+`hover`、`signatureHelp`、`codeAction`、`documentHighlight`、`selectionRange` 以前
+`session.view(&path)?`（渲染）配 `offset_at_position(&view, position)`；现在一律
 
 ```text
-callHierarchy            没有（LSP 3.16 的 call hierarchy；对 C++ 有用，能回答"谁调用了它"）
-typeDefinition           没有（`textDocument/typeDefinition`，对 `auto` 很有用）
-documentOnTypeFormatting 没注册（VSCode 的 C++ 一般不依赖）
-workspace/diagnostic     **明确不支持**（`workspace_diagnostics: false`），只支持 pull
-inlayHint/resolve        没有 resolve（可接受：答案很小）
-semanticTokens 增量      只有 full；大文件每次全量（LuaSyntaxTree.cpp 507 个 token / 31 ms，可接受）
+written  = session.view_of_the_file(&path)      文件自身的文本
+offset_f = file_offset_at_position(&written, position)
+offset_r = rendering.reading_offset_of(FileOffset::new(offset_f))   需要渲染时
 ```
 
-## 这次自测发现并修好的
+`documentHighlight` 和 `selectionRange` 两步都留在文件坐标里（它们的查询本来就是文件坐标的）。
 
-**`implementation` 从来没能回答过一个真实项目的问题**（位置换算错误），修好后第一个回答是
-`CodeFormat.cpp:31`。同一条规则的另一半——`.cpp` 里的类外定义以前根本不在索引里——是上一条提交修的
-（`qualified_declarations`）。
+## P2：还没做
+
+### ④ 一个 local 如果在 `local_references_of` 里没有条目，`rename` 就拒绝它
+
+手写测试里 `int more[MAX_ITEMS];`（数组长度是宏）是索引里的事实，但 `local_references_of` **没有**它的条目。
+现在的行为是"名字被分析放置了才允许改"：`symbol_at` 检查这一点，所以 `prepareRename` 和 `rename` 不会一个给框、
+一个不改（`handshake.rs` 的那一半断言就是这个状态）。这是一个需要查的缺口，不是"按设计不支持"。
+
+### ⑤ `signatureHelp` 仍未在真实项目上回答过
+
+位置换算修好之后，12 个调用点仍然全 `null`，而 `debug` 日志里**没有** `no signature yet` —— 说明
+`is_locally_ready` 那道门过了，是 `signatures_at` 在这些位置没找到调用。分析层有 21 个测试
+（`tests/signature.rs`），所以是这个 handler 与真实渲染的交接处的问题，不是算法。下一步：给这个 handler 加
+`CPPLS_TRACE_SIGNATURE` 探针（打印光标处的节点、`signatures_at` 的入参和结果），在一个**单行调用**上定位。
+
+### ⑥ `diagnostic` 与批处理对同一文件结果不同
+
+服务器对 `CodeFormat.cpp` pull 出 0 条（settled true），`edit_loop` 1 条 —— 那 1 条是已知假报
+（`std::vector::erase` 没进事实），所以 0 反而对；但两条路径看到的**事实集不同**要说清楚，并用一条真报
+（`else-after-return` 之类）在两边对齐。
+
+### ⑦ 缺的功能
 
 ```text
-tests/lsp_status.rs           这张表本身（可重跑）
-tests/implementation_real.rs  真实项目上的 implementation 断言（会话层，不需要服务器）
+callHierarchy            没有
+typeDefinition           没有（对 `auto` 有用）
+workspace/diagnostic     明确不支持，只有 pull
+semanticTokens 增量      只有 full（507 token / 26 ms，可接受）
+inlayHint/resolve        没有（可接受）
 ```
 
-## 怎么用这张表
+## 表（P1 之后的真实运行）
 
-每改一项，重跑 `lsp_status`，把 `no` 变 `yes`、把 `0` 变成合理的数字，然后把新的一行贴回本文件。
-表的价值在于它是**可重跑的**：不是"我记得某次测过"，而是"这一行现在还是这样"。
+```text
+feature                answered n     time   note
+hover                  yes      3     21 ms  `LuaDiagnosticStyle _diagnosticStyle`
+definition (member)    yes      1     2 ms   codeformat.h:56
+definition (header)    yes      1     1 ms   codeformat.h:56
+implementation         yes      1     4 ms   CodeFormat.cpp:31
+references             yes      6     10 ms   codeformat.cpp:32
+documentHighlight      yes      6     3 ms    ← 0 之前
+prepareRename          yes      1     10 ms  placeholder `_diagnosticStyle`   ← 之前 null
+rename                 yes      2     11 ms  codeformat.h: 1 | codeformat.cpp: 6  ← 之前 null
+documentSymbol         yes      14    1 ms
+workspaceSymbol        yes      512   7 ms
+foldingRange           yes      39    1 ms
+selectionRange         yes      5     1 ms
+semanticTokens         yes      507   26 ms
+inlayHint              yes      5     23 ms
+documentLink           yes      5     1 ms
+diagnostic             yes      0     29 ms
+completion (member)    yes      2     27 ms  Editorconfig, Workspace
+signatureHelp          no       0     0 ms   null for 12 call sites（P2④）
+codeAction             yes      0     2 ms
+rangeFormatting        yes      0     2 ms
+formatting             yes      0     1 ms
+```

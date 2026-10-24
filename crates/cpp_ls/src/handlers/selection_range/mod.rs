@@ -44,7 +44,11 @@ pub async fn on_selection_range(
 
     snapshot_query(context.analysis(), cancel_token, move |session| {
         let path = uri_to_file_path(&uri)?;
-        let view = session.view(&path)?;
+        // **The file's own text, for the cursor and for the walk.** A selection is what the reader is about to see
+        // highlighted, and `Session::selection_chain` walks the written text — while the position below used to be
+        // converted through the **rendering**, which resolves directives and merges lines, so it named a different
+        // place (the same defect `docs/lsp-status.md` P1 ③ records for `implementation`).
+        let view = session.view_of_the_file(&path)?;
         let held = session.files().held(&view.path)?;
 
         let mut answered = Vec::with_capacity(positions.len());
