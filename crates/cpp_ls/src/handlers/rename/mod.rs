@@ -146,30 +146,11 @@ pub fn symbol_at<F: cpp_code_analysis::FileProvider + Clone>(
     view: &cpp_code_analysis::FileView,
     offset: cpp_code_analysis::file::coordinates::ReadingOffset,
 ) -> Option<(String, cpp_parser::SourceRange)> {
-    let Known::Yes(defined) = session.definitions(view, offset) else {
+    let Known::Yes(_) = session.definitions(view, offset) else {
         return None;
     };
     let (name, range) =
         cpp_code_analysis::sema::resolve::name_at_including_directives(&view.root, offset.get())?;
-
-    // **A local is answerable only when the per-file analysis places it**, and refusing it here is what keeps the
-    // rename box and the rename from disagreeing: a box that appears and then edits nothing is worse than no box.
-    //
-    // This is a real gap rather than a precaution — measured on the handshake fixture, `int more[MAX_ITEMS];` (an
-    // array whose extent is a macro) is a fact in the index but has **no entry** in `local_references_of`. The reason
-    // is worth chasing (`docs/lsp-status.md` P2), and until it is, the honest answer for such a local is "no".
-    if defined.found.iter().any(|definition| definition.fact.local) {
-        let locals =
-            cpp_code_analysis::sema::declarations::local_references_of(&view.scopes, &view.root);
-        let placed = locals.iter().any(|entry| {
-            entry.declared_at as usize == range.start_offset
-                || entry.uses.iter().any(|at| *at as usize == range.start_offset)
-        });
-        if !placed {
-            log::debug!("refusing `{name}`: a local the per-file analysis did not place");
-            return None;
-        }
-    }
 
     // A name that is written in a `#define` is a macro's, and the macro path answers it first; refusing it here keeps
     // the two paths from disagreeing about what the cursor is.
@@ -213,11 +194,19 @@ pub fn workspace_edit_of_renaming_a_symbol<F: cpp_code_analysis::FileProvider + 
     // spelling appears in every file — so the cross-file search below would edit `i` in files that have nothing to do
     // with this one. The per-file answer already exists (`local_references_of`, which the highlight handler uses), and
     // this is the same distinction `document_highlight` makes between a local and a symbol.
+    // **A local is renamed inside this file.** A local name is not visible through an include and its spelling appears
+    // everywhere, so the cross-file search below would edit `i` in files that have nothing to do with this one. The
+    // per-file answer is `local_references_of`, and an unused local has no entry there — the function records a *use*
+    // against its declaration — which is not a reason to refuse: renaming the declaration alone is the whole edit.
     let defined = match session.definitions(view, offset) {
         Known::Yes(defined) => defined,
         _ => return None,
     };
-    if defined.found.iter().any(|definition| definition.fact.local) {
+    if defined
+        .found
+        .iter()
+        .any(|definition| definition.fact.local)
+    {
         let locals =
             cpp_code_analysis::sema::declarations::local_references_of(&view.scopes, &view.root);
         // **The cursor's own name starts where the entry says**, not where the client's column does: a cursor lands
@@ -227,12 +216,17 @@ pub fn workspace_edit_of_renaming_a_symbol<F: cpp_code_analysis::FileProvider + 
         let (_, at_the_cursor) =
             cpp_code_analysis::sema::resolve::name_at_including_directives(&view.root, offset.get())?;
 
-        let entry = locals.iter().find(|entry| {
-            entry.declared_at as usize == at_the_cursor.start_offset
-                || entry.uses.iter().any(|at| *at as usize == at_the_cursor.start_offset)
-        })?;
-        let mut ranges: Vec<u32> = vec![entry.declared_at];
-        ranges.extend(entry.uses.iter().copied());
+        let uses: Vec<u32> = locals
+            .iter()
+            .find(|entry| {
+                entry.declared_at as usize == at_the_cursor.start_offset
+                    || entry.uses.iter().any(|at| *at as usize == at_the_cursor.start_offset)
+            })
+            .map(|entry| entry.uses.clone())
+            .unwrap_or_default();
+        // **The declaration first, then the uses** — an unused local is one edit, which is the whole name.
+        let mut ranges: Vec<u32> = vec![at_the_cursor.start_offset as u32];
+        ranges.extend(uses);
         let mut changes: HashMap<lsp_types::Uri, Vec<TextEdit>> = HashMap::new();
         let held = session.files().held(&view.path)?;
         let uri = path_to_uri(&view.path)?;

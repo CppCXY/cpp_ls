@@ -2181,25 +2181,24 @@ fn a_macro_is_renamed_everywhere_and_an_ordinary_name_is_refused() {
         "and the definition's edit covers its name: {definition_edit}"
     );
 
-    // --- an ordinary name that the per-file analysis cannot place is refused, and said so --------------
-    // `more` is a local in this file — `int more[MAX_ITEMS];`, an array whose extent is a macro. It is a fact in the
-    // index, and it has **no entry** in `local_references_of` (a gap worth its own investigation, `docs/lsp-status.md`
-    // P2), so both requests answer `null`: a rename box that appears and then edits nothing would be worse than none.
-    // A name the analysis *does* place is renamed by the same rule that answers Find References (see the handler's own
-    // tests and `docs/lsp-status.md` P1 ①).
+    // --- the other half of the feature: a **local** is renamed inside its own file ---------------------
+    // `more` is declared and never used in this fixture, which is the case that used to be refused: `local_references_of`
+    // records a *use* against its declaration, so an unused local has no entry — and renaming the declaration alone is
+    // the whole edit. It must not leave this file: a local is not visible through an include, so a cross-file list
+    // would rewrite other files' `more`s.
     let on_a_local = json!({ "line": 2, "character": 9 });
 
-    let refused = server.request(
+    let prepared = server.request(
         400,
         "textDocument/prepareRename",
         json!({ "textDocument": { "uri": main_uri }, "position": on_a_local }),
     );
-    assert!(
-        refused["result"].is_null(),
-        "a local the per-file analysis did not place has no rename box: {refused}"
+    assert_eq!(
+        prepared["result"]["placeholder"], "more",
+        "a local has a rename box too: {prepared}"
     );
 
-    let refused = server.request(
+    let renamed = server.request(
         500,
         "textDocument/rename",
         json!({
@@ -2208,9 +2207,19 @@ fn a_macro_is_renamed_everywhere_and_an_ordinary_name_is_refused() {
             "newName": "renamed",
         }),
     );
-    assert!(
-        refused["result"].is_null(),
-        "and renaming it edits nothing rather than half of it: {refused}"
+    let changes = renamed["result"]["changes"]
+        .as_object()
+        .unwrap_or_else(|| panic!("the local is renamed: {renamed}"));
+    println!("local rename: {renamed}");
+    assert_eq!(changes.len(), 1, "one file — the one the local is in: {renamed}");
+    assert_eq!(
+        changes
+            .values()
+            .next()
+            .and_then(|edits| edits.as_array())
+            .map(Vec::len),
+        Some(1),
+        "one edit: the declaration, the only occurrence in this fixture: {renamed}"
     );
     // A rename to something that is not a name is refused too — two identifiers, a literal, nothing at all.
     for not_a_name in ["two words", "\"quoted\"", ""] {

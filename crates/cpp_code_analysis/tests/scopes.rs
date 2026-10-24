@@ -2411,3 +2411,34 @@ fn operators_bind_a_name() {
     assert!(shape.contains("operator[]"), "{shape}");
     assert!(shape.contains("cents"), "{shape}");
 }
+/// **A local whose extent is a macro is still a local.**
+///
+/// Reported from a rename: `int more[MAX_ITEMS];` is a fact in the index, and `local_references_of` — the per-file
+/// analysis that rename and highlight use for locals — has **no entry for it**. A rename then refuses the name (the
+/// safe direction), but a reader with the cursor on it gets nothing highlighted, and the question "where else is this
+/// local" goes unanswered.
+///
+/// The two spellings below are the same declaration with and without the macro, so that the macro is the only
+/// difference the assertion can see.
+#[test]
+fn a_local_whose_extent_is_a_macro_is_placed() {
+    use cpp_code_analysis::sema::declarations::local_references_of;
+
+    for source in [
+        "void f() {\n    int more[4];\n    (void)more;\n}\n",
+        "#define N 4\nvoid f() {\n    int more[N];\n    (void)more;\n}\n",
+    ] {
+        let tree = CppParser::parse(source, ParserConfig::default());
+        let root = tree.get_red_root();
+        let table = build_scopes(&root, &cpp_code_analysis::NoMacroBodies);
+        let locals = local_references_of(&table, &root);
+        println!("{source:?} → {locals:?}");
+        assert!(
+            locals.iter().any(|entry| {
+                source[entry.declared_at as usize..].starts_with("more")
+                    && !entry.uses.is_empty()
+            }),
+            "`more` is a local, declared at one place and used at another: {locals:?}"
+        );
+    }
+}

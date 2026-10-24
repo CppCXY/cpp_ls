@@ -126,19 +126,15 @@ fn main() {
     let started = Instant::now();
     let read = session.index_everything();
     let indexed = started.elapsed();
-    // **Is the language version known?** The question `#if __cplusplus >= 201103L` asks of every libstdc++ header,
-    // and the one that decides whether `std::vector::erase` is in the facts at all.
-    if std::env::var_os("CPPLS_PRINT_LANGUAGE").is_some() {
-        match session.index().macros().get("__cplusplus") {
-            Some(definition) => eprintln!("[language] __cplusplus = {definition:?}"),
-            None => eprintln!("[language] __cplusplus is NOT in the index's macro table"),
-        }
-    }
-    // **Why a name lookup answers what it answers** — the count, and the kinds and files behind it. Written for
-    // `_Tp`, whose lookup was 167 ms of one pull (2288 answers): the question is whether those are declarations at
-    // all. See `docs/index-lookup.md`.
-    if let Some(name) = std::env::var_os("CPPLS_PRINT_LOOKUP") {
-        let name = name.to_string_lossy().into_owned();
+    // **Why a name lookup answers what it answers** — the count, the kinds and the files behind it. Written for `_Tp`,
+    // whose lookup was 167 ms of one pull (2288 answers): the question is whether those are declarations at all.
+    //
+    //     CPPLS_TRACE_ANSWERS=_Tp cargo run --example edit_loop -- <project> <file> 1
+    //
+    // See `docs/index-lookup.md` for the whole dissection, and `probes.rs` for the switch this reads.
+    if cpp_code_analysis::probes::answers()
+        && let Ok(name) = std::env::var("CPPLS_TRACE_ANSWERS")
+    {
         let started = std::time::Instant::now();
         let found = session.index().definitions(&name, &file);
         let took = started.elapsed();

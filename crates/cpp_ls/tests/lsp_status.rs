@@ -58,7 +58,9 @@ impl Server {
             .arg("--log-path")
             .arg(&log_dir)
             .arg("--log-level")
-            .arg(std::env::var("CPPLS_STATUS_LOG").unwrap_or_else(|_| "info".to_string()))
+            // `debug`, like `real_project.rs`: the log is read when a row says something surprising, and a probe that
+            // hides the handler's own reasons cannot explain its own table.
+            .arg("debug")
             .current_dir(project)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

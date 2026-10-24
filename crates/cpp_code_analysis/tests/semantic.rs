@@ -1800,3 +1800,33 @@ fn a_template_parameter_is_not_a_declaration_at_file_scope() {
         Known::No => panic!("`definitions` answers `Known`, not `No`"),
     }
 }
+/// **A qualified definition carries its parameter list**, which is what a signature help's label is read from when the
+/// declaring file has no rendering.
+///
+/// Found by `tests/signature_real.rs`: on a real project, `SetupStyle(style, options);` answered **no signature** while
+/// the fixture tests passed. The chain was: the call is in the `.cpp`; the index's `definitions("SetupStyle")` answers
+/// the **definition fact in that same file** (the "own file wins" rule); that fact's `parameter_list` was `None`; and
+/// the signature's fallback — which builds the label from the fact when the header is not cooked — therefore had
+/// nothing to build.
+#[test]
+fn a_qualified_definition_carries_its_parameter_list() {
+    let session = session_with(&[(
+        "/p/a.cpp",
+        "struct C {\n    void f(int a, int b);\n};\nvoid C::f(int a, int b) { }\n",
+    )]);
+    let summary = session
+        .index()
+        .summary(std::path::Path::new("/p/a.cpp"))
+        .expect("indexed");
+    let found: Vec<(&str, Option<&str>)> = summary
+        .declarations
+        .iter()
+        .filter(|fact| fact.name == "f")
+        .map(|fact| (&*fact.name, fact.parameter_list.as_deref()))
+        .collect();
+    println!("facts for `f`: {found:?}");
+    assert!(
+        found.iter().any(|(_, parameters)| parameters.is_some()),
+        "the declaration has a list, and the definition's own is `(int a, int b)`: {found:?}"
+    );
+}

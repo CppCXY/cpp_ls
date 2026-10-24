@@ -2915,23 +2915,14 @@ impl<'a> DeclarationFacts<'a> {
         // The scope a qualified declaration belongs to is **written in the text**, so the fact is built from the
         // spelling — the class may be declared in a header this file's scope tree has never seen. No binding is added,
         // which keeps the lookup rule the refusal exists for.
-        if std::env::var_os("CPPLS_TRACE_QUALIFIED").is_some() {
-            eprintln!(
-                "[qualified] pass ran over {} node(s): {:?}",
-                root.descendants().count(),
-                root.descendants()
-                    .map(|node| format!("{:?}", CppSyntaxKind::from(node.kind())))
-                    .collect::<Vec<_>>()
-            );
-        }
-        for (binding, scope) in qualified_declarations(root) {
+        for (binding, scope, parameters) in qualified_declarations(root) {
             if facts
                 .iter()
                 .any(|fact| fact.name_range.start_offset == binding.name_range.start_offset)
             {
                 continue;
             }
-            if let Some(fact) = fact_for(
+            if let Some(mut fact) = fact_for(
                 root,
                 &shapes,
                 &binding,
@@ -2940,6 +2931,12 @@ impl<'a> DeclarationFacts<'a> {
                 None,
                 &declarations,
             ) {
+                // **The walker answered `None` for a definition's list**, because the shape it reads the declarator
+                // from has no name (a qualified definition's name is in the specifier sequence). The pass read the
+                // list from the declaration itself, so the fact a call site's signature is built from is complete.
+                if fact.parameter_list.is_none() {
+                    fact.parameter_list = parameters;
+                }
                 facts.push(fact);
             }
         }
@@ -2973,7 +2970,7 @@ impl<'a> DeclarationFacts<'a> {
 /// The binding's `scope` field is [`ScopeId`]`(0)` and unused: [`fact_for`] takes the scope as its own argument, and the
 /// scope a qualified declaration belongs to is the **spelling**, not a scope in this file's tree (the class is usually
 /// in a header this tree has never seen).
-fn qualified_declarations(root: &CppSyntaxNode) -> Vec<(Binding, String)> {
+fn qualified_declarations(root: &CppSyntaxNode) -> Vec<(Binding, String, Option<String>)> {
     let mut found = Vec::new();
 
     for node in root.descendants() {
@@ -3128,6 +3125,24 @@ fn qualified_declarations(root: &CppSyntaxNode) -> Vec<(Binding, String)> {
                 origin: None,
             },
             qualifier.to_string(),
+            // **The parameter list, taken from the declaration's own header.** `fact_for` reads it through the scope
+            // walker's declarator, and for a qualified definition the *name* is in the specifier sequence rather than
+            // in the declarator — so the walker's shape has no declarator to read, and every definition fact carried
+            // `parameter_list: None`. Measured on a real project: `SetupStyle(style, options);` answered **no
+            // signature**, because the call is in the `.cpp`, the index answers the *definition* fact there (the "own
+            // file wins" rule), and a signature's fallback label is read from exactly this field.
+            node.children()
+                .filter(|child| {
+                    !matches!(CppSyntaxKind::from(child.kind()), CppSyntaxKind::CompoundStat)
+                })
+                .find_map(|child| {
+                    child
+                        .descendants()
+                        .find(|child| {
+                            matches!(CppSyntaxKind::from(child.kind()), CppSyntaxKind::ParameterList)
+                        })
+                        .map(|list| crate::inlay::tidy_list_text(&list.text().to_string()).0)
+                }),
         ));
     }
 

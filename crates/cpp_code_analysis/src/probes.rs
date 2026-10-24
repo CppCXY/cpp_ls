@@ -71,6 +71,7 @@ switch! {
     timing => "CPPLS_TRACE_TIME", "Every type inference, and every file a question had to read to answer one.";
     no_inference => "CPPLS_NO_INFERENCE", "Answer every type question `Unknown`, so that a rule's own walk can be measured apart from the inference.";
     no_index_lookup => "CPPLS_NO_INDEX_LOOKUP", "Answer every declaration query `NotDeclaredHere`, so that a pull's cost can be split into the engine and the index — the sibling of `CPPLS_NO_INFERENCE`.";
+    answers => "CPPLS_TRACE_ANSWERS", "What one name query found: how many declarations, of which kinds, in which files — the question `docs/index-lookup.md` turned on (2288 `_Tp` answers, none of them a class).";
 }
 
 /// **Count how many distinct summaries a session asks for** — the working set `docs/memory-audit.md` M3 needs.

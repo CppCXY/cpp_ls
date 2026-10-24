@@ -186,6 +186,28 @@ where
             None => constructors_of(declared_in, candidate.name_offset),
         };
 
+        // **A declaration whose list the tree does not have, in the file being edited.** A qualified definition —
+        // `void CodeFormat::SetupStyle(LuaStyle &style, …)` — writes its name in the specifier sequence, so
+        // `parameter_list_of` finds no declarator at the fact's name offset and the candidate drops out **silently**:
+        // measured on a real project, `SetupStyle(style, options);` answered no signature while the fact beside it
+        // carried `(LuaStyle &style, const FormattingOptions &options)`. The fact is the same fallback the other-file
+        // branch uses, so the label, the count and the active parameter are right even without the parameter spans.
+        if sources.is_empty()
+            && let Some(parameters) = &candidate.parameters
+        {
+            let (tidy, _) = crate::inlay::tidy_list_text(parameters);
+            signatures.push(CallSignature {
+                label: format!("{spelling}{tidy}"),
+                parameters: Vec::new(),
+                active_parameter: active,
+                declared_in: candidate.file.clone(),
+                declared_at: candidate.name_offset,
+                documentation: None,
+            });
+            rankable.push((Vec::new(), Vec::new()));
+            continue;
+        }
+
         for source in sources {
             let Some(list) = parameter_list_of(declared_in, source.name_offset) else {
                 continue;
