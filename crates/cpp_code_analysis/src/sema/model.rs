@@ -139,6 +139,7 @@ impl<'a> SemanticModel<'a> {
             self.inferred.set(self.inferred.get() + 1);
         }
 
+        let started = std::time::Instant::now();
         let answer = {
             // One borrow of the resolver for the whole inference, so a question that reaches into another file —
             // and the question *inside* that answer, recursively — all go through the same memo and the same
@@ -156,6 +157,19 @@ impl<'a> SemanticModel<'a> {
                 0,
             )
         };
+        // **The slow questions, by name.** A pull answers about 150 of them (measured: "153 question(s) in 169 ms"),
+        // and a total says nothing about which of them is worth the next hour — this does.
+        if crate::probes::timing() {
+            let took = started.elapsed();
+            if took.as_micros() >= 500 {
+                let text: String = expression.text().to_string().chars().take(70).collect();
+                eprintln!(
+                    "[question] {:>5.1} ms  {}",
+                    took.as_secs_f64() * 1000.0,
+                    text.split_whitespace().collect::<Vec<_>>().join(" ")
+                );
+            }
+        }
         answer
     }
 

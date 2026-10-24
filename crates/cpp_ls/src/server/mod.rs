@@ -29,7 +29,29 @@ pub async fn run_ls(cmd_args: CmdArgs) -> Result<(), Box<dyn Error + Sync + Send
     };
 
     let (id, params) = connection.initialize_start()?;
-    let initialization_params: InitializeParams = serde_json::from_value(params).unwrap();
+    // **A malformed `initialize` must be answered, not fatal.** It used to be `unwrap()`: a capability object that
+    // this build of `lsp_types` cannot deserialize — a required field a newer client omits, a field renamed — took
+    // the whole server down before it had answered anything, which an editor shows as "the language server crashed
+    // on startup" with no way to know why. Measured with a real client shape: `textDocument.semanticTokens` without
+    // `requests` panicked with `missing field 'requests'`. The protocol's answer to a request the server cannot
+    // understand is an **error response with `InvalidParams`**, and the client stays alive to report it.
+    let initialization_params: InitializeParams = match serde_json::from_value(params) {
+        Ok(params) => params,
+        Err(error) => {
+            // `InvalidParams`, as the protocol defines it (JSON-RPC **-32602**), and **not** `initialize_finish`: that
+            // sends a successful response, and a client reading `result` out of an error payload is the failure a
+            // wrong code would produce. `::lsp_server` with the leading `::` because this module has a *local*
+            // `lsp_server` (the thin wrapper over the crate) that would otherwise be the one named.
+            connection.sender.send(::lsp_server::Message::Response(
+                ::lsp_server::Response::new_err(
+                    id,
+                    -32602,
+                    format!("cannot read initialize params: {error}"),
+                ),
+            ))?;
+            return Ok(());
+        }
+    };
     let server_capabilities = server_capabilities(&initialization_params.capabilities);
     let initialize_data = serde_json::json!({
         "capabilities": server_capabilities,

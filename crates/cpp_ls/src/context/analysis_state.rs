@@ -485,10 +485,17 @@ impl AnalysisState {
         // hold is in flight — which during a cold index is the 195 seconds this whole guard exists to avoid. An
         // unavailable lock means "cannot answer the question yet", which is a `false` that falls through to the
         // path below rather than a wait.
+        //
+        // **What counts as ready is the summary, and only the summary.** It used to require `session.view(…)` as
+        // well — a *parse of the file* — to decide whether there was any work to do, on a path whose whole purpose is
+        // to be free when there is none; the handler then parsed the file again to answer. A view is derived data
+        // built per request, so requiring one proved nothing about the index, and the summary is the honest test:
+        // **a summary exists exactly when the index has read the file's current text** (the same rule the in-lock
+        // check below applies). Measured on a keystroke loop: one parse of the open file per pull, before the
+        // request's own work.
         if let Ok(session) = self.inner.try_read()
             && let Some(session) = session.as_ref()
             && session.index().summary(&to_prepare).is_some()
-            && session.view(&to_prepare).is_some()
         {
             return true;
         }
