@@ -685,7 +685,20 @@ pub struct ProjectIndex {
     /// Cleared wherever [`ProjectIndex::visibility`] is — an insert, a cook, or a forget — because a fact arriving
     /// is exactly what can change it.
     definition_answers: std::sync::Mutex<HashMap<(String, String), Known<ProjectDefinitions>>>,
+    /// **Every path the index has ever filed**, in normalized form — what tells a *re-read* from a *new file*.
+    ///
+    /// [`ProjectIndex::known_paths`] outlives [`ProjectIndex::forget`] on purpose: an edit is a forget followed by a
+    /// re-read, so at the moment the re-read inserts, the summaries map has no entry for the file — and testing that
+    /// map made every keystroke look like a brand-new file, which cleared the whole walk memo that the contributor
+    /// rule exists to keep. It is a set of `String` and not of ids because `sequence` goes with the summary (see
+    /// `forget`), and because a path that was known once must stay known after it is forgotten.
+    known_paths: std::collections::HashSet<String>,
 }
+
+/// **What evaluating guarded `#include` conditions has cost**, in asks and nanoseconds — see the `FactGuard::Region`
+/// arm and the `[visibility]` probe. Only written when `CPPLS_TRACE_TIME` is on, so a normal run does not touch it.
+pub(crate) static CONDITION_ASKS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub(crate) static CONDITION_NANOS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// One entry of [`ProjectIndex::member_lists`]: the members, and **what the answer was made of**.
 ///
@@ -6857,10 +6870,16 @@ impl ProjectIndex {
         // can change how an `#include "x.h"` resolves for a closure that does not contain it, so that one clears the
         // map. Measured on `LuaSyntaxTree.cpp`: five walks per diagnostics pull, 33.5 ms, and every pull paid them
         // because a pull inserts before it checks.
-        let known_to_the_index = self.summaries.contains_key(&normalize(path));
+        // **"Known" means "the index has filed this path at some point", not "it holds a summary right now".** An
+        // edit is `forget` followed by a re-read, so the summary is absent at the moment the re-read inserts it —
+        // testing the summaries map made every keystroke look like a brand-new file and cleared the whole walk memo
+        // (measured: one keystroke left two walks where the targeted rule should leave one, and the survival this
+        // change is for never happened). `known_paths` outlives a forget for exactly this reason.
+        let rewritten = normalize(path);
+        let known_to_the_index = self.known_paths.contains(&rewritten) || self.summaries.contains_key(&rewritten);
+        self.known_paths.insert(rewritten.clone());
         if let Ok(mut walks) = self.visibility.lock() {
             if known_to_the_index {
-                let rewritten = normalize(path);
                 walks.retain(|_, cached| {
                     cached
                         .contributors
@@ -7710,17 +7729,22 @@ impl ProjectIndex {
         // **What the walk costs per question** — the number `docs/interactive-cost.md` needs to tell a slow pull
         // apart: `[gather]` says how long a declaration query took, this says how much of it was the graph.
         let walk_started = std::time::Instant::now();
+        let asks_before = CONDITION_ASKS.load(std::sync::atomic::Ordering::Relaxed);
+        let nanos_before = CONDITION_NANOS.load(std::sync::atomic::Ordering::Relaxed);
         let (visible_files, through_an_import) = self.visible_files_with_modules(visible_from);
         let files = self.visible_in_order_of(visible_files);
         if crate::probes::timing() && walk_started.elapsed().as_micros() >= 500 {
+            let asks = CONDITION_ASKS.load(std::sync::atomic::Ordering::Relaxed) - asks_before;
+            let nanos = CONDITION_NANOS.load(std::sync::atomic::Ordering::Relaxed) - nanos_before;
             eprintln!(
-                "[visibility] {:>5.1} ms, {} file(s), from {}",
+                "[visibility] {:>5.1} ms, {} file(s), from {} — {asks} condition(s)/{} ms",
                 walk_started.elapsed().as_secs_f64() * 1000.0,
                 files.len(),
                 visible_from
                     .file_name()
                     .map(|name| name.to_string_lossy().to_string())
                     .unwrap_or_else(|| visible_from.display().to_string()),
+                nanos / 1_000_000,
             );
         }
         // Everything below this line is reading facts out of files that are already known to be visible: the
@@ -8331,12 +8355,23 @@ impl ProjectIndex {
                         {
                             Some(answer) => answer,
                             None => {
+                                // **What a condition costs, counted** — the probe that says whether a warm walk is
+                                // warm because the memo works or because there was nothing to ask.
+                                let started = std::time::Instant::now();
                                 let answer = crate::index::environment::visibility_at(
                                     self,
                                     Path::new(&current),
                                     include.guard,
                                     include.range.start_offset,
                                 );
+                                if crate::probes::timing() {
+                                    CONDITION_NANOS.fetch_add(
+                                        started.elapsed().as_nanos() as u64,
+                                        std::sync::atomic::Ordering::Relaxed,
+                                    );
+                                    CONDITION_ASKS
+                                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                }
                                 if let Ok(mut answers) = self.visibility_answers.lock() {
                                     answers.insert(key, answer);
                                 }
