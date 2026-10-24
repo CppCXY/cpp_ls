@@ -2442,3 +2442,57 @@ fn a_local_whose_extent_is_a_macro_is_placed() {
         );
     }
 }
+/// **A member after a nested class that closes inside a conditional region is still a member of the outer class.**
+///
+/// Found on libstdc++'s `<bits/basic_string.h>`: every member of `std::basic_string` after `struct _Alloc_hider` is
+/// filed under the **nested** class — 1134 facts, and `members_of("std::basic_string")` answered the 27 typedefs
+/// declared before it and none of the functions (`size`, `erase`, …). The nested class is declared like this:
+///
+/// ```cpp
+/// struct _Alloc_hider : allocator_type
+/// {
+///     _Alloc_hider(pointer __dat, const _Alloc& __a = _Alloc()) : … { }
+///     pointer _M_p;
+/// };
+/// ```
+///
+/// so `#if` regions *inside* a class body are the shape to test: the closing `};` of a nested class must end it,
+/// whatever conditional regions it contains.
+#[test]
+fn a_nested_class_ends_where_its_brace_ends() {
+    for source in [
+        "class C { struct Inner : Base { int x; }; int size() const; };\n",
+        "class C {\n#if __cplusplus < 201103L\n    int old();\n#else\n    struct Inner : Base { int x; };\n#endif\n    int size() const;\n};\n",
+        "class C {\n    struct Inner : Base {\n#if 1\n        Inner() : Base() { }\n#endif\n        int x;\n    };\n    int size() const;\n};\n",
+        "class C {\n    struct Inner : Base { Inner() : Base() { }\n#if 1\n        int y;\n#endif\n    };\n    int size() const;\n};\n",
+        // Bisection: which part of the shape loses the closing brace?
+        "class C {\n    struct Inner : Base // note\n    {\n        int y;\n    };\n    int size() const;\n};\n",
+        "class C {\n    struct Inner : Base\n    {\n#if A\n        Inner(p a)\n        : Base(a), _M_p(a) { }\n#else\n        Inner(p a)\n        : Base(a), _M_p(a) { }\n#endif\n        int y;\n    };\n    int size() const;\n};\n",
+        "class C {\n    struct Inner : Base\n    {\n#if A\n        Inner(p a) : Base(a), _M_p(a) { }\n#endif\n        int y;\n    };\n    int size() const;\n};\n",
+        "class C {\n    struct Inner : Base\n    {\n        Inner(p a) : Base(a), _M_p(a) { }\n        int y;\n    };\n    int size() const;\n};\n",
+        // Deeper bisection: two constructors in one branch, default arguments, `std::move`.
+        "class C {\n    struct Inner : Base\n    {\n#if A\n        Inner(p a)\n        : Base(a), _M_p(a) { }\n#else\n        Inner(p a)\n        : Base(a), _M_p(a) { }\n\n        Inner(p a)\n        : Base(std::move(a)), _M_p(a) { }\n#endif\n        int y;\n    };\n    int size() const;\n};\n",
+        "class C {\n    struct Inner : Base\n    {\n        Inner(p a)\n        : Base(a), _M_p(a) { }\n        Inner(p a)\n        : Base(std::move(a)), _M_p(a) { }\n        int y;\n    };\n    int size() const;\n};\n",
+        "class C {\n    struct Inner : Base\n    {\n        Inner(p a)\n        : Base(a) { }\n        Inner(p a)\n        : Base(a) { }\n        int y;\n    };\n    int size() const;\n};\n",
+        "class C {\n    struct Inner : Base\n    {\n        Inner(p a) : Base(a) { }\n        Inner(p a) : Base(a) { }\n        int y;\n    };\n    int size() const;\n};\n",
+        // **The libstdc++ shape, verbatim** — a base with a trailing comment, both branches of a conditional holding
+        // constructors with member-initializer lists, and a macro before them.
+        "class C {\n    struct Inner : Base // TODO check __is_final\n    {\n#if __cplusplus < 201103L\n\tInner(pointer __dat, const Alloc& __a = Alloc())\n\t: Base(__a), _M_p(__dat) { }\n#else\n\tCONSTEXPR\n\tInner(pointer __dat, const Alloc& __a)\n\t: Base(__a), _M_p(__dat) { }\n\n\tCONSTEXPR\n\tInner(pointer __dat, Alloc&& __a = Alloc())\n\t: Base(std::move(__a)), _M_p(__dat) { }\n#endif\n\n\tpointer _M_p; // The actual data.\n    };\n    int size() const;\n};\n",
+    ] {
+        let tree = CppParser::parse(source, ParserConfig::default());
+        let table = build_scopes(&tree.get_red_root(), &cpp_code_analysis::NoMacroBodies);
+        let shape = shape(&table);
+        println!("{source}\n→ {shape}\n");
+        let size_scope = table.scopes().iter().find(|scope| {
+            scope
+                .bindings
+                .iter()
+                .any(|binding| binding.name.text() == "size")
+        });
+        assert_eq!(
+            size_scope.and_then(|scope| scope.name.as_ref()).map(|name| name.to_string()),
+            Some("C".to_string()),
+            "`size` is a member of `C`, whatever the nested class does: {shape}"
+        );
+    }
+}

@@ -4431,6 +4431,19 @@ fn parse_class_body_members(p: &mut CppParser) -> ParseResult {
 
         // A `}` with a debt outstanding closes the member that was abandoned, not this body.
         if p.current_token() == CppTokenKind::RightBrace {
+            // **The body's own brace, reached after trivia.** The loop's condition is checked *before*
+            // `emit_trivia_after_current_token`, so a comment written before the closing brace brings the cursor here
+            // with **no debt** — and this branch used to take the brace anyway, decrementing the debt to `-1` and
+            // filing the brace as an error node. The body then read on past its own end.
+            //
+            // Measured: `struct S { int x; // note\n};` swallowed the `}` and every declaration after it. On
+            // libstdc++'s `<bits/basic_string.h>` the trailing `// TODO check __is_final` on `struct _Alloc_hider`
+            // did exactly that, so all 1 100-odd members of `std::basic_string` after it were filed under
+            // `basic_string::_Alloc_hider` and `members_of("std::string")` answered 27 typedefs and no function —
+            // which is what made `size()`, `begin()` and `end()` on a `std::string` report "no member".
+            if unclosed_braces <= 0 {
+                break;
+            }
             unclosed_braces -= 1;
             let error = p.mark(CppSyntaxKind::ErrorNode);
             p.bump();
@@ -5621,6 +5634,12 @@ pub fn parse_linkage_block(p: &mut CppParser) -> ParseResult {
 
         // A `}` with a debt outstanding closes the declaration that was abandoned, not this block.
         if p.current_token() == CppTokenKind::RightBrace {
+            // The same guard the class body needed — see `parse_class_body_members`: the loop's condition was checked
+            // before the trivia was emitted, so a comment before the closing brace arrives here with no debt, and
+            // taking the brace would end the block nowhere and read on past it.
+            if unclosed_braces <= 0 {
+                break;
+            }
             unclosed_braces -= 1;
             let error = p.mark(CppSyntaxKind::ErrorNode);
             p.bump();

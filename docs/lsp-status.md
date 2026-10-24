@@ -139,8 +139,50 @@ local → 只在本文件内改（跨文件会改到别的文件的同名 local�
   两个答案不一致，这是"cooked 读数的条件编译区域被丢掉"的形状（`erase` 在 `#if __cplusplus >= 201103L` 里，
   `docs/semantics-todo.md` ⑤ 记过）。
 
-所以下一次不是"关掉这个检查"，而是让 `members_of` 与 `name_postings` 对同一个类给出一致的答案；在那之前这 9 条
-假报就是"检查太相信自己的成员表"的代价。**这一条是 P2 的第一优先项。**
+所以下一次不是"关掉这个检查"，而是让 `members_of` 与 `name_postings` 对同一个类给出一致的答案。**这一条是 P2 的
+第一优先项。**
+
+#### 追下去的结果：一个解析器 bug，注释吃掉了类的右花括号
+
+`members_of("std::string")` 的 27 个成员**全是 typedef/嵌套类型**，正好是 `struct _Alloc_hider` 之前声明的那些。
+看 `facts_probe`：
+
+```text
+@36242   std::basic_string::_Alloc_hider::size    kind Function ...
+```
+
+`basic_string` 的每个成员都被归到了**嵌套类** `_Alloc_hider` 名下。再往上，最小复现是：
+
+```cpp
+struct S {
+    int x; // note
+};
+int size();
+```
+
+```text
+ClassBody {
+  Declaration int x;
+  DocComment // note
+  ErrorNode }          ← 类的右花括号
+  Token ;
+  Declaration int size();    ← 被吞进类体
+}
+```
+
+原因在 `parse_class_body_members` 的循环里：循环条件在 `emit_trivia_after_current_token()` **之前**求值，所以
+"右花括号前面有注释"时游标带着**零债务**走到那个分支，而分支原来无条件地 `unclosed_braces -= 1`（变成 `-1`）并把
+`}` 收成 `ErrorNode` —— 类体于是越过自己的结尾继续。libstdc++ 的 `_Alloc_hider` 后面正好有一句
+`// TODO check __is_final`，于是 `std::basic_string` 之后的一千多个成员全部落到嵌套类里，`size()` 成了"没有成员"。
+
+修：那个分支先看债务，`unclosed_braces <= 0` 时就是**本体的右花括号**，`break`。同一形状的第二个循环（文件作用域的
+声明序列）一起修。
+
+```text
+std::string      27 → 257 member(s)   size/begin/end 都在
+std::basic_string 27 → 257
+CodeFormat.cpp   9 条假报 → 0（服务器 pull）；批处理仍报 1 条：`std::vector::erase`
+```
 
 ## P3
 
@@ -170,10 +212,10 @@ documentSymbol         yes      14    1 ms
 workspaceSymbol        yes      512   6 ms
 foldingRange           yes      39    1 ms
 selectionRange         yes      5     1 ms
-semanticTokens         yes      507   26 ms
+semanticTokens         yes      516   25 ms
 inlayHint              yes      5     23 ms
 documentLink           yes      5     2 ms
-diagnostic             yes      9     32 ms  `"result" has no member "size"`（假报，见 ⑥）
+diagnostic             yes      0     33 ms  （修复前是 9 条假报，见 ⑥）
 completion (member)    yes      2     28 ms  Editorconfig, Workspace
 signatureHelp          yes      1     0 ms   at 82:17 → SetupStyle(LuaStyle &style, …)   ← 之前 null
 codeAction             yes      0     2 ms
