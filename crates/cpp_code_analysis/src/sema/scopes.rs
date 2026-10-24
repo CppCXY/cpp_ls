@@ -1808,7 +1808,7 @@ impl ScopeWalker<'_> {
 ///
 /// So the walk follows the chain of **last** children down to the deepest one that holds a real token, which is
 /// where the declaration actually ends, and takes the trivia off from there.
-fn without_trailing_trivia(node: &CppSyntaxNode) -> cpp_parser::SourceRange {
+pub(crate) fn without_trailing_trivia(node: &CppSyntaxNode) -> cpp_parser::SourceRange {
     let range = cpp_parser::source_range(node.text_range());
     let end = significant_end(node).unwrap_or(range.end_offset());
     cpp_parser::SourceRange::new(

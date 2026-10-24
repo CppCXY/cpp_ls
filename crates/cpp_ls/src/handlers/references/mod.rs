@@ -540,7 +540,7 @@ fn position_of<F: cpp_code_analysis::FileProvider + Clone>(
 ///
 /// Both are answered here, because the second is the ordinary case in a real project: without it every reference
 /// query in a `.cpp` had no class to compare against and nothing was filtered.
-fn the_class_the_cursor_is_in(
+pub(crate) fn the_class_the_cursor_is_in(
     scopes: &cpp_code_analysis::ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
     offset: usize,

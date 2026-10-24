@@ -59,7 +59,21 @@ pub async fn on_goto_implementation(
         };
         let name = defined.found.first()?.fact.name.clone();
 
-        let found = implementations_of(session, &name);
+        // **The body, then the overrides.** A cursor on a declaration is asking "where is the code"; a cursor on a
+        // base class or a virtual member is asking "what implements this". Both are answered, the definition first
+        // because it is the one a reader on a header declaration means.
+        let mut found = definitions_of(session, &view, offset.get());
+        found.extend(implementations_of(session, &name));
+        let mut seen: Vec<(String, String)> = Vec::new();
+        found.retain(|location| {
+            let key = (location.uri.to_string(), format!("{:?}", location.range));
+            if seen.iter().any(|held| *held == key) {
+                false
+            } else {
+                seen.push(key);
+                true
+            }
+        });
         if found.is_empty() {
             return None;
         }
@@ -68,6 +82,97 @@ pub async fn on_goto_implementation(
     .await
 }
 
+/// **The definitions of the declaration at the cursor** — `void Base::run() { … }` for `void run();` in a header.
+///
+/// This is the question a reader asks when the cursor is on a *declaration*: where is the code? C++ puts the
+/// declaration in a header and the body in a `.cpp`, and until the index recorded out-of-line definitions it answered
+/// nothing at all — the fact for `void CodeFormat::UpdateCodeStyle(…) { … }` did not exist (see `qualified_declarations`
+/// in `sema::declarations` for why, and what it cost).
+///
+/// # Why this is a scan and not a `definitions` query
+///
+/// [`Session::definitions`] answers "what does this **name** resolve to **from here**", and a `.cpp` that defines a
+/// header's function is not visible from the header — it includes the header, not the other way round. So the
+/// direction `definitions` answers is the call site's, and the direction this answers is the declaration's, which is a
+/// scan over the summaries for the same **qualified** name.
+///
+/// Only functions: a class's implementations are its derived classes, which [`implementations_of`] answers.
+pub fn definitions_of<F: FileProvider + Clone>(
+    session: &Session<F>,
+    view: &cpp_code_analysis::FileView,
+    offset: usize,
+) -> Vec<Location> {
+    let Known::Yes(found) = session.definitions(
+        view,
+        cpp_code_analysis::file::coordinates::ReadingOffset::new(offset),
+    ) else {
+        return Vec::new();
+    };
+
+    // **The class the cursor is in, not the fact's `scope`.** `definitions` answers with facts whose `scope` is
+    // rewritten for the asking file (`qualified_name()` of the header's `run` came back as `run`, not `Base::run`), and
+    // the *definition* in the `.cpp` carries `Base` — so a comparison on the fact's own scope would never match. The
+    // cursor's enclosing class is the same answer both declarations were written under, and it is what Find
+    // References and Go to Definition use for the same reason.
+    let owner = crate::handlers::references::the_class_the_cursor_is_in(
+        &view.scopes,
+        &view.root,
+        offset,
+    );
+    let mut wanted: Vec<(String, Option<String>)> = found
+        .found
+        .iter()
+        .filter(|definition| definition.fact.kind == cpp_code_analysis::DeclKind::Function)
+        .map(|definition| (definition.fact.name.clone(), owner.clone()))
+        .collect();
+    wanted.sort();
+    wanted.dedup();
+    if wanted.is_empty() {
+        return Vec::new();
+    }
+
+    let mut locations: Vec<Location> = Vec::new();
+    let summaries = session.index().all_summaries();
+
+    for (path, summary) in &summaries {
+        for fact in &summary.declarations {
+            if fact.kind != cpp_code_analysis::DeclKind::Function {
+                continue;
+            }
+            if !wanted.iter().any(|(name, scope)| {
+                fact.name == *name && fact.scope.as_deref() == scope.as_deref()
+            }) {
+                continue;
+            }
+            // **A definition is the one with a body.** The fact does not record whether it has one (a declaration and
+            // its definition are the same seven fields), so the text is asked: a declaration ends with `;`, a
+            // definition with `}`. One read per candidate file, and only for the name the cursor is on.
+            if !ends_with_a_body(session, path, fact.range) {
+                continue;
+            }
+            push_location(session, path, fact.name_range, &mut locations);
+        }
+    }
+    locations
+}
+
+/// Does the text at `range` in `path` end with a `}` — that is, is this declaration a definition?
+fn ends_with_a_body<F: FileProvider + Clone>(
+    session: &Session<F>,
+    path: &std::path::Path,
+    range: cpp_parser::SourceRange,
+) -> bool {
+    let text = session
+        .files()
+        .held(path)
+        .map(|held| held.text.to_string())
+        .or_else(|| std::fs::read_to_string(path).ok());
+    let Some(text) = text else {
+        return false;
+    };
+    text.get(range.start_offset..range.end_offset())
+        .is_some_and(|declaration| declaration.trim_end().ends_with('}'))
+}
 /// Every declaration that implements `name` — the derived classes, and their members of that name.
 ///
 /// A free function so that a test can ask it without a client, and generic over the provider for the same reason
@@ -230,6 +335,63 @@ mod tests {
                 .iter()
                 .any(|found| found.uri.path().ends_with("derived.h")),
             "the implementation is in the derived class: {overrides:?}"
+        );
+    }
+}
+#[cfg(test)]
+mod a_declaration_in_a_header {
+    use std::path::PathBuf;
+
+    use cpp_code_analysis::{
+        CompilerConfig, MemoryFiles, OpenDocuments, Session, SessionFiles, WatchFilter,
+    };
+
+    use super::definitions_of;
+
+    /// **A header's declaration answers the `.cpp` that defines it.**
+    ///
+    /// The layout every C++ project has, and the answer a reader means by "go to implementation" on a declaration:
+    /// `void run();` in `base.h`, `void Base::run() { … }` in `base.cpp`. It answered **nothing** until the index
+    /// recorded out-of-line definitions at all (`qualified_declarations` in `sema::declarations`).
+    #[test]
+    fn answers_the_body_in_the_source_file() {
+        let files = MemoryFiles::new()
+            .with_file(
+                "/p/base.h",
+                "struct Base {\n    virtual void run();\n};\n",
+            )
+            .with_file(
+                "/p/base.cpp",
+                "#include \"base.h\"\nvoid Base::run() { }\n",
+            );
+        let providers = SessionFiles::new(OpenDocuments::new(), files);
+        let mut session = Session::with_config(
+            "/p",
+            providers,
+            WatchFilter::new("/p"),
+            CompilerConfig::default(),
+        );
+        session.add_project_files([PathBuf::from("/p/base.h"), PathBuf::from("/p/base.cpp")]);
+        session.index_everything();
+
+        let path = PathBuf::from("/p/base.h");
+        let held = session.files().held(&path).expect("the header is held");
+        let view =
+            cpp_code_analysis::FileView::parse_with(held, &cpp_parser::MacroEnvironment::default());
+        let at = "struct Base {\n    virtual void ".len();
+
+        let found = definitions_of(&session, &view, at);
+        println!(
+            "definitions: {:?}",
+            found
+                .iter()
+                .map(|location| location.uri.path().to_string())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(found.len(), 1, "the body, and only it: {found:?}");
+        assert!(
+            found[0].uri.path().ends_with("base.cpp"),
+            "the implementation is in the source file: {found:?}"
         );
     }
 }

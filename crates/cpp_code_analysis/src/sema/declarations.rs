@@ -2902,6 +2902,48 @@ impl<'a> DeclarationFacts<'a> {
             }
         }
 
+        // **A declaration written with a qualified name** — `unsigned long CodeFormat::UpdateCodeStyle(…) { … }`.
+        //
+        // [`declared_name`] refuses these on purpose: `int ns::Widget::count = 0;` declares a member of `ns::Widget`,
+        // and binding `count` in *this* file's scope would put a name in scope that cannot be used unqualified. The
+        // cost of that refusal was larger than it looked: the walker made **no binding at all**, so the declaration
+        // made **no fact**, so a `.cpp` definition was invisible to the whole index — Go to Definition from a call
+        // site answered the header, Find References never showed the definition, and "go to implementation" on a
+        // header declaration had nothing to find. Measured on a real project: `definitions("UpdateCodeStyle")` answered
+        // **1** (the header), while the file defining it was open in front of the reader.
+        //
+        // The scope a qualified declaration belongs to is **written in the text**, so the fact is built from the
+        // spelling — the class may be declared in a header this file's scope tree has never seen. No binding is added,
+        // which keeps the lookup rule the refusal exists for.
+        if std::env::var_os("CPPLS_TRACE_QUALIFIED").is_some() {
+            eprintln!(
+                "[qualified] pass ran over {} node(s): {:?}",
+                root.descendants().count(),
+                root.descendants()
+                    .map(|node| format!("{:?}", CppSyntaxKind::from(node.kind())))
+                    .collect::<Vec<_>>()
+            );
+        }
+        for (binding, scope) in qualified_declarations(root) {
+            if facts
+                .iter()
+                .any(|fact| fact.name_range.start_offset == binding.name_range.start_offset)
+            {
+                continue;
+            }
+            if let Some(fact) = fact_for(
+                root,
+                &shapes,
+                &binding,
+                Some(scope),
+                false,
+                None,
+                &declarations,
+            ) {
+                facts.push(fact);
+            }
+        }
+
         // The sweep below needs both lists in offset order. Facts are sorted rather than built in order
         // because the scope tree's order is depth-first, which is not offset order — a nested class's members
         // are walked before the next top-level declaration.
@@ -2918,7 +2960,179 @@ impl<'a> DeclarationFacts<'a> {
     }
 }
 
-/// Give every fact the innermost conditional region it was written in.
+/// **Every declaration in this file written with a qualified name** — `void CodeFormat::UpdateCodeStyle(…) { … }`.
+///
+/// Returned as a [`Binding`] and the scope its spelling names, for [`DeclarationFacts::build`] to turn into a fact
+/// through the same [`fact_for`] every other declaration goes through. It is a second pass rather than a change to the
+/// scope walker because the walker's refusal is **right**: a qualified name declares nothing this file can use
+/// unqualified, so no binding may be added. What was wrong was stopping there — a declaration with no binding made no
+/// fact, and a `.cpp` definition was invisible to the whole index. Measured on a real project:
+/// `definitions("UpdateCodeStyle")` answered **1** — the header's declaration — while the file defining it was the one
+/// the reader had open.
+///
+/// The binding's `scope` field is [`ScopeId`]`(0)` and unused: [`fact_for`] takes the scope as its own argument, and the
+/// scope a qualified declaration belongs to is the **spelling**, not a scope in this file's tree (the class is usually
+/// in a header this tree has never seen).
+fn qualified_declarations(root: &CppSyntaxNode) -> Vec<(Binding, String)> {
+    let mut found = Vec::new();
+
+    for node in root.descendants() {
+        if !matches!(
+            CppSyntaxKind::from(node.kind()),
+            CppSyntaxKind::Declaration | CppSyntaxKind::FunctionDef
+        ) {
+            continue;
+        }
+        // **Only a declaration outside every body.** A statement is not a declaration, and the parser's own ambiguity
+        // makes that visible here: `ns::f(1);` inside a function body parses as a *declaration* of a variable whose
+        // type is `ns::f` and whose initializer is `(1)` — the most-vexing-parse shape. Without this guard the pass
+        // filed a `Variable` named `f` with scope `ns` and type `ns::f` in a `.cpp` that only *calls* it, and the
+        // overload set `ns::f` became one entry. A qualified definition is written at file scope or in a class body, so
+        // nothing this pass is for is inside a `CompoundStat`.
+        if node.ancestors().any(|ancestor| {
+            matches!(
+                CppSyntaxKind::from(ancestor.kind()),
+                CppSyntaxKind::CompoundStat
+            )
+        }) {
+            continue;
+        }
+        let Some(declarator) = node.children().find(|child| {
+            matches!(
+                CppSyntaxKind::from(child.kind()),
+                CppSyntaxKind::InitDeclarator | CppSyntaxKind::Declarator
+            )
+        }) else {
+            continue;
+        };
+        // **Where the grammar puts a qualified definition's name is not the declarator.**
+        //
+        // `void C::f() { }` parses as `DeclSpecifierSeq [ void, NamedType C::f ]` plus `InitDeclarator ()` — the name
+        // is read as part of the *type* and the declarator holds only the parameter list. (Measured with `dump_tree`;
+        // the same surprise cost this pass its first version, which looked in the declarator and found nothing.) So
+        // the name is looked for in two places, and the rule that tells them apart is that **a declarator with no
+        // name of its own means the name was written before the parameter list**:
+        //
+        // ```text
+        // void C::f() { }        declarator ()                     → the specifier seq's last qualified name
+        // std::string f();       declarator "f()" with a name      → not this pass's business at all
+        // int C::count = 0;      declarator "count = 0" with a name → the declarator's name is unqualified, skip
+        // ```
+        //
+        // **"Its own name" is the outermost `Declarator`'s `NameExpr`, not any `NameExpr` under it**: a parameter is a
+        // declaration of its own (`unsigned long offset` is `Parameter [ DeclSpecifierSeq, Declarator [NameExpr
+        // offset] ]`), so asking whether *anything* under the declarator names something answered `true` for every
+        // function with a named parameter — which was the first version's second bug, and it silently skipped every
+        // definition this pass exists for.
+        let outer = declarator
+            .children()
+            .find(|child| {
+                matches!(CppSyntaxKind::from(child.kind()), CppSyntaxKind::Declarator)
+            })
+            .unwrap_or_else(|| declarator.clone());
+        let names_itself = outer.children().any(|child| {
+            matches!(CppSyntaxKind::from(child.kind()), CppSyntaxKind::NameExpr)
+        });
+        let from_the_declarator = outer
+            .children()
+            .find(|child| {
+                matches!(CppSyntaxKind::from(child.kind()), CppSyntaxKind::NameExpr)
+                    && child.text().to_string().contains("::")
+            })
+            .map(|name| (name, true));
+        let from_the_specifiers = (!names_itself)
+            .then(|| {
+                node.children()
+                    .find(|child| {
+                        matches!(
+                            CppSyntaxKind::from(child.kind()),
+                            CppSyntaxKind::DeclSpecifierSeq
+                        )
+                    })
+                    .and_then(|specifiers| {
+                        specifiers
+                            .descendants()
+                            .filter(|child| {
+                                matches!(CppSyntaxKind::from(child.kind()), CppSyntaxKind::NameExpr)
+                                    && child.text().to_string().contains("::")
+                            })
+                            .last()
+                    })
+            })
+            .flatten()
+            .map(|name| (name, false));
+        // The declarator's own name wins when it has one: it is the shape the parser produces for
+        // `int C::count = 0;` and for a definition written with the name in the declarator.
+        let (name_node, _from_declarator) = match (from_the_declarator, from_the_specifiers) {
+            (Some(found), _) => found,
+            (None, Some(found)) => found,
+            (None, None) => continue,
+        };
+        let spelling = name_node.text().to_string();
+        let Some((qualifier, name)) = spelling.rsplit_once("::") else {
+            continue;
+        };
+        let qualifier = qualifier.trim();
+        let name = name.trim();
+        if qualifier.is_empty() || name.is_empty() {
+            continue;
+        }
+
+        // **The name's own range when it is an identifier**, and the whole spelling otherwise (a destructor and an
+        // operator have no single identifier to highlight) — the same fallback `declared_name` makes, for the same
+        // reason: a fact whose `name_range` covers nothing is a member row with no label.
+        let name_range = name_node
+            .descendants_with_tokens()
+            .filter_map(|element| element.into_token())
+            .filter(|token| {
+                cpp_parser::CppTokenKind::from(token.kind())
+                    == cpp_parser::CppTokenKind::Identifier
+                    && token.text() == name
+            })
+            .last()
+            .map(|token| cpp_parser::source_range(token.text_range()))
+            .unwrap_or_else(|| cpp_parser::source_range(name_node.text_range()));
+
+        let has_parameters = node.descendants().any(|child| {
+            matches!(
+                CppSyntaxKind::from(child.kind()),
+                CppSyntaxKind::ParameterList
+            )
+        });
+        let class = qualifier.rsplit("::").next().unwrap_or(qualifier).trim();
+        let kind = if name.starts_with('~') {
+            crate::BindingKind::Destructor
+        } else if name.starts_with("operator") {
+            crate::BindingKind::OperatorFunction
+        } else if name == class {
+            crate::BindingKind::Constructor
+        } else if has_parameters {
+            crate::BindingKind::Function
+        } else {
+            crate::BindingKind::Variable
+        };
+
+        found.push((
+            Binding {
+                name: if let Some(rest) = name.strip_prefix('~') {
+                    crate::Name::destructor(rest)
+                } else if let Some(symbol) = name.strip_prefix("operator") {
+                    crate::Name::operator(symbol.trim())
+                } else {
+                    crate::Name::identifier(name)
+                },
+                kind,
+                range: crate::scopes::without_trailing_trivia(&node),
+                name_range,
+                scope: ScopeId(0),
+                origin: None,
+            },
+            qualifier.to_string(),
+        ));
+    }
+
+    found
+}
 ///
 /// The one place that knows where the directives are, and therefore the one place that can answer this — which is
 /// why it is a function rather than a step inside the declaration walk. **Every** kind of fact needs it: a
