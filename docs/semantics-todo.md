@@ -120,3 +120,27 @@ Go to Definition，每条只给一个答案（本类声明处）；`references` 
    然后把 `returns` 与一元 arm 一起打开。
 3. 最后才是 `substituted_members` 的放宽——它独立可测。
 ```
+### 为什么 `std::vector::erase` 不在事实里 —— 下一刀的具体位置（测过）
+
+`erase` 在 libstdc++ 的 `bits/stl_vector.h:1793` 是这样写的：**返回类型和声明符之间夹着条件编译**。
+
+```cpp
+      iterator
+#if __cplusplus >= 201103L
+      erase(const_iterator __position)
+```
+
+已经排除的和已经确认的：
+
+```text
+__cplusplus 在索引的宏表里         CPPLS_PRINT_LANGUAGE=1 → body 202002L、value Some(202002)
+同样的形状在 fixture 里能读出来      `int #if HAS_ERASE erase(int); #else erase(long); #endif` →
+                                  members_of(V) 有一条，v.erase(1) 没有假报
+```
+
+所以不是"条件夹在声明符里"这个形状本身，而是 `stl_vector.h` 里那一处的具体读法（模板类体内、
+`_GLIBCXX20_CONSTEXPR` 在上一行、命名空间由 `_GLIBCXX_BEGIN_NAMESPACE_CONTAINER` 展开）。
+
+**下一步**：把 `stl_vector.h` 的 cooked rendering 在 `erase` 附近 dump 出来（或临时打印
+`index.declarations_in("std::vector")` 的名字集合），看 `erase` 是根本没进 facts，还是进了但 scope
+不是 `std::vector`。判据：`members_of(std::vector)` 里出现裸 `erase`，CodeFormat.cpp 最后一条假报消失。
