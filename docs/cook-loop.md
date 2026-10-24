@@ -6,8 +6,10 @@
 **结论先行。**
 
 ```text
-1. 不是 client 的 refresh 请求引起的（`workspace/diagnostic/refresh` 在这个服务里**从未被调用**）；
-   单核来自会话内部一个**永不收敛的 cooking 队列**。
+1. 当时不是 client 的 refresh 请求引起的（那时 `workspace/diagnostic/refresh` 未被调用）；这一次的单核来自会话
+   内部一个**永不收敛的 cooking 队列**。**后来** drain 处又加了一次 refresh（`republish open file
+   diagnostics`），它把这同一条队列变成了"排空→叫客户端重拉→再产生工作"的闭环 —— 那一半见
+   [`refresh-removed.md`](refresh-removed.md)，refresh 已被彻底删除。
 2. 实测出来的两个原因，都在同一条链上：
    a. `want_cooked_reading` 每次请求都**清掉"这个文件烤不动"的记录**，然后重新入队 —— 于是一次拉取
       诊断就把"拒绝"撤销一次，pump 再 claim、再拒绝，循环。
