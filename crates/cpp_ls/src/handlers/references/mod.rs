@@ -447,32 +447,12 @@ fn name_level_locations<F: cpp_code_analysis::FileProvider + Clone>(
     let mut locations: Vec<Location> = Vec::new();
     let push =
         |file: &std::path::Path, range: cpp_parser::SourceRange, locations: &mut Vec<Location>| {
-            // **A file the session is not holding is still a file a declaration can be in.** The VFS holds what has
-            // been read into *this* run, and a header the index read from its disk cache is not in it — which is why
-            // a member's declaration in its header was missing from every reference list. Reading it here is one
-            // `read_to_string` for a list a user asked for, and it is the only way the declaration can be shown.
-            let disk = session
-                .files()
-                .held(file)
-                .is_none()
-                .then(|| std::fs::read_to_string(file).ok())
-                .flatten();
-            let disk_index = disk.as_deref().map(cpp_parser::LineIndex::parse);
-            let (text, index) = match session.files().held(file) {
-                Some(held) => (&*held.text, &*held.line_index),
-                None => {
-                    let (Some(disk), Some(index)) = (disk.as_deref(), disk_index.as_ref()) else {
-                        return;
-                    };
-                    (disk, index)
-                }
-            };
             let Some(uri) = crate::util::path_to_uri(file) else {
                 return;
             };
             let (Some(start), Some(end)) = (
-                crate::util::position_in(text, index, range.start_offset),
-                crate::util::position_in(text, index, range.end_offset()),
+                position_of(session, file, range.start_offset),
+                position_of(session, file, range.end_offset()),
             ) else {
                 return;
             };
@@ -544,6 +524,26 @@ fn name_level_locations<F: cpp_code_analysis::FileProvider + Clone>(
     locations
 }
 
+/// **The position of a byte in a file, whether or not this session is holding it.**
+///
+/// The VFS holds what has been read into *this* run, and a header the index read from its **disk cache** is not in it
+/// — which is why a member's declaration in its header was missing from every reference list. Reading such a file
+/// here is one `read_to_string` for a list a user asked for, and it is the only way the declaration can be shown.
+///
+/// Split out of the `push` closure so that the disk path is testable on its own: a session over `MemoryFiles` holds
+/// every file it knows, and the case that matters is precisely the file it does not know.
+fn position_of<F: cpp_code_analysis::FileProvider + Clone>(
+    session: &cpp_code_analysis::Session<F>,
+    file: &std::path::Path,
+    offset: usize,
+) -> Option<lsp_types::Position> {
+    if let Some(held) = session.files().held(file) {
+        return crate::util::position_in(&held.text, &held.line_index, offset);
+    }
+    let text = std::fs::read_to_string(file).ok()?;
+    let index = cpp_parser::LineIndex::parse(&text);
+    crate::util::position_in(&text, &index, offset)
+}
 /// The **innermost class** whose body contains `offset` — by name, which is what a `DeclFact::scope` carries.
 ///
 /// # The two ways a position is "inside a class", and only one of them is a scope
@@ -769,5 +769,47 @@ void Second::update() { _value = 2; }
             1,
             "one use — `First::update`'s — and not `Second`'s: {locations:?}"
         );
+    }
+}
+#[cfg(test)]
+mod a_file_the_session_does_not_hold {
+    use super::position_of;
+    use cpp_code_analysis::{
+        CompilerConfig, MemoryFiles, OpenDocuments, Session, SessionFiles, WatchFilter,
+    };
+
+    /// **A declaration in a file the VFS never read still gets a position.**
+    ///
+    /// This is the real defect behind "查找引用没有查找到头文件": the index knows the declaration is in
+    /// `codeformat.h`, and the request answered nothing for it because the VFS holds only what has been read into this
+    /// run — a header the index read *from its disk cache* is not in it. The fix reads the file; this test makes the
+    /// file exist on disk and *not* in the session, which is the state that used to answer `None`.
+    #[test]
+    fn is_positioned_even_though_the_vfs_has_never_seen_it() {
+        let root = std::env::temp_dir().join("cpp_ls-references-disk");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("a scratch directory");
+        let header = root.join("only_on_disk.h");
+        std::fs::write(&header, "struct Widget {\n    int size;\n};\n").expect("the fixture");
+
+        let files = MemoryFiles::new();
+        let providers = SessionFiles::new(OpenDocuments::new(), files);
+        let session = Session::with_config(
+            &root,
+            providers,
+            WatchFilter::new(&root),
+            CompilerConfig::default(),
+        );
+        assert!(
+            session.files().held(&header).is_none(),
+            "the fixture is the state this test is about"
+        );
+
+        // The `size` of line 2, counted from zero: its position is line 1, character 8.
+        let at = "struct Widget {\n    int ".len();
+        let found = position_of(&session, &header, at).expect("the file is read for its line index");
+        println!("{header:?} at {at} → {found:?}");
+        assert_eq!(found.line, 1);
+        assert_eq!(found.character, 8);
     }
 }
