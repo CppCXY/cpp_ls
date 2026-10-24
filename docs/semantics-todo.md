@@ -172,3 +172,34 @@ LSP 层对"不能插值 snippet"的客户端用 `->` + label，而不是把 `$0`
 `an_arrow_reaches_the_class_through_the_pointer_and_through_operator_arrow` —— 修前两种接收者都是 `[]`；
 `a_dot_on_a_pointer_lists_the_pointee`；`a_dot_on_a_pointer_is_completed_as_an_arrow` —— 替换范围覆盖的
 那一个字符就是 `.`，插入文本是 `->size`。
+## ⑦ `textDocument/implementation`：头文件里的声明 → `.cpp` 的实现（本次）
+
+报告："把头文件上的 go to implement 也做了"。这一条以前**不可能**回答，原因不在这个 handler，而在索引：
+
+```text
+void CodeFormat::UpdateCodeStyle(…) { … }
+  → 解析成 DeclSpecifierSeq [ void, NamedType C::f ] + InitDeclarator ()
+  → declared_name 看到限定名就 return None（这条拒绝本身是对的：不能把 count 绑进本文件作用域）
+  → 于是没有 binding、没有事实 —— 整个项目的 .cpp 定义都不在索引里。
+    实测：definitions("UpdateCodeStyle") 只回答 1 条 —— 头文件那条，而读者正打开着定义它的文件。
+```
+
+修法（`sema/declarations.rs::qualified_declarations`）：**第二个 pass**，从拼写里取 scope 建事实，不建 binding（
+拒绝的理由因此不受影响）。判据与两个需要实测的形状：
+
+```text
+void C::f() { }      名字在 DeclSpecifierSeq 里，declarator 只有 ()   → 取 specifier 里最后一个限定名
+std::string f();     declarator 自己有名字                             → 跳过（否则会把返回类型当名字）
+"自己有没有名字"      是最外层 Declarator 的 NameExpr，不是它下面任意 NameExpr —— 参数也是声明
+ns::f(1); 在函数体里   会被解析成一个变量声明（most vexing parse）        → 只处理文件作用域，否则多出一条假事实
+```
+
+然后 `implementation` handler 增加了 `definitions_of`：从光标的声明取出 `(名字, 光标所在类)`，扫全部 summary 找
+**同一个限定名、且文本以 `}` 结尾**的函数 —— 那就是定义。ctor 声明以 `;` 结尾，用来区分。不能复用
+`definitions`：它回答的是"从这里能看到什么"，而 `.cpp` 对头文件不可见（是 .cpp include 头文件，不是反过来）。
+
+判据（`cpp_ls` 的 `a_declaration_in_a_header::answers_the_body_in_the_source_file`）：`base.h` 的 `run()`
+→ 唯一答案在 `base.cpp`。返回顺序是"定义先、override 后"，因为光标在声明上时读者要的是代码。
+
+实测：真实项目事实 152 576 → 153 317（+741 个定义），诊断不变（214/187 ms，findings 不变）。
+`tests/semantic.rs::an_unresolved_include_does_not_erase_the_files_own_facts` 第一次变绿 —— 它就是这条的哨兵。
