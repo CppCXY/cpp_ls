@@ -119,7 +119,7 @@ local → 只在本文件内改（跨文件会改到别的文件的同名 local�
 
 `handshake.rs` 断言的就是这个形状：`more`（声明，未使用）→ 1 处编辑，在本文件。
 
-### ⑥ `diagnostic` 现在报 9 条，全是假报，而且类型是对的
+### ⑥ `diagnostic` 的 9 条假报：一个解析器 bug，已修
 
 `CodeFormat.cpp` pull 出 9 条：`result`/`formattedText` 没有 `size`/`begin`/`end`，`config.Workspace` 没有 `size`，
 `_configs` 没有 `erase`。`auto result = f.GetFormatResult(t);` 那个 `auto` **推对了**（`std::string`），错的是成员表。
@@ -131,13 +131,14 @@ local → 只在本文件内改（跨文件会改到别的文件的同名 local�
 [undefined-field] `std::vector` -> `erase` (303 member(s), 0 unlisted) — index: 122 posting(s), 278 in scope `std::vector`
 ```
 
-读法：**成员表不完整，但不是"unlisted"的那种不完整**（`unlisted` 是基类，这里 0）。两个不同的缺口：
+读法：**成员表不完整，但不是"unlisted"的那种不完整**（`unlisted` 是基类，这里 0）。两个不同的缺口，都追到了根：
 
-* `std::string` 是别名（`basic_string<char>`），它的 27 个成员不是 `basic_string` 的完整列表，而 `size`/`begin`/`end`
-  在索引里有 posting、**在 scope `std::string` 下是 0** —— 别名解析/模板实参替换这一层没把成员挂到 `std::string` 上。
-* `std::vector` 有 303 个成员、`erase` 在 scope `std::vector` 下有 **278 个 posting**，成员表里却没有它 —— 同一个类的
-  两个答案不一致，这是"cooked 读数的条件编译区域被丢掉"的形状（`erase` 在 `#if __cplusplus >= 201103L` 里，
-  `docs/semantics-todo.md` ⑤ 记过）。
+* `std::string` 的 27 个成员**全是 typedef**，正好是 `struct _Alloc_hider` 之前声明的那些 —— 那是解析器 bug（见下）。
+* `std::vector` 的 303 个成员里没有 `erase`，而 `facts_probe` 在 `bits/stl_vector.h` 上给出
+  `erase` → **0 个事实**、`push_back` → 2 个 —— 也是别的 bug，见下面最后一节。
+
+（`scope_postings` 是"这个 scope 下有多少 posting"，**不是某个名字在这个 scope 下的数量**；早先那行
+`0 in scope std::string` 被我读成了"别名没把成员挂上去"，是误读。真正的证据是 `facts_probe` 打印的 scope 名。）
 
 所以下一次不是"关掉这个检查"，而是让 `members_of` 与 `name_postings` 对同一个类给出一致的答案。**这一条是 P2 的
 第一优先项。**
@@ -182,6 +183,38 @@ ClassBody {
 std::string      27 → 257 member(s)   size/begin/end 都在
 std::basic_string 27 → 257
 CodeFormat.cpp   9 条假报 → 0（服务器 pull）；批处理仍报 1 条：`std::vector::erase`
+```
+
+#### 还没修的：`std::vector::erase`（声明被条件编译从中间劈开）
+
+```cpp
+      _GLIBCXX20_CONSTEXPR
+      iterator
+#if __cplusplus >= 201103L
+      erase(const_iterator __position)
+      { return _M_erase(begin() + (__position - cbegin())); }
+#else
+      erase(iterator __position)
+      { return _M_erase(__position); }
+#endif
+```
+
+`#if` 夹在**返回类型和函数名之间**。未 cook 的读数里，说明符序列把 `_GLIBCXX20_CONSTEXPR` 当成类型、把 `iterator`
+当成声明符的名字（`Declaration CONSTEXPR > InitDeclarator iterator`），然后声明在 `#` 处失败、回滚成碎片：
+`Declaration erase` 加一个 `ErrorNode` 装 `(` —— 于是 `erase` 没有参数表，也没有事实。
+
+两个可选修法，都还没试：
+
+```text
+说明符序列：读到 NamedType 之后再遇到 # 就把指令读掉、继续读说明符
+            （CONSTEXPR 和 iterator 都是说明符，声明符是 erase(...)）——风险是 `Type name #if` 会把名字吃掉
+声明规则：声明符之前允许一条指令（每个分支各自成为一个成员）——这是更保守的读法，但要在回滚之前生效
+```
+
+`facts_probe` 是复现命令：
+
+```text
+target\release\examples\facts_probe.exe <mingw64>/lib/gcc/.../include/c++/bits/stl_vector.h erase
 ```
 
 ## P3
