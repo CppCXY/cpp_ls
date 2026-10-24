@@ -126,6 +126,14 @@ fn main() {
     let started = Instant::now();
     let read = session.index_everything();
     let indexed = started.elapsed();
+    // **Is the language version known?** The question `#if __cplusplus >= 201103L` asks of every libstdc++ header,
+    // and the one that decides whether `std::vector::erase` is in the facts at all.
+    if std::env::var_os("CPPLS_PRINT_LANGUAGE").is_some() {
+        match session.index().macros().get("__cplusplus") {
+            Some(definition) => eprintln!("[language] __cplusplus = {definition:?}"),
+            None => eprintln!("[language] __cplusplus is NOT in the index's macro table"),
+        }
+    }
     let stats = session.stats();
     let units = session.unit_stats();
     println!(
