@@ -47,6 +47,26 @@ finding — unchanged, as a fix that removes work must be. The probe that found 
 `crates/cpp_ls/tests/loop_probe.rs` (`#[ignore]`d, driven by `CPPLS_LOOP_ROOT`/`CPPLS_LOOP_FILE`), which starts the
 real server over a real project and counts the log's lines by kind.
 
-Still open, and measured: a pull asks for one or two *renderings* through `macro_work` and they are not found the
-next time, so a pull still costs one render. That is a cache question, not a loop — the queue empties and the answers
-hold — and it is the next number to look at rather than a reason to send a refresh.
+## And the cook a pull still caused — the second half of the same loop
+
+With the refresh gone, the probe still showed one `cook slice` per pull. Two candidates were measured and one was
+wrong:
+
+```text
+the rendering cache's capacity      8 -> 64 entries: the same cooks, entry for entry (`cache 8 -> 8`, `cache 64 -> 64`)
+the ask in view_of_the_file         unconditional: every call queued a cook for its file, even with the rendering cached
+```
+
+`Session::view_of_the_file` queued `macro_work` on **every** call — its comment said "exactly as `view` does", and
+`view` queues only when the lookup misses. Every query about a *position* goes through it, so a pull cooked the same
+two headers again and again (`types.h`, `stl_vector.h` in the log). It now asks the same question `view` asks.
+
+Measured with the probe, one edit then twenty pulls in two rounds:
+
+```text
+round 1: ten pulls over 2.8 s, 2 cook(s)      ← the edit's own closure finishing, paid once
+round 2: ten pulls over 2.8 s, 0 cook(s)      ← nothing typed, nothing cooked
+```
+
+`cache_lru::RENDERING_ENTRIES` stays at **eight**, and its comment carries the measurement that says why: raising it
+changed no number, so it was not the cause, and it went back.

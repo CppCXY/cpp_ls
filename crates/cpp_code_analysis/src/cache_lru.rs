@@ -31,6 +31,13 @@ use std::collections::HashMap;
 use std::hash::Hash;
 
 /// How many renderings a session keeps — see [`Cache::renderings`].
+///
+/// **Eight is enough, and the question was measured rather than argued.** A session that re-cooked one file per
+/// diagnostics pull looked like cache thrash — a pull asks for the open file, its quoted includes and the standard
+/// headers those pull in, which is more than eight files — so the cap was raised to **sixty-four** and the same probe
+/// was run again: the same cooks, entry for entry (`cache 8 -> 8` and `cache 64 -> 64`). The cause was not eviction
+/// but an unconditional ask in `Session::view_of_the_file`; with that fixed, ten pulls cause **no** cook, and the
+/// number stays at eight rather than at a value that changed nothing.
 pub const RENDERING_ENTRIES: usize = 8;
 
 /// How many bytes of rendered text a session keeps — see [`Cache::renderings`].

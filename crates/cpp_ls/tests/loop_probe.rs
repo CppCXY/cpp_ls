@@ -39,7 +39,12 @@ fn what_repeats() {
         .current_dir(&root)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        // **The child's stderr is a file, not a hole.** The probes in `cpp_code_analysis` print there, and a probe
+        // that cannot be read is not a probe — the first version of this file sent them to `Stdio::null()` and then
+        // reported "0" for lines that were being written all along.
+        .stderr(Stdio::from(
+            std::fs::File::create(log_dir.join("stderr.txt")).expect("a stderr file"),
+        ))
         .env("CPPLS_TRACE_COOKING", "1")
         .spawn()
         .expect("the server starts");
@@ -93,16 +98,30 @@ fn what_repeats() {
             "contentChanges": [{ "text": edited }],
         }),
     );
-    let started = Instant::now();
-    for id in 200..210 {
-        std::thread::sleep(Duration::from_millis(250));
-        let _ = server.request(
-            id,
-            "textDocument/diagnostic",
-            json!({ "textDocument": { "uri": uri } }),
+    // **The edit's own cooks are the edit's**, not the pulls': let the pump finish them, then count from there. What
+    // the ten pulls cost is the number this probe exists for — and **two rounds** of it, because the first round can
+    // honestly share the edit's aftermath while a second round with nothing typed in between must cost nothing.
+    std::thread::sleep(Duration::from_secs(3));
+    let mut cooks_before = stderr_matching(&log_dir, "commit_a_cooked").len();
+    for round in 1..=2 {
+        let started = Instant::now();
+        for id in (200 + round * 10)..(210 + round * 10) {
+            std::thread::sleep(Duration::from_millis(250));
+            let _ = server.request(
+                id,
+                "textDocument/diagnostic",
+                json!({ "textDocument": { "uri": uri } }),
+            );
+        }
+        let cooks = stderr_matching(&log_dir, "commit_a_cooked").len();
+        println!(
+            "round {round}: ten pulls over {:?}, {} cook(s)",
+            started.elapsed(),
+            cooks.saturating_sub(cooks_before)
         );
+        cooks_before = cooks;
+        std::thread::sleep(Duration::from_secs(2));
     }
-    println!("ten pulls over {:?}", started.elapsed());
 
     let _ = server.request(99, "shutdown", Value::Null);
     server.notify("exit", Value::Null);
@@ -120,6 +139,8 @@ fn what_repeats() {
         "cook slice:",
         "cook slice committed:",
         "want_cooked_reading(",
+        "view: no rendering",
+        "commit_a_cooked:",
         "index drained",
         "the pump made no progress",
     ] {
@@ -136,6 +157,18 @@ fn what_repeats() {
         })
         .take(20)
     {
+        println!("{line}");
+    }
+
+    // **The child's own stderr**, which is where `cpp_code_analysis`'s probes print. The first version of this file
+    // sent it to `Stdio::null()` and then reported zero lines that were being written all along.
+    let cooks = stderr_matching(&log_dir, "commit_a_cooked");
+    println!(
+        "--- the ten pulls caused {} cook(s) (of {} in the whole run)",
+        cooks.len().saturating_sub(cooks_before),
+        cooks.len()
+    );
+    for line in cooks.iter().rev().take(6) {
         println!("{line}");
     }
 }
@@ -219,6 +252,16 @@ fn uri_of(path: &std::path::Path) -> String {
     }
     format!("file://{text}")
 }
+/// The lines of the child's stderr that contain `needle`.
+fn stderr_matching(dir: &std::path::Path, needle: &str) -> Vec<String> {
+    std::fs::read_to_string(dir.join("stderr.txt"))
+        .unwrap_or_default()
+        .lines()
+        .filter(|line| line.contains(needle))
+        .map(str::to_string)
+        .collect()
+}
+
 /// Every line of every log file in `dir`, in file order.
 fn log_lines(dir: &std::path::Path) -> Vec<String> {
     let mut lines = Vec::new();

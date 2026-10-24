@@ -3386,8 +3386,15 @@ impl<F: FileProvider + Clone> Session<F> {
         // the request below names the file the session will actually cook.
         let requested = path.as_ref();
         let file = self.vfs.held(requested)?;
-        // Queue it exactly as `view` does, so that asking twice is a request rather than a wait.
-        if let Ok(mut work) = self.macro_work.lock() {
+        // Queue it **only if there is nothing to read yet** — the rule `view` states, and the reason this one used to
+        // make every request work: it asked unconditionally, so the file was cooked again on every query even though
+        // its rendering was in the cache. Measured on a real project with the loop probe
+        // (`crates/cpp_ls/tests/loop_probe.rs`): ten diagnostics pulls caused **five** cooks, the same two headers
+        // each time (`types.h`, `stl_vector.h`), each a render and a parse — and raising the cache from 8 to 64
+        // entries changed the count **not at all**, which is what named the cause: the ask, not the eviction.
+        if self.known_rendering_of(&file.path, &file.text).is_none()
+            && let Ok(mut work) = self.macro_work.lock()
+        {
             work.want(&file.path);
         }
 
