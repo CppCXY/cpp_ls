@@ -614,7 +614,18 @@ pub struct ProjectIndex {
     ///
     /// Keyed by the root so that a server with several files open keeps at most one answer per file, and storing the
     /// walk's own `Seen` rather than a copy of the pair because that is what the walk produces.
-    visibility: std::sync::Mutex<HashMap<String, std::sync::Arc<Seen>>>,
+    ///
+    /// # Why an entry carries the files it was made of
+    ///
+    /// **Clearing the whole map on every insert is what made a keystroke pay for the walk.** A pull cooks (inserts)
+    /// before it runs the checks, so every pull walked five closures from scratch: measured on `LuaSyntaxTree.cpp`,
+    /// 13.0 / 3.6 / 4.9 / 2.8 / 9.2 ms = 33.5 ms of one 200 ms pull. But a walk's answer depends on exactly the
+    /// files it read (their includes, their conditions' macros), so a re-read of a file invalidates precisely the
+    /// entries whose closure contains it — and editing `LuaSyntaxTree.cpp` drops the walk *from* `LuaSyntaxTree.cpp`
+    /// while the four walks from the headers it includes survive. A file the index has **never** seen still clears
+    /// the whole map, because a new file can change how an `#include "x.h"` resolves for a closure that does not
+    /// contain it. See [`ProjectIndex::insert_at`] and [`ProjectIndex::forget`].
+    visibility: std::sync::Mutex<HashMap<String, CachedWalk>>,
     /// What the **condition** on a guarded `#include` was last answered, by `(file, region)`.
     ///
     /// A memo, not a fact: it is cleared whenever a summary is inserted, because that is the only thing that can
@@ -6806,17 +6817,33 @@ impl ProjectIndex {
     /// whose keys match have the same declarations, at the same offsets, with the same ranges, *and* the same
     /// resolved includes.
     pub fn insert_at(&mut self, path: &Path, summary: FileSummary) {
-        // A new summary can change any condition's answer, so the memos go — both of them, because both answer
-        // questions about conditions: the per-condition one and the whole-walk one. They are cheap to lose and a
-        // wrong answer is not. See [`ProjectIndex::visibility`].
+        // A new summary can change any condition's answer, so the per-condition memo goes: an answer about
+        // visibility can only change when what the index holds changes, and losing one costs a condition, not a
+        // walk. See [`ProjectIndex::visibility_answers`].
         if let Ok(mut answers) = self.visibility_answers.lock() {
             answers.clear();
         }
-        if let Ok(mut walks) = self.visibility.lock() {
-            walks.clear();
-        }
         if let Ok(mut declared) = self.definition_answers.lock() {
             declared.clear();
+        }
+        // **The walk memo is dropped per contributor rather than whole** — see [`ProjectIndex::visibility`]. A
+        // re-read of a file the index already knew can only change the walks that read it; a file it has never seen
+        // can change how an `#include "x.h"` resolves for a closure that does not contain it, so that one clears the
+        // map. Measured on `LuaSyntaxTree.cpp`: five walks per diagnostics pull, 33.5 ms, and every pull paid them
+        // because a pull inserts before it checks.
+        let known_to_the_index = self.summaries.contains_key(&normalize(path));
+        if let Ok(mut walks) = self.visibility.lock() {
+            if known_to_the_index {
+                let rewritten = normalize(path);
+                walks.retain(|_, cached| {
+                    cached
+                        .contributors
+                        .binary_search_by(|file| file.as_str().cmp(rewritten.as_str()))
+                        .is_err()
+                });
+            } else {
+                walks.clear();
+            }
         }
         // …and every member list this file contributed to, which is the narrow invalidation: a class whose members
         // live in another file keeps its answer. See [ProjectIndex::member_lists].
@@ -6925,16 +6952,22 @@ impl ProjectIndex {
             return false;
         };
 
-        // **A file that is gone changes answers, so every memo goes** — the visibility walks, the per-condition
-        // answers and the declaration answers, by the rule they share (an answer can only change when what the
-        // index holds changes). Clearing them here is also a correctness fix rather than only bookkeeping: the
-        // test `name_index_agrees_with_the_scan::after_every_kind_of_edit` caught a query between a forget and the
-        // next insert answering from a walk that still had the forgotten file in it.
+        // **A file that is gone changes answers, so the memos go** — the per-condition answers and the declaration
+        // answers whole, and the walks whose closure contained the file. A walk that never read it cannot answer
+        // differently, and keeping those is what stopped a keystroke from paying for five closure walks: measured on
+        // `LuaSyntaxTree.cpp`, 33.5 ms of a 200 ms pull. The contributor rule is also a correctness fix rather than
+        // only bookkeeping — the test `name_index_agrees_with_the_scan::after_every_kind_of_edit` caught a query
+        // between a forget and the next insert answering from a walk that still had the forgotten file in it.
         if let Ok(mut answers) = self.visibility_answers.lock() {
             answers.clear();
         }
         if let Ok(mut walks) = self.visibility.lock() {
-            walks.clear();
+            walks.retain(|_, cached| {
+                cached
+                    .contributors
+                    .binary_search_by(|file| file.as_str().cmp(path.as_str()))
+                    .is_err()
+            });
         }
         if let Ok(mut declared) = self.definition_answers.lock() {
             declared.clear();
@@ -7054,16 +7087,11 @@ impl ProjectIndex {
         if changed {
             self.forget_member_lists(Path::new(&path));
         }
-        // The memo keyed by `(file, region)` is cleared for the same reason `insert` clears it: an answer about
-        // visibility can only change when what the index holds changes.
-        self.visibility_answers
-            .lock()
-            .expect("the visibility memo is not poisoned")
-            .clear();
-        self.visibility
-            .lock()
-            .expect("the visibility walk memo is not poisoned")
-            .clear();
+        // **What a cooked reading can change is the declaration answers, and nothing else here.** A walk reads
+        // includes and their conditions — facts of the file's *own text*, which the cooked reading does not rewrite
+        // — so clearing the walk memo for a cook was over-invalidation of the most expensive kind: the second pass
+        // cooks ~1 200 files back to back, and every one of them threw away every closure the queries had built.
+        // Measured: it was the reason a keystroke right after a cold start walked five closures again (33.5 ms).
         self.definition_answers
             .lock()
             .expect("the definition memo is not poisoned")
@@ -7921,7 +7949,7 @@ impl ProjectIndex {
             .visibility
             .lock()
             .ok()
-            .and_then(|walks| walks.get(&from).map(std::sync::Arc::clone))
+            .and_then(|walks| walks.get(&from).map(|cached| std::sync::Arc::clone(&cached.seen)))
         {
             let mut order: Vec<(String, IncludeVisibility)> =
                 Vec::with_capacity(known.visibility.len());
@@ -7946,8 +7974,18 @@ impl ProjectIndex {
         // function asks is not a second implementation of the walk — it is the same walk, told to report the files
         // it enters. That is the rule the module keeps being bitten by: one question, one implementation.
         let mut seen = Seen::new(&from);
+        let macros_started = std::time::Instant::now();
         let mut state = self.macros.clone();
+        let macros_cloned = macros_started.elapsed();
         let certain = self.certainly_in_the_translation_unit(Path::new(&from));
+        if crate::probes::timing() && macros_started.elapsed().as_micros() >= 300 {
+            eprintln!(
+                "[visibility] the state: macro table cloned in {macros_cloned:?} ({} entry(ies)), \
+                 the translation unit's certain set in {:?}",
+                self.macros.len(),
+                macros_started.elapsed() - macros_cloned
+            );
+        }
 
         self.macro_candidates(
             Path::new(&from),
@@ -7999,9 +8037,28 @@ impl ProjectIndex {
 
         // Remembered before it is handed out, and `through_an_import` is cloned out of the shared copy: the caller
         // owns its set, and the memo has to be immutable to be shared.
+        //
+        // **The contributor list is the closure, normalized once here** so that [`ProjectIndex::insert_at`] can
+        // drop precisely the walks a re-read invalidates without normalizing a closure per insert.
         let through_an_import = seen.through_an_import.clone();
+        let mut contributors: Vec<String> = Vec::with_capacity(seen.visibility.len() + 1);
+        contributors.push(from.clone());
+        contributors.extend(
+            seen.visibility
+                .keys()
+                .filter(|path| **path != from)
+                .map(|path| normalize(Path::new(path))),
+        );
+        contributors.sort_unstable();
+        contributors.dedup();
         if let Ok(mut walks) = self.visibility.lock() {
-            walks.insert(from, std::sync::Arc::new(seen));
+            walks.insert(
+                from,
+                CachedWalk {
+                    seen: std::sync::Arc::new(seen),
+                    contributors: std::sync::Arc::new(contributors),
+                },
+            );
         }
 
         (order, through_an_import)
@@ -9431,6 +9488,17 @@ enum Collecting<'a> {
 
 /// The files one root can see, and which of them are in view only through an `import`.
 ///
+/// One memoised visibility walk: what it found, and **the files it was made of**.
+///
+/// The contributors are the normalized paths of the closure (the root and every file [`Seen::visibility`] records),
+/// so a re-read of one of them drops exactly the walks that could have answered differently. See
+/// [`ProjectIndex::visibility`] for the measurement that made this worth carrying.
+#[derive(Debug)]
+struct CachedWalk {
+    seen: std::sync::Arc<Seen>,
+    contributors: std::sync::Arc<Vec<String>>,
+}
+
 /// Two outputs from one walk because the second is a property of *how* a file was reached, and a walk that has
 /// already crossed the edge is the only thing that knows. See [`ProjectIndex::visible_files_with_modules`].
 #[derive(Default, Debug)]
