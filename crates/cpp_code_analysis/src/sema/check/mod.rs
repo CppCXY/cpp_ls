@@ -1459,8 +1459,9 @@ pub fn run(context: CheckContext<'_>) -> Vec<Finding> {
 
     if crate::probes::timing() {
         let (ran, nanos) = context.model.inference_cost();
+        let (inferred, reused) = context.model.inference_stats();
         eprintln!(
-            "[checks] inference: {ran} question(s) in {} ms",
+            "[checks] inference: {ran} question(s) in {} ms ({inferred} computed, {reused} reused)",
             nanos / 1_000_000
         );
     }

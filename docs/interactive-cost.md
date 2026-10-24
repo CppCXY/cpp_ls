@@ -109,6 +109,12 @@ crates/cpp_code_analysis/src/probes.rs
 2. `undefined-field` 的 99 ms 不是树遍历（收集 74 个访问只要 0.27 ms），是 74 次 type_of
    （共 452 个推断问题，约 6 个/访问）。所以下一刀在引擎的"一个对象表达式要问 6 个问题"上，
    而不是在这个检查里。
+   **现在的分布（LuaSyntaxTree.cpp，稳态 171–173 ms）**：`CPPLS_NO_INFERENCE=1` → 17 ms，
+   `CPPLS_NO_INDEX_LOOKUP=1` → 118 ms。所以推断 ≈155 ms = 索引查询 ≈55 + 引擎自身 ≈100；
+   引擎的 452 个问题里 **247 个是真正算的、273 个是记忆命中**，即每个"算"的问题 0.4 ms。
+   下一个探针要回答的是"这 0.4 ms 花在什么上"（候选：`Type::parse` 的类型拼写解析、
+   `convertible_to`、每个问题都做的 `scope_at`）——把 `[type_of]`（>5 ms/问题）打开跑一遍即可，
+   它现在一条都不打印，说明没有单点慢，是均摊。
 3. 剩下几次慢查询里 `size_t` 有 136 个答案、`std` 209 个：typedef/别名在标准库的每个头里都声明一次。
    命名空间的折叠规则能不能推广（前提是"指向同一个实体"，不能猜）。
 4. 冷启动尾巴仍然 63 切片 / 7.7 s，和编辑延迟是两笔账；见 docs/memory-audit.md 与 docs/cook-loop.md。
