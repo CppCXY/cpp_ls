@@ -505,12 +505,13 @@ fn every_feature_answers_what_the_project_holds() {
         let mut ordered = candidates.clone();
         if let Some(line) = text.lines().position(|body| body.contains("SetupStyle(")) {
             if let Some(column) = text.lines().nth(line).and_then(|body| body.find('(')) {
-                let mut preferred = Position {
-                    line: line as u32,
-                    character: (column + 3) as u32,
-                };
-                ordered.insert(0, preferred);
-                let _ = preferred;
+                ordered.insert(
+                    0,
+                    Position {
+                        line: line as u32,
+                        character: (column + 3) as u32,
+                    },
+                );
             }
         }
         let mut best: Option<(u32, u32, usize, String)> = None;
