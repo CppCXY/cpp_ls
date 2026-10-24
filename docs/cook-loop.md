@@ -105,3 +105,24 @@ provisional 单元答 `None`，于是没有进展。
 
 验收：handshake 全量并行连跑 4 次全绿；`cpp_ls` 87 + 32 + idle + latency 全绿；keystroke 延迟不变
 （did_chg 2–5 ms，诊断 21–23 ms，findings 12/13/13）。
+## 后续二：空报告不是答案（2026-10-24，实测）
+
+`sticky report` 的第一版只在"没有读数"时重复上一次报告。加了 `tests/diagnostics_stable.rs` 才发现**还有第二种空答案**：
+
+```text
+一次编辑 → pull → diagnose_file 返回 Some(0)（真的"干净"报告，连续 7 次）→ 客户端擦掉波浪线
+       → pump 结束 → refresh → 客户端再问 → 2 条出现
+```
+
+原因在检查层的可见性门：`checks_may_be_trusted` 在索引还有活的时候**扣住 check 结果**，于是报告里只有
+parse error（这里没有），成了一个"干净"的答案。修法是把"扣住"当成第三种状态：
+
+```text
+settled 的报告          最终答案，替换客户端持有的
+未 settled 的报告       与上一次报告合并（新出现的 parse error 立刻显示，未确认的 finding 留在屏幕上）
+没有答案                重复上一次报告
+```
+
+规则是 `document_diagnostic::the_report`（三个分支有单测），`diagnose_file_with_state` 报告是否 settled。
+`tests/diagnostics_stable.rs` 是端到端门禁：一个 `int count = "three"` 的文件，编辑后立刻 pull、
+再连拉三次，findings 的数量**不允许从 >0 掉到 0**。修前 12 次跑 2 次失败，修后 12 次全过。

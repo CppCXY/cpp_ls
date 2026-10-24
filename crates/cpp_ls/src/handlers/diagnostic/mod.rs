@@ -59,6 +59,21 @@ use log::debug;
 /// VFS's line index (not through a parse of the file, which the layered answer no longer needs) and the message
 /// becomes a [`Diagnostic`].
 pub fn diagnose_file(session: &Session<DiskFiles>, path: &Path) -> Option<(Uri, Vec<Diagnostic>)> {
+    diagnose_file_with_state(session, path).map(|(uri, items, _settled)| (uri, items))
+}
+
+/// [`diagnose_file`], and **whether the analysis had nothing left to do when it answered**.
+///
+/// An empty answer while the pump still has work is not a claim a client should act on: the check layer reads facts
+/// that are still being filed, so "no findings" there can become a finding a moment later — measured with
+/// `tests/diagnostics_stable.rs` on a four-line file, seven consecutive pulls answered "clean" before the finding
+/// appeared. The pull handler repeats the last report for that state instead of sending it; see
+/// `document_diagnostic::the_report`. `diagnose_file` keeps the old signature for callers that only want the list.
+pub fn diagnose_file_with_state(
+    session: &Session<DiskFiles>,
+    path: &Path,
+) -> Option<(Uri, Vec<Diagnostic>, bool)> {
+    let settled = session.pending_work() == 0;
     let uri = path_to_uri(path)?;
     // Held by the VFS: this is the text — the buffer when the file is open, the disk otherwise — the offsets below
     // are offsets into, and the index that turns them into a line and a column.
@@ -135,7 +150,7 @@ pub fn diagnose_file(session: &Session<DiskFiles>, path: &Path) -> Option<(Uri, 
         })
         .collect();
 
-    Some((uri, diagnostics))
+    Some((uri, diagnostics, settled))
 }
 
 /// **May a check's finding be published yet?** — the gate described where it is used.

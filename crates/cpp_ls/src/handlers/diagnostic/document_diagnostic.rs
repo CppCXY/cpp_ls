@@ -54,23 +54,37 @@ pub async fn on_pull_document_diagnostic(
         context.request_manager(),
         &cache_key,
         Some(cancel_token),
-        move |session| Some(super::diagnose_file(session, &for_the_query)),
+        move |session| Some(super::diagnose_file_with_state(session, &for_the_query)),
     )
     .await;
 
     outcome.map(|found| {
         // **What this pull can answer, and what it says when it cannot.**
         //
-        // `diagnose_file` answers `None` for a file the analysis has no cooked reading for — which is the state right
-        // after every edit, until the pump cooks the file. Turning that into an **empty report** tells the client
-        // "this file is clean", it clears the squiggles the user is looking at, and the refresh that follows the cook
-        // makes them come back: that is the flash, and it is a claim the server cannot support.
+        // Two states produce a report a client must not act on. `diagnose_file` answers `None` when the analysis has
+        // no cooked reading for the file — the state right after every edit, until the pump cooks it — and it
+        // answers a list *without the check layer* while the index still has work (`checks_may_be_trusted`). Either
+        // one, sent as it stands, tells the client "this file is clean", it clears the squiggles the user is looking
+        // at, and the refresh that follows the cook makes them come back: that is the flash, and both are claims the
+        // server cannot support.
         //
-        // So a pull that cannot answer repeats the last report it gave for that file (`AnalysisState::last_reports`)
-        // and only a *real* answer replaces it. The visible effect is the one a user expects: the squiggles stay
-        // until the analysis has something better to say, and then they change once.
-        let found = found.map(|(_, items)| items);
-        let (items, to_remember) = the_report(found, context.analysis().last_report(&path));
+        // So a pull with no answer repeats the last report the file was given, and a pull whose checks were
+        // **withheld** unions what it has with that report — a parse error that just appeared is shown at once, and
+        // the findings that are merely unconfirmed stay on screen until the analysis settles and the real answer
+        // replaces them. `AnalysisState::last_reports` holds that report; the rule is `the_report` below.
+        let (found, settled) = match found {
+            Some((_, items, settled)) => (Some(items), settled),
+            None => (None, false),
+        };
+        let was = found.as_ref().map(|items| items.len());
+        let (items, to_remember) = the_report(found, context.analysis().last_report(&path), settled);
+        log::debug!(
+            "pull: {} -> {} item(s) (analysis said {:?}, settled {settled}, repeated {})",
+            path.display(),
+            items.len(),
+            was,
+            to_remember.is_none()
+        );
         if let Some(items) = to_remember {
             context
                 .analysis()
@@ -94,17 +108,41 @@ pub async fn on_pull_document_diagnostic(
 /// the whole content of "diagnostics do not flash", and the middle one is the case that made them flash. The second
 /// return value is what the caller should remember: `None` when the answer came from the memory, because repeating
 /// it must not refresh it.
+///
+/// **Three states, and the second is the one that made diagnostics flash.** A `settled` answer is the analysis's
+/// final word and replaces what the client holds. An unsettled one is a report whose *check layer was withheld*
+/// because the index still has work: it is merged with the last report rather than replacing it, so a parse error
+/// that just appeared is shown at once while the findings that are merely unconfirmed stay on screen. No answer at
+/// all repeats the last report.
 fn the_report(
     found: Option<Vec<lsp_types::Diagnostic>>,
     last: Option<std::sync::Arc<Vec<lsp_types::Diagnostic>>>,
+    settled: bool,
 ) -> (Vec<lsp_types::Diagnostic>, Option<Vec<lsp_types::Diagnostic>>) {
+    let held = last.map(|held| (*held).clone());
     match found {
-        Some(items) => (items.clone(), Some(items)),
-        None => (
-            last.map(|held| (*held).clone()).unwrap_or_default(),
-            None,
-        ),
+        Some(items) if settled => (items.clone(), Some(items)),
+        Some(items) => {
+            let mut merged = items;
+            if let Some(held) = held {
+                for diagnostic in held {
+                    if !merged.iter().any(|sent| the_same_diagnostic(sent, &diagnostic)) {
+                        merged.push(diagnostic);
+                    }
+                }
+            }
+            (merged, None)
+        }
+        None => (held.unwrap_or_default(), None),
     }
+}
+
+/// The identity a client uses to draw one diagnostic: the range, the rule, and the message.
+///
+/// Two reports that differ only in item order are the same picture, so the merge above has to recognise an item it
+/// already has — and `lsp_types::Diagnostic` does not implement `PartialEq`.
+fn the_same_diagnostic(one: &lsp_types::Diagnostic, other: &lsp_types::Diagnostic) -> bool {
+    one.range == other.range && one.code == other.code && one.message == other.message
 }
 
 /// A `DocumentDiagnosticReport` saying nothing is wrong, which is a valid answer to a pull request.
@@ -126,33 +164,42 @@ fn an_empty_report() -> DocumentDiagnosticReportResult {
 mod tests {
     use super::*;
 
-    /// **The middle case is the one that made diagnostics flash**: no answer from the analysis, and a report the
-    /// client is already showing. Answering `[]` there claims the file became clean, and the refresh that follows
-    /// the cook takes that claim back a moment later.
+    fn a_diagnostic(message: &str) -> lsp_types::Diagnostic {
+        lsp_types::Diagnostic {
+            message: message.to_string(),
+            ..lsp_types::Diagnostic::default()
+        }
+    }
+
+    /// **The middle state is the one that made diagnostics flash**: a report computed while the check layer was
+    /// withheld. Replacing the client's report with it removes the findings that were only *unconfirmed*, and the
+    /// refresh after the cook puts them back — a diagnostic that blinks at every keystroke.
     #[test]
-    fn no_answer_repeats_the_last_report_instead_of_claiming_the_file_is_clean() {
-        let one = lsp_types::Diagnostic::default();
-        let last = std::sync::Arc::new(vec![one]);
-        let found_nothing: Option<Vec<lsp_types::Diagnostic>> = None;
+    fn an_unsettled_report_keeps_what_the_client_already_holds() {
+        let held = std::sync::Arc::new(vec![a_diagnostic("from the last report")]);
 
-        // 1. Nothing to say, but something was said before: repeat it, and do not overwrite it.
-        let (sent, remember) = the_report(None, Some(std::sync::Arc::clone(&last)));
-        assert_eq!(sent.len(), 1, "a pull with no answer must not say the file is clean");
-        assert!(remember.is_none(), "repeating a report must not refresh it");
-
-        // 2. A real answer — including a clean one — wins and becomes what is repeated afterwards.
-        let (sent, remember) = the_report(Some(Vec::new()), Some(last));
-        assert!(sent.is_empty(), "an answer from the analysis is the answer");
-        assert!(remember.is_some(), "and it is what the next silent pull repeats");
-
-        // 3. A file nothing was ever said about is empty: all a first pull can be.
-        let (sent, remember) = the_report(None, None);
+        // A settled answer is the final word, even when it is empty.
+        let (sent, remember) = the_report(Some(Vec::new()), Some(std::sync::Arc::clone(&held)), true);
         assert!(sent.is_empty());
+        assert!(remember.is_some(), "the settled answer is what gets repeated");
+
+        // An unsettled one is merged: the parse error it has, plus the finding it could not confirm.
+        let (sent, remember) = the_report(
+            Some(vec![a_diagnostic("a parse error")]),
+            Some(std::sync::Arc::clone(&held)),
+            false,
+        );
+        assert_eq!(sent.len(), 2, "{sent:?}");
+        assert!(remember.is_none(), "an unsettled report is not remembered");
+
+        // No answer at all repeats the last report.
+        let (sent, remember) = the_report(None, Some(held), false);
+        assert_eq!(sent.len(), 1);
         assert!(remember.is_none());
 
-        // 4. The `found` case carries its own items through unchanged.
-        let (sent, remember) = the_report(Some(vec![lsp_types::Diagnostic::default()]), None);
-        assert_eq!(sent.len(), 1);
-        assert_eq!(remember.map(|items| items.len()), Some(1));
+        // Nothing was ever said: empty, and nothing to remember.
+        let (sent, remember) = the_report(None, None, false);
+        assert!(sent.is_empty());
+        assert!(remember.is_none());
     }
 }
