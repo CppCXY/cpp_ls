@@ -2121,3 +2121,182 @@ fn a_member_is_completed_in_a_separated_definition() {
         "the body of a separated definition names the class's own members: {labels:?}"
     );
 }
+/// **`->` reaches the class the arrow means**, which is not the object's own class.
+///
+/// Reported: "operator 的支持还没做完，比如智能指针的补全没有考虑到指向的内容". A smart pointer's own members are
+/// `operator->`, `operator*`, `reset`, … — none of which `->` can reach — so a list built from the object's class is
+/// the wrong list twice over: it offers what the arrow cannot name and omits what it means.
+///
+/// The chain is followed through the type: a pointer's pointee, or a class's own `operator->` return type and then its
+/// pointee. `Widget* pointer;` and `std::unique_ptr<Widget> smart;` therefore answer the same member list.
+#[test]
+fn an_arrow_reaches_the_class_through_the_pointer_and_through_operator_arrow() {
+    let source = "\
+namespace std {
+template <class T>
+struct unique_ptr {
+    T* operator->() const;
+    T& operator*() const;
+};
+}
+struct Widget {
+    int size;
+    void draw();
+};
+Widget* pointer;
+std::unique_ptr<Widget> smart;
+void f() {
+    pointer->;
+    smart->;
+}
+";
+    let mem = MemoryFiles::new().with_file("/p/a.cpp", source);
+    let providers = SessionFiles::new(OpenDocuments::new(), mem);
+    let mut session = Session::with_config(
+        "/p",
+        providers,
+        WatchFilter::new("/p"),
+        CompilerConfig::default(),
+    );
+    session.add_project_files([std::path::PathBuf::from("/p/a.cpp")]);
+    session.index_everything();
+    let _ = session.view("/p/a.cpp");
+    session.index_everything();
+
+    for (needle, what) in [("pointer->", "a raw pointer"), ("smart->", "a smart pointer")] {
+        let at = source.find(needle).expect("the fixture writes it") + needle.len();
+        let labels = labels_at(&mut session, "/p/a.cpp", at);
+        println!("{what} at {at}: {labels:?}");
+        assert!(
+            labels.iter().any(|label| label == "size"),
+            "{what}: the pointee's member is offered: {labels:?}"
+        );
+        assert!(
+            labels.iter().any(|label| label == "draw"),
+            "{what}: and its member function: {labels:?}"
+        );
+        assert!(
+            !labels.iter().any(|label| label == "operator->"),
+            "{what}: the pointer's own `operator->` is not what the arrow reaches: {labels:?}"
+        );
+    }
+}
+
+/// **A `.` typed on a pointer lists the pointee's members**, which is what the reader meant — the operator they
+/// should have typed is the client's business, and the list is the same one `->` gives.
+#[test]
+fn a_dot_on_a_pointer_lists_the_pointee() {
+    let source = "\
+struct Widget {
+    int size;
+};
+Widget* pointer;
+void f() {
+    pointer.;
+}
+";
+    let mem = MemoryFiles::new().with_file("/p/a.cpp", source);
+    let providers = SessionFiles::new(OpenDocuments::new(), mem);
+    let mut session = Session::with_config(
+        "/p",
+        providers,
+        WatchFilter::new("/p"),
+        CompilerConfig::default(),
+    );
+    session.add_project_files([std::path::PathBuf::from("/p/a.cpp")]);
+    session.index_everything();
+    let _ = session.view("/p/a.cpp");
+    session.index_everything();
+    let at = source.find("pointer.").expect("the fixture") + "pointer.".len();
+    let labels = labels_at(&mut session, "/p/a.cpp", at);
+    println!("dot at {at}: {labels:?}");
+    assert!(
+        labels.iter().any(|label| label == "size"),
+        "the pointee's member is offered after a `.` on a pointer: {labels:?}"
+    );
+}
+/// **A `.` typed on a pointer is completed as `->`**: the range the client replaces covers the operator itself, and
+/// the insertion carries `->`.
+///
+/// Reported as "我们通过.补全的时候也应该补全时替换为->". The list is the pointee's (see the test above), and the operator
+/// is the one thing the reader got wrong — `.size` on a `Widget*` does not compile — so the answer replaces it rather
+/// than completing a member onto text that cannot use one.
+#[test]
+fn a_dot_on_a_pointer_is_completed_as_an_arrow() {
+    let source = "\
+struct Widget {
+    int size;
+};
+Widget* pointer;
+void f() {
+    pointer.;
+}
+";
+    let mem = MemoryFiles::new().with_file("/p/a.cpp", source);
+    let providers = SessionFiles::new(OpenDocuments::new(), mem);
+    let mut session = Session::with_config(
+        "/p",
+        providers,
+        WatchFilter::new("/p"),
+        CompilerConfig::default(),
+    );
+    session.add_project_files([std::path::PathBuf::from("/p/a.cpp")]);
+    session.index_everything();
+    let _ = session.view("/p/a.cpp");
+    session.index_everything();
+
+    // **The last one**: the fixture declares `pointer` and then uses it, and the use is what the cursor is on.
+    let dot = source.rfind("pointer.").expect("the fixture") + "pointer".len();
+    let at_in_the_file = dot + 1;
+    let view = cooked_view(&mut session, "/p/a.cpp");
+    let answered = session.completions(
+        &view,
+        cpp_code_analysis::file::coordinates::FileOffset::new(at_in_the_file),
+    );
+    // **The answer's offsets are the rendering's**, and the rendering is not the file byte for byte (the cook drops
+    // what the preprocessor consumed). The cursor therefore has to be read in the same numbering before the two are
+    // compared — the mistake this test made first, and the reason both numbers are printed below.
+    let at = view
+        .reading_offset_of(cpp_code_analysis::file::coordinates::FileOffset::new(
+            at_in_the_file,
+        ))
+        .expect("the offset is in the rendering")
+        .get();
+    println!(
+        "replace {:?} items {:?}",
+        answered.replace,
+        answered
+            .items
+            .iter()
+            .map(|item| (&item.label, &item.insert))
+            .collect::<Vec<_>>()
+    );
+
+    // **A rendering's offsets, not the fixture's**: the answer is in the cooked text's numbering, which is what the
+    // client's range is in. What matters is the character the range covers and where it sits relative to the cursor.
+    assert_eq!(
+        answered.replace.length, 1,
+        "the replacement covers one character — the operator: {:?}",
+        answered.replace
+    );
+    assert_eq!(
+        at - answered.replace.start_offset,
+        1,
+        "and that character is the one immediately before the cursor: {:?} at {at}",
+        answered.replace
+    );
+    assert_eq!(
+        &view.source[answered.replace.start_offset..answered.replace.end_offset()],
+        ".",
+        "which is the `.` the reader typed"
+    );
+    let size = answered
+        .items
+        .iter()
+        .find(|item| item.label == "size")
+        .expect("the pointee's member is offered");
+    assert_eq!(
+        size.insert, "->size",
+        "and the insertion carries the operator the member can actually follow"
+    );
+}

@@ -3779,7 +3779,7 @@ fn binary_operands_of(
 /// `None` for a class that declares no such operator, for one nobody declared (a template parameter, a name from a
 /// header the project never read), and for an operator whose declaration did not spell a return type. Every `None`
 /// means "this layer has no answer", never "the program has no answer".
-fn operator_returns_of(
+pub(crate) fn operator_returns_of(
     index: &ProjectIndex,
     declaring: &mut dyn FnMut(&Path) -> Option<crate::FileView>,
     scopes: &crate::ScopeTree,

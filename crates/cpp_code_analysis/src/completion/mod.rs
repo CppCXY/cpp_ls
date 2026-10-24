@@ -446,6 +446,72 @@ pub fn why_no_members(
 /// index can see, the class has no members, or every member was the implementation's — and they have four different
 /// fixes. The reason is produced *here*, where the steps are, rather than re-derived by a diagnostic that would
 /// have to ask the same questions again and could answer them differently. See [`why_no_members`].
+/// **Which class a `.` or a `->` reaches** — the answer a member list is built from.
+///
+/// A `.` means the object's own class (or, for a pointer, the class it points at — C++ makes that ill-formed, and a
+/// reader typing `.` on a pointer is asking about the class anyway). A `->` means the same thing *after* the arrow has
+/// been followed as far as the type answers, which is what makes the two cases a reader reports work:
+///
+/// ```text
+/// Widget* p;                    p->   reaches Widget          (a pointer's pointee)
+/// std::unique_ptr<Widget> sp;   sp->  reaches Widget          (the class's own operator->, then its pointee)
+/// std::shared_ptr<T> sp;        sp->  reaches T               (same, one more hop through the pointer)
+/// standard containers           it->  reaches the element     (`iterator::operator->`'s return)
+/// ```
+///
+/// Answering the object's own class instead was the defect reported as "智能指针的补全没有考虑指向的内容": a smart
+/// pointer's own member list is `operator->`, `operator*`, `reset`, `get`, … — none of which can be reached through
+/// `->` — while the class it points at has exactly the members the arrow means.
+///
+/// **Bounded.** A class whose `operator->` returns itself (a proxy) is a loop, and four hops is past every real chain
+/// measured: `shared_ptr<T>` is two, a `unique_ptr` is two, a container iterator is two.
+fn the_class_after_the_operator(
+    index: &ProjectIndex,
+    scopes: &ScopeTree,
+    root: &CppSyntaxNode,
+    path: &Path,
+    written: &crate::sema::types::Type,
+    arrow: bool,
+) -> Option<(String, bool)> {
+    // **Whether a pointer was followed to find the class**, which is what says a `.` should have been a `->`.
+    let mut followed_a_pointer = false;
+    let mut current = written.clone();
+    for _ in 0..4 {
+        if let Some(class) = current.class_name().map(str::to_string) {
+            if !arrow {
+                return Some((class, followed_a_pointer));
+            }
+            // **A class takes the arrow through its own `operator->`**, and a class without one is where the arrow
+            // stops: a plain `struct` on the left of `->` is ill-formed, and its members are the honest answer for a
+            // reader who typed one by mistake.
+            let Some(returns) = crate::index::project::operator_returns_of(
+                index,
+                &mut |_: &Path| None,
+                scopes,
+                root,
+                path,
+                &current,
+                "operator->",
+            ) else {
+                return Some((class, followed_a_pointer));
+            };
+            current = crate::sema::types::parse_type_spelling(&returns);
+            continue;
+        }
+        match current.pointee() {
+            Some(pointee) => {
+                followed_a_pointer = true;
+                current = (*pointee).clone();
+            }
+            None => return None,
+        }
+    }
+    current
+        .class_name()
+        .map(str::to_string)
+        .map(|class| (class, followed_a_pointer))
+}
+
 fn members(
     index: &ProjectIndex,
     scopes: &ScopeTree,
@@ -495,14 +561,23 @@ fn members(
     // **The class, not the type.** `std::vector<int>` is a type and `std::vector` is what has members; listing the
     // members of the whole spelling asked about a class nobody declares, which is why a completion after a standard
     // container's member answered nothing.
-    let Some(class) = written.class_name() else {
+    //
+    // **And for `->` it is the class the arrow reaches, not the object's own class.** `p->` on a `Widget*` means
+    // `Widget`; `sp->` on a `std::unique_ptr<Widget>` means `Widget` as well, through the class's own `operator->`
+    // (whose return type is a pointer, whose pointee is the class). Answering the object's own class was the defect
+    // a reader reported as "智能指针的补全没有考虑指向的内容": a smart pointer's own members are `operator->`,
+    // `operator*`, `reset`, … — none of which can be reached through `->` — while the class it points at has exactly
+    // the members the arrow means.
+    let Some((class, followed_a_pointer)) =
+        the_class_after_the_operator(index, scopes, root, path, &written, access.arrow)
+    else {
         return refused(format!(
             "the type of `{}` is `{written}`, which names no class to list members of",
             access.object.text().to_string().trim()
         ));
     };
 
-    let found = match crate::index::project::members_of(index, scopes, root, path, class) {
+    let found = match crate::index::project::members_of(index, scopes, root, path, &class) {
         Known::Yes(found) => found,
         Known::Unknown(reason) => {
             return MemberAnswer {
@@ -569,7 +644,7 @@ fn members(
         }
 
         let mut item = CompletionItem::declared(&member.fact, &member.file);
-        item.kind = member_kind(member, class);
+        item.kind = member_kind(member, &class);
         item.replace = replace;
 
         if member.depth > 0 {
@@ -596,7 +671,7 @@ fn members(
         }
 
         scored.push(Scored {
-            score: member_score(member, class),
+            score: member_score(member, &class),
             matched,
             item,
         });
@@ -604,6 +679,28 @@ fn members(
 
     let (items, truncated) = ordered(scored);
     let offered = items.len();
+
+    // **A `.` typed on a pointer completes as `->`.** The list is the pointee's — what the reader meant — and the
+    // operator they typed is the one thing about the answer that is wrong: `.size` on a `Widget*` does not compile.
+    // So the operator is replaced as part of the insertion: the range grows one byte to the left (the `.`) and every
+    // insert text gains the `->`. The handler keeps the rewrite for a client that cannot interpolate snippets by
+    // noticing the prefix, and a client that filters on the label is unaffected (the label stays the member's name).
+    let (replace, items) = if followed_a_pointer {
+        let operator = replace.start_offset.saturating_sub(1);
+        let items: Vec<crate::completion::CompletionItem> = items
+            .into_iter()
+            .map(|mut item| {
+                item.insert = format!("->{}", item.insert);
+                item
+            })
+            .collect();
+        (
+            cpp_parser::SourceRange::new(operator, replace.length + 1),
+            items,
+        )
+    } else {
+        (replace, items)
+    };
 
     let why = if offered > 0 {
         format!("the member query answered, with {offered} members")

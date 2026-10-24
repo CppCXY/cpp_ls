@@ -374,11 +374,16 @@ fn text_edit(
     insert_as_a_snippet: bool,
 ) -> Option<CompletionTextEdit> {
     let new_text = if insert_as_a_snippet {
-        item.insert.as_str()
+        item.insert.clone()
+    } else if item.insert.starts_with("->") {
+        // **A rewritten operator is part of the insertion, not part of the placeholders.** The analysis answers
+        // `->size` when the reader typed `.` on a pointer, and a client that cannot interpolate snippets still has to
+        // get the operator: the alternative is `$0` in the file, which is why the label is normally what is inserted.
+        format!("->{}", item.label)
     } else {
         // A snippet the client cannot interpolate is inserted as its **label**: the alternative is placeholder
         // syntax in the file.
-        item.label.as_str()
+        item.label.clone()
     };
 
     Some(CompletionTextEdit::Edit(TextEdit {
@@ -392,7 +397,7 @@ fn text_edit(
                 cpp_code_analysis::file::coordinates::ReadingOffset::new(replace.end_offset()),
             )?,
         ),
-        new_text: new_text.to_string(),
+        new_text,
     }))
 }
 
