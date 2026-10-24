@@ -77,12 +77,19 @@
 两个类各有一份 `_value`、各在 `First::update`/`Second::update` 里用一次 → 修前 4 条（两个声明 + 两个用法），
 修后 **2 条**（`First` 在头文件里的声明 + `First::update` 的用法）。
 
-### 还差的（诚实记下）
+### 带限定的用法：接收者的类型决定（本次补上）
 
-**带限定的用法仍然不过滤**：`other._value` 里的接收者是什么类型，这个列表不去算，所以一个别的类的对象上的
-同名成员访问仍会出现在列表里。下一步是把 `member_access_at` 拿到的 object 交给
-`type_of_expression`，比对它的类——这是有界的（每次出现一次推断），但会让一次 Find References 变贵，
-要先量再决定。
+`other._value` / `p->_value` 现在按**接收者的类型**判断，和裸名字是两条规则：
+
+```text
+裸名字            外层类是哪个类，就是哪个类的成员（无限定查找先找本类）
+带限定            用 member_access_at 拿到 object，Session::type_at 求它的类型，比对 owner
+类型求不出来        保留（漏报一个可见的用法，比隐藏一个真实用法更糟）
+```
+
+判据（`a_receiver_of_another_class::is_the_receivers_and_a_bare_name_is_the_enclosing_classs`）：
+`First::update` 里既有自己的裸 `_value`，也有 `first._value`（first 是 First），而 `Second::update` 里还有
+一个裸 `_value` → 从 `First::_value` 出发只应得到 **第 2、5 行**；关掉接收者规则是 `[1, 4, 5]`（把 Second 的也算进来）。
 ## ④ operator 推断：**已落地**，而且成本是零（2026-10-24）
 
 `DeclFact::name` 现在对 operator 是真实的拼写（`operator[]`、`operator+`、`~Widget`），operator 的返回类型也进了

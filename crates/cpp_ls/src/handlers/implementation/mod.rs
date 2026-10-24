@@ -234,6 +234,10 @@ pub fn implementations_of<F: FileProvider + Clone>(
     found
 }
 
+/// The last `::`-separated segment of a spelling, for a caller in another handler — `std::vector` -> `vector`.
+pub(crate) fn last_segment_of(spelling: &str) -> &str {
+    last_segment(spelling)
+}
 /// The last `::`-separated segment of a spelling — `std::vector` -> `vector`.
 fn last_segment(spelling: &str) -> &str {
     spelling.rsplit("::").next().unwrap_or(spelling).trim()

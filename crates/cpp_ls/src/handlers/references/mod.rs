@@ -492,13 +492,7 @@ fn name_level_locations<F: cpp_code_analysis::FileProvider + Clone>(
         };
         for range in ranges {
             if let Some((class, view)) = &scopes
-                && a_bare_name_in_another_class(
-                    &view.scopes,
-                    &view.root,
-                    view.source.as_ref(),
-                    range.start_offset,
-                    class,
-                )
+                && an_occurrence_of_another_class(session, view, range.start_offset, class)
             {
                 continue;
             }
@@ -615,29 +609,53 @@ pub(crate) fn narrowed_to_the_cursors_class(
     narrowed.found = inside;
     narrowed
 }
-/// **Is this occurrence a bare name inside a class that is not `owner`?** — see [`name_level_locations`].
+/// **Is this occurrence provably another class's member?** — the filter [`name_level_locations`] applies.
 ///
-/// "Bare" is read from the text: the characters before the name, past whitespace, are `.`, `->` or `::` for a
-/// qualified occurrence and something else for an unqualified one. A qualified occurrence is kept whatever its class,
-/// because which object a receiver names is a type question rather than a scope question, and dropping a use a reader
-/// is looking for is worse than showing one they would not rename.
-fn a_bare_name_in_another_class(
-    scopes: &cpp_code_analysis::ScopeTree,
-    root: &cpp_parser::CppSyntaxNode,
-    text: &str,
+/// Two shapes, and they are answered by different questions because the language answers them differently:
+///
+/// ```text
+/// a bare name       `_value` inside `Second::update` — unqualified lookup finds that class's member first, so a
+///                   different enclosing class proves it is not this one
+/// a qualified name  `other._value` / `p->_value` / `Type::_value` — the *receiver's type* is what decides, and
+///                   `Session::type_at` is the same inference every other query uses
+/// ```
+///
+/// A receiver whose type cannot be worked out keeps the occurrence: a list a reader cannot rename from is a
+/// smaller problem than a list that hides a use.
+fn an_occurrence_of_another_class<F: cpp_code_analysis::FileProvider + Clone>(
+    session: &cpp_code_analysis::Session<F>,
+    view: &cpp_code_analysis::FileView,
     offset: usize,
     owner: &str,
 ) -> bool {
-    let Some(class) = the_class_the_cursor_is_in(scopes, root, offset) else {
-        return false;
-    };
-    if class == owner {
-        return false;
-    }
-    let before = text.get(..offset).unwrap_or_default().trim_end();
-    !(before.ends_with('.') || before.ends_with("->") || before.ends_with("::"))
-}
+    use cpp_code_analysis::Known;
 
+    // **Qualified**: the member access the occurrence is in names it, and its object's type is the answer.
+
+    if let Some(access) = cpp_code_analysis::sema::resolve::member_access_at(&view.root, offset)
+        && access.member_range.start_offset == offset
+    {
+        let at = cpp_code_analysis::file::coordinates::ReadingOffset::new(
+            usize::from(access.object.text_range().start()),
+        );
+        return match session.type_at(view, at) {
+            Known::Yes(found) => cpp_code_analysis::sema::types::parse_type_spelling(
+                &found.type_of,
+            )
+            .class_name()
+            .is_some_and(|class| {
+                crate::handlers::implementation::last_segment_of(class) != owner
+            }),
+            _ => false,
+        };
+    }
+
+    // **Bare**: the enclosing class decides, and a class that is not this one means the name is not this member.
+    match the_class_the_cursor_is_in(&view.scopes, &view.root, offset) {
+        Some(class) => class != owner,
+        None => false,
+    }
+}
 #[cfg(test)]
 mod name_level {
     use std::path::PathBuf;
@@ -903,6 +921,85 @@ void First::update() { _value = 1; }
             names,
             ["First::_value"],
             "the cursor is in `First::update`, so that is the declaration meant"
+        );
+    }
+}
+#[cfg(test)]
+mod a_receiver_of_another_class {
+    use std::path::PathBuf;
+
+    use cpp_code_analysis::{
+        CompilerConfig, MemoryFiles, OpenDocuments, Session, SessionFiles, WatchFilter,
+    };
+
+    use super::name_level_locations;
+
+    const BASE_H: &str = "\
+struct First {
+    int _value;
+    void update();
+};
+struct Second {
+    int _value;
+    void update();
+};
+";
+
+    const USE_CPP: &str = "\
+#include \"base.h\"
+void First::update() { _value = 1; }
+void Second::update() {
+    First first;
+    first._value = 2;    // First's member, reached through a First
+    _value = 3;          // Second's member
+}
+";
+
+    /// **A qualified use is the receiver's**, so `first._value` belongs to `First` even from `Second`'s member.
+    ///
+    /// This is the half the bare-name rule cannot answer: the occurrence is inside `Second::update`, which would make
+    /// every unqualified `_value` there `Second`'s — and it is, except the one behind `.`. The receiver's type decides,
+    /// with the same inference every other query uses.
+    #[test]
+    fn is_the_receivers_and_a_bare_name_is_the_enclosing_classs() {
+        let files = MemoryFiles::new()
+            .with_file("/p/base.h", BASE_H)
+            .with_file("/p/use.cpp", USE_CPP);
+        let providers = SessionFiles::new(OpenDocuments::new(), files);
+        let mut session = Session::with_config(
+            "/p",
+            providers,
+            WatchFilter::new("/p"),
+            CompilerConfig::default(),
+        );
+        session.add_project_files([PathBuf::from("/p/base.h"), PathBuf::from("/p/use.cpp")]);
+        session.index_everything();
+
+        let path = PathBuf::from("/p/use.cpp");
+        let held = session.files().held(&path).expect("the file is held");
+        let view =
+            cpp_code_analysis::FileView::parse_with(held, &cpp_parser::MacroEnvironment::default());
+
+        // **From `First::update`**: its own use, the receiver-qualified one, and not `Second`'s.
+        let at = USE_CPP
+            .find("_value = 1")
+            .expect("the fixture writes it in First::update");
+        let found = name_level_locations(
+            &session,
+            &view,
+            cpp_code_analysis::file::coordinates::ReadingOffset::new(at),
+            true,
+        );
+        let lines: Vec<u32> = found
+            .iter()
+            .filter(|location| location.uri.path().ends_with("use.cpp"))
+            .map(|location| location.range.start.line)
+            .collect();
+        println!("lines in use.cpp for First::_value: {lines:?}");
+        assert_eq!(
+            lines,
+            [1, 4],
+            "the bare use in `First::update` and the receiver-qualified one — not `Second`'s own"
         );
     }
 }
