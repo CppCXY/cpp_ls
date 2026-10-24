@@ -380,6 +380,28 @@ const NAME_REFERENCE_BUDGET: usize = 2000;
 /// The declarations come from the index (`Session::definitions`), which is the same answer "go to definition" gives;
 /// the uses come from `name_references`, which lexes the files that can see those declarations. The two are merged and
 /// deduplicated, because a declaration is also a place the name is written and a client shows it once.
+///
+/// # A member of one class is not a member of another, and this function is where that is decided
+///
+/// The lexer answers *every* occurrence of the spelling, because a spelling is all a lexer can see: asking for
+/// `_diagnosticStyle` on a real project answered three classes' members and eighteen uses, and a reader looking at
+/// `CodeFormat::_diagnosticStyle` was shown `LuaCodeFormat`'s and `FormatState`'s as well. That is a list of the
+/// **wrong entities** — a rename built on it would rewrite another class's member.
+///
+/// So the cursor's own class decides which declaration is meant, and an occurrence is dropped when it is *provably*
+/// another class's:
+///
+/// ```text
+/// the cursor is inside a class body     → the declaration whose `scope` is that class is the one meant
+/// an occurrence is a bare name inside   → dropped: unqualified lookup in a member function finds its own
+///   a member of a *different* class       class's member before anything else, so it cannot be this one
+/// an occurrence has a qualifier         → kept: `x.`, `p->`, `Type::` — which class or object the receiver is
+///   (`.`, `->`, `::`)                     is a type question this list does not answer, and keeping it is the
+///                                         conservative direction for a reader who is looking, not renaming
+/// no enclosing class at all             → kept, for the same reason
+/// ```
+///
+/// The declarations are filtered by the same rule, which is what keeps another class's *declaration* out of the list.
 fn name_level_locations<F: cpp_code_analysis::FileProvider + Clone>(
     session: &cpp_code_analysis::Session<F>,
     view: &cpp_code_analysis::FileView,
@@ -394,26 +416,63 @@ fn name_level_locations<F: cpp_code_analysis::FileProvider + Clone>(
     };
     let name = first.fact.name.clone();
 
-    let mut declaring: Vec<std::path::PathBuf> = defined
-        .found
+    // **The class the cursor is in**, which is what says *which* of the declarations is meant.
+    let owner = enclosing_class(&view.scopes, &view.root, offset.get());
+    let aimed: Vec<&cpp_code_analysis::ProjectDefinition> = match &owner {
+        Some(class) => {
+            let inside: Vec<&cpp_code_analysis::ProjectDefinition> = defined
+                .found
+                .iter()
+                .filter(|definition| definition.fact.scope.as_deref() == Some(class.as_str()))
+                .collect();
+            // A name the class does not declare itself is a name lookups reached further out: the whole list is the
+            // honest answer then, and the filter below still has the class to compare against.
+            if inside.is_empty() {
+                defined.found.iter().collect()
+            } else {
+                inside
+            }
+        }
+        None => defined.found.iter().collect(),
+    };
+
+    let mut declaring: Vec<std::path::PathBuf> = aimed
         .iter()
         .map(|definition| definition.file.clone())
         .collect();
     declaring.sort();
     declaring.dedup();
 
+
     let mut locations: Vec<Location> = Vec::new();
     let push =
         |file: &std::path::Path, range: cpp_parser::SourceRange, locations: &mut Vec<Location>| {
-            let Some(held) = session.files().held(file) else {
-                return;
+            // **A file the session is not holding is still a file a declaration can be in.** The VFS holds what has
+            // been read into *this* run, and a header the index read from its disk cache is not in it — which is why
+            // a member's declaration in its header was missing from every reference list. Reading it here is one
+            // `read_to_string` for a list a user asked for, and it is the only way the declaration can be shown.
+            let disk = session
+                .files()
+                .held(file)
+                .is_none()
+                .then(|| std::fs::read_to_string(file).ok())
+                .flatten();
+            let disk_index = disk.as_deref().map(cpp_parser::LineIndex::parse);
+            let (text, index) = match session.files().held(file) {
+                Some(held) => (&*held.text, &*held.line_index),
+                None => {
+                    let (Some(disk), Some(index)) = (disk.as_deref(), disk_index.as_ref()) else {
+                        return;
+                    };
+                    (disk, index)
+                }
             };
             let Some(uri) = crate::util::path_to_uri(file) else {
                 return;
             };
             let (Some(start), Some(end)) = (
-                crate::util::position_in_file(held, range.start_offset),
-                crate::util::position_in_file(held, range.end_offset()),
+                crate::util::position_in(text, index, range.start_offset),
+                crate::util::position_in(text, index, range.end_offset()),
             ) else {
                 return;
             };
@@ -430,7 +489,7 @@ fn name_level_locations<F: cpp_code_analysis::FileProvider + Clone>(
         };
 
     if include_declaration {
-        for definition in &defined.found {
+        for definition in &aimed {
             push(&definition.file, definition.fact.name_range, &mut locations);
         }
     }
@@ -444,13 +503,124 @@ fn name_level_locations<F: cpp_code_analysis::FileProvider + Clone>(
         &declaring,
         NAME_REFERENCE_BUDGET,
     );
+    // **One parse per candidate file, and only if it has an occurrence.** The scopes are what says which class an
+    // occurrence is inside, and a file with no occurrence of the name is never parsed.
+    let mut parsed: std::collections::HashMap<std::path::PathBuf, Option<cpp_code_analysis::FileView>> =
+        std::collections::HashMap::new();
     for (file, ranges) in references.found {
+        let scopes = match &owner {
+            Some(class) => {
+                let view = parsed.entry(file.clone()).or_insert_with(|| {
+                    session.files().held(&file).map(|held| {
+                        cpp_code_analysis::FileView::parse_with(
+                            held,
+                            &cpp_parser::MacroEnvironment::default(),
+                        )
+                    })
+                });
+                match view.as_ref() {
+                    Some(view) => Some((class, view)),
+                    None => None,
+                }
+            }
+            None => None,
+        };
         for range in ranges {
+            if let Some((class, view)) = &scopes
+                && a_bare_name_in_another_class(
+                    &view.scopes,
+                    &view.root,
+                    view.source.as_ref(),
+                    range.start_offset,
+                    class,
+                )
+            {
+                continue;
+            }
             push(&file, range, &mut locations);
         }
     }
 
     locations
+}
+
+/// The **innermost class** whose body contains `offset` — by name, which is what a `DeclFact::scope` carries.
+///
+/// # The two ways a position is "inside a class", and only one of them is a scope
+///
+/// A member function defined **inside** its class body has a class scope around the position, and the scope tree says
+/// so. A member function defined **outside** it — `void CodeFormat::UpdateCodeStyle() { … }` in a `.cpp`, which is
+/// where most code a reader asks about lives — has no class scope at all: the position is inside a *function* at file
+/// scope, and the class exists only in the declarator's text (`CodeFormat::UpdateCodeStyle`).
+///
+/// Both are answered here, because the second is the ordinary case in a real project: without it every reference
+/// query in a `.cpp` had no class to compare against and nothing was filtered.
+fn enclosing_class(
+    scopes: &cpp_code_analysis::ScopeTree,
+    root: &cpp_parser::CppSyntaxNode,
+    offset: usize,
+) -> Option<String> {
+    if let Some(id) = scopes.scope_at(offset)
+        && let Some(class) = scopes.scope_chain(id).into_iter().find_map(|id| {
+            let scope = scopes.scope(id)?;
+            (scope.kind == cpp_code_analysis::ScopeKind::Class)
+                .then(|| scope.name.as_ref().map(|name| name.to_string()))
+                .flatten()
+        })
+    {
+        return Some(class);
+    }
+    // **The class a qualified definition names.** `void CodeFormat::UpdateCodeStyle(…)` is a `FunctionDef` whose
+    // declarator reads `CodeFormat::UpdateCodeStyle`, so the last `::` segment before the parameter list is the class.
+    let token = cpp_parser::token_at(root, offset)?;
+    // **A definition parses as a `Declaration` with a body**, not as a `FunctionDef` — measured by printing the
+    // ancestors of a name inside one: `IdentifierExpr, BinaryExpr, ExpressionStat, CompoundStat, Declaration,
+    // TranslationUnit`. Both kinds are accepted because a function defined *inside* a class body is the other shape.
+    let definition = token.parent_ancestors().find(|node| {
+        matches!(
+            cpp_parser::CppSyntaxKind::from(node.kind()),
+            cpp_parser::CppSyntaxKind::FunctionDef | cpp_parser::CppSyntaxKind::Declaration
+        )
+    })?;
+    // **The declaration's own text, up to its parameter list.** The `InitDeclarator` of a definition holds only
+    // `()` — measured: `void First::update() { … }` has children `[DeclSpecifierSeq, InitDeclarator, CompoundStat]`
+    // and the declarator's text is `"()"` — so the qualified spelling lives in the declaration, and the first `(`
+    // ends the signature.
+    let text = definition.text().to_string();
+    let before_the_parameters = text.split('(').next()?.trim();
+    let (before_the_name, _) = before_the_parameters.rsplit_once("::")?;
+    // **The last identifier before the name is the class**, not the whole left side: `void First::update` splits
+    // into `void First` and `update`, and `void First` is not a class spelling. `ns::C::f` gives `C`, because a
+    // `DeclFact::scope` carries the last segment and the class itself is the last word of what is left.
+    before_the_name
+        .rsplit(|character: char| !(character.is_alphanumeric() || character == '_'))
+        .next()
+        .map(str::trim)
+        .filter(|class| !class.is_empty())
+        .map(str::to_string)
+}
+
+/// **Is this occurrence a bare name inside a class that is not `owner`?** — see [`name_level_locations`].
+///
+/// "Bare" is read from the text: the characters before the name, past whitespace, are `.`, `->` or `::` for a
+/// qualified occurrence and something else for an unqualified one. A qualified occurrence is kept whatever its class,
+/// because which object a receiver names is a type question rather than a scope question, and dropping a use a reader
+/// is looking for is worse than showing one they would not rename.
+fn a_bare_name_in_another_class(
+    scopes: &cpp_code_analysis::ScopeTree,
+    root: &cpp_parser::CppSyntaxNode,
+    text: &str,
+    offset: usize,
+    owner: &str,
+) -> bool {
+    let Some(class) = enclosing_class(scopes, root, offset) else {
+        return false;
+    };
+    if class == owner {
+        return false;
+    }
+    let before = text.get(..offset).unwrap_or_default().trim_end();
+    !(before.ends_with('.') || before.ends_with("->") || before.ends_with("::"))
 }
 
 #[cfg(test)]
@@ -511,6 +681,93 @@ mod name_level {
                 .iter()
                 .any(|found| found.uri.path().ends_with("use.cpp")),
             "and the use in the file that included it: {locations:?}"
+        );
+    }
+}
+#[cfg(test)]
+mod a_member_of_one_class {
+    use std::path::PathBuf;
+
+    use cpp_code_analysis::{
+        CompilerConfig, MemoryFiles, OpenDocuments, Session, SessionFiles, WatchFilter,
+    };
+
+    use super::name_level_locations;
+
+    const BASE_H: &str = "\
+struct First {
+    int _value;
+    void update();
+};
+struct Second {
+    int _value;
+    void update();
+};
+";
+
+    const USE_CPP: &str = "\
+#include \"base.h\"
+void First::update() { _value = 1; }
+void Second::update() { _value = 2; }
+";
+
+    /// **One class's member is not another class's**, and the declaration in the header is one of its references.
+    ///
+    /// Measured from a reader's screenshot: Find References on `_diagnosticStyle` answered three classes' members and
+    /// eighteen uses, all by spelling, and no header at all. The spelling is all a lexer can see, so the filter is a
+    /// scope question — and for a `.cpp` the class is not a scope but the prefix of a qualified definition
+    /// (`void First::update()`), which is the case this test pins.
+    #[test]
+    fn is_not_another_classs_member_and_the_header_declaration_counts() {
+        let files = MemoryFiles::new()
+            .with_file("/p/base.h", BASE_H)
+            .with_file("/p/use.cpp", USE_CPP);
+        let providers = SessionFiles::new(OpenDocuments::new(), files);
+        let mut session = Session::with_config(
+            "/p",
+            providers,
+            WatchFilter::new("/p"),
+            CompilerConfig::default(),
+        );
+        session.add_project_files([PathBuf::from("/p/base.h"), PathBuf::from("/p/use.cpp")]);
+        session.index_everything();
+
+        let path = PathBuf::from("/p/use.cpp");
+        let held = session.files().held(&path).expect("the file is held");
+        let view =
+            cpp_code_analysis::FileView::parse_with(held, &cpp_parser::MacroEnvironment::default());
+        // The cursor on `_value` **inside `First::update`** — the member the reader asked about.
+        let at = USE_CPP
+            .find("_value = 1")
+            .expect("the fixture writes the member in First::update");
+
+        let locations = name_level_locations(
+            &session,
+            &view,
+            cpp_code_analysis::file::coordinates::ReadingOffset::new(at),
+            true,
+        );
+        println!(
+            "references: {:?}",
+            locations
+                .iter()
+                .map(|found| (found.uri.path().to_string(), found.range.start.line))
+                .collect::<Vec<_>>()
+        );
+
+        assert!(
+            locations
+                .iter()
+                .any(|found| found.uri.path().ends_with("base.h")),
+            "the declaration in the header is a reference: {locations:?}"
+        );
+        assert_eq!(
+            locations
+                .iter()
+                .filter(|found| found.uri.path().ends_with("use.cpp"))
+                .count(),
+            1,
+            "one use — `First::update`'s — and not `Second`'s: {locations:?}"
         );
     }
 }

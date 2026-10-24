@@ -23,11 +23,12 @@ pub use catch_unwind::catch_unwind;
 pub use messages::set_locale;
 pub use kind::symbol_kind;
 pub use position::{
-    file_offset_at_position, line_body, offset_at_position, position_at_offset, position_in_file,
-    utf16_column,
+    file_offset_at_position, line_body, offset_at_position, position_at_offset, position_in,
+    position_in_file, utf16_column,
 };
-// `position_in_file` is the one a handler wants (a file the VFS is holding); `position_in` is the piece it is built
-// from, and what a handler with a view's own text and line index uses.
+// `position_in_file` is the one a handler wants for a file the VFS is holding; `position_in` is the piece it is
+// built from, and what a handler with its own text and line index uses — a declaration in a header this session
+// never read, which is why it is public.
 pub use time_cancel_token::time_cancel_token;
 pub use uri::{path_to_uri, uri_to_file_path};
 
