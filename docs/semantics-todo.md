@@ -54,24 +54,35 @@
 追 `CompilerConfig::standard` 是否从 `-std=gnu++20` 解析出来了。**判据**：`members_of(std::vector)`
 里出现裸 `erase`，且那一条假报消失。
 
-## ③ 定义/引用仍然"按名字"查找（用户图 1）
+## ③ 引用：**已按类过滤，头文件里的声明也在列表里**（用户图 2）
 
-`_diagnosticStyle` 在 `LuaCodeFormat::UpdateDiagnosticStyle` 里，Go to Definition 列出 **3 个**：
-本类的、`FormatState.h` 里另一个类的、`luacodeformat.h` 里第三个类的。也就是查询**是**按名字扫可见集合的，
-没有用"光标所在的类"。
+报告：`_diagnosticStyle` 的 Find References 给了 18 条、3 个文件，两个类的成员混在一起，而且**完全没有头文件**。
 
-要做的事：
+现状（`43f4162`、`8cb444f`）：
 
 ```text
-1. `definition` 的入口先看光标处是不是**成员**（在某个类的成员函数体里、名字是该类的成员）：
-   是 → 只在该类的作用域里找（`definitions_in_scope` 已有这个规则的一半），不要返回别人的同名成员。
-2. 引用（references）同一个规则：一个类的成员 `_diagnosticStyle` 与另一个类的同名成员是两个实体。
-3. 现有 `definitions_in_scope` 的注释说"裸名字不进类"，但这里光标处是**类内**，规则相反：
-   类内的裸名字**先**进本类。缺的正是这一步。
+1. 词法只能看到拼写，所以每个同名 identifier 都被报出来 —— 现在由"光标所在的类"决定说的是哪个声明：
+   裸名字出现在**另一个类**的成员函数里 → 丢掉（无限定查找先找本类的成员，它不可能是这一个）；
+   带限定（x. / p-> / Type::）→ 保留（接收者是什么类型是类型问题，漏报比多报更糟）；
+   光标不在类里 → 全部保留。声明也按同一规则过滤，所以别的类的声明不会进来。
+2. 头文件里的声明以前被丢掉，因为 VFS 只持有**这一轮读过**的文件，而索引是从磁盘缓存读的 ——
+   `held()` 是 None，push 里就 return 了。现在从磁盘读一次并建行索引（`position_of`），并有测试。
+3. "在类里"有两种形状，只有一种有作用域：类体内定义的成员函数有 Class scope；类外定义
+   （`void CodeFormat::UpdateCodeStyle() { … }`，.cpp 里的常态）只有声明符里的文字。两种都处理了 ——
+   实测这种定义解析成 `Declaration`（不是 `FunctionDef`），而且 `InitDeclarator` 只装 `()`，
+   所以类名从声明文字到第一个 `(` 之间取最后一个标识符。
 ```
 
-判据：`LuaParser`/`CodeFormatCLib` 里给 `_diagnosticStyle`、`_session`、`_configs` 这类成员做
-Go to Definition，每条只给一个答案（本类声明处）；`references` 不再跨类。
+判据（测试 `a_member_of_one_class::is_not_another_classs_member_and_the_header_declaration_counts`）：
+两个类各有一份 `_value`、各在 `First::update`/`Second::update` 里用一次 → 修前 4 条（两个声明 + 两个用法），
+修后 **2 条**（`First` 在头文件里的声明 + `First::update` 的用法）。
+
+### 还差的（诚实记下）
+
+**带限定的用法仍然不过滤**：`other._value` 里的接收者是什么类型，这个列表不去算，所以一个别的类的对象上的
+同名成员访问仍会出现在列表里。下一步是把 `member_access_at` 拿到的 object 交给
+`type_of_expression`，比对它的类——这是有界的（每次出现一次推断），但会让一次 Find References 变贵，
+要先量再决定。
 ## ④ operator 推断：**已落地**，而且成本是零（2026-10-24）
 
 `DeclFact::name` 现在对 operator 是真实的拼写（`operator[]`、`operator+`、`~Widget`），operator 的返回类型也进了
@@ -140,3 +151,24 @@ __cplusplus 在索引的宏表里         CPPLS_PRINT_LANGUAGE=1 → body 202002
 **下一步**：把 `stl_vector.h` 的 cooked rendering 在 `erase` 附近 dump 出来（或临时打印
 `index.declarations_in("std::vector")` 的名字集合），看 `erase` 是根本没进 facts，还是进了但 scope
 不是 `std::vector`。判据：`members_of(std::vector)` 里出现裸 `erase`，CodeFormat.cpp 最后一条假报消失。
+## ⑥ 补全：`->` 走 operator-> 链，`.` 打在指针上补成 `->`（用户图 3）
+
+报告两条："智能指针的补全没有考虑到指向的内容"，以及"通过 `.` 补全的时候也应该替换为 `->`"。
+
+现状（`33eb601`）：
+
+```text
+`->` 以前列出的是**对象自己的类**：`Widget* p` 上是空的（指针不命名类），`std::unique_ptr<Widget> sp`
+上是 `operator->`、`operator*`、`reset`…… —— 全是箭头到不了的成员，而 `Widget` 的成员一个都没有。
+现在顺着类型走：指针 → 指向的类型；类 → 它自己的 `operator->` 返回类型 → 再取指针指向的类型；
+最多四跳（`shared_ptr<T>` 两跳、迭代器两跳，实测链长没有超过二的）。
+
+`.` 打在指针上时列表已经是指向类的（读者就是这个意思），但操作符没改，选中会写出 `p.size` —— 不编译。
+现在**替换范围向左扩一个字节**（那个 `.`）、插入文本带 `->`；label 不变（客户端按它过滤），
+LSP 层对"不能插值 snippet"的客户端用 `->` + label，而不是把 `$0` 写进文件。
+```
+
+判据（`tests/completion.rs`）：
+`an_arrow_reaches_the_class_through_the_pointer_and_through_operator_arrow` —— 修前两种接收者都是 `[]`；
+`a_dot_on_a_pointer_lists_the_pointee`；`a_dot_on_a_pointer_is_completed_as_an_arrow` —— 替换范围覆盖的
+那一个字符就是 `.`，插入文本是 `->size`。
