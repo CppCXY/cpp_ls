@@ -59,6 +59,11 @@ module notes                 0 ms
 ordered_visibility：把可见性走查的答案预先转成 file id，每次声明查询 O(1) 而不是重新展开 617 个路径。
   量到：型推断 169 → 151 ms，checks 63/55 → 57/49 ms。end-to-end 在噪声内。
   按本仓的规矩（数字不动就是没修）回滚；结论留下 —— 真正的成本是"同名查询的重复"，不是"路径展开"。
+
+members_of 返回 Arc<MemberList> 而不是 clone：一个 std::string 的成员表是三百条声明，
+  每个成员访问点都 clone 一次。量到：undefined-field 91 → 73–91 ms，诊断总数 214 → 202 ms（噪声内）。
+  同样回滚。→ 说明 undefined-field 的 90 ms 不在 clone 上，而在 member_accesses() 的收集或
+  每个访问的 type_of 上，下一轮从 [question] 探针的 slow list 里那个文件的项看起。
 ```
 
 ## 本轮的落地
@@ -82,12 +87,16 @@ crates/cpp_code_analysis/src/probes.rs
 ## 下一步（都有可验证的判据）
 
 ```text
-1. `undefined-field` 仍是 LuaSyntaxTree.cpp 里最贵的一条（92 ms）——它问的是成员存在性，
-   每个成员访问一次 members_of；看它是否也该走"按 (class, member) 记忆"的路径。
+1. `undefined-field` 仍是 LuaSyntaxTree.cpp 里最贵的一条（73–92 ms）。clone 不是原因（见上），
+   所以下一刀在 `context.member_accesses()` 的收集，或每个访问的 `type_of`；用 [question] 探针
+   看那个文件的 slow list 就能定位。
 2. 剩下 3 次慢查询里 `size_t` 有 132 个答案：一个 typedef 在标准库的每个头里都声明一次。
    命名空间的折叠规则能不能推广到 typedef/别名（同名的多个声明如果"指向同一个实体"……
    —— 这条要小心，不能猜）。
 3. 冷启动尾巴仍然 63 切片 / 7.7 s，和编辑延迟是两笔账；见 docs/memory-audit.md 与 docs/cook-loop.md。
+4. `tests/latency.rs` 的 steady-state 断言是边界性的：它允许"恰好一次尝试付 render 的钱"，
+   而付钱那次实测 116–124 ms，另一次偶发 51–60 ms 就会让它失败。串行连跑三次：2 过 1 败。
+   不是本轮引入的回归（改前也这样），但边界值得放宽成"至多两次、且都在 render 预算内"。
 ```
 
 ## 复现命令
