@@ -120,6 +120,15 @@ pub struct AnalysisState {
     worst_write_hold: Arc<std::sync::atomic::AtomicU64>,
     /// "The queue has work in it" — how an edit reaches the task that reads.
     work: Arc<Notify>,
+    /// **The last report this server gave each file** — see [`AnalysisState::last_report`].
+    ///
+    /// It exists because a pull has no way to say "I do not know yet". A file whose cooked reading is gone (an
+    /// edit) answers `None` from the analysis, and `None` becomes an **empty report**, which a client reads as "no
+    /// problems" and clears the squiggles it is showing. The next pump slice cooks the file and
+    /// `workspace/diagnostic/refresh` makes the client ask again — and the squiggles come back. Every keystroke
+    /// repeats it: that is the "diagnostics flash" a user sees, and no amount of refresh taming fixes it, because
+    /// the answer itself alternates.
+    last_reports: std::sync::Mutex<std::collections::HashMap<PathBuf, std::sync::Arc<Vec<lsp_types::Diagnostic>>>>,
 }
 
 /// **How long an update may hold the analysis before it is a defect.**
@@ -156,6 +165,40 @@ impl AnalysisState {
             blocking_permits: Arc::new(Semaphore::new(Self::analysis_parallelism())),
             worst_write_hold: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             work: Arc::new(Notify::new()),
+            last_reports: std::sync::Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+
+    /// **The report this server last gave for `path`**, if it gave one — see [`AnalysisState::last_reports`].
+    ///
+    /// A pull answers from the analysis when it can and from this when it cannot, so that a client is never told
+    /// "and now there is nothing" by a server that simply has not finished reading. The alternative for the caller
+    /// is an empty report, which is a *claim*: it says the file is clean.
+    pub fn last_report(&self, path: &std::path::Path) -> Option<std::sync::Arc<Vec<lsp_types::Diagnostic>>> {
+        self.last_reports
+            .lock()
+            .ok()
+            .and_then(|reports| reports.get(path).map(std::sync::Arc::clone))
+    }
+
+    /// **Remember what was just sent**, so that the next pull that cannot answer keeps showing it.
+    ///
+    /// Bounded to the open documents' worth of files by the call site (`didClose` forgets one), so it is not a
+    /// project-sized cache: it holds what a client is currently looking at.
+    pub fn remember_report(
+        &self,
+        path: std::path::PathBuf,
+        items: std::sync::Arc<Vec<lsp_types::Diagnostic>>,
+    ) {
+        if let Ok(mut reports) = self.last_reports.lock() {
+            reports.insert(path, items);
+        }
+    }
+
+    /// **Forget one file's last report** — a close, or a workspace reload.
+    pub fn forget_report(&self, path: &std::path::Path) {
+        if let Ok(mut reports) = self.last_reports.lock() {
+            reports.remove(path);
         }
     }
 

@@ -222,6 +222,15 @@ fn main() {
         // check layer, so it is the half of the loop that is not the index.
         let started = Instant::now();
         let found = session.diagnostics(&file).map(|diagnostics| {
+            // **The messages, when asked for.** A count says how much the checks say; a report is about *what*.
+            if std::env::var_os("CPPLS_PRINT_FINDINGS").is_some() {
+                for finding in &diagnostics.checks {
+                    eprintln!("[finding] {} {}", finding.code.name(), finding.message);
+                }
+                for error in &diagnostics.errors {
+                    eprintln!("[error]   {} {}", error.code.name(), error.message);
+                }
+            }
             diagnostics.errors.len() + diagnostics.checks.len() + diagnostics.notes.len()
         });
         let took_diagnose = started.elapsed();

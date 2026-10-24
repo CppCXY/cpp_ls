@@ -623,6 +623,57 @@ fn a_finding_underlines_only_the_construct_it_is_about() {
     );
 }
 
+/// **A member of a `using` alias is the member of the class it names.**
+///
+/// Reported from an editor: `undefined-field` underlined `result.size()` on a `std::string`, and the measurement
+/// behind it is `members_of(std::string) -> 0 member(s), unlisted []` — an *empty but complete* list, which the
+/// check reads as "this class has no members". The empty answer came from the alias being treated as a class with
+/// no members instead of being followed to the class it names.
+#[test]
+fn a_member_reached_through_a_using_alias_is_not_undefined() {
+    let source = "\
+struct Base { int size; };
+using Alias = Base;
+void use() {
+    Alias a;
+    (void)a.size;
+}
+";
+    let codes = codes_of(source);
+    assert!(
+        !codes.contains(&DiagnosticCode::UndefinedField),
+        "the alias names `Base`, and `Base` has `size`: {codes:?}"
+    );
+}
+
+/// **A deduced `auto` is not a conversion question** — `auto&` least of all.
+///
+/// Reported from an editor: `auto& config = configs.emplace_back(…);` was underlined with "`config` is initialised
+/// with a value that does not convert to `auto&`". The type written there is not a type: it is an instruction to
+/// deduce one from the initialiser, so every spelling of it — `auto`, `auto&`, `const auto&`, `auto&&`, `auto*` —
+/// is outside this check's question. See `assign_type_check::is_a_deduced_auto`.
+#[test]
+fn a_deduced_auto_is_not_a_conversion_question() {
+    let source = "\
+struct Widget { int n; };
+Widget& make();
+void use() {
+    int value = 1;
+    auto plain = value;
+    auto* pointer = &value;
+    auto& reference = make();
+    const auto& constant = make();
+    auto&& forwarded = make();
+    (void)plain; (void)pointer; (void)reference; (void)constant; (void)forwarded;
+}
+";
+    let codes = codes_of(source);
+    assert!(
+        !codes.contains(&DiagnosticCode::AssignTypeCheck),
+        "a deduced type is not a written one, so nothing here can fail to convert: {codes:?}"
+    );
+}
+
 /// The first finding of one code in a two-file fixture, with its range in the **file's** coordinates.
 fn first_finding_of(
     source: &str,

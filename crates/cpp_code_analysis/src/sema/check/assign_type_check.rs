@@ -65,7 +65,7 @@ impl Check for AssignTypeCheck {
             let Some(written) = fact.type_of.as_deref() else {
                 continue;
             };
-            if matches!(written, "auto" | "decltype(auto)") {
+            if is_a_deduced_auto(written) {
                 continue;
             }
             declared.insert(fact.name.as_str(), written);
@@ -186,6 +186,27 @@ impl Check for AssignTypeCheck {
             report_if_it_does_not_convert(context, right.syntax(), written, &name, "assigned");
         }
     }
+}
+
+/// **A type the compiler deduces is not a conversion this check may judge** — `auto`, and every spelling of it.
+///
+/// The first version compared the written type against exactly `"auto"` and `"decltype(auto)"`, so `auto&`, `const
+/// auto&` and `auto&&` were judged as *written* types: reported from an editor, `auto& config =
+/// configs.emplace_back(…)` was underlined as "`config` is initialised with a value that does not convert to
+/// `auto&`", which is a claim about a type that is not the type — `auto&` is a question for the initialiser.
+/// The decorations are part of the deduction, not part of a type: `const`, `volatile`, `&`, `&&` and `*` are what
+/// `auto` is being deduced *from*.
+fn is_a_deduced_auto(written: &str) -> bool {
+    let cleaned: String = written
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect();
+    let cleaned = cleaned
+        .replace("const", "")
+        .replace("volatile", "")
+        .trim_end_matches(['&', '*'])
+        .to_string();
+    cleaned == "auto" || cleaned == "decltype(auto)"
 }
 
 /// **One place a value enters an object whose type is written down**, reported when it does not convert.

@@ -123,6 +123,24 @@ impl Check for UndefinedField {
                 continue;
             }
 
+            // **What the list held, and what the index holds about the name** — the pair that separates "the class
+            // has no such member" from "the index never recorded it". The second number is what showed that
+            // `std::vector::erase` was missing from the *facts*, not from the check.
+            if crate::probes::members() {
+                let index = context.model.index();
+                eprintln!(
+                    "[undefined-field] `{}` -> `{}` ({} member(s), {} unlisted) — index: {} posting(s) of \
+                     `{}`, {} in scope `{}`",
+                    object.class_name().unwrap_or("?"),
+                    access.member,
+                    members.members.len(),
+                    members.unlisted.len(),
+                    index.name_postings(&access.member),
+                    access.member,
+                    index.scope_postings(object.class_name().unwrap_or("")),
+                    object.class_name().unwrap_or("?"),
+                );
+            }
             // The message names what the reader wrote rather than a rendering of the type: `w.weight` is what is on
             // their screen, and a type pretty-printed by this layer would be a second spelling to disagree with.
             context.add(

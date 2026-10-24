@@ -1191,6 +1191,9 @@ fn members_of_inner(
     path: &Path,
     class: &str,
 ) -> Known<MemberList> {
+    // The spelling as the caller wrote it, kept for the one question the resolved one cannot answer: whether this
+    // answer came through an alias at all — see the end of this function.
+    let original = base_type_name(class).to_string();
     // The spelling is normalized once, at the entry, for the same reason a base's is: a consumer feeding this from
     // `DeclFact.type_of` hands over what the file wrote — `const Widget&`, `::Widget`, `Base<int>` — and every one
     // of those parts is about the type's shape rather than about which class declares the members. Normalizing
@@ -1202,8 +1205,25 @@ fn members_of_inner(
     // recorded no gap, and answered 42 members with `unlisted` **empty**, while the resolved spelling
     // (`std::basic_istream`) answered the same 42 and *named* the gap. Two spellings of one type, one of them
     // claiming a completeness it does not have.
-    let class = resolve_aliases(index, scopes, root, path, base_type_name(class));
-    let class = &*class;
+    // **An alias whose target nothing declares is a gap, not a class with no members.** The list comes back with the
+    // missing class recorded in `unlisted` — the field that exists to say where an answer stops — so a consumer that
+    // must not invent findings (`undefined-field`) stays silent instead of reporting every member of `std::string` as
+    // undefined. See [`resolve_aliases_or_unresolved`] for the measurement.
+    let (resolved, _arguments, missing) =
+        resolve_aliases_or_unresolved(index, scopes, root, path, base_type_name(class));
+    if let Some(missing) = missing {
+        if crate::probes::members() {
+            eprintln!("members_of_inner: {class} names {missing}, which nothing declares");
+        }
+        return Known::Yes(MemberList {
+            members: Vec::new(),
+            unlisted: vec![UnlistedBase {
+                spelling: missing.clone(),
+                reason: UnknownReason::NotDeclaredHere(Box::from(missing)),
+            }],
+        });
+    }
+    let class = &*resolved;
 
     let own = match direct_members(index, scopes, root, path, class) {
         Known::Yes(members) => members,
@@ -1212,6 +1232,9 @@ fn members_of_inner(
         // the index is a subset of the translation unit — so this arm exists for totality, not for a case.
         Known::No => return Known::Unknown(UnknownReason::NotDeclaredHere(Box::from(class))),
     };
+    if crate::probes::members() && own.is_empty() {
+        eprintln!("members_of_inner: {class} has no own members (after alias resolution)");
+    }
 
     let mut list = MemberList::default();
     let mut hidden: HashSet<String> = HashSet::new();
@@ -1334,6 +1357,24 @@ fn members_of_inner(
 
         level = next;
         depth += 1;
+    }
+
+    // **An alias that resolved to a class with no members at all is a gap, not an empty class.**
+    //
+    // `std::string` is `typedef basic_string<char> string;` inside libstdc++'s `inline namespace __cxx11`, and the
+    // class's facts are keyed `std::__cxx11::basic_string`. The alias walk lands on `std::basic_string` — a name the
+    // forward declaration does declare — and `direct_members` finds no members under it, so the list came back
+    // **empty and complete** and `undefined-field` reported every member of a `std::string` as undefined (measured:
+    // ten findings on `CodeFormatCLib/src/CodeFormat.cpp`). The index cannot see that `__cxx11` is inline, so the
+    // honest answer is "the answer stops here" — `unlisted` — which is the field that exists for exactly this.
+    if list.members.is_empty()
+        && list.unlisted.is_empty()
+        && class != base_type_name(&original)
+    {
+        list.unlisted.push(UnlistedBase {
+            spelling: class.to_string(),
+            reason: UnknownReason::NotDeclaredHere(Box::from(class.to_string())),
+        });
     }
 
     Known::Yes(list)
@@ -5935,6 +5976,27 @@ fn resolve_aliases_with_arguments(
     path: &Path,
     class: &str,
 ) -> (String, Vec<Type>) {
+    let (name, carried, _unresolved) = resolve_aliases_or_unresolved(index, scopes, root, path, class);
+    (name, carried)
+}
+
+/// [`resolve_aliases_with_arguments`], and **the class it could not find** when the chain ends at a spelling the
+/// index does not declare.
+///
+/// That third answer is what tells a member query the difference between "this class has no members" and "this
+/// spelling names a class I cannot see", and the two must not be answered the same way. Measured on
+/// `CodeFormatCLib/src/CodeFormat.cpp` (libstdc++): `std::string` is `typedef basic_string<char> string;` inside
+/// `std::__cxx11`, so the walk resolves the name `basic_string` from `std` — where nothing declares it — and used to
+/// settle on `std::basic_string` anyway. `direct_members` then found no facts under that spelling, answered an
+/// **empty, complete** list, and `undefined-field` reported `result.size()`, `formattedText.begin()` and eight more
+/// members of `std::string` as undefined. Ten false positives on one file, all from this fallback.
+fn resolve_aliases_or_unresolved(
+    index: &ProjectIndex,
+    scopes: &crate::ScopeTree,
+    root: &cpp_parser::CppSyntaxNode,
+    path: &Path,
+    class: &str,
+) -> (String, Vec<Type>, Option<String>) {
     let mut current = class.to_string();
     let mut carried: Vec<Type> = Vec::new();
     let mut seen: Vec<String> = Vec::new();
@@ -6034,11 +6096,22 @@ fn resolve_aliases_with_arguments(
             _ => vec![target.clone()],
         };
 
-        let next = candidates
+        // **A target nothing declares is not an answer.** The candidates are the target qualified by the scopes the
+        // alias was written in, outermost last; when every one of them is undeclared the chain has reached a name
+        // this index cannot see (a namespace opened by a macro the index did not expand is the ordinary case) and
+        // the spelling it would have returned describes nothing. Measured: `std::basic_string` for libstdc++'s
+        // `std::string`, and ten false `undefined-field` findings on one file. The caller is told instead.
+        let Some(next) = candidates
             .iter()
             .find(|candidate| is_declared(index, scopes, path, candidate))
-            .unwrap_or(&candidates[0])
-            .clone();
+            .cloned()
+        else {
+            // **The target is still the answer, and the third slot says it was not found.** A caller that only wants
+            // a spelling keeps the one the alias named — `animate_aliases_whose_target_is_not_indexed_reports_the_target`
+            // pins that: the missing declaration is `Widget::size`, not `Alias::size` — while a caller that has to
+            // decide whether "no members" means an empty class or an unreadable one reads the third slot.
+            return (candidates[0].clone(), carried, Some(candidates[0].clone()));
+        };
 
         if next == current {
             break;
@@ -6048,7 +6121,7 @@ fn resolve_aliases_with_arguments(
 
     // The arguments of the **first** step are the ones that describe the type as written when nothing later said
     // otherwise: `std::string` has none of its own, and the step that resolved it supplied them.
-    (current, carried)
+    (current, carried, None)
 }
 
 /// What an alias points at, and the scope it was declared in, or `None` when the spelling is not an alias.

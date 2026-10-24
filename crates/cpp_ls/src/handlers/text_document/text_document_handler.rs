@@ -151,6 +151,9 @@ pub async fn process_did_close_document(
         .update_session("didClose", |session| session.did_close(&path))
         .await;
     context.analysis().wake();
+    // **And the report it last gave for this file goes with it** — see `AnalysisState::last_reports`: the next pull
+    // for a file the user is no longer looking at should be answered from the index, not from what was on screen.
+    context.analysis().forget_report(&path);
 
     // **Nothing is published, and nothing has to be.** Diagnostics are pulled: a client asks about the file it is
     // showing, and a closed file is one it is not showing — so there is no list of ours to clear, which is what the

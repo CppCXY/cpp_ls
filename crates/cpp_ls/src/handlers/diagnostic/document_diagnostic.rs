@@ -59,11 +59,23 @@ pub async fn on_pull_document_diagnostic(
     .await;
 
     outcome.map(|found| {
-        // `None` from `diagnose_file` is "this file cannot be read", and it is answered with an empty report rather
-        // than with the `Missing` that would become a JSON `null` — see this module's note.
-        let items = found
-            .map(|(_, diagnostics)| diagnostics)
-            .unwrap_or_default();
+        // **What this pull can answer, and what it says when it cannot.**
+        //
+        // `diagnose_file` answers `None` for a file the analysis has no cooked reading for — which is the state right
+        // after every edit, until the pump cooks the file. Turning that into an **empty report** tells the client
+        // "this file is clean", it clears the squiggles the user is looking at, and the refresh that follows the cook
+        // makes them come back: that is the flash, and it is a claim the server cannot support.
+        //
+        // So a pull that cannot answer repeats the last report it gave for that file (`AnalysisState::last_reports`)
+        // and only a *real* answer replaces it. The visible effect is the one a user expects: the squiggles stay
+        // until the analysis has something better to say, and then they change once.
+        let found = found.map(|(_, items)| items);
+        let (items, to_remember) = the_report(found, context.analysis().last_report(&path));
+        if let Some(items) = to_remember {
+            context
+                .analysis()
+                .remember_report(path.clone(), std::sync::Arc::new(items));
+        }
         DocumentDiagnosticReport::Full(RelatedFullDocumentDiagnosticReport {
             related_documents: None,
             full_document_diagnostic_report: FullDocumentDiagnosticReport {
@@ -73,6 +85,26 @@ pub async fn on_pull_document_diagnostic(
         })
         .into()
     })
+}
+
+/// **The one rule this handler applies**: an answer from the analysis wins and is remembered; no answer repeats the
+/// last one; a file never answered is empty.
+///
+/// Split out to be testable as a rule rather than as a protocol exchange — the three cases the test below covers are
+/// the whole content of "diagnostics do not flash", and the middle one is the case that made them flash. The second
+/// return value is what the caller should remember: `None` when the answer came from the memory, because repeating
+/// it must not refresh it.
+fn the_report(
+    found: Option<Vec<lsp_types::Diagnostic>>,
+    last: Option<std::sync::Arc<Vec<lsp_types::Diagnostic>>>,
+) -> (Vec<lsp_types::Diagnostic>, Option<Vec<lsp_types::Diagnostic>>) {
+    match found {
+        Some(items) => (items.clone(), Some(items)),
+        None => (
+            last.map(|held| (*held).clone()).unwrap_or_default(),
+            None,
+        ),
+    }
 }
 
 /// A `DocumentDiagnosticReport` saying nothing is wrong, which is a valid answer to a pull request.
@@ -88,4 +120,39 @@ fn an_empty_report() -> DocumentDiagnosticReportResult {
         },
     })
     .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// **The middle case is the one that made diagnostics flash**: no answer from the analysis, and a report the
+    /// client is already showing. Answering `[]` there claims the file became clean, and the refresh that follows
+    /// the cook takes that claim back a moment later.
+    #[test]
+    fn no_answer_repeats_the_last_report_instead_of_claiming_the_file_is_clean() {
+        let one = lsp_types::Diagnostic::default();
+        let last = std::sync::Arc::new(vec![one]);
+        let found_nothing: Option<Vec<lsp_types::Diagnostic>> = None;
+
+        // 1. Nothing to say, but something was said before: repeat it, and do not overwrite it.
+        let (sent, remember) = the_report(None, Some(std::sync::Arc::clone(&last)));
+        assert_eq!(sent.len(), 1, "a pull with no answer must not say the file is clean");
+        assert!(remember.is_none(), "repeating a report must not refresh it");
+
+        // 2. A real answer — including a clean one — wins and becomes what is repeated afterwards.
+        let (sent, remember) = the_report(Some(Vec::new()), Some(last));
+        assert!(sent.is_empty(), "an answer from the analysis is the answer");
+        assert!(remember.is_some(), "and it is what the next silent pull repeats");
+
+        // 3. A file nothing was ever said about is empty: all a first pull can be.
+        let (sent, remember) = the_report(None, None);
+        assert!(sent.is_empty());
+        assert!(remember.is_none());
+
+        // 4. The `found` case carries its own items through unchanged.
+        let (sent, remember) = the_report(Some(vec![lsp_types::Diagnostic::default()]), None);
+        assert_eq!(sent.len(), 1);
+        assert_eq!(remember.map(|items| items.len()), Some(1));
+    }
 }
