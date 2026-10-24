@@ -40,7 +40,7 @@ use lsp_types::request::{
     CodeActionRequest, Completion, DocumentDiagnosticRequest, DocumentHighlightRequest,
     DocumentLinkRequest, DocumentSymbolRequest, FoldingRangeRequest, Formatting, GotoDefinition,
     RangeFormatting, WillSaveWaitUntil,
-    GotoImplementation, HoverRequest, InlayHintRequest, PrepareRenameRequest, References, Rename,
+    GotoImplementation, GotoTypeDefinition, HoverRequest, InlayHintRequest, PrepareRenameRequest, References, Rename,
     Request as LspRequest, ResolveCompletionItem, SelectionRangeRequest, SemanticTokensFullRequest,
     SignatureHelpRequest, WorkspaceSymbolRequest,
 };
@@ -59,6 +59,7 @@ use super::{
     folding_range::on_folding_range,
     hover::on_hover,
     implementation::on_goto_implementation,
+    type_definition::on_goto_type_definition,
     inlay_hint::on_inlay_hint,
     references::on_references,
     rename::{on_prepare_rename, on_rename},
@@ -113,6 +114,7 @@ pub async fn on_request_handler(
     // written at a cursor, and a file's diagnostics. The rest of the table is a one-line row each
     GotoDefinition => on_goto_definition_handler,
     GotoImplementation => on_goto_implementation,
+    GotoTypeDefinition => on_goto_type_definition,
     HoverRequest => on_hover,
     CodeActionRequest => on_code_action,
     Completion => on_completion,

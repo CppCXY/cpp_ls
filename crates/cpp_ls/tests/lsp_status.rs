@@ -274,6 +274,20 @@ fn every_feature_answers_what_the_project_holds() {
             )
         },
     );
+    // **`typeDefinition` on the same member**: it asks what the member's *type* is and where that class is declared, so
+    // the answer is the class, not the member — the one place this feature is distinguishable from Go to Definition.
+    ask(
+        &mut server,
+        &mut id,
+        &mut rows,
+        "typeDefinition",
+        "textDocument/typeDefinition",
+        position(&source_uri, member),
+        &|result| {
+            let locations = locations_of(result);
+            (locations.len(), locations.first().cloned().unwrap_or_default())
+        },
+    );
     ask(
         &mut server,
         &mut id,

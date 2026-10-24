@@ -43,6 +43,7 @@ mod selection_range;
 mod semantic_token;
 mod signature_help;
 mod text_document;
+mod type_definition;
 mod workspace_symbol;
 
 use crate::context::ServerContextSnapshot;
@@ -172,6 +173,7 @@ capabilities!(modules: {
     formatting => FormattingCapabilities,
     folding_range => FoldingRangeCapabilities,
     implementation => ImplementationCapabilities,
+    type_definition => TypeDefinitionCapabilities,
     inlay_hint => InlayHintCapabilities,
     references => ReferencesCapabilities,
     rename => RenameCapabilities,
