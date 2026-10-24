@@ -300,3 +300,17 @@ CodeFormat.cpp          150 834 个事实，0 条诊断
 ```
 
 剩下的 18 是两种形状，都不是"成员丢了"：`alloc_traits.h` 的 6 个是 **concept**（`concept __has_allocate_hint = requires (…) { … };`，里面还夹着 `#if`），`fs_path.h` 的 12 个是**转换运算符**（`operator string() const`）。把最小夹具单独喂进去**复现不出来**（concept 正确成为 `Type` 事实、转换运算符没有留下碎片），所以它们依赖上下文（concept 的 `requires` 里夹 `#if`、转换运算符所在的类）。0.12%，留作下一轮的一个小目标。
+## 测量时的两个陷阱（这一轮踩了三次）
+
+```text
+① 换过文件之后 cargo 不会重建
+   Copy-Item / git checkout 恢复的文件保留**旧的** mtime，cargo 认为没变，测试二进制于是报的是上一个版本的行为。
+   A/B 一次解析器改动，得到过三种互相矛盾的结论，全是这个。换完文件 touch 一下，或者 cargo clean -p <crate>。
+
+② 位置算错了，结论也会跟着错
+   CRLF、UTF-16 列、渲染坐标 —— 这一轮里 `implementation` 的 null、`signatureHelp` 的 null、探针自己的
+   "0 个签名"，三件事各有一个位置错误。凡是"这个功能不工作"的结论，先打印**光标处的那段文本**确认它真的是你想测的地方。
+```
+
+两次 `cargo clean -p` 之后重测的数字才是这一轮所有结论的依据：`std::string` 257 个成员、`std::vector` 285 个（含
+`erase`）、150 834 个事实、0 条诊断、libstdc++ 579 个头文件 18 个函数没有参数表。
