@@ -119,17 +119,28 @@ local → 只在本文件内改（跨文件会改到别的文件的同名 local�
 
 `handshake.rs` 断言的就是这个形状：`more`（声明，未使用）→ 1 处编辑，在本文件。
 
-### ⑥ `diagnostic` 现在报 9 条，其中一条是假报
+### ⑥ `diagnostic` 现在报 9 条，全是假报，而且类型是对的
 
-`CodeFormat.cpp` pull 出 9 条，第一条是 `"result" has no member "size"`。查过源码：
+`CodeFormat.cpp` pull 出 9 条：`result`/`formattedText` 没有 `size`/`begin`/`end`，`config.Workspace` 没有 `size`，
+`_configs` 没有 `erase`。`auto result = f.GetFormatResult(t);` 那个 `auto` **推对了**（`std::string`），错的是成员表。
+`CPPLS_TRACE_MEMBERS=1` 的实测：
 
-```cpp
-auto result = f.GetFormatResult(t);     // FormatBuilder::GetFormatResult 返回 std::string
-auto length = result.size();            // 于是 size() 是对的
+```text
+[undefined-field] `std::string` -> `size`  (27 member(s), 0 unlisted) — index: 135 posting(s), 0 in scope `std::string`
+[undefined-field] `std::string` -> `begin` (27 member(s), 0 unlisted) — index: 194 posting(s), 0 in scope `std::string`
+[undefined-field] `std::vector` -> `erase` (303 member(s), 0 unlisted) — index: 122 posting(s), 278 in scope `std::vector`
 ```
 
-`GetFormatResult` 是**基类里的 virtual**（`FormatBuilder.h:17`），所以这是 `auto` 从"基类里的虚函数调用"推导失败。
-和 `_configs has no member erase` 是同一类。这是下一轮 P2 的入口。
+读法：**成员表不完整，但不是"unlisted"的那种不完整**（`unlisted` 是基类，这里 0）。两个不同的缺口：
+
+* `std::string` 是别名（`basic_string<char>`），它的 27 个成员不是 `basic_string` 的完整列表，而 `size`/`begin`/`end`
+  在索引里有 posting、**在 scope `std::string` 下是 0** —— 别名解析/模板实参替换这一层没把成员挂到 `std::string` 上。
+* `std::vector` 有 303 个成员、`erase` 在 scope `std::vector` 下有 **278 个 posting**，成员表里却没有它 —— 同一个类的
+  两个答案不一致，这是"cooked 读数的条件编译区域被丢掉"的形状（`erase` 在 `#if __cplusplus >= 201103L` 里，
+  `docs/semantics-todo.md` ⑤ 记过）。
+
+所以下一次不是"关掉这个检查"，而是让 `members_of` 与 `name_postings` 对同一个类给出一致的答案；在那之前这 9 条
+假报就是"检查太相信自己的成员表"的代价。**这一条是 P2 的第一优先项。**
 
 ## P3
 
