@@ -58,6 +58,11 @@ use log::debug;
 /// and the file's own text otherwise. This layer's job is the wire format: offsets become positions through the
 /// VFS's line index (not through a parse of the file, which the layered answer no longer needs) and the message
 /// becomes a [`Diagnostic`].
+/// **Test-only**: the list without the "was the analysis settled" flag.
+///
+/// The handler uses [`diagnose_file_with_state`] — the flag is what keeps an empty report from being read as a
+/// verdict — and the fixture in `context::analysis_state` wants only the list.
+#[cfg(test)]
 pub fn diagnose_file(session: &Session<DiskFiles>, path: &Path) -> Option<(Uri, Vec<Diagnostic>)> {
     diagnose_file_with_state(session, path).map(|(uri, items, _settled)| (uri, items))
 }
