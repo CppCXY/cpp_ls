@@ -49,7 +49,14 @@ pub async fn on_goto_implementation(
 
     snapshot_query(context.analysis(), cancel_token, move |session| {
         let path = uri_to_file_path(&uri)?;
-        let view = session.view(&path)?;
+        // **The cursor is read from the file's own text, not from the rendering**, for the reason Go to Definition
+        // states at the same line: a rendering has the directives resolved and their line breaks deleted, so a line and a
+        // column from a client name a *different* place in it. Measured on this handler over a real project: the
+        // position of `void UpdateCodeStyle(…)` in `codeformat.h` resolved one declaration away in the rendering,
+        // `definitions` answered the class rather than the function, and the feature answered `null` — while the same
+        // question asked of the written text answered `CodeFormat.cpp:18` first time
+        // (`tests/implementation_real.rs`).
+        let view = session.view_of_the_file(&path)?;
         let offset = offset_at_position(&view, position)?;
 
         // **The name comes from the declaration the cursor is on**, not from the text: the analysis already answered

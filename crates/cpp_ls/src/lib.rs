@@ -7,7 +7,7 @@ rust_i18n::i18n!("./locales", fallback = "en");
 
 pub mod cmd_args;
 mod context;
-mod handlers;
+pub mod handlers;
 mod logger;
 mod server;
 mod util;
