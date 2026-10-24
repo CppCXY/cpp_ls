@@ -1345,6 +1345,48 @@ fn holds_a_unit_for(session: &Session<MemoryFiles>, path: &str) -> bool {
         .contains_key(&queue_key(Path::new(path)))
 }
 
+/// **A cook that cannot succeed is not queued again by a request** — the loop an editor reported as "one core, and
+/// the diagnostics flashing".
+///
+/// Measured from a real session's log before this test existed: `index slice: … 4 to cook, 2 left` every ~250 ms for
+/// minutes after the index had drained. The cause was the pair this test pins down: [`Session::want_cooked_reading`]
+/// *cleared* the refusal (a request is not evidence that the reason changed), and the pump then claimed, refused and
+/// the next pull cleared it again.
+#[test]
+fn a_cook_that_cannot_succeed_is_not_queued_again_by_a_request() {
+    let files = MemoryFiles::new().with_file("/p/a.cpp", "int a;\n");
+    let fixture = Memory::new("a-refused-cook-is-not-requeued", &files);
+    let mut session = fixture.session();
+    session.index_everything();
+
+    // A file no summary describes: `materials_for` answers `None` for it, which is the state a cook cannot serve.
+    session.want_cooked_reading(Path::new("/p/absent.cpp"));
+    let claimed = session.claim_cooking(4);
+    assert_eq!(claimed.len(), 1, "the request queued it once");
+    let built = session.materials_for(claimed.clone());
+    assert!(
+        built.is_empty(),
+        "a file the index cannot describe has no materials to cook"
+    );
+    session.refuse_the_cooks_that_built_nothing(&claimed, &[]);
+    assert_eq!(session.pending_cooking(), 0, "the refused file left the queue");
+
+    // **The request that names it again must not put it back.**
+    session.want_cooked_reading(Path::new("/p/absent.cpp"));
+    assert_eq!(
+        session.pending_cooking(),
+        0,
+        "a request does not resurrect a refusal — that was the loop"
+    );
+
+    // A change to the text is the one thing that asks for a retry.
+    session.did_change(Path::new("/p/absent.cpp"), "int b;\n");
+    assert_eq!(
+        session.pending_cooking(),
+        1,
+        "an edit is what makes a refusal worth retrying"
+    );
+}
 /// **Editing a header invalidates the reading of the open file that includes it.**
 ///
 /// A file's cooked reading is a reading of its *environment* as well as of its text: `BEGIN_NS` opening a

@@ -1583,6 +1583,12 @@ impl<F: FileProvider + Clone> Session<F> {
             self.held_units().remove(&queue_key(path));
         }
         self.units_read.remove(&queue_key(path));
+        // **The one place a refusal is cleared**, and it is cleared because the reason for it — the text — has
+        // changed. See [`Session::want_cooked_reading`], which used to clear it on every request and turned a cook
+        // that cannot succeed into a loop.
+        if let Ok(mut refused) = self.cooking_refused.lock() {
+            refused.remove(&queue_key(path));
+        }
         self.cooking.want(path);
 
         self.queue.again(path.to_path_buf(), Priority::Open, 0);
@@ -1908,10 +1914,19 @@ impl<F: FileProvider + Clone> Session<F> {
             .collect()
     }
     pub fn want_cooked_reading(&mut self, path: &Path) {
-        // **A request clears a refusal**, because it is a statement that someone needs the answer now. The pump's
-        // closure walk does not clear it — that is the retry loop this exists to break (see `cooking_refused`).
-        if let Ok(mut refused) = self.cooking_refused.lock() {
-            refused.remove(&queue_key(path));
+        // **A refusal is not cleared by asking again, and that is the fix for a live loop.** It used to be: every
+        // diagnostics pull called this, cleared the refusal of the file the pull was about, and re-queued it — so a
+        // file whose cook can never succeed was queued, claimed, refused, cleared and queued again, for as long as
+        // the window stayed open, at one core. Measured from a real session's log: an `index slice` line every
+        // ~250 ms, minutes after the index had drained. A refusal is cleared where the *reason* could have changed —
+        // an edit ([`Session::buffer_changed`]) — not by a request that changes nothing.
+        let refused = self
+            .cooking_refused
+            .lock()
+            .map(|refused| refused.contains(&queue_key(path)))
+            .unwrap_or(false);
+        if refused {
+            return;
         }
         // **And read it, if nothing has.** A reading is built out of a summary ([`Session::cook`] answers `None`
         // without one), and a file a request names may be one no pump has reached — a header outside every
@@ -5012,6 +5027,13 @@ fn error_directive_line(text: &str) -> Option<(usize, usize, String)> {
         // a later drain renders it when the timeline is the whole program. See [`HeldUnit`].
         let (unit, provisional) = self.unit_and_state_of(&path)?;
         if provisional {
+            // **A provisional timeline with an empty queue is stale, not pending.** It was walked while files its
+            // closure needed were still queued; with the queue drained a fresh walk is of the whole program. Ask for
+            // that walk next time by dropping the held one — otherwise this cook refuses for ever and whoever asked
+            // asks again (`unit_and_state_of` rebuilds a dropped unit on its next call).
+            if self.queue.pending() == 0 {
+                self.held_units().remove(&queue_key(&path));
+            }
             return None;
         }
 

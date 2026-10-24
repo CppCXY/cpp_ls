@@ -81,6 +81,60 @@ fn main() {
         ),
     );
 
+    // **The idle pump, exactly as the server runs it**: slices until `pending_work()` reaches zero. `docs/memory-audit.md`
+    // and the server's own log are why this phase exists — a session that never reaches zero spins a core for ever.
+    if std::env::var_os("CPPLS_PUMP").is_some() {
+        for slice in 0..200 {
+            let pending = session.pending_work();
+            if pending == 0 {
+                println!("  pump: idle after {slice} slice(s)");
+                break;
+            }
+            let did = session.advance(64).len();
+            if slice < 12 || slice % 20 == 0 {
+                println!(
+                    "  pump slice {slice}: pending {pending}, advanced {did}, cooking {}, owed {}",
+                    session.pending_cooking(),
+                    session.re_read_backlog()
+                );
+            }
+            if slice == 199 {
+                println!("  pump: STILL NOT IDLE after 200 slices (pending {})", session.pending_work());
+            }
+        }
+    }
+
+    // **The server's pull+pump cycle**, reproduced: a diagnostics pull calls `want_cooked_reading` for the open file,
+    // then the pump runs a slice. If the two keep each other awake, this loop never leaves `pending > 0` — which is
+    // the report `docs/memory-audit.md` was extended for (a core at 100% with nothing to do).
+    if std::env::var_os("CPPLS_PULL_LOOP").is_some() {
+        for round in 0..40 {
+            // Exactly what the server's pull path does: ask first, take the write lock only when the answer would
+            // change (`AnalysisState::prepare_for_a_diagnostic`).
+            if !session.is_ready_for_a_request_about(&file) {
+                session.want_cooked_reading(&file);
+            }
+            let pending_before = session.pending_work();
+            let did = session.advance(64).len();
+            let pending_after = session.pending_work();
+            if round < 10 || round % 5 == 0 {
+                println!(
+                    "  pull {round}: pending {pending_before} -> {pending_after}, advanced {did}, \
+                     cooking {}, owed {}",
+                    session.pending_cooking(),
+                    session.re_read_backlog()
+                );
+            }
+            if pending_after == 0 && pending_before == 0 && did == 0 {
+                println!("  pull: settled at round {round}");
+                break;
+            }
+            if round == 39 {
+                println!("  pull: STILL BUSY after 40 rounds (pending {})", session.pending_work());
+            }
+        }
+    }
+
     // The cursor: inside a function body, which is where a reader types.
     let text = session.text(&file).unwrap_or(on_disk.clone());
     let cursor = text.find('{').map(|index| index + 1).unwrap_or(text.len());
