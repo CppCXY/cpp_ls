@@ -107,6 +107,29 @@ fn a_classs_member_list_and_its_postings_agree() {
                 "std::vector has `erase` among its members: {names:?}"
             );
         }
+        // **What the signatures look like now.** Before the declarator-choice fix, every member whose return type ends
+        // in `&` or `*` carried `parameter_list: None` — 1 937 of libstdc++'s 15 253 function facts — so the
+        // completion row and the signature popup read `assign(…)` with no arguments at all.
+        if class == "std::vector" {
+            let samples: Vec<(String, Option<String>)> = match &listed {
+                Known::Yes(list) => list.members.iter(),
+                _ => [].iter(),
+            }
+                .filter(|member| {
+                    matches!(
+                        member.fact.name.as_str(),
+                        "assign" | "insert" | "erase" | "at"
+                    )
+                })
+                .take(4)
+                .map(|member| (member.fact.name.clone(), member.fact.parameter_list.clone()))
+                .collect();
+            println!("  signatures: {samples:?}");
+            assert!(
+                samples.iter().any(|(_, parameters)| parameters.is_some()),
+                "at least one sampled member carries its parameter list: {samples:?}"
+            );
+        }
         println!(
             "  has size: {}  has erase: {}  has begin: {}",
             names.iter().any(|name| name == "size"),

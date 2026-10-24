@@ -1919,12 +1919,47 @@ pub fn parameter_list_at(root: &CppSyntaxNode, offset: usize) -> Option<String> 
 pub(crate) fn declared_parameters_with(shapes: &DeclarationShapes, binding: &Binding) -> Option<String> {
     let mut found = None;
     shapes.on_the_path(binding.name_range.start_offset, |shape| {
-        if let Some(declarator) = &shape.declarator {
+        // **The declarator that names this binding**, not merely the last one on the path.
+        //
+        // A path can hold several declarators, and the *innermost* one is often a prefix rather than the
+        // declaration: `__ostream_type& operator<<(long)` parses as
+        //
+        // ```text
+        // InitDeclarator
+        //   Declarator  &  operator<<(long)      <- the name and the list are here
+        //     Declarator  &                      <- and this is the last one on the path
+        //     NameExpr    operator<<
+        //     ParameterList (long)
+        // ```
+        //
+        // Taking the last declarator answered "no parameter list" for every operator and every function whose
+        // return type ends in `&` or `*`. Measured on libstdc++ with `parse_loss_probe`: **1 937 of 15 253**
+        // function facts had `parameter_list: None`, and `bits/ostream.h` was 53 of 66 — a signature help, a
+        // hover and an argument check that all see a function with no arguments.
+        if let Some(declarator) = &shape.declarator
+            && names_the_binding(declarator, binding.name_range.start_offset)
+        {
             found = Some(declarator.clone());
         }
     });
 
     crate::inlay::parameter_list_text(&found?)
+}
+
+/// Is the **name this declarator declares** the one at `offset`?
+///
+/// A declarator's own name is a **direct child** — the parameter types are names too, but they are deeper — so the
+/// question is "does one of my direct children name the binding", which is what separates the declarator that
+/// declares from the wrappers around it (`&`, `*`, `const`) and from a function pointer's
+/// `Declarator > (Declarator(*f), ParameterList)`, whose name is not a direct child precisely because the list
+/// there belongs to the pointer's type rather than to a function.
+fn names_the_binding(declarator: &CppSyntaxNode, offset: usize) -> bool {
+    let at = u32::try_from(offset).unwrap_or(u32::MAX);
+    declarator.children().any(|child| {
+        matches!(CppSyntaxKind::from(child.kind()), CppSyntaxKind::NameExpr)
+            && u32::from(child.text_range().start()) <= at
+            && at < u32::from(child.text_range().end())
+    })
 }
 
 /// The names a class template declares its parameters with** — `["_Ty", "_Alloc"]` for `std::vector`.

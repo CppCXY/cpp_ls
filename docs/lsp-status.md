@@ -226,3 +226,58 @@ CodeFormat.cpp       批处理最后一条假报消失（9 → 1 → 0）
 服务器后台会 cook（日志里的 `N to cook`），cook 完的摘要替换掉未 cook 的。所以 `#if` 只在**未 cook 的窗口**里存在：
 `members_real.rs` 里实测，`bits/stl_vector.h` 在被要求渲染之前 `erase` 不在，cook 之后就在（305 个成员）。
 这也意味着**解析器必须在任何位置都容忍指令**，不能指望"preprocessed 就没有 `#` 了"。
+## P2 ⑦ 未 cook 窗口的成员损失：一个探针，一类 bug
+
+`docs/lsp-status.md` 上一节解释了为什么"预处理过了"还会看到 `#if`：索引先读**文件自身文本**。那么问题就从"某个
+名字找不到"变成"这些文本里还有多少成员根本没读出来"。新探针 `examples/parse_loss_probe`：
+
+```text
+parse_loss_probe <dir-or-file> …     每个文件：函数事实里 parameter_list 为 None 的个数、ErrorNode 个数
+parse_loss_probe --show <file> <n>   把那些声明本身打出来 —— 形状才是修法的依据
+```
+
+在 libstdc++ 的 579 个头文件上：
+
+```text
+15 253 个函数事实，1 937 个没有参数表（12.7%）
+bits/stl_algo.h  88/353     bits/basic_string.h 73/336     bits/cow_string.h 72/221     bits/ostream.h 53/66
+```
+
+### 第一个形状：声明符里套了一层前缀（已修）
+
+`bits/ostream.h` 的 53/66 全是同一种：
+
+```cpp
+      __ostream_type&
+      operator<<(long __n)
+      { return _M_insert(__n); }
+```
+
+解析树是
+
+```text
+InitDeclarator
+  Declarator  &  operator<<(long __n)     ← 名字和参数表在这里
+    Declarator  &                         ← 而这是路径上最后一个声明符
+    NameExpr    operator<<
+    ParameterList (long __n)
+```
+
+事实层取的是**路径上最后一个**声明符（那个 `&`），它没有参数表。凡返回类型以 `&`/`*` 结尾的函数都受影响 ——
+签名帮助、hover、参数检查看到的都是"没有参数"。
+
+修：取**直接子节点里含这个名字**的那个声明符（`names_the_binding`）。函数指针的参数表不受影响 ——
+`void (*f)(int)` 的名字不是那个含参数表的声明符的直接子节点。
+
+```text
+1 937 → 312（12.7% → 2.1%）
+std::vector 的成员现在带签名：assign(size_type __n, const value_type& __val)、
+                             assign(_InputIterator __first, _InputIterator __last)、…
+```
+
+### 剩下的 312
+
+一大半是**最易解析歧义**的碎片（`std::iter_swap(__result, __b);` 在函数体里被读成声明，事实名叫 `iter_swap`、
+`local` 却是 false）。它们不是"丢失的成员"，是**多出来的事实** —— 属于另一类 bug，探针已经能分开计数（`local`）。
+
+下一轮：`parse_loss_probe --show` 剩下的 312 条里，按 `local == false` 且名字等于自己类型段的名字筛，就是这一类。

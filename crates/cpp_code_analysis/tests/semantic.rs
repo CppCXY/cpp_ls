@@ -1884,3 +1884,45 @@ fn a_member_whos_return_type_a_directive_separates_is_a_member() {
         "`erase` is a member of `C` with a parameter list: {found:?}"
     );
 }
+/// **A function whose return type ends in `&` keeps its parameter list.**
+///
+/// The declarator is nested for this shape — `__ostream_type& operator<<(long)` is
+/// `InitDeclarator > Declarator > (Declarator(&), NameExpr, ParameterList)` — and the fact pass took the **last**
+/// declarator on the path, which is the `&` wrapper and has no list. Every such function became a fact with
+/// `parameter_list: None`: on libstdc++'s 579 headers, `parse_loss_probe` counted **1 937 of 15 253** functions that
+/// way, and `bits/ostream.h` was 53 of 66. A signature help, a hover and an argument check all saw a function with
+/// no arguments.
+///
+/// The declarator that is chosen now is the one whose **direct child names the binding** — the one the name and the
+/// list belong to — which leaves a function pointer's own list (`void (*f)(int)`) where it was, because there the
+/// name is not a direct child of the declarator that holds the list.
+#[test]
+fn a_function_returning_a_reference_keeps_its_parameter_list() {
+    let session = session_with(&[(
+        "/p/a.cpp",
+        "struct S {\n    __ostream_type& operator<<(long n) { return n; }\n    Widget& value(int a, int b) { return a; }\n};\n",
+    )]);
+    let summary = session
+        .index()
+        .summary(std::path::Path::new("/p/a.cpp"))
+        .expect("indexed");
+    let found: Vec<(&str, Option<&str>)> = summary
+        .declarations
+        .iter()
+        .filter(|fact| matches!(fact.kind, cpp_code_analysis::DeclKind::Function))
+        .map(|fact| (&*fact.name, fact.parameter_list.as_deref()))
+        .collect();
+    println!("functions: {found:?}");
+    assert!(
+        found
+            .iter()
+            .any(|(name, parameters)| *name == "operator<<" && *parameters == Some("(long n)")),
+        "the operator keeps its list: {found:?}"
+    );
+    assert!(
+        found
+            .iter()
+            .any(|(name, parameters)| *name == "value" && parameters.is_some()),
+        "and so does the reference-returning member: {found:?}"
+    );
+}
