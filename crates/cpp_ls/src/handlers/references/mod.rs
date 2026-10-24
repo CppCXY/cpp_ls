@@ -417,24 +417,9 @@ fn name_level_locations<F: cpp_code_analysis::FileProvider + Clone>(
     let name = first.fact.name.clone();
 
     // **The class the cursor is in**, which is what says *which* of the declarations is meant.
-    let owner = enclosing_class(&view.scopes, &view.root, offset.get());
-    let aimed: Vec<&cpp_code_analysis::ProjectDefinition> = match &owner {
-        Some(class) => {
-            let inside: Vec<&cpp_code_analysis::ProjectDefinition> = defined
-                .found
-                .iter()
-                .filter(|definition| definition.fact.scope.as_deref() == Some(class.as_str()))
-                .collect();
-            // A name the class does not declare itself is a name lookups reached further out: the whole list is the
-            // honest answer then, and the filter below still has the class to compare against.
-            if inside.is_empty() {
-                defined.found.iter().collect()
-            } else {
-                inside
-            }
-        }
-        None => defined.found.iter().collect(),
-    };
+    let owner = the_class_the_cursor_is_in(&view.scopes, &view.root, offset.get());
+    let defined = narrowed_to_the_cursors_class(view, offset.get(), defined);
+    let aimed: Vec<&cpp_code_analysis::ProjectDefinition> = defined.found.iter().collect();
 
     let mut declaring: Vec<std::path::PathBuf> = aimed
         .iter()
@@ -555,7 +540,7 @@ fn position_of<F: cpp_code_analysis::FileProvider + Clone>(
 ///
 /// Both are answered here, because the second is the ordinary case in a real project: without it every reference
 /// query in a `.cpp` had no class to compare against and nothing was filtered.
-fn enclosing_class(
+fn the_class_the_cursor_is_in(
     scopes: &cpp_code_analysis::ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
     offset: usize,
@@ -600,6 +585,36 @@ fn enclosing_class(
         .map(str::to_string)
 }
 
+/// **The declarations the cursor's own class is about**, when the cursor is inside a class and the name is one of its
+/// members — the rule [`name_level_locations`] and Go to Definition both need.
+///
+/// Reported twice from the same screenshot: Go to Definition on `_diagnosticStyle` listed three classes' members, and
+/// Find References listed the same three twice over. A member of one class is not a member of another, and the cursor's
+/// enclosing class is what says which one is meant.
+///
+/// A name the class does **not** declare itself is left alone: lookups reached further out (a base's member, a
+/// namespace's name), and the whole list is the honest answer then.
+pub(crate) fn narrowed_to_the_cursors_class(
+    view: &cpp_code_analysis::FileView,
+    offset: usize,
+    found: cpp_code_analysis::ProjectDefinitions,
+) -> cpp_code_analysis::ProjectDefinitions {
+    let Some(class) = the_class_the_cursor_is_in(&view.scopes, &view.root, offset) else {
+        return found;
+    };
+    let inside: Vec<cpp_code_analysis::ProjectDefinition> = found
+        .found
+        .iter()
+        .filter(|definition| definition.fact.scope.as_deref() == Some(class.as_str()))
+        .cloned()
+        .collect();
+    if inside.is_empty() {
+        return found;
+    }
+    let mut narrowed = found;
+    narrowed.found = inside;
+    narrowed
+}
 /// **Is this occurrence a bare name inside a class that is not `owner`?** — see [`name_level_locations`].
 ///
 /// "Bare" is read from the text: the characters before the name, past whitespace, are `.`, `->` or `::` for a
@@ -613,7 +628,7 @@ fn a_bare_name_in_another_class(
     offset: usize,
     owner: &str,
 ) -> bool {
-    let Some(class) = enclosing_class(scopes, root, offset) else {
+    let Some(class) = the_class_the_cursor_is_in(scopes, root, offset) else {
         return false;
     };
     if class == owner {
@@ -811,5 +826,83 @@ mod a_file_the_session_does_not_hold {
         println!("{header:?} at {at} → {found:?}");
         assert_eq!(found.line, 1);
         assert_eq!(found.character, 8);
+    }
+}
+#[cfg(test)]
+mod a_definition_in_a_class {
+    use std::path::PathBuf;
+
+    use cpp_code_analysis::{
+        CompilerConfig, MemoryFiles, OpenDocuments, Session, SessionFiles, WatchFilter,
+    };
+
+    /// **Go to Definition on a member answers its own class's declaration, not every class's.**
+    ///
+    /// The first screenshot of this report: three `_diagnosticStyle`s, from `CodeFormat`, `FormatState` and
+    /// `DiagnosticBuilder`, offered for a cursor inside one of them. `definitions` answers by name — it has to, a name
+    /// is what a lookup is — so the narrowing belongs to the caller that knows where the cursor is.
+    #[test]
+    fn is_the_class_the_cursor_is_in() {
+        let base = "\
+struct First {
+    int _value;
+    void update();
+};
+struct Second {
+    int _value;
+    void update();
+};
+";
+        let use_cpp = "\
+#include \"base.h\"
+void First::update() { _value = 1; }
+";
+        let files = MemoryFiles::new()
+            .with_file("/p/base.h", base)
+            .with_file("/p/use.cpp", use_cpp);
+        let providers = SessionFiles::new(OpenDocuments::new(), files);
+        let mut session = Session::with_config(
+            "/p",
+            providers,
+            WatchFilter::new("/p"),
+            CompilerConfig::default(),
+        );
+        session.add_project_files([PathBuf::from("/p/base.h"), PathBuf::from("/p/use.cpp")]);
+        session.index_everything();
+
+        let path = PathBuf::from("/p/use.cpp");
+        let held = session.files().held(&path).expect("the file is held");
+        let view =
+            cpp_code_analysis::FileView::parse_with(held, &cpp_parser::MacroEnvironment::default());
+        let at = use_cpp.find("_value").expect("the fixture uses it");
+
+        let cpp_code_analysis::Known::Yes(found) = session.definitions(
+            &view,
+            cpp_code_analysis::file::coordinates::ReadingOffset::new(at),
+        ) else {
+            panic!("`_value` is declared");
+        };
+        println!(
+            "before: {:?}",
+            found
+                .found
+                .iter()
+                .map(|definition| definition.fact.qualified_name())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(found.found.len(), 2, "the fixture is two classes' members");
+
+        let narrowed = super::narrowed_to_the_cursors_class(&view, at, found);
+        let names: Vec<String> = narrowed
+            .found
+            .iter()
+            .map(|definition| definition.fact.qualified_name())
+            .collect();
+        println!("after: {names:?}");
+        assert_eq!(
+            names,
+            ["First::_value"],
+            "the cursor is in `First::update`, so that is the declaration meant"
+        );
     }
 }

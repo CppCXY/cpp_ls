@@ -128,6 +128,11 @@ pub async fn on_goto_definition_handler(
         let Known::Yes(found) = session.definitions(&view, offset) else {
             return None;
         };
+        // **One class's member, not every class's.** `definitions` answers by *name*, and three classes in a real
+        // project declare `_diagnosticStyle` — so a cursor inside one of them was offered all three. The cursor's own
+        // class decides which is meant; see `references::narrowed_to_the_cursors_class`, which is the same rule Find
+        // References applies and the reason the two answer consistently.
+        let found = crate::handlers::references::narrowed_to_the_cursors_class(&view, offset.get(), found);
 
         // **The overload a call means comes first.** The protocol allows a list and a client shows it in order, so the
         // first entry is what a reader who does not pick from the popup gets — and for a call that is the declaration
