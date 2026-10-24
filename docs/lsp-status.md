@@ -299,4 +299,4 @@ libstdc++ 579 个文件    56 734 → 55 549 事实        （1 185 个幽灵事
 CodeFormat.cpp          150 834 个事实，0 条诊断
 ```
 
-剩下的 18：`experimental/bits/fs_path.h`（12）、`bits/alloc_traits.h`（6）。下一轮看它们的形状。
+剩下的 18 是两种形状，都不是"成员丢了"：`alloc_traits.h` 的 6 个是 **concept**（`concept __has_allocate_hint = requires (…) { … };`，里面还夹着 `#if`），`fs_path.h` 的 12 个是**转换运算符**（`operator string() const`）。把最小夹具单独喂进去**复现不出来**（concept 正确成为 `Type` 事实、转换运算符没有留下碎片），所以它们依赖上下文（concept 的 `requires` 里夹 `#if`、转换运算符所在的类）。0.12%，留作下一轮的一个小目标。
