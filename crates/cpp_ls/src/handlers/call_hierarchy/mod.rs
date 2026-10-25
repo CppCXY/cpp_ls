@@ -185,49 +185,47 @@ pub fn incoming_calls_of<F: FileProvider + Clone>(
     offset: usize,
     name: &str,
 ) -> Vec<CallHierarchyIncomingCall> {
+    let _ = name;
     let references = crate::handlers::references::name_level_offsets(
         session,
         view,
         cpp_code_analysis::file::coordinates::ReadingOffset::new(offset),
         false,
     );
-    // **One entry per caller**, keyed by its declaration's start, in the order they are found.
+
+    // **One parse per file**, kept for both questions about it: is this reference a *declaration* (the defining file's
+    // own fact is not in the reference list's `aimed` set, so it arrives here as a reference), and which function is it in.
+    let mut parsed: HashMap<PathBuf, Option<cpp_code_analysis::FileView>> = HashMap::new();
     let mut callers: Vec<(CallHierarchyItem, Vec<Range>)> = Vec::new();
-    // **A declaration's own name is not a call**, even though the text after it is `(` — a definition's parameter list
-    // reads exactly like a call to a lexical test. The facts know where every function's name is, so those ranges are
-    // skipped by identity rather than by shape.
-    let mut declaration_names: HashMap<PathBuf, Vec<cpp_parser::SourceRange>> = HashMap::new();
     for (file, range) in references {
         let Some(held) = session.files().held(&file) else {
             continue;
         };
-        let names = declaration_names.entry(file.clone()).or_insert_with(|| {
-            session
-                .index()
-                .summary(&file)
-                .map(|summary| {
-                    summary
-                        .declarations
-                        .iter()
-                        .filter(|fact| fact.kind == cpp_code_analysis::DeclKind::Function)
-                        .map(|fact| fact.name_range)
-                        .collect()
-                })
-                .unwrap_or_default()
-        });
-        if names.contains(&range) {
+        let parsed_view = parsed
+            .entry(file.clone())
+            .or_insert_with(|| {
+                Some(cpp_code_analysis::FileView::parse_with(
+                    &held,
+                    &cpp_parser::MacroEnvironment::default(),
+                ))
+            })
+            .as_ref();
+        let Some(parsed_view) = parsed_view else {
+            continue;
+        };
+        if is_a_declaration(parsed_view, range) {
             continue;
         }
         if !is_a_call(&held.text, range) {
             continue;
         }
-        let Some(caller) = the_caller_of(session, &file, range.start_offset) else {
+        let Some(caller) = the_caller_of(session, parsed_view, &file, range.start_offset) else {
             continue;
         };
-        let Some((Some(start), Some(end))) = Some((
-            position_in_file(held, range.start_offset),
-            position_in_file(held, range.end_offset()),
-        )) else {
+        let (Some(start), Some(end)) = (
+            position_in_file(&held, range.start_offset),
+            position_in_file(&held, range.end_offset()),
+        ) else {
             continue;
         };
         let call = Range::new(start, end);
@@ -242,7 +240,6 @@ pub fn incoming_calls_of<F: FileProvider + Clone>(
             }
             None => callers.push((caller, vec![call])),
         }
-        let _ = name;
     }
     callers
         .into_iter()
@@ -250,6 +247,32 @@ pub fn incoming_calls_of<F: FileProvider + Clone>(
         .collect()
 }
 
+/// Is `range` the **name of a declaration** in this file — the definition of the function whose calls are being listed?
+///
+/// A definition arrives in the reference list: the list excludes the declarations *visible from the asking file*, and a
+/// `.cpp` that defines a header's function is not visible from the header. Its name is followed by `(` too, so the
+/// lexical test cannot tell them apart — the file's own facts can.
+fn is_a_declaration(view: &cpp_code_analysis::FileView, range: cpp_parser::SourceRange) -> bool {
+    let Known::Yes(defined) = cpp_code_analysis::sema::resolve::definitions_at(
+        &view.scopes,
+        &view.root,
+        range.start_offset,
+    ) else {
+        return false;
+    };
+    defined.iter().any(|binding| {
+        binding.name_range.start_offset == range.start_offset
+            && matches!(
+                binding.kind,
+                cpp_code_analysis::BindingKind::Function
+                    | cpp_code_analysis::BindingKind::Constructor
+                    | cpp_code_analysis::BindingKind::Destructor
+                    | cpp_code_analysis::BindingKind::ConversionFunction
+                    | cpp_code_analysis::BindingKind::OperatorFunction
+                    | cpp_code_analysis::BindingKind::LiteralOperator
+            )
+    })
+}
 /// Is the reference at `range` a **call** — is the next non-space character a `(`?
 ///
 /// A lexical test on the file's text, and the honest one: the analysis resolves *names*, and whether a name is called
@@ -269,13 +292,11 @@ fn is_a_call(text: &str, range: cpp_parser::SourceRange) -> bool {
 /// the innermost declaration whose `CompoundStat` child contains the offset.
 fn the_caller_of<F: FileProvider + Clone>(
     session: &Session<F>,
+    view: &cpp_code_analysis::FileView,
     file: &std::path::Path,
     offset: usize,
 ) -> Option<CallHierarchyItem> {
-
     let held = session.files().held(file)?;
-    let view =
-        cpp_code_analysis::FileView::parse_with(held, &cpp_parser::MacroEnvironment::default());
     let mut node = view.root.clone();
     loop {
         let mut child = None;
@@ -301,6 +322,13 @@ fn the_caller_of<F: FileProvider + Clone>(
                 cpp_parser::CppSyntaxKind::from(child.kind()),
                 cpp_parser::CppSyntaxKind::CompoundStat
             )
+        });
+        // **The body has to contain the offset.** A definition's own name is inside the declaration that has a body —
+        // as a *sibling* — so "the declaration has a body" is not the same question as "this offset is in the body".
+        // Measured: without this, the definition of `UpdateCodeStyle` was reported as its own caller.
+        let body = body.filter(|body| {
+            let range = body.text_range();
+            offset >= usize::from(range.start()) && offset < usize::from(range.end())
         });
         if body.is_some() {
             // **The declarator's own name**, not a parameter's: the direct `NameExpr` child of the outermost
@@ -333,12 +361,16 @@ fn the_caller_of<F: FileProvider + Clone>(
                 return None;
             }
             let uri = path_to_uri(file)?;
-            let (Some(range), Some(selection_range)) = (
-                span(held, usize::from(node.text_range().start()), usize::from(node.text_range().end())),
-                span(held, usize::from(name_node.text_range().start()), usize::from(name_node.text_range().end())),
-            ) else {
-                return None;
-            };
+            let range = span(
+                &held,
+                usize::from(node.text_range().start()),
+                usize::from(node.text_range().end()),
+            )?;
+            let selection_range = span(
+                &held,
+                usize::from(name_node.text_range().start()),
+                usize::from(name_node.text_range().end()),
+            )?;
             return Some(CallHierarchyItem {
                 name: name.clone(),
                 // **A member is a method**: an out-of-line definition writes `C::f`, and a qualifier is what says the
@@ -360,7 +392,6 @@ fn the_caller_of<F: FileProvider + Clone>(
     }
     None
 }
-
 /// A byte range in a file, as a protocol range.
 fn span(held: &cpp_code_analysis::VfsFile, start: usize, end: usize) -> Option<Range> {
     Some(Range::new(

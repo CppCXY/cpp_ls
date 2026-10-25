@@ -20,7 +20,7 @@
 //! `document_symbol`, `folding_range`, `references`, `rename`, `selection_range`, `workspace_symbol` and
 //! `inlay_hint` all came back that way.
 
-mod call_hierarchy;
+pub mod call_hierarchy;
 mod code_action;
 mod completion;
 mod configuration;

@@ -210,3 +210,23 @@ typeDefinition 的 auto   推断在**渲染**里做（文件自身文本回答 K
 
 ⑤ 剩下的 CPU 是**首次索引 1273 个文件**的固有成本，不是循环；要再压就得动索引本身（那是另一个话题）。
 ② 和 ⑥ 的截图来自同一份日志，现在 hover 不再触发 cook，日志里也不该再有每 hover 一条的 cook。
+#### 真机上的一个问题（未修）：`prepare` 排队 cook 时 pump 空转，请求等不到
+
+`lsp_status` 加上 `prepareCallHierarchy` 之后探针**卡住**：日志里请求 1200 收到之后，pump 每 8 秒打一条
+`the pump made no progress in 8 slices with 0 file(s) left`，请求一直没有响应。
+
+同一个请求在**分析层**是毫秒级（`tests/call_hierarchy_real.rs`，真项目）：
+
+```text
+prepare            63 µs   （UpdateCodeStyle）
+incomingCalls      4.5 ms  （一个调用者：C API 里的同名自由函数 UpdateCodeStyle —— 名字对，因为那确实是一个同名函数）
+outgoingCalls      9 µs    （头文件里的声明没有函数体）
+outgoing（定义处）  16 ms   （OpenFile ×2、emplace_back ×1）
+```
+
+所以卡的不是这三个问题，而是 `AnalysisState::prepare` → `want_cooked_reading` 之后 **pump 的"没有进展"循环**：它占着
+写锁一遍遍重试，请求拿不到读锁。这是一个**饥饿 bug**，与 call hierarchy 无关，任何在渲染被挤掉之后调用 `prepare`
+的请求都会踩到（`hover` 之前也会，只是它现在不碰渲染了）。
+
+下一步：给 pump 的"没有进展"加一个退出条件（例如同一次唤醒里连续 8 个空 slice 之后把那个文件从队列里摘掉并记录），
+然后 call hierarchy 的真机行就能出现在表里。

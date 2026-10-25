@@ -402,7 +402,7 @@ const NAME_REFERENCE_BUDGET: usize = 2000;
 /// ```
 ///
 /// The declarations are filtered by the same rule, which is what keeps another class's *declaration* out of the list.
-pub(crate) fn name_level_offsets<F: cpp_code_analysis::FileProvider + Clone>(
+pub fn name_level_offsets<F: cpp_code_analysis::FileProvider + Clone>(
     session: &cpp_code_analysis::Session<F>,
     view: &cpp_code_analysis::FileView,
     offset: cpp_code_analysis::file::coordinates::ReadingOffset,
