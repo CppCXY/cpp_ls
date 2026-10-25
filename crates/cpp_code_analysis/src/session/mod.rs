@@ -607,6 +607,15 @@ pub struct Session<F: FileProvider = DiskFiles> {
             std::sync::Arc<crate::preprocess::cooked::RenderedCooked>,
         >,
     >,
+    /// **The summary of a rendering**, by `(path, content hash of the rendered text)`.
+    ///
+    /// A rendering is what the preprocessor resolved, so a declaration a directive splits has one answer there —
+    /// `reference` for libstdc++'s `emplace_back` — where the file's own text has two. Reading it needs the *summary*
+    /// of the rendered text, which is a parse: measured at **20.2 ms, and 19.1 ms again** on the second ask
+    /// (`tests/rendering_real.rs`), because the rendering is cached by the cook path and its summary was not.
+    rendering_summaries: std::sync::Mutex<
+        crate::cache_lru::Cache<(PathBuf, u64), std::sync::Arc<crate::FileSummary>>,
+    >,
     ///
     /// `cooking_materials` answers `None` for a file whose unit is provisional, whose summary is not in the index, or
     /// whose render declines — and the caller that wanted it (`want_the_closure_cooked`, once per drain) wants it
@@ -1066,6 +1075,10 @@ impl<F: FileProvider + Clone> Session<F> {
             surfaces: std::sync::Mutex::new(crate::effect::Surfaces::new()),
             effects: std::sync::Mutex::new(HashMap::new()),
             renderings: std::sync::Mutex::new(crate::cache_lru::Cache::renderings()),
+        rendering_summaries: std::sync::Mutex::new(crate::cache_lru::Cache::new(
+            RENDERING_SUMMARY_ENTRIES,
+            RENDERING_SUMMARY_BYTES,
+        )),
             cooking_refused: std::sync::Mutex::new(std::collections::HashSet::new()),
             unit_from_memory: std::sync::atomic::AtomicUsize::new(0),
             unit_from_disk: std::sync::atomic::AtomicUsize::new(0),
@@ -5341,11 +5354,51 @@ fn error_directive_line(text: &str) -> Option<(usize, usize, String)> {
         scope: Option<&str>,
     ) -> Option<crate::DeclFact> {
         let path = self.store.index().summary(path.as_ref())?.path.clone();
-        let rendered = self.rendering_of(&path)?;
-        let summary = crate::summarize(&path, &rendered.text, crate::SummaryKey::new(0, 0));
-        summary.declarations.into_iter().find(|fact| {
-            fact.name == name && fact.scope.as_deref() == scope && !fact.split_by_a_directive
-        })
+        // **The cached rendering first.** `rendering_of` builds one — a unit walk, a lex and a cook — and the session
+        // already keeps them by content hash; asking for the artifact it holds is the difference between a lookup and
+        // 4 ms (`tests/rendering_real.rs`: the second ask was 3.9 ms with this missing, 23.8 → 19.1 before the summary
+        // cache existed).
+        let text = self.files.read(&path)?;
+        let rendered = match self.known_rendering_of(&path, &text) {
+            Some(rendered) => rendered,
+            None => {
+                // Built and **kept**: the key is the one `known_rendering_of` reads, so the next ask is a lookup.
+                let built = std::sync::Arc::new(self.rendering_of(&path)?);
+                if let Ok(mut known) = self.renderings.lock() {
+                    let weight = built.weight();
+                    known.insert((path.clone(), crate::cache::content_hash(&text)), built.clone(), weight);
+                }
+                built
+            }
+        };
+        // **The summary of the rendered text, cached** — see `rendering_summaries`. A hover on a declaration
+        // a directive splits asks this, and before the cache existed every ask paid one parse of the rendering.
+        let key = (path.clone(), crate::cache::content_hash(&rendered.text));
+        let remembered = self
+            .rendering_summaries
+            .lock()
+            .ok()
+            .and_then(|mut known| known.get(&key).cloned());
+        let summary = match remembered {
+            Some(summary) => summary,
+            None => {
+                let built = std::sync::Arc::new(crate::summarize(
+                    &path,
+                    &rendered.text,
+                    crate::SummaryKey::new(0, 0),
+                ));
+                if let Ok(mut known) = self.rendering_summaries.lock() {
+                    let weight = built.declarations.len() + built.macros.len();
+                    known.insert(key, built.clone(), weight);
+                }
+                built
+            }
+        };
+        summary
+            .declarations
+            .iter()
+            .find(|fact| fact.name == name && fact.scope.as_deref() == scope && !fact.split_by_a_directive)
+            .cloned()
     }
 
     /// Cook every **open** file — what the indexing loop does when its queue drains.
@@ -7462,3 +7515,10 @@ fn is_a_source_file(path: &Path, extra: &[String]) -> bool {
 }
 #[cfg(test)]
 mod tests;
+/// How many rendering summaries a session remembers, and how much they may weigh.
+///
+/// The weight is `declarations + macros`, which is what a summary is made of, so the bound is "a handful of the
+/// largest headers": a rendering summary of `bits/basic_string.h` is about 1 100 declarations and one of
+/// `stl_bvector.h` about 440. Sixteen of the largest is a few tens of thousands of entries.
+const RENDERING_SUMMARY_ENTRIES: usize = 16;
+const RENDERING_SUMMARY_BYTES: usize = 40_000;

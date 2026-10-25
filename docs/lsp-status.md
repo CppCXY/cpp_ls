@@ -314,13 +314,14 @@ basic_string.h 1130 条，4 条
 `split_by_a_directive` 为真时走这条路，于是 `emplace_back` 显示 `reference`：
 
 ```text
-written:   returns None, split_by_a_directive true
-rendering: returns Some("reference") in 20.2 ms（再一次 19.1 ms —— 一次渲染文本的 parse）
+written:      returns None, split_by_a_directive true
+rendering:    returns Some("reference")
+             第一次 24.1 ms（cook 渲染 + 摘要），第二次 **205.6 µs**
 ```
 
-**这 20 ms 是代价，写在文档里而不是藏起来**：渲染本身是 cook 缓存，但它的**摘要**没有缓存，所以每次问都要重新
-parse 一次渲染文本。只有被标记的声明会走（三头文件里 12/1589 条），下一步是给"渲染的摘要"按渲染文本内容 hash 加
-缓存，第二次就变成一次查找。
+**这两层缓存都是这一轮补上的**：`rendering_summaries`（按 `(path, 渲染文本内容 hash)` 的 LRU，权重 = 声明数+宏数，
+16 条 / 40 000）让第二次不必再 parse 渲染文本；而 `fact_from_the_rendering` 自己**建的渲染会存回** `renderings`
+缓存（它以前只查不存，所以第二次仍要重建一次渲染，4.2 ms）。修之前是 20.2 → 19.1 ms，修之后 24.1 → 0.2 ms。
 
 **还没做**：剩下 10 条矛盾（`operator bool`、`_M_data_ptr`、`basic_string.h` 的 4 个 `__s`）是别的形状（指令在声明
 **之前**、或渲染把整条声明删掉）。
