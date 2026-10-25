@@ -37,6 +37,7 @@ use std::error::Error;
 use log::error;
 use lsp_server::{Request, Response};
 use lsp_types::request::{
+    CallHierarchyIncomingCalls, CallHierarchyOutgoingCalls, CallHierarchyPrepare,
     CodeActionRequest, Completion, DocumentDiagnosticRequest, DocumentHighlightRequest,
     DocumentLinkRequest, DocumentSymbolRequest, FoldingRangeRequest, Formatting, GotoDefinition,
     RangeFormatting, WillSaveWaitUntil,
@@ -48,6 +49,9 @@ use lsp_types::request::{
 use crate::context::ServerContext;
 
 use super::{
+    call_hierarchy::{
+        on_incoming_calls, on_outgoing_calls, on_prepare_call_hierarchy,
+    },
     code_action::on_code_action,
     completion::{on_completion, on_completion_resolve},
     definition::on_goto_definition_handler,
@@ -116,6 +120,9 @@ pub async fn on_request_handler(
     GotoImplementation => on_goto_implementation,
     GotoTypeDefinition => on_goto_type_definition,
     HoverRequest => on_hover,
+    CallHierarchyPrepare => on_prepare_call_hierarchy,
+    CallHierarchyIncomingCalls => on_incoming_calls,
+    CallHierarchyOutgoingCalls => on_outgoing_calls,
     CodeActionRequest => on_code_action,
     Completion => on_completion,
     ResolveCompletionItem => on_completion_resolve,

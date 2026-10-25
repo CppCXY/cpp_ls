@@ -4482,3 +4482,86 @@ fn a_macro_hover_shows_its_own_define_line() {
     server.request(999, "shutdown", Value::Null);
     server.notify("exit", Value::Null);
 }
+/// **The call hierarchy over the wire**: prepare on a caller, then the two directions.
+///
+/// The three requests are a path through the dispatcher that no unit test covers — `prepareCallHierarchy` was asked on a
+/// real project and the server **never answered**, so the plumbing is what this test is for.
+#[test]
+fn the_call_hierarchy_answers_over_the_wire() {
+    let project = Project::new("call_hierarchy");
+    project.write(
+        "base.h",
+        "int add(int a, int b);\nint subtract(int a, int b);\n",
+    );
+    let main = "#include \"base.h\"\n\
+                int both(int a, int b) {\n    return add(a, b) + subtract(a, b);\n}\n";
+    project.write("main.cpp", main);
+
+    let mut server = Server::start(project.root());
+    let main_uri = uri_of(&project.root().join("main.cpp"));
+
+    server.request(
+        1,
+        "initialize",
+        json!({
+            "processId": std::process::id(),
+            "rootUri": uri_of(project.root()),
+            "capabilities": { "textDocument": { "callHierarchy": {} } },
+        }),
+    );
+    server.notify("initialized", json!({}));
+    server.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": { "uri": main_uri, "languageId": "cpp", "version": 1, "text": main },
+        }),
+    );
+
+    // **Inside the name**: `position_of` answers the position *after* the needle, so the needle ends at the `(` and two
+    // characters back is the `h` of `both`.
+    let (line, character) = position_of(main, "both(");
+    let prepared = server.request(
+        2,
+        "textDocument/prepareCallHierarchy",
+        json!({
+            "textDocument": { "uri": main_uri },
+            "position": { "line": line, "character": character - 2 },
+        }),
+    );
+    println!("prepare: {prepared}");
+    let item = prepared["result"]
+        .as_array()
+        .and_then(|items| items.first())
+        .cloned()
+        .unwrap_or_else(|| panic!("the function is a call hierarchy item: {prepared}"));
+    assert_eq!(item["name"], "both");
+
+    let incoming = server.request(
+        3,
+        "callHierarchy/incomingCalls",
+        json!({ "item": item }),
+    );
+    println!("incoming: {incoming}");
+    assert!(
+        !incoming["result"].is_null(),
+        "the request is answered: {incoming}"
+    );
+
+    let outgoing = server.request(
+        4,
+        "callHierarchy/outgoingCalls",
+        json!({ "item": item }),
+    );
+    println!("outgoing: {outgoing}");
+    let names: Vec<&str> = outgoing["result"]
+        .as_array()
+        .map(|calls| {
+            calls
+                .iter()
+                .filter_map(|call| call["to"]["name"].as_str())
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(names.contains(&"add"), "{names:?}");
+    assert!(names.contains(&"subtract"), "{names:?}");
+}
