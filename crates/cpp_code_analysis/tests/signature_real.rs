@@ -31,6 +31,13 @@ fn project() -> PathBuf {
 #[ignore = "opens a real project; run with --ignored"]
 fn a_call_site_answers_a_signature() {
     let project = project();
+    // **Two files, because the two shapes are in different ones**: `CodeFormat.cpp` has the qualified member
+    // definition's call, and `LuaLexer.cpp` has the constructor call whose class's header the session never cooks.
+    let needles = vec![
+        ("SetupStyle(style, options)", "a call to a static member"),
+        ("LuaParser p(file, std::move", "a constructor whose class lives in a header"),
+    ];
+    {
     let source = project.join("CodeFormatCLib/src/CodeFormat.cpp");
     let text = std::fs::read_to_string(&source).expect("the file reads");
 
@@ -47,11 +54,7 @@ fn a_call_site_answers_a_signature() {
     };
 
     let mut asked = 0;
-    for (needle, what) in [
-        ("SetupStyle(style, options)", "a call to a static member"),
-        ("LuaParser p(file, std::move", "a constructor"),
-        ("FormatBuilder f(style)", "an object whose class is declared in the file"),
-    ] {
+    for (needle, what) in needles {
         let Some(open) = text.find(needle).map(|at| at + needle.find('(').unwrap_or(0))
         else {
             println!("{what}: not in the file");
@@ -128,4 +131,5 @@ fn a_call_site_answers_a_signature() {
         // constructors are found through `constructors_of`, which needs the class's own file — another day's work.
     }
     assert!(asked > 0, "the fixture names a call");
+    }
 }

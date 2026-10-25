@@ -92,6 +92,19 @@ pub fn signatures_at<F>(
 where
     F: FnMut(&Path) -> Option<FileView>,
 {
+    // **Direct initialization is a constructor call the grammar does not spell as one.** `LuaParser p(file, tokens);`
+    // parses as a *declaration* whose declarator holds a parameter list, so `call_around` finds no call and the popup
+    // was empty on the most ordinary line of C++ there is — measured on a real project (`CodeFormat.cpp:72`,
+    // `LuaParser p(file, std::move(luaLexer.GetTokens()));` answered nothing). The class is the type the declaration
+    // writes and the arguments are that list, so the answer is its constructors', read from the facts.
+    if let Some((class, list)) = directly_initialized_at(&view.root, offset) {
+        let active = active_parameter(&list, offset);
+        let constructors = constructors_in_the_index(index, &view.path, &class, active);
+        if !constructors.is_empty() {
+            return constructors;
+        }
+    }
+
     let Some(call) = call_around(&view.root, offset) else {
         return Vec::new();
     };
@@ -167,6 +180,17 @@ where
                         documentation: None,
                     });
                     rankable.push((Vec::new(), Vec::new()));
+                } else {
+                    // **A class with no rendering**: `LuaParser p(file, std::move(…))` is a constructor call, and a
+                    // class fact carries no parameter list of its own — its constructors do, and the index files them
+                    // under the class's name. Without this the popup was empty for the most ordinary line of code
+                    // there is, in every header the session has not cooked.
+                    let from_the_index =
+                        constructors_in_the_index(index, &view.path, &spelling, active);
+                    if !from_the_index.is_empty() {
+                        signatures.extend(from_the_index);
+                        rankable.push((Vec::new(), Vec::new()));
+                    }
                 }
                 continue;
             };
@@ -185,6 +209,22 @@ where
             Some(_) => vec![candidate.clone()],
             None => constructors_of(declared_in, candidate.name_offset),
         };
+
+
+        // **A class whose own file this session has not read**: the constructors are facts in the index, with their
+        // parameter lists, and the class's own tree (which `constructors_of` needs) is not there.
+        //
+        // Measured on a real project: `LuaParser p(file, std::move(luaLexer.GetTokens()));` answered **no signature**,
+        // while the hover on `LuaParser` listed the two constructors with their parameters. A constructor's list is a
+        // fact, so the popup can be built from facts alone — the same fallback as `candidate.parameters` below.
+        if sources.is_empty() && candidate.parameters.is_none() {
+            let from_the_index = constructors_in_the_index(index, &view.path, &spelling, active);
+            if !from_the_index.is_empty() {
+                signatures.extend(from_the_index);
+                rankable.push((Vec::new(), Vec::new()));
+                continue;
+            }
+        }
 
         // **A declaration whose list the tree does not have, in the file being edited.** A qualified definition —
         // `void CodeFormat::SetupStyle(LuaStyle &style, …)` — writes its name in the specifier sequence, so
@@ -545,4 +585,119 @@ fn element_contains(element: &CppSyntaxElement, offset: usize) -> bool {
 
 fn within(start: usize, end: usize, offset: usize) -> bool {
     offset >= start && offset <= end
+}
+/// **The constructors of a class, from the index**, for a call whose class's own file this session has not read.
+///
+/// A constructor's name is its class's, so the facts are the ones the class is filed under: `name == class` and
+/// `scope`'s last segment `== class`. The parameter list is on each fact (the parser's, once a definition in the same
+/// file stopped borrowing the class's), so a label can be built without a tree — the popup loses only the per-parameter
+/// spans a client bolds, the same trade `candidate.parameters` makes.
+fn constructors_in_the_index(
+    index: &ProjectIndex,
+    path: &Path,
+    spelling: &str,
+    active: Option<usize>,
+) -> Vec<CallSignature> {
+    let class = spelling.trim();
+    let class = class.rsplit("::").next().unwrap_or(class).trim();
+    if class.is_empty() {
+        return Vec::new();
+    }
+    let Known::Yes(found) = index.definitions(class, path) else {
+        return Vec::new();
+    };
+    let mut constructors = Vec::new();
+    for declaration in &found.found {
+        if declaration.fact.name != class {
+            continue;
+        }
+        if declaration.fact.kind != crate::DeclKind::Function {
+            continue;
+        }
+        let Some(scope) = declaration.fact.scope.as_deref() else {
+            continue;
+        };
+        if scope.rsplit("::").next().map(str::trim) != Some(class) {
+            continue;
+        }
+        let Some(parameters) = declaration.fact.parameter_list.as_deref() else {
+            continue;
+        };
+        let (tidy, _) = crate::inlay::tidy_list_text(parameters);
+        constructors.push(CallSignature {
+            label: format!("{class}{tidy}"),
+            parameters: Vec::new(),
+            active_parameter: active,
+            declared_in: declaration.file.clone(),
+            declared_at: declaration.fact.name_range.start_offset,
+            documentation: None,
+        });
+    }
+    constructors
+}
+/// **The class and parameter list of a direct initialization**, when the cursor is inside one.
+///
+/// `Widget w(1, 2);` is `Declaration > DeclSpecifierSeq(Widget) + InitDeclarator > Declarator(w + ParameterList(1, 2))`
+/// — the list is a *parameter* list to the grammar, which is right for a declaration and wrong for this question. The
+/// caller's answer is the type's constructors, and the list is where the cursor is.
+///
+/// Only a `Declaration` whose declarator has **nothing but** the list (a declarator with a name and a body is a
+/// function definition, whose parameter list is not a call) and whose last specifier names a type.
+fn directly_initialized_at(
+    root: &CppSyntaxNode,
+    offset: usize,
+) -> Option<(String, CppSyntaxNode)> {
+    let mut node = root.clone();
+    loop {
+        let mut child = None;
+        for candidate in node.children() {
+            let range = candidate.text_range();
+            let start = usize::from(range.start());
+            let end = usize::from(range.end());
+            if offset >= start && offset < end {
+                child = Some(candidate);
+                break;
+            }
+        }
+        let Some(child) = child else {
+            return None;
+        };
+        if CppSyntaxKind::from(child.kind()) == CppSyntaxKind::ParameterList {
+            // Up from the list: the declarator must hold **only** the list — `(int a)` and not `f(int a)` — and the
+            // declaration must not be a function definition (a body after it is a different thing entirely).
+            let declarator = child.parent()?;
+            if CppSyntaxKind::from(declarator.kind()) != CppSyntaxKind::Declarator {
+                return None;
+            }
+            let initializer = declarator.parent()?;
+            let declaration = initializer.parent()?;
+            if CppSyntaxKind::from(declaration.kind()) != CppSyntaxKind::Declaration {
+                return None;
+            }
+            // **A function definition is not a call.** `void f(int a) { … }` is the same declaration + declarator +
+            // parameter list, and what separates them is the body: a definition has a `CompoundStat`, a construction
+            // has a `;`.
+            if declaration.children().any(|sibling| {
+                matches!(CppSyntaxKind::from(sibling.kind()), CppSyntaxKind::CompoundStat)
+            }) {
+                return None;
+            }
+            let specifiers = declaration.children().find(|sibling| {
+                CppSyntaxKind::from(sibling.kind()) == CppSyntaxKind::DeclSpecifierSeq
+            })?;
+            // The class's name is the **last identifier** in the specifiers: `std::shared_ptr<LuaSource>` takes one name
+            // and `shared_ptr` is what the index files the class under.
+            let class = specifiers
+                .descendants_with_tokens()
+                .filter_map(|element| element.into_token())
+                .filter(|token| {
+                    cpp_parser::CppTokenKind::from(token.kind())
+                        == cpp_parser::CppTokenKind::Identifier
+                })
+                .last()
+                .map(|token| token.text().to_string())?;
+            return Some((class, child));
+        }
+        node = child;
+    }
 }

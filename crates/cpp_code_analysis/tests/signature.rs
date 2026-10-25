@@ -122,6 +122,36 @@ int main() {
         "the constructor's own parameters, or nothing: {label:?}"
     );
 }
+/// **Direct initialization is a call the grammar does not spell as one.**
+///
+/// `LuaParser p(file, std::move(tokens));` parses as a *declaration* whose declarator holds a parameter list, so the
+/// query that looks for a call found none and the popup was empty — measured on a real project
+/// (`CodeFormat.cpp:72` answered nothing while `LuaParser`'s constructors were facts in the index).
+///
+/// The answer is the class's constructors, and the class is the last name the declaration's specifiers write. A
+/// function *definition* is the same declaration + declarator + list, and the body is what tells them apart.
+#[test]
+fn a_direct_initialization_offers_the_constructors() {
+    let source = "\
+class Widget {
+public:
+    Widget(int size, int extra);
+};
+void f() {
+    Widget w(|);
+}
+";
+    let (_, signature) = signature_where_marked(source);
+    let label = signature
+        .map(|signature| signature.label)
+        .unwrap_or_default();
+    println!("direct initialization: {label:?}");
+    assert!(
+        label.contains("size") && label.contains("extra"),
+        "the constructor's own parameters: {label:?}"
+    );
+}
+
 /// **The overload the call's arguments select comes first.**
 ///
 /// A client whose `activeSignature` defaults to the first entry shows the language's answer; before the resolver was
