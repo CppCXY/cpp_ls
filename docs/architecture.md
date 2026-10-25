@@ -349,6 +349,31 @@ hover / 定义 / 补全      当前 1–12 ms                    目标：不劣
 > **还没做，且明确不做在本次**：eager 分支（无 unit）仍是 raw；四层补丁（`split_by_a_directive`、查找期
 > `visibility_at`、对账探针、转换运算符拼写规则）**仍然必须留着** —— 它们覆盖的是"第一次读法到 pump 精炼之间"的
 > 窗口，只有第一步全部落地（第一次读法也渲染）才能删。谁删谁要先把那个窗口关掉。
+>
+> **⑭ 第一次读法也能渲染了（同一提交）：窗口关掉了一半。** `Session::advance` 本来就会把"已经有 unit 的文件"从
+> wave 里摘出来，交给 `index_one` 的 `None` 分支单独读 —— 那个分支原来做的是"raw 解析 + 宏体"，现在做的是
+> **渲染 + `index_the_readings`**（`SummaryStore::prepare_with_the_timeline`）。所以键入一个字符、不移动任何指令时，
+> 这个文件的下一次读法**就是**编译器读法，不用等 pump 的第二次读法：
+>
+> ```text
+> session::tests::a_keystroke_in_a_body_reads_the_file_through_its_timeline
+>   did_change(widget.h, 体内加一行) → advance → Step::with_the_environment == true
+>   并且 summary 里 Widget 的 scope == Some("std")（来自别的文件的 _STD_BEGIN 体），立刻成立
+> edit_loop（真项目 CodeFormat.cpp，10 次按键）
+>   min 17 / median 18 / max 71 ms     ← 基线 16–18 / 17–60 / 61–118，未劣化
+>   second-pass backlog 937 文件        ← 基线 1 205：被 timeline 读过的文件不再进第二遍
+> lsp_status  settle 24.3 s（80 pulls），hover 9 ms，diagnostic 30 ms
+> ```
+>
+> 同时删掉了因此变成死路的 API：`SummaryStore::prepare_with_the_environment`、
+> `FileIndexer::with_macro_body_readers` / `with_a_macro_environment`（"raw + 宏体"作为**读法**没有了，
+> `with_macro_bodies` 只剩 eager 回退一个用户）。
+>
+> **剩下的一半窗口**：某个文件手上有 unit 才走这条快路，而 unit 表是有界的（`HeldUnit` 的字节预算）—— 一次
+> `index_everything` 之后，键击的那个文件的 unit 常常已经被挤掉，于是仍然走 wave 的 raw 解析（`edit_loop` 的
+> `env 0` 就是这个意思）。下一步（§5 第二步）要么让查询按需拿到该文件的 unit，要么让 wave 也能拿到
+> `directive_summary` 先建 environment 再读 —— 后者的顺序是文档里那句话：**先指令、再 unit、最后 parse**。
+
 
 ### 第二步：per-TU 的索引与查找
 

@@ -2199,6 +2199,74 @@ fn a_class_scoped_by_another_files_macro_body_is_scoped_through_the_session() {
     );
 }
 
+/// **A keystroke in a body rebuilds the file's summary *through its timeline*, not from its bytes.**
+///
+/// The window this closes is the one the four patch layers exist for. An edit drops the file's summary
+/// ([`Session::did_change`]) and the next drain rebuilds it; while that rebuild was a parse of the file's own bytes,
+/// every answer about the file was the *written* reading until the idle pass got to it — a scope opened by another
+/// file's macro was `None`, a return type split by `#if` was the wrong branch. A body edit moves no directive, so the
+/// timeline is still in force, and an index step that holds one now renders instead of parsing text.
+#[test]
+fn a_keystroke_in_a_body_reads_the_file_through_its_timeline() {
+    let project = Project::new("keystroke-renders");
+    project.write(
+        "open.h",
+        "#pragma once\n#define _STD_BEGIN namespace std {\n#define _STD_END }\n",
+    );
+    let widget = project.write(
+        "widget.h",
+        "#include \"open.h\"\n_STD_BEGIN\nstruct Widget { int size; };\n_STD_END\n",
+    );
+
+    let mut session = Session::with_config(
+        &project.root,
+        SessionFiles::new(OpenDocuments::new(), DiskFiles),
+        WatchFilter::new(&project.root),
+        CompilerConfig::default(),
+    );
+    session.add_project_files([widget.clone()]);
+    session.index_everything();
+    assert!(
+        session.index().summary(&widget).is_some_and(|summary| {
+            summary
+                .declarations
+                .iter()
+                .any(|fact| fact.name == "Widget" && fact.scope.as_deref() == Some("std"))
+        }),
+        "the first reading is the timeline's, from the second pass"
+    );
+
+    // **The keystroke**: a declaration added to the body. No directive moves, so the timeline still describes this
+    // file — which is the case the pump sees on most keystrokes.
+    session.did_change(
+        &widget,
+        "#include \"open.h\"\nint padding;\n_STD_BEGIN\nstruct Widget { int size; };\n_STD_END\n",
+    );
+    let steps = session.advance(4);
+    let step = steps
+        .iter()
+        .find(|step| step.path == widget)
+        .unwrap_or_else(|| panic!("the edited file is read: {:?}", paths(&steps)));
+    assert!(
+        step.with_the_environment,
+        "the rebuild was taken through the file's timeline, so the second pass has nothing to repair: {step:?}"
+    );
+
+    // And the facts say so: the scope of a declaration written inside a macro-opened namespace is `std` **now**,
+    // before any idle pass could have re-read the file.
+    let summary = session.index().summary(&widget).expect("indexed again");
+    let widget_fact = summary
+        .declarations
+        .iter()
+        .find(|fact| fact.name == "Widget")
+        .expect("the class is declared");
+    assert_eq!(
+        widget_fact.scope.as_deref(),
+        Some("std"),
+        "a rendering, not the file's own bytes"
+    );
+}
+
 // -------------------------------------------------------------------------------------------
 // The project's own configuration file
 // -------------------------------------------------------------------------------------------

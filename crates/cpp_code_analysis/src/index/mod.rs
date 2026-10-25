@@ -193,6 +193,8 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
     /// `namespace std {` is in `yvals_core.h`, and every declaration in MSVC's `<vector>` is scoped by it. See
     /// [`crate::summary::MacroScopeReading`], which is where the reading and the body behind it are kept.
     ///
+    /// The same evidence, for a caller that **already holds it as two trait objects**.
+    ///
     /// Generic over the reader rather than taking a `dyn` one, because the two traits it has to satisfy are
     /// unrelated as *trait objects* (`MacroFacts` implies `MacroBodies` through a blanket impl, which the compiler
     /// cannot see through `dyn`): the call site passes a concrete reader — a materialised `MacroEnvironment`, or a
@@ -201,41 +203,6 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
         self.bodies = Some(bodies);
         self.macro_facts = Some(bodies);
         self
-    }
-
-    /// The same evidence, for a caller that **already holds it as two trait objects**.
-    ///
-    /// [`FileIndexer::with_macro_bodies`] is generic because a `dyn MacroFacts` does not itself satisfy
-    /// `MacroFacts` — the blanket impl that makes a facts reader a bodies reader cannot be seen through the trait
-    /// object. A caller that has already erased the type (`SummaryStore::prepare_with_the_environment`, which is
-    /// handed one from a session) says so here instead of naming a concrete type it does not have.
-    ///
-    /// Both arguments are the **same value** in every call in this crate — the field documentation above says why
-    /// there are two of them at all — so a caller passes one thing twice.
-    pub fn with_macro_body_readers(
-        mut self,
-        bodies: &'a dyn cpp_parser::MacroBodies,
-        facts: &'a dyn cpp_parser::MacroFacts,
-    ) -> Self {
-        self.bodies = Some(bodies);
-        self.macro_facts = Some(facts);
-        self
-    }
-
-    /// The same, for a caller that has the two readers as one `Option` — which is how
-    /// [`crate::SummaryStore::prepare_with_the_environment`] carries them, since a caller preparing a whole wave
-    /// may or may not have an environment for each file of it.
-    pub fn with_a_macro_environment(
-        self,
-        environment: Option<(
-            &'a dyn cpp_parser::MacroBodies,
-            &'a dyn cpp_parser::MacroFacts,
-        )>,
-    ) -> Self {
-        match environment {
-            Some((bodies, facts)) => self.with_macro_body_readers(bodies, facts),
-            None => self,
-        }
     }
 
     /// **What the compilation itself defines** — `-D`s, `-std=`, and the compiler's own several hundred names.

@@ -715,37 +715,32 @@ impl<F: FileProvider> SummaryStore<F> {
         self.prepare_inner(path, None, None)
     }
 
-    /// **Prepare a file the caller already has the macro environment for** — the one parse an edit needs.
+    /// **Prepare a file through the timeline that covers it** — one read, and it is the reading a compiler takes.
     ///
     /// # What this is for
     ///
-    /// A file's scopes can come out of a macro *body* written in another file: MSVC's `<vector>` writes
-    /// `_STD_BEGIN` and `namespace std {` is in `yvals_core.h`, so a summary built from the file's own text alone
-    /// files every one of those declarations at file scope. The second pass
-    /// ([`SummaryStore::prepare_the_re_read`]) exists to repair that afterwards, and it re-parses the file to do
-    /// it — which is a parse the *caller* can make unnecessary when it already holds the environment, because
-    /// [`FileIndexer::with_macro_bodies`] builds the right summary the first time.
+    /// A file's summary is a function of its text **and of the replacement lists of everything it includes**: MSVC's
+    /// `<vector>` writes `_STD_BEGIN` and `namespace std {` is in `yvals_core.h`, and `bits/stl_bvector.h` writes a
+    /// return type once per `#if` branch. A parse of the file's own bytes can answer neither. The timeline can — it is
+    /// the walk that had those files in force — and it is already in hand when this is called: the session holds it
+    /// for the file it was built from, which is why [`Session::advance`](crate::Session) takes a file with a held
+    /// timeline out of the wave and reads it here instead.
     ///
-    /// `bodies` and `facts` are the **same value** passed twice; see
-    /// [`FileIndexer::with_macro_body_readers`] for why the type has to be erased here.
+    /// # What it changes about the key
     ///
-    /// # What it does not change
+    /// The key carries the environment ([`SummaryKey::env_hash`]), because the reading is a function of it — the same
+    /// rule [`SummaryStore::index_the_rendering`] follows. So a summary written here is found again by a later run
+    /// **that has the same timeline**, and never by one that does not: the entry cannot be mistaken for a reading of
+    /// the file's own text, which is the defect that made a stored reading survive the macro that produced it.
     ///
-    /// The disk lookup: a summary is keyed by the text and the configuration, and the environment deliberately
-    /// left that key (see `crate::cache`), so an entry written by a caller *without* an environment is served to
-    /// one *with* it. That is the existing rule for [`SummaryStore::get`] and this does not alter it — it means a
-    /// warm cache is as cheap here as anywhere else, and a cold one is where the saving is.
+    /// # What a caller claims by using it
     ///
-    /// A caller that sets `Step::with_the_environment` from this is claiming the second pass has nothing to do for
-    /// that file. It is the same claim the flag's documentation makes, and it is only true because the parse below
-    /// was given the environment.
-    pub fn prepare_with_the_environment(
-        &self,
-        path: &Path,
-        bodies: &dyn cpp_parser::MacroBodies,
-        facts: &dyn cpp_parser::MacroFacts,
-    ) -> Prepared {
-        self.prepare_inner(path, None, Some((bodies, facts)))
+    /// That the second pass has nothing to repair for this file. It is the same claim
+    /// [`crate::Session`]'s `Step::with_the_environment` makes, and it is true for a stronger reason than it used to
+    /// be: the summary *is* the rendering, so the pass's own trigger (a split or guarded declaration) is already
+    /// false for it.
+    pub fn prepare_with_the_timeline(&self, path: &Path, unit: &crate::TranslationUnit) -> Prepared {
+        self.prepare_inner(path, None, Some(unit))
     }
 
     /// [`SummaryStore::prepare`] that says what the file includes **as soon as it knows** — before the parse.
@@ -759,14 +754,14 @@ impl<F: FileProvider> SummaryStore<F> {
         self.prepare_inner(path, Some(includes), None)
     }
 
-    /// The one body, with the early include notification and the macro environment **both optional** — see
-    /// [`SummaryStore::prepare`] for what the callers want from the first and
-    /// [`SummaryStore::prepare_with_the_environment`] for the second.
+    /// The one body, with the early include notification and the timeline **both optional** — see
+    /// [`SummaryStore::prepare`] for what the first caller wants, and
+    /// [`SummaryStore::prepare_with_the_timeline`] for the last: a file whose unit is in hand is read as the program.
     fn prepare_inner(
         &self,
         path: &Path,
         mut includes: Option<&mut dyn FnMut(&[PathBuf])>,
-        environment: Option<(&dyn cpp_parser::MacroBodies, &dyn cpp_parser::MacroFacts)>,
+        timeline: Option<&crate::TranslationUnit>,
     ) -> Prepared {
         let tracing = crate::probes::cooking();
         let entered = std::time::Instant::now();
@@ -774,11 +769,21 @@ impl<F: FileProvider> SummaryStore<F> {
             return Prepared(PreparedOutcome::Unreadable);
         };
         let read = entered.elapsed();
+        // **Where this file sits in the timeline**, by the spelling the walk used — a unit's frames are keyed by the
+        // include graph's spelling, and asking with the session's finds nothing. See [`Session::held_units`].
+        let view = timeline.and_then(|unit| {
+            let spelled = self
+                .index
+                .summary(path)
+                .map(|summary| summary.path.clone())
+                .unwrap_or_else(|| path.to_path_buf());
+            unit.environment_of(&spelled)
+        });
         // **The key knows which environment the reading is under** — see [`SummaryKey::env_hash`]. Without it the
         // second pass would write over the first pass's entry and a later reader could get either one.
         let mut key = SummaryKey::new(content_hash(&source), self.context_hash(path));
-        if let Some((_, facts)) = environment {
-            key = key.with_environment(environment_hash(facts));
+        if let Some(view) = view.as_ref() {
+            key = key.with_environment(environment_hash(view));
         }
 
         {
@@ -848,17 +853,21 @@ impl<F: FileProvider> SummaryStore<F> {
             // Without a scan the sweep finds the `#include`s itself. With one it is handed them, so that the
             // search is not run twice for the same file.
             .with_scanned_includes_opt(scanned.as_ref())
-            // **The environment, when the caller has one** — the difference between a summary whose scopes are
-            // right and one the second pass has to come back for. See
-            // [`SummaryStore::prepare_with_the_environment`].
-            .with_a_macro_environment(environment)
             // **Whatever the unit walk already decided about this file's `#define`s.** `prepare` is the path a file
             // takes when a query needs it *before* the unit's re-read reaches it — and a header made only of
             // `#define`s is exactly the file the re-read skips (`mentions_one_of`), so without this its summary
             // keeps every guarded `#define` and a consumer decides the regions again, with a different environment.
             // See [`SummaryStore::dead_macros`].
             .without_these_macros(&self.dead_macros_for(path));
-        let summary = indexer.index(path, &source, key);
+        // **The reading is the rendering's when the timeline is in hand**, and the timeline is what an index step
+        // already holds for this file — see [`SummaryStore::prepare_with_the_timeline`]. The raw parse stays for
+        // every other caller: a wave has no unit of its own, so what it can say about a file is what the file's own
+        // bytes say, and the second pass refines it.
+        let rendered = match (timeline, view) {
+            (Some(unit), Some(view)) => Some(self.the_rendering_of(path, &source, unit, view, key)),
+            _ => None,
+        };
+        let summary = rendered.unwrap_or_else(|| indexer.index(path, &source, key));
 
         // The one rule about the filesystem: a summary that records a *failed* search must not be stored, because
         // nothing in the key would notice the header appearing. See the module documentation.
@@ -887,6 +896,39 @@ impl<F: FileProvider> SummaryStore<F> {
         }
 
         Prepared(PreparedOutcome::Built { summary, stored })
+    }
+
+    /// **The summary of one file, read as the program reads it** — lex, render through `unit`, parse the rendering,
+    /// and put the file's directives back beside it.
+    ///
+    /// The three steps are the architecture's (`docs/architecture.md` §3) and every caller that has a timeline must
+    /// pay them, so they live in one place: [`SummaryStore::prepare_with_the_timeline`] here, and
+    /// [`SummaryStore::prepare_the_re_read`] for the files the pump refines afterwards.
+    ///
+    /// `FileMacros` is the one type that can answer a cook's questions out of a walk — the view is a **position** in
+    /// the timeline and the definitions are the `Arc` bodies its indices point into — which is why this takes the
+    /// unit rather than a materialised map. See [`crate::preprocess::cooked::FileMacros`].
+    fn the_rendering_of(
+        &self,
+        path: &Path,
+        source: &str,
+        unit: &crate::TranslationUnit,
+        view: crate::MacroView<'_>,
+        key: SummaryKey,
+    ) -> crate::FileSummary {
+        let seed = crate::macros::MacroTable::from_marked(self.index.macros());
+        let definitions = unit.definitions();
+        let (tokens, _) = cpp_parser::lex(source, &cpp_parser::LexerConfig::default());
+        let macros = {
+            crate::preprocess::cooked::FileMacros::new(view, &definitions, Some(&seed), true)
+        };
+        let rendered = { crate::preprocess::cooked::cook_with(source, &tokens, &macros).render() };
+
+        FileIndexer::new(&self.files, &self.config)
+            .with_seed(self.index.macros())
+            .without_these_macros(&self.dead_macros_for(path))
+            .index_the_readings(path, source, &rendered, key)
+            .summary
     }
 
     /// Put what [`SummaryStore::prepare`] made into the index, and count it.

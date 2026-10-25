@@ -2812,23 +2812,26 @@ impl<F: FileProvider + Clone> Session<F> {
         // is a header that gets a unit per spelling.
         //
         // The `Arc` is held on its own because a `MacroView` borrows the unit it came from, and the unit has to
-        // outlive it.
+        // outlive it — and it is **cloned**, because the store call below takes `&mut self` at the next step.
         let spelled = self
             .store
             .index()
             .summary(&path)
             .map(|summary| summary.path.clone())
             .unwrap_or_else(|| path.clone());
-        let held = self.held_units().get(&queue_key(&spelled));
         // **And not a provisional one.** `with_the_environment` asserts that the second pass has nothing to repair,
         // and a timeline built while a file the closure needs was still queued is missing exactly what that file
         // defines — so reading a file with it and marking the result would suppress the repair for a reading that
         // needs it. A provisional timeline is a reading of most of the program, which is worth having for a *cook*
         // and is not worth asserting anything about. See [`HeldUnit`].
-        let unit = held
+        let unit = self
+            .held_units()
+            .get(&queue_key(&spelled))
             .filter(|(provisional, _)| !*provisional)
             .map(|(_, unit)| unit);
-        let view = unit.as_ref().and_then(|unit| unit.environment_of(&spelled));
+        let has_a_timeline = unit
+            .as_ref()
+            .is_some_and(|unit| unit.environment_of(&spelled).is_some());
         // Read before the wave's work is moved into the store, because the flag below is about which arm ran.
         let read_here = ready.is_none();
 
@@ -2836,11 +2839,12 @@ impl<F: FileProvider + Clone> Session<F> {
             // A wave prepared this file, and a wave has no unit of its own (`Session::prepare_a_wave` runs before
             // the pass that builds them), so what it produced is what it is and the second pass still looks at it.
             Some(ready) => self.store.commit(&path, ready),
-            None => match &view {
-                // **Read once, with the environment** — instead of once without it and once again in the second
-                // pass. See `SummaryStore::prepare_with_the_environment`.
-                Some(view) => {
-                    let prepared = self.store.prepare_with_the_environment(&path, view, view);
+            None => match &unit {
+                // **Read once, through the timeline** — instead of once without one and once again in the second
+                // pass. The summary this builds *is* the rendering, which is the reading every other feature and the
+                // second pass were trying to reach; see `SummaryStore::prepare_with_the_timeline`.
+                Some(unit) => {
+                    let prepared = self.store.prepare_with_the_timeline(&path, unit);
                     self.store.commit(&path, prepared)
                 }
                 None => self.store.get(&path),
@@ -2875,7 +2879,7 @@ impl<F: FileProvider + Clone> Session<F> {
             // file read without an environment is exactly what the second pass is for. Claiming either would be
             // claiming the second pass has nothing to repair, which is the whole of what this flag asserts.
             with_the_environment: read_here
-                && view.is_some()
+                && has_a_timeline
                 && matches!(outcome, StepOutcome::Built | StepOutcome::Unstored),
         }
     }
