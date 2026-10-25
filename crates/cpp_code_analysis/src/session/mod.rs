@@ -5321,6 +5321,33 @@ fn error_directive_line(text: &str) -> Option<(usize, usize, String)> {
         Some(crate::preprocess::cooked::cook_with(&text, &tokens, &macros).render())
     }
 
+    /// **A declaration's fact, read from the *rendering*** — the reading where a directive is resolved.
+    ///
+    /// For a fact whose [`DeclFact::split_by_a_directive`] is set the summary declines to name a type: the file's own
+    /// text states one per branch and the written reading cannot know which is live. The rendering deleted the
+    /// inactive branch, so *its* summary has a single answer — `reference` for libstdc++'s `emplace_back`, where the
+    /// written text says `void` (measured over three headers: 12 of 1589 facts, `examples/facts_vs_rendering.rs`).
+    ///
+    /// **Cost.** The rendering itself is the artifact a cook produces — a hash and a lookup when it is cached — and
+    /// the summary of its text is computed here, so a caller pays one parse of the rendered text per split
+    /// declaration it asks about. That is why this is asked from a hover on a hand-written `#if` rather than from a
+    /// path a keystroke takes.
+    ///
+    /// [`DeclFact::split_by_a_directive`]: crate::DeclFact::split_by_a_directive
+    pub fn fact_from_the_rendering(
+        &self,
+        path: impl AsRef<Path>,
+        name: &str,
+        scope: Option<&str>,
+    ) -> Option<crate::DeclFact> {
+        let path = self.store.index().summary(path.as_ref())?.path.clone();
+        let rendered = self.rendering_of(&path)?;
+        let summary = crate::summarize(&path, &rendered.text, crate::SummaryKey::new(0, 0));
+        summary.declarations.into_iter().find(|fact| {
+            fact.name == name && fact.scope.as_deref() == scope && !fact.split_by_a_directive
+        })
+    }
+
     /// Cook every **open** file — what the indexing loop does when its queue drains.
     ///
     /// The moment is the point: a file's environment is only complete once everything it includes has been read, and

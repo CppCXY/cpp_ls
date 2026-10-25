@@ -478,7 +478,20 @@ fn overloads_markdown(
         let is_the_one = chosen.as_ref().is_some_and(|(file, at)| {
             *file == declaration.file && *at == declaration.fact.name_range.start_offset
         });
-        let mut line = signature_line(&declaration.fact);
+        // **A declaration the file's own text splits across a directive has no written type** — see
+        // [`DeclFact::split_by_a_directive`]. The handler holds the session, so it asks the reading where the
+        // directive is *resolved*: `bits/stl_bvector.h` writes `emplace_back` returning `reference` under
+        // `#if __cplusplus > 201402L` and `void` under `#else`, and only the rendering knows which one this
+        // compilation means.
+        let mut fact = declaration.fact.clone();
+        if fact.split_by_a_directive
+            && let Some(read) =
+                session.fact_from_the_rendering(&declaration.file, &fact.name, fact.scope.as_deref())
+        {
+            fact.returns = read.returns;
+            fact.type_of = read.type_of;
+        }
+        let mut line = signature_line(&fact);
         if is_the_one
             && let Some(view) = view
             && let Some(text) = session.text(&declaration.file)
