@@ -219,6 +219,18 @@ hover / 定义 / 补全      当前 1–12 ms                    目标：不劣
 > 所以下一步不是"接渲染"而是"**先让 plan 带上每个文件自己的 unit**"（plan 里的 `through_a_timeline` 从 `(&PathBuf,
 > &String)` 变成带上 unit 索引），否则选择逻辑决定了渲染的正确性。
 >
+> **可以机械执行的做法（API 都已确认存在）**：渲染只在"unit 走完了这个文件的整个闭包"时才可用 ——
+>
+> ```text
+> TranslationUnit::paths()         单位走过的文件集合
+> TranslationUnit::environment_of   该文件的视图（只在走过时 Some）
+> ProjectIndex::visible_files      该文件的 include 闭包（已有、带记忆）
+> 规则：environment_of 为 Some 且 闭包 ⊆ paths() 的那个 unit 才能用来渲染；否则保持 raw 路径
+> ```
+>
+> 为什么这条规则是对的：渲染是"整个环境"的函数，而 raw + `with_macro_bodies` 只需要"名字→体"的映射 —— 后者在部分
+> 环境里仍然完整，前者不完整就会把 `_STD_BEGIN` 原样留在文本里。所以**部分环境 ⇒ 不渲染**，而不是"渲了再补救"。
+>
 > 1. **timeline 分支**可以接（第二次渲染试过、代码写得出、编译过），要在**有 unit 的场景**里验：真项目探针
 >    （`lsp_status` settle 之后 `index.summary(stl_bvector.h)` 的 `emplace_back` 应为 `reference`），或一个
 >    session 测试让 drain 带 units。
