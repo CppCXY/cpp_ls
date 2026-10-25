@@ -63,7 +63,28 @@ fn a_scope_opened_by_another_files_body_is_in_the_rendering() {
         "macro_readings: {}",
         summary.macro_readings.len()
     );
-    assert!(
+    // **And the same file read the way the index is supposed to read it**: the rendering, through the indexer. The
+    // question this answers is whether the scope survives *that* path — the session test's failure cannot be blamed on
+    // the commit if the summary built here already has no scope.
+    let empty = cpp_code_analysis::MemoryFiles::new();
+    let config = CompilerConfig::default();
+    let indexer = cpp_code_analysis::FileIndexer::new(&empty, &config);
+    let read = indexer.index_rendering(
+        std::path::Path::new("/p/widget.h"),
+        &rendered,
+        cpp_code_analysis::SummaryKey::new(0, 0),
+    );
+    let from_the_rendering = read
+        .summary
+        .declarations
+        .iter()
+        .find(|fact| fact.name == "Widget");
+    println!(
+        "from the rendering: Widget scope {:?}, {} declaration(s), {} include(s)",
+        from_the_rendering.and_then(|fact| fact.scope.clone()),
+        read.summary.declarations.len(),
+        read.summary.includes.len()
+    );    assert!(
         rendered.text.contains("namespace std"),
         "the body of _STD_BEGIN is expanded: {}",
         rendered.text

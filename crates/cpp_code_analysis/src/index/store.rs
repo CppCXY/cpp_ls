@@ -1271,11 +1271,26 @@ impl<F: FileProvider> SummaryStore<F> {
     /// which will re-read it from the text it now has.
     pub fn commit_the_re_read(&mut self, plan: ReRead) -> usize {
         let mut re_read = 0;
-        for (rebuilt, stored) in plan.rebuilt {
-            let current = self.index.summary(&rebuilt.path).map(|summary| summary.key);
-            if current != Some(rebuilt.key) {
+        for (mut rebuilt, stored) in plan.rebuilt {
+            let Some(current) = self.index.summary(&rebuilt.path).map(|summary| summary.key) else {
+                continue;
+            };
+            // **The plan refined *this* reading.** `content_hash` and `context_hash` are what says so — the same
+            // text, read for the same configuration — and a key that moved in either means something read that file
+            // again in between, so the plan is left for the next pass, exactly as before.
+            //
+            // The key's **environment** part is *not* compared, and that is the correction: the first pass builds a
+            // summary through `prepare_with_the_environment` (its key carries `env_hash`), while the re-read refines
+            // that same reading towards the rendering and can only name the text and the configuration. Comparing the
+            // whole key refused every re-read of a file the first pass had given an environment — silently, which is
+            // how a rebuilt summary with `Widget` scoped to `std` was dropped while the index kept the raw reading.
+            if current.content_hash != rebuilt.key.content_hash
+                || current.context_hash != rebuilt.key.context_hash
+            {
                 continue;
             }
+            // The reading the file is identified by is the one the index holds; the re-read changed its **content**.
+            rebuilt.key = current;
             self.commit_reread(rebuilt, stored);
             re_read += 1;
         }
