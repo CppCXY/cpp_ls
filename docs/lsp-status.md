@@ -16,6 +16,7 @@ feature                answered n     time   note
 hover                  yes      3     21 ms  `_diagnosticStyle = LuaDiagnosticStyle();` → `LuaDiagnosticStyle …`
 definition (member)    yes      1     2 ms   codeformat.h:56
 typeDefinition         yes      1     1 ms   LuaDiagnosticStyle.h:10      ← 类型，不是成员
+typeDefinition (auto)  yes      2     2 ms   `auto result = …` → stringfwd.h:79（推断出的 std::string）
 definition (header)    yes      1     0 ms   codeformat.h:56
 implementation         yes      1     4 ms   CodeFormat.cpp:31
 references             yes      6     11 ms  codeformat.cpp:32
@@ -133,16 +134,23 @@ typeDefinition        LuaDiagnosticStyle.h:10  ← 它的**类型**声明在哪
 ## P3（未做）
 
 ```text
-typeDefinition 的 auto   `auto made = make();` 上 session.type_at 在名字处回答 Known::No，而 hover 对同一行能
-                         显示推断类型 —— hover 有自己的一条路（type_of == "auto" 的事实、在渲染坐标里重问、
-                         再回退到初始化器）。接过来 = 共享 hover 的 written_type_of，不是写第二种问法。
-那 18 条                 见上
+那 18 条                 见上（上下文相关，最小夹具复现不出来）
 callHierarchy            没有
 workspace/diagnostic     明确不支持，只有 pull
 semanticTokens 增量      只有 full（516 token / 25 ms，可接受）
 inlayHint/resolve        没有（可接受）
-构造函数的签名            `LuaParser p(file, std::move(...))` 仍然 0 个签名：名字解析到类，构造函数的列表要通过
-                         `constructors_of` 读类自己的文件，而那个头文件没有渲染
+```
+
+已完成（原来在 P3 里）：
+
+```text
+typeDefinition 的 auto   推断在**渲染**里做（文件自身文本回答 Known::No），所以第一个读数没答案时用
+                         `Session::rendering_of` 自己建一份渲染（&self、不排 cook、不受渲染缓存影响）再问一次
+                         → 真项目 `auto result = f.GetFormatResult(t);` → stringfwd.h:79，2 ms
+构造函数的签名            `LuaParser p(file, std::move(...))` 是**直接初始化**，语法上是一个声明（声明符里带参数表），
+                         不是调用 —— 以前连候选都没有。新 `directly_initialized_at` 认出这个形状（有参数表、
+                         没有函数体），类名取说明符里最后一个名字，答案来自索引里的构造函数事实
+                         → `LuaParser(std::shared_ptr<LuaSource> luaFile, std::vector<LuaToken> &&tokens)`
 ```
 
 ## 测量时的两个陷阱

@@ -15,15 +15,18 @@
 //! an `auto` declaration                **not yet** — see below
 //! ```
 //!
-//! # What is not answered: an `auto`'s deduced type
+//! # An `auto`, and the two readings
 //!
-//! This is the case the feature would be worth most for — the type is written nowhere in the file — and it is the one
-//! that does not work yet. Measured on a fixture: `session.type_at` answers `Known::No` at the name of
-//! `auto made = make();`, while the **hover** shows the deduced type for the same declaration. The hover gets it
-//! through its own path (a fact whose `type_of` is `auto` is re-asked at the fact's name offset in the *rendering*,
-//! and falls back to the fact's initializer), and wiring that into this handler means sharing the hover's
-//! `written_type_of` rather than calling [`Session::type_at`] a second way. Recorded in `docs/lsp-status.md` rather
-//! than guessed at here.
+//! The case the feature is worth most for — the type is written nowhere in the file — needs the **rendering**: the
+//! deduction lives there, and the file's own text answers `Known::No` for the same name (measured). So after the
+//! written view has answered nothing, the same question is asked of the rendering, which
+//! [`Session::rendering_of`] builds from what the session already holds — no cook queued, nothing to be starved by
+//! the rendering cache.
+//!
+//! Measured on the real project: `auto result = f.GetFormatResult(t);` → `stringfwd.h:79` (the declaration of
+//! `std::string`, the deduced type) in 2 ms. A MemoryFiles fixture whose initializer is a *call* still answers
+//! nothing — the difference is the deduction of a call's return type in a session with no cooked closure, not the
+//! handler.
 //!
 //! # Where the type comes from
 //!
@@ -133,6 +136,33 @@ pub fn type_definitions_of<F: FileProvider + Clone>(
         let spelling = found.type_of.to_string();
         if let Some(locations) = declarations_of_a_type(session, view, &spelling) {
             return locations;
+        }
+    }
+
+    // (1c) **An `auto`'s type is deduced by the *rendering's* question**, not the written text's. `auto made = make();`
+    // answers `Known::No` at the name in the file's own text — which is why the first version of this handler answered
+    // nothing for it — while the same offset in the rendering answers the deduced type. That is the question the hover
+    // asks, and the reason a hover shows a type the reader cannot see in the text.
+    //
+    // `rendering_of` builds the rendering from what the session already holds (a summary, a unit, the text) and takes
+    // `&self`: it queues no cook and cannot be starved by the rendering cache the way `view` could.
+    if let Some(rendered) = session.rendering_of(&view.path)
+        && let Some(held) = session.files().held(&view.path)
+    {
+        let rendering = cpp_code_analysis::FileView::parse_rendering(held, &rendered);
+        for at in [end, start] {
+            let Some(at) = rendering
+                .reading_offset_of(cpp_code_analysis::file::coordinates::FileOffset::new(at))
+            else {
+                continue;
+            };
+            let Known::Yes(found) = session.type_at(&rendering, at) else {
+                continue;
+            };
+            let spelling = found.type_of.to_string();
+            if let Some(locations) = declarations_of_a_type(session, view, &spelling) {
+                return locations;
+            }
         }
     }
 

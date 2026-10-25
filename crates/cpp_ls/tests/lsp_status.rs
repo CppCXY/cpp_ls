@@ -310,6 +310,22 @@ fn every_feature_answers_what_the_project_holds() {
             },
         );
     }
+    // **`typeDefinition` on an `auto`**: the type is written nowhere in the file, so the answer has to come from the
+    // deduction. `CodeFormat.cpp:86` is `auto result = f.GetFormatResult(t);`.
+    if let Some(auto_at) = at(&text, "auto result", 0) {
+        ask(
+            &mut server,
+            &mut id,
+            &mut rows,
+            "typeDefinition (auto)",
+            "textDocument/typeDefinition",
+            position(&source_uri, Position { line: auto_at.line, character: auto_at.character + 5 }),
+            &|result| {
+                let locations = locations_of(result);
+                (locations.len(), locations.first().cloned().unwrap_or_default())
+            },
+        );
+    }
     ask(
         &mut server,
         &mut id,
