@@ -168,9 +168,31 @@ hover / 定义 / 补全      当前 1–12 ms                    目标：不劣
 > `index.summary(stl_bvector.h)` 里 `emplace_back` 的返回类型是 `reference`（现在是 `None`，因为索引里还是 raw
 > 读法）。
 >
-> **接线试了一次，被一条测试挡住了，挡得对**（`git checkout` 已回退，代码树保持绿）：
-> `session::tests::a_class_scoped_by_another_files_macro_body_is_scoped_through_the_session` 失败，
-> `std::Widget` → `NotDeclaredHere`。原因不是渲染做错了，而是**摘要里有一半事实不属于渲染**：
+> **接线试了三次，第三次把原因测出来了**（代码用 `git checkout` 回退，树保持绿）。第三次的做法：渲染 → `index_rendering`
+> → 把第一次读法的 `macros`/`includes`/`guards` 合并进来。诊断打印证明：
+>
+> ```text
+> [re-read] widget.h: Widget scope Some("std")       ← 渲染读法建出来的摘要是对的
+> [test]    widget.h: 2 declaration(s), Widget scope None, macro_readings 0
+>                                                     ← 但索引里最终留下的还是第一次读法
+> ```
+>
+> 也就是说：**重建的摘要在 `commit_the_re_read` 被丢掉了**。那个函数有一条正确的守卫：
+>
+> ```rust
+> let current = self.index.summary(&rebuilt.path).map(|summary| summary.key);
+> if current != Some(rebuilt.key) { continue; }   // 文件在这期间被别的读法换过，就别覆盖它
+> ```
+>
+> 而重建的 key 与索引里的不是同一个：第一次读法是用 `prepare_with_the_environment` 建的，key 里带 `env_hash`，而重读路径
+> 里现算的 key 不带。于是 `current != Some(rebuilt.key)` 永远成立 —— 重建被跳过的次数比它成功的次数多得多，而且**没有
+> 任何日志说它被跳过**。
+>
+> 结论（下一次接线的第一步，已经定位到行）：重读路径必须**沿用索引当前的 key**，而不是重新算一个：
+> `let key = self.index.summary(path).map(|s| s.key).unwrap_or_else(|| SummaryKey::new(...))`。注意这里还有一个待验证
+> 的点：这条路径上的 `path` 拼写与索引里存的是否一致（`c:/…` vs `C:\…`），因为它决定了 `self.index.summary(path)`
+> 是 `Some` 还是 `None` —— 这也是合并进来的 `macros`/`includes` 变成了空的同一个原因（`[test]` 行里的
+> `macro_readings 0` 就是它）。
 >
 > ```text
 > 渲染文本 = 编译器看见的东西：宏已展开、非活跃分支已删除、#define 行本身不在里面
