@@ -259,6 +259,40 @@ fn every_feature_answers_what_the_project_holds() {
         let count = contents.matches("LuaDiagnosticStyle").count();
         (count, format!("`{}` → {}", trim(&member_line), trim(&contents)))
     });
+    // **A hover deep inside the out-of-line definition**, which is where a reader lives: the member used on the left
+    // of a `.` (`_diagnosticStyle.code_style_check`) and the member itself. Reported as "分离定义的 cpp 文件里面没有
+    // hover 结果" while Find References answered.
+    for (nth, what) in [(2usize, "hover (use in a .cpp)"), (3, "hover (member after a .)")] {
+        if let Some(use_at) = at(&text, "_diagnosticStyle", nth) {
+            let line = text.lines().nth(use_at.line as usize).unwrap_or_default().to_string();
+            ask(
+                &mut server,
+                &mut id,
+                &mut rows,
+                what,
+                "textDocument/hover",
+                position(&source_uri, use_at),
+                &|result| {
+                    let contents = result["contents"].to_string();
+                    (contents.matches("```").count(), format!("`{}`", trim(&line)))
+                },
+            );
+        }
+    }
+    if let Some(member_at) = at(&text, "code_style_check", 0) {
+        ask(
+            &mut server,
+            &mut id,
+            &mut rows,
+            "hover (member of a member)",
+            "textDocument/hover",
+            position(&source_uri, member_at),
+            &|result| {
+                let contents = result["contents"].to_string();
+                (contents.matches("bool").count(), format!("{}", trim(&contents)))
+            },
+        );
+    }
     ask(
         &mut server,
         &mut id,

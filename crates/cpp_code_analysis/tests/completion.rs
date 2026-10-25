@@ -2215,6 +2215,60 @@ void f() {
         "the pointee's member is offered after a `.` on a pointer: {labels:?}"
     );
 }
+/// **A `.` on a class with `operator->` is the same mistake as a `.` on a pointer** — the list is the pointee's and the
+/// operator is replaced.
+///
+/// Reported with a screenshot: `config.Editorconfig.` where `Editorconfig` is a `std::shared_ptr<LuaEditorConfig>`
+/// offered `operator=`, `element_type` and `weak_type` — the members of `shared_ptr` itself, which the reader is not
+/// writing and which the `.` cannot use. A smart pointer reaches its pointee only through `operator->`, so the answer
+/// has to follow it: the same chain the `->` path already walks, entered one operator earlier.
+#[test]
+fn a_dot_on_a_class_with_operator_arrow_lists_the_pointee() {
+    let source = "\
+namespace std {
+template <class T>
+struct shared_ptr {
+    T* operator->() const;
+    long use_count() const;
+};
+}
+struct LuaEditorConfig {
+    bool code_style_check;
+    void OpenFile();
+};
+struct Config {
+    std::shared_ptr<LuaEditorConfig> Editorconfig;
+};
+void f(Config config) {
+    config.Editorconfig.;
+}
+";
+    let mem = MemoryFiles::new().with_file("/p/a.cpp", source);
+    let providers = SessionFiles::new(OpenDocuments::new(), mem);
+    let mut session = Session::with_config(
+        "/p",
+        providers,
+        WatchFilter::new("/p"),
+        CompilerConfig::default(),
+    );
+    session.add_project_files([std::path::PathBuf::from("/p/a.cpp")]);
+    session.index_everything();
+    let _ = session.view("/p/a.cpp");
+    session.index_everything();
+
+    let at = source.find("config.Editorconfig.").expect("the fixture") + "config.Editorconfig.".len();
+    let labels = labels_at(&mut session, "/p/a.cpp", at);
+    println!("dot on a smart pointer at {at}: {labels:?}");
+    assert!(
+        labels.iter().any(|label| label == "code_style_check"),
+        "the pointee's member is offered: {labels:?}"
+    );
+    assert!(
+        !labels.iter().any(|label| label == "use_count"),
+        "and the smart pointer's own members are not: {labels:?}"
+    );
+}
+
 /// **A `.` typed on a pointer is completed as `->`**: the range the client replaces covers the operator itself, and
 /// the insertion carries `->`.
 ///

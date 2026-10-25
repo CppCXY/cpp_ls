@@ -314,12 +314,37 @@ fn hover_of_the_program(
         // `std::format` showed an empty popup on the most ordinary call in modern C++. The list is what the reader
         // is asking for ("what can I call here"), and the index can now show each one's parameters.
         Known::Unknown(UnknownReason::Ambiguous(_)) => match session.definitions(view, offset) {
-            Known::Yes(found) if found.found.len() > 1 => Some(markdown(overloads_markdown(
-                session,
-                Some(view),
-                offset,
-                &found,
-            ))),
+            Known::Yes(found) => {
+                // **A member of one class is not a member of another.** The index answers every declaration of the
+                // *spelling*, so hovering `_supportNonStandardSymbol` in `CodeFormat.cpp` listed `CodeFormat`'s and
+                // `LuaLexer`'s and told the reader "which one a call means is decided by the arguments" — about a
+                // **data member**, which has no arguments and no second reading. Find References and Go to Definition
+                // narrow by the cursor's class; this is the same rule, at the same offset.
+                let found =
+                    crate::handlers::references::narrowed_to_the_cursors_class(view, offset.get(), found);
+                // **A class name is one declaration, not an overload set.** `LuaParser p(…)` hovers three facts — the
+                // class and its two constructors, which are filed under the same name because a constructor's name is
+                // its class's — and the answer listed the constructors as if a call were meant ("3 declarations …
+                // decided by the arguments"), about a name being *declared* in that very line. When one of the facts is
+                // a type, that is the one the reader named.
+                if let Some(the_type) = found
+                    .found
+                    .iter()
+                    .find(|definition| matches!(definition.fact.kind, cpp_code_analysis::DeclKind::Type))
+                {
+                    return Some(markdown(declaration_markdown(session, view, the_type)));
+                }
+                match found.found.len() {
+                    1 => Some(markdown(declaration_markdown(session, view, &found.found[0]))),
+                    2.. => Some(markdown(overloads_markdown(
+                        session,
+                        Some(view),
+                        offset,
+                        &found,
+                    ))),
+                    _ => None,
+                }
+            }
             _ => expression_markdown(session, view, offset).map(markdown),
         },
         // `No` and `Unknown` both leave the name question unanswered: the first says the analysis looked and there

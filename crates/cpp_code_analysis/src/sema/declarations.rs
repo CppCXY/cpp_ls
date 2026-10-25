@@ -2951,10 +2951,24 @@ impl<'a> DeclarationFacts<'a> {
         // spelling — the class may be declared in a header this file's scope tree has never seen. No binding is added,
         // which keeps the lookup rule the refusal exists for.
         for (binding, scope, parameters) in qualified_declarations(root) {
-            if facts
-                .iter()
-                .any(|fact| fact.name_range.start_offset == binding.name_range.start_offset)
+            // **The walker may already have filed this declaration, with no scope.** A definition written in the
+            // declarator — `std::vector<LuaTokenError> &LuaLexer::GetErrors() { … }` — is bound by the scope walker as a
+            // plain function of this file, because the class is in a header the file only includes: its fact came out
+            // with `scope: None`, so "go to implementation" on the header's `GetErrors` found nothing — it looks for the
+            // same name whose scope is `LuaLexer`. The walker's fact is the better one (it has the parameters and the
+            // return type), so this **adopts** it and supplies the scope instead of skipping it.
+            if let Some(existing) = facts
+                .iter_mut()
+                .find(|fact| fact.name_range.start_offset == binding.name_range.start_offset)
             {
+                if existing.scope.is_none() {
+                    existing.scope = Some(scope);
+                }
+                // **And the range is the declaration's, not the declarator's.** The walker's binding covers the name
+                // and its parameter list — `&LuaLexer::GetErrors()` — while "is this a definition" is asked of the
+                // text: a declaration ends with `;`, a definition with `}`. With the declarator's range the answer was
+                // "no" for every definition written this way, which is exactly what "go to implementation" asks.
+                existing.range = binding.range;
                 continue;
             }
             if let Some(mut fact) = fact_for(

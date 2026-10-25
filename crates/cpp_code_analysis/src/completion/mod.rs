@@ -478,6 +478,27 @@ fn the_class_after_the_operator(
     let mut current = written.clone();
     for _ in 0..4 {
         if let Some(class) = current.class_name().map(str::to_string) {
+            // **A `.` on a class with `operator->` still means the pointee.** `config.Editorconfig.` where
+            // `Editorconfig` is a `std::shared_ptr<LuaEditorConfig>` offered `operator=`, `element_type` and
+            // `weak_type` — the members of `shared_ptr`, which is not what the reader is writing; C++ wants `->` and
+            // the members are the pointee's. Following the operator here reports `followed_a_pointer`, and that is
+            // what makes the completion **replace the `.` with `->`**, so the reader gets the spelling C++ needs and
+            // not only the right list.
+            if !arrow
+                && let Some(returns) = crate::index::project::operator_returns_of(
+                    index,
+                    &mut |_: &Path| None,
+                    scopes,
+                    root,
+                    path,
+                    &current,
+                    "operator->",
+                )
+            {
+                current = crate::sema::types::parse_type_spelling(&returns);
+                followed_a_pointer = true;
+                continue;
+            }
             if !arrow {
                 return Some((class, followed_a_pointer));
             }
