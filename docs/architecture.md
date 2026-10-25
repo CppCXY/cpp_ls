@@ -202,6 +202,23 @@ hover / 定义 / 补全      当前 1–12 ms                    目标：不劣
 > 而挡路的那条 fixture **走的正是 eager 分支**（`units` 为空），所以 timeline 分支的渲染接线既没被它验证、也没被它
 > 否定 —— 接线要验的是"有 unit 的那条路"。两条具体结论：
 >
+> **更正（第三次接线实测）**：上面那句"fixture 走 eager 分支"是**错的** —— 第三次接线后同一条测试仍然红，说明它走
+> 到了 timeline 分支，且渲染读法在这条路上**丢掉了 scope**。而 `tests/rendering_scope.rs` 已经证明同一个文件的渲染
+> （`session.rendering_of`）和 `index_rendering` 都能给出 `scope: Some("std")`。差别在**选哪个 unit**：
+>
+> ```text
+> session.rendering_of(path)  →  translation_unit_of(path)：这个文件**自己的** unit
+> timeline 分支（旧代码也一样）→  units.iter().find(|u| u.environment_of(path).is_some())：**第一个覆盖它的** unit
+> ```
+>
+> 一个有多个 unit 的工程里，第一个覆盖 widget.h 的 unit 可能没有走到 open.h，于是 `_STD_BEGIN` 没有体可展开 —— 渲染
+> 出 `_STD_BEGIN struct Widget {};`，scope 就是 None。旧路径不怕这种"部分环境"，因为 `with_macro_bodies` 只需要
+> **名字→体**的映射（部分视图也有），不需要完整展开；而渲染需要完整环境。**部分环境下的渲染比 raw 更差**，这是这次
+> 试出来最重要的一条。
+>
+> 所以下一步不是"接渲染"而是"**先让 plan 带上每个文件自己的 unit**"（plan 里的 `through_a_timeline` 从 `(&PathBuf,
+> &String)` 变成带上 unit 索引），否则选择逻辑决定了渲染的正确性。
+>
 > 1. **timeline 分支**可以接（第二次渲染试过、代码写得出、编译过），要在**有 unit 的场景**里验：真项目探针
 >    （`lsp_status` settle 之后 `index.summary(stl_bvector.h)` 的 `emplace_back` 应为 `reference`），或一个
 >    session 测试让 drain 带 units。
