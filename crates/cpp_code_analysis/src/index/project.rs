@@ -1254,7 +1254,7 @@ fn members_of_inner(
     // The retry is by the **last segment only** — the name the class is declared under, whatever namespaces wrap it —
     // and it runs only when the scoped spelling missed, so a class that is where the spelling says is unaffected.
     let mut class = (*resolved).to_string();
-    let mut own = match direct_members(index, scopes, root, path, &class) {
+    let own = match direct_members(index, scopes, root, path, &class) {
         Known::Yes(members) => members,
         Known::Unknown(UnknownReason::NotDeclaredHere(_)) => {
             let last = class.rsplit("::").next().unwrap_or(&class).to_string();
