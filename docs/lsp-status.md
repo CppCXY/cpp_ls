@@ -354,3 +354,35 @@ _M_data_ptr     written "value_type *"         → rendering "_Up *"    ← 同�
 `tests/rendering_real.rs::a_dead_branch_is_not_an_answer` 钉住它：`insert` 的五个答案全是 `iterator`，`_M_data_ptr`
 不再有 `value_type *`。`facts_vs_rendering` 三个头文件现在是 **0 条矛盾**（267 条可比较的事实，195 条是分支内的声明，
 单独计数）。
+### ⑫ 「预处理器正确，为什么 parser 还看得见宏？」
+
+因为**主读法不是预处理之后的文本**，而是文件自身文本 —— 这是设计选择，不是 bug：
+
+* 一个头文件**没有统一的预处理结果**：`#if __cplusplus`、`#ifdef _GLIBCXX_USE_CXX11_ABI`、`_GLIBCXX_DEBUG` 都取决于
+  **包含它的那个 TU**。所以"按文件建索引"只能存 raw 读法；渲染是**按 TU/按需**的产物（`rendering_of`）。
+* 于是 parser 在 raw 读法里看到的 `_GLIBCXX20_CONSTEXPR`、`__CHAR_BIT__`、`_GLIBCXX_NODISCARD` 就是**普通标识符**：
+  它会把它们当说明符、当类型、甚至在声明开头把它们当成一条声明。
+
+**这漏出来多少，量了**（`facts_vs_rendering`，三个头文件，2072 条 raw 事实）：
+
+```text
+与渲染有对应、可比的事实         267 条   返回类型/type_of 矛盾 **0** 条
+渲染里根本没有对应物的事实        483 条   —— 其中 **462** 条在条件分支里（编译器不读，查找已按 visibility 过滤）
+                                        —— **21** 条是 Unconditional 的"孤儿"
+```
+
+那 21 条孤儿就是"parser 看见宏"的真身，样本直接指向形状：
+
+```text
+_GLIBCXX_NODISCARD        kind Variable   ← 宏调用本身被当成一条变量声明
+__CHAR_BIT__              kind Type       ← 预定义宏被当成一个类型
+_Bit_iterator / _Bit_const_iterator / _Bit_iterator_base   kind Function/Variable
+                          ← 说明符里的宏让 parser 把**类型**当成了声明的名字（真正该是 _M_start 之类）
+```
+
+也就是说：**约 1%（21/2072）的 raw 事实是宏文本造成的**，其中一半是"名字 = 一个宏"，一半是"名字错成了类型名"。
+预处理器正确并不影响这条路径 —— 它压根没在这条路径上跑。
+
+下一个候选修法（按代价排序）：① 查找时丢掉"名字是闭包里某个宏"的事实（`ProjectIndex::macros()` 已经在手里，
+`_GLIBCXX_NODISCARD`/`__CHAR_BIT__` 这类直接消失）；② 说明符序列里的宏调用要让 parser 继续往后找声明符
+（`_Bit_iterator` 这类改名字的），这要动 grammar 的 specifier/declarator 规则，风险和收益都比 ① 大。
