@@ -58,12 +58,15 @@ pub async fn on_prepare_call_hierarchy(
     let uri = params.text_document_position_params.text_document.uri;
     let position = params.text_document_position_params.position;
 
+    log::debug!("call hierarchy: prepare asked at {position:?}");
     if let Some(path) = uri_to_file_path(&uri) {
         context.analysis().prepare(&path).await;
     }
+    log::debug!("call hierarchy: prepare returned, asking the session");
 
     snapshot_query(context.analysis(), cancel_token, move |session| {
         let path = uri_to_file_path(&uri)?;
+        log::debug!("call hierarchy: inside the query for {}", path.display());
         let view = session.view_of_the_file(&path)?;
         let offset = offset_at_position(&view, position)?;
         let item = item_at(session, &view, offset.get())?;

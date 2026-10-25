@@ -228,5 +228,16 @@ outgoing（定义处）  16 ms   （OpenFile ×2、emplace_back ×1）
 写锁一遍遍重试，请求拿不到读锁。这是一个**饥饿 bug**，与 call hierarchy 无关，任何在渲染被挤掉之后调用 `prepare`
 的请求都会踩到（`hover` 之前也会，只是它现在不碰渲染了）。
 
-下一步：给 pump 的"没有进展"加一个退出条件（例如同一次唤醒里连续 8 个空 slice 之后把那个文件从队列里摘掉并记录），
-然后 call hierarchy 的真机行就能出现在表里。
+**定位（同一轮内）**：给 handler 首行加了 `log::debug!` 之后重跑，日志里**只有请求到达、没有 handler 的第一行** ——
+所以卡的不是 handler，而是它之前的 `catch_up_upto`（`lsp_server` 收下请求之后、`RequestManager::task` 里先等
+inbox 的 `applying` 锁）。同一时间 pump 每秒一次空 slice（`pending == 0` 时它也会被 `IDLE_WAIT` 唤醒），
+每 8 次打一条 no-progress 警告。
+
+也就是说这是**两件事**：
+
+* `catch_up_upto` 的 `applying` 锁有一个持有者卡住了（handler 根本没开始跑）；
+* pump 在完全空闲时仍然以 ~1 Hz 的空 slice + 每 8 秒一条警告空转（这也是 fig 5 那种 CPU 常驻的一个候选解释，
+  尚未单独测量）。
+
+下一步不是 call hierarchy 本身：先在 `apply_upto` 里把"锁的持有者"打出来（谁在 apply、apply 在等什么），再决定
+是去掉那把锁还是缩短临界区；然后才是 pump 空转的退出条件。

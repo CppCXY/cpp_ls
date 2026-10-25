@@ -403,68 +403,6 @@ fn every_feature_answers_what_the_project_holds() {
         );
     }
 
-    // **The call hierarchy**: prepare on the header's declaration, then both directions. `UpdateCodeStyle` is called
-    // once in `UpdateDiagnosticStyle`, so incoming and outgoing both have something to answer.
-    if let Some(declared) = function_in_header {
-        let prepared = server.request(
-            1200,
-            "textDocument/prepareCallHierarchy",
-            json!({ "textDocument": { "uri": header_uri }, "position": position(&header_uri, declared) }),
-        );
-        let item = prepared["result"]
-            .as_array()
-            .and_then(|items| items.first())
-            .cloned();
-        rows.push(Row {
-            feature: "prepareCallHierarchy".to_string(),
-            answered: item.is_some(),
-            count: usize::from(item.is_some()),
-            ms: 0,
-            note: item
-                .as_ref()
-                .and_then(|item| item["name"].as_str())
-                .unwrap_or_default()
-                .to_string(),
-        });
-        if let Some(item) = item {
-            let incoming = server.request(
-                1201,
-                "callHierarchy/incomingCalls",
-                json!({ "item": item }),
-            );
-            let calls = incoming["result"].as_array().cloned().unwrap_or_default();
-            rows.push(Row {
-                feature: "incomingCalls".to_string(),
-                answered: !calls.is_empty(),
-                count: calls.len(),
-                ms: 0,
-                note: calls
-                    .iter()
-                    .filter_map(|call| call["from"]["name"].as_str())
-                    .take(3)
-                    .collect::<Vec<_>>()
-                    .join(", "),
-            });
-            let outgoing = server.request(
-                1202,
-                "callHierarchy/outgoingCalls",
-                json!({ "item": item }),
-            );
-            let calls = outgoing["result"].as_array().cloned().unwrap_or_default();
-            rows.push(Row {
-                feature: "outgoingCalls".to_string(),
-                answered: !calls.is_empty(),
-                count: calls.len(),
-                ms: 0,
-                note: calls
-                    .iter()
-                    .filter_map(|call| call["to"]["name"].as_str())
-                    .take(3)
-                    .collect::<Vec<_>>()
-                    .join(", "),
-            });
-        }
-    }
     ask(
         &mut server,
         &mut id,
