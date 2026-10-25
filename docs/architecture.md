@@ -143,6 +143,26 @@ hover / 定义 / 补全      当前 1–12 ms                    目标：不劣
 
 ### 第一步：把"渲染读法"变成主路径（不改任何 LSP 行为）
 
+> **已经查清楚的接缝（写在这里，避免下一步再猜）**：索引目前从 `SummaryStore::prepare_inner` 出发，它拿到的
+> `environment` 是 **parser 层的两个 trait**（`&dyn MacroBodies`, `&dyn MacroFacts`），而渲染器要的是 **session 层的
+> 类型**：`FileMacros::new(MacroView<'unit>, &UnitDefinitions, Option<&MacroTable>, bool)`。也就是说"渲染 + 解析渲染"
+> **不能在 store 里做**，只能在 `Session` 里做 —— `Session::rendering_of` 已经证明这条路可行（它就在 session 层拼出
+> `FileMacros`）。于是第一步的落点是：
+>
+> ```text
+> Session::index_the_rendering(path)
+>     unit   = translation_unit_of(path)                      // 已有
+>     text   = files.read(path)                               // 已有
+>     tokens = lex(text)                                      // 已有
+>     macros = FileMacros::new(unit.view(path), &unit.definitions(), Some(seed), true)
+>     rendered = cook_with(&text, &tokens, &macros).render()
+>     indexed  = FileIndexer::index_rendering(path, &rendered, key.with_environment(env_hash))
+>     commit indexed.summary                                   // 范围已经映射回文件
+> ```
+>
+> 也就是说：**准备（prepare）与提交（commit）之间的那一步换掉，而不是重写 store**。pump 的切片、`prepare_closure`
+> 的并行读、摘要缓存都保留；换来的是"事实来自渲染"。
+
 * `FileIndexer`/`summarize` 的**唯一**入口改成"给文本 + 环境 → 渲染 → 解析 → 映射 → `FileSummary`"；
   保留一个仅供测试的 `summarize_the_written_text`（名字里带"测试"），生产代码不再调用。
 * 删除 `DeclFact::split_by_a_directive`（渲染里不存在"拆分"）：事实要么有一个类型，要么确实没有。
