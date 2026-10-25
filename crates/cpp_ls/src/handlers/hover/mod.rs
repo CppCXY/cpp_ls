@@ -122,10 +122,17 @@ pub async fn on_hover(
         // that cannot drift.
         let written = session.view_of_the_file(&path)?;
         let in_the_file = file_offset_at_position(&written, position)?;
-        let view = session.view(&path)?;
-        let offset = view.reading_offset_of(cpp_code_analysis::file::coordinates::FileOffset::new(
-            in_the_file.get(),
-        ))?;
+        // **The hover answers from the file's own text, not from its rendering** — and that is a fix, not a
+        // simplification. `session.view` asks for a cook when the rendering is not cached, and the cache holds eight,
+        // so on a project whose closure is a hundred files hovering the file the reader is in **evicted it** and
+        // answered `None` for that request while queuing the cook that would answer the next one. Reported from a real
+        // session as "分离定义的 cpp 文件里面没有 hover 结果", together with a log of
+        // `cook slice: asked 1, rendered 1, emptied the queue` on every hover.
+        //
+        // Everything below — `definitions`, `type_at`, `members_of`, the doc comment — is a name or type question, and
+        // the scopes that answer those are the written text's.
+        let view = written.clone();
+        let offset = cpp_code_analysis::file::coordinates::ReadingOffset::new(in_the_file.get());
         if let Known::Yes(header) = session.header_at(&view, in_the_file) {
             return Some(markdown(header_markdown(&header)));
         }
@@ -1264,10 +1271,9 @@ fn documentation_of_a_fact(
     file: &std::path::Path,
     offset: usize,
 ) -> Option<String> {
-    let declared = session.view(file)?;
-    let in_the_file = declared.file_offset_of(
-        cpp_code_analysis::file::coordinates::ReadingOffset::new(offset),
-    )?;
-
-    documentation_markdown(session, view, file, in_the_file.get())
+    // **The offset is the file's**, because the view the caller holds is the file's own text — `hover` answers from
+    // `view_of_the_file` now (see the note at its call). This used to ask `session.view(file)` for the rendering and map
+    // the offset through `file_offset_of`, and that was the *only* place a hover queued a cook: on a file whose
+    // rendering had been evicted the documentation disappeared, and the next hover paid for the render.
+    documentation_markdown(session, view, file, offset)
 }

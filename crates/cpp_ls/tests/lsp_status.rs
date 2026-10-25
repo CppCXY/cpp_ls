@@ -262,6 +262,23 @@ fn every_feature_answers_what_the_project_holds() {
     // **A hover deep inside the out-of-line definition**, which is where a reader lives: the member used on the left
     // of a `.` (`_diagnosticStyle.code_style_check`) and the member itself. Reported as "分离定义的 cpp 文件里面没有
     // hover 结果" while Find References answered.
+    // **A class name**, which is a name being *declared*, not a call: reported as "类型的 hover 有点莫名其妙" — the
+    // answer listed the class's constructors as an overload set ("3 declarations … decided by the arguments").
+    if let Some(the_type) = at(&text, "LuaDiagnosticStyle", 0) {
+        ask(
+            &mut server,
+            &mut id,
+            &mut rows,
+            "hover (type name)",
+            "textDocument/hover",
+            position(&source_uri, the_type),
+            &|result| {
+                let contents = result["contents"].to_string();
+                let declarations = contents.matches("declaration").count();
+                (declarations, format!("{}", trim(&contents)))
+            },
+        );
+    }
     for (nth, what) in [(2usize, "hover (use in a .cpp)"), (3, "hover (member after a .)")] {
         if let Some(use_at) = at(&text, "_diagnosticStyle", nth) {
             let line = text.lines().nth(use_at.line as usize).unwrap_or_default().to_string();

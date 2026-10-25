@@ -159,3 +159,28 @@ inlayHint/resolve        没有（可接受）
 
 这一轮所有结论都以 `cargo clean -p` 之后重测的数字为准：`std::string` 257 个成员、`std::vector` 285 个（含 `erase`）、
 150 834 个事实、0 条诊断、libstdc++ 18 个函数没有参数表。
+## ⑥ 截图里的六个问题（2026-10-25 中午）
+
+```text
+① 智能指针的 `.` 补全   shared_ptr 自己的成员（operator= / element_type / weak_type）
+                        → 现在跟随 `operator->`：pointee 的成员，并把 `.` 替换成 `->`
+② 分离定义的成员 hover  "2 declarations" + "which one a call means is decided by the arguments"（对数据成员）
+                        → 按光标所在类收窄（引用/定义同一条规则）：真项目上 3 → 2（一个声明）
+③ 类型的 hover          "3 declarations"（类 + 两个构造函数被当成重载）
+                        → 有一个 Type 事实时就回答它：`class LuaDiagnosticStyle`
+④ 头文件 go to impl     GetErrors 没有结果
+                        → 作用域遍历给类外定义的 fact 是 `scope: None` + **声明符的** range；限定名那一遍现在
+                          **收编**它并补上 scope 和声明的 range（"是不是定义"问的就是这段文本结尾是 `;` 还是 `}`）
+                          → LuaLexer.h 的 GetErrors → LuaLexer.cpp:73
+⑤ CPU / cook 循环       pull 循环是健康的（loop_probe：第一轮 10 次 pull 2 次 cook，第二轮 **0**；
+                        整个 run 88 次 cook 全在 1273 个文件的首次索引里）
+⑥ 分离定义的 cpp 里没有 hover
+                        → hover 以前要**渲染**（`session.view`），而渲染缓存只有 8 条：hover 把正在看的文件自己
+                          挤出去，于是这一次回答 null、同时排一次 cook（日志里每次 hover 一条
+                          `cook slice: asked 1, rendered 1`）。现在 hover 从**文件自身文本**回答，不碰渲染；
+                          文档注释那条路（`documentation_of_a_fact`）同理 —— 它是唯一还在排 cook 的地方
+                          → 真项目上 hover 25 ms → 11 ms，四个位置全部有答案
+```
+
+⑤ 剩下的 CPU 是**首次索引 1273 个文件**的固有成本，不是循环；要再压就得动索引本身（那是另一个话题）。
+② 和 ⑥ 的截图来自同一份日志，现在 hover 不再触发 cook，日志里也不该再有每 hover 一条的 cook。
