@@ -232,7 +232,7 @@ outgoingCalls          yes  0  0 ms  （头文件里只有声明，函数体在 
 顺带留下两条只打慢路径的 debug 诊断：`catch_up_upto` 超过 50 ms、`apply_upto` 等 applier 或单个事件超过 50 ms
 （请求在 handler 第一行之前就等在这里，以前"卡住"和"慢"分不开）。
 
-#### 仍在的观察：pump 空闲时 ~1 Hz 空转
+#### 已修：pump 空闲时每秒一次空 slice
 
 同一个请求在**分析层**是毫秒级（`tests/call_hierarchy_real.rs`，真项目）：
 
@@ -252,11 +252,16 @@ outgoing（定义处）  16 ms   （OpenFile ×2、emplace_back ×1）
 inbox 的 `applying` 锁）。同一时间 pump 每秒一次空 slice（`pending == 0` 时它也会被 `IDLE_WAIT` 唤醒），
 每 8 次打一条 no-progress 警告。
 
-也就是说这是**两件事**：
+pump 尾巴原来是 `wait_for_work(IDLE_WAIT).await` 之后**不管结果都走一圈**，于是**超时也跑一个完整 slice**
+（parse wave、commit、claim cooking、pending 计数、状态栏刷新，全是空的）。修法：超时（`false`）就 `continue`
+继续等 —— 到那里时 `pending` 一定为 0（`pending > 0` 的分支已经先 `continue` 了），所以"超时"只意味着"再等"。
+另外 "no progress" 计数现在只统计**本来有活却没干成**的 slice（一次 `prepare` 唤醒一个已经就绪的文件不再算）。
 
-* `catch_up_upto` 的 `applying` 锁有一个持有者卡住了（handler 根本没开始跑）；
-* pump 在完全空闲时仍然以 ~1 Hz 的空 slice + 每 8 秒一条警告空转（这也是 fig 5 那种 CPU 常驻的一个候选解释，
-  尚未单独测量）。
+新增探针 `tests/idle_probe.rs`（起真服务器、初始化、等索引排空、然后 10 秒不发任何请求，数日志）：
 
-下一步不是 call hierarchy 本身：先在 `apply_upto` 里把"锁的持有者"打出来（谁在 apply、apply 在等什么），再决定
-是去掉那把锁还是缩短临界区；然后才是 pump 空转的退出条件。
+```text
+修之前：10 秒空闲 = 16 个空 slice、**2 条 no-progress 警告**
+修之后：10 秒空闲 = 0 个 slice、**0 条警告**
+```
+
+`lsp_status`（80 次 pull + 29 行功能表）和 `loop_probe`（第一轮 10 次 pull 2 次 cook、第二轮 0 次）都照旧。

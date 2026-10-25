@@ -549,8 +549,17 @@ async fn index_in_background(context: ServerContextSnapshot) {
             // files it must *re-read* always reports `prepared > 0`, and one that only cooks always reports `cooked`.
             // Eight in a row with nothing at all is a state, not a phase — so the files that cannot be built are
             // dropped from the queue (the next request that names one puts it back) and the pump is allowed to idle.
+            //
+            // **Only a slice that had work to do counts.** A wake with nothing pending is what a `prepare` for a file
+            // that is already prepared produces, and counting those as "no progress" is how a single stuck file's
+            // signal got diluted into a warning every eight seconds on an idle server.
+            let had_work = pending > 0 || claimed_count > 0 || !drain_was_empty;
             let progressed = prepared_count > 0 || !drain_was_empty || claimed_count > 0 || re_read > 0 || cooked > 0;
-            no_progress = if progressed { 0 } else { no_progress + 1 };
+            no_progress = if progressed || !had_work {
+                0
+            } else {
+                no_progress + 1
+            };
             if no_progress >= 8 {
                 let dropped = context
                     .analysis()
@@ -714,7 +723,15 @@ async fn index_in_background(context: ServerContextSnapshot) {
             }
             was_pending = false;
 
-            context.analysis().wait_for_work(IDLE_WAIT).await;
+            // **A timeout is not work.** `wait_for_work` answers whether something was queued while the loop waited;
+            // going round on `false` ran a *full slice* — a parse wave, a commit, a cook claim, all empty — once a
+            // second for as long as the window stayed open. That is the `index slice: … 0 to cook, 0 left` line
+            // repeated for ever in a reader's log, plus a no-progress warning every eighth slice, and it holds the
+            // analysis for a moment each time. Nothing is pending when the loop reaches here (the `pending > 0` branch
+            // above continues first), so a timeout only means "wait again".
+            if !context.analysis().wait_for_work(IDLE_WAIT).await {
+                continue;
+            }
         }
     });
 }
