@@ -188,11 +188,26 @@ hover / 定义 / 补全      当前 1–12 ms                    目标：不劣
 > 里现算的 key 不带。于是 `current != Some(rebuilt.key)` 永远成立 —— 重建被跳过的次数比它成功的次数多得多，而且**没有
 > 任何日志说它被跳过**。
 >
-> 结论（下一次接线的第一步，已经定位到行）：重读路径必须**沿用索引当前的 key**，而不是重新算一个：
-> `let key = self.index.summary(path).map(|s| s.key).unwrap_or_else(|| SummaryKey::new(...))`。注意这里还有一个待验证
-> 的点：这条路径上的 `path` 拼写与索引里存的是否一致（`c:/…` vs `C:\…`），因为它决定了 `self.index.summary(path)`
-> 是 `Some` 还是 `None` —— 这也是合并进来的 `macros`/`includes` 变成了空的同一个原因（`[test]` 行里的
-> `macro_readings 0` 就是它）。
+> **守卫已经修好（这是迁移的使能项，已提交）**：`commit_the_re_read` 现在只比较 `content_hash`/`context_hash`
+> （"计划是针对这次读法做的"），并在提交时沿用当前 key 的环境部分 —— 文本变了仍然拒绝。之前比整个 key，于是**凡是
+> 第一次读法给过环境的文件，重读结果都被静默丢掉**。修好之后那条一直挡路的 `std::Widget` 测试在旧路径下通过。
+>
+> **两个分支的能力不一样，这是下一步的全部要点**：
+>
+> | 分支 | 有 unit？ | 能渲染？ |
+> |---|---|---|
+> | `through_a_timeline`（`prepare_the_re_read` 里带 `units` 的） | 有：`unit.environment_of` + `unit.definitions()` | **能**：`FileMacros::new` 要的正是这两个 |
+> | 无 unit 的 eager 分支（`closure_environment`） | 没有，只有 `MacroEnvironment` | **不能**：`cook_with` 要 `MacroBindings`，而只有 `FileMacros` 实现它，`FileMacros` 又要 `MacroView`/`UnitDefinitions` |
+>
+> 而挡路的那条 fixture **走的正是 eager 分支**（`units` 为空），所以 timeline 分支的渲染接线既没被它验证、也没被它
+> 否定 —— 接线要验的是"有 unit 的那条路"。两条具体结论：
+>
+> 1. **timeline 分支**可以接（第二次渲染试过、代码写得出、编译过），要在**有 unit 的场景**里验：真项目探针
+>    （`lsp_status` settle 之后 `index.summary(stl_bvector.h)` 的 `emplace_back` 应为 `reference`），或一个
+>    session 测试让 drain 带 units。
+> 2. **eager 分支**要么保持 raw（现状，可以用），要么接受一个新适配器：把 `MacroEnvironment` 实现成
+>    `MacroBindings`（`definition_at(name, offset)`）。这是**唯一**能在无 unit 时渲染的路，且是新机制 —— 决策留给
+>    下一步，不偷偷加。
 >
 > ```text
 > 渲染文本 = 编译器看见的东西：宏已展开、非活跃分支已删除、#define 行本身不在里面
