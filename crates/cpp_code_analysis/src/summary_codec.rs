@@ -259,6 +259,7 @@ pub fn encode(summary: &FileSummary) -> Vec<u8> {
         put_u8(&mut out, u8::from(fact.local));
         put_opt_str(&mut out, fact.in_namespace.as_deref());
         put_u8(&mut out, u8::from(fact.clean));
+        put_u8(&mut out, u8::from(fact.split_by_a_directive));
         put_u32(&mut out, guard_code(fact.guard));
         put_u8(&mut out, access_code(fact.access));
         put_u8(&mut out, u8::from(fact.exported));
@@ -664,6 +665,7 @@ pub fn decode(bytes: &[u8]) -> Result<FileSummary, DecodeError> {
             local: reader.u8()? != 0,
             in_namespace: reader.optional_string()?,
             clean: reader.u8()? != 0,
+        split_by_a_directive: reader.u8()? != 0,
             guard: guard_from(reader.u32()?)?,
             access: access_from(reader.u8()?),
             exported: reader.u8()? != 0,
@@ -1259,6 +1261,7 @@ mod tests {
                     // [`DeclFact::in_namespace`]. The two facts below cover `None`.
                     in_namespace: Some("std::ranges".to_string()),
                     clean: false,
+                    split_by_a_directive: false,
                     guard: FactGuard::Unconditional,
                 },
                 DeclFact {
@@ -1285,6 +1288,7 @@ mod tests {
                     local: false,
                     in_namespace: None,
                     clean: true,
+                    split_by_a_directive: false,
                     guard: FactGuard::Region(3),
                 },
                 DeclFact {
@@ -1305,6 +1309,7 @@ mod tests {
                     local: false,
                     in_namespace: None,
                     clean: true,
+                    split_by_a_directive: false,
                     guard: FactGuard::Unconditional,
                 },
             ],

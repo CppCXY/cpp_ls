@@ -2302,10 +2302,7 @@ fn fact_for(
     // compiler configuration a summary is deliberately not keyed by. So the honest fact says nothing rather than a
     // branch: a consumer holding a **rendering** (the reading where the directive is resolved) has the real type, and
     // one that holds only this summary is told the truth.
-    let split_by_a_directive = shapes
-        .specifiers_at(the_offset_to_descend_by(binding))
-        .map(|node| node.text().to_string())
-        .is_some_and(|text| text.lines().any(|line| line.trim_start().starts_with('#')));
+    let split_by_a_directive = split_by_a_directive_with(shapes, binding);
     let type_of = if split_by_a_directive {
         None
     } else {
@@ -2401,6 +2398,7 @@ fn fact_for(
         in_namespace,
         type_of,
         returns,
+        split_by_a_directive,
         bases,
         parameters,
         constraints,
@@ -4786,4 +4784,15 @@ int Box<int>::Inner::deep = 0;
         );
         assert_eq!(of("plain").returns.as_deref(), Some("void"));
     }
+}
+/// **Does this declaration's specifier sequence hold a directive line?** — see [`DeclFact::split_by_a_directive`].
+///
+/// The text is the one the written type was read from: `_GLIBCXX20_CONSTEXPR\n\treference\n#else\n\tvoid\n#endif` for
+/// libstdc++'s `emplace_back`. A `#` at the start of a line inside it is the parser's own spelling of "this
+/// declaration was written for two configurations", and it costs one `to_string` of a specifier node per declaration.
+pub fn split_by_a_directive_with(shapes: &DeclarationShapes, binding: &Binding) -> bool {
+    shapes
+        .specifiers_at(the_offset_to_descend_by(binding))
+        .map(|node| node.text().to_string())
+        .is_some_and(|text| text.lines().any(|line| line.trim_start().starts_with('#')))
 }

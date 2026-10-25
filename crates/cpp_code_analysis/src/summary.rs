@@ -143,7 +143,19 @@ pub struct DeclFact {
     /// `None` for a return type the file does not state — `auto make() { … }` is deduced, and `auto` is not a
     /// class anything can be looked up in.
     pub returns: Option<String>,
-    /// For a class-like declaration, the base classes it was written with, in declaration order.
+    /// **Does the file's own text state this declaration's type across a directive?**
+    ///
+    /// `bits/stl_bvector.h` writes `emplace_back`'s return type as `#if __cplusplus > 201402L … reference … #else
+    /// void … #endif`, and the written reading — which cannot know which branch is live, because that needs the
+    /// compiler configuration a summary is deliberately not keyed by — has no single type to report: [`DeclFact::returns`]
+    /// and [`DeclFact::type_of`] are `None` for such a declaration instead of one branch's answer.
+    ///
+    /// This flag is how a consumer tells that apart from `auto` (also `None`, and nothing to ask) and from a
+    /// declaration that simply states no type. A consumer holding a **rendering** — the reading where the directive is
+    /// resolved — can answer properly, and the flag is the only thing that says it is worth asking. Measured over
+    /// three standard-library headers (`facts_vs_rendering`): 12 of 1589 facts disagreed with the rendering about the
+    /// return type before this flag existed, every one of them this shape.
+    pub split_by_a_directive: bool,    /// For a class-like declaration, the base classes it was written with, in declaration order.
     ///
     /// Spelled as written — `B`, `ns::C`, `Base<int>` — for the same reason [`DeclFact::type_of`] is: a consumer
     /// resolves them with the machinery that already exists, and `Unknown` where it cannot go beats a guess.

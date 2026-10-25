@@ -6643,6 +6643,7 @@ fn fact_from_binding_with(
         // Answered here as well, because **members** are exactly where a call happens: `fac.build().size` needs the
         // return type of a member function that the file being edited declares. See [`DeclFact::returns`].
         returns: crate::sema::declarations::declared_returns_of_in(shapes, root, binding),
+        split_by_a_directive: crate::sema::declarations::split_by_a_directive_with(shapes, binding),
         bases: crate::sema::declarations::declared_bases_of_with(shapes, binding),
         // A member list's facts carry no parameters: this path answers *which members* a class has, and substitution
         // is the caller's step — it is the caller that knows the arguments. See [DeclFact::parameters].
@@ -10411,6 +10412,7 @@ impl ProjectDefinition {
                 // not this answer.
                 type_of: None,
                 returns: None,
+        split_by_a_directive: false,
                 bases: Vec::new(),
                 parameters: Vec::new(),
         constraints: Vec::new(),

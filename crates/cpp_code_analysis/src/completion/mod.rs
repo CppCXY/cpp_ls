@@ -1446,6 +1446,7 @@ mod tests {
             range: cpp_parser::SourceRange::new(0, 0),
             name_range: cpp_parser::SourceRange::new(0, 0),
             clean: true,
+            split_by_a_directive: false,
             guard: crate::FactGuard::Unconditional,
             access: None,
             exported: false,
