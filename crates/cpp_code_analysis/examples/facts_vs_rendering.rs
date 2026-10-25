@@ -54,6 +54,7 @@ fn main() {
     let mut total = 0usize;
     let mut differing = 0usize;
     let mut deferred = 0usize;
+    let mut guarded = 0usize;
     for file in &files {
         let Some(rendered) = session.rendering_of(file) else {
             println!("{}: no rendering", file.display());
@@ -83,6 +84,19 @@ fn main() {
             let Some(candidates) = from_the_rendering.get(&key(fact)) else {
                 continue;
             };
+            // **A local has no identity across the two readings**: its `scope` is `None` (a body contributes no
+            // qualified name), so two different functions' `__s` match each other and the comparison says nothing. The
+            // question this probe asks is about declarations that a lookup can name.
+            if fact.local {
+                continue;
+            }
+            // **A fact inside a conditional region is not a contradiction**: the file writes both branches and *which
+            // one is compiled* is the configuration's answer, so the summary honestly holds both (a lookup filters the
+            // dead one, which `tests/rendering_real.rs::a_dead_branch_is_not_an_answer` asserts).
+            if fact.guard != cpp_code_analysis::FactGuard::Unconditional {
+                guarded += 1;
+                continue;
+            }
             total += 1;
             // A name may be overloaded; the written fact **contradicts** the rendering only if no reading of that name
             // agrees with it. A written `None` is not a contradiction: it is the fact declining to name a branch — see
@@ -113,6 +127,6 @@ fn main() {
     }
     println!(
         "totals: {total} fact(s) matched by name and scope, **{differing}** contradict the rendering about the \
-         return type, {deferred} decline to name one (a directive splits the declaration)"
+         return type, {deferred} decline to name one (a directive splits the declaration), {guarded} are branch-guarded"
     );
 }

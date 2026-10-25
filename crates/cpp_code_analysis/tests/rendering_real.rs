@@ -98,3 +98,56 @@ fn a_split_return_type_is_read_from_the_rendering() {
         "the compiled branch's type"
     );
 }
+/// **A declaration in a branch this compilation does not take is not an answer.**
+///
+/// libstdc++ declares `insert` and `_M_data_ptr` twice — `void insert(...)`/`value_type* _M_data_ptr(...)` under the
+/// `#else` of a `#if __cplusplus >= 201103L`, and the `iterator`/`pointer_traits<_Ptr>::element_type*` versions under
+/// the taken branch. Both were answers, so a hover or a completion could name a declaration a compiler never reads.
+/// The lookup now asks `visibility_at` for each candidate's own guard and drops the ones whose branch is not taken
+/// (`Unknown` keeps them: a guard this layer cannot decide must not become "the name is not declared").
+#[test]
+#[ignore = "opens a real project; run with --ignored"]
+fn a_dead_branch_is_not_an_answer() {
+    let project = project();
+    let header = std::path::PathBuf::from(
+        std::env::var("CPPLS_STL_VECTOR").unwrap_or_else(|_| {
+            r"C:\Users\zc\Desktop\mingw64\lib\gcc\x86_64-w64-mingw32\15.1.0\include\c++\bits\stl_vector.h"
+                .to_string()
+        }),
+    );
+
+    let mut session = Session::open(
+        project.clone(),
+        SessionFiles::new(OpenDocuments::new(), DiskFiles),
+        WatchFilter::new(&project),
+    );
+    session.add_project_files([header.clone()]);
+    session.index_everything();
+
+    for name in ["insert", "_M_data_ptr"] {
+        let started = Instant::now();
+        let known = session.index().definitions(name, &header);
+        let took = started.elapsed();
+        let cpp_code_analysis::Known::Yes(found) = known else {
+            panic!("`{name}` must be declared somewhere: {known:?}");
+        };
+        let returns: Vec<Option<&str>> = found
+            .found
+            .iter()
+            .map(|declaration| declaration.fact.returns.as_deref())
+            .collect();
+        println!("{name}: {returns:?} in {took:?}");
+        assert!(
+            !returns.contains(&Some("void")),
+            "the `#else` branch's declaration is not an answer: {returns:?}"
+        );
+        assert!(
+            !returns.contains(&Some("value_type *")),
+            "and neither is the other one: {returns:?}"
+        );
+        assert!(
+            !returns.is_empty(),
+            "the taken branch is still an answer: {returns:?}"
+        );
+    }
+}

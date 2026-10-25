@@ -1668,6 +1668,27 @@ pub(crate) fn declared_returns_of_with(shapes: &DeclarationShapes, binding: &Bin
     // `std::string` mean the same thing in a fact as in the class body, and `Money operator+` names a class from
     // outside the body. So an operator records its return type here and [`an_operator_return_is_usable`] decides
     // whether the *fact* may carry it — the typedef case is refused there, with the file's tree in hand.
+    // **A conversion operator's return type is its own name.** `operator bool` converts *to* `bool`, and what is
+    // written before it is a specifier — often through a macro. libstdc++ writes
+    //
+    // ```text
+    //     _GLIBCXX_NODISCARD _GLIBCXX20_CONSTEXPR
+    //     operator bool() const
+    // ```
+    //
+    // and the written reading recorded `_GLIBCXX20_CONSTEXPR` as the return type — a macro's *name*, which no lookup
+    // can resolve and which is not a type at all (measured: `facts_vs_rendering` over three headers, the one
+    // contradiction left after the branch-guarded declarations were accounted for).
+    // The rule is the **spelling**, not the kind: the walker classifies `operator bool` as an operator, and a
+    // conversion operator is the one operator whose name carries a space and a type (`operator[]` and `operator+` do
+    // not match this pattern, and their return type is a real specifier).
+    let spelled = binding.name.text();
+    if let Some(target) = spelled.trim().strip_prefix("operator ").map(str::trim)
+        && !target.is_empty()
+    {
+        return Some(target.to_string());
+    }
+
     if !matches!(
         binding.kind,
         BindingKind::Function | BindingKind::OperatorFunction

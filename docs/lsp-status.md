@@ -325,3 +325,32 @@ rendering:    returns Some("reference")
 
 **还没做**：剩下 10 条矛盾（`operator bool`、`_M_data_ptr`、`basic_string.h` 的 4 个 `__s`）是别的形状（指令在声明
 **之前**、或渲染把整条声明删掉）。
+### ⑪ 剩下 6 条：三个不同的形状，全部归零
+
+```text
+operator bool   written "_GLIBCXX20_CONSTEXPR" → rendering "void"    ← 转换运算符的返回类型被当成"名字前的最后一个标识符"
+insert ×4       written "void"                 → rendering "iterator" ← 一条声明写在一个分支里，另一分支的声明也是答案
+_M_data_ptr     written "value_type *"         → rendering "_Up *"    ← 同上
+```
+
+**转换运算符的返回类型就是它的名字。** `_GLIBCXX_NODISCARD _GLIBCXX20_CONSTEXPR operator bool()` 里，写读法把宏名
+`_GLIBCXX20_CONSTEXPR` 当成了返回类型 —— 它不是类型、任何查找都解析不了。规则改成按拼写取：`operator bool` →
+`bool`（`operator[]`/`operator+` 没有空格，不匹配这条规则，它们的返回类型是真说明符）。两边读法现在都是 `bool`。
+
+**死分支的声明不是答案。** `insert`/`_M_data_ptr` 在 `#if __cplusplus >= 201103L … #else … #endif` 的两边各写一份，
+两份都成了答案，于是 hover/补全可能给出编译器根本不读的那一条。查找现在对每个候选问
+`visibility_at(self, file, fact.guard, offset)`，`Inactive` 丢弃、`Unknown` 保留（判不了的条件不能变成"这个名字没声明"）。
+
+**代价，用 A/B 量过**：
+
+```text
+不做缓存         diagnostic 28 → **71 ms**，80 次 pull 的落定时间 23.8 → 28.2 s
+加 verdict 记忆    diagnostic **29 ms**，落定 24.2 s（与没加过滤器的 23.8 s 在噪声内）
+```
+
+记忆是 `guard_answers: (file, offset, region) → Visibility`，上限 16 384 条，文件一改（`forget_member_lists` 的每个
+调用点）就丢。verdict 本身按 (file, offset, region) 是稳定的：同一个事实在每次 pull 被问的都是同一件事。
+
+`tests/rendering_real.rs::a_dead_branch_is_not_an_answer` 钉住它：`insert` 的五个答案全是 `iterator`，`_M_data_ptr`
+不再有 `value_type *`。`facts_vs_rendering` 三个头文件现在是 **0 条矛盾**（267 条可比较的事实，195 条是分支内的声明，
+单独计数）。

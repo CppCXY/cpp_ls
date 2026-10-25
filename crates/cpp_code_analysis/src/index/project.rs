@@ -40,7 +40,7 @@ use cpp_parser::CppSyntaxKind;
 
 use super::names::{NameIndex, Posting};
 use crate::file::paths::normalize_path;
-use crate::guard::Visibility;
+use crate::Visibility;
 use crate::include::graph::Marked;
 use crate::preprocess::directive::IncludeForm;
 use crate::sema::types::{Type, TypeBindings, parse_type_spelling, type_of_declaration};
@@ -684,6 +684,10 @@ pub struct ProjectIndex {
     ///
     /// Cleared wherever [`ProjectIndex::visibility`] is — an insert, a cook, or a forget — because a fact arriving
     /// is exactly what can change it.
+    /// **One verdict per guarded declaration** — see `certain_declarations`. A guard costs a macro walk, and the
+    /// same fact is asked again on every pull that names the declaration: measured on the real project, the
+    /// uncached filter took a diagnostic pull from **28 ms to 71 ms** (`lsp_status`).
+    guard_answers: std::sync::Mutex<HashMap<(PathBuf, usize, u32), crate::Visibility>>,
     definition_answers: std::sync::Mutex<HashMap<(String, String), Known<ProjectDefinitions>>>,
     /// **Every path the index has ever filed**, in normalized form — what tells a *re-read* from a *new file*.
     ///
@@ -734,6 +738,12 @@ const MAX_CACHED_MEMBER_LISTS: usize = 96;
 /// A pull asks for a few dozen spellings and the whole point of the memo is that the repeats hit; the bound is
 /// there so that a long-running session cannot grow it without limit, and emptying it costs one pull's lookups.
 const MAX_DEFINITION_ANSWERS: usize = 4096;
+
+/// How many guard verdicts [`ProjectIndex::a_guard_is_taken`] may hold before it is emptied.
+///
+/// One per guarded declaration any lookup has asked about — a few thousand on a standard-library closure, each a
+/// `(path, offset, region)` and an enum.
+const MAX_GUARD_ANSWERS: usize = 16_384;
 
 /// Which member a `obj.member` or `ptr->member` at `offset` names.
 ///
@@ -1211,6 +1221,40 @@ impl ProjectIndex {
         }
     }
 
+    /// **Is the branch this declaration is written in the one the configuration takes?**
+    ///
+    /// `Unconditional` is a free yes, and a region is a macro walk (`visibility_at`) — so the verdict is memoized:
+    /// the same fact is asked again on every pull that names the declaration, and the uncached filter took a
+    /// diagnostic pull from **28 ms to 71 ms** on the real project (`lsp_status`). `Unknown` answers **true** — a
+    /// guard this layer cannot decide must not become a lookup that says the name is not declared.
+    fn a_guard_is_taken(&self, file: &Path, guard: crate::FactGuard, offset: usize) -> bool {
+        let region = match guard {
+            crate::FactGuard::Unconditional => return true,
+            crate::FactGuard::Region(region) => region,
+        };
+        let key = (file.to_path_buf(), offset, region);
+        if let Ok(known) = self.guard_answers.lock()
+            && let Some(answer) = known.get(&key)
+        {
+            return *answer != crate::Visibility::Inactive;
+        }
+        let visibility = crate::index::environment::visibility_at(self, file, guard, offset);
+        if let Ok(mut known) = self.guard_answers.lock() {
+            if known.len() >= MAX_GUARD_ANSWERS {
+                known.clear();
+            }
+            known.insert(key, visibility);
+        }
+        visibility != crate::Visibility::Inactive
+    }
+
+    /// **Drop every memoized guard verdict about `path`** — called wherever the index changes for it.
+    fn forget_guard_answers(&self, path: &Path) {
+        let wanted = normalize(path);
+        if let Ok(mut known) = self.guard_answers.lock() {
+            known.retain(|(file, _, _), _| normalize(file) != wanted);
+        }
+    }
     /// **Drop every member list one of whose contributors is `path`** — called wherever the index changes for it.
     ///
     /// The comparison is by [`normalize`], for the reason every path comparison in this file is: a summary is filed
@@ -7094,6 +7138,7 @@ impl ProjectIndex {
         // …and every member list this file contributed to, which is the narrow invalidation: a class whose members
         // live in another file keeps its answer. See [ProjectIndex::member_lists].
         self.forget_member_lists(path);
+        self.forget_guard_answers(path);
         let mut summary = summary;
         summary.path = path.to_path_buf();
 
@@ -7221,6 +7266,7 @@ impl ProjectIndex {
 
         // A file that is gone is a contributor that changed: every member list it was made of is dropped.
         self.forget_member_lists(Path::new(&path));
+        self.forget_guard_answers(Path::new(&path));
 
         for target in include_targets(&summary) {
             if let Some(includers) = self.included_by.get_mut(&target) {
@@ -7433,6 +7479,7 @@ impl ProjectIndex {
     pub fn forget_cooked(&mut self, path: &Path) {
         let path = normalize(path);
         self.forget_member_lists(Path::new(&path));
+        self.forget_guard_answers(Path::new(&path));
         // A cooked reading names things the raw one does not (`_STD_BEGIN` is `namespace std {` to it), so an
         // answer given while it was held can stop being true when it goes — the same rule as `forget`, see there.
         if let Ok(mut declared) = self.definition_answers.lock() {
@@ -9074,7 +9121,22 @@ impl ProjectIndex {
             candidates.retain(|found| normalize(&found.file) == own);
         }
 
-        // What is reachable only through a conditional `#include` is counted rather than offered: whether it is in
+        // **A declaration in a branch this compilation does not take is not an answer.** libstdc++ declares
+        // `_M_data_ptr` twice — `value_type*` under `#else` and `pointer_traits<_Ptr>::element_type*` under
+        // `#if __cplusplus >= 201103L` — and `insert` the same way, so both branches arrived as answers and a hover could
+        // name the one a compiler never reads (measured: `facts_vs_rendering` counted five such duplicates over
+        // `stl_vector.h` and `stl_bvector.h`).
+        //
+        // The question is not the file's own `#if` but the macros **at that offset**: `visibility_at` walks them, and
+        // `Unknown` keeps the declaration — a guard this layer cannot decide must not become a lookup that says the name
+        // is not declared.
+        candidates.retain(|found| {
+            self.a_guard_is_taken(
+                &found.file,
+                found.fact.guard,
+                found.fact.range.start_offset,
+            )
+        });
         // scope depends on macros this layer does not have, and a jump to a declaration that may not be there is a
         // wrong answer rather than a missing one. The count is what keeps the answer from claiming there is
         // nothing else — "one declaration, and two that might be" is not "one declaration".
