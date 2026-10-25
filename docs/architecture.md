@@ -167,6 +167,28 @@ hover / 定义 / 补全      当前 1–12 ms                    目标：不劣
 > 接线的验收：`lsp_status` 全绿、`loop_probe` 第二轮 0 次 cook、`edit_loop` 不劣化，并且真项目 settle 之后
 > `index.summary(stl_bvector.h)` 里 `emplace_back` 的返回类型是 `reference`（现在是 `None`，因为索引里还是 raw
 > 读法）。
+>
+> **接线试了一次，被一条测试挡住了，挡得对**（`git checkout` 已回退，代码树保持绿）：
+> `session::tests::a_class_scoped_by_another_files_macro_body_is_scoped_through_the_session` 失败，
+> `std::Widget` → `NotDeclaredHere`。原因不是渲染做错了，而是**摘要里有一半事实不属于渲染**：
+>
+> ```text
+> 渲染文本 = 编译器看见的东西：宏已展开、非活跃分支已删除、#define 行本身不在里面
+> 所以 summary.macros 若从渲染的解析里来，就是**空的** —— 而 open.h 的 _STD_BEGIN 体正是别的文件
+> 靠它把 Widget 放进 std 的东西。raw + with_macro_bodies 那条路能通过，就是因为它保留了 #define 事实。
+> ```
+>
+> 也就是说目标架构要写清一条新的分层规则（下一次接线的依据）：
+>
+> | 事实 | 来源 |
+> |---|---|
+> | 声明、类型、参数、基类、范围 | **渲染的解析**（宏已展开、分支已选） |
+> | `#define` / `#include` 事实、会话需要的宏体 | **原始文本**（它们不在渲染文本里） |
+> | 映射 | 渲染 token 的 `spans`（`index_rendering` 已经在做） |
+>
+> 于是"一个文件的摘要"= 渲染的声明事实 + 原始文本的指令事实，两者用同一个 `SummaryKey`（含 `env_hash`）落在同一份
+> 摘要里。下一步就是按这张表实现：`index_rendering` 产声明，指令事实由一次轻量的指令扫描（`FileIndexer::includes_of`
+> 已经是这类扫描）补齐，`macros` 从扫描里来而不是从渲染的解析里来。
 
 
 > **已经查清楚的接缝（写在这里，避免下一步再猜）**：索引目前从 `SummaryStore::prepare_inner` 出发，它拿到的
