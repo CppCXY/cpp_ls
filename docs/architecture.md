@@ -155,8 +155,18 @@ hover / 定义 / 补全      当前 1–12 ms                    目标：不劣
 > 所有 range 都在文件内
 > ```
 >
-> **还差的那一半**：pump/drain 仍然调 `SummaryStore::prepare`（raw 路）。把它换成
-> `Session::index_the_rendering`（每个切片一批文件），然后四层补丁才能删。
+> **还差的那一半，接缝已经确认（查过代码）**：第二次读法（`SummaryStore::prepare_the_re_read`）的签名带
+> `units: &[Arc<TranslationUnit>]`，也就是说它手上已经有 unit，可以在 store 里直接渲染 ——
+> `unit.environment_of(path)`（`MacroView`）+ `unit.definitions()`（`UnitDefinitions`）+ `cook_with` →
+> `RenderedCooked`，再走 `index_rendering`。第一次读法（`prepare_inner`）没有 unit，只能是临时读法，这正是第二次读法
+> 存在的原因（按已知的宏环境重读）。
+>
+> 所以接线的顺序是：**先把第二次读法切成渲染读法**（事实从此来自渲染，四层补丁才能删），再决定第一次读法要不要也
+> 变成"知道环境就渲染、否则临时"。
+>
+> 接线的验收：`lsp_status` 全绿、`loop_probe` 第二轮 0 次 cook、`edit_loop` 不劣化，并且真项目 settle 之后
+> `index.summary(stl_bvector.h)` 里 `emplace_back` 的返回类型是 `reference`（现在是 `None`，因为索引里还是 raw
+> 读法）。
 
 
 > **已经查清楚的接缝（写在这里，避免下一步再猜）**：索引目前从 `SummaryStore::prepare_inner` 出发，它拿到的
