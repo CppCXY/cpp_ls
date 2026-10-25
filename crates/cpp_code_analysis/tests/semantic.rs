@@ -1926,3 +1926,59 @@ fn a_function_returning_a_reference_keeps_its_parameter_list() {
         "and so does the reference-returning member: {found:?}"
     );
 }
+/// **A return type split by a directive is no return type at all.**
+///
+/// `bits/stl_bvector.h` writes `emplace_back` as
+///
+/// ```text
+/// #if __cplusplus > 201402L
+///     _GLIBCXX20_CONSTEXPR
+///     reference
+/// #else
+///     void
+/// #endif
+///     emplace_back(_Args&&... __args)
+/// ```
+///
+/// and the specifier sequence the type is read from is that text: the walk steps over the directives and answers the
+/// nearest type, which is the `#else` branch's `void` — in a C++20 project where the function returns `reference`
+/// (the rendering says so; measured over three headers, 12 of 1589 facts disagreed with the rendering about the return
+/// type, every one of them this shape).
+///
+/// The written reading cannot know which branch is live — that is the preprocessor's answer and needs the compiler
+/// configuration a summary is not keyed by — so the fact declines to name one. A declaration whose specifiers are not
+/// split keeps its type, which is the other half of the rule.
+#[test]
+fn a_return_type_a_directive_splits_is_not_named() {
+    let session = session_with(&[(
+        "/p/a.cpp",
+        "struct S {\n\
+         #if __cplusplus > 201402L\n\
+         \tWidget\n\
+         #else\n\
+         \tvoid\n\
+         #endif\n\
+         \tmake(int a);\n\
+         int plain(int a);\n\
+         };\n",
+    )]);
+    let summary = session
+        .index()
+        .summary(std::path::Path::new("/p/a.cpp"))
+        .expect("indexed");
+    let found: Vec<(&str, Option<&str>)> = summary
+        .declarations
+        .iter()
+        .filter(|fact| matches!(fact.kind, cpp_code_analysis::DeclKind::Function))
+        .map(|fact| (&*fact.name, fact.returns.as_deref()))
+        .collect();
+    println!("returns: {found:?}");
+    assert!(
+        found.iter().any(|(name, returns)| *name == "make" && returns.is_none()),
+        "a split declaration names no return type rather than the wrong branch: {found:?}"
+    );
+    assert!(
+        found.iter().any(|(name, returns)| *name == "plain" && *returns == Some("int")),
+        "and an unsplit one keeps its type: {found:?}"
+    );
+}

@@ -638,6 +638,30 @@ impl DeclarationShapes {
         self.shapes.is_empty()
     }
 
+    /// **The declaration node this name was written in** — the innermost shape containing it.
+    ///
+    /// The shape table's entries are the declaration nodes themselves ([`Shape::at`]), so this is the range a
+    /// directive inside the declaration falls in — which is what "was this declaration split by the preprocessor"
+    /// needs and what a fact's own range (its declarator) cannot answer.
+    pub fn declaration_around(&self, name_range: SourceRange) -> Option<SourceRange> {
+        let mut innermost = None;
+        // **A `template<…>` header is where the directive usually sits**: `template<typename... _Args>` then
+        // `#if __cplusplus > 201402L` … `#endif` then the declarator. The `TemplateDecl`'s own range covers both, so it
+        // is preferred over the declaration inside it.
+        let mut template = None;
+        self.on_the_path(name_range.start_offset, |shape| {
+            if !contains(shape.at, name_range) {
+                return;
+            }
+            if shape.kind == cpp_parser::CppSyntaxKind::TemplateDecl {
+                template = Some(shape.at);
+            } else {
+                innermost = Some(shape.at);
+            }
+        });
+        template.or(innermost)
+    }
+
     /// Walk the shapes an offset is inside, **outermost first**, and let the caller keep what it wants.
     ///
     /// This is the whole of the query side, and the reason it is a walk with a visitor rather than four functions
@@ -2255,8 +2279,38 @@ fn fact_for(
     // **The four type questions, timed apart.** Together they are 98% of the index's sweep on a real project
     // (138 files of MSVC's standard library), and each one is a different traversal of the same tree — so which of
     // them dominates is the difference between four different fixes. See `crate::stages`.
-    let type_of = { declared_type_of_with(shapes, binding) }
-        .or_else(|| declared_alias_target_with(shapes, binding));
+    // **A specifier sequence interrupted by a directive states two types, not one.**
+    //
+    // `bits/stl_bvector.h` writes `emplace_back`'s return type as
+    //
+    // ```text
+    // #if __cplusplus > 201402L
+    //     _GLIBCXX20_CONSTEXPR
+    //     reference
+    // #else
+    //     void
+    // #endif
+    //     emplace_back(_Args&&... __args)
+    // ```
+    //
+    // and the specifier sequence the type is read from is literally that text: `declared_returns_of_with` walks it,
+    // steps over the directives, and answers with the nearest type — the `#else` branch's `void`, in a C++20 project
+    // where the function returns `reference`. Measured over three standard-library headers (`facts_vs_rendering`):
+    // **12 of 1589** facts disagree with the rendering about the return type, and every one is this shape.
+    //
+    // The written reading cannot know which branch is live — that is the preprocessor's answer, and it needs the
+    // compiler configuration a summary is deliberately not keyed by. So the honest fact says nothing rather than a
+    // branch: a consumer holding a **rendering** (the reading where the directive is resolved) has the real type, and
+    // one that holds only this summary is told the truth.
+    let split_by_a_directive = shapes
+        .specifiers_at(the_offset_to_descend_by(binding))
+        .map(|node| node.text().to_string())
+        .is_some_and(|text| text.lines().any(|line| line.trim_start().starts_with('#')));
+    let type_of = if split_by_a_directive {
+        None
+    } else {
+        declared_type_of_with(shapes, binding).or_else(|| declared_alias_target_with(shapes, binding))
+    };
     let returns = {
         // **The written return type, and the deduced one when there is none to write.** `declared_returns_of_with`
         // answers `None` for `auto`, by design and for a reason that has not changed — `auto` is not a class
@@ -2267,12 +2321,16 @@ fn fact_for(
         // **An operator's written return type is kept only when a fact may carry it** — see
         // [`an_operator_return_is_usable`]; this is the index's own writer, so the gate is asked here as well as in
         // [`declared_returns_of_in`].
-        declared_returns_of_with(shapes, binding)
-            .filter(|spelling| {
-                binding.kind != BindingKind::OperatorFunction
-                    || an_operator_return_is_usable(root, binding, spelling)
-            })
-            .or_else(|| deduced_returns_of(root, binding))
+        if split_by_a_directive {
+            None
+        } else {
+            declared_returns_of_with(shapes, binding)
+                .filter(|spelling| {
+                    binding.kind != BindingKind::OperatorFunction
+                        || an_operator_return_is_usable(root, binding, spelling)
+                })
+                .or_else(|| deduced_returns_of(root, binding))
+        }
     };
     let bases = { declared_bases_of_with(shapes, binding) };
     // The class template's parameter names, for the members whose types are written with them. Answered from the
@@ -3258,7 +3316,6 @@ pub fn assign_guards(
             None => FactGuard::Unconditional,
         };
     }
-
     guards.regions = regions;
     guards.conditionals = conditions;
 }

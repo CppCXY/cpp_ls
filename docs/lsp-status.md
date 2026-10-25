@@ -265,3 +265,50 @@ pump 尾巴原来是 `wait_for_work(IDLE_WAIT).await` 之后**不管结果都走
 ```
 
 `lsp_status`（80 次 pull + 29 行功能表）和 `loop_probe`（第一轮 10 次 pull 2 次 cook、第二轮 0 次）都照旧。
+### ⑩ 「预处理器有根本性问题」的回执：不是预处理器，是**eager 索引的写法**
+
+截图里 `auto &config = _configs.emplace_back(` 跳到 `stl_bvector.h:1525`，看到的是
+
+```cpp
+#if __cplusplus > 201402L
+    _GLIBCXX20_CONSTEXPR
+    reference
+#else
+    void
+#endif
+    emplace_back(_Args&&... __args)
+```
+
+而 `emplace_back` 在我们的事实里 `returns: Some("void")` —— **`#else` 那一支**，在 C++20 工程里是错的（应为 `reference`）。
+
+**预处理器本身是对的**。把同一个头文件渲染出来（`rendering_probe --dump`），那一行是：
+
+```text
+template<typename... _Args> constexpr reference emplace_back(_Args&&... __args) { … }
+```
+
+不活跃的分支被删掉了，`reference` 保留；渲染里 294 条声明、raw 439 条、双方 0 个错误节点。
+
+问题在**读的是文件自身文本**：类型是从 `DeclSpecifierSeq` 里"最近的类型名"读出来的，而那个节点的文本就是
+`_GLIBCXX20_CONSTEXPR\n\treference\n#else\n\tvoid\n#endif` —— 于是拿到了 `#else` 的分支。
+
+**测量**（新探针 `examples/facts_vs_rendering.rs`，按名字+作用域把两种读法对齐）：
+
+```text
+stl_bvector.h   439 条事实，4 条与渲染的返回类型不一致
+stl_vector.h    503 条，4 条
+basic_string.h 1130 条，4 条
+合计            1589 条匹配，**12** 条矛盾
+```
+
+**已做的修法（不是 workaround）**：一份声明如果它的说明符序列被指令打断，那么**文件自身文本没有单一的返回类型**，
+事实就不写类型 —— `returns: None`/`type_of: None`。拿着渲染的消费者有真值；只拿摘要的消费者被告知真相，而不是
+一个分支。测完：`emplace_back`/`insert` 的 `returns` 从 `Some("void")` 变成 `None`；三头文件里矛盾 12 → **10**、
+另有 **7** 条改为"不表态"（`facts_vs_rendering` 现在分开计这两个数）。
+
+`tests/semantic.rs::a_return_type_a_directive_splits_is_not_named` 钉住两半：分割的 `make` → `None`，不分割的
+`plain` → `Some("int")`。
+
+**还没做**：剩下 10 条矛盾（`operator bool`、`_M_data_ptr`、`basic_string.h` 的 4 个 `__s`）是别的形状（指令在声明
+**之前**、或渲染把整条声明删掉）。真正的终局是**让需要精确类型的消费者去问渲染**（`Session::rendering_of` 已经有，
+`stl_bvector.h` 的渲染 ~17 ms），那是一条比"改摘要"更长的路；在那之前，事实不再撒谎。
