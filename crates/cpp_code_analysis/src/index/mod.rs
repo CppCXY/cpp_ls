@@ -454,6 +454,44 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
         }
     }
 
+    /// **Both readings of one file, as the one summary the index holds** — the composition
+    /// [`FileIndexer::index_rendering`] and [`FileIndexer::directive_summary`] exist for.
+    ///
+    /// A file is tokenized and rendered, and the parser reads **only the rendering**; the directives the rendering
+    /// consumed are read from the tokens. That is the whole of it, and this function is the only place the two halves
+    /// are put together — deliberately, because every caller that took one without the other got a summary that
+    /// answered half a file:
+    ///
+    /// ```text
+    /// index_rendering alone     the declarations a compiler reads, and NO #define, #include or region
+    /// directive_summary alone   the directives, and NO declarations
+    /// both, here                what the file declares *and* what it directs
+    /// ```
+    ///
+    /// The first line is not a smaller answer, it is a wrong one, and the cost of it is written on
+    /// [`crate::FileSummary::take_the_directives_of`]: a header whose `#define`s are missing from its summary is a
+    /// header whose includers render with `_STD_BEGIN` unexpanded.
+    ///
+    /// `source` is the file's **own text** — tokenized, never parsed. `key` describes the compilation; its
+    /// `content_hash` is replaced by the hash of `source`, exactly as [`FileIndexer::index`] does, because the text is
+    /// what is here and no caller can describe it more accurately than hashing it. (`index_rendering` cannot: the text
+    /// it is given *is* the rendering, and a summary filed under the rendering's hash is filed under a name that
+    /// describes no file — the store's re-read guard compares that hash, and would refuse every reading this builds.)
+    pub fn index_the_readings(
+        &self,
+        path: &Path,
+        source: &str,
+        rendered: &crate::preprocess::cooked::RenderedCooked,
+        key: SummaryKey,
+    ) -> crate::IndexedRendering {
+        let mut indexed = { self.index_rendering(path, rendered, key) };
+        let directed = { self.directive_summary(path, source) };
+        indexed.summary.take_the_directives_of(directed);
+        indexed.summary.key = key;
+        indexed.summary.key.content_hash = content_hash(source);
+        indexed
+    }
+
     /// **Parse a unit's rendering once, and file the facts under the files they stand in.**
     ///
     /// This is the reading the plan calls *the unit reading*, and it is one step further than
@@ -708,6 +746,18 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
             (macros, includes)
         };
 
+        // **What the walk decided is not compiled**, and this is where that decision is applied: a `#define` under a
+        // conditional a compiler does not take is not a definition any consumer should see, and a summary that keeps
+        // it makes the consumer decide the region a second time — with a different environment, and differently. See
+        // [`FileIndexer::without_these_macros`] and [`crate::TranslationUnit::dead_macros`].
+        //
+        // It has to happen **here**, on the facts, and not inside the preprocessing: the offsets come from a walk of
+        // the whole translation unit, which this type has never seen. The list is per file and holds the handful of
+        // guarded `#define`s a real header writes per configuration, so the linear test is the whole cost.
+        if !self.dead_macros.is_empty() {
+            macros.retain(|fact| !self.dead_macros.contains(&fact.range.start_offset));
+        }
+
         // Every kind of fact carries a guard, and they are assigned together rather than per kind: the sweep is
         // over *offsets*, and running it once per fact list would rebuild the region list each time. An include's
         // guard is the one that earns its keep — it is what a cross-file lookup reads to decide whether a
@@ -871,6 +921,11 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
             (macros, includes)
         };
 
+        // The same decision, the same place — see the note in [`FileIndexer::index_tree`].
+        if !self.dead_macros.is_empty() {
+            macros.retain(|fact| !self.dead_macros.contains(&fact.range.start_offset));
+        }
+
         // The order `index_tree` does them in, and it matters: the guards are assigned to the facts *before* the
         // file's own guard de-guards them, and the settling rule reads what that left.
         macros.sort_by_key(|fact| fact.range.start_offset);
@@ -921,7 +976,10 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
             includes,
             guards,
             macro_readings: Vec::new(),
-            use_filter: Vec::new(),
+            // **From the tokens**, which is what this function has: the filter's contract is that a `false` is
+            // certain, and the token stream is the file's whole text — every branch, every macro body. See
+            // [`crate::summary::use_filter_of_tokens`].
+            use_filter: crate::summary::use_filter_of_tokens(source, &tokens),
             modules: crate::ModuleReading::default(),
         }
     }

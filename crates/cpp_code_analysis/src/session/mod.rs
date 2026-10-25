@@ -1664,7 +1664,8 @@ impl<F: FileProvider + Clone> Session<F> {
     /// Conservative in the safe direction: the cost of being wrong is one re-cook, and the cost of being wrong the
     /// other way is a stale answer.
     fn invalidate_dependents(&mut self, path: &Path) {
-        for dependent in self.store.index().dependents_of(path) {
+        let dependents = self.store.index().dependents_of(path);
+        for dependent in dependents {
             // **And the timeline it was read out of.** A cooked reading is not the only thing a dependent holds
             // that was made out of this file: it also has a **translation unit**, and the in-memory one is checked
             // against nothing at all. The disk entry is keyed on the content of its closure, so this edit refuses
@@ -1677,14 +1678,29 @@ impl<F: FileProvider + Clone> Session<F> {
             // working. The re-cook is what needs the new timeline, so this is where it has to go.
             self.held_units().remove(&queue_key(&dependent));
 
-            // **Only the files that had a reading are asked for another one.** Dropping a stale reading is what this
-            // loop is for; re-marking a file that never had one would cook a file nobody has looked at, which is the
-            // 11.7 s the cooking policy was narrowed to avoid — paid here one header edit at a time. A file with no
-            // reading is answered from its own text, and gets one when something looks at it.
-            let had_a_reading = self.store.index().cooked_declarations(&dependent).is_some();
-            self.store.index_mut().forget_cooked(&dependent);
-            if had_a_reading {
-                self.cooking.want(&dependent);
+            // **And the summary itself, which is the part this loop did not used to own.** A dependent's summary is
+            // now a reading of *this* file's replacement lists — `Widget` is in `std` because `open.h` says
+            // `#define _STD_BEGIN namespace std {`, and the parser read that out of the rendering — so a directive
+            // that moved makes every dependent's summary a statement about a body that no longer exists.
+            //
+            // Dropping it is the *same* answer the cooked reading gets, for the same reason: between the edit and
+            // the next drain, "not found" is honest while `std::Widget` pointing at a body that now opens `studio`
+            // is not. Nothing is lost for ever — the file is queued, read, and the re-read pass renders it again
+            // from the new timeline, which is exactly the pipeline that built it.
+            //
+            // Measured: without this, `std::Widget` kept answering after `_STD_BEGIN` became `namespace studio {`,
+            // with every other step of the invalidation working — and the assertion that used to stand for this
+            // (`macro_readings` non-empty) was a note nothing read, so the capability had never been wired at all.
+            let was_indexed = self.store.forget(&dependent);
+            if was_indexed {
+                self.queue.again(dependent.clone(), Priority::Rest, 0);
+            }
+
+            // **The named rendering too.** `renderings` is keyed by the *dependent's* own text, which did not
+            // change — so the entry left behind is a rendering of a world whose macros have moved, and the next
+            // ask would find it instead of rendering again.
+            if let Ok(mut known) = self.renderings.lock() {
+                known.retain(|(held, _)| held != &dependent);
             }
         }
     }
@@ -2322,6 +2338,20 @@ impl<F: FileProvider + Clone> Session<F> {
         // change reads the same way. So the warm path — everything reused — pays nothing, and an editing drain pays
         // for the one file the edit produced.
         //
+        // **That premise is now false, and the `Reused` half below is the correction.** It was true while a stored
+        // summary was a reading of the file's **own text**: the text is in the key, so the same key is the same
+        // reading. A summary is now a reading of the text *and of its environment* — `Widget` is in `std` because a
+        // header this file includes says so — and that second half is in no key a lookup can compute today. So the
+        // disk holds **unrefined** readings (a refined one is refused at write time for exactly this reason, see
+        // `prepare_the_re_read`), and a reused summary is one that may still be missing its environment. It has to
+        // go through the pass like a parsed one, and the pass decides: a file that mentions no bodied macro is
+        // skipped there for nothing, while one that does is rendered.
+        //
+        // The cost is that a warm start re-reads what a cold one re-reads. That is the bill for not having the
+        // environment in the key, and paying it is the honest half of the migration — the other half is
+        // `docs/architecture.md` §5 steps 2–4: the directive summary and the unit walk can compute the environment
+        // **before** the file is parsed, which is what makes a rendering-carrying entry findable again.
+        //
         // **And not the files that were parsed *with* their environment.** This pass exists to repair a reading
         // made without one, and `Step::with_the_environment` is the mark that says the repair has already happened
         // — a file whose summary was built from the closure's macro bodies the first time has nothing a re-parse
@@ -2329,7 +2359,12 @@ impl<F: FileProvider + Clone> Session<F> {
         // for why the session can hold an environment for a file at all.
         self.parsed_since_the_last_pass.extend(
             done.iter()
-                .filter(|step| matches!(step.outcome, StepOutcome::Built | StepOutcome::Unstored))
+                .filter(|step| {
+                    matches!(
+                        step.outcome,
+                        StepOutcome::Built | StepOutcome::Unstored | StepOutcome::Reused
+                    )
+                })
                 .filter(|step| !step.with_the_environment)
                 .map(|step| step.path.clone()),
         );
@@ -6710,29 +6745,26 @@ fn error_directive_line(text: &str) -> Option<(usize, usize, String)> {
 
     /// **The file's declarations as a tree** — what an outline, a breadcrumb bar or a folding range is drawn from.
     ///
-    /// # Two sources, and why the second one exists
+    /// # One source: the file's own text
     ///
-    /// The index's summary when it has one, and **the buffer's own parse when it does not**. That second state is
-    /// ordinary rather than exotic: a file's summary is dropped the moment it is edited and read again one drain
-    /// later, and an outline is refreshed *as the user types* — so "the summary is gone" must not mean "the outline
-    /// is empty". Between two keystrokes the panel would blink, and what it would blink to is a file whose
-    /// declarations are still right there in the text in front of the reader.
+    /// An outline is about the **file**, not about the program: a declaration in a branch nobody takes belongs in an
+    /// outline, and a type a macro declares does not. So this reads the view it is given — the file's own parse
+    /// ([`Session::view_of_the_file`]) — and never the index's summary.
     ///
-    /// The two readings differ in exactly one way, and it is worth knowing which: a summary was built **with the
-    /// closure's macro bodies**, so a namespace a macro opens (`BEGIN_NS` is `namespace one {`) is a scope in it and
-    /// not in a buffer that has only this file's tokens. The fallback therefore nests what the file writes
-    /// literally — the honest reading of the text on screen — and it lasts one drain.
+    /// **That used to be worded "the index's summary when it has one, and the buffer's own parse when it does not",
+    /// and the difference is no longer a fallback but a wrong answer.** While a summary was the file's own text
+    /// reading, the two sources agreed about everything an outline shows. A summary is now built from the **rendering**
+    /// (`docs/architecture.md` §5), where a dead branch is deleted and a macro call is expanded — so an outline read
+    /// from one showed `HWND` (declared by a `DECLARE_HANDLE(HWND)`, which the file never writes as a declaration) and
+    /// hid the `Dead` class the reader was editing. Measured in `cpp_ls`'s
+    /// `the_outline_shows_the_file_and_not_the_compiler`, which is what says the two readings must not be mixed here.
     ///
-    /// # Which reading of the *two* this is
+    /// # What it costs, and why that is not a regression
     ///
-    /// Neither: an outline is about the **file**, so it is built from the raw facts in both cases (see
-    /// [`crate::FileSummary::outline`]) — a declaration in a branch nobody takes belongs in an outline, and a type
-    /// a macro declares does not. That is the opposite choice from every other query here, and deliberately so.
+    /// One parse of the file's own bytes per request (the buffer, which the VFS already holds), and no dependence on a
+    /// rendering existing — so the "summary is gone between a keystroke and the next drain" case that the fallback
+    /// existed for is now the only case, and the panel never waits for a cook.
     pub fn outline(&self, view: &FileView) -> Vec<OutlineSymbol> {
-        if let Some(summary) = self.store.index().summary(&view.path) {
-            return summary.outline();
-        }
-
         let preprocessing = crate::preprocess(&view.source, view.tree.get_tokens());
         let errors: Vec<cpp_parser::SourceRange> = view
             .tree

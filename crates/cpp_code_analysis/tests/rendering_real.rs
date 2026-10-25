@@ -181,6 +181,41 @@ fn the_rendering_is_the_reading() {
     session.add_project_files([header.clone()]);
     session.index_everything();
 
+    // **And then the pump, the way a server drives it.** `index_everything` returns while the second pass is still
+    // owed, and that is deliberate — folding the pass into it took a real project's cold start from 12.6 s to
+    // 135.6 s (see its note). The work is the pump's, a slice at a time, and what it buys is this: the summary the
+    // index holds for a file is the reading a compiler would take of it.
+    let mut slices = 0;
+    while session.pending_work() > 0 && slices < 4_000 {
+        session.advance(64);
+        slices += 1;
+    }
+    println!(
+        "the pump took {slices} slice(s); owed afterwards: {}",
+        session.pending_work()
+    );
+
+    // **And what a plain `index_everything` filed, with nothing asked of it.** This is the gate the whole migration
+    // is judged by: the answer a consumer gets must not depend on whether somebody happened to request a rendering.
+    // The re-read pass is what makes this true — a file whose own text splits a declaration across `#if` branches is
+    // re-read through its timeline exactly because the fact says it might read differently.
+    let filed = {
+        let summary = session.index().summary(&header).expect("the header is indexed");
+        let facts: Vec<_> = summary
+            .declarations
+            .iter()
+            .filter(|fact| fact.name == "emplace_back")
+            .map(|fact| (fact.returns.clone(), fact.split_by_a_directive))
+            .collect();
+        println!("filed by the pipeline: {facts:?}");
+        facts
+    };
+    assert_eq!(
+        filed,
+        vec![(Some("reference".to_string()), false)],
+        "the reading the index holds is the rendering's, and nothing had to ask for it"
+    );
+
     let started = Instant::now();
     let summary = session
         .index_the_rendering(&header)

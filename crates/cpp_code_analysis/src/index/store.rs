@@ -603,10 +603,15 @@ impl<F: FileProvider> SummaryStore<F> {
     ///
     /// This is the architecture's main path: the raw text is lexed once (`rendered` was produced from exactly that
     /// token stream), the rendering is parsed, and every fact's range comes back through
-    /// [`crate::FileSummary::map_into_the_file`] — see [`FileIndexer::index_rendering`]. What the file's own text says
-    /// is not a reading at all here, which is the point: `bits/stl_bvector.h` writes `emplace_back`'s return type as
+    /// [`crate::FileSummary::map_into_the_file`] — see [`FileIndexer::index_rendering`]. The **declarations** are not
+    /// read from the file's own text, which is the point: `bits/stl_bvector.h` writes `emplace_back`'s return type as
     /// `#if __cplusplus > 201402L … reference … #else void … #endif`, and only the rendering says which one this
     /// compilation means.
+    ///
+    /// **Two readings of the same text, and the summary is both.** The rendering's is the declaration half; the
+    /// directives (`#define`, `#include`, the conditional regions) exist only in the text, because rendering *consumes*
+    /// them — so they are read from the tokens, with no second parse. See [`FileIndexer::index_the_readings`], which is
+    /// what this calls.
     ///
     /// The key carries the environment the rendering was cooked under ([`SummaryKey::env_hash`]), so two translation
     /// units that define different macros get two summaries rather than one that is wrong for one of them.
@@ -627,7 +632,11 @@ impl<F: FileProvider> SummaryStore<F> {
         }
         let indexer = FileIndexer::new(&self.files, &self.config)
             .with_seed(self.index.macros());
-        let indexed = indexer.index_rendering(path, rendered, key);
+        // **Both readings**, not the rendering alone — see [`FileIndexer::index_the_readings`]. A header's `#define`s
+        // are what its includers expand, so a summary built from the rendering alone leaves every file after it
+        // rendering with its scope-opening macros unexpanded; measured as `std::Widget` answering
+        // `NotDeclaredHere` while the header that declares it was in the index.
+        let indexed = indexer.index_the_readings(path, &source, rendered, key);
         let summary = indexed.summary;
         self.index.insert(summary);
         self.index.summary(path)
@@ -1573,7 +1582,39 @@ impl<F: FileProvider> SummaryStore<F> {
             }
         }
 
-        if bodied.is_empty() {
+        // **The second reason a file's reading can be wrong, and the one `bodied` cannot see.** A macro body is not
+        // the only thing the written reading and the compiled reading disagree about: a file that writes
+        //
+        // ```text
+        // #if __cplusplus > 201402L
+        //     reference emplace_back(…);
+        // #else
+        //     void emplace_back(…);
+        // #endif
+        // ```
+        //
+        // has **two** declarations in its own text and one in the program — and no macro body is involved at all. The
+        // facts say so themselves (`DeclFact::split_by_a_directive`, and a guard that is not `Unconditional`), which
+        // is what makes this a question about the index rather than a guess, and why it can be asked before any
+        // timeline exists.
+        //
+        // A file whose declarations are all unguarded and whole is a file the two readings agree about, so rendering
+        // it would cost a cook and buy nothing — that is the filter. After the pass the declarations are the
+        // rendering's, every one of them unguarded, and this cannot be true of the same file twice.
+        let guarded: std::collections::HashSet<&Path> = indexed
+            .iter()
+            .filter(|path| {
+                self.index.summary(path).is_some_and(|summary| {
+                    summary.declarations.iter().any(|fact| {
+                        fact.split_by_a_directive
+                            || !matches!(fact.guard, crate::summary::FactGuard::Unconditional)
+                    })
+                })
+            })
+            .map(PathBuf::as_path)
+            .collect();
+
+        if bodied.is_empty() && guarded.is_empty() {
             if tracing {
                 eprintln!(
                     "re-read: eager {eager}, {} source(s), {} word(s) mentioned, {} candidate file(s), \
@@ -1628,7 +1669,9 @@ impl<F: FileProvider> SummaryStore<F> {
             // again afterwards — so its summary kept every guarded `#define` and a lookup answered `_STL_LANG = 0L`
             // for a file the compiler reads as C++20. See [`SummaryStore::dead_macros`].
             let decided_about = !self.dead_macros_for(path).is_empty();
-            if !mentioned && !decided_about {
+            // **And a file whose own declarations a conditional splits** — see `guarded` above. This is the case
+            // `mentions_one_of` cannot see: no body is involved, and the file is the only evidence of the question.
+            if !mentioned && !decided_about && !guarded.contains(path.as_path()) {
                 continue;
             }
 
@@ -1668,30 +1711,54 @@ impl<F: FileProvider> SummaryStore<F> {
         // for, and it answers the parser's questions — `kind_of`, `body_text_of`, the in-force bodies — out of
         // that walk rather than out of a map materialised for this file alone.
         let rebuilt_through_a_timeline = parallel_map(&through_a_timeline, |(path, source)| {
-            let view = units.iter().find_map(|unit| unit.environment_of(path))?;
+            // **The file's own position in a timeline**, and both halves of what rendering it needs: the `MacroView`
+            // answers the parser's questions out of that walk, and the walk's definitions are the `Arc` bodies the
+            // view's indices point into. `FileMacros` is the one type that has both — see [`crate::FileMacros`].
+            let (view, definitions) = environments.iter().find_map(|(unit, definitions)| {
+                Some((unit.environment_of(path)?, definitions))
+            })?;
 
             let key = SummaryKey::new(content_hash(source), self.context_hash(path));
+            // **The reading is the rendering's**, and this is the branch that makes it possible: a timeline can render
+            // a file, which is what the timeline-less half of this pass cannot do (see the note on `eager`).
+            let (tokens, _) = cpp_parser::lex(source, &cpp_parser::LexerConfig::default());
+            let macros = crate::preprocess::cooked::FileMacros::new(
+                view,
+                definitions,
+                Some(&seed),
+                true,
+            );
+            let rendered = { crate::preprocess::cooked::cook_with(source, &tokens, &macros).render() };
+
             // **And what the walk decided is not compiled.** The unit has already evaluated every guarded `#define`
             // against its own state — the same evaluation the cook uses — and a fact it skipped is one a compiler
-            // would not have read. The summary is built from the raw reading and would keep it, which is how a
-            // consumer comes to decide the same region a second time and answer differently. See
-            // [`crate::TranslationUnit::dead_macros`].
+            // would not have read. Applied to the directive half, which is where a `#define` lives; the rendering's
+            // declarations are already only the ones compiled. See [`crate::TranslationUnit::dead_macros`].
             // **What the walk decided, by the spelling both sides agree on.** The unit keys its map by the path the
             // *include graph* spells (`c:/users/…`) and this holds the one the session was given (`C:\Users\…`).
             // See [`SummaryStore::dead_macros_for`].
             let dead = self.dead_macros_for(path);
             let rebuilt = FileIndexer::new(&self.files, &self.config)
                 .with_seed(self.index.macros())
-                .with_macro_bodies(&view)
                 .without_these_macros(&dead)
-                .index(path, source, key);
+                .index_the_readings(path, source, &rendered, key)
+                .summary;
 
-            let stored = !truncated && !has_unresolved_includes(&rebuilt);
-            if stored {
-                if let Some(database) = self.summary_database() {
-                    database.put(rebuilt.key, &rebuilt);
-                    database.note_file(&rebuilt.path, rebuilt.key.content_hash, rebuilt.key.context_hash, rebuilt.key.env_hash, self.generation);
-                }
+            // **Not written to the disk cache, and that is the reading's own statement about itself.** A summary
+            // built here is a function of the file's text *and of its environment* — of the replacement lists every
+            // file it includes had in force — while the entry's key names only the text and the configuration. A
+            // reading stored under a key that does not describe it is served to the next run as if it did: measured
+            // on this very fixture, `_STD_BEGIN` changed from `namespace std {` to `namespace studio {`, the file was
+            // correctly forgotten and re-queued, and the index **handed back the stored `std` reading** — the whole
+            // invalidation chain working, defeated by a cache entry that could not tell the two worlds apart.
+            //
+            // The disk entry the first pass wrote stays, and it is the honest one: a reading of the text with no
+            // environment claimed. This pass refines it in memory. Making the rendering storable is what
+            // [`SummaryKey::env_hash`] is for, and it needs a caller that can compute the same hash at lookup time —
+            // `docs/architecture.md` §5 steps 2–4, not this branch.
+            let stored = false;
+            if tracing {
+                eprintln!("re-read: {} through its timeline", path.display());
             }
             Some((rebuilt, stored))
         });

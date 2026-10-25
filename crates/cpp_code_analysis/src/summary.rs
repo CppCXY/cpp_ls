@@ -4628,6 +4628,47 @@ pub fn use_filter_of(root: &cpp_parser::CppSyntaxNode) -> Vec<u8> {
         }
     }
 
+    use_filter_of_names(names)
+}
+
+/// **The same filter over a file's own tokens** — the half [`use_filter_of`] cannot answer for a caller that has
+/// tokens and no tree.
+///
+/// That caller is the one this whole file's second reading is about: a file is **tokenized** and **rendered**, and the
+/// parser only ever sees the rendering ([`FileSummary::take_the_directives_of`]). The tree the filter would have come
+/// from belongs to that rendering, whose dead branches are deleted — so a name used only inside an `#if` nobody takes
+/// is a name the tree does not have while the file's text does, and [`use_filter_might_contain`]'s one guarantee is
+/// that a `false` is *certain*. Asking the tokens keeps it: the token stream is the file's text, every branch of it.
+pub fn use_filter_of_tokens(source: &str, tokens: &[cpp_parser::CppTokenData]) -> Vec<u8> {
+    use std::collections::HashSet;
+
+    let mut names: HashSet<&str> = HashSet::new();
+    for token in tokens {
+        if token.kind != cpp_parser::CppTokenKind::Identifier {
+            continue;
+        }
+        let from = token.range.start_offset;
+        if let Some(name) = source.get(from..from + token.range.length)
+            && !name.is_empty()
+        {
+            names.insert(name);
+        }
+    }
+
+    use_filter_of_names(names)
+}
+
+/// The filter itself, over a name set — one builder for both readings of a file.
+fn use_filter_of_names<S: AsRef<str> + Eq + std::hash::Hash>(
+    names: impl IntoIterator<Item = S>,
+) -> Vec<u8> {
+    use std::collections::HashSet;
+
+    let names: HashSet<S> = names
+        .into_iter()
+        .filter(|name| !name.as_ref().is_empty())
+        .collect();
+
     let bits = names
         .len()
         .saturating_mul(USE_FILTER_BITS_PER_NAME)
@@ -4635,7 +4676,7 @@ pub fn use_filter_of(root: &cpp_parser::CppSyntaxNode) -> Vec<u8> {
     let mut filter = vec![0u8; bits.div_ceil(8)];
 
     for name in names {
-        for probe in use_filter_probes(&name) {
+        for probe in use_filter_probes(name.as_ref()) {
             let bit = probe as usize % bits;
             filter[bit / 8] |= 1 << (bit % 8);
         }
@@ -4723,6 +4764,79 @@ impl FileSummary {
                 FactGuard::Region((self.guards.regions.len() - 1) as u32)
             }
         }
+    }
+
+    /// **Complete a summary built from a rendering with the directives of the file's own text.**
+    ///
+    /// A file is read **twice**, and each reading answers a question the other cannot:
+    ///
+    /// ```text
+    /// the text      lexed, not parsed     #define / #include / #if regions — what this file *directs*
+    /// the rendering parsed                declarations, uses — what a compiler *reads* here
+    /// ```
+    ///
+    /// `self` is the first of those to be *built* — it came from
+    /// [`FileIndexer::index_rendering`](crate::FileIndexer::index_rendering) — and it is missing exactly the three
+    /// fields only the text can answer, because **a rendering has no directives in it**: they were consumed producing
+    /// it. `directed` is the same file's text read by the lexer and the directive scanner and by nothing else
+    /// ([`FileIndexer::directive_summary`](crate::FileIndexer::directive_summary)), so no second parse is paid for.
+    ///
+    /// # Why this is not an optimization
+    ///
+    /// The three fields are what **every other file's cook reads out of this one**: a header's `#define`s are the
+    /// bodies its includers expand, and its `#include`s are the edges the closure walks. A summary that has the
+    /// rendering's declarations and an empty `macros` therefore does not describe a file that declares things — it
+    /// describes a file whose macros have never been defined, and the next file's rendering comes out with
+    /// `_STD_BEGIN` unexpanded and its declarations at file scope. Measured as a red test three times before this
+    /// method existed: a summary built from a rendering alone made `std::Widget` answer `NotDeclaredHere`.
+    ///
+    /// # What is taken, and what is kept
+    ///
+    /// Taken: `macros`, `includes`, `guards`, and `use_filter`. The filter is the text's for a stated reason — a
+    /// rendering has the dead branches deleted, so a name used only inside one would be a **false negative** of
+    /// [`use_filter_might_contain`], whose contract is that a `false` is certain (see [`use_filter_of_tokens`]).
+    ///
+    /// Kept: `declarations` (the point of the exercise), `macro_readings` (where a scope came out of a replacement
+    /// list — the rendering's answer, and its ranges are already the file's), and `modules` (the `import`s are still
+    /// in the rendering, and [`FileIndexer::directive_summary`] cannot see them: it has no tree).
+    ///
+    /// Declarations keep their **own** guards, which a rendering's parse makes `Unconditional` — and that is the
+    /// reading, not a shortcut: a declaration in a rendering is one the compiler compiles. A caller that hands this a
+    /// directive-bearing summary gets its indices translated into the adopted region list rather than left pointing
+    /// into a list that is gone.
+    pub fn take_the_directives_of(&mut self, directed: FileSummary) {
+        let authored = std::mem::take(&mut self.guards.regions);
+        let mut directed = directed;
+        let mut regions = std::mem::take(&mut directed.guards.regions);
+
+        if !authored.is_empty() {
+            for fact in &mut self.declarations {
+                let FactGuard::Region(index) = fact.guard else {
+                    continue;
+                };
+                let Some(range) = authored.get(index as usize).copied() else {
+                    fact.guard = FactGuard::Unconditional;
+                    continue;
+                };
+                fact.guard = match regions.iter().position(|known| *known == range) {
+                    Some(index) => FactGuard::Region(index as u32),
+                    None => {
+                        regions.push(range);
+                        FactGuard::Region((regions.len() - 1) as u32)
+                    }
+                };
+            }
+        }
+
+        self.macros = directed.macros;
+        self.includes = directed.includes;
+        self.guards = directed.guards;
+        self.guards.regions = regions;
+        if !directed.use_filter.is_empty() {
+            self.use_filter = directed.use_filter;
+        }
+        // The **key is the caller's**, and deliberately not touched here: this method has a rendering and a text and
+        // no way to say which file they are of. `index_the_readings` sets it, where the file's own hash is at hand.
     }
 
     /// **Turn a summary built from a rendering back into a summary of the file.**

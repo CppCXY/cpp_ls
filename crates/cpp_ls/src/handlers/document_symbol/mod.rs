@@ -54,7 +54,11 @@ pub async fn on_document_symbol(
 
     snapshot_query(context.analysis(), cancel_token, move |session| {
         let path = uri_to_file_path(&uri)?;
-        let view = session.view(&path)?;
+        // **The file's own text, not the reading a compiler takes of it.** An outline is about the file: a
+        // declaration in a branch nobody takes belongs in it, and a type a macro declares does not — see
+        // [`cpp_code_analysis::Session::outline`] for the measurement. This also makes the answer independent of
+        // whether a rendering exists yet, which is the state a file is in between a keystroke and the next drain.
+        let view = session.view_of_the_file(&path)?;
         let outline = session.outline(&view);
 
         Some(DocumentSymbolResponse::Nested(symbols(&view, &outline)))

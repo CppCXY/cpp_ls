@@ -1736,8 +1736,9 @@ fn a_file_that_was_worked_is_queued_again_when_its_answer_changes() {
 #[test]
 fn a_reported_change_is_read_again_and_a_reported_removal_is_forgotten() {
     // The "no OS watcher" entry point: the client reports events, the session turns them into work. A modified
-    // header is one file to re-read — its includers' summaries do not depend on its contents — and a removed
-    // one is forgotten together with the files whose includes resolved to it.
+    // header is **two** files to re-read — itself, and the file that includes it, whose summary is now a reading of
+    // the header's replacement lists (see `Session::invalidate_dependents`) — and a removed one is forgotten
+    // together with the files whose includes resolved to it.
     let files = MemoryFiles::new()
         .with_file("/p/widget.h", "struct Widget { int size; };\n")
         .with_file(
@@ -1758,10 +1759,14 @@ fn a_reported_change_is_read_again_and_a_reported_removal_is_forgotten() {
     assert_eq!(modified.reindex, [PathBuf::from("/p/widget.h")]);
     assert!(modified.forgotten.is_empty());
     assert!(!modified.everything);
-    assert_eq!(session.pending(), 1, "the reported change is queued");
+    assert_eq!(
+        session.pending(),
+        2,
+        "the change and the file whose reading depends on it are both queued"
+    );
 
     let steps = session.advance(4);
-    assert_eq!(paths(&steps), ["/p/widget.h"]);
+    assert_eq!(paths(&steps), ["/p/widget.h", "/p/main.cpp"]);
     assert_eq!(
         steps[0].outcome,
         StepOutcome::Reused,
@@ -2130,7 +2135,7 @@ fn a_class_scoped_by_another_files_macro_body_is_scoped_through_the_session() {
     // No compiler and no compile database take part: the body is written in a file of the project, which is
     // what makes this test the same on every machine.
     let project = Project::new("body-pass");
-    project.write(
+    let open = project.write(
         "open.h",
         "#pragma once\n#define _STD_BEGIN namespace std {\n#define _STD_END }\n",
     );
@@ -2155,13 +2160,42 @@ fn a_class_scoped_by_another_files_macro_body_is_scoped_through_the_session() {
     assert_eq!(found.file, widget);
     assert_eq!(found.fact.scope.as_deref(), Some("std"));
 
-    // And the reading is recorded as **evidence** rather than as a conclusion: the summary says which body
-    // opened the scope, which is what lets a consumer re-read it when the macro changes. See
-    // A fact derived from a macro body is evidence, not part of the key.
-    let summary = session.index().summary(&widget).expect("indexed");
+    // And the scope is a reading **of the body, not a conclusion about it**. The body is in `open.h`; the scope it
+    // opens is in `widget.h` only because `widget.h` renders through it. So a changed body has to be a changed
+    // answer — and that, rather than a stored note, is what "evidence" means once the parser reads the rendering:
+    // there is no scope read out of a replacement list to record (`tests/rendering_scope.rs` prints the rendering:
+    // `namespace std {` is literal text there), and what makes the answer follow the body is that the summary *is*
+    // the rendering, which [`Session::invalidate_dependents`] drops when a directive of an included file moves.
+    assert_eq!(
+        session.index().dependents_of(&open).len(),
+        2,
+        "`widget.h` includes it and `main.cpp` includes that: the index knows both"
+    );
+    session.did_change(
+        &open,
+        "#pragma once\n#define _STD_BEGIN namespace studio {\n#define _STD_END }\n",
+    );
     assert!(
-        !summary.macro_readings.is_empty(),
-        "the scope came from a body, and the summary has to say so"
+        !session.is_indexed(&widget),
+        "the body moved, so the file that rendered through it has to be read again"
+    );
+    session.index_everything();
+
+    assert!(
+        matches!(
+            session.index().definition("std::Widget", &main),
+            Known::No | Known::Unknown(_)
+        ),
+        "the body no longer opens `std`, so nothing may still answer `std::Widget`"
+    );
+    let moved = session.index().definition("studio::Widget", &main);
+    let Known::Yes(moved) = moved else {
+        panic!("`Widget` is behind `namespace studio` now: {moved:?}");
+    };
+    assert_eq!(
+        moved.file.file_name(),
+        widget.file_name(),
+        "the declaration is still `widget.h`'s"
     );
 }
 

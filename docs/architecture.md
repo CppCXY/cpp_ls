@@ -302,6 +302,54 @@ hover / 定义 / 补全      当前 1–12 ms                    目标：不劣
 * 删除 `facts_vs_rendering` 这个"两种读法对账"探针，改成"渲染读法的事实清单"探针（保留它作为审计工具）。
 * 验收：全部测试套件绿；`facts_vs_rendering` 的位置由新探针取代；`lsp_status` 表全绿且延迟不劣化。
 
+> **⑬ 接线落地（本次提交）—— 上表就是实现，而且它不是"再试一次"**：`FileIndexer::index_the_readings(path, source,
+> rendered, key)` 是唯一入口，声明来自渲染的解析（范围经 `reported_span` 映射回文件），`#define`/`#include`/条件区
+> 从**同一次 lex 的 token** 来（`directive_summary`，不解析），两者由 `FileSummary::take_the_directives_of` 合成一份
+> 摘要。`prepare_the_re_read` 的 timeline 分支现在真的渲染：`unit.environment_of` + `unit.definitions()` →
+> `FileMacros` → `cook_with` → `index_the_readings`。
+>
+> 这条路上真正挡住前四次的不是"能不能渲染"，而是**三个已经存在、但没人读的东西**：
+>
+> 1. **`FileIndexer::dead_macros` 从来没被读过。** `without_these_macros` 设置了它，`index_tree`/
+>    `directive_summary` 都不看它 —— 也就是说 `vcruntime.h` 那条 `_STL_LANG = 0L` 的修复**从未生效**。现在两处都过滤。
+> 2. **磁盘缓存把"依赖环境"的读法存在只描述文本的 key 下。** 实测：`_STD_BEGIN` 从 `namespace std {` 改成
+>    `namespace studio {`，文件被正确 forget、重新入队、重读，然后 `ProjectIndex` **把上次存在磁盘上的 `std` 读法
+>    又发了回来** —— 整条失效链都工作，输给了一个分不清两个世界的缓存项。现在重读的摘要**不写盘**（它没有能描述自己
+>    的 key；那是 `env_hash` 与第二步的事），盘上留的仍是第一次读法的诚实读法。
+> 3. **依赖失效从来没丢过摘要。** `invalidate_dependents` 只丢 cooked 读法、重排一次 cook。现在它丢**摘要本身**
+>    （`store.forget` + 重新入队），并清掉该文件的渲染缓存。旧测试用 `macro_readings` 非空来代表这件事 —— 那个字段
+>    **没有任何读者**，所以那项能力其实一直是空的（把断言换成行为断言后，旧代码同样红）。
+>
+> 还有两处是模板本身的后果，必须写下来：
+>
+> * **`Reused`（磁盘命中）的文件也要进第二遍。** 一条摘要现在是"文本 + 环境"的函数，而 key 只描述文本，所以盘上那份
+>   永远是未精炼的读法 —— 用它当答案就是回到 raw。代价：热启动重读冷启动要重读的那些文件（实测真项目 settle
+>    **23.6 s / 80 pulls**，基线 22–27 s，未劣化）。
+> * **第三类重读触发条件：声明被条件编译拆开的文件。** `bodied`（宏体）看不见 `#if` 拆分的声明，而 `stl_bvector.h`
+>    的 `emplace_back` 形如 `#if __cplusplus > 201402L reference #else void #endif`，完全没有宏体参与。触发条件就是
+>    事实自己说的话：`split_by_a_directive` 或 guard 不是 `Unconditional`。重读之后这些事实全是 `Unconditional`，
+>    所以**同一个文件不会被无谓地渲染第二次**。
+>
+> 验收（真项目 `E:\EmmyLuaCodeStyle`，重跑于最终代码）：
+>
+> ```text
+> rendering_real（libstdc++ stl_bvector.h，pump 78 slices 后）
+>   index.summary(header) 的 emplace_back = [(Some("reference"), split:false)]   ← 流水线自己落的读法，没人要求过
+>   lsp_status：29 行全绿，settle 23.6 s / 80 pulls，hover 1–8 ms，diagnostic 31 ms，completion 2 ms
+>   cpp_code_analysis lib 677 绿；cpp_parser / cpp_ls / cpp_formatter 全绿；仅剩已知的
+>   translation_unit::the_timeline_answers_what_the_per_file_walk_answered 红（先于本次改动）
+> ```
+>
+> **一个真实的产品后果，必须记在这里**：`Session::outline` 原来说"有摘要就用摘要，因为大纲是文件的读法"，这在摘要
+> 还是 raw 时成立；摘要变成渲染之后，`cpp_ls` 的 `the_outline_shows_the_file_and_not_the_compiler` 立刻红 —— 大纲
+> 少了 `Dead`（死分支里的类，用户正在编辑它）、多了 `HWND`（`DECLARE_HANDLE(HWND)` 宏声明的类型，文件里没有这个声明）。
+> 结论：**大纲一律读文件自己的文本**（`view_of_the_file`），不看摘要 —— 归档视图和档案视图不能混；这一改顺带让大纲
+> 不再依赖"渲染是否已经存在"。
+>
+> **还没做，且明确不做在本次**：eager 分支（无 unit）仍是 raw；四层补丁（`split_by_a_directive`、查找期
+> `visibility_at`、对账探针、转换运算符拼写规则）**仍然必须留着** —— 它们覆盖的是"第一次读法到 pump 精炼之间"的
+> 窗口，只有第一步全部落地（第一次读法也渲染）才能删。谁删谁要先把那个窗口关掉。
+
 ### 第二步：per-TU 的索引与查找
 
 * `ProjectIndex` 的摘要查找按 `(path, env_hash of the asking file's TU)`；询问方没有 TU 时用工程默认环境。
@@ -336,6 +384,10 @@ hover / 定义 / 补全      当前 1–12 ms                    目标：不劣
 
 ## 6. 从现在到第一步的具体改动清单
 
+> **⑬ 之后的状态**：第 1 项已完成（唯一入口是 `FileIndexer::index_the_readings`）；第 2 项部分（重读路径的 key 有了
+> 文本与上下文，`env_hash` 还没有算，因为算它需要先有 unit —— 见 §5 第二步）；第 3–5 项**还没做**，理由是上面那条
+> "窗口"：第一次读法还是 raw，删掉补丁会让窗口内的答案退化。清单本身保留，作为删补丁那一步的依据。
+
 1. `cpp_code_analysis::summarize(path, text, key)` → 私有 + `#[cfg(test)]`；新增
    `summarize_the_rendering(path, rendered, key) -> IndexedRendering`（已有等价实现，改成公开入口）。
 2. `ProjectIndex` 的所有 `SummaryKey::new(0, 0)` 处改成真实的环境键（现在有几个"没有环境"的占位，正是它们让
@@ -361,3 +413,19 @@ LSP         lsp_status 表 29 行全绿，hover 1–12 ms，diagnostic 28–29 m
 ```
 
 **第一步的完成标准**：facts 全部来自渲染；删除四类补丁后全部套件仍绿（除已知红）；上表每一项不劣化。
+
+### 7.1 ⑬ 之后的重测（同一台机器，最终代码）
+
+```text
+渲染读法的落点   index.summary(stl_bvector.h).emplace_back = [(Some("reference"), split:false)]
+                  —— 流水线自己落的，没有调用 index_the_rendering；pump 78 slices 收敛
+LSP              lsp_status 表 29 行全绿，hover 1–8 ms，diagnostic 31 ms，completion 2 ms，
+                 settle 23.6 s（80 次 pull）      ← 基线 22–27 s，未劣化
+测试             cpp_code_analysis lib 677；cpp_parser / cpp_ls / cpp_formatter 全绿；
+                 唯一红仍是 translation_unit::the_timeline_answers_what_the_per_file_walk_answered
+重读触发         宏体（`bodied`）+ 死宏（`dead_macros`）+ **声明被条件编译拆开**（新增）
+失效             丢摘要 + 丢渲染缓存 + 重新入队；重读的摘要不写盘（没有能描述环境的 key）
+```
+
+**为什么四层补丁还在**：它们覆盖的是"第一次读法（raw）到 pump 精炼"之间的窗口。第一次读法也渲染之后那个窗口才关，
+而那需要 §5 第二步的 key（`env_hash` 由调用方可算），也就是 `directive_summary` + unit walk 先于 parse 的顺序。

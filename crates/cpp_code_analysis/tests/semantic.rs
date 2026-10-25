@@ -1945,11 +1945,17 @@ fn a_function_returning_a_reference_keeps_its_parameter_list() {
 /// (the rendering says so; measured over three headers, 12 of 1589 facts disagreed with the rendering about the return
 /// type, every one of them this shape).
 ///
-/// The written reading cannot know which branch is live — that is the preprocessor's answer and needs the compiler
-/// configuration a summary is not keyed by — so the fact declines to name one. A declaration whose specifiers are not
-/// split keeps its type, which is the other half of the rule.
+/// **Which branch is live is the preprocessor's answer, and the summary now has it.** The written reading could not
+/// know it — a summary was keyed by the text and the configuration, and `__cplusplus` is neither — so the fact used to
+/// decline to name a type at all (`DeclFact::split_by_a_directive`). The reading a summary holds is the **rendering**'s
+/// now (`docs/architecture.md` §5), so the branch this compilation takes is the branch it names: here `__cplusplus` is
+/// not defined, so `#else` is compiled and `make` returns `void`. The other branch is proved where a compiler defines
+/// it — `rendering_real.rs`'s `the_rendering_is_the_reading`, on libstdc++'s `stl_bvector.h`, where
+/// `#if __cplusplus > 201402L` holds and `emplace_back` returns `reference`.
+///
+/// A declaration whose specifiers are not split keeps its type, which is the other half of the rule.
 #[test]
-fn a_return_type_a_directive_splits_is_not_named() {
+fn a_return_type_a_directive_splits_is_the_branch_this_compilation_takes() {
     let session = session_with(&[(
         "/p/a.cpp",
         "struct S {\n\
@@ -1974,8 +1980,10 @@ fn a_return_type_a_directive_splits_is_not_named() {
         .collect();
     println!("returns: {found:?}");
     assert!(
-        found.iter().any(|(name, returns)| *name == "make" && returns.is_none()),
-        "a split declaration names no return type rather than the wrong branch: {found:?}"
+        found
+            .iter()
+            .any(|(name, returns)| *name == "make" && *returns == Some("void")),
+        "the `#else` branch is the one this configuration compiles, and one answer is named: {found:?}"
     );
     assert!(
         found.iter().any(|(name, returns)| *name == "plain" && *returns == Some("int")),
