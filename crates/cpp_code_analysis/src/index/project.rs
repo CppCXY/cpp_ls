@@ -705,10 +705,20 @@ pub(crate) static CONDITION_NANOS: std::sync::atomic::AtomicU64 = std::sync::ato
 /// The contributors are the files whose facts the list holds — every member's own file. An entry is dropped when one
 /// of them changes, which is the narrowest invalidation that is sound without recording which *bases* were walked:
 /// a base's members are in the list and carry the base's file.
+///
+/// # A list with an `unlisted` base, and the generation it was built at
+///
+/// A gap — "this base is not declared anywhere I can see" — is a statement about the **files that have been read**, not
+/// about the class, so such a list used to be remembered at all: every file that mentioned the class rebuilt it.
+/// Measured on a real project: `std::vector<LuaSyntaxNode>` 1.7 ms from one file and **20 ms** from the next, twelve
+/// lists built per pull and **zero hits**. Remembering it together with the **number of summaries at the time** is
+/// sound instead: a file being read is exactly what can fill the gap, so an entry built at an older count is treated as
+/// absent. A pull reads nothing new, so the count does not move and the entry is reused.
 #[derive(Debug)]
 struct CachedMemberList {
     contributors: Vec<PathBuf>,
     list: MemberList,
+    read_at: usize,
 }
 
 
@@ -1131,11 +1141,19 @@ impl ProjectIndex {
     /// keeps the asking path because a class declared in the file being read is resolved against that file's own tree —
     /// a list made *of* this file's facts must not be served to another file, and such a list always has the asking
     /// path among its contributors.
+    ///
+    /// A list with an `unlisted` base is only as good as the set of files that had been read when it was built, so such
+    /// an entry is treated as absent once that set has grown — see [`CachedMemberList`]. A list without a gap never
+    /// goes stale by counting.
     fn cached_member_list(&self, key: &(String, PathBuf)) -> Option<Known<MemberList>> {
         let known = self.member_lists.lock().ok()?;
+        let read_now = self.summaries.len();
         let cached = known.get(key).or_else(|| {
             known.get(&(key.0.clone(), PathBuf::new()))
         })?;
+        if !cached.list.unlisted.is_empty() && cached.read_at != read_now {
+            return None;
+        }
         if crate::probes::members() {
             eprintln!(
                 "members_of({}) -> {} member(s), cached",
@@ -1148,14 +1166,16 @@ impl ProjectIndex {
 
     /// **Remember one member list**, with the files it was made of.
     ///
-    /// A list with an `unlisted` base is not remembered: the gap is a statement about a file nobody has read, and a
-    /// file arriving is not a change to any contributor. An empty list is not remembered either — `direct_members`
-    /// answers one for a class whose declaration is not in the index yet, and the contributor set would be empty, so
-    /// nothing could invalidate it.
+    /// An **empty** list is not remembered — `direct_members` answers one for a class whose declaration is not in the
+    /// index yet, and the contributor set would be empty, so nothing could invalidate it.
+    ///
+    /// A list with an `unlisted` base **is** remembered, tagged with [`CachedMemberList::read_at`]: the gap is a
+    /// statement about the files that have been read, so the entry is valid only while that set does not grow.
     fn remember_member_list(&self, key: (String, PathBuf), list: &MemberList) {
-        if list.members.is_empty() || !list.unlisted.is_empty() {
+        if list.members.is_empty() {
             return;
         }
+        let read_at = self.summaries.len();
 
         let mut contributors: Vec<PathBuf> = Vec::new();
         for member in &list.members {
@@ -1176,6 +1196,7 @@ impl ProjectIndex {
                     CachedMemberList {
                         contributors: contributors.clone(),
                         list: list.clone(),
+                        read_at,
                     },
                 );
             }
@@ -1184,6 +1205,7 @@ impl ProjectIndex {
                 CachedMemberList {
                     contributors,
                     list: list.clone(),
+                    read_at,
                 },
             );
         }
@@ -1258,7 +1280,7 @@ fn members_of_inner(
         Known::Yes(members) => members,
         Known::Unknown(UnknownReason::NotDeclaredHere(_)) => {
             let last = class.rsplit("::").next().unwrap_or(&class).to_string();
-            if last == class {
+            if last == class || last.contains('<') {
                 return Known::Unknown(UnknownReason::NotDeclaredHere(Box::from(class)));
             }
             match direct_members(index, scopes, root, path, &last) {
