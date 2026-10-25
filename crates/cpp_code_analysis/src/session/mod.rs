@@ -5334,6 +5334,29 @@ fn error_directive_line(text: &str) -> Option<(usize, usize, String)> {
         Some(crate::preprocess::cooked::cook_with(&text, &tokens, &macros).render())
     }
 
+    /// **Read one file the way the compiler does, and put that reading in the index.**
+    ///
+    /// The main path of `docs/architecture.md` §5 step one: the file's own text is lexed once, rendered, and the
+    /// *rendering* is what the parser reads — every fact's range is mapped back into the file by
+    /// [`crate::FileIndexer::index_rendering`]. Its key carries the environment the rendering was cooked under, so a
+    /// header included by two translation units with different macros gets two readings rather than one that is wrong
+    /// for one of them.
+    ///
+    /// Returns the summary it committed. Costs the cook (a cached rendering is a hash and a lookup) plus the parse of
+    /// the rendered text; `tests/rendering_real.rs` measures both halves.
+    pub fn index_the_rendering(&mut self, path: impl AsRef<Path>) -> Option<crate::FileSummary> {
+        let path = self.store.index().summary(path.as_ref())?.path.clone();
+        let unit = self.translation_unit_of(&path)?;
+        let environment = unit.environment_of(&path)?;
+        let written = self.files.read(&path)?;
+        let rendered = match self.known_rendering_of(&path, &written) {
+            Some(rendered) => rendered,
+            None => std::sync::Arc::new(self.rendering_of(&path)?),
+        };
+        self.store
+            .index_the_rendering(&path, &rendered, Some(&environment))
+            .cloned()
+    }
     /// **A declaration's fact, read from the *rendering*** — the reading where a directive is resolved.
     ///
     /// For a fact whose [`DeclFact::split_by_a_directive`] is set the summary declines to name a type: the file's own

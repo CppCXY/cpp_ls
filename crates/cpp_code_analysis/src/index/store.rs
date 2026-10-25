@@ -599,6 +599,39 @@ impl<F: FileProvider> SummaryStore<F> {
         )
     }
 
+    /// **Index one file the way a compiler reads it** — render it, then parse the rendering.
+    ///
+    /// This is the architecture's main path: the raw text is lexed once (`rendered` was produced from exactly that
+    /// token stream), the rendering is parsed, and every fact's range comes back through
+    /// [`crate::FileSummary::map_into_the_file`] — see [`FileIndexer::index_rendering`]. What the file's own text says
+    /// is not a reading at all here, which is the point: `bits/stl_bvector.h` writes `emplace_back`'s return type as
+    /// `#if __cplusplus > 201402L … reference … #else void … #endif`, and only the rendering says which one this
+    /// compilation means.
+    ///
+    /// The key carries the environment the rendering was cooked under ([`SummaryKey::env_hash`]), so two translation
+    /// units that define different macros get two summaries rather than one that is wrong for one of them.
+    ///
+    /// **The disk cache is not written here yet**, deliberately: this is the first half of the migration in
+    /// `docs/architecture.md` §5, and a cache entry whose key is right but whose *content* has not been compared
+    /// against the old path on a real project would be a silent wrong answer for the next run.
+    pub fn index_the_rendering(
+        &mut self,
+        path: &Path,
+        rendered: &crate::preprocess::cooked::RenderedCooked,
+        environment: Option<&dyn cpp_parser::MacroFacts>,
+    ) -> Option<&FileSummary> {
+        let source = self.files.read(path)?;
+        let mut key = SummaryKey::new(content_hash(&source), self.context_hash(path));
+        if let Some(facts) = environment {
+            key = key.with_environment(environment_hash(facts));
+        }
+        let indexer = FileIndexer::new(&self.files, &self.config)
+            .with_seed(self.index.macros());
+        let indexed = indexer.index_rendering(path, rendered, key);
+        let summary = indexed.summary;
+        self.index.insert(summary);
+        self.index.summary(path)
+    }
     /// **Parse one file now, from its own text** — the *raw* summary, whatever the index happens to hold.
     ///
     /// Not the same question as [`ProjectIndex::summary`](crate::ProjectIndex::summary): the index holds what was

@@ -143,6 +143,22 @@ hover / 定义 / 补全      当前 1–12 ms                    目标：不劣
 
 ### 第一步：把"渲染读法"变成主路径（不改任何 LSP 行为）
 
+> **进度（已落地的那一半）**：`Session::index_the_rendering(path)` 已经能工作 —— 它用现有的
+> `rendering_of` + `FileIndexer::index_rendering` + `ProjectIndex::insert`，把"lex 一次 → 渲染 → 解析渲染 → 范围映射回
+> 文件"这条路走通，并用 `tests/rendering_real.rs::the_rendering_is_the_reading` 钉住：
+>
+> ```text
+> stl_bvector.h：294 条事实（raw 读法是 439 条），24.8 ms（cook + parse + map + commit）
+> emplace_back → [Some("reference")]      ← 没有任何兜底，因为 #else 分支不在 parser 读的文本里
+> insert       → 5 × Some("iterator")     ← 死分支的 void 声明不存在
+> split_by_a_directive 为真的事实 = 0      ← 渲染里没有指令可拆
+> 所有 range 都在文件内
+> ```
+>
+> **还差的那一半**：pump/drain 仍然调 `SummaryStore::prepare`（raw 路）。把它换成
+> `Session::index_the_rendering`（每个切片一批文件），然后四层补丁才能删。
+
+
 > **已经查清楚的接缝（写在这里，避免下一步再猜）**：索引目前从 `SummaryStore::prepare_inner` 出发，它拿到的
 > `environment` 是 **parser 层的两个 trait**（`&dyn MacroBodies`, `&dyn MacroFacts`），而渲染器要的是 **session 层的
 > 类型**：`FileMacros::new(MacroView<'unit>, &UnitDefinitions, Option<&MacroTable>, bool)`。也就是说"渲染 + 解析渲染"

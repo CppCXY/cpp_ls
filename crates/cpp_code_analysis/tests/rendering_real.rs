@@ -151,3 +151,79 @@ fn a_dead_branch_is_not_an_answer() {
         );
     }
 }
+/// **The main path of `docs/architecture.md` §5 step one**: one file, lexed once, rendered, and the *rendering*
+/// parsed — every fact's range mapped back into the file.
+///
+/// The assertions are the ones the old path could not make:
+///
+/// * `emplace_back` returns `reference` **without any fallback**, because the `#else` branch does not exist in the
+///   text the parser read;
+/// * no fact carries `split_by_a_directive` — there is no "the file states two types" case left;
+/// * `insert` has no `void` — the `#else` branch's declaration is not in the rendering;
+/// * every range is inside the file it was mapped into.
+#[test]
+#[ignore = "opens a real project; run with --ignored"]
+fn the_rendering_is_the_reading() {
+    let project = project();
+    let header = std::path::PathBuf::from(
+        std::env::var("CPPLS_STL_HEADER").unwrap_or_else(|_| {
+            r"C:\Users\zc\Desktop\mingw64\lib\gcc\x86_64-w64-mingw32\15.1.0\include\c++\bits\stl_bvector.h"
+                .to_string()
+        }),
+    );
+    let text = std::fs::read_to_string(&header).expect("the header reads");
+
+    let mut session = Session::open(
+        project.clone(),
+        SessionFiles::new(OpenDocuments::new(), DiskFiles),
+        WatchFilter::new(&project),
+    );
+    session.add_project_files([header.clone()]);
+    session.index_everything();
+
+    let started = Instant::now();
+    let summary = session
+        .index_the_rendering(&header)
+        .expect("the rendering is indexed");
+    let took = started.elapsed();
+
+    let find = |name: &str| {
+        summary
+            .declarations
+            .iter()
+            .filter(|fact| fact.name == name)
+            .map(|fact| fact.returns.clone())
+            .collect::<Vec<_>>()
+    };
+    let emplace_back = find("emplace_back");
+    let insert = find("insert");
+    println!(
+        "{} facts in {took:?}: emplace_back {emplace_back:?}, insert {insert:?}",
+        summary.declarations.len()
+    );
+
+    assert_eq!(
+        emplace_back,
+        vec![Some("reference".to_string())],
+        "the compiled branch's type, with no fallback"
+    );
+    assert!(
+        !insert.contains(&Some("void".to_string())),
+        "the `#else` branch is not in the rendering: {insert:?}"
+    );
+    assert!(
+        summary
+            .declarations
+            .iter()
+            .all(|fact| !fact.split_by_a_directive),
+        "a rendering has no directive left to split a declaration"
+    );
+    let length = text.len();
+    assert!(
+        summary
+            .declarations
+            .iter()
+            .all(|fact| fact.range.end_offset() <= length && fact.name_range.end_offset() <= length),
+        "every range is a place in the file"
+    );
+}
