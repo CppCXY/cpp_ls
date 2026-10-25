@@ -72,6 +72,7 @@ const IDLE_WAIT: Duration = Duration::from_secs(1);
 ///
 /// The names drop the protocol's `did` prefix: this is a queue of *what happened* to a document, and the protocol's
 /// own spelling is already on the parameter type inside each variant.
+#[derive(Debug)]
 pub enum UpdateEvent {
     Opened(DidOpenTextDocumentParams),
     Changed(DidChangeTextDocumentParams),
@@ -204,7 +205,12 @@ impl UpdateInbox {
         F: FnMut(UpdateEvent) -> Fut,
         Fut: std::future::Future<Output = ()>,
     {
+        let started = std::time::Instant::now();
         let _applying = self.applying.lock().await;
+        let waited = started.elapsed().as_millis();
+        if waited > 50 {
+            log::debug!("apply_upto: waited {waited} ms for the applier (upto {upto})");
+        }
         let mut applied = 0;
 
         loop {
@@ -220,7 +226,13 @@ impl UpdateInbox {
                 break;
             };
 
+            log::debug!("apply_upto: applying event {} ({:?})", queued.seq, queued.event);
+            let started = std::time::Instant::now();
             apply(queued.event).await;
+            let took = started.elapsed().as_millis();
+            if took > 50 {
+                log::debug!("apply_upto: event {} took {took} ms", queued.seq);
+            }
             applied += 1;
         }
 
@@ -229,11 +241,21 @@ impl UpdateInbox {
 }
 
 /// **Apply the client's pending notifications up to `upto`** — the whole of what a request waits for.
+///
+/// The timing is the diagnostic that was missing when a request looked stuck: a client waits here before its handler's
+/// first line, so "the request never answered" and "the events took a second" were indistinguishable in the log. Only a
+/// slow run is logged.
 pub async fn catch_up_upto(snapshot: &ServerContextSnapshot, upto: u64) -> usize {
-    snapshot
+    let started = std::time::Instant::now();
+    let applied = snapshot
         .inbox()
         .apply_upto(upto, |event| async move { process(snapshot, event).await })
-        .await
+        .await;
+    let took = started.elapsed().as_millis();
+    if took > 50 {
+        log::debug!("catch_up_upto: {applied} event(s) applied in {took} ms (upto {upto})");
+    }
+    applied
 }
 
 /// Apply one event: the whole of what a notification does to the analysis.

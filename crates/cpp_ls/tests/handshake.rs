@@ -4565,3 +4565,43 @@ fn the_call_hierarchy_answers_over_the_wire() {
     assert!(names.contains(&"add"), "{names:?}");
     assert!(names.contains(&"subtract"), "{names:?}");
 }
+/// **A request whose params do not parse gets an answer.** The protocol's is `InvalidParams`; before this the request
+/// produced **no response at all** — the dispatcher fell out of its arm, logged nothing, and a client waited for ever
+/// (measured with a `prepareCallHierarchy` whose `position` was nested one level too deep: the probe hung, and every
+/// request after it queued behind the same silence).
+///
+/// A malformed request is a client bug, but silence turns it into a server that looks hung.
+#[test]
+fn a_request_with_unreadable_params_is_answered_with_invalid_params() {
+    let project = Project::new("invalid_params");
+    project.write("main.cpp", "int main() { return 0; }\n");
+
+    let mut server = Server::start(project.root());
+    server.request(
+        1,
+        "initialize",
+        json!({
+            "processId": std::process::id(),
+            "rootUri": uri_of(project.root()),
+            "capabilities": {},
+        }),
+    );
+    server.notify("initialized", json!({}));
+
+    let uri = uri_of(&project.root().join("main.cpp"));
+    // `position` is a *position*, not a `{ textDocument, position }` object — the shape a client gets wrong.
+    let answer = server.request(
+        2,
+        "textDocument/prepareCallHierarchy",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": { "position": { "line": 0, "character": 4 } },
+        }),
+    );
+    println!("answer: {answer}");
+    assert_eq!(
+        answer["error"]["code"].as_i64().map(|code| code as i32),
+        Some(lsp_server::ErrorCode::InvalidParams as i32),
+        "an unreadable request is InvalidParams, not silence: {answer}"
+    );
+}

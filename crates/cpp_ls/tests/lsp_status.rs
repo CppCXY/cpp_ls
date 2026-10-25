@@ -263,6 +263,58 @@ fn every_feature_answers_what_the_project_holds() {
     let mut rows: Vec<Row> = Vec::new();
     let mut id = 1000;
     // **The first symbol a reader would ask about**: a member declared in the header and used in the source.
+    // **The call hierarchy over the real project**: prepare on the header's declaration, then both directions. The
+    // outgoing list is empty on purpose — the header *declares* `UpdateDiagnosticStyle` and the body is in
+    // `CodeFormat.cpp`, so there is nothing to walk here and the honest answer is no calls (the module says so).
+    if let Some(declared) = at(&header_text, "UpdateDiagnosticStyle", 0)
+        .or_else(|| at(&header_text, "UpdateCodeStyle", 0))
+    {
+        let started = std::time::Instant::now();
+        let prepared = server.request(
+            1200,
+            "textDocument/prepareCallHierarchy",
+            position(&header_uri, declared),
+        );
+        let items = prepared["result"].as_array().cloned().unwrap_or_default();
+        let took = started.elapsed().as_millis();
+        rows.push(Row {
+            feature: "prepareCallHierarchy".to_string(),
+            answered: !items.is_empty(),
+            count: items.len(),
+            ms: took,
+            note: items
+                .first()
+                .and_then(|item| item["name"].as_str())
+                .unwrap_or_default()
+                .to_string(),
+        });
+        if let Some(item) = items.first().cloned() {
+            for (feature, method, id) in [
+                ("incomingCalls", "callHierarchy/incomingCalls", 1201),
+                ("outgoingCalls", "callHierarchy/outgoingCalls", 1202),
+            ] {
+                let started = std::time::Instant::now();
+                let answer = server.request(id, method, json!({ "item": item }));
+                let calls = answer["result"].as_array().cloned().unwrap_or_default();
+                rows.push(Row {
+                    feature: feature.to_string(),
+                    answered: answer["result"].is_array(),
+                    count: calls.len(),
+                    ms: started.elapsed().as_millis(),
+                    note: calls
+                        .iter()
+                        .filter_map(|call| {
+                            call["from"]["name"]
+                                .as_str()
+                                .or_else(|| call["to"]["name"].as_str())
+                        })
+                        .take(3)
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                });
+            }
+        }
+    }
     let member = at(&text, "_diagnosticStyle", 0).expect("the source uses the member");
     let member_in_header = at(&header_text, "_diagnosticStyle", 0).expect("the header declares it");
     let member_line = text

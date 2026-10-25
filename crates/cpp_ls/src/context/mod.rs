@@ -87,8 +87,10 @@ impl ServerContext {
         let cancellations = self.cancellations.clone();
 
         tokio::spawn(async move {
+
             // Catch panics so every request still gets a response.
             let res = catch_unwind(exec(cancel_token.clone())).await;
+
 
             let response = match res {
                 Ok(RequestOutcome::Ready(value)) => Response::new_ok(req_id.clone(), value),
@@ -111,6 +113,7 @@ impl ServerContext {
             let mut cancellations = cancellations.lock().await;
             cancellations.remove(&req_id);
         });
+
     }
 
     pub async fn cancel(&self, req_id: RequestId) {

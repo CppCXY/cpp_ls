@@ -58,7 +58,13 @@ where
         return RequestOutcome::Cancelled(CancelSource::Client);
     }
 
-    match analysis.query_blocking(compute).await {
+    let started = std::time::Instant::now();
+    let outcome = analysis.query_blocking(compute).await;
+    let took = started.elapsed().as_millis();
+    if took > 100 {
+        log::debug!("a query waited {took} ms for the analysis");
+    }
+    match outcome {
         RequestOutcome::Ready(value) => RequestOutcome::Ready(value),
         RequestOutcome::Missing => {
             if let Some(token) = &cancel_token
@@ -89,7 +95,13 @@ where
         return RequestOutcome::Cancelled(CancelSource::Client);
     }
 
-    match analysis.query_blocking(compute).await {
+    let started = std::time::Instant::now();
+    let outcome = analysis.query_blocking(compute).await;
+    let took = started.elapsed().as_millis();
+    if took > 100 {
+        log::debug!("a query waited {took} ms for the analysis");
+    }
+    match outcome {
         RequestOutcome::Ready(value) => RequestOutcome::Ready(value),
         RequestOutcome::Missing => {
             if cancel_token.is_cancelled() {

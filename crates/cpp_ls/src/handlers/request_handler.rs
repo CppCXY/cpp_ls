@@ -80,19 +80,43 @@ macro_rules! dispatch_request {
         match $request.method.as_str() {
             $(
                 <$req_type>::METHOD => {
-                    if let Ok((id, params)) = $request.extract::<<$req_type as LspRequest>::Params>(<$req_type>::METHOD) {
-                        let snapshot = $context.snapshot();
-                        // **How much of the client's stream this request is entitled to see.** Read here, on the
-                        // task that has just read the messages in order, and applied inside the request's own task.
-                        let upto = snapshot.inbox().queued();
-                        $context.task(id.clone(), move |cancel_token| {
-                            let snapshot = snapshot.clone();
-                            async move {
-                                crate::context::catch_up_upto(&snapshot, upto).await;
-                                $handler(snapshot, params, cancel_token).await
-                            }
-                        }).await;
-                        return Ok(());
+                    // **A request whose params do not parse is still a request, and the protocol's answer is
+                    // `InvalidParams`.** This arm used to fall out of the `if let` with nothing sent when `extract`
+                    // failed — no response, no log, and a `dispatch: returned` that looked like success — which a client
+                    // can only experience as a request that never got an answer.
+                    //
+                    // Measured: a `textDocument/prepareCallHierarchy` whose `position` object was nested one level too
+                    // deep made the probe wait for ever, and every row after it too, while the server's log showed the
+                    // request dispatched and nothing else. The id is cloned first because `extract` consumes the request.
+                    let request_id = $request.id.clone();
+                    match $request.extract::<<$req_type as LspRequest>::Params>(<$req_type>::METHOD) {
+                        Ok((id, params)) => {
+                            let snapshot = $context.snapshot();
+                            // **How much of the client's stream this request is entitled to see.** Read here, on the
+                            // task that has just read the messages in order, and applied inside the request's own task.
+                            let upto = snapshot.inbox().queued();
+                            $context.task(id.clone(), move |cancel_token| {
+                                let snapshot = snapshot.clone();
+                                async move {
+                                    crate::context::catch_up_upto(&snapshot, upto).await;
+                                    $handler(snapshot, params, cancel_token).await
+                                }
+                            }).await;
+                            return Ok(());
+                        }
+                        Err(error) => {
+                            log::error!(
+                                "the params of {} could not be read: {error}",
+                                <$req_type>::METHOD
+                            );
+                            let response = Response::new_err(
+                                request_id,
+                                lsp_server::ErrorCode::InvalidParams as i32,
+                                format!("{error}"),
+                            );
+                            $context.send(response);
+                            return Ok(());
+                        }
                     }
                 }
             )*
@@ -113,6 +137,10 @@ pub async fn on_request_handler(
     req: Request,
     server_context: &mut ServerContext,
 ) -> Result<(), Box<dyn Error + Sync + Send>> {
+    // **Where the loop is**: a request that never becomes a response either never reaches the dispatcher (the loop is
+    // busy with an earlier message) or never leaves it. One line at each end says which — the stall this was written
+    // for turned out to be neither, but the two lines are what proved it.
+    log::debug!("dispatch: {} entering", req.method);
     dispatch_request!(req, server_context, {
     // The first four are the ones the C++ analysis answers today: a location, a type, the names that can be
     // written at a cursor, and a file's diagnostics. The rest of the table is a one-line row each
@@ -146,6 +174,7 @@ pub async fn on_request_handler(
     // compile database run — see the module for why it is a command rather than something the server does on its
     // own, and why it is not shaped per client.
     });
+    log::debug!("dispatch: returned");
 
     Ok(())
 }
