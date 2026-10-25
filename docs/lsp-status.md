@@ -309,6 +309,18 @@ basic_string.h 1130 条，4 条
 `tests/semantic.rs::a_return_type_a_directive_splits_is_not_named` 钉住两半：分割的 `make` → `None`，不分割的
 `plain` → `Some("int")`。
 
+**第二步（已完成）：需要精确类型的消费者去问渲染。** 新 `Session::fact_from_the_rendering(path, name, scope)`：
+`rendering_of`（cook 缓存，一次 hash+lookup）→ 对渲染文本 `summarize` → 按名字+作用域取那条声明。hover 在
+`split_by_a_directive` 为真时走这条路，于是 `emplace_back` 显示 `reference`：
+
+```text
+written:   returns None, split_by_a_directive true
+rendering: returns Some("reference") in 20.2 ms（再一次 19.1 ms —— 一次渲染文本的 parse）
+```
+
+**这 20 ms 是代价，写在文档里而不是藏起来**：渲染本身是 cook 缓存，但它的**摘要**没有缓存，所以每次问都要重新
+parse 一次渲染文本。只有被标记的声明会走（三头文件里 12/1589 条），下一步是给"渲染的摘要"按渲染文本内容 hash 加
+缓存，第二次就变成一次查找。
+
 **还没做**：剩下 10 条矛盾（`operator bool`、`_M_data_ptr`、`basic_string.h` 的 4 个 `__s`）是别的形状（指令在声明
-**之前**、或渲染把整条声明删掉）。真正的终局是**让需要精确类型的消费者去问渲染**（`Session::rendering_of` 已经有，
-`stl_bvector.h` 的渲染 ~17 ms），那是一条比"改摘要"更长的路；在那之前，事实不再撒谎。
+**之前**、或渲染把整条声明删掉）。
