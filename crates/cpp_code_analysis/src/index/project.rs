@@ -1125,14 +1125,25 @@ pub fn members_of(
 
 impl ProjectIndex {
     /// **A member list already built for this class and this file's tree**, if one is held.
+    ///
+    /// A list whose facts all came from **other** files is the same answer for every file that merely *uses* the class,
+    /// so `remember_member_list` files such a list under the empty path too and this lookup falls back to it. The key
+    /// keeps the asking path because a class declared in the file being read is resolved against that file's own tree —
+    /// a list made *of* this file's facts must not be served to another file, and such a list always has the asking
+    /// path among its contributors.
     fn cached_member_list(&self, key: &(String, PathBuf)) -> Option<Known<MemberList>> {
         let known = self.member_lists.lock().ok()?;
-        known.get(key).map(|cached| {
-            if crate::probes::members() {
-                eprintln!("members_of({}) -> {} member(s), cached", key.0, cached.list.members.len());
-            }
-            Known::Yes(cached.list.clone())
-        })
+        let cached = known.get(key).or_else(|| {
+            known.get(&(key.0.clone(), PathBuf::new()))
+        })?;
+        if crate::probes::members() {
+            eprintln!(
+                "members_of({}) -> {} member(s), cached",
+                key.0,
+                cached.list.members.len()
+            );
+        }
+        Some(Known::Yes(cached.list.clone()))
     }
 
     /// **Remember one member list**, with the files it was made of.
@@ -1156,6 +1167,17 @@ impl ProjectIndex {
         if let Ok(mut known) = self.member_lists.lock() {
             if known.len() >= MAX_CACHED_MEMBER_LISTS {
                 known.clear();
+            }
+            // **And under the empty path when no fact came from the asking file**: that list is the index's alone, so
+            // every other file that merely uses the class gets the same answer (see `cached_member_list`).
+            if !contributors.iter().any(|file| file == &key.1) {
+                known.insert(
+                    (key.0.clone(), PathBuf::new()),
+                    CachedMemberList {
+                        contributors: contributors.clone(),
+                        list: list.clone(),
+                    },
+                );
             }
             known.insert(
                 key,
@@ -1223,10 +1245,31 @@ fn members_of_inner(
             }],
         });
     }
-    let class = &*resolved;
-
-    let own = match direct_members(index, scopes, root, path, class) {
+    // **An inline namespace is not part of the name a reader writes.** libstdc++ declares the class in `std::__cxx11`
+    // (`_GLIBCXX_BEGIN_NAMESPACE_CXX11`) while `std::string`'s alias target is spelled `basic_string<char>` — so once
+    // `bits/basic_string.h` is **cooked** (the macro expanded) the scoped lookup for `std::basic_string` answers "not
+    // declared" and every `std::string` loses its members: measured on the real project, `std::string` answered 0 with
+    // `unlisted: ["std::basic_string"]`, while the *unqualified* lookup found `std::__cxx11::basic_string` at once.
+    //
+    // The retry is by the **last segment only** — the name the class is declared under, whatever namespaces wrap it —
+    // and it runs only when the scoped spelling missed, so a class that is where the spelling says is unaffected.
+    let mut class = (*resolved).to_string();
+    let mut own = match direct_members(index, scopes, root, path, &class) {
         Known::Yes(members) => members,
+        Known::Unknown(UnknownReason::NotDeclaredHere(_)) => {
+            let last = class.rsplit("::").next().unwrap_or(&class).to_string();
+            if last == class {
+                return Known::Unknown(UnknownReason::NotDeclaredHere(Box::from(class)));
+            }
+            match direct_members(index, scopes, root, path, &last) {
+                Known::Yes(members) => {
+                    class = last;
+                    members
+                }
+                Known::Unknown(reason) => return Known::Unknown(reason),
+                Known::No => return Known::Unknown(UnknownReason::NotDeclaredHere(Box::from(class))),
+            }
+        }
         Known::Unknown(reason) => return Known::Unknown(reason),
         // `direct_members` reports a name nothing declares as `Unknown(NotDeclaredHere)` rather than as `No` —
         // the index is a subset of the translation unit — so this arm exists for totality, not for a case.
@@ -1279,9 +1322,9 @@ fn members_of_inner(
     // index — measured on `LuaSource.cpp`, `members_of("std::vector")` called that question twice for **251 ms and
     // 88 ms**, 96% of a member list whose own members cost 1 ms. The rule that removes them is not a heuristic: C++
     // makes a template parameter shadow any name of its class, so a parameter of *this* class can never be its base.
-    let parameters = class_template_parameters(index, scopes, root, path, class);
+    let parameters = class_template_parameters(index, scopes, root, path, &class);
 
-    let mut level: Vec<(String, String)> = match bases_of(index, scopes, root, path, class) {
+    let mut level: Vec<(String, String)> = match bases_of(index, scopes, root, path, &class) {
         Known::Yes(bases) => bases
             .into_iter()
             .filter(|base| !names_a_template_parameter(base, &parameters))
@@ -5826,7 +5869,7 @@ fn member_fact_inner(
     // looked up by", and asking "who declares `_Tp`" is a whole-index name query. Measured on `LuaSyntaxTree.cpp`,
     // `member_fact(std::vector, size_t)` — a member the class does not have — cost **370–389 ms** per call, eight
     // times, which was 2 280 ms of the file's inference.
-    let parameters = class_template_parameters(index, scopes, root, path, class);
+    let parameters = class_template_parameters(index, scopes, root, path, &class);
     let mut level: Vec<(String, String)> = bases_of(index, scopes, root, path, class)
         .value()
         .unwrap_or_default()

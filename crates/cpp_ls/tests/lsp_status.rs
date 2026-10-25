@@ -64,7 +64,12 @@ impl Server {
             .current_dir(project)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            // **The probe traces go to stderr** (`eprintln!` from the analysis), and a probe that throws them away
+            // cannot answer a question about them: `CPPLS_TRACE_MEMBERS` / `CPPLS_TRACE_TIME` are read by the *server*
+            // this test spawns, and the counts are the measurement.
+            .stderr(Stdio::from(
+                std::fs::File::create(log_dir.join("server-stderr.log")).expect("a stderr file"),
+            ))
             .spawn()
             .expect("the server starts");
         let stdin = child.stdin.take().expect("stdin");
@@ -242,6 +247,18 @@ fn every_feature_answers_what_the_project_holds() {
         pulls += 1;
     }
     println!("--- settled after {pulls} pull(s), {:?}", started.elapsed());
+
+    // **A second file, pulled in the same session**: the across-file question. A class the first file pulled
+    // (`std::vector`, `std::string`, the project's own) is a list the second file only *uses*, so its answer must be
+    // the index's own and reusable — see `ProjectIndex::remember_member_list`. The header is opened above, so this
+    // costs one request per pull and no new cook.
+    for id in 90..110 {
+        let _ = server.request(
+            id,
+            "textDocument/diagnostic",
+            json!({ "textDocument": { "uri": header_uri } }),
+        );
+    }
 
     let mut rows: Vec<Row> = Vec::new();
     let mut id = 1000;

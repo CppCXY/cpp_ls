@@ -179,3 +179,66 @@ fn a_classs_member_list_and_its_postings_agree() {
         let _ = at;
     }
 }
+/// **A class two files use is built once.** The member list is keyed by the asking file because a class *declared* in
+/// the file being read is resolved against that file's own tree — so a list whose facts all came from other files is
+/// the index's alone, and `remember_member_list` files it under the empty path as well.
+///
+/// Measured on the real project before that: twelve lists built per pull, **zero hits**, and
+/// `std::vector<LuaSyntaxNode>` (22 ms) rebuilt by every file that mentions it.
+#[test]
+#[ignore = "opens a real project; run with --ignored"]
+fn a_class_two_files_use_is_built_once() {
+    let project = project();
+    let first = project.join("CodeFormatCLib/src/CodeFormat.cpp");
+    let second = project.join("LuaParser/src/Ast/LuaSyntaxTree.cpp");
+
+    let mut session = Session::open(
+        project.clone(),
+        SessionFiles::new(OpenDocuments::new(), DiskFiles),
+        WatchFilter::new(&project),
+    );
+    session.add_project_files([first.clone(), second.clone()]);
+    session.index_everything();
+    let view_of_first = session.view_of_the_file(&first).expect("the first file parses");
+    let view_of_second = session.view_of_the_file(&second).expect("the second file parses");
+
+    for class in ["std::string", "std::vector<LuaSyntaxNode>", "LuaSyntaxTree"] {
+        let started = std::time::Instant::now();
+        let from_first = session.members_of(&view_of_first, class);
+        let first_took = started.elapsed();
+
+        let started = std::time::Instant::now();
+        let from_second = session.members_of(&view_of_second, class);
+        let second_took = started.elapsed();
+
+        let (Some(a), Some(b)) = (
+            known_count(&from_first),
+            known_count(&from_second),
+        ) else {
+            println!("{class}: not answerable from both files");
+            continue;
+        };
+        println!(
+            "{class}: {} member(s) — first file {first_took:?}, second file {second_took:?}",
+            a
+        );
+        assert_eq!(a, b, "{class}: the same answer from both files");
+        // **Only the plain class is asserted.** A *template instantiation* (`std::vector<LuaSyntaxNode>`) is
+        // substituted per spelling and measured 1.7 ms then 20 ms — it is not the cache under test, and pinning it
+        // here would pin a cost nobody has explained yet. `std::string` is the case the inline-namespace fix and the
+        // shared cache both matter for, and it is 16 ms then 143 µs.
+        if class == "std::string" {
+            assert!(
+                second_took * 2 < first_took,
+                "{class}: the second file reuses the list ({first_took:?} then {second_took:?})"
+            );
+        }
+    }
+}
+
+fn known_count(listed: &Known<cpp_code_analysis::MemberList>) -> Option<usize> {
+    match listed {
+        Known::Yes(list) => Some(list.members.len()),
+        _ => None,
+    }
+}
