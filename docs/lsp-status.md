@@ -210,10 +210,29 @@ typeDefinition 的 auto   推断在**渲染**里做（文件自身文本回答 K
 
 ⑤ 剩下的 CPU 是**首次索引 1273 个文件**的固有成本，不是循环；要再压就得动索引本身（那是另一个话题）。
 ② 和 ⑥ 的截图来自同一份日志，现在 hover 不再触发 cook，日志里也不该再有每 hover 一条的 cook。
-#### 真机上的一个问题（未修）：`prepare` 排队 cook 时 pump 空转，请求等不到
+#### 已修：参数解析失败的请求**得不到任何回答**
 
-`lsp_status` 加上 `prepareCallHierarchy` 之后探针**卡住**：日志里请求 1200 收到之后，pump 每 8 秒打一条
-`the pump made no progress in 8 slices with 0 file(s) left`，请求一直没有响应。
+`lsp_status` 加上 `prepareCallHierarchy` 之后探针**卡住**。原因有两层：探针自己的 `position` 多套了一层
+（客户端 bug），而**服务端在参数解析失败时什么都不回** —— `dispatch_request!` 写成 `if let Ok(..) = extract(..)`，
+失败就掉出分支：没有响应、没有日志，日志里还写着 `dispatch: returned`。客户端只能理解为"服务器卡死了"，之后
+每个请求都排在同一片沉默后面。
+
+修法（协议本来就这么规定的）：那个分支现在回 `InvalidParams` 并带上 serde 的错因，
+`handshake.rs::a_request_with_unreadable_params_is_answered_with_invalid_params` 钉住它：
+`{"error":{"code":-32602,"message":"… missing field `line`"}}`。
+
+修完之后真机三行就都答了（同一个探针，22 s 通过）：
+
+```text
+prepareCallHierarchy   yes  1  0 ms  UpdateDiagnosticStyle
+incomingCalls          yes  0  3 ms  （入口函数没人调用）
+outgoingCalls          yes  0  0 ms  （头文件里只有声明，函数体在 CodeFormat.cpp）
+```
+
+顺带留下两条只打慢路径的 debug 诊断：`catch_up_upto` 超过 50 ms、`apply_upto` 等 applier 或单个事件超过 50 ms
+（请求在 handler 第一行之前就等在这里，以前"卡住"和"慢"分不开）。
+
+#### 仍在的观察：pump 空闲时 ~1 Hz 空转
 
 同一个请求在**分析层**是毫秒级（`tests/call_hierarchy_real.rs`，真项目）：
 
