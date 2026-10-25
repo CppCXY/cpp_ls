@@ -191,11 +191,29 @@ hover / 定义 / 补全      当前 1–12 ms                    目标：不劣
 > 已经是这类扫描）补齐，`macros` 从扫描里来而不是从渲染的解析里来。
 
 
-> **已经查清楚的接缝（写在这里，避免下一步再猜）**：索引目前从 `SummaryStore::prepare_inner` 出发，它拿到的
-> `environment` 是 **parser 层的两个 trait**（`&dyn MacroBodies`, `&dyn MacroFacts`），而渲染器要的是 **session 层的
-> 类型**：`FileMacros::new(MacroView<'unit>, &UnitDefinitions, Option<&MacroTable>, bool)`。也就是说"渲染 + 解析渲染"
-> **不能在 store 里做**，只能在 `Session` 里做 —— `Session::rendering_of` 已经证明这条路可行（它就在 session 层拼出
-> `FileMacros`）。于是第一步的落点是：
+> **接线又试了一次（两半合并：声明来自渲染、`#define`/`#include` 事实从第一次读法继承），仍被同一条测试挡住**：
+> `Widget` 在渲染里没有落在 `std` 里。测试本身说明了原因，而且它是架构层面的：
+>
+> ```text
+> session::tests::a_class_scoped_by_another_files_macro_body_is_scoped_through_the_session
+>   open.h   #define _STD_BEGIN namespace std {
+>   widget.h _STD_BEGIN struct Widget {}; _STD_END      ← 作用域来自**别的文件里**的宏体
+>   断言：std::Widget 能找到、scope == "std"，并且 summary.macro_readings 非空（"作用域来自宏体，摘要要记下证据"）
+> ```
+>
+> 也就是说第二次读法要跨过的不是"能不能渲染"，而是**渲染之后的两个后果**：
+>
+> 1. `Widget` 的 `scope` 必须由**展开后的** `namespace std {` 决定，并且在范围映射回文件之后仍然对；
+> 2. `macro_readings`（"作用域是哪个宏体给的"这份证据）在渲染读法下**没有意义了** —— 那正是要删的东西，但决策
+>    与它绑在一起：先证明 1 成立，再删 2。
+>
+> 这两条现在写进计划，而不是留成"下次再说"：下一步是**先把这条测试在渲染读法下修绿**（scope 与映射），再删
+> `macro_readings`，然后四层补丁。
+>
+> **接缝（已用代码确认，替换上一版"不能在 store 里做"的说法）**：第一次读法 `prepare_inner` 只有 parser 层的
+> `(&dyn MacroBodies, &dyn MacroFacts)`，确实渲染不了；但**第二次读法 `prepare_the_re_read` 带着
+> `units: &[Arc<TranslationUnit>]`**，而 `unit.environment_of(path)` 给 `MacroView`、`unit.definitions()` 给
+> `UnitDefinitions` —— `FileMacros::new` 要的正是这两个，所以渲染**能**在 store 里做。第一步的落点是：
 >
 > ```text
 > Session::index_the_rendering(path)
