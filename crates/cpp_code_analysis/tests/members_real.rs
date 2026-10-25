@@ -222,6 +222,7 @@ fn a_class_two_files_use_is_built_once() {
             "{class}: {} member(s) — first file {first_took:?}, second file {second_took:?}",
             a
         );
+
         assert_eq!(a, b, "{class}: the same answer from both files");
         // **Only the plain class is asserted.** A *template instantiation* (`std::vector<LuaSyntaxNode>`) is
         // substituted per spelling and measured 1.7 ms then 20 ms — it is not the cache under test, and pinning it

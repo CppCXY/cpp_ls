@@ -1279,8 +1279,8 @@ fn members_of_inner(
     let own = match direct_members(index, scopes, root, path, &class) {
         Known::Yes(members) => members,
         Known::Unknown(UnknownReason::NotDeclaredHere(_)) => {
-            let last = class.rsplit("::").next().unwrap_or(&class).to_string();
-            if last == class || last.contains('<') {
+            let last = without_the_namespace(&class);
+            if last == class {
                 return Known::Unknown(UnknownReason::NotDeclaredHere(Box::from(class)));
             }
             match direct_members(index, scopes, root, path, &last) {
@@ -15120,4 +15120,27 @@ fn the_class_a_definition_belongs_to(root: &cpp_parser::CppSyntaxNode, offset: u
         }
     }
     None
+}
+/// **A qualified spelling without its namespace** — the name the class is declared under, with any template arguments
+/// kept.
+///
+/// The last `::` **outside angle brackets** is the boundary: `std::basic_string<char>` → `basic_string<char>` (the alias
+/// target of `std::string`, which lives in the inline namespace `std::__cxx11`), and `std::vector<LuaSyntaxNode>` →
+/// `vector<LuaSyntaxNode>`. Stripping arguments — which an earlier version did by taking `rsplit("::")`'s last piece and
+/// then skipping anything with a `<` — lost the substitution and answered the *unparameterized* class.
+fn without_the_namespace(class: &str) -> String {
+    let mut depth = 0usize;
+    let mut boundary = 0usize;
+    let bytes = class.as_bytes();
+    let mut index = 0usize;
+    while index + 1 < bytes.len() {
+        match bytes[index] {
+            b'<' => depth += 1,
+            b'>' => depth = depth.saturating_sub(1),
+            b':' if depth == 0 && bytes[index + 1] == b':' => boundary = index + 2,
+            _ => {}
+        }
+        index += 1;
+    }
+    class[boundary.min(class.len())..].to_string()
 }
