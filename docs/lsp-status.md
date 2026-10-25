@@ -141,6 +141,24 @@ semanticTokens 增量      只有 full（516 token / 25 ms，可接受）
 inlayHint/resolve        没有（可接受）
 ```
 
+### ⑧ 成员表的两个真问题（2026-10-25 下午）
+
+**`std::string` 一旦 `bits/basic_string.h` 被 cook 就没有成员了。** libstdc++ 把类声明在 `std::__cxx11` 里
+（`_GLIBCXX_BEGIN_NAMESPACE_CXX11`），而 `std::string` 的别名目标拼成 `basic_string<char>` —— cook 之后
+`std::basic_string` 的 scoped 查找回答 NotDeclaredHere，成员表空、`unlisted` 里写着那个名字。真项目实测：
+`std::string` 0 个成员（未 cook 时是 257）。修：scoped 拼写查不到时**按最后一段重试**（只在这一种情况下），
+因为内联命名空间不是读者写出来的名字的一部分。
+
+**索引做出来的成员表对所有"只是使用这个类"的文件是同一份。** 缓存键带调用方的路径，是因为在**被读的文件里声明**的类
+要按那个文件自己的树解析；当贡献文件里没有调用方时，这份表也记在空路径下，下一个文件直接命中。
+
+```text
+std::string   从 CodeFormat.cpp 16.1 ms，从 LuaSyntaxTree.cpp **143 µs**
+修之前一个 pull：12 次构建、**0 次命中**，`std::vector<LuaSyntaxNode>`（22 ms）被每个提到它的文件重建
+```
+
+模板实例化（`std::vector<LuaSyntaxNode>`）仍然是按拼写替换的（1.7 ms 然后 20 ms），新测试没有钉它。
+
 已完成（原来在 P3 里）：
 
 ```text
