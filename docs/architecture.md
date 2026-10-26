@@ -766,4 +766,9 @@ bucketed 查找）另有一条"raw 影子盖住 cooked"的规则 —— 两处�
 **这对四层补丁意味着什么**：patch 2（查找期 `visibility_at` 过滤）存在的理由是"死分支的声明还在摘要里"。⑱ 之后，
 它只对**没有渲染读法**的文件还有用户 —— 而那些文件正是 §7.6 要消灭的。
 
+**下一步的验收条件已经写成测试**（`#[ignore]`，`session::tests::a_header_read_in_two_programs_answers_each_its_own_way`）：
+`cfg.h` 在 `A` 定义/未定义时各声明一个 `X`，`a.cpp` 定义它、`b.cpp` 不定义 —— 现在跑出来的答案是 `b.cpp` 也拿到
+`a.cpp` 的 `int` 分支（`Some(9)` 对上期望的 `Some(41)`），因为最后读的那个程序覆盖了 `cooked[cfg.h]`。这条测试就是
+§5 第二步的判据：`cooked` 的键要带上"被哪个程序读过"，查找按询问方（`visible_from`）所在的程序选一份。
+
 

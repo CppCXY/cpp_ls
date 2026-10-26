@@ -910,6 +910,58 @@ fn a_files_rendering_is_its_reading_and_not_one_answer_beside_another() {
     );
 }
 
+/// **The same header, read in two translation units, must answer each of them its own way** — §5 step two's acceptance.
+///
+/// `cfg.h` declares `X` one way when `A` is defined and another when it is not, so `a.cpp` (which defines it before the
+/// include) and `b.cpp` (which does not) read **different** `X` from the same text. Every file has one reading today
+/// (⑱: "the rendering, where there is one"), and a file read by two programs keeps the **last** program's reading — so
+/// one of these two answers is the other translation unit's.
+///
+/// `#[ignore]`d rather than red, and it is the statement of what is missing rather than a test of what is there: when
+/// `cooked` is keyed by `(file, the program that read it)` and a lookup picks by the asking file's program — the
+/// `env_hash` of §5 step two — this test is the one that says it happened. Its fixture is the doc's own acceptance
+/// criterion, written down so it cannot be lost.
+#[test]
+#[ignore = "§5 step two: a file read in two programs keeps the last one's reading"]
+fn a_header_read_in_two_programs_answers_each_its_own_way() {
+    let cfg = "#ifdef A\nstruct X { int from_a; };\n#else\nstruct X { long from_b; };\n#endif\n";
+    let a = "#define A 1\n#include \"cfg.h\"\n";
+    let b = "#include \"cfg.h\"\n";
+    let files = MemoryFiles::new()
+        .with_file("/p/cfg.h", cfg)
+        .with_file("/p/a.cpp", a)
+        .with_file("/p/b.cpp", b);
+    let fixture = Memory::new("a-header-in-two-programs", &files);
+    let mut session = fixture.session();
+    session.did_open("/p/a.cpp", a);
+    session.did_open("/p/b.cpp", b);
+    session.index_everything();
+
+    // **Both programs**, one per call — the schedule reads one at a time and the two roots are both open.
+    let mut read = Vec::new();
+    while let Some(reading) = session.read_a_looked_at_unit() {
+        read.push(reading.root.clone());
+    }
+    assert!(read.len() >= 2, "both translation units are read: {read:?}");
+
+    let from_a = session.index().definitions("X", Path::new("/p/a.cpp"));
+    let from_b = session.index().definitions("X", Path::new("/p/b.cpp"));
+    let offset = |known: &Known<crate::ProjectDefinitions>| match known {
+        Known::Yes(found) => found.found.first().map(|one| one.fact.range.start_offset),
+        _ => None,
+    };
+    assert_eq!(
+        offset(&from_a),
+        Some(cfg.find("struct X { int from_a; }").expect("the fixture")),
+        "`a.cpp` defines `A`, so it sees the `int` branch: {from_a:?}"
+    );
+    assert_eq!(
+        offset(&from_b),
+        Some(cfg.find("struct X { long from_b; }").expect("the fixture")),
+        "`b.cpp` does not, so it sees the `long` one: {from_b:?}"
+    );
+}
+
 /// **The diagnostics of a file whose error is in a branch nobody takes.**
 ///
 /// The two readings disagree here, and that is the whole reason [`Session::diagnostics`] exists: the file's own
