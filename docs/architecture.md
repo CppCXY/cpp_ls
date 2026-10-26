@@ -551,3 +551,29 @@ LSP              lsp_status 表 29 行全绿，hover 1–8 ms，diagnostic 31 ms
 "**读者正在看的那个文件**"的窗口。wave 里的其他文件仍然先读 raw，所以 `split_by_a_directive` 之类的兜底仍然有用户。
 删它们的前置条件是 §5 第二步：一个 TU 的闭包只走一条 timeline，闭包里每个文件的事实都从**这一条**渲染里分出来
 （`FileIndexer::index_unit_rendering` 已经在，只是没接线 —— 见 `finish_a_slice` 里"NOT WIRED, ON PURPOSE"那段）。
+
+### 7.3 第二步的「before」：一次 unit read 到底给索引加了什么（本机，`clice`）
+
+`tests/unit_read_probe.rs`（新增，`--ignored`）先索引一个真项目，再对**一个** TU 调用 `Session::read_the_unit`，
+打印前后的数字。这是接线的判据，也是"那三个数字变差"这条旧结论的复核：
+
+```text
+项目                       397 文件；settle 13.0 s；索引时走了 168 条 timeline
+闭包（Selection.cpp）      177 个文件，42 526 条 raw 事实，**0** 条 cooked 声明
+read_the_unit              5.09 s；159 个文件 placed；737 525 token；**0 error / 0 unplaced / 0 unbalanced**
+之后                       42 526 条 raw 事实（不变，一条没丢）+ **39 080** 条 cooked 声明（142 个文件有了）
+第二次读（同一程序）       85 ms（rendering 与 facts 都按程序字节记忆）
+```
+
+三条值得记下来的：
+
+1. **一条没丢。** 旧结论（`declarations_in("std")` 2008 → 1959）在这份代码上不复现：一次 737 k token 的整程序
+   解析**零错误**，142 个文件的 cooked 声明是净增，raw 事实数一位没变。所以当年那三个数字变差的原因确实是现在
+   `index_unit_rendering` 的 crossing fence 隔离掉的那一类（一个文件的未闭合作用域吞掉后面所有文件），而不是
+   整程序解析本身不成立。
+2. **cooked 可以比 raw 多。** `logger.h`：raw 18 条 / cooked 28 条 —— 多出来的是宏写出来的声明，正是"只有渲染才
+   看得见"的那一类（`DECLARE_HANDLE(HWND)` 的形状）。
+3. **代价是 5 s，而且是一次性的、按程序算的。** 同一个程序的第二次是 85 ms。但这 5 s 现在是**一整块**，落在哪一半
+   锁上就是哪一半的停顿 —— 所以接线的方式只能是 `prepare_the_drain`（读锁一侧，与查询并行）算出 `IndexedUnit`，
+   `commit_the_drain` 只做 `insert_cooked`。`read_the_unit` 现在把这两半写在了一个 `&mut self` 里，接线前要拆开；
+   两个记忆字段（`rendered_unit` / `unit_index`）也要从 `&mut` 改成锁。
