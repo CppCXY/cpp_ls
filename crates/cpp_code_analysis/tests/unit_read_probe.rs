@@ -142,6 +142,16 @@ fn what_a_unit_read_does_to_the_index() {
         sum(&before, 3)
     );
 
+    // **The render on its own**, because the next step in `docs/architecture.md` §7.4 depends on how the 5 s
+    // divides: the walk needs the session, and the cook, the parse and the sweep are functions of the unit and its
+    // texts. The memo then answers the same program inside `read_the_unit`, so what is left there is the parse and
+    // the sweep.
+    let started = Instant::now();
+    let rendered = session.render_the_unit(&file);
+    let rendering = started.elapsed();
+    let bytes = rendered.as_ref().map_or(0, |unit| unit.text.len());
+    println!("render_the_unit: {rendering:?} for {bytes} byte(s) of program");
+
     // **The read itself**, and where its time goes.
     let started = Instant::now();
     let reading = session.read_the_unit(&file);
@@ -150,7 +160,8 @@ fn what_a_unit_read_does_to_the_index() {
         panic!("the entry has a summary, so the unit can be walked");
     };
     println!(
-        "read_the_unit: {took:?} | {} file(s) placed, {} token(s), {} error(s), {} unplaced, {} unbalanced",
+        "read_the_unit: {took:?} with the render already done | {} file(s) placed, {} token(s), {} error(s), \
+         {} unplaced, {} unbalanced",
         reading.files,
         reading.tokens,
         reading.errors,

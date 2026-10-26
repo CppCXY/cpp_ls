@@ -602,17 +602,20 @@ read_the_unit              5.09 s；159 个文件 placed；737 525 token；**0 e
 
 这条线把所有包含标准库头的 TU 都排除在外了 —— clice 那个闭包是 **7.07 MB**，libstdc++ 的闭包也在同一量级。所以诚实的
 结论是：**这套机制现在是活的、有测试的，但在真项目上几乎不会触发**，因为真正的解法不是调大预算，而是**让这次读不需要
-会话锁**：
+会话锁**。5.09 s 的实测切分（`unit_read_probe`，同一程序，第二次跑在 render 已做完的基础上）：
 
 ```text
-walk                    需要 &Session（units / definitions 两张表、queue）        38 ms
-render + parse + sweep  只需要 unit(Arc) + 每个文件的文本 + 配置 + files 句柄      ~5.0 s
+walk + 每个文件的文本   41 ms + 3 ms     ← 唯一真正需要 &Session 的部分（units / definitions 两张表、queue）
+render（cook + 拼接）   1.25 s           ← 3 524 298 字节的渲染文本
+parse + sweep           3.66 s           ← 737 525 token、39 080 条声明
+第二次读（记忆/DB）     63 ms
 ```
 
-也就是说 5 s 里只有 38 ms 真的需要那把锁。下一步是把 `prepare_a_unit_reading` 拆成"锁内取材料"与"锁外算"，前者产出
-`(Arc<TranslationUnit>, sources, config, files)`，后者是纯函数；服务端那边 `run_blocking` 的三段式（锁内、锁外、锁内）
-是现成的形状（`prepare_a_drain`/`commit_a_drain` 就是这个裁剪）。预算那时可以抬到一个只防"病态闭包"的值，而不是
-现在这个"防人手速"的值。
+也就是说 5.05 s 是 unit + 文本 + 配置的纯函数，只有 44 ms 需要那把锁。下一步是把 `prepare_a_unit_reading` 拆成
+"锁内取材料"与"锁外算"：前者产出 `(Arc<TranslationUnit>, sources, config, files 句柄)`，后者依次是 `cook_the_unit`
+与 `index_unit_rendering`；服务端那边需要一个三段式的 `run_blocking`（读锁 gather → 无锁 compute → 写锁 apply），
+`prepare_the_drain`/`commit_the_drain` 已经是同一个形状。预算那时可以抬到一个只防"病态闭包"的值，而不是现在这个
+"防人手速"的值。
 
 测试（`crates/cpp_code_analysis/src/session/tests.rs`，两条都断言机器而不是断言意图）：
 
