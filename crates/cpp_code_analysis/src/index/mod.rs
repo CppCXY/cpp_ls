@@ -335,7 +335,13 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
         fold_quoted_header_names(source, &mut tokens);
 
         let mut interner = PathInterner::new(cfg!(windows));
-        let resolver = IncludeResolver::new(self.files, self.config);
+        // **This file's compilation, not the project's** — see `CompilerConfig::for_file`. A CMake target keeps its
+        // `-I` flags in a `@response` file, and resolving against the project-wide configuration is what left
+        // `CommandService.cpp` unable to find `#include "LanguageServer.h"` one directory up: the summary recorded
+        // the directive with no path, the include edge was never built, and that class's 32 member facts were invisible
+        // from the file (`docs/remaining.md` §F).
+        let per_file = self.config.for_file(path);
+        let resolver = IncludeResolver::new(self.files, &per_file);
         let directory = path.parent().unwrap_or(Path::new("."));
 
         let mut scanned = ScannedIncludes::default();
@@ -703,7 +709,13 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
             { build_facts(&scopes, &preprocessing, &root, &errors) };
 
         let mut interner = PathInterner::new(cfg!(windows));
-        let resolver = IncludeResolver::new(self.files, self.config);
+        // **This file's compilation, not the project's** — see `CompilerConfig::for_file`. A CMake target keeps its
+        // `-I` flags in a `@response` file, and resolving against the project-wide configuration is what left
+        // `CommandService.cpp` unable to find `#include "LanguageServer.h"` one directory up: the summary recorded
+        // the directive with no path, the include edge was never built, and that class's 32 member facts were invisible
+        // from the file (`docs/remaining.md` §F).
+        let per_file = self.config.for_file(path);
+        let resolver = IncludeResolver::new(self.files, &per_file);
         let directory = path.parent().unwrap_or(Path::new("."));
 
         // The includes are their own stage because **resolving one is a filesystem search**, per file, per pass —
@@ -886,7 +898,13 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
         };
 
         let mut interner = PathInterner::new(cfg!(windows));
-        let resolver = IncludeResolver::new(self.files, self.config);
+        // **This file's compilation, not the project's** — see `CompilerConfig::for_file`. A CMake target keeps its
+        // `-I` flags in a `@response` file, and resolving against the project-wide configuration is what left
+        // `CommandService.cpp` unable to find `#include "LanguageServer.h"` one directory up: the summary recorded
+        // the directive with no path, the include edge was never built, and that class's 32 member facts were invisible
+        // from the file (`docs/remaining.md` §F).
+        let per_file = self.config.for_file(path);
+        let resolver = IncludeResolver::new(self.files, &per_file);
         let directory = path.parent().unwrap_or(Path::new("."));
 
         let (mut macros, mut includes) = {
