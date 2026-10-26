@@ -1284,3 +1284,58 @@ explicit            → TypeKind::Modifier 的 token 存在（测试 a_declarati
 ```
 
 `cpp_code_analysis` 692 lib + 42 个集成目标全绿，`cpp_ls` release 13 个目标全绿。
+### 9.1 为什么"读 223 个 TU"很慢，以及两条推断为什么失败（实测定位）
+
+**慢在哪。** 整项目读法按 TU 一个个读，每个 TU 的成本是"读它的整个闭包"：走每个文件的宏时间线（walk）、把每个文件渲染一次
+（按环境的缓存命中）、把整条闭包**当成一个翻译单元解析**、再扫一遍。后两条是**按 TU 计的**，不能按文件缓存 —— 一条闭包是
+7 MB 文本（`std` 系头），解析是 0.4–3.6 s。实测：
+
+```text
+按文件重读（第二遍）     397 个文件 5 296 ms            ≈ 13 ms/文件   ← 每文件一次，闭包只有自己
+按 TU 读（整程序）       96 个程序 271 s 冷 / 36 s 热     ≈ 375 ms/TU（热）
+EmmyLuaCodeStyle         1 761 个文件，223 个 TU         → 热态约 84 s，冷态十几分钟
+```
+
+所以 223 个 TU 慢的原因是**架构性的**：每个 TU 都要把它的整条闭包重新解析一遍，而 223 条闭包共享大量头文件 —— 文件级的渲染
+有缓存，**解析没有**（一条 TU 的解析结果不能拆给另一条用）。可选的三条路，按代价排：
+
+1. **不要读**：`.cppls.toml` 里 `[index] read_the_whole_project = false`，只读读者打开的文件所在的 TU（§8.5）；
+2. **按需读**：只读"被问到的" TU（打开的文件、即将被跳转/补全引用的头所属的 TU）；
+3. **真正便宜地读**：跳过渲染直接解析闭包文本（只在 TU 的宏环境没有生效条件时成立），这需要一条新的"读法"路径。
+
+**两条推断失败，根因都不是推断本身，而是"类型拼写里的模板参数没有被代换"。**
+
+`events[Pos].U`（图2）：
+
+```text
+events[Pos].        → Unknown(NotDeclaredHere("_Ty"))
+```
+
+`events` 的类型已经是 `std::vector<MarkEvent> &`，下标表达式也确实走了 `operator[]` 那条路 —— 但拿回来的是**未代换**的
+`reference`/`_Ty&`，于是成员查找去问一个叫 `_Ty` 的类。`file->`（图3）同理：
+
+```text
+file->              → class "_Ty2": 0 member(s)
+```
+
+`file` 是 `std::shared_ptr<LuaSource>`，`operator->` 的返回类型是 `_Ty2 *`（MSVC 的拼写），代换没发生，于是去问 `_Ty2`。
+
+**同一个根因还有第二种表现**：`LuaSource::From` 的**类外定义**把限定名当成了返回类型 ——
+
+```text
+LuaParser/include/.../LuaSource.h   From: returns Some("std::shared_ptr<LuaSource>")   ← 声明，正确
+LuaParser/src/File/LuaSource.cpp    From: returns Some("LuaSource::From")             ← 定义，错误
+```
+
+语法把类外定义的限定名放进说明符序列（`void Widget::grow(int)` 也是），"最后一个名字获胜"的规则于是选中了 `LuaSource::From`。
+两条声明都在索引里，查到哪一条就决定 `auto file = LuaSource::From(...)` 有没有类型 —— 实测 `UnknownType("LuaSource::From")`。
+
+**这两处的下一步是明确的**（已用 `tests/inference_probe.rs` 复现，探针只吃 `CPPLS_PROJECT_ROOT`/`CPPLS_FILE`/`CPPLS_NEEDLE`/
+`CPPLS_NAME`，没有任何项目路径写进代码）：
+
+1. 成员查询的返回类型统一经过一次"用类的实参代换类参数"（`substituted_spelling`），包括 `operator[]`/`operator->` 的快路径；
+2. 类外定义的说明符序列要先去掉与绑定名相同的限定名，再读返回类型。
+
+**探针本身抓到了自己的一个错误，值得记下**：第一版用 `Session::with_config` 打开项目，于是 `compile_commands.json` 和编译器
+宏都没读 —— `p.GetEvents()` 答 `NotDeclaredHere("LuaParser::GetEvents")`，因为头文件在索引里但**从这个文件不可见**（包含没
+解析）。换成 `Session::open`（服务器用的那个）之后，同一处答的是 `_Ty`。**探针必须用产品的打开方式**，否则量的是另一个项目。
