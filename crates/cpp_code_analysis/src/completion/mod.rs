@@ -1458,6 +1458,7 @@ mod tests {
             bases: Vec::new(),
             parameters: Vec::new(),
             constraints: Vec::new(),
+            parameter_defaults: Vec::new(),
             pattern: None,
             parameter_list: parameter_list.map(str::to_string),
             range: cpp_parser::SourceRange::new(0, 0),

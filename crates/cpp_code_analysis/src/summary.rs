@@ -205,6 +205,26 @@ pub struct DeclFact {
     /// declared in a header is the ordinary shape, and a call site in another file can only ask the summary. The
     /// names alone cannot answer *is this argument's type constrained, and by what*.
     pub constraints: Vec<String>,
+    /// **The default argument of each template parameter**, in the same order as [`DeclFact::parameters`], as the file
+    /// wrote it — `["", "allocator<_Ty>"]` for `template <class _Ty, class _Alloc = allocator<_Ty>>`.
+    ///
+    /// `""` for a parameter with no default, which is most of them; a parameter with no default and no argument is a
+    /// use this layer cannot substitute, and it says so by leaving the name standing.
+    ///
+    /// # The wrong answer this removes, measured
+    ///
+    /// A use writes fewer arguments than the declaration has parameters constantly: `std::vector<int>` names one of
+    /// two, `std::map<Key, Value>` names two of four. A member whose type is written with a defaulted parameter —
+    /// `std::vector::reference` is `_Alloc_traits::reference`, and `allocator_traits<_Alloc>::reference` is
+    /// `_Alloc::value_type&` — then answers a spelling that exists nowhere the reader is standing. Measured on
+    /// `auto lineStartOffset = _lineOffsetVec[line];`: the chain followed every alias correctly and stopped at
+    /// `_Alloc::value_type&`, because `_Alloc`'s default was not in the fact. With it, the same chain reaches
+    /// `std::size_t&` — see [`crate::substituted_spelling_with_defaults`]. `twice<float>` answering `U` is the same
+    /// gap.
+    ///
+    /// Stored rather than read when it is wanted, for the reason [`DeclFact::parameters`] gives: the declaration is in
+    /// another file and the index keeps summaries rather than the text they came from.
+    pub parameter_defaults: Vec<String>,
     /// **The class's own name as the declaration wrote it, when that name carries a pattern** — `shared_ptr<_Ty>`
     /// for `struct atomic<shared_ptr<_Ty>>`, and `None` for anything whose name is a single identifier.
     ///

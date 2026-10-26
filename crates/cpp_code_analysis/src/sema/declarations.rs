@@ -2064,6 +2064,15 @@ pub fn declared_template_parameters_of(root: &CppSyntaxNode, binding: &Binding) 
     declared_template_parameters_with(&DeclarationShapes::of(root), binding)
 }
 
+/// **What each template parameter of this declaration defaults to** — see [`declared_parameter_defaults_with`].
+///
+/// The tree-side twin of [`DeclFact::parameter_defaults`], for a declaration in the file being edited: a use that
+/// writes fewer arguments than the declaration has parameters is answered by the same rule in both halves, and the
+/// rule needs the defaults in both.
+pub fn declared_parameter_defaults_of(root: &CppSyntaxNode, binding: &Binding) -> Vec<String> {
+    declared_parameter_defaults_with(&DeclarationShapes::of(root), binding)
+}
+
 /// [`declared_template_parameters_of`] for a caller that has the file's shapes already.
 ///
 /// The **innermost** template whose introduced specifier sequence contains the name wins, and that is a deliberate
@@ -2381,6 +2390,9 @@ fn fact_for(
     // check at another file`s call site can only ask the summary, and names without their constraints cannot say
     // whether an argument satisfied what the declaration asked for.
     let constraints = { declared_constraints_with(shapes, binding) };
+    // **And what each of them defaults to**, which is the other half of a use that writes fewer arguments than the
+    // declaration has parameters — see [`DeclFact::parameter_defaults`].
+    let parameter_defaults = { declared_parameter_defaults_with(shapes, binding) };
     // **Who may name it.** Recorded on the shape the binding's name sits in, which the pass that built this table
     // already knows — see [`Shape::access`]. `None` for a name no class body contains.
     let access = shapes.access_at(the_offset_to_descend_by(binding));
@@ -2445,6 +2457,7 @@ fn fact_for(
         bases,
         parameters,
         constraints,
+        parameter_defaults,
         pattern,
         parameter_list,
         access,
@@ -2457,6 +2470,37 @@ fn fact_for(
         // Filled in by `assign_guards`, which is the only place that knows where the directives are.
         guard: FactGuard::Unconditional,
     })
+}
+
+/// **The default argument of each of those parameters**, in the declaration's order — see
+/// [`DeclFact::parameter_defaults`].
+///
+/// Empty for the overwhelming majority of templates (the field is a row of `""` and is not stored at all), and empty
+/// for anything that is not a template, which is the same guard [`declared_template_parameters_with`] applies.
+fn declared_parameter_defaults_with(shapes: &DeclarationShapes, binding: &Binding) -> Vec<String> {
+    if declared_template_parameters_with(shapes, binding).is_empty() {
+        return Vec::new();
+    }
+
+    let at = binding.name_range.start_offset;
+    let Some((_, head)) = shapes
+        .templates
+        .iter()
+        .rev()
+        .find(|(introduced, _)| introduced.start_offset <= at && at <= introduced.end_offset())
+    else {
+        return Vec::new();
+    };
+
+    let defaults = crate::sema::types::template_parameter_defaults(head);
+    // **A row of "no default" is not stored.** The field is cloned and compared per fact, and most templates have no
+    // default at all: storing the empties would put sixteen bytes on every class template in the standard library to
+    // say nothing.
+    defaults
+        .iter()
+        .any(|default| !default.is_empty())
+        .then_some(defaults)
+        .unwrap_or_default()
 }
 
 /// **A class declaration's own text, up to its body** — read child by child instead of from the node.

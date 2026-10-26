@@ -840,17 +840,19 @@ double f() {
     );
 }
 
-/// **A defaulted template parameter of a variable template is still not read.**
+/// **A defaulted template parameter of a variable template takes its default.**
 ///
-/// `template <class T, class U = T> constexpr U twice = U(2);` called as `twice<float>` writes one argument for two
-/// parameters, and the second must take its default — which makes the answer `float`. It answers `U` instead, and the
-/// reason is where the defaults are not: `DeclFact::parameters` holds the parameter **names** and nothing holds the
-/// `= T` beside them, so the positional pairing runs out of arguments and leaves the name standing.
+/// `template <class T, class U = T> constexpr U twice = U(2);` written as `twice<float>` writes one argument for two
+/// parameters, and the second's meaning is the first's — which makes the answer `float`.
 ///
-/// Filling that in is a field on the fact plus a codec change, which is why this is recorded rather than done here.
+/// This was a known red, and the reason was where the defaults were not: `DeclFact::parameters` held the parameter
+/// **names** and nothing held the `= T` beside them, so the positional pairing ran out of arguments and left the name
+/// standing. [`DeclFact::parameter_defaults`] is that field (codec version 30), and the substitution falls back to it:
+/// [`crate::TypeSubstitutions::with_defaults`] for a `Type` — this case — and
+/// [`crate::substituted_spelling_with_defaults`] for a spelling, which is what a member's recorded type is.
+///
 /// The explicit half of the same question works and is asserted above.
 #[test]
-#[ignore = "known red: a template parameter's default argument is not in the fact, so `twice<float>` answers `U`"]
 fn a_defaulted_template_parameter_of_a_variable_template_substitutes() {
     let header = "\
 #pragma once

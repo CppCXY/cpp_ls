@@ -662,21 +662,56 @@ impl Type {
 pub struct TypeSubstitutions<'a> {
     names: &'a [String],
     arguments: &'a [Type],
+    /// **What a parameter with no argument stands for** — the declaration's own default, already parsed and already
+    /// substituted with the arguments the use wrote, so `template <class T, class U = T>` and `twice<float>` give
+    /// `U` the meaning `float`. Empty when the caller has no defaults, which is every caller that has no declaration
+    /// in hand.
+    defaults: &'a [Type],
 }
 
 impl<'a> TypeSubstitutions<'a> {
     pub fn new(names: &'a [String], arguments: &'a [Type]) -> TypeSubstitutions<'a> {
-        TypeSubstitutions { names, arguments }
+        TypeSubstitutions {
+            names,
+            arguments,
+            defaults: &[],
+        }
+    }
+
+    /// **[`TypeSubstitutions::new`] that falls back to the parameter's own default** for a use that wrote fewer
+    /// arguments than the declaration has parameters — `std::vector<int>` is `vector<_Ty, _Alloc>` with `_Alloc`
+    /// defaulted, and `twice<float>` writes one argument for two.
+    pub fn with_defaults(
+        names: &'a [String],
+        arguments: &'a [Type],
+        defaults: &'a [Type],
+    ) -> TypeSubstitutions<'a> {
+        TypeSubstitutions {
+            names,
+            arguments,
+            defaults,
+        }
     }
 
     /// What `name` stands for, if this map says.
     ///
     /// A parameter with **no** argument is mapped to nothing rather than to itself: `std::vector` written without
     /// arguments is not a `std::vector<T>` whose `T` happens to be called `T`, and answering the parameter name
-    /// would be answering with a placeholder as if it were a type.
+    /// would be answering with a placeholder as if it were a type. A parameter with a **default** stands for the
+    /// default, unless the default is the parameter itself (a spelling this layer cannot expand).
     pub fn get(&self, name: &str) -> Option<&Type> {
-        let at = self.names.iter().position(|parameter| parameter == name)?;
-        self.arguments.get(at)
+        let at = self
+            .names
+            .iter()
+            .position(|parameter| !parameter.is_empty() && parameter == name)?;
+        if let Some(argument) = self.arguments.get(at) {
+            return Some(argument);
+        }
+        let default = self.defaults.get(at)?;
+        let stands_for_itself = default
+            .class_name()
+            .is_some_and(|class| class == name && default.arguments().is_empty());
+        (!stands_for_itself).then_some(default)
     }
 }
 
@@ -1117,6 +1152,39 @@ pub fn template_parameter_names(list: &CppSyntaxNode) -> Vec<String> {
 /// The constraint is what stands **before** the name, with `class`/`typename`/`template` and any `...` taken off, so
 /// `class... Ts` is unconstrained and `std::integral T` is `std::integral`.
 pub fn template_parameters_in(list: &CppSyntaxNode) -> Vec<(String, String)> {
+    template_parameters_with_defaults(list)
+        .into_iter()
+        .map(|(name, constraint, _)| (name, constraint))
+        .collect()
+}
+
+/// **Each template parameter's default argument**, in the same order, empty string for a parameter that has none.
+///
+/// Separate from the names so that the fact can carry a parallel list — see [`crate::DeclFact::parameter_defaults`].
+pub fn template_parameter_defaults(list: &CppSyntaxNode) -> Vec<String> {
+    template_parameters_with_defaults(list)
+        .into_iter()
+        .map(|(_, _, default)| default.unwrap_or_default())
+        .collect()
+}
+
+/// **Each template parameter's name, constraint and default** — `("_Alloc", "", Some("allocator<_Ty>"))`.
+///
+/// # Why the default is kept
+///
+/// A use writes fewer arguments than the declaration has parameters all the time: `std::vector<int>` is
+/// `vector<_Ty, allocator<int>>`, and `std::map<Key, Value>` is four parameters. Without the default, a member whose
+/// type names the second parameter answers a spelling that has no meaning at the use site — measured on
+/// `auto lineStartOffset = _lineOffsetVec[line]`: the chain reached `_Alloc_traits::reference` →
+/// `allocator_traits<_Alloc>::reference` and stopped at `_Alloc::value_type&`, because `_Alloc` had no argument and
+/// its default (`std::allocator<std::size_t>`) was not in the fact. `twice<float>` answering `U` is the same gap.
+///
+/// The default is written in the **same parameter names** as the declaration (`_Alloc = allocator<_Ty>`), so a
+/// substitution that uses it has to substitute *into* it as well — see
+/// [`substituted_spelling_with_defaults`].
+pub fn template_parameters_with_defaults(
+    list: &CppSyntaxNode,
+) -> Vec<(String, String, Option<String>)> {
     let mut found = Vec::new();
 
     for parameter in list.children() {
@@ -1149,12 +1217,14 @@ pub fn template_parameters_in(list: &CppSyntaxNode) -> Vec<(String, String)> {
             }
         }
 
+        let default = default_of(&written);
+
         // **An unnamed parameter keeps its slot.** Arguments are paired with names **by position**, so dropping the
         // entry would move every later name one argument to the left: `template <typename, class T>` would
         // substitute the *first* argument for `T`, and a `pair<int, long>` would answer `pair<int, int>`. The empty
         // string is a name no spelling can equal, which is exactly what a parameter with no name is.
         let Some(name) = name else {
-            found.push((String::new(), String::new()));
+            found.push((String::new(), String::new(), default));
             continue;
         };
 
@@ -1180,10 +1250,33 @@ pub fn template_parameters_in(list: &CppSyntaxNode) -> Vec<(String, String)> {
         }
 
         // A pack whose name came first (`Ts...`) leaves nothing in front, and so does an unconstrained parameter.
-        found.push((name, constraint));
+        found.push((name, constraint, default));
     }
 
     found
+}
+
+/// **The default argument written for a template parameter**, if one is — `allocator<_Ty>` for
+/// `class _Alloc = allocator<_Ty>`.
+///
+/// The first `=` at **angle depth zero**: a non-type default may be an expression (`= 4`, `= sizeof(T)`), and a type
+/// default may contain its own `>` (`= std::greater<>`), which is what the depth counter is for. A constraint cannot
+/// contain a `=` at that depth, so the first one is the default's boundary.
+fn default_of(parameter: &str) -> Option<String> {
+    let bytes = parameter.as_bytes();
+    let mut depth = 0usize;
+    for (at, byte) in bytes.iter().enumerate() {
+        match byte {
+            b'<' => depth += 1,
+            b'>' => depth = depth.saturating_sub(1),
+            b'=' if depth == 0 => {
+                let default = parameter[at + 1..].trim();
+                return (!default.is_empty()).then(|| default.to_string());
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 /// **The declarator that declares the name at `range`** — the innermost one whose text holds it.
@@ -2406,6 +2499,54 @@ mod tests {
 /// mentioned. An identifier that is not one of `names` is left alone, which is the ordinary case: the target's own
 /// `enable_if` and its `typename` are not parameters.
 pub fn substituted_spelling(written: &str, names: &[String], arguments: &[String]) -> String {
+    substituted_spelling_from(written, names, arguments)
+}
+
+/// **[`substituted_spelling`] that falls back to the parameter's own default** — the step a use that writes fewer
+/// arguments than the declaration has parameters needs.
+///
+/// `_Alloc` has no argument in `std::vector<int>`, and its default is `allocator<int>`: a member whose type says
+/// `_Alloc::value_type` cannot be resolved from the use alone, and answering `_Alloc::value_type&` is a spelling that
+/// has no meaning where the reader is standing. Measured on `lineStartOffset`: with the default it is
+/// `allocator<int>::value_type&` → `int&`; without it the chain stopped one hop short.
+///
+/// The default is written in **the declaration's own parameter names** (`_Alloc = allocator<_Ty>`), so it is itself
+/// substituted with the same arguments before it is used. A default that names its own parameter is left alone —
+/// that is a spelling this layer cannot expand, and expanding it would not terminate.
+pub fn substituted_spelling_with_defaults(
+    written: &str,
+    names: &[String],
+    defaults: &[String],
+    arguments: &[String],
+) -> String {
+    if names.is_empty() {
+        return written.to_string();
+    }
+
+    let mut replacements: Vec<String> = Vec::with_capacity(names.len());
+    for (at, name) in names.iter().enumerate() {
+        let written_argument = arguments.get(at).filter(|argument| !argument.is_empty());
+        let replacement = match written_argument {
+            Some(argument) => argument.clone(),
+            None => defaults
+                .get(at)
+                .map(|default| default.trim())
+                .filter(|default| !default.is_empty() && *default != name && !name.is_empty())
+                // **Substituted as it is read**, because a default is written in the same parameter names:
+                // `_Alloc = allocator<_Ty>` has to become `allocator<int>` before it can stand for `_Alloc`.
+                .map(|default| substituted_spelling(default, names, arguments))
+                .unwrap_or_default(),
+        };
+        replacements.push(replacement);
+    }
+
+    substituted_spelling_from(written, names, &replacements)
+}
+
+/// The walk itself: replace whole words that are one of `names` with the replacement at the same position, and leave
+/// everything else alone. An **empty** replacement means "keep the word" — the parameter had neither an argument nor
+/// a default, which is the state the caller must not turn into an erasure.
+fn substituted_spelling_from(written: &str, names: &[String], replacements: &[String]) -> String {
     // **A use may write fewer arguments than the class declares parameters, and that is not a refusal.**
     //
     // `std::vector<MarkEvent>` writes one argument for a class declared with two parameters (`_Ty`, `_Alloc`), because
@@ -2414,10 +2555,9 @@ pub fn substituted_spelling(written: &str, names: &[String], arguments: &[String
     // because `std::vector<MarkEvent>::operator[]`'s `_Ty&` was never substituted.
     //
     // The pairing is the language's own — the arguments fill the parameters *in order* — so a parameter with a written
-    // argument is substituted and the rest are left as the declaration spelled them. Leaving `_Alloc` alone is the
-    // honest answer (its default is not read here), and it is a smaller answer than no substitution at all: `_Ty` is
-    // the parameter a reader's type actually names.
-    if names.is_empty() || arguments.is_empty() {
+    // argument is substituted and the rest keep the spelling the declaration gave them (or their default, when the
+    // caller has one — see [`substituted_spelling_with_defaults`]).
+    if names.is_empty() || replacements.is_empty() {
         return written.to_string();
     }
 
@@ -2429,16 +2569,17 @@ pub fn substituted_spelling(written: &str, names: &[String], arguments: &[String
             return;
         }
 
-        // **A parameter with no argument keeps the declaration's own spelling.** The pairing is by position, and a
+        // **A parameter with no replacement keeps the declaration's own spelling.** The pairing is by position, and a
         // use may write fewer arguments than the declaration has parameters (`std::vector<_Ty, _Alloc>` used as
         // `std::vector<int>`), so the lookup must not assume the two lists are the same length — indexing with the
         // parameter's position was an out-of-bounds read waiting for the first use that omitted an argument.
         match names
             .iter()
             .position(|name| !name.is_empty() && name == word)
-            .and_then(|at| arguments.get(at))
+            .and_then(|at| replacements.get(at))
+            .filter(|replacement| !replacement.is_empty())
         {
-            Some(argument) => out.push_str(argument),
+            Some(replacement) => out.push_str(replacement),
             None => out.push_str(word),
         }
         word.clear();

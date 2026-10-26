@@ -214,7 +214,17 @@ const MAGIC: &[u8; 8] = b"CPPLSSUM";
 /// of a layout bug and not of a logic one.
 ///
 /// So the number moves, the old entries are dropped on sight, and the field is what the reader sees.
-pub const CODEC_VERSION: u32 = 29;
+///
+/// # Version 30
+///
+/// A declaration fact gained `parameter_defaults` — the bump to version 30: what each template parameter defaults to,
+/// in the declaration's order (`["", "allocator<_Ty>"]`). It is what a use that writes fewer arguments than the
+/// declaration has parameters needs: `std::vector<int>` names one of two, and a member whose type is written with the
+/// second (`allocator_traits<_Alloc>::reference` is `_Alloc::value_type&`) answered a spelling that exists nowhere the
+/// reader is standing. Measured on `auto lineStartOffset = _lineOffsetVec[line]`: the alias chain followed every hop
+/// correctly and stopped at `_Alloc::value_type&`; with the default it reaches `std::size_t&`. See
+/// [`crate::DeclFact::parameter_defaults`] and [`crate::substituted_spelling_with_defaults`].
+pub const CODEC_VERSION: u32 = 30;
 
 /// Write a summary as bytes.
 ///
@@ -251,6 +261,10 @@ pub fn encode(summary: &FileSummary) -> Vec<u8> {
         put_u32(&mut out, fact.constraints.len() as u32);
         for constraint in &fact.constraints {
             put_str(&mut out, constraint);
+        }
+        put_u32(&mut out, fact.parameter_defaults.len() as u32);
+        for default in &fact.parameter_defaults {
+            put_str(&mut out, default);
         }
         put_opt_str(&mut out, fact.parameter_list.as_deref());
         put_opt_str(&mut out, fact.pattern.as_deref());
@@ -657,6 +671,13 @@ pub fn decode(bytes: &[u8]) -> Result<FileSummary, DecodeError> {
                     constraints.push(reader.string()?);
                 }
                 constraints
+            },
+            parameter_defaults: {
+                let mut defaults = Vec::new();
+                for _ in 0..reader.count()? {
+                    defaults.push(reader.string()?);
+                }
+                defaults
             },
             parameter_list: reader.optional_string()?,
             pattern: reader.optional_string()?,
@@ -1242,6 +1263,7 @@ mod tests {
                     parameters: vec!["_Ty".to_string(), "_Alloc".to_string()],
                     // The constraint in front of each parameter — empty here, and carried by the round trip.
                     constraints: vec![String::new(), "Integral".to_string()],
+                    parameter_defaults: Vec::new(),
                     // **A pattern**, so the round trip carries one: the field a member lookup uses to tell a partial
                     // specialization from its primary template. The `None` branch is covered by the two facts below.
                     pattern: Some("Widget<_Ty, _Alloc>".to_string()),
@@ -1275,6 +1297,7 @@ mod tests {
                     bases: Vec::new(),
                     parameters: Vec::new(),
                     constraints: Vec::new(),
+                    parameter_defaults: Vec::new(),
                     pattern: None,
                     // The one field a completion's detail line reads: a function with no parameters is written
                     // `()`, which is an answer, and `None` would be "nobody looked".
@@ -1300,6 +1323,7 @@ mod tests {
                     bases: Vec::new(),
                     parameters: Vec::new(),
                     constraints: Vec::new(),
+                    parameter_defaults: Vec::new(),
                     pattern: None,
                     parameter_list: None,
                     access: None,

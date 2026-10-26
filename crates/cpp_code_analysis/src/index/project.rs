@@ -4567,6 +4567,25 @@ impl NamedDeclaration {
             }
         }
     }
+
+    /// **What each of those parameters defaults to**, in the same order, `""` for none — the other half of
+    /// [`NamedDeclaration::parameters_of`], and what a use that writes *fewer* arguments needs.
+    ///
+    /// `template <class T, class U = T> constexpr U twice = U(2);` used as `twice<float>` writes one argument for two
+    /// parameters: `U`'s meaning is `T`'s, which the use wrote as `float`. Without this the answer is the parameter's
+    /// own name — see `substituted_at_the_use`.
+    fn parameter_defaults_of(
+        &self,
+        _index: &ProjectIndex,
+        root: &cpp_parser::CppSyntaxNode,
+    ) -> Vec<String> {
+        match self {
+            NamedDeclaration::Here(binding) => {
+                crate::sema::declarations::declared_parameter_defaults_of(root, binding)
+            }
+            NamedDeclaration::Indexed(fact, _, _) => fact.parameter_defaults.clone(),
+        }
+    }
     ///
     /// A name range rather than the declaration's range, because the two answer different questions: a rename
     /// edits the name, and a caller looking for the declaration's own declarator has to be *at* the name — see
@@ -6162,7 +6181,12 @@ fn a_members_answer_as_a_type(
         .map(|argument| argument.to_string())
         .collect();
     let parameters = index.template_parameters_for(class, path, &arguments);
-    let substituted = crate::sema::types::substituted_spelling(returns, &parameters, &arguments);
+    // **A use that writes fewer arguments than the declaration has parameters**, which is the ordinary case:
+    // `std::vector<int>` names one of two. The defaults are what the rest stand for — see
+    // [`crate::substituted_spelling_with_defaults`], and `lineStartOffset` for the chain that needed it.
+    let defaults = index.template_parameter_defaults_for(class, path, &arguments);
+    let substituted =
+        crate::sema::types::substituted_spelling_with_defaults(returns, &parameters, &defaults, &arguments);
 
     // **The operators and qualifiers the spelling around the name carries**: `const reference&` is `const T&`, and
     // replacing only the name must keep both ends.
@@ -6190,7 +6214,8 @@ fn a_members_answer_as_a_type(
     let Some(target) = fact.type_of.as_deref() else {
         return substituted;
     };
-    let target = crate::sema::types::substituted_spelling(target, &parameters, &arguments);
+    let target =
+        crate::sema::types::substituted_spelling_with_defaults(target, &parameters, &defaults, &arguments);
     // **And the target is a *name* too**, so it is followed before it is answered: `pointer` is `_Val*` in the class
     // that declares it, and `_Alloc_traits::reference` is whatever that alias names. Answering the spelling instead
     // is what made `map::find(text)->second` look `second` up in `_Rb_tree_iterator` rather than in its `pair`.
@@ -6264,6 +6289,7 @@ fn a_spelling_through_the_aliases(
     };
     let arguments: Vec<String> = class.arguments().iter().map(|one| one.to_string()).collect();
     let parameters = index.template_parameters_for(class_name, path, &arguments);
+    let defaults = index.template_parameter_defaults_for(class_name, path, &arguments);
     if crate::probes::inference() {
         eprintln!(
             "[inference] alias step: {written:?} in {class:?} (class {class_name:?}, parameters {parameters:?}, \
@@ -6281,7 +6307,7 @@ fn a_spelling_through_the_aliases(
         let Some(target) = fact.type_of.as_deref() else {
             return written.to_string();
         };
-        let target = crate::sema::types::substituted_spelling(target, &parameters, &arguments);
+        let target = crate::sema::types::substituted_spelling_with_defaults(target, &parameters, &defaults, &arguments);
         if target == core {
             return written.to_string();
         }
@@ -6297,7 +6323,7 @@ fn a_spelling_through_the_aliases(
     // this line the chain stops at `_Alloc::value_type&`, with it at `std::size_t&` — the difference between a
     // spelling no reader can use and the type they asked for.
     let qualifier = {
-        let substituted = crate::sema::types::substituted_spelling(&qualifier, &parameters, &arguments);
+        let substituted = crate::sema::types::substituted_spelling_with_defaults(&qualifier, &parameters, &defaults, &arguments);
         if substituted.trim().is_empty() {
             qualifier
         } else {
@@ -6322,6 +6348,7 @@ fn a_spelling_through_the_aliases(
         .map(|one| one.to_string())
         .collect();
     let inner_parameters = index.template_parameters_for(inner_name, path, &inner_arguments);
+    let inner_defaults = index.template_parameter_defaults_for(inner_name, path, &inner_arguments);
     let Known::Yes((fact, _)) =
         member_fact(index, scopes, root, path, inner_name, &last, None)
     else {
@@ -6330,7 +6357,7 @@ fn a_spelling_through_the_aliases(
     let Some(target) = fact.type_of.as_deref() else {
         return written.to_string();
     };
-    let target = crate::sema::types::substituted_spelling(target, &inner_parameters, &inner_arguments);
+    let target = crate::sema::types::substituted_spelling_with_defaults(target, &inner_parameters, &inner_defaults, &inner_arguments);
     let followed = a_spelling_through_the_aliases(index, scopes, root, path, &inner_type, &target, depth - 1);
     format!("{leading}{followed}{trailing}")
 }
@@ -7524,6 +7551,7 @@ fn fact_from_binding_with(
         // is the caller's step — it is the caller that knows the arguments. See [DeclFact::parameters].
         parameters: Vec::new(),
         constraints: Vec::new(),
+        parameter_defaults: Vec::new(),
         // …and no pattern, for the same reason: this path looks a member up **by the class the object already has**,
         // rather than choosing between classes that share a scope. See [`DeclFact::pattern`].
         pattern: None,
@@ -8737,6 +8765,38 @@ impl ProjectIndex {
         visible_from: &Path,
         arguments: &[String],
     ) -> Vec<String> {
+        self.the_template_for(class, visible_from, arguments)
+            .map(|(parameters, _)| parameters)
+            .unwrap_or_default()
+    }
+
+    /// **What the same parameters default to**, in the same order — `["", "allocator<_Ty>"]` for
+    /// `template <class _Ty, class _Alloc = allocator<_Ty>>`.
+    ///
+    /// The other half of [`ProjectIndex::template_parameters_for`], and the one a use that writes *fewer* arguments
+    /// needs: see [`crate::substituted_spelling_with_defaults`] for the three-hop chain that needs it and the
+    /// measurement behind it.
+    pub fn template_parameter_defaults_for(
+        &self,
+        class: &str,
+        visible_from: &Path,
+        arguments: &[String],
+    ) -> Vec<String> {
+        self.the_template_for(class, visible_from, arguments)
+            .map(|(_, defaults)| defaults)
+            .unwrap_or_default()
+    }
+
+    /// **The declaration whose parameter list a use of `class` is read against**, as `(names, defaults)`.
+    ///
+    /// One selection for both answers: the names and the defaults have to come from the *same* declaration, or a
+    /// partial specialization's names would be paired with its primary's defaults.
+    fn the_template_for(
+        &self,
+        class: &str,
+        visible_from: &Path,
+        arguments: &[String],
+    ) -> Option<(Vec<String>, Vec<String>)> {
         let bare = class.strip_prefix("::").unwrap_or(class);
         let last = bare.rsplit("::").next().unwrap_or(bare);
 
@@ -8771,8 +8831,12 @@ impl ProjectIndex {
                     .filter(|found| lists_usable_parameter_names(&found.fact.parameters))
                     .max_by_key(|found| found.fact.parameters.len())
             })
-            .map(|found| found.fact.parameters.clone())
-            .unwrap_or_default()
+            .map(|found| {
+                (
+                    found.fact.parameters.clone(),
+                    found.fact.parameter_defaults.clone(),
+                )
+            })
     }
 
     pub fn template_parameters_of(&self, class: &str, visible_from: &Path) -> Vec<String> {
@@ -11462,6 +11526,7 @@ impl ProjectDefinition {
                 bases: Vec::new(),
                 parameters: Vec::new(),
                 constraints: Vec::new(),
+                parameter_defaults: Vec::new(),
                 // Nor a pattern: this fact is a place to jump to, and the class it names is already the one the
                 // caller asked about. See [`DeclFact::pattern`].
                 pattern: None,
@@ -15915,7 +15980,31 @@ fn substituted_at_the_use(
         return type_of;
     }
 
-    let substitutions = crate::sema::types::TypeSubstitutions::new(&names, &arguments);
+    // **And what a parameter the use did not write stands for.** `twice<float>` writes one argument for
+    // `template <class T, class U = T>`, so the second meaning is the first argument — see
+    // [`crate::TypeSubstitutions::with_defaults`]. The defaults are written in the declaration's own parameter names
+    // (`U = T`), so each one is substituted with what the use wrote before it stands for anything; a default that
+    // names itself is left alone by `TypeSubstitutions::get`.
+    let written_defaults = named.parameter_defaults_of(index, root);
+    let written_arguments: Vec<Type> = arguments.clone();
+    let mut defaults: Vec<Type> = Vec::with_capacity(written_defaults.len());
+    for default in &written_defaults {
+        if default.trim().is_empty() {
+            defaults.push(Type::builtin(""));
+            continue;
+        }
+        let parsed = parse_type_spelling(default);
+        defaults.push(parsed.substituted(&crate::sema::types::TypeSubstitutions::new(
+            &names,
+            &written_arguments,
+        )));
+    }
+
+    let substitutions = crate::sema::types::TypeSubstitutions::with_defaults(
+        &names,
+        &written_arguments,
+        &defaults,
+    );
     type_of.substituted(&substitutions)
 }
 /// **An argument spelling as the pattern comparison should see it**: a decidable compiler builtin, folded.
