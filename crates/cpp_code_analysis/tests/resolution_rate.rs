@@ -308,5 +308,51 @@ fn the_member_questions_of_a_real_project_and_how_many_resolve() {
     }
 
     total.report(counted_files, uncooked);
-    let _ = Path::new("");
+
+    // **One class, on request** — `CPPLS_CLASS=LanguageServer` prints the member list the query builds for it, which
+    // is the first thing to look at when the scoreboard names a class: an empty list and a missing class are two
+    // different bugs, and the sample line cannot tell them apart from the outside.
+    if let Some(asked) = std::env::var_os("CPPLS_CLASS") {
+        let asked = asked.to_string_lossy().to_string();
+        let somewhere = files
+            .iter()
+            .find(|path| session.view_of_the_file(path).is_some())
+            .cloned();
+        if let Some(somewhere) = somewhere {
+            let view = session.view_of_the_file(&somewhere).expect("a view");
+            // **The two answers that separate the two bugs**: facts *filed* under the scope, and facts the query can
+            // *see* from this file. A postings count of zero is the member walk never having filed them; a positive
+            // count with an empty list is the visibility filter dropping them.
+            println!(
+                "\n{asked}: {} fact(s) filed under that scope, {} visible from {}",
+                session.index().scope_postings(&asked),
+                session
+                    .index()
+                    .declarations_in(&asked, &somewhere)
+                    .len(),
+                somewhere.display()
+            );
+            for (file, fact) in session.index().every_fact_named("SendRequest").iter().take(6) {
+                println!(
+                    "  SendRequest in {}: scope {:?} qualified {:?}",
+                    file.file_name().unwrap_or_default().to_string_lossy(),
+                    fact.scope,
+                    fact.qualified_name()
+                );
+            }
+            match session.members_of(&view, &asked) {
+                Known::Yes(list) => {
+                    println!("\n{asked}: {} member(s)", list.members.len());
+                    for member in list.members.iter().take(40) {
+                        println!(
+                            "  {:?} {:?} scope {:?} type {:?}",
+                            member.fact.kind, member.fact.name, member.fact.scope, member.fact.type_of
+                        );
+                    }
+                }
+                Known::Unknown(reason) => println!("\n{asked}: no list, {reason:?}"),
+                Known::No => println!("\n{asked}: no list"),
+            }
+        }
+    }
 }

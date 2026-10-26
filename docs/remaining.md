@@ -234,6 +234,45 @@ tests/macros.rs:37    宏查询的一个已知缺口（文件里有 "# Why this 
 
 ---
 
+## F. 记分板：整个项目的成员问题，以及它点出的三个普通 BUG
+
+```text
+CPPLS_REAL_PROJECT=E:\EmmyLuaCodeStyle \
+  cargo test --release -p cpp_code_analysis --test resolution_rate -- --ignored --nocapture
+```
+
+**为什么是这个问题**：`x.member` / `x->member` 是编辑器必须回答的问题，答案只有三种 —— 找到声明、带理由拒绝、
+没有答案。第一个数是产品，第二个里的理由就是工作清单；而 `UnknownType` 那一类正是模板推理的墙。用**文件自己的
+文本**（不是渲染）算，是因为渲染要烹整个标准库闭包（分钟级），而记分板必须能在每次改动后跑（本次 23 s）。
+
+**基线（`2716fa7` 之前，103 个文件）**：
+
+```text
+6013 个成员问题   4571 解析（76.0%）   1442 拒绝   0 弃权
+按接收者形状：  名字 4695 问 82.0% ｜ 成员链 873 问 34.0% ｜ 调用 350 问 94.9% ｜ 下标 89 问 97.8%
+拒绝里：91 个有接收者类型，1351 个没有
+```
+
+`873 问 / 34%` 的"成员链"是 `a.b.c` 里取 `b` 的那一步：`a.b` 的类型没算出来，`c` 就没得问。
+
+**探针点出来的三个候选（第一个已证明是"对的回答"，后两个还要一次测量）**：
+
+| 现象 | 例子 | 探针说 |
+|---|---|---|
+| 类找到了，成员表是空的 | `_owner->SendRequest`，`LanguageServer*` | 从 `CommandService.cpp` 问：`members_of` → 0 个成员；而索引里 **32 条**事实的 `scope` 就是 `LanguageServer` |
+| 类本身找不到 | `options.non_standard_symbol`，`FormattingOptions` | 从作废文件问 `NotDeclaredHere`（**这条已证明是对的**：`UriCommon.c` 确实 include 不到 `FormattingOptions`，32 条事实 0 条可见） |
+| 已知 std 类型，成员缺 | `inputPath.parent_path`，`std::filesystem::path` | `no list: ConditionalCompilation` —— **文件视图没有宏环境**，`<bits/fs_path.h>` 的类在 `#if` 里；这是记分板已知的悲观项，不是 bug |
+
+**第二行是可用的工具而不是 bug**：`CPPLS_CLASS=<类名>` 会打印"这个 scope 下有多少条事实 / 从某个文件能看见多少条"，
+两个数一对比就知道是**没归档**还是**可见性过滤掉了**。第一行（32 条事实、0 条可见）就停在这个岔路口上，
+下一步是给出"从 `CommandService.cpp` 到底能看见几条"的数字 —— 那一个数字决定这是可见性问题还是可见性正确而
+查询另有 bug。
+
+**怎么读那 1351 个"没有接收者类型"**：接收者本身是 `auto x = f();` 这类**调用结果**，所以它需要调用路径的返回
+类型（`what_a_call_has`）。这一桶是下一步最大的，但在上面那条岔路走通之前不碰。
+
+---
+
 ## 怎么验证（每一条改完都跑这些）
 
 ```text
