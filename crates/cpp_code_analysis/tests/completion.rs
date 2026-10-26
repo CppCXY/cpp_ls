@@ -261,7 +261,21 @@ fn a_member_position_is_not_a_name_position() {
 ///
 /// The cursor sits after `this->`, which is the plainest way to ask: `this` has the enclosing class's type, and the
 /// enclosing class is not declared in this file.
-#[ignore = "measured: the object `this` is found now and the failure has moved to `UnknownType(\"this\")` — `void Widget::grow(…)` opens no function scope, so the cursor's innermost scope is the TranslationUnit: the definition's name is written in its specifier sequence, not its declarator"]
+///
+/// # What was wrong, and what it took
+///
+/// Two things, found in that order.
+///
+/// **The fixture did not include the header.** A query is answered from the files the asking file can see, and a
+/// `.cpp` whose text never `#include`s its own header sees nothing in it — so no scope-tree reading could have made
+/// this expectation satisfiable. The include is the fixture's, not the reading's.
+///
+/// **`void Widget::grow(…)` opened a scope that belonged to no class.** When the qualifier names a class *this file*
+/// has built, the function scope hangs off that class and inherits its qualified name. When it does not — the
+/// ordinary layout, the class in a header — the scope was created **unnamed**, and `this` is typed from the cursor's
+/// innermost scope's qualified name: `Unknown(UnknownType("this"))`, measured. The scope now carries the definition's
+/// own spelling (`Widget::grow`) even though `Widget` is not a scope here, which is exactly what a reader needs to
+/// answer *which* class the body belongs to — see `read_the_inside_of_a_foreign_definition`.
 #[test]
 fn a_member_function_defined_in_another_file_sees_its_class() {
     let header = "\
@@ -271,7 +285,11 @@ public:
     void grow(int by);
 };
 ";
+    // **The include is what makes the header's members reachable at all** — a query is answered from the files the
+    // asking file can see, and a `.cpp` that never includes its own header sees nothing in it. The fixture was
+    // written without this line, which is why the expectation could not be met however the scope tree was read.
     let source = "\
+#include \"widget.h\"
 void Widget::grow(int by) {
     this->
 }

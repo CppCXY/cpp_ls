@@ -1513,6 +1513,13 @@ impl ScopeWalker<'_> {
     ///
     /// Opens the one scope the function owns and binds nothing into the file: the function's *name* belongs to the
     /// class in another file, and a body is not a place a name can be found from.
+    ///
+    /// **The scope is named with the definition's own qualified spelling** — `Widget::grow` — because that name is
+    /// the only thing the body has to know *which class* it is a member of: `this` is typed from the cursor's
+    /// innermost scope's qualified name ([`class_of_the_enclosing_definition`]), so an unnamed scope left `this->`
+    /// answering `Unknown(UnknownType("this"))` inside every out-of-line member definition — the ordinary layout of
+    /// every `.cpp` there is. Measured in
+    /// `tests/completion.rs::a_member_function_defined_in_another_file_sees_its_class`, which is that fixture.
     fn read_the_inside_of_a_foreign_definition(&mut self, node: &CppSyntaxNode, outer: ScopeId) {
         let Some(body) = function_body(node) else {
             return;
@@ -1525,9 +1532,28 @@ impl ScopeWalker<'_> {
             cpp_parser::source_range(declarator.text_range()),
             cpp_parser::source_range(body.text_range()),
         );
-        let function = self
-            .table
-            .create_scope(ScopeKind::Function, Some(outer), Some(range));
+        // The qualifier names no scope *here*, but it is still the answer to "which class is this a member of",
+        // and the name node that carries it was already read to get this far.
+        let spelled = first_child(node, CppSyntaxKind::DeclSpecifierSeq)
+            .and_then(|specifiers| {
+                specifiers.descendants().find(|child| {
+                    CppSyntaxKind::from(child.kind()) == CppSyntaxKind::NameExpr
+                        && is_qualified(child)
+                })
+            })
+            .map(|name| name.text().to_string())
+            .filter(|name| name.contains("::"));
+        let function = match &spelled {
+            Some(spelled) => self.table.create_named_scope(
+                ScopeKind::Function,
+                Some(outer),
+                Some(range),
+                Some(spelled),
+            ),
+            None => self
+                .table
+                .create_scope(ScopeKind::Function, Some(outer), Some(range)),
+        };
 
         for parameter_list in parameter_lists(&declarator) {
             self.parameters(&parameter_list, function);

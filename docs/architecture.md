@@ -803,5 +803,36 @@ cpp_ls release        13 个目标全绿：handshake 34（含 folding）、laten
 接上它是下一步。四层补丁里 patch 2 的用户只剩"没有渲染读法的文件"，patch 1/3/4 的用户只剩"查找时手上只有摘要"的
 路径 —— 都和 §7.6 的冷启动改造是同一件事。
 
+### 7.10 ⑳ 两条 known red 转绿：析构函数的名字，和 `.cpp` 里那个 `this`
+
+一轮"把 `#[ignore]` 的账清一清"，结果是两条都真的修掉了，而且**两条的原因都和它们自己写的诊断不完全一样**。
+
+**① 析构函数在成员表里是 `""`**（`index::project::tests::a_destructor_without_a_specifier_is_a_member`）。
+诊断写的是"事实对了、进成员表时被读空了"。实测：`DeclFact::name` 早就改成了 `binding.name.text()`（拼写，
+`~Derived`），所以那条断言现在拿到的是 `["d", "~Derived"]` —— **名字是对的，顺序不是它写的那样**：成员表按名字
+排序，`d` 在 `~` 前面。于是这条测试改成通过版本，期望 `["d", "~Derived"]`，并在文档里记下这次到底修了什么
+（`recorded_names` 的注释也一起改了：它原来写"析构/运算符/转换函数的 name 是空"，那条前提已经不成立，隐藏规则对
+它们和对别的成员一样成立 —— `~Derived` 与 `~Base` 拼写不同，所以不会互相隐藏）。
+
+**② `void Widget::grow(…) { this-> }` 里的 `this` 没有类型**
+（`tests/completion.rs::a_member_function_defined_in_another_file_sees_its_class`）。诊断写的是"定义没有开函数作用域"。
+实测是两件事：
+
+```text
+fixture 少了一行 #include "widget.h"    查询只从「询问文件能看见的文件」里答，不 include 就永远看不到那个头
+                                       —— 这条测试在改作用域之前就不可能绿
+作用域是开了，但没有名字               qualifier 指向本文件没有的类时，函数作用域挂在文件作用域下、无名字，
+                                       而 this 的类型来自「最内层作用域的全限定名」→ UnknownType("this")
+```
+
+修法只有一行语义：`read_the_inside_of_a_foreign_definition` 现在用定义自己的拼写（`Widget::grow`）**命名**那个
+作用域 —— 它仍然不向文件绑定任何名字（这条规则 `a_qualified_declaration_binds_nothing_here` 保持），但"这个体属于
+哪个类"从此有答案。这覆盖的是**每一个 `.cpp` 里写成员函数定义**的普通 C++ 布局。
+
+```text
+cpp_code_analysis   686 lib（lib 里现在 0 ignored）+ 全部集成绿；completion 41（now 0 ignored）
+cpp_ls release      13 个目标全绿：handshake 34（含 folding）、latency 2（5.73 s）
+```
+
 
 

@@ -1703,14 +1703,18 @@ fn direct_members(
     }
 }
 
-/// The names in a level that take part in **hiding**: every member except the ones whose name is not recorded.
+/// The names in a level that take part in **hiding**: every member that has a name at all.
 ///
-/// A destructor, an operator and a conversion function come back with an empty [`DeclFact::name`], because a fact
-/// stores a lookup key rather than a spelling — the spelling lives in the source, and `~D` has no identifier in it.
-/// There is therefore nothing to compare them by, and two of them are *not* one name: `~D` and `~B` differ by the
-/// class they name. Leaving them out of the hiding rule is what keeps `~D` from hiding `~B` — a wrong answer
-/// arrived at by treating a missing spelling as if it were a spelling. They are still **listed**, because they are
-/// declarations that exist; see [`direct_members`].
+/// **A destructor, an operator and a conversion function used to be left out of this rule** because a fact stored a
+/// lookup key rather than a spelling — `~D` has no identifier in it — so their `DeclFact::name` was `""` and there was
+/// nothing to compare them by. That is no longer what a fact holds: `binding.name.text()` answers the spelling
+/// (`~Derived`, `operator[]`, `operator int`), for the reason `fact_for` records — an empty name made every
+/// destructor answer for its own class and made an operator invisible to a member list. So the hiding rule applies to
+/// them like anything else, and it is *right* that it does: `~Derived` and `~Base` are different spellings, so a
+/// derived destructor hides nothing it should not, while a derived `operator[]` does hide a base's.
+///
+/// What is still left out is a member with **no** name at all, which a fact now has only where the source has no
+/// spelling to read.
 fn recorded_names(members: &[ProjectMember]) -> impl Iterator<Item = String> + '_ {
     members
         .iter()
@@ -13171,35 +13175,24 @@ mod tests {
         );
     }
 
-    /// **`#[ignore]`: the scope tree names the destructor, the index still lists it as `""`.**
+    /// **A destructor written without a specifier is a member, and is listed by its spelling.**
     ///
-    /// Two halves, and only the first is done.
+    /// Two halves of this were broken at different times, and the fixture pins both.
     ///
-    /// The parser half is fixed and measured. `CppDeclaration::get_name_token` reads a bare `Declarator` as well as an
-    /// `InitDeclarator` — a constructor and a destructor have no `decl-specifier-seq`, so the grammar puts their name
-    /// straight under the declaration — and `name_from_text` falls back to the declarator's own spelling, because a
-    /// destructor's `NameExpr` holds a nested `Declaration` rather than an identifier and the token the walker finds
-    /// has an empty spelling:
+    /// The first is the *class's* name. A constructor and a destructor have no `decl-specifier-seq`, so the grammar
+    /// puts their name straight under the declaration, and `name_from_text` used to read the class's name off the
+    /// destructor inside its body: `Derived` was never bound and `d` was filed under `~Derived`. That half is green
+    /// (`tests/scopes.rs`, shape `File{Widget}(Class{size,~Widget})`).
     ///
-    /// ```text
-    /// Name(const int f);  Declaration > Declarator > NameExpr("Name"), ParameterList
-    /// ~Derived();         Declaration > Declarator > NameExpr, Declaration["Derived()"]
-    /// void f();           Declaration > DeclSpecifierSeq, InitDeclarator > Declarator
-    /// ```
+    /// The second is the *fact's* name, and it is why this test was `#[ignore]`d for several rounds with the
+    /// expectation `["~Derived", "d"]` written down: `DeclFact::name` was empty for anything without an identifier —
+    /// a destructor, an operator, a conversion function — on the argument that their spellings are not lookup keys.
+    /// Measured, that cost more than it bought: `members_of` answered `[""]` for a class whose member is
+    /// `operator[]`, so an operator was invisible to every member query, and a destructor answered for its own class
+    /// in `definition`. A fact now carries the **spelling** (`binding.name.text()`), so the member list reads
+    /// `~Derived` — the round that fixed it is the one that also removed the `#[ignore]`.
     ///
-    /// `tests/scopes.rs` is green on it: the shape is `File{Widget}(Class{size,~Widget})`. And `fact_for` is right
-    /// too — instrumented, it prints `binding_name=Name { kind: Destructor("Derived") } text="~Derived"`.
-    ///
-    /// What is not done is the last step into the member list, which answers with an **empty** name where `fact_for`
-    /// produced `~Derived`: something between the fact and `MemberList::members` is reading the name from a place that
-    /// does not know about `NameKind::Destructor`. That is the next measurement, and this test is it — the assertion
-    /// below is the *correct* expectation and the code does not meet it yet, which is why this is ignored rather than
-    /// rewritten to `["", "d"]`.
-    ///
-    /// What the fixture was originally written to pin is still pinned by the `Known::Yes`: the class is found by **its
-    /// own** name — before `name_from_text` was fixed, a class whose body held a destructor was itself named
-    /// `~Derived`, `d` was filed under that, and `Derived` was never bound.
-    #[ignore]
+    /// The order is the list's, not the source's: members are sorted by name, so `d` comes before `~Derived`.
     #[test]
     fn a_destructor_without_a_specifier_is_a_member() {
         let source = "struct Derived {\n  ~Derived();\n  int d;\n};\n";
@@ -13208,7 +13201,7 @@ mod tests {
         let Known::Yes(list) = found else {
             panic!("the class must be found by its own name: {found:?}");
         };
-        assert_eq!(names(&list), ["~Derived", "d"]);
+        assert_eq!(names(&list), ["d", "~Derived"]);
     }
 
     #[test]
