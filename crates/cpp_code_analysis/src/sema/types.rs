@@ -1127,19 +1127,40 @@ pub fn template_parameters_in(list: &CppSyntaxNode) -> Vec<(String, String)> {
         let written = parameter.text().to_string();
         let before_a_default = written.split('=').next().unwrap_or(&written);
 
-        // The last identifier of what is left. `class _Ty` ends in the name; `SomeConcept T` does too, and the
-        // concept is the word before it — which is why this is not "the first word".
-        let name = before_a_default
-            .split(|character: char| !character.is_alphanumeric() && character != '_')
-            .rfind(|word| !word.is_empty());
+        // **The name is the last *identifier* before the default**, read from the **tokens** rather than from the
+        // text. Splitting the text took "the last word", and for an **unnamed** parameter that word is the keyword
+        // that introduces it: `template <typename, typename> class vector;` recorded `["typename", "typename"]` — two
+        // "names" no body can mention, and a list that then *won* the choice of which declaration's parameters a
+        // substitution used (see `is_a_parameter_name`, which had to be written to reject exactly that). A keyword is
+        // not an identifier to the lexer, so the token stream answers what the text could not.
+        let mut name: Option<String> = None;
+        for token in parameter
+            .descendants_with_tokens()
+            .filter_map(|element| element.into_token())
+        {
+            let kind = cpp_parser::CppTokenKind::from(token.kind());
+            // The default argument starts here, and everything after it is a *value* rather than the parameter's
+            // name — `class _Alloc = allocator<_Ty>` must not answer `_Ty`.
+            if kind == cpp_parser::CppTokenKind::Assign {
+                break;
+            }
+            if kind == cpp_parser::CppTokenKind::Identifier {
+                name = Some(token.text().to_string());
+            }
+        }
 
+        // **An unnamed parameter keeps its slot.** Arguments are paired with names **by position**, so dropping the
+        // entry would move every later name one argument to the left: `template <typename, class T>` would
+        // substitute the *first* argument for `T`, and a `pair<int, long>` would answer `pair<int, int>`. The empty
+        // string is a name no spelling can equal, which is exactly what a parameter with no name is.
         let Some(name) = name else {
+            found.push((String::new(), String::new()));
             continue;
         };
 
         // Everything before the name, minus the spellings that are not a constraint.
         let before = before_a_default
-            .rfind(name)
+            .rfind(&name)
             .map(|at| before_a_default[..at].trim())
             .unwrap_or("");
         let mut constraint = before.to_string();
@@ -1159,7 +1180,7 @@ pub fn template_parameters_in(list: &CppSyntaxNode) -> Vec<(String, String)> {
         }
 
         // A pack whose name came first (`Ts...`) leaves nothing in front, and so does an unconstrained parameter.
-        found.push((name.to_string(), constraint));
+        found.push((name, constraint));
     }
 
     found
@@ -1325,6 +1346,14 @@ pub fn type_of_declaration_named(
 ) -> Type {
     let base = read_specifiers_named(specifiers, declared_name);
 
+    // **A base with no spelling has nothing for a declarator to be applied to.** `priority[]` of the unnamed class
+    // type above is not `[]`, it is an array of a type this layer cannot spell — so wrapping it in an `Array`
+    // would write `[]`, which is a different answer rather than a shorter one. The empty spelling goes back as it
+    // came, and the fact records no type at all.
+    if base.to_string().is_empty() {
+        return base;
+    }
+
     let Some(declarator) = declarator else {
         return base;
     };
@@ -1385,6 +1414,8 @@ pub(crate) fn read_specifiers_named(
     // The **last** name in the sequence, and the last unmodelled node — see the two notes below.
     let mut named: Option<Type> = None;
     let mut spelling = None;
+    // Was a class-like **body** written here without a name in front of it? See the answer below.
+    let mut an_unnamed_body = false;
 
     for child in specifiers.children_with_tokens() {
         let Some(node) = child.into_node() else {
@@ -1452,11 +1483,18 @@ pub(crate) fn read_specifiers_named(
             // **An elaborated specifier whose class body is here**: `struct Widget { … }` is a definition, and the
             // type it declares is named by the `NameExpr` inside it — which the arms above have already returned,
             // because the body is a *child* of this node rather than a sibling.
+            //
+            // **Unless there is no name**, and then this is the only thing in the sequence that says anything at
+            // all: `static const struct { unsigned char left; unsigned char right; } priority[] = …` is an
+            // **unnamed** class type, and this layer cannot spell it. The answer is the empty spelling below and
+            // *not* `void` — see the note there.
             CppSyntaxKind::ClassDef
             | CppSyntaxKind::StructDef
             | CppSyntaxKind::UnionDef
             | CppSyntaxKind::EnumDef
-            | CppSyntaxKind::EnumClassDef => {}
+            | CppSyntaxKind::EnumClassDef => {
+                an_unnamed_body = true;
+            }
             // **Anything else is not a type's name**, and the rule is the converse of the one above: what a file
             // writes in a specifier sequence that this layer has no rule for is a *keyword* far more often than it
             // is a type. Measured, the fallback that used to stand here produced `friend constexpr
@@ -1487,6 +1525,15 @@ pub(crate) fn read_specifiers_named(
     // `istream`, so the two declarations disagreed about the type and neither answered.
     if let Some(named) = named {
         return named;
+    }
+
+    // **A class body nothing named is a type, and it has no spelling here.** `void` is not "no answer": it is a
+    // *different type*, and recording it made `static const struct { … } priority[];` answer `void[]` — measured on
+    // the `LuaLexer.cpp` fixture this was written for, and the hover then printed the wrong signature instead of
+    // the file's own text. The empty spelling is what [`declared_type_of`] reads as "no type to name", which is
+    // the honest answer for a spelling a compiler would print as `struct { … }` and this layer does not model.
+    if an_unnamed_body && spelling.is_none() {
+        return Type::builtin("");
     }
 
     spelling.unwrap_or_else(|| Type::builtin("void"))
@@ -2329,8 +2376,16 @@ pub fn substituted_spelling(written: &str, names: &[String], arguments: &[String
             return;
         }
 
-        match names.iter().position(|name| name == word) {
-            Some(at) => out.push_str(&arguments[at]),
+        // **A parameter with no argument keeps the declaration's own spelling.** The pairing is by position, and a
+        // use may write fewer arguments than the declaration has parameters (`std::vector<_Ty, _Alloc>` used as
+        // `std::vector<int>`), so the lookup must not assume the two lists are the same length — indexing with the
+        // parameter's position was an out-of-bounds read waiting for the first use that omitted an argument.
+        match names
+            .iter()
+            .position(|name| !name.is_empty() && name == word)
+            .and_then(|at| arguments.get(at))
+        {
+            Some(argument) => out.push_str(argument),
             None => out.push_str(word),
         }
         word.clear();

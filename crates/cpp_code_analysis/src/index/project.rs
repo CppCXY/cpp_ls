@@ -8566,13 +8566,7 @@ impl ProjectIndex {
         let of_the_same_arity = |found: &&VisibleDeclaration<'_>| {
             let pattern = found.fact.pattern.as_deref().unwrap_or_default();
             let slots = arguments_in_a_spelling(pattern).unwrap_or_default();
-            slots.len() == arguments.len()
-                && !found.fact.parameters.is_empty()
-                && found
-                    .fact
-                    .parameters
-                    .iter()
-                    .all(|name| is_a_parameter_name(name))
+            slots.len() == arguments.len() && lists_usable_parameter_names(&found.fact.parameters)
         };
         candidates
             .iter()
@@ -8589,14 +8583,7 @@ impl ProjectIndex {
             .or_else(|| {
                 candidates
                     .iter()
-                    .filter(|found| {
-                        !found.fact.parameters.is_empty()
-                            && found
-                                .fact
-                                .parameters
-                                .iter()
-                                .all(|name| is_a_parameter_name(name))
-                    })
+                    .filter(|found| lists_usable_parameter_names(&found.fact.parameters))
                     .max_by_key(|found| found.fact.parameters.len())
             })
             .map(|found| found.fact.parameters.clone())
@@ -16017,12 +16004,15 @@ fn without_the_namespace(class: &str) -> String {
 
 /// **Is this a template parameter's *name*?** — an identifier, not the keyword that introduced it.
 ///
-/// A fact's `parameters` is a list of names (`["_Ty", "_Alloc"]`), and one measured declaration of `std::vector` in
-/// MSVC's `<vector>` carries `["class", "class"]` instead — the keywords rather than the identifiers after them. A
-/// list like that substitutes nothing and, worse, *wins* the choice of which declaration's parameters to use, which is
-/// how `std::vector<MarkEvent>::operator[]` answered `_Ty&` after two rounds of fixing the substitution itself. The
-/// fact is wrong and that is a defect to fix where it is built; until then this is the guard that keeps a wrong fact
-/// from deciding an answer.
+/// A fact's `parameters` is a list of names (`["_Ty", "_Alloc"]`), and it used to be able to carry the *keywords*
+/// instead — one measured declaration of `std::vector` in MSVC's `<vector>` recorded `["class", "class"]`, because the
+/// name was read as "the last word of the parameter" and an **unnamed** parameter's last word is the keyword. That
+/// list substitutes nothing and, worse, *won* the choice of which declaration's parameters to use, which is how
+/// `std::vector<MarkEvent>::operator[]` answered `_Ty&` after two rounds of fixing the substitution itself.
+///
+/// The fact is fixed where it is built now (`template_parameters_in` reads the name from the **tokens**, so a keyword
+/// cannot become one, and an unnamed parameter is an **empty slot** that keeps the arguments aligned). This remains
+/// as the shape check a substitution needs: a list with nothing nameable is a list it cannot use.
 fn is_a_parameter_name(name: &str) -> bool {
     !name.is_empty()
         && !matches!(
@@ -16032,6 +16022,20 @@ fn is_a_parameter_name(name: &str) -> bool {
         && name
             .chars()
             .all(|character| character.is_alphanumeric() || character == '_')
+}
+
+/// **Can a substitution be driven by this list?** — at least one name, and every entry either a name or an empty slot.
+///
+/// The empty entry is a slot rather than a fact: an unnamed parameter (`template <typename, class T>`) cannot be
+/// substituted into, because no spelling of a body equals the empty string, and its presence keeps the *later*
+/// arguments aligned with their names. So a list that has names beside its slots is exactly a list a substitution can
+/// use — and one that is all slots (`template <typename, typename> class vector;`) has nothing to substitute.
+fn lists_usable_parameter_names(names: &[String]) -> bool {
+    !names.is_empty()
+        && names.iter().any(|name| !name.is_empty())
+        && names
+            .iter()
+            .all(|name| name.is_empty() || is_a_parameter_name(name))
 }
 
 /// **`element_type` read through the member that names the base** — `using _Mybase = _Ptr_base<_Ty>;` and then

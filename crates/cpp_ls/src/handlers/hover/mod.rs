@@ -314,8 +314,18 @@ fn hover_of_the_program(
         return Some(markdown(macro_markdown(session, view, &found)));
     }
 
+    // **The spelling the cursor sits on**, when it is a template-id use. Read once here rather than inside the card:
+    // the card is also asked about declarations the cursor does *not* name (an overload list, a member resolved
+    // through `->`), and those must not borrow this file's spelling.
+    let written = written_template_id(view, offset);
+
     match session.definition(view, offset) {
-        Known::Yes(found) => Some(markdown(declaration_markdown(session, view, &found))),
+        Known::Yes(found) => Some(markdown(declaration_markdown(
+            session,
+            view,
+            &found,
+            written.as_deref(),
+        ))),
         // **A name with several declarations is a popup with several signatures**, not none. `std::format` is four
         // overloads, so the name question has always answered `Ambiguous` — and `Ambiguous` used to fall through to
         // the *expression* question, which has nothing to say about a name that is not in an expression: hovering
@@ -341,13 +351,19 @@ fn hover_of_the_program(
                 if let Some(the_type) = found.found.iter().find(|definition| {
                     matches!(definition.fact.kind, cpp_code_analysis::DeclKind::Type)
                 }) {
-                    return Some(markdown(declaration_markdown(session, view, the_type)));
+                    return Some(markdown(declaration_markdown(
+                        session,
+                        view,
+                        the_type,
+                        written.as_deref(),
+                    )));
                 }
                 match found.found.len() {
                     1 => Some(markdown(declaration_markdown(
                         session,
                         view,
                         &found.found[0],
+                        written.as_deref(),
                     ))),
                     2.. => Some(markdown(overloads_markdown(
                         session,
@@ -414,7 +430,7 @@ fn member_markdown(
         file: member.file.clone(),
         fact: member.fact.clone(),
     };
-    declaration_markdown(session, view, &definition)
+    declaration_markdown(session, view, &definition, None)
 }
 
 /// **Every declaration of one name**, as one popup — what a hover says about an overloaded function.
@@ -676,14 +692,53 @@ fn macro_markdown(session: &Session<DiskFiles>, view: &FileView, found: &Project
     out
 }
 
+/// **The template-id the reader wrote at the cursor**, if that is where the cursor is: `std::map<std::string, int>`.
+///
+/// # Why the use is read and not the declaration
+///
+/// A class template's fact describes the **declaration** — the parameter names, in the order the header wrote them —
+/// and a use says only which arguments were passed. Both are needed for the card a reader wants, and the index can
+/// only give the first: `map<_Kty, _Ty, _Pr, _Alloc>` is the shape, `std::map<std::string, int>` is what the file in
+/// front of them says. So the spelling is read from the file, where it is written exactly once.
+///
+/// The walk is [`cpp_code_analysis::sema::resolve::name_node_at`] — the innermost name node holding the offset —
+/// and the parser folds a whole qualified name with its argument list into that one node (see `read_named`), so its
+/// text *is* the spelling. `None` when the name has no arguments (`Widget`), which is the case the declaration's own
+/// text already answers.
+fn written_template_id(
+    view: &FileView,
+    offset: cpp_code_analysis::file::coordinates::ReadingOffset,
+) -> Option<String> {
+    let node = cpp_code_analysis::sema::resolve::name_node_at(&view.root, offset.get())?;
+    let written = node.text().to_string();
+    let written = written.trim();
+
+    (written.contains('<') && !written.is_empty()).then(|| written.to_string())
+}
+
 /// A declaration, rendered from the fact the index holds.
+///
+/// `written` is **the spelling the reader wrote at the cursor**, when the cursor is on a template-id use — see
+/// [`written_template_id`]. It is `None` for every other card, and the one card that uses it is a type template's.
 fn declaration_markdown(
     session: &Session<DiskFiles>,
     view: &FileView,
     found: &ProjectDefinition,
+    written: Option<&str>,
 ) -> String {
     let fact = &found.fact;
     let mut out = String::new();
+
+    // **The instantiation the reader wrote is the signature they asked about.** A class template's fact describes
+    // the *declaration* — `pattern` is `map<_Kty, _Ty, _Pr, _Alloc>`, which is what the header says — while the
+    // cursor is on `std::map<std::string, LuaTokenKind, std::less<>>` and the reader is asking what *that* is. The
+    // card showed only the declaration's parameter names, which names nothing the reader can see (reported from an
+    // editor, on `LuaLexer.cpp`'s `LuaReserved`). So the written spelling becomes the signature line and the
+    // subject of the sentence, and the face the fact describes follows it.
+    let subject = match written {
+        Some(written) if matches!(fact.kind, DeclKind::Type) && !fact.parameters.is_empty() => written,
+        _ => "",
+    };
 
     // **Reconstructed from the facts when they can spell it, and copied only when they cannot.** The raw text of a
     // declaration is what a *reader* cannot use in a popup: it carries the vendor's macro noise (`& _CLR_OR_THIS_CALL
@@ -691,7 +746,9 @@ fn declaration_markdown(
     // declaration that was found rather than the shape of the thing. The signature line is the same reconstruction the
     // overload popup uses, so the two answers cannot disagree — and a declaration whose facts are too thin to spell (a
     // class, a namespace) keeps the raw text rather than a worse guess.
-    let declaration = if spells_a_signature(fact) {
+    let declaration = if !subject.is_empty() {
+        subject.to_string()
+    } else if spells_a_signature(fact) {
         signature_line(fact)
     } else {
         declaration_text(session, Some(view), &found.file, fact)
@@ -705,17 +762,18 @@ fn declaration_markdown(
     // and if it did it should show the value"). The value is not in the fact: it is computed from the enumerators
     // written before it, which is what the language does and what the raw text of the file holds.
     let enumerator = enumerator_value(view, fact.name_range.start_offset);
+    let qualified = if subject.is_empty() {
+        fact.qualified_name()
+    } else {
+        subject.to_string()
+    };
     match enumerator {
         Some(_) => out.push_str(&format!(
             "\n`{}` — an enumerator of `{}`\n",
-            fact.qualified_name(),
+            qualified,
             fact.scope.as_deref().unwrap_or("(an anonymous enum)")
         )),
-        None => out.push_str(&format!(
-            "\n`{}` — {}\n",
-            fact.qualified_name(),
-            kind_words(fact)
-        )),
+        None => out.push_str(&format!("\n`{}` — {}\n", qualified, kind_words(fact))),
     }
 
     if let Some(value) = enumerator {
@@ -1119,12 +1177,17 @@ fn kind_words(fact: &DeclFact) -> String {
     // shown as the fact gives them.
     //
     // The one word *not* shown is `class` or `typename`: the fact records the parameter names and not their keywords,
-    // and printing `class` for a `typename` would be a guess dressed as a fact.
-    if !fact.parameters.is_empty() {
-        words.push_str(&format!(
-            " template over `{}`",
-            fact.parameters.join("`, `")
-        ));
+    // and printing `class` for a `typename` would be a guess dressed as a fact. An **unnamed** parameter is an empty
+    // entry (its slot is kept so arguments pair with names by position — see `template_parameters_in`), and a name
+    // the reader cannot write is not shown at all.
+    let named: Vec<&str> = fact
+        .parameters
+        .iter()
+        .filter(|name| !name.is_empty())
+        .map(String::as_str)
+        .collect();
+    if !named.is_empty() {
+        words.push_str(&format!(" template over `{}`", named.join("`, `")));
     }
 
     match (&fact.type_of, &fact.returns) {
@@ -1224,6 +1287,26 @@ fn declaration_text(
         }
     }
 
+    // **A declaration whose type this layer cannot spell is shown as the file writes it**, from the *declaration's*
+    // own start rather than from the declarator's. `static const struct { unsigned char left; … } priority[]` is the
+    // case: the type is an unnamed class, so there is no spelling for a signature line, and the declarator alone is
+    // `priority[] = …` — while what the reader needs to see is the struct they wrote. The head rule below cuts at the
+    // first `{` because that is where a *body* starts; here the first `{` opens the type, so the cut is skipped.
+    if matches!(fact.kind, DeclKind::Variable)
+        && fact.type_of.is_none()
+        && let Some(start) = the_declarations_start(view, file, fact)
+    {
+        let written = slice_lines(text, start, fact.range.end_offset());
+        let written = written.trim();
+        if !written.is_empty() {
+            return if written.ends_with(';') || written.ends_with('…') {
+                written.to_string()
+            } else {
+                format!("{written};")
+            };
+        }
+    }
+
     let written = slice_lines(text, fact.range.start_offset, fact.range.end_offset());
     let head = match written.find('{') {
         Some(at) => written[..at].trim_end(),
@@ -1234,6 +1317,32 @@ fn declaration_text(
         Some(')') => format!("{head};"),
         _ => head.to_string(),
     }
+}
+
+/// **Where the declaration that names `fact` starts**, when the fact is about the file the view is of.
+///
+/// A fact's `range` is its **declarator** — `priority[] = { … }` — while the declaration it belongs to starts at its
+/// specifiers (`static const struct`). The tree answers this without a heuristic: the innermost `Declaration` node
+/// holding the fact's name is the declaration, and its start is where a reader would say the line begins.
+///
+/// `None` for a fact about another file (this view has no tree for it) and for a name the tree cannot place, which is
+/// the case the caller answers with the declarator's own text as it always did.
+fn the_declarations_start(
+    view: Option<&FileView>,
+    file: &std::path::Path,
+    fact: &DeclFact,
+) -> Option<usize> {
+    let view = view.filter(|view| is_the_viewed_file(view, file))?;
+    let mut node = cpp_parser::token_at(&view.root, fact.name_range.start_offset)?.parent();
+
+    while let Some(current) = node {
+        if cpp_parser::CppSyntaxKind::from(current.kind()) == cpp_parser::CppSyntaxKind::Declaration {
+            return Some(cpp_parser::source_range(current.text_range()).start_offset);
+        }
+        node = current.parent();
+    }
+
+    None
 }
 
 /// **The text a fact's offsets are offsets into** — which is not always the file's own text.

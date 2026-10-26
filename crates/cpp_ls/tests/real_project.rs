@@ -280,3 +280,145 @@ fn the_first_completion_on_a_real_project_says_where_its_time_went() {
         println!("{line}");
     }
 }
+
+/// **The two hovers `docs/remaining.md` §A reports, asked of the project they were reported on.**
+///
+/// ```text
+/// A1  `std::map<std::string, LuaTokenKind, std::less<>> LuaLexer::LuaReserved = {`
+///     hovering `map` — the card showed `class map` and the *declaration's* parameter names, never the spelling
+///     the file in front of the reader says;
+/// A2  `static const struct { unsigned char left; unsigned char right; } priority[] = { … }`
+///     hovering `priority` — the card said `void[] priority`, because an unnamed class body contributed no name
+///     and the specifier reader fell back to `void`.
+/// ```
+///
+/// The two files are the project's own, so this is the report's own fixture: `LuaParser/src/Lexer/LuaLexer.cpp` and
+/// `LuaParser/include/LuaParser/Lexer/LuaDefine.h`. A checkout without them is skipped rather than failed — the
+/// point of an `#[ignore]`d real-project probe is that it says nothing about a machine that has no project.
+#[test]
+#[ignore = "opens a real project; run with --ignored"]
+fn the_two_reported_hovers_answer_on_the_project_they_came_from() {
+    let project = project();
+    let lexer = project
+        .join("LuaParser")
+        .join("src")
+        .join("Lexer")
+        .join("LuaLexer.cpp");
+    let define = project
+        .join("LuaParser")
+        .join("include")
+        .join("LuaParser")
+        .join("Lexer")
+        .join("LuaDefine.h");
+    if !lexer.is_file() || !define.is_file() {
+        eprintln!("skipped: the project has no {:?}", lexer);
+        return;
+    }
+
+    let lexer_text = std::fs::read_to_string(&lexer).expect("the file reads");
+    let define_text = std::fs::read_to_string(&define).expect("the file reads");
+    let lexer_uri = format!("file:///{}", lexer.display().to_string().replace('\\', "/"));
+    let define_uri = format!("file:///{}", define.display().to_string().replace('\\', "/"));
+
+    // Where the two names are written, read off the file rather than stated by hand.
+    let (instance_line, instance_character) = position_of(&lexer_text, "LuaReserved = ", "map");
+    let (priority_line, priority_character) = position_of(&define_text, "priority[]", "priority");
+    println!(
+        "`map` at {instance_line}:{instance_character}, `priority` at {priority_line}:{priority_character}"
+    );
+
+    let mut server = Server::start(&project);
+    let answer = server.request(
+        1,
+        "initialize",
+        json!({
+            "processId": std::process::id(),
+            "rootUri": format!("file:///{}", project.display().to_string().replace('\\', "/")),
+            "capabilities": { "textDocument": { "hover": { "contentFormat": ["markdown"] } } },
+        }),
+    );
+    assert!(answer["result"].is_object(), "initialize failed: {answer}");
+    server.notify("initialized", json!({}));
+    for (uri, text) in [(&lexer_uri, &lexer_text), (&define_uri, &define_text)] {
+        server.notify(
+            "textDocument/didOpen",
+            json!({ "textDocument": { "uri": uri, "languageId": "cpp", "version": 1, "text": text } }),
+        );
+    }
+
+    // **Asked until the index has the answer**, which is the deal the protocol offers (`isIncomplete`): a project
+    // this size is still being read when the first request arrives, and `null` there means *ask again*, not *there
+    // is nothing*. The deadline is what turns a missing answer into a failure worth reading.
+    let mut hover = |server: &mut Server, id: i64, uri: &str, line: u64, character: u64| {
+        let deadline = Instant::now() + Duration::from_secs(90);
+        let mut next = id;
+        loop {
+            let answer = server.request(
+                next,
+                "textDocument/hover",
+                json!({
+                    "textDocument": { "uri": uri },
+                    "position": { "line": line, "character": character },
+                }),
+            );
+            if !answer["result"].is_null() {
+                return answer;
+            }
+            if Instant::now() >= deadline {
+                return answer;
+            }
+            next += 1;
+            std::thread::sleep(Duration::from_millis(300));
+        }
+    };
+
+    let card = hover(
+        &mut server,
+        100,
+        &lexer_uri,
+        instance_line,
+        instance_character,
+    );
+    let text = card["result"]["contents"]["value"]
+        .as_str()
+        .unwrap_or_else(|| panic!("a markdown answer was expected, got {card}"));
+    println!("\n--- hover on `map` ---\n{text}\n");
+    assert!(
+        text.contains("std::map<std::string, LuaTokenKind, std::less<>>"),
+        "the instantiation the file writes: {text}"
+    );
+
+    let card = hover(
+        &mut server,
+        200,
+        &define_uri,
+        priority_line,
+        priority_character,
+    );
+    let text = card["result"]["contents"]["value"]
+        .as_str()
+        .unwrap_or_else(|| panic!("a markdown answer was expected, got {card}"));
+    println!("--- hover on `priority` ---\n{text}\n");
+    assert!(
+        !text.contains("void"),
+        "an anonymous struct's variable is not `void`: {text}"
+    );
+    assert!(
+        text.contains("unsigned char"),
+        "the declaration's own text is what the reader can see: {text}"
+    );
+}
+
+/// The protocol position of `needle` on the first line that contains `anchor`.
+fn position_of(text: &str, anchor: &str, needle: &str) -> (u64, u64) {
+    let line = text
+        .lines()
+        .position(|line| line.contains(anchor))
+        .unwrap_or_else(|| panic!("{anchor:?} is not in the fixture"));
+    let character = text
+        .lines()
+        .nth(line)
+        .and_then(|text| text.find(needle))
+        .unwrap_or_else(|| panic!("{needle:?} is not on the line that writes {anchor:?}"));
+    (line as u64, character as u64)
+}

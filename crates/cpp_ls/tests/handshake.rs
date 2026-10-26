@@ -3072,6 +3072,106 @@ fn a_completion_item_resolves_to_its_declarations_documentation() {
     server.notify("exit", Value::Null);
 }
 
+/// **The instantiation the reader wrote, and a type with no spelling** — `docs/remaining.md` §A1 and §A2, over the
+/// wire.
+///
+/// Two reports, one card each:
+///
+/// * a class template's card used to show only the **declaration's** parameter names (`map<_Kty, _Ty, _Pr, _Alloc>`),
+///   because it was rebuilt from the fact — while the reader is looking at `std::map<const char*, int, std::less<>>`
+///   and asking what *that* is;
+/// * `static const struct { … } priority[]` was answered `void[]`, because the anonymous class body contributed no
+///   name and the specifier reader fell back to `void`. The honest answer is that this layer cannot spell the type,
+///   and the card then shows the declaration's own text — which is the only place the reader can see it.
+#[test]
+fn a_hover_names_the_instantiation_and_never_invents_a_void() {
+    let project = Project::new("hover-instantiation");
+    project.write("map.h", INSTANTIATION_HEADER);
+    project.write("main.cpp", INSTANTIATION_CPP);
+
+    let mut server = Server::start(project.root());
+    let main_uri = uri_of(&project.root().join("main.cpp"));
+    server.request(
+        1,
+        "initialize",
+        json!({
+            "processId": std::process::id(),
+            "rootUri": uri_of(project.root()),
+            "capabilities": {
+                "workspace": { "configuration": true, "didChangeWatchedFiles": { "dynamicRegistration": true } },
+                "window": { "workDoneProgress": true },
+            },
+        }),
+    );
+    server.notify("initialized", json!({}));
+    server.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": { "uri": main_uri, "languageId": "cpp", "version": 1, "text": INSTANTIATION_CPP }
+        }),
+    );
+
+    let instantiation = hover_over(
+        &mut server,
+        100,
+        &main_uri,
+        INSTANTIATION_CPP,
+        "map<const char*, int, Less>",
+    );
+    let text = instantiation["result"]["contents"]["value"]
+        .as_str()
+        .unwrap_or_else(|| panic!("a markdown answer was expected, got {instantiation}"));
+    assert!(
+        text.contains("std::map<const char*, int, Less>"),
+        "the use's own spelling, not the declaration's parameter names: {text}"
+    );
+    assert!(
+        !text.contains("map<_Kty, _Ty"),
+        "and not the shape the header declares: {text}"
+    );
+
+    let anonymous = hover_over(&mut server, 200, &main_uri, INSTANTIATION_CPP, "priority");
+    let text = anonymous["result"]["contents"]["value"]
+        .as_str()
+        .unwrap_or_else(|| panic!("a markdown answer was expected, got {anonymous}"));
+    assert!(
+        !text.contains("void"),
+        "an anonymous struct's variable is not `void`: {text}"
+    );
+    assert!(
+        text.contains("unsigned char"),
+        "the declaration's own text is what the reader can see: {text}"
+    );
+
+    server.request(999, "shutdown", Value::Null);
+    server.notify("exit", Value::Null);
+}
+
+/// The fixture for the two cards above: a class template declared in a **header** (the shape a real project has —
+/// `map` is in `<map>`, not in the file being edited) used with arguments, and an anonymous class type.
+const INSTANTIATION_HEADER: &str = "\
+#pragma once
+namespace std {
+template <class _Kty, class _Ty, class _Less>
+class map {
+public:
+    void insert(const _Kty& key, const _Ty& value);
+};
+}
+";
+
+const INSTANTIATION_CPP: &str = "\
+#include \"map.h\"
+
+std::map<const char*, int, Less> table;
+
+static const struct
+{
+    unsigned char left;
+    unsigned char right;
+} priority[] = { { 1, 2 } };
+";
+
 /// The hover fixture: a documented function, one with a plain comment above it, and a `this` in a member function.
 const HOVER_CPP: &str = "\
 /// Adds two counts.

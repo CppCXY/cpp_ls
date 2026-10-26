@@ -968,7 +968,16 @@ fn doc_comments(
                 // and the fact separates the two: `parameters` is the template head, `parameter_list` the
                 // parameter list. Both are offered, because which command the reader typed is a spelling and the
                 // name they want is a name.
-                let mut names: Vec<String> = fact.parameters.to_vec();
+                // **The empty name is a slot, not a parameter.** `fact.parameters` keeps one entry per template
+                // parameter so that arguments pair with names by position, and an **unnamed** parameter's entry is
+                // the empty string (`template <typename, class T>` is `["", "T"]`). It is not a name a reader can be
+                // told about — offering it would put a blank item in the list.
+                let mut names: Vec<String> = fact
+                    .parameters
+                    .iter()
+                    .filter(|name| !name.is_empty())
+                    .cloned()
+                    .collect();
                 if let Some(list) = &fact.parameter_list
                     && let Some(found) = crate::inlay::parameter_names_from_text(list)
                 {
