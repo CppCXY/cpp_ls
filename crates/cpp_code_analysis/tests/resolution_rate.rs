@@ -368,6 +368,34 @@ fn the_member_questions_of_a_real_project_and_how_many_resolve() {
 
     total.report(counted_files, uncooked);
 
+    // **Is one file in the index twice?** The finding that the 77 refusals with a receiver type are *all* visibility
+    // led to a hypothesis: the same header arrives under two spellings, so it has two summaries, two sequence numbers
+    // and two sets of postings — which would explain why making the dropped spellings visible *cost* 28 answers
+    // instead of gaining any. This counts it, because the fix depends entirely on the answer.
+    {
+        let mut by_identity: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for (path, _) in session.index().all_summaries() {
+            let spelling = path.to_string_lossy().to_lowercase().replace('\\', "/");
+            by_identity
+                .entry(spelling)
+                .or_default()
+                .push(path.to_string_lossy().to_string());
+        }
+        let duplicated: Vec<(&String, &Vec<String>)> = by_identity
+            .iter()
+            .filter(|(_, spellings)| spellings.len() > 1)
+            .collect();
+        println!(
+            "\n{} summar(ies), {} distinct file(s) by identity, {} in the index twice",
+            by_identity.values().map(Vec::len).sum::<usize>(),
+            by_identity.len(),
+            duplicated.len()
+        );
+        for (identity, spellings) in duplicated.iter().take(5) {
+            println!("  {identity}: {spellings:?}");
+        }
+    }
+
     // **One class, on request** — `CPPLS_CLASS=LanguageServer` prints the member list the query builds for it, which
     // is the first thing to look at when the scoreboard names a class: an empty list and a missing class are two
     // different bugs, and the sample line cannot tell them apart from the outside.

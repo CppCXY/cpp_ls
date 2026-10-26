@@ -9245,8 +9245,15 @@ impl ProjectIndex {
         // both spellings, which doubles its summary in the name index and changes what the member walk reads.
         //
         // The next step is therefore to make the **identity** unique — one file, one summary, one sequence number, one
-        // set of postings — and only then to stop dropping the spelling. Either half alone is a regression. See
-        // `docs/remaining.md` §F; neither experiment is in the tree.
+        // set of postings — and only then to stop dropping the spelling. Either half alone is a regression.
+        //
+        // **That was the hypothesis, and it has been counted: it is false.** The index holds 1581 summaries for 1581
+        // distinct identities and **not one file twice**, so the loss is not a duplicate summary. What is left is the
+        // only other thing a wider view changes: which declarations exist *at all* for a name — and the scoreboard
+        // says every refusal with a receiver type had **no visible declaration of the class** (47) or a list built
+        // from none (30), so the 28 lost questions are ones where one visible declaration used to be enough and two
+        // now are not. Neither experiment is in the tree; the next round starts from this number, not from a theory.
+        // See `docs/remaining.md` §F.
         let mut files: Vec<(u32, IncludeVisibility)> = visible
             .into_iter()
             .filter_map(|(key, visibility)| Some((*self.sequence.get(&key)?, visibility)))
