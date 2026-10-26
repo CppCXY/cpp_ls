@@ -1196,6 +1196,18 @@ impl ScopeWalker<'_> {
                 return;
             }
         } else if is_unnamed_declaration(node) {
+            // **A declaration with no name can still declare members.** `enum { LAJF };` is the C spelling of a set
+            // of constants, and it names nothing — `is_unnamed_declaration` is true, so this used to return before
+            // the body was walked at all, and every enumerator of an anonymous enum was missing from the scope tree
+            // and therefore from the index: reported from an editor as "an unnamed enum is not supported", and
+            // measured as `definitions("LAJF") → NotDeclaredHere` in a file that declares it two lines up.
+            //
+            // The specifier pass is what walks a body — `enum_like`, `class_like` — so it runs here, and only for a
+            // declaration that has one. A body-less unnamed declaration (`int;`, a stray `;`) still declares
+            // nothing and still returns.
+            if declares_a_body(node) {
+                self.specifiers(node, outer, inner, false);
+            }
             return;
         }
 
@@ -2024,6 +2036,24 @@ fn function_binding_kind(name: &Name) -> BindingKind {
     }
 }
 
+/// **Does this declaration hold a body that declares members?** — an enum's enumerators, a class's members.
+///
+/// The question [`ScopeWalker::declaration`] asks before walking a declaration that names nothing: `enum { A, B };` and
+/// `struct { int x; } s;` both declare members under a name of their own (`s` for the second), and an unnamed one
+/// still declares them.
+fn declares_a_body(node: &CppSyntaxNode) -> bool {
+    node.descendants().any(|child| {
+        matches!(
+            CppSyntaxKind::from(child.kind()),
+            CppSyntaxKind::EnumDef
+                | CppSyntaxKind::EnumClassDef
+                | CppSyntaxKind::ClassDef
+                | CppSyntaxKind::StructDef
+                | CppSyntaxKind::UnionDef
+        )
+    })
+}
+
 /// Does this `Declaration` go through the declaration path **without declaring anything here**?
 ///
 /// The question the most vexing parse forces on any parser without a table of type names. `f(x);` — a call —
@@ -2046,6 +2076,7 @@ fn function_binding_kind(name: &Name) -> BindingKind {
 ///
 /// `false` for every node that is not a `Declaration`, because the other declaration kinds state their name
 /// differently and already handle an absent one — an anonymous namespace, an unnamed `class {}`.
+
 fn is_unnamed_declaration(node: &CppSyntaxNode) -> bool {
     if CppSyntaxKind::from(node.kind()) != CppSyntaxKind::Declaration {
         return false;

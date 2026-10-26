@@ -1864,6 +1864,23 @@ pub fn member_completions_at(
         return Known::Unknown(UnknownReason::UnknownType(Box::from(written.to_string())));
     };
 
+    // **`config->` on a smart pointer lists the pointee's members**, not the handle's: `std::shared_ptr<T>` has
+    // `operator->`, `get` and `reset`, and the names a reader is reaching for after an arrow are `T`'s (reported from
+    // an editor: "and there is no completion either"). Only for an **arrow**, and only when the handle declares
+    // `operator->` — an object whose `->` reaches a class it declares no `operator->` for is a pointer, which
+    // [`member_access_class`] has already reached through.
+    // **The *written* spelling**, not `class`: `member_access_class` has already stripped `shared_ptr<Config>` to
+    // `shared_ptr`, and the template arguments are exactly what the handle's `operator->` return type is substituted
+    // with. Measured: with the stripped spelling the step declined for want of arguments and the list was the
+    // handle's.
+    let spelled = written.to_string();
+    let class = match access.arrow {
+        true => {
+            the_class_an_arrow_points_at(index, scopes, root, path, &spelled, None).unwrap_or(class)
+        }
+        false => class,
+    };
+
     match members_of(index, scopes, root, path, &class) {
         Known::Yes(mut members) => {
             let hidden_by_access =
@@ -6083,6 +6100,59 @@ pub(crate) fn callee_of_a_call(
 /// The lookup is the qualified name `<class>::<member>`, which is why nothing here needs to know what a class
 /// *is*: the file being edited is asked first through its scope tree, and the index second — the same two-layer
 /// split [`definition_across_files`] makes, and for the same reason.
+/// **The member a class's `operator->` reaches**, when the class declares one — see the call site in
+/// [`member_fact_inner`].
+///
+/// One level, like the pointer rule: an object whose `operator->` returns another handle is a shape this layer does
+/// not follow twice, and a second level would be a guess about which `operator->` the language picked.
+fn through_an_operator_arrow(
+    index: &ProjectIndex,
+    scopes: &crate::ScopeTree,
+    root: &cpp_parser::CppSyntaxNode,
+    path: &Path,
+    class: &str,
+    member: &str,
+    arguments: Option<&[String]>,
+) -> Option<(DeclFact, PathBuf)> {
+    // **The class without its arguments**, because that is the name its members are filed under, and the arguments
+    // are what the arrow's return type is substituted with.
+    let target = the_class_an_arrow_points_at(index, scopes, root, path, class, arguments)?;
+    direct_member(index, scopes, root, path, &target, member, None)
+}
+
+/// **The class an object's `operator->` reaches**, or `None` when it declares none — or when its answer is a
+/// template parameter this call cannot substitute.
+fn the_class_an_arrow_points_at(
+    index: &ProjectIndex,
+    scopes: &crate::ScopeTree,
+    root: &cpp_parser::CppSyntaxNode,
+    path: &Path,
+    class: &str,
+    arguments: Option<&[String]>,
+) -> Option<String> {
+    let bare = without_arguments(class).to_string();
+    let (arrow, _) = direct_member(index, scopes, root, path, &bare, "operator->", None)?;
+    let returns = arrow.returns?;
+
+    let arguments: Vec<String> = arguments
+        .map(<[String]>::to_vec)
+        .or_else(|| {
+            class.split_once('<').map(|(_, rest)| {
+                crate::sema::builtins::split_arguments(
+                    rest.trim_end().strip_suffix('>').unwrap_or(rest),
+                )
+            })
+        })
+        .unwrap_or_default();
+    if arguments.is_empty() {
+        return None;
+    }
+    let parameters = class_template_parameters(index, scopes, root, path, &bare);
+    let substituted = crate::sema::types::substituted_spelling(&returns, &parameters, &arguments);
+    let target = base_type_name(&substituted);
+    (!target.is_empty() && target != bare).then(|| target.to_string())
+}
+
 fn member_fact(
     index: &ProjectIndex,
     scopes: &crate::ScopeTree,
@@ -6233,6 +6303,21 @@ fn member_fact_inner(
             1 => return Known::Yes(found.remove(0)),
             _ => return Known::Unknown(UnknownReason::Ambiguous(Box::from(member))),
         }
+    }
+
+    // **A member reached through `operator->`** — `shared_ptr<T>::operator->` returns `T *`, so `config->Generate`
+    // is `T::Generate`, and a lookup that stopped at the handle answered "`std::shared_ptr<LuaEditorConfig>` has no
+    // member `Generate`" with no completion beside it (reported from an editor, on the ordinary way a smart pointer
+    // is used). The rule is the language's: `->` on a class calls the class's `operator->` and looks at what it
+    // returns, one level — the same one level [`member_access_class`] reaches through a pointer for.
+    //
+    // The return type is the *class's* parameter spelling (`_Ty *` for `shared_ptr`, `T *` for a hand-written
+    // handle), so it is substituted with the arguments the use wrote before the lookup. A class with no
+    // `operator->`, or one whose answer is not a class this analysis can name, answers as it did before.
+    if let Some(found) =
+        through_an_operator_arrow(index, scopes, root, path, class, member, arguments)
+    {
+        return Known::Yes(found);
     }
 
     Known::Unknown(UnknownReason::NotDeclaredHere(Box::from(format!(

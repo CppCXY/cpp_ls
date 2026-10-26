@@ -698,11 +698,31 @@ fn declaration_markdown(
     };
     out.push_str(&code_block(&declaration));
 
-    out.push_str(&format!(
-        "\n`{}` — {}\n",
-        fact.qualified_name(),
-        kind_words(fact)
-    ));
+    // **An enumerator is drawn as one, with the value the compilation gives it.** `OPR_MUL` is a `Variable` in the
+    // fact — that is the kind a name in a scope has, and `DeclKind` has no enumerator — so a card that only asks the
+    // fact says "`BinOpr::OPR_MUL` — a variable", which is true and useless: what a reader hovering an enumerator
+    // wants is which set it belongs to and **what number it is** (reported from an editor: "the member has no hover,
+    // and if it did it should show the value"). The value is not in the fact: it is computed from the enumerators
+    // written before it, which is what the language does and what the raw text of the file holds.
+    let enumerator = enumerator_value(view, fact.name_range.start_offset);
+    match enumerator {
+        Some(_) => out.push_str(&format!(
+            "\n`{}` — an enumerator of `{}`\n",
+            fact.qualified_name(),
+            fact.scope.as_deref().unwrap_or("(an anonymous enum)")
+        )),
+        None => out.push_str(&format!(
+            "\n`{}` — {}\n",
+            fact.qualified_name(),
+            kind_words(fact)
+        )),
+    }
+
+    if let Some(value) = enumerator {
+        out.push_str(&format!(
+            "\nValue **{value}** — counted from the enumerators written before it, as a compiler does.\n"
+        ));
+    }
 
     // The comment the file writes above the declaration, in the place clangd and the C++ extension put it: after
     // the signature, before where it was declared from.
@@ -1006,6 +1026,81 @@ fn inline(text: &str) -> String {
 }
 
 /// What kind of declaration this is, as a sentence fragment.
+/// **The value of an enumerator, counted from the text** — `None` when the cursor is not on one.
+///
+/// An enumerator's value is not stored in its fact and should not be: it is a function of the enumerators written
+/// before it in the same body (an explicit `= 1` sets it, anything after it counts on), and the fact is a fact about
+/// one name. The file's own tree is where the sequence is, so this walks it:
+///
+/// ```text
+/// enum class E { A = 1, B, C = 0x10, D };    A 1, B 2, C 16, D 17
+/// ```
+///
+/// `None` when an explicit initialiser is not an integer literal — `1 << 4` or `Other` are values this layer does not
+/// evaluate, and a card that guessed at them would be worse than one that says the number it knows.
+fn enumerator_value(view: &FileView, offset: usize) -> Option<i64> {
+    let token = cpp_parser::token_at(&view.root, offset)?;
+    let declaration = token.parent_ancestors().find(|node| {
+        cpp_parser::CppSyntaxKind::from(node.kind()) == cpp_parser::CppSyntaxKind::EnumeratorDecl
+    })?;
+    let body = declaration.parent()?;
+
+    let mut value: i64 = -1;
+    for enumerator in body.children() {
+        if cpp_parser::CppSyntaxKind::from(enumerator.kind())
+            != cpp_parser::CppSyntaxKind::EnumeratorDecl
+        {
+            continue;
+        }
+        // **The significant tokens of the whole enumerator, nested ones included**: `A = 1 << 4` holds three of them
+        // after the name, and an initialiser that is not exactly one integer literal is not a value this layer
+        // evaluates — `None` rather than the first number it happened to see.
+        let mut tokens: Vec<cpp_parser::CppSyntaxToken> = enumerator
+            .descendants_with_tokens()
+            .filter_map(|element| element.into_token())
+            .filter(|token| !cpp_parser::is_trivia(cpp_parser::CppTokenKind::from(token.kind())))
+            .collect();
+        tokens.retain(|token| !token.text().trim().is_empty());
+        match tokens.get(1) {
+            Some(token)
+                if cpp_parser::CppTokenKind::from(token.kind())
+                    == cpp_parser::CppTokenKind::Assign =>
+            {
+                let literal = tokens.get(2)?;
+                if tokens.len() != 3
+                    || cpp_parser::CppTokenKind::from(literal.kind())
+                        != cpp_parser::CppTokenKind::IntegerLiteral
+                {
+                    return None;
+                }
+                value = an_integer(literal.text())?;
+            }
+            _ => value += 1,
+        }
+        if enumerator.text_range() == declaration.text_range() {
+            return Some(value);
+        }
+    }
+
+    None
+}
+
+/// An integer literal's value — decimal, hexadecimal, binary, with a `u`/`l` suffix if one is written.
+fn an_integer(text: &str) -> Option<i64> {
+    let text = text.trim_end_matches(|character: char| {
+        character.is_ascii_alphabetic() && !matches!(character, 'x' | 'X' | 'b' | 'B')
+    });
+    let text = text.replace('\'', "");
+    let (digits, radix) = match text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
+        Some(digits) => (digits, 16),
+        None => match text.strip_prefix("0b").or_else(|| text.strip_prefix("0B")) {
+            Some(digits) => (digits, 2),
+            None => (text.as_str(), 10),
+        },
+    };
+    i64::from_str_radix(digits, radix).ok()
+}
+
 fn kind_words(fact: &DeclFact) -> String {
     let kind = match fact.kind {
         DeclKind::Type => "a type",
@@ -1314,6 +1409,61 @@ impl RegisterCapabilities for HoverCapabilities {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// **An enumerator's value, counted the way a compiler counts it.**
+    ///
+    /// Reported from an editor: hovering `OPR_MUL` in an `enum class BinOpr { OPR_ADD = 1, OPR_MUL, … }` showed
+    /// nothing, and the report asked for the number beside it. The number is not in the fact — it is a function of the
+    /// enumerators written before it — so this reads the sequence out of the file's own tree.
+    #[test]
+    fn an_enumerators_value_is_counted_from_the_ones_before_it() {
+        let text = "enum class Kind { A = 1, B, C = 0x10, D, E = 100, F };\n";
+        let tree = cpp_parser::CppParser::parse(text, cpp_parser::ParserConfig::default());
+        let files = cpp_code_analysis::MemoryFiles::new().with_file("/p/a.cpp", text);
+        let mut session = cpp_code_analysis::Session::with_config(
+            "/p",
+            cpp_code_analysis::SessionFiles::new(cpp_code_analysis::OpenDocuments::new(), files),
+            cpp_code_analysis::WatchFilter::new("/p"),
+            cpp_code_analysis::CompilerConfig::default(),
+        );
+        session.load("/p/a.cpp");
+        let view = session
+            .view_of_the_file(std::path::Path::new("/p/a.cpp"))
+            .expect("a view");
+        let _ = tree;
+
+        for (name, expected) in [
+            ("A", 1),
+            ("B", 2),
+            ("C", 16),
+            ("D", 17),
+            ("E", 100),
+            ("F", 101),
+        ] {
+            let offset = text.find(&format!(" {name}")).expect("the fixture") + 1;
+            assert_eq!(
+                enumerator_value(&view, offset),
+                Some(expected),
+                "`{name}` counts from the enumerators before it"
+            );
+        }
+
+        // **A non-literal initialiser is not guessed at**: `1 << 4` is a value this layer does not evaluate, and the
+        // answer is `None` rather than a number nobody computed.
+        let shifted = "enum class S { A = 1 << 4, B };\n";
+        let files = cpp_code_analysis::MemoryFiles::new().with_file("/p/s.cpp", shifted);
+        let mut session = cpp_code_analysis::Session::with_config(
+            "/p",
+            cpp_code_analysis::SessionFiles::new(cpp_code_analysis::OpenDocuments::new(), files),
+            cpp_code_analysis::WatchFilter::new("/p"),
+            cpp_code_analysis::CompilerConfig::default(),
+        );
+        session.load("/p/s.cpp");
+        let view = session
+            .view_of_the_file(std::path::Path::new("/p/s.cpp"))
+            .expect("a view");
+        let offset = shifted.find(" A").expect("the fixture") + 1;
+        assert_eq!(enumerator_value(&view, offset), None);
+    }
 
     /// **中文表加载成功，而且和英文表用的是同一组 key。**
     ///

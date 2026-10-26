@@ -1481,6 +1481,36 @@ int f(int value);
     }
 
     #[test]
+    /// **Every declaration-specifier keyword is drawn as one** — the list in `kind_of_keyword`, asked of the real
+    /// token stream rather than read off the match arms.
+    ///
+    /// Reported from an editor: `explicit` was grey while `struct` and `constexpr` were coloured, in a class body
+    /// whose constructors are all spelled `explicit Marker(std::size_t pos);`. A keyword the pass drops is not a
+    /// colour a theme can recover — the client's own grammar draws it as plain text — so the list is tested rather
+    /// than trusted.
+    #[test]
+    fn a_declaration_specifier_is_drawn_as_a_modifier() {
+        let text = "struct Marker {\n\
+                    \x20   explicit Marker(int pos);\n\
+                    \x20   virtual ~Marker();\n\
+                    \x20   constexpr int size() const noexcept;\n\
+                    };\n";
+        let (session, path) = a_held_file(text);
+        let view = session.view_of_the_file(&path).expect("a view");
+        let file = session.files().held(&path).expect("the file is held");
+        let names = session.classified_names(&view);
+        let tokens = encode(file, Some(&view), &names, &None, false);
+        let at_type = by_offset(text, &tokens);
+
+        for word in ["explicit", "virtual", "constexpr", "const", "noexcept"] {
+            let at = text[..text.find(word).expect("the fixture writes it")].len();
+            assert_eq!(
+                at_type.get(&at),
+                Some(&index_of(TypeKind::Modifier)),
+                "`{word}` is a declaration specifier: {at_type:?}"
+            );
+        }
+    }
     fn a_keyword_is_drawn_as_what_it_is() {
         // **`auto` is in the fixture on purpose**: a reader asked for "`auto`, `const` and their kind in the blue a
         // type has, not the keyword colour" — a control-flow word says something about the syntax, while these say

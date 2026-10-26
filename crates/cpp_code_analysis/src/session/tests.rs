@@ -839,6 +839,90 @@ fn a_program_too_large_to_read_at_once_is_left_alone() {
     );
 }
 
+/// **An anonymous enum declares its enumerators** — `enum { LAJF };`, the C spelling of a set of constants.
+///
+/// Reported from an editor as "an unnamed enum is not supported", and it was literally true: the declaration names
+/// nothing, `is_unnamed_declaration` was consulted before the body was walked, and the walker returned — so every
+/// enumerator of every anonymous enum was missing from the scope tree and from the index. Two lines above it the file
+/// declares `LAJF`, and `definitions("LAJF")` answered `NotDeclaredHere`.
+#[test]
+fn an_anonymous_enum_declares_its_enumerators() {
+    let text = "enum { LAJF, LBJF };\nvoid f() { int x = LAJF; }\n";
+    let files = MemoryFiles::new().with_file("/p/a.cpp", text);
+    let fixture = Memory::new("an-anonymous-enum", &files);
+    let mut session = fixture.session();
+    session.did_open("/p/a.cpp", text);
+    session.index_everything();
+    let path = std::path::PathBuf::from("/p/a.cpp");
+
+    for name in ["LAJF", "LBJF"] {
+        let found = session.index().definitions(name, &path);
+        let Known::Yes(found) = found else {
+            panic!("`{name}` is declared by the anonymous enum: {found:?}");
+        };
+        assert_eq!(
+            found.found[0].fact.scope, None,
+            "an unnamed enum has no scope name"
+        );
+    }
+
+    // **And the name is classified as an enumerator**, which is what the semantic pass draws.
+    let view = session.view_of_the_file(&path).expect("a view");
+    let names = session.classified_names(&view);
+    let lajf = names
+        .iter()
+        .find(|name| name.range.start_offset == text.find("LAJF").expect("the fixture"))
+        .expect("`LAJF` is a name");
+    assert_eq!(lajf.kind, crate::semantic::NameKind::EnumMember);
+}
+/// **A member reached through `operator->`** — `config->Generate` on a smart-pointer-shaped class.
+///
+/// Reported twice from an editor, in one sentence: *"a member cannot be found through a smart pointer, and there is no
+/// completion either"*. The handle's own member list is `operator->`, `get`, `reset`; the names a reader is reaching
+/// for after an arrow are the pointee's. Both halves are answered here: the lookup follows what `operator->` returns
+/// (substituted with the arguments the use wrote, because the return type is the *class's* spelling — `_Ty *` for
+/// `std::shared_ptr`), and the member list after `->` is the pointee's.
+#[test]
+fn a_member_through_an_operator_arrow_is_the_pointees() {
+    let text = "template <typename T> struct handle { T *operator->(); void reset(); };\n\
+                struct Config { int Generate(int uri); };\n\
+                void g(handle<Config> config) { config->Generate(1); }\n";
+    let files = MemoryFiles::new().with_file("/p/a.cpp", text);
+    let fixture = Memory::new("through-an-arrow", &files);
+    let mut session = fixture.session();
+    session.did_open("/p/a.cpp", text);
+    session.index_everything();
+    let path = std::path::PathBuf::from("/p/a.cpp");
+    let view = session.view_of_the_file(&path).expect("a view");
+
+    // **The lookup**: `Generate` is `Config`'s, not the handle's.
+    let at = text.find("Generate(1)").expect("the fixture") + 1;
+    let found = session.definition(&view, crate::file::coordinates::ReadingOffset::new(at));
+    let Known::Yes(found) = found else {
+        panic!("`config->Generate` must resolve through `operator->`: {found:?}");
+    };
+    assert_eq!(
+        (found.fact.name.as_str(), found.fact.scope.as_deref()),
+        ("Generate", Some("Config")),
+        "the member is the pointee's"
+    );
+
+    // **And the list**, after the arrow: the pointee's declarations.
+    let after = text.find("config->Generate").expect("the fixture") + "config->".len();
+    let completions =
+        session.member_completions(&view, crate::file::coordinates::FileOffset::new(after));
+    let Known::Yes(completions) = completions else {
+        panic!("`config->` must list the pointee's members: {completions:?}");
+    };
+    assert_eq!(completions.class, "Config");
+    let names: Vec<&str> = completions
+        .members
+        .members
+        .iter()
+        .map(|member| member.fact.name.as_str())
+        .collect();
+    assert_eq!(names, ["Generate"], "and not the handle's own list");
+}
 /// **`index.read_the_whole_project = false` keeps the reader's own programs and nothing else.**
 ///
 /// The setting exists because the two reads are worth different things: a file the reader has open is a program they
