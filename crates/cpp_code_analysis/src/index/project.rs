@@ -6191,7 +6191,174 @@ fn a_members_answer_as_a_type(
         return substituted;
     };
     let target = crate::sema::types::substituted_spelling(target, &parameters, &arguments);
+    // **And the target is a *name* too**, so it is followed before it is answered: `pointer` is `_Val*` in the class
+    // that declares it, and `_Alloc_traits::reference` is whatever that alias names. Answering the spelling instead
+    // is what made `map::find(text)->second` look `second` up in `_Rb_tree_iterator` rather than in its `pair`.
+    let target = a_spelling_through_the_aliases(
+        index,
+        scopes,
+        root,
+        path,
+        class_type,
+        &target,
+        MAX_ALIAS_HOPS,
+    );
     format!("{leading}{target}{trailing}")
+}
+
+/// **How many aliases one spelling may be followed through** — see [`a_spelling_through_the_aliases`].
+///
+/// Six is past anything the standard library writes (`reference` → `_Alloc_traits::reference` →
+/// `allocator_traits<_Alloc>::reference` → `_Tp&` is three), and it is what stops a cyclic `typedef` from looping.
+const MAX_ALIAS_HOPS: usize = 6;
+
+/// **A spelling with the aliases a class declares followed through** — `pointer` → `_Val*`, and
+/// `_Alloc_traits::reference` → `std::size_t&`.
+///
+/// # Why this is a step of its own
+///
+/// A member's recorded type is a **name**: `typedef _Val* pointer;` records `_Val*`, while the use writes `pointer`,
+/// and the two are the same type only once the class's parameters are paired with the use's arguments — after which
+/// the answer is often *another* name (`_Alloc_traits::reference`) that has to be resolved in the same class again.
+/// The layer used to answer the name it found, and every consumer downstream then treated a spelling as a type:
+///
+/// * `map::find(text)->second` — `_Rb_tree_iterator<_Val>::operator->` answers `pointer`, and the answer was used as
+///   the class to look `second` up in: `Unknown(NotDeclaredHere("std::_Rb_tree_iterator::second"))`;
+/// * `auto lineStartOffset = _lineOffsetVec[line]` — `vector::reference` is `_Alloc_traits::reference`, and the
+///   `auto` variable was typed by that alias rather than by `std::size_t&`.
+///
+/// # The two shapes, and why `::` is the whole of the rule
+///
+/// ```text
+/// pointer                 a member of this class            ask this class for it
+/// _Alloc_traits::reference names `reference` in `_Alloc_traits`, which is a member of this class (an alias, a
+///                         base's alias, a nested class)     resolve the qualifier here, then ask *it* for `reference`
+/// ```
+///
+/// `depth` counts the hops, and a hop that would answer the spelling it was given is refused — the honest way to stop
+/// on a `typedef` that names itself.
+fn a_spelling_through_the_aliases(
+    index: &ProjectIndex,
+    scopes: &crate::ScopeTree,
+    root: &cpp_parser::CppSyntaxNode,
+    path: &Path,
+    class: &Type,
+    written: &str,
+    depth: usize,
+) -> String {
+    if depth == 0 {
+        return written.to_string();
+    }
+
+    let (leading, core, trailing) = split_the_operators_of(written);
+    let a_name = !core.is_empty()
+        && core
+            .chars()
+            .all(|character| character.is_alphanumeric() || matches!(character, '_' | ':' | '<' | '>' | ',' | ' '));
+    if !a_name {
+        return written.to_string();
+    }
+
+    let Some(class_name) = class.class_name() else {
+        return written.to_string();
+    };
+    let arguments: Vec<String> = class.arguments().iter().map(|one| one.to_string()).collect();
+    let parameters = index.template_parameters_for(class_name, path, &arguments);
+    if crate::probes::inference() {
+        eprintln!(
+            "[inference] alias step: {written:?} in {class:?} (class {class_name:?}, parameters {parameters:?}, \
+             arguments {arguments:?})"
+        );
+    }
+
+    // **An unqualified name is a member of this class.**
+    let Some((qualifier, last)) = split_at_the_last_scope(&core) else {
+        let Known::Yes((fact, _)) =
+            member_fact(index, scopes, root, path, &class.to_string(), &core, None)
+        else {
+            return written.to_string();
+        };
+        let Some(target) = fact.type_of.as_deref() else {
+            return written.to_string();
+        };
+        let target = crate::sema::types::substituted_spelling(target, &parameters, &arguments);
+        if target == core {
+            return written.to_string();
+        }
+        let followed = a_spelling_through_the_aliases(index, scopes, root, path, class, &target, depth - 1);
+        return format!("{leading}{followed}{trailing}");
+    };
+
+    // **A qualified name is a member of whatever the qualifier names** — and the qualifier is itself resolved here,
+    // because the library writes it without its namespace (`_Alloc_traits` inside `std`), and **substituted first**,
+    // because the qualifier is often a template parameter of the class the member came from:
+    // `allocator_traits<_Alloc>` declares `reference` as `typename _Alloc::value_type&`, so `_Alloc` has to become
+    // `std::allocator<std::size_t>` before `value_type` can be looked up. Measured on `lineStartOffset`: without
+    // this line the chain stops at `_Alloc::value_type&`, with it at `std::size_t&` — the difference between a
+    // spelling no reader can use and the type they asked for.
+    let qualifier = {
+        let substituted = crate::sema::types::substituted_spelling(&qualifier, &parameters, &arguments);
+        if substituted.trim().is_empty() {
+            qualifier
+        } else {
+            substituted
+        }
+    };
+    let inner = a_spelling_through_the_aliases(index, scopes, root, path, class, &qualifier, depth - 1);
+    // **A qualifier that did not resolve is where this stops.** Carrying on with the spelling as if it were a class
+    // asks the index for a *bare* name, and the library declares `_Alloc_traits` in a dozen classes: measured, the
+    // chain silently continued in `std::basic_string` and answered a type from another class. Stopping answers the
+    // last thing that *was* resolved, which is the honest place to hand over.
+    if inner.trim() == qualifier.trim() {
+        return written.to_string();
+    }
+    let inner_type = crate::sema::types::parse_type_spelling(&inner);
+    let Some(inner_name) = inner_type.class_name() else {
+        return written.to_string();
+    };
+    let inner_arguments: Vec<String> = inner_type
+        .arguments()
+        .iter()
+        .map(|one| one.to_string())
+        .collect();
+    let inner_parameters = index.template_parameters_for(inner_name, path, &inner_arguments);
+    let Known::Yes((fact, _)) =
+        member_fact(index, scopes, root, path, inner_name, &last, None)
+    else {
+        return written.to_string();
+    };
+    let Some(target) = fact.type_of.as_deref() else {
+        return written.to_string();
+    };
+    let target = crate::sema::types::substituted_spelling(target, &inner_parameters, &inner_arguments);
+    let followed = a_spelling_through_the_aliases(index, scopes, root, path, &inner_type, &target, depth - 1);
+    format!("{leading}{followed}{trailing}")
+}
+
+/// `A::b` → (`A`, `b`), split at the last `::` **outside angle brackets** — the same boundary
+/// [`without_the_namespace`] finds from the other side.
+fn split_at_the_last_scope(spelling: &str) -> Option<(String, String)> {
+    let bytes = spelling.as_bytes();
+    let mut depth = 0usize;
+    let mut boundary = None;
+    let mut at = 0usize;
+    while at + 1 < bytes.len() {
+        match bytes[at] {
+            b'<' => depth += 1,
+            b'>' => depth = depth.saturating_sub(1),
+            b':' if depth == 0 && bytes[at + 1] == b':' => {
+                boundary = Some(at);
+                at += 1;
+            }
+            _ => {}
+        }
+        at += 1;
+    }
+
+    let boundary = boundary?;
+    let qualifier = spelling[..boundary].trim().to_string();
+    let last = spelling[boundary + 2..].trim().to_string();
+    (!qualifier.is_empty() && !last.is_empty()).then_some((qualifier, last))
 }
 
 /// `const reference&` → (`const `, `reference`, `&`). The middle is what a name lookup is asked about.
@@ -6206,6 +6373,24 @@ fn split_the_operators_of(spelling: &str) -> (String, String, String) {
             leading.push(' ');
             rest = after.trim_start();
         }
+    }
+    // **The elaborated-type keywords are dropped rather than kept**, because they are not part of the type: a lookup
+    // asked for a member literally called `typename _Alloc_traits` finds nothing, and the chain then guessed a class
+    // by *bare* name and silently followed the wrong one — `std::basic_string`'s `_Alloc_traits` instead of
+    // `std::vector`'s, measured on `lineStartOffset`. They are not qualifiers either (`typename T&` and `T&` are the
+    // same type), so they belong in neither half of the answer.
+    loop {
+        let trimmed = rest.trim_start();
+        let Some(after) = ["typename", "class", "struct", "union", "enum"]
+            .iter()
+            .find_map(|keyword| trimmed.strip_prefix(keyword))
+        else {
+            break;
+        };
+        if !after.starts_with(char::is_whitespace) {
+            break;
+        }
+        rest = after.trim_start();
     }
     let trimmed = rest.trim_end();
     let mut trailing = String::new();

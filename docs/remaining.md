@@ -157,18 +157,45 @@ $env:CPPLS_REAL_PROJECT = "E:\does-not-exist"     → skipped × 3，全绿
 
 ## 还没修
 
-### A4. 依赖形式的限定别名没有跟随（`LuaReserved.find(text)->second`、`_Alloc_traits::reference`）
+### A4. 依赖形式的限定别名没有跟随（`LuaReserved.find(text)->second`、`_Tp_alloc_type::value_type&`）
 
 **现象**：`LuaReserved.find(text)->second` 报 "`std::map<…>` has no member second"；`lineStartOffset` 的类型停在
-`_Alloc_traits::reference`；`LuaReserved` 找不到引用。
+`_Tp_alloc_type::value_type&`；`LuaReserved` 找不到引用。
 
-**根因方向**（与本轮 A3 同一条链的后半段）：`_Alloc_traits::reference` 是一个**依赖形式的限定名**，要得到
-`std::size_t&` 必须：在该类的作用域里解析 `_Alloc_traits`（它是 `allocator_traits<_Alloc>` 的别名）→ 找到它的
-`reference` → 代入实参。`map::find` 返回 `iterator`，`->` 又经过 `_Rb_tree_iterator::operator->` 的 `pointer`，
-是同一类跟随。`LuaReserved` 的"找不到引用"同源：符号解析停在一个拼写而不是一个声明上。
+**已经做的（`25e5733` 之后的那次改动）**：`a_spelling_through_the_aliases` —— 把一个拼写里**类自己声明的别名**一路跟下去：
+
+```text
+pointer                     → _Val*                 （无限定：问这个类）
+_Alloc_traits::reference    → 先解析限定符，再问它     （限定：先跟限定符）
+```
+
+配套：`split_at_the_last_scope`（角度括号之外的最后一个 `::`）、`split_the_operators_of` 丢 `typename`/`class`/
+`struct`/`union`/`enum`（此前查找被问成 `typename _Alloc_traits`，什么也找不到，然后按**裸名**猜了一个类 —— 实测跟进了
+`std::basic_string` 的 `_Alloc_traits`）、以及"限定符没解析出来就停"的守卫（不再按裸名猜）。
+
+**现在停在哪（实测，`CPPLS_TRACE_INFERENCE=1` 每一跳都有日志）**：
+
+```text
+vector<size_t>::reference        → typename _Alloc_traits::reference
+_Alloc_traits                   → __gnu_cxx::__alloc_traits<_Tp_alloc_type>
+   …（每一跳都正确）…
+最终                             → _Tp_alloc_type::value_type&
+```
+
+残差全是**没有实参的模板形参**（`_Alloc` 用了默认实参 `std::allocator<size_t>`，而**默认实参不在事实里**）。这和
+C2 里 `a_defaulted_template_parameter_of_a_variable_template_substitutes`（`twice<float>` 答 `U`）是**同一个缺口**，
+也是 `map::find(…)->second` 停下的地方：箭头那一侧还要先按同一套把 `operator->` 的 `pointer` 跟成 `_Val*`。
+
+**下一步（按顺序）**：
+
+1. 事实里记下模板参数的**默认实参**（`declared_template_parameters_with` 旁边的表，`template_parameters_in` 已经在读
+   参数节点，只需要把 `= …` 那一段也留下），并把 `substituted_spelling` 的配对改成"缺实参用默认值"。
+2. 箭头路径（`through_an_operator_arrow`）里对 `operator->` 的返回拼写先跑一次
+   `a_spelling_through_the_aliases`，再取 pointee —— 这是 `find()->second` 的最后一块。
 
 **怎么验收**：`inference_probe` 在 `LuaSource.cpp` 上 `type_at` 给出 `std::size_t&`；`map<…>::find` 的 `->second`
-答到 `pair<const K, V>::second`；`symbol_references` 对 `LuaReserved` 列出 `LuaLexer.cpp` 的声明与使用。
+答到 `pair<const K, V>::second`。
+
 
 ### 其余
 
