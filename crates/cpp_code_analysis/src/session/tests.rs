@@ -932,10 +932,16 @@ fn a_class_templates_members_are_read_through_the_uses_arguments() {
 /// the arrow reaches.
 #[test]
 fn an_arrow_through_a_member_template_reaches_the_element_type() {
+    // **The shape MSVC writes**, because it is the one that broke: the base is named through an alias, and the alias
+    // being re-exposed (`using typename _Mybase::element_type;`) declares no type of its own.
     let header = "template <typename T> struct Holder {\n\
                   \x20   using element_type = T;\n\
                   };\n\
-                  template <typename T> struct Handle : Holder<T> {\n\
+                  template <typename T> struct Handle {\n\
+                  \x20 private:\n\
+                  \x20   using _Mybase = Holder<T>;\n\
+                  \x20 public:\n\
+                  \x20   using typename _Mybase::element_type;\n\
                   \x20   template <typename U = T, int = 0>\n\
                   \x20   U *operator->() const;\n\
                   };\n";

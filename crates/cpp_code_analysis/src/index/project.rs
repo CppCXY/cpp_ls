@@ -6360,6 +6360,22 @@ fn the_element_type_of(
     arguments: &[String],
 ) -> Option<String> {
     let parameters = index.template_parameters_for(bare, path, arguments);
+    // **The walk that follows member aliases as well as base clauses** — see
+    // [`an_element_type_through_the_members`]. The class this exists for names its base through an alias
+    // (`class shared_ptr : public _Mybase`), so the base's `element_type` is never in the class's own member list.
+    let through_the_members = an_element_type_through_the_members(
+        index,
+        scopes,
+        root,
+        path,
+        class,
+        &parameters,
+        arguments,
+        0,
+    );
+    if through_the_members.is_some() {
+        return through_the_members;
+    }
     // **The member *list*, not the single-member query**: `member_fact` ends by falling back to this very function
     // (the arrow of a class that has no `element_type`), so asking it here recursed until the stack ran out — measured,
     // the test that produced this line overflowed it. A list walks the bases and never asks about an arrow.
@@ -15989,4 +16005,107 @@ fn is_a_parameter_name(name: &str) -> bool {
         && name
             .chars()
             .all(|character| character.is_alphanumeric() || character == '_')
+}
+
+/// **`element_type` read through the member that names the base** — `using _Mybase = _Ptr_base<_Ty>;` and then
+/// `class shared_ptr : public _Mybase`.
+///
+/// `members_of` walks a base clause, and a base clause that names an **alias** is not a class: measured on a fixture
+/// with MSVC's own shape, `members_of("Handle<Item>")` listed `_Mybase: Some("Holder<Item>")`, `element_type` (from the
+/// re-exposing `using typename _Mybase::element_type;`, with no type of its own) and `operator->` — and *none* of the
+/// base's members. The alias's `type_of` is the base's spelling, already substituted with the use's arguments, so it is
+/// the step this walk needs: one level of alias, then the same question.
+fn an_element_type_through_the_members(
+    index: &ProjectIndex,
+    scopes: &crate::ScopeTree,
+    root: &cpp_parser::CppSyntaxNode,
+    path: &Path,
+    class: &str,
+    parameters: &[String],
+    arguments: &[String],
+    depth: usize,
+) -> Option<String> {
+    if depth > 3 {
+        return None;
+    }
+    let Known::Yes(members) = members_of(index, scopes, root, path, class) else {
+        return None;
+    };
+
+    // The class's own `element_type`/`value_type`, when the declaration that has the name also has a type.
+    for name in ["element_type", "value_type"] {
+        let Some(fact) = members
+            .members
+            .iter()
+            .filter(|member| member.fact.name == name)
+            .map(|member| &member.fact)
+            .find(|fact| fact.type_of.is_some())
+        else {
+            continue;
+        };
+        let Some(written) = fact.type_of.as_deref() else {
+            continue;
+        };
+        let substituted = crate::sema::types::substituted_spelling(written, parameters, arguments);
+        let target = base_type_name(&substituted).to_string();
+        if crate::probes::inference() {
+            eprintln!(
+                "[inference] element_type: {class}::{name} wrote {written:?} -> {substituted:?} -> {target:?}"
+            );
+        }
+        if !target.is_empty()
+            && !parameters.iter().any(|parameter| parameter == &target)
+            && target != base_type_name(class)
+        {
+            return Some(target);
+        }
+    }
+
+    // A member of kind `Type` whose target names another class — the alias of the base.
+    for member in &members.members {
+        if member.fact.kind != crate::DeclKind::Type {
+            continue;
+        }
+        let Some(target) = member.fact.type_of.as_deref() else {
+            continue;
+        };
+        if base_type_name(target) == base_type_name(class) {
+            continue;
+        }
+        if let Some(found) = an_element_type_through_the_members(
+            index,
+            scopes,
+            root,
+            path,
+            target,
+            parameters,
+            arguments,
+            depth + 1,
+        ) {
+            return Some(found);
+        }
+    }
+
+    // And the declared base clauses, for the ones that do name a class.
+    for base in bases_of(index, scopes, root, path, class)
+        .value()
+        .unwrap_or_default()
+    {
+        let base = resolved_in_the_enclosing_scopes(index, scopes, path, class, base.trim());
+        let base = resolve_aliases(index, scopes, root, path, &base);
+        if let Some(found) = an_element_type_through_the_members(
+            index,
+            scopes,
+            root,
+            path,
+            &base,
+            parameters,
+            arguments,
+            depth + 1,
+        ) {
+            return Some(found);
+        }
+    }
+
+    None
 }

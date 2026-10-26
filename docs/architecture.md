@@ -1438,3 +1438,33 @@ g(Handle<Item> file) { file-> }   →  class "Item"（修前：Unknown(NotDeclar
 `using` 记下目标（`kind: Type`、`type_of: <目标>`），然后 `element_type` 的回退就能在真实项目上给出 `LuaSource`。
 
 `cpp_code_analysis` 695 lib + 43 个集成目标全绿。
+### 9.5 箭头这一条的进展：成员别名指出的基类，在夹具上走通了
+
+§9.4 说 `shared_ptr::element_type` 的事实是 `kind: Other, type_of: None`。进一步追下来，MSVC 是这么写的：
+
+```cpp
+template <class _Ty> class shared_ptr : public _Mybase {
+private:
+    using _Mybase = _Ptr_base<_Ty>;      // ← 基类是通过【成员别名】命名的
+public:
+    using typename _Mybase::element_type;   // ← 只是一句"重新暴露"，本身不引入类型
+```
+
+于是 `members_of("std::shared_ptr<…>")` 的 44 个成员里，`element_type` 是那句重新暴露（没有类型），**基类的成员根本不在列表里** ——
+`members_of` 会走基类子句，但这条基类子句写的是别名 `_Mybase`，不是类。
+
+修法（`an_element_type_through_the_members`）：在类的成员里找**kind 为 `Type` 且 `type_of` 指向另一个类**的成员（正是
+`_Mybase = _Ptr_base<_Ty>`），把它的目标当基类再问一次，深度上限 3。夹具（MSVC 的原始形状）实测通过：
+
+```text
+Handle<Item> 的成员  [("_Mybase", Some("Holder<Item>"), Type), ("element_type", None, Other), ("operator->", None, Function)]
+[inference] element_type: Holder<T>::element_type wrote "T" -> "Item" -> "Item"
+[inference] operator-> substitution: … "_Ty2 *"-同形 → "Item"
+file->            →  class "Item"
+```
+
+**但真实项目上这一步还没走通**：`std::shared_ptr<LuaSource>` 的 44 个成员里仍只有那句没有类型的 `element_type`，走别名的递归
+没有拿到 `_Ptr_base` 的成员（别名目标是 `_Ptr_base<_Ty>`，而类在索引里叫 `std::_Ptr_base`；两次尝试——按拼写解析、去掉实参再
+解析——都还没命中）。这一条留给下一轮，现象与两次尝试都记在这里，免得重走。
+
+`cpp_code_analysis` 695 lib + 43 个集成目标全绿。
