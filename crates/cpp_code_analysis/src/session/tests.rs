@@ -839,6 +839,81 @@ fn a_program_too_large_to_read_at_once_is_left_alone() {
     );
 }
 
+/// **The project's other roots are read in the background, after a pause that is clearly not mid-sentence.**
+///
+/// A reader has `a.cpp` open and `b.cpp` is a project root nobody is looking at. Both include one header, so reading
+/// either program makes that header's declarations the compiler's reading for the files it is in force in — which is
+/// the whole point of §7.6: a project nobody has opened a file from still becomes queryable, one program at a time.
+///
+/// The two clocks are the behaviour: the open file's program after **one second**, the project's other roots after
+/// **ten**. `pretend_a_pause` moves the session's editing clock rather than sleeping, because the second number is a
+/// person's typing rhythm and a test that waited for it would be a test nobody runs.
+#[test]
+fn the_roots_of_the_project_are_read_in_the_background() {
+    let shared = "struct Shared { int size; };\n";
+    let a = "#include \"shared.h\"\n";
+    let b = "#include \"shared.h\"\nint from_b = 1;\n";
+    let files = MemoryFiles::new()
+        .with_file("/p/shared.h", shared)
+        .with_file("/p/a.cpp", a)
+        .with_file("/p/b.cpp", b);
+    let fixture = Memory::new("the-project-is-read", &files);
+    let mut session = fixture.session();
+    session.add_project_files([
+        std::path::PathBuf::from("/p/a.cpp"),
+        std::path::PathBuf::from("/p/b.cpp"),
+        std::path::PathBuf::from("/p/shared.h"),
+    ]);
+    session.did_open("/p/a.cpp", a);
+    session.index_everything();
+
+    // **The reader's own file**, one second after they stop typing.
+    session.pretend_a_pause(std::time::Duration::from_millis(1_100));
+    let first = session
+        .read_a_program_now()
+        .expect("the program of the file the reader has open");
+    assert_eq!(first.root, std::path::Path::new("/p/a.cpp"));
+
+    // **A root nobody has open waits ten seconds**, and it is the *header* that is not a root: `shared.h` is
+    // included by two files, so it is part of their programs rather than a program of its own.
+    assert!(
+        session.read_a_program_now().is_none(),
+        "the project's other roots wait for a longer pause"
+    );
+    session.pretend_a_pause(std::time::Duration::from_secs(11));
+    let second = session
+        .read_a_program_now()
+        .expect("the project's other root");
+    assert_eq!(second.root, std::path::Path::new("/p/b.cpp"));
+
+    // **And both programs filed the header's declarations**, each under the program that read it (⑲): the header is
+    // one text with two readings, and neither session has to have opened it.
+    assert!(
+        session
+            .index()
+            .the_program_that_read(std::path::Path::new("/p/shared.h"))
+            .is_some(),
+        "the header was read by the programs that include it"
+    );
+    assert!(
+        matches!(
+            session
+                .index()
+                .definitions("Shared", std::path::Path::new("/p/a.cpp")),
+            Known::Yes(_)
+        ),
+        "and a lookup from `a.cpp` finds it"
+    );
+    assert!(
+        matches!(
+            session
+                .index()
+                .definitions("Shared", std::path::Path::new("/p/b.cpp")),
+            Known::Yes(_)
+        ),
+        "and from a file whose program was read later"
+    );
+}
 /// **A body edit does not cost the program again; a directive edit does.**
 ///
 /// A program read is 5.24 s of background CPU for 180 files (measured, `tests/keystroke_probe.rs`), and what decides

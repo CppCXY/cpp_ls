@@ -748,7 +748,12 @@ async fn index_in_background(context: ServerContextSnapshot) {
                     .flatten()
             {
                 if wait.is_zero() {
-                    context.analysis().read_a_program().await;
+                    // **Then breathe.** A project has one program per translation unit, and a pump that read them
+                    // back to back would peg a core for minutes after every pause; one idle tick between them is
+                    // the same pace the loop uses when it has nothing to do.
+                    if context.analysis().read_a_program().await {
+                        tokio::time::sleep(IDLE_WAIT).await;
+                    }
                 } else {
                     tokio::time::sleep(wait + IDLE_WAIT).await;
                 }
