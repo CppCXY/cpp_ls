@@ -135,6 +135,15 @@ pub async fn on_goto_definition_handler(
         let found =
             crate::handlers::references::narrowed_to_the_cursors_class(&view, offset.get(), found);
 
+        // **A declaration is not a definition, and this request is the one for definitions.** `class vector<bool,
+        // _Alloc>;` forward-declares the specialization `<vector>` then defines it, and both are candidates for the
+        // name — measured on MSVC's `<vector>`, a jump to `vector` offered three places, one of them the forward
+        // declaration. C++ has no rule that hides it, but a reader asking *where this is defined* means the body,
+        // and a list whose entries are "the definition, a promise that one exists, another definition" makes the
+        // promise look like a place. What is kept per group — one file, one scope, one name — is the definitions when
+        // a group has any, and everything when it has none (a declaration is a better answer than no answer).
+        let found = definitions_where_there_are_bodies(session, found);
+
         // **The overload a call means comes first.** The protocol allows a list and a client shows it in order, so the
         // first entry is what a reader who does not pick from the popup gets — and for a call that is the declaration
         // its arguments select. The same two queries the hover marks from, so the two handlers cannot disagree.
@@ -209,6 +218,128 @@ fn name_range(
 
 pub struct DefinitionCapabilities;
 
+/// **Keep the candidates that are written as definitions, per group — and everything when a group has none.**
+///
+/// A group is *one file, one scope, one name*: the same entity declared twice. `class vector<bool, _Alloc>;` and the
+/// specialization that follows it are one such group, and C++ says they are two declarations of one entity — the
+/// first a promise, the second the body. A reader who asked for the definition means the body, and a list that holds
+/// both makes the promise look like a place to go.
+///
+/// # How a fact says "definition" without a field for it
+///
+/// A [`DeclFact`](cpp_code_analysis::DeclFact) records where a declaration is written, so the file's own text answers
+/// the question: the first `{`, `:` or `;` after the declaration's range is a **body**, a **base clause** (or a
+/// constructor's initializer list) — both of which only a definition has — or the semicolon that ends a declaration.
+/// Measured on the four spellings that matter:
+///
+/// ```text
+/// struct A;                range "struct A"        → `;`      a declaration
+/// struct A { int x; };     range "struct A { … }"  → `;` after a `{` *inside* the range
+/// struct A : public B {…}  range "struct A : public B" → `:`   a definition
+/// void f(); void f() {…}   range "f()"             → `;` / `{`
+/// ```
+///
+/// The braces are looked for **inside** the range as well, because a class's range already contains its body while a
+/// function's does not; and nothing is claimed when the file's text is not held — a filter that guessed about a file
+/// it cannot read would be removing answers it knows nothing about.
+fn definitions_where_there_are_bodies<F: cpp_code_analysis::FileProvider + Clone>(
+    session: &Session<F>,
+    found: cpp_code_analysis::ProjectDefinitions,
+) -> cpp_code_analysis::ProjectDefinitions {
+    if found.found.len() < 2 {
+        return found;
+    }
+
+    let written_as_a_definition: Vec<bool> = found
+        .found
+        .iter()
+        .map(|declaration| {
+            is_written_as_a_definition(session, &declaration.file, &declaration.fact)
+        })
+        .collect();
+
+    // The groups that have one, and the ones that do not are left whole.
+    let groups_with_a_body: std::collections::HashSet<(
+        std::path::PathBuf,
+        Option<String>,
+        String,
+    )> = found
+        .found
+        .iter()
+        .zip(&written_as_a_definition)
+        .filter(|(_, definition)| **definition)
+        .map(|(declaration, _)| {
+            (
+                declaration.file.clone(),
+                declaration.fact.scope.clone(),
+                declaration.fact.name.clone(),
+            )
+        })
+        .collect();
+    if groups_with_a_body.is_empty() {
+        return found;
+    }
+
+    let kept: Vec<cpp_code_analysis::ProjectDefinition> = found
+        .found
+        .into_iter()
+        .zip(written_as_a_definition)
+        .filter(|(declaration, definition)| {
+            let group = (
+                declaration.file.clone(),
+                declaration.fact.scope.clone(),
+                declaration.fact.name.clone(),
+            );
+            !groups_with_a_body.contains(&group) || *definition
+        })
+        .map(|(declaration, _)| declaration)
+        .collect();
+
+    cpp_code_analysis::ProjectDefinitions {
+        found: kept,
+        ..found
+    }
+}
+
+/// **Is this declaration written with a body?** — see [`definitions_where_there_are_bodies`].
+fn is_written_as_a_definition<F: cpp_code_analysis::FileProvider + Clone>(
+    session: &Session<F>,
+    file: &std::path::Path,
+    fact: &cpp_code_analysis::DeclFact,
+) -> bool {
+    let Some(text) = session.text(file) else {
+        return false;
+    };
+    let start = fact.range.start_offset.min(text.len());
+    let end = fact.range.end_offset().min(text.len());
+    let Some(written) = text.get(start..end) else {
+        return false;
+    };
+
+    // **A range that ends its own declaration is a declaration** — and the semicolon is *inside* it: measured,
+    // `class Box;` has the range `class Box;`, so looking past the end would find the next declaration's body and call
+    // a promise a definition.
+    if written.trim_end().ends_with(';') {
+        return false;
+    }
+
+    // A class's range already holds its body: `struct A { int x; }` is one range, while a function's range is its
+    // declarator — `f()` — with the body written after it.
+    if written.contains('{') {
+        return true;
+    }
+
+    for character in text.get(end..).unwrap_or_default().chars() {
+        match character {
+            '{' | ':' => return true,
+            ';' => return false,
+            _ => {}
+        }
+    }
+
+    false
+}
+
 impl RegisterCapabilities for DefinitionCapabilities {
     fn register_capabilities(server_capabilities: &mut ServerCapabilities, _: &ClientCapabilities) {
         server_capabilities.definition_provider = Some(OneOf::Left(true));
@@ -251,4 +382,91 @@ fn chosen_definition(
         })
         .collect();
     session.the_declaration_a_call_means(view, offset, &parameter_lists, &template_parameters)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cpp_code_analysis::{
+        CompilerConfig, MemoryFiles, OpenDocuments, Session, SessionFiles, WatchFilter,
+    };
+
+    /// **A forward declaration is not a place a definition lives.**
+    ///
+    /// The two-definitions shape is MSVC's `<vector>`: `class vector<bool, _Alloc>;` forward-declares the
+    /// specialization, and the definition with its base clause follows a few hundred lines later — so a jump to
+    /// `vector` offered three places, one of them a promise. The filter keeps the two definitions and drops the
+    /// promise, and a name that is *only* declared keeps its declaration (a better answer than none).
+    #[test]
+    fn a_forward_declaration_is_not_offered_beside_its_definition() {
+        let header = "\
+class Box;
+class Box { int size; };
+class Box<bool>;
+class Box<bool> : public Box { };
+class Promised;
+";
+        let source = "#include \"box.h\"\nBox b;\nPromised* promised;\n";
+        let mut memory = MemoryFiles::new()
+            .with_file("/p/box.h", header)
+            .with_file("/p/main.cpp", source);
+        memory = memory.with_file("/p/other.cpp", "int main() { return 0; }\n");
+        let providers = SessionFiles::new(OpenDocuments::new(), memory);
+        let mut session = Session::with_config(
+            "/p",
+            providers,
+            WatchFilter::new("/p"),
+            CompilerConfig::default(),
+        );
+        session.add_project_files([
+            std::path::PathBuf::from("/p/box.h"),
+            std::path::PathBuf::from("/p/main.cpp"),
+        ]);
+        session.index_everything();
+
+        let found = session
+            .index()
+            .definitions("Box", std::path::Path::new("/p/main.cpp"));
+        let Known::Yes(found) = found else {
+            panic!("the name is declared: {found:?}");
+        };
+        assert_eq!(found.found.len(), 4, "four declarations before the filter");
+
+        let kept = definitions_where_there_are_bodies(&session, found);
+        let written: Vec<String> = kept
+            .found
+            .iter()
+            .map(|declaration| {
+                let text = session.text(&declaration.file).expect("held");
+                text[declaration.fact.range.start_offset..declaration.fact.range.end_offset()]
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(
+            written.len(),
+            2,
+            "a forward declaration is not a definition: {written:?}"
+        );
+        assert!(
+            written.iter().all(|declaration| declaration.contains('{')),
+            "what survived is what has a body: {written:?}"
+        );
+
+        // **A name nothing defines keeps its declaration.** `Promised` is only ever forward-declared here, and a
+        // declaration is a better answer than "not found" — the filter removes places that cannot be the definition,
+        // it does not require one to exist.
+        let known = session
+            .index()
+            .definitions("Promised", std::path::Path::new("/p/main.cpp"));
+        let Known::Yes(known) = known else {
+            panic!("the name is declared: {known:?}");
+        };
+        assert_eq!(
+            definitions_where_there_are_bodies(&session, known)
+                .found
+                .len(),
+            1,
+            "a declaration with nothing to prefer stays"
+        );
+    }
 }

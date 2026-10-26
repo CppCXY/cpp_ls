@@ -3092,7 +3092,8 @@ struct Widget {
 /// **Hover shows what the file wrote about a declaration — and only what it wrote as documentation.**
 ///
 /// Three positions in one fixture, because the interesting part is the *boundary*: the documented declaration
-/// carries its comment (Doxygen markers and all, the way clangd shows them), the one under a plain `//` comment
+/// carries its comment (its `@param`s rendered as a list, not as markers in a paragraph — see
+/// `render_documentation`), the one under a plain `//` comment
 /// carries none — a `// TODO` dressed as an interface description is the failure the parser's own classification
 /// exists to prevent — and `this`, which names no declaration at all, is answered by the expression question
 /// instead: the class it points at.
@@ -3133,8 +3134,12 @@ fn hover_shows_the_documentation_and_refuses_a_plain_comment() {
         "the comment above the declaration is the documentation: {text}"
     );
     assert!(
-        text.contains("@param a the first"),
-        "shown as the file wrote it, markers included: {text}"
+        text.contains("**`a`** — the first") && text.contains("**`b`** — the second"),
+        "each parameter is a list item, named and described: {text}"
+    );
+    assert!(
+        !text.contains("@param"),
+        "and the markers are no longer in the text: {text}"
     );
     assert!(
         text.contains("add(int a, int b)"),

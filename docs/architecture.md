@@ -844,6 +844,44 @@ unit_read_probe, clice, 同一闭包, 连跑两次    43 238 / 43 363 fact(s)，
 （`prepare_the_re_read`）的**覆盖面**取决于队列顺序 —— 一个文件在第二遍之前被读成 raw，还是在第二遍里被读成
 渲染，事实数本来就不同（⑱ 之后一份读法只有一份来源，但"哪一份"取决于谁先读到）。这不是这一轮能顺手修的，已经记
 在这里当下一步的测量起点：把队列顺序固定成确定的，再看这个数是否还变。
+### 7.11 ㉑ 两条用户看到的问题：hover 里的 Doxygen，和定义列表里的前置声明
 
+用户发来两张截图，都不是"迁移计划"里的条目，而是能看见的错。两条都修了，而且第一条推翻了一条**写在文档里**的决定。
 
+**① hover 把文档注释当成一段连续文字。** 原来的规则是"按文件写的显示"（`documentation_text` 的注释里写着理由：不要发明
+文件没写的结构）。截图里的结果是：
 
+```text
+printh(const std::string &message, int count);
+printh — a function
+@brief Prints a message with a preceding newline. @param message The message to print after a newline. @param count …
+Declared in main.cpp:77:6
+```
+
+Markdown 会把一个段落里的换行接起来，所以 `@brief`、两个 `@param` 变成一坨，`@param` 看起来像句子里的一个词。那条规则的
+论据（"不要发明结构"）说的是**发明**；而这些结构是文件自己写的，`@brief`/`@param` 就是 Doxygen 的拼写方式。
+
+现在的渲染（`render_documentation`，hover 和 signature help 共用，所以两个弹窗不会互相矛盾）：
+
+```text
+每个命令是一个块：@brief/@details → 自己的段落；@param/@tparam/@return/@note/@warning/@see/@deprecated/@todo → 一个
+列表，参数名或标签加粗；续行并入上一个块；空行结束一个块；\brief 与 @brief 是同一个命令（两种拼写都是 Doxygen 的）；
+认不出的命令**照原样**留在正文里 —— 丢掉它是没人要求过的策略。
+```
+
+标签本身走 i18n（`doc.*`，中英各一份，很短 —— 它们出现在作者写的正文旁边而不是取代正文）。`@param[in] p` 的方向保留在
+名字旁边（`- **`p`** (in) — …`）：读者要先知道这个参数是读的，再去读描述。
+
+**② 定义跳转把前置声明列成"定义之一"。** `class vector<bool, _Alloc>;` 在 `<vector>` 里先前置声明特化，再定义它；于是一次
+跳转给出三个位置，其中一个是"我保证后面有"。C++ 没有隐藏它的规则，但读者问的是**定义在哪**，一份"定义 / 一句承诺 /
+另一个定义"的列表让承诺看起来像地方。
+
+规则：**按（文件, 作用域, 名字）分组，组里有定义就只留定义；一个组里没有任何定义时全部保留**（声明比"找不到"好）。
+一条事实没有"这是定义"的字段，所以答案是文件自己的文字：范围里含 `{`，或范围**之后**第一个 `{`/`:`/`;` 是 `{`/`:`。
+`;` 在范围**里面**（`class Box;` 的范围就是 `class Box;`）—— 这一点是被测试抓住的：先写成"看范围之后的第一个分隔符"，
+把每条前置声明都读成了定义。
+
+```text
+cpp_ls        103 lib（+3：渲染 2 条、过滤 1 条）+ handshake 34 全绿；latency 2（5.96 s）
+cpp_code_analysis  686 lib 全绿
+```

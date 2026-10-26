@@ -123,3 +123,13 @@ command:
   image: "**`@image`** —— 文档里的一张图：`@image html file.png \"说明\"`。"
   li: "**`@li`** —— 列表里的一项。"
   arg: "**`@arg`** —— 列表里的一项，同 `@li`。"
+# 文档注释里的命令在 hover 中显示时使用的**标签**。刻意很短：它出现在作者写的正文旁边，而不是取代正文。
+doc:
+  returns: "返回"
+  note: "注意"
+  warning: "警告"
+  attention: "注意"
+  see: "参见"
+  deprecated: "已弃用"
+  todo: "待办"
+  parameter: "参数"

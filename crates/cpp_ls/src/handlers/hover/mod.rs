@@ -779,9 +779,175 @@ pub(crate) fn documentation_text(comment: &CppDocComment) -> Option<String> {
     let text = comment.get_comment_text();
     let text = text.trim();
 
-    (!text.is_empty()).then(|| text.to_string())
+    (!text.is_empty()).then(|| render_documentation(text))
 }
 
+/// **A documentation comment as markdown** — its Doxygen commands rendered rather than dumped.
+///
+/// # Why this is not "show the comment as it was written"
+///
+/// That was the rule, and a screenshot of the result is why it changed. Markdown joins a paragraph's lines, so
+///
+/// ```text
+/// /// @brief Prints a message with a preceding newline.
+/// /// @param message The message to print after a newline.
+/// /// @param count The number of times to print the message after a newline.
+/// ```
+///
+/// — the ordinary shape of a documented C++ function — arrived in the popup as **one run-on paragraph** with the tags
+/// still in it, and `@param` read as a word in a sentence rather than as the name of a parameter. The rule's own
+/// argument ("a rendering policy the file did not write") is about *inventing* structure; the file wrote this
+/// structure, and Doxygen's tags are its spelling of it.
+///
+/// # What is rendered, and what is left alone
+///
+/// A **command is a block**. `@brief`/`@details` become their own paragraph; `@param`/`@tparam`/`@return`/`@note`/
+/// `@warning`/`@see`/`@deprecated` become one list, with the parameter's name or the label in bold; a continuation
+/// line belongs to the block above it; a blank line ends the block. `\brief` is the same command as `@brief` — both
+/// spellings are Doxygen's — and a command this table does not know is shown **as it was written**, in prose, because
+/// a policy that silently dropped the parts it did not recognise would be worse than the run-on paragraph.
+fn render_documentation(text: &str) -> String {
+    // The blocks of the answer, in the order the file wrote them, and the **one list** they share: Doxygen's
+    // parameter and label commands are one list even when a `@note` sits between two `@param`s.
+    let mut blocks: Vec<String> = Vec::new();
+    let mut list: Vec<String> = Vec::new();
+    let mut prose: Option<String> = None;
+
+    fn end_prose(blocks: &mut Vec<String>, prose: &mut Option<String>) {
+        if let Some(text) = prose.take()
+            && !text.trim().is_empty()
+        {
+            blocks.push(text);
+        }
+    }
+    fn end_list(blocks: &mut Vec<String>, list: &mut Vec<String>) {
+        if !list.is_empty() {
+            blocks.push(list.join("\n"));
+            list.clear();
+        }
+    }
+    fn say(prose: &mut Option<String>, line: &str) {
+        match prose {
+            Some(text) => {
+                text.push(' ');
+                text.push_str(line);
+            }
+            None => *prose = Some(line.to_string()),
+        }
+    }
+
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            end_prose(&mut blocks, &mut prose);
+            end_list(&mut blocks, &mut list);
+            continue;
+        }
+
+        let Some((command, rest)) = command_of(trimmed) else {
+            // **A line with no command continues the block above it** — a parameter's description that ran onto the
+            // next line, or a paragraph that did. With nothing open it starts a paragraph of its own.
+            if let Some(prose) = &mut prose {
+                prose.push(' ');
+                prose.push_str(trimmed);
+            } else if let Some(item) = list.last_mut() {
+                item.push(' ');
+                item.push_str(trimmed);
+            } else {
+                say(&mut prose, trimmed);
+            }
+            continue;
+        };
+
+        match command {
+            "param" | "tparam" | "arg" | "return" | "returns" | "result" | "note" | "warning"
+            | "attention" | "see" | "deprecated" | "todo" | "pre" | "post" | "remark" => {
+                end_prose(&mut blocks, &mut prose);
+                let item = match command {
+                    // `@param[in] name description` — the direction is part of the command, not of the name, and it
+                    // is worth keeping: "this parameter is read" is the first thing the description has to be read
+                    // against.
+                    "param" | "tparam" | "arg" => {
+                        let (direction, rest) = direction_of(rest);
+                        match rest.split_once(char::is_whitespace) {
+                            Some((name, description)) => match direction {
+                                Some(direction) => {
+                                    format!("- **`{name}`** ({direction}) — {}", description.trim())
+                                }
+                                None => format!("- **`{name}`** — {}", description.trim()),
+                            },
+                            None => format!("- **{}** — {rest}", t!("doc.parameter")),
+                        }
+                    }
+                    "return" | "returns" | "result" => {
+                        format!("- **{}** — {rest}", t!("doc.returns"))
+                    }
+                    "note" => format!("- **{}** — {rest}", t!("doc.note")),
+                    "warning" => format!("- **{}** — {rest}", t!("doc.warning")),
+                    "attention" => format!("- **{}** — {rest}", t!("doc.attention")),
+                    "see" => format!("- **{}** — {rest}", t!("doc.see")),
+                    "deprecated" => format!("- **{}** — {rest}", t!("doc.deprecated")),
+                    "todo" => format!("- **{}** — {rest}", t!("doc.todo")),
+                    // A label this table has no translation for keeps the command's own spelling, capitalised:
+                    // `@pre` reads as **Pre**, which is what the file wrote and what Doxygen calls it.
+                    other => format!("- **{}** — {rest}", capitalize(other)),
+                };
+                list.push(item);
+            }
+            // `@brief` and `@details` are what a paragraph says, so they open one.
+            "brief" | "details" | "short" => {
+                end_list(&mut blocks, &mut list);
+                say(&mut prose, rest);
+            }
+            // **A command this table does not know is shown as the file wrote it**, in a block of its own — dropping
+            // it would be a policy nobody asked for, and merging it into the paragraph above hides where it starts.
+            _ => {
+                end_list(&mut blocks, &mut list);
+                end_prose(&mut blocks, &mut prose);
+                say(&mut prose, trimmed);
+            }
+        }
+    }
+
+    end_prose(&mut blocks, &mut prose);
+    end_list(&mut blocks, &mut list);
+    blocks.join("\n\n")
+}
+
+/// The direction a parameter command carries, and the rest — `@param[in] p` is `(Some("in"), "p")`.
+fn direction_of(rest: &str) -> (Option<String>, &str) {
+    let Some(after) = rest.strip_prefix('[') else {
+        return (None, rest);
+    };
+    let Some(end) = after.find(']') else {
+        return (None, rest);
+    };
+    (
+        Some(after[..end].trim().to_string()),
+        after[end + 1..].trim_start(),
+    )
+}
+
+/// The Doxygen command a comment line starts with, and the text after it — `None` for prose.
+///
+/// Both spellings are Doxygen's: `@brief` and `\brief` are one command, and a real codebase uses both.
+fn command_of(line: &str) -> Option<(&str, &str)> {
+    let rest = line.strip_prefix('@').or_else(|| line.strip_prefix('\\'))?;
+    let end = rest
+        .find(|character: char| !character.is_ascii_alphanumeric())
+        .unwrap_or(rest.len());
+    let command = &rest[..end];
+    (!command.is_empty()).then(|| (command, rest[end..].trim_start()))
+}
+
+/// A command's own spelling, capitalised — the label for one this crate has no translation for.
+fn capitalize(word: &str) -> String {
+    let mut characters = word.chars();
+    match characters.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + characters.as_str(),
+        None => String::new(),
+    }
+}
 /// What the expression at the cursor is, when no declaration is at it.
 ///
 /// The fallback for `this`, `*p`, `f(1)`, `w.size`: positions where there is no *name* to look up and the analysis
@@ -1301,4 +1467,55 @@ fn documentation_of_a_fact(
     // the offset through `file_offset_of`, and that was the *only* place a hover queued a cook: on a file whose
     // rendering had been evicted the documentation disappeared, and the next hover paid for the render.
     documentation_markdown(session, view, file, offset)
+}
+
+/// **The comment a project writes above a function, rendered as the popup shows it.**
+///
+/// The fixture is the shape from the screenshot that started this: a `@brief` and two `@param`s, one of them
+/// running onto a second line as real code does. Before this, markdown joined every line and the popup read as one
+/// paragraph with the tags still in it.
+#[test]
+fn a_documented_function_is_rendered_as_blocks() {
+    let rendered = render_documentation(
+        "@brief Prints a message with a preceding newline.\n\
+             @param message The message to print after a newline.\n\
+             @param count The number of times to print the message\n\
+             after a newline.\n\
+             @return whether anything was written\n\
+             @note the stream is flushed",
+    );
+
+    assert_eq!(
+        rendered,
+        "Prints a message with a preceding newline.\n\n\
+             - **`message`** — The message to print after a newline.\n\
+             - **`count`** — The number of times to print the message after a newline.\n\
+             - **Returns** — whether anything was written\n\
+             - **Note** — the stream is flushed",
+        "brief is prose, the commands are one list, and a continuation line belongs to its item"
+    );
+}
+
+/// **A command this crate does not know is kept as written**, and `\brief` is the same command as `@brief`.
+///
+/// The alternative — dropping what a table does not name — silently removes an author's structure, which is a
+/// worse popup than the run-on paragraph this renderer replaced.
+#[test]
+fn an_unknown_command_stays_in_the_text() {
+    let rendered = render_documentation(
+        "\\brief One line.\n@precondition the file is open\n@param[in] p a pointer",
+    );
+    assert!(rendered.contains("One line."), "{rendered}");
+    assert!(
+        !rendered.contains("@brief") && !rendered.contains("\\brief"),
+        "a command this table knows is not shown as a tag: {rendered}"
+    );
+    assert!(
+        rendered.contains("@precondition the file is open"),
+        "an unknown one is kept, tag and text together: {rendered}"
+    );
+    assert!(
+        rendered.contains("- **`p`** (in) — a pointer"),
+        "and a parameter's direction is kept beside its name: {rendered}"
+    );
 }

@@ -127,3 +127,15 @@ command:
   image: "**`@image`** — an image in the documentation: `@image html file.png \"caption\"`."
   li: "**`@li`** — one item of a list."
   arg: "**`@arg`** — one item of a list, as `@li`."
+# The **labels** a documentation comment's commands are rendered under, when the comment is shown as a hover.
+# Short by design: they appear beside the text the author wrote, not instead of it — command.* above is what
+# hovering the command itself answers.
+doc:
+  returns: "Returns"
+  note: "Note"
+  warning: "Warning"
+  attention: "Attention"
+  see: "See also"
+  deprecated: "Deprecated"
+  todo: "Todo"
+  parameter: "Parameter"
