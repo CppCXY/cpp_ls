@@ -269,6 +269,16 @@ impl Marker {
             }
             _ => unreachable!(),
         }
+        // **And off the open stack**, which is the half that was missing. An undone node keeps its events — the tokens
+        // it consumed are in the tree either way — but it is not a node any more, so leaving it registered is a mark
+        // no owner will ever complete: the rule that opened it has just said so.
+        //
+        // Measured: `class A { A(; };` — a constructor whose parameter list has no closer — left one undone marker
+        // open for the rest of the file, and `parse_cpp_unit`'s own check (`open_marks == base + 1`) is what caught
+        // it. The rule's caller does unwind with `close_marks_above(base)`, which would have drained it, but a
+        // *snapshot taken after the leak* cannot: the undone mark is below it, so every later recovery in the file
+        // closes down to a level that still holds it.
+        p.close_mark(self.position, false);
     }
 }
 

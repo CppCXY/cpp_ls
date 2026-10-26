@@ -3918,7 +3918,17 @@ pub fn parse_expression_list(p: &mut CppParser, closing: CppTokenKind) -> ParseR
         CppTokenKind::LeftBracket
     };
 
-    expect_token(p, opening)?;
+    // **Every early return unwinds**, and both of this rule's are a `?` on a `expect_token` that has already
+    // failed: `ArgumentList` is open, so a bare `?` leaves a marker no owner will close.
+    //
+    // Measured: `std::sort(a(), b(, [](int i, int j) { return i < j; });` — a call whose closer is missing, which is
+    // what a reader types halfway through — left one `ArgumentList` open for the rest of the file. The caller
+    // (`parse_the_initializer`) undoes its own mark, which does not touch this one, so from there on every recovery
+    // in the file closed down to a level that still held it (`parse_cpp_unit`'s `open_marks == base + 1`).
+    if let Err(err) = expect_token(p, opening) {
+        p.close_marks_above(base);
+        return Err(err);
+    }
 
     while p.current_token() != closing && !p.is_eof() {
         // One **element** of the list, read below the comma operator: the commas between elements belong to the
@@ -3939,7 +3949,10 @@ pub fn parse_expression_list(p: &mut CppParser, closing: CppTokenKind) -> ParseR
         break;
     }
 
-    expect_token(p, closing)?;
+    if let Err(err) = expect_token(p, closing) {
+        p.close_marks_above(base);
+        return Err(err);
+    }
     Ok(m.complete(p))
 }
 

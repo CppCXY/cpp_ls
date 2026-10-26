@@ -1102,3 +1102,39 @@ fn a_column_read_inside_a_multibyte_character_is_the_character_before_it() {
         "and an offset at the very end is still a real position"
     );
 }
+
+/// **I7 — a parenthesis group that has no closer yet leaves no node open.**
+///
+/// This is the invariant an editor sees *while a line is being typed*, and it is the one the deletion fuzz above
+/// found: two shapes, both a mid-line state rather than a style of broken code.
+///
+/// ```text
+/// class A { A(; };                          a constructor whose parameter list has no closer
+/// std::sort(a(), b(, [](int i, int j) { … }); a call whose argument list is missing one
+/// ```
+///
+/// Both used to leave one marker on the parser's open stack for the rest of the file — one from `Marker::undo`
+/// (which un-named a node but left it registered) and one from `parse_expression_list` (which returned through a
+/// bare `?` with its own `ArgumentList` still open). A leaked marker is not a tree-shape error the tree builder
+/// cannot repair; it is worse than that, because the repair is *silent*: every later recovery in the file unwinds
+/// to a level that still holds the leaked mark, so the nodes a rule opens after it are nested one level deeper
+/// than the code says, and `parse_cpp_unit`'s own check is the only thing that says so.
+///
+/// Stated as the event stream's balance rather than as a tree assertion, because the tree is repaired and still
+/// looks well formed — [`EventStreamAudit`](cpp_parser::EventStreamAudit) is the record of what the grammar did,
+/// and `unclosed` must be empty for any input at all.
+#[test]
+fn a_group_that_is_missing_its_closer_leaves_no_marker_open() {
+    for source in [
+        "class A { A(; };",
+        "void f() { std::sort(a(), b(, [](int i, int j) { return i < j; }); }",
+    ] {
+        let (tree, audit) = CppParser::parse_with_audit(source, ParserConfig::default());
+        assert_eq!(tree.to_source_text(), source, "I1 violated for {source:?}");
+        assert!(
+            audit.is_balanced(),
+            "{source:?} left a node open: {audit:?}"
+        );
+        assert_well_formed(&tree);
+    }
+}
