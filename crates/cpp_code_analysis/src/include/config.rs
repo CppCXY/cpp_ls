@@ -220,6 +220,24 @@ impl CompilerConfig {
     }
 
     pub fn for_file(&self, file: &Path) -> CompilerConfig {
+        self.for_file_with(file, &mut |path| std::fs::read_to_string(path).ok())
+    }
+
+    /// **[`CompilerConfig::for_file`] with the file reads the caller's**, which is what a test needs and what a
+    /// caller holding an unsaved buffer would need.
+    ///
+    /// The reads are here because a compile command may name a **response file** and keep its include paths inside
+    /// it: CMake writes `@CMakeFiles/<target>.dir/includes_CXX.rsp` for the Makefile and Ninja generators alike, and
+    /// on a real project *every* entry of its database was that shape. Expanding it only for the language standard
+    /// (which is what happened before) left the per-file include paths of such a project **empty** — measured:
+    /// `CommandService.cpp` cannot see `LanguageServer.h` from one directory up, so the include edge is never built,
+    /// `LanguageServer`'s 32 member facts are invisible from that file, and every member query that starts there
+    /// refuses. See `docs/remaining.md` §F.
+    pub fn for_file_with(
+        &self,
+        file: &Path,
+        read: &mut dyn FnMut(&Path) -> Option<String>,
+    ) -> CompilerConfig {
         let Some(root) = self.root.clone() else {
             return self.clone();
         };
@@ -247,6 +265,12 @@ impl CompilerConfig {
                 .cloned()
                 .chain(self.extra_args.iter().cloned())
                 .collect();
+
+            // **The `@response` file is expanded before anything is read out of the command**, because that is
+            // where a CMake build keeps the include paths — see [`CompilerConfig::for_file_with`] for the measured
+            // cost of not doing it.
+            let arguments =
+                expand_response_files(&arguments, command.directory.as_deref(), read);
 
             // **The include paths, and only those.** They are what decides which header a name resolves to, so they
             // are the ones that must be this file's; the defines stay project-wide because the **cook** seeds every
