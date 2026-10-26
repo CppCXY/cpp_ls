@@ -9222,10 +9222,11 @@ impl ProjectIndex {
         // under, so a file whose two spellings differ is dropped **silently** — the walk says it is visible and this
         // step removes it. Adding a normalized fallback did not fix the case it was written for
         // (`CommandService.cpp` still sees 0 facts of `LanguageServer`, while the header *is* in its walk and *has* a
-        // summary), and it moved the scoreboard the wrong way: 4637 (77.1%) → 4609 (76.7%), most likely because more
-        // visible files means more redeclarations and `definitions` answers `Ambiguous` where it used to answer one
-        // declaration. Two changes are tangled there — identity and ambiguity — and one of them should not be made
-        // while the other is unmeasured. See `docs/remaining.md` §F.
+        // summary), and it moved the scoreboard the wrong way: 4637 (77.1%) → 4609 (76.7%), **+28 `NotDeclaredHere`
+        // and not one `Ambiguous`**. So the extra files did not add answers; they changed *which* declaration a
+        // lookup chose — `direct_member` takes the first candidate among the visible ones, and one more visible
+        // declaration of the class can be one whose member list is emptier. That is a rule about choosing between
+        // declarations, and it has to be measured as its own question. See `docs/remaining.md` §F.
         let mut files: Vec<(u32, IncludeVisibility)> = visible
             .into_iter()
             .filter_map(|(key, visibility)| Some((*self.sequence.get(&key)?, visibility)))
