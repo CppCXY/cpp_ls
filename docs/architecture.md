@@ -1555,3 +1555,31 @@ hover 一个类模板的实例   `std::map<std::string, LuaTokenKind, std::less<
 hover 一个匿名 struct    `static const struct { … } priority[]` 的 type_of 是 Some("void")
                         → 说明符里的匿名类体没有名字，读取器却回落到 void；该让它回落到"文件的原文"
 ```
+### 9.9 删掉"读整个项目"：clangd 不付的代价，我们也不付
+
+用户的判断是对的，而且理由比"慢"更硬：**clangd 不做后台按 TU 解析整个项目**。它做的是——打开/询问一个文件时解析那个翻译单元，
+并把 preamble 缓存起来；后台把每个 TU 都读一遍是**没有人要求过的工作**，而且代价随项目规模增长，不随读者的注意力增长。
+
+我们的数据本来也指向同一个结论：`[index] read_the_whole_project` 的实测成本是 **96 个 TU 热 36 s / 冷 271 s**（397 文件的
+项目，§8.4），每次启动重付，因为程序的读法不像文件的摘要那样持久化；229 个 TU 的项目就是几分钟的 CPU。收益只有一条：
+⑲ 最宽的那个情形——同一个头被两个 TU 读到两份读法，而这两个 TU **都没有被打开**。
+
+所以这一轮不是把它默认关掉，而是**删掉**：
+
+```text
+删掉  UNTIL_THE_PROJECT_MAY_BE_READ 与第二个时钟（the_wait_before_a_program_may_be_read 现在只有一个时钟）
+删掉  the_next_root_of_the_project_to_read / a_program_of_the_project_may_be_read_now / programs_left_to_read
+删掉  [index] read_the_whole_project 这个键（连同 Session 的字段与初始化）
+删掉  cpp_ls 里"read as programs"的进度分支；进度条重新在队列排空时结束
+删掉  tests/project_read_probe.rs（它量的是被删掉的那条路）与 the_roots_of_the_project_are_read_in_the_background
+留下  the_next_unit_to_read / the_program_to_read：**只有打开的文件**会被读成程序，静默一秒之后
+```
+
+收益不只是省 CPU：`Session` 少了一个时钟、一个调度器、一个配置键和一个"进度条的第二个承诺"。**打开的文件仍然拿到编译器的
+读法**（这是读者能感知的全部），㉔ 的按程序归档（⑲）仍然成立——只是覆盖面从"整个项目"变成"读者正在看的文件及其闭包"，
+而那正是 clangd 的覆盖面。
+
+```text
+cpp_code_analysis   696 lib + 42 个集成目标全绿（少了一个探针）
+cpp_ls release      13 个目标全绿
+```

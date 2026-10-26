@@ -162,21 +162,7 @@ it is not a target for every file.
 [index]
 cache_dir = ".cppls"     # one component, relative to the root; where cooked readings are cached
 max_files = 20000        # how many files the project scan may list
-read_the_whole_project = false # read one program per translation unit, in the background
 ```
-
-`read_the_whole_project` is the one setting here that trades CPU for coverage. **It is off by default**, and
-the reason is a reader's report: *"the process is very slow and I cannot tell what it is doing"*, over a
-progress bar that said 229 translation units were being read as programs.
-
-A file the reader has open is read as a program one second after they stop typing, which is what makes its
-whole include closure answer from the compiler's reading — that happens either way. This setting extends it
-to **every translation unit of the project**, so that a header two programs read keeps both readings, and a
-query from either source gets its own. The price is measured: **36 s of CPU for 96 translation units** on a
-397-file project with a warm cache, and **271 s** cold — paid again on every start, because a program's
-reading is not persisted the way a file's summary is.
-
-Turn it on for a project whose headers are read several ways and where the answers matter more than the quiet.
 
 ### Read by the language server
 
@@ -283,4 +269,3 @@ cargo run --release -p cpp_code_analysis --example discover -- <project root>
 
 `discover` is the one to reach for when a configuration key seems to have no effect: it prints the discovery report,
 including every problem the file's sections produced.
-

@@ -180,20 +180,6 @@ const MACRO_SLICE: usize = 1;
 /// [`THE_LARGEST_PROGRAM_READ_AT_ONCE`], not this.
 const UNTIL_A_UNIT_MAY_BE_READ: std::time::Duration = std::time::Duration::from_secs(1);
 
-/// **How long a session waits after an edit before it reads a program nobody is looking at.**
-///
-/// Ten times the clock above, and the factor is the difference between the two reads rather than a round number. A
-/// file the reader has open is a program they are about to ask about — one second of quiet is already a strong signal
-/// that they have stopped to read. A file nobody has open is a program they have *not* asked about: reading it makes
-/// the whole project queryable (every file's declarations become the compiler's reading, and no `#if` branch is left
-/// standing) but it is speculative work, so it waits for a pause that is clearly not mid-sentence.
-///
-/// The two clocks are what makes this affordable at all: reading one closure as **one program** is 1.15 s of
-/// rendering and 3.65 s of parsing for 177 files, while rendering the same files one at a time through their own
-/// closures is an order of magnitude more (measured; see `docs/architecture.md` §7.6). A project is therefore read
-/// root by root, in the background, and this is the clock that keeps it out of the way.
-const UNTIL_THE_PROJECT_MAY_BE_READ: std::time::Duration = std::time::Duration::from_secs(10);
-
 /// **How often a root's whole-program read is attempted before the session gives up on it.**
 ///
 /// Each attempt is a *gather* — the walk, the texts — and a read declines when the closure cannot be walked (a
@@ -506,10 +492,6 @@ pub struct Session<F: FileProvider = DiskFiles> {
     /// cannot be walked yet is retried, but not for ever: three attempts and it keeps the reading the per-file path
     /// gave it.
     units_attempted: std::collections::HashMap<String, u8>,
-    /// **May the session read a program nobody has open?** — `index.read_the_whole_project`, on unless the project
-    /// says otherwise. See [`Session::the_next_root_of_the_project_to_read`] and, for what it costs, the field's
-    /// documentation on [`crate::project::config::IndexSection`].
-    read_the_whole_project: bool,
     /// **When this session last took an edit** — the clock the one indivisible piece of work in it is deferred by.
     ///
     /// A unit read ([`Session::prepare_a_unit_reading`]) is a walk, a render and a **parse of a whole program** in one
@@ -1260,13 +1242,6 @@ impl<F: FileProvider + Clone> Session<F> {
             )),
             units_read: std::collections::HashSet::new(),
             units_attempted: std::collections::HashMap::new(),
-            // **Off unless the project asks for it** — see the field's documentation for the reader's report and the
-            // measured price.
-            read_the_whole_project: project_config
-                .config
-                .index
-                .read_the_whole_project
-                .unwrap_or(false),
             unit_index: std::sync::Mutex::new(None),
             rendered_unit: std::sync::Mutex::new(None),
             last_edit: std::time::Instant::now(),
@@ -5243,68 +5218,11 @@ impl<F: FileProvider + Clone> Session<F> {
             .unwrap_or_else(std::time::Instant::now);
     }
 
-    /// **Is a program of the project — not of a file the reader has open — worth reading now?**
-    ///
-    /// The same question as [`Session::a_unit_may_be_read_now`] with a longer clock, and the difference is what each
-    /// read is *for*. A file the reader has open is a program they are looking at: one second after they stop typing
-    /// is a good moment to read it, because the answers about its closure are the ones they are about to ask for. A
-    /// file nobody has open is a program they have not asked about — reading it makes the *project* queryable
-    /// (every file's declarations become the compiler's reading, with no `#if` branch left standing), and that is
-    /// worth doing in the background but not worth doing the moment a reader pauses.
-    ///
-    /// [#7.6's shape, measured]: reading one closure as **one program** is 1.15 s of rendering and 3.65 s of parsing
-    /// for 177 files, while rendering the same 177 files one at a time through their own closures is an order of
-    /// magnitude more. So the project is read root by root, in the background, and this clock is what keeps it out of
-    /// the way.
-    fn a_program_of_the_project_may_be_read_now(&self) -> bool {
-        self.last_edit.elapsed() >= UNTIL_THE_PROJECT_MAY_BE_READ
-    }
-
-    /// **How long until a whole program may be read** — the pump's timer, and `None` when nothing is waiting.
-    ///
-    /// [`Session::a_unit_may_be_read_now`] is a *clock*, and a clock does not wake a pump: after the queue drains, the
-    /// server waits for a notification, and a reader who has stopped typing sends none — so the one moment the read
-    /// is safe is the one moment nothing would happen. This is the remainder for the pump to sleep, which makes the
-    /// gate a delay rather than a deadlock.
-    /// **How many of the project's roots the session still owes a program for** — a number for a progress bar, not a
-    /// rule the session obeys (the clock is [`Session::the_wait_before_a_program_may_be_read`]).
-    ///
-    /// The count is the same set [`Session::the_next_root_of_the_project_to_read`] chooses from, without the clock:
-    /// a root of the project that nothing includes, not yet read, not given up on, and not too large to read in one
-    /// piece. Reported from an editor: after `Load workspace` said "0 files to read" the machine was busy for half a
-    /// minute and the bar said nothing, which reads as a hang.
-    pub fn programs_left_to_read(&self) -> usize {
-        if !self.read_the_whole_project {
-            return 0;
-        }
-        let index = self.store.index();
-        self.project
-            .iter()
-            .filter(|path| index.dependents_of(path).is_empty())
-            .filter(|path| {
-                let key = queue_key(path);
-                !self.units_read.contains(&key)
-                    && self.units_attempted.get(&key).copied().unwrap_or(0) < PROGRAM_READ_ATTEMPTS
-                    && !self.the_program_is_too_large_to_read_at_once(path)
-            })
-            .count()
-    }
-
     pub fn the_wait_before_a_program_may_be_read(&self) -> Option<std::time::Duration> {
-        let ready_in = |until: std::time::Duration| until.saturating_sub(self.last_edit.elapsed());
-        // **The nearest of the two clocks.** An open file becomes readable after a second and a project root after
-        // [`UNTIL_THE_PROJECT_MAY_BE_READ`], so a pump that slept only for the shorter one would wake for work that is
-        // not ready yet — and one that slept for the longer one would delay the file the reader is looking at.
-        let open = self
-            .the_next_unit_to_read()
-            .map(|_| ready_in(UNTIL_A_UNIT_MAY_BE_READ));
-        let project = self
-            .the_next_root_of_the_project_to_read()
-            .map(|_| ready_in(UNTIL_THE_PROJECT_MAY_BE_READ));
-        match (open, project) {
-            (Some(open), Some(project)) => Some(open.min(project)),
-            (open, project) => open.or(project),
-        }
+        // **One clock.** An open file becomes readable one second after the reader stops typing, and nothing else is
+        // read as a program at all — see [`UNTIL_A_UNIT_MAY_BE_READ`].
+        self.the_next_unit_to_read()
+            .map(|_| UNTIL_A_UNIT_MAY_BE_READ.saturating_sub(self.last_edit.elapsed()))
     }
 
     /// **The next file whose whole program is worth reading** — an open file the program of which nobody has read,
@@ -5323,12 +5241,11 @@ impl<F: FileProvider + Clone> Session<F> {
     /// [`Session::the_next_unit_to_read`] is the same question without the clock, for a caller that is itself the
     /// signal that now is a good moment (`Session::read_a_looked_at_unit`).
     pub fn the_program_to_read(&self) -> Option<PathBuf> {
-        if let Some(open) = self.the_next_unit_to_read() {
-            return self.a_unit_may_be_read_now().then_some(open);
-        }
-        let root = self.the_next_root_of_the_project_to_read()?;
-        self.a_program_of_the_project_may_be_read_now()
-            .then_some(root)
+        // **Open files only.** A project with two hundred translation units does not read two hundred programs because
+        // one file is open — the files nobody has open keep the reading their own text gives them, which is what
+        // `clangd` does too: it parses a unit when a file is opened, not for the whole project in the background.
+        let open = self.the_next_unit_to_read()?;
+        self.a_unit_may_be_read_now().then_some(open)
     }
 
     /// The root a program read would be for, ignoring the clock — see [`Session::the_program_to_read`].
@@ -5339,31 +5256,18 @@ impl<F: FileProvider + Clone> Session<F> {
         })
     }
 
-    /// **The next translation unit of the project nobody has read** — the roots of the project, in the order the
-    /// caller listed them, skipping the ones that are not roots.
+    /// **The next translation unit of the project nobody has read** — gone.
     ///
-    /// A **root** is a project file nothing else includes: a file that some other file includes is not a program, it
-    /// is part of one, and reading every project file as a root would read a header's closure hundreds of times (the
-    /// measurement is why [`Session::units_for_the_pass`] walks one timeline per file and not one per project entry).
-    /// A project of two hundred translation units therefore reads two hundred programs once, and a header is covered
-    /// by the programs that include it — which is exactly what [`Session::commit_a_unit_reading`] does with the facts
-    /// it files per program (⑲).
-    fn the_next_root_of_the_project_to_read(&self) -> Option<PathBuf> {
-        if !self.read_the_whole_project {
-            return None;
-        }
-        let index = self.store.index();
-        self.project
-            .iter()
-            .filter(|path| index.dependents_of(path).is_empty())
-            .find(|path| {
-                let key = queue_key(path);
-                !self.units_read.contains(&key)
-                    && self.units_attempted.get(&key).copied().unwrap_or(0) < PROGRAM_READ_ATTEMPTS
-                    && !self.the_program_is_too_large_to_read_at_once(path)
-            })
-            .cloned()
-    }
+    /// A background pass used to read every root of the project as a program, and it is deleted rather than disabled: a
+    /// reader reported the process as "very slow, and I cannot tell what it is doing" over a progress bar that counted
+    /// **229 translation unit(s) to read as programs**, and the measured price was 36 s warm / 271 s cold for 96 of
+    /// them on a 397-file project — paid again on every start, because a program's reading is not persisted
+    /// (`docs/architecture.md` §8.4). `clangd` does not do this either: it parses a translation unit when a file is
+    /// opened or asked about. A file nobody has open keeps the reading its own text gives it, and the reader's own
+    /// files still get the compiler's reading one second after they stop typing.
+    ///
+    /// What is lost is only ⑲'s widest case — the same header read two ways by two programs *neither of which is
+    /// open*. Everything a reader can look at keeps its per-program reading.
 
     /// **Is this program over [`THE_LARGEST_PROGRAM_READ_AT_ONCE`]?** — asked before the read, so a keystroke never
     /// waits for one that is too big.

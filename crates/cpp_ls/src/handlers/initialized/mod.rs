@@ -306,8 +306,6 @@ async fn index_in_background(context: ServerContextSnapshot) {
     tokio::spawn(async move {
         let version = context.workspace_manager().lock().await.workspace_version();
         let mut first_pass = true;
-        // **Has the first pass ended while the bar is still owed an end?** — see the note above the program read.
-        let mut the_bar_owes_an_end = false;
         // What the last slice left to do — see the drain below, which is the moment a file's **cooked** reading
         // changes hands.
         let mut was_pending = false;
@@ -665,7 +663,6 @@ async fn index_in_background(context: ServerContextSnapshot) {
                 first_pass = false;
                 // **Not finished here** — see the note above the program read: the bar's end is owed until nothing is
                 // left to read as a program.
-                the_bar_owes_an_end = true;
                 // **The one number that bounds how long a request can have been made to wait.** A query and an update
                 // take the same lock, so this is the worst case *by construction*: if a completion felt slow and this
                 // says 12 ms, the wait was inside that completion's own work rather than in the queue behind the
@@ -751,30 +748,6 @@ async fn index_in_background(context: ServerContextSnapshot) {
             // `read_a_program` is three phases — the walk under the read lock, the 4.9 s of cook/parse/sweep with
             // **no lock at all**, and the inserts under the writer — which is why a real project's program can be read
             // now and could not be before (`docs/architecture.md` §7.4).
-            // **The bar does not retire while a program is still owed.** The first pass ends with the queue, but the
-            // session then reads one program per translation unit — 36 s measured on a 397-file project (§8.4 of
-            // `docs/architecture.md`) — and a bar that ends there is a promise the server does not keep: the reader
-            // sees an idle editor and a busy machine. So the message says what is left and the bar ends when nothing
-            // is owed at all.
-            if pending == 0 {
-                let owed = context
-                    .analysis()
-                    .with_snapshot(cpp_code_analysis::Session::programs_left_to_read)
-                    .unwrap_or(0);
-                if owed > 0 {
-                    context.status_bar().update_progress_task(
-                        ProgressTask::LoadWorkspace,
-                        None,
-                        Some(format!("{owed} translation unit(s) to read as programs")),
-                    );
-                } else if the_bar_owes_an_end {
-                    the_bar_owes_an_end = false;
-                    context.status_bar().finish_progress_task(
-                        ProgressTask::LoadWorkspace,
-                        Some("Workspace loaded".to_string()),
-                    );
-                }
-            }
 
             if pending == 0
                 && let Some(wait) = context
