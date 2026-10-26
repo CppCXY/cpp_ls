@@ -997,3 +997,27 @@ dead_macros_for      从 HashMap 里 find 第一个"路径规范化后相等"的
 cpp_code_analysis   687 lib + 40 个集成目标全绿
 cpp_ls release      13 个目标全绿
 ```
+**㉒ 又两个守门，以及一个把问题缩小到"这一遍读了哪些文件"的诊断。** 这一轮加的两条都在 `a_timeline_of_its_own` 的完整性
+检查上（渲染只有在闭包**真的完整**时才算数）：
+
+```text
+依赖缺摘要                          → 不渲染（已经有了）
+依赖的摘要自己有解不掉的 #include → 不渲染（新）
+```
+
+第二条是"洞在这个文件下面"的情况：`has_unresolved_includes` 本来就是"这份摘要不描述一个闭合世界"的判据（也是它从不被写进
+缓存的原因）。
+
+**诊断做得更细了**：把 `CPPLS_DUMP_FACTS` 的输出加上**名字**（每行 `路径<TAB>数量<TAB>名字列表`），于是两次跑完能直接看出
+差的是哪些声明 —— 全部落在一个头的**条件块**里（`xfilesystem_abi.h` 多出的 120 条是 `_IntTy`/`_Left`/`_Right`/`operator&`
+这一族，`xmemory` 多出的 23 条是 `_First`/`_Last`/`__std_remove_N`）：**一份是渲染（分支被剪掉），一份是原始读法**。
+
+再打开 `CPPLS_TRACE_COOKING=1` 看两遍的 pass：**两遍都走 eager 臂**（没有任何 `re-read: … through its timeline`），
+每一片都重读 16 个文件，共 14 片 —— 也就是说差异在"**这 16 个文件是哪 16 个**"，而这正是下一步要打出来的东西：把每一片的候选
+集合写进 trace，两次跑 diff。
+
+```text
+六次连跑：43 483 / 42 395 / 43 238 / 43 363 / 43 483 / 43 483
+cpp_code_analysis   687 lib + 40 个集成目标全绿
+cpp_ls release      13 个目标全绿
+```
