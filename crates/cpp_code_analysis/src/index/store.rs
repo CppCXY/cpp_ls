@@ -1959,10 +1959,19 @@ impl<F: FileProvider> SummaryStore<F> {
         let Ok(dead) = self.dead_macros.lock() else {
             return Vec::new();
         };
-        dead.iter()
-            .find(|(held, _)| normalize_path(held, cfg!(windows)) == wanted)
-            .map(|(_, offsets)| offsets.clone())
-            .unwrap_or_default()
+        // **Every entry for this file, unioned** — not the first one found. The map is keyed by the spelling the walk
+        // used, and one file can be in it twice (`C:\…` from the session and `c:/…` from an include graph), so a
+        // `find` over a `HashMap` returned whichever spelling came first in *this process's* hash order: two runs then
+        // gave the same file two different sets of decided `#define`s, and a summary that differed by 120 declarations
+        // in one system header. A union is order-free and is also the complete answer.
+        let mut offsets: Vec<usize> = dead
+            .iter()
+            .filter(|(held, _)| normalize_path(held, cfg!(windows)) == wanted)
+            .flat_map(|(_, offsets)| offsets.iter().copied())
+            .collect();
+        offsets.sort_unstable();
+        offsets.dedup();
+        offsets
     }
 
     /// **How many guarded `#define`s the unit walks have decided about** — `(files, offsets)`.
