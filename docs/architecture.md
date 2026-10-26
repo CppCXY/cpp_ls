@@ -373,6 +373,71 @@ hover / 定义 / 补全      当前 1–12 ms                    目标：不劣
 > `index_everything` 之后，键击的那个文件的 unit 常常已经被挤掉，于是仍然走 wave 的 raw 解析（`edit_loop` 的
 > `env 0` 就是这个意思）。下一步（§5 第二步）要么让查询按需拿到该文件的 unit，要么让 wave 也能拿到
 > `directive_summary` 先建 environment 再读 —— 后者的顺序是文档里那句话：**先指令、再 unit、最后 parse**。
+> （**这一半已经关了，见 ⑮。**）
+
+> **⑮ 剩下的一半窗口关掉了：unit 不在手上时，就按「先指令、再 unit、最后 parse」现场走一个**（本次提交）
+>
+> ⑭ 之后，一个文件的第一次读法是不是编译器读法，取决于这个会话**手上有 unit**。而 unit 表是有界的，所以真实序列是：
+> 项目索引完 → unit 被挤掉 → 用户在那个文件里键入 → 这一步回到 raw。⑮ 把"手上有"换成"**要得到**"，并且用文档自己
+> 写下的那个顺序：
+>
+> ```text
+> 先指令     summary 被编辑丢掉了，但文件的 #include 还在文本里 —— directive_summary 不需要 parse
+> 再 unit    从这个 root 走一条时间线；closure 里有一个文件还没被读过，就**拒绝**（部分环境比 raw 更差，见 §5）
+> 最后 parse 解析的是渲染，事实的范围经 reported_span 映回文件
+> ```
+>
+> 落点（三处，都在 `Session`）：
+>
+> | 位置 | 作用 |
+> |---|---|
+> | `unit_and_state_of` | index 没有 summary 时，若**读者正在看这个文件**（`documents.is_open`），用 `directive_summary` 当 walk 的 root；闭包没读完就 `None` |
+> | `the_timeline_to_read_through` | `index_one` 的入口：手上有（非 provisional）就用，否则 `a_timeline_can_be_walked_for` 说可以就走 |
+> | `will_read_it_as_the_program` | `advance`/`prepare_a_wave` 决定**要不要把这个文件留给 wave** —— 留给 wave 就会先写下一份 raw 读法 |
+>
+> **两个便宜一半的修正，都是量出来才加的**（同一台机器，真项目 `clice`：397 文件 / 60 k 事实 / settle ~10.5 s）：
+>
+> * **`directive_summary` 被记住了。** 一次索引步会问它**三次**（wave 的决定、walk 的 root、渲染的指令半边），而它是
+>   lex + 指令扫描 + 每个条件求值 + 每个 `#include` 一次文件系统搜索 —— 实测 55 KB 源文件 **16 ms**。按
+>   `(路径, 文本哈希)` 记住之后，3 次变 1 次：directive 按键 **165 → 125 ms**。
+> * **渲染的指令半边不再重算。** `FileIndexer::with_directives` 让 `index_the_readings` 用调用方已经读过的那一份 ——
+>   能走 timeline 的调用方，正是先读过指令的那一个：**125 → 113 ms**。
+>
+> 实测（`crates/cpp_code_analysis/tests/keystroke_probe.rs`，新增；`--ignored`，打印而不断言）：
+>
+> ```text
+>                       基线（HEAD）                     ⑮
+> didOpen + 重读        50 ms，environment false          74 ms，environment **true**
+> 体内按键 10 次        52 / 54 / 55 ms，10/10 是程序      54 / 56 / 57 ms，10/10
+> 指令按键 10 次        93 / 98 / 109 ms，**0/10**        109 / 113 / 123 ms，**10/10**
+> unit walk 次数        168（索引时）+ 10（每次指令按键）  168 + 10 —— 相同，但**基线那 10 次是白走的**
+> ```
+>
+> 最后一行是这笔账的关键：基线里第二遍**走了**这个文件的 timeline（41 ms），然后因为"没有宏体提到"把文件跳过，walk 白费；
+> ⑮ 走同一次，但它的结果就是这份摘要。所以多出来的 ~15 ms 不是新工作，是"把它用在正确的地方"加上一次 16 ms 的指令扫描。
+>
+> **明确不做**：wave 里的**其他**文件仍然先读 raw、由第二遍精修。让整个项目第一次就读渲染 = 每个 TU root 走一次
+> timeline，代价是 §4 那张表；正确的答案是 §5 第二步的 per-TU 索引（一个 TU 的闭包读一次、每个文件的事实
+> 从 `index_unit_rendering` 分出来），不是给每个文件各走一次。
+>
+> **本次顺带修掉的三个真实缺陷（都不是 ⑮ 引入的，是 ⑮ 的探针和测试撞出来的）**：
+>
+> 1. **parser 的 marker 泄漏**（`crates/cpp_parser`）：`Marker::undo` 把节点改名成 `None` 却**没有从 open 栈上摘掉**，
+>    `parse_expression_list` 的两处 `expect_token(…)?` 也不 unwind。结果：一个没有闭合的括号 —— 也就是读者**正在输入**
+>    的那一行 —— 会在文件剩下的部分里留一个 open marker，之后每一次 recovery 都收敛到一个仍然握着它的层级。
+>    `tests/invariants.rs` 的删除 fuzz 一直在红（`single_character_deletions_are_parseable`）；现在它是绿的，并新增了
+>    `a_group_that_is_missing_its_closer_leaves_no_marker_open` 钉住这两种形状。
+> 2. **宏展开里跨两个坐标系做减法**（`preprocess::expand`）：`expand_body` 用 `tokens.first()..tokens.last()` 算
+>    region，而一次 rescan 的 token 可以同时来自**替换列表**（`#define A F`）和**调用点**（`A(1)`）—— 两个不同文本的
+>    offset 相减于是 `attempt to subtract with overflow`（debug 直接 panic，release 得到一个荒唐的 `SourceRange`，
+>    `origin_of` 拿它和 token 比大小）。现在 region 是 invocation 的 **call site**，它按构造只在一个文本里。
+>    `tests/expand.rs` 里那两条一直红的用例（`a_function_like_name_ending_a_body_takes_the_arguments_after_the_call`、
+>    `a_chain_of_object_like_macros_ends_in_a_call`）现在绿。
+> 3. **`textDocument/foldingRange` 永远回答 `null`**（`crates/cpp_ls`）：handler 要的是**渲染视图**，而渲染只有在 cook
+>    之后才有，cook 又会被"闭包还没读完"拒绝 —— 所以在索引还没收敛的项目上，折叠请求三十秒里每一次都拿到 `null`。
+>    折叠本来就是"只读这个文件"的查询（它自己的模块文档这么写，`Region` 折法也来自 `#if` 指令，而渲染里没有指令），
+>    改成 `view_of_the_file` 之后立刻就有答案。`the_folds_of_a_file_are_the_regions_a_reader_hides` 从红变绿。
+
 
 
 ### 第二步：per-TU 的索引与查找
@@ -439,6 +504,11 @@ LSP         lsp_status 表 29 行全绿，hover 1–12 ms，diagnostic 28–29 m
 
 **第一步的完成标准**：facts 全部来自渲染；删除四类补丁后全部套件仍绿（除已知红）；上表每一项不劣化。
 
+> **上表是另一台机器上的数字**（`E:\EmmyLuaCodeStyle`，本机没有这个 checkout）。本机能跑的是 `C:\Users\zc\Desktop\github\clice`
+> （397 个文件，60 k 事实，无 `compile_commands.json`），所以 ⑮ 的数字来自它，并且**只用于和同一台机器上的 HEAD 比**，
+> 不与上表相比。`tests/keystroke_probe.rs` 是那台的 `edit_loop` 的替代品：同样的三个问题（重开一个文件、体内按键、
+> 指令按键），打印而不是断言。
+
 ### 7.1 ⑬ 之后的重测（同一台机器，最终代码）
 
 ```text
@@ -451,6 +521,27 @@ LSP              lsp_status 表 29 行全绿，hover 1–8 ms，diagnostic 31 ms
 重读触发         宏体（`bodied`）+ 死宏（`dead_macros`）+ **声明被条件编译拆开**（新增）
 失效             丢摘要 + 丢渲染缓存 + 重新入队；重读的摘要不写盘（没有能描述环境的 key）
 ```
+
+### 7.2 ⑮ 之后的重测（本机，`clice`，与 HEAD 同机对比）
+
+```text
+按键探针          tests/keystroke_probe.rs（新增，--ignored）：didOpen / 体内 10 次 / 指令 10 次
+                  didOpen        50 → 74 ms，environment false → true
+                  体内按键        52/54/55 → 54/56/57 ms，10/10 → 10/10 是程序
+                  指令按键        93/98/109 → 109/113/123 ms，0/10 → 10/10 是程序
+                  代价来自：一次 55 KB 文件的指令扫描（16 ms，已被记住后只算一次）+ 渲染解析比 raw 解析贵
+测试              cpp_code_analysis lib 680 绿（新增 2 条 session 测试）；cpp_parser 全绿（含之前一直红的
+                  删除 fuzz）；cpp_ls 34 绿（含之前一直红的 folding）；cpp_formatter 全绿
+                  仍然唯一的已知红：translation_unit::the_timeline_answers_what_the_per_file_walk_answered
+已知红的 next   那个测试要的是"两条路给出同一个答案"，而它比的是 per-file walk 与 timeline；先在 ⑮ 之后重跑，
+                  仍然红，所以它和本次改动无关（也先于本次改动）
+```
+
+**四层补丁为什么还在**：它们覆盖的是"**别人**的文件第一次被读成 raw 到第二遍精修之间"的窗口 —— ⑮ 关掉的是
+"**读者正在看的那个文件**"的窗口。wave 里的其他文件仍然先读 raw，所以 `split_by_a_directive` 之类的兜底仍然有用户。
+删它们的前置条件是 §5 第二步：一个 TU 的闭包只走一条 timeline，闭包里每个文件的事实都从**这一条**渲染里分出来
+（`FileIndexer::index_unit_rendering` 已经在，只是没接线 —— 见 `finish_a_slice` 里"NOT WIRED, ON PURPOSE"那段）。
+
 
 **为什么四层补丁还在**：它们覆盖的是"第一次读法（raw）到 pump 精炼"之间的窗口。第一次读法也渲染之后那个窗口才关，
 而那需要 §5 第二步的 key（`env_hash` 由调用方可算），也就是 `directive_summary` + unit walk 先于 parse 的顺序。
