@@ -733,3 +733,37 @@ raw 摘要里有、渲染里没有     **1 095** 条（`stdlib.h` 的 `#ifdef` �
 做同样的事）。真正要做的因此是：**摘要按（文本 + 它被读的那个 TU 的环境）分区**，查找按询问方所在 TU 选一份 ——
 `SummaryStore::prepare_with_the_timeline` 已经在用这样的 key 写渲染摘要了，缺的是查找侧。
 
+### 7.8 ⑱ 一个文件只有一份读法：渲染赢，并集删掉
+
+上面那条"1 095 条差异"指出的最直接问题不是"该用哪一份"，而是**查找当时把两份一起给了**。
+`visible_declarations_upto` 的规则是"先放摘要的事实，再放渲染的事实里摘要没有的那些"，`hits_in`（补全走的那条
+bucketed 查找）另有一条"raw 影子盖住 cooked"的规则 —— 两处都在**替一个文件调解两份读法**。现在两处都只有一条规则：
+
+```text
+一个文件有渲染读法  →  它的读法就是渲染（facts = cooked.declarations）
+没有渲染读法        →  它的读法就是摘要（facts = summary.declarations）
+```
+
+`Posting::is_cooked` 说明一条 posting 属于哪一份列表，所以选边是一次比较而不是一次扫描
+（`ProjectIndex::the_reading_is_cooked`）。随之删掉的：按 qualified name 的 raw-vs-cooked 去重（十行注释与逻辑）、
+`hits_in` 里的影子规则、以及"一个文件的两份读法该怎样合并"这一整类推理。
+
+实测（本机 `clice`，`unit_read_probe`）：
+
+```text
+名字在两份列表里都有、却仍从同一个文件答出 >1 个候选     **0**（改动前最多 1 095）
+```
+
+一条新测试钉住这条规则的**语义**（`a_files_rendering_is_its_reading_and_not_one_answer_beside_another`）：
+`api.h` 在 `FROM_THE_SOURCE` 定义与不定义时各声明一个 `Live`，所以"单独读"和"在 `main.cpp` 里读"是两个答案；
+程序读之后，查找给出**一个**，而且是被选中的那个分支（改动前给的是单独读的那份，并集时是两份）。
+
+**还没解决的、也是 §5 第二步剩下的**：一个文件被**两个**程序读过时，写进 `cooked[path]` 的是后一个 —— 现在是
+"最后读的那个 TU 的读法"，不是"询问方所在 TU 的读法"。要做到后者，`cooked` 的键得像
+`SummaryStore::prepare_with_the_timeline` 那样带上 `env_hash`，查找再用询问方（`visible_from`）的 TU 环境去选。
+⑱ 让"选一份"这件事成为**唯一**的规则，接下来只是"选哪一份"。
+
+**这对四层补丁意味着什么**：patch 2（查找期 `visibility_at` 过滤）存在的理由是"死分支的声明还在摘要里"。⑱ 之后，
+它只对**没有渲染读法**的文件还有用户 —— 而那些文件正是 §7.6 要消灭的。
+
+

@@ -286,10 +286,52 @@ fn what_a_unit_read_does_to_the_index() {
         }
     }
     println!(
-        "{a_compiler_never_sees} declaration(s) the raw summary has and a compiler never sees — what the lookup-time \
-         filter still has to remove:"
+        "{a_compiler_never_sees} declaration(s) the raw summary has and a compiler never sees — the difference \
+         between the file read on its own and the file read in this program:"
     );
     for line in &dead {
+        println!("{line}");
+    }
+
+    // **And does a lookup still offer both readings?** The rule now is "one source per file: the rendering's facts
+    // when there is a rendering". A name the two lists disagree about is the test of it: the answer must carry **one**
+    // candidate from that file, not two. Counted rather than trusted, because "no union" is a property of a lookup and
+    // the only way to know is to ask one.
+    let mut offered_two = 0usize;
+    let mut example: Option<String> = None;
+    for path in &closure {
+        let Some(summary) = session.index().summary(path) else {
+            continue;
+        };
+        let Some(cooked) = session.index().cooked_declarations(path) else {
+            continue;
+        };
+        let seen: std::collections::HashSet<&str> =
+            cooked.iter().map(|fact| fact.name.as_str()).collect();
+        for fact in &summary.declarations {
+            if seen.contains(fact.name.as_str()) {
+                continue;
+            }
+            let from_this_file = match session.index().definitions(&fact.name, &file) {
+                Known::Yes(found) => found.found.iter().filter(|one| one.file == *path).count(),
+                _ => 0,
+            };
+            if from_this_file > 1 {
+                offered_two += 1;
+                example.get_or_insert_with(|| {
+                    format!(
+                        "  {} :: {} — {from_this_file} candidate(s) from that file",
+                        path.file_name().unwrap_or_default().to_string_lossy(),
+                        fact.name
+                    )
+                });
+            }
+        }
+    }
+    println!(
+        "{offered_two} name(s) the two lists disagree about still answer with more than one candidate from that file"
+    );
+    if let Some(line) = example {
         println!("{line}");
     }
 

@@ -840,6 +840,76 @@ fn a_body_edit_does_not_cost_the_program_again() {
     );
 }
 
+/// **Where a file has been read as a program, that reading is the reading — not one answer beside another.**
+///
+/// The two declaration lists an index can hold for one file are not two views of one thing: the summary is the file
+/// read *on its own* and a cooked reading is the file read **in a program**, and `_CRT_…`/`_GLIBCXX_…` decide
+/// differently in the two. Measured on a real project, **1 095 declarations over 177 files** are in one list and not
+/// the other (`tests/unit_read_probe.rs`). Offering both at once answers for two translation units with one question.
+///
+/// The fixture is that disagreement in one name: `api.h` declares `Live` one way when `FROM_THE_SOURCE` is defined and
+/// another when it is not, so the file read on its own has one `Live` and the file read inside `main.cpp` has the
+/// other. With the union, a lookup gets **both** — two declarations of one name, which is a list where a jump wants a
+/// place. With the rendering as the reading, it gets the one its translation unit has.
+#[test]
+fn a_files_rendering_is_its_reading_and_not_one_answer_beside_another() {
+    let api = "#ifdef FROM_THE_SOURCE\n\
+               struct Live { int a; };\n\
+               #else\n\
+               struct Live { long b; };\n\
+               #endif\n";
+    let main = "#define FROM_THE_SOURCE 1\n#include \"api.h\"\nLive live;\n";
+    let files = MemoryFiles::new()
+        .with_file("/p/api.h", api)
+        .with_file("/p/main.cpp", main);
+    let fixture = Memory::new("the-rendering-is-the-reading", &files);
+    let mut session = fixture.session();
+    session.did_open("/p/main.cpp", main);
+    session.index_everything();
+
+    let taken = api.find("struct Live { int a; }").expect("the fixture");
+    let not_taken = api.find("struct Live { long b; }").expect("the fixture");
+
+    // **Before the program is read**: whatever the per-file reading produced, the one it did *not* produce is not an
+    // answer for `main.cpp` — and that is the reading this change is about.
+    let before = session
+        .index()
+        .definitions("Live", Path::new("/p/main.cpp"));
+    println!("before the program read: {before:?}");
+
+    session
+        .read_a_looked_at_unit()
+        .expect("the reader has a file open, so there is a program to read");
+
+    // **One answer, and it is the branch this translation unit takes.** Two candidates here would mean the summary's
+    // facts were offered beside the rendering's — the union this change removes.
+    let found = session
+        .index()
+        .definitions("Live", Path::new("/p/main.cpp"));
+    let Known::Yes(found) = found else {
+        panic!("`Live` is declared in a header the source includes: {found:?}");
+    };
+    assert_eq!(
+        found.found.len(),
+        1,
+        "the file has been read as a program, so its reading is the reading: {:?}",
+        found
+            .found
+            .iter()
+            .map(|one| one.fact.range)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        found.found[0].fact.range.start_offset, taken,
+        "the answer is the branch `FROM_THE_SOURCE` selects: {:?}",
+        found.found[0].fact.range
+    );
+    assert_ne!(
+        found.found[0].fact.range.start_offset, not_taken,
+        "and not the one the file has when it is read on its own"
+    );
+}
+
 /// **The diagnostics of a file whose error is in a branch nobody takes.**
 ///
 /// The two readings disagree here, and that is the whole reason [`Session::diagnostics`] exists: the file's own

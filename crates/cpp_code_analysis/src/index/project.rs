@@ -7816,7 +7816,13 @@ impl ProjectIndex {
         into[start..].sort_by(hit_order);
     }
 
-    /// The hits among one name's postings, with the cooked reading deduplicated against the raw one.
+    /// The hits among one name's postings, **one reading per file** — see [`ProjectIndex::visible_declarations_upto`].
+    ///
+    /// A file can carry two declaration lists: its summary (the file read on its own) and its cooked reading (the file
+    /// read in a program). Only one of them is the file's reading, and which one is
+    /// [`ProjectIndex::the_reading_is_cooked`] — so a posting that belongs to the other list is not a candidate. The
+    /// deduplication this used to do (raw first, cooked shadowed by it) is gone with the union: two readings of one
+    /// file are not two halves of one answer, they are two answers about two translation units.
     ///
     /// `rank` is the rank the caller already knows (a whole bucket of names shares one), or `None` when the rank has
     /// to be worked out from the declaration's qualified name.
@@ -7828,28 +7834,16 @@ impl ProjectIndex {
         stop_at: usize,
         into: &mut Vec<Hit<'a>>,
     ) {
-        for (at, posting) in postings.iter().enumerate() {
+        for posting in postings.iter() {
             if into.len() >= stop_at {
                 break;
+            }
+            if posting.is_cooked() != self.the_reading_is_cooked(posting.file) {
+                continue;
             }
             let Some((summary, fact)) = self.resolve(*posting) else {
                 continue;
             };
-
-            // A fact both readings found is one symbol: the raw reading's postings for this file come first in the
-            // list, and the same `(name, kind)` among them shadows the cooked one.
-            if posting.is_cooked() {
-                let shadowed = postings[..at]
-                    .iter()
-                    .rev()
-                    .take_while(|held| held.file == posting.file)
-                    .filter(|held| !held.is_cooked())
-                    .filter_map(|held| self.resolve(*held))
-                    .any(|(_, raw)| raw.kind == fact.kind);
-                if shadowed {
-                    continue;
-                }
-            }
 
             let qualified = fact.qualified_name();
             let Some(rank) = rank.or_else(|| rank_of(&qualified, &fact.name, wanted)) else {
@@ -7888,6 +7882,22 @@ impl ProjectIndex {
             summary.declarations.get(posting.index())?
         };
         Some((summary, fact))
+    }
+
+    /// **Is this file's reading the rendering?** — the one question every lookup asks per file.
+    ///
+    /// A file the index can describe twice — its summary and, once something has read it as a program, its cooked
+    /// reading — has **one** reading, and the rendering is it. The two are not two views of one thing: the summary is
+    /// the file read on its own and the rendering is the file read in a translation unit, and `_CRT_…` and `_GLIBCXX_…`
+    /// answer differently in the two (measured: **1 095 declarations over 177 files** differ, and every one of them
+    /// used to be offered beside its twin — `tests/unit_read_probe.rs` now counts **0** lookups that do).
+    ///
+    /// So a lookup uses one list per file, and this says which. `Posting::is_cooked` says which list a posting belongs
+    /// to, so the answer is a comparison and not a scan.
+    fn the_reading_is_cooked(&self, file: u32) -> bool {
+        self.order
+            .get(&file)
+            .is_some_and(|key| self.cooked.contains_key(key))
     }
 
     /// The files that **define** the macro `name`, in insertion order — one lookup, where the question used to be a
@@ -8256,8 +8266,7 @@ impl ProjectIndex {
                 continue;
             };
 
-            // The cooked reading is looked up **once**, because a file that was never cooked — which is most of
-            // them — has nothing to union and must not pay for the `raw` list below.
+            // The cooked reading is looked up **once**, because a file that was never cooked has nothing to union.
             let cooked = self.cooked.get(key);
 
             // **A file in view only through an `import` contributes only what it exports.** The rule is per *file*
@@ -8272,61 +8281,32 @@ impl ProjectIndex {
             let contributes =
                 |fact: &DeclFact| accepts(fact) && (!only_what_is_exported || fact.exported);
 
-            let mut raw: Vec<&DeclFact> = Vec::new();
-
-            match group {
-                None => raw.extend(summary.declarations.iter().filter(|fact| contributes(fact))),
-                Some(group) => raw.extend(
-                    group
-                        .iter()
-                        .filter(|posting| !posting.is_cooked())
-                        .filter_map(|posting| summary.declarations.get(posting.index()))
-                        .filter(|fact| contributes(fact)),
-                ),
-            }
-
-            for fact in &raw {
-                found.push(VisibleDeclaration {
-                    file: summary.path.clone(),
-                    fact,
-                    visibility,
-                });
-            }
-
-            let Some(cooked) = cooked else {
-                continue;
+            // **The rendering is the reading, where there is one.** A cooked reading is a *better* reading of the
+            // same file — macros expanded, every condition decided — and the two are not two views of one thing:
+            // measured on a real project, **1 095 declarations over 177 files** are in a file's summary and in no
+            // rendering of it (`tests/unit_read_probe.rs`), because the file read *on its own* answers `_CRT_…` and
+            // `_GLIBCXX_…` differently from the file read **inside this program**. Offering both at once answers for
+            // two translation units with one question — and the answer a caller gets is the one that is wrong for
+            // the file it asked about, or a list where one of them had a single declaration.
+            //
+            // So: one source per file. The rendering's facts when there is a rendering, the summary's when there is
+            // not. `Posting::is_cooked` says which list an index belongs to, so the narrowing below stays exact.
+            let (facts, reading_is_cooked): (&[DeclFact], bool) = match cooked {
+                Some(cooked) => (cooked.declarations.as_slice(), true),
+                None => (summary.declarations.as_slice(), false),
             };
 
-            // …and what the file was **cooked** into, minus what the raw reading already said. `(name, kind)` is
-            // the identity a candidate is deduplicated by — see the method's note.
             let candidates: Box<dyn Iterator<Item = &DeclFact> + '_> = match group {
-                None => Box::new(cooked.declarations.iter()),
+                None => Box::new(facts.iter()),
                 Some(group) => Box::new(
                     group
                         .iter()
-                        .filter(|posting| posting.is_cooked())
-                        .filter_map(|posting| cooked.declarations.get(posting.index())),
+                        .filter(|posting| posting.is_cooked() == reading_is_cooked)
+                        .filter_map(|posting| facts.get(posting.index())),
                 ),
             };
 
             for fact in candidates.filter(|fact| contributes(fact)) {
-                // **By the whole qualified name, not by `(name, kind)`.** The two readings place a declaration in
-                // the same scope *usually*, and the exception is the reason the cooked reading exists: `_STD_BEGIN`
-                // is `namespace std {` to a compiler and an ordinary identifier to a file read on its own, so
-                // `<xstring>`'s raw reading files `basic_string::size` where its cooked reading files
-                // `std::basic_string::size`. Those are two different entities to every lookup there is, and
-                // collapsing them by `(name, kind)` dropped the one a query asks for.
-                //
-                // Measured: `std::string::size()` and `std::basic_string<char>::size()` both answered
-                // `NotDeclaredHere` **while the fact was in the index**, because the raw twin had won the
-                // deduplication and its scope was `basic_string`. `std::vector<int>::size()` worked, which is what
-                // made the difference look like an alias problem for a round. Two facts that differ only by scope
-                // are two declarations; one that differs by nothing is one.
-                if raw.iter().any(|known| {
-                    known.name == fact.name && known.kind == fact.kind && known.scope == fact.scope
-                }) {
-                    continue;
-                }
                 found.push(VisibleDeclaration {
                     file: summary.path.clone(),
                     fact,
