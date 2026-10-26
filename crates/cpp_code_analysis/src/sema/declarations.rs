@@ -268,14 +268,23 @@ pub(crate) fn declared_type_of_with(
 
     let specifiers = specifiers?;
 
-    // **The declared name is handed over**, because an out-of-line definition writes it in the specifier sequence and
-    // "the last name is the type" reads it as one — see [`crate::sema::types::type_of_declaration_named`].
-    let spelled = binding.name.text();
+    // **The declared name is handed over, because an out-of-line definition writes it in the specifier sequence** —
+    // see [`crate::sema::types::type_of_declaration_named`]. **Except for a `typedef`**, whose specifier sequence is
+    // its *type* and nothing else: `typedef typename _Base::reference reference;` writes the name twice, once inside
+    // the type and once as the declared one, and the out-of-line rule (a qualified spelling that ends in the declared
+    // name is the declarator's own name, not a type) then threw the **type** away and left nothing — which reads as
+    // `void`. Measured on libstdc++'s `vector`: `operator[]` returns `reference`, `reference`'s own `type_of` was
+    // `void`, so `_lineOffsetVec[line]` typed as `void` and a hover on the `auto` variable printed `void`
+    // (`docs/remaining.md` §A3). An alias is exactly the case where the two spellings must not be reconciled.
+    let spelled = match binding.kind {
+        BindingKind::Typedef => None,
+        _ => Some(binding.name.text()),
+    };
     let found = crate::sema::types::type_of_declaration_named(
         &specifiers,
         declarator.as_ref(),
         binding.name_range,
-        Some(spelled.as_str()),
+        spelled.as_deref(),
     );
 
     let written = found.to_string();

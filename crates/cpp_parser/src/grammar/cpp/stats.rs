@@ -1431,12 +1431,62 @@ fn parse_switch_statement(p: &mut CppParser) -> ParseResult {
         return Err(err);
     }
 
+    // **A `switch` body is a *statement*, and a brace block is only one of them.** Requiring `{` here is what made
+    // gtest unreadable: its assertion macros expand to
+    //
+    // ```text
+    // switch (0) case 0: default: if (const AssertionResult gtest_ar_ = …) ; else AssertHelper(…) = Message();
+    // ```
+    //
+    // (`GTEST_SWITCH_`), a body with **labels and one statement** and no braces at all. Measured on
+    // `Test/src/FilePattern_unitest.cpp`: 62 `SyntaxError`s, one per assertion — `expected {, but get case` — on a
+    // file whose rendering is correct, so the preprocessor was blamed for a gap in the grammar.
+    //
+    // The two shapes are read in their own terms: a block holds many statements and is read as before; anything else
+    // is a run of `case`/`default` labels followed by the one statement they label, which is what the language says a
+    // labelled statement is.
+    if p.current_token() != CppTokenKind::LeftBrace {
+        read_switch_labels(p, base)?;
+        if let Err(err) = parse_stat(p) {
+            p.close_marks_above(base);
+            return Err(err);
+        }
+        return Ok(m.complete(p));
+    }
+
     if let Err(err) = expect_token(p, CppTokenKind::LeftBrace) {
         p.close_marks_above(base);
         return Err(err);
     }
 
     while p.current_token() != CppTokenKind::RightBrace && !p.is_eof() {
+        match p.current_token() {
+            CppTokenKind::CaseKeyword | CppTokenKind::DefaultKeyword => {
+                read_switch_labels(p, base)?;
+            }
+            _ => {
+                // Regular statements inside the switch body.
+                parse_stat(p)?;
+            }
+        }
+    }
+
+    if p.current_token() == CppTokenKind::RightBrace {
+        p.bump();
+    } else {
+        p.emit_missing_node();
+    }
+
+    Ok(m.complete(p))
+}
+
+/// **A run of `case`/`default` labels**, each one complete — the prefix of a labelled statement.
+///
+/// One `case` label is `case <constant-expression> :` or a range `case 1 ... 5:`; `default` is the keyword and the
+/// colon. Both are read here rather than at the two call sites, because a `switch` body reads them in a block and
+/// without one, and the grammar must not have two answers for the same token.
+fn read_switch_labels(p: &mut CppParser, base: usize) -> ParseResult {
+    loop {
         match p.current_token() {
             CppTokenKind::CaseKeyword => {
                 let case = p.mark(CppSyntaxKind::CaseStat);
@@ -1473,20 +1523,9 @@ fn parse_switch_statement(p: &mut CppParser) -> ParseResult {
                 }
                 default.complete(p);
             }
-            _ => {
-                // Regular statements inside the switch body.
-                parse_stat(p)?;
-            }
+            _ => return Ok(CompleteMarker::empty()),
         }
     }
-
-    if p.current_token() == CppTokenKind::RightBrace {
-        p.bump();
-    } else {
-        p.emit_missing_node();
-    }
-
-    Ok(m.complete(p))
 }
 
 /// The name the standard library's own header gives to `try`, and to `catch`.

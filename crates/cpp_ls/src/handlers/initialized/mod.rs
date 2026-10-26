@@ -323,6 +323,12 @@ async fn index_in_background(context: ServerContextSnapshot) {
         let mut wave = THE_FIRST_WAVE;
 
         loop {
+            // **The pump's own heartbeat, at `trace`.** A bar stuck at "re-reading N" with no CPU means the loop is
+            // parked on an `await`, and which one is invisible from the outside: every step of a slice is silent when
+            // the slice finds nothing to do. These five lines are the only way to tell "blocked on the workspace
+            // manager" from "blocked on the analysis" from "blocked in the drain", and they cost nothing when the
+            // level is not `trace`.
+            log::trace!("pump: round");
             // A reload bumps the version and starts a pump of its own: this one stops rather than racing it for
             // the write lock, because its idea of what the project is is the one that was replaced.
             if context.workspace_manager().lock().await.workspace_version() != version {
@@ -359,6 +365,7 @@ async fn index_in_background(context: ServerContextSnapshot) {
                 .await
                 .unwrap_or_default();
             let prepared_count = prepared.prepared.len();
+            log::trace!("pump: wave prepared ({prepared_count})");
 
             let Some((pending, drain, claimed, held)) = context
                 .analysis()
@@ -475,6 +482,11 @@ async fn index_in_background(context: ServerContextSnapshot) {
             let drain_was_empty = drain.is_empty();
             let asked: Vec<std::path::PathBuf> = claimed.clone();
             let claimed_count = asked.len();
+            log::trace!(
+                "pump: drain starts (empty {}, {} claimed to cook)",
+                drain_was_empty,
+                asked.len()
+            );
             let (prepared_drain, rendered_cooks, built) = context
                 .analysis()
                 .run_blocking(move |session| {
@@ -497,6 +509,7 @@ async fn index_in_background(context: ServerContextSnapshot) {
             // **And the insert, under the write lock** — one `insert` per re-read summary and one `insert_cooked` per
             // cooked file, and nothing else. Both halves are timed, because the count is not the number a caller
             // feels: what makes this product slow is a write lock held for long, and this line says which half did it.
+            log::trace!("pump: commit starts");
             let (re_read, cooked) = context
                 .analysis()
                 .update_session("index slice", |session| {

@@ -1539,10 +1539,52 @@ pub(crate) fn read_specifiers_named(
     spelling.unwrap_or_else(|| Type::builtin("void"))
 }
 
+/// **Where the argument list that ends this spelling starts**, if one does.
+///
+/// `std::vector<int>` → the `std::vector` cut; `A<B<int>>` → the `A` cut (the brackets nest, so the first `<` is the
+/// one whose partner is the last character); `Base<T>::reference` → `None`, because the list is not at the end and
+/// what follows it is part of the name; `Foo<int>::Bar<int>` → the `Bar` cut, which is the group that ends the
+/// spelling.
+///
+/// A byte scan with a depth counter, which is enough: the text is a type spelling, and a `<` inside a *string* is not
+/// a shape a type has.
+fn trailing_template_id(written: &str) -> Option<usize> {
+    let bytes = written.as_bytes();
+    if bytes.last() != Some(&b'>') {
+        return None;
+    }
+
+    // **The group that closes at the last byte**, not the first group written: the openings are stacked, so the one
+    // popped when the depth falls to zero *and the bracket is the last character* is the answer.
+    let mut depth = 0usize;
+    let mut openings: Vec<usize> = Vec::new();
+    for (at, byte) in bytes.iter().enumerate() {
+        match byte {
+            b'<' => {
+                depth += 1;
+                openings.push(at);
+            }
+            b'>' => {
+                if depth == 0 {
+                    // Unbalanced: not a template-id, and the name keeps its spelling.
+                    return None;
+                }
+                depth -= 1;
+                let opening = openings.pop()?;
+                if depth == 0 && at + 1 == bytes.len() {
+                    return Some(opening);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    None
+}
+
 /// A name **without** its arguments, and the arguments beside it: `std::vector<int>` is the class `std::vector`
 /// with one argument.
 ///
-/// # Why one node gives both, and why the name is cut rather than taken
 ///
 /// The parser folds a whole qualified name — qualifiers, the template argument list and all — into **one
 /// `NameExpr`**, so its text is `std::vector<int>` and the argument list is a *child* of it. So the two readings a
@@ -1566,13 +1608,24 @@ fn read_named(node: &CppSyntaxNode) -> Option<Type> {
         return None;
     }
 
-    let (name, arguments) = match written.find('<') {
+    // **The argument list has to be the *end* of the spelling.** Cutting at the first `<` took `Base<T>::reference`
+    // as the class `Base<T>` — the `::reference` vanished, so a `typedef typename _Base::reference reference;`
+    // recorded a type that names a class rather than the alias it is, and a hover on the variable deduced from it
+    // printed the class. A template-id is a spelling that **ends** in its argument list; a qualified name with one in
+    // the middle is not one, and this layer's model has no place to keep it, so the whole spelling stays the name.
+    let trailing = trailing_template_id(&written);
+    let (name, arguments) = match trailing {
         Some(at) => {
+            let wanted = written[at..].trim().to_string();
             let list = node
                 .descendants()
-                .find(|child| {
+                .filter(|child| {
                     CppSyntaxKind::from(child.kind()) == CppSyntaxKind::TemplateArgumentList
                 })
+                // **The last list whose text is the group that ends the spelling** — `Foo<int>::Bar<int>` has two
+                // identical-looking lists and only the second one is the type's own.
+                .filter(|list| list.text().to_string().trim() == wanted)
+                .last()
                 .map(|list| read_template_arguments(&list))
                 .unwrap_or_default();
             (written[..at].trim_end().to_string(), list)

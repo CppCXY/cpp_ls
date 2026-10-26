@@ -58,7 +58,8 @@ fn entry(project: &std::path::Path) -> std::path::PathBuf {
 struct Server {
     child: Child,
     stdin: ChildStdin,
-    stdout: BufReader<ChildStdout>,
+    /// Every message the server has sent, filled by the reader thread — see [`Server::read`].
+    incoming: std::sync::mpsc::Receiver<Value>,
     log_dir: std::path::PathBuf,
 }
 
@@ -73,21 +74,30 @@ impl Server {
             .arg(&log_dir)
             // The five numbers this probe exists for are `debug`, and the default level is `info`.
             .arg("--log-level")
-            .arg("debug")
+            .arg(std::env::var("CPPLS_LOG_LEVEL").unwrap_or_else(|_| "debug".to_string()))
             .current_dir(project)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            // **Kept, not discarded.** A panic in a `tokio::spawn`ed task does not reach the LSP channel — it prints to
+            // the server's stderr — and a pump task that dies that way leaves its progress bar on screen for ever,
+            // which is the report this probe exists for. `/dev/null` is why the first run of it could not say so.
+            .stderr(Stdio::from(
+                std::fs::File::create(log_dir.join("stderr.txt")).expect("a stderr file"),
+            ))
             .spawn()
             .expect("the server starts");
 
         // Taken rather than cloned: a child's pipes are not files and have no `try_clone`.
         let stdin = child.stdin.take().expect("stdin");
-        let stdout = BufReader::new(child.stdout.take().expect("stdout"));
+        let stdout = child.stdout.take().expect("stdout");
+        // **From the first byte, on its own thread** — see `read`. `read_messages` answers every message including the
+        // ones nobody asked for, which is the whole point: the progress reports are server-initiated.
+        let (incoming, from_the_server) = std::sync::mpsc::channel();
+        std::thread::spawn(move || Self::read_messages(stdout, incoming));
         Server {
             child,
             stdin,
-            stdout,
+            incoming: from_the_server,
             log_dir,
         }
     }
@@ -115,37 +125,74 @@ impl Server {
     }
 
     fn read(&mut self) -> Option<Value> {
-        let mut length = 0usize;
+        // **The reader thread's queue, not the pipe.** A client that only reads while it waits for an answer of its
+        // own is not a client: the server writes `$/progress` on its own rhythm, and a pipe nobody drains fills at
+        // 64 KB and blocks the server's writer — which parks the pump on a *write*, with no CPU and a progress bar
+        // that never moves. That is what the first version of the idle probe measured instead of the server.
+        self.incoming.recv_timeout(Duration::from_secs(30)).ok()
+    }
+
+    /// Read the server's stdout until it closes, one LSP message at a time.
+    fn read_messages(stdout: ChildStdout, into: std::sync::mpsc::Sender<Value>) {
+        let mut stdout = BufReader::new(stdout);
         loop {
-            let mut header = String::new();
-            if self.stdout.read_line(&mut header).ok()? == 0 {
-                return None;
+            let mut length = 0usize;
+            loop {
+                let mut header = String::new();
+                match stdout.read_line(&mut header) {
+                    Ok(0) | Err(_) => return,
+                    Ok(_) => {}
+                }
+                let header = header.trim_end();
+                if header.is_empty() {
+                    break;
+                }
+                if let Some(rest) = header.strip_prefix("Content-Length: ") {
+                    length = rest.trim().parse().unwrap_or(0);
+                }
             }
-            let header = header.trim_end();
-            if header.is_empty() {
-                break;
+            let mut body = vec![0u8; length];
+            if stdout.read_exact(&mut body).is_err() {
+                return;
             }
-            if let Some(rest) = header.strip_prefix("Content-Length: ") {
-                length = rest.trim().parse().ok()?;
+            if let Ok(message) = serde_json::from_slice(&body) {
+                if into.send(message).is_err() {
+                    return;
+                }
             }
         }
-        let mut body = vec![0u8; length];
-        self.stdout.read_exact(&mut body).ok()?;
-        serde_json::from_slice(&body).ok()
     }
 
     /// Everything the server has written about completions so far.
     fn completion_lines(&self) -> Vec<String> {
+        self.lines_with("completion")
+    }
+
+    /// Every `index slice` line, in the order the log files were read.
+    fn slice_lines(&self) -> Vec<String> {
+        self.lines_with("index slice")
+    }
+
+    /// Every line the server wrote at `warn` or worse — the pump's own admission that something cannot be paid.
+    fn warning_lines(&self) -> Vec<String> {
+        let mut lines = self.lines_with("WARN");
+        lines.extend(self.lines_with("ERROR"));
+        lines
+    }
+
+    fn lines_with(&self, needle: &str) -> Vec<String> {
         let Ok(entries) = std::fs::read_dir(&self.log_dir) else {
             return Vec::new();
         };
         let mut lines = Vec::new();
-        for entry in entries.filter_map(Result::ok) {
-            let Ok(text) = std::fs::read_to_string(entry.path()) else {
+        let mut paths: Vec<_> = entries.filter_map(Result::ok).map(|entry| entry.path()).collect();
+        paths.sort();
+        for path in paths {
+            let Ok(text) = std::fs::read_to_string(path) else {
                 continue;
             };
             for line in text.lines() {
-                if line.contains("completion") {
+                if line.contains(needle) {
                     lines.push(line.to_string());
                 }
             }
@@ -421,4 +468,96 @@ fn position_of(text: &str, anchor: &str, needle: &str) -> (u64, u64) {
         .and_then(|text| text.find(needle))
         .unwrap_or_else(|| panic!("{needle:?} is not on the line that writes {anchor:?}"));
     (line as u64, character as u64)
+}
+
+/// **Does the pump go idle on its own?** — the `Load workspace: re-reading N file(s)` bar that never retired.
+///
+/// Reported from an editor as a bar stuck at `re-reading 9 file(s) for the compiler's view` with **no CPU in use**.
+/// The bar retires when `pending_work()` reaches zero, so a bar that stays is a count nothing pays: either a slice keeps
+/// claiming work it cannot build, or the count holds something no slice takes. This runs the real server over the
+/// project with one file open and watches its own log for two minutes — the state the report was in, where the bar is
+/// the only thing the server is saying and no request nudges it.
+#[test]
+#[ignore = "opens a real project; run with --ignored"]
+fn the_pump_goes_idle_without_a_client_asking() {
+    let project = project();
+    let source = project
+        .join("LuaParser")
+        .join("src")
+        .join("File")
+        .join("LuaSource.cpp");
+    if !source.is_file() {
+        eprintln!("skipped: the project has no {source:?}");
+        return;
+    }
+    let text = std::fs::read_to_string(&source).expect("the file reads");
+    let uri = format!("file:///{}", source.display().to_string().replace('\\', "/"));
+
+    let mut server = Server::start(&project);
+    let answer = server.request(
+        1,
+        "initialize",
+        json!({
+            "processId": std::process::id(),
+            "rootUri": format!("file:///{}", project.display().to_string().replace('\\', "/")),
+            "capabilities": {
+                "workspace": { "configuration": true },
+                "window": { "workDoneProgress": true },
+            },
+        }),
+    );
+    assert!(answer["result"].is_object(), "initialize failed: {answer}");
+    server.notify("initialized", json!({}));
+    server.notify(
+        "textDocument/didOpen",
+        json!({ "textDocument": { "uri": uri, "languageId": "cpp", "version": 1, "text": text } }),
+    );
+
+    // **Two minutes without asking for anything.** An idle session logs no slice at all — that is the property the
+    // `wait_for_work` fix bought — so a pump that keeps logging is a pump that keeps finding work it cannot do.
+    let mut counted_at_60 = 0usize;
+    let mut counted_at_90 = 0usize;
+    for round in 0..18 {
+        std::thread::sleep(Duration::from_secs(5));
+        match round {
+            11 => counted_at_60 = server.slice_lines().len(),
+            17 => counted_at_90 = server.slice_lines().len(),
+            _ => {}
+        }
+    }
+
+    let slices = server.slice_lines();
+    let warnings = server.warning_lines();
+    println!("\n--- the last slice the pump reported ---");
+    for line in slices.iter().rev().take(3) {
+        println!("{line}");
+    }
+    println!(
+        "\n--- {} slice line(s) in total, {} between 60 s and 90 s, {} breaker warning(s) ---",
+        slices.len(),
+        counted_at_90 - counted_at_60,
+        warnings.len()
+    );
+    for line in warnings.iter().take(5) {
+        println!("{line}");
+    }
+
+    let _ = server.request(999, "shutdown", Value::Null);
+    server.notify("exit", Value::Null);
+
+    assert!(
+        counted_at_90 - counted_at_60 <= 5,
+        "the pump is still slicing on an idle session: {counted_at_90} lines at 90 s against {counted_at_60} at 60 s"
+    );
+    assert!(
+        !slices
+            .last()
+            .is_some_and(|line| line.contains("to cook,") && line.contains(", 0 left")),
+        "the pump ended on work it keeps claiming: {:?}",
+        slices.last()
+    );
+    assert!(
+        warnings.is_empty(),
+        "the pump admitted it could not pay a count it was holding: {warnings:?}"
+    );
 }

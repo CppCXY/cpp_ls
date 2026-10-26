@@ -3811,6 +3811,13 @@ fn valid_cpp_in_the_shapes_recovery_eats() {
             "while (a) { }",
             "do { } while (a);",
             "switch (a) { case 1: break; }",
+            // **A `switch` body that is not a block.** The language allows any statement there, and gtest's assertion
+            // macros are built on exactly that: `GTEST_SWITCH_` expands to `switch (0) case 0: default: if (…) ; else
+            // …;` — labels and one statement, no braces. Requiring `{` reported 62 syntax errors on
+            // `Test/src/FilePattern_unitest.cpp`, one per assertion, on a file whose rendering was correct.
+            "switch (0) case 0: default: if (a) ; else g();",
+            "switch (a) f();",
+            "switch (a) case 1 ... 5: break;",
             "goto end; end: ;",
             "if (a) { }",
             "throw X();",

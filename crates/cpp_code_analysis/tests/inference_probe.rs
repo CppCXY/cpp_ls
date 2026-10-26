@@ -63,10 +63,32 @@ fn what_is_answered_at_a_place() {
                     );
                 }
                 for error in &found.errors {
-                    println!("  error {:?}", error.code);
+                    println!(
+                        "  error {:?} at {} (length {}): {}",
+                        error.code, error.start, error.end, error.message
+                    );
                 }
             }
             None => println!("the check layer had nothing to say about the file"),
+        }
+    }
+
+    // **The text the parser was handed**, when asked — the one artifact that separates "the checker is wrong" from
+    // "the preprocessor handed the parser something that is not a program". A file whose macros do not expand reads
+    // as a pile of syntax errors, and every one of them is an accurate report about the text it was shown.
+    if std::env::var_os("CPPLS_RENDERING").is_some() {
+        match session.rendering_of(&file) {
+            Some(rendered) => {
+                let lines = std::env::var("CPPLS_RENDERING_LINES")
+                    .ok()
+                    .and_then(|count| count.parse::<usize>().ok())
+                    .unwrap_or(40);
+                println!("--- the rendering, first {lines} line(s) ---");
+                for line in rendered.text.lines().take(lines) {
+                    println!("{line}");
+                }
+            }
+            None => println!("the file has no rendering yet"),
         }
     }
 
@@ -145,6 +167,16 @@ fn what_is_answered_at_a_place() {
                 })
                 .collect();
             println!("     definitions: {names:?}");
+        }
+
+        // **What the expression at the cursor is**, which is the question a hover on an `auto` variable ends in:
+        // `type_at` reads the initializer when the declaration has no type of its own. `CPPLS_TYPE=1`.
+        if std::env::var_os("CPPLS_TYPE").is_some() {
+            let typed = session.type_at(
+                &view,
+                cpp_code_analysis::file::coordinates::ReadingOffset::new(offset),
+            );
+            println!("     type_at: {typed:?}");
         }
     }
 

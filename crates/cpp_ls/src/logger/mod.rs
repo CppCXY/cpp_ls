@@ -19,6 +19,7 @@ pub fn init_logger(root: Option<&str>, cmd_args: &CmdArgs) {
         LogLevel::Warn => LevelFilter::Warn,
         LogLevel::Info => LevelFilter::Info,
         LogLevel::Debug => LevelFilter::Debug,
+        LogLevel::Trace => LevelFilter::Trace,
     };
 
     let cmd_log_path = cmd_args.log_path.clone();

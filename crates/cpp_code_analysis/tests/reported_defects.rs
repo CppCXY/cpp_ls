@@ -141,3 +141,54 @@ fn a_template_id_keeps_the_spelling_that_was_written() {
         "the type the file wrote"
     );
 }
+
+/// **§A3 — a `typedef` of a qualified name is its type, not its own name.**
+///
+/// The report was a hover: `auto lineStartOffset = _lineOffsetVec[line];` printed `void lineStartOffset;`. The
+/// chain that produced it, measured on libstdc++'s `vector`:
+///
+/// ```text
+/// operator[] returns `reference`  ->  reference is `typedef typename _Base::reference reference;`
+///                                 ->  that fact's type was `void`
+///                                 ->  the subscript typed as `void`
+///                                 ->  the `auto` variable typed as `void`
+/// ```
+///
+/// The rule that reads an out-of-line definition's type ("a qualified spelling that ends in the declared name is the
+/// declarator's own name, not a type") was applied to a `typedef` as well, where the two spellings are a coincidence:
+/// `typedef typename _Base::reference reference;` writes the name twice and both halves are real. An alias never needs
+/// the rule, so it no longer gets it.
+#[test]
+fn an_alias_of_a_qualified_type_is_not_a_void() {
+    let session = session_with(&[(
+        "/p/a.cpp",
+        "template <class T> struct Base { typedef T& reference; };\n\
+         template <class T> struct V {\n\
+         typedef typename Base<T>::reference reference;\n\
+         reference at(int i);\n\
+         };\n",
+    )]);
+    let summary = session
+        .index()
+        .summary(std::path::Path::new("/p/a.cpp"))
+        .expect("indexed");
+    let alias = summary
+        .declarations
+        .iter()
+        .find(|fact| fact.name == "reference" && fact.scope.as_deref() == Some("V"))
+        .expect("the alias is a fact");
+    println!("V::reference type_of {:?}", alias.type_of);
+    assert!(
+        alias.type_of.as_deref() != Some("void"),
+        "an alias's type is never `void`: {:?}",
+        alias.type_of
+    );
+    assert!(
+        alias
+            .type_of
+            .as_deref()
+            .is_some_and(|written| written.contains("Base<T>::reference")),
+        "the type the typedef wrote: {:?}",
+        alias.type_of
+    );
+}

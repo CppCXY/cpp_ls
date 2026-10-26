@@ -61,6 +61,12 @@ pub enum LogLevel {
     Info,
     /// Debug level
     Debug,
+    /// Trace level — the per-step lines a stalled loop is diagnosed with
+    ///
+    /// **There were `log::trace!` calls and no way to turn them on.** A pump stuck at `re-reading N file(s)` with no
+    /// CPU is a loop parked on an `await`, and the per-slice lines that say which one are exactly these: the report
+    /// cannot be diagnosed from `debug` alone, because a slice that finds nothing to do logs nothing there.
+    Trace,
 }
 
 impl std::str::FromStr for LogLevel {
@@ -72,8 +78,9 @@ impl std::str::FromStr for LogLevel {
             "warn" => Ok(LogLevel::Warn),
             "info" => Ok(LogLevel::Info),
             "debug" => Ok(LogLevel::Debug),
+            "trace" => Ok(LogLevel::Trace),
             _ => Err(format!(
-                "Invalid log level: '{}'. Please choose 'error', 'warn', 'info', 'debug'",
+                "Invalid log level: '{}'. Please choose 'error', 'warn', 'info', 'debug', 'trace'",
                 input
             )),
         }
