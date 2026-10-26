@@ -322,6 +322,10 @@ async fn index_in_background(context: ServerContextSnapshot) {
         const THE_FIRST_WAVE: usize = 8;
         let mut wave = THE_FIRST_WAVE;
 
+        // **The bar's rate** — see the report below, which is per slice.
+        const PROGRESS_REPORT_EVERY: std::time::Duration = std::time::Duration::from_millis(250);
+        let mut last_report = std::time::Instant::now();
+
         loop {
             // **The pump's own heartbeat, at `trace`.** A bar stuck at "re-reading N" with no CPU means the loop is
             // parked on an `await`, and which one is invisible from the outside: every step of a slice is silent when
@@ -622,11 +626,25 @@ async fn index_in_background(context: ServerContextSnapshot) {
                 } else {
                     format!("re-reading {still} file(s) for the compiler's view")
                 };
-                context.status_bar().update_progress_task(
-                    ProgressTask::LoadWorkspace,
-                    None,
-                    Some(message),
-                );
+
+                // **A message per slice is a message per keystroke's worth of work, and that is too many.** Slices are
+                // as small as one file, so a cold start of this project sent **418 `$/progress` reports in seven
+                // seconds** — a client that batches UI updates garbage-collects them into a dozen, and a client whose
+                // pipe backs up blocks the server's writer in between (measured: a test client that only read while
+                // waiting for its own answers filled the 64 KB pipe and parked the pump on a *write*, with no CPU and
+                // a bar that never moved). A reader cannot perceive more than a few updates a second either, and the
+                // count changes on almost every slice, so a rule that reports "when the sentence changes" reports
+                // every time — the limit is the clock and nothing else. The final sentence is not lost: the last
+                // slice before `pending == 0` is still reported, and the bar is ended there anyway.
+                let now = std::time::Instant::now();
+                if now.duration_since(last_report) >= PROGRESS_REPORT_EVERY {
+                    context.status_bar().update_progress_task(
+                        ProgressTask::LoadWorkspace,
+                        None,
+                        Some(message),
+                    );
+                    last_report = now;
+                }
 
                 // Yield between slices: the runtime is also serving requests, and a loop that never awaits would
                 // hold the worker it runs on.

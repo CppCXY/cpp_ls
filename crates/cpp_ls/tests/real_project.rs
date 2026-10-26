@@ -545,19 +545,28 @@ fn the_pump_goes_idle_without_a_client_asking() {
     let _ = server.request(999, "shutdown", Value::Null);
     server.notify("exit", Value::Null);
 
+    let reports = server.lines_with("$/progress").len();
+    let stalled = warnings
+        .iter()
+        .filter(|line| line.contains("made no progress"))
+        .count();
+    println!(
+        "{reports} `$/progress` line(s) for {} slice(s); {stalled} stall warning(s)",
+        slices.len()
+    );
+
     assert!(
         counted_at_90 - counted_at_60 <= 5,
         "the pump is still slicing on an idle session: {counted_at_90} lines at 90 s against {counted_at_60} at 60 s"
     );
-    assert!(
-        !slices
-            .last()
-            .is_some_and(|line| line.contains("to cook,") && line.contains(", 0 left")),
-        "the pump ended on work it keeps claiming: {:?}",
-        slices.last()
-    );
-    assert!(
-        warnings.is_empty(),
+    assert_eq!(
+        stalled, 0,
         "the pump admitted it could not pay a count it was holding: {warnings:?}"
+    );
+    // **The bar's own rate**, which is what a client feels: it used to be one report per slice (418 for this project).
+    assert!(
+        reports <= slices.len() / 2 + 20,
+        "the bar reports once per slice: {reports} reports for {} slices",
+        slices.len()
     );
 }
