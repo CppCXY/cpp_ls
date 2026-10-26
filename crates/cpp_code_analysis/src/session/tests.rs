@@ -910,19 +910,13 @@ fn a_files_rendering_is_its_reading_and_not_one_answer_beside_another() {
     );
 }
 
-/// **The same header, read in two translation units, must answer each of them its own way** — §5 step two's acceptance.
+/// **The same header, read in two translation units, answers each of them its own way** — §5 step two's acceptance.
 ///
-/// `cfg.h` declares `X` one way when `A` is defined and another when it is not, so `a.cpp` (which defines it before the
-/// include) and `b.cpp` (which does not) read **different** `X` from the same text. Every file has one reading today
-/// (⑱: "the rendering, where there is one"), and a file read by two programs keeps the **last** program's reading — so
-/// one of these two answers is the other translation unit's.
-///
-/// `#[ignore]`d rather than red, and it is the statement of what is missing rather than a test of what is there: when
-/// `cooked` is keyed by `(file, the program that read it)` and a lookup picks by the asking file's program — the
-/// `env_hash` of §5 step two — this test is the one that says it happened. Its fixture is the doc's own acceptance
-/// criterion, written down so it cannot be lost.
+/// `cfg.h` declares `X` one way when `A` is defined and another when it is not, so `a.cpp` (which defines it before
+/// the include) and `b.cpp` (which does not) read **different** `X` from the same bytes. The index keeps a reading
+/// **per program** (`Readings`), and a lookup picks by the asking file's program — the `env_hash` of §5 step two.
+/// Before that, the file kept the *last* program's reading and this test answered `b.cpp` with what `a.cpp` compiled.
 #[test]
-#[ignore = "§5 step two: a file read in two programs keeps the last one's reading"]
 fn a_header_read_in_two_programs_answers_each_its_own_way() {
     let cfg = "#ifdef A\nstruct X { int from_a; };\n#else\nstruct X { long from_b; };\n#endif\n";
     let a = "#define A 1\n#include \"cfg.h\"\n";

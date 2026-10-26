@@ -5078,7 +5078,12 @@ impl<F: FileProvider + Clone> Session<F> {
             // when it is compiled inside `Selection.cpp`. So replacing one list with the other would answer for the
             // wrong translation unit — the problem §5 step two (a key with `env_hash`) exists to solve, not one a
             // rewrite can.
-            self.store.index_mut().insert_cooked(&path, cooked);
+            // **Filed under the program that read it**, not under the file: the same header read by two translation
+            // units is two readings, and a lookup asks for the asking file's one
+            // (`ProjectIndex::the_reading_for`). See `Readings` in `index/project.rs`.
+            self.store
+                .index_mut()
+                .insert_cooked_in_a_program(&path, program, cooked);
         }
 
         UnitReading {

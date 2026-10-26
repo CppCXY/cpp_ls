@@ -761,14 +761,47 @@ bucketed 查找）另有一条"raw 影子盖住 cooked"的规则 —— 两处�
 **还没解决的、也是 §5 第二步剩下的**：一个文件被**两个**程序读过时，写进 `cooked[path]` 的是后一个 —— 现在是
 "最后读的那个 TU 的读法"，不是"询问方所在 TU 的读法"。要做到后者，`cooked` 的键得像
 `SummaryStore::prepare_with_the_timeline` 那样带上 `env_hash`，查找再用询问方（`visible_from`）的 TU 环境去选。
-⑱ 让"选一份"这件事成为**唯一**的规则，接下来只是"选哪一份"。
+⑱ 让"选一份"这件事成为**唯一**的规则，接下来只是"选哪一份"。**⑲ 把它做完了**，见 §7.9。
 
 **这对四层补丁意味着什么**：patch 2（查找期 `visibility_at` 过滤）存在的理由是"死分支的声明还在摘要里"。⑱ 之后，
 它只对**没有渲染读法**的文件还有用户 —— 而那些文件正是 §7.6 要消灭的。
 
-**下一步的验收条件已经写成测试**（`#[ignore]`，`session::tests::a_header_read_in_two_programs_answers_each_its_own_way`）：
-`cfg.h` 在 `A` 定义/未定义时各声明一个 `X`，`a.cpp` 定义它、`b.cpp` 不定义 —— 现在跑出来的答案是 `b.cpp` 也拿到
-`a.cpp` 的 `int` 分支（`Some(9)` 对上期望的 `Some(41)`），因为最后读的那个程序覆盖了 `cooked[cfg.h]`。这条测试就是
-§5 第二步的判据：`cooked` 的键要带上"被哪个程序读过"，查找按询问方（`visible_from`）所在的程序选一份。
+**验收条件先写成了测试**（`session::tests::a_header_read_in_two_programs_answers_each_its_own_way`）：
+`cfg.h` 在 `A` 定义/未定义时各声明一个 `X`，`a.cpp` 定义它、`b.cpp` 不定义 —— 当时跑出来的答案是 `b.cpp` 也拿到
+`a.cpp` 的 `int` 分支（`Some(9)` 对上期望的 `Some(41)`），因为最后读的那个程序覆盖了 `cooked[cfg.h]`。⑲ 之后这条
+测试是绿的，`#[ignore]` 也摘掉了。
+
+### 7.9 ⑲ 一个文件每个程序各一份读法，查找按询问方选
+
+§5 第二步的最后一块：`cooked` 不再是"每个文件一份"，而是 `Readings { on_its_own, in_a_program: Vec<(程序, 读法)>,
+last }` —— **同一个头被两个 TU 读成不同答案时，两份都留着**。挑选规则只有一条，落在
+`ProjectIndex::the_reading_for(file, asking)`：
+
+```text
+询问方是哪个 TU   询问方文件自己是被哪个程序读的（the_program_that_read(visible_from)）
+选中哪一份        这个程序对该文件的读法 → 否则它自己单独读的那份 → 否则摘要
+```
+
+**posting 必须跟着一起说"哪一份"**，否则窄化（补全、定义走的都是按名字的桶）会把索引指向另一份列表：
+`Posting` 从 `{ file, slot }`（高位标记 cooked）变成 `{ file, reading, slot }`，`reading` 是
+`0`（文件自己的摘要）/ `1`（单独读的那份）/ `2 + 程序序号`。`NameIndex::add_declarations`/`remove_declarations`
+的 `cooked: bool` 因此变成 `reading: u32` —— 少了"两份读法怎么合并"的推理，多了"哪一份"的显式身份。
+
+实测（本机 `clice`，release）：
+
+```text
+unit_read_probe       177 个文件的闭包读完后：39 080 条 cooked 声明、0 条"同一文件答出两个候选"
+                      （⑱ 的判据在"每程序一份"之后仍然成立）
+loop_probe            真服务端：索引 87 ms 内完成 → 停手后读 180 文件 / 806 008 token / 0 error
+                      十次 diagnostics pull 0 cook
+cpp_code_analysis     685 lib + 全部集成绿（含 §5 第二步的验收测试，已从 #[ignore] 转正）
+cpp_ls release        13 个目标全绿：handshake 34（含 folding）、latency 2（5.44 s）、idle、diagnostics_stable …
+```
+
+**还剩什么**：同一份读法的**键**没有 `env_hash`（现在是程序渲染文本的哈希，一个进程内稳定、不跨进程），所以
+"这个头在两个 TU 里各是什么"这件事在**重启之后**要靠重读重建；磁盘那侧的 `SummaryKey::with_environment` 已经有了，
+接上它是下一步。四层补丁里 patch 2 的用户只剩"没有渲染读法的文件"，patch 1/3/4 的用户只剩"查找时手上只有摘要"的
+路径 —— 都和 §7.6 的冷启动改造是同一件事。
+
 
 

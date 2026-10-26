@@ -557,6 +557,74 @@ impl From<crate::IndexedRendering> for CookedFile {
     }
 }
 
+/// **What one file was read as**, beyond its own summary: the renderings of it, one per translation unit.
+///
+/// A file's summary is the file read **on its own** — its own text, its own closure, its own environment. A cooked
+/// reading is the file read **inside a program**, and a header can be read by several programs: `a.cpp` that defines
+/// `_GNU_SOURCE` before including it and `b.cpp` that does not read *different declarations* out of the same bytes.
+/// So the readings are kept per program, and which one a lookup uses is decided by the **asking** file's program —
+/// see [`ProjectIndex::the_reading_for`].
+///
+/// The id a [`Posting`] carries is **`0` for the file's own summary** (which lives in `ProjectIndex::summaries`, not
+/// here), `1` for the reading it was cooked into on its own, and `2 + its position` for a program's reading — so a
+/// reading keeps its id for as long as the file does and a re-read replaces it in place.
+#[derive(Debug, Default)]
+struct Readings {
+    /// The file rendered in its own translation unit — what the per-file cook produces.
+    on_its_own: Option<CookedFile>,
+    /// The programs that read it, in the order they did.
+    in_a_program: Vec<(u64, CookedFile)>,
+    /// The last program to read it, which is the reading a caller that cannot name one gets.
+    last: Option<u64>,
+}
+
+impl Readings {
+    /// The id of a program's reading of this file, if it has one.
+    fn id_for(&self, program: u64) -> Option<u32> {
+        self.in_a_program
+            .iter()
+            .position(|(held, _)| *held == program)
+            .map(|at| at as u32 + 2)
+    }
+
+    /// The reading filed under `id`: `1` is the file's own, `2..` are the programs'. `0` — the file's summary — is
+    /// not a cooked reading and answers `None`.
+    fn reading(&self, id: u32) -> Option<&CookedFile> {
+        match id {
+            0 => None,
+            1 => self.on_its_own.as_ref(),
+            id => self
+                .in_a_program
+                .get(id as usize - 2)
+                .map(|(_, reading)| reading),
+        }
+    }
+
+    /// The id the file's **own** cooked reading has, if it was ever cooked that way.
+    const ON_ITS_OWN: u32 = 1;
+
+    /// The reading a caller gets when it has no program to ask for: the last program's, else the file's own.
+    fn any(&self) -> Option<&CookedFile> {
+        self.last
+            .and_then(|program| self.id_for(program))
+            .and_then(|id| self.reading(id))
+            .or(self.on_its_own.as_ref())
+            .or_else(|| self.in_a_program.first().map(|(_, reading)| reading))
+    }
+
+    fn every(&self) -> impl Iterator<Item = (u32, &CookedFile)> {
+        self.on_its_own
+            .iter()
+            .map(|reading| (Self::ON_ITS_OWN, reading))
+            .chain(
+                self.in_a_program
+                    .iter()
+                    .enumerate()
+                    .map(|(at, (_, reading))| (at as u32 + 2, reading)),
+            )
+    }
+}
+
 /// A project's summaries, and the queries that need more than one of them.
 ///
 /// Built incrementally: [`ProjectIndex::insert`] takes a summary that some other layer produced, which is what
@@ -614,7 +682,9 @@ pub struct ProjectIndex {
     ///
     /// **Sparse on purpose**: cooking needs the translation unit's environment, so a caller has this for the files
     /// it actually read rather than for the whole project, and a file with no entry here is one nobody cooked.
-    cooked: HashMap<String, CookedFile>,
+    ///
+    /// **Per program**, because the same bytes read in two translation units are two answers — see [`Readings`].
+    cooked: HashMap<String, Readings>,
     /// **The cooked files in the order they arrived** — what [`ProjectIndex::insert_cooked`] evicts from.
     cooked_order: std::collections::VecDeque<String>,
     /// A visibility walk's answer, by the file it was asked about.
@@ -7338,7 +7408,7 @@ impl ProjectIndex {
 
             // The names the previous text declared and the macros it defined stop being findable under this file.
             self.names
-                .remove_declarations(sequence, false, &previous.declarations);
+                .remove_declarations(sequence, 0, &previous.declarations);
             self.names.remove_macros(sequence, &previous.macros);
 
             // **The cooked reading describes the file *under the key it was built with***, so a summary filed under
@@ -7351,11 +7421,8 @@ impl ProjectIndex {
             // different bytes, a cache entry replaced by a fresh index, and the whole-project re-read a changed
             // `compile_commands.json` causes. Leaving the reading there would answer for a file nobody has any more,
             // at offsets into words that are gone — a wrong answer rather than a missing one.
-            if previous.key != summary.key
-                && let Some(cooked) = self.cooked.remove(&path)
-            {
-                self.names
-                    .remove_declarations(sequence, true, &cooked.declarations);
+            if previous.key != summary.key {
+                self.forget_the_readings_of(&path);
             }
 
             sequence
@@ -7366,10 +7433,13 @@ impl ProjectIndex {
             self.sequence.insert(path.clone(), sequence);
 
             // A reading filed before its summary (the contract says it should not be, but `insert_cooked` does not
-            // refuse) is findable from the moment the file has a number to be found under.
-            if let Some(cooked) = self.cooked.get(&path) {
-                self.names
-                    .add_declarations(sequence, true, &cooked.declarations);
+            // refuse) is findable from the moment the file has a number to be found under — every reading of it,
+            // under the id it was filed with.
+            if let Some(readings) = self.cooked.get(&path) {
+                for (id, reading) in readings.every() {
+                    self.names
+                        .add_declarations(sequence, id, &reading.declarations);
+                }
             }
 
             sequence
@@ -7403,7 +7473,7 @@ impl ProjectIndex {
         }
 
         self.names
-            .add_declarations(sequence, false, &summary.declarations);
+            .add_declarations(sequence, 0, &summary.declarations);
         self.names.add_macros(sequence, &summary.macros);
         self.summaries.insert(path, summary);
     }
@@ -7454,21 +7524,17 @@ impl ProjectIndex {
                 includers.remove(&path);
             }
         }
+        // **The cooked readings go with it, and they need the sequence to be taken back from the name index** — so
+        // they are dropped before the file loses its number. A file that is no longer indexed must not keep answering
+        // declaration queries out of a rendering nobody has any more: the same rule as the summary, for the same
+        // reason, because an answer about a file that is gone is worse than no answer.
+        self.forget_the_readings_of(&path);
         let sequence = self.sequence.remove(&path);
         if let Some(sequence) = sequence {
             self.order.remove(&sequence);
             self.names
-                .remove_declarations(sequence, false, &summary.declarations);
+                .remove_declarations(sequence, 0, &summary.declarations);
             self.names.remove_macros(sequence, &summary.macros);
-        }
-        // **The cooked reading goes with it.** A file that is no longer indexed must not keep answering
-        // declaration queries out of a rendering nobody has any more — the same rule as the summary, for the
-        // same reason: an answer about a file that is gone is worse than no answer.
-        if let Some(cooked) = self.cooked.remove(&path)
-            && let Some(sequence) = sequence
-        {
-            self.names
-                .remove_declarations(sequence, true, &cooked.declarations);
         }
 
         true
@@ -7547,16 +7613,51 @@ impl ProjectIndex {
     /// Inserting **replaces** what was there: a file that was cooked again (its text changed, or its environment
     /// did) must not keep the old reading's declarations beside the new one's.
     pub fn insert_cooked(&mut self, path: &Path, reading: CookedFile) {
+        self.insert_a_reading(path, None, reading);
+    }
+
+    /// **Add the reading a whole program produced for one of its files** — the same insert, filed under the program
+    /// that read it.
+    ///
+    /// `program` is the hash of that program's rendering
+    /// ([`crate::RenderedUnit::text`](crate::session::UnitReading)), which is what makes two translation units that
+    /// read one header differently keep two readings of it ([`Readings`]). The session passes the one it just read;
+    /// [`ProjectIndex::the_reading_for`] is what looks it up per query.
+    pub fn insert_cooked_in_a_program(&mut self, path: &Path, program: u64, reading: CookedFile) {
+        self.insert_a_reading(path, Some(program), reading);
+    }
+
+    fn insert_a_reading(&mut self, path: &Path, program: Option<u64>, reading: CookedFile) {
         let path = normalize(path);
+
+        // **Which id this reading is filed under, and whether it changed** — decided before anything is touched,
+        // because the answer is a fact about the map and the effects below are on other fields of `self`.
+        let (id, changed) = {
+            let readings = self.cooked.get(&path);
+            let existing = match program {
+                None => Some(Readings::ON_ITS_OWN),
+                Some(program) => readings.and_then(|readings| readings.id_for(program)),
+            };
+            match existing {
+                Some(id) => (
+                    id,
+                    readings
+                        .and_then(|readings| readings.reading(id))
+                        .is_none_or(|previous| previous.declarations != reading.declarations),
+                ),
+                // A program that has not read this file yet gets the next id.
+                None => (
+                    readings.map_or(2, |readings| readings.in_a_program.len() as u32 + 2),
+                    true,
+                ),
+            }
+        };
+
         // **A cooked reading is a second set of facts, and member lists union both — but only a *changed* one can
         // change a list.** A file is cooked again with the same text and the same environment on every pump slice
         // (the edited file, and the closure want_the_closure_cooked asks for), and invalidating on every insert
         // made the cross-request member cache useless: measured on LuaSyntaxTree.cpp, 15 hits against 59
         // computations over three keystrokes — and 37/37 once this comparison was in place.
-        let changed = self
-            .cooked
-            .get(&path)
-            .is_none_or(|previous| previous.declarations != reading.declarations);
         if changed {
             self.forget_member_lists(Path::new(&path));
         }
@@ -7570,15 +7671,38 @@ impl ProjectIndex {
             .expect("the definition memo is not poisoned")
             .clear();
 
+        // The name index holds this file's *other* reading of the same id, if any, and then this one.
         if let Some(&sequence) = self.sequence.get(&path) {
-            if let Some(previous) = self.cooked.get(&path) {
-                self.names
-                    .remove_declarations(sequence, true, &previous.declarations);
+            let previous = self
+                .cooked
+                .get(&path)
+                .and_then(|readings| readings.reading(id))
+                .map(|previous| &previous.declarations);
+            if let Some(previous) = previous {
+                self.names.remove_declarations(sequence, id, previous);
             }
             self.names
-                .add_declarations(sequence, true, &reading.declarations);
+                .add_declarations(sequence, id, &reading.declarations);
         }
-        self.cooked.insert(path.clone(), reading);
+
+        // **Filed, in place of whatever that program (or the file itself) read before.**
+        let readings = self.cooked.entry(path.clone()).or_default();
+        match program {
+            None => readings.on_its_own = Some(reading),
+            Some(program) => {
+                // A program's id is `2 + its position`, so the position is the id minus two.
+                match readings.id_for(program) {
+                    Some(id) => readings.in_a_program[id as usize - 2] = (program, reading),
+                    None => readings.in_a_program.push((program, reading)),
+                }
+                readings.last = Some(program);
+            }
+        }
+        debug_assert!(
+            readings.reading(id).is_some(),
+            "the id an insert decided on is the id it filled"
+        );
+
         // **Bounded**: cooking runs for the closure of every open file — a thousand headers on a project that
         // includes the standard library — and each reading is a declaration list as large as the file`s own
         // summary. The map is *sparse by design* ("a file with no entry here is one nobody cooked", so a miss falls
@@ -7588,7 +7712,21 @@ impl ProjectIndex {
             let Some(oldest) = self.cooked_order.pop_front() else {
                 break;
             };
-            self.cooked.remove(&oldest);
+            self.forget_the_readings_of(&oldest);
+        }
+    }
+
+    /// **Drop every reading of one path, and the name entries they made** — the one place that has to know a reading
+    /// is a list of lists.
+    fn forget_the_readings_of(&mut self, path: &str) {
+        let Some(readings) = self.cooked.remove(path) else {
+            return;
+        };
+        if let Some(&sequence) = self.sequence.get(path) {
+            for (id, reading) in readings.every() {
+                self.names
+                    .remove_declarations(sequence, id, &reading.declarations);
+            }
         }
     }
 
@@ -7598,7 +7736,8 @@ impl ProjectIndex {
         let declarations = self
             .cooked
             .values()
-            .map(|cooked| cooked.declarations.len())
+            .flat_map(|readings| readings.every())
+            .map(|(_, reading)| reading.declarations.len())
             .sum();
         (self.cooked.len(), declarations)
     }
@@ -7615,19 +7754,21 @@ impl ProjectIndex {
             .map(FileSummary::heap_bytes)
             .sum::<usize>();
         let mut cooked_bytes = 0usize;
-        for reading in self.cooked.values() {
-            cooked_bytes += std::mem::size_of::<CookedFile>()
-                + reading
-                    .declarations
-                    .iter()
-                    .map(DeclFact::heap_bytes)
-                    .sum::<usize>()
-                + reading
-                    .macros
-                    .iter()
-                    .map(MacroFact::heap_bytes)
-                    .sum::<usize>()
-                + reading.diagnostics.len() * std::mem::size_of::<crate::CookedDiagnostic>();
+        for readings in self.cooked.values() {
+            for (_, reading) in readings.every() {
+                cooked_bytes += std::mem::size_of::<CookedFile>()
+                    + reading
+                        .declarations
+                        .iter()
+                        .map(DeclFact::heap_bytes)
+                        .sum::<usize>()
+                    + reading
+                        .macros
+                        .iter()
+                        .map(MacroFact::heap_bytes)
+                        .sum::<usize>()
+                    + reading.diagnostics.len() * std::mem::size_of::<crate::CookedDiagnostic>();
+            }
         }
         (
             self.summaries.len(),
@@ -7648,7 +7789,44 @@ impl ProjectIndex {
     /// reading* has not been made, and a caller that needs an answer falls back to the file's own text
     /// ([`crate::Session::diagnostics`] does exactly that).
     pub fn cooked_reading(&self, path: &Path) -> Option<&CookedFile> {
-        self.cooked.get(&normalize(path))
+        self.cooked.get(&normalize(path))?.any()
+    }
+
+    /// **Which of a file's readings a lookup uses** — the file's own, or the one the asking program made of it.
+    ///
+    /// `asking` is the program that read the file the *question* is about
+    /// ([`ProjectIndex::the_program_that_read`]), because that is the translation unit the reader is looking at:
+    /// `a.cpp` that defines `_GNU_SOURCE` and `b.cpp` that does not must each see the header they compiled. A file
+    /// that program has not read falls back to its own reading, and a file nobody read as a program has no cooked
+    /// reading at all — the caller then uses the file's summary.
+    ///
+    /// Answers the reading's id, which is what a [`Posting`] carries, so the narrowing and the facts agree.
+    fn the_reading_for(&self, file: u32, asking: Option<u64>) -> u32 {
+        let Some(readings) = self.order.get(&file).and_then(|key| self.cooked.get(key)) else {
+            return 0;
+        };
+        if let Some(id) = asking.and_then(|program| readings.id_for(program)) {
+            return id;
+        }
+        if readings.on_its_own.is_some() {
+            return Readings::ON_ITS_OWN;
+        }
+        // **Nothing read on its own, and not this program either**: the last program's reading, which is what a
+        // caller with no environment has always got.
+        readings
+            .last
+            .and_then(|program| readings.id_for(program))
+            .unwrap_or(0)
+    }
+
+    /// **The program that read `path`**, if one did — the environment a question asked *from* that file is in.
+    ///
+    /// The last program to read it, because a file's own text does not say which of its includers is being compiled:
+    /// a `.cpp` has exactly one program and the answer is exact, while a header that two programs read answers with
+    /// the one read most recently. That is the honest limit of a lookup that is not told the translation unit, and
+    /// it is written down here rather than guessed at the call sites.
+    pub fn the_program_that_read(&self, path: &Path) -> Option<u64> {
+        self.cooked.get(&normalize(path))?.last
     }
 
     /// Forget what a file **was read as**, keeping its summary.
@@ -7670,12 +7848,7 @@ impl ProjectIndex {
         if let Ok(mut declared) = self.definition_answers.lock() {
             declared.clear();
         }
-        if let Some(cooked) = self.cooked.remove(&path)
-            && let Some(&sequence) = self.sequence.get(&path)
-        {
-            self.names
-                .remove_declarations(sequence, true, &cooked.declarations);
-        }
+        self.forget_the_readings_of(&path);
     }
 
     /// **The project's symbols matching `query`**, best first — what a `workspace/symbol` search shows.
@@ -7838,7 +8011,10 @@ impl ProjectIndex {
             if into.len() >= stop_at {
                 break;
             }
-            if posting.is_cooked() != self.the_reading_is_cooked(posting.file) {
+            // **One reading per file**, and a posting from another of that file's readings is not a candidate — see
+            // [`ProjectIndex::the_reading_for`]. A symbol search has no translation unit to ask from, so every file
+            // answers with the reading it has by default.
+            if posting.reading != self.the_reading_for(posting.file, None) {
                 continue;
             }
             let Some((summary, fact)) = self.resolve(*posting) else {
@@ -7876,28 +8052,16 @@ impl ProjectIndex {
     fn resolve(&self, posting: Posting) -> Option<(&FileSummary, &DeclFact)> {
         let key = self.order.get(&posting.file)?;
         let summary = self.summaries.get(key)?;
-        let fact = if posting.is_cooked() {
-            self.cooked.get(key)?.declarations.get(posting.index())?
-        } else {
-            summary.declarations.get(posting.index())?
+        let fact = match posting.reading {
+            0 => summary.declarations.get(posting.index())?,
+            reading => self
+                .cooked
+                .get(key)?
+                .reading(reading)?
+                .declarations
+                .get(posting.index())?,
         };
         Some((summary, fact))
-    }
-
-    /// **Is this file's reading the rendering?** — the one question every lookup asks per file.
-    ///
-    /// A file the index can describe twice — its summary and, once something has read it as a program, its cooked
-    /// reading — has **one** reading, and the rendering is it. The two are not two views of one thing: the summary is
-    /// the file read on its own and the rendering is the file read in a translation unit, and `_CRT_…` and `_GLIBCXX_…`
-    /// answer differently in the two (measured: **1 095 declarations over 177 files** differ, and every one of them
-    /// used to be offered beside its twin — `tests/unit_read_probe.rs` now counts **0** lookups that do).
-    ///
-    /// So a lookup uses one list per file, and this says which. `Posting::is_cooked` says which list a posting belongs
-    /// to, so the answer is a comparison and not a scan.
-    fn the_reading_is_cooked(&self, file: u32) -> bool {
-        self.order
-            .get(&file)
-            .is_some_and(|key| self.cooked.contains_key(key))
     }
 
     /// The files that **define** the macro `name`, in insertion order — one lookup, where the question used to be a
@@ -8102,8 +8266,7 @@ impl ProjectIndex {
                 found.push((summary.path.clone(), fact));
                 continue;
             }
-            if let Some(cooked) = self.cooked.get(key)
-                && let Some(fact) = cooked.declarations.get(posting.index())
+            if let Some((_, fact)) = self.resolve(*posting)
                 && fact.name == name
             {
                 found.push((summary.path.clone(), fact));
@@ -8171,6 +8334,8 @@ impl ProjectIndex {
         // by `#include` has no such restriction at all.
         // **What the walk costs per question** — the number `docs/interactive-cost.md` needs to tell a slow pull
         // apart: `[gather]` says how long a declaration query took, this says how much of it was the graph.
+        // **The translation unit this question is asked from** — the reading every file's answer is chosen by.
+        let asking = self.the_program_that_read(visible_from);
         let walk_started = std::time::Instant::now();
         let asks_before = CONDITION_ASKS.load(std::sync::atomic::Ordering::Relaxed);
         let nanos_before = CONDITION_NANOS.load(std::sync::atomic::Ordering::Relaxed);
@@ -8266,9 +8431,6 @@ impl ProjectIndex {
                 continue;
             };
 
-            // The cooked reading is looked up **once**, because a file that was never cooked has nothing to union.
-            let cooked = self.cooked.get(key);
-
             // **A file in view only through an `import` contributes only what it exports.** The rule is per *file*
             // rather than per fact because it is about how the file became visible: `import m;` brings what the
             // module interface exported and nothing else, while an `#include` brings the whole file — and a file
@@ -8281,19 +8443,25 @@ impl ProjectIndex {
             let contributes =
                 |fact: &DeclFact| accepts(fact) && (!only_what_is_exported || fact.exported);
 
-            // **The rendering is the reading, where there is one.** A cooked reading is a *better* reading of the
-            // same file — macros expanded, every condition decided — and the two are not two views of one thing:
-            // measured on a real project, **1 095 declarations over 177 files** are in a file's summary and in no
-            // rendering of it (`tests/unit_read_probe.rs`), because the file read *on its own* answers `_CRT_…` and
-            // `_GLIBCXX_…` differently from the file read **inside this program**. Offering both at once answers for
-            // two translation units with one question — and the answer a caller gets is the one that is wrong for
-            // the file it asked about, or a list where one of them had a single declaration.
+            // **One reading per file, and which one is the asking translation unit's answer.** The file read *on its
+            // own* and the file read **inside a program** are not two views of one thing: measured on a real project,
+            // **1 095 declarations over 177 files** are in one and not the other (`tests/unit_read_probe.rs`), because
+            // `_CRT_…` and `_GLIBCXX_…` decide differently in the two. Offering both at once answers for two
+            // translation units with one question, and offering the *wrong* one answers `b.cpp` with what `a.cpp`
+            // compiled.
             //
-            // So: one source per file. The rendering's facts when there is a rendering, the summary's when there is
-            // not. `Posting::is_cooked` says which list an index belongs to, so the narrowing below stays exact.
-            let (facts, reading_is_cooked): (&[DeclFact], bool) = match cooked {
-                Some(cooked) => (cooked.declarations.as_slice(), true),
-                None => (summary.declarations.as_slice(), false),
+            // So the reading is chosen per file — [`ProjectIndex::the_reading_for`], which prefers the program that
+            // read **the file this question is about** (the reader's own translation unit) and falls back to the
+            // file's own reading. Its id is what a posting carries, so the narrowing below stays exact.
+            let reading = self.the_reading_for(file, asking);
+            let cooked = self
+                .cooked
+                .get(key)
+                .and_then(|readings| readings.reading(reading));
+
+            let (facts, reading): (&[DeclFact], u32) = match cooked {
+                Some(cooked) => (cooked.declarations.as_slice(), reading),
+                None => (summary.declarations.as_slice(), 0),
             };
 
             let candidates: Box<dyn Iterator<Item = &DeclFact> + '_> = match group {
@@ -8301,7 +8469,7 @@ impl ProjectIndex {
                 Some(group) => Box::new(
                     group
                         .iter()
-                        .filter(|posting| posting.is_cooked() == reading_is_cooked)
+                        .filter(|posting| posting.reading == reading)
                         .filter_map(|posting| facts.get(posting.index())),
                 ),
             };

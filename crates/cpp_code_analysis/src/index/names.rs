@@ -25,44 +25,46 @@
 //! # Postings are ordered, and that is a contract
 //!
 //! A posting names a **file by its sequence number** — the number the index gave the file when it first appeared,
-//! never reused — and a list is sorted by `(file, slot)`. So a query that walks a list visits files in insertion
-//! order, which is the order the per-file scan visited them in, and two runs over one project answer in one order.
-//! Within a file the raw reading's facts come before the cooked reading's (the high bit of the slot), because the
-//! cooked reading is deduplicated *against* the raw one and needs it first.
+//! never reused — and **which of the file's readings** it points into, and a list is sorted by `(file, reading,
+//! entry)`. So a query that walks a list visits files in insertion order, which is the order the per-file scan
+//! visited them in, and two runs over one project answer in one order. Within a file the own summary (reading 0) comes
+//! before the programs that read it, because a file read as a program is a *second* answer about the same text.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::Bound;
 
 use crate::summary::{DeclFact, MacroFact};
 
-/// The high bit of a slot: this posting points into the file's cooked reading rather than its own summary.
-const COOKED: u32 = 1 << 31;
-
-/// Where one fact lives: which file (by sequence number) and which entry of which list.
+/// Where one fact lives: which file (by sequence number), which of its readings, and which entry of that list.
+///
+/// **A file has more than one reading**, and a posting says which one it was indexed from: `0` is the file's own
+/// summary (the file read on its own), and `1..` are the programs that have read it as part of a translation unit, in
+/// the order they did — see [`crate::ProjectIndex::insert_cooked_in_a_program`]. Two programs that read one header
+/// under different macros file different declarations for it, and a posting that did not say which reading it came
+/// from would point a lookup at another translation unit's list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(super) struct Posting {
     pub file: u32,
+    pub reading: u32,
     slot: u32,
 }
 
 impl Posting {
-    fn new(file: u32, index: usize, cooked: bool) -> Self {
+    fn new(file: u32, reading: u32, index: usize) -> Self {
         debug_assert!(
-            index < COOKED as usize,
-            "a file with two billion declarations"
+            index < u32::MAX as usize,
+            "a file with four billion declarations"
         );
-        let slot = index as u32 | if cooked { COOKED } else { 0 };
-        Posting { file, slot }
-    }
-
-    /// Does this point into the cooked reading?
-    pub fn is_cooked(self) -> bool {
-        self.slot & COOKED != 0
+        Posting {
+            file,
+            reading,
+            slot: index as u32,
+        }
     }
 
     /// The position in the list it points into.
     pub fn index(self) -> usize {
-        (self.slot & !COOKED) as usize
+        self.slot as usize
     }
 }
 
@@ -79,10 +81,10 @@ pub(super) struct NameIndex {
 }
 
 impl NameIndex {
-    /// Add the facts of one file's reading — its own summary (`cooked: false`) or its cooked reading.
-    pub fn add_declarations(&mut self, file: u32, cooked: bool, facts: &[DeclFact]) {
+    /// Add the facts of one of a file's readings — its own summary (reading `0`) or one program's reading of it.
+    pub fn add_declarations(&mut self, file: u32, reading: u32, facts: &[DeclFact]) {
         for (index, fact) in facts.iter().enumerate() {
-            let posting = Posting::new(file, index, cooked);
+            let posting = Posting::new(file, reading, index);
 
             // A local names nothing another file can see, so it is not indexed by name — `matches` in the project
             // index refuses one for the same reason. A scope is different: the scope of a local is `None`, so there
@@ -108,8 +110,8 @@ impl NameIndex {
         }
     }
 
-    fn drop_name(&mut self, name: &str, file: u32, cooked: bool) {
-        if !remove_range(&mut self.by_name, name, file, cooked) {
+    fn drop_name(&mut self, name: &str, file: u32, reading: u32) {
+        if !remove_range(&mut self.by_name, name, file, reading) {
             return;
         }
 
@@ -127,7 +129,7 @@ impl NameIndex {
     /// Takes the facts rather than a file number alone because that is what makes it cheap: the keys to visit are
     /// exactly the names in the list being dropped, so an edit to one file touches the lists of the names *it*
     /// declared and not every list in the project.
-    pub fn remove_declarations(&mut self, file: u32, cooked: bool, facts: &[DeclFact]) {
+    pub fn remove_declarations(&mut self, file: u32, reading: u32, facts: &[DeclFact]) {
         let mut names: HashSet<&str> = HashSet::new();
         let mut scopes: HashSet<&str> = HashSet::new();
 
@@ -141,10 +143,10 @@ impl NameIndex {
         }
 
         for name in names {
-            self.drop_name(name, file, cooked);
+            self.drop_name(name, file, reading);
         }
         for scope in scopes {
-            let _ = remove_range(&mut self.by_scope, scope, file, cooked);
+            let _ = remove_range(&mut self.by_scope, scope, file, reading);
         }
     }
 
@@ -245,19 +247,20 @@ fn remove_range(
     map: &mut HashMap<Box<str>, Vec<Posting>>,
     key: &str,
     file: u32,
-    cooked: bool,
+    reading: u32,
 ) -> bool {
     let Some(list) = map.get_mut(key) else {
         return false;
     };
 
+    // A list is sorted by `(file, reading, slot)`, so the block to drop is one interval: the file's, then that
+    // reading's inside it.
     let start = list.partition_point(|held| held.file < file);
     let end = start + list[start..].partition_point(|held| held.file == file);
-    // Raw slots sort before cooked ones, so the file's block is `[raw…, cooked…]`.
-    let split = start + list[start..end].partition_point(|held| !held.is_cooked());
-    let range = if cooked { split..end } else { start..split };
+    let begin = start + list[start..end].partition_point(|held| held.reading < reading);
+    let finish = begin + list[begin..end].partition_point(|held| held.reading == reading);
 
-    list.drain(range);
+    list.drain(begin..finish);
 
     if list.is_empty() {
         map.remove(key);
@@ -287,11 +290,11 @@ mod tests {
         summarize(Path::new("/p/a.h"), source, SummaryKey::new(0, 0)).declarations
     }
 
-    fn held(index: &NameIndex, name: &str) -> Vec<(u32, bool)> {
+    fn held(index: &NameIndex, name: &str) -> Vec<(u32, u32)> {
         index
             .named(name)
             .iter()
-            .map(|posting| (posting.file, posting.is_cooked()))
+            .map(|posting| (posting.file, posting.reading))
             .collect()
     }
 
@@ -299,33 +302,30 @@ mod tests {
     fn a_list_stays_in_file_order_whatever_order_files_arrive_in() {
         let facts = facts_of("int x;\n");
         let mut index = NameIndex::default();
-        index.add_declarations(3, false, &facts);
-        index.add_declarations(1, false, &facts);
-        index.add_declarations(2, true, &facts);
-        index.add_declarations(2, false, &facts);
+        index.add_declarations(3, 0, &facts);
+        index.add_declarations(1, 0, &facts);
+        index.add_declarations(2, 1, &facts);
+        index.add_declarations(2, 0, &facts);
 
-        assert_eq!(
-            held(&index, "x"),
-            vec![(1, false), (2, false), (2, true), (3, false)]
-        );
+        assert_eq!(held(&index, "x"), vec![(1, 0), (2, 0), (2, 1), (3, 0)]);
     }
 
     #[test]
     fn removing_one_reading_of_a_file_leaves_the_other() {
         let facts = facts_of("namespace ns { int x; int y; }\n");
         let mut index = NameIndex::default();
-        index.add_declarations(1, false, &facts);
-        index.add_declarations(1, true, &facts);
-        index.add_declarations(2, false, &facts);
+        index.add_declarations(1, 0, &facts);
+        index.add_declarations(1, 1, &facts);
+        index.add_declarations(2, 0, &facts);
         let scoped = index.scoped("ns").len();
         assert_eq!(scoped, 6, "two facts in the scope, three readings");
 
-        index.remove_declarations(1, true, &facts);
-        assert_eq!(held(&index, "x"), vec![(1, false), (2, false)]);
+        index.remove_declarations(1, 1, &facts);
+        assert_eq!(held(&index, "x"), vec![(1, 0), (2, 0)]);
         assert_eq!(index.scoped("ns").len(), 4);
 
-        index.remove_declarations(1, false, &facts);
-        index.remove_declarations(2, false, &facts);
+        index.remove_declarations(1, 0, &facts);
+        index.remove_declarations(2, 0, &facts);
         assert!(index.named("x").is_empty());
         assert!(index.scoped("ns").is_empty());
         assert_eq!(
@@ -344,7 +344,7 @@ mod tests {
         );
 
         let mut index = NameIndex::default();
-        index.add_declarations(1, false, &facts);
+        index.add_declarations(1, 0, &facts);
 
         assert!(index.named("inner").is_empty());
         assert_eq!(index.named("f").len(), 1);
@@ -355,12 +355,12 @@ mod tests {
         let facts = facts_of("int a;\nint b;\n");
         let cooked = facts_of("int b;\n");
         let mut index = NameIndex::default();
-        index.add_declarations(7, false, &facts);
-        index.add_declarations(7, true, &cooked);
+        index.add_declarations(7, 0, &facts);
+        index.add_declarations(7, 1, &cooked);
 
         let b = index.named("b");
-        assert_eq!((b[0].index(), b[0].is_cooked()), (1, false));
-        assert_eq!((b[1].index(), b[1].is_cooked()), (0, true));
+        assert_eq!((b[0].index(), b[0].reading), (1, 0));
+        assert_eq!((b[1].index(), b[1].reading), (0, 1));
     }
 
     #[test]
@@ -368,9 +368,9 @@ mod tests {
         let upper = facts_of("int Size;\n");
         let lower = facts_of("int size;\n");
         let mut index = NameIndex::default();
-        index.add_declarations(1, false, &upper);
-        index.add_declarations(2, false, &lower);
-        index.add_declarations(3, false, &lower);
+        index.add_declarations(1, 0, &upper);
+        index.add_declarations(2, 0, &lower);
+        index.add_declarations(3, 0, &lower);
 
         let spellings = |index: &NameIndex| -> Vec<String> {
             index
@@ -385,13 +385,13 @@ mod tests {
             spellings(&index)
         );
 
-        index.remove_declarations(2, false, &lower);
+        index.remove_declarations(2, 0, &lower);
         assert_eq!(spellings(&index).len(), 2, "file 3 still declares `size`");
 
-        index.remove_declarations(3, false, &lower);
+        index.remove_declarations(3, 0, &lower);
         assert_eq!(spellings(&index), vec!["Size".to_string()]);
 
-        index.remove_declarations(1, false, &upper);
+        index.remove_declarations(1, 0, &upper);
         assert!(index.spellings_of("size").is_none());
         assert_eq!(index.lowered_from("").count(), 0);
     }
@@ -408,7 +408,7 @@ mod tests {
         .iter()
         .enumerate()
         {
-            index.add_declarations(file as u32, false, &facts_of(source));
+            index.add_declarations(file as u32, 0, &facts_of(source));
         }
 
         let keys: Vec<&str> = index.lowered_from("apple").map(|(key, _)| key).collect();
