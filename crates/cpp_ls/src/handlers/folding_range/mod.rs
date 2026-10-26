@@ -45,7 +45,17 @@ pub async fn on_folding_range(
 
     snapshot_query(context.analysis(), cancel_token, move |session| {
         let path = uri_to_file_path(&uri)?;
-        let view = session.view(&path)?;
+        // **The file's own text, and not the compiler's rendering.** Folding is the one query whose answer is about
+        // the text a reader is looking at: `#if`/`#endif` and a run of `#include`s are *directives*, and a rendering
+        // has them consumed — so a fold list taken from one can never contain the `Region` a reader most wants (the
+        // branch that is not their platform's).
+        //
+        // It is also the answer that does not wait. A rendering exists only after the file has been cooked, and the
+        // cook is refused for a file whose include closure has not been read yet — the state of a project that is
+        // still being indexed. Measured over the wire on the handshake fixture: `textDocument/foldingRange` answered
+        // `{"result":null}` on **every** retry for thirty seconds, because the handler asked for a reading it could
+        // not have. This view needs nothing but the file, which `prepare` above has just read.
+        let view = session.view_of_the_file(&path)?;
         let held = session.files().held(&view.path)?;
 
         Some(
