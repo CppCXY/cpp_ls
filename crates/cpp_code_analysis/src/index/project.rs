@@ -9228,7 +9228,7 @@ impl ProjectIndex {
         &self,
         visible: Vec<(String, IncludeVisibility)>,
     ) -> Vec<(u32, IncludeVisibility)> {
-        // **The lookup below is a suspect, and it is left as it was until the rule it feeds can be measured.**
+        // **The lookup below is a suspect, and it is left as it was until the effect of fixing it is understood.**
         //
         // The walk's keys are normalized (`e:/p/app.cpp`) and `sequence` is keyed by the path the summary was filed
         // under, so a file whose two spellings differ is dropped **silently** — the walk says it is visible and this
@@ -9238,12 +9238,15 @@ impl ProjectIndex {
         // * normalizing the key when it is **written** (both spellings inserted, both removed),
         //
         // were each measured on the same cold store and each moved the scoreboard the same way — 4637 (77.1%) →
-        // 4609 (76.7%), **+28 `NotDeclaredHere` and not one `Ambiguous`**. The files were being dropped, and putting
-        // them back costs 28 answers instead of gaining any. So the defect is not the drop; it is what the queries do
-        // once those files are in view — `direct_member` takes the first candidate among the visible declarations,
-        // and a wider view can hand it a declaration whose member list is emptier. That rule has to be fixed (or
-        // measured as its own question) **before** this one, or the fix is a regression. See `docs/remaining.md` §F.
-        // Neither experiment is in the tree: what is here is what ships.
+        // 4609 (76.7%), **+28 `NotDeclaredHere` and not one `Ambiguous`**. And the scoreboard now splits those
+        // refusals: of the 77 that had a receiver type, **47 had no visible declaration of the class and 30 had a
+        // member list built from no visible declaration** — not one was "the list does not hold the member". So the
+        // loss is not a different declaration being chosen; it is the same file becoming visible **twice**, under
+        // both spellings, which doubles its summary in the name index and changes what the member walk reads.
+        //
+        // The next step is therefore to make the **identity** unique — one file, one summary, one sequence number, one
+        // set of postings — and only then to stop dropping the spelling. Either half alone is a regression. See
+        // `docs/remaining.md` §F; neither experiment is in the tree.
         let mut files: Vec<(u32, IncludeVisibility)> = visible
             .into_iter()
             .filter_map(|(key, visibility)| Some((*self.sequence.get(&key)?, visibility)))

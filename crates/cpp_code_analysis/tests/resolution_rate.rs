@@ -58,6 +58,11 @@ struct Scoreboard {
     by_shape: BTreeMap<&'static str, (usize, usize)>,
     /// A handful of refusals written out, so that the next change starts from a name rather than a number.
     samples: Vec<String>,
+    /// **Of the refusals that had a receiver type, what was there to choose from** — the split the last measurement
+    /// was missing. `NotDeclaredHere` covers "the class is not visible at all" and "the class is visible several times
+    /// and the chosen declaration has no such member", and they are different work: the first is the include graph,
+    /// the second is the rule that picks among candidates.
+    refused_choices: BTreeMap<&'static str, usize>,
 }
 
 /// **What kind of thing the receiver is** — the classification the scoreboard steers by.
@@ -109,6 +114,9 @@ impl Scoreboard {
             entry.1 += resolved;
         }
         self.samples.extend(other.samples);
+        for (choice, count) in other.refused_choices {
+            *self.refused_choices.entry(choice).or_default() += count;
+        }
     }
 
     fn report(&mut self, files: usize, uncooked: usize) {
@@ -152,6 +160,17 @@ impl Scoreboard {
         types.sort_by_key(|(_, count)| std::cmp::Reverse(**count));
         for (type_of, count) in types.iter().take(25) {
             println!("  {count:>6}  {type_of}");
+        }
+
+        println!("\nof the refusals that had a receiver type, what there was to choose from:");
+        let mut choices: Vec<(&str, usize)> = self
+            .refused_choices
+            .iter()
+            .map(|(choice, count)| (*choice, *count))
+            .collect();
+        choices.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
+        for (choice, count) in choices {
+            println!("  {count:>6}  {choice}");
         }
 
         println!("\nthe first refusals, so the next change starts from a name:");
@@ -278,16 +297,56 @@ fn the_member_questions_of_a_real_project_and_how_many_resolve() {
                                 .trim_end_matches(|character: char| matches!(character, '*' | '&'))
                                 .trim()
                                 .to_string();
+                            // **How many declarations of that class this file can see**, which is the number the last
+                            // measurement was missing: a refusal with *no* visible declaration is visibility, one
+                            // with several is the choice between them, and `NotDeclaredHere` reports both the same
+                            // way. `members_of` then says what the chosen one answered.
+                            let declared = session
+                                .index()
+                                .declarations_in(&class, &view.path)
+                                .len();
+                            let choice = match session.members_of(&view, &class) {
+                                Known::Yes(list) => {
+                                    let has = list
+                                        .members
+                                        .iter()
+                                        .any(|member| member.fact.name == access.member);
+                                    if declared == 0 {
+                                        "a list from no visible declaration"
+                                    } else if list.members.is_empty() {
+                                        "a visible class with an empty list"
+                                    } else if has {
+                                        "the member is in the list and the query still refused"
+                                    } else {
+                                        "a list that does not hold the member"
+                                    }
+                                }
+                                Known::Unknown(reason) => {
+                                    if declared == 0 {
+                                        "no visible declaration of the class"
+                                    } else {
+                                        let _ = reason;
+                                        "visible declarations and no list"
+                                    }
+                                }
+                                Known::No => "no list",
+                            };
+                            *scoreboard.refused_choices.entry(choice).or_default() += 1;
                             match session.members_of(&view, &class) {
                                 Known::Yes(list) => {
                                     let has = list
                                         .members
                                         .iter()
                                         .any(|member| member.fact.name == access.member);
-                                    format!("{} member(s), has it: {has}", list.members.len())
+                                    format!(
+                                        "{declared} visible declaration(s), {} member(s), has it: {has}",
+                                        list.members.len()
+                                    )
                                 }
-                                Known::Unknown(reason) => format!("no list: {reason:?}"),
-                                Known::No => "no list".to_string(),
+                                Known::Unknown(reason) => {
+                                    format!("{declared} visible declaration(s), no list: {reason:?}")
+                                }
+                                Known::No => format!("{declared} visible declaration(s), no list"),
                             }
                         };
                         let operator = if access.arrow { "->" } else { "." };
