@@ -2850,10 +2850,32 @@ impl<F: FileProvider + Clone> Session<F> {
             }
         }
 
-        match prepared.re_read {
-            Some(plan) => self.store.commit_the_re_read(plan),
-            None => 0,
+        let Some(plan) = prepared.re_read else {
+            return 0;
+        };
+
+        // **A refinement that could not be taken is retried, not dropped.** The pass refuses to render a file whose
+        // closure is not in the index yet (see [`SummaryStore::a_timeline_of_its_own`]), and dropping such a file
+        // would make "is this file's summary a rendering" depend on *when* the pass reached it — which is the
+        // difference two runs of one project kept showing (`docs/architecture.md` §7.12). So while there is still
+        // work in the queue the file goes back on it, and once the index is complete it is left alone: a dependency
+        // nothing will ever index is a fact about the project, not about timing, and the file keeps the reading the
+        // first pass gave it.
+        let waiting: Vec<PathBuf> = plan.waiting_for_the_index().to_vec();
+        let re_read = self.store.commit_the_re_read(plan);
+        if !waiting.is_empty() && self.pending_work() > 0 {
+            if crate::probes::cooking() {
+                eprintln!(
+                    "re-read: {} file(s) go back on the queue — their closures are still filling",
+                    waiting.len()
+                );
+            }
+            for path in waiting {
+                self.queue.again(path, Priority::Rest, 0);
+            }
         }
+
+        re_read
     }
 
     /// **The translation units a pass over these files reads its environments out of** — one walk each, and cached.

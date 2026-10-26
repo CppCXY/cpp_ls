@@ -164,12 +164,22 @@ const MAX_INCLUDE_SEARCHES: usize = 8192;
 pub struct ReRead {
     /// The files whose reading changed, and whether each may be written down.
     rebuilt: Vec<(FileSummary, bool)>,
+    /// **Files this pass could not read yet**, because the closure they need is not in the index yet — see
+    /// [`SummaryStore::a_timeline_of_its_own`]. A caller puts them back on its queue so that a later drain refines
+    /// them; without that, "was this file refined" would depend on *when* in the index the pass reached it, which is
+    /// the difference two runs of one project kept showing (`docs/architecture.md` §7.12).
+    not_yet: Vec<PathBuf>,
 }
 
 impl ReRead {
     /// Is there nothing to apply? A caller that would take the write lock only for this can skip it.
     pub fn is_empty(&self) -> bool {
         self.rebuilt.is_empty()
+    }
+
+    /// The files whose refinement is waiting for a closure the index does not have yet.
+    pub fn waiting_for_the_index(&self) -> &[PathBuf] {
+        &self.not_yet
     }
 }
 
@@ -1750,6 +1760,7 @@ impl<F: FileProvider> SummaryStore<F> {
             }
             return ReRead {
                 rebuilt: Vec::new(),
+                not_yet: Vec::new(),
             };
         }
 
@@ -1764,6 +1775,9 @@ impl<F: FileProvider> SummaryStore<F> {
         // index is the one thing that is not a pure function of the store, and it is what
         // [`SummaryStore::commit_the_re_read`] is for — so the plan is a list here and a loop there.
         let mut rebuilt: Vec<(FileSummary, bool)> = Vec::new();
+        // **And the candidates that cannot be read yet** — a closure the index does not describe completely. The
+        // caller queues them again; see [`ReRead::waiting_for_the_index`].
+        let mut not_yet: Vec<PathBuf> = Vec::new();
 
         // **Two kinds of re-read, and only one of them waits for the other.** A file a unit's timeline covers is
         // re-read through that timeline — a pure function of the file, the configuration and the walk the pass
@@ -1846,6 +1860,16 @@ impl<F: FileProvider> SummaryStore<F> {
             // Walking the file's own closure costs ~38 ms and is cached by content (`walked_by_content`), and it is
             // what the other arm is: a rendering of the file in the environment its own reading was built with.
             let Some(unit) = self.a_timeline_of_its_own(path, &sources) else {
+                // **Not "nothing to say" — "not yet".** The file's closure is not in the index, so a rendering of it
+                // today is a rendering of part of a program. The caller retries this file once the index has it, which
+                // is what makes "was this file refined" independent of when the pass happened to reach it.
+                if tracing {
+                    eprintln!(
+                        "re-read: {} waits for its closure to be indexed",
+                        path.display()
+                    );
+                }
+                not_yet.push(path.clone());
                 continue;
             };
             let Some(view) = unit.environment_of(path) else {
@@ -1943,7 +1967,7 @@ impl<F: FileProvider> SummaryStore<F> {
             );
         }
 
-        ReRead { rebuilt }
+        ReRead { rebuilt, not_yet }
     }
 
     /// Count a re-read summary and put it in the index.
