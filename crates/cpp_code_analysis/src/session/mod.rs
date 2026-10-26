@@ -5068,6 +5068,16 @@ impl<F: FileProvider + Clone> Session<F> {
             // file in the program; the per-file queue would otherwise parse each of them a second time — the
             // measurement is the whole of `docs/clangd-model.md` §二.
             self.queue.mark_worked(&path);
+            // **The summary is left alone, and that is a measurement rather than an omission.** The tempting next
+            // step here is "replace the file's summary declarations with the program's reading of it", and it is
+            // wrong for a reason `tests/unit_read_probe.rs` shows: after this pipeline has run, a file's summary is
+            // *already* a rendering — the second pass re-read every file whose declarations a directive split or a
+            // body macro moved. What differs between the two lists is not raw-versus-rendering, it is **file-read-
+            // on-its-own versus file-read-in-this-program**: 1 095 declarations over 177 files are in one and not the
+            // other, because `_CRT_…` and `_GLIBCXX_…` answer differently when the file is compiled standalone and
+            // when it is compiled inside `Selection.cpp`. So replacing one list with the other would answer for the
+            // wrong translation unit — the problem §5 step two (a key with `env_hash`) exists to solve, not one a
+            // rewrite can.
             self.store.index_mut().insert_cooked(&path, cooked);
         }
 

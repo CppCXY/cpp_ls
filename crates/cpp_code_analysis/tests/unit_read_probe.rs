@@ -86,13 +86,17 @@ fn shape_of(session: &Session, file: &std::path::Path, names: &[&str]) -> (usize
 fn what_a_unit_read_does_to_the_index() {
     let root = project();
     let file = entry(&root);
+    // **Names declared in headers the reader never opened**, which is the question a program read is supposed to
+    // change the answer to: each of these lives in `include/AST/*.h` or in a standard header inside the closure.
     let names = [
-        "Selection",
-        "SyntaxNode",
-        "Decl",
-        "SemanticToken",
-        "Visitor",
-        "clang::Decl",
+        "SelectionTree",
+        "TUContext",
+        "HeaderContext",
+        "TemplateResolver",
+        "SemanticVisitor",
+        "FilteredASTVisitor",
+        "RelationKind",
+        "string",
     ];
 
     let mut session = Session::open(
@@ -203,6 +207,89 @@ fn what_a_unit_read_does_to_the_index() {
         .collect();
     println!("files that moved ({}):", moved.len());
     for line in moved.iter().take(24) {
+        println!("{line}");
+    }
+
+    // **What the program read actually bought, in answers**: the declarations the *rendering* has and the file's own
+    // text does not. This is the number that says whether a whole-program reading is worth 5 s — "the index has more
+    // facts" is not the same claim, because the raw summary already answers for every declaration the file writes.
+    let mut only_the_compiler_sees = 0usize;
+    let mut examples: Vec<String> = Vec::new();
+    for path in &closure {
+        let Some(summary) = session.index().summary(path) else {
+            continue;
+        };
+        let raw: std::collections::HashSet<&str> = summary
+            .declarations
+            .iter()
+            .map(|fact| fact.name.as_str())
+            .collect();
+        let Some(cooked) = session.index().cooked_declarations(path) else {
+            continue;
+        };
+        for fact in cooked {
+            if raw.contains(fact.name.as_str()) {
+                continue;
+            }
+            only_the_compiler_sees += 1;
+            if examples.len() < 12 {
+                examples.push(format!(
+                    "  {} :: {} ({:?}, scope {:?})",
+                    path.file_name().unwrap_or_default().to_string_lossy(),
+                    fact.name,
+                    fact.kind,
+                    fact.scope
+                ));
+            }
+        }
+    }
+    println!(
+        "{only_the_compiler_sees} declaration(s) only the rendering has (the raw summary cannot answer for them):"
+    );
+    for line in &examples {
+        println!("{line}");
+    }
+
+    // **And the other direction, which is what the four patch layers are still doing**: declarations the file's own
+    // text has and a compiler never sees — a dead `#if` branch, a body a macro expands differently. They stay in the
+    // *summary*, and `visible_declarations_upto` unions summaries with cooked readings, so the program read does not
+    // remove them: a lookup still has to filter them (that is `visibility_at`, patch number two). This is the number
+    // that says how much work the patches still have, and what replacing the summary's declaration half would take
+    // away.
+    let mut a_compiler_never_sees = 0usize;
+    let mut dead: Vec<String> = Vec::new();
+    for path in &closure {
+        let Some(summary) = session.index().summary(path) else {
+            continue;
+        };
+        let Some(cooked) = session.index().cooked_declarations(path) else {
+            continue;
+        };
+        let seen: std::collections::HashSet<(&str, usize)> = cooked
+            .iter()
+            .map(|fact| (fact.name.as_str(), fact.name_range.start_offset))
+            .collect();
+        for fact in &summary.declarations {
+            if seen.contains(&(fact.name.as_str(), fact.name_range.start_offset)) {
+                continue;
+            }
+            a_compiler_never_sees += 1;
+            if dead.len() < 8 {
+                dead.push(format!(
+                    "  {} :: {} at {} (kind {:?})",
+                    path.file_name().unwrap_or_default().to_string_lossy(),
+                    fact.name,
+                    fact.name_range.start_offset,
+                    fact.kind
+                ));
+            }
+        }
+    }
+    println!(
+        "{a_compiler_never_sees} declaration(s) the raw summary has and a compiler never sees — what the lookup-time \
+         filter still has to remove:"
+    );
+    for line in &dead {
         println!("{line}");
     }
 
