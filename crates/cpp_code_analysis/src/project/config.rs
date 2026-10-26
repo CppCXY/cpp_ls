@@ -488,6 +488,19 @@ pub struct IndexSection {
     /// How many files the project scan may list.
     #[serde(default)]
     pub max_files: Option<usize>,
+    /// **May the session read the whole project as one program per translation unit, in the background?**
+    ///
+    /// On by default, because that is what makes the *project* queryable rather than only the files a reader has
+    /// opened: every program's per-file facts are filed under the program that made them (⑲), which is what a lookup
+    /// asks for when two translation units read one header differently. What it costs is measured: **36 s of CPU for
+    /// 96 translation units** on a 397-file project with a warm unit cache, and **271 s cold**
+    /// (`tests/project_read_probe.rs`, `docs/architecture.md` §8.4).
+    ///
+    /// `false` keeps the reader's own translation units (the files they have open, one second after they stop typing)
+    /// and never reads a program nobody is looking at. A caller that knows a project is huge, or a machine that should
+    /// stay cool, says so here.
+    #[serde(default)]
+    pub read_the_whole_project: Option<bool>,
 }
 
 /// `[diagnostics]` — read by the language server.

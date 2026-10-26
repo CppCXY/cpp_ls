@@ -506,6 +506,10 @@ pub struct Session<F: FileProvider = DiskFiles> {
     /// cannot be walked yet is retried, but not for ever: three attempts and it keeps the reading the per-file path
     /// gave it.
     units_attempted: std::collections::HashMap<String, u8>,
+    /// **May the session read a program nobody has open?** — `index.read_the_whole_project`, on unless the project
+    /// says otherwise. See [`Session::the_next_root_of_the_project_to_read`] and, for what it costs, the field's
+    /// documentation on [`crate::project::config::IndexSection`].
+    read_the_whole_project: bool,
     /// **When this session last took an edit** — the clock the one indivisible piece of work in it is deferred by.
     ///
     /// A unit read ([`Session::prepare_a_unit_reading`]) is a walk, a render and a **parse of a whole program** in one
@@ -1256,6 +1260,11 @@ impl<F: FileProvider + Clone> Session<F> {
             )),
             units_read: std::collections::HashSet::new(),
             units_attempted: std::collections::HashMap::new(),
+            read_the_whole_project: project_config
+                .config
+                .index
+                .read_the_whole_project
+                .unwrap_or(true),
             unit_index: std::sync::Mutex::new(None),
             rendered_unit: std::sync::Mutex::new(None),
             last_edit: std::time::Instant::now(),
@@ -5314,6 +5323,9 @@ impl<F: FileProvider + Clone> Session<F> {
     /// by the programs that include it — which is exactly what [`Session::commit_a_unit_reading`] does with the facts
     /// it files per program (⑲).
     fn the_next_root_of_the_project_to_read(&self) -> Option<PathBuf> {
+        if !self.read_the_whole_project {
+            return None;
+        }
         let index = self.store.index();
         self.project
             .iter()

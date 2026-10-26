@@ -1213,3 +1213,21 @@ patch 4（转换运算符按拼写取返回类型） 121 / 59 956    0.20%
 **这一更正的代价**：如果按文件更便宜，那就应该问"按 TU 读法是否值得 36 s"。它的价值是 ⑲：两个 TU 读同一个头得到两份读法，
 查找按询问方选一份。没有它就回到"一个文件一份读法"，那正是 §5 第二步要避免的。所以 36 s 买的是**正确性**，不是速度 ——
 而这句话比原来那句更有用，也更接近这个项目一直在说的事。
+### 8.5 "36 s 买正确性"变成一个可以拒绝的设置
+
+§8.4 的结论是：按 TU 读整项目买的是 ⑲ 的正确性（同一头在两个程序里各有一份读法），价格是 **36 s（缓存热）/ 271 s（冷）**。
+这一轮把它做成 `.cppls.toml` 里的一个键：
+
+```toml
+[index]
+read_the_whole_project = true   # 默认开；false 时只读读者打开的那些 TU
+```
+
+`false` 时保留的是：打开的文件在静默一秒后被读成程序（它的整个闭包因此可查询）；失去的是：同一个头被两个程序读过时的那两份
+读法 —— 没人打开的文件只能用自己的文本读法。`Session::the_next_root_of_the_project_to_read` 直接返回 `None`，于是 pump 连
+定时器都不再等（`the_wait_before_a_program_may_be_read` 返回 `None`）。
+
+测试 `a_project_can_decline_to_read_its_other_roots`：一个两 root 的项目声明 `read_the_whole_project = false`，读者打开
+`a.cpp` —— 一秒后 `a.cpp` 的程序被读（`root == a.cpp`），之后**无论拨多久的钟**都不再有 program 被读，pump 也没有要等的
+东西。这条测试还顺手揭示了一个夹具事实：`Memory` 的 root 是临时目录，而文件在 `/p` 下，所以 `.cppls.toml` 只有在**会话的
+root 就是项目**（`Session::with_config("/p", …)`）时才会被读到。

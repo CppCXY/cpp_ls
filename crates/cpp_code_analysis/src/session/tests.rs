@@ -839,6 +839,68 @@ fn a_program_too_large_to_read_at_once_is_left_alone() {
     );
 }
 
+/// **`index.read_the_whole_project = false` keeps the reader's own programs and nothing else.**
+///
+/// The setting exists because the two reads are worth different things: a file the reader has open is a program they
+/// are about to ask about, and one nobody has open is speculative — 36 s of CPU for 96 translation units on the
+/// project this was measured on (`docs/architecture.md` §8.4). A project that says so gets the first and not the
+/// second, and the clock says it too: with the setting off there is nothing for the pump to wait for once the reader's
+/// own programs are read.
+#[test]
+fn a_project_can_decline_to_read_its_other_roots() {
+    let shared = "struct Shared { int size; };\n";
+    let a = "#include \"shared.h\"\n";
+    let b = "#include \"shared.h\"\nint from_b = 1;\n";
+    let files = MemoryFiles::new()
+        .with_file("/p/shared.h", shared)
+        .with_file("/p/a.cpp", a)
+        .with_file("/p/b.cpp", b)
+        .with_file(
+            "/p/.cppls.toml",
+            "[index]\nread_the_whole_project = false\n",
+        );
+    let fixture = Memory::new("a-project-declines", &files);
+    // **The session's root is the project's**, not the fixture's temporary directory: `.cppls.toml` is read from
+    // under that root, and the fixture files live under `/p`.
+    let mut session = crate::Session::with_config(
+        "/p",
+        fixture.providers.clone(),
+        crate::WatchFilter::new("/p"),
+        crate::CompilerConfig::default(),
+    );
+    session.add_project_files([
+        std::path::PathBuf::from("/p/a.cpp"),
+        std::path::PathBuf::from("/p/b.cpp"),
+    ]);
+    session.did_open("/p/a.cpp", a);
+    session.index_everything();
+
+    // **The reader's own file is still read**, one second after they stop typing.
+    session.pretend_a_pause(std::time::Duration::from_millis(1_100));
+    let first = session
+        .read_a_program_now()
+        .expect("the reader's own program");
+    assert_eq!(first.root, std::path::Path::new("/p/a.cpp"));
+
+    // **And then nothing is owed**, however long the pause: `b.cpp` is a root nobody has open, which this project
+    // asked not to read.
+    session.pretend_a_pause(std::time::Duration::from_secs(60));
+    assert!(
+        session.read_a_program_now().is_none(),
+        "the project declined its unopened roots"
+    );
+    assert!(
+        session.the_wait_before_a_program_may_be_read().is_none(),
+        "so the pump has nothing to wait for"
+    );
+    assert!(
+        !session
+            .index()
+            .the_program_that_read(std::path::Path::new("/p/b.cpp"))
+            .is_some(),
+        "and `b.cpp` was not read"
+    );
+}
 /// **The project's other roots are read in the background, after a pause that is clearly not mid-sentence.**
 ///
 /// A reader has `a.cpp` open and `b.cpp` is a project root nobody is looking at. Both include one header, so reading

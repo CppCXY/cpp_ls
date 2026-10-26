@@ -162,7 +162,17 @@ it is not a target for every file.
 [index]
 cache_dir = ".cppls"     # one component, relative to the root; where cooked readings are cached
 max_files = 20000        # how many files the project scan may list
+read_the_whole_project = true  # read one program per translation unit, in the background
 ```
+
+`read_the_whole_project` is the one setting here that trades CPU for coverage, and it is worth knowing what
+it buys. A file the reader has open is read as a program one second after they stop typing, which is what
+makes its whole include closure answer from the compiler's reading. This setting extends that to **every
+translation unit of the project**, so a header two programs read keeps both readings and a query from either
+source gets its own — measured at **36 s of CPU for 96 translation units** on a 397-file project with a warm
+cache, and **271 s** cold. Set it to `false` on a machine that should stay cool, or on a project whose
+background work you can hear: what is lost is the per-program reading of files nobody has open, and those
+keep the reading of their own text.
 
 ### Read by the language server
 
