@@ -493,11 +493,22 @@ impl<F: FileProvider> SummaryStore<F> {
         &self.cache
     }
 
-    /// **The summary database, opened on first use and used always** — see [`SummaryStore::summary_database`].
+    /// **The summary database, opened on first use and used always** — see [`SummaryStore::database`].
     fn summary_database(&self) -> Option<std::sync::Arc<cache::cache_db::SummaryCache>> {
         self.summary_database
             .get_or_init(|| cache::cache_db::shared(&self.cache, crate::READING_FINGERPRINT))
             .clone()
+    }
+
+    /// **The database handle itself**, for a caller that has to read or write units *without* the store.
+    ///
+    /// The one caller is a program read: `Session::gather_a_unit_read` gathers what a translation unit needs and
+    /// then hands it a handle, because the render, the parse and the sweep — 4.9 s of the 5.09 s measured — are a pure
+    /// function of the unit, its texts and the configuration, and must be payable **outside the lock every query and
+    /// every keystroke goes through**. The handle is an `Arc` of a shared database ([`cache::cache_db::shared`]), so
+    /// holding it costs a pointer and gives the reader exactly what the store's own wrappers give it.
+    pub fn database(&self) -> Option<std::sync::Arc<cache::cache_db::SummaryCache>> {
+        self.summary_database()
     }
 
     /// **Start a generation**, so a collection can tell this run's rows from the last one's.

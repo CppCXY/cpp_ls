@@ -729,12 +729,16 @@ async fn index_in_background(context: ServerContextSnapshot) {
             // **A whole program the session owes, and the only thing that can wake it up for it.**
             //
             // The session defers reading a program as one piece — a walk, a cook, a parse of the whole program and a
-            // sweep, measured at 5.09 s for 159 files — until nothing has been typed for a moment, because its
-            // preparing half holds the read lock a keystroke's write waits for. That gate is a *clock*, and a clock
-            // wakes nothing: a reader who has stopped typing sends no notification, so the one moment the read is
-            // safe is the one the pump would sleep through. This is the timer that makes the gate a delay rather than
-            // a deadlock, and it sleeps the remainder rather than polling: a completed program is taken off the
-            // schedule (`units_read`), so this fires at most once per open file.
+            // sweep, measured at 5.09 s for 159 files — until nothing has been typed for a moment: a program read is
+            // the session's one indivisible piece of work, and nothing may start one while a reader is typing. That
+            // gate is a *clock*, and a clock wakes nothing: a reader who has stopped typing sends no notification, so
+            // the one moment the read is safe is the one the pump would sleep through. This is the timer that makes
+            // the gate a delay rather than a deadlock, and it sleeps the remainder rather than polling: a completed
+            // program is taken off the schedule (`units_read`), so this fires at most once per open file.
+            //
+            // `read_a_program` is three phases — the walk under the read lock, the 4.9 s of cook/parse/sweep with
+            // **no lock at all**, and the inserts under the writer — which is why a real project's program can be read
+            // now and could not be before (`docs/architecture.md` §7.4).
             if pending == 0
                 && let Some(wait) = context
                     .analysis()
@@ -743,7 +747,11 @@ async fn index_in_background(context: ServerContextSnapshot) {
                     )
                     .flatten()
             {
-                tokio::time::sleep(wait + IDLE_WAIT).await;
+                if wait.is_zero() {
+                    context.analysis().read_a_program().await;
+                } else {
+                    tokio::time::sleep(wait + IDLE_WAIT).await;
+                }
                 continue;
             }
 

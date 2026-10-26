@@ -622,6 +622,46 @@ parse + sweep           3.66 s           ← 737 525 token、39 080 条声明
 ```text
 a_program_is_read_when_the_reader_stops_editing   打完字一秒钟后，下一个 drain 把程序读了，
                                                   闭包 4 层下的 deep.h 有了 cooked 读法，HWND__ 落在 api.h
-a_program_too_large_to_read_at_once_is_left_alone 同一个 fixture 加一个 1 MB 的注释头 → 不读，per-file 读法照旧
+a_program_too_large_to_read_at_once_is_left_alone 同一个 fixture 加一个超预算的注释头 → 不读，per-file 读法照旧
 ```
+
+（**⑯ 的第二半已在 ⑰ 完成**，见 §7.5：预算已经抬到 8 MiB，那两条测试按常量取尺寸而不是写死 1 MB。）
+
+### 7.5 ⑰ 那 5 s 挪到锁外了，于是整程序读法在真项目上真的会跑
+
+§7.4 的下一步就是这一步，做法和当时写的完全一样 —— **三段式**，中间那段不带任何会话：
+
+```text
+Session::gather_a_unit_read(&self)          读锁   44 ms    walk、闭包文本、两次缓存查询
+UnitReadMaterials::read_the_program(self)   无锁   4.9 s    cook → facts 查询 → parse+sweep → 两行写库
+Session::commit_a_unit_reading(&mut self)   写锁   几 ms    每文件 insert_cooked + mark_worked
+```
+
+`UnitReadMaterials` 带的是 `Arc<TranslationUnit>`、每个文件的文本、`Marked`、`CompilerConfig`、files 句柄、以及
+store 的数据库 `Arc` —— 也就是说"读一个程序"这件事需要的每一样东西都可克隆、都不借会话。服务端那边
+`AnalysisState::read_a_program` 就是这个三段式：`run_blocking`（读锁）取材料 → `tokio::task::spawn_blocking`
+（**不带锁**）算 → `update_session`（写锁）落库；pump 在队列排空、且距上次编辑一秒时调它，时钟的剩余时间仍由
+`the_wait_before_a_program_may_be_read` 让 pump 自己睡出来。
+
+**预算因此换了含义**：`THE_LARGEST_PROGRAM_READ_AT_ONCE` 从 1 MiB（"防人手速"）抬到 **8 MiB**（"防病态闭包"）——
+中间那 4.9 s 不握任何锁，所以一个读者在它跑的时候敲键只会等 gather 的 44 ms。8 MiB ≈ 5.8 s 单核，并且**高于**
+被测量的那个程序（7.07 MB，MSVC 的 STL），也就是说真项目的真 TU 落在线内。超过的（生成出来的、被到处 include 的
+那种）保持 per-file 读法：不阻塞、也不会失控。
+
+实测（本机 `clice`，release）：
+
+```text
+keystroke_probe 新加的最后一相（读者停手 1.2 s 之后调用 read_a_program_now）
+                  5.24 s，180 个文件，806 008 token，**0 error / 0 unplaced / 0 unbalanced**
+                  **+43 522** 条 cooked 声明变成可查询的（142 → 180 个文件有这个闭包的读法）
+交互不变          didOpen 71 ms（environment true）；体内按键 54/58/60 ms；指令按键 104/108/113 ms；10/10 是程序
+cpp_ls release    13 个目标全绿：handshake 34（含 folding）、latency 2（5.87 s）、idle、diagnostics_stable …
+cpp_code_analysis 682 lib + 全部集成绿
+```
+
+**这条链现在闭合到哪**：一个读者打开一个文件、停手一秒，这条 TU 的**整个闭包**就有了编译器读法（不只是他打开的那个
+文件），而且这些事实是从**一条** timeline、**一次**整程序解析里分出来的 —— 正是 §5 第二步的形状。还差的是
+§5 第二步的另一半：`ProjectIndex` 的查找按询问方所在 TU 的环境分区（`env_hash`），以及把四层补丁删掉。删补丁的
+窗口现在是"**非读者文件**第一次被读成 raw"——wave 仍按文本读它们，然后第二遍精修；把 wave 也变成"一个 TU 一条
+timeline"就是下一步。
 

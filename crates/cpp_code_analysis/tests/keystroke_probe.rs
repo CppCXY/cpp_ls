@@ -157,4 +157,31 @@ fn what_a_keystroke_costs() {
         "cache afterwards: {} summar(ies), {} unit(s), {} fact(s)",
         sizes.summaries, sizes.units, sizes.facts
     );
+
+    // **And the one thing the reader gets for pausing**: a second of quiet lets the session read the whole program the
+    // open file belongs to — one walk, one cook, one parse, every fact filed under the file that wrote it. The cost is
+    // paid off the lock (`UnitReadMaterials::read_the_program` takes no session at all), so what this measures is CPU
+    // and how much of the closure becomes queryable, not a wait.
+    std::thread::sleep(std::time::Duration::from_millis(1_200));
+    let before = session.cache_sizes().cooked_declarations;
+    let started = Instant::now();
+    let read = session.read_a_program_now();
+    println!(
+        "a paused reader: {:?} for {:?} file(s), +{} cooked declaration(s) now queryable",
+        started.elapsed(),
+        read.as_ref().map(|reading| reading.files),
+        session
+            .cache_sizes()
+            .cooked_declarations
+            .saturating_sub(before)
+    );
+    if let Some(reading) = read {
+        println!(
+            "                 {} token(s), {} error(s), {} unplaced, {} unbalanced",
+            reading.tokens,
+            reading.errors,
+            reading.unplaced,
+            reading.unbalanced.len()
+        );
+    }
 }

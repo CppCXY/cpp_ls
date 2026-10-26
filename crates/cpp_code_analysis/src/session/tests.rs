@@ -732,9 +732,11 @@ fn a_program_is_read_when_the_reader_stops_editing() {
 /// that differs between the two tests.
 #[test]
 fn a_program_too_large_to_read_at_once_is_left_alone() {
-    // A megabyte of comment: the file is in the program's closure and contributes nothing but bytes, which is
-    // exactly what the budget is about.
-    let big = "// padding padding padding padding\n".repeat(32 * 1024);
+    // A comment block just over the budget: the file is in the program's closure and contributes nothing but bytes,
+    // which is exactly what the budget is about. Sized from the constant rather than written out, so that raising the
+    // budget cannot quietly turn this test into the one above.
+    let line = "// padding padding padding padding\n";
+    let big = line.repeat(super::THE_LARGEST_PROGRAM_READ_AT_ONCE / line.len() + 1);
     assert!(big.len() > super::THE_LARGEST_PROGRAM_READ_AT_ONCE);
 
     let handle = "#include \"big.h\"\n#include \"mid.h\"\n#define DECLARE_HANDLE(name) struct name##__ { int unused; }; \

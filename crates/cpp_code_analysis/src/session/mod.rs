@@ -182,18 +182,17 @@ const UNTIL_A_UNIT_MAY_BE_READ: std::time::Duration = std::time::Duration::from_
 
 /// **The largest program this session reads in one piece, in bytes of the source text it is made of.**
 ///
-/// A unit read is linear in its program — **5.09 s for 7.07 MB of source** (159 files, 737 525 tokens; measured in
-/// `tests/unit_read_probe.rs` on a real project), so 0.72 s per megabyte. Its preparing half holds the **read** lock,
-/// and `didChange` takes the write one, so whatever that read costs is what a keystroke arriving during it waits for.
-/// The server's own budget for a write hold is a second (`crates/cpp_ls/tests/latency.rs`'s `UPDATE_BUDGET`), which is
-/// where this number comes from: 1 MiB is 0.72 s of reading, inside that budget.
+/// A unit read is linear in its program: **5.09 s for 7.07 MB of source** (159 files, 737 525 tokens; measured in
+/// `tests/unit_read_probe.rs` on a real project), i.e. 0.72 s per megabyte. Since the *reading* was split so that only
+/// its 44 ms walk holds a lock (`Session::gather_a_unit_read` → [`UnitReadMaterials::read_the_program`] →
+/// `Session::commit_a_unit_reading`), what this bounds is **background CPU and memory**, not a reader's keystroke:
+/// the middle phase needs no lock, so a keystroke during it is answered beside it.
 ///
-/// A program larger than this is **not read as one piece** — it keeps the per-file reading it has always had, which is
-/// slower to answer for the closure and never wrong. That is a deliberate half-measure rather than a policy: the real
-/// fix is to make the read not need the session lock at all (the walk does; the render, the parse and the sweep are
-/// pure functions of the unit and the texts, and are 5 s of the 5.1 s), and that is the next thing this file owes the
-/// reader — see `docs/architecture.md` §7.4.
-const THE_LARGEST_PROGRAM_READ_AT_ONCE: usize = 1024 * 1024;
+/// Eight megabytes is ~5.8 s of one core, which is the largest that stays in the same order as the index itself — and
+/// it is deliberately **above** the program this was measured on (7.07 MB, MSVC's STL from one source), so a real
+/// translation unit of a real project is covered. A closure larger than this is either pathological or a mistake
+/// (a generated file included everywhere), and it keeps the per-file reading, which never blocks and never runs away.
+const THE_LARGEST_PROGRAM_READ_AT_ONCE: usize = 8 * 1024 * 1024;
 
 /// How many files [`Session::want_the_closure_cooked`] reaches for **one level below the direct includes**.
 ///
@@ -931,21 +930,19 @@ pub struct Drain {
     units: Vec<std::sync::Arc<crate::TranslationUnit>>,
     /// The macro environments a query asked for and has not got — up to `MACRO_SLICE` of them.
     environments: Vec<PathBuf>,
-    /// **The translation unit roots whose whole program this drain is going to read** — at most one, and only when
-    /// nothing is being typed into. See [`Session::prepare_a_unit_reading`] for what it costs and
-    /// [`Session::a_unit_may_be_read_now`] for when it is allowed.
-    unit_reads: Vec<PathBuf>,
 }
 
 impl Drain {
     /// Is there nothing to do? A caller that would take a lock only for this can skip it.
     pub fn is_empty(&self) -> bool {
-        self.files.is_empty() && self.environments.is_empty() && self.unit_reads.is_empty()
+        self.files.is_empty() && self.environments.is_empty()
     }
 }
 
-/// **What [`Session::prepare_the_drain`] made** — the re-reads built, the environments rendered, and the programs
-/// read.
+/// **What [`Session::prepare_the_drain`] made** — the re-reads built and the environments rendered.
+///
+/// **A whole program is not in here**, and that is the point of [`UnitReadMaterials`]: it costs 4.9 s, and a drain is
+/// planned under the writer. The pump takes it as its own three phases, with every lock dropped for the middle one.
 #[derive(Default)]
 pub struct PreparedDrain {
     /// The second pass, planned: `None` when the slice's backlog was empty.
@@ -956,14 +953,125 @@ pub struct PreparedDrain {
         (PathBuf, u64),
         std::sync::Arc<crate::preprocess::cooked::RenderedCooked>,
     )>,
-    /// The units worked out — a program each, parsed and swept, waiting for one insert per file.
-    units: Vec<PreparedUnitReading>,
 }
 
 /// **A unit read whose expensive half is done** — see [`Session::prepare_a_unit_reading`].
 pub struct PreparedUnitReading {
     root: PathBuf,
+    /// The hash of the rendering these facts were read from — what the memo and the database file them under.
+    program: u64,
     indexed: crate::IndexedUnit,
+}
+
+/// **What a program read needs, gathered under the session lock and read without it.**
+///
+/// The three parts of a unit read, and the measurement that decides where each one is paid
+/// (`tests/unit_read_probe.rs`, a 159-file / 7.07 MB program, 5.09 s in total):
+///
+/// ```text
+/// gather   the walk, the closure's texts, two cache reads        44 ms      needs &Session — this type comes from it
+/// read     the cook (1.25 s), the parse and the sweep (3.66 s)   ~4.9 s     needs none of it — `read_the_program`
+/// commit   one insert_cooked per file, and queue.mark_worked     a few ms   needs &mut Session
+/// ```
+///
+/// So the caller may drop **every** lock between [`Session::gather_a_unit_read`] and
+/// [`Session::commit_a_unit_reading`], which is the difference between a whole-program reading that a keystroke waits
+/// five seconds for and one it does not wait for at all. The session's own schedule
+/// ([`Session::a_unit_may_be_read_now`]) only allowed programs under a megabyte while this split did not exist; the
+/// budget is about a pathological closure now, not about a person's typing speed.
+pub struct UnitReadMaterials<F: FileProvider> {
+    root: PathBuf,
+    /// The compilation context, which is part of the key a summary is filed under.
+    key: SummaryKey,
+    /// The key the rendering is filed under: the content hash of every file the walk entered, folded.
+    units_key: u64,
+    /// The walked timeline.
+    unit: std::sync::Arc<crate::TranslationUnit>,
+    /// The text of every file the walk entered, by path — what the cook reads.
+    sources: HashMap<PathBuf, String>,
+    /// What the compilation itself defines ([`crate::Marked`]), which no file in the closure knows.
+    macros: crate::Marked,
+    config: CompilerConfig,
+    files: F,
+    /// The store's own database, for the two rows a program read reads and writes.
+    database: Option<std::sync::Arc<cache::cache_db::SummaryCache>>,
+    /// The rendering's hash, when the rendering was already in hand.
+    program: Option<u64>,
+    /// The rendering, when this session or the database already had it.
+    rendered: Option<crate::RenderedUnit>,
+    /// The facts, when they were already read.
+    known: Option<crate::IndexedUnit>,
+}
+
+impl<F: FileProvider> UnitReadMaterials<F> {
+    /// The root this program is read for, by the index's spelling.
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// **Read the program** — the cook, the parse and the sweep, and no session at all.
+    ///
+    /// The order is the one the measurements put in: facts if they are known, then the rendering (a cook, or the one
+    /// gathered), then the facts again by the rendering's own hash, then the one parse. Both rows are written back,
+    /// so the next session decodes instead of computing — 63 ms against 3.66 s on the measured program.
+    pub fn read_the_program(self) -> Option<PreparedUnitReading> {
+        if let Some(indexed) = self.known {
+            return Some(PreparedUnitReading {
+                root: self.root,
+                program: self.program?,
+                indexed,
+            });
+        }
+
+        let stream = match self.rendered {
+            Some(rendered) => rendered,
+            None => {
+                let definitions = self.unit.definitions();
+                let seed = MacroTable::from_marked(&self.macros);
+                // **The include search, so `__has_include` is answerable.** Without it the operator answers
+                // `Unknown`, which is honest but decides nothing, and `#if __has_include(<span>)` is a shape real
+                // headers are full of. See [`Session::render_the_unit`].
+                let search = crate::preprocess::cooked::Search::new(&self.files, &self.config);
+                let stream = self.unit.cook_the_unit(
+                    &self.sources,
+                    &definitions,
+                    Some(&seed),
+                    true,
+                    Some(&search),
+                );
+                // **Kept under the key, provisionally or not — the key is what makes that safe.** It folds every
+                // `(path, content)` the walk entered, so a rendering of a closure that was still filling has a key
+                // the finished closure cannot repeat: the row is never hit again, it is merely wasted.
+                if let Some(database) = &self.database {
+                    let _ = database.put_unit(self.units_key, &stream);
+                }
+                stream
+            }
+        };
+
+        let program = crate::cache::content_hash(&stream.text);
+        if let Some(database) = &self.database
+            && let Ok(Some(known)) = database.indexed_unit(program)
+        {
+            return Some(PreparedUnitReading {
+                root: self.root,
+                program,
+                indexed: known,
+            });
+        }
+
+        let indexer = FileIndexer::new(&self.files, &self.config);
+        let indexed = indexer.index_unit_rendering(&self.root, &stream, self.key);
+        if let Some(database) = &self.database {
+            let _ = database.put_indexed_unit(program, &indexed);
+        }
+
+        Some(PreparedUnitReading {
+            root: self.root,
+            program,
+            indexed,
+        })
+    }
 }
 
 /// **How the effect chain reads files**: the session`s own provider, and the include graph the index resolved.
@@ -2261,6 +2369,13 @@ impl<F: FileProvider + Clone> Session<F> {
         let prepared = self.prepare_the_drain(drain);
         self.commit_the_drain(prepared);
 
+        // **And a whole program if one is owed**, in the same three phases the pump takes apart — this path has no
+        // lock to keep free, so it takes them in a row. The clock and the budget are inside
+        // [`Session::read_a_program_now`] (`the_program_to_read`), so a caller that has just edited reads nothing.
+        if self.is_idle() && self.pending_cooking() == 0 && self.re_read_backlog() == 0 {
+            self.read_a_program_now();
+        }
+
         done
     }
 
@@ -2500,35 +2615,23 @@ impl<F: FileProvider + Clone> Session<F> {
             files,
             units,
             environments: Vec::new(),
-            unit_reads: Vec::new(),
         };
 
         if self.is_idle() {
-            // **One program, read as one program** — the schedule that replaces the "NOT WIRED" note this comment
-            // used to carry. What that note said was true of the *call*: a unit read is one indivisible piece of
-            // work (5.09 s for a 159-file, 7.07 MB program, measured in `tests/unit_read_probe.rs`) and calling it
-            // here held the writer for all of it. What changed is where it is paid, not what it costs:
+            // **NOT WIRED HERE, and now for a better reason than the one this note used to give.**
             //
-            // ```text
-            // prepare_the_drain (read lock)   the walk, the cook, the parse of the whole program, the sweep
-            // commit_the_drain  (write lock)  one insert_cooked per file — nothing else
-            // ```
+            // A whole-program read is 5.09 s for a 159-file, 7.07 MB program (`tests/unit_read_probe.rs`), and its
+            // answers were re-measured on that project rather than assumed: 159 files, 737 525 tokens, zero errors,
+            // 39 080 cooked declarations added, and not one raw fact lost. The three readings the old note recorded
+            // as worse do not reproduce; their cause was the unclosed scope that `index_unit_rendering`'s crossing
+            // fence now quarantines.
             //
-            // And its *answers* were re-measured on a real project rather than assumed: 159 files, 737 525 tokens,
-            // zero errors, 39 080 cooked declarations added, and not one raw fact lost. The three readings the old
-            // note recorded as worse do not reproduce; their cause was the unclosed scope that
-            // `index_unit_rendering`'s crossing fence now quarantines.
-            //
-            // **Not while a reader is typing, and not on a program too large to read inside a keystroke's budget.**
-            // The split cannot fix that: the read lock is shared with queries but a keystroke takes the *write* lock,
-            // so it waits for whatever the read costs. `Session::a_unit_may_be_read_now` is the clock and
-            // `Session::the_next_unit_to_read` is the budget; both are counted in
-            // `crates/cpp_ls/tests/latency.rs`'s terms, and what they leave out is written down at
-            // [`THE_LARGEST_PROGRAM_READ_AT_ONCE`].
-            //
-            // **And only a drain with nothing else to do.** The second pass and the environments are the same lock,
-            // and a program read added to a slice that already holds sixteen re-reads is how one wait becomes two.
-            // `drain.unit_reads` is filled at the end of this function, once everything else has been planned.
+            // What keeps it out of *this* function is the writer: a drain is planned inside `commit_a_wave`, so
+            // anything decided here is paid under the write lock. The read itself is
+            // [`Session::read_a_program_now`], and the pump takes it as three phases — `Session::gather_a_unit_read`
+            // under the read lock, [`UnitReadMaterials::read_the_program`] with **every lock dropped** (4.9 s of the
+            // 5.09 s needs no session at all), and `Session::commit_a_unit_reading` under the writer for the inserts.
+            // A caller that is already the writer (this function's callers `advance`) takes the three in a row.
 
             // **What a reader is looking at**, and nothing else: the open files and the files their own text names,
             // plus whatever a request named ([`Session::want_cooked_reading`]). See
@@ -2626,23 +2729,34 @@ impl<F: FileProvider + Clone> Session<F> {
             }
         }
 
-        // **And, last, a whole program** — only for a drain that has nothing else to do, only when nothing has been
-        // typed for a moment, and only when the program fits in a keystroke's budget. See the note at the top of the
-        // `is_idle` block for the three numbers and where they come from.
-        if self.is_idle()
-            && drain.files.is_empty()
-            && drain.environments.is_empty()
-            && self.a_unit_may_be_read_now()
-            && let Some(root) = self.the_next_unit_to_read()
-        {
-            // **Marked read here and not at the commit**: a root whose program cannot be walked yet would otherwise
-            // be chosen again on the next drain, and a schedule that keeps choosing the same unbuildable root is a
-            // pump that never goes idle.
-            self.units_read.insert(queue_key(&root));
-            drain.unit_reads.push(root);
-        }
-
         drain
+    }
+
+    /// **Read one whole program now, if one is owed and allowed** — the inline form of the pump's three phases.
+    ///
+    /// A program read is three phases around a lock ([`Session::gather_a_unit_read`], the read itself, and
+    /// [`Session::commit_a_unit_reading`]), because the 4.9 s in the middle takes no session at all. A caller that
+    /// *is* the writer — [`Session::advance`], a test, a batch — has no lock to keep free, so it takes them in a row
+    /// and this is that shape. The pump takes them apart and drops the lock between.
+    pub fn read_a_program_now(&mut self) -> Option<UnitReading> {
+        let root = self.the_program_to_read()?;
+        let materials = self.gather_a_unit_read(&root);
+        let prepared = materials.and_then(UnitReadMaterials::read_the_program);
+        self.commit_a_program(&root, prepared)
+    }
+
+    /// **File what a program read produced** — the third phase, and the one place `units_read` is written.
+    ///
+    /// `prepared` is `None` when the read declined (a root the walk cannot reach, a render that failed) and the root is
+    /// **still marked read**: a root that cannot be walked would otherwise be chosen again on the next wake, and a
+    /// schedule that keeps choosing the same unbuildable root is one that never goes idle.
+    pub fn commit_a_program(
+        &mut self,
+        root: &Path,
+        prepared: Option<PreparedUnitReading>,
+    ) -> Option<UnitReading> {
+        self.units_read.insert(queue_key(root));
+        prepared.map(|prepared| self.commit_a_unit_reading(prepared))
     }
 
     /// **Work out the expensive half of a drain, holding nothing but `&self`.**
@@ -2661,7 +2775,6 @@ impl<F: FileProvider + Clone> Session<F> {
             files,
             units,
             environments,
-            unit_reads,
         } = drain;
         let tracing = crate::probes::cooking();
 
@@ -2714,28 +2827,7 @@ impl<F: FileProvider + Clone> Session<F> {
             ));
         }
 
-        // **A whole program, read here rather than inside the writer.** The largest single thing a drain can be asked
-        // to do — 5.09 s for a 159-file, 737 525-token program — and it changes nothing until the inserts in
-        // [`Session::commit_the_drain`]. What it costs this lock is the parse of one program; what it saves is a walk
-        // and a render for every file below it, because the commit tells the queue those files are read.
-        let started = std::time::Instant::now();
-        let units = unit_reads
-            .iter()
-            .filter_map(|root| self.prepare_a_unit_reading(root))
-            .collect();
-        if tracing && !unit_reads.is_empty() {
-            eprintln!(
-                "drain: {} program(s) read in {} ms",
-                unit_reads.len(),
-                started.elapsed().as_millis()
-            );
-        }
-
-        PreparedDrain {
-            re_read,
-            rendered,
-            units,
-        }
+        PreparedDrain { re_read, rendered }
     }
 
     /// **Apply what [`Session::prepare_the_drain`] worked out** — the index inserts, and the remembered renderings.
@@ -2745,10 +2837,6 @@ impl<F: FileProvider + Clone> Session<F> {
                 let weight = rendered.weight();
                 known.insert(key, rendered, weight);
             }
-        }
-
-        for prepared in prepared.units {
-            self.commit_a_unit_reading(prepared);
         }
 
         match prepared.re_read {
@@ -4760,42 +4848,10 @@ impl<F: FileProvider + Clone> Session<F> {
 
     pub fn render_the_unit(&self, root: &Path) -> Option<crate::RenderedUnit> {
         let unit = self.translation_unit_of(root)?;
+        let (sources, key) = self.the_units_inputs(&unit);
 
-        // **The text of every file the walk entered**, which is what the cook reads.
-        let mut sources: HashMap<PathBuf, String> = HashMap::new();
-        for path in unit.files() {
-            if let Some(text) = self.files.read(path) {
-                sources.insert(path.to_path_buf(), text);
-            }
-        }
-
-        // **What this render is a function of**: every file's path and content, folded into one number.
-        //
-        // Not the root path. A file the reader has open and has **not saved** comes from the overlay, so an edit
-        // changes the program without changing its name, and a cache keyed on the name would answer with a stream
-        // built from text the files no longer have. Folding the *content* in is what makes a hit mean "the same
-        // input", which is the only thing that makes reusing the output sound.
-        //
-        // Sorted, so two runs that read the same files in a different order of *this loop* still agree; the include
-        // order that matters is already fixed inside the stream by the walk.
-        let mut inputs: Vec<(&std::path::Path, u64)> = sources
-            .iter()
-            .map(|(path, text)| (path.as_path(), crate::cache::content_hash(text)))
-            .collect();
-        inputs.sort_unstable_by(|left, right| left.0.cmp(right.0));
-        let key = {
-            let mut folded = String::new();
-            for (path, hash) in &inputs {
-                folded.push_str(&path.to_string_lossy());
-                folded.push('|');
-                folded.push_str(&hash.to_string());
-                folded.push(';');
-            }
-            crate::cache::content_hash(&folded)
-        };
-
-        // **The same inputs, already rendered.** A reader asks for the same unit again and again 鈥?every keystroke
-        // that lands on a name, every drain 鈥?and a render is a walk, a cook of every file in include order and a
+        // **The same inputs, already rendered.** A reader asks for the same unit again and again — every keystroke
+        // that lands on a name, every drain — and a render is a walk, a cook of every file in include order and a
         // stitched stream of megabytes. The plan's M4 is this call: the second answer must not cost what the first
         // did.
         if let Ok(known) = self.rendered_unit.lock()
@@ -4838,55 +4894,129 @@ impl<F: FileProvider + Clone> Session<F> {
         Some(stream)
     }
 
+    /// **The texts a unit's cook reads, and the key its rendering is filed under.**
+    ///
+    /// Extracted because two callers need exactly this pair and neither should compute it twice: the render
+    /// ([`Session::render_the_unit`]) and the gather ([`Session::gather_a_unit_read`]).
+    ///
+    /// # The key is the inputs, not the root path
+    ///
+    /// A file the reader has open and has **not saved** comes from the overlay, so an edit changes the program without
+    /// changing its name, and a cache keyed on the name would answer with a stream built from text the files no longer
+    /// have. Folding every file's *content hash* in is what makes a hit mean "the same input", which is the only thing
+    /// that makes reusing the output sound.
+    ///
+    /// Sorted, so two runs that read the same files in a different order of *this loop* still agree; the include order
+    /// that matters is already fixed inside the stream by the walk.
+    fn the_units_inputs(&self, unit: &crate::TranslationUnit) -> (HashMap<PathBuf, String>, u64) {
+        let mut sources: HashMap<PathBuf, String> = HashMap::new();
+        for path in unit.files() {
+            if let Some(text) = self.files.read(path) {
+                sources.insert(path.to_path_buf(), text);
+            }
+        }
+
+        let mut inputs: Vec<(&std::path::Path, u64)> = sources
+            .iter()
+            .map(|(path, text)| (path.as_path(), crate::cache::content_hash(text)))
+            .collect();
+        inputs.sort_unstable_by(|left, right| left.0.cmp(right.0));
+        let key = {
+            let mut folded = String::new();
+            for (path, hash) in &inputs {
+                folded.push_str(&path.to_string_lossy());
+                folded.push('|');
+                folded.push_str(&hash.to_string());
+                folded.push(';');
+            }
+            crate::cache::content_hash(&folded)
+        };
+
+        (sources, key)
+    }
+
+    /// **Everything a program read needs, gathered under the lock that is already held.**
+    ///
+    /// The point of this type is *where the time is spent*, and it is measured: of the 5.09 s a program read costs,
+    /// the **walk and the closure's texts are 44 ms** and they are the only part that needs the session — the cook
+    /// (1.25 s), the parse and the sweep (3.66 s) are a function of the unit, the texts and the configuration.
+    /// [`UnitReadMaterials::read_the_program`] is that part, and it takes no session at all, so the caller may drop
+    /// every lock while it runs — which is what lets a real project's program be read without a keystroke waiting.
+    ///
+    /// The cheap lookups happen here rather than in `read_the_program`, because they are cache reads the store owns:
+    /// the rendering by the closure's key, and (when the rendering is already known) the facts by the rendering's own
+    /// hash.
+    ///
+    /// `None` when the file has no summary or the walk cannot be built — nothing has read it yet, which is a state
+    /// and not an error.
+    pub fn gather_a_unit_read(&self, root: &Path) -> Option<UnitReadMaterials<SessionFiles<F>>> {
+        // The index's own spelling again, for the same reason [`Session::cook`] takes it: the unit's frames are
+        // keyed by the normalized path.
+        let root = self.store.index().summary(root)?.path.clone();
+        let unit = self.translation_unit_of(&root)?;
+        let (sources, units_key) = self.the_units_inputs(&unit);
+        let key = SummaryKey::new(0, self.store.context_hash(&root));
+
+        // **The rendering, if this session or the database already has it.** Without it the program's hash is unknown
+        // and neither cache can be asked — so the facts are looked up in `read_the_program`, after the cook.
+        let rendered = self
+            .rendered_unit
+            .lock()
+            .ok()
+            .and_then(|known| {
+                known
+                    .as_ref()
+                    .filter(|(seen, _)| *seen == units_key)
+                    .map(|(_, cached)| cached.clone())
+            })
+            .or_else(|| self.store.cached_unit(units_key));
+
+        let (program, known) = match &rendered {
+            Some(rendered) => {
+                let program = crate::cache::content_hash(&rendered.text);
+                let known = self
+                    .unit_index
+                    .lock()
+                    .ok()
+                    .and_then(|memo| {
+                        memo.as_ref()
+                            .filter(|(seen, _)| *seen == program)
+                            .map(|(_, cached)| cached.clone())
+                    })
+                    .or_else(|| self.store.cached_indexed_unit(program));
+                (Some(program), known)
+            }
+            None => (None, None),
+        };
+
+        Some(UnitReadMaterials {
+            root,
+            key,
+            units_key,
+            unit,
+            sources,
+            macros: self.store.index().macros().clone(),
+            config: self.config.clone(),
+            files: self.files.clone(),
+            database: self.store.database(),
+            program,
+            rendered,
+            known,
+        })
+    }
+
     /// **A unit read worked out, and nothing changed** — the expensive half, under `&self`.
+    ///
+    /// The whole of it: gather ([`Session::gather_a_unit_read`], which needs the session for the walk) and then read
+    /// ([`UnitReadMaterials::read_the_program`], which does not). A caller that has a *lock* to keep free — the pump —
+    /// calls the two apart; this is the caller that does not care.
     ///
     /// The counterpart of [`Session::commit_a_unit_reading`], and the split exists for the reason every other
     /// prepare/commit pair in this session does: a unit read is a walk, a cook of every file in include order, a
     /// **parse of the whole program** and a sweep of every declaration in it — **5.09 s** for a 159-file,
-    /// 737 525-token program on a real project, and **85 ms** for the same program again. That is one indivisible
-    /// piece of work, so where it is paid is where it stalls: taken here, it runs under the *read* lock, beside
-    /// whatever a request is doing, and what is left for the writer is one `insert_cooked` per file.
-    ///
-    /// `None` when the file has no summary or the walk cannot be built — nothing has read it yet, which is a state
-    /// and not an error.
+    /// 737 525-token program on a real project, and **85 ms** for the same program again.
     pub fn prepare_a_unit_reading(&self, root: &Path) -> Option<PreparedUnitReading> {
-        // The index's own spelling again, for the same reason [`Session::cook`] takes it: the unit's frames are
-        // keyed by the normalized path.
-        let root = self.store.index().summary(root)?.path.clone();
-        let stream = self.render_the_unit(&root)?;
-
-        let key = SummaryKey::new(0, self.store.context_hash(&root));
-        let program = crate::cache::content_hash(&stream.text);
-        let memo = self
-            .unit_index
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone();
-        let indexed = match memo {
-            // **The same program, already read.** The reading is a function of the stream's bytes, and a project's
-            // sources share their headers, so this is the common case rather than a lucky one: measured, twenty
-            // sources including `<future>` all render to the same 617 607 tokens, and this turns the second and
-            // later of them from a parse-and-sweep of the whole program into a clone of the facts.
-            Some((seen, cached)) if seen == program => cached,
-            // **And the database may have it from a previous run.** The parse and the sweep are a pure function of
-            // `stream.text`, whose hash is `program` — so the facts filed under it are these facts, and reading them
-            // back is a decode instead of 399 ms of parsing plus ≈3.8 s of sweeping.
-            _ => match self.store.cached_indexed_unit(program) {
-                Some(cached) => {
-                    self.remember_the_unit_index(program, &cached);
-                    cached
-                }
-                None => {
-                    let indexer = FileIndexer::new(&self.files, &self.config);
-                    let indexed = indexer.index_unit_rendering(&root, &stream, key);
-                    self.store.remember_indexed_unit(program, &indexed);
-                    self.remember_the_unit_index(program, &indexed);
-                    indexed
-                }
-            },
-        };
-
-        Some(PreparedUnitReading { root, indexed })
+        self.gather_a_unit_read(root)?.read_the_program()
     }
 
     /// Remember what a program's parse came out as — the one-entry memo `Session::unit_index` holds.
@@ -4899,7 +5029,16 @@ impl<F: FileProvider + Clone> Session<F> {
     /// **Put what [`Session::prepare_a_unit_reading`] worked out into the index** — one `insert_cooked` per file, and
     /// the only part of a unit read that needs `&mut self`.
     pub fn commit_a_unit_reading(&mut self, prepared: PreparedUnitReading) -> UnitReading {
-        let PreparedUnitReading { root, indexed } = prepared;
+        let PreparedUnitReading {
+            root,
+            program,
+            indexed,
+        } = prepared;
+        // **And the memo, which is the difference between a second program read costing 3.66 s and costing a clone.**
+        // It is filled here rather than in `read_the_program` because the memo is the session's; a program read off
+        // the lock still writes the database rows, so a session that never commits this one (a dropped batch) loses
+        // the fast path for one read and nothing else.
+        self.remember_the_unit_index(program, &indexed);
 
         // **The gate is gone, and what replaced it is a repair rather than a refusal.** A parse error is filed
         // against the file it is in; a brace the parser paired across two files is neutralised in the stream and
@@ -5003,8 +5142,8 @@ impl<F: FileProvider + Clone> Session<F> {
     }
 
     /// **The next file whose whole program is worth reading** — an open file the program of which nobody has read,
-    /// and whose program is small enough that reading it cannot make a keystroke wait
-    /// ([`THE_LARGEST_PROGRAM_READ_AT_ONCE`]).
+    /// whose program is small enough that reading it cannot make a keystroke wait
+    /// ([`THE_LARGEST_PROGRAM_READ_AT_ONCE`]), and — the clock — which nothing has been typed into for a moment.
     ///
     /// Open files only, in the order the client sent them: a project with two hundred translation units does not
     /// read two hundred programs because one file is open. `units_read` is what makes it once per program, and it is
@@ -5014,6 +5153,17 @@ impl<F: FileProvider + Clone> Session<F> {
     /// a closure walk of hash lookups (the texts are held), and it is what lets the program be read later if the file
     /// is edited down or the configuration shrinks it. The alternative — marking it read — would make the budget
     /// permanent for a file that merely started large.
+    ///
+    /// [`Session::the_next_unit_to_read`] is the same question without the clock, for a caller that is itself the
+    /// signal that now is a good moment (`Session::read_a_looked_at_unit`).
+    pub fn the_program_to_read(&self) -> Option<PathBuf> {
+        if !self.a_unit_may_be_read_now() {
+            return None;
+        }
+        self.the_next_unit_to_read()
+    }
+
+    /// The root a program read would be for, ignoring the clock — see [`Session::the_program_to_read`].
     fn the_next_unit_to_read(&self) -> Option<PathBuf> {
         self.documents.paths().into_iter().find(|path| {
             !self.units_read.contains(&queue_key(path))

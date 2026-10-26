@@ -318,6 +318,59 @@ impl AnalysisState {
         self.work.notify_one();
     }
 
+    /// **Read one whole program — the one part of a slice whose cost must not be paid under any lock.**
+    ///
+    /// A program read is a walk, a cook of every file in include order, a parse of the whole program and a sweep of
+    /// every declaration in it: **5.09 s** for a 159-file, 7.07 MB program, and 63 ms for the same program from the
+    /// database. Of that, the walk and the closure's texts are **44 ms** and they are the only part that needs the
+    /// session — so the three phases are priced completely differently, and this is where they are taken apart:
+    ///
+    /// ```text
+    /// Session::gather_a_unit_read      under the read lock   44 ms    the walk, the texts, two cache reads
+    /// UnitReadMaterials::read_the_program   NO LOCK         4.9 s     the cook, the parse, the sweep
+    /// Session::commit_a_program        under the write lock a few ms  one insert_cooked per file
+    /// ```
+    ///
+    /// # Why the middle phase runs on a blocking thread of its own
+    ///
+    /// Because it is the session's **only** indivisible piece of work, and the walk's 44 ms is the only part that has
+    /// to hold the lock a keystroke waits for. Measured over the wire, before the split: a unit read inside the
+    /// writer held it for **all of it**, which is why the capability sat unused for several rounds
+    /// (`docs/architecture.md` §7.4). Nothing about it needs an `async` context, so it must not occupy an `async`
+    /// one: a 4.9 second task on the runtime would take the executor away from every request in flight — the same
+    /// reason `run_blocking` exists.
+    ///
+    /// Returns whether a program was attempted. `false` when none was owed, or when the clock
+    /// ([`cpp_code_analysis::Session::the_program_to_read`]) or the size budget said no.
+    pub async fn read_a_program(&self) -> bool {
+        let Some(Some(root)) = self.with_snapshot(|session| session.the_program_to_read()) else {
+            return false;
+        };
+
+        // **The cheap half under the lock that is already taken for reads**, beside whatever other queries are doing.
+        let gathering = root.clone();
+        let materials = self
+            .run_blocking(move |session| session.gather_a_unit_read(&gathering))
+            .await;
+
+        // **The expensive half with no lock at all.** `spawn_blocking` rather than the analysis pool: this work is
+        // the background's, and it must not be one of the permits a request waits for.
+        let prepared = match materials {
+            Some(materials) => tokio::task::spawn_blocking(move || materials.read_the_program())
+                .await
+                .unwrap_or(None),
+            None => None,
+        };
+
+        // **And the inserts, under the writer.** The root is marked read even when the read declined, so a program
+        // that cannot be built is not chosen again on the next wake.
+        self.update_session("read a program", move |session| {
+            session.commit_a_program(&root, prepared).is_some()
+        })
+        .await
+        .unwrap_or(false)
+    }
+
     /// Wait for a wake-up, or for `timeout` to pass.
     ///
     /// Returns whether a wake-up arrived. The timeout is **insurance, not the mechanism**: `Notify` stores one
