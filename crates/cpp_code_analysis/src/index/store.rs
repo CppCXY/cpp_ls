@@ -1795,6 +1795,14 @@ impl<F: FileProvider> SummaryStore<F> {
                 continue;
             }
 
+            // **Which files one drain re-reads**, on `CPPLS_TRACE_COOKING=1` — the number beside each drain is 16, and
+            // *which* sixteen is the question that decides what the index holds: measured, two runs of one project
+            // differ by 120 declarations in a system header, and the only remaining candidate is this set
+            // (`docs/architecture.md` §7.12).
+            if tracing {
+                eprintln!("re-read candidate: {}", path.display());
+            }
+
             if units.iter().any(|unit| unit.environment_of(path).is_some()) {
                 through_a_timeline.push((path, source));
                 continue;

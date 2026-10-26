@@ -158,7 +158,13 @@ fn what_a_unit_read_does_to_the_index() {
                 let mut names: Vec<&str> = session
                     .index()
                     .summary(path)
-                    .map(|summary| summary.declarations.iter().map(|fact| fact.name.as_str()).collect())
+                    .map(|summary| {
+                        summary
+                            .declarations
+                            .iter()
+                            .map(|fact| fact.name.as_str())
+                            .collect()
+                    })
                     .unwrap_or_default();
                 names.sort_unstable();
                 format!(
