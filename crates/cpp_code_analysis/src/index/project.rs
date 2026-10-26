@@ -8039,7 +8039,14 @@ impl ProjectIndex {
             let sequence = self.next_sequence;
             self.next_sequence += 1;
             self.order.insert(sequence, path.clone());
+            // **The key is normalized when it is written**, not when it is asked for. Two readers arrive at this map
+            // with two spellings of the same file: the visibility walk hands back the *normalized* paths it built the
+            // graph from (`e:/p/app.cpp`), and every query arrives with the path a client or a summary used
+            // (`E:/p/app.cpp`). Storing only the second spelling meant the first was dropped silently — the walk said
+            // the file was visible, `visible_in_order_of` did not find it, and the query answered as if the file had
+            // never been included. `docs/remaining.md` §F has the measurement that led here.
             self.sequence.insert(path.clone(), sequence);
+            self.sequence.insert(normalize(Path::new(&path)), sequence);
 
             // A reading filed before its summary (the contract says it should not be, but `insert_cooked` does not
             // refuse) is findable from the moment the file has a number to be found under — every reading of it,
@@ -8138,7 +8145,12 @@ impl ProjectIndex {
         // declaration queries out of a rendering nobody has any more: the same rule as the summary, for the same
         // reason, because an answer about a file that is gone is worse than no answer.
         self.forget_the_readings_of(&path);
-        let sequence = self.sequence.remove(&path);
+        let sequence = self.sequence.remove(&path).or_else(|| {
+            // **Both spellings go**, for the reason the insert keeps both: a file forgotten under one spelling that
+            // stayed findable under the other would answer with declarations the index no longer has.
+            self.sequence
+                .remove(&normalize(Path::new(&path)))
+        });
         if let Some(sequence) = sequence {
             self.order.remove(&sequence);
             self.names
@@ -9216,17 +9228,22 @@ impl ProjectIndex {
         &self,
         visible: Vec<(String, IncludeVisibility)>,
     ) -> Vec<(u32, IncludeVisibility)> {
-        // **The lookup below is a suspect, and it is left as it was until it can be measured properly.**
+        // **The lookup below is a suspect, and it is left as it was until the rule it feeds can be measured.**
         //
         // The walk's keys are normalized (`e:/p/app.cpp`) and `sequence` is keyed by the path the summary was filed
         // under, so a file whose two spellings differ is dropped **silently** — the walk says it is visible and this
-        // step removes it. Adding a normalized fallback did not fix the case it was written for
-        // (`CommandService.cpp` still sees 0 facts of `LanguageServer`, while the header *is* in its walk and *has* a
-        // summary), and it moved the scoreboard the wrong way: 4637 (77.1%) → 4609 (76.7%), **+28 `NotDeclaredHere`
-        // and not one `Ambiguous`**. So the extra files did not add answers; they changed *which* declaration a
-        // lookup chose — `direct_member` takes the first candidate among the visible ones, and one more visible
-        // declaration of the class can be one whose member list is emptier. That is a rule about choosing between
-        // declarations, and it has to be measured as its own question. See `docs/remaining.md` §F.
+        // step removes it. That is a bug, and *fixing it alone makes the answers worse*, which is the finding:
+        //
+        // * a normalized fallback **here**, and
+        // * normalizing the key when it is **written** (both spellings inserted, both removed),
+        //
+        // were each measured on the same cold store and each moved the scoreboard the same way — 4637 (77.1%) →
+        // 4609 (76.7%), **+28 `NotDeclaredHere` and not one `Ambiguous`**. The files were being dropped, and putting
+        // them back costs 28 answers instead of gaining any. So the defect is not the drop; it is what the queries do
+        // once those files are in view — `direct_member` takes the first candidate among the visible declarations,
+        // and a wider view can hand it a declaration whose member list is emptier. That rule has to be fixed (or
+        // measured as its own question) **before** this one, or the fix is a regression. See `docs/remaining.md` §F.
+        // Neither experiment is in the tree: what is here is what ships.
         let mut files: Vec<(u32, IncludeVisibility)> = visible
             .into_iter()
             .filter_map(|(key, visibility)| Some((*self.sequence.get(&key)?, visibility)))
