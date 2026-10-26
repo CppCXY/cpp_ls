@@ -839,6 +839,125 @@ fn a_program_too_large_to_read_at_once_is_left_alone() {
     );
 }
 
+/// **A class template's member answer is substituted with the use's arguments** — `b[0].value` and `b->value`.
+///
+/// The two reports from an editor (`events[Pos].U` on a `std::vector<MarkEvent>`, `file->setUri` on a
+/// `std::shared_ptr<LuaSource>`) both ended the same way: the member question was asked about a class called `_Ty` or
+/// `_Ty2` — the *declaration's* spelling of the class's own parameter, not the type the use wrote. Measured on the real
+/// project with `tests/inference_probe.rs`:
+///
+/// ```text
+/// events[Pos].   → Unknown(NotDeclaredHere("_Ty"))
+/// file->         → class "_Ty2": 0 member(s)
+/// ```
+///
+/// This fixture is the same question with names that say what is happening.
+#[test]
+fn a_class_templates_members_are_read_through_the_uses_arguments() {
+    // **Three shapes, because the standard library uses all three.** `T& operator[]` states the parameter itself;
+    // `reference operator[]` names an alias *of the class*, and the alias is what says `T&` — `std::vector`'s spelling,
+    // and the one that answered `NotDeclaredHere("_Ty")` on a real project; `T *operator->` is `shared_ptr`'s.
+    let text = "template <typename T> struct Box {\n\
+                \x20   T &operator[](int index);\n\
+                \x20   T *operator->();\n\
+                };\n\
+                template <typename T> struct AliasBox {\n\
+                \x20   using reference = T &;\n\
+                \x20   reference operator[](int index);\n\
+                };\n\
+                struct Item { int value; void grow(); };\n\
+                void f(Box<Item> box) {\n\
+                \x20   box[0].value;\n\
+                \x20   box->grow();\n\
+                }\n\
+                void g(AliasBox<Item> box) {\n\
+                \x20   alias[0].value;\n\
+                }\n";
+    let text = text.replace("alias[0]", "box[0]");
+    let files = MemoryFiles::new().with_file("/p/a.cpp", &text);
+    let fixture = Memory::new("a-class-templates-members", &files);
+    let mut session = fixture.session();
+    session.did_open("/p/a.cpp", &text);
+    session.index_everything();
+    let path = std::path::PathBuf::from("/p/a.cpp");
+    let view = session.view_of_the_file(&path).expect("a view");
+
+    // **The member after the operator, as a definition question** — the shape both reports had: `events[Pos].U` and
+    // `file->setUri` are jumps, and a jump that asks about `_Ty` finds nothing.
+    //
+    // The third one searches *after* the first two, because the fixture writes `box[0].value` twice and the cursor of
+    // each case has to be in its own function.
+    let mut searched = 0usize;
+    for (written, expected) in [
+        ("box[0].value", ("value", Some("Item"))),
+        ("box->grow", ("grow", Some("Item"))),
+        ("box[0].value", ("value", Some("Item"))),
+    ] {
+        let found_at = text[searched..]
+            .find(written)
+            .map(|at| searched + at)
+            .expect("the fixture writes it");
+        searched = found_at + written.len();
+        let at = found_at + written.len() - expected.0.len();
+        let found = session.definitions(&view, crate::file::coordinates::ReadingOffset::new(at));
+        let Known::Yes(found) = found else {
+            panic!("`{written}` must resolve to the element's member: {found:?}");
+        };
+        assert_eq!(
+            (
+                found.found[0].fact.name.as_str(),
+                found.found[0].fact.scope.as_deref()
+            ),
+            expected,
+            "`{written}` is the element's member"
+        );
+    }
+}
+/// **The same question when the class is declared in a header** — the shape the real project has, and the one that
+/// answers `_Ty`.
+///
+/// `std::vector`'s `operator[]` is declared `reference operator[](size_type)`, and `reference` is `_Ty&` — an alias
+/// *inside* the class. When the class is declared in another file, the alias is followed by
+/// `ProjectIndex::template_parameters_of`/`resolve_aliases`, which has the *spelling* and not the use's arguments, so
+/// it answers `_Ty&` and the member lookup then asks about a class called `_Ty`. Measured on EmmyLuaCodeStyle's
+/// `Mark.cpp` (`events[Pos].U`): `Unknown(NotDeclaredHere("_Ty"))`.
+#[test]
+fn a_class_templates_alias_return_is_substituted_too() {
+    let header = "template <typename T> struct AliasBox {\n\
+                  \x20   using reference = T &;\n\
+                  \x20   reference operator[](int index);\n\
+                  };\n";
+    let source = "#include \"box.h\"\n\
+                  struct Item { int value; void grow(); };\n\
+                  void g(AliasBox<Item> box) {\n\
+                  \x20   box[0].value;\n\
+                  }\n";
+    let files = MemoryFiles::new()
+        .with_file("/p/box.h", header)
+        .with_file("/p/a.cpp", source);
+    let fixture = Memory::new("a-class-templates-alias", &files);
+    let mut session = fixture.session();
+    session.did_open("/p/a.cpp", source);
+    session.add_project_files([std::path::PathBuf::from("/p/a.cpp")]);
+    session.index_everything();
+    let path = std::path::PathBuf::from("/p/a.cpp");
+    let view = session.view_of_the_file(&path).expect("a view");
+
+    let written = "box[0].value";
+    let at = source.find(written).expect("the fixture") + written.len() - "value".len();
+    let found = session.definitions(&view, crate::file::coordinates::ReadingOffset::new(at));
+    let Known::Yes(found) = found else {
+        panic!("`{written}` must resolve to the element's member: {found:?}");
+    };
+    assert_eq!(
+        (
+            found.found[0].fact.name.as_str(),
+            found.found[0].fact.scope.as_deref()
+        ),
+        ("value", Some("Item")),
+        "the alias's target is the use's argument, not the class's parameter name"
+    );
+}
 /// **An anonymous enum declares its enumerators** — `enum { LAJF };`, the C spelling of a set of constants.
 ///
 /// Reported from an editor as "an unnamed enum is not supported", and it was literally true: the declaration names

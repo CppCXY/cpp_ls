@@ -1368,3 +1368,42 @@ fixture（单个 `int count = "zero";`）                          AssignTypeChe
 ```
 
 顺带把探针扩了一个开关：`CPPLS_DIAGNOSTICS=1` 让 `tests/inference_probe.rs` 打印这个文件的所有检查结果，因为"假阳性"是关于**整个文件的诊断**的报告，不是"某个位置答了什么"。
+### 9.3 `events[Pos].U` 修好了：一条链上三个原因，以及一个追踪开关
+
+上一节留下的两个推断失败，这一轮把 `events[Pos]` 这条链走通了。**三个原因串在一起**，每一个都实测：
+
+```text
+① substituted_spelling 在"实参个数 ≠ 形参个数"时直接放弃
+   std::vector<MarkEvent> 只写一个实参，而类声明有两个参数（_Ty, _Alloc，第二个有默认值）
+   → 一个字符都不代换，_Ty 原样返回
+② 形参取自"第一个有参数表的声明"，而 MSVC 的 <vector> 有三份声明
+   主模板 ["_Ty","_Alloc"] + 两份偏特化 ["_Alloc"]  → 位置代换把实参装进了 _Alloc 的槽
+③ 有一份 std::vector 事实的 parameters 是 ["class", "class"]（关键字而不是名字）
+   它不但代换不了，还赢得了"用哪份声明的形参"这个选择
+```
+
+修法与实测（`tests/inference_probe.rs` 的 `[inference]` 追踪，新开关 `CPPLS_TRACE_INFERENCE=1`）：
+
+```text
+① 实参按 C++ 的顺序填进形参，没写到的形参保持原拼写（默认实参这里不读，留 _Alloc 比乱猜好）
+② ProjectIndex::template_parameters_for：按 pattern 与实参选声明（先比个数，再用既有的 a_pattern_matches），
+   兜底取"形参最多的那一个"（主模板）
+③ is_a_parameter_name：形参必须是标识符，class/typename/struct/union/enum/concept 一律不算
+
+修前  events[Pos].  → Unknown(NotDeclaredHere("_Ty"))
+修后  events[Pos].  → class "MarkEvent": 3 member(s) ["MarkEvent", "Type", "U"]
+      [inference] operator_returns_of(std::vector, operator[]): parameters ["_Ty", "_Alloc"], arguments ["MarkEvent"]
+      [inference] subscript on "std::vector<MarkEvent>&&": the member wrote "MarkEvent &", the type is "MarkEvent &"
+```
+
+**`file->setUri` 还没修好**，但追踪把它钉死了：
+
+```text
+[inference] operator-> of std::shared_ptr on arguments ["LuaSource"]: the member wrote "_Ty2 *"
+[inference] operator-> substitution: parameters ["_Ty"], "_Ty2 *" -> "_Ty2 *" -> "_Ty2"
+```
+
+`std::shared_ptr` 的形参是 `["_Ty"]`，而取到的 `operator->` 事实写的是 `_Ty2 *` —— 这不是这个类的成员，说明
+`direct_member("std::shared_ptr", "operator->")` 拿到了**另一个同名类**（或同名类的另一份声明）的成员事实。下一步是
+用 `CPPLS_NAME=operator->` 把带有 `scope: Some("std::shared_ptr")` 的事实全部打出来，看清楚 `_Ty2` 是从哪一份声明来的；
+修法是让 `direct_member` 要求候选事实的**声明所属的类**与查询的类是同一个（qualified name 相等），再谈 pattern 匹配。

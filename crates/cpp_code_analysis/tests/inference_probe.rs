@@ -75,12 +75,13 @@ fn what_is_answered_at_a_place() {
             for fact in &summary.declarations {
                 if fact.name == name {
                     println!(
-                        "{name} in {}: kind {:?} scope {:?} returns {:?} type_of {:?}",
+                        "{name} in {}: kind {:?} scope {:?} returns {:?} type_of {:?} parameters {:?}",
                         summary.path.display(),
                         fact.kind,
                         fact.scope,
                         fact.returns,
-                        fact.type_of
+                        fact.type_of,
+                        fact.parameters
                     );
                 }
             }

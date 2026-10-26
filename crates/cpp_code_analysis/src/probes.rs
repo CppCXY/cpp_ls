@@ -72,6 +72,7 @@ switch! {
     no_inference => "CPPLS_NO_INFERENCE", "Answer every type question `Unknown`, so that a rule's own walk can be measured apart from the inference.";
     no_index_lookup => "CPPLS_NO_INDEX_LOOKUP", "Answer every declaration query `NotDeclaredHere`, so that a pull's cost can be split into the engine and the index — the sibling of `CPPLS_NO_INFERENCE`.";
 
+    inference => "CPPLS_TRACE_INFERENCE", "What a member answer was substituted with, and the type it became — the switch two editor reports needed.";
     answers => "CPPLS_TRACE_ANSWERS", "What one name query found: how many declarations, of which kinds, in which files — the question `docs/index-lookup.md` turned on (2288 `_Tp` answers, none of them a class).";
 }
 

@@ -3718,7 +3718,21 @@ fn type_of_expression_inner(
                     "operator[]",
                 ) {
                     Some(returns) => {
-                        Known::Yes((crate::sema::types::parse_type_spelling(&returns), file))
+                        // **The answer is a *type*, not the spelling the member wrote.** `reference` is the class's own
+                        // alias for `T&`, and both halves — the alias and the parameter — are what this reads; see
+                        // [`a_members_answer_as_a_type`] for the measurement.
+                        let written = a_members_answer_as_a_type(
+                            index, scopes, root, path, &type_of, &returns,
+                        );
+                        if crate::probes::inference() {
+                            eprintln!(
+                                "[inference] subscript on {:?}: the member wrote {:?}, the type is {:?}",
+                                type_of.to_string(),
+                                returns,
+                                written
+                            );
+                        }
+                        Known::Yes((crate::sema::types::parse_type_spelling(&written), file))
                     }
                     // A class with no `operator[]`: nothing this layer can say, and saying nothing is the rule.
                     None => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
@@ -4134,12 +4148,25 @@ pub(crate) fn operator_returns_of(
     // has to be read through before it is a type. `member_fact` answers the *fact*, which carries the declaration's
     // own words (`T& operator[]`); the list fallback below substitutes them, so this path has to as well or the same
     // question answers `T&` here and `int&` there.
-    let parameter_names = &first.fact.parameters;
+    // **The parameters of the declaration that has any.** `first` is the class's first declaration in insertion
+    // order, and for a class template that is as often a forward declaration as the definition — measured on MSVC's
+    // `std::shared_ptr`, whose first fact carries no parameter list at all, so `_Ty2 *` came back unsubstituted and a
+    // member lookup was asked about a class called `_Ty2`. `template_parameters_of` already answers this question the
+    // right way for the rest of the analysis (it skips empty lists), so the two cannot disagree.
     let written_arguments: Vec<String> = class_type
         .arguments()
         .iter()
         .map(|argument| argument.to_string())
         .collect();
+    // **The declarations that match this use**, not just "the first one with parameters" — see
+    // [`ProjectIndex::template_parameters_for`].
+    let parameters = index.template_parameters_for(&class, path, &written_arguments);
+    let parameter_names = &parameters;
+    if crate::probes::inference() {
+        eprintln!(
+            "[inference] operator_returns_of({class}, {operator}): parameters {parameters:?}, arguments {written_arguments:?}"
+        );
+    }
     for spelling in [wanted.as_str(), symbol] {
         if let Known::Yes((fact, _)) = member_fact(
             index,
@@ -6105,6 +6132,100 @@ pub(crate) fn callee_of_a_call(
 ///
 /// One level, like the pointer rule: an object whose `operator->` returns another handle is a shape this layer does
 /// not follow twice, and a second level would be a guess about which `operator->` the language picked.
+/// **A member's written answer, read as a type in the class the member belongs to.**
+///
+/// `std::vector<T>::operator[]` is declared `reference operator[](size_type)`, and `reference` is `T&` — an alias
+/// *inside the class*. Two things have to happen before that is a type a member lookup can ask about:
+///
+/// 1. the class's parameters are substituted with the arguments the use wrote (`reference` → `_Ty&` → `MarkEvent&`);
+/// 2. the alias is read **in this class**, not by its bare name in the index.
+///
+/// The second is what a real project needs and a fixture does not show: `files_declaring("reference", …)` answers with
+/// every class's `reference` — `basic_string`'s, `vector`'s, `_Vector_val`'s — and the first visible one is usually not
+/// the one whose member was asked. Measured on EmmyLuaCodeStyle's `Mark.cpp`, where `events[Pos].U` on a
+/// `std::vector<MarkEvent>` answered `Unknown(NotDeclaredHere("_Ty"))`: the alias was followed to a *different* class's
+/// `reference`, whose `_Ty` nothing substitutes.
+fn a_members_answer_as_a_type(
+    index: &ProjectIndex,
+    scopes: &crate::ScopeTree,
+    root: &cpp_parser::CppSyntaxNode,
+    path: &Path,
+    class_type: &Type,
+    returns: &str,
+) -> String {
+    let Some(class) = class_type.class_name() else {
+        return returns.to_string();
+    };
+    let arguments: Vec<String> = class_type
+        .arguments()
+        .iter()
+        .map(|argument| argument.to_string())
+        .collect();
+    let parameters = index.template_parameters_for(class, path, &arguments);
+    let substituted = crate::sema::types::substituted_spelling(returns, &parameters, &arguments);
+
+    // **The operators and qualifiers the spelling around the name carries**: `const reference&` is `const T&`, and
+    // replacing only the name must keep both ends.
+    let (leading, core, trailing) = split_the_operators_of(&substituted);
+    if core.is_empty()
+        || !core
+            .chars()
+            .all(|character| character.is_alphanumeric() || character == '_')
+    {
+        return substituted;
+    }
+
+    // **The class's own declaration of that name**, which is the only one whose parameters are the ones in hand.
+    let Known::Yes((fact, _)) = member_fact(
+        index,
+        scopes,
+        root,
+        path,
+        &class_type.to_string(),
+        &core,
+        None,
+    ) else {
+        return substituted;
+    };
+    let Some(target) = fact.type_of.as_deref() else {
+        return substituted;
+    };
+    let target = crate::sema::types::substituted_spelling(target, &parameters, &arguments);
+    format!("{leading}{target}{trailing}")
+}
+
+/// `const reference&` → (`const `, `reference`, `&`). The middle is what a name lookup is asked about.
+fn split_the_operators_of(spelling: &str) -> (String, String, String) {
+    let mut leading = String::new();
+    let mut rest = spelling.trim();
+    for qualifier in ["const", "volatile", "constexpr", "static"] {
+        if let Some(after) = rest.strip_prefix(qualifier)
+            && after.starts_with(char::is_whitespace)
+        {
+            leading.push_str(qualifier);
+            leading.push(' ');
+            rest = after.trim_start();
+        }
+    }
+    let trimmed = rest.trim_end();
+    let mut trailing = String::new();
+    let mut core = trimmed;
+    for _ in 0..4 {
+        if let Some(before) = core
+            .strip_suffix("&&")
+            .or_else(|| core.strip_suffix('&'))
+            .or_else(|| core.strip_suffix('*'))
+        {
+            let operator = &core[before.len()..];
+            trailing.insert_str(0, operator);
+            core = before.trim_end();
+            continue;
+        }
+        break;
+    }
+    (leading, core.to_string(), trailing)
+}
+
 fn through_an_operator_arrow(
     index: &ProjectIndex,
     scopes: &crate::ScopeTree,
@@ -6131,9 +6252,6 @@ fn the_class_an_arrow_points_at(
     arguments: Option<&[String]>,
 ) -> Option<String> {
     let bare = without_arguments(class).to_string();
-    let (arrow, _) = direct_member(index, scopes, root, path, &bare, "operator->", None)?;
-    let returns = arrow.returns?;
-
     let arguments: Vec<String> = arguments
         .map(<[String]>::to_vec)
         .or_else(|| {
@@ -6144,12 +6262,35 @@ fn the_class_an_arrow_points_at(
             })
         })
         .unwrap_or_default();
+    // **The arguments are handed to the lookup**, so that a partial specialization whose pattern does not match is not
+    // the declaration `operator->` is read from — the same rule `direct_member`'s members already follow.
+    let (arrow, _) = direct_member(
+        index,
+        scopes,
+        root,
+        path,
+        &bare,
+        "operator->",
+        Some(&arguments),
+    )?;
+    let returns = arrow.returns?;
+    if crate::probes::inference() {
+        eprintln!(
+            "[inference] operator-> of {bare} on arguments {arguments:?}: the member wrote {returns:?}"
+        );
+    }
+
     if arguments.is_empty() {
         return None;
     }
-    let parameters = class_template_parameters(index, scopes, root, path, &bare);
+    let parameters = index.template_parameters_for(&bare, path, &arguments);
     let substituted = crate::sema::types::substituted_spelling(&returns, &parameters, &arguments);
     let target = base_type_name(&substituted);
+    if crate::probes::inference() {
+        eprintln!(
+            "[inference] operator-> substitution: parameters {parameters:?}, {returns:?} -> {substituted:?} -> {target:?}"
+        );
+    }
     (!target.is_empty() && target != bare).then(|| target.to_string())
 }
 
@@ -8226,6 +8367,76 @@ impl ProjectIndex {
     /// both are just names. It is the right answer whenever the first such declaration is the primary template,
     /// which is the ordinary case, and it is never a *made-up* answer — a name paired with an argument it does not
     /// belong to is still a name that appears in the class.
+    /// **The parameters of the declaration that this use of the class is an instance of.**
+    ///
+    /// [`ProjectIndex::template_parameters_of`] answers "the first declaration of this class that has a parameter
+    /// list", and for a class template with partial specializations that is not the same question: `std::vector` is
+    /// declared three ways in MSVC's `<vector>` — the primary with `["_Ty", "_Alloc"]`, and two specializations whose
+    /// lists are `["_Alloc"]` — and taking the first one that has *any* parameters substitutes the use's arguments
+    /// into the wrong slots. Measured: `std::vector<MarkEvent>::operator[]` answered `_Ty&`, because `_Ty` is the
+    /// primary's first parameter and the list in hand was a specialization's.
+    ///
+    /// The choice is the one [`direct_member`] already makes for members: [`a_pattern_matches`] compares the
+    /// declaration's own pattern against the arguments the use wrote, and a pattern argument that is one of the class's
+    /// own parameters is a slot. The first declaration that matches wins, and one that has no parameters at all is
+    /// only the fallback.
+    pub fn template_parameters_for(
+        &self,
+        class: &str,
+        visible_from: &Path,
+        arguments: &[String],
+    ) -> Vec<String> {
+        let bare = class.strip_prefix("::").unwrap_or(class);
+        let last = bare.rsplit("::").next().unwrap_or(bare);
+
+        let mut candidates = self.files_declaring(class, visible_from);
+        if candidates.is_empty() {
+            candidates = self.files_declaring(last, visible_from);
+        }
+        // **A declaration whose pattern has a different number of arguments is not an instance of this use**, which is
+        // the one place this cannot lean on `a_pattern_matches`: that function answers `true` for a length mismatch on
+        // purpose (a use that wrote fewer arguments — defaulted template parameters — keeps its candidates), and here a
+        // mismatch is exactly what tells `vector<bool, _Alloc>` from `vector<_Ty, _Alloc>`.
+        let of_the_same_arity = |found: &&VisibleDeclaration<'_>| {
+            let pattern = found.fact.pattern.as_deref().unwrap_or_default();
+            let slots = arguments_in_a_spelling(pattern).unwrap_or_default();
+            slots.len() == arguments.len()
+                && !found.fact.parameters.is_empty()
+                && found
+                    .fact
+                    .parameters
+                    .iter()
+                    .all(|name| is_a_parameter_name(name))
+        };
+        candidates
+            .iter()
+            .filter(of_the_same_arity)
+            .find(|found| {
+                a_pattern_matches(
+                    found.fact.pattern.as_deref(),
+                    &found.fact.parameters,
+                    Some(arguments),
+                )
+            })
+            // The declaration with the **longest** parameter list is the primary template: a specialization names
+            // some of its arguments concretely and therefore has fewer parameters to describe them with.
+            .or_else(|| {
+                candidates
+                    .iter()
+                    .filter(|found| {
+                        !found.fact.parameters.is_empty()
+                            && found
+                                .fact
+                                .parameters
+                                .iter()
+                                .all(|name| is_a_parameter_name(name))
+                    })
+                    .max_by_key(|found| found.fact.parameters.len())
+            })
+            .map(|found| found.fact.parameters.clone())
+            .unwrap_or_default()
+    }
+
     pub fn template_parameters_of(&self, class: &str, visible_from: &Path) -> Vec<String> {
         let bare = class.strip_prefix("::").unwrap_or(class);
         let last = bare.rsplit("::").next().unwrap_or(bare);
@@ -15636,4 +15847,23 @@ fn without_the_namespace(class: &str) -> String {
         index += 1;
     }
     class[boundary.min(class.len())..].to_string()
+}
+
+/// **Is this a template parameter's *name*?** — an identifier, not the keyword that introduced it.
+///
+/// A fact's `parameters` is a list of names (`["_Ty", "_Alloc"]`), and one measured declaration of `std::vector` in
+/// MSVC's `<vector>` carries `["class", "class"]` instead — the keywords rather than the identifiers after them. A
+/// list like that substitutes nothing and, worse, *wins* the choice of which declaration's parameters to use, which is
+/// how `std::vector<MarkEvent>::operator[]` answered `_Ty&` after two rounds of fixing the substitution itself. The
+/// fact is wrong and that is a defect to fix where it is built; until then this is the guard that keeps a wrong fact
+/// from deciding an answer.
+fn is_a_parameter_name(name: &str) -> bool {
+    !name.is_empty()
+        && !matches!(
+            name,
+            "class" | "typename" | "struct" | "union" | "enum" | "concept"
+        )
+        && name
+            .chars()
+            .all(|character| character.is_alphanumeric() || character == '_')
 }

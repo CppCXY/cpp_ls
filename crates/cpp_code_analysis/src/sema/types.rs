@@ -2265,7 +2265,18 @@ mod tests {
 /// mentioned. An identifier that is not one of `names` is left alone, which is the ordinary case: the target's own
 /// `enable_if` and its `typename` are not parameters.
 pub fn substituted_spelling(written: &str, names: &[String], arguments: &[String]) -> String {
-    if names.is_empty() || names.len() != arguments.len() {
+    // **A use may write fewer arguments than the class declares parameters, and that is not a refusal.**
+    //
+    // `std::vector<MarkEvent>` writes one argument for a class declared with two parameters (`_Ty`, `_Alloc`), because
+    // the second has a default. Requiring equal lengths made this return the spelling unchanged, and the chain it
+    // broke was measured end to end on a real project: `events[Pos].U` answered `Unknown(NotDeclaredHere("_Ty"))`
+    // because `std::vector<MarkEvent>::operator[]`'s `_Ty&` was never substituted.
+    //
+    // The pairing is the language's own — the arguments fill the parameters *in order* — so a parameter with a written
+    // argument is substituted and the rest are left as the declaration spelled them. Leaving `_Alloc` alone is the
+    // honest answer (its default is not read here), and it is a smaller answer than no substitution at all: `_Ty` is
+    // the parameter a reader's type actually names.
+    if names.is_empty() || arguments.is_empty() {
         return written.to_string();
     }
 
