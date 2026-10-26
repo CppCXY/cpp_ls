@@ -147,11 +147,28 @@ fn answers(
     )
 }
 
-/// **The one-walk reading answers exactly what the per-file walk answered.**
+/// **The one-walk reading answers everything the per-file walk answered — and one thing it cannot.**
 ///
 /// The fixture is the shape the corpus is made of: a header that defines macros **conditionally**, a header that
 /// includes it and defines more, a source file that includes both, and a header that names something neither of
 /// them defines.
+///
+/// # The two readings, and the one place they must differ
+///
+/// ```text
+/// per_file   a MacroEnvironment materialised out of the closure: every `#define` the includes write, stamped with
+///            the offset of the `#include` that brings it in (`IncludedMacro::from_offset`)
+/// timeline   the walk, which evaluated every condition on its way through — the same facts, plus the branch taken
+/// ```
+///
+/// A `#define` **inside a condition** is the difference, and it is structural rather than a shortcut: deciding
+/// `#ifdef __cplusplus` needs the state of the unit at that point, so a caller with only a closure cannot stamp the
+/// definition at an offset. It goes into the environment's read-only "body in force" channel instead
+/// ([`MacroFacts::body_text_in_force`]), which a rule may *read* and must not take as "this name is a macro here".
+///
+/// So the assertion is the strongest one that is true: wherever the fallback answers, the two agree exactly; the
+/// in-force channel agrees at every offset; and a difference is only allowed for a name whose body the fallback
+/// carries in force — that is, one whose definition the fallback could not place.
 #[test]
 fn the_timeline_answers_what_the_per_file_walk_answered() {
     let files = [
@@ -204,15 +221,61 @@ fn the_timeline_answers_what_the_per_file_walk_answered() {
         "f",
         "value",
     ];
+    let mut the_timeline_knew_more = 0usize;
     for name in names {
         for offset in (0..source.len()).step_by(7) {
-            assert_eq!(
-                answers(&view, name, offset),
-                answers(&per_file, name, offset),
-                "`{name}` at offset {offset} of api.h: the timeline and the per-file walk disagree"
-            );
+            let materialised = answers(&per_file, name, offset);
+            let walked = answers(&view, name, offset);
+
+            let positioned = |answer: &(Option<String>, Option<String>, Option<String>, Option<String>)| {
+                (
+                    answer.0.clone(),
+                    answer.1.clone(),
+                    answer.2.clone(),
+                )
+            };
+
+            // **The positional answer, wherever the fallback has one.** This is the comparison the test exists
+            // for: the name at that offset, its body, its parameter list.
+            if materialised.0.is_some() || materialised.1.is_some() || materialised.2.is_some() {
+                assert_eq!(
+                    positioned(&walked),
+                    positioned(&materialised),
+                    "`{name}` at offset {offset} of api.h: the fallback answers this position and the timeline \
+                     does not answer it the same way"
+                );
+            } else if walked.0.is_some() || walked.1.is_some() || walked.2.is_some() {
+                // **…and where it has none, the timeline may — but only for a body the fallback carries in force.**
+                // A `#define` inside a condition cannot be stamped at an offset without the unit's state, so the
+                // fallback files it under "in force" and reads it without claiming it is a macro here; the walk
+                // decided the branch, so it can say. See [`MacroFacts::body_text_in_force`].
+                assert!(
+                    per_file.body_text_in_force(name).is_some(),
+                    "`{name}` at offset {offset} of api.h: the timeline answered {:?}, the fallback {:?} — and the \
+                     fallback does not even carry the name's body in force, so this is not a conditional it could \
+                     not place",
+                    positioned(&walked),
+                    positioned(&materialised),
+                );
+                the_timeline_knew_more += 1;
+            }
+
+            // **The in-force channel.** The timeline may carry more names than the fallback here (every definition
+            // it met inside a conditional region is also a body in force), and nothing may disagree.
+            if let Some(body) = materialised.3.as_deref() {
+                assert_eq!(
+                    walked.3.as_deref(),
+                    Some(body),
+                    "`{name}` at offset {offset} of api.h: the fallback has a body in force and the timeline has \
+                     another"
+                );
+            }
         }
     }
+    assert!(
+        the_timeline_knew_more > 0,
+        "the allowance has to be used by this fixture, or the test is not asserting anything about it"
+    );
 
     // …and the precondition of the whole comparison, asserted rather than assumed: both readings really do know
     // the names that come **from the include**, so "they agree" is not "they are both empty".

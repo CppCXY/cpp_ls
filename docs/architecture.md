@@ -500,6 +500,7 @@ LSP         lsp_status 表 29 行全绿，hover 1–12 ms，diagnostic 28–29 m
 按键        edit_loop 每按键 min 16–18 / median 17–60 / max 61–118 ms（文件而异）
 测试        cpp_parser 30、cpp_code_analysis 35、cpp_ls 13、cpp_formatter 12 个套件；唯一已知红：
             translation_unit::the_timeline_answers_what_the_per_file_walk_answered
+            （**⑮ 之后全绿**：那条红是断言本身写错了，见 §7.2）
 ```
 
 **第一步的完成标准**：facts 全部来自渲染；删除四类补丁后全部套件仍绿（除已知红）；上表每一项不劣化。
@@ -531,17 +532,22 @@ LSP              lsp_status 表 29 行全绿，hover 1–8 ms，diagnostic 31 ms
                   指令按键        93/98/109 → 109/113/123 ms，0/10 → 10/10 是程序
                   代价来自：一次 55 KB 文件的指令扫描（16 ms，已被记住后只算一次）+ 渲染解析比 raw 解析贵
 测试              cpp_code_analysis lib 680 绿（新增 2 条 session 测试）；cpp_parser 全绿（含之前一直红的
-                  删除 fuzz）；cpp_ls 34 绿（含之前一直红的 folding）；cpp_formatter 全绿
-                  仍然唯一的已知红：translation_unit::the_timeline_answers_what_the_per_file_walk_answered
-已知红的 next   那个测试要的是"两条路给出同一个答案"，而它比的是 per-file walk 与 timeline；先在 ⑮ 之后重跑，
-                  仍然红，所以它和本次改动无关（也先于本次改动）
+                  删除 fuzz）；cpp_ls 全绿（含之前一直红的 folding；`latency` 必须 `--release` 跑，debug 下它
+                  自己文档就写了会因算术而红）；cpp_formatter 全绿
+                  另外：`translation_unit::the_timeline_answers_what_the_per_file_walk_answered` 这条从 ⑭ 之前
+                  就一直红的测试**也绿了**，但绿的方式是把它改成它本来该断言的东西 —— 见下
+一直红的那条 它要的是"per-file walk 与 timeline 给出**完全相同**的答案"。实测的差异只有一处，而且是结构性的：
+                SA（config.h 里 #ifdef __cplusplus 之内）
+                  timeline   offset 21 之后：kind/body/parameters 都有   ← 它求值过那个条件
+                  fallback   只有 body_text_in_force，位置通道答 None    ← 没有 unit 就无法给条件里的 #define 定位置
+                REPEATABLE / _CONFIG_H_（文件自己的 include guard 之内）
+                  位置通道两者**完全一致**；只有"in force"通道 timeline 多一份（表示差异，不影响判定）
+              所以测试现在断言的是那条真正成立的关系：**fallback 能答的位置，timeline 必须答得一样；timeline 多答
+              的地方，那个名字必须是 fallback 只能放进 in-force 通道的**（并且 fixture 必须真的用上这条许可）。
+              这正是 §5 第二步要解决的差别，而不是一个可以长期留红的噪声。
 ```
 
 **四层补丁为什么还在**：它们覆盖的是"**别人**的文件第一次被读成 raw 到第二遍精修之间"的窗口 —— ⑮ 关掉的是
 "**读者正在看的那个文件**"的窗口。wave 里的其他文件仍然先读 raw，所以 `split_by_a_directive` 之类的兜底仍然有用户。
 删它们的前置条件是 §5 第二步：一个 TU 的闭包只走一条 timeline，闭包里每个文件的事实都从**这一条**渲染里分出来
 （`FileIndexer::index_unit_rendering` 已经在，只是没接线 —— 见 `finish_a_slice` 里"NOT WIRED, ON PURPOSE"那段）。
-
-
-**为什么四层补丁还在**：它们覆盖的是"第一次读法（raw）到 pump 精炼"之间的窗口。第一次读法也渲染之后那个窗口才关，
-而那需要 §5 第二步的 key（`env_hash` 由调用方可算），也就是 `directive_summary` + unit walk 先于 parse 的顺序。
