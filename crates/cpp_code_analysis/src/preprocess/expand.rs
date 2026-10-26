@@ -793,13 +793,21 @@ impl<M: MacroValues + ?Sized> Expander<'_, M> {
             .map(|range| range.start - offset..range.end - offset)
             .collect();
         let arguments = arguments.as_slice();
-        let region = match (tokens.first(), tokens.last()) {
-            (Some(first), Some(last)) => Some(SourceRange::new(
-                first.token.range.start_offset,
-                last.token.range.end_offset() - first.token.range.start_offset,
-            )),
-            _ => None,
-        };
+        // **The call's own span in the file it was written in** — the region the two readers below compare
+        // against, and the reason it is the *invocation's* call site rather than the run's own extent.
+        //
+        // A run can mix two texts: the replacement list the call's name came from (a token of this run, or of the
+        // `#define` an object-like macro expanded out of) and the use it was invoked at. `tokens.first()..last()`
+        // is therefore a range spanned across two coordinate systems, and the arithmetic is not merely wrong but
+        // can underflow: `#define A F` / `A(1) + 2` made the body's `F` (offset 27 of the define text) the first
+        // token and the use's `2` (offset 7 of the *use* text) the last, so `last.end - first.start` wrapped.
+        // Under `debug_assertions` that is a panic; in a release build it is a nonsense `SourceRange` that
+        // `origin_of` then compares tokens against.
+        //
+        // The call site is built from the `(` and the arguments, which are tokens of one text by construction
+        // (see the `source`/`open` pair above) — so "an argument's token is the reader's own, a body token is the
+        // macro's" is decided between two offsets that belong together.
+        let region = Some(invocation.call_site);
         // **Arguments are macro-expanded before they are substituted** (C11 6.10.3.1), except where they are the
         // operand of `#` or `##`. The difference is observable: `#define S(x) S_(x)` / `#define S_(x) #x` makes
         // `S(LEVEL)` the string of what `LEVEL` expands to — `"0"` — and a rescan-only expander stringizes the
