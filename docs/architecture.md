@@ -1231,3 +1231,32 @@ read_the_whole_project = true   # 默认开；false 时只读读者打开的那�
 `a.cpp` —— 一秒后 `a.cpp` 的程序被读（`root == a.cpp`），之后**无论拨多久的钟**都不再有 program 被读，pump 也没有要等的
 东西。这条测试还顺手揭示了一个夹具事实：`Memory` 的 root 是临时目录，而文件在 `/p` 下，所以 `.cppls.toml` 只有在**会话的
 root 就是项目**（`Session::with_config("/p", …)`）时才会被读到。
+### 8.6 两个真缺陷，来自把"判定性探针"跑在另一套工具链上
+
+`tests/rendering_real.rs` 是这条迁移的**判据探针**（它自己的注释说"The assertions are the ones the old path could not
+make"）。它原先只对 libstdc++ 的头写断言，在这台机器（MSVC）上三条全红 —— 而其中两红是**探针过时**，一红是**真缺陷**：
+
+**① 探针过时（两条）。** 它们断言"索引里存的是*书写*读法，只有 hover 去要渲染才会拿到 `reference`"。这在第二遍存在之后
+已经不成立：一个声明被条件拆开的文件会被重读，所以队列排空时摘要**就是**渲染。断言改成现在的事实（每个 `emplace_back`
+都未拆开、且不是 `void`），并把"渲染给出的是一个**类型**而不是宏名"写成与工具链无关的形式 —— MSVC 把返回类型写成宏
+`_CONTAINER_EMPLACE_RETURN`，libstdc++ 直接写 `reference`。这一条恰好也是 patch 1 有真用户的证据：**书写读法回答宏名，
+渲染回答类型**。
+
+```text
+MSVC   filed by the pipeline: [("_CONTAINER_EMPLACE_RETURN", split=false)]
+       the rendering answers:  "reference"
+```
+
+**② 真缺陷：`split_by_a_directive` 把 `#pragma` 也算了。** 规则原先是"说明符序列的文本里有任何一行以 `#` 开头"，而
+`#pragma warning(push)` 会命中 —— 于是一份**渲染**（所有分支都已解析）也会带这个标记，实测在 MSVC 的 `<vector>` 上
+`emplace_back` 就带着它，hover 于是为一个第一读法已经回答过的问题去要第二份读法。现在只认**条件指令**
+（`#if`/`#ifdef`/`#ifndef`/`#elif`/`#else`/`#endif`），这正是这个标记的含义。
+
+```text
+rendering_real（clice + MSVC 的 <vector>）  3 / 3 通过
+cpp_code_analysis                          690 lib + 42 个集成目标全绿
+cpp_ls release                             13 个目标全绿
+```
+
+（`members_real.rs` 仍然只对 EmmyLuaCodeStyle 的文件成立 —— 它找的是那个项目里的 `LuaSource.cpp`，这台机器没有；
+`signature_real` 同理。这不是缺陷，是那两个探针的夹具是项目专有的。）

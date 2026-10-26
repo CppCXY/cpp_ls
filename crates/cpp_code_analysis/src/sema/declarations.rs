@@ -4822,5 +4822,23 @@ pub fn split_by_a_directive_with(shapes: &DeclarationShapes, binding: &Binding) 
     shapes
         .specifiers_at(the_offset_to_descend_by(binding))
         .map(|node| node.text().to_string())
-        .is_some_and(|text| text.lines().any(|line| line.trim_start().starts_with('#')))
+        // **A *conditional* directive, and only a conditional one.** The flag means "the written reading states two
+        // types and cannot know which is live", which is `#if`/`#ifdef`/`#ifndef`/`#elif`/`#else`/`#endif` and nothing
+        // else. The first version asked whether *any* line of the specifier sequence starts with `#`, and a
+        // `#pragma warning(push)` between the type and the name answered yes: measured on MSVC's `<vector>`, whose
+        // rendering — which has every branch resolved — still carried the flag on `emplace_back`, so a hover asked a
+        // second reading for a question the first had already answered.
+        .is_some_and(|text| {
+            text.lines().any(|line| {
+                let Some(directive) = line.trim_start().strip_prefix('#') else {
+                    return false;
+                };
+                let word: &str = directive
+                    .trim_start()
+                    .split(|character: char| !character.is_ascii_alphanumeric())
+                    .next()
+                    .unwrap_or_default();
+                matches!(word, "if" | "ifdef" | "ifndef" | "elif" | "else" | "endif")
+            })
+        })
 }
