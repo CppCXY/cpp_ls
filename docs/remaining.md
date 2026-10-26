@@ -93,7 +93,84 @@ $env:CPPLS_REAL_PROJECT = "E:\does-not-exist"     → skipped × 3，全绿
 
 以后加真实项目探针，都照这个形状。
 
+## 本轮第二批（2026-10-27，同一个提交 `25e5733`）
+
+四条来自同一个编辑器会话的四张截图，每条都在项目上量过。
+
+### ✅ B2. `switch (0) case 0: default: …` 不解析 —— gtest 整个文件报错
+
+**现象**：`Test/src/FilePattern_unitest.cpp` 里每条 `TEST(...)` / `EXPECT_TRUE(...)` 都报满屏红：`62 个 SyntaxError`
+（`expected {, but get case`）。看起来像"预处理器没做好"。
+
+**实测**：**渲染是正确的** —— `CPPLS_RENDERING=1` 打出来的是 gtest 真正的展开（一个类定义 + `TestBody()` +
+`switch (0) case 0: default: if (...) ; else AssertHelper(...) = Message();`）。所以错的不是预处理器。
+
+**根因**：`parse_switch_statement` 在条件后面**要求 `{`**。语言允许任何语句作为 body，而 gtest 的 `GTEST_SWITCH_`
+正是"`case`/`default` 标签 + 一条语句、没有花括号"。
+
+**修在哪**：`crates/cpp_parser/src/grammar/cpp/stats.rs` —— 抽出 `read_switch_labels`（块形式与非块形式共用），
+非块形式读"标签串 + 一条语句"。
+
+**验收**：该文件诊断 **62 → 0**；`tests/gaps.rs` 增加 `switch (0) case 0: default: …`、`switch (a) f();`、
+`switch (a) case 1 ... 5: break;` 三条到"读得懂"清单。
+
+### ✅ A3. `auto` 变量的悬停显示成 `void`
+
+**现象**：`auto lineStartOffset = _lineOffsetVec[line];`，hover 打印 `void lineStartOffset;`。
+
+**实测**（`CPPLS_TRACE_INFERENCE=1`）：
+
+```text
+[inference] operator_returns_of(std::vector, operator[]): parameters ["_Tp","_Alloc"], arguments ["std::size_t"]
+[inference] subscript on "std::vector<std::size_t>": the member wrote "reference", the type is "void"
+```
+
+**根因（两层，都修了）**：
+
+1. `typedef typename _Base::reference reference;` 的**类型**被当成"声明符自己的名字"丢掉了（那条规则是给类外定义
+   用的：`std::map<…> LuaLexer::LuaReserved`）。别名永远不需要那条规则 —— 于是 `reference` 的类型成了 `void`。
+   修在 `sema/declarations.rs::declared_type_of_with`：`BindingKind::Typedef` 不再传 declared name。
+2. `read_named` 在**第一个 `<`** 处切断拼写，`Base<T>::reference` 于是成了 `Base<T>` —— 名字里少了 `::reference`，
+   `Foo<int>::Bar<int>` 还丢后半截。改成"只有**结尾**的实参表才是 template-id"
+   （`trailing_template_id`，带括号深度栈）。
+
+**验收**：真项目上 `lineStartOffset` 从 `void` 变成 `_Alloc_traits::reference`（不再是假答案，见下面"还没修"）；
+`reported_defects.rs::an_alias_of_a_qualified_type_is_not_a_void` 钉住类型是 `typename Base<T>::reference`。
+
+### ✅ C4. 进度条卡在 `re-reading 9 file(s)` —— 工具补上了，结论是"没能复现"
+
+**实测**：用一个**真正读取管道的客户端**跑真服务器 90 秒，pump 在 **9 秒**内抽干并打印
+`the workspace is indexed`；之后不再有 slice 日志（说明它睡了）。**卡住的是我这台测试里的客户端**：它只在等自己
+的响应时读 stdout，于是服务器写 `$/progress`（7 秒里 418 条）填满 64 KB 管道，**阻塞在写**，CPU 为 0、进度条不动 ——
+和截图一模一样，但不是产品的 bug。`real_project.rs` 的 `Server` 现在从第一字节起就在独立线程里排空管道。
+
+为了让"真的再出现时"能定位，补了两件工具：
+
+* `--log-level trace`（此前**没有**，而代码里已有 `log::trace!`）；
+* **pump 心跳**：每轮 5 条 trace（round / wave prepared / drain starts / commit starts），因为"找不到事做的 slice"
+  在 `debug` 下什么都不打，卡在哪个 `await` 从外面看不出来。
+
+**还没排除的**：截图里的 9 和文档里那条老 livelock（"每秒要同样 9 个 cook，提交 0"）是同一个数字，那条已经被
+`abandon_the_cooking_queue` 兜住；如果它再出现，`trace` 日志会直接指出是 pump 卡在 workspace 锁、analysis 锁还是 drain。
+
+---
+
 ## 还没修
+
+### A4. 依赖形式的限定别名没有跟随（`LuaReserved.find(text)->second`、`_Alloc_traits::reference`）
+
+**现象**：`LuaReserved.find(text)->second` 报 "`std::map<…>` has no member second"；`lineStartOffset` 的类型停在
+`_Alloc_traits::reference`；`LuaReserved` 找不到引用。
+
+**根因方向**（与本轮 A3 同一条链的后半段）：`_Alloc_traits::reference` 是一个**依赖形式的限定名**，要得到
+`std::size_t&` 必须：在该类的作用域里解析 `_Alloc_traits`（它是 `allocator_traits<_Alloc>` 的别名）→ 找到它的
+`reference` → 代入实参。`map::find` 返回 `iterator`，`->` 又经过 `_Rb_tree_iterator::operator->` 的 `pointer`，
+是同一类跟随。`LuaReserved` 的"找不到引用"同源：符号解析停在一个拼写而不是一个声明上。
+
+**怎么验收**：`inference_probe` 在 `LuaSource.cpp` 上 `type_at` 给出 `std::size_t&`；`map<…>::find` 的 `->second`
+答到 `pair<const K, V>::second`；`symbol_references` 对 `LuaReserved` 列出 `LuaLexer.cpp` 的声明与使用。
+
+### 其余
 
 ### C2. 已知红（`#[ignore]`，语义缺口，不是回归）
 
