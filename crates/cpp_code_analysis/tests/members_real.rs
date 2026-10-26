@@ -22,17 +22,30 @@ use std::path::PathBuf;
 use cpp_code_analysis::file::coordinates::ReadingOffset;
 use cpp_code_analysis::{DiskFiles, Known, OpenDocuments, Session, SessionFiles, WatchFilter};
 
-fn project() -> PathBuf {
-    PathBuf::from(
-        std::env::var("CPPLS_REAL_PROJECT").unwrap_or_else(|_| r"E:\EmmyLuaCodeStyle".to_string()),
-    )
+/// The project to open — **from the environment, and only when it is there**.
+///
+/// A probe that hardcodes one machine's checkout is a probe that fails on the next machine, and the question it asks is
+/// answerable on any project. `None` is "this machine has no project", which the tests turn into a skip rather than a
+/// failure; see `docs/remaining.md` §C1.
+fn project() -> Option<PathBuf> {
+    let named = std::env::var_os("CPPLS_REAL_PROJECT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"E:\EmmyLuaCodeStyle"));
+    named.is_dir().then_some(named)
 }
 
 #[test]
 #[ignore = "opens a real project; run with --ignored"]
 fn a_classs_member_list_and_its_postings_agree() {
-    let project = project();
+    let Some(project) = project() else {
+        eprintln!("skipped: no project (set CPPLS_REAL_PROJECT)");
+        return;
+    };
     let source = project.join("CodeFormatCLib/src/CodeFormat.cpp");
+    if !source.is_file() {
+        eprintln!("skipped: {:?} is not in the project", source);
+        return;
+    }
 
     let mut session = Session::open(
         project.clone(),
@@ -193,9 +206,16 @@ fn a_classs_member_list_and_its_postings_agree() {
 #[test]
 #[ignore = "opens a real project; run with --ignored"]
 fn a_class_two_files_use_is_built_once() {
-    let project = project();
+    let Some(project) = project() else {
+        eprintln!("skipped: no project (set CPPLS_REAL_PROJECT)");
+        return;
+    };
     let first = project.join("CodeFormatCLib/src/CodeFormat.cpp");
     let second = project.join("LuaParser/src/Ast/LuaSyntaxTree.cpp");
+    if !first.is_file() || !second.is_file() {
+        eprintln!("skipped: the project does not hold {first:?} and {second:?}");
+        return;
+    }
 
     let mut session = Session::open(
         project.clone(),

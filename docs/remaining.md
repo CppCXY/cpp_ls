@@ -80,16 +80,20 @@ libstdc++ 的**无名形参**：`template <typename, typename> class vector;` �
 
 ---
 
+### ✅ C1（本轮也修了）. `members_real.rs` / `signature_real.rs` 只对一台机器上的那个项目成立
+
+它们把 `E:\EmmyLuaCodeStyle` 写在默认值里，在别的机器上是红的。现在改成 `tests/inference_probe.rs` 与
+`real_project.rs` 的同一种写法：项目从 `CPPLS_REAL_PROJECT` 读，**目录/文件不在就打印 `skipped: …` 并返回**，
+不是失败。验证过两种机器状态：
+
+```text
+$env:CPPLS_REAL_PROJECT = "E:\EmmyLuaCodeStyle"   → 2 passed / 1 passed（真项目上仍然在跑）
+$env:CPPLS_REAL_PROJECT = "E:\does-not-exist"     → skipped × 3，全绿
+```
+
+以后加真实项目探针，都照这个形状。
+
 ## 还没修
-
-### C1. `members_real.rs` / `signature_real.rs` 只对一台机器上的那个项目成立
-
-它们把 `E:\EmmyLuaCodeStyle` 和 libstdc++ 的 `<vector>` 路径写在默认值里，在别的机器上是红的。
-**后来的写法**：`crates/cpp_ls/tests/real_project.rs` 与 `crates/cpp_code_analysis/tests/inference_probe.rs` ——
-只吃环境变量（`CPPLS_REAL_PROJECT`、`CPPLS_FILE`、`CPPLS_NEEDLE`、`CPPLS_NAME`、`CPPLS_DIAGNOSTICS`、
-`CPPLS_TRACE_INFERENCE`），并且**文件不在就跳过而不是失败**。
-
-**改法**：把这两个探针改成同一种写法。
 
 ### C2. 已知红（`#[ignore]`，语义缺口，不是回归）
 

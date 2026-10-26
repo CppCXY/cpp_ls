@@ -21,16 +21,24 @@ use std::path::PathBuf;
 use cpp_code_analysis::file::coordinates::ReadingOffset;
 use cpp_code_analysis::{DiskFiles, OpenDocuments, Session, SessionFiles, WatchFilter};
 
-fn project() -> PathBuf {
-    PathBuf::from(
-        std::env::var("CPPLS_REAL_PROJECT").unwrap_or_else(|_| r"E:\EmmyLuaCodeStyle".to_string()),
-    )
+/// The project to open — **from the environment, and only when it is there**.
+///
+/// A probe that hardcodes one machine's checkout fails on the next machine; `None` means "no project here", which the
+/// test turns into a skip. See `docs/remaining.md` §C1.
+fn project() -> Option<PathBuf> {
+    let named = std::env::var_os("CPPLS_REAL_PROJECT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"E:\EmmyLuaCodeStyle"));
+    named.is_dir().then_some(named)
 }
 
 #[test]
 #[ignore = "opens a real project; run with --ignored"]
 fn a_call_site_answers_a_signature() {
-    let project = project();
+    let Some(project) = project() else {
+        eprintln!("skipped: no project (set CPPLS_REAL_PROJECT)");
+        return;
+    };
     // **Two files, because the two shapes are in different ones**: `CodeFormat.cpp` has the qualified member
     // definition's call, and `LuaLexer.cpp` has the constructor call whose class's header the session never cooks.
     let needles = vec![
@@ -42,6 +50,10 @@ fn a_call_site_answers_a_signature() {
     ];
     {
         let source = project.join("CodeFormatCLib/src/CodeFormat.cpp");
+        if !source.is_file() {
+            eprintln!("skipped: the project does not hold {source:?}");
+            return;
+        }
         let text = std::fs::read_to_string(&source).expect("the file reads");
 
         let mut session = Session::open(
