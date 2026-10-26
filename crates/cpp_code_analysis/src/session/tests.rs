@@ -2273,6 +2273,133 @@ fn a_keystroke_in_a_body_reads_the_file_through_its_timeline() {
     );
 }
 
+/// **A file opened after the project was indexed is read through a timeline that has to be *walked*, not one in hand.**
+///
+/// The other half of the window [`a_keystroke_in_a_body_reads_the_file_through_its_timeline`] closes. That one
+/// pins the cheap case — a body edit keeps the file's timeline — and the timeline table is bounded
+/// ([`super::MAX_UNIT_BYTES`], [`super::MAX_UNITS`]), so after a project is indexed the file a reader opens has no
+/// entry. The step then used to parse the file's own bytes and leave the repair to the idle pass.
+///
+/// What this pins is the order `docs/architecture.md` §5 names — **the directives, then the unit, then the parse**:
+///
+/// ```text
+/// directives   the file's includes, read without a parse (`SummaryStore::directive_summary`)
+/// the unit     walked from them, and *refused* when a file the program needs has not been read
+/// the parse    of the rendering, which is then the reading every consumer gets
+/// ```
+#[test]
+fn a_file_opened_after_the_index_was_built_is_read_through_a_walked_timeline() {
+    let project = Project::new("opened-renders");
+    project.write(
+        "open.h",
+        "#pragma once\n#define _STD_BEGIN namespace std {\n#define _STD_END }\n",
+    );
+    let widget = project.write(
+        "widget.h",
+        "#include \"open.h\"\n_STD_BEGIN\nstruct Widget { int size; };\n_STD_END\n",
+    );
+
+    let mut session = Session::with_config(
+        &project.root,
+        SessionFiles::new(OpenDocuments::new(), DiskFiles),
+        WatchFilter::new(&project.root),
+        CompilerConfig::default(),
+    );
+    session.add_project_files([widget.clone()]);
+    session.index_everything();
+
+    // **The edit that takes the timeline away.** A body edit keeps it ([`Session::directives_moved`] compares the
+    // file's directives, and a body is not one); a directive edit moves the layout, which is a change to every offset
+    // the timeline recorded — so the entry is dropped, the summary with it, and the file is queued at
+    // `Priority::Open`. That is the state the units table's byte budget leaves a reader in after a project is
+    // indexed, and it used to mean "read the file's own bytes".
+    let edited = format!(
+        "{}#define PAD 1\n",
+        std::fs::read_to_string(&widget).expect("the fixture reads")
+    );
+    session.did_change(&widget, &edited);
+    assert!(
+        session.index().summary(&widget).is_none(),
+        "the edit drops the reading: the buffer is the text now"
+    );
+
+    // **The walk is the thing being measured**, so it is counted rather than assumed: a timeline in hand would
+    // answer this step with no walk at all, and then the test would be about the other one.
+    let walked_before = session.unit_stats().walked;
+    let steps = session.advance(4);
+    let step = steps
+        .iter()
+        .find(|step| step.path == widget)
+        .unwrap_or_else(|| panic!("the opened file is read: {:?}", paths(&steps)));
+    assert!(
+        session.unit_stats().walked > walked_before,
+        "the timeline was walked for this file: {:?}",
+        session.unit_stats()
+    );
+    assert!(
+        step.with_the_environment,
+        "and the reading taken through it is the program's, so the second pass has nothing to repair: {step:?}"
+    );
+
+    let summary = session.index().summary(&widget).expect("indexed again");
+    let widget_fact = summary
+        .declarations
+        .iter()
+        .find(|fact| fact.name == "Widget")
+        .expect("the class is declared");
+    assert_eq!(
+        widget_fact.scope.as_deref(),
+        Some("std"),
+        "the scope comes from another file's macro body, so the timeline is what answered"
+    );
+}
+
+/// **A file whose program nobody has read yet is read as text, and that is the honest answer rather than a worse one.**
+///
+/// The guard on the walk above, and the reason it is a condition rather than a retry: a timeline that stops at a file
+/// it cannot look up is a timeline of a *smaller* program — the macro is left unexpanded in the rendering — and a
+/// rendering is written down and believed. `docs/architecture.md` §5 measures the two and concludes that **a partial
+/// environment renders worse than the raw reading**, so a file whose closure is not in the index yet is read as text
+/// and the idle pass refines it once the closure is there.
+#[test]
+fn a_file_whose_program_has_not_been_read_yet_is_still_read_as_text() {
+    let project = Project::new("opened-before-the-program");
+    project.write(
+        "open.h",
+        "#pragma once\n#define _STD_BEGIN namespace std {\n#define _STD_END }\n",
+    );
+    let widget = project.write(
+        "widget.h",
+        "#include \"open.h\"\n_STD_BEGIN\nstruct Widget { int size; };\n_STD_END\n",
+    );
+    let text = std::fs::read_to_string(&widget).expect("the fixture reads");
+
+    // **Nothing is read yet**: the session is told about the project and about the buffer, and no pass has run.
+    let mut session = Session::with_config(
+        &project.root,
+        SessionFiles::new(OpenDocuments::new(), DiskFiles),
+        WatchFilter::new(&project.root),
+        CompilerConfig::default(),
+    );
+    session.add_project_files([widget.clone()]);
+    session.did_open(&widget, &text);
+
+    let steps = session.advance(4);
+    let step = steps
+        .iter()
+        .find(|step| step.path == widget)
+        .unwrap_or_else(|| panic!("the opened file is read: {:?}", paths(&steps)));
+    assert!(
+        !step.with_the_environment,
+        "`open.h` has not been read, so there is no timeline to read this file through: {step:?}"
+    );
+    assert_eq!(
+        step.outcome,
+        StepOutcome::Built,
+        "and the file's own text is what was read: {step:?}"
+    );
+}
+
 // -------------------------------------------------------------------------------------------
 // The project's own configuration file
 // -------------------------------------------------------------------------------------------

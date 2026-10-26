@@ -60,13 +60,13 @@ use std::path::{Path, PathBuf};
 
 use cpp_parser::Dialect;
 
-use crate::{IncludeForm, cache};
 use crate::cache::{SummaryKey, content_hash, fnv1a64};
 use crate::file::paths::{DiskFiles, FileProvider, normalize_path};
 use crate::include::config::CompilerConfig;
 use crate::index::FileIndexer;
 use crate::index::project::ProjectIndex;
 use crate::summary::{FileSummary, IncludeFact};
+use crate::{IncludeForm, cache};
 
 /// A project's summaries on disk and in memory, and the rule for when each is rebuilt.
 ///
@@ -141,7 +141,17 @@ pub struct SummaryStore<F: FileProvider = DiskFiles> {
     /// from the first one's table (cleared on open, which hid the bug rather than fixing it), and a
     /// [`crate::MemoryReport`] could not account for it at all.
     walk_cache: crate::index::walk_cache::WalkCache,
+    /// **The directive readings this store has been asked for** — see [`SummaryStore::directive_summary`] for why
+    /// there is a table and what the key is.
+    directives: std::sync::Mutex<
+        std::collections::HashMap<String, (u64, std::sync::Arc<crate::FileSummary>)>,
+    >,
 }
+
+/// **How many directive readings are remembered** — a table that is cleared when it fills, like the include
+/// searches of [`SummaryStore`]. An entry is a file's `#define`/`#include`/guard facts and nothing else, so this is
+/// hundreds of bytes per file and a few hundred files' worth is a bounded amount of memory.
+const MAX_DIRECTIVE_READINGS: usize = 512;
 
 /// **How many include questions are remembered** — the cache inside [`SummaryStore`], cleared when it fills.
 const MAX_INCLUDE_SEARCHES: usize = 8192;
@@ -463,6 +473,7 @@ impl<F: FileProvider> SummaryStore<F> {
             generation: 0,
             include_searches: std::sync::Mutex::new(std::collections::HashMap::new()),
             walk_cache: crate::index::walk_cache::WalkCache::new(),
+            directives: std::sync::Mutex::new(std::collections::HashMap::new()),
         }
     }
 
@@ -595,13 +606,43 @@ impl<F: FileProvider> SummaryStore<F> {
     /// `None` when the file cannot be read. The indexer is built the way every summary this store builds is: the
     /// configuration, the seed the index has collected, and nothing else — a directive reading has no use for macro
     /// bodies or for a scanned include list.
-    pub fn directive_summary(&self, path: &Path) -> Option<crate::FileSummary> {
+    ///
+    /// # Why it is remembered
+    ///
+    /// Because one index step asks for it **several times** and it is not free: a lex, a directive scan, an
+    /// evaluation of every conditional in the file, and a filesystem search per `#include` — measured at
+    /// **16 ms for a 55 KB source** on a real project. The step that read a file the reader is editing asked three
+    /// times (the wave's decision, the timeline's walk, and the rendering's directive half), and the same reading
+    /// came back each time because the text had not moved between them.
+    ///
+    /// The key is the file and **the hash of the text it was read from**, so an edit misses and the next read
+    /// rescans; `env_hash` is not needed because this reading is the file's own `#define`s and `#include`s, which no
+    /// other file's environment changes. Bounded: the entries are small and the table is cleared when it fills.
+    pub fn directive_summary(&self, path: &Path) -> Option<std::sync::Arc<crate::FileSummary>> {
         let source = self.files.read(path)?;
-        Some(
+        let hash = content_hash(&source);
+        let key = normalize_path(path, cfg!(windows));
+
+        if let Ok(known) = self.directives.lock()
+            && let Some((held, summary)) = known.get(&key)
+            && *held == hash
+        {
+            return Some(std::sync::Arc::clone(summary));
+        }
+
+        let summary = std::sync::Arc::new(
             crate::index::FileIndexer::new(&self.files, &self.config)
                 .with_seed(self.index.macros())
                 .directive_summary(path, &source),
-        )
+        );
+        if let Ok(mut known) = self.directives.lock() {
+            if known.len() >= MAX_DIRECTIVE_READINGS {
+                known.clear();
+            }
+            known.insert(key, (hash, std::sync::Arc::clone(&summary)));
+        }
+
+        Some(summary)
     }
 
     /// **Index one file the way a compiler reads it** — render it, then parse the rendering.
@@ -931,9 +972,16 @@ impl<F: FileProvider> SummaryStore<F> {
             { crate::preprocess::cooked::FileMacros::new(view, &definitions, Some(&seed), true) };
         let rendered = { crate::preprocess::cooked::cook_with(source, &tokens, &macros).render() };
 
+        // **The directives the caller may have read already.** For a file the index cannot describe — the one a
+        // reader is editing — they were read to decide whether the file could be read through a timeline at all, and
+        // `directive_summary` answers from its own table, so this costs nothing when it was read before it was
+        // written. See [`crate::FileIndexer::with_directives`].
+        let directives = self.directive_summary(path);
+
         FileIndexer::new(&self.files, &self.config)
             .with_seed(self.index.macros())
             .without_these_macros(&self.dead_macros_for(path))
+            .with_directives(directives.as_deref())
             .index_the_readings(path, source, &rendered, key)
             .summary
     }

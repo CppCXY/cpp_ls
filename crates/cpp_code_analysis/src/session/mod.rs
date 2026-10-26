@@ -73,7 +73,6 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
-use crate::{PathInterner, cache};
 use crate::cache::SummaryKey;
 use crate::file::coordinates::{FileOffset, ReadingOffset};
 use crate::file::paths::{DiskFiles, FileProvider, OverlayFiles, normalize_path};
@@ -98,8 +97,9 @@ use crate::inlay::ParameterHint;
 use crate::macros::MacroTable;
 use crate::project::{ConfigReport, ProjectDiscovery};
 use crate::sema::modules::{ImportOutcome, ModuleScanner};
-use crate::summary::{OutlineSymbol, UnitReading};
+use crate::summary::{FileSummary, OutlineSymbol, UnitReading};
 use crate::symbol::{Known, UnknownReason};
+use crate::{PathInterner, cache};
 
 /// How many files one drain **cooks**.
 ///
@@ -1156,9 +1156,12 @@ impl<F: FileProvider + Clone> Session<F> {
     }
 
     /// **What the file directs, without parsing it** — the reading a timeline walk needs, available *before* a file
-    /// is indexed. See [`crate::index::FileIndexer::directive_summary`].
+    /// is indexed. See [`crate::index::FileIndexer::directive_summary`], and
+    /// [`SummaryStore::directive_summary`](crate::SummaryStore::directive_summary) for why the store remembers it.
     pub fn directive_summary(&self, path: &Path) -> Option<crate::FileSummary> {
-        self.store.directive_summary(path)
+        self.store
+            .directive_summary(path)
+            .map(|summary| (*summary).clone())
     }
 
     /// **Parse one file now, from its own text** — see [`SummaryStore::parsed_summary`]: the raw reading, whatever
@@ -2088,7 +2091,7 @@ impl<F: FileProvider + Clone> Session<F> {
             // for the whole of a cold start.
             let key = queue_key(&path);
             let left = steps - taken;
-            // **A file whose macro environment this session holds is left out of the wave.** The wave parses on the
+            // **A file that is going to be read through a timeline is left out of the wave.** The wave parses on the
             // read path, where a summary is a pure function of the text — which is exactly what cannot place a scope
             // a macro in **another** file opens. For the one file this session knows better about, the wave would
             // build the wrong reading *and write it to the disk cache*, and then `index_one`'s own attempt would be
@@ -2098,8 +2101,20 @@ impl<F: FileProvider + Clone> Session<F> {
             // So it is not a root of this wave, and its includes are prepared by the iteration that reads it.
             // **This is what makes §5.2's steps 1–3 reachable at all**: they live at `index_one`'s `None` arm, and
             // the pump's path always reached it with `Some`, so the mechanism was correct, tested, and dead.
-            let holds_the_environment = self.holds_an_environment_for(&path);
-            if left > 1 && !holds_the_environment && !self.prefetched.contains_key(&key) {
+            //
+            // The question is [`Session::will_read_it_as_the_program`], which is the timeline in hand **or one that
+            // can be walked now** — the file a reader is typing in, whose unit was evicted from the bounded table or
+            // has never been built. It is asked here, before the wave, because after it the raw reading would already
+            // have been written down.
+            //
+            // **And only when a wave is about to be built.** `left == 1` is the single-file step — the one a pull and
+            // a `didOpen` take — and it never consults `prefetched` for a gate: with nothing prepared, `index_one`
+            // decides for itself, so asking here would be the same question twice and the second answer is the one
+            // that matters.
+            let wave_would_parse_it_as_text = left > 1
+                && !self.will_read_it_as_the_program(&path)
+                && !self.prefetched.contains_key(&key);
+            if wave_would_parse_it_as_text {
                 let mut wave = vec![path.clone()];
                 wave.extend(
                     self.queue
@@ -2212,6 +2227,11 @@ impl<F: FileProvider + Clone> Session<F> {
                 let key = queue_key(path);
                 !self.prefetched.contains_key(&key) && !self.queue.is_worked(path)
             })
+            // **And the file that is going to be read through its timeline is not part of it.** A wave parses text;
+            // this file is read by [`Session::commit_a_wave`]'s `index_one`, which has the session and can walk the
+            // timeline. See [`Session::will_read_it_as_the_program`] for the question and
+            // [`Session::the_timeline_to_read_through`] for what it costs.
+            .filter(|path| !self.will_read_it_as_the_program(path))
             .collect();
 
         // **The units, rooted at the files the pass after this one will actually re-read** — which is the slice
@@ -2796,10 +2816,12 @@ impl<F: FileProvider + Clone> Session<F> {
         }
         let before = self.store.stats();
 
-        // **The environment this session already holds for this file, if it holds one.** A unit that is *not* in
-        // memory is one whose closure this session has not read, and an index step is not the place to start: the
-        // walk is minutes of work on a real project, and starting it here would put it in front of the file it is
-        // meant to be reading. `None` is therefore the ordinary cold case and means today's path, unchanged.
+        // **The environment this session already holds for this file, or one it can walk now.** A unit that is *not*
+        // in memory is one whose closure this session has not read — or has read, and lost the timeline of: the units
+        // table is bounded by [`MAX_UNIT_BYTES`], and after a project is indexed the file a reader is typing in
+        // usually has no entry. That case used to be the ordinary one and it fell back to the file's own text; what
+        // decides now is [`Session::the_timeline_to_read_through`], which walks one when the file is the reader's
+        // and the program it needs is already read, and answers `None` for everything else.
         //
         // **Asked by the index's own spelling**, because a unit's frames are keyed by the spelling the walk used
         // and asking with any other one answers `None`. `Session::units_for_the_pass` records the same trap from
@@ -2814,16 +2836,12 @@ impl<F: FileProvider + Clone> Session<F> {
             .summary(&path)
             .map(|summary| summary.path.clone())
             .unwrap_or_else(|| path.clone());
-        // **And not a provisional one.** `with_the_environment` asserts that the second pass has nothing to repair,
+        // **And never a provisional one.** `with_the_environment` asserts that the second pass has nothing to repair,
         // and a timeline built while a file the closure needs was still queued is missing exactly what that file
         // defines — so reading a file with it and marking the result would suppress the repair for a reading that
         // needs it. A provisional timeline is a reading of most of the program, which is worth having for a *cook*
         // and is not worth asserting anything about. See [`HeldUnit`].
-        let unit = self
-            .held_units()
-            .get(&queue_key(&spelled))
-            .filter(|(provisional, _)| !*provisional)
-            .map(|(_, unit)| unit);
+        let unit = self.the_timeline_to_read_through(&spelled);
         let has_a_timeline = unit
             .as_ref()
             .is_some_and(|unit| unit.environment_of(&spelled).is_some());
@@ -4185,8 +4203,37 @@ impl<F: FileProvider + Clone> Session<F> {
                 (std::sync::Arc::new(unit), false)
             }
             None => {
+                // **The file the index cannot describe in full, and the order that answers it.**
+                //
+                // A file a reader is editing has no summary — [`Session::did_change`] drops it — so the walk has no
+                // root to start from, and until this existed the file's timeline was unobtainable exactly while the
+                // reader was working on it. Its **directives** are the part of it that can be read without a parse,
+                // and they are also the part the walk needs first, because they name the includes. That is the order
+                // `docs/architecture.md` §5 fixes: **the directives, then the unit, then the parse**.
+                //
+                // The fallback is for a file a reader is looking at, and only for one: a directive reading is a lex
+                // and a directive scan, which is cheap but not free, and the project's other ten thousand files have
+                // no claim on it — they are read as text and refined by the second pass.
+                let owned_root;
+                let index = self.store.index();
+                let root = match index.summary(path) {
+                    Some(summary) => summary,
+                    None if self.documents.is_open(path) => {
+                        owned_root = self.store.directive_summary(path)?;
+                        // **A timeline of the whole program or none at all.** A walk stops at a file it cannot look
+                        // up and treats it as defining nothing, which is the right reading for a file outside the
+                        // analysis and the wrong one for a file nobody has read yet: the rendering made from such a
+                        // timeline is the macro left unexpanded, which is worse than the file's own text (see
+                        // [`HeldUnit`]). A file whose program is not read yet is left to the raw path, and the second
+                        // pass renders it once the closure is in hand.
+                        self.the_closure_of_the_directives(path, &owned_root)?;
+                        owned_root.as_ref()
+                    }
+                    None => return None,
+                };
+
                 let read_started = std::time::Instant::now();
-                let (closure, closure_by_key) = { self.closure_with_text(path) };
+                let (closure, closure_by_key) = { self.closure_with_text_from(path, Some(root)) };
                 let read_took = read_started.elapsed();
                 let closure_bytes: usize = closure.iter().map(|(_, text)| text.len()).sum();
                 let walk_started = std::time::Instant::now();
@@ -4196,8 +4243,6 @@ impl<F: FileProvider + Clone> Session<F> {
                 // `_STD_BEGIN`, whose text is in `yvals_core.h`. One cache per *walk* is one parse per definition
                 // per file, which the census measured at 12.2 s of a 40 s run. Invalidated **per path** when a file
                 // changes, since the keys are offsets in that file.
-                let index = self.store.index();
-                let root = index.summary(path)?;
                 // **Held rather than taken**, for the reason the units table carries: this cache is what made the
                 // unit walk need `&mut self`, and `&mut self` is what put the walk inside the writer. A lock of its
                 // own is enough — the walk is the only thing that ever holds it for long.
@@ -4228,12 +4273,22 @@ impl<F: FileProvider + Clone> Session<F> {
                     // grow is incomplete by construction: it must neither fill the sharing cache nor read from it.
                     let provisional = self.closure_is_still_growing(&closure, &closure_by_key);
                     let walked = std::sync::Arc::new({
+                        // **The root's own summary comes from `root`, not from the index.** For a file the index
+                        // cannot describe — the one a reader is editing, whose directives are all there is — the
+                        // lookup would otherwise answer `None` for the very file the walk starts at, and a timeline
+                        // with no root is a timeline of an empty program.
+                        let root_key = queue_key(path);
                         crate::TranslationUnit::walk(
                             root,
                             |wanted| {
                                 let (held, text) =
                                     closure.get(*closure_by_key.get(&queue_key(wanted))?)?;
-                                Some((index.summary(held)?, text.as_str()))
+                                let summary = if queue_key(held) == root_key {
+                                    root
+                                } else {
+                                    index.summary(held)?
+                                };
+                                Some((summary, text.as_str()))
                             },
                             index.macros(),
                             &mut definitions,
@@ -4328,6 +4383,75 @@ impl<F: FileProvider + Clone> Session<F> {
             .unwrap_or_else(|| path.to_path_buf());
         let held = self.held_units().get(&queue_key(&spelled));
         held.is_some_and(|(provisional, _)| !provisional)
+    }
+
+    /// **Will this file be read as the program it is in?** — the question a wave asks before it parses a file as
+    /// text, and the union of the two ways a file gets a macro environment here.
+    ///
+    /// ```text
+    /// the timeline is in hand                      the pump's ordinary case: a body edit keeps it
+    /// it can be walked now — see below             what this closes: the unit was evicted, or this is the
+    ///                                              first read after `did_open`
+    /// ```
+    ///
+    /// [`Session::advance`] and [`Session::prepare_a_wave`] both ask it for every file they are about to hand to a
+    /// wave, because a wave parses a file as a pure function of its text — which cannot place a scope that a macro
+    /// in **another** file opens, and would then be *written to the disk cache* as the file's reading. A file this
+    /// answers `true` for is left out of the wave and read by [`Session::index_one`] instead, where the timeline is.
+    fn will_read_it_as_the_program(&self, path: &Path) -> bool {
+        self.holds_an_environment_for(path) || self.a_timeline_can_be_walked_for(path)
+    }
+
+    /// **Can a timeline for this file be walked right now, without one being in hand?**
+    ///
+    /// Three conditions, and each is one of the costs this has to be worth:
+    ///
+    /// * **A reader is looking at it.** A walk reads the whole closure and evaluates every conditional in it — 38 ms
+    ///   on a real project's — and it is worth that for the file somebody is typing in and for no other. The rest of
+    ///   the project is read as text and refined by the second pass, which is what the pipeline already does.
+    /// * **It has no summary, or its whole closure is read.** A file with no summary is one that was just edited or
+    ///   just opened: its *directives* are the only part of it the index can describe, and they are enough to say
+    ///   whether the program it needs is in the index ([`Session::the_closure_of_the_directives`]).
+    /// * **Nothing is left queued inside that closure**, which is the same statement: a file whose summary was
+    ///   dropped has no entry, and the check above fails on it — so a cold start answers `false` for everything and
+    ///   pays nothing but the directive scan.
+    fn a_timeline_can_be_walked_for(&self, path: &Path) -> bool {
+        if !self.documents.is_open(path) {
+            return false;
+        }
+
+        match self.store.index().summary(path) {
+            Some(_) => self.is_closure_ready(path),
+            None => self
+                .store
+                .directive_summary(path)
+                .is_some_and(|directives| {
+                    self.the_closure_of_the_directives(path, &directives)
+                        .is_some()
+                }),
+        }
+    }
+
+    /// **The timeline `path` may be read through now** — the one in hand, or the one that can be walked.
+    ///
+    /// `None` means the file falls back to its own text (and the second pass refines it later), which is the cold
+    /// start's path and stays it: an environment that is not the whole program renders *worse* than the raw text.
+    fn the_timeline_to_read_through(
+        &self,
+        path: &Path,
+    ) -> Option<std::sync::Arc<crate::TranslationUnit>> {
+        if let Some((false, unit)) = self.held_units().get(&queue_key(path))
+            && unit.environment_of(path).is_some()
+        {
+            return Some(unit);
+        }
+
+        if !self.a_timeline_can_be_walked_for(path) {
+            return None;
+        }
+
+        let (unit, provisional) = self.unit_and_state_of(path)?;
+        (!provisional && unit.environment_of(path).is_some()).then_some(unit)
     }
 
     /// **Could this closure still grow?** — the question a timeline's cache entry has to answer, and the one the
@@ -5487,10 +5611,24 @@ impl<F: FileProvider + Clone> Session<F> {
     /// path's summary and text" once per file it visits, and answering that by scanning the list with `same_file` is
     /// quadratic in the closure — a thousand files of standard library, for each of a hundred files being cooked.
     fn closure_with_text(&self, root: &Path) -> (Vec<(PathBuf, String)>, HashMap<String, usize>) {
+        let seed = self.store.index().summary(root);
+        self.closure_with_text_from(root, seed)
+    }
+
+    /// [`Session::closure_with_text`] for a root whose summary the caller has **instead of** the index.
+    ///
+    /// The one caller that has one is the file a reader is editing: its summary is dropped by the edit, so the
+    /// index can describe its *directives* and nothing else — and those are what names its includes. See
+    /// [`Session::unit_and_state_of`], where the order `directives → unit → parse` is written out.
+    fn closure_with_text_from(
+        &self,
+        root: &Path,
+        seed: Option<&FileSummary>,
+    ) -> (Vec<(PathBuf, String)>, HashMap<String, usize>) {
         let mut out: Vec<(PathBuf, String)> = Vec::new();
         let mut by_key: HashMap<String, usize> = HashMap::new();
 
-        for path in self.closure_paths(root) {
+        for path in self.closure_paths_from(root, seed) {
             if let Some(text) = self.text(&path) {
                 by_key.insert(queue_key(&path), out.len());
                 out.push((path, text));
@@ -5507,7 +5645,10 @@ impl<F: FileProvider + Clone> Session<F> {
     /// `#include` resolved to, and a file the index has not read contributes no edges. A file is listed once,
     /// whatever number of paths reach it, which is what keeps a header included by everything from being cooked
     /// per includer.
-    fn closure_paths(&self, root: &Path) -> Vec<PathBuf> {
+    ///
+    /// `seed` is the caller's own reading of the **root**, for the one caller whose root the index cannot describe —
+    /// the file a reader is editing. See [`Session::closure_with_text_from`].
+    fn closure_paths_from(&self, root: &Path, seed: Option<&FileSummary>) -> Vec<PathBuf> {
         let mut out: Vec<PathBuf> = Vec::new();
         // **By the key every other queue in this crate compares by.** This used to ask `same_file` against every
         // file already listed, which normalizes two paths per comparison — and the closure of a standard-library
@@ -5518,6 +5659,10 @@ impl<F: FileProvider + Clone> Session<F> {
         let mut queue: std::collections::VecDeque<PathBuf> = std::collections::VecDeque::new();
         queue.push_back(root.to_path_buf());
 
+        // **The root's edges come from `seed` when there is one**, because the index has none for it: a file that
+        // was just edited describes nothing but its directives, and its directives are exactly its includes.
+        let mut edges: Option<&FileSummary> = seed;
+
         while let Some(path) = queue.pop_front() {
             // One entry per **file**: two spellings of it are one file to cook, and a closure that listed both would
             // cook it twice, once under a name the index does not use.
@@ -5526,7 +5671,11 @@ impl<F: FileProvider + Clone> Session<F> {
             }
             out.push(path.clone());
 
-            if let Some(summary) = self.store.index().summary(&path) {
+            let summary = match edges.take() {
+                Some(seed) => Some(seed),
+                None => self.store.index().summary(&path),
+            };
+            if let Some(summary) = summary {
                 for include in &summary.includes {
                     if let Some(resolved) = &include.resolved {
                         queue.push_back(resolved.clone());
@@ -5536,6 +5685,30 @@ impl<F: FileProvider + Clone> Session<F> {
         }
 
         out
+    }
+
+    /// **The closure a file's own directives name, and whether every file in it has been read.**
+    ///
+    /// `None` when one of them has not. That is deliberately the strict answer rather than a list with a hole in
+    /// it: a walk that cannot look a file up stops there and treats it as a file that defines nothing, which is the
+    /// right reading for a header outside the analysis and the wrong one for a header **nobody has read yet** — the
+    /// rendering made from such a timeline is the macro left unexpanded, which is worse than the file's own text
+    /// (see [`HeldUnit`], and `docs/architecture.md` §5 for the measurement that says so).
+    ///
+    /// The root itself is exempt: the whole reason this exists is a file whose summary the index does not have.
+    fn the_closure_of_the_directives(
+        &self,
+        root: &Path,
+        directives: &FileSummary,
+    ) -> Option<Vec<PathBuf>> {
+        let index = self.store.index();
+        let root_key = queue_key(root);
+        let reached = self.closure_paths_from(root, Some(directives));
+
+        reached
+            .iter()
+            .all(|path| queue_key(path) == root_key || index.summary(path).is_some())
+            .then_some(reached)
     }
 
     /// Which declaration the name at `offset` means, using this file's scopes and then the index.

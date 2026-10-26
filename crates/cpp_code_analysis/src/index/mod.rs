@@ -117,6 +117,8 @@ pub struct FileIndexer<'a, F: FileProvider> {
     /// The includes a scan already resolved — see [`FileIndexer::scan_includes`]. Resolving an include is a
     /// filesystem search, so a caller that has done it once passes the answers along instead of paying twice.
     scanned: Option<&'a ScannedIncludes>,
+    /// **The file's directives, read by someone else** — see [`FileIndexer::with_directives`].
+    directives: Option<&'a FileSummary>,
 }
 
 /// The `#include`s of one file, found and resolved **before** its parse — see [`FileIndexer::scan_includes`].
@@ -167,7 +169,23 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
             dead_macros: Vec::new(),
             seed: None,
             scanned: None,
+            directives: None,
         }
+    }
+
+    /// **The file's directive reading, when the caller already has it.**
+    ///
+    /// [`FileIndexer::index_the_readings`] needs three things from one file's text: the rendering to parse, the
+    /// tokens it was rendered from, and the directives the rendering consumed. Only the first two have to be
+    /// produced fresh — the third is a lex, a directive scan, an evaluation of every conditional and a filesystem
+    /// search per `#include`, and a caller that has already paid for it (the store remembers it: see
+    /// [`SummaryStore::directive_summary`](crate::SummaryStore::directive_summary)) hands it over instead.
+    ///
+    /// Same text, or the same answer as reading it again: this is the file's own `#define`s, `#include`s and
+    /// conditional regions, none of which any other file's environment can change.
+    pub fn with_directives(mut self, directives: Option<&'a FileSummary>) -> Self {
+        self.directives = directives;
+        self
     }
 
     /// Index with includes a scan already resolved, so that the parse does not search for them a second time.
@@ -452,7 +470,13 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
         key: SummaryKey,
     ) -> crate::IndexedRendering {
         let mut indexed = { self.index_rendering(path, rendered, key) };
-        let directed = { self.directive_summary(path, source) };
+        // **The directive half, unless the caller read it already** — see [`FileIndexer::with_directives`]. The
+        // order is the architecture's (`directives → unit → parse`), and the caller that needed the directives *first*
+        // — to know whether it could walk a timeline at all — is exactly the one that can hand them over.
+        let directed = match self.directives {
+            Some(directives) => directives.clone(),
+            None => self.directive_summary(path, source),
+        };
         indexed.summary.take_the_directives_of(directed);
         indexed.summary.key = key;
         indexed.summary.key.content_hash = content_hash(source);
