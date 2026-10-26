@@ -264,9 +264,40 @@ CPPLS_REAL_PROJECT=E:\EmmyLuaCodeStyle \
 | 已知 std 类型，成员缺 | `inputPath.parent_path`，`std::filesystem::path` | `no list: ConditionalCompilation` —— **文件视图没有宏环境**，`<bits/fs_path.h>` 的类在 `#if` 里；这是记分板已知的悲观项，不是 bug |
 
 **第二行是可用的工具而不是 bug**：`CPPLS_CLASS=<类名>` 会打印"这个 scope 下有多少条事实 / 从某个文件能看见多少条"，
-两个数一对比就知道是**没归档**还是**可见性过滤掉了**。第一行（32 条事实、0 条可见）就停在这个岔路口上，
-下一步是给出"从 `CommandService.cpp` 到底能看见几条"的数字 —— 那一个数字决定这是可见性问题还是可见性正确而
-查询另有 bug。
+两个数一对比就知道是**没归档**还是**可见性过滤掉了**。
+
+### ✅ 找到了：`@响应文件` 没有展开 —— 这是"索引器"最大的一个洞
+
+```text
+CommandService.cpp 的编译命令：
+  g++.exe -DURI_STATIC_BUILD -D_WIN32_WINNT=0x0601 @CMakeFiles/CodeFormatServer.dir/includes_CXX.rsp -O3 ...
+                                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                                                  所有的 -I 都在这个文件里
+```
+
+`-I` / `-isystem` 是**从编译命令里读的**（`config.rs:539`/`548` 的 `-isystem`/`-I` 分支，`includes.rs` 的
+"user paths before system paths" 也依赖它），而 CMake 生成的命令把全部 `-I` 放进了 `@…/includes_CXX.rsp` ——
+**一个参数文件**。解析器不认识 `@`，于是这个 TU 的搜索路径里**一条 `-I` 都没有**。
+
+后果是一条链，不是一句话：
+
+```text
+# 没有 -I
+#include "LanguageServer.h"        ← 不在 CommandService.cpp 自己的目录里（它在 src/Service/，头在 src/）
+  → include 边不存在            ← graph.rs 里没有这条边
+  → LanguageServer 的 32 条成员事实"不可见"   ← 测出来的就是 0 visible
+  → _owner->SendRequest 拒绝     ← 记分板里 20+ 条，全部是这个原因
+```
+
+证据（同一 scope，三个问题问出来的）：32 条事实在索引里；从 `LanguageServer.cpp` 看见 32 条，从 `main.cpp` 看见
+21 条，从 `CommandService.cpp` 看见 **0** 条 —— 而它明明 `#include "LanguageServer.h"`。
+
+**修在哪**：`crates/cpp_code_analysis/src/config.rs` 的参数解析（``@file` 要按 `directory` 展开成参数，再走现有的
+`-I`/`-isystem` 分支），夹具用一份带 `@rsp` 的 compile_commands 条目断言搜索路径条数。
+**验收**：`CommandService.cpp` 看见 32 条；记分板 76.0% → 预计 85%+（1242 个 `->` 问题里一大半是这类）。
+
+**为什么这一条比模板推理重要**：它解释的是"为什么 `LuaReserved` 找不到引用/类型看着对却查不到成员"这一整类现象 ——
+索引的 include 图缺边，后面所有层都只能摇头。先修它，再谈 §A4 的别名链。
 
 **怎么读那 1351 个"没有接收者类型"**：接收者本身是 `auto x = f();` 这类**调用结果**，所以它需要调用路径的返回
 类型（`what_a_call_has`）。这一桶是下一步最大的，但在上面那条岔路走通之前不碰。

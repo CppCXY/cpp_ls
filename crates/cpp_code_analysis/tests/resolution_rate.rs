@@ -340,6 +340,18 @@ fn the_member_questions_of_a_real_project_and_how_many_resolve() {
                     fact.qualified_name()
                 );
             }
+            // **And from where**: the same scope asked from a few files. A file that includes the header has to see
+            // the facts, and a file that does not has to see none — the two answers are what makes the visibility
+            // filter right, and a count of zero where it should be 32 is the bug.
+            for path in files.iter().take(400) {
+                let visible = session.index().declarations_in(&asked, path).len();
+                if visible > 0 {
+                    println!(
+                        "  visible from {}: {visible} fact(s)",
+                        path.file_name().unwrap_or_default().to_string_lossy()
+                    );
+                }
+            }
             match session.members_of(&view, &asked) {
                 Known::Yes(list) => {
                     println!("\n{asked}: {} member(s)", list.members.len());
