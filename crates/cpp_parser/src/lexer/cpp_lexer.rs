@@ -1222,8 +1222,8 @@ impl<'a> CppLexer<'a> {
     /// character and turn the literal into a user-defined one, which is the opposite of what the file wrote.
     fn fixed_width_float_suffix(&self) -> Option<usize> {
         const SUFFIXES: [&str; 16] = [
-            "f128x", "F128x", "f32x", "F32x", "f64x", "F64x", "f128", "F128", "bf16", "BF16", "f16", "F16",
-            "f32", "F32", "f64", "F64",
+            "f128x", "F128x", "f32x", "F32x", "f64x", "F64x", "f128", "F128", "bf16", "BF16",
+            "f16", "F16", "f32", "F32", "f64", "F64",
         ];
         for suffix in SUFFIXES {
             if suffix

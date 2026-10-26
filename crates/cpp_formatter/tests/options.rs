@@ -98,14 +98,16 @@ const SINK_SPACING: &str = r##"void f() {
 }
 "##;
 
-
 /// Format `sink` under `configuration` and compare with the oracle's answer, then re-format that answer.
 #[track_caller]
 fn check_against_the_oracle(sink: &str, configuration: &str, expected: &str) {
     let style = style(configuration);
     let path = std::path::Path::new("sink.cpp");
     let actual = cpp_formatter::format_file(path, sink, &style);
-    assert_eq!(actual, expected, "the option is not honoured the way clang-format honours it");
+    assert_eq!(
+        actual, expected,
+        "the option is not honoured the way clang-format honours it"
+    );
     let again = cpp_formatter::format_file(path, expected, &style);
     assert_eq!(again, expected, "the oracle's text is not a fixed point");
 }

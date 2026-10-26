@@ -180,7 +180,6 @@ impl<'a> SemanticModel<'a> {
     /// gives (`docs/status.md` §十五 ④: it was not, because this call passed the rendering to a function reading the
     /// file's own text at the fact's offsets).
     pub fn members_of(&self, class: &str) -> Known<MemberList> {
-
         // **Memoised, because the same class is asked dozens of times per file.** Measured on one header of a real project:
         // `std::vector<heap_entry>` was asked **64 times** and each answer cost about **589 ms** — 37 seconds of a file that
         // took 45, and the reason five different rules all looked slow. The memo is the same shape as the `types` one beside
@@ -189,7 +188,9 @@ impl<'a> SemanticModel<'a> {
             return answer.clone();
         }
         let answer = self.members_of_uncached(class);
-        self.members.borrow_mut().insert(class.to_string(), answer.clone());
+        self.members
+            .borrow_mut()
+            .insert(class.to_string(), answer.clone());
         answer
     }
 

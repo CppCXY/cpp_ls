@@ -57,7 +57,11 @@ pub fn sorted(source: &str, stem: Option<&str>, style: &Style) -> String {
         // **A reordered block keeps a terminator on every line**: when the file`s last line has no trailing newline
         // and sorting moves it into the middle, the lines after it would be glued to it (measured with the inline
         // tests: `#include "local.h"#include <vector>`).
-        let line_ending = if source.contains("\r\n") { "\r\n" } else { "\n" };
+        let line_ending = if source.contains("\r\n") {
+            "\r\n"
+        } else {
+            "\n"
+        };
         let count = block.len();
         for (position, (_, line)) in block.into_iter().enumerate() {
             out.push_str(line);
@@ -79,17 +83,34 @@ struct IncludeKey {
 impl IncludeKey {
     fn of(line: &str, stem: Option<&str>, ignore_case: bool) -> IncludeKey {
         let rest = line.trim().strip_prefix("#include").unwrap_or("").trim();
-        let (category, path) = if let Some(inner) = rest.strip_prefix('"').and_then(|rest| rest.strip_suffix('"')) {
+        let (category, path) = if let Some(inner) = rest
+            .strip_prefix('"')
+            .and_then(|rest| rest.strip_suffix('"'))
+        {
             // **The file`s own header comes first** (`clang-format` promotes it out of its category).
-            (if is_the_main_header(inner, stem) { 0u8 } else { 1u8 }, inner)
-        } else if let Some(inner) = rest.strip_prefix('<').and_then(|rest| rest.strip_suffix('>')) {
+            (
+                if is_the_main_header(inner, stem) {
+                    0u8
+                } else {
+                    1u8
+                },
+                inner,
+            )
+        } else if let Some(inner) = rest
+            .strip_prefix('<')
+            .and_then(|rest| rest.strip_suffix('>'))
+        {
             (2u8, inner)
         } else {
             (3u8, rest)
         };
         IncludeKey {
             category,
-            path: if ignore_case { path.to_ascii_lowercase() } else { path.to_string() },
+            path: if ignore_case {
+                path.to_ascii_lowercase()
+            } else {
+                path.to_string()
+            },
         }
     }
 }
@@ -128,7 +149,8 @@ mod tests {
 
     #[test]
     fn angle_includes_are_sorted_and_quoted_ones_come_first() {
-        let source = "#include <memory>\n#include \"b.h\"\n#include <string_view>\n#include \"a.h\"\n";
+        let source =
+            "#include <memory>\n#include \"b.h\"\n#include <string_view>\n#include \"a.h\"\n";
         assert_eq!(
             sorted_with(source),
             "#include \"a.h\"\n#include \"b.h\"\n#include <memory>\n#include <string_view>\n"
@@ -138,32 +160,48 @@ mod tests {
     #[test]
     fn a_blank_line_ends_a_block() {
         let source = "#include <vector>\n\n#include <array>\n";
-        assert_eq!(sorted_with(source), source, "each block is sorted on its own");
+        assert_eq!(
+            sorted_with(source),
+            source,
+            "each block is sorted on its own"
+        );
     }
 
     #[test]
     fn other_directives_are_left_alone() {
         let source = "#pragma once\n#include <z>\n#include <a>\n#define X 1\n";
-        assert_eq!(sorted_with(source), "#pragma once\n#include <a>\n#include <z>\n#define X 1\n");
+        assert_eq!(
+            sorted_with(source),
+            "#pragma once\n#include <a>\n#include <z>\n#define X 1\n"
+        );
     }
 
     #[test]
     fn the_files_own_header_comes_first() {
         // `Mark.cpp` includes `Mark.h`; clang-format promotes it above the others even when it sorts later.
         let source = "#include \"LuaParser/Parse/Mark.h\"\n#include \"LuaParser/Parse/LuaParser.h\"\n#include <cstring>\n";
-        assert_eq!(sorted(source, Some("Mark"), &Style::default_style()), source);
+        assert_eq!(
+            sorted(source, Some("Mark"), &Style::default_style()),
+            source
+        );
     }
 
     #[test]
     fn without_a_stem_there_is_no_main_header() {
         let source = "#include \"b.h\"\n#include \"a.h\"\n";
-        assert_eq!(sorted(source, None, &Style::default_style()), "#include \"a.h\"\n#include \"b.h\"\n");
+        assert_eq!(
+            sorted(source, None, &Style::default_style()),
+            "#include \"a.h\"\n#include \"b.h\"\n"
+        );
     }
 
     #[test]
     fn sorting_can_be_turned_off() {
         let mut style = Style::default_style();
         style.set_from_text("SortIncludes.Enabled", "false");
-        assert_eq!(sorted("#include <z>\n#include <a>\n", None, &style), "#include <z>\n#include <a>\n");
+        assert_eq!(
+            sorted("#include <z>\n#include <a>\n", None, &style),
+            "#include <z>\n#include <a>\n"
+        );
     }
 }

@@ -178,7 +178,10 @@ fn reaches_the_name(node: &CppSyntaxNode, name: cpp_parser::SourceRange) -> bool
     usize::from(span.start()) <= name.start_offset && usize::from(span.end()) >= name.start_offset
 }
 
-pub(crate) fn declared_type_of_with(shapes: &DeclarationShapes, binding: &Binding) -> Option<String> {
+pub(crate) fn declared_type_of_with(
+    shapes: &DeclarationShapes,
+    binding: &Binding,
+) -> Option<String> {
     // **The kinds that name a type.** A field and a parameter are `Variable` too — they are what a member access is
     // asked *from* — and so is an **alias**, which is the kind this list was missing: `typedef _Ty& reference;`
     // records nothing under a rule that only allows `Variable`, so every member a class declares with its own
@@ -1570,11 +1573,7 @@ pub(crate) fn declared_returns_of_in(
 /// that declares the operator does **not** declare a name of its own with that spelling — which is the same rule as
 /// the language's (an unqualified name in a member's return type is looked up in the class first), asked of the tree
 /// instead of the scope table because this reader is handed the file's tree.
-fn an_operator_return_is_usable(
-    root: &CppSyntaxNode,
-    binding: &Binding,
-    spelling: &str,
-) -> bool {
+fn an_operator_return_is_usable(root: &CppSyntaxNode, binding: &Binding, spelling: &str) -> bool {
     fn means_the_same_everywhere(kind: &crate::sema::types::Type) -> bool {
         use crate::sema::types::Type;
         match kind {
@@ -1611,12 +1610,10 @@ fn the_enclosing_body_declares(root: &CppSyntaxNode, binding: &Binding, name: &s
     let Some(declaration) = declaration_of(root, binding) else {
         return false;
     };
-    let Some(body) = declaration.ancestors().find(|node| {
-        matches!(
-            CppSyntaxKind::from(node.kind()),
-            CppSyntaxKind::ClassBody
-        )
-    }) else {
+    let Some(body) = declaration
+        .ancestors()
+        .find(|node| matches!(CppSyntaxKind::from(node.kind()), CppSyntaxKind::ClassBody))
+    else {
         return false;
     };
     // **An alias, and the name it introduces** — that is the case this gate exists for, and it is the only one read.
@@ -1656,7 +1653,10 @@ fn the_enclosing_body_declares(root: &CppSyntaxNode, binding: &Binding, name: &s
         })
 }
 
-pub(crate) fn declared_returns_of_with(shapes: &DeclarationShapes, binding: &Binding) -> Option<String> {
+pub(crate) fn declared_returns_of_with(
+    shapes: &DeclarationShapes,
+    binding: &Binding,
+) -> Option<String> {
     // **A `Function`, and an operator when the spelling cannot be a name from the class's own body.**
     //
     // An operator does declare a return type, and recording every one of them was measured and rejected once:
@@ -1961,7 +1961,10 @@ pub fn parameter_list_at(root: &CppSyntaxNode, offset: usize) -> Option<String> 
 ///
 /// Measured together with [`enclosing_namespaces_of`]: the two were **1576 ms of a 4562 ms `Facts` stage** over 126
 /// files of MSVC's standard library.
-pub(crate) fn declared_parameters_with(shapes: &DeclarationShapes, binding: &Binding) -> Option<String> {
+pub(crate) fn declared_parameters_with(
+    shapes: &DeclarationShapes,
+    binding: &Binding,
+) -> Option<String> {
     let mut found = None;
     shapes.on_the_path(binding.name_range.start_offset, |shape| {
         // **The declarator that names this binding**, not merely the last one on the path.
@@ -2327,7 +2330,8 @@ fn fact_for(
     let type_of = if split_by_a_directive {
         None
     } else {
-        declared_type_of_with(shapes, binding).or_else(|| declared_alias_target_with(shapes, binding))
+        declared_type_of_with(shapes, binding)
+            .or_else(|| declared_alias_target_with(shapes, binding))
     };
     let returns = {
         // **The written return type, and the deduced one when there is none to write.** `declared_returns_of_with`
@@ -3149,13 +3153,11 @@ fn qualified_declarations(root: &CppSyntaxNode) -> Vec<(Binding, String, Option<
         // definition this pass exists for.
         let outer = declarator
             .children()
-            .find(|child| {
-                matches!(CppSyntaxKind::from(child.kind()), CppSyntaxKind::Declarator)
-            })
+            .find(|child| matches!(CppSyntaxKind::from(child.kind()), CppSyntaxKind::Declarator))
             .unwrap_or_else(|| declarator.clone());
-        let names_itself = outer.children().any(|child| {
-            matches!(CppSyntaxKind::from(child.kind()), CppSyntaxKind::NameExpr)
-        });
+        let names_itself = outer
+            .children()
+            .any(|child| matches!(CppSyntaxKind::from(child.kind()), CppSyntaxKind::NameExpr));
         let from_the_declarator = outer
             .children()
             .find(|child| {
@@ -3208,8 +3210,7 @@ fn qualified_declarations(root: &CppSyntaxNode) -> Vec<(Binding, String, Option<
             .descendants_with_tokens()
             .filter_map(|element| element.into_token())
             .filter(|token| {
-                cpp_parser::CppTokenKind::from(token.kind())
-                    == cpp_parser::CppTokenKind::Identifier
+                cpp_parser::CppTokenKind::from(token.kind()) == cpp_parser::CppTokenKind::Identifier
                     && token.text() == name
             })
             .last()
@@ -3259,13 +3260,19 @@ fn qualified_declarations(root: &CppSyntaxNode) -> Vec<(Binding, String, Option<
             // file wins" rule), and a signature's fallback label is read from exactly this field.
             node.children()
                 .filter(|child| {
-                    !matches!(CppSyntaxKind::from(child.kind()), CppSyntaxKind::CompoundStat)
+                    !matches!(
+                        CppSyntaxKind::from(child.kind()),
+                        CppSyntaxKind::CompoundStat
+                    )
                 })
                 .find_map(|child| {
                     child
                         .descendants()
                         .find(|child| {
-                            matches!(CppSyntaxKind::from(child.kind()), CppSyntaxKind::ParameterList)
+                            matches!(
+                                CppSyntaxKind::from(child.kind()),
+                                CppSyntaxKind::ParameterList
+                            )
                         })
                         .map(|list| crate::inlay::tidy_list_text(&list.text().to_string()).0)
                 }),

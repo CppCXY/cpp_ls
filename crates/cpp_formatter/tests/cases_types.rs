@@ -65,19 +65,13 @@ fn types_03_reference() {
 /// `04_rvalue`
 #[test]
 fn types_04_rvalue() {
-    check(
-        r#"void r(std::string&& s);"#,
-        r#"void r(std::string &&s);"#,
-    );
+    check(r#"void r(std::string&& s);"#, r#"void r(std::string &&s);"#);
 }
 
 /// `05_pointer_chain`
 #[test]
 fn types_05_pointer_chain() {
-    check(
-        r#"int **pp = &p;"#,
-        r#"int **pp = &p;"#,
-    );
+    check(r#"int **pp = &p;"#, r#"int **pp = &p;"#);
 }
 
 /// `06_const_ptr`

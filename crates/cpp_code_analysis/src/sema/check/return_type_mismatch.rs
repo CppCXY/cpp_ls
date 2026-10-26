@@ -70,7 +70,10 @@ impl Check for ReturnTypeMismatch {
                                 DiagnosticCode::ReturnTypeMismatch,
                                 cpp_parser::source_range(returned.text_range()),
                                 String::new(),
-                                t!("`return;` in a function declared to return `%{declared}`", declared = declared),
+                                t!(
+                                    "`return;` in a function declared to return `%{declared}`",
+                                    declared = declared
+                                ),
                             );
                         }
                     }
@@ -91,9 +94,10 @@ impl Check for ReturnTypeMismatch {
                         // `None` for one), asks the type relation first and the index only for the class question. Only
                         // `Refused` reports, so an unread class stays quiet — which is the rule the module's own note above
                         // is about.
-                        let conversion = crate::sema::convert::conversion(&from, &declared, |class| {
-                            super::a_class_can_be_built_from(context, class, &from)
-                        });
+                        let conversion =
+                            crate::sema::convert::conversion(&from, &declared, |class| {
+                                super::a_class_can_be_built_from(context, class, &from)
+                            });
                         if !conversion.is_refused() {
                             continue;
                         }

@@ -1651,7 +1651,9 @@ fn a_qualified_definition_is_a_fact() {
         .collect();
     println!("facts: {names:?}");
     assert!(
-        names.iter().any(|(name, qualified)| name == "From" && qualified == "LuaSource::From"),
+        names
+            .iter()
+            .any(|(name, qualified)| name == "From" && qualified == "LuaSource::From"),
         "the out-of-class definition is a fact of its own: {names:?}"
     );
 }
@@ -1728,7 +1730,11 @@ fn an_unresolved_include_does_not_erase_the_files_own_facts() {
         .index()
         .summary(std::path::Path::new("/p/a.cpp"))
         .expect("indexed");
-    let found: Vec<String> = summary.declarations.iter().map(|fact| fact.qualified_name()).collect();
+    let found: Vec<String> = summary
+        .declarations
+        .iter()
+        .map(|fact| fact.qualified_name())
+        .collect();
     println!("with unresolved includes: {found:?}");
     if let Some(view) = session.view(std::path::Path::new("/p/a.cpp")) {
         println!("rendering: {:?}", view.source);
@@ -1787,7 +1793,10 @@ fn a_template_parameter_is_not_a_declaration_at_file_scope() {
         "the parameters live on the fact, which is what substitution reads"
     );
 
-    match session.index().definitions("_Tp", std::path::Path::new("/p/a.cpp")) {
+    match session
+        .index()
+        .definitions("_Tp", std::path::Path::new("/p/a.cpp"))
+    {
         Known::Unknown(reason) => println!("lookup `_Tp`: {reason:?}"),
         Known::Yes(found) => panic!(
             "`_Tp` is a template parameter, so no declaration is findable by that name: {:?}",
@@ -1986,7 +1995,9 @@ fn a_return_type_a_directive_splits_is_the_branch_this_compilation_takes() {
         "the `#else` branch is the one this configuration compiles, and one answer is named: {found:?}"
     );
     assert!(
-        found.iter().any(|(name, returns)| *name == "plain" && *returns == Some("int")),
+        found
+            .iter()
+            .any(|(name, returns)| *name == "plain" && *returns == Some("int")),
         "and an unsplit one keeps its type: {found:?}"
     );
 }

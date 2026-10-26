@@ -1194,16 +1194,13 @@ fn own_guard_region_from_tokens(
 ) -> Option<usize> {
     match crate::guards::detect_guard_from_tokens(&preprocessing.directives, tokens) {
         crate::guards::Guard::Macro(_) => Some(0),
-        crate::guards::Guard::PragmaOnce => crate::guards::has_a_macro_guard_from_tokens(
-            &preprocessing.directives,
-            tokens,
-        )
-        .then_some(0),
+        crate::guards::Guard::PragmaOnce => {
+            crate::guards::has_a_macro_guard_from_tokens(&preprocessing.directives, tokens)
+                .then_some(0)
+        }
         crate::guards::Guard::None => None,
     }
 }
-
-
 
 /// Treat everything inside a file's own include guard as **unconditional**.
 ///

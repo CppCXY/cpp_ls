@@ -38,7 +38,9 @@ fn the_three_questions_are_affordable() {
     session.add_project_files([header.clone()]);
     session.index_everything();
 
-    let view = session.view_of_the_file(&header).expect("the header parses");
+    let view = session
+        .view_of_the_file(&header)
+        .expect("the header parses");
     let at = source
         .find("UpdateCodeStyle")
         .expect("the header declares it")
@@ -64,7 +66,8 @@ fn the_three_questions_are_affordable() {
         "raw references: {:?}",
         raw.iter()
             .map(|(file, range)| (
-                file.file_name().map(|name| name.to_string_lossy().into_owned()),
+                file.file_name()
+                    .map(|name| name.to_string_lossy().into_owned()),
                 range.start_offset,
                 session.files().held(file).is_some()
             ))
@@ -99,7 +102,10 @@ fn the_three_questions_are_affordable() {
     let definition = project.join("CodeFormatCLib/src/CodeFormat.cpp");
     if let Some(view) = session.view_of_the_file(&definition) {
         let source = std::fs::read_to_string(&definition).expect("the source reads");
-        let at = source.find("CodeFormat::UpdateCodeStyle").expect("the definition") + 1;
+        let at = source
+            .find("CodeFormat::UpdateCodeStyle")
+            .expect("the definition")
+            + 1;
         let started = Instant::now();
         let outgoing = outgoing_calls_of(&session, &view, at);
         println!(

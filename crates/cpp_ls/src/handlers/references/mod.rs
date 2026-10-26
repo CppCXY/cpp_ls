@@ -428,7 +428,6 @@ pub fn name_level_offsets<F: cpp_code_analysis::FileProvider + Clone>(
     declaring.sort();
     declaring.dedup();
 
-
     let mut found: Vec<(std::path::PathBuf, cpp_parser::SourceRange)> = Vec::new();
     let push = |file: &std::path::Path,
                 range: cpp_parser::SourceRange,
@@ -456,8 +455,10 @@ pub fn name_level_offsets<F: cpp_code_analysis::FileProvider + Clone>(
     );
     // **One parse per candidate file, and only if it has an occurrence.** The scopes are what says which class an
     // occurrence is inside, and a file with no occurrence of the name is never parsed.
-    let mut parsed: std::collections::HashMap<std::path::PathBuf, Option<cpp_code_analysis::FileView>> =
-        std::collections::HashMap::new();
+    let mut parsed: std::collections::HashMap<
+        std::path::PathBuf,
+        Option<cpp_code_analysis::FileView>,
+    > = std::collections::HashMap::new();
     for (file, ranges) in references.found {
         let scopes = match &owner {
             Some(class) => {
@@ -645,17 +646,17 @@ fn an_occurrence_of_another_class<F: cpp_code_analysis::FileProvider + Clone>(
     if let Some(access) = cpp_code_analysis::sema::resolve::member_access_at(&view.root, offset)
         && access.member_range.start_offset == offset
     {
-        let at = cpp_code_analysis::file::coordinates::ReadingOffset::new(
-            usize::from(access.object.text_range().start()),
-        );
+        let at = cpp_code_analysis::file::coordinates::ReadingOffset::new(usize::from(
+            access.object.text_range().start(),
+        ));
         return match session.type_at(view, at) {
-            Known::Yes(found) => cpp_code_analysis::sema::types::parse_type_spelling(
-                &found.type_of,
-            )
-            .class_name()
-            .is_some_and(|class| {
-                crate::handlers::implementation::last_segment_of(class) != owner
-            }),
+            Known::Yes(found) => {
+                cpp_code_analysis::sema::types::parse_type_spelling(&found.type_of)
+                    .class_name()
+                    .is_some_and(|class| {
+                        crate::handlers::implementation::last_segment_of(class) != owner
+                    })
+            }
             _ => false,
         };
     }
@@ -850,7 +851,8 @@ mod a_file_the_session_does_not_hold {
 
         // The `size` of line 2, counted from zero: its position is line 1, character 8.
         let at = "struct Widget {\n    int ".len();
-        let found = position_of(&session, &header, at).expect("the file is read for its line index");
+        let found =
+            position_of(&session, &header, at).expect("the file is read for its line index");
         println!("{header:?} at {at} → {found:?}");
         assert_eq!(found.line, 1);
         assert_eq!(found.character, 8);

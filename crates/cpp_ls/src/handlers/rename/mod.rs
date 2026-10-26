@@ -202,25 +202,26 @@ pub fn workspace_edit_of_renaming_a_symbol<F: cpp_code_analysis::FileProvider + 
         Known::Yes(defined) => defined,
         _ => return None,
     };
-    if defined
-        .found
-        .iter()
-        .any(|definition| definition.fact.local)
-    {
+    if defined.found.iter().any(|definition| definition.fact.local) {
         let locals =
             cpp_code_analysis::sema::declarations::local_references_of(&view.scopes, &view.root);
         // **The cursor's own name starts where the entry says**, not where the client's column does: a cursor lands
         // *inside* an identifier (`more` at column 9 is its second letter), while `local_references_of` records the
         // first byte of the name. Comparing the two raw offsets answers "no such local" for every cursor that is not
         // exactly on the first letter.
-        let (_, at_the_cursor) =
-            cpp_code_analysis::sema::resolve::name_at_including_directives(&view.root, offset.get())?;
+        let (_, at_the_cursor) = cpp_code_analysis::sema::resolve::name_at_including_directives(
+            &view.root,
+            offset.get(),
+        )?;
 
         let uses: Vec<u32> = locals
             .iter()
             .find(|entry| {
                 entry.declared_at as usize == at_the_cursor.start_offset
-                    || entry.uses.iter().any(|at| *at as usize == at_the_cursor.start_offset)
+                    || entry
+                        .uses
+                        .iter()
+                        .any(|at| *at as usize == at_the_cursor.start_offset)
             })
             .map(|entry| entry.uses.clone())
             .unwrap_or_default();
@@ -233,9 +234,10 @@ pub fn workspace_edit_of_renaming_a_symbol<F: cpp_code_analysis::FileProvider + 
         for at in ranges {
             // The name's own extent at that offset — a local's use is an identifier, and the declaration's range is
             // the identifier in its declarator.
-            let Some((_, range)) =
-                cpp_code_analysis::sema::resolve::name_at_including_directives(&view.root, at as usize)
-            else {
+            let Some((_, range)) = cpp_code_analysis::sema::resolve::name_at_including_directives(
+                &view.root,
+                at as usize,
+            ) else {
                 continue;
             };
             let (Some(start), Some(end)) = (

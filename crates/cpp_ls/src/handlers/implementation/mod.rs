@@ -121,11 +121,8 @@ pub fn definitions_of<F: FileProvider + Clone>(
     // the *definition* in the `.cpp` carries `Base` — so a comparison on the fact's own scope would never match. The
     // cursor's enclosing class is the same answer both declarations were written under, and it is what Find
     // References and Go to Definition use for the same reason.
-    let owner = crate::handlers::references::the_class_the_cursor_is_in(
-        &view.scopes,
-        &view.root,
-        offset,
-    );
+    let owner =
+        crate::handlers::references::the_class_the_cursor_is_in(&view.scopes, &view.root, offset);
     let mut wanted: Vec<(String, Option<String>)> = found
         .found
         .iter()
@@ -367,14 +364,8 @@ mod a_declaration_in_a_header {
     #[test]
     fn answers_the_body_in_the_source_file() {
         let files = MemoryFiles::new()
-            .with_file(
-                "/p/base.h",
-                "struct Base {\n    virtual void run();\n};\n",
-            )
-            .with_file(
-                "/p/base.cpp",
-                "#include \"base.h\"\nvoid Base::run() { }\n",
-            );
+            .with_file("/p/base.h", "struct Base {\n    virtual void run();\n};\n")
+            .with_file("/p/base.cpp", "#include \"base.h\"\nvoid Base::run() { }\n");
         let providers = SessionFiles::new(OpenDocuments::new(), files);
         let mut session = Session::with_config(
             "/p",

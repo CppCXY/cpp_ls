@@ -38,37 +38,25 @@ fn style() -> Style {
 /// `01_call`
 #[test]
 fn spacing_01_call() {
-    check(
-        r#"int x=f(a,b);"#,
-        r#"int x = f(a, b);"#,
-    );
+    check(r#"int x=f(a,b);"#, r#"int x = f(a, b);"#);
 }
 
 /// `02_pointer`
 #[test]
 fn spacing_02_pointer() {
-    check(
-        r#"int *p = &x;"#,
-        r#"int *p = &x;"#,
-    );
+    check(r#"int *p = &x;"#, r#"int *p = &x;"#);
 }
 
 /// `03_cast`
 #[test]
 fn spacing_03_cast() {
-    check(
-        r#"void f() { (void)i; }"#,
-        r#"void f() { (void)i; }"#,
-    );
+    check(r#"void f() { (void)i; }"#, r#"void f() { (void)i; }"#);
 }
 
 /// `04_operators`
 #[test]
 fn spacing_04_operators() {
-    check(
-        r#"int y = a+b*c-d/e;"#,
-        r#"int y = a + b * c - d / e;"#,
-    );
+    check(r#"int y = a+b*c-d/e;"#, r#"int y = a + b * c - d / e;"#);
 }
 
 /// `05_compare`
@@ -92,10 +80,7 @@ fn spacing_06_template_args() {
 /// `07_angle_space`
 #[test]
 fn spacing_07_angle_space() {
-    check(
-        r#"std::vector<int> v;"#,
-        r#"std::vector<int> v;"#,
-    );
+    check(r#"std::vector<int> v;"#, r#"std::vector<int> v;"#);
 }
 
 /// `08_lambda_bracket`
@@ -110,17 +95,11 @@ fn spacing_08_lambda_bracket() {
 /// `09_braced_list`
 #[test]
 fn spacing_09_braced_list() {
-    check(
-        r#"int a[3] = {1,2,3};"#,
-        r#"int a[3] = {1, 2, 3};"#,
-    );
+    check(r#"int a[3] = {1,2,3};"#, r#"int a[3] = {1, 2, 3};"#);
 }
 
 /// `10_ternary`
 #[test]
 fn spacing_10_ternary() {
-    check(
-        r#"int t = a ? b : c;"#,
-        r#"int t = a ? b : c;"#,
-    );
+    check(r#"int t = a ? b : c;"#, r#"int t = a ? b : c;"#);
 }

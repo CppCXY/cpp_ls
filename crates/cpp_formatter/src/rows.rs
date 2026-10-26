@@ -32,7 +32,9 @@ pub fn paddings(stream: &Stream<'_>, roles: &Roles, style: &Style) -> Vec<usize>
     let mut start = 0usize;
     while start < all.len() {
         let mut end = start + 1;
-        while end < all.len() && line_of(stream, all[end].open) == line_of(stream, all[end - 1].open) + 1 {
+        while end < all.len()
+            && line_of(stream, all[end].open) == line_of(stream, all[end - 1].open) + 1
+        {
             end += 1;
         }
         if end - start >= 2 {
@@ -90,7 +92,10 @@ fn rows(stream: &Stream<'_>) -> Vec<Row> {
                             end_of_line(after)
                         };
                         if ends {
-                            rows.push(Row { open: index, close: cursor });
+                            rows.push(Row {
+                                open: index,
+                                close: cursor,
+                            });
                         }
                         break;
                     }
@@ -110,7 +115,13 @@ struct Measured {
 }
 
 /// **Pad one run's columns to the widest cell of each.**
-fn align_run(stream: &Stream<'_>, roles: &Roles, style: &Style, run: &[Row], paddings: &mut [usize]) {
+fn align_run(
+    stream: &Stream<'_>,
+    roles: &Roles,
+    style: &Style,
+    run: &[Row],
+    paddings: &mut [usize],
+) {
     let mut measured: Vec<Measured> = Vec::new();
     for row in run {
         let mut natural = vec![0usize; stream.tokens.len()];
@@ -126,8 +137,12 @@ fn align_run(stream: &Stream<'_>, roles: &Roles, style: &Style, run: &[Row], pad
         let mut depth = 0isize;
         for index in row.open + 1..row.close {
             match stream.tokens[index].kind {
-                CppTokenKind::LeftBrace | CppTokenKind::LeftParen | CppTokenKind::LeftBracket => depth += 1,
-                CppTokenKind::RightBrace | CppTokenKind::RightParen | CppTokenKind::RightBracket => depth -= 1,
+                CppTokenKind::LeftBrace | CppTokenKind::LeftParen | CppTokenKind::LeftBracket => {
+                    depth += 1
+                }
+                CppTokenKind::RightBrace
+                | CppTokenKind::RightParen
+                | CppTokenKind::RightBracket => depth -= 1,
                 CppTokenKind::Comma if depth == 0 => {
                     cells.push(Vec::new());
                     continue;
@@ -148,7 +163,11 @@ fn align_run(stream: &Stream<'_>, roles: &Roles, style: &Style, run: &[Row], pad
         });
     }
 
-    let columns = measured.iter().map(|row| row.cells.len()).max().unwrap_or(0);
+    let columns = measured
+        .iter()
+        .map(|row| row.cells.len())
+        .max()
+        .unwrap_or(0);
     if columns < 2 {
         return;
     }
@@ -156,7 +175,8 @@ fn align_run(stream: &Stream<'_>, roles: &Roles, style: &Style, run: &[Row], pad
     for row in &measured {
         for (column, cell) in row.cells.iter().enumerate() {
             if let (Some(first), Some(last)) = (cell.first(), cell.last()) {
-                let width = row.natural[*last] + stream.tokens[*last].text.chars().count() - row.natural[*first];
+                let width = row.natural[*last] + stream.tokens[*last].text.chars().count()
+                    - row.natural[*first];
                 widest[column] = widest[column].max(width);
             }
         }
@@ -182,7 +202,13 @@ fn align_run(stream: &Stream<'_>, roles: &Roles, style: &Style, run: &[Row], pad
             .cells
             .get(last)
             .and_then(|cell| cell.first())
-            .map_or(0, |first| starts.get(last).copied().unwrap_or(0).saturating_sub(row.natural[*first]));
+            .map_or(0, |first| {
+                starts
+                    .get(last)
+                    .copied()
+                    .unwrap_or(0)
+                    .saturating_sub(row.natural[*first])
+            });
         paddings[row.close] += close_target.saturating_sub(row.natural[row.close] + shift);
     }
 }
@@ -202,7 +228,9 @@ mod tests {
 
     #[test]
     fn the_rows_of_a_table_include_the_last_one_without_a_comma() {
-        let stream = crate::tokens::stream("int t[] = {\n  {\"a\", 1},\n  {\"bb\", 2},\n  {\"ccc\", 3}\n};\n");
+        let stream = crate::tokens::stream(
+            "int t[] = {\n  {\"a\", 1},\n  {\"bb\", 2},\n  {\"ccc\", 3}\n};\n",
+        );
         let found = rows(&stream);
         assert_eq!(found.len(), 3, "{found:?}");
     }
@@ -224,10 +252,7 @@ mod tests {
         assert!(!non_zero.is_empty(), "{found:?}");
         // Every row's `}` carries the same padding.
         let stream = crate::tokens::stream("int t[] = {\n  {\"a\", 1},\n  {\"ccc\", 3}\n};\n");
-        let closes: Vec<usize> = rows(&stream)
-            .iter()
-            .map(|row| found[row.close])
-            .collect();
+        let closes: Vec<usize> = rows(&stream).iter().map(|row| found[row.close]).collect();
         assert_eq!(closes.len(), 2);
         assert_eq!(closes[0], closes[1], "{closes:?}");
     }

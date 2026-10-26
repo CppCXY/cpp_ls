@@ -155,7 +155,8 @@ pub struct DeclFact {
     /// resolved — can answer properly, and the flag is the only thing that says it is worth asking. Measured over
     /// three standard-library headers (`facts_vs_rendering`): 12 of 1589 facts disagreed with the rendering about the
     /// return type before this flag existed, every one of them this shape.
-    pub split_by_a_directive: bool,    /// For a class-like declaration, the base classes it was written with, in declaration order.
+    pub split_by_a_directive: bool,
+    /// For a class-like declaration, the base classes it was written with, in declaration order.
     ///
     /// Spelled as written — `B`, `ns::C`, `Base<int>` — for the same reason [`DeclFact::type_of`] is: a consumer
     /// resolves them with the machinery that already exists, and `Unknown` where it cannot go beats a guess.
@@ -1117,7 +1118,11 @@ impl FileSummary {
                 .map(DeclFact::heap_bytes)
                 .sum::<usize>()
             + self.macros.iter().map(MacroFact::heap_bytes).sum::<usize>()
-            + self.includes.iter().map(IncludeFact::heap_bytes).sum::<usize>()
+            + self
+                .includes
+                .iter()
+                .map(IncludeFact::heap_bytes)
+                .sum::<usize>()
             + self.guards.regions.len() * std::mem::size_of::<cpp_parser::SourceRange>()
             + self
                 .macro_readings
@@ -1129,16 +1134,8 @@ impl FileSummary {
                 })
                 .sum::<usize>()
             + self.use_filter.len()
-            + self
-                .modules
-                .module
-                .as_ref()
-                .map_or(0, |name| name.len())
-            + self
-                .modules
-                .partition
-                .as_ref()
-                .map_or(0, |name| name.len())
+            + self.modules.module.as_ref().map_or(0, |name| name.len())
+            + self.modules.partition.as_ref().map_or(0, |name| name.len())
             + self
                 .modules
                 .imports
@@ -1159,12 +1156,16 @@ impl MacroDefinitions {
     pub fn accounting(&self) -> (usize, usize) {
         let mut bytes = 0usize;
         for (key, definition) in &self.parsed {
-            bytes += std::mem::size_of::<((std::path::PathBuf, usize), Option<std::sync::Arc<MacroDef>>)>();
+            bytes += std::mem::size_of::<(
+                (std::path::PathBuf, usize),
+                Option<std::sync::Arc<MacroDef>>,
+            )>();
             bytes += key.0.as_os_str().len();
             if let Some(definition) = definition {
                 bytes += std::mem::size_of::<MacroDef>() + definition.name.len();
                 if let Some(params) = &definition.params {
-                    bytes += params.len() * std::mem::size_of::<crate::preprocess::macros::Parameter>();
+                    bytes +=
+                        params.len() * std::mem::size_of::<crate::preprocess::macros::Parameter>();
                 }
             }
         }
@@ -1205,9 +1206,10 @@ impl MacroDefinitions {
             self.parsed.clear();
             self.bytes = 0;
         }
-        self.bytes += std::mem::size_of::<
-            ((std::sync::Arc<std::path::Path>, usize), Option<std::sync::Arc<MacroDef>>),
-        >();
+        self.bytes += std::mem::size_of::<(
+            (std::sync::Arc<std::path::Path>, usize),
+            Option<std::sync::Arc<MacroDef>>,
+        )>();
         self.bytes += std::mem::size_of::<MacroDef>();
         if let Some(definition) = &definition {
             self.bytes += definition.name.len();
@@ -1483,7 +1485,15 @@ pub fn macros_in_force_before_the_include<'a>(
 ) -> ClosureEvidence {
     {
         let cache = crate::index::walk_cache::WalkCache::new();
-        walk_the_translation_unit(includer, Some(before), Some(0), look_up, seed, definitions, &cache)
+        walk_the_translation_unit(
+            includer,
+            Some(before),
+            Some(0),
+            look_up,
+            seed,
+            definitions,
+            &cache,
+        )
     }
 }
 

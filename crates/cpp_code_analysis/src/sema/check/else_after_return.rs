@@ -41,7 +41,8 @@ impl Check for ElseAfterReturn {
                 .is_none()
             {
                 continue;
-            }            context.add(
+            }
+            context.add(
                 DiagnosticCode::ElseAfterReturn,
                 cpp_parser::source_range(else_branch.syntax().text_range()),
                 "else".to_string(),

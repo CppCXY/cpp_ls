@@ -1162,7 +1162,8 @@ impl ScopeWalker<'_> {
         // `qualified_declarations` makes for the same reason. Both halves are asked together: only a declaration of
         // *this* shape is a statement, and every other declaration in a body — a local, a parameter, a nested type —
         // is untouched.
-        if (declaration_is_qualified(node) || (specifier_is_qualified && is_unnamed_declaration(node)))
+        if (declaration_is_qualified(node)
+            || (specifier_is_qualified && is_unnamed_declaration(node)))
             && node.ancestors().any(|ancestor| {
                 matches!(
                     CppSyntaxKind::from(ancestor.kind()),
@@ -1173,7 +1174,9 @@ impl ScopeWalker<'_> {
             return;
         }
 
-        if declaration_is_qualified(node) || (specifier_is_qualified && is_unnamed_declaration(node)) {
+        if declaration_is_qualified(node)
+            || (specifier_is_qualified && is_unnamed_declaration(node))
+        {
             if !self.names_a_scope_this_file_has(node) {
                 // **The name is not this file's — the body is.** `size_t LuaSource::GetLine(size_t offset) const
                 // { … }` declares nothing at file scope: the class is in a header this file only includes. That
@@ -2878,7 +2881,8 @@ fn is_qualified(node: &CppSyntaxNode) -> bool {
 ///
 /// **The name node's own tokens only**, so it answers `None` for a name whose segments are child nodes
 /// (`Outer<T>::grow`) — see [`qualified_name`], which reads the subtree instead and says why.
-fn last_identifier(node: &CppSyntaxNode) -> Option<cpp_parser::CppSyntaxToken> {    node.children_with_tokens()
+fn last_identifier(node: &CppSyntaxNode) -> Option<cpp_parser::CppSyntaxToken> {
+    node.children_with_tokens()
         .filter_map(|child| child.into_token())
         .filter(|token| CppTokenKind::from(token.kind()) == CppTokenKind::Identifier)
         .last()

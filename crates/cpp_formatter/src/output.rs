@@ -50,7 +50,8 @@ pub fn replacement<'a>(source: &'a str, formatted: &'a str) -> Option<(usize, us
     let mut suffix = 0usize;
     while suffix < source_bytes.len() - prefix
         && suffix < formatted_bytes.len() - prefix
-        && source_bytes[source_bytes.len() - 1 - suffix] == formatted_bytes[formatted_bytes.len() - 1 - suffix]
+        && source_bytes[source_bytes.len() - 1 - suffix]
+            == formatted_bytes[formatted_bytes.len() - 1 - suffix]
     {
         suffix += 1;
     }
@@ -100,7 +101,10 @@ mod tests {
         let xml = replacements_xml("int  a;\n", "int a;\n", None);
         assert!(xml.starts_with("<?xml version='1.0'?>\n"), "{xml}");
         assert!(xml.contains("incomplete_format='false'"), "{xml}");
-        assert!(xml.contains("<replacement offset='4' length='1'></replacement>"), "{xml}");
+        assert!(
+            xml.contains("<replacement offset='4' length='1'></replacement>"),
+            "{xml}"
+        );
     }
 
     #[test]

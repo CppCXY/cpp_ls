@@ -64,12 +64,21 @@ pub enum Event {
         range: SourceRange,
     },
     /// `#else` / `#endif` — carried so that a condition's scope is known without re-lexing.
-    Else { range: SourceRange },
-    Endif { range: SourceRange },
+    Else {
+        range: SourceRange,
+    },
+    Endif {
+        range: SourceRange,
+    },
     /// `#define` — the export, parsed by the same reader the preprocessor uses.
-    Define { definition: MacroDef },
+    Define {
+        definition: MacroDef,
+    },
     /// `#undef NAME` — the anti-export, and why a surface is a sequence rather than a set.
-    Undef { name: String, range: SourceRange },
+    Undef {
+        name: String,
+        range: SourceRange,
+    },
     /// `#include "x"` / `#include <x>`.
     Include {
         /// As written: `"x.h"`, `<vector>`, or a macro name a caller has to expand.
@@ -78,7 +87,10 @@ pub enum Event {
         range: SourceRange,
     },
     /// `#pragma`, `#error`, `#include_next`, `#import`, anything else — kept in sequence so an interpreter sees it.
-    Other { spelling: String, range: SourceRange },
+    Other {
+        spelling: String,
+        range: SourceRange,
+    },
 }
 
 /// **One file's directives**: everything an effect needs, and nothing a parse would add.
@@ -136,7 +148,9 @@ impl Surface {
         self.events
             .iter()
             .filter_map(|event| match event {
-                Event::Include { spelling, angled, .. } => Some((spelling.as_str(), *angled)),
+                Event::Include {
+                    spelling, angled, ..
+                } => Some((spelling.as_str(), *angled)),
                 _ => None,
             })
             .collect()
@@ -241,7 +255,9 @@ pub fn surface_of(path: &Path, text: &str) -> Surface {
                     .iter()
                     .map(|token| Token::new(token.kind, spelling(text, token), token.range))
                     .collect();
-                if let Some(definition) = crate::preprocess::macros::parse_define(&from_the_name, range) {
+                if let Some(definition) =
+                    crate::preprocess::macros::parse_define(&from_the_name, range)
+                {
                     surface.events.push(Event::Define { definition });
                 }
             }
@@ -301,7 +317,11 @@ pub fn surface_of(path: &Path, text: &str) -> Surface {
             }),
         }
 
-        at = if end < tokens.len() { end + 1 } else { tokens.len() };
+        at = if end < tokens.len() {
+            end + 1
+        } else {
+            tokens.len()
+        };
     }
 
     surface
@@ -436,7 +456,8 @@ mod tests {
         from_surface.sort();
         from_surface.dedup();
 
-        let summary = crate::index::summarize(Path::new("/p/a.h"), text, crate::SummaryKey::new(0, 0));
+        let summary =
+            crate::index::summarize(Path::new("/p/a.h"), text, crate::SummaryKey::new(0, 0));
         let mut from_parse: Vec<&str> = summary
             .macros
             .iter()

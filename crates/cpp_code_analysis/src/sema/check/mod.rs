@@ -175,7 +175,10 @@ pub fn run_check<T: Check>(context: &mut CheckContext<'_>) {
             if took.as_millis() > 0 {
                 eprintln!(
                     "[check] {:<32} {:>6} ms  {}",
-                    std::any::type_name::<T>().rsplit("::").next().unwrap_or("?"),
+                    std::any::type_name::<T>()
+                        .rsplit("::")
+                        .next()
+                        .unwrap_or("?"),
                     took.as_millis(),
                     context.path.display()
                 );

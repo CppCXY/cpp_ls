@@ -1929,7 +1929,11 @@ fn a_diagnostic_follows_the_locale() {
             .unwrap_or_else(|| panic!("the unused check reports it: {list:?}"))
     };
 
-    assert!(unused(&english).contains("never used"), "{:?}", unused(&english));
+    assert!(
+        unused(&english).contains("never used"),
+        "{:?}",
+        unused(&english)
+    );
     assert!(
         unused(&chinese).contains("从未使用"),
         "the message is translated: {:?}",

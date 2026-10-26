@@ -141,7 +141,10 @@ fn an_idle_session_sends_the_client_nothing() {
         .iter()
         .filter_map(|message| message.get("method").and_then(Value::as_str))
         .collect();
-    let refreshes = methods.iter().filter(|method| method.contains("refresh")).count();
+    let refreshes = methods
+        .iter()
+        .filter(|method| method.contains("refresh"))
+        .count();
     assert!(
         refreshes <= EDIT_BUDGET,
         "one edit caused {refreshes} refresh request(s) (budget {EDIT_BUDGET}): {methods:?}"

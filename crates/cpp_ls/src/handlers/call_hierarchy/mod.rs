@@ -35,15 +35,14 @@
 //! `incomingCalls` is one references query plus the file texts of the callers; nothing is parsed. `outgoingCalls` parses
 //! the file that holds the body once — the same parse a hover would do — and then asks `definitions` per call.
 
-
 use cpp_code_analysis::{FileProvider, Known, Session};
-use std::collections::HashMap;
-use std::path::PathBuf;
 use lsp_types::{
     CallHierarchyIncomingCall, CallHierarchyIncomingCallsParams, CallHierarchyItem,
     CallHierarchyOutgoingCall, CallHierarchyOutgoingCallsParams, CallHierarchyPrepareParams,
     CallHierarchyServerCapability, ClientCapabilities, Range, ServerCapabilities, SymbolKind,
 };
+use std::collections::HashMap;
+use std::path::PathBuf;
 use tokio_util::sync::CancellationToken;
 
 use super::RegisterCapabilities;
@@ -232,10 +231,9 @@ pub fn incoming_calls_of<F: FileProvider + Clone>(
             continue;
         };
         let call = Range::new(start, end);
-        match callers
-            .iter_mut()
-            .find(|(item, _)| item.uri == caller.uri && item.selection_range == caller.selection_range)
-        {
+        match callers.iter_mut().find(|(item, _)| {
+            item.uri == caller.uri && item.selection_range == caller.selection_range
+        }) {
             Some((_, ranges)) => {
                 if !ranges.contains(&call) {
                     ranges.push(call);
@@ -412,7 +410,6 @@ pub fn outgoing_calls_of<F: FileProvider + Clone>(
     view: &cpp_code_analysis::FileView,
     offset: usize,
 ) -> Vec<CallHierarchyOutgoingCall> {
-
     let Some(body) = the_body_of(view, offset) else {
         return Vec::new();
     };
@@ -631,11 +628,7 @@ int both(int a, int b) {
                 .map(|call| (call.from.name.clone(), call.from_ranges.len()))
                 .collect::<Vec<_>>()
         );
-        assert_eq!(
-            incoming.len(),
-            1,
-            "one caller, `both`: {incoming:?}"
-        );
+        assert_eq!(incoming.len(), 1, "one caller, `both`: {incoming:?}");
         assert_eq!(incoming[0].from.name, "both");
         assert_eq!(
             incoming[0].from_ranges.len(),
@@ -651,6 +644,9 @@ int both(int a, int b) {
         let path = PathBuf::from("/p/base.h");
         let view = session.view_of_the_file(&path).expect("the header parses");
         let at = 0;
-        assert!(item_at(&session, &view, at).is_none(), "a file has no function at 0");
+        assert!(
+            item_at(&session, &view, at).is_none(),
+            "a file has no function at 0"
+        );
     }
 }

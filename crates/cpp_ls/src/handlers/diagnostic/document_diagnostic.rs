@@ -77,7 +77,8 @@ pub async fn on_pull_document_diagnostic(
             None => (None, false),
         };
         let was = found.as_ref().map(|items| items.len());
-        let (items, to_remember) = the_report(found, context.analysis().last_report(&path), settled);
+        let (items, to_remember) =
+            the_report(found, context.analysis().last_report(&path), settled);
         log::debug!(
             "pull: {} -> {} item(s) (analysis said {:?}, settled {settled}, repeated {})",
             path.display(),
@@ -118,7 +119,10 @@ fn the_report(
     found: Option<Vec<lsp_types::Diagnostic>>,
     last: Option<std::sync::Arc<Vec<lsp_types::Diagnostic>>>,
     settled: bool,
-) -> (Vec<lsp_types::Diagnostic>, Option<Vec<lsp_types::Diagnostic>>) {
+) -> (
+    Vec<lsp_types::Diagnostic>,
+    Option<Vec<lsp_types::Diagnostic>>,
+) {
     let held = last.map(|held| (*held).clone());
     match found {
         Some(items) if settled => (items.clone(), Some(items)),
@@ -126,7 +130,10 @@ fn the_report(
             let mut merged = items;
             if let Some(held) = held {
                 for diagnostic in held {
-                    if !merged.iter().any(|sent| the_same_diagnostic(sent, &diagnostic)) {
+                    if !merged
+                        .iter()
+                        .any(|sent| the_same_diagnostic(sent, &diagnostic))
+                    {
                         merged.push(diagnostic);
                     }
                 }
@@ -179,9 +186,13 @@ mod tests {
         let held = std::sync::Arc::new(vec![a_diagnostic("from the last report")]);
 
         // A settled answer is the final word, even when it is empty.
-        let (sent, remember) = the_report(Some(Vec::new()), Some(std::sync::Arc::clone(&held)), true);
+        let (sent, remember) =
+            the_report(Some(Vec::new()), Some(std::sync::Arc::clone(&held)), true);
         assert!(sent.is_empty());
-        assert!(remember.is_some(), "the settled answer is what gets repeated");
+        assert!(
+            remember.is_some(),
+            "the settled answer is what gets repeated"
+        );
 
         // An unsettled one is merged: the parse error it has, plus the finding it could not confirm.
         let (sent, remember) = the_report(

@@ -884,9 +884,15 @@ mod tests {
         let keys: Vec<&str> = StyleOption::ALL.iter().map(|option| option.key()).collect();
         let mut sorted = keys.clone();
         sorted.sort_unstable();
-        assert_eq!(keys, sorted, "the dump prints in the oracle's order, and rom_key relies on it");
+        assert_eq!(
+            keys, sorted,
+            "the dump prints in the oracle's order, and rom_key relies on it"
+        );
 
-        let mut indices: Vec<usize> = StyleOption::ALL.iter().map(|option| *option as usize).collect();
+        let mut indices: Vec<usize> = StyleOption::ALL
+            .iter()
+            .map(|option| *option as usize)
+            .collect();
         let count = indices.len();
         indices.sort_unstable();
         indices.dedup();

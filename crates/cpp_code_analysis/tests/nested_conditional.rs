@@ -44,7 +44,10 @@ fn unit_of(files: &[(&str, &str)], root: &str) -> TranslationUnit {
     let mut texts: HashMap<PathBuf, String> = HashMap::new();
     for (path, text) in files {
         let path = PathBuf::from(*path);
-        summaries.insert(path.clone(), indexer.index(&path, text, SummaryKey::new(0, 0)));
+        summaries.insert(
+            path.clone(),
+            indexer.index(&path, text, SummaryKey::new(0, 0)),
+        );
         texts.insert(path, text.to_string());
     }
     TranslationUnit::walk(
@@ -68,10 +71,13 @@ fn unit_of(files: &[(&str, &str)], root: &str) -> TranslationUnit {
 
 fn a_guarded_define_in_the_same_file_is_in_force_too() {
     let unit = unit_of(
-        &[(
-            "/p/same.h",
-            "#define SAME 1\n#ifdef SAME\n#define OWN_INSIDE 1\n#endif\n",
-        ), ("/p/root.cpp", "#include \"same.h\"\nint x;\n")],
+        &[
+            (
+                "/p/same.h",
+                "#define SAME 1\n#ifdef SAME\n#define OWN_INSIDE 1\n#endif\n",
+            ),
+            ("/p/root.cpp", "#include \"same.h\"\nint x;\n"),
+        ],
         "/p/root.cpp",
     );
     let own = unit.macro_at(std::path::Path::new("/p/same.h"), "OWN_INSIDE", usize::MAX);
@@ -115,5 +121,8 @@ fn a_guarded_define_is_in_force_after_the_include_that_defines_its_condition() {
     let inherited = unit
         .macro_at(std::path::Path::new("/p/root.cpp"), "INSIDE", usize::MAX)
         .expect("root.cpp includes guarded.h");
-    assert!(inherited.defined, "and it reaches the file that includes it");
+    assert!(
+        inherited.defined,
+        "and it reaches the file that includes it"
+    );
 }

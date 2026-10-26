@@ -665,7 +665,7 @@ pub fn decode(bytes: &[u8]) -> Result<FileSummary, DecodeError> {
             local: reader.u8()? != 0,
             in_namespace: reader.optional_string()?,
             clean: reader.u8()? != 0,
-        split_by_a_directive: reader.u8()? != 0,
+            split_by_a_directive: reader.u8()? != 0,
             guard: guard_from(reader.u32()?)?,
             access: access_from(reader.u8()?),
             exported: reader.u8()? != 0,

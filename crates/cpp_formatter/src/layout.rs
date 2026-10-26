@@ -318,29 +318,27 @@ fn matching_angle(stream: &Stream<'_>, open: usize) -> Option<usize> {
     use cpp_parser::CppTokenKind::*;
     let previous = stream.tokens.get(open.wrapping_sub(1))?;
     let after = stream.tokens.get(open + 1)?;
-    let opens_a_list = matches!(
-        previous.kind,
-        Identifier | Greater | TemplateKeyword
-    ) && matches!(
-        after.kind,
-        Identifier
-            | Greater
-            | ConstKeyword
-            | AutoKeyword
-            | VoidKeyword
-            | IntKeyword
-            | CharKeyword
-            | ShortKeyword
-            | LongKeyword
-            | FloatKeyword
-            | DoubleKeyword
-            | UnsignedKeyword
-            | SignedKeyword
-            | Star
-            | Ampersand
-            | LogicalAnd
-            | Scope
-    );
+    let opens_a_list = matches!(previous.kind, Identifier | Greater | TemplateKeyword)
+        && matches!(
+            after.kind,
+            Identifier
+                | Greater
+                | ConstKeyword
+                | AutoKeyword
+                | VoidKeyword
+                | IntKeyword
+                | CharKeyword
+                | ShortKeyword
+                | LongKeyword
+                | FloatKeyword
+                | DoubleKeyword
+                | UnsignedKeyword
+                | SignedKeyword
+                | Star
+                | Ampersand
+                | LogicalAnd
+                | Scope
+        );
     if !opens_a_list {
         return Option::None;
     }

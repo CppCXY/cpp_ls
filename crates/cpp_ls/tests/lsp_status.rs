@@ -323,11 +323,22 @@ fn every_feature_answers_what_the_project_holds() {
         .unwrap_or_default()
         .to_string();
 
-    ask(&mut server, &mut id, &mut rows, "hover", "textDocument/hover", position(&source_uri, member), &|result| {
-        let contents = result["contents"].to_string();
-        let count = contents.matches("LuaDiagnosticStyle").count();
-        (count, format!("`{}` → {}", trim(&member_line), trim(&contents)))
-    });
+    ask(
+        &mut server,
+        &mut id,
+        &mut rows,
+        "hover",
+        "textDocument/hover",
+        position(&source_uri, member),
+        &|result| {
+            let contents = result["contents"].to_string();
+            let count = contents.matches("LuaDiagnosticStyle").count();
+            (
+                count,
+                format!("`{}` → {}", trim(&member_line), trim(&contents)),
+            )
+        },
+    );
     // **A hover deep inside the out-of-line definition**, which is where a reader lives: the member used on the left
     // of a `.` (`_diagnosticStyle.code_style_check`) and the member itself. Reported as "分离定义的 cpp 文件里面没有
     // hover 结果" while Find References answered.
@@ -348,9 +359,16 @@ fn every_feature_answers_what_the_project_holds() {
             },
         );
     }
-    for (nth, what) in [(2usize, "hover (use in a .cpp)"), (3, "hover (member after a .)")] {
+    for (nth, what) in [
+        (2usize, "hover (use in a .cpp)"),
+        (3, "hover (member after a .)"),
+    ] {
         if let Some(use_at) = at(&text, "_diagnosticStyle", nth) {
-            let line = text.lines().nth(use_at.line as usize).unwrap_or_default().to_string();
+            let line = text
+                .lines()
+                .nth(use_at.line as usize)
+                .unwrap_or_default()
+                .to_string();
             ask(
                 &mut server,
                 &mut id,
@@ -360,7 +378,10 @@ fn every_feature_answers_what_the_project_holds() {
                 position(&source_uri, use_at),
                 &|result| {
                     let contents = result["contents"].to_string();
-                    (contents.matches("```").count(), format!("`{}`", trim(&line)))
+                    (
+                        contents.matches("```").count(),
+                        format!("`{}`", trim(&line)),
+                    )
                 },
             );
         }
@@ -375,7 +396,10 @@ fn every_feature_answers_what_the_project_holds() {
             position(&source_uri, member_at),
             &|result| {
                 let contents = result["contents"].to_string();
-                (contents.matches("bool").count(), format!("{}", trim(&contents)))
+                (
+                    contents.matches("bool").count(),
+                    format!("{}", trim(&contents)),
+                )
             },
         );
     }
@@ -388,10 +412,19 @@ fn every_feature_answers_what_the_project_holds() {
             &mut rows,
             "typeDefinition (auto)",
             "textDocument/typeDefinition",
-            position(&source_uri, Position { line: auto_at.line, character: auto_at.character + 5 }),
+            position(
+                &source_uri,
+                Position {
+                    line: auto_at.line,
+                    character: auto_at.character + 5,
+                },
+            ),
             &|result| {
                 let locations = locations_of(result);
-                (locations.len(), locations.first().cloned().unwrap_or_default())
+                (
+                    locations.len(),
+                    locations.first().cloned().unwrap_or_default(),
+                )
             },
         );
     }
@@ -421,7 +454,10 @@ fn every_feature_answers_what_the_project_holds() {
         position(&source_uri, member),
         &|result| {
             let locations = locations_of(result);
-            (locations.len(), locations.first().cloned().unwrap_or_default())
+            (
+                locations.len(),
+                locations.first().cloned().unwrap_or_default(),
+            )
         },
     );
     ask(
@@ -433,7 +469,10 @@ fn every_feature_answers_what_the_project_holds() {
         position(&header_uri, member_in_header),
         &|result| {
             let locations = locations_of(result);
-            (locations.len(), locations.first().cloned().unwrap_or_default())
+            (
+                locations.len(),
+                locations.first().cloned().unwrap_or_default(),
+            )
         },
     );
 
@@ -464,7 +503,10 @@ fn every_feature_answers_what_the_project_holds() {
         json!({ "textDocument": { "uri": source_uri }, "position": { "line": member.line, "character": member.character }, "context": { "includeDeclaration": true } }),
         &|result| {
             let locations = locations_of(result);
-            (locations.len(), locations.first().cloned().unwrap_or_default())
+            (
+                locations.len(),
+                locations.first().cloned().unwrap_or_default(),
+            )
         },
     );
     ask(
@@ -499,11 +541,20 @@ fn every_feature_answers_what_the_project_holds() {
             let edits = result["changes"].as_object().map(|changes| {
                 changes
                     .iter()
-                    .map(|(uri, edits)| format!("{}: {}", file_of(uri), edits.as_array().map(|array| array.len()).unwrap_or(0)))
+                    .map(|(uri, edits)| {
+                        format!(
+                            "{}: {}",
+                            file_of(uri),
+                            edits.as_array().map(|array| array.len()).unwrap_or(0)
+                        )
+                    })
                     .collect::<Vec<_>>()
             });
             let count = edits.as_ref().map(|list| list.len()).unwrap_or(0);
-            (count, edits.map(|list| list.join(" | ")).unwrap_or_default())
+            (
+                count,
+                edits.map(|list| list.join(" | ")).unwrap_or_default(),
+            )
         },
     );
 
@@ -578,7 +629,10 @@ fn every_feature_answers_what_the_project_holds() {
         "textDocument/semanticTokens/full",
         json!({ "textDocument": { "uri": source_uri } }),
         &|result| {
-            let count = result["data"].as_array().map(|data| data.len() / 5).unwrap_or(0);
+            let count = result["data"]
+                .as_array()
+                .map(|data| data.len() / 5)
+                .unwrap_or(0);
             (count, String::new())
         },
     );
@@ -614,7 +668,10 @@ fn every_feature_answers_what_the_project_holds() {
         "textDocument/diagnostic",
         json!({ "textDocument": { "uri": source_uri } }),
         &|result| {
-            let count = result["items"].as_array().map(|items| items.len()).unwrap_or(0);
+            let count = result["items"]
+                .as_array()
+                .map(|items| items.len())
+                .unwrap_or(0);
             let first = result["items"]
                 .as_array()
                 .and_then(|items| items.first())
@@ -634,9 +691,10 @@ fn every_feature_answers_what_the_project_holds() {
             "textDocument/completion",
             json!({ "textDocument": { "uri": source_uri }, "position": { "line": completion_at.line, "character": completion_at.character } }),
             &|result| {
-                let items = result.as_array().cloned().unwrap_or_else(|| {
-                    result["items"].as_array().cloned().unwrap_or_default()
-                });
+                let items = result
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_else(|| result["items"].as_array().cloned().unwrap_or_default());
                 let labels: Vec<String> = items
                     .iter()
                     .take(4)
@@ -677,7 +735,10 @@ fn every_feature_answers_what_the_project_holds() {
             if result.is_null() {
                 continue;
             }
-            let count = result["signatures"].as_array().map(|array| array.len()).unwrap_or(0);
+            let count = result["signatures"]
+                .as_array()
+                .map(|array| array.len())
+                .unwrap_or(0);
             let labels: Vec<String> = result["signatures"]
                 .as_array()
                 .map(|array| {
@@ -764,7 +825,10 @@ fn every_feature_answers_what_the_project_holds() {
         },
     );
     // **The table.**
-    println!("\n{:<22} {:<8} {:<5} {:<6} note", "feature", "answered", "n", "time");
+    println!(
+        "\n{:<22} {:<8} {:<5} {:<6} note",
+        "feature", "answered", "n", "time"
+    );
     for row in &rows {
         row.print();
     }
@@ -793,7 +857,11 @@ fn ask(
     if !answered {
         println!("  …{feature} → {}", trim(&answer.to_string()));
     }
-    let (count, note) = if answered { count(result) } else { (0, "null".to_string()) };
+    let (count, note) = if answered {
+        count(result)
+    } else {
+        (0, "null".to_string())
+    };
     rows.push(Row {
         feature: feature.to_string(),
         answered,
@@ -805,7 +873,13 @@ fn ask(
 fn trim(text: &str) -> String {
     let cleaned: String = text
         .chars()
-        .map(|character| if character == '\n' || character == '\r' { ' ' } else { character })
+        .map(|character| {
+            if character == '\n' || character == '\r' {
+                ' '
+            } else {
+                character
+            }
+        })
         .collect();
     let cleaned = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
     if cleaned.len() > 70 {
@@ -823,7 +897,9 @@ fn locations_of(result: &Value) -> Vec<String> {
     let mut locations = Vec::new();
     let mut push = |location: &Value| {
         let uri = location["uri"].as_str().unwrap_or_default();
-        let line = location["range"]["start"]["line"].as_u64().unwrap_or_default();
+        let line = location["range"]["start"]["line"]
+            .as_u64()
+            .unwrap_or_default();
         locations.push(format!("{}:{}", file_of(uri), line + 1));
     };
     match result {
@@ -854,8 +930,6 @@ fn depth_of_selection(range: &Value) -> usize {
     }
     depth
 }
-
-
 
 /// **A `.` or `->` in real code** — not in a comment, a string, or a `#include` line, which is where the first one in a
 /// file usually is (`#include "CodeFormat.h"` — measured: the first probe asked its member completion inside that).

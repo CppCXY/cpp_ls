@@ -554,7 +554,11 @@ async fn index_in_background(context: ServerContextSnapshot) {
             // that is already prepared produces, and counting those as "no progress" is how a single stuck file's
             // signal got diluted into a warning every eight seconds on an idle server.
             let had_work = pending > 0 || claimed_count > 0 || !drain_was_empty;
-            let progressed = prepared_count > 0 || !drain_was_empty || claimed_count > 0 || re_read > 0 || cooked > 0;
+            let progressed = prepared_count > 0
+                || !drain_was_empty
+                || claimed_count > 0
+                || re_read > 0
+                || cooked > 0;
             no_progress = if progressed || !had_work {
                 0
             } else {
@@ -675,7 +679,6 @@ async fn index_in_background(context: ServerContextSnapshot) {
                         }
                     })
                     .await;
-
             } else if was_pending {
                 // **The queue drained — and the server says nothing about it.**
                 //

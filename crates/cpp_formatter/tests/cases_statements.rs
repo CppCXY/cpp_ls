@@ -38,10 +38,7 @@ fn style() -> Style {
 /// `05_return`
 #[test]
 fn statements_05_return() {
-    check(
-        r#"int f() { return; }"#,
-        r#"int f() { return; }"#,
-    );
+    check(r#"int f() { return; }"#, r#"int f() { return; }"#);
 }
 
 /// `07_if_block`

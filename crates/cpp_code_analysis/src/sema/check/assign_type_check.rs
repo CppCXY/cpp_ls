@@ -277,7 +277,12 @@ fn report(
         DiagnosticCode::AssignTypeCheck,
         cpp_parser::source_range(expression.text_range()),
         name.to_string(),
-        t!("`%{name}` is %{how} with a value that does not convert to `%{written}`", name = name, how = how, written = written),
+        t!(
+            "`%{name}` is %{how} with a value that does not convert to `%{written}`",
+            name = name,
+            how = how,
+            written = written
+        ),
     );
 }
 

@@ -133,8 +133,7 @@ fn the_question_answers_itself(expression: &cpp_parser::CppSyntaxNode) -> bool {
             .find(|token| {
                 !matches!(
                     cpp_parser::CppTokenKind::from(token.kind()),
-                    cpp_parser::CppTokenKind::Whitespace
-                        | cpp_parser::CppTokenKind::Newline
+                    cpp_parser::CppTokenKind::Whitespace | cpp_parser::CppTokenKind::Newline
                 )
             })
             .is_some_and(|token| token.text() == "!");

@@ -473,9 +473,9 @@ fn the_unit_walks_its_files_once() {
 ///    slightly different timeline produces a *reading*, not a diagnostic, and every rule downstream would then
 ///    answer about a header nobody has;
 /// 3. a file in the closure whose contents moved **refuses** the entry, which is the whole validity key.
-    // **`a_walked_unit_can_be_kept_and_read_back` is gone, with the cache it tested.** A built timeline is no
-    // longer persisted: it outlives the files it was built from, and rebuilding one is 38 ms — see
-    // `Session::translation_unit_of`. The other tests in this file are about the walk itself, which is unchanged.
+// **`a_walked_unit_can_be_kept_and_read_back` is gone, with the cache it tested.** A built timeline is no
+// longer persisted: it outlives the files it was built from, and rebuilding one is 38 ms — see
+// `Session::translation_unit_of`. The other tests in this file are about the walk itself, which is unchanged.
 /// **The unit cooks as one program**, not as a pile of headers.
 ///
 /// Cooking one file at a time answers "does this header read on its own" — it cannot answer "does the program

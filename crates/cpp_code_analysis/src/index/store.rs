@@ -64,8 +64,8 @@ use crate::IncludeForm;
 use crate::cache::{SummaryKey, content_hash, fnv1a64};
 use crate::file::paths::{DiskFiles, FileProvider, normalize_path};
 use crate::include::config::CompilerConfig;
-use crate::index::project::ProjectIndex;
 use crate::index::FileIndexer;
+use crate::index::project::ProjectIndex;
 use crate::summary::{FileSummary, IncludeFact};
 
 /// A project's summaries on disk and in memory, and the rule for when each is rebuilt.
@@ -508,7 +508,10 @@ impl<F: FileProvider> SummaryStore<F> {
 
     /// **A unit's facts**, by the hash of the rendering they were read from — see [`SummaryStore::cached_unit`].
     pub fn cached_indexed_unit(&self, program: u64) -> Option<crate::IndexedUnit> {
-        self.summary_database()?.indexed_unit(program).ok().flatten()
+        self.summary_database()?
+            .indexed_unit(program)
+            .ok()
+            .flatten()
     }
 
     /// Remember a unit's facts — see [`SummaryStore::cached_indexed_unit`].
@@ -533,7 +536,8 @@ impl<F: FileProvider> SummaryStore<F> {
     /// collection is what stops the database growing with rows nothing references; compaction is a separate job for
     /// a moment when nobody else holds the handle.
     pub fn collect_the_cache(&mut self) -> Option<crate::cache_db::Collected> {
-        self.summary_database().and_then(|database| database.collect())
+        self.summary_database()
+            .and_then(|database| database.collect())
     }
 
     /// Commit whatever the database is holding — the end of a slice.
@@ -545,7 +549,8 @@ impl<F: FileProvider> SummaryStore<F> {
 
     /// Rows and bytes of the summary database, when it is in use.
     pub fn summary_database_sizes(&self) -> Option<crate::cache_db::DatabaseSizes> {
-        self.summary_database().and_then(|database| database.sizes())
+        self.summary_database()
+            .and_then(|database| database.sizes())
     }
 
     pub fn stats(&self) -> StoreStats {
@@ -630,8 +635,7 @@ impl<F: FileProvider> SummaryStore<F> {
         if let Some(facts) = environment {
             key = key.with_environment(environment_hash(facts));
         }
-        let indexer = FileIndexer::new(&self.files, &self.config)
-            .with_seed(self.index.macros());
+        let indexer = FileIndexer::new(&self.files, &self.config).with_seed(self.index.macros());
         // **Both readings**, not the rendering alone — see [`FileIndexer::index_the_readings`]. A header's `#define`s
         // are what its includers expand, so a summary built from the rendering alone leaves every file after it
         // rendering with its scope-opening macros unexpanded; measured as `std::Widget` answering
@@ -739,7 +743,11 @@ impl<F: FileProvider> SummaryStore<F> {
     /// [`crate::Session`]'s `Step::with_the_environment` makes, and it is true for a stronger reason than it used to
     /// be: the summary *is* the rendering, so the pass's own trigger (a split or guarded declaration) is already
     /// false for it.
-    pub fn prepare_with_the_timeline(&self, path: &Path, unit: &crate::TranslationUnit) -> Prepared {
+    pub fn prepare_with_the_timeline(
+        &self,
+        path: &Path,
+        unit: &crate::TranslationUnit,
+    ) -> Prepared {
         self.prepare_inner(path, None, Some(unit))
     }
 
@@ -824,7 +832,7 @@ impl<F: FileProvider> SummaryStore<F> {
             } else if tracing {
                 note_a_prepared_file(
                     read,
-                        reading.elapsed(),
+                    reading.elapsed(),
                     std::time::Duration::ZERO,
                     std::time::Duration::ZERO,
                 );
@@ -919,9 +927,8 @@ impl<F: FileProvider> SummaryStore<F> {
         let seed = crate::macros::MacroTable::from_marked(self.index.macros());
         let definitions = unit.definitions();
         let (tokens, _) = cpp_parser::lex(source, &cpp_parser::LexerConfig::default());
-        let macros = {
-            crate::preprocess::cooked::FileMacros::new(view, &definitions, Some(&seed), true)
-        };
+        let macros =
+            { crate::preprocess::cooked::FileMacros::new(view, &definitions, Some(&seed), true) };
         let rendered = { crate::preprocess::cooked::cook_with(source, &tokens, &macros).render() };
 
         FileIndexer::new(&self.files, &self.config)
@@ -1428,10 +1435,8 @@ impl<F: FileProvider> SummaryStore<F> {
         // **Built once per timeline, not once per slice.** definitions() walks every event and allocates an
         // Arc per definition; the pass used to pay that again for every slice that reused the same unit —
         // measured at ~2.6 ms per unit, ~8 units per slice, 81 slices, **1.7 s of a 5.8 s pass**.
-        let unit_definitions: Vec<std::sync::Arc<crate::UnitDefinitions>> = units
-            .iter()
-            .map(|unit| unit.definitions_cached())
-            .collect();
+        let unit_definitions: Vec<std::sync::Arc<crate::UnitDefinitions>> =
+            units.iter().map(|unit| unit.definitions_cached()).collect();
         let environments: Vec<(
             &std::sync::Arc<crate::TranslationUnit>,
             std::sync::Arc<crate::UnitDefinitions>,
@@ -1741,7 +1746,13 @@ impl<F: FileProvider> SummaryStore<F> {
             if stored {
                 if let Some(database) = self.summary_database() {
                     database.put(made.key, &made);
-                    database.note_file(&made.path, made.key.content_hash, made.key.context_hash, made.key.env_hash, self.generation);
+                    database.note_file(
+                        &made.path,
+                        made.key.content_hash,
+                        made.key.context_hash,
+                        made.key.env_hash,
+                        self.generation,
+                    );
                 }
             }
             rebuilt.push((made, stored));
@@ -1756,21 +1767,18 @@ impl<F: FileProvider> SummaryStore<F> {
             // **The file's own position in a timeline**, and both halves of what rendering it needs: the `MacroView`
             // answers the parser's questions out of that walk, and the walk's definitions are the `Arc` bodies the
             // view's indices point into. `FileMacros` is the one type that has both — see [`crate::FileMacros`].
-            let (view, definitions) = environments.iter().find_map(|(unit, definitions)| {
-                Some((unit.environment_of(path)?, definitions))
-            })?;
+            let (view, definitions) = environments
+                .iter()
+                .find_map(|(unit, definitions)| Some((unit.environment_of(path)?, definitions)))?;
 
             let key = SummaryKey::new(content_hash(source), self.context_hash(path));
             // **The reading is the rendering's**, and this is the branch that makes it possible: a timeline can render
             // a file, which is what the timeline-less half of this pass cannot do (see the note on `eager`).
             let (tokens, _) = cpp_parser::lex(source, &cpp_parser::LexerConfig::default());
-            let macros = crate::preprocess::cooked::FileMacros::new(
-                view,
-                definitions,
-                Some(&seed),
-                true,
-            );
-            let rendered = { crate::preprocess::cooked::cook_with(source, &tokens, &macros).render() };
+            let macros =
+                crate::preprocess::cooked::FileMacros::new(view, definitions, Some(&seed), true);
+            let rendered =
+                { crate::preprocess::cooked::cook_with(source, &tokens, &macros).render() };
 
             // **And what the walk decided is not compiled.** The unit has already evaluated every guarded `#define`
             // against its own state — the same evaluation the cook uses — and a fact it skipped is one a compiler
@@ -1860,10 +1868,7 @@ impl<F: FileProvider> SummaryStore<F> {
         let Ok(dead) = self.dead_macros.lock() else {
             return (0, 0);
         };
-        (
-            dead.len(),
-            dead.values().map(|offsets| offsets.len()).sum(),
-        )
+        (dead.len(), dead.values().map(|offsets| offsets.len()).sum())
     }
 
     fn read_into(&self, sources: &mut std::collections::HashMap<String, String>, path: &Path) {

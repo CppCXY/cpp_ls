@@ -55,7 +55,11 @@ fn main() {
     if dump {
         // `-dump-config` with a file argument resolves the style the way formatting that file would, which is what
         // makes it a useful diagnostic: the resolved values, not the preset's.
-        let style = match resolve(&style_argument, files.first().map(Path::new), &fallback_name) {
+        let style = match resolve(
+            &style_argument,
+            files.first().map(Path::new),
+            &fallback_name,
+        ) {
             Ok(style) => style,
             Err(message) => {
                 eprintln!("cppfmt: {message}");
@@ -82,7 +86,10 @@ fn main() {
         };
         let formatted = cpp_formatter::format(&source, &style);
         if replacements_xml {
-            print!("{}", cpp_formatter::output::replacements_xml(&source, &formatted, None));
+            print!(
+                "{}",
+                cpp_formatter::output::replacements_xml(&source, &formatted, None)
+            );
         } else {
             print!("{formatted}");
         }
@@ -106,7 +113,10 @@ fn main() {
         };
         let formatted = cpp_formatter::format_file(Path::new(file), &source, &style);
         if replacements_xml {
-            print!("{}", cpp_formatter::output::replacements_xml(&source, &formatted, Some(Path::new(file))));
+            print!(
+                "{}",
+                cpp_formatter::output::replacements_xml(&source, &formatted, Some(Path::new(file)))
+            );
             continue;
         }
         if in_place {
@@ -157,9 +167,8 @@ fn resolve_from_file(file: Option<&Path>, fallback: &str) -> Result<Style, Strin
         return Ok(fallback_or_default(fallback));
     };
     match find_config(file) {
-        Some((path, text)) => {
-            config::parse(&text, Some(fallback)).map_err(|error| format!("{}: {error}", path.display()))
-        }
+        Some((path, text)) => config::parse(&text, Some(fallback))
+            .map_err(|error| format!("{}: {error}", path.display())),
         None => Ok(fallback_or_default(fallback)),
     }
 }

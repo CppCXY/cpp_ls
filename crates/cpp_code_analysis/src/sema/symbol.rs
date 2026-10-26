@@ -1000,9 +1000,7 @@ impl ScopeTree {
         // of the scope started last but not after it, so walking up from that one finds the innermost in
         // O(log n + depth) instead of the O(scopes) scan this used to be — and it was asked once per name lookup in
         // the inference, which on a 2 800-line file is thousands of times per diagnostics pull.
-        let at = self
-            .by_start
-            .partition_point(|(start, _)| *start <= offset);
+        let at = self.by_start.partition_point(|(start, _)| *start <= offset);
         let mut current = at.checked_sub(1).map(|index| self.by_start[index].1);
         while let Some(id) = current {
             let Some(scope) = self.scopes.get(id.index()) else {

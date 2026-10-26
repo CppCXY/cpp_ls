@@ -265,11 +265,13 @@ fn decide(flavour: ConditionFlavour, tokens: &[Token], environment: &Macros) -> 
                 return Value::Unknown;
             };
             match environment.lookup(name.text.as_ref()).is_defined() {
-                Some(defined) => Value::Known(i128::from(if flavour == ConditionFlavour::Defined {
-                    defined
-                } else {
-                    !defined
-                })),
+                Some(defined) => {
+                    Value::Known(i128::from(if flavour == ConditionFlavour::Defined {
+                        defined
+                    } else {
+                        !defined
+                    }))
+                }
                 None => Value::Unknown,
             }
         }
@@ -343,7 +345,10 @@ impl Surfaces {
     /// The surface of `text`, scanned once per distinct content.
     pub fn of(&self, path: &std::path::Path, text: &str) -> std::sync::Arc<Surface> {
         let key = crate::cache::content_hash(text);
-        let mut held = self.held.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut held = self
+            .held
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         // **Bounded**: one surface per distinct content, and content changes on every keystroke — a session
         // left open while typing would keep a scan of every buffer state it ever saw. Cleared rather than
         // evicted because a surface is cheap to rebuild (one scan of one file) and the table is only a warm start.
@@ -359,10 +364,7 @@ impl Surfaces {
     }
 
     pub fn len(&self) -> usize {
-        self.held
-            .lock()
-            .map(|held| held.len())
-            .unwrap_or(0)
+        self.held.lock().map(|held| held.len()).unwrap_or(0)
     }
 }
 
@@ -454,7 +456,11 @@ impl<'a, R: Reads> Chain<'a, R> {
         (self.signatures, self.walked)
     }
 
-    pub fn at(mut self, root: &std::path::Path, seed: &Macros) -> (HashMap<std::path::PathBuf, Macros>, Walked) {
+    pub fn at(
+        mut self,
+        root: &std::path::Path,
+        seed: &Macros,
+    ) -> (HashMap<std::path::PathBuf, Macros>, Walked) {
         let mut table = seed.clone();
         self.enter(root, &mut table, 0);
         (self.tables, self.walked)
@@ -520,7 +526,8 @@ impl<'a, R: Reads> Chain<'a, R> {
         // inclusion, which the oracle test below found by comparing every macro against the compiler-shaped walk.
         self.walked.evaluated += 1;
         let mut regions: Vec<(bool, bool, bool)> = Vec::new();
-        let active = |regions: &Vec<(bool, bool, bool)>| regions.last().map_or(true, |region| region.2);
+        let active =
+            |regions: &Vec<(bool, bool, bool)>| regions.last().map_or(true, |region| region.2);
         for event in &surface.events {
             match event {
                 Event::If {
@@ -664,7 +671,14 @@ mod tests {
 
         let with = table(&[("WIN32", "1")]);
         let effect = effect_of(&surface, &with);
-        assert_eq!(effect.touched(), vec!["API"], "certain={} folds={:?} tokens={:?}", effect.certain, effect.folds.len(), surface.events);
+        assert_eq!(
+            effect.touched(),
+            vec!["API"],
+            "certain={} folds={:?} tokens={:?}",
+            effect.certain,
+            effect.folds.len(),
+            surface.events
+        );
     }
 
     #[test]
@@ -750,13 +764,18 @@ mod tests {
     fn a_chain_folds_what_the_includes_define() {
         let files = Fixture::new(&[
             ("/p/a.h", "#define A 1\n"),
-            ("/p/b.h", "#include \"a.h\"\n#ifdef A\n#define B 2\n#endif\n"),
+            (
+                "/p/b.h",
+                "#include \"a.h\"\n#ifdef A\n#define B 2\n#endif\n",
+            ),
         ]);
         let mut cache = std::collections::HashMap::new();
         let chain = Chain::new(&files, &mut cache);
         let (tables, walked) = chain.at(std::path::Path::new("/p/b.h"), &Macros::new());
 
-        let at_b = tables.get(std::path::Path::new("/p/b.h")).expect("b was entered");
+        let at_b = tables
+            .get(std::path::Path::new("/p/b.h"))
+            .expect("b was entered");
         assert!(at_b.get("A").is_some(), "a.h`s define is in b.h`s table");
         assert_eq!(walked.files, 2, "a.h and b.h");
         assert_eq!(walked.inclusions, 1);
@@ -802,7 +821,9 @@ mod tests {
         let chain = Chain::new(&files, &mut cache);
         let (tables, _) = chain.at(std::path::Path::new("/p/root.cpp"), &Macros::new());
 
-        let at_c = tables.get(std::path::Path::new("/p/c.h")).expect("c was entered");
+        let at_c = tables
+            .get(std::path::Path::new("/p/c.h"))
+            .expect("c was entered");
         assert!(
             at_c.get("C").is_some(),
             "the host`s define comes before the include that reads it"
@@ -822,7 +843,6 @@ mod tests {
         let key_without = Effect::key(sensitive.signature(), &[None]);
         let key_with = Effect::key(sensitive.signature(), &[Some("1")]);
         assert_ne!(key_without, key_with);
-
     }
     /// **The oracle**: the same fixture, read two ways — the effect chain, and the compiler-shaped walk that the
     /// index uses today. Every macro the chain says a file sees must be what the walk says it sees.
@@ -833,7 +853,10 @@ mod tests {
         use cpp_parser::MacroFacts;
 
         let files: &[(&str, &str)] = &[
-            ("/p/base.h", "#define BASE 1\n#define WITH_ARGS(x) ((x) + 1)\n"),
+            (
+                "/p/base.h",
+                "#define BASE 1\n#define WITH_ARGS(x) ((x) + 1)\n",
+            ),
             (
                 "/p/guarded.h",
                 "#ifndef GUARDED_H\n#define GUARDED_H\n#include \"base.h\"\n#ifdef BASE\n#define FROM_INSIDE 2\n#endif\n#endif\n",
@@ -851,7 +874,8 @@ mod tests {
         // The chain.
         let fixture = Fixture::new(files);
         let mut cache = std::collections::HashMap::new();
-        let (tables, walked) = Chain::new(&fixture, &mut cache).at(std::path::Path::new("/p/root.cpp"), &Macros::new());
+        let (tables, walked) = Chain::new(&fixture, &mut cache)
+            .at(std::path::Path::new("/p/root.cpp"), &Macros::new());
 
         // The walk.
         let mut provider = MemoryFiles::new();
@@ -862,10 +886,14 @@ mod tests {
         let indexer = FileIndexer::new(&provider, &config);
         let mut summaries: std::collections::HashMap<std::path::PathBuf, crate::FileSummary> =
             std::collections::HashMap::new();
-        let mut texts: std::collections::HashMap<std::path::PathBuf, String> = std::collections::HashMap::new();
+        let mut texts: std::collections::HashMap<std::path::PathBuf, String> =
+            std::collections::HashMap::new();
         for (path, text) in files {
             let path = std::path::PathBuf::from(*path);
-            summaries.insert(path.clone(), indexer.index(&path, text, SummaryKey::new(0, 0)));
+            summaries.insert(
+                path.clone(),
+                indexer.index(&path, text, SummaryKey::new(0, 0)),
+            );
             texts.insert(path, text.to_string());
         }
         let mut definitions = MacroDefinitions::default();
@@ -919,7 +947,9 @@ mod tests {
             &disagreements[..disagreements.len().min(6)]
         );
         assert!(compared > 0, "the two readings share at least one file");
-        assert!(walked.files >= 4, "the chain entered every file: {walked:?}");
+        assert!(
+            walked.files >= 4,
+            "the chain entered every file: {walked:?}"
+        );
     }
-
 }

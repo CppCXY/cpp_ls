@@ -306,5 +306,4 @@ _GLIBCXX_BEGIN_NAMESPACE_VERSION
         Some(" @brief  Write a newline and flush the stream.\n\n This manipulator is often mistakenly used when a simple newline is desired.".to_string()),
         "and the comment the parser finds is that one"
     );
-
 }

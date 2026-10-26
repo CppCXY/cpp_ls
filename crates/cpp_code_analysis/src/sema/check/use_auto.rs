@@ -82,4 +82,3 @@ impl Check for UseAuto {
         }
     }
 }
-

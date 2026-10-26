@@ -47,7 +47,10 @@ pub fn of(source: &str) -> Roles {
         let kind = CppSyntaxKind::from(node.kind());
         match kind {
             CppSyntaxKind::TemplateArgumentList | CppSyntaxKind::TemplateParameterList => {
-                for token in node.descendants_with_tokens().filter_map(|it| it.into_token()) {
+                for token in node
+                    .descendants_with_tokens()
+                    .filter_map(|it| it.into_token())
+                {
                     let token_kind = CppTokenKind::from(token.kind());
                     if matches!(token_kind, CppTokenKind::Less | CppTokenKind::Greater) {
                         roles.template_angle.insert(token_range_start(&token));
@@ -57,7 +60,10 @@ pub fn of(source: &str) -> Roles {
             CppSyntaxKind::PointerType
             | CppSyntaxKind::ReferenceType
             | CppSyntaxKind::RValueReferenceType => {
-                for token in node.descendants_with_tokens().filter_map(|it| it.into_token()) {
+                for token in node
+                    .descendants_with_tokens()
+                    .filter_map(|it| it.into_token())
+                {
                     // `&&` is the lexer's `LogicalAnd`, not `Ampersand`: a formatter that forgets it writes
                     // `T && x` where the file had `T&& x`.
                     if matches!(

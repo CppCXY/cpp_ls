@@ -373,9 +373,7 @@ pub fn completion_with(
             parameters,
         } => macro_body(index, path, &written, range, &parameters),
         // **A preprocessor condition** — `#if`, `#elif`, `#ifdef`, `#undef`: the macros, and the operators on them.
-        CompletionContext::Condition { written, range } => {
-            condition(index, path, &written, range)
-        }
+        CompletionContext::Condition { written, range } => condition(index, path, &written, range),
         // **Inside a documentation comment**: Doxygen's vocabulary, or the name the command takes. Both are read
         // from the file's own text rather than from a scope, so neither needs the index — see
         // [`doc_comment_at`].
@@ -1042,7 +1040,8 @@ fn macro_body(
         if matching::quality(parameter, written) == matching::NONE {
             continue;
         }
-        let mut item = CompletionItem::word(parameter, ItemKind::Variable, "a parameter of this macro");
+        let mut item =
+            CompletionItem::word(parameter, ItemKind::Variable, "a parameter of this macro");
         item.replace = range;
         items.push(item);
     }
@@ -1075,7 +1074,11 @@ fn macro_names<'a>(index: &'a ProjectIndex, path: &Path) -> Vec<&'a str> {
         return Vec::new();
     };
 
-    let mut macros: Vec<&str> = summary.macros.iter().map(|fact| fact.name.as_str()).collect();
+    let mut macros: Vec<&str> = summary
+        .macros
+        .iter()
+        .map(|fact| fact.name.as_str())
+        .collect();
     for include in &summary.includes {
         let Some(resolved) = &include.resolved else {
             continue;
@@ -1101,7 +1104,12 @@ fn macro_names<'a>(index: &'a ProjectIndex, path: &Path) -> Vec<&'a str> {
 /// Nothing else belongs here. An `#if` expression is evaluated by the preprocessor before a single declaration
 /// exists, so a function or a class name is not a candidate — offering the program's names, which is what a directive
 /// argument used to do there, is offering words the condition can never mean.
-fn condition(index: &ProjectIndex, path: &Path, written: &str, range: SourceRange) -> CompletionSet {
+fn condition(
+    index: &ProjectIndex,
+    path: &Path,
+    written: &str,
+    range: SourceRange,
+) -> CompletionSet {
     let mut items: Vec<CompletionItem> = Vec::new();
 
     // **`defined` first**: the one operator a condition is written with, and a word of the preprocessor rather than a

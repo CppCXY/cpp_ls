@@ -1087,7 +1087,10 @@ fn a_column_read_inside_a_multibyte_character_is_the_character_before_it() {
     let index = cpp_parser::LineIndex::parse(text);
     let inside = text.find('译').expect("the fixture") + 1;
 
-    assert!(!text.is_char_boundary(inside), "the offset is inside the character");
+    assert!(
+        !text.is_char_boundary(inside),
+        "the offset is inside the character"
+    );
     assert_eq!(
         index.position_of(inside, text),
         Some((0, "// 汉字".chars().count())),

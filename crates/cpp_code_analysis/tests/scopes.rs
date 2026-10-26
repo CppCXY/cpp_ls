@@ -2435,8 +2435,7 @@ fn a_local_whose_extent_is_a_macro_is_placed() {
         println!("{source:?} → {locals:?}");
         assert!(
             locals.iter().any(|entry| {
-                source[entry.declared_at as usize..].starts_with("more")
-                    && !entry.uses.is_empty()
+                source[entry.declared_at as usize..].starts_with("more") && !entry.uses.is_empty()
             }),
             "`more` is a local, declared at one place and used at another: {locals:?}"
         );
@@ -2490,7 +2489,9 @@ fn a_nested_class_ends_where_its_brace_ends() {
                 .any(|binding| binding.name.text() == "size")
         });
         assert_eq!(
-            size_scope.and_then(|scope| scope.name.as_ref()).map(|name| name.to_string()),
+            size_scope
+                .and_then(|scope| scope.name.as_ref())
+                .map(|name| name.to_string()),
             Some("C".to_string()),
             "`size` is a member of `C`, whatever the nested class does: {shape}"
         );

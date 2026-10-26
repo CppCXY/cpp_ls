@@ -39,8 +39,8 @@ use std::sync::Arc;
 use cpp_parser::CppSyntaxKind;
 
 use super::names::{NameIndex, Posting};
-use crate::file::paths::normalize_path;
 use crate::Visibility;
+use crate::file::paths::normalize_path;
 use crate::include::graph::Marked;
 use crate::preprocess::directive::IncludeForm;
 use crate::sema::types::{Type, TypeBindings, parse_type_spelling, type_of_declaration};
@@ -240,12 +240,26 @@ pub fn member_definitions_across_files(
         return Known::Unknown(UnknownReason::UnparsableName);
     }
 
-    let Known::Yes((object_type, _)) =
-        type_of_expression_memoed(&memo, index, declaring, scopes, root, path, &access.object, 0)
-    else {
-        let Known::Unknown(reason) =
-            type_of_expression_memoed(&memo, index, declaring, scopes, root, path, &access.object, 0)
-        else {
+    let Known::Yes((object_type, _)) = type_of_expression_memoed(
+        &memo,
+        index,
+        declaring,
+        scopes,
+        root,
+        path,
+        &access.object,
+        0,
+    ) else {
+        let Known::Unknown(reason) = type_of_expression_memoed(
+            &memo,
+            index,
+            declaring,
+            scopes,
+            root,
+            path,
+            &access.object,
+            0,
+        ) else {
             unreachable!("the first match established that this is an `Unknown`")
         };
         return Known::Unknown(reason);
@@ -701,8 +715,10 @@ pub struct ProjectIndex {
 
 /// **What evaluating guarded `#include` conditions has cost**, in asks and nanoseconds — see the `FactGuard::Region`
 /// arm and the `[visibility]` probe. Only written when `CPPLS_TRACE_TIME` is on, so a normal run does not touch it.
-pub(crate) static CONDITION_ASKS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-pub(crate) static CONDITION_NANOS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub(crate) static CONDITION_ASKS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub(crate) static CONDITION_NANOS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
 
 /// One entry of [`ProjectIndex::member_lists`]: the members, and **what the answer was made of**.
 ///
@@ -724,7 +740,6 @@ struct CachedMemberList {
     list: MemberList,
     read_at: usize,
 }
-
 
 /// How many member lists [`ProjectIndex::member_lists`] may hold before it is emptied.
 ///
@@ -793,12 +808,26 @@ pub fn member_across_files(
     }
 
     // The type of the object, which is what decides which class the member is looked for in.
-    let Known::Yes((written, _)) =
-        type_of_expression_memoed(&memo, index, declaring, scopes, root, path, &access.object, 0)
-    else {
-        let Known::Unknown(reason) =
-            type_of_expression_memoed(&memo, index, declaring, scopes, root, path, &access.object, 0)
-        else {
+    let Known::Yes((written, _)) = type_of_expression_memoed(
+        &memo,
+        index,
+        declaring,
+        scopes,
+        root,
+        path,
+        &access.object,
+        0,
+    ) else {
+        let Known::Unknown(reason) = type_of_expression_memoed(
+            &memo,
+            index,
+            declaring,
+            scopes,
+            root,
+            path,
+            &access.object,
+            0,
+        ) else {
             unreachable!("the first match established that this is an `Unknown`")
         };
         return Known::Unknown(reason);
@@ -1158,9 +1187,9 @@ impl ProjectIndex {
     fn cached_member_list(&self, key: &(String, PathBuf)) -> Option<Known<MemberList>> {
         let known = self.member_lists.lock().ok()?;
         let read_now = self.summaries.len();
-        let cached = known.get(key).or_else(|| {
-            known.get(&(key.0.clone(), PathBuf::new()))
-        })?;
+        let cached = known
+            .get(key)
+            .or_else(|| known.get(&(key.0.clone(), PathBuf::new())))?;
         if !cached.list.unlisted.is_empty() && cached.read_at != read_now {
             return None;
         }
@@ -1333,7 +1362,9 @@ fn members_of_inner(
                     members
                 }
                 Known::Unknown(reason) => return Known::Unknown(reason),
-                Known::No => return Known::Unknown(UnknownReason::NotDeclaredHere(Box::from(class))),
+                Known::No => {
+                    return Known::Unknown(UnknownReason::NotDeclaredHere(Box::from(class)));
+                }
             }
         }
         Known::Unknown(reason) => return Known::Unknown(reason),
@@ -1418,19 +1449,19 @@ fn members_of_inner(
             }
 
             let members = match direct_members(index, scopes, root, path, &base) {
-                        Known::Yes(members) => members,
-                        // A base nothing here can resolve. Its members are **missing from the list** rather than absent
-                        // from the type, and naming the base is what makes the gap actionable — the fix is an include
-                        // path or a file that was never indexed, not a different query.
-                        Known::Unknown(reason) => {
-                            list.unlisted.push(UnlistedBase {
-                                spelling: base,
-                                reason,
-                            });
-                            continue;
-                        }
-                        Known::No => continue,
-                    };
+                Known::Yes(members) => members,
+                // A base nothing here can resolve. Its members are **missing from the list** rather than absent
+                // from the type, and naming the base is what makes the gap actionable — the fix is an include
+                // path or a file that was never indexed, not a different query.
+                Known::Unknown(reason) => {
+                    list.unlisted.push(UnlistedBase {
+                        spelling: base,
+                        reason,
+                    });
+                    continue;
+                }
+                Known::No => continue,
+            };
             let further = bases_of(index, scopes, root, path, &base);
 
             found.extend(members.into_iter().map(|(file, fact)| ProjectMember {
@@ -1476,10 +1507,7 @@ fn members_of_inner(
     // **empty and complete** and `undefined-field` reported every member of a `std::string` as undefined (measured:
     // ten findings on `CodeFormatCLib/src/CodeFormat.cpp`). The index cannot see that `__cxx11` is inline, so the
     // honest answer is "the answer stops here" — `unlisted` — which is the field that exists for exactly this.
-    if list.members.is_empty()
-        && list.unlisted.is_empty()
-        && class != base_type_name(&original)
-    {
+    if list.members.is_empty() && list.unlisted.is_empty() && class != base_type_name(&original) {
         list.unlisted.push(UnlistedBase {
             spelling: class.to_string(),
             reason: UnknownReason::NotDeclaredHere(Box::from(class.to_string())),
@@ -1737,8 +1765,16 @@ pub fn member_completions_at(
         return Known::Unknown(UnknownReason::UnparsableName);
     };
 
-    let written = match type_of_expression_memoed(&memo, index, declaring, scopes, root, path, &access.object, 0)
-    {
+    let written = match type_of_expression_memoed(
+        &memo,
+        index,
+        declaring,
+        scopes,
+        root,
+        path,
+        &access.object,
+        0,
+    ) {
         Known::Yes((written, _)) => written,
         Known::Unknown(reason) => return Known::Unknown(reason),
         // The only `No` the type layer produces is "nothing says what this is", which is the same answer as an
@@ -2882,7 +2918,9 @@ pub(crate) fn type_of_expression(
     // asked *inside* one expression are the ones that repeat. A caller that asks about many expressions shares a
     // larger memo by calling [`type_of_expression_memoed`] itself — see `SemanticModel`.
     let memo = TypeMemo::default();
-    type_of_expression_memoed(&memo, index, declaring, scopes, root, path, expression, depth)
+    type_of_expression_memoed(
+        &memo, index, declaring, scopes, root, path, expression, depth,
+    )
 }
 
 /// **What an expression's type was, and what a member lookup answered** — the memo one request shares.
@@ -2900,9 +2938,8 @@ pub(crate) fn type_of_expression(
 #[derive(Default)]
 pub(crate) struct TypeMemo {
     types: std::cell::RefCell<std::collections::HashMap<(u32, u32), Known<(Type, PathBuf)>>>,
-    members: std::cell::RefCell<
-        std::collections::HashMap<(String, String), Known<(DeclFact, PathBuf)>>,
-    >,
+    members:
+        std::cell::RefCell<std::collections::HashMap<(String, String), Known<(DeclFact, PathBuf)>>>,
     /// How long the engine has spent, in nanoseconds — the attribution these measurements need.
     spent: std::cell::Cell<u64>,
     /// How many inferences ran.
@@ -2985,10 +3022,9 @@ pub(crate) fn type_of_expression_memoed(
                 .unwrap_or_default()
         );
     }
-    memo.types
-        .borrow_mut()
-        .insert(key, answer.clone());
-    memo.spent.set(memo.spent.get() + started.elapsed().as_nanos() as u64);
+    memo.types.borrow_mut().insert(key, answer.clone());
+    memo.spent
+        .set(memo.spent.get() + started.elapsed().as_nanos() as u64);
     memo.ran.set(memo.ran.get() + 1);
     answer
 }
@@ -3151,9 +3187,9 @@ fn type_of_expression_inner(
     // `auto`, and the elementâ€™s type is whatever the *range* (or the initializer) produces. The answer is that
     // type's position-th component, which is the language's rule rather than an inference: `[a, b]` over a
     // `pair<A, B>` binds `a` to `A` and `b` to `B`, and a `map<K, V>`'s elements are `pair<const K, V>`.
-    if let Some(answer) =
-        structured_binding_type(memo, index, declaring, scopes, root, path, expression, depth)
-    {
+    if let Some(answer) = structured_binding_type(
+        memo, index, declaring, scopes, root, path, expression, depth,
+    ) {
         return answer;
     }
 
@@ -3189,7 +3225,16 @@ fn type_of_expression_inner(
             return Known::Unknown(UnknownReason::UnknownType(Box::from(written)));
         };
 
-        return match type_of_expression_memoed(memo, index, declaring, scopes, root, path, &first, depth + 1) {
+        return match type_of_expression_memoed(
+            memo,
+            index,
+            declaring,
+            scopes,
+            root,
+            path,
+            &first,
+            depth + 1,
+        ) {
             // The named type is a class, and a class has no `type_of` of its own — so the *spelling* is the answer,
             // which is what the initializer wrote.
             Known::Yes((type_of, file)) => Known::Yes((type_of, file)),
@@ -3240,9 +3285,16 @@ fn type_of_expression_inner(
     // stop one level above the answer — which is exactly where it used to stop.
     if cpp_parser::CppSyntaxKind::from(expression.kind()) == cpp_parser::CppSyntaxKind::ParenExpr {
         return match expression.children().next() {
-            Some(inner) => {
-                type_of_expression_memoed(memo, index, declaring, scopes, root, path, &inner, depth + 1)
-            }
+            Some(inner) => type_of_expression_memoed(
+                memo,
+                index,
+                declaring,
+                scopes,
+                root,
+                path,
+                &inner,
+                depth + 1,
+            ),
             None => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
         };
     }
@@ -3296,7 +3348,8 @@ fn type_of_expression_inner(
             return Known::Yes((Type::named("bool"), path.to_path_buf()));
         }
 
-        let left_type = type_of_expression_memoed(memo, index, declaring, scopes, root, path, &left, depth + 1);
+        let left_type =
+            type_of_expression_memoed(memo, index, declaring, scopes, root, path, &left, depth + 1);
         if matches!(
             operator.as_str(),
             "=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>="
@@ -3311,7 +3364,16 @@ fn type_of_expression_inner(
             };
         };
 
-        return match type_of_expression_memoed(memo, index, declaring, scopes, root, path, &right, depth + 1) {
+        return match type_of_expression_memoed(
+            memo,
+            index,
+            declaring,
+            scopes,
+            root,
+            path,
+            &right,
+            depth + 1,
+        ) {
             Known::Yes((right_type, _)) if right_type == left_type => {
                 // **Two pointers subtracted are not a pointer.** `p - q` is a *count of elements*, and C++ spells
                 // it `ptrdiff_t` — so "the operands agree, therefore the answer is their type" holds for
@@ -3347,8 +3409,16 @@ fn type_of_expression_inner(
     // A **dereference**: `*p` has the type `p` points at. Nothing is looked up — the pointer's own declaration
     // already spells the pointee, and the `*` is arithmetic on that spelling.
     if let Some(operand) = unary_operand_with(expression, "*") {
-        let operand_type =
-            type_of_expression_memoed(memo, index, declaring, scopes, root, path, &operand, depth + 1);
+        let operand_type = type_of_expression_memoed(
+            memo,
+            index,
+            declaring,
+            scopes,
+            root,
+            path,
+            &operand,
+            depth + 1,
+        );
         return match operand_type {
             // **A `*` is the type model's own operation.** `Widget**` gives `Widget*`, an array gives its
             // element, and a class with an `operator*` gives nothing — that one needs the class's members and
@@ -3357,10 +3427,7 @@ fn type_of_expression_inner(
                 // below even though `pointee()` answers for it too: what `*` means for a class is what the class
                 // declared, and a class that declared nothing is the iterator model's case.
                 Some(pointee)
-                    if !matches!(
-                        type_of,
-                        Type::Named { .. } | Type::TemplateParameter { .. }
-                    ) =>
+                    if !matches!(type_of, Type::Named { .. } | Type::TemplateParameter { .. }) =>
                 {
                     Known::Yes(((*pointee).clone(), file))
                 }
@@ -3402,8 +3469,16 @@ fn type_of_expression_inner(
     // so that the two operators are one rule rather than one rule and one hole: `(&r)->size` is a member access
     // whose object is this, and the `->` already knows what to do with a pointer.
     if let Some(operand) = unary_operand_with(expression, "&") {
-        let operand_type =
-            type_of_expression_memoed(memo, index, declaring, scopes, root, path, &operand, depth + 1);
+        let operand_type = type_of_expression_memoed(
+            memo,
+            index,
+            declaring,
+            scopes,
+            root,
+            path,
+            &operand,
+            depth + 1,
+        );
         return match operand_type {
             Known::Yes((type_of, file)) => {
                 // `&x` is a pointer to `x`, and the decay first is what makes `&arr` a pointer to the array's
@@ -3436,8 +3511,16 @@ fn type_of_expression_inner(
         let Some(operand) = unary_operand_with(expression, symbol) else {
             continue;
         };
-        let operand_type =
-            type_of_expression_memoed(memo, index, declaring, scopes, root, path, &operand, depth + 1);
+        let operand_type = type_of_expression_memoed(
+            memo,
+            index,
+            declaring,
+            scopes,
+            root,
+            path,
+            &operand,
+            depth + 1,
+        );
         return match operand_type {
             Known::Yes((type_of, file)) => {
                 if matches!(type_of, Type::Named { .. } | Type::TemplateParameter { .. })
@@ -3451,10 +3534,7 @@ fn type_of_expression_inner(
                         &format!("operator{symbol}"),
                     )
                 {
-                    return Known::Yes((
-                        crate::sema::types::parse_type_spelling(&returns),
-                        file,
-                    ));
+                    return Known::Yes((crate::sema::types::parse_type_spelling(&returns), file));
                 }
                 if symbol == "!" {
                     Known::Yes((Type::named("bool"), path.to_path_buf()))
@@ -3482,10 +3562,26 @@ fn type_of_expression_inner(
         let (Some(then_arm), Some(else_arm)) = (arms.get(1), arms.get(2)) else {
             return Known::Unknown(UnknownReason::UnknownType(Box::from(written)));
         };
-        let then_type =
-            type_of_expression_memoed(memo, index, declaring, scopes, root, path, then_arm, depth + 1);
-        let else_type =
-            type_of_expression_memoed(memo, index, declaring, scopes, root, path, else_arm, depth + 1);
+        let then_type = type_of_expression_memoed(
+            memo,
+            index,
+            declaring,
+            scopes,
+            root,
+            path,
+            then_arm,
+            depth + 1,
+        );
+        let else_type = type_of_expression_memoed(
+            memo,
+            index,
+            declaring,
+            scopes,
+            root,
+            path,
+            else_arm,
+            depth + 1,
+        );
 
         return match (then_type, else_type) {
             (Known::Yes((then_type, file)), Known::Yes((else_type, _)))
@@ -3507,7 +3603,8 @@ fn type_of_expression_inner(
     // with an `operator[]` — `v[0]` on a `std::vector` — needs the template instantiated, and this answers
     // `Unknown` for the same reason it does everywhere else: see [`element_type_name`].
     if let Some(base) = subscript_base(expression) {
-        let base_type = type_of_expression_memoed(memo, index, declaring, scopes, root, path, &base, depth + 1);
+        let base_type =
+            type_of_expression_memoed(memo, index, declaring, scopes, root, path, &base, depth + 1);
         return match base_type {
             // **An array's element is the model's own operation**, and a *class* with an `operator[]` is the case
             // this arm deliberately leaves alone: `v[0]` on a `std::vector` gives the template's `reference`, which
@@ -3937,7 +4034,10 @@ pub(crate) fn operator_returns_of(
     // list's own `find` would return first, and asking the list again can only produce the same `returns`. That is
     // what makes the whole list unnecessary whenever the narrow query hits, which is every operator on every class
     // the index has read.
-    let wanted: String = operator.chars().filter(|character| !character.is_whitespace()).collect();
+    let wanted: String = operator
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect();
     let symbol = wanted.strip_prefix("operator").unwrap_or(&wanted);
     // **The class's own parameter names, and the arguments written at the use** — what a return spelling like `T&`
     // has to be read through before it is a type. `member_fact` answers the *fact*, which carries the declaration's
@@ -3974,9 +4074,13 @@ pub(crate) fn operator_returns_of(
         None => (scopes, root, path),
     };
 
-    let Known::Yes(list) =
-        members_of(index, class_scopes, class_root, class_path, &class_type.to_string())
-    else {
+    let Known::Yes(list) = members_of(
+        index,
+        class_scopes,
+        class_root,
+        class_path,
+        &class_type.to_string(),
+    ) else {
         return None;
     };
 
@@ -4525,11 +4629,12 @@ fn declared_type(
     //
     // `Known::No` still means the walk declined to take the question at all, which is what the placeholder reason is
     // for; only a walk that *tried and failed* has a better answer to give.
-    let deduced = match initializer_type(memo, index, declaring, scopes, root, path, named, depth + 1) {
-        Known::Yes((deduced, _)) => deduced,
-        Known::Unknown(reason) => return Known::Unknown(reason),
-        Known::No => return unknown(),
-    };
+    let deduced =
+        match initializer_type(memo, index, declaring, scopes, root, path, named, depth + 1) {
+            Known::Yes((deduced, _)) => deduced,
+            Known::Unknown(reason) => return Known::Unknown(reason),
+            Known::No => return unknown(),
+        };
 
     match auto_substituted(&as_written, &deduced) {
         Some(type_of) => Known::Yes(parse_type_spelling(&type_of)),
@@ -4590,10 +4695,19 @@ fn range_for_element_type(
         })?;
 
     let range = range_expression_of_the_pattern(&loop_node)?;
-    let Known::Yes((container, _)) =
-        type_of_expression_memoed(memo, index, declaring, scopes, root, path, &range, depth + 1)
-    else {
-        return Some(Known::Unknown(UnknownReason::UnknownType(Box::from("auto"))));
+    let Known::Yes((container, _)) = type_of_expression_memoed(
+        memo,
+        index,
+        declaring,
+        scopes,
+        root,
+        path,
+        &range,
+        depth + 1,
+    ) else {
+        return Some(Known::Unknown(UnknownReason::UnknownType(Box::from(
+            "auto",
+        ))));
     };
 
     Some(match range_element_of(&container) {
@@ -4677,7 +4791,16 @@ fn initializer_type(
         return Known::Unknown(UnknownReason::UnknownType(Box::from("auto")));
     };
 
-    type_of_expression_memoed(memo, index, declaring, scopes, root, path, &expression, depth)
+    type_of_expression_memoed(
+        memo,
+        index,
+        declaring,
+        scopes,
+        root,
+        path,
+        &expression,
+        depth,
+    )
 }
 
 /// The spelling `auto` stands for, and the expression that decides it.
@@ -4936,10 +5059,28 @@ fn structured_binding_type(
 
     // The container: the range of the `for` this pattern is a binding of, or the initializer of a plain declaration.
     let container = match range_expression_of_the_pattern(&pattern) {
-        Some(range) => type_of_expression_memoed(memo, index, declaring, scopes, root, path, &range, depth + 1),
+        Some(range) => type_of_expression_memoed(
+            memo,
+            index,
+            declaring,
+            scopes,
+            root,
+            path,
+            &range,
+            depth + 1,
+        ),
         None => {
             let initializer = initializer_of_the_pattern(&pattern)?;
-            type_of_expression_memoed(memo, index, declaring, scopes, root, path, &initializer, depth + 1)
+            type_of_expression_memoed(
+                memo,
+                index,
+                declaring,
+                scopes,
+                root,
+                path,
+                &initializer,
+                depth + 1,
+            )
         }
     };
     let Known::Yes((container, file)) = container else {
@@ -5061,7 +5202,9 @@ fn element_of(container: &Type, position: usize) -> Option<String> {
 
     // `pair` and `tuple` are the components themselves.
     if matches!(plain, "pair" | "tuple") {
-        return arguments.get(position).map(|component| component.to_string());
+        return arguments
+            .get(position)
+            .map(|component| component.to_string());
     }
 
     None
@@ -5413,7 +5556,9 @@ fn type_of_a_call(
     // members are not readable; what a reader writes next is `it->first`, `it->second` and `*it`, and all three are
     // questions about the **element**. Answering the element type is what makes them work — and the declared
     // `iterator` type, whose members are `operator*` and four typedefs, is both harder to compute and less useful.
-    if let Some(element) = iterator_element_type(memo, index, declaring, scopes, root, path, &callee) {
+    if let Some(element) =
+        iterator_element_type(memo, index, declaring, scopes, root, path, &callee)
+    {
         return element;
     }
 
@@ -5428,7 +5573,9 @@ fn type_of_a_call(
             .unwrap_or_default()
             .iter()
             .filter_map(|argument| {
-                match type_of_expression_memoed(memo, index, declaring, scopes, root, path, argument, 0) {
+                match type_of_expression_memoed(
+                    memo, index, declaring, scopes, root, path, argument, 0,
+                ) {
                     Known::Yes((type_of, _)) => Some(type_of),
                     _ => None,
                 }
@@ -5494,14 +5641,29 @@ fn iterator_element_type(
     let member = crate::sema::resolve::member_access_at(root, end_of_the_written_name(callee))?;
     if !matches!(
         member.member.as_str(),
-        "begin" | "cbegin" | "rbegin" | "end" | "cend" | "rend" | "find" | "lower_bound" | "upper_bound"
+        "begin"
+            | "cbegin"
+            | "rbegin"
+            | "end"
+            | "cend"
+            | "rend"
+            | "find"
+            | "lower_bound"
+            | "upper_bound"
     ) {
         return None;
     }
 
-    let Known::Yes((object, file)) =
-        type_of_expression_memoed(memo, index, declaring, scopes, root, path, &member.object, 0)
-    else {
+    let Known::Yes((object, file)) = type_of_expression_memoed(
+        memo,
+        index,
+        declaring,
+        scopes,
+        root,
+        path,
+        &member.object,
+        0,
+    ) else {
         return None;
     };
 
@@ -5560,12 +5722,20 @@ fn declaration_of_a_callee(
 ) -> Known<NamedDeclaration> {
     // A member call: the object's type, then the member's declaration.
     if let Some(access) = crate::sema::resolve::member_access_of(callee) {
-        let object =
-            match type_of_expression_memoed(memo, index, declaring, scopes, root, path, &access.object, 0) {
-                Known::Yes((type_of, _)) => type_of,
-                Known::Unknown(reason) => return Known::Unknown(reason),
-                Known::No => return Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
-            };
+        let object = match type_of_expression_memoed(
+            memo,
+            index,
+            declaring,
+            scopes,
+            root,
+            path,
+            &access.object,
+            0,
+        ) {
+            Known::Yes((type_of, _)) => type_of,
+            Known::Unknown(reason) => return Known::Unknown(reason),
+            Known::No => return Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
+        };
 
         let Some(class) = member_access_class(&object) else {
             return Known::Unknown(UnknownReason::UnknownType(Box::from(object.to_string())));
@@ -5741,7 +5911,16 @@ fn member_callees(
     path: &Path,
     access: &crate::sema::resolve::MemberAccess,
 ) -> Known<Vec<Callee>> {
-    let object = match type_of_expression_memoed(memo, index, declaring, scopes, root, path, &access.object, 0) {
+    let object = match type_of_expression_memoed(
+        memo,
+        index,
+        declaring,
+        scopes,
+        root,
+        path,
+        &access.object,
+        0,
+    ) {
         Known::Yes((type_of, _)) => type_of,
         Known::Unknown(reason) => return Known::Unknown(reason),
         Known::No => {
@@ -5812,7 +5991,9 @@ pub(crate) fn callee_of_a_call(
         return Known::Unknown(UnknownReason::UnknownType(Box::from(written)));
     };
 
-    match declaration_of_a_callee(&memo, index, declaring, scopes, root, path, &callee, written) {
+    match declaration_of_a_callee(
+        &memo, index, declaring, scopes, root, path, &callee, written,
+    ) {
         Known::Yes(named) => Known::Yes(Callee {
             file: named.file(path),
             name_offset: named.name_offset(),
@@ -5968,9 +6149,7 @@ fn member_fact_inner(
                     .value()
                     .unwrap_or_default()
                     .into_iter()
-                    .filter(|base_of_base| {
-                        !names_a_template_parameter(base_of_base, &parameters)
-                    })
+                    .filter(|base_of_base| !names_a_template_parameter(base_of_base, &parameters))
                     .map(|base_of_base| (base_of_base, base.clone())),
             );
         }
@@ -6146,7 +6325,8 @@ fn resolve_aliases_with_arguments(
     path: &Path,
     class: &str,
 ) -> (String, Vec<Type>) {
-    let (name, carried, _unresolved) = resolve_aliases_or_unresolved(index, scopes, root, path, class);
+    let (name, carried, _unresolved) =
+        resolve_aliases_or_unresolved(index, scopes, root, path, class);
     (name, carried)
 }
 
@@ -7121,7 +7301,8 @@ impl ProjectIndex {
         // (measured: one keystroke left two walks where the targeted rule should leave one, and the survival this
         // change is for never happened). `known_paths` outlives a forget for exactly this reason.
         let rewritten = normalize(path);
-        let known_to_the_index = self.known_paths.contains(&rewritten) || self.summaries.contains_key(&rewritten);
+        let known_to_the_index =
+            self.known_paths.contains(&rewritten) || self.summaries.contains_key(&rewritten);
         self.known_paths.insert(rewritten.clone());
         if let Ok(mut walks) = self.visibility.lock() {
             if known_to_the_index {
@@ -7441,7 +7622,11 @@ impl ProjectIndex {
                     .iter()
                     .map(DeclFact::heap_bytes)
                     .sum::<usize>()
-                + reading.macros.iter().map(MacroFact::heap_bytes).sum::<usize>()
+                + reading
+                    .macros
+                    .iter()
+                    .map(MacroFact::heap_bytes)
+                    .sum::<usize>()
                 + reading.diagnostics.len() * std::mem::size_of::<crate::CookedDiagnostic>();
         }
         (
@@ -8247,12 +8432,11 @@ impl ProjectIndex {
         // question on every keystroke and the answer cannot change until the index does, which is exactly what
         // `visibility` is cleared by. Measured on the latency fixture in release: **4–5 ms** with the memo and
         // **84–90 ms** without it, against a 50 ms steady-state budget.
-        if let Some(known) = self
-            .visibility
-            .lock()
-            .ok()
-            .and_then(|walks| walks.get(&from).map(|cached| std::sync::Arc::clone(&cached.seen)))
-        {
+        if let Some(known) = self.visibility.lock().ok().and_then(|walks| {
+            walks
+                .get(&from)
+                .map(|cached| std::sync::Arc::clone(&cached.seen))
+        }) {
             let mut order: Vec<(String, IncludeVisibility)> =
                 Vec::with_capacity(known.visibility.len());
             order.push((from.clone(), IncludeVisibility::Unconditional));
@@ -8701,7 +8885,6 @@ impl ProjectIndex {
     /// answered `Ambiguous`, and every one of them had a perfectly good list behind it (an overload set, a
     /// redeclaration, a namespace).
     pub fn definition(&self, name: &str, visible_from: &Path) -> Known<ProjectDefinition> {
-
         match self.definitions(name, visible_from) {
             Known::Yes(mut found) if found.found.len() == 1 => Known::Yes(found.found.remove(0)),
             // **A `using`-declaration is a synonym, not a second entity.** C++ says so in as many words: a
@@ -9131,11 +9314,7 @@ impl ProjectIndex {
         // `Unknown` keeps the declaration — a guard this layer cannot decide must not become a lookup that says the name
         // is not declared.
         candidates.retain(|found| {
-            self.a_guard_is_taken(
-                &found.file,
-                found.fact.guard,
-                found.fact.range.start_offset,
-            )
+            self.a_guard_is_taken(&found.file, found.fact.guard, found.fact.range.start_offset)
         });
         // scope depends on macros this layer does not have, and a jump to a declaration that may not be there is a
         // wrong answer rather than a missing one. The count is what keeps the answer from claiming there is
@@ -10474,10 +10653,10 @@ impl ProjectDefinition {
                 // not this answer.
                 type_of: None,
                 returns: None,
-        split_by_a_directive: false,
+                split_by_a_directive: false,
                 bases: Vec::new(),
                 parameters: Vec::new(),
-        constraints: Vec::new(),
+                constraints: Vec::new(),
                 // Nor a pattern: this fact is a place to jump to, and the class it names is already the one the
                 // caller asked about. See [`DeclFact::pattern`].
                 pattern: None,
@@ -15156,7 +15335,10 @@ fn split_template_arguments(spelling: &str) -> Option<(String, Vec<String>)> {
 /// the last `::` is the class. `None` for anything else — a cursor outside a declaration, an ordinary declarator, or a
 /// qualifier with more than one level (which would need the class's own file to resolve the inner one, and is left to the
 /// scope chain).
-fn the_class_a_definition_belongs_to(root: &cpp_parser::CppSyntaxNode, offset: usize) -> Option<String> {
+fn the_class_a_definition_belongs_to(
+    root: &cpp_parser::CppSyntaxNode,
+    offset: usize,
+) -> Option<String> {
     use cpp_parser::CppAstNode;
 
     for declaration in root.descendants() {
@@ -15175,7 +15357,9 @@ fn the_class_a_definition_belongs_to(root: &cpp_parser::CppSyntaxNode, offset: u
         let at = written.rfind("::")?;
         let before = written[..at].trim_end();
         let start = before
-            .rfind(|character: char| !(character.is_alphanumeric() || matches!(character, '_' | ':')))
+            .rfind(|character: char| {
+                !(character.is_alphanumeric() || matches!(character, '_' | ':'))
+            })
             .map(|boundary| boundary + 1)
             .unwrap_or(0);
         let class = before[start..].trim();

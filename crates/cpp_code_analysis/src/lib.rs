@@ -55,9 +55,8 @@ pub mod align;
 pub mod cache;
 pub mod cache_db;
 pub mod cache_lru;
-pub mod effect;
-pub mod unit_codec;
 pub mod completion;
+pub mod effect;
 pub mod file;
 pub mod folding;
 pub mod include;
@@ -74,6 +73,7 @@ pub mod signature;
 pub mod summary;
 pub mod summary_codec;
 pub mod surface;
+pub mod unit_codec;
 
 // The folders above are the *organisation*; the modules inside them keep their own names, and they are
 // re-exported here so that every path written before the reorganisation still resolves — `crate::directive::…`
@@ -86,8 +86,7 @@ pub mod surface;
 // * `project`  — what the project says about itself: `.cppls.toml`, the build system, the toolchain
 // * `sema`     — names, scopes, the index's declaration facts, and C++20 modules
 pub use cache::{
-    CACHE_DIRECTORY, FORMAT_VERSION, READING_FINGERPRINT,
-    SummaryKey, content_hash, fnv1a64,
+    CACHE_DIRECTORY, FORMAT_VERSION, READING_FINGERPRINT, SummaryKey, content_hash, fnv1a64,
 };
 // The alignment layer, flattened like the rest: a consumer that wants to check a reading against a compiler needs
 // `Report::of` and `tokenize_preprocessed`, and reaching them through the module hop says nothing a reader benefits
@@ -115,8 +114,6 @@ pub use sema::check::{CheckConfig, CheckContext, DiagnosticCode, Finding};
 pub use sema::declarations::{build_facts, by_name, declared_type_of, scope_of};
 pub use sema::{check, module_info, modules, parser_symbols, scopes, symbol};
 // `tu_cache` is gone: a built `TranslationUnit` is not persisted any more — see `Session::translation_unit_of`.
-
-
 
 pub use memory::MemoryReport;
 pub use summary::ConditionalBody;

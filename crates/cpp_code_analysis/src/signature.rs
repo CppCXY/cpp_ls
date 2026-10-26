@@ -210,7 +210,6 @@ where
             None => constructors_of(declared_in, candidate.name_offset),
         };
 
-
         // **A class whose own file this session has not read**: the constructors are facts in the index, with their
         // parameter lists, and the class's own tree (which `constructors_of` needs) is not there.
         //
@@ -643,10 +642,7 @@ fn constructors_in_the_index(
 ///
 /// Only a `Declaration` whose declarator has **nothing but** the list (a declarator with a name and a body is a
 /// function definition, whose parameter list is not a call) and whose last specifier names a type.
-fn directly_initialized_at(
-    root: &CppSyntaxNode,
-    offset: usize,
-) -> Option<(String, CppSyntaxNode)> {
+fn directly_initialized_at(root: &CppSyntaxNode, offset: usize) -> Option<(String, CppSyntaxNode)> {
     let mut node = root.clone();
     loop {
         let mut child = None;
@@ -678,7 +674,10 @@ fn directly_initialized_at(
             // parameter list, and what separates them is the body: a definition has a `CompoundStat`, a construction
             // has a `;`.
             if declaration.children().any(|sibling| {
-                matches!(CppSyntaxKind::from(sibling.kind()), CppSyntaxKind::CompoundStat)
+                matches!(
+                    CppSyntaxKind::from(sibling.kind()),
+                    CppSyntaxKind::CompoundStat
+                )
             }) {
                 return None;
             }

@@ -20,8 +20,8 @@ mod uri;
 mod messages;
 
 pub use catch_unwind::catch_unwind;
-pub use messages::set_locale;
 pub use kind::symbol_kind;
+pub use messages::set_locale;
 pub use position::{
     file_offset_at_position, line_body, offset_at_position, position_at_offset, position_in,
     position_in_file, utf16_column,

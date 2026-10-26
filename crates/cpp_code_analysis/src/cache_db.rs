@@ -34,9 +34,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use redb::{
-    Database, ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition,
-};
+use redb::{Database, ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition};
 
 /// The name of the database file inside the cache directory.
 pub const DATABASE_FILE: &str = "cache.redb";
@@ -118,7 +116,6 @@ impl FileRow {
             generation: values[5],
         })
     }
-
 }
 
 /// What a garbage collection did — the numbers a probe prints and a test asserts on.
@@ -247,7 +244,11 @@ impl CacheDb {
             let table = read.open_table(META);
             match table {
                 Ok(table) => {
-                    let schema = table.get(KEY_SCHEMA).ok().flatten().map(|value| value.value().to_vec());
+                    let schema = table
+                        .get(KEY_SCHEMA)
+                        .ok()
+                        .flatten()
+                        .map(|value| value.value().to_vec());
                     let fingerprint = table
                         .get(KEY_FINGERPRINT)
                         .ok()
@@ -396,7 +397,11 @@ impl CacheDb {
     /// **Summaries and file rows in one transaction.** The two belong together: a summary no `files` row references
     /// is exactly what a collection deletes, so a batch that wrote only half of the pair would create garbage on
     /// every commit — and a slice writes both.
-    pub fn put_rows(&self, summaries: &[(CacheKey, Vec<u8>)], files: &[(String, FileRow)]) -> Result<()> {
+    pub fn put_rows(
+        &self,
+        summaries: &[(CacheKey, Vec<u8>)],
+        files: &[(String, FileRow)],
+    ) -> Result<()> {
         if summaries.is_empty() && files.is_empty() {
             return Ok(());
         }
@@ -458,7 +463,9 @@ impl CacheDb {
         let Some(value) = renderings.get((content, env))? else {
             return Ok(None);
         };
-        Ok(Some(String::from_utf8_lossy(&decompress(value.value())?).into_owned()))
+        Ok(Some(
+            String::from_utf8_lossy(&decompress(value.value())?).into_owned(),
+        ))
     }
 
     pub fn put_rendering(&self, content: u64, env: u64, text: &str) -> Result<()> {
@@ -718,8 +725,8 @@ const BATCH: usize = 32;
 
 /// **The handles this process holds, by directory.** See the note on [`SummaryCache`]: two stores over one cache must
 /// be one writer, or a summary written through one is invisible to the other until a flush that may never come.
-fn open_handles() -> &'static std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<SummaryCache>>>
-{
+fn open_handles()
+-> &'static std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<SummaryCache>>> {
     static HANDLES: std::sync::OnceLock<
         std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<SummaryCache>>>,
     > = std::sync::OnceLock::new();
@@ -772,18 +779,14 @@ impl SummaryCache {
             config: key.context_hash,
             env: 0,
         };
-        let buffered = self
-            .pending
-            .lock()
-            .ok()
-            .and_then(|pending| {
-                pending
-                    .0
-                    .iter()
-                    .rev()
-                    .find(|(held, _)| *held == cache_key)
-                    .map(|(_, bytes)| bytes.clone())
-            });
+        let buffered = self.pending.lock().ok().and_then(|pending| {
+            pending
+                .0
+                .iter()
+                .rev()
+                .find(|(held, _)| *held == cache_key)
+                .map(|(_, bytes)| bytes.clone())
+        });
         let bytes = match buffered {
             Some(bytes) => bytes,
             None => self.database.summary(cache_key).ok().flatten()?,
@@ -907,10 +910,7 @@ impl Drop for SummaryCache {
     }
 }
 
-fn flush(
-    database: &CacheDb,
-    pending: &mut (Vec<(CacheKey, Vec<u8>)>, Vec<(String, FileRow)>),
-) {
+fn flush(database: &CacheDb, pending: &mut (Vec<(CacheKey, Vec<u8>)>, Vec<(String, FileRow)>)) {
     if pending.0.is_empty() && pending.1.is_empty() {
         return;
     }
@@ -939,7 +939,8 @@ mod tests {
     use super::*;
 
     fn scratch(name: &str) -> PathBuf {
-        let directory = std::env::temp_dir().join(format!("cppls-cache-db-{name}-{}", std::process::id()));
+        let directory =
+            std::env::temp_dir().join(format!("cppls-cache-db-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&directory);
         directory
     }
@@ -967,7 +968,10 @@ mod tests {
         };
         let body = vec![b'x'; 4_096];
 
-        assert!(database.summary(key).unwrap().is_none(), "a miss is not an error");
+        assert!(
+            database.summary(key).unwrap().is_none(),
+            "a miss is not an error"
+        );
         database.put_summary(key, &body).unwrap();
         assert_eq!(database.summary(key).unwrap().unwrap(), body);
 
@@ -996,19 +1000,33 @@ mod tests {
         };
         database.put_summary(live, b"live").unwrap();
         database.put_summary(dead, b"dead").unwrap();
-        database.put_rendering(live.content, live.env, "int x;").unwrap();
-        database.put_rendering(dead.content, dead.env, "int y;").unwrap();
-        database.put_projection(live.content, &["_STD".to_string()]).unwrap();
-        database.put_projection(dead.content, &["_HAS_CXX20".to_string()]).unwrap();
+        database
+            .put_rendering(live.content, live.env, "int x;")
+            .unwrap();
+        database
+            .put_rendering(dead.content, dead.env, "int y;")
+            .unwrap();
+        database
+            .put_projection(live.content, &["_STD".to_string()])
+            .unwrap();
+        database
+            .put_projection(dead.content, &["_HAS_CXX20".to_string()])
+            .unwrap();
         database
             .put_file(Path::new("C:/p/live.cpp"), row(live.content, live.env, 1))
             .unwrap();
 
         let collected = database.collect().unwrap();
         assert_eq!(collected.summaries, 1, "the unreferenced summary is gone");
-        assert_eq!(collected.renderings, 1, "and so is the unreferenced rendering");
+        assert_eq!(
+            collected.renderings, 1,
+            "and so is the unreferenced rendering"
+        );
         assert_eq!(collected.projections, 1, "and the unreferenced projection");
-        assert!(database.summary(live).unwrap().is_some(), "the referenced one stays");
+        assert!(
+            database.summary(live).unwrap().is_some(),
+            "the referenced one stays"
+        );
         assert!(database.summary(dead).unwrap().is_none());
 
         drop(database);
@@ -1057,7 +1075,10 @@ mod tests {
 
         // Nothing references them, so a collection drops the lot — and compaction is what gives the file back.
         let collected = database.collect().unwrap();
-        assert_eq!(collected.summaries, 255, "every summary but the referenced one");
+        assert_eq!(
+            collected.summaries, 255,
+            "every summary but the referenced one"
+        );
         assert_eq!(
             database.sizes().unwrap().summaries,
             1,
@@ -1066,7 +1087,10 @@ mod tests {
         let before = database.sizes().unwrap().bytes;
         assert!(database.compact().unwrap());
         let after = database.sizes().unwrap().bytes;
-        assert!(after < before, "compaction must shrink: {before} -> {after}");
+        assert!(
+            after < before,
+            "compaction must shrink: {before} -> {after}"
+        );
 
         drop(database);
         let _ = std::fs::remove_dir_all(&directory);
@@ -1119,9 +1143,19 @@ mod tests {
         assert_eq!(database.begin_generation().unwrap(), 2);
 
         database
-            .put_file(Path::new("C:/p/a.cpp"), row(1, 2, database.generation().unwrap()))
+            .put_file(
+                Path::new("C:/p/a.cpp"),
+                row(1, 2, database.generation().unwrap()),
+            )
             .unwrap();
-        assert_eq!(database.file(Path::new("c:/P/A.CPP")).unwrap().unwrap().generation, 2);
+        assert_eq!(
+            database
+                .file(Path::new("c:/P/A.CPP"))
+                .unwrap()
+                .unwrap()
+                .generation,
+            2
+        );
 
         drop(database);
         let _ = std::fs::remove_dir_all(&directory);

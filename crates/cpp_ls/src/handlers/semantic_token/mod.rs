@@ -695,7 +695,11 @@ constexpr bool is_assignable_v = __is_assignable(To, From);
                 TypeKind::VariableTemplate,
                 "a variable template names a family of values, not one",
             ),
-            ("is_assignable_v", TypeKind::VariableTemplate, "and so does this one"),
+            (
+                "is_assignable_v",
+                TypeKind::VariableTemplate,
+                "and so does this one",
+            ),
         ] {
             let at = text[..text.find(word).expect("the fixture writes it")].len();
             assert_eq!(
@@ -1461,7 +1465,8 @@ int f(int value);
             );
         }
 
-        let plain = text.find("// a plain comment").expect("the fixture") + "// a plain comment with ".len();
+        let plain = text.find("// a plain comment").expect("the fixture")
+            + "// a plain comment with ".len();
         assert_eq!(
             at_type.get(&plain),
             None,

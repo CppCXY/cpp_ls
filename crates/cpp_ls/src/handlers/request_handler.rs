@@ -40,18 +40,16 @@ use lsp_types::request::{
     CallHierarchyIncomingCalls, CallHierarchyOutgoingCalls, CallHierarchyPrepare,
     CodeActionRequest, Completion, DocumentDiagnosticRequest, DocumentHighlightRequest,
     DocumentLinkRequest, DocumentSymbolRequest, FoldingRangeRequest, Formatting, GotoDefinition,
-    RangeFormatting, WillSaveWaitUntil,
-    GotoImplementation, GotoTypeDefinition, HoverRequest, InlayHintRequest, PrepareRenameRequest, References, Rename,
-    Request as LspRequest, ResolveCompletionItem, SelectionRangeRequest, SemanticTokensFullRequest,
-    SignatureHelpRequest, WorkspaceSymbolRequest,
+    GotoImplementation, GotoTypeDefinition, HoverRequest, InlayHintRequest, PrepareRenameRequest,
+    RangeFormatting, References, Rename, Request as LspRequest, ResolveCompletionItem,
+    SelectionRangeRequest, SemanticTokensFullRequest, SignatureHelpRequest, WillSaveWaitUntil,
+    WorkspaceSymbolRequest,
 };
 
 use crate::context::ServerContext;
 
 use super::{
-    call_hierarchy::{
-        on_incoming_calls, on_outgoing_calls, on_prepare_call_hierarchy,
-    },
+    call_hierarchy::{on_incoming_calls, on_outgoing_calls, on_prepare_call_hierarchy},
     code_action::on_code_action,
     completion::{on_completion, on_completion_resolve},
     definition::on_goto_definition_handler,
@@ -59,17 +57,17 @@ use super::{
     document_highlight::on_document_highlight,
     document_link::on_document_link,
     document_symbol::on_document_symbol,
-    formatting::{on_formatting, on_range_formatting, on_will_save_wait_until},
     folding_range::on_folding_range,
+    formatting::{on_formatting, on_range_formatting, on_will_save_wait_until},
     hover::on_hover,
     implementation::on_goto_implementation,
-    type_definition::on_goto_type_definition,
     inlay_hint::on_inlay_hint,
     references::on_references,
     rename::{on_prepare_rename, on_rename},
     selection_range::on_selection_range,
     semantic_token::on_semantic_tokens,
     signature_help::on_signature_help,
+    type_definition::on_goto_type_definition,
     workspace_symbol::on_workspace_symbol,
 };
 

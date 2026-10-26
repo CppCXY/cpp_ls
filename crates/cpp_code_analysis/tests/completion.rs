@@ -545,7 +545,10 @@ fn a_blank_line_in_a_body_offers_the_keywords_and_the_snippets() {
     match session.members_of(&view, "Source") {
         cpp_code_analysis::Known::Yes(list) => println!(
             "members_of(Source) → {:?}",
-            list.members.iter().map(|m| m.fact.name.clone()).collect::<Vec<_>>()
+            list.members
+                .iter()
+                .map(|m| m.fact.name.clone())
+                .collect::<Vec<_>>()
         ),
         other => println!("members_of(Source) → {other:?}"),
     }
@@ -1561,7 +1564,10 @@ fn a_macro_is_not_shown_with_a_signature() {
     match session.members_of(&view, "Source") {
         cpp_code_analysis::Known::Yes(list) => println!(
             "members_of(Source) → {:?}",
-            list.members.iter().map(|m| m.fact.name.clone()).collect::<Vec<_>>()
+            list.members
+                .iter()
+                .map(|m| m.fact.name.clone())
+                .collect::<Vec<_>>()
         ),
         other => println!("members_of(Source) → {other:?}"),
     }
@@ -1627,7 +1633,8 @@ fn a_macro_is_not_shown_with_a_signature() {
 /// that a conversion with nothing to convert is not mistaken for the answer.
 #[test]
 fn the_typed_prefix_is_the_word_being_replaced() {
-    let header = "namespace std { template <class T> struct vector { void push_back(const T&); }; }\n";
+    let header =
+        "namespace std { template <class T> struct vector { void push_back(const T&); }; }\n";
 
     // **One session per typed word**, because the word is part of the file: the cursor at `a|` and the cursor at
     // `an|` are two different texts, and a fixture that writes only `a` cannot be asked the second.
@@ -1653,17 +1660,24 @@ fn the_typed_prefix_is_the_word_being_replaced() {
 
         let at = source.find("auto x = ").expect("the fixture") + "auto x = ".len() + typed.len();
         match session.members_of(&view, "Source") {
-        cpp_code_analysis::Known::Yes(list) => println!(
-            "members_of(Source) → {:?}",
-            list.members.iter().map(|m| m.fact.name.clone()).collect::<Vec<_>>()
-        ),
-        other => println!("members_of(Source) → {other:?}"),
-    }
-    let offered = session.completions(
+            cpp_code_analysis::Known::Yes(list) => println!(
+                "members_of(Source) → {:?}",
+                list.members
+                    .iter()
+                    .map(|m| m.fact.name.clone())
+                    .collect::<Vec<_>>()
+            ),
+            other => println!("members_of(Source) → {other:?}"),
+        }
+        let offered = session.completions(
             &view,
             cpp_code_analysis::file::coordinates::FileOffset::new(at),
         );
-        let labels: Vec<&str> = offered.items.iter().map(|item| item.label.as_str()).collect();
+        let labels: Vec<&str> = offered
+            .items
+            .iter()
+            .map(|item| item.label.as_str())
+            .collect();
         println!(
             "`{typed}|`: prefix {:?} replace {}..{} (len {}) → {:?}",
             offered.prefix,
@@ -1692,9 +1706,8 @@ fn the_typed_prefix_is_the_word_being_replaced() {
 #[test]
 fn a_statement_position_prefix_is_read_too() {
     for typed in ["a", "an"] {
-        let source = format!(
-            "int main()\n{{\n    int anotherVec = 1;\n    {typed}\n    return 0;\n}}\n"
-        );
+        let source =
+            format!("int main()\n{{\n    int anotherVec = 1;\n    {typed}\n    return 0;\n}}\n");
         let files = MemoryFiles::new().with_file("/p/a.cpp", &source);
         let providers = SessionFiles::new(OpenDocuments::new(), files);
         let mut session = Session::with_config(
@@ -1706,23 +1719,26 @@ fn a_statement_position_prefix_is_read_too() {
         session.add_project_files([std::path::PathBuf::from("/p/a.cpp")]);
         let view = cooked_view(&mut session, "/p/a.cpp");
 
-        let at = source
-            .find(&format!("    {typed}\n"))
-            .expect("the fixture")
-            + 4
-            + typed.len();
+        let at = source.find(&format!("    {typed}\n")).expect("the fixture") + 4 + typed.len();
         match session.members_of(&view, "Source") {
-        cpp_code_analysis::Known::Yes(list) => println!(
-            "members_of(Source) → {:?}",
-            list.members.iter().map(|m| m.fact.name.clone()).collect::<Vec<_>>()
-        ),
-        other => println!("members_of(Source) → {other:?}"),
-    }
-    let offered = session.completions(
+            cpp_code_analysis::Known::Yes(list) => println!(
+                "members_of(Source) → {:?}",
+                list.members
+                    .iter()
+                    .map(|m| m.fact.name.clone())
+                    .collect::<Vec<_>>()
+            ),
+            other => println!("members_of(Source) → {other:?}"),
+        }
+        let offered = session.completions(
             &view,
             cpp_code_analysis::file::coordinates::FileOffset::new(at),
         );
-        let labels: Vec<&str> = offered.items.iter().map(|item| item.label.as_str()).collect();
+        let labels: Vec<&str> = offered
+            .items
+            .iter()
+            .map(|item| item.label.as_str())
+            .collect();
         println!(
             "statement `{typed}|`: prefix {:?} replace {}..{} (len {}) → {:?}",
             offered.prefix,
@@ -1731,9 +1747,16 @@ fn a_statement_position_prefix_is_read_too() {
             offered.replace.length,
             &labels[..labels.len().min(10)]
         );
-        assert_eq!(offered.prefix, typed, "the statement position reads the word too");
+        assert_eq!(
+            offered.prefix, typed,
+            "the statement position reads the word too"
+        );
         assert_eq!(offered.replace.length, typed.len());
-        assert!(labels.contains(&"anotherVec"), "{:?}", &labels[..labels.len().min(12)]);
+        assert!(
+            labels.contains(&"anotherVec"),
+            "{:?}",
+            &labels[..labels.len().min(12)]
+        );
     }
 }
 
@@ -1764,7 +1787,10 @@ int main()
     match session.members_of(&view, "Source") {
         cpp_code_analysis::Known::Yes(list) => println!(
             "members_of(Source) → {:?}",
-            list.members.iter().map(|m| m.fact.name.clone()).collect::<Vec<_>>()
+            list.members
+                .iter()
+                .map(|m| m.fact.name.clone())
+                .collect::<Vec<_>>()
         ),
         other => println!("members_of(Source) → {other:?}"),
     }
@@ -1772,7 +1798,11 @@ int main()
         &view,
         cpp_code_analysis::file::coordinates::FileOffset::new(at),
     );
-    let labels: Vec<&str> = offered.items.iter().map(|item| item.label.as_str()).collect();
+    let labels: Vec<&str> = offered
+        .items
+        .iter()
+        .map(|item| item.label.as_str())
+        .collect();
     println!(
         "after the macro `STD s|`: prefix {:?} scope {:?} replace {}..{} → {:?}",
         offered.prefix,
@@ -1784,9 +1814,15 @@ int main()
 
     // **The macro is expanded before the question is asked**, which is the point: `STD` is `std::` in the cook, so
     // the position is a *qualified* name with `s` written — the scope is `std` and the names are its members.
-    assert_eq!(offered.scope, "std", "the expansion made this a qualified name");
+    assert_eq!(
+        offered.scope, "std",
+        "the expansion made this a qualified name"
+    );
     assert_eq!(offered.prefix, "s");
-    assert_eq!(offered.replace.length, 1, "the range covers the `s` that was typed");
+    assert_eq!(
+        offered.replace.length, 1,
+        "the range covers the `s` that was typed"
+    );
     assert!(labels.contains(&"size"), "{labels:?}");
     assert!(
         !labels.contains(&"main"),
@@ -1830,7 +1866,10 @@ struct Widget { int size; };
     match session.members_of(&view, "Source") {
         cpp_code_analysis::Known::Yes(list) => println!(
             "members_of(Source) → {:?}",
-            list.members.iter().map(|m| m.fact.name.clone()).collect::<Vec<_>>()
+            list.members
+                .iter()
+                .map(|m| m.fact.name.clone())
+                .collect::<Vec<_>>()
         ),
         other => println!("members_of(Source) → {other:?}"),
     }
@@ -1838,9 +1877,20 @@ struct Widget { int size; };
         &view,
         cpp_code_analysis::file::coordinates::FileOffset::new(after_par),
     );
-    let labels: Vec<&str> = offered.items.iter().map(|item| item.label.as_str()).collect();
-    println!("after `@par`: prefix {:?} → {:?}", offered.prefix, &labels[..labels.len().min(8)]);
-    assert_eq!(offered.prefix, "par", "the command's name is what is being typed");
+    let labels: Vec<&str> = offered
+        .items
+        .iter()
+        .map(|item| item.label.as_str())
+        .collect();
+    println!(
+        "after `@par`: prefix {:?} → {:?}",
+        offered.prefix,
+        &labels[..labels.len().min(8)]
+    );
+    assert_eq!(
+        offered.prefix, "par",
+        "the command's name is what is being typed"
+    );
     assert!(
         labels.contains(&"param"),
         "`param` is a command that begins with `par`: {labels:?}"
@@ -1851,7 +1901,10 @@ struct Widget { int size; };
     match session.members_of(&view, "Source") {
         cpp_code_analysis::Known::Yes(list) => println!(
             "members_of(Source) → {:?}",
-            list.members.iter().map(|m| m.fact.name.clone()).collect::<Vec<_>>()
+            list.members
+                .iter()
+                .map(|m| m.fact.name.clone())
+                .collect::<Vec<_>>()
         ),
         other => println!("members_of(Source) → {other:?}"),
     }
@@ -1859,8 +1912,15 @@ struct Widget { int size; };
         &view,
         cpp_code_analysis::file::coordinates::FileOffset::new(after_param),
     );
-    let labels: Vec<&str> = offered.items.iter().map(|item| item.label.as_str()).collect();
-    println!("after `@param `: prefix {:?} → {:?}", offered.prefix, labels);
+    let labels: Vec<&str> = offered
+        .items
+        .iter()
+        .map(|item| item.label.as_str())
+        .collect();
+    println!(
+        "after `@param `: prefix {:?} → {:?}",
+        offered.prefix, labels
+    );
     assert_eq!(offered.prefix, "", "nothing is typed yet");
     assert!(labels.contains(&"widget"), "{labels:?}");
     assert!(labels.contains(&"count"), "{labels:?}");
@@ -1873,7 +1933,8 @@ struct Widget { int size; };
 /// **`#define` 的替换列表里补全它自己的形参** —— 那些名字只存在于这一行,索引和 scope 都不知道它们。
 #[test]
 fn a_macro_body_offers_its_own_parameters() {
-    let source = "#define MAX(a, b) ((a) > (b) ? (a) : (b))\n#define MAX3(a, b, c) MAX(MAX(a, b), c)\n";
+    let source =
+        "#define MAX(a, b) ((a) > (b) ? (a) : (b))\n#define MAX3(a, b, c) MAX(MAX(a, b), c)\n";
     let files = MemoryFiles::new().with_file("/p/a.cpp", source);
     let providers = SessionFiles::new(OpenDocuments::new(), files);
     let mut session = Session::with_config(
@@ -1893,7 +1954,10 @@ fn a_macro_body_offers_its_own_parameters() {
     match session.members_of(&view, "Source") {
         cpp_code_analysis::Known::Yes(list) => println!(
             "members_of(Source) → {:?}",
-            list.members.iter().map(|m| m.fact.name.clone()).collect::<Vec<_>>()
+            list.members
+                .iter()
+                .map(|m| m.fact.name.clone())
+                .collect::<Vec<_>>()
         ),
         other => println!("members_of(Source) → {other:?}"),
     }
@@ -1901,14 +1965,17 @@ fn a_macro_body_offers_its_own_parameters() {
         &view,
         cpp_code_analysis::file::coordinates::FileOffset::new(at),
     );
-    let labels: Vec<&str> = offered.items.iter().map(|item| item.label.as_str()).collect();
+    let labels: Vec<&str> = offered
+        .items
+        .iter()
+        .map(|item| item.label.as_str())
+        .collect();
     println!("prefix {:?} → {labels:?}", offered.prefix);
     // **The macro's parameters first**, then the macros already defined — at the start of the replacement list,
     // which is where a reader begins to write one.
     assert_eq!(labels, vec!["a", "b", "c", "MAX", "MAX3"], "{labels:?}");
     assert_eq!(
-        offered.replace.length,
-        0,
+        offered.replace.length, 0,
         "nothing is typed yet, so the range is where the caret is"
     );
 }
@@ -1944,7 +2011,10 @@ int neither;
     match session.members_of(&view, "Source") {
         cpp_code_analysis::Known::Yes(list) => println!(
             "members_of(Source) → {:?}",
-            list.members.iter().map(|m| m.fact.name.clone()).collect::<Vec<_>>()
+            list.members
+                .iter()
+                .map(|m| m.fact.name.clone())
+                .collect::<Vec<_>>()
         ),
         other => println!("members_of(Source) → {other:?}"),
     }
@@ -1952,7 +2022,11 @@ int neither;
         &view,
         cpp_code_analysis::file::coordinates::FileOffset::new(at),
     );
-    let labels: Vec<&str> = offered.items.iter().map(|item| item.label.as_str()).collect();
+    let labels: Vec<&str> = offered
+        .items
+        .iter()
+        .map(|item| item.label.as_str())
+        .collect();
     println!("prefix {:?} at {at} → {labels:?}", offered.prefix);
     assert_eq!(offered.prefix, "FEATU", "the word being typed");
     assert_eq!(labels, vec!["FEATURE"], "and only the macro that matches");
@@ -1962,7 +2036,10 @@ int neither;
     match session.members_of(&view, "Source") {
         cpp_code_analysis::Known::Yes(list) => println!(
             "members_of(Source) → {:?}",
-            list.members.iter().map(|m| m.fact.name.clone()).collect::<Vec<_>>()
+            list.members
+                .iter()
+                .map(|m| m.fact.name.clone())
+                .collect::<Vec<_>>()
         ),
         other => println!("members_of(Source) → {other:?}"),
     }
@@ -1970,7 +2047,11 @@ int neither;
         &view,
         cpp_code_analysis::file::coordinates::FileOffset::new(blank),
     );
-    let labels: Vec<&str> = offered.items.iter().map(|item| item.label.as_str()).collect();
+    let labels: Vec<&str> = offered
+        .items
+        .iter()
+        .map(|item| item.label.as_str())
+        .collect();
     println!("blank prefix {:?} → {labels:?}", offered.prefix);
     assert!(labels.contains(&"VERSION"), "{labels:?}");
     assert!(labels.contains(&"defined"), "{labels:?}");
@@ -2025,7 +2106,10 @@ int f() {
     match session.members_of(&view, "Source") {
         cpp_code_analysis::Known::Yes(list) => println!(
             "members_of(Source) → {:?}",
-            list.members.iter().map(|m| m.fact.name.clone()).collect::<Vec<_>>()
+            list.members
+                .iter()
+                .map(|m| m.fact.name.clone())
+                .collect::<Vec<_>>()
         ),
         other => println!("members_of(Source) → {other:?}"),
     }
@@ -2033,7 +2117,11 @@ int f() {
         &view,
         cpp_code_analysis::file::coordinates::FileOffset::new(at),
     );
-    let labels: Vec<&str> = offered.items.iter().map(|item| item.label.as_str()).collect();
+    let labels: Vec<&str> = offered
+        .items
+        .iter()
+        .map(|item| item.label.as_str())
+        .collect();
     println!(
         "why: {}",
         cpp_code_analysis::completion::why_no_members(
@@ -2104,7 +2192,10 @@ fn a_member_is_completed_in_a_separated_definition() {
     match session.members_of(&view, "Source") {
         cpp_code_analysis::Known::Yes(list) => println!(
             "members_of(Source) → {:?}",
-            list.members.iter().map(|m| m.fact.name.clone()).collect::<Vec<_>>()
+            list.members
+                .iter()
+                .map(|m| m.fact.name.clone())
+                .collect::<Vec<_>>()
         ),
         other => println!("members_of(Source) → {other:?}"),
     }
@@ -2112,7 +2203,11 @@ fn a_member_is_completed_in_a_separated_definition() {
         &view,
         cpp_code_analysis::file::coordinates::FileOffset::new(at),
     );
-    let labels: Vec<&str> = offered.items.iter().map(|item| item.label.as_str()).collect();
+    let labels: Vec<&str> = offered
+        .items
+        .iter()
+        .map(|item| item.label.as_str())
+        .collect();
     println!("offered: {labels:?}");
     // `_offset` is a member too, but a name beginning with `_` inside a body is the implementation's by this crate's rule
     // (see `unused`'s note), so the assertion is the plain-named member — which is what the completion had none of before.
@@ -2163,7 +2258,10 @@ void f() {
     let _ = session.view("/p/a.cpp");
     session.index_everything();
 
-    for (needle, what) in [("pointer->", "a raw pointer"), ("smart->", "a smart pointer")] {
+    for (needle, what) in [
+        ("pointer->", "a raw pointer"),
+        ("smart->", "a smart pointer"),
+    ] {
         let at = source.find(needle).expect("the fixture writes it") + needle.len();
         let labels = labels_at(&mut session, "/p/a.cpp", at);
         println!("{what} at {at}: {labels:?}");
@@ -2256,7 +2354,8 @@ void f(Config config) {
     let _ = session.view("/p/a.cpp");
     session.index_everything();
 
-    let at = source.find("config.Editorconfig.").expect("the fixture") + "config.Editorconfig.".len();
+    let at =
+        source.find("config.Editorconfig.").expect("the fixture") + "config.Editorconfig.".len();
     let labels = labels_at(&mut session, "/p/a.cpp", at);
     println!("dot on a smart pointer at {at}: {labels:?}");
     assert!(

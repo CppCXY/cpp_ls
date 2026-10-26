@@ -80,7 +80,9 @@ fn is_a_label(stream: &Stream<'_>, index: usize) -> bool {
     while cursor > 0 {
         cursor -= 1;
         match stream.tokens[cursor].kind {
-            CaseKeyword | DefaultKeyword | PublicKeyword | PrivateKeyword | ProtectedKeyword => return true,
+            CaseKeyword | DefaultKeyword | PublicKeyword | PrivateKeyword | ProtectedKeyword => {
+                return true;
+            }
             Semicolon | LeftBrace | RightBrace | Question => return false,
             _ => {}
         }
@@ -172,10 +174,7 @@ mod tests {
 
     #[test]
     fn a_control_head_ends_at_its_parenthesis_when_the_body_is_on_the_next_line() {
-        assert_eq!(
-            texts("if (x)\nreturn;\n"),
-            vec!["if ( x )", "return ;"]
-        );
+        assert_eq!(texts("if (x)\nreturn;\n"), vec!["if ( x )", "return ;"]);
     }
 
     #[test]
@@ -279,10 +278,18 @@ pub fn break_line(
             }
             // **A piece after the first one starts at the continuation column**, not at the statement`s: charging the
             // statement column made the search believe pieces fitted when they did not.
-            let indent = if start == 0 { start_column } else { start_column + continuation };
+            let indent = if start == 0 {
+                start_column
+            } else {
+                start_column + continuation
+            };
             let piece = width(positions[start], positions[end], indent);
             let excess = piece.saturating_sub(limit) as i64 * penalties.excess_character;
-            let break_cost = if start == 0 { 0 } else { break_at(stream, positions[start], &penalties) };
+            let break_cost = if start == 0 {
+                0
+            } else {
+                break_at(stream, positions[start], &penalties)
+            };
             let cost = best[start] + excess + break_cost;
             if cost < best[end] {
                 best[end] = cost;
@@ -302,7 +309,11 @@ pub fn break_line(
         cursor = previous;
     }
     chosen.reverse();
-    if chosen.is_empty() { None } else { Some(chosen) }
+    if chosen.is_empty() {
+        None
+    } else {
+        Some(chosen)
+    }
 }
 
 /// May a break go before the token at `index`?
@@ -314,8 +325,9 @@ pub fn is_breakable(stream: &Stream<'_>, index: usize) -> bool {
         // After a comma: the classic argument break.
         _ if previous == Comma => true,
         // Before a binary operator (`a + b` broken before the `+`).
-        Plus | Minus | Star | Slash | Percent | Ampersand | Pipe | Caret | Less | Greater | LessEqual
-        | GreaterEqual | Equal | NotEqual | LogicalAnd | LogicalOr | LeftShift | RightShift | Question => true,
+        Plus | Minus | Star | Slash | Percent | Ampersand | Pipe | Caret | Less | Greater
+        | LessEqual | GreaterEqual | Equal | NotEqual | LogicalAnd | LogicalOr | LeftShift
+        | RightShift | Question => true,
         // Before a member access and after an opening bracket.
         Dot | Arrow => true,
         _ if matches!(previous, LeftParen | LeftBracket) => true,
@@ -415,7 +427,10 @@ mod break_tests {
     #[test]
     fn a_long_sum_breaks_before_the_operator() {
         let pieces = broken("int x = aaaaaaaaaa + bbbbbbbbbb + cccccccccc;", "25").expect("broken");
-        assert!(pieces.iter().any(|piece| piece.starts_with('+')), "{pieces:?}");
+        assert!(
+            pieces.iter().any(|piece| piece.starts_with('+')),
+            "{pieces:?}"
+        );
     }
 
     #[test]

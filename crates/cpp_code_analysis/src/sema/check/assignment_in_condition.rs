@@ -87,7 +87,10 @@ impl Check for AssignmentInCondition {
                 .and_then(|parenthesised| parenthesised.child::<cpp_parser::CppBinaryExpr>())
                 .and_then(|binary| binary.token::<cpp_parser::CppOperatorToken>())
                 .is_some_and(|operator| {
-                    matches!(operator.syntax().text().to_string().as_str(), "==" | "!=" | "<" | ">" | "<=" | ">=")
+                    matches!(
+                        operator.syntax().text().to_string().as_str(),
+                        "==" | "!=" | "<" | ">" | "<=" | ">="
+                    )
                 });
             if is_a_comparison {
                 continue;

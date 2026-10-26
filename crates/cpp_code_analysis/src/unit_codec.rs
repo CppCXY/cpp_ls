@@ -55,7 +55,9 @@ impl std::fmt::Display for DecodeError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             DecodeError::NotAUnit => write!(formatter, "not a unit rendering"),
-            DecodeError::UnsupportedVersion => write!(formatter, "unit rendering from another version"),
+            DecodeError::UnsupportedVersion => {
+                write!(formatter, "unit rendering from another version")
+            }
             DecodeError::Truncated => write!(formatter, "unit rendering is truncated"),
         }
     }
@@ -161,7 +163,8 @@ pub fn decode(bytes: &[u8]) -> Result<RenderedUnit, DecodeError> {
         let file = reader.path()?;
         let fatal = reader.u8()? != 0;
         let at = reader.u32()? as usize;
-        let message = String::from_utf8(reader.bytes(MAX_TEXT)?).map_err(|_| DecodeError::Truncated)?;
+        let message =
+            String::from_utf8(reader.bytes(MAX_TEXT)?).map_err(|_| DecodeError::Truncated)?;
         messages.push(UnitMessage {
             file,
             fatal,
@@ -364,7 +367,10 @@ pub fn encode_indexed_unit(unit: &crate::IndexedUnit) -> Vec<u8> {
     put_u32(&mut out, unit.files.len() as u32);
     for (path, cooked) in &unit.files {
         put_path(&mut out, path);
-        put_bytes(&mut out, &crate::summary_codec::encode(&as_a_summary(path, cooked)));
+        put_bytes(
+            &mut out,
+            &crate::summary_codec::encode(&as_a_summary(path, cooked)),
+        );
         put_u32(&mut out, cooked.unplaced as u32);
         put_u32(&mut out, cooked.diagnostics.len() as u32);
         for diagnostic in &cooked.diagnostics {

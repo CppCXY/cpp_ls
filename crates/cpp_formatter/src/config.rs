@@ -135,16 +135,16 @@ impl Style {
         Style::preset("LLVM").expect("LLVM is a preset")
     }
 
-/// **The style used when a file has no `.clang-format`**: LLVM with a four-space indent.
-///
-/// clang-format`s own fallback is LLVM, whose `IndentWidth` is 2. This project formats C++ at four spaces, so the
-/// fallback differs on that one option and on nothing else: `-style=LLVM` still gives clang-format`s two-space file,
-/// and a `.clang-format` always wins over both.
-pub fn fallback_style() -> Style {
-    let mut style = Style::default_style();
-    style.set_from_text("IndentWidth", "4");
-    style
-}
+    /// **The style used when a file has no `.clang-format`**: LLVM with a four-space indent.
+    ///
+    /// clang-format`s own fallback is LLVM, whose `IndentWidth` is 2. This project formats C++ at four spaces, so the
+    /// fallback differs on that one option and on nothing else: `-style=LLVM` still gives clang-format`s two-space file,
+    /// and a `.clang-format` always wins over both.
+    pub fn fallback_style() -> Style {
+        let mut style = Style::default_style();
+        style.set_from_text("IndentWidth", "4");
+        style
+    }
 
     /// **One option's value.** The query every formatting rule makes, and it is an index.
     pub fn value(&self, option: StyleOption) -> &Value {
@@ -477,11 +477,15 @@ fn successors(key: &str, value: &str) -> Option<Vec<(&'static str, &'static str)
                 vec![("SpacesInParens", "Never")]
             }
         }
-        "SpacesInConditionalStatement" | "SpacesInCStyleCastParentheses" | "SpaceInEmptyParentheses" => vec![
+        "SpacesInConditionalStatement"
+        | "SpacesInCStyleCastParentheses"
+        | "SpaceInEmptyParentheses" => vec![
             ("SpacesInParens", "Custom"),
             (
                 match key {
-                    "SpacesInConditionalStatement" => "SpacesInParensOptions.InConditionalStatements",
+                    "SpacesInConditionalStatement" => {
+                        "SpacesInParensOptions.InConditionalStatements"
+                    }
                     "SpacesInCStyleCastParentheses" => "SpacesInParensOptions.InCStyleCasts",
                     _ => "SpacesInParensOptions.InEmptyParentheses",
                 },
@@ -493,7 +497,10 @@ fn successors(key: &str, value: &str) -> Option<Vec<(&'static str, &'static str)
             if on { "Always" } else { "Never" },
         )],
         "KeepEmptyLinesAtTheStartOfBlocks" => {
-            vec![("KeepEmptyLinesAtStartOfBlock", if on { "true" } else { "false" })]
+            vec![(
+                "KeepEmptyLinesAtStartOfBlock",
+                if on { "true" } else { "false" },
+            )]
         }
         "AlwaysBreakTemplateDeclarations" => {
             vec![("BreakTemplateDeclarations", if on { "Yes" } else { "No" })]
@@ -504,7 +511,10 @@ fn successors(key: &str, value: &str) -> Option<Vec<(&'static str, &'static str)
             vec![("BreakConstructorInitializers", leak(value.trim()))]
         }
         "ConstructorInitializerAllOnOneLineOrOnePerLine" => {
-            vec![("PackConstructorInitializers", if on { "BinPack" } else { "NextLine" })]
+            vec![(
+                "PackConstructorInitializers",
+                if on { "BinPack" } else { "NextLine" },
+            )]
         }
         _ => return None,
     })
@@ -613,12 +623,17 @@ mod tests {
         let root = std::env::temp_dir().join(format!("cppfmt-style-{}", std::process::id()));
         let nested = root.join("a/b");
         std::fs::create_dir_all(&nested).expect("the tree is creatable");
-        std::fs::write(root.join(".clang-format"), "IndentWidth: 7\n").expect("the config is writable");
+        std::fs::write(root.join(".clang-format"), "IndentWidth: 7\n")
+            .expect("the config is writable");
         let inside = nested.join("x.cpp");
         std::fs::write(&inside, "int x;\n").expect("the file is writable");
 
         let style = style_for_file(&inside);
-        assert_eq!(style.count(crate::options::StyleOption::IndentWidth), 7, "the nearest `.clang-format` wins");
+        assert_eq!(
+            style.count(crate::options::StyleOption::IndentWidth),
+            7,
+            "the nearest `.clang-format` wins"
+        );
 
         std::fs::remove_dir_all(&root).ok();
         // The fallback is four spaces (this project`s convention), not clang-format`s two.
@@ -654,7 +669,10 @@ mod tests {
         // the document is read and never again. `1` for a flag and `"4"` for a count both work, because the
         // accessors read whichever shape they are given.
         let style = parse("IndentWidth: 4\nIndentCaseLabels: 1\n", None).unwrap();
-        assert!(matches!(style.value(StyleOption::IndentWidth), Value::Number(4)));
+        assert!(matches!(
+            style.value(StyleOption::IndentWidth),
+            Value::Number(4)
+        ));
         // **`1` for a flag is a number that is true**, which is what clang-format accepts; the accessor reads it
         // whichever shape the document wrote.
         assert!(style.flag(StyleOption::IndentCaseLabels));
@@ -682,9 +700,15 @@ mod tests {
 
         // A boolean that became an enum.
         let comments = parse("AlignTrailingComments: false\n", None).unwrap();
-        assert_eq!(comments.text(StyleOption::AlignTrailingCommentsKind), "Never");
+        assert_eq!(
+            comments.text(StyleOption::AlignTrailingCommentsKind),
+            "Never"
+        );
         let comments = parse("AlignTrailingComments: true\n", None).unwrap();
-        assert_eq!(comments.text(StyleOption::AlignTrailingCommentsKind), "Always");
+        assert_eq!(
+            comments.text(StyleOption::AlignTrailingCommentsKind),
+            "Always"
+        );
 
         // And a renamed boolean only.
         let empty = parse("KeepEmptyLinesAtTheStartOfBlocks: true\n", None).unwrap();

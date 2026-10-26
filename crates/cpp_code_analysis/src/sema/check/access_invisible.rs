@@ -118,7 +118,9 @@ impl Check for AccessInvisible {
             // `CPPLS_NO_INFERENCE=1` makes the rule answer before it ever gets here, so the A/B that attributed
             // 96% of the layer to inference did not see it. A token at the offset and its ancestors reach the same
             // node in O(depth).
-            let Some(declaration) = declaration_starting_at(context, member.fact.range.start_offset) else {
+            let Some(declaration) =
+                declaration_starting_at(context, member.fact.range.start_offset)
+            else {
                 continue;
             };
             if !context

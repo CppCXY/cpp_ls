@@ -12,7 +12,9 @@
 
 use std::path::PathBuf;
 
-use cpp_code_analysis::{CompilerConfig, MemoryFiles, OpenDocuments, Session, SessionFiles, WatchFilter};
+use cpp_code_analysis::{
+    CompilerConfig, MemoryFiles, OpenDocuments, Session, SessionFiles, WatchFilter,
+};
 
 #[test]
 fn a_scope_opened_by_another_files_body_is_in_the_rendering() {
@@ -25,7 +27,10 @@ fn a_scope_opened_by_another_files_body_is_in_the_rendering() {
             "/p/widget.h",
             "#include \"open.h\"\n_STD_BEGIN\nstruct Widget {\n    int size;\n};\n_STD_END\n",
         )
-        .with_file("/p/main.cpp", "#include \"widget.h\"\nint f() { std::Widget w; return w.size; }\n");
+        .with_file(
+            "/p/main.cpp",
+            "#include \"widget.h\"\nint f() { std::Widget w; return w.size; }\n",
+        );
     let mut session = Session::with_config(
         "/p",
         SessionFiles::new(OpenDocuments::new(), files),
@@ -55,14 +60,8 @@ fn a_scope_opened_by_another_files_body_is_in_the_rendering() {
         .iter()
         .find(|fact| fact.name == "Widget")
         .expect("Widget is a fact");
-    println!(
-        "Widget: scope {:?}, guard {:?}",
-        widget.scope, widget.guard
-    );
-    println!(
-        "macro_readings: {}",
-        summary.macro_readings.len()
-    );
+    println!("Widget: scope {:?}, guard {:?}", widget.scope, widget.guard);
+    println!("macro_readings: {}", summary.macro_readings.len());
     // **And the same file read the way the index is supposed to read it**: the rendering, through the indexer. The
     // question this answers is whether the scope survives *that* path — the session test's failure cannot be blamed on
     // the commit if the summary built here already has no scope.
@@ -84,7 +83,8 @@ fn a_scope_opened_by_another_files_body_is_in_the_rendering() {
         from_the_rendering.and_then(|fact| fact.scope.clone()),
         read.summary.declarations.len(),
         read.summary.includes.len()
-    );    assert!(
+    );
+    assert!(
         rendered.text.contains("namespace std"),
         "the body of _STD_BEGIN is expanded: {}",
         rendered.text

@@ -52,7 +52,13 @@ pub async fn on_range_formatting(
     params: DocumentRangeFormattingParams,
     cancel_token: CancellationToken,
 ) -> RequestOutcome<Vec<TextEdit>> {
-    format_request(context, params.text_document.uri, Some(params.range), cancel_token).await
+    format_request(
+        context,
+        params.text_document.uri,
+        Some(params.range),
+        cancel_token,
+    )
+    .await
 }
 
 /// Format the document that is about to be written (`textDocument/willSaveWaitUntil`).
@@ -114,7 +120,10 @@ pub fn edits_between(old: &str, formatted: &str) -> Vec<TextEdit> {
     let new_lines: Vec<&str> = formatted.split_inclusive('\n').collect();
 
     let mut prefix = 0usize;
-    while prefix < old_lines.len() && prefix < new_lines.len() && old_lines[prefix] == new_lines[prefix] {
+    while prefix < old_lines.len()
+        && prefix < new_lines.len()
+        && old_lines[prefix] == new_lines[prefix]
+    {
         prefix += 1;
     }
     let mut suffix = 0usize;
@@ -132,8 +141,14 @@ pub fn edits_between(old: &str, formatted: &str) -> Vec<TextEdit> {
     // testable without a file.
     vec![TextEdit {
         range: Range {
-            start: Position { line: prefix as u32, character: 0 },
-            end: Position { line: (prefix + old_middle.len()) as u32, character: 0 },
+            start: Position {
+                line: prefix as u32,
+                character: 0,
+            },
+            end: Position {
+                line: (prefix + old_middle.len()) as u32,
+                character: 0,
+            },
         },
         new_text: new_middle,
     }]
@@ -144,7 +159,10 @@ pub fn edits_between(old: &str, formatted: &str) -> Vec<TextEdit> {
 /// `held` is what a formatting request usually finds (the buffer was opened and the analysis read it); the disk read is
 /// the fallback for a file that is open but not yet read, which is the state a client that formats right after
 /// `didOpen` can put the server in.
-fn read_text(session: &cpp_code_analysis::Session<cpp_code_analysis::DiskFiles>, path: &Path) -> Option<String> {
+fn read_text(
+    session: &cpp_code_analysis::Session<cpp_code_analysis::DiskFiles>,
+    path: &Path,
+) -> Option<String> {
     if let Some(held) = session.files().held(path) {
         return Some(held.text.to_string());
     }

@@ -48,7 +48,11 @@ pub fn columns(source: &str, stream: &Stream<'_>, style: &Style) -> Vec<Option<u
         while end < found.len() && found[end].0 == found[end - 1].0 + 1 {
             end += 1;
         }
-        let widest = found[start..end].iter().map(|(_, _, code_end)| *code_end).max().unwrap_or(0);
+        let widest = found[start..end]
+            .iter()
+            .map(|(_, _, code_end)| *code_end)
+            .max()
+            .unwrap_or(0);
         for (_, index, _) in &found[start..end] {
             targets[*index] = Some(widest + minimum);
         }
@@ -136,11 +140,15 @@ fn start_spaces(code: &str, comment: &str, minimum: usize) -> usize {
     if code.trim_start().starts_with('{') && code.trim_end().ends_with(',') {
         return minimum + 1;
     }
-        // **A block comment asks for *at least* one space, not one more than the minimum**: with
-        // `SpacesBeforeTrailingComments: 1` clang-format writes `a = 1; /* inline */` on a lone line, and with 0 it
-        // writes the same one — so the rule is `max(minimum, 1)`, not `minimum + 1` (measured on the snippet
-        // corpus, where `minimum + 1` produced two spaces).
-    if comment.starts_with("/*") { minimum.max(1) } else { minimum }
+    // **A block comment asks for *at least* one space, not one more than the minimum**: with
+    // `SpacesBeforeTrailingComments: 1` clang-format writes `a = 1; /* inline */` on a lone line, and with 0 it
+    // writes the same one — so the rule is `max(minimum, 1)`, not `minimum + 1` (measured on the snippet
+    // corpus, where `minimum + 1` produced two spaces).
+    if comment.starts_with("/*") {
+        minimum.max(1)
+    } else {
+        minimum
+    }
 }
 /// Split one line into (code, comment) when it has a trailing comment; `None` for a line that has none.
 
@@ -171,7 +179,9 @@ fn split_trailing_comment(line: &str) -> Option<(&str, &str)> {
                 seen_code = true;
                 index += 1;
             }
-            b'/' if index + 1 < bytes.len() && (bytes[index + 1] == b'/' || bytes[index + 1] == b'*') => {
+            b'/' if index + 1 < bytes.len()
+                && (bytes[index + 1] == b'/' || bytes[index + 1] == b'*') =>
+            {
                 if !seen_code {
                     return None;
                 }
@@ -269,9 +279,15 @@ mod tests {
         // (`/* … */`, so one space, and the sequence pushes both to the wider line`s column).
         let mut style = Style::default_style();
         style.set_from_text("SpacesBeforeTrailingComments", "0");
-        assert_eq!(align("    TK_GLOBAL, // x\n", &style), "    TK_GLOBAL,// x\n");
         assert_eq!(
-            align("    unsigned char left; /* a */\n    unsigned char right; /* b */\n", &style),
+            align("    TK_GLOBAL, // x\n", &style),
+            "    TK_GLOBAL,// x\n"
+        );
+        assert_eq!(
+            align(
+                "    unsigned char left; /* a */\n    unsigned char right; /* b */\n",
+                &style
+            ),
             "    unsigned char left;  /* a */\n    unsigned char right; /* b */\n"
         );
     }

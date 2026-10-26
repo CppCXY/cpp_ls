@@ -128,7 +128,9 @@ pub struct AnalysisState {
     /// `workspace/diagnostic/refresh` makes the client ask again — and the squiggles come back. Every keystroke
     /// repeats it: that is the "diagnostics flash" a user sees, and no amount of refresh taming fixes it, because
     /// the answer itself alternates.
-    last_reports: std::sync::Mutex<std::collections::HashMap<PathBuf, std::sync::Arc<Vec<lsp_types::Diagnostic>>>>,
+    last_reports: std::sync::Mutex<
+        std::collections::HashMap<PathBuf, std::sync::Arc<Vec<lsp_types::Diagnostic>>>,
+    >,
 }
 
 /// **How long an update may hold the analysis before it is a defect.**
@@ -174,7 +176,10 @@ impl AnalysisState {
     /// A pull answers from the analysis when it can and from this when it cannot, so that a client is never told
     /// "and now there is nothing" by a server that simply has not finished reading. The alternative for the caller
     /// is an empty report, which is a *claim*: it says the file is clean.
-    pub fn last_report(&self, path: &std::path::Path) -> Option<std::sync::Arc<Vec<lsp_types::Diagnostic>>> {
+    pub fn last_report(
+        &self,
+        path: &std::path::Path,
+    ) -> Option<std::sync::Arc<Vec<lsp_types::Diagnostic>>> {
         self.last_reports
             .lock()
             .ok()
@@ -541,10 +546,7 @@ impl AnalysisState {
         if let Ok(session) = self.inner.try_read()
             && let Some(session) = session.as_ref()
             && session.index().summary(&to_prepare).is_some()
-            && session
-                .index()
-                .cooked_declarations(&to_prepare)
-                .is_some()
+            && session.index().cooked_declarations(&to_prepare).is_some()
         {
             return true;
         }
@@ -561,8 +563,7 @@ impl AnalysisState {
             //
             // Asking the question *inside* the write lock costs nothing and settles it: a view that is already
             // there means this request has all it needs.
-            if session.index().summary(&to_prepare).is_some()
-                && session.view(&to_prepare).is_some()
+            if session.index().summary(&to_prepare).is_some() && session.view(&to_prepare).is_some()
             {
                 return true;
             }

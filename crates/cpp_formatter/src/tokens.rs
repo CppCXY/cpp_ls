@@ -77,7 +77,11 @@ pub struct Stream<'a> {
 /// What line ending the file uses. A formatter that turned CRLF into LF would rewrite every line of a file it was
 /// asked to "only re-indent".
 pub fn line_ending(source: &str) -> &'static str {
-    if source.contains("\r\n") { "\r\n" } else { "\n" }
+    if source.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    }
 }
 
 /// Split `source` into tokens and gaps.
@@ -194,7 +198,10 @@ mod tests {
         // `int x ; int y ;` — the two comments stand before the second `int`, which is token index 3.
         let gap = &stream.gaps[3];
         assert_eq!(gap.comments.len(), 2);
-        assert!(!gap.comments[0].own_line, "the first comment trails `int x;`");
+        assert!(
+            !gap.comments[0].own_line,
+            "the first comment trails `int x;`"
+        );
         assert!(gap.comments[0].ends_line);
         assert!(gap.comments[1].own_line);
         assert!(gap.comments[1].ends_line);

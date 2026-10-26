@@ -778,8 +778,10 @@ fn kind_of_binding(binding: &Binding, view: &FileView, is_a_parameter: bool) -> 
         BindingKind::Variable => {
             if is_a_parameter {
                 NameKind::Parameter
-            } else if !crate::sema::declarations::declared_template_parameters_of(&view.root, binding)
-                .is_empty()
+            } else if !crate::sema::declarations::declared_template_parameters_of(
+                &view.root, binding,
+            )
+            .is_empty()
             {
                 // **`template <class T> constexpr bool v = …;`** — the declaration introduces a family of values,
                 // while the scope model records a variable because that is all a binding can say. The template head

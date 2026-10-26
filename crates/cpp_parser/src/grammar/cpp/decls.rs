@@ -478,8 +478,10 @@ fn parse_template_parameter(p: &mut CppParser) -> ParseResult {
     //
     // The specifier must **start with a name** for this to apply: `int N` and `auto N` declare values, and a
     // keyword is what tells them apart.
-    let a_name_precedes_the_parameter =
-        matches!(p.current_token(), CppTokenKind::Identifier | CppTokenKind::Scope);
+    let a_name_precedes_the_parameter = matches!(
+        p.current_token(),
+        CppTokenKind::Identifier | CppTokenKind::Scope
+    );
     if let Err(err) = parse_decl_specifier_seq(p) {
         p.close_marks_above(base);
         return Err(err);

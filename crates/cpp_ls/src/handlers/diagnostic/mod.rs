@@ -181,9 +181,7 @@ pub fn checks_may_be_trusted(session: &Session<DiskFiles>, path: &std::path::Pat
     // on a real project, while the answers those findings need were already in the index. A check about *this* file
     // reads this file and its includes, so that is the question — and `its_closure_is_owed` is the same walk the
     // cross-file queries already pay.
-    session.pending() == 0
-        && session.pending_cooking() == 0
-        && !session.its_closure_is_owed(path)
+    session.pending() == 0 && session.pending_cooking() == 0 && !session.its_closure_is_owed(path)
 }
 
 /// **What the semantic checks found** — one diagnostic per finding, with the rule's own code and severity.

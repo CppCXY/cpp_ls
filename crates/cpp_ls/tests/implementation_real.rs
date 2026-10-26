@@ -44,7 +44,8 @@ fn a_header_declaration_answers_the_source_that_defines_it() {
     let Some(held) = session.files().held(&header) else {
         panic!("the header is readable");
     };
-    let view = cpp_code_analysis::FileView::parse_with(held, &cpp_parser::MacroEnvironment::default());
+    let view =
+        cpp_code_analysis::FileView::parse_with(held, &cpp_parser::MacroEnvironment::default());
 
     // **Every declaration of `UpdateCodeStyle` in the header**, asked one at a time: the first occurrence is the one a
     // reader's cursor would be on, and a comment before it is why the probe asks the *declaration* explicitly.
@@ -54,51 +55,57 @@ fn a_header_declaration_answers_the_source_that_defines_it() {
     // declaration (`CodeFormat`, the class) and answered 0 locations, which looked exactly like a broken rule.
     for (at, _) in header_text.match_indices("UpdateCodeStyle") {
         let line = header_text[..at].matches('\n').count();
-        let column = at - header_text[..at].rfind('\n').map_or(0, |newline| newline + 1);
+        let column = at
+            - header_text[..at]
+                .rfind('\n')
+                .map_or(0, |newline| newline + 1);
         let offset = at + 1;
         asked += 1;
         // **A second shape**: the definition put the returned type in front of a qualified name in the *declarator*
-    // (`std::vector<LuaTokenError> &LuaLexer::GetErrors()`), and the scope walker had filed it as a plain function of
-    // the file — `scope: None` — so the header's declaration found nothing. It is the fact the walker made, adopted
-    // and given its scope (see `qualified_declarations`), rather than a second fact.
-    let lexer_header = project.join("LuaParser/include/LuaParser/Lexer/LuaLexer.h");
-    let lexer_source = project.join("LuaParser/src/Lexer/LuaLexer.cpp");
-    if lexer_header.exists() && lexer_source.exists() {
-        let header = std::fs::read_to_string(&lexer_header).expect("the header reads");
-        let Some(raw) = header.find("GetErrors").map(|at| at + 1) else {
-            panic!("the header declares GetErrors");
-        };
-        let mut session = Session::open(
-            project.clone(),
-            SessionFiles::new(OpenDocuments::new(), DiskFiles),
-            WatchFilter::new(&project),
-        );
-        session.add_project_files([lexer_header.clone(), lexer_source.clone()]);
-        session.index_everything();
-        let view = session
-            .view_of_the_file(&lexer_header)
-            .expect("the header parses");
-        let found = definitions_of(
-            &session,
-            &view,
-            cpp_code_analysis::file::coordinates::ReadingOffset::new(raw).get(),
-        );
-        println!(
-            "GetErrors at header offset {raw} → {:?}",
-            found
-                .iter()
-                .map(|location| format!("{}:{}", location.uri.path(), location.range.start.line + 1))
-                .collect::<Vec<_>>()
-        );
-        assert!(
-            found.iter().any(|location| location
-                .uri
-                .path()
-                .ends_with("LuaLexer.cpp")),
-            "the definition in the .cpp: {found:?}"
-        );
-    }
-    let found = definitions_of(&session, &view, offset);
+        // (`std::vector<LuaTokenError> &LuaLexer::GetErrors()`), and the scope walker had filed it as a plain function of
+        // the file — `scope: None` — so the header's declaration found nothing. It is the fact the walker made, adopted
+        // and given its scope (see `qualified_declarations`), rather than a second fact.
+        let lexer_header = project.join("LuaParser/include/LuaParser/Lexer/LuaLexer.h");
+        let lexer_source = project.join("LuaParser/src/Lexer/LuaLexer.cpp");
+        if lexer_header.exists() && lexer_source.exists() {
+            let header = std::fs::read_to_string(&lexer_header).expect("the header reads");
+            let Some(raw) = header.find("GetErrors").map(|at| at + 1) else {
+                panic!("the header declares GetErrors");
+            };
+            let mut session = Session::open(
+                project.clone(),
+                SessionFiles::new(OpenDocuments::new(), DiskFiles),
+                WatchFilter::new(&project),
+            );
+            session.add_project_files([lexer_header.clone(), lexer_source.clone()]);
+            session.index_everything();
+            let view = session
+                .view_of_the_file(&lexer_header)
+                .expect("the header parses");
+            let found = definitions_of(
+                &session,
+                &view,
+                cpp_code_analysis::file::coordinates::ReadingOffset::new(raw).get(),
+            );
+            println!(
+                "GetErrors at header offset {raw} → {:?}",
+                found
+                    .iter()
+                    .map(|location| format!(
+                        "{}:{}",
+                        location.uri.path(),
+                        location.range.start.line + 1
+                    ))
+                    .collect::<Vec<_>>()
+            );
+            assert!(
+                found
+                    .iter()
+                    .any(|location| location.uri.path().ends_with("LuaLexer.cpp")),
+                "the definition in the .cpp: {found:?}"
+            );
+        }
+        let found = definitions_of(&session, &view, offset);
         println!(
             "line {} col {} → {} location(s): {:?}",
             line + 1,

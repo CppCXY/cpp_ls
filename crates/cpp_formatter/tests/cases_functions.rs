@@ -38,10 +38,7 @@ fn style() -> Style {
 /// `02_noexcept`
 #[test]
 fn functions_02_noexcept() {
-    check(
-        r#"void f() noexcept;"#,
-        r#"void f() noexcept;"#,
-    );
+    check(r#"void f() noexcept;"#, r#"void f() noexcept;"#);
 }
 
 /// `03_default_arg`

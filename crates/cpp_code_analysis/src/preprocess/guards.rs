@@ -258,9 +258,8 @@ fn declares_something_before(root: &CppSyntaxNode, offset: usize) -> bool {
         }
     }
 
-    root.children().any(|child| {
-        (u32::from(child.text_range().start()) as usize) < offset && is_code(&child)
-    })
+    root.children()
+        .any(|child| (u32::from(child.text_range().start()) as usize) < offset && is_code(&child))
 }
 
 /// Analyse a parsed file's guards.

@@ -63,8 +63,9 @@ fn distinct() -> &'static Mutex<HashSet<u64>> {
 /// so a single mutex-guarded map is both correct and small; the rule it follows is the one
 /// `docs/memory-audit.md` §3.2 states: no `thread_local!`, because state belongs to an owner, not to a thread.
 fn projections() -> &'static Mutex<HashMap<std::path::PathBuf, (u64, Arc<Vec<(Box<str>, u64)>>)>> {
-    static PROJECTIONS: OnceLock<Mutex<HashMap<std::path::PathBuf, (u64, Arc<Vec<(Box<str>, u64)>>)>>> =
-        OnceLock::new();
+    static PROJECTIONS: OnceLock<
+        Mutex<HashMap<std::path::PathBuf, (u64, Arc<Vec<(Box<str>, u64)>>)>>,
+    > = OnceLock::new();
     PROJECTIONS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 

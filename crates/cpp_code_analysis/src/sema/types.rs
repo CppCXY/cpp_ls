@@ -1237,7 +1237,9 @@ pub fn declarator_declaring(
             continue;
         }
         let own = node.text_range();
-        if usize::from(own.start()) > name.start_offset || usize::from(own.end()) < name.end_offset() {
+        if usize::from(own.start()) > name.start_offset
+            || usize::from(own.end()) < name.end_offset()
+        {
             continue;
         }
 

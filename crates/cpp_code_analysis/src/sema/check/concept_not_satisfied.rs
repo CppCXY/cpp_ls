@@ -65,7 +65,9 @@ impl Check for ConceptNotSatisfied {
             };
             // Cloned because the finding below needs `&mut context`: the list is one short string per
             // parameter, and only a constrained declaration ever has a non-empty one.
-            let Some(constraints) = constraints_of_a_declaration(context, &name).map(<[String]>::to_vec) else {
+            let Some(constraints) =
+                constraints_of_a_declaration(context, &name).map(<[String]>::to_vec)
+            else {
                 continue;
             };
 
@@ -180,14 +182,21 @@ impl Concept {
             }
             "convertible_to" => {
                 let arguments = split_at_top_level_commas(arguments?);
-                Some(Concept::ConvertibleTo(arguments.first()?.trim().to_string()))
+                Some(Concept::ConvertibleTo(
+                    arguments.first()?.trim().to_string(),
+                ))
             }
             "derived_from" => {
                 let arguments = split_at_top_level_commas(arguments?);
                 Some(Concept::DerivedFrom(arguments.first()?.trim().to_string()))
             }
-            "default_initializable" | "move_constructible" | "copy_constructible" | "movable" | "copyable"
-            | "semiregular" | "regular" => Some(Concept::NeedsAnObjectType(match name {
+            "default_initializable"
+            | "move_constructible"
+            | "copy_constructible"
+            | "movable"
+            | "copyable"
+            | "semiregular"
+            | "regular" => Some(Concept::NeedsAnObjectType(match name {
                 "default_initializable" => "std::default_initializable",
                 "move_constructible" => "std::move_constructible",
                 "copy_constructible" => "std::copy_constructible",
@@ -242,14 +251,14 @@ impl Concept {
                     // class nobody has read answers `Unknown` there and stays quiet here.
                     crate::Known::No => Some(false),
                     crate::Known::Yes(()) => Some(true),
-                    crate::Known::Unknown(_) => Some(match crate::sema::convert::conversion(
-                        passed,
-                        &target.to_string(),
-                        |_| None,
-                    ) {
-                        crate::sema::convert::Conversion::Refused => false,
-                        _ => true,
-                    }),
+                    crate::Known::Unknown(_) => Some(
+                        match crate::sema::convert::conversion(passed, &target.to_string(), |_| {
+                            None
+                        }) {
+                            crate::sema::convert::Conversion::Refused => false,
+                            _ => true,
+                        },
+                    ),
                 }
             }
         }
@@ -361,7 +370,11 @@ fn split_at_top_level_commas(text: &str) -> Vec<String> {
 /// `None` when the walk cannot answer: a class nobody has described, a chain deeper than the bound. `Some(false)`
 /// only when every class on the way was read and none of them is the base — which is what makes a builtin or a
 /// pointer a definite `false` without asking anything.
-fn derives_from(context: &CheckContext<'_>, derived: &crate::sema::types::Type, base: &str) -> Option<bool> {
+fn derives_from(
+    context: &CheckContext<'_>,
+    derived: &crate::sema::types::Type,
+    base: &str,
+) -> Option<bool> {
     use crate::sema::types::Type;
 
     let Type::Named { name, arguments } = derived else {

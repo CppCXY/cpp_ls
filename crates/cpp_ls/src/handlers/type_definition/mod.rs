@@ -43,8 +43,8 @@
 
 use cpp_code_analysis::{FileProvider, Known, Session};
 use lsp_types::{
-    request::{GotoTypeDefinitionParams, GotoTypeDefinitionResponse},
     ClientCapabilities, Location, ServerCapabilities, TypeDefinitionProviderCapability,
+    request::{GotoTypeDefinitionParams, GotoTypeDefinitionResponse},
 };
 use tokio_util::sync::CancellationToken;
 
@@ -116,9 +116,7 @@ pub fn type_definitions_of<F: FileProvider + Clone>(
     // **Only the member's type answers here.** Falling through to the object's type would send the reader to the class
     // of the thing the member is called on: `w.size` returning `int` has no type definition, and the answer that
     // matters is "none", not `Widget`.
-    if let Some(access) =
-        cpp_code_analysis::sema::resolve::member_access_at(&view.root, offset)
-    {
+    if let Some(access) = cpp_code_analysis::sema::resolve::member_access_at(&view.root, offset) {
         return the_members_type(session, view, &access)
             .and_then(|spelling| declarations_of_a_type(session, view, &spelling))
             .unwrap_or_default();
@@ -216,7 +214,14 @@ fn declarations_of_a_type<F: FileProvider + Clone>(
 /// `const ns::Widget<T>&` → `Widget`. The name a declaration is filed under.
 fn the_name_of_a_type(spelling: &str) -> Option<String> {
     let mut text = spelling.trim();
-    for keyword in ["const ", "volatile ", "struct ", "class ", "typename ", "enum "] {
+    for keyword in [
+        "const ",
+        "volatile ",
+        "struct ",
+        "class ",
+        "typename ",
+        "enum ",
+    ] {
         while let Some(rest) = text.strip_prefix(keyword) {
             text = rest.trim();
         }
@@ -325,16 +330,25 @@ mod tests {
         // answer is the class, not the variable.
         let at = offset_of(&source, "Widget w;");
         let found = type_definitions_of(&session, &view, at + "Widget".len() - 1);
-        assert_eq!(found.len(), 1, "the class name answers its own declaration: {found:?}");
+        assert_eq!(
+            found.len(),
+            1,
+            "the class name answers its own declaration: {found:?}"
+        );
     }
     /// **A builtin has no declaration to go to**, so the answer is empty rather than the variable's own declaration —
     /// which would be Go to Definition wearing another name.
     #[test]
     fn an_int_answers_nothing() {
         let session = session();
-        let held = session.files().held(&PathBuf::from("/p/a.cpp")).expect("held");
+        let held = session
+            .files()
+            .held(&PathBuf::from("/p/a.cpp"))
+            .expect("held");
         let source = held.text.to_string();
-        let view = session.view_of_the_file(&PathBuf::from("/p/a.cpp")).expect("parses");
+        let view = session
+            .view_of_the_file(&PathBuf::from("/p/a.cpp"))
+            .expect("parses");
         // **On `size`, not on `w`** — a cursor on the object asks about the object, which is the right answer for that
         // caret and not what this test is about.
         let at = offset_of(&source, "w.size") + 1;
@@ -375,7 +389,8 @@ mod tests {
 /// a member access at its end — and a client's caret is somewhere in the middle by construction.
 fn the_name_around(source: &str, offset: usize) -> (usize, usize) {
     let bytes = source.as_bytes();
-    let is_part = |character: u8| character.is_ascii_alphanumeric() || character == b'_' || character == b':';
+    let is_part =
+        |character: u8| character.is_ascii_alphanumeric() || character == b'_' || character == b':';
     let mut start = offset.min(bytes.len());
     while start > 0 && is_part(bytes[start - 1]) {
         start -= 1;

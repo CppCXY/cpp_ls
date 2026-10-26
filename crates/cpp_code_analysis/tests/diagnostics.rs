@@ -46,7 +46,10 @@ fn a_fragment_header_reports_its_own_refusal_not_the_cascade() {
     println!(
         "errors={} first={:?}",
         found.errors.len(),
-        found.errors.first().map(|error| (&error.message, error.start))
+        found
+            .errors
+            .first()
+            .map(|error| (&error.message, error.start))
     );
     assert_eq!(
         found.errors.len(),
@@ -60,9 +63,7 @@ fn a_fragment_header_reports_its_own_refusal_not_the_cascade() {
             .collect::<Vec<_>>()
     );
     assert!(
-        found.errors[0]
-            .message
-            .contains("not a public header"),
+        found.errors[0].message.contains("not a public header"),
         "{:?}",
         found.errors[0].message
     );

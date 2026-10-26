@@ -65,7 +65,9 @@ fn a_classs_member_list_and_its_postings_agree() {
         if let Known::Yes(list) = session.members_of(&view, "std::vector") {
             println!(
                 "  std::vector has erase after cooking: {}  ({} member(s))",
-                list.members.iter().any(|member| member.fact.name == "erase"),
+                list.members
+                    .iter()
+                    .any(|member| member.fact.name == "erase"),
                 list.members.len()
             );
         }
@@ -115,15 +117,15 @@ fn a_classs_member_list_and_its_postings_agree() {
                 Known::Yes(list) => list.members.iter(),
                 _ => [].iter(),
             }
-                .filter(|member| {
-                    matches!(
-                        member.fact.name.as_str(),
-                        "assign" | "insert" | "erase" | "at"
-                    )
-                })
-                .take(4)
-                .map(|member| (member.fact.name.clone(), member.fact.parameter_list.clone()))
-                .collect();
+            .filter(|member| {
+                matches!(
+                    member.fact.name.as_str(),
+                    "assign" | "insert" | "erase" | "at"
+                )
+            })
+            .take(4)
+            .map(|member| (member.fact.name.clone(), member.fact.parameter_list.clone()))
+            .collect();
             println!("  signatures: {samples:?}");
             assert!(
                 samples.iter().any(|(_, parameters)| parameters.is_some()),
@@ -162,7 +164,10 @@ fn a_classs_member_list_and_its_postings_agree() {
                 std::collections::BTreeMap::new();
             for (file, summary) in session.index().all_summaries() {
                 for fact in summary.declarations.iter().filter(|fact| fact.name == name) {
-                    let key = fact.scope.clone().unwrap_or_else(|| "<file scope>".to_string());
+                    let key = fact
+                        .scope
+                        .clone()
+                        .unwrap_or_else(|| "<file scope>".to_string());
                     let entry = scopes.entry(key).or_insert((0, String::new()));
                     entry.0 += 1;
                     if entry.1.is_empty() {
@@ -199,8 +204,12 @@ fn a_class_two_files_use_is_built_once() {
     );
     session.add_project_files([first.clone(), second.clone()]);
     session.index_everything();
-    let view_of_first = session.view_of_the_file(&first).expect("the first file parses");
-    let view_of_second = session.view_of_the_file(&second).expect("the second file parses");
+    let view_of_first = session
+        .view_of_the_file(&first)
+        .expect("the first file parses");
+    let view_of_second = session
+        .view_of_the_file(&second)
+        .expect("the second file parses");
 
     for class in ["std::string", "std::vector<LuaSyntaxNode>", "LuaSyntaxTree"] {
         let started = std::time::Instant::now();
@@ -211,10 +220,7 @@ fn a_class_two_files_use_is_built_once() {
         let from_second = session.members_of(&view_of_second, class);
         let second_took = started.elapsed();
 
-        let (Some(a), Some(b)) = (
-            known_count(&from_first),
-            known_count(&from_second),
-        ) else {
+        let (Some(a), Some(b)) = (known_count(&from_first), known_count(&from_second)) else {
             println!("{class}: not answerable from both files");
             continue;
         };

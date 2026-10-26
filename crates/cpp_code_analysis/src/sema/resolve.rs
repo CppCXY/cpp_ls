@@ -521,10 +521,13 @@ pub fn name_position_at(root: &CppSyntaxNode, offset: usize) -> Option<NamePosit
         // client puts it after a keystroke — answers both halves: its text up to the cursor is the prefix, and the
         // whole word is the range, so that accepting the item replaces what has been typed rather than appending to it.
         let word = cpp_parser::token_at(root, offset)
-            .filter(|token| cpp_parser::CppTokenKind::from(token.kind()) == cpp_parser::CppTokenKind::Identifier)
+            .filter(|token| {
+                cpp_parser::CppTokenKind::from(token.kind()) == cpp_parser::CppTokenKind::Identifier
+            })
             .or_else(|| {
                 cpp_parser::token_at(root, offset.saturating_sub(1)).filter(|token| {
-                    cpp_parser::CppTokenKind::from(token.kind()) == cpp_parser::CppTokenKind::Identifier
+                    cpp_parser::CppTokenKind::from(token.kind())
+                        == cpp_parser::CppTokenKind::Identifier
                 })
             });
 

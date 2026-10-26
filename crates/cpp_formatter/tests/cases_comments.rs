@@ -38,19 +38,13 @@ fn style() -> Style {
 /// `01_trailing_line`
 #[test]
 fn comments_01_trailing_line() {
-    check(
-        r#"int x = 1; // note"#,
-        r#"int x = 1; // note"#,
-    );
+    check(r#"int x = 1; // note"#, r#"int x = 1; // note"#);
 }
 
 /// `02_trailing_block`
 #[test]
 fn comments_02_trailing_block() {
-    check(
-        r#"int x = 1; /* note */"#,
-        r#"int x = 1; /* note */"#,
-    );
+    check(r#"int x = 1; /* note */"#, r#"int x = 1; /* note */"#);
 }
 
 /// `03_own_line`

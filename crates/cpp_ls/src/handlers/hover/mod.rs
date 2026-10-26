@@ -258,8 +258,10 @@ pub fn hover(
     // **A Doxygen command**, asked of the file's own text: a comment is trivia, so the rendering has none of it —
     // the same reason the completion and the doc tokens read the written text. `@param` is a word the reader cannot
     // look up anywhere else in the editor.
-    if let Some(name) = doc_command_at(view.written_text().unwrap_or(&view.source), in_the_file.get())
-        && let Some(text) = vocabulary::command_hover(&name)
+    if let Some(name) = doc_command_at(
+        view.written_text().unwrap_or(&view.source),
+        in_the_file.get(),
+    ) && let Some(text) = vocabulary::command_hover(&name)
     {
         return Some(markdown(text));
     }
@@ -280,7 +282,6 @@ fn hover_of_the_program(
     if session.project_config().config.hover.enable == Some(false) {
         return None;
     }
-
 
     // **A header name before a declaration**, for the reason the jump asks it first: `#include <vector>` declares
     // nothing, so every question below answers "nothing to say" for a name whose answer is a file on disk. The
@@ -327,22 +328,27 @@ fn hover_of_the_program(
                 // `LuaLexer`'s and told the reader "which one a call means is decided by the arguments" — about a
                 // **data member**, which has no arguments and no second reading. Find References and Go to Definition
                 // narrow by the cursor's class; this is the same rule, at the same offset.
-                let found =
-                    crate::handlers::references::narrowed_to_the_cursors_class(view, offset.get(), found);
+                let found = crate::handlers::references::narrowed_to_the_cursors_class(
+                    view,
+                    offset.get(),
+                    found,
+                );
                 // **A class name is one declaration, not an overload set.** `LuaParser p(…)` hovers three facts — the
                 // class and its two constructors, which are filed under the same name because a constructor's name is
                 // its class's — and the answer listed the constructors as if a call were meant ("3 declarations …
                 // decided by the arguments"), about a name being *declared* in that very line. When one of the facts is
                 // a type, that is the one the reader named.
-                if let Some(the_type) = found
-                    .found
-                    .iter()
-                    .find(|definition| matches!(definition.fact.kind, cpp_code_analysis::DeclKind::Type))
-                {
+                if let Some(the_type) = found.found.iter().find(|definition| {
+                    matches!(definition.fact.kind, cpp_code_analysis::DeclKind::Type)
+                }) {
                     return Some(markdown(declaration_markdown(session, view, the_type)));
                 }
                 match found.found.len() {
-                    1 => Some(markdown(declaration_markdown(session, view, &found.found[0]))),
+                    1 => Some(markdown(declaration_markdown(
+                        session,
+                        view,
+                        &found.found[0],
+                    ))),
                     2.. => Some(markdown(overloads_markdown(
                         session,
                         Some(view),
@@ -485,8 +491,11 @@ fn overloads_markdown(
         // compilation means.
         let mut fact = declaration.fact.clone();
         if fact.split_by_a_directive
-            && let Some(read) =
-                session.fact_from_the_rendering(&declaration.file, &fact.name, fact.scope.as_deref())
+            && let Some(read) = session.fact_from_the_rendering(
+                &declaration.file,
+                &fact.name,
+                fact.scope.as_deref(),
+            )
         {
             fact.returns = read.returns;
             fact.type_of = read.type_of;
@@ -1140,7 +1149,6 @@ impl RegisterCapabilities for HoverCapabilities {
 mod tests {
     use super::*;
 
-
     /// **中文表加载成功，而且和英文表用的是同一组 key。**
     ///
     /// 一张译文表最容易出的错不是翻译错，而是 key 拼错或漏了 —— 那样 rust-i18n 会安静地回落成英文，看起来像
@@ -1152,7 +1160,10 @@ mod tests {
         let chinese = (t!("keyword.constexpr"), t!("command.param"));
         rust_i18n::set_locale("en");
 
-        assert_ne!(english.0, chinese.0, "`keyword.constexpr` has a translation");
+        assert_ne!(
+            english.0, chinese.0,
+            "`keyword.constexpr` has a translation"
+        );
         assert_ne!(english.1, chinese.1, "`command.param` has a translation");
         assert!(chinese.0.starts_with("**`constexpr`**"), "{chinese:?}");
         assert!(chinese.1.contains("@param"), "{chinese:?}");
@@ -1178,7 +1189,8 @@ mod tests {
             .find(|token| token.text() == "constexpr")
             .expect("the fixture writes it");
 
-        let keyword = vocabulary::keyword_hover(&token).expect("`constexpr` is in the keyword table");
+        let keyword =
+            vocabulary::keyword_hover(&token).expect("`constexpr` is in the keyword table");
         assert!(
             keyword.contains("constexpr"),
             "the popup names the word it is about: {keyword}"

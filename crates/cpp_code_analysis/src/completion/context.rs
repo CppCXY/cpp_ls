@@ -540,7 +540,8 @@ fn define_at(
             return CompletionContext::DirectiveArgument { written, range };
         }
         let parameters = Vec::new();
-        let (written, range) = segment_written(&rest[name_length..], argument_at + name_length, offset);
+        let (written, range) =
+            segment_written(&rest[name_length..], argument_at + name_length, offset);
         return CompletionContext::MacroBody {
             written,
             range,
@@ -555,7 +556,8 @@ fn define_at(
         .any(|character| character.is_whitespace());
     if space_before_the_paren {
         let parameters = Vec::new();
-        let (written, range) = segment_written(&rest[name_length..], argument_at + name_length, offset);
+        let (written, range) =
+            segment_written(&rest[name_length..], argument_at + name_length, offset);
         return CompletionContext::MacroBody {
             written,
             range,
@@ -932,7 +934,12 @@ mod tests {
 /// `segment_written` is handed the text from the argument`s start to the cursor and answers the word the cursor is
 /// in; the `>`/`<`/`!`/`(`/`)` of an expression are not name characters, so a condition like
 /// `#if VERSION >= 3 && defined(FEATURE|)` needs no special case — the word is whatever follows the last one.
-fn condition_argument(rest: &str, at: usize, written_before_cursor: usize, offset: usize) -> CompletionContext {
+fn condition_argument(
+    rest: &str,
+    at: usize,
+    written_before_cursor: usize,
+    offset: usize,
+) -> CompletionContext {
     let _ = written_before_cursor;
     let trimmed = rest.trim_start();
     let skipped = rest.len() - trimmed.len();
@@ -948,6 +955,7 @@ fn condition_argument(rest: &str, at: usize, written_before_cursor: usize, offse
                 || character == '-')
         })
         .map_or(0, |found| found + 1);
-    let (written, range) = segment_written(&trimmed[word_start..], at + skipped + word_start, offset);
+    let (written, range) =
+        segment_written(&trimmed[word_start..], at + skipped + word_start, offset);
     CompletionContext::Condition { written, range }
 }

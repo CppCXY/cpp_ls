@@ -78,7 +78,10 @@ fn code_width(line: &str) -> usize {
     let body = line.trim_end_matches(['\n', '\r']);
     let body = body.trim_end_matches([' ', '\t']);
     let without_backslash = body.strip_suffix('\\').unwrap_or(body);
-    without_backslash.trim_end_matches([' ', '\t']).chars().count()
+    without_backslash
+        .trim_end_matches([' ', '\t'])
+        .chars()
+        .count()
 }
 
 /// The line with its code, spaces up to `target`, the backslash, and the line ending it had.
@@ -124,7 +127,10 @@ mod tests {
     #[test]
     fn dont_align_leaves_the_text_alone() {
         let input = "#define M \\\n    body\n";
-        assert_eq!(align_escaped_newlines(input, &style_with("DontAlign")), input);
+        assert_eq!(
+            align_escaped_newlines(input, &style_with("DontAlign")),
+            input
+        );
     }
 
     #[test]

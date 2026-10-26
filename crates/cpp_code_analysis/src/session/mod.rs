@@ -1075,10 +1075,10 @@ impl<F: FileProvider + Clone> Session<F> {
             surfaces: std::sync::Mutex::new(crate::effect::Surfaces::new()),
             effects: std::sync::Mutex::new(HashMap::new()),
             renderings: std::sync::Mutex::new(crate::cache_lru::Cache::renderings()),
-        rendering_summaries: std::sync::Mutex::new(crate::cache_lru::Cache::new(
-            RENDERING_SUMMARY_ENTRIES,
-            RENDERING_SUMMARY_BYTES,
-        )),
+            rendering_summaries: std::sync::Mutex::new(crate::cache_lru::Cache::new(
+                RENDERING_SUMMARY_ENTRIES,
+                RENDERING_SUMMARY_BYTES,
+            )),
             cooking_refused: std::sync::Mutex::new(std::collections::HashSet::new()),
             unit_from_memory: std::sync::atomic::AtomicUsize::new(0),
             unit_from_disk: std::sync::atomic::AtomicUsize::new(0),
@@ -1194,7 +1194,6 @@ impl<F: FileProvider + Clone> Session<F> {
         self.store.flush_summaries();
     }
 
-
     pub fn cache_sizes(&self) -> CacheSizes {
         let (renderings, rendering_bytes) = self
             .renderings
@@ -1293,10 +1292,7 @@ impl<F: FileProvider + Clone> Session<F> {
             dead_macro_decisions: dead_macro_files,
             dead_macro_bytes: dead_macro_offsets * std::mem::size_of::<usize>(),
             directive_signatures: self.directive_signatures.len(),
-            include_searches: self
-                .store
-                .include_search_count()
-                .unwrap_or(0),
+            include_searches: self.store.include_search_count().unwrap_or(0),
             units_read: self.units_read.len(),
             walk_cache_entries,
             walk_cache_bytes,
@@ -1405,7 +1401,6 @@ impl<F: FileProvider + Clone> Session<F> {
     // ---------------------------------------------------------------------------------------------
     // What changed
     // ---------------------------------------------------------------------------------------------
-
 
     /// The client opened a document, or said what its buffer now contains.
     ///
@@ -3893,61 +3888,57 @@ impl<F: FileProvider + Clone> Session<F> {
     }
 
     /// **A file that declares itself a fragment**, with the message it wrote for that case.
-///
-/// The two signals, both facts and both required: the file **writes an `#error` line**, and the **first token of its
-/// rendering is a brace**. A fragment's body begins with the `{` of the initializer its including file opens;
-/// nothing else starts a translation unit that way, and a file that has an `#error` in a branch nobody takes still
-/// starts with a declaration. See the call site for the header this was measured on.
-fn a_fragment_and_its_message(view: &crate::FileView) -> Option<(usize, usize, String)> {
-    let written = view.written_text().unwrap_or(&view.source);
-    let (start, end, message) = Self::error_directive_line(written)?;
+    ///
+    /// The two signals, both facts and both required: the file **writes an `#error` line**, and the **first token of its
+    /// rendering is a brace**. A fragment's body begins with the `{` of the initializer its including file opens;
+    /// nothing else starts a translation unit that way, and a file that has an `#error` in a branch nobody takes still
+    /// starts with a declaration. See the call site for the header this was measured on.
+    fn a_fragment_and_its_message(view: &crate::FileView) -> Option<(usize, usize, String)> {
+        let written = view.written_text().unwrap_or(&view.source);
+        let (start, end, message) = Self::error_directive_line(written)?;
 
-    // The rendering's first non-trivia token, read from the tree rather than from the text: comments and directives
-    // are already gone from it, so a `{` here is the file's first real token.
-    let first = view
-        .root
-        .descendants_with_tokens()
-        .filter_map(|element| element.into_token())
-        .map(|token| cpp_parser::CppTokenKind::from(token.kind()))
-        .find(|kind| {
-            !matches!(
-                kind,
-                cpp_parser::CppTokenKind::Whitespace | cpp_parser::CppTokenKind::Newline
-            )
-        })?;
-    if !matches!(
-        first,
-        cpp_parser::CppTokenKind::LeftBrace | cpp_parser::CppTokenKind::RightBrace
-    ) {
-        return None;
-    }
-
-    Some((start, end, message))
-}
-
-/// The first `#error` line of a written text: where it is, and what it says.
-fn error_directive_line(text: &str) -> Option<(usize, usize, String)> {
-    let mut at = 0;
-    for line in text.split_inclusive('\n') {
-        let trimmed = line.trim_start();
-        let indent = line.len() - trimmed.len();
-        if let Some(rest) = trimmed.strip_prefix('#') {
-            let rest = rest.trim_start();
-            if let Some(message) = rest.strip_prefix("error") {
-                let message = message.trim().trim_matches('"').trim();
-                return Some((
-                    at + indent,
-                    at + line.trim_end().len(),
-                    message.to_string(),
-                ));
-            }
+        // The rendering's first non-trivia token, read from the tree rather than from the text: comments and directives
+        // are already gone from it, so a `{` here is the file's first real token.
+        let first = view
+            .root
+            .descendants_with_tokens()
+            .filter_map(|element| element.into_token())
+            .map(|token| cpp_parser::CppTokenKind::from(token.kind()))
+            .find(|kind| {
+                !matches!(
+                    kind,
+                    cpp_parser::CppTokenKind::Whitespace | cpp_parser::CppTokenKind::Newline
+                )
+            })?;
+        if !matches!(
+            first,
+            cpp_parser::CppTokenKind::LeftBrace | cpp_parser::CppTokenKind::RightBrace
+        ) {
+            return None;
         }
-        at += line.len();
-    }
-    None
-}
 
-/// The checks' answer for one file — see [`crate::sema::check`].
+        Some((start, end, message))
+    }
+
+    /// The first `#error` line of a written text: where it is, and what it says.
+    fn error_directive_line(text: &str) -> Option<(usize, usize, String)> {
+        let mut at = 0;
+        for line in text.split_inclusive('\n') {
+            let trimmed = line.trim_start();
+            let indent = line.len() - trimmed.len();
+            if let Some(rest) = trimmed.strip_prefix('#') {
+                let rest = rest.trim_start();
+                if let Some(message) = rest.strip_prefix("error") {
+                    let message = message.trim().trim_matches('"').trim();
+                    return Some((at + indent, at + line.trim_end().len(), message.to_string()));
+                }
+            }
+            at += line.len();
+        }
+        None
+    }
+
+    /// The checks' answer for one file — see [`crate::sema::check`].
     ///
     /// An empty list when the index holds no summary for the path, which is the same answer as "no check had
     /// anything to say": a check is a claim about facts the analysis has, and a file it has no facts about is a
@@ -4509,10 +4500,7 @@ fn error_directive_line(text: &str) -> Option<(usize, usize, String)> {
     pub fn effect_walk(
         &self,
         root: &Path,
-    ) -> Option<(
-        HashMap<PathBuf, u64>,
-        crate::effect::Walked,
-    )> {
+    ) -> Option<(HashMap<PathBuf, u64>, crate::effect::Walked)> {
         self.store.index().summary(root)?;
         let reads = SessionReads {
             files: &self.files,
@@ -5428,7 +5416,11 @@ fn error_directive_line(text: &str) -> Option<(usize, usize, String)> {
                 let built = std::sync::Arc::new(self.rendering_of(&path)?);
                 if let Ok(mut known) = self.renderings.lock() {
                     let weight = built.weight();
-                    known.insert((path.clone(), crate::cache::content_hash(&text)), built.clone(), weight);
+                    known.insert(
+                        (path.clone(), crate::cache::content_hash(&text)),
+                        built.clone(),
+                        weight,
+                    );
                 }
                 built
             }
@@ -5459,7 +5451,9 @@ fn error_directive_line(text: &str) -> Option<(usize, usize, String)> {
         summary
             .declarations
             .iter()
-            .find(|fact| fact.name == name && fact.scope.as_deref() == scope && !fact.split_by_a_directive)
+            .find(|fact| {
+                fact.name == name && fact.scope.as_deref() == scope && !fact.split_by_a_directive
+            })
             .cloned()
     }
 
@@ -7335,7 +7329,6 @@ impl Work {
             }
         }
     }
-
 
     /// The next `how_many` files [`Work::pop`] would answer with, **without taking them** — in the order it would.
     ///

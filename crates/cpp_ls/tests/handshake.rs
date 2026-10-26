@@ -469,7 +469,10 @@ fn a_formatting_request_returns_edits_for_the_whole_file() {
     let edits = response["result"]
         .as_array()
         .unwrap_or_else(|| panic!("edits were expected, got {response}"));
-    assert!(!edits.is_empty(), "the file is not formatted, so there is work: {response}");
+    assert!(
+        !edits.is_empty(),
+        "the file is not formatted, so there is work: {response}"
+    );
     let text = edits
         .iter()
         .filter_map(|edit| edit["newText"].as_str())
@@ -2211,7 +2214,11 @@ fn a_macro_is_renamed_everywhere_and_an_ordinary_name_is_refused() {
         .as_object()
         .unwrap_or_else(|| panic!("the local is renamed: {renamed}"));
     println!("local rename: {renamed}");
-    assert_eq!(changes.len(), 1, "one file — the one the local is in: {renamed}");
+    assert_eq!(
+        changes.len(),
+        1,
+        "one file — the one the local is in: {renamed}"
+    );
     assert_eq!(
         changes
             .values()
@@ -2929,7 +2936,9 @@ fn a_signature_is_shown_while_the_arguments_are_typed() {
 
     let parameter_documentation = signature["parameters"][0]["documentation"]["value"]
         .as_str()
-        .unwrap_or_else(|| panic!("`@param count the count` belongs to the first parameter: {answer}"));
+        .unwrap_or_else(|| {
+            panic!("`@param count the count` belongs to the first parameter: {answer}")
+        });
     assert_eq!(parameter_documentation, "the count");
     assert_eq!(
         signature["parameters"][1]["documentation"],
@@ -4536,22 +4545,14 @@ fn the_call_hierarchy_answers_over_the_wire() {
         .unwrap_or_else(|| panic!("the function is a call hierarchy item: {prepared}"));
     assert_eq!(item["name"], "both");
 
-    let incoming = server.request(
-        3,
-        "callHierarchy/incomingCalls",
-        json!({ "item": item }),
-    );
+    let incoming = server.request(3, "callHierarchy/incomingCalls", json!({ "item": item }));
     println!("incoming: {incoming}");
     assert!(
         !incoming["result"].is_null(),
         "the request is answered: {incoming}"
     );
 
-    let outgoing = server.request(
-        4,
-        "callHierarchy/outgoingCalls",
-        json!({ "item": item }),
-    );
+    let outgoing = server.request(4, "callHierarchy/outgoingCalls", json!({ "item": item }));
     println!("outgoing: {outgoing}");
     let names: Vec<&str> = outgoing["result"]
         .as_array()

@@ -10,10 +10,10 @@
 //! by this pass and then by `clang-format` differs only where the *decisions* differ, which is what the audit
 //! measures; a file formatted by this pass can never lose a comment or a token.
 
-use crate::config::Style;
 use crate::columns::Columns;
-use crate::options::StyleOption;
+use crate::config::Style;
 use crate::layout;
+use crate::options::StyleOption;
 use crate::roles;
 use crate::space;
 use crate::tokens;
@@ -86,7 +86,8 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
             // **Only the source lines are searched**: a statement that is already spread over several lines is
             // short per line, and breaking it by its *whole* length adds breaks clang-format never makes (measured:
             // 28 of 43 files changed when clang-format`s own 80-column output was fed back through us).
-            for at in crate::breaks::break_over_long_pieces(&stream, &roles, style, &line, &blocks) {
+            for at in crate::breaks::break_over_long_pieces(&stream, &roles, style, &line, &blocks)
+            {
                 forced_breaks[at] = true;
             }
         }
@@ -111,11 +112,17 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
             };
         } else if forced && index > 0 && !in_directive {
             // **A break the column limit asked for**: the line continues at the continuation column.
-            let indent = layout::continuation(&stack, statement_indent, stream.tokens[index].kind, style);
+            let indent =
+                layout::continuation(&stack, statement_indent, stream.tokens[index].kind, style);
             out.push_str(line_ending);
             out.push_str(&" ".repeat(indent));
             column = indent;
-        } else if gap.newlines == 0 && gap.comments.is_empty() && !gap.at_end && index > 0 && !in_directive {
+        } else if gap.newlines == 0
+            && gap.comments.is_empty()
+            && !gap.at_end
+            && index > 0
+            && !in_directive
+        {
             let spaces = space::between(&stream, index, &roles, style) + row_paddings[index];
             out.push_str(&" ".repeat(spaces));
             column += spaces;
@@ -167,24 +174,32 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
                             in_ctor_init,
                             ctor_column,
                             init_depths[index] > 0,
-                            angles.last().copied().filter(|column| *column != usize::MAX),
-                            enums.last().map(|(_, column)| *column).filter(|column| *column != usize::MAX),
+                            angles
+                                .last()
+                                .copied()
+                                .filter(|column| *column != usize::MAX),
+                            enums
+                                .last()
+                                .map(|(_, column)| *column)
+                                .filter(|column| *column != usize::MAX),
                         )
-                            .map(|(indent, is_block_line)| {
-                                let closing = stream.tokens[index].kind == cpp_parser::CppTokenKind::RightBrace;
-                                match inside {
-                                    Some((_, column)) if is_block_line && closing => (column, true),
-                                    Some((_, column)) if is_block_line => (column + indent_width, true),
-                                    _ => (indent, is_block_line),
-                                }
-                            })
+                        .map(|(indent, is_block_line)| {
+                            let closing =
+                                stream.tokens[index].kind == cpp_parser::CppTokenKind::RightBrace;
+                            match inside {
+                                Some((_, column)) if is_block_line && closing => (column, true),
+                                Some((_, column)) if is_block_line => (column + indent_width, true),
+                                _ => (indent, is_block_line),
+                            }
+                        })
                     })
             }
         {
             // **A line that starts here**, with nothing in the gap but whitespace: the break count collapses to
             // `MaxEmptyLinesToKeep` and the column is the layout's. Everything else — a comment, a directive — is
             // still copied, which keeps this pass's blast radius to the lines it can decide.
-            line_was_bracket_placed = !is_block_line && !stack.is_empty() && init_depths[index] == 0;
+            line_was_bracket_placed =
+                !is_block_line && !stack.is_empty() && init_depths[index] == 0;
             line_column = indent;
             let mut keep = gap.newlines.min(max_empty + 1);
             // **A blank line right after `{` is not kept** unless the style asks (`KeepEmptyLinesAtStartOfBlock`,
@@ -206,7 +221,8 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
                     stream.tokens[index - 1].kind,
                     cpp_parser::CppTokenKind::Semicolon | cpp_parser::CppTokenKind::RightBrace
                 );
-                let at_block_start = stream.tokens[index - 1].kind == cpp_parser::CppTokenKind::LeftBrace;
+                let at_block_start =
+                    stream.tokens[index - 1].kind == cpp_parser::CppTokenKind::LeftBrace;
                 if !at_block_start
                     && (policy == "Always" || (policy == "LogicalBlock" && after_declarations))
                 {
@@ -227,11 +243,7 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
             // indentation of the line after the comment (`      return 0;` stayed at six spaces when clang-format
             // writes four). The comment's own text still comes from the source; only the column is decided here.
             let own_line_comment = gap.comments.last().filter(|comment| comment.own_line);
-            let breaks_to_emit = if own_line_comment.is_some() {
-                0
-            } else {
-                keep
-            };
+            let breaks_to_emit = if own_line_comment.is_some() { 0 } else { keep };
             for _ in 0..breaks_to_emit {
                 out.push_str(line_ending);
             }
@@ -260,7 +272,8 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
                 } else {
                     let verbatim = source.get(gap.start..comment.end).unwrap_or("");
                     out.push_str(verbatim);
-                    column = columns.advance(0, verbatim.rsplit(char::from(10)).next().unwrap_or(""));
+                    column =
+                        columns.advance(0, verbatim.rsplit(char::from(10)).next().unwrap_or(""));
                 }
             } else {
                 out.push_str(&" ".repeat(indent));
@@ -327,7 +340,8 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
             out.push_str(&" ".repeat(usize::from(before)));
             out.push_str(comment.text);
             out.push_str(&" ".repeat(usize::from(after)));
-            column = columns.advance(column + usize::from(before), comment.text) + usize::from(after);
+            column =
+                columns.advance(column + usize::from(before), comment.text) + usize::from(after);
         } else {
             // Verbatim: the gap's own bytes (newlines, indentation, comments) are not ours to change in this pass.
             let gap_text = source.get(gap.start..gap.end).unwrap_or("");
@@ -363,7 +377,8 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
             stack.pop();
         }
         // The template closer pops its own stack, so a line after the list is not pulled to its column.
-        if template_angles[index] && stream.tokens[index].kind == cpp_parser::CppTokenKind::Greater {
+        if template_angles[index] && stream.tokens[index].kind == cpp_parser::CppTokenKind::Greater
+        {
             angles.pop();
         }
         if stream.tokens[index].kind == cpp_parser::CppTokenKind::RightBrace
@@ -380,7 +395,9 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
                 line_was_bracket_placed = false;
             }
             cpp_parser::CppTokenKind::RightBrace => {
-                if let Some((depth, _)) = bracket_body && depth >= brace_depth {
+                if let Some((depth, _)) = bracket_body
+                    && depth >= brace_depth
+                {
                     bracket_body = None;
                 }
                 brace_depth = brace_depth.saturating_sub(1);
@@ -442,7 +459,12 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
         {
             in_directive = true;
         }
-        if in_directive && stream.gaps.get(index + 1).is_some_and(|next| next.newlines > 0) {
+        if in_directive
+            && stream
+                .gaps
+                .get(index + 1)
+                .is_some_and(|next| next.newlines > 0)
+        {
             in_directive = false;
         }
     }
@@ -501,7 +523,10 @@ mod tests {
     fn a_constructor_initializer_list_and_the_class_body_after_it() {
         let source = "class T {\npublic:\n  T(const T &t)\n      : a(t.a),\n        b(t.b) {\n  }\n\nprivate:\n  int a;\n  int b;\n};\n";
         let formatted = format(source, None, &llvm());
-        assert_eq!(formatted, source, "already formatted input must come back unchanged");
+        assert_eq!(
+            formatted, source,
+            "already formatted input must come back unchanged"
+        );
     }
 
     #[test]
@@ -509,16 +534,18 @@ mod tests {
     fn an_own_line_comment_inside_an_initializer_is_an_element() {
         let source = "static int table[] = {\n  /* note */\n  1,\n  2,\n};\n";
         let formatted = format(source, None, &llvm());
-        assert_eq!(formatted, "static int table[] = {\n        /* note */\n        1,\n        2,\n};\n", "elements line up, the comment with them");
+        assert_eq!(
+            formatted, "static int table[] = {\n        /* note */\n        1,\n        2,\n};\n",
+            "elements line up, the comment with them"
+        );
     }
-
-
 
     #[test]
     fn a_continuation_that_starts_with_an_operator_aligns_with_the_first_one() {
         // LLVM's `IndentWidth` is 2, so the body sits at 2 and the statement's first `<<` at 12; the continuation's
         // `<<` goes to the same column.
-        let source = "void f()\n{\n  std::cerr << util::format(\"x\", y)\n            << std::endl;\n}\n";
+        let source =
+            "void f()\n{\n  std::cerr << util::format(\"x\", y)\n            << std::endl;\n}\n";
         let formatted = format(source, None, &llvm());
         assert_eq!(
             formatted, source,
@@ -541,21 +568,30 @@ mod tests {
 
     #[test]
     fn a_clang_format_off_span_is_copied_verbatim() {
-        let source = "int  a = 1;\n// clang-format off\nint   b   =   2;\n// clang-format on\nint  c = 3;\n";
+        let source =
+            "int  a = 1;\n// clang-format off\nint   b   =   2;\n// clang-format on\nint  c = 3;\n";
         let mut style = llvm();
         style.set_from_text("ColumnLimit", "0");
         let out = format(source, None, &style);
-        assert!(out.contains("int   b   =   2;"), "the disabled span keeps its own spacing: {out:?}");
-        assert!(out.contains("int a = 1;"), "the lines around it are formatted: {out:?}");
+        assert!(
+            out.contains("int   b   =   2;"),
+            "the disabled span keeps its own spacing: {out:?}"
+        );
+        assert!(
+            out.contains("int a = 1;"),
+            "the lines around it are formatted: {out:?}"
+        );
     }
-
 
     #[test]
     fn the_line_structure_is_kept_and_the_indentation_is_the_layout_s() {
         // **The line breaks stay the input's; the column is now decided** (P0b): `IndentWidth: 2` puts the body at 2,
         // and the spacing rules still apply inside the line.
         let source = "void f() {\n      int  x = 1;\n}\n";
-        assert_eq!(format(source, None, &llvm()), "void f() {\n  int x = 1;\n}\n");
+        assert_eq!(
+            format(source, None, &llvm()),
+            "void f() {\n  int x = 1;\n}\n"
+        );
     }
 
     #[test]
@@ -579,7 +615,10 @@ mod tests {
     #[test]
     fn a_braced_initializer_keeps_its_shape() {
         let source = "std::vector<int> v = { 1,2,3 };\n";
-        assert_eq!(format(source, None, &llvm()), "std::vector<int> v = {1, 2, 3};\n");
+        assert_eq!(
+            format(source, None, &llvm()),
+            "std::vector<int> v = {1, 2, 3};\n"
+        );
     }
 
     #[test]
@@ -588,8 +627,16 @@ mod tests {
         // reading of the file. The formatter declines the file instead of writing something else than it read.
         let source = "std::vector<std::vector<int> > v;\n";
         let formatted = format(source, None, &llvm());
-        let before: Vec<_> = tokens::stream(source).tokens.iter().map(|t| t.text).collect();
-        let after: Vec<_> = tokens::stream(&formatted).tokens.iter().map(|t| t.text).collect();
+        let before: Vec<_> = tokens::stream(source)
+            .tokens
+            .iter()
+            .map(|t| t.text)
+            .collect();
+        let after: Vec<_> = tokens::stream(&formatted)
+            .tokens
+            .iter()
+            .map(|t| t.text)
+            .collect();
         assert_eq!(before, after);
     }
 }
@@ -604,7 +651,9 @@ mod tests {
 fn source_indent(source: &str, gap: &tokens::Gap) -> Option<usize> {
     let text = source.get(gap.start..gap.end)?;
     let after_last_newline = text.rsplit(char::from(10)).next().unwrap_or(text);
-    let only_spaces = after_last_newline.chars().all(|character| character == char::from(32) || character == char::from(9));
+    let only_spaces = after_last_newline
+        .chars()
+        .all(|character| character == char::from(32) || character == char::from(9));
     if only_spaces && gap.newlines > 0 {
         Some(after_last_newline.chars().count())
     } else {
@@ -689,10 +738,16 @@ fn planned_indent(
         cpp_parser::CppTokenKind::LeftShift | cpp_parser::CppTokenKind::RightShift
     ) {
         let base = blocks[index].unwrap_or(statement_indent);
-        return Some((base + style.count(StyleOption::ContinuationIndentWidth), false));
+        return Some((
+            base + style.count(StyleOption::ContinuationIndentWidth),
+            false,
+        ));
     }
     if stream.tokens[index].text == "requires" {
-        return Some((statement_indent + style.count(StyleOption::IndentWidth), false));
+        return Some((
+            statement_indent + style.count(StyleOption::IndentWidth),
+            false,
+        ));
     }
     // **An item of an enumeration written on the opening line aligns under the first item**:
     // `enum class Wide { A,` then `B,` at the column after the `{ ` (not the block indent).
@@ -714,8 +769,13 @@ fn planned_indent(
     if stack.is_empty() && !layout::starts_a_continuation(stream, index) {
         return None;
     }
-    if first == cpp_parser::CppTokenKind::Comma && let Some(column) = ctor_column {
+    if first == cpp_parser::CppTokenKind::Comma
+        && let Some(column) = ctor_column
+    {
         return Some((column, false));
     }
-    Some((layout::continuation(stack, statement_indent, first, style), false))
+    Some((
+        layout::continuation(stack, statement_indent, first, style),
+        false,
+    ))
 }

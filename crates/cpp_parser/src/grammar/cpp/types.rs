@@ -4630,7 +4630,6 @@ fn a_parenthesised_declarator_with_a_name_follows(p: &CppParser) -> bool {
         );
     }
 
-
     if matches!(
         p.peek_token_kind_at(1..4).as_slice(),
         [

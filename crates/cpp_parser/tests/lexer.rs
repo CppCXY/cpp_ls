@@ -605,7 +605,8 @@ fn a_fixed_width_float_suffix_is_part_of_the_literal() {
 /// 一个 `_Float16` 常量在声明里不该让解析器报错 —— 这条是上面那条的"后果"测试。
 #[test]
 fn a_float16_constant_parses_as_a_return_statement() {
-    let text = "struct limits { static constexpr _Float16 min() noexcept { return 6.1e-05F16; } };\n";
+    let text =
+        "struct limits { static constexpr _Float16 min() noexcept { return 6.1e-05F16; } };\n";
     let tree = cpp_parser::CppParser::parse(text, cpp_parser::ParserConfig::default());
     let errors = tree.get_errors();
 

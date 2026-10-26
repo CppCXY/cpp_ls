@@ -316,7 +316,9 @@ fn a_split_member_head_may_name_its_type_in_the_else_branch() {
     // second name, and `f` is the declarator of the whole.
     assert_reads(
         Where::Class,
-        &["template<typename _Tp>\n#if X\n  static MY_API C\n#else\n  static MY_API D\n#endif\n  f() { }"],
+        &[
+            "template<typename _Tp>\n#if X\n  static MY_API C\n#else\n  static MY_API D\n#endif\n  f() { }",
+        ],
     );
 
     // The shape the old note was protecting is a **different seam** and still does not read: there the directive
@@ -7425,19 +7427,27 @@ fn a_nested_namespace_definition_may_spell_inline_on_an_inner_segment() {
     for (source, name) in [
         ("namespace a::b::inline c { }", "a::b::c"),
         ("namespace a::inline b::inline c { int x; }", "a::b::c"),
-        ("export namespace std::inline literals::inline chrono_literals { }", "std::literals::chrono_literals"),
+        (
+            "export namespace std::inline literals::inline chrono_literals { }",
+            "std::literals::chrono_literals",
+        ),
         // The ordinary spellings keep working, and the innermost `inline` alone is the header's own first line.
         ("namespace a::b::c { }", "a::b::c"),
         ("inline namespace a::b { }", "a::b"),
     ] {
         let tree = cpp_parser::CppParser::parse(source, cpp_parser::ParserConfig::default());
-        assert!(tree.get_errors().is_empty(), "{source}: {:?}", tree.get_errors());
+        assert!(
+            tree.get_errors().is_empty(),
+            "{source}: {:?}",
+            tree.get_errors()
+        );
 
         let root = tree.get_red_root();
         let declaration = root
             .descendants()
             .find(|node| {
-                cpp_parser::CppSyntaxKind::from(node.kind()) == cpp_parser::CppSyntaxKind::NamespaceDecl
+                cpp_parser::CppSyntaxKind::from(node.kind())
+                    == cpp_parser::CppSyntaxKind::NamespaceDecl
             })
             .unwrap_or_else(|| panic!("{source}: no NamespaceDecl"));
 
@@ -7481,13 +7491,18 @@ fn a_templated_base_is_one_base_specifier() {
         ("struct D { };", 0),
     ] {
         let tree = cpp_parser::CppParser::parse(source, cpp_parser::ParserConfig::default());
-        assert!(tree.get_errors().is_empty(), "{source}: {:?}", tree.get_errors());
+        assert!(
+            tree.get_errors().is_empty(),
+            "{source}: {:?}",
+            tree.get_errors()
+        );
 
         let bases = tree
             .get_red_root()
             .descendants()
             .filter(|node| {
-                cpp_parser::CppSyntaxKind::from(node.kind()) == cpp_parser::CppSyntaxKind::BaseSpecifier
+                cpp_parser::CppSyntaxKind::from(node.kind())
+                    == cpp_parser::CppSyntaxKind::BaseSpecifier
             })
             .count();
         assert_eq!(bases, expected, "{source}");

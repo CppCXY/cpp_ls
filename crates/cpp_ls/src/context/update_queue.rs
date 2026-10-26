@@ -226,7 +226,11 @@ impl UpdateInbox {
                 break;
             };
 
-            log::debug!("apply_upto: applying event {} ({:?})", queued.seq, queued.event);
+            log::debug!(
+                "apply_upto: applying event {} ({:?})",
+                queued.seq,
+                queued.event
+            );
             let started = std::time::Instant::now();
             apply(queued.event).await;
             let took = started.elapsed().as_millis();

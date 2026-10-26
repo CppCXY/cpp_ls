@@ -200,7 +200,10 @@ fn the_rendering_is_the_reading() {
     // The re-read pass is what makes this true — a file whose own text splits a declaration across `#if` branches is
     // re-read through its timeline exactly because the fact says it might read differently.
     let filed = {
-        let summary = session.index().summary(&header).expect("the header is indexed");
+        let summary = session
+            .index()
+            .summary(&header)
+            .expect("the header is indexed");
         let facts: Vec<_> = summary
             .declarations
             .iter()

@@ -86,17 +86,11 @@ fn preprocessor_04_multiline() {
 /// `05_pragma`
 #[test]
 fn preprocessor_05_pragma() {
-    check(
-        r#"#pragma once"#,
-        r#"#pragma once"#,
-    );
+    check(r#"#pragma once"#, r#"#pragma once"#);
 }
 
 /// `06_undef`
 #[test]
 fn preprocessor_06_undef() {
-    check(
-        r#"#undef FOO"#,
-        r#"#undef FOO"#,
-    );
+    check(r#"#undef FOO"#, r#"#undef FOO"#);
 }

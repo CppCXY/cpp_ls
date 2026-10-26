@@ -56,7 +56,9 @@ pub fn disabled_spans(source: &str) -> Vec<(usize, usize)> {
 
 /// Is `offset` inside one of the spans?
 pub fn is_disabled(spans: &[(usize, usize)], offset: usize) -> bool {
-    spans.iter().any(|(begin, end)| offset >= *begin && offset < *end)
+    spans
+        .iter()
+        .any(|(begin, end)| offset >= *begin && offset < *end)
 }
 
 /// One flag per token and per gap: does it fall inside a disabled span?
@@ -122,7 +124,11 @@ mod tests {
         assert_eq!(spans.len(), 1);
         let (begin, end) = spans[0];
         assert!(source[begin..end].starts_with("// clang-format off"));
-        assert!(source[begin..end].trim_end().ends_with("// clang-format on"));
+        assert!(
+            source[begin..end]
+                .trim_end()
+                .ends_with("// clang-format on")
+        );
         assert!(!is_disabled(&spans, 0), "the first line is still ours");
         assert!(is_disabled(&spans, begin + 1));
     }

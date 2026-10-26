@@ -45,7 +45,8 @@ pub fn between(stream: &Stream<'_>, index: usize, roles: &Roles, style: &Style) 
     //
     // The exception is a mark that belongs to a declarator: `const std::vector<int> &v` was written `>&v` in the source,
     // and gluing it is right for the *characters* but wrong for the *reference*, so the pointer rule below has to see it.
-    let declarator_after_a_template = previous.kind == Greater && roles.is_template_angle(previous.start);
+    let declarator_after_a_template =
+        previous.kind == Greater && roles.is_template_angle(previous.start);
     if stream.gaps[index].is_empty()
         && !declarator_after_a_template
         && is_operator_punctuation(previous.kind)
@@ -61,7 +62,11 @@ pub fn between(stream: &Stream<'_>, index: usize, roles: &Roles, style: &Style) 
     // `]` test the corpus lost a file to `return LuaReserved.find(text) -> second;`).
     if current.kind == Arrow || previous.kind == Arrow {
         // The token on the *other* side of the arrow from the gap being asked about.
-        let before_arrow = if current.kind == Arrow { index - 1 } else { index - 2 };
+        let before_arrow = if current.kind == Arrow {
+            index - 1
+        } else {
+            index - 2
+        };
         // A requirement block arrow is spaced on both sides: `{ c.size() } -> T`.
         if before_arrow < stream.tokens.len()
             && stream.tokens[before_arrow].kind == RightBrace
@@ -94,13 +99,19 @@ pub fn between(stream: &Stream<'_>, index: usize, roles: &Roles, style: &Style) 
             }
             // **A lambda** (`[` `]` before the parameters) **or a declaration** (`auto f(...) -> T`): both put the
             // arrow in a trailing return type. The declaration is recognised by the type keyword before the name.
-            let after_a_lambda = opener.is_some_and(|at| at > 0 && stream.tokens[at - 1].kind == RightBracket);
+            let after_a_lambda =
+                opener.is_some_and(|at| at > 0 && stream.tokens[at - 1].kind == RightBracket);
             let after_a_declarator = opener.is_some_and(|at| {
                 at >= 2
                     && stream.tokens[at - 1].kind == Identifier
                     && matches!(
                         stream.tokens[at - 2].kind,
-                        AutoKeyword | VoidKeyword | IntKeyword | CharKeyword | DoubleKeyword | FloatKeyword
+                        AutoKeyword
+                            | VoidKeyword
+                            | IntKeyword
+                            | CharKeyword
+                            | DoubleKeyword
+                            | FloatKeyword
                     )
             });
             if after_a_lambda || after_a_declarator {
@@ -231,10 +242,18 @@ pub fn between(stream: &Stream<'_>, index: usize, roles: &Roles, style: &Style) 
         // operator, a keyword or an opening bracket keeps that space; everything else (`a[i]`, `[[attr]]`) glues.
         // **A declarator or an attribute starts with a space**: `auto [a, b] = p`, `struct [[nodiscard]] S`,
         // `class [[attr]] C`. A subscript (`a[i]`) and an attribute on a name (`int x [[attr]]`) do not.
-        if matches!(previous.kind, StructKeyword | ClassKeyword | UnionKeyword | EnumKeyword | AutoKeyword) {
+        if matches!(
+            previous.kind,
+            StructKeyword | ClassKeyword | UnionKeyword | EnumKeyword | AutoKeyword
+        ) {
             return 1;
         }
-        if previous.kind == Identifier && matches!(previous.text, "auto" | "struct" | "class" | "union" | "enum") {
+        if previous.kind == Identifier
+            && matches!(
+                previous.text,
+                "auto" | "struct" | "class" | "union" | "enum"
+            )
+        {
             return 1;
         }
         return match previous.kind {
@@ -313,7 +332,9 @@ pub fn between(stream: &Stream<'_>, index: usize, roles: &Roles, style: &Style) 
         // **The closing brace of a requirement block keeps its space too**: `{ c.size() } -> T`.
         let requirement_close = closes_a_requirement_block(stream, index);
         if previous.kind != LeftBrace
-            && (roles.block_brace.contains(&offset) || closes_a_declaration_body(stream, index) || requirement_close)
+            && (roles.block_brace.contains(&offset)
+                || closes_a_declaration_body(stream, index)
+                || requirement_close)
         {
             return 1;
         }
@@ -327,7 +348,9 @@ pub fn between(stream: &Stream<'_>, index: usize, roles: &Roles, style: &Style) 
         // **A requirement block is a block too**: `{ c.size() } -> std::convertible_to<size_t>` — the brace
         // is followed by `->`, and the spaces inside it are the block`s (`{ c.size() }`, not `{c.size()}`).
         let requirement = is_a_requirement_block(stream, index - 1);
-        if (roles.block_brace.contains(&previous.start) || body || requirement) && current.kind != RightBrace {
+        if (roles.block_brace.contains(&previous.start) || body || requirement)
+            && current.kind != RightBrace
+        {
             return 1;
         }
         return 0;
@@ -502,7 +525,11 @@ fn is_a_mark(kind: CppTokenKind) -> bool {
 /// follows a list with an arrow) — measured on `concept Container = requires(T c) { { c.size() } -> ... }`, where we
 /// wrote `{c.size()}->…`.
 fn is_a_requirement_block(stream: &Stream<'_>, open: usize) -> bool {
-    if stream.tokens.get(open).is_none_or(|token| token.kind != CppTokenKind::LeftBrace) {
+    if stream
+        .tokens
+        .get(open)
+        .is_none_or(|token| token.kind != CppTokenKind::LeftBrace)
+    {
         return false;
     }
     let mut depth = 0isize;
@@ -594,8 +621,15 @@ fn a_space_before_a_paren(previous: CppTokenKind, previous_text: &str, style: &S
     // space (measured against 22.1.3), and they are identifiers to this lexer, not keywords.
     if matches!(
         previous_text,
-        "static_assert" | "_Static_assert" | "alignas" | "alignof" | "decltype" | "sizeof" | "noexcept"
-            | "typeid" | "requires"
+        "static_assert"
+            | "_Static_assert"
+            | "alignas"
+            | "alignof"
+            | "decltype"
+            | "sizeof"
+            | "noexcept"
+            | "typeid"
+            | "requires"
     ) {
         return false;
     }

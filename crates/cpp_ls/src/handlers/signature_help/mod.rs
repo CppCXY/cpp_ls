@@ -37,8 +37,8 @@ use tokio_util::sync::CancellationToken;
 
 use super::RegisterCapabilities;
 use crate::context::{RequestOutcome, ServerContextSnapshot, snapshot_query};
-use cpp_parser::CppDocComment;
 use crate::util::uri_to_file_path;
+use cpp_parser::CppDocComment;
 
 pub async fn on_signature_help(
     context: ServerContextSnapshot,
@@ -185,14 +185,16 @@ fn brief_of(comment: &CppDocComment) -> Option<String> {
     let mut kept = String::with_capacity(text.len());
     for line in text.lines() {
         let content = line.trim_start().trim_start_matches("///").trim_start();
-        let content = content.strip_prefix("*").map_or(content, |rest| rest.trim_start());
+        let content = content
+            .strip_prefix("*")
+            .map_or(content, |rest| rest.trim_start());
         let name = content.strip_prefix(['@', '\\']).map(|rest| {
             rest.chars()
                 .take_while(|character| character.is_ascii_alphanumeric())
                 .collect::<String>()
         });
-        let is_a_parameter_line = name.as_deref().and_then(cpp_parser::command_kind)
-            == Some(DocCommandKind::Parameter);
+        let is_a_parameter_line =
+            name.as_deref().and_then(cpp_parser::command_kind) == Some(DocCommandKind::Parameter);
 
         if !is_a_parameter_line {
             kept.push_str(line);
@@ -288,7 +290,8 @@ double scale(int count, double factor);
         let comment = root
             .descendants()
             .find(|node| {
-                cpp_parser::CppSyntaxKind::from(node.kind()) == cpp_parser::CppSyntaxKind::DocComment
+                cpp_parser::CppSyntaxKind::from(node.kind())
+                    == cpp_parser::CppSyntaxKind::DocComment
             })
             .and_then(CppDocComment::cast)
             .expect("the fixture writes a doc comment");

@@ -1175,7 +1175,11 @@ int f() {
     let view = session.view("/p/a.cpp").expect("a view");
     let type_of = |needle: &str| {
         let at = source.find(needle).expect("the fixture writes it")
-            + needle.len().saturating_sub(needle.trim_start_matches(|c: char| c == '=' || c == ' ' || c == '(' || c == ')').len());
+            + needle.len().saturating_sub(
+                needle
+                    .trim_start_matches(|c: char| c == '=' || c == ' ' || c == '(' || c == ')')
+                    .len(),
+            );
         let reading = view
             .reading_offset_of(cpp_code_analysis::file::coordinates::FileOffset::new(at))
             .expect("the cursor is in the rendering");
@@ -1431,5 +1435,9 @@ int f() {
     assert_eq!(type_of("int at = a"), "int", "operator[] returns int");
     // Same rule as the subscript — one character later, onto the call's own `(`.
     assert_eq!(type_of("int times = a"), "int", "operator() returns int");
-    assert_eq!(type_of("Money neg = "), "Money", "unary operator- returns Money");
+    assert_eq!(
+        type_of("Money neg = "),
+        "Money",
+        "unary operator- returns Money"
+    );
 }

@@ -18,16 +18,16 @@
 pub mod breaks;
 pub mod columns;
 pub mod config;
-pub mod presets;
-pub mod macros;
-pub mod output;
-pub mod regions;
-pub mod render;
-pub mod rows;
 pub mod includes;
 pub mod layout;
+pub mod macros;
 pub mod options;
+pub mod output;
+pub mod presets;
+pub mod regions;
+pub mod render;
 pub mod roles;
+pub mod rows;
 pub mod space;
 pub mod tokens;
 pub mod trailing;
@@ -61,7 +61,14 @@ pub fn format_file(path: &std::path::Path, source: &str, style: &Style) -> Strin
     if regions::is_fully_disabled(style) {
         return source.to_string();
     }
-    finish(render::format(source, path.file_stem().and_then(|stem| stem.to_str()), style), style)
+    finish(
+        render::format(
+            source,
+            path.file_stem().and_then(|stem| stem.to_str()),
+            style,
+        ),
+        style,
+    )
 }
 
 /// **Format only the lines `first..=last`** (0-based), the library half of clang-format's `-lines`.
@@ -100,7 +107,11 @@ mod tests {
     fn a_range_leaves_the_lines_outside_it_alone() {
         let source = "int  a = 1;\nint  b = 2;\n";
         let out = format_range(source, &Style::default_style(), 1, 1);
-        assert_eq!(out.lines().nth(0), Some("int  a = 1;"), "line 0 is not in the range");
+        assert_eq!(
+            out.lines().nth(0),
+            Some("int  a = 1;"),
+            "line 0 is not in the range"
+        );
         assert_eq!(out.lines().nth(1), Some("int b = 2;"), "line 1 is");
     }
 

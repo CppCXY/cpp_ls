@@ -549,7 +549,9 @@ pub fn search_paths(
     // **What the project stated, or the newest the compiler takes.** See [`ASSUMED_STANDARDS_GNU`]: the last
     // candidate is "no flag at all", so a compiler that knows neither spelling is still asked rather than skipped.
     for candidate in standards_to_try(standard, &ASSUMED_STANDARDS_GNU) {
-        if let Some(found) = search_paths_with(runner, compiler, candidate, standard.is_none(), flags) {
+        if let Some(found) =
+            search_paths_with(runner, compiler, candidate, standard.is_none(), flags)
+        {
             return Some(found);
         }
     }

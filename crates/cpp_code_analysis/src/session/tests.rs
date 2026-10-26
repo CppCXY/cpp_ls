@@ -1,4 +1,3 @@
-
 use super::{OpenDocuments, Session, SessionFiles, queue_key};
 use crate::file::coordinates::ReadingOffset;
 use crate::file::paths::{DiskFiles, FileProvider, MemoryFiles};
@@ -110,7 +109,11 @@ fn the_sharing_cache_survives_a_restart() {
     // **A restart**: the memory is empty, the disk is not.
     // A restart: the store a session opens has its own table, empty.
     let empty = fixture.session();
-    assert_eq!(empty.walk_contributions_held(), 0, "a new store holds nothing");
+    assert_eq!(
+        empty.walk_contributions_held(),
+        0,
+        "a new store holds nothing"
+    );
 
     let session = fixture.session();
     let restored = session.load_the_sharing();
@@ -991,7 +994,6 @@ fn typing_in_a_body_does_not_cost_the_walk_a_translation_unit_is() {
     // its own memory (`held_units`), not a previous run's file. The property the cases below assert — a keystroke
     // does not cost a walk — is what remains, and it is what the entry was ever for.
 
-
     // **One fresh session per question**, because the in-memory table would otherwise answer and hide whether
     // the entry on disk was usable at all — and the entry on disk is the thing under test: it is what has to
     // survive a keystroke, for a session that has not seen the file before and for the one that has.
@@ -1369,7 +1371,11 @@ fn a_cook_that_cannot_succeed_is_not_queued_again_by_a_request() {
         "a file the index cannot describe has no materials to cook"
     );
     session.refuse_the_cooks_that_built_nothing(&claimed, &[]);
-    assert_eq!(session.pending_cooking(), 0, "the refused file left the queue");
+    assert_eq!(
+        session.pending_cooking(),
+        0,
+        "the refused file left the queue"
+    );
 
     // **The request that names it again must not put it back.**
     session.want_cooked_reading(Path::new("/p/absent.cpp"));
