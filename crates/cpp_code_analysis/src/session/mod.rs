@@ -2794,7 +2794,9 @@ impl<F: FileProvider + Clone> Session<F> {
         // closure — so a single number for the drain names neither.
         let started = std::time::Instant::now();
         let re_read =
-            (!files.is_empty()).then(|| self.store.prepare_the_re_read(&files, &units, false));
+            // **`true`: this caller can walk a timeline**, so the pass renders a file no slice unit covers instead of
+            // keeping the raw reading of it. See `SummaryStore::prepare_the_re_read`'s `walk_its_own`.
+            (!files.is_empty()).then(|| self.store.prepare_the_re_read(&files, &units, false, true));
         if tracing && !files.is_empty() {
             eprintln!(
                 "drain: re-read {} file(s) in {} ms",

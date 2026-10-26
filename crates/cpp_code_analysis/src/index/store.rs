@@ -1323,7 +1323,7 @@ impl<F: FileProvider> SummaryStore<F> {
         // See [`SummaryStore::prepare_the_re_read`] for the filter and for what is deliberately not stored.
         let truncated = !outcome.not_indexed.is_empty();
         let indexed = outcome.indexed.clone();
-        let plan = self.prepare_the_re_read(&indexed, &[], truncated);
+        let plan = self.prepare_the_re_read(&indexed, &[], truncated, false);
         outcome.re_read = self.commit_the_re_read(plan);
 
         outcome.stats = self.stats.since(before);
@@ -1379,7 +1379,7 @@ impl<F: FileProvider> SummaryStore<F> {
         files: &[PathBuf],
         units: &[std::sync::Arc<crate::TranslationUnit>],
     ) -> usize {
-        let plan = self.prepare_the_re_read(files, units, false);
+        let plan = self.prepare_the_re_read(files, units, false, true);
         self.commit_the_re_read(plan)
     }
 
@@ -1436,6 +1436,9 @@ impl<F: FileProvider> SummaryStore<F> {
         indexed: &[PathBuf],
         units: &[std::sync::Arc<crate::TranslationUnit>],
         truncated: bool,
+        // **May this caller walk a file's own timeline?** See the two arms below: the session can, and wants a
+        // rendering; `index_includes_from` cannot, and wants the macro evidence a raw reading keeps.
+        walk_its_own: bool,
     ) -> ReRead {
         // **No longer read, and kept because it still describes the call.** It used to decide whether a refined
         // summary could be stored: a truncated re-read is a reading of part of the program, which is not storable. Now
@@ -1757,9 +1760,6 @@ impl<F: FileProvider> SummaryStore<F> {
         let bodied_names: std::collections::HashSet<&str> =
             bodied.iter().map(String::as_str).collect();
 
-        // The fallback's cache of parsed `#define`s — one parse per definition rather than one per definition per
-        // file. Read only by a caller that has no timeline to hand this pass (see the `None` arm below).
-        let mut definitions = crate::summary::MacroDefinitions::default();
         // **The re-reads themselves, waiting to be applied.** Everything below builds a summary; putting one in the
         // index is the one thing that is not a pure function of the store, and it is what
         // [`SummaryStore::commit_the_re_read`] is for — so the plan is a list here and a loop there.
@@ -1800,20 +1800,58 @@ impl<F: FileProvider> SummaryStore<F> {
                 continue;
             }
 
+            // **A caller that cannot walk a timeline keeps the reading this pass has always had.**
+            //
+            // The two arms exist for two callers, and they want different things. The session has the machinery to
+            // walk a file's own closure (`Session::walk_the_timelines`) and wants the reading the other arm produces —
+            // a rendering — so that a file is one reading whichever arm reached it (`docs/architecture.md` §7.12).
+            // `SummaryStore::index_includes_from` and the tests have no walker and want the *evidence* a raw reading
+            // keeps: which macro invocations opened which scopes (`Summary::macro_readings`), which a rendering does
+            // not have because it has expanded them away. See `tests/scopes.rs`.
+            if !walk_its_own {
+                let key = SummaryKey::new(content_hash(source), self.context_hash(path));
+                let indexer =
+                    FileIndexer::new(&self.files, &self.config).with_seed(self.index.macros());
+                let Some(environment) = self.closure_environment(path, &sources) else {
+                    continue;
+                };
+                let made = indexer
+                    .with_macro_bodies(&environment)
+                    .index(path, source, key);
+                // **Not stored**: the summary is the file read with its closure's macro bodies in force, while the
+                // key names only the text and the configuration. See the note at the other arm.
+                rebuilt.push((made, false));
+                continue;
+            }
+
             let key = SummaryKey::new(content_hash(source), self.context_hash(path));
             let indexer =
                 FileIndexer::new(&self.files, &self.config).with_seed(self.index.macros());
-            // **A caller with no timeline** — a probe indexing a closure from an entry point, a test — keeps
-            // the reading this pass has always had: the file's own closure, walked once for it. The session
-            // passes units and never comes here; dropping this arm would silently unscope every declaration
-            // behind a namespace-opening macro for those callers (`tests/scopes.rs` is one).
-            let Some(environment) = self.closure_environment(path, &sources, &mut definitions)
-            else {
+            // **A file no slice unit covers is read through its own timeline**, walked here rather than skipped.
+            //
+            // This arm used to fix the scopes macros open and leave every `#if` branch standing, while the timeline
+            // arm above *rendered* — so the same file was two different readings depending on whether a unit covering
+            // it happened to be in hand. Measured (`docs/architecture.md` §7.12): `xfilesystem_abi.h` answered **365**
+            // declarations through this arm and **245** through the other, which is the whole of the "same project,
+            // two answers" difference the probes kept reporting.
+            //
+            // Walking the file's own closure costs ~38 ms and is cached by content (`walked_by_content`), and it is
+            // what the other arm is: a rendering of the file in the environment its own reading was built with.
+            let Some(unit) = self.a_timeline_of_its_own(path, &sources) else {
                 continue;
             };
+            let Some(view) = unit.environment_of(path) else {
+                continue;
+            };
+            let definitions = unit.definitions();
+            let (tokens, _) = cpp_parser::lex(source, &cpp_parser::LexerConfig::default());
+            let macros =
+                crate::preprocess::cooked::FileMacros::new(view, &definitions, Some(&seed), true);
+            let rendered =
+                { crate::preprocess::cooked::cook_with(source, &tokens, &macros).render() };
             let made = indexer
-                .with_macro_bodies(&environment)
-                .index(path, source, key);
+                .index_the_readings(path, source, &rendered, key)
+                .summary;
 
             // **Not stored, for the reason the timeline branch gives below.** `made` is the file read with its own
             // closure's macro bodies in force — the environment every file it includes had at that point — while the
@@ -1987,13 +2025,19 @@ impl<F: FileProvider> SummaryStore<F> {
     /// The fallback for a caller with no units at all: `SummaryStore::index_includes_from` walks a closure from an
     /// entry point and has no session behind it, and `FileMacros`/`MacroView` need a walk to be a position in. The
     /// cost is a closure walk per file that needs one, which is why the session passes units instead.
+    /// **The closure's macro bodies, as the parser sees them** — what a caller with no timeline can offer.
+    ///
+    /// The reading this builds is the file's own text parsed with the replacement lists of every macro its closure
+    /// defines in force: it fixes the scopes those macros open and keeps the evidence of which invocation did it. It is
+    /// **not** a rendering (a `#if` branch nobody takes is still there), which is why the arm that uses it is for
+    /// callers that cannot walk a timeline — see [`SummaryStore::prepare_the_re_read`]'s `walk_its_own`.
     fn closure_environment(
         &self,
         path: &Path,
         sources: &std::collections::HashMap<String, String>,
-        definitions: &mut crate::summary::MacroDefinitions,
     ) -> Option<cpp_parser::MacroEnvironment> {
         let summary = self.index.summary(path)?;
+        let mut definitions = crate::summary::MacroDefinitions::default();
 
         let evidence = crate::summary::macros_from_the_closure_with_bodies(
             summary,
@@ -2007,13 +2051,93 @@ impl<F: FileProvider> SummaryStore<F> {
                 ))
             },
             self.index.macros(),
-            definitions,
+            &mut definitions,
         );
 
         Some(
             cpp_parser::MacroEnvironment::from_included_macros(evidence.macros)
                 .with_bodies_in_force(evidence.conditional_bodies),
         )
+    }
+
+    /// **The file's own timeline, walked from what this store holds** — the second pass's fallback arm needs one.
+    ///
+    /// A `TranslationUnit` is the walk of a closure; the session keeps them in a table and hands them out, and the
+    /// store has the same ingredients without the table: every summary in the index and every text behind them. What
+    /// this builds is the timeline the file would have had if it had been walked for itself, which is the environment
+    /// its own reading was built with — the answer the `through_a_timeline` arm gets from a unit it was handed.
+    ///
+    /// `None` when the file has no summary, which is a file the pass has nothing to say about.
+    fn a_timeline_of_its_own(
+        &self,
+        path: &Path,
+        sources: &std::collections::HashMap<String, String>,
+    ) -> Option<std::sync::Arc<crate::TranslationUnit>> {
+        let root = self.index.summary(path)?;
+
+        // **Every file of the closure, text and all, before the walk starts** — `walk`'s lookup hands out `&str` for
+        // the text it is given, so something has to own those strings for as long as it runs. The texts the pass has
+        // already copied are reused; the rest are read here.
+        let mut texts: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut queue: std::collections::VecDeque<std::path::PathBuf> =
+            std::collections::VecDeque::new();
+        queue.push_back(root.path.clone());
+        // **Only a closure the index can describe in full is rendered.** A walk taken while the queue is still filling
+        // sees the includes that happen to be indexed yet, so its rendering is of *part of the program* — a reading
+        // that will change again when the rest arrives. Whether that happened used to depend on how warm the cache
+        // was, and it is the last difference between two runs of one project: measured, the same closure held 43 483
+        // declarations in one run and 42 604 in another, and every file that moved was one whose walk had been taken
+        // early (`docs/architecture.md` §7.12). A file whose closure is not all here keeps the summary the first pass
+        // built, which is a reading of its own text and does not depend on timing at all.
+        let mut complete = true;
+        while let Some(file) = queue.pop_front() {
+            let key = normalize_path(&file, cfg!(windows));
+            if !seen.insert(key.clone()) {
+                continue;
+            }
+            let Some(text) = sources
+                .get(&key)
+                .cloned()
+                .or_else(|| self.files.read(&file))
+            else {
+                complete = false;
+                continue;
+            };
+            match self.index.summary(&file) {
+                Some(summary) => queue.extend(
+                    summary
+                        .includes
+                        .iter()
+                        .filter_map(|include| include.resolved.clone()),
+                ),
+                None => complete = false,
+            }
+            texts.insert(key, text);
+        }
+        if !complete {
+            return None;
+        }
+
+        // The walk's own definition cache: one parse per `#define` rather than one per file that includes it.
+        let mut definitions = crate::summary::MacroDefinitions::default();
+        let unit = crate::TranslationUnit::walk(
+            root,
+            |wanted| {
+                let summary = self.index.summary(wanted)?;
+                let key = normalize_path(wanted, cfg!(windows));
+                let text = texts.get(&key)?;
+                Some((summary, text.as_str()))
+            },
+            self.index.macros(),
+            &mut definitions,
+            // **Not shared**: a timeline this walk produces for one file of a re-read slice is not the shared answer
+            // for a root, and filing it under the closure's identity would hand it to a caller that asked for the
+            // root. The walk's contribution cache is what makes a repeat walk cheap, and that is passed below.
+            false,
+            self.contributions(),
+        );
+        Some(std::sync::Arc::new(unit))
     }
 
     /// Forget everything the store holds about `path`, because the file is gone.    ///

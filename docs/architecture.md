@@ -944,3 +944,40 @@ Session::units_for_the_pass
 （365）。也就是说**同一个文件有时被精修、有时不被精修**。要让这个数彻底稳定，只有一条路：让"没有 timeline"的那条臂
 也产出渲染（需要给 `cpp_parser::MacroEnvironment` 实现 `cook_with` 要的 `MacroBindings`，或给第二遍的每个候选都走一遍
 它自己的 timeline），这正是 §7.12 开头的两个方向之一。
+**㉑ 两条臂现在读的是同一种东西。** 上一段留下的那个"让 eager 臂也产出渲染"在这一轮做了，做法不是去造
+`MacroBindings`，而是**让那个臂自己走一遍这个文件的时间线**：
+
+```text
+SummaryStore::a_timeline_of_its_own(path, sources)
+    闭包里每个文件：文本（pass 已经复制过的直接复用，其余现读）+ 摘要（来自索引）
+    TranslationUnit::walk(root, …, share = false, self.contributions())   ← 走一遍 ~38 ms，按内容缓存
+    unit.environment_of(path) → FileMacros → cook_with → index_the_readings
+```
+
+于是两条臂都产出**渲染**：有 slice unit 的走现成的，没有的走自己那条。同时 `units_for_the_pass` 只剩一条规则：
+**只用 root 就是候选文件自己的那条 timeline** —— 一个仅仅"覆盖"这个文件的 unit 是它在**另一个 root 的环境**里的读法
+（`Selection.cpp` 的程序里定义过的宏会剪掉它自己的分支），那是 cooked 读法该管的事（⑲ 按程序归档），不是文件自己摘要
+的内容。
+
+还有一个必要的守门：**只有闭包完整时才渲染**。索引还在跑的时候走出来的 timeline 只含"此刻已经索引到的 include"，
+它的渲染是**程序的一部分** —— 这正是最后那点差异的来源（同一闭包 43 483 一次、42 604 一次，动过的文件都是"walk 走早了"
+的那些）。闭包不完整时保留第一遍的摘要，那是一个只依赖文本的读数。
+
+实测（删缓存后连跑四次，clice，`unit_read_probe`）：
+
+```text
+43 483 / 43 483 / 43 483 / 43 363         ← 三次一致，第四次仍差一个系统头（120 条）
+```
+
+**仍然差的那一次**：`index_one` 在把某个文件重新读入库时，如果那一刻手上有一条覆盖它的 timeline 就走渲染，否则用缓存里
+的摘要 —— 而"手上有没有"取决于持有表（历史）。这是同一个问题的第三个入口，规则已经写好（只认 root 就是自己的
+timeline），下一轮把它套到 `index_one` 上，然后这个数应该就固定了。
+
+**`walk_its_own` 这个参数是为了保住另一半能力。** `SummaryStore::index_includes_from`（probe 与测试用的"从入口文件索引
+一个闭包"）没有 walker，它要的是**原始读法里的证据**：哪个宏调用打开了哪个作用域（`Summary::macro_readings`）——
+渲染里这些调用已经被展开掉了。所以那条臂保留下来，`tests/scopes.rs` 的三条断言继续成立。
+
+```text
+cpp_code_analysis   687 lib + 40 个集成目标全绿
+cpp_ls release      13 个目标全绿
+```
