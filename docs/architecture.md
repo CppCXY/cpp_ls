@@ -1086,3 +1086,15 @@ pump                                读完一个程序睡一个 IDLE_WAIT ——
 
 **下一步**：381 / 397 已经接近全覆盖，剩下的 16 个是"没有任何 root 的闭包覆盖到"的文件（孤立的头）。把它们也读掉，然后
 就是删四层补丁的窗口 —— patch 2 的用户只剩没有渲染读法的文件，而那样的文件将只剩 0 个。
+**端到端（真服务端，clice）：后台读项目不拖慢请求。** `loop_probe` 打开 `Selection.cpp`、等索引收敛，然后十次 diagnostics
+pull。同一段日志里同时出现的是**按 TU 读程序**的推进：
+
+```text
+[INFO analysis_state] read a program as one piece: 1 file(s), 9 token(s), 0 error(s)
+[INFO analysis_state] read a program as one piece: 19 file(s), 9947 token(s), 0 error(s)
+[INFO analysis_state] read a program as one piece: 90 file(s), 433813 token(s), 0 error(s)
+[INFO analysis_state] read a program as one piece: 2 file(s), 6062 token(s), 0 error(s)
+```
+
+而同一时间窗里的十次 pull：**2.638 s / 2.656 s**（每次约 264 ms），与改动前同一夹具的 2.64 s 一致，并且**0 cook**。也就是说
+"后台把一个项目读成编译器读法"和"回答请求"真的并行了 —— 这正是 ⑰ 把 4.9 s 挪到锁外换来的那件事。
