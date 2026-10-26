@@ -35,6 +35,9 @@ fn what_is_answered_at_a_place() {
     );
     let started = std::time::Instant::now();
     session.did_open(&file, &text);
+    // **A cooked reading on purpose**: the checks are run over the compiler's view, and a probe that asks for
+    // diagnostics without one is answered "nothing to say" rather than "nothing wrong".
+    session.want_cooked_reading(&file);
     session.add_project_files([file.clone()]);
     session.index_everything();
     while session.pending_work() > 0 {
@@ -45,6 +48,26 @@ fn what_is_answered_at_a_place() {
         session.cache_sizes().summaries,
         started.elapsed()
     );
+
+    // **What the check layer says about the whole file**, when asked: a false positive is a report about
+    // diagnostics rather than about one place, and the code carries the rule's own name.
+    if std::env::var_os("CPPLS_DIAGNOSTICS").is_some() {
+        match session.diagnostics(&file) {
+            Some(found) => {
+                println!("{} finding(s):", found.checks.len() + found.errors.len());
+                for finding in &found.checks {
+                    println!(
+                        "  {:?} at {}: {}",
+                        finding.code, finding.range.start_offset, finding.message
+                    );
+                }
+                for error in &found.errors {
+                    println!("  error {:?}", error.code);
+                }
+            }
+            None => println!("the check layer had nothing to say about the file"),
+        }
+    }
 
     // **And every fact the index holds for a name**, when one is named: the `returns` a call has to answer with.
     if let Ok(name) = std::env::var("CPPLS_NAME") {

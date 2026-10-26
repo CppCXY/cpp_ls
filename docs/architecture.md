@@ -1339,3 +1339,32 @@ LuaParser/src/File/LuaSource.cpp    From: returns Some("LuaSource::From")       
 **探针本身抓到了自己的一个错误，值得记下**：第一版用 `Session::with_config` 打开项目，于是 `compile_commands.json` 和编译器
 宏都没读 —— `p.GetEvents()` 答 `NotDeclaredHere("LuaParser::GetEvents")`，因为头文件在索引里但**从这个文件不可见**（包含没
 解析）。换成 `Session::open`（服务器用的那个）之后，同一处答的是 `_Ty`。**探针必须用产品的打开方式**，否则量的是另一个项目。
+### 9.2 `assign-type-check` 的假阳性：一张按**裸名字**建、跨整个文件的表
+
+报告（"极其错误的诊断"）：
+
+```cpp
+std::size_t LuaSource::GetColumn(std::size_t offset) const {
+    auto line = GetLine(offset);
+    auto lineStartOffset = _lineOffsetVec[line];   ← "`line` is initialised with a value that does not convert to `std::size_t`"
+```
+
+`line` 是 `auto`，规则文档里写着"`auto x = expr;` 不报（那是推导问题，不是转换问题）"—— 但它报了。原因是规则建的表：
+
+```text
+declared: HashMap<&str, &str>      每个 Variable 事实的 (裸名字 → 写出来的类型)，auto 跳过
+                                   ← 一个文件里所有声明共用一个键空间
+declared.get("line") → "std::size_t"   ← 来自同一文件里另一个函数写的 `std::size_t line;`
+```
+
+实测这个文件自己的事实：**7 个 `line` 的 `type_of` 是 `auto`，2 个是 `std::size_t`**，于是"旁边那个 `line`"被按另一个函数的类型判定。
+
+改法：**一个名字只有当这个文件对它只有一种说法时才判定**。表变成 `HashMap<&str, Option<&str>>`，同名声明出现第二种写法（或任一写法是 `auto`）就把该项置 `None` 并丢弃 —— 该名字不判定。这条规则与检查的前提一致（"类型写在值旁边"才谈得上转换），并且是**保守**的方向：不判定只是少一条提示，误判是一条错误的提示。
+
+```text
+fixture（两个函数各声明一个 line，一个 auto 一个 std::size_t）   AssignTypeCheck 不出现
+fixture（单个 `int count = "zero";`）                          AssignTypeCheck 照常出现
+真项目 LuaSource.cpp，`session.diagnostics`                     0 条（修之前有那条假阳性）
+```
+
+顺带把探针扩了一个开关：`CPPLS_DIAGNOSTICS=1` 让 `tests/inference_probe.rs` 打印这个文件的所有检查结果，因为"假阳性"是关于**整个文件的诊断**的报告，不是"某个位置答了什么"。

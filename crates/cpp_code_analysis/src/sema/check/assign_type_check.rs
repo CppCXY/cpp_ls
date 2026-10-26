@@ -57,7 +57,25 @@ impl Check for AssignTypeCheck {
         // **The written type of every variable this file declares**, by name. Built first so that the walk below is
         // one pass over the tree and one lookup per place a value is assigned — see the module documentation for
         // what the opposite order cost.
-        let mut declared: HashMap<&str, &str> = HashMap::new();
+        // **`None` means "this file declares the name more than one way", and such a name is not judged.**
+        //
+        // The map was `&str -> &str` and keyed by the **bare name**, over every variable the file declares — so a
+        // `std::size_t line` in one function decided the type of an `auto line` in another. Reported from an editor as
+        // *"an extremely wrong diagnostic"*, over
+        //
+        // ```cpp
+        // auto line = GetLine(offset);                 // deduced, not judged
+        // auto lineStartOffset = _lineOffsetVec[line];
+        // ```
+        //
+        // in `LuaSource.cpp`, where `line` is also declared `std::size_t` in other functions: the message said "`line`
+        // is initialised with a value that does not convert to `std::size_t`" about the **deduced** one. Measured on
+        // that file's own facts: seven `line`s with `type_of: Some("auto")` and two with `Some("std::size_t")`.
+        //
+        // A name the file writes two ways has no single answer to give, and this check's whole premise is that the
+        // type is written down beside the value. `auto` in any of them is the same answer — the file already said it
+        // does not want that declaration judged.
+        let mut declared: HashMap<&str, Option<&str>> = HashMap::new();
         for fact in &context.summary.declarations {
             if fact.kind != crate::DeclKind::Variable {
                 continue;
@@ -65,11 +83,19 @@ impl Check for AssignTypeCheck {
             let Some(written) = fact.type_of.as_deref() else {
                 continue;
             };
-            if is_a_deduced_auto(written) {
-                continue;
+            let written = (!is_a_deduced_auto(written)).then_some(written);
+            match declared.entry(fact.name.as_str()) {
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    entry.insert(written);
+                }
+                std::collections::hash_map::Entry::Occupied(mut entry) => {
+                    if *entry.get() != written {
+                        entry.insert(None);
+                    }
+                }
             }
-            declared.insert(fact.name.as_str(), written);
         }
+        declared.retain(|_, written| written.is_some());
         if declared.is_empty() {
             // Nothing to judge: no variable in this file has a written type. The ordinary answer for a file that
             // only declares functions, and the reason this check costs nothing on one.
@@ -114,7 +140,7 @@ impl Check for AssignTypeCheck {
             let Some(name) = super::spelling_of(&declarator) else {
                 continue;
             };
-            let Some(written) = declared.get(name.as_str()).copied() else {
+            let Some(Some(written)) = declared.get(name.as_str()).copied() else {
                 continue;
             };
 
@@ -179,7 +205,7 @@ impl Check for AssignTypeCheck {
             let Some(name) = super::spelling_of(named.syntax()) else {
                 continue;
             };
-            let Some(written) = declared.get(name.as_str()).copied() else {
+            let Some(Some(written)) = declared.get(name.as_str()).copied() else {
                 continue;
             };
 

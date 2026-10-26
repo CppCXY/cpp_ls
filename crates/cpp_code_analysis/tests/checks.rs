@@ -453,6 +453,48 @@ fn assign_type_check_reports_both_places_a_value_is_assigned() {
 /// a finding. The alternative is a rule that reports conversions it cannot see, which is what this layer is written
 /// against.
 #[test]
+/// **A name the file declares two ways is not judged** — and the report that made this a rule.
+///
+/// Reported from an editor as *"an extremely wrong diagnostic"*. `LuaSource.cpp` reads
+///
+/// ```cpp
+/// std::size_t LuaSource::GetColumn(std::size_t offset) const {
+///     auto line = GetLine(offset);
+///     auto lineStartOffset = _lineOffsetVec[line];
+/// ```
+///
+/// and the check said "`line` is initialised with a value that does not convert to `std::size_t`" about the **deduced**
+/// `line`, because its map was keyed by the bare name over every variable the file declares and another function
+/// writes `std::size_t line;`. Measured on that file: seven `line`s whose `type_of` is `auto` and two whose is
+/// `std::size_t`.
+#[test]
+fn assign_type_check_stays_quiet_about_a_name_the_file_declares_two_ways() {
+    // Two functions, both declaring `line`: one deduced, one written. The deduced one must not be judged against the
+    // written one's type, and neither may the reverse (the two values are compatible here, so this is only about the
+    // name collision — a *wrong* pair is the fixture below).
+    let source = "struct Source { std::size_t GetLine(std::size_t offset); };\n\
+                  void one(Source &s, std::size_t offset) {\n\
+                  \x20   auto line = s.GetLine(offset);\n\
+                  \x20   auto next = line;\n\
+                  }\n\
+                  void two() {\n\
+                  \x20   std::size_t line = 1;\n\
+                  \x20   line = 2;\n\
+                  }\n";
+    assert!(
+        !codes_of(source).contains(&DiagnosticCode::AssignTypeCheck),
+        "neither `line` is judged"
+    );
+
+    // **And a single written declaration is still judged**, which is the check's whole job.
+    let wrong = "void f() {\n    int count = \"zero\";\n}\n";
+    assert!(
+        codes_of(wrong).contains(&DiagnosticCode::AssignTypeCheck),
+        "one written type is one answer"
+    );
+}
+
+#[test]
 fn assign_type_check_stays_quiet_when_the_target_is_a_class_it_cannot_see_into() {
     let source =
         "#include <string>\nstd::string line = 1231;\nint main() { return (int)line.size(); }\n";
