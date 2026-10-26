@@ -1437,6 +1437,10 @@ impl<F: FileProvider> SummaryStore<F> {
         units: &[std::sync::Arc<crate::TranslationUnit>],
         truncated: bool,
     ) -> ReRead {
+        // **No longer read, and kept because it still describes the call.** It used to decide whether a refined
+        // summary could be stored: a truncated re-read is a reading of part of the program, which is not storable. Now
+        // *no* refinement is storable (see the note at the arm that builds one), so the answer is the same either way.
+        let _ = truncated;
         // **The shape of this call, on `CPPLS_TRACE_COOKING=1`.** The pass has two forms — one rooted at a slice
         // with a timeline in hand, and an "eager" one for a caller with no timeline at all that copies every indexed
         // file's text and asks a question about every `#define` in the project — and from outside they are the same

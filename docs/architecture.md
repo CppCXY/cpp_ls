@@ -920,3 +920,27 @@ cpp_code_analysis   687 lib + 40 个集成目标全绿
 cpp_ls release      13 个目标全绿（handshake 34、latency、idle…）
 cold / warm         缓存删掉后连跑三次：43 483 / 43 483 / 43 363 —— 差异仍在，定位到文件与臂
 ```
+**⑳ 之后的第二刀：`held` 是一张 HashMap。** 上一段说"走哪条臂取决于那一轮准备了哪些 unit"，这一轮把那句话变成了代码：
+
+```text
+Session::units_for_the_pass
+    let held = self.held_units().held.values()…collect();   ← HashMap 的 values()，两次跑顺序不同
+    for candidate in candidates {
+        if let Some(unit) = held.iter().find(|unit| unit.environment_of(&candidate).is_some()) { … }
+```
+
+`find` 取**第一个**覆盖这个文件的 timeline，而覆盖同一个头的两个 timeline（本文件的、和以某个 `.cpp` 为根的）给出**不同的
+环境** —— 于是同一个头在两次运行里被读成两份不同的读法。修法两条一起：
+
+```text
+按 timeline 的 root 排序          顺序变成"手上有什么"的函数，而不是"HashMap 怎么排"
+优先选 root 就是候选文件自己的那条   这不仅是稳定的答案，还是**正确**的答案：文件自己的 timeline 就是它自己的读法
+```
+
+实测（删缓存后连跑四次）：**43 483 / 43 460 / 43 483 / 43 238** —— 差异变小但仍在，说明还有第二个来源。
+
+**剩下的那个来源已经知道名字了**：第二遍**重读哪些文件**取决于排水历史（`parsed_since_the_last_pass` 的 slice，以及
+由这些文件的文本发现的 `#if`/宏体候选），而"重读"分两条臂 —— 有 timeline 的读成渲染（245），没有的只修宏开的 scope
+（365）。也就是说**同一个文件有时被精修、有时不被精修**。要让这个数彻底稳定，只有一条路：让"没有 timeline"的那条臂
+也产出渲染（需要给 `cpp_parser::MacroEnvironment` 实现 `cook_with` 要的 `MacroBindings`，或给第二遍的每个候选都走一遍
+它自己的 timeline），这正是 §7.12 开头的两个方向之一。
