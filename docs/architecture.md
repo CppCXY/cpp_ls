@@ -665,3 +665,26 @@ cpp_code_analysis 682 lib + 全部集成绿
 窗口现在是"**非读者文件**第一次被读成 raw"——wave 仍按文本读它们，然后第二遍精修；把 wave 也变成"一个 TU 一条
 timeline"就是下一步。
 
+### 7.6 下一步：冷启动按 TU 读，而不是按文件读（计划，未开始）
+
+删四层补丁的前置条件写在 §5.4 和第 7 章里很多次了，⑰ 之后它第一次成了一个**可算**的问题而不是一个愿望：
+
+```text
+现在的冷启动   397 个文件各解析一次（wave）→ 每个 open 文件的 TU 再读一次程序（⑰）→ 第二遍再精修被条件拆开的
+目标           每个 TU root 一次：directive_summary 把闭包扫一遍（不解析）→ walk → render → parse → 每个文件
+               的事实与摘要都从这一次读法里分出来
+```
+
+为什么现在可算：⑰ 证明了一次整程序读法是 **5.2 s / 180 个文件 / 806 k token**，而它取代的是"这 180 个文件各解析
+一次 + 第二遍重读其中一部分"。指令那一半是每文件一次 lex + 指令扫描（55 KB 的文件 16 ms，头文件多为 10–30 KB），
+而且**已经在 `SummaryStore::directive_summary` 里按内容和路径记住了**。
+
+真正的工作量在三处，都不是小改：
+
+1. **`FileSummary` 的来源要换。** 目标定义是"指令（文本里）+ 声明（渲染里）"，两者都用同一个 `SummaryKey`；
+   现在 `summarize`/`index`（raw）是声明那半的唯一来源。
+2. **walk 要先于 parse**：闭包里的每个文件先只有 directive summary，`TranslationUnit::walk` 已经能吃
+   `&FileSummary`（它只读 `macros`/`includes`/`guards`），所以这条顺序是通的 —— ⑮ 已经在单个文件上用了它。
+3. **缓存键**：这样建出来的摘要**不能写进只描述文本的那一行**（⑬ 的第 2 条教训），要有 `env_hash`
+   （`SummaryKey::with_environment` 已有），而 lookup 侧必须能用同一个哈希问 —— 这就是 §5 第二步。
+
