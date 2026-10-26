@@ -1407,3 +1407,34 @@ fixture（单个 `int count = "zero";`）                          AssignTypeChe
 `direct_member("std::shared_ptr", "operator->")` 拿到了**另一个同名类**（或同名类的另一份声明）的成员事实。下一步是
 用 `CPPLS_NAME=operator->` 把带有 `scope: Some("std::shared_ptr")` 的事实全部打出来，看清楚 `_Ty2` 是从哪一份声明来的；
 修法是让 `direct_member` 要求候选事实的**声明所属的类**与查询的类是同一个（qualified name 相等），再谈 pattern 匹配。
+### 9.4 `shared_ptr` 的箭头：成员模板的形参，和一个没有目标的 `element_type`
+
+`file->setUri` 的原因在 §9.3 结尾被追踪到 `_Ty2`。这一轮把它彻底查清了，**是两个缺陷叠在一起**：
+
+```text
+① MSVC 的 shared_ptr 把 operator-> 写成成员模板
+   template <class _Ty2 = _Ty, enable_if_t<!is_array_v<_Ty2>, int> = 0>
+   _NODISCARD _Ty2* operator->() const noexcept;
+   事实记录成员模板的形参【名字】（_Ty2, int），不记录【默认值】，所以 _Ty2 无法从类实参代换
+② 标准的约定是 element_type：pointer-like 类型都声明它 —— 但这一份事实没有目标
+   [inference] element_type: std::shared_ptr<LuaSource> has 44 member(s), ["element_type kind Other type_of None"]
+```
+
+①的修法：箭头的结果如果**是成员自己的形参名**（或索引里根本没有这个名字的类），退回去问类的 `element_type` / `value_type`
+（`the_element_type_of`，走成员列表所以包含基类）。夹具上有效：
+
+```text
+template <typename T> struct Holder { using element_type = T; };
+template <typename T> struct Handle : Holder<T> { template <typename U = T, int = 0> U *operator->() const; };
+g(Handle<Item> file) { file-> }   →  class "Item"（修前：Unknown(NotDeclaredHere("U"))）
+```
+
+顺带修掉一个自己造成的栈溢出：`the_element_type_of` 第一版用 `member_fact` 查 `element_type`，而 `member_fact` 在没有找到成员时
+会走向**同一个箭头回退**，于是无限递归、栈溢出（实测）。改成走 `members_of`（它只walk 基类，不会再问箭头）。
+
+②还没修，但定位到字段级：那份 `element_type` 事实是 `kind: Other`、`type_of: None` —— 一个**成员**位置的
+`using element_type = _Ty;`（或 `using _Base::element_type;` 这种引入）没有把目标的拼写记进事实。类模板里的成员别名在
+`std::string::value_type`、`std::vector::reference` 这些地方同样是成员类型推断的入口，所以这是下一轮的第一件事：让成员位置的
+`using` 记下目标（`kind: Type`、`type_of: <目标>`），然后 `element_type` 的回退就能在真实项目上给出 `LuaSource`。
+
+`cpp_code_analysis` 695 lib + 43 个集成目标全绿。

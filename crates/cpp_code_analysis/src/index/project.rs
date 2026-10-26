@@ -6285,13 +6285,136 @@ fn the_class_an_arrow_points_at(
     }
     let parameters = index.template_parameters_for(&bare, path, &arguments);
     let substituted = crate::sema::types::substituted_spelling(&returns, &parameters, &arguments);
-    let target = base_type_name(&substituted);
+    let mut target = base_type_name(&substituted).to_string();
+
+    // **The member may be a template of its own**, and then its answer names *its* parameter, not the class's:
+    //
+    // ```cpp
+    // template <class _Ty2 = _Ty, enable_if_t<!is_array_v<_Ty2>, int> = 0>
+    // _NODISCARD _Ty2* operator->() const noexcept;
+    // ```
+    //
+    // is how MSVC's `<memory>` writes `shared_ptr::operator->`. A fact records a template's parameter *names* and not
+    // their defaults, so `_Ty2` cannot be substituted from here — and asking a member lookup about a class called
+    // `_Ty2` is what an editor saw as "`file->` has no members" (`class "_Ty2": 0 member(s)`, measured on
+    // EmmyLuaCodeStyle's `LuaFormat.cpp`).
+    //
+    // What settles it is the convention every pointer-like type in the standard library follows: `element_type` is
+    // what the arrow reaches, and it is declared on the class or one of its bases.
+    // **When the answer is a name nothing declares, it is a parameter** — the member's own, or the class's own written
+    // somewhere the substitution could not reach. `_Ty2` is declared nowhere in a project, and a class called `_Ty2` is
+    // a class no reader wrote.
+    let names_nothing =
+        index.files_declaring(&target, path).is_empty() && !is_a_builtin_name(&target);
+    if target.is_empty()
+        || target == bare
+        || names_nothing
+        || arrow.parameters.iter().any(|name| name == &target)
+    {
+        target = the_element_type_of(index, scopes, root, path, class, &bare, &arguments)
+            .unwrap_or(target);
+    }
     if crate::probes::inference() {
         eprintln!(
-            "[inference] operator-> substitution: parameters {parameters:?}, {returns:?} -> {substituted:?} -> {target:?}"
+            "[inference] operator-> substitution: parameters {parameters:?}, the member's own {arrow_parameters:?}, {returns:?} -> {substituted:?} -> {target:?}",
+            arrow_parameters = arrow.parameters
         );
     }
-    (!target.is_empty() && target != bare).then(|| target.to_string())
+    (!target.is_empty() && target != bare).then_some(target)
+}
+
+/// A name the language spells, not one a declaration introduces — `int` is not a class to look members up in, and it is
+/// also not a parameter whose meaning was lost.
+fn is_a_builtin_name(name: &str) -> bool {
+    matches!(
+        name,
+        "int"
+            | "char"
+            | "bool"
+            | "void"
+            | "float"
+            | "double"
+            | "long"
+            | "short"
+            | "signed"
+            | "unsigned"
+            | "auto"
+            | "wchar_t"
+            | "char8_t"
+            | "char16_t"
+            | "char32_t"
+            | "size_t"
+    )
+}
+/// **What a pointer-like class's arrow reaches** — its `element_type`, or `value_type` when it has one instead.
+///
+/// Both are read from the class or a base (a `shared_ptr`'s `element_type` is `_Ptr_base`'s), and both are substituted
+/// with the arguments the use wrote, because the declaration spells them with the class's own parameter names.
+fn the_element_type_of(
+    index: &ProjectIndex,
+    scopes: &crate::ScopeTree,
+    root: &cpp_parser::CppSyntaxNode,
+    path: &Path,
+    class: &str,
+    bare: &str,
+    arguments: &[String],
+) -> Option<String> {
+    let parameters = index.template_parameters_for(bare, path, arguments);
+    // **The member *list*, not the single-member query**: `member_fact` ends by falling back to this very function
+    // (the arrow of a class that has no `element_type`), so asking it here recursed until the stack ran out — measured,
+    // the test that produced this line overflowed it. A list walks the bases and never asks about an arrow.
+    let Known::Yes(members) = members_of(index, scopes, root, path, class) else {
+        if crate::probes::inference() {
+            eprintln!("[inference] element_type: no member list for {class}");
+        }
+        return None;
+    };
+    if crate::probes::inference() {
+        let found: Vec<String> = members
+            .members
+            .iter()
+            .filter(|member| matches!(member.fact.name.as_str(), "element_type" | "value_type"))
+            .map(|member| {
+                format!(
+                    "{} kind {:?} type_of {:?}",
+                    member.fact.name, member.fact.kind, member.fact.type_of
+                )
+            })
+            .collect();
+        eprintln!(
+            "[inference] element_type: {class} has {} member(s), {found:?}",
+            members.members.len()
+        );
+    }
+    for name in ["element_type", "value_type"] {
+        let Some(fact) = members
+            .members
+            .iter()
+            .find(|member| member.fact.name == name)
+            .map(|member| &member.fact)
+        else {
+            continue;
+        };
+        let Some(written) = fact.type_of.as_deref() else {
+            continue;
+        };
+        let substituted = crate::sema::types::substituted_spelling(written, &parameters, arguments);
+        let target = base_type_name(&substituted).to_string();
+        if crate::probes::inference() {
+            eprintln!(
+                "[inference] element_type: {class}::{name} wrote {written:?} -> {substituted:?} -> {target:?} ({} member(s))",
+                members.members.len()
+            );
+        }
+        // A parameter name is not an answer: it means the declaration named something this call cannot substitute.
+        if !target.is_empty()
+            && target != bare
+            && !parameters.iter().any(|parameter| parameter == &target)
+        {
+            return Some(target);
+        }
+    }
+    None
 }
 
 fn member_fact(

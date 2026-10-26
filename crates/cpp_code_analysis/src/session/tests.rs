@@ -913,6 +913,66 @@ fn a_class_templates_members_are_read_through_the_uses_arguments() {
         );
     }
 }
+/// **A member template's own parameter is not the class's** — the shape `std::shared_ptr` is written in.
+///
+/// MSVC's `<memory>` declares
+///
+/// ```cpp
+/// template <class _Ty> class shared_ptr : public _Ptr_base<_Ty> {
+///     template <class _Ty2 = _Ty, enable_if_t<!is_array_v<_Ty2>, int> = 0>
+///     _NODISCARD _Ty2* operator->() const noexcept { return get(); }
+/// ```
+///
+/// so the member's answer mentions `_Ty2` — a parameter of the *member template*, defaulted to the class's `_Ty`. The
+/// fact records the member's parameters as names, without their defaults, so substituting with the class's arguments
+/// leaves `_Ty2` standing and the member lookup asks about a class called `_Ty2` (measured on EmmyLuaCodeStyle's
+/// `LuaFormat.cpp`: `file->` → `class "_Ty2": 0 member(s)`).
+///
+/// What settles it is the convention every pointer-like type in the standard library follows: `element_type` is what
+/// the arrow reaches.
+#[test]
+fn an_arrow_through_a_member_template_reaches_the_element_type() {
+    let header = "template <typename T> struct Holder {\n\
+                  \x20   using element_type = T;\n\
+                  };\n\
+                  template <typename T> struct Handle : Holder<T> {\n\
+                  \x20   template <typename U = T, int = 0>\n\
+                  \x20   U *operator->() const;\n\
+                  };\n";
+    let source = "#include \"handle.h\"\n\
+                  struct Item { int value; void grow(); };\n\
+                  void g(Handle<Item> file) {\n\
+                  \x20   file->\n\
+                  }\n";
+    let files = MemoryFiles::new()
+        .with_file("/p/handle.h", header)
+        .with_file("/p/a.cpp", source);
+    let fixture = Memory::new("an-arrow-through-a-member-template", &files);
+    let mut session = fixture.session();
+    session.did_open("/p/a.cpp", source);
+    session.add_project_files([std::path::PathBuf::from("/p/a.cpp")]);
+    session.index_everything();
+    let path = std::path::PathBuf::from("/p/a.cpp");
+    let view = session.view_of_the_file(&path).expect("a view");
+
+    let written = "file->";
+    let at = source.find(written).expect("the fixture") + written.len();
+    let completions =
+        session.member_completions(&view, crate::file::coordinates::FileOffset::new(at));
+    let Known::Yes(completions) = completions else {
+        panic!("`{written}` must list the element's members: {completions:?}");
+    };
+    let names: Vec<&str> = completions
+        .members
+        .members
+        .iter()
+        .map(|member| member.fact.name.as_str())
+        .collect();
+    assert_eq!(
+        completions.class, "Item",
+        "the arrow reaches `element_type`, not the member template's parameter name ({names:?})"
+    );
+}
 /// **The same question when the class is declared in a header** — the shape the real project has, and the one that
 /// answers `_Ty`.
 ///
