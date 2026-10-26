@@ -1760,8 +1760,17 @@ impl<F: FileProvider + Clone> Session<F> {
         // refuses itself the moment anything it was built from moves (`crate::tu_cache`).
         if moved.layout {
             self.held_units().remove(&queue_key(path));
+            // **And the program this file is in, for the same reason and no other.** A body edit changes the file's own
+            // text, but not the program's *shape*: the closure's directives, includes and conditions are where they
+            // were, so the facts a program read filed for every **other** file of the closure are still true — and the
+            // edited file's own facts are rebuilt by the per-file cook (`Session::want_the_closure_cooked`). Re-reading
+            // the program after every pause in typing would be **5.24 s of background CPU for an answer that did not
+            // change** (measured: 180 files, 806 008 tokens, `tests/keystroke_probe.rs`).
+            //
+            // A *directive* edit is the other case: every offset the timeline recorded moved, and the rendering of the
+            // whole program changes with it, so this file's program is read again at the next quiet moment.
+            self.units_read.remove(&queue_key(path));
         }
-        self.units_read.remove(&queue_key(path));
         // **The one place a refusal is cleared**, and it is cleared because the reason for it — the text — has
         // changed. See [`Session::want_cooked_reading`], which used to clear it on every request and turned a cook
         // that cannot succeed into a loop.

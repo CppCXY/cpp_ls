@@ -774,6 +774,72 @@ fn a_program_too_large_to_read_at_once_is_left_alone() {
     );
 }
 
+/// **A body edit does not cost the program again; a directive edit does.**
+///
+/// A program read is 5.24 s of background CPU for 180 files (measured, `tests/keystroke_probe.rs`), and what decides
+/// whether it has to be paid again is the **shape** of the program: a body edit moves no directive, so every file of
+/// the closure but the edited one still reads exactly as it did — and the edited one is rebuilt by the per-file cook
+/// that every keystroke already queues. A directive edit moves every offset the timeline recorded, and the rendering
+/// of the whole program with it.
+///
+/// [`Session::the_wait_before_a_program_may_be_read`] is the question the pump asks — `Some` when a program is owed,
+/// whatever the clock says — and it is what makes this testable without sleeping.
+#[test]
+fn a_body_edit_does_not_cost_the_program_again() {
+    let handle = "#define DECLARE_HANDLE(name) struct name##__ { int unused; }; \
+                  typedef struct name##__ *name\n";
+    let main = "#include \"api.h\"\nHWND h;\n";
+    let body_edit = "#include \"api.h\"\nHWND h;\nint padding;\n";
+    let directive_edit = "#include \"api.h\"\nHWND h;\nint padding;\n#define PAD 1\n";
+    let files = MemoryFiles::new()
+        .with_file("/p/handle.h", handle)
+        .with_file("/p/api.h", "#include \"handle.h\"\nDECLARE_HANDLE(HWND);\n")
+        .with_file("/p/main.cpp", main);
+    let fixture = Memory::new("a-body-edit-keeps-the-program", &files);
+    let mut session = fixture.session();
+    session.did_open("/p/main.cpp", main);
+    session.index_everything();
+
+    // **The program is read once**, and it stops being owed for that root.
+    let reading = session
+        .read_a_looked_at_unit()
+        .expect("the reader has a file open, so there is a program to read");
+    assert!(
+        reading.files >= 3,
+        "the program is three files: {reading:?}"
+    );
+    assert!(
+        session.the_wait_before_a_program_may_be_read().is_none(),
+        "one program per root, until something changes its shape"
+    );
+
+    // **A body edit**: the file's text changed, the program's shape did not.
+    session.did_change("/p/main.cpp", body_edit);
+    assert!(
+        session.the_wait_before_a_program_may_be_read().is_none(),
+        "a declaration added to a body does not make the program owed again"
+    );
+    // …and the edited file is still read, by the per-file path its keystroke queued.
+    session.advance(4);
+    assert!(
+        session
+            .index()
+            .summary(Path::new("/p/main.cpp"))
+            .is_some_and(|summary| summary
+                .declarations
+                .iter()
+                .any(|fact| fact.name == "padding")),
+        "the keystroke's own file is read again, by the per-file path"
+    );
+
+    // **A directive edit**: every offset the timeline recorded moved, so the program is owed again.
+    session.did_change("/p/main.cpp", directive_edit);
+    assert!(
+        session.the_wait_before_a_program_may_be_read().is_some(),
+        "a directive that moved makes the program worth reading again"
+    );
+}
+
 /// **The diagnostics of a file whose error is in a branch nobody takes.**
 ///
 /// The two readings disagree here, and that is the whole reason [`Session::diagnostics`] exists: the file's own

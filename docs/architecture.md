@@ -659,11 +659,29 @@ cpp_ls release    13 个目标全绿：handshake 34（含 folding）、latency 2
 cpp_code_analysis 682 lib + 全部集成绿
 ```
 
+**端到端（真正的服务端，`loop_probe` 打开 clice 的 `Selection.cpp`）**：索引收敛的那一行之后紧跟着
+
+```text
+[INFO cpp_ls::handlers::initialized] the workspace is indexed — the longest an update held the analysis was 91 ms
+[INFO cpp_ls::context::analysis_state] read a program as one piece: 180 file(s), 806008 token(s), 0 error(s)
+                                       — their declarations are the compiler's reading now
+```
+
+也就是说这把 5.2 s 真的是**在写锁之外**发生的：同一段日志里最长的写锁是 **91 ms**（那是索引自己的输入），而那十次
+diagnostics pull 期间 `0 cook(s)`、没有一行重复（`loop_probe` 的判据）。
+
 **这条链现在闭合到哪**：一个读者打开一个文件、停手一秒，这条 TU 的**整个闭包**就有了编译器读法（不只是他打开的那个
 文件），而且这些事实是从**一条** timeline、**一次**整程序解析里分出来的 —— 正是 §5 第二步的形状。还差的是
 §5 第二步的另一半：`ProjectIndex` 的查找按询问方所在 TU 的环境分区（`env_hash`），以及把四层补丁删掉。删补丁的
 窗口现在是"**非读者文件**第一次被读成 raw"——wave 仍按文本读它们，然后第二遍精修；把 wave 也变成"一个 TU 一条
 timeline"就是下一步。
+
+**一个读到一半才发现的代价，已经修掉**：`units_read` 原来在**每次编辑**都清掉（`buffer_changed`），于是"打字 → 停
+一秒 → 再打字"会让这条程序每停一次就重读一遍 —— 5.24 s 的后台 CPU 换来一份**没有变化**的读法。现在它和 unit 表用
+同一条规则：只有**指令移动**（`moved.layout`）才让这条程序重新变成"欠着"的，因为只有那时整程序渲染的每个偏移才都变了；
+body 编辑不动程序形状，而那个文件自己的事实本来就由 per-file cook（⑮）重建。
+`session::tests::a_body_edit_does_not_cost_the_program_again` 钉住这件事，用的
+是 `the_wait_before_a_program_may_be_read`（pump 问的那个问题）而不是睡眠。
 
 ### 7.6 下一步：冷启动按 TU 读，而不是按文件读（计划，未开始）
 

@@ -364,11 +364,26 @@ impl AnalysisState {
 
         // **And the inserts, under the writer.** The root is marked read even when the read declined, so a program
         // that cannot be built is not chosen again on the next wake.
-        self.update_session("read a program", move |session| {
-            session.commit_a_program(&root, prepared).is_some()
-        })
-        .await
-        .unwrap_or(false)
+        let read = self
+            .update_session("read a program", move |session| {
+                session.commit_a_program(&root, prepared)
+            })
+            .await
+            .flatten();
+
+        // **One line, because this is the most expensive thing the server does unprompted** — and the reader's log is
+        // where "why is a core busy for five seconds after I stop typing" is answered. Silent when the *insert* is
+        // all that happened (a program the database already had), which is the cheap case.
+        if let Some(reading) = &read {
+            log::info!(
+                "read a program as one piece: {} file(s), {} token(s), {} error(s) — their declarations are the \
+                 compiler's reading now",
+                reading.files,
+                reading.tokens,
+                reading.errors
+            );
+        }
+        read.is_some()
     }
 
     /// Wait for a wake-up, or for `timeout` to pass.
