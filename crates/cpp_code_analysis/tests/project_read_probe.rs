@@ -97,12 +97,20 @@ fn what_reading_the_whole_project_costs() {
     let mut roots = 0usize;
     let mut files = 0usize;
     let mut first: Option<std::time::Duration> = None;
-    while let Some(read) = session.read_a_program_now() {
-        if first.is_none() {
-            first = Some(reading.elapsed());
+    // **Until nothing is owed, not until a read succeeds.** A declined read is retried (three times), so a loop that
+    // stopped on the first `None` would have left the probe's own project half-read — which is exactly what it did
+    // before this line was written.
+    while session.the_wait_before_a_program_may_be_read().is_some() {
+        match session.read_a_program_now() {
+            Some(read) => {
+                if first.is_none() {
+                    first = Some(reading.elapsed());
+                }
+                roots += 1;
+                files += read.files;
+            }
+            None => break,
         }
-        roots += 1;
-        files += read.files;
     }
     println!(
         "{roots} program(s) read in {:?} (first {:?}), covering {files} file-read(s)",
@@ -115,6 +123,28 @@ fn what_reading_the_whole_project_costs() {
         "afterwards: {} cooked file(s) / {} declaration(s), {} summar(ies)",
         sizes.cooked_files, sizes.cooked_declarations, sizes.summaries
     );
+
+    // **Which files the project read did not reach**, by name: the ones still answering from their own text, and the
+    // whole of what is left before the lookup-time guard patch can be deleted (§8.1).
+    let uncovered: Vec<String> = session
+        .index()
+        .summaries()
+        .filter(|summary| session.index().cooked_declarations(&summary.path).is_none())
+        .map(|summary| summary.path.to_string_lossy().to_string())
+        .collect();
+    println!("{} file(s) have no rendering:", uncovered.len());
+    for path in uncovered.iter().take(40) {
+        let in_project = all
+            .iter()
+            .any(|said| said.to_string_lossy() == path.as_str());
+        println!(
+            "  {path}  (project file: {in_project}, dependents: {})",
+            session
+                .index()
+                .dependents_of(std::path::Path::new(path))
+                .len()
+        );
+    }
     assert!(roots > 0, "the project has at least one root");
 
     // One file at the end: is it answered from the compiler's reading?

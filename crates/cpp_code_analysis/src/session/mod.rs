@@ -194,6 +194,15 @@ const UNTIL_A_UNIT_MAY_BE_READ: std::time::Duration = std::time::Duration::from_
 /// root by root, in the background, and this is the clock that keeps it out of the way.
 const UNTIL_THE_PROJECT_MAY_BE_READ: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// **How often a root's whole-program read is attempted before the session gives up on it.**
+///
+/// Each attempt is a *gather* — the walk, the texts — and a read declines when the closure cannot be walked (a
+/// dependency the session has no text for). The first decline used to be final: the root was marked read, and measured
+/// on a real project three of its own roots were never read because one attempt declined while the index was still
+/// filling. Three attempts cover that without letting a genuinely unbuildable root be chosen on every wake — and a
+/// fourth would not learn anything the third did not.
+const PROGRAM_READ_ATTEMPTS: u8 = 3;
+
 /// **The largest program this session reads in one piece, in bytes of the source text it is made of.**
 ///
 /// A unit read is linear in its program: **5.09 s for 7.07 MB of source** (159 files, 737 525 tokens; measured in
@@ -493,6 +502,10 @@ pub struct Session<F: FileProvider = DiskFiles> {
     /// Cleared wherever [Session::units] is: a unit read is a reading of the same timeline, so anything that
     /// moves inside it makes this list a claim about a reading that no longer describes its closure.
     units_read: std::collections::HashSet<String>,
+    /// **How often a root's program was attempted and declined** — see [`Session::commit_a_program`]. A root that
+    /// cannot be walked yet is retried, but not for ever: three attempts and it keeps the reading the per-file path
+    /// gave it.
+    units_attempted: std::collections::HashMap<String, u8>,
     /// **When this session last took an edit** — the clock the one indivisible piece of work in it is deferred by.
     ///
     /// A unit read ([`Session::prepare_a_unit_reading`]) is a walk, a render and a **parse of a whole program** in one
@@ -1242,6 +1255,7 @@ impl<F: FileProvider + Clone> Session<F> {
                 MAX_WALKS_BY_CONTENT_BYTES,
             )),
             units_read: std::collections::HashSet::new(),
+            units_attempted: std::collections::HashMap::new(),
             unit_index: std::sync::Mutex::new(None),
             rendered_unit: std::sync::Mutex::new(None),
             last_edit: std::time::Instant::now(),
@@ -2778,8 +2792,26 @@ impl<F: FileProvider + Clone> Session<F> {
         root: &Path,
         prepared: Option<PreparedUnitReading>,
     ) -> Option<UnitReading> {
+        let Some(prepared) = prepared else {
+            // **A declined read is retried — three times.** The walk can be refused for a reason that heals: a
+            // dependency the index does not have *yet* (the schedule fires when the queue is empty, but a file the
+            // session cannot read at all leaves a hole that stays). Marking it read on the first decline, which this
+            // did, made a temporarily-incomplete closure permanent: measured on a real project, three of a project's
+            // own roots were never read because one attempt declined (`tests/project_read_probe.rs`).
+            //
+            // The bound is what keeps a genuinely unbuildable root from being chosen on every wake: three attempts,
+            // and the file keeps the reading the per-file path gave it. The number is small because each attempt is a
+            // whole-program read's *gather* — a walk — and a fourth would not learn anything the third did not.
+            let key = queue_key(root);
+            let attempts = self.units_attempted.entry(key).or_default();
+            *attempts += 1;
+            if *attempts >= PROGRAM_READ_ATTEMPTS {
+                self.units_read.insert(queue_key(root));
+            }
+            return None;
+        };
         self.units_read.insert(queue_key(root));
-        prepared.map(|prepared| self.commit_a_unit_reading(prepared))
+        Some(self.commit_a_unit_reading(prepared))
     }
 
     /// **Work out the expensive half of a drain, holding nothing but `&self`.**
@@ -5287,7 +5319,9 @@ impl<F: FileProvider + Clone> Session<F> {
             .iter()
             .filter(|path| index.dependents_of(path).is_empty())
             .find(|path| {
-                !self.units_read.contains(&queue_key(path))
+                let key = queue_key(path);
+                !self.units_read.contains(&key)
+                    && self.units_attempted.get(&key).copied().unwrap_or(0) < PROGRAM_READ_ATTEMPTS
                     && !self.the_program_is_too_large_to_read_at_once(path)
             })
             .cloned()
