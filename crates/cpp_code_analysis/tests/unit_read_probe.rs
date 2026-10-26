@@ -146,6 +146,20 @@ fn what_a_unit_read_does_to_the_index() {
         sum(&before, 3)
     );
 
+    // **Per file, on request** — the answer to "two runs, two fact counts": the total is a sum, and a sum cannot say
+    // *which* file was read differently. `CPPLS_DUMP_FACTS=<path>` writes one row per closure file, so two runs can
+    // be diffed with any tool at all.
+    if let Some(into) = std::env::var_os("CPPLS_DUMP_FACTS") {
+        let mut rows: Vec<String> = before
+            .iter()
+            .map(|(path, facts, cooked, answered)| {
+                format!("{}\t{facts}\t{cooked}\t{answered}", path.display())
+            })
+            .collect();
+        rows.sort();
+        std::fs::write(into, rows.join("\n")).expect("the dump path is writable");
+    }
+
     // **The render on its own**, because the next step in `docs/architecture.md` §7.4 depends on how the 5 s
     // divides: the walk needs the session, and the cook, the parse and the sweep are functions of the unit and its
     // texts. The memo then answers the same program inside `read_the_unit`, so what is left there is the parse and

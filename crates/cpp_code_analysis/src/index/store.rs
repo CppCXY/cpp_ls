@@ -927,11 +927,21 @@ impl<F: FileProvider> SummaryStore<F> {
             (Some(unit), Some(view)) => Some(self.the_rendering_of(path, &source, unit, view, key)),
             _ => None,
         };
+        // Whether the summary came from a rendering, decided before the value is moved out of the option.
+        let from_a_rendering = rendered.is_some();
         let summary = rendered.unwrap_or_else(|| indexer.index(path, &source, key));
 
         // The one rule about the filesystem: a summary that records a *failed* search must not be stored, because
         // nothing in the key would notice the header appearing. See the module documentation.
-        let stored = !has_unresolved_includes(&summary);
+        //
+        // **And a summary that describes a *rendering* is not stored either**, for the same kind of reason: the key is
+        // the file's text and the compilation's context, and a rendering is a function of the text **and of the
+        // environment at the point the file was included** — two translation units that read one header differently
+        // produce two renderings, and one key for both cannot describe what it holds. This is the line the rule was
+        // missing: `prepare_with_the_timeline` builds exactly such a summary, and writing it under the text-only key
+        // leaves a row the next session reads as the file's *own* reading. The reading is still in the index and
+        // answers this session; it is only the cache that must not remember it.
+        let stored = !from_a_rendering && !has_unresolved_includes(&summary);
         if stored {
             // **The database, and only the database** — the per-directory `summaries/*.bin` files are gone with
             // `cache.redb` taking their place (see `docs/refactor-cache-and-startup.md` M1/M5).
@@ -1801,19 +1811,16 @@ impl<F: FileProvider> SummaryStore<F> {
                 .with_macro_bodies(&environment)
                 .index(path, source, key);
 
-            let stored = !truncated && !has_unresolved_includes(&made);
-            if stored {
-                if let Some(database) = self.summary_database() {
-                    database.put(made.key, &made);
-                    database.note_file(
-                        &made.path,
-                        made.key.content_hash,
-                        made.key.context_hash,
-                        made.key.env_hash,
-                        self.generation,
-                    );
-                }
-            }
+            // **Not stored, for the reason the timeline branch gives below.** `made` is the file read with its own
+            // closure's macro bodies in force — the environment every file it includes had at that point — while the
+            // key names only the text and the configuration. So the entry the *first pass* wrote stays (a reading of
+            // the text claiming no environment), and this refinement lives in the index for this run.
+            //
+            // Measured, and it is why this line changed: the same project indexed twice answered **43 483** and
+            // **43 363** declarations in one closure (`tests/unit_read_probe.rs`), cold run against warm, because the
+            // warm run's cache held summaries this branch had written. The refinement is redone every run either way,
+            // so refusing to store it costs nothing.
+            let stored = false;
             rebuilt.push((made, stored));
         }
 

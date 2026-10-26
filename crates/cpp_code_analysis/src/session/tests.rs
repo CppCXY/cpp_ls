@@ -71,6 +71,71 @@ fn paths(steps: &[crate::index::Step]) -> Vec<String> {
 // The buffer is the text
 // -------------------------------------------------------------------------------------------
 
+/// **A summary that describes a *rendering* is not left in the cache for the next session.**
+///
+/// `api.h` declares `Live` one way when `FROM_THE_SOURCE` is defined and another when it is not, so the file read
+/// **inside `main.cpp`'s program** is not the file read **on its own**. The cache key is the file's text plus the
+/// compilation's context, and a rendering is a function of the text *and of the environment at the point the file was
+/// included* — so a rendering-derived summary written under that key is a row which says something the next session
+/// has no way to ask for, and a session that reads it answers another translation unit's reading.
+///
+/// Measured before this rule: the same project indexed twice answered **43 238** and **43 483** declarations in one
+/// closure (`tests/unit_read_probe.rs`), and 36 name answers in both — a small enough difference to look like noise,
+/// which is why it went unexplained for a round.
+#[test]
+fn a_rendering_is_not_left_in_the_cache_for_the_next_session() {
+    let api = "#ifdef FROM_THE_SOURCE\nstruct Live { int a; };\n#else\nstruct Live { long b; };\n#endif\n";
+    let main = "#define FROM_THE_SOURCE 1\n#include \"api.h\"\nLive live;\n";
+    let files = MemoryFiles::new()
+        .with_file("/p/api.h", api)
+        .with_file("/p/main.cpp", main);
+    let fixture = Memory::new("a-rendering-is-not-cached", &files);
+
+    // **The run that renders**: `main.cpp`'s program defines the macro, so `api.h`'s reading there is the `int`
+    // branch and the summary built for it is that rendering.
+    {
+        let mut session = fixture.session();
+        session.did_open("/p/main.cpp", main);
+        session.index_everything();
+        let reading = session
+            .read_a_looked_at_unit()
+            .expect("the program is read");
+        assert!(reading.files >= 2, "two files: {reading:?}");
+        assert!(
+            session
+                .index()
+                .cooked_declarations(Path::new("/p/api.h"))
+                .is_some_and(|facts| facts.iter().any(|fact| fact.name == "Live")),
+            "the program's reading of the header is in this session"
+        );
+    }
+
+    // **The next session knows nothing about that program.** `api.h` read on its own takes the `#else` branch, so
+    // that — and only that — is what its summary may say.
+    let mut session = fixture.session();
+    session.add_project_files([std::path::PathBuf::from("/p/api.h")]);
+    session.index_everything();
+    let summary = session
+        .index()
+        .summary(Path::new("/p/api.h"))
+        .expect("the header is read")
+        .clone();
+    let live: Vec<_> = summary
+        .declarations
+        .iter()
+        .filter(|fact| fact.name == "Live")
+        .collect();
+    assert_eq!(
+        live.len(),
+        1,
+        "the file declares `Live` once when it is read on its own: {live:?}"
+    );
+    assert_eq!(
+        live[0].range.start_offset,
+        api.find("struct Live { long b; }").expect("the fixture"),
+        "and it is the branch that file has when nothing defines `FROM_THE_SOURCE`"
+    );
+}
 /// **A declaration only a macro makes becomes one this session answers for**, once its queue drains.
 ///
 /// `DECLARE_HANDLE(HWND)` declares `HWND__` and `HWND` to a compiler and *nothing* to a reader of the file's own
@@ -1882,11 +1947,16 @@ fn an_edit_replaces_what_the_index_knew_and_the_gap_is_visible() {
 
     let steps = session.advance(4);
     assert_eq!(paths(&steps), ["/p/widget.h"]);
-    assert_eq!(
-        steps[0].outcome,
-        StepOutcome::Built,
-        "the summary was dropped, so this is a parse and not a cache hit"
+    // **`Unstored` is the right answer for a file read through its own timeline**: the summary is a *rendering*, and
+    // a rendering is a function of the environment as well as the text, so it answers this session and is not written
+    // under the text-only key — see `SummaryStore::prepare_inner`. What the assertion is about is unchanged: the file
+    // was parsed, not served from the cache.
+    assert!(
+        matches!(steps[0].outcome, StepOutcome::Built | StepOutcome::Unstored),
+        "the summary was dropped, so this is a parse and not a cache hit: {:?}",
+        steps[0].outcome
     );
+    assert_eq!(session.stats().rebuilt, 2, "the first index and this one");
 
     // **The pump to the end, because the question is semantic.** `advance` reads files into the index and
     // `Pending` returned here is a *cook* — so a view needs the loop that runs the cook as well, and
@@ -2176,10 +2246,10 @@ fn a_configuration_change_re_arms_a_worked_file_and_it_is_rebuilt() {
 
     let steps = session.advance(4);
     assert_eq!(paths(&steps), ["/p/a.cpp"], "the file is work again");
-    assert_eq!(
-        steps[0].outcome,
-        StepOutcome::Built,
-        "a different configuration is a different reading, so the text alone cannot answer for it"
+    assert!(
+        matches!(steps[0].outcome, StepOutcome::Built | StepOutcome::Unstored),
+        "a different configuration is a different reading, so the text alone cannot answer for it: {:?}",
+        steps[0].outcome
     );
     assert_eq!(session.stats().since(before).rebuilt, 1);
     assert_eq!(

@@ -885,3 +885,38 @@ Markdown 会把一个段落里的换行接起来，所以 `@brief`、两个 `@pa
 cpp_ls        103 lib（+3：渲染 2 条、过滤 1 条）+ handshake 34 全绿；latency 2（5.96 s）
 cpp_code_analysis  686 lib 全绿
 ```
+### 7.12 ㉒ 那个"不确定的事实数"找到了具体的文件，而不是找到了原因
+
+§7.10 记的 43 238 / 43 363 在本轮复现了，而且这次是**逐个文件**的差异（`CPPLS_DUMP_FACTS` 把闭包里每个文件的
+事实数写成一行，两次跑完 diff）：
+
+```text
+.../msvc/14.51.36231/include/xfilesystem_abi.h   365 → 245
+```
+
+一个系统头，其余 176 个文件两两相同。365 是"文本的读法"（两个分支的声明都在），245 是"渲染的读法"（只留选中的
+分支）。差的那 120 条全部在这个头的 `#if` 块里。
+
+**为什么同一个文件两次走了不同的路**：第二遍（`prepare_the_re_read`）有两条臂 —— 拿到 timeline 时把文件读成
+**渲染**，没有时用 `with_macro_bodies` 读**文本**（只修宏开的 scope，不看条件分支）。前者给 245，后者给 365。走哪条
+取决于那一轮**为这一遍准备了哪些 unit**（`finish_a_slice` → `the_units_for_the_pass`，按这一遍要重读的文件作为 root），
+而 slice 的组成取决于排水过程 —— 于是"同一个项目两次索引"在**没人打开过的系统头**上给出不同的答案。
+
+**这一轮没有修它**，修法有两个方向，都不小：
+
+1. **让"没有 timeline"的那条臂也产出渲染** —— 结构上正确（事实只来自渲染），但需要给
+   `cpp_parser::MacroEnvironment` 实现 `cook_with` 要的 `MacroBindings`（目前只有 `MacroTable`/`FileMacros`/`Live`/`Over`
+   有实现）。
+2. **让"哪条臂"变成确定的** —— 也就是第二遍的 unit 集合与 slice 组成不再依赖排水历史。
+
+**同时把两条"不许写盘"的规则补全了**（它们和这个差异无关，是同一个道理，而且其中一条本来就已经写在时间线那条臂
+上）：`prepare_inner` 只有在摘要**不是**渲染时才写盘（`prepare_with_the_timeline` 会造出渲染），`prepare_the_re_read`
+的 eager 臂也不再写盘。两条都只影响**缓存**，不影响这一轮的索引 —— 谁的读法写进了缓存，谁就会被下一次运行当成
+"文本自己的读法"服侍。`StepOutcome::Unstored` 的文档因此扩宽成"键描述不了它的两个理由"，两条用到 `Built` 的测试
+改成接受 `Built | Unstored`（它们断言的是"这是一次 parse，不是缓存命中"，这一点没变）。
+
+```text
+cpp_code_analysis   687 lib + 40 个集成目标全绿
+cpp_ls release      13 个目标全绿（handshake 34、latency、idle…）
+cold / warm         缓存删掉后连跑三次：43 483 / 43 483 / 43 363 —— 差异仍在，定位到文件与臂
+```
