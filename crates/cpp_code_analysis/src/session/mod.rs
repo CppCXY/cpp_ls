@@ -5264,6 +5264,30 @@ impl<F: FileProvider + Clone> Session<F> {
     /// server waits for a notification, and a reader who has stopped typing sends none — so the one moment the read
     /// is safe is the one moment nothing would happen. This is the remainder for the pump to sleep, which makes the
     /// gate a delay rather than a deadlock.
+    /// **How many of the project's roots the session still owes a program for** — a number for a progress bar, not a
+    /// rule the session obeys (the clock is [`Session::the_wait_before_a_program_may_be_read`]).
+    ///
+    /// The count is the same set [`Session::the_next_root_of_the_project_to_read`] chooses from, without the clock:
+    /// a root of the project that nothing includes, not yet read, not given up on, and not too large to read in one
+    /// piece. Reported from an editor: after `Load workspace` said "0 files to read" the machine was busy for half a
+    /// minute and the bar said nothing, which reads as a hang.
+    pub fn programs_left_to_read(&self) -> usize {
+        if !self.read_the_whole_project {
+            return 0;
+        }
+        let index = self.store.index();
+        self.project
+            .iter()
+            .filter(|path| index.dependents_of(path).is_empty())
+            .filter(|path| {
+                let key = queue_key(path);
+                !self.units_read.contains(&key)
+                    && self.units_attempted.get(&key).copied().unwrap_or(0) < PROGRAM_READ_ATTEMPTS
+                    && !self.the_program_is_too_large_to_read_at_once(path)
+            })
+            .count()
+    }
+
     pub fn the_wait_before_a_program_may_be_read(&self) -> Option<std::time::Duration> {
         let ready_in = |until: std::time::Duration| until.saturating_sub(self.last_edit.elapsed());
         // **The nearest of the two clocks.** An open file becomes readable after a second and a project root after

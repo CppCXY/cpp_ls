@@ -1260,3 +1260,27 @@ cpp_ls release                             13 个目标全绿
 
 （`members_real.rs` 仍然只对 EmmyLuaCodeStyle 的文件成立 —— 它找的是那个项目里的 `LuaSource.cpp`，这台机器没有；
 `signature_real` 同理。这不是缺陷，是那两个探针的夹具是项目专有的。）
+## 9. 正确性测试的第一批报告（六张图）
+
+从编辑器来的六条报告，逐条定位。四条是分析层的真缺陷（各带一条测试），一条是进度条的谎话，一条是主题映射。
+
+| 报告 | 原因 | 状态 |
+| --- | --- | --- |
+| ① 进度条停在 `0 files to read` 而后台很忙 | 消息只数**队列**（`session.pending()`），第二遍的重读不在里面；程序读法开始后条已经结束了 | 已修：消息区分"待读 / 待重读"，条延到"没有程序可读"才结束 |
+| ② 智能指针找不到成员、没有补全 | `member_fact` 停在句柄类本身，没跟随 `operator->` 的返回类型 | 已修（成员查找 + 成员列表，含参数代换）|
+| ③ 初始化的类变量被识别为函数 | 用 `LuaParser p(a, b);` 的合成用例**不能**复现（分类为 `Variable`）| **需要原始那一行** |
+| ④ 枚举成员没有 hover，且应显示数值 | 匿名枚举的成员完全不在索引里（见⑤）；命名枚举有事实但没有数值 | 已修：hover 显示枚举所属与值（按编译器的方式计数）|
+| ⑤ 不支持 C 的无名枚举 | `is_unnamed_declaration` 在走 body 之前就 `return`，`enum { LAJF };` 的成员全部丢失 | 已修 |
+| ⑥ `explicit` 没有语义高亮 | 服务端**发了** token（`kind_of_keyword` 映射到 `modifier`），测试已补 | 主题映射问题（`modifier` 未被主题上色）|
+
+实测（夹具）：
+
+```text
+config->Generate    → Config::Generate           （经 operator-> 代换 _Ty → Config）
+config->            → class Config: ["Generate"]  （不是句柄自己的 operator->/reset）
+enum { LAJF }       → definitions("LAJF") = Yes，分类 EnumMember
+hover OPR_MUL       → "an enumerator of BinOpr"，Value **2**（A=1,B,C=0x10,D → 1,2,16,17；1 << 4 不给数字）
+explicit            → TypeKind::Modifier 的 token 存在（测试 a_declaration_specifier_is_drawn_as_a_modifier）
+```
+
+`cpp_code_analysis` 692 lib + 42 个集成目标全绿，`cpp_ls` release 13 个目标全绿。
