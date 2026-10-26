@@ -1583,3 +1583,9 @@ hover 一个匿名 struct    `static const struct { … } priority[]` 的 type_o
 cpp_code_analysis   696 lib + 42 个集成目标全绿（少了一个探针）
 cpp_ls release      13 个目标全绿
 ```
+## 10. 还没修的东西：`docs/remaining.md`
+
+§9 记的是已经修掉的；**没修完的不在这里**，在 [`docs/remaining.md`](remaining.md)。那份文档是给后面接手的人看的，按优先级
+排：hover 的两条（类模板实例拼写、匿名 struct 的 `void`）、一个事实层的真缺陷（`parameters` 是关键字，现在只在用的时候挡）、
+探针的可用性（`members_real`/`signature_real` 仍然硬编码另一台机器的路径）、已知红清单、§7.12 的不确定性、以及两条可选的
+性能工作（打开文件的 TU 每次启动重读；trait 形态的 `element_type`）。每条都写了现象、根因、改哪里、怎么验收。
