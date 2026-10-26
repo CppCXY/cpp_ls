@@ -6311,8 +6311,35 @@ fn the_class_an_arrow_points_at(
         || names_nothing
         || arrow.parameters.iter().any(|name| name == &target)
     {
-        target = the_element_type_of(index, scopes, root, path, class, &bare, &arguments)
-            .unwrap_or(target);
+        // **An answer only counts when it names a class the index has.** The walk can arrive at a spelling that is a
+        // *trait* rather than a class — `remove_extent_t` after `remove_extent_t<_Ty>` is substituted, an alias template
+        // whose target the standard library defines through `typename remove_extent<T>::type` — and asking a member
+        // lookup about it answers "no members" with confidence.
+        // **A class, not an alias of one.** Both are `DeclKind::Type`; what tells them apart is the same field
+        // `operator_returns_of` uses — an alias declares a target in `type_of`, a class declares none. A bare
+        // `remove_extent_t` is an alias template, and treating it as a class is exactly the mistake this guards.
+        let names_a_class = |name: &str| {
+            let bare = base_type_name(name);
+            is_a_builtin_name(bare)
+                || index.files_declaring(bare, path).iter().any(|found| {
+                    found.fact.kind == crate::DeclKind::Type && found.fact.type_of.is_none()
+                })
+        };
+        let walked = the_element_type_of(index, scopes, root, path, class, &bare, &arguments);
+        target = match walked {
+            Some(walked) if names_a_class(&walked) => walked,
+            // **The pointer-like class's own argument, when its `element_type` leads through a trait this layer cannot
+            // follow.** MSVC's `_Ptr_base` says `using element_type = remove_extent_t<_Ty>;`, which substitutes to
+            // `remove_extent_t<LuaSource>` — an alias *template* whose target is `typename remove_extent<T>::type`, a
+            // trait evaluation rather than a spelling. `base_type_name` then leaves `remove_extent_t`, a class template
+            // with no arguments, and no member list can come of it. For a class template that declares a pointer-like
+            // arrow, the element is its own argument — that is what `shared_ptr<T>`, `unique_ptr<T>` and every other
+            // handle mean, and it is what the standard's `element_type` is for the non-array case.
+            _ => match arguments.as_slice() {
+                [only] if names_a_class(only) => base_type_name(only).to_string(),
+                _ => target,
+            },
+        };
     }
     if crate::probes::inference() {
         eprintln!(
@@ -16029,6 +16056,9 @@ fn an_element_type_through_the_members(
         return None;
     }
     let Known::Yes(members) = members_of(index, scopes, root, path, class) else {
+        if crate::probes::inference() {
+            eprintln!("[inference] element_type: no member list for {class}");
+        }
         return None;
     };
 
@@ -16072,12 +16102,19 @@ fn an_element_type_through_the_members(
         if base_type_name(target) == base_type_name(class) {
             continue;
         }
+        // **The target is written inside the class's own namespace and carries the class's arguments**: `_Mybase` is
+        // `_Ptr_base<_Ty>` in `std`, and the declaration is filed as `std::_Ptr_base`. Asking the bare spelling found
+        // nothing on a real project, and asking it *with* arguments found a class with no members — measured, in this
+        // order, which is why both parts are removed here and the arguments stay in the substitution.
+        let bare_target = without_arguments(target.trim()).to_string();
+        let qualified = resolved_in_the_enclosing_scopes(index, scopes, path, class, &bare_target);
+        let qualified = resolve_aliases(index, scopes, root, path, &qualified);
         if let Some(found) = an_element_type_through_the_members(
             index,
             scopes,
             root,
             path,
-            target,
+            &qualified,
             parameters,
             arguments,
             depth + 1,

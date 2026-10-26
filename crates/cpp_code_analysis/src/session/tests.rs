@@ -979,6 +979,76 @@ fn an_arrow_through_a_member_template_reaches_the_element_type() {
         "the arrow reaches `element_type`, not the member template's parameter name ({names:?})"
     );
 }
+/// **The real shape: a base in another file, a namespace, and an alias with arguments.**
+///
+/// The fixture above keeps `element_type` in the same file; this one is MSVC's layout — `std::_Ptr_base` in one header,
+/// `std::shared_ptr` in another, the base named through `using _Mybase = _Ptr_base<_Ty>;` and the alias re-exposed with
+/// `using typename _Mybase::element_type;`. It exists because the arrow's fallback works on the small fixture and did
+/// **not** work on a real project, and the difference had to be found somewhere cheaper than a 95-second probe run.
+#[test]
+fn an_arrow_through_a_base_named_by_a_member_alias_in_another_file() {
+    // **A forward declaration first**, which is what MSVC's `<memory>` has and what a member list must look past: the
+    // first visible declaration of a class is not always the one with a body.
+    // **The trait, not the parameter** — MSVC's `_Ptr_base` says `using element_type = remove_extent_t<_Ty>;`, and
+    // `remove_extent_t` is an alias *template* whose target the library writes through `typename remove_extent<T>::type`.
+    // A layer that follows spellings arrives at the bare name `remove_extent_t`, which is an alias and not a class; the
+    // answer for a pointer-like handle is the class's own argument, and that is what the last part of the arrow's
+    // fallback is for.
+    let base = "namespace std {\n\
+                template <typename T> class _Ptr_base;\n\
+                template <typename T> struct remove_extent { using type = T; };\n\
+                template <typename T> using remove_extent_t = typename remove_extent<T>::type;\n\
+                template <typename T> class _Ptr_base {\n\
+                public:\n\
+                \x20   using element_type = remove_extent_t<T>;\n\
+                };\n\
+                }\n";
+    let memory = "#include \"ptr_base.h\"\nnamespace std {\n\
+                  template <typename T> class shared_ptr {\n\
+                  private:\n\
+                  \x20   using _Mybase = _Ptr_base<T>;\n\
+                  public:\n\
+                  \x20   using typename _Mybase::element_type;\n\
+                  \x20   template <typename U = T, int = 0>\n\
+                  \x20   U *operator->() const;\n\
+                  \x20   element_type *get() const;\n\
+                  };\n\
+                  }\n";
+    let source = "#include \"memory.h\"\n\
+                  struct Item { int value; void grow(); };\n\
+                  void g(std::shared_ptr<Item> file) {\n\
+                  \x20   file->\n\
+                  }\n";
+    let files = MemoryFiles::new()
+        .with_file("/p/ptr_base.h", base)
+        .with_file("/p/memory.h", memory)
+        .with_file("/p/a.cpp", source);
+    let fixture = Memory::new("an-arrow-through-a-real-shape", &files);
+    let mut session = fixture.session();
+    session.did_open("/p/a.cpp", source);
+    session.add_project_files([std::path::PathBuf::from("/p/a.cpp")]);
+    session.index_everything();
+    let path = std::path::PathBuf::from("/p/a.cpp");
+    let view = session.view_of_the_file(&path).expect("a view");
+
+    let written = "file->";
+    let at = source.find(written).expect("the fixture") + written.len();
+    let completions =
+        session.member_completions(&view, crate::file::coordinates::FileOffset::new(at));
+    let Known::Yes(completions) = completions else {
+        panic!("`{written}` must list the element's members: {completions:?}");
+    };
+    let names: Vec<&str> = completions
+        .members
+        .members
+        .iter()
+        .map(|member| member.fact.name.as_str())
+        .collect();
+    assert_eq!(
+        completions.class, "Item",
+        "the arrow reaches the base alias's `element_type` ({names:?})"
+    );
+}
 /// **The same question when the class is declared in a header** — the shape the real project has, and the one that
 /// answers `_Ty`.
 ///

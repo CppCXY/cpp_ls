@@ -1468,3 +1468,42 @@ file->            →  class "Item"
 解析——都还没命中）。这一条留给下一轮，现象与两次尝试都记在这里，免得重走。
 
 `cpp_code_analysis` 695 lib + 43 个集成目标全绿。
+### 9.6 `file->setUri` 修好了：一条四段的链，全部在夹具上先复现
+
+§9.5 停在"真实项目上走不到基类"。这一轮把它走通了，方法是**先在夹具里把 MSVC 的形状复现出来**（5 秒一次迭代，而不是
+95 秒一次的探针），然后沿追踪逐段修：
+
+```text
+① 基类写成【成员别名】     class shared_ptr : public _Mybase;  using _Mybase = _Ptr_base<_Ty>;
+   → members_of 走基类子句，而子句里是别名不是类，基类成员从不进列表
+② 别名目标是限定名         _Mybase 的 type_of 是 "_Ptr_base<_Ty>"（std 命名空间内）
+   → 按裸拼写查不到；按带实参的拼写查到的是【前向声明】，零成员
+③ 重新暴露的 element_type  using typename _Mybase::element_type; 本身不引入类型
+   → 命中它得到一个 kind Other、没有类型的成员
+④ element_type 走 trait    using element_type = remove_extent_t<_Ty>;（MSVC 的 _Ptr_base 就是这样）
+   → 代换后是 remove_extent_t<LuaSource>，剥掉实参得到 remove_extent_t —— 一个【别名模板】，不是类
+```
+
+四段的修法与验证：
+
+```text
+① an_element_type_through_the_members：成员里 kind=Type 且 type_of 指向别处的成员，就是"基类别名"，递归问它（深度 3）
+② 递归前先去掉实参、再在本类的命名空间里解析（std::_Ptr_base），并跟随别名
+③ 只在"有类型的那个声明"里找 element_type/value_type —— 重新暴露的那句没有类型，跳过
+④ 走出来的名字必须【真的像一个类】（kind Type 且 type_of 为空；别名有目标，类没有）；
+   否则退到"这个类模板自己的实参" —— 这正是 shared_ptr<T>/unique_ptr<T> 的语义，也是标准的 element_type 在非数组情形下
+   的定义
+```
+
+真实项目实测（`tests/inference_probe.rs`，EmmyLuaCodeStyle 1 761 个文件）：
+
+```text
+修前  file->  → class "remove_extent_t": 0 member(s) []          （更早：class "_Ty2": 0 member(s)）
+修后  file->  → class "LuaSource": 19 member(s) ["…", "From", "GetColumn", "GetLine", …]
+```
+
+三条夹具测试钉住每一段：单文件成员模板（§9.4 起的 `an_arrow_through_a_member_template_…`）、**多文件 + std 命名空间 +
+前向声明 + using 重新暴露**（`an_arrow_through_a_base_named_by_a_member_alias_in_another_file`）、以及**trait 形态的
+element_type**（同一个测试最后一段）。真实项目这一条以后不必再开探针，夹具 5 秒就能跑。
+
+`cpp_code_analysis` 696 lib + 43 个集成目标全绿，`cpp_ls` release 13 个目标全绿。
