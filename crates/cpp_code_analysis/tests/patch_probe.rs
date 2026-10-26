@@ -82,6 +82,63 @@ fn what_the_guard_filter_still_removes() {
     std::thread::sleep(std::time::Duration::from_millis(10_500));
     while session.read_a_program_now().is_some() {}
 
+    // **The census first**: how many of the facts a lookup can see still need each of the four patch layers. "What a
+    // lookup can see" is ⑱'s rule — the rendering when a file has one, its summary when it does not — so the two
+    // columns below are the difference between the architecture and the patch list.
+    let mut files = 0usize;
+    let mut with_a_rendering = 0usize;
+    let mut effective = 0usize;
+    let mut effective_split = 0usize;
+    let mut effective_guarded = 0usize;
+    let mut effective_conversions = 0usize;
+    let mut summary_facts = 0usize;
+    let mut summary_split = 0usize;
+    let mut summary_guarded = 0usize;
+    for summary in session.index().summaries() {
+        files += 1;
+        summary_facts += summary.declarations.len();
+        summary_split += summary
+            .declarations
+            .iter()
+            .filter(|fact| fact.split_by_a_directive)
+            .count();
+        summary_guarded += summary
+            .declarations
+            .iter()
+            .filter(|fact| !matches!(fact.guard, cpp_code_analysis::FactGuard::Unconditional))
+            .count();
+        let reading: &[cpp_code_analysis::DeclFact] =
+            match session.index().cooked_declarations(&summary.path) {
+                Some(cooked) => {
+                    with_a_rendering += 1;
+                    cooked
+                }
+                None => &summary.declarations,
+            };
+        effective += reading.len();
+        effective_split += reading
+            .iter()
+            .filter(|fact| fact.split_by_a_directive)
+            .count();
+        effective_guarded += reading
+            .iter()
+            .filter(|fact| !matches!(fact.guard, cpp_code_analysis::FactGuard::Unconditional))
+            .count();
+        // **A conversion function is spelled `operator T`** — the fourth patch layer's population (its return type is
+        // read from the spelling rather than from a specifier sequence, which a fact does not have for it).
+        effective_conversions += reading
+            .iter()
+            .filter(|fact| fact.name.starts_with("operator "))
+            .count();
+    }
+    println!(
+        "{files} file(s), {with_a_rendering} with a rendering\n\
+         \x20 the summaries:  {summary_facts} fact(s), {summary_split} split across a directive, \
+         {summary_guarded} in a conditional\n\
+         \x20 what a lookup sees (⑱): {effective} fact(s), {effective_split} split, {effective_guarded} conditional, \
+         {effective_conversions} conversion function(s)"
+    );
+
     // **Both answers, in one process.** The population is read once and asked twice: with the patch and without it.
     // The memo that would otherwise serve the second pass from the first is dropped between them, and the switch is
     // the probe's rather than the environment's — see `probes::set_no_guard_filter` for why two processes would not do.

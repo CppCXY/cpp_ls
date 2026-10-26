@@ -6017,7 +6017,9 @@ impl<F: FileProvider + Clone> Session<F> {
     /// For a fact whose [`DeclFact::split_by_a_directive`] is set the summary declines to name a type: the file's own
     /// text states one per branch and the written reading cannot know which is live. The rendering deleted the
     /// inactive branch, so *its* summary has a single answer — `reference` for libstdc++'s `emplace_back`, where the
-    /// written text says `void` (measured over three headers: 12 of 1589 facts, `examples/facts_vs_rendering.rs`).
+    /// written text says `void` (measured over three headers: 12 of 1589 facts, by the census probe that has since
+    /// been folded into `tests/patch_probe.rs` — 65 of 59 956 facts a lookup can see are still `split` on a real
+    /// project, see `docs/architecture.md` §8.3).
     ///
     /// **Cost.** The rendering itself is the artifact a cook produces — a hash and a lookup when it is cached — and
     /// the summary of its text is computed here, so a caller pays one parse of the rendered text per split
