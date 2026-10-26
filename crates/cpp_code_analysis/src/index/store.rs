@@ -60,7 +60,7 @@ use std::path::{Path, PathBuf};
 
 use cpp_parser::Dialect;
 
-use crate::IncludeForm;
+use crate::{IncludeForm, cache};
 use crate::cache::{SummaryKey, content_hash, fnv1a64};
 use crate::file::paths::{DiskFiles, FileProvider, normalize_path};
 use crate::include::config::CompilerConfig;
@@ -116,7 +116,7 @@ pub struct SummaryStore<F: FileProvider = DiskFiles> {
     ///
     /// Opened on first use rather than in `with_provider`, because the cache directory is only final after
     /// `with_cache_directory` and a store that opened the wrong directory would be a store with two caches.
-    summary_database: std::sync::OnceLock<Option<std::sync::Arc<crate::cache_db::SummaryCache>>>,
+    summary_database: std::sync::OnceLock<Option<std::sync::Arc<cache::cache_db::SummaryCache>>>,
     /// The generation a write is recorded under — bumped when the store opens, so a collection can tell this run's
     /// rows from the previous one's.
     generation: u64,
@@ -483,9 +483,9 @@ impl<F: FileProvider> SummaryStore<F> {
     }
 
     /// **The summary database, opened on first use and used always** — see [`SummaryStore::summary_database`].
-    fn summary_database(&self) -> Option<std::sync::Arc<crate::cache_db::SummaryCache>> {
+    fn summary_database(&self) -> Option<std::sync::Arc<cache::cache_db::SummaryCache>> {
         self.summary_database
-            .get_or_init(|| crate::cache_db::shared(&self.cache, crate::READING_FINGERPRINT))
+            .get_or_init(|| cache::cache_db::shared(&self.cache, crate::READING_FINGERPRINT))
             .clone()
     }
 
@@ -535,7 +535,7 @@ impl<F: FileProvider> SummaryStore<F> {
     /// store holds comes from [`crate::cache_db::shared`] and is shared with every other store in the process. A
     /// collection is what stops the database growing with rows nothing references; compaction is a separate job for
     /// a moment when nobody else holds the handle.
-    pub fn collect_the_cache(&mut self) -> Option<crate::cache_db::Collected> {
+    pub fn collect_the_cache(&mut self) -> Option<cache::cache_db::Collected> {
         self.summary_database()
             .and_then(|database| database.collect())
     }
@@ -548,7 +548,7 @@ impl<F: FileProvider> SummaryStore<F> {
     }
 
     /// Rows and bytes of the summary database, when it is in use.
-    pub fn summary_database_sizes(&self) -> Option<crate::cache_db::DatabaseSizes> {
+    pub fn summary_database_sizes(&self) -> Option<cache::cache_db::DatabaseSizes> {
         self.summary_database()
             .and_then(|database| database.sizes())
     }

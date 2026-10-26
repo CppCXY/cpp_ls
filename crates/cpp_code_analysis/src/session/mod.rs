@@ -73,7 +73,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
-use crate::PathInterner;
+use crate::{PathInterner, cache};
 use crate::cache::SummaryKey;
 use crate::file::coordinates::{FileOffset, ReadingOffset};
 use crate::file::paths::{DiskFiles, FileProvider, OverlayFiles, normalize_path};
@@ -556,7 +556,7 @@ pub struct Session<F: FileProvider = DiskFiles> {
     /// than the whole budget is still kept, because the walk that just produced it is the one a query is about to
     /// use and rebuilding it is the most expensive thing this session can do.
     walked_by_content: std::sync::Mutex<
-        crate::cache_lru::Cache<(u64, u64), std::sync::Arc<crate::TranslationUnit>>,
+        cache::cache_lru::Cache<(u64, u64), std::sync::Arc<crate::TranslationUnit>>,
     >,
     /// **The headers the include search path can name**, read once — what `#include` is completed from.
     ///
@@ -582,7 +582,7 @@ pub struct Session<F: FileProvider = DiskFiles> {
     /// Behind a lock because the queries that want it hold a read on the session, and an environment is only ever
     /// added (§[`Session::view_with_macros`] takes `&self`).
     macro_environments: std::sync::Mutex<
-        crate::cache_lru::Cache<(PathBuf, u64), std::sync::Arc<cpp_parser::MacroEnvironment>>,
+        cache::cache_lru::Cache<(PathBuf, u64), std::sync::Arc<cpp_parser::MacroEnvironment>>,
     >,
     /// **Files whose macros something has asked for and not yet got.**
     ///
@@ -602,7 +602,7 @@ pub struct Session<F: FileProvider = DiskFiles> {
     /// **Effects already computed**, shared by every walk — the other half of what makes a walk hash lookups.
     effects: std::sync::Mutex<HashMap<u64, crate::effect::Effect>>,
     renderings: std::sync::Mutex<
-        crate::cache_lru::Cache<
+        cache::cache_lru::Cache<
             (PathBuf, u64),
             std::sync::Arc<crate::preprocess::cooked::RenderedCooked>,
         >,
@@ -614,7 +614,7 @@ pub struct Session<F: FileProvider = DiskFiles> {
     /// of the rendered text, which is a parse: measured at **20.2 ms, and 19.1 ms again** on the second ask
     /// (`tests/rendering_real.rs`), because the rendering is cached by the cook path and its summary was not.
     rendering_summaries: std::sync::Mutex<
-        crate::cache_lru::Cache<(PathBuf, u64), std::sync::Arc<crate::FileSummary>>,
+        cache::cache_lru::Cache<(PathBuf, u64), std::sync::Arc<crate::FileSummary>>,
     >,
     ///
     /// `cooking_materials` answers `None` for a file whose unit is provisional, whose summary is not in the index, or
@@ -1060,7 +1060,7 @@ impl<F: FileProvider + Clone> Session<F> {
             cooking: Cooking::default(),
             definitions: std::sync::Mutex::new(crate::MacroDefinitions::default()),
             units: std::sync::Mutex::new(UnitTable::default()),
-            walked_by_content: std::sync::Mutex::new(crate::cache_lru::Cache::new(
+            walked_by_content: std::sync::Mutex::new(cache::cache_lru::Cache::new(
                 MAX_WALKS_BY_CONTENT_ENTRIES,
                 MAX_WALKS_BY_CONTENT_BYTES,
             )),
@@ -1071,11 +1071,11 @@ impl<F: FileProvider + Clone> Session<F> {
             prefetched: HashMap::new(),
             headers,
             macro_work: std::sync::Mutex::new(Cooking::default()),
-            macro_environments: std::sync::Mutex::new(crate::cache_lru::Cache::macro_environments()),
+            macro_environments: std::sync::Mutex::new(cache::cache_lru::Cache::macro_environments()),
             surfaces: std::sync::Mutex::new(crate::effect::Surfaces::new()),
             effects: std::sync::Mutex::new(HashMap::new()),
-            renderings: std::sync::Mutex::new(crate::cache_lru::Cache::renderings()),
-            rendering_summaries: std::sync::Mutex::new(crate::cache_lru::Cache::new(
+            renderings: std::sync::Mutex::new(cache::cache_lru::Cache::renderings()),
+            rendering_summaries: std::sync::Mutex::new(cache::cache_lru::Cache::new(
                 RENDERING_SUMMARY_ENTRIES,
                 RENDERING_SUMMARY_BYTES,
             )),
@@ -1180,12 +1180,12 @@ impl<F: FileProvider + Clone> Session<F> {
     ///
     /// `None` is the file cache, which is still the default until the database is measured on a real project; see
     /// `docs/refactor-cache-and-startup.md` M1.
-    pub fn summary_database_sizes(&self) -> Option<crate::cache_db::DatabaseSizes> {
+    pub fn summary_database_sizes(&self) -> Option<cache::cache_db::DatabaseSizes> {
         self.store.summary_database_sizes()
     }
 
     /// **Collect and compact the summary database** — the idle step, never a query.
-    pub fn collect_the_cache(&mut self) -> Option<crate::cache_db::Collected> {
+    pub fn collect_the_cache(&mut self) -> Option<cache::cache_db::Collected> {
         self.store.collect_the_cache()
     }
 
@@ -4516,7 +4516,7 @@ impl<F: FileProvider + Clone> Session<F> {
         // **The effect table is bounded by count, not by bytes**: each effect is a small list of folds, and the
         // map outlives every walk, so a long session over a big project would otherwise keep one entry per
         // (file, environment) pair it ever saw — see [`crate::cache_lru::EFFECT_ENTRIES`].
-        if cache.len() >= crate::cache_lru::EFFECT_ENTRIES {
+        if cache.len() >= cache::cache_lru::EFFECT_ENTRIES {
             cache.clear();
         }
         let seed = crate::effect::Macros::new();

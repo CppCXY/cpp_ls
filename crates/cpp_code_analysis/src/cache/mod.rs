@@ -65,6 +65,8 @@
 //! value is ever persisted). FNV-1a is fixed by definition, is a few lines, and is strong enough for this job: the
 //! key guards a **local** cache, and a collision costs a stale summary for one file — a wrong answer a re-parse
 //! fixes, not a security boundary.
+pub mod cache_db;
+pub mod cache_lru;
 
 use std::path::{Path, PathBuf};
 
