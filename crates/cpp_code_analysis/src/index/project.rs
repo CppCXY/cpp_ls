@@ -8068,6 +8068,18 @@ impl ProjectIndex {
         Some((summary, fact))
     }
 
+    /// **Forget the answers this index gave about names** — for a probe that must ask the same questions twice
+    /// (`tests/patch_probe.rs`, which measures what the lookup-time guard patch still removes). Nothing a session does
+    /// calls this: the memos are dropped by the changes that make them wrong, and dropping them at another moment would
+    /// only cost a re-walk.
+    pub fn forget_the_name_answers(&self) {
+        if let Ok(mut answers) = self.definition_answers.lock() {
+            answers.clear();
+        }
+        if let Ok(mut guards) = self.guard_answers.lock() {
+            guards.clear();
+        }
+    }
     /// The files that **define** the macro `name`, in insertion order — one lookup, where the question used to be a
     /// scan of every file's macro facts.
     pub fn files_defining_macro(&self, name: &str) -> Vec<PathBuf> {
@@ -9465,9 +9477,16 @@ impl ProjectIndex {
         // The question is not the file's own `#if` but the macros **at that offset**: `visibility_at` walks them, and
         // `Unknown` keeps the declaration — a guard this layer cannot decide must not become a lookup that says the name
         // is not declared.
-        candidates.retain(|found| {
-            self.a_guard_is_taken(&found.file, found.fact.guard, found.fact.range.start_offset)
-        });
+        //
+        // **Skippable by a probe switch, and that is how its remaining work is measured.** `CPPLS_NO_GUARD_FILTER`
+        // answers without this step, so the two answers can be compared over the same questions: with a rendering for
+        // most files (⑱ makes the rendering the reading) this filter should have almost nothing left to remove, and
+        // "almost nothing" is a number this crate's style asks for rather than a claim. See `tests/patch_probe.rs`.
+        if !crate::probes::no_guard_filter() {
+            candidates.retain(|found| {
+                self.a_guard_is_taken(&found.file, found.fact.guard, found.fact.range.start_offset)
+            });
+        }
         // scope depends on macros this layer does not have, and a jump to a declaration that may not be there is a
         // wrong answer rather than a missing one. The count is what keeps the answer from claiming there is
         // nothing else — "one declaration, and two that might be" is not "one declaration".

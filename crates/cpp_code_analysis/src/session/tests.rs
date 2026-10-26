@@ -980,6 +980,72 @@ fn a_body_edit_does_not_cost_the_program_again() {
     );
 }
 
+/// **Once a file is read as a program, the lookup-time guard filter has nothing left to do** — patch number two's
+/// remaining work, measured.
+///
+/// The filter exists because a *summary* keeps both branches of every `#if`: `#if 0 struct Dead { … }; #endif` is a
+/// declaration to a reader of the text and nothing to a compiler. A **rendering** has no branch left to remove, so a
+/// file the session has read as a program answers from facts that are already the compiler's — and the filter becomes
+/// a pass over candidates that never rejects one.
+///
+/// This test pins that on a fixture rather than on a project: the same questions are asked with the filter on and
+/// off (`probes::set_no_guard_filter`, which exists for this measurement), and the answers must be identical. If they
+/// ever differ, this file's reading is not the rendering and the patch has a user again.
+#[test]
+fn a_file_read_as_a_program_needs_no_guard_filter() {
+    let cfg = "#define ON 1\n";
+    let api = "#include \"cfg.h\"\n#if 0\nstruct Dead { int gone; };\n#endif\nstruct Live { int kept; };\n";
+    let main = "#include \"api.h\"\nLive live;\n";
+    let files = MemoryFiles::new()
+        .with_file("/p/cfg.h", cfg)
+        .with_file("/p/api.h", api)
+        .with_file("/p/main.cpp", main);
+    let fixture = Memory::new("no-guard-filter-needed", &files);
+    let mut session = fixture.session();
+    session.did_open("/p/main.cpp", main);
+    session.index_everything();
+    session
+        .read_a_looked_at_unit()
+        .expect("the reader has a file open, so there is a program to read");
+
+    let ask = |session: &Session<_>| {
+        let mut answers: Vec<String> = Vec::new();
+        for name in ["Dead", "gone", "Live", "kept"] {
+            let answer = match session.index().definitions(name, Path::new("/p/main.cpp")) {
+                Known::Yes(found) => format!(
+                    "{:?}",
+                    found
+                        .found
+                        .iter()
+                        .map(|one| (
+                            one.file.to_string_lossy().to_string(),
+                            one.fact.name.clone()
+                        ))
+                        .collect::<Vec<_>>()
+                ),
+                Known::Unknown(reason) => format!("unknown:{reason:?}"),
+                Known::No => String::from("no"),
+            };
+            answers.push(format!("{name} = {answer}"));
+        }
+        answers
+    };
+
+    let with = ask(&session);
+    session.index().forget_the_name_answers();
+    crate::probes::set_no_guard_filter(true);
+    let without = ask(&session);
+    crate::probes::set_no_guard_filter(false);
+
+    assert_eq!(
+        with, without,
+        "the filter changed an answer, so this file's reading is not the rendering: {with:?}"
+    );
+    assert!(
+        !with.iter().any(|answer| answer.starts_with("Dead = yes")),
+        "and the branch nobody takes is not an answer at all: {with:?}"
+    );
+}
 /// **Where a file has been read as a program, that reading is the reading — not one answer beside another.**
 ///
 /// The two declaration lists an index can hold for one file are not two views of one thing: the summary is the file

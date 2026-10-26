@@ -71,9 +71,36 @@ switch! {
     timing => "CPPLS_TRACE_TIME", "Every type inference, and every file a question had to read to answer one.";
     no_inference => "CPPLS_NO_INFERENCE", "Answer every type question `Unknown`, so that a rule's own walk can be measured apart from the inference.";
     no_index_lookup => "CPPLS_NO_INDEX_LOOKUP", "Answer every declaration query `NotDeclaredHere`, so that a pull's cost can be split into the engine and the index — the sibling of `CPPLS_NO_INFERENCE`.";
+
     answers => "CPPLS_TRACE_ANSWERS", "What one name query found: how many declarations, of which kinds, in which files — the question `docs/index-lookup.md` turned on (2288 `_Tp` answers, none of them a class).";
 }
 
+/// **Do not filter a candidate whose declaration is written in a `#if` region.**
+///
+/// The measurement behind deleting the lookup-time guard patch: with ⑱ (a file with a rendering is read through it)
+/// the filter has almost nothing left to remove, and "almost nothing" is a number this crate asks for rather than a
+/// claim. Seeded from `CPPLS_NO_GUARD_FILTER` once, and settable at run time so that **one process** can answer the
+/// same questions both ways — two processes would differ by the corpus as well as by the patch (the summaries of two
+/// system headers are not identical between runs; see `docs/architecture.md` §7.12).
+pub fn no_guard_filter() -> bool {
+    static SEEDED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    SEEDED.get_or_init(|| {
+        NO_GUARD_FILTER.store(
+            is_on(std::env::var_os("CPPLS_NO_GUARD_FILTER")),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    });
+    NO_GUARD_FILTER.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Turn [`no_guard_filter`] on or off at run time — for a probe comparing the two answers, and for a test.
+pub fn set_no_guard_filter(on: bool) {
+    // Read once first, so the environment's value cannot land *after* this call and overwrite it.
+    let _ = no_guard_filter();
+    NO_GUARD_FILTER.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+static NO_GUARD_FILTER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 /// **Count how many distinct summaries a session asks for** — the working set `docs/memory-audit.md` M3 needs.
 ///
 /// The question the plan turns on is not "how many files are indexed" but "how many of them a session actually reads
