@@ -352,6 +352,57 @@ fn the_member_questions_of_a_real_project_and_how_many_resolve() {
                     );
                 }
             }
+
+            // **One file, in detail** — `CPPLS_FROM=CommandService.cpp` prints what that file's own summary says its
+            // `#include`s resolved to and how many files the walk thinks it sees. The end-to-end symptom ("this class
+            // is invisible here") has exactly two causes: the directive did not resolve, or it did and the walk did
+            // not cross the edge.
+            if let Some(named) = std::env::var_os("CPPLS_FROM") {
+                let named = named.to_string_lossy().to_string();
+                if let Some(path) = files
+                    .iter()
+                    .find(|path| path.to_string_lossy().contains(&named))
+                {
+                    println!("\nfrom {}:", path.display());
+                    let mut visible = session.index().visible_files(path);
+                    println!("  {} file(s) visible", visible.len());
+                    // **Is the header the class is in, in the walk at all?**
+                    let header = visible
+                        .iter()
+                        .find(|(seen, _)| seen.ends_with("languageserver.h"))
+                        .map(|(seen, _)| seen.clone());
+                    println!("  the header in the walk: {header:?}");
+                    // **And does the index have a summary under the path the walk handed back?** A walk that names a
+                    // file the index cannot map to a summary is a walk whose edges are invisible to every query —
+                    // the answer here separates "the edge was never crossed" from "the edge crossed under a name the
+                    // index does not know".
+                    for (seen, _) in visible.iter().take(5) {
+                        println!(
+                            "    {seen}: summary {}",
+                            if session.index().summary(std::path::Path::new(seen)).is_some() {
+                                "found"
+                            } else {
+                                "MISSING"
+                            }
+                        );
+                    }
+                    visible.truncate(12);
+                    visible.truncate(12);
+                    for (seen, _) in &visible {
+                        println!("    {seen}");
+                    }
+                    if let Some(summary) = session.index().summary(path) {
+                        println!("  {} include(s) recorded:", summary.includes.len());
+                        for include in summary.includes.iter().take(20) {
+                            println!(
+                                "    {:?} {:?} -> {:?}",
+                                include.form, include.spelling, include.resolved
+                            );
+                        }
+                    }
+                }
+            }
+
             match session.members_of(&view, &asked) {
                 Known::Yes(list) => {
                     println!("\n{asked}: {} member(s)", list.members.len());

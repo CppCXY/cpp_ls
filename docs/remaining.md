@@ -321,6 +321,29 @@ refused          1442         →  1376
 **还剩一个**：`CommandService.cpp` 自己仍然是 0 条可见 —— 同一个目标、同一个 rsp，说明这条路上还有第二个原因
 （它不是可见性规则能解释的，因为同目录的 `LSPHandle.cpp` 已经好了）。下一步就是它，然后是"成员链 34.2%"那一桶。
 
+### 关于 `CommandService.cpp`：已经排除的与已经定位的
+
+用 `CPPLS_CLASS=<类> CPPLS_FROM=<文件名>` 逐层排：
+
+```text
+CommandService.cpp 的 6 条 include 全部解析成功（含 LanguageServer.h → …/languageserver.h）
+它的可见闭包有 1031 个文件，LanguageServer.h 在闭包里
+索引里也有它的摘要（summary found）
+可是 declarations_in("LanguageServer", 它) == 0
+```
+
+所以 include 边、可见集、摘要这三层都是通的，**丢在最后一步**：`visible_in_order_of` 把"可见集的文件名"映射成
+序号（`sequence.get(&key)`），而 `sequence` 是按"摘要归档时的路径拼写"存的 —— 两个拼写不同就**静默丢弃**，
+`filter_map` 连一个警告都没有。
+
+**试过、撤回**：给这个查找加一个 `normalize` 后备。它没有修好 `CommandService.cpp`（仍然 0），并且把记分板
+**推错了方向**：冷 store 4637（77.1%）→ 4609（76.7%）。原因很可能是**两个问题被搅在一起**：多个可见文件 →
+同一成员有更多重声明 → `definitions` 回答 `Ambiguous`，而它以前回答一个声明。所以这条注释留在原地，写清了
+"身份"和"歧义"要分开度量，不许在没量之前只改一个。
+
+**下一步（可执行）**：把 `sequence` 的键在**写入时**就统一成 `normalize` 的结果（而不是在查找时补一次），
+然后单独看 `Ambiguous` 的数量 —— 记分板里 `declined`/`refused` 会把"两个答案"和"没有答案"混在一起，先分开再动。
+
 **怎么读那 1351 个"没有接收者类型"**：接收者本身是 `auto x = f();` 这类**调用结果**，所以它需要调用路径的返回
 类型（`what_a_call_has`）。这一桶是下一步最大的，但在上面那条岔路走通之前不碰。
 

@@ -9055,6 +9055,13 @@ impl ProjectIndex {
         let nanos_before = CONDITION_NANOS.load(std::sync::atomic::Ordering::Relaxed);
         let (visible_files, through_an_import) = self.visible_files_with_modules(visible_from);
         let files = self.visible_in_order_of(visible_files);
+        if std::env::var_os("CPPLS_TRACE_VISIBILITY").is_some() {
+            eprintln!(
+                "[visibility] {} file(s) after the order step, from {}",
+                files.len(),
+                visible_from.display()
+            );
+        }
         if crate::probes::timing() && walk_started.elapsed().as_micros() >= 500 {
             let asks = CONDITION_ASKS.load(std::sync::atomic::Ordering::Relaxed) - asks_before;
             let nanos = CONDITION_NANOS.load(std::sync::atomic::Ordering::Relaxed) - nanos_before;
@@ -9209,6 +9216,16 @@ impl ProjectIndex {
         &self,
         visible: Vec<(String, IncludeVisibility)>,
     ) -> Vec<(u32, IncludeVisibility)> {
+        // **The lookup below is a suspect, and it is left as it was until it can be measured properly.**
+        //
+        // The walk's keys are normalized (`e:/p/app.cpp`) and `sequence` is keyed by the path the summary was filed
+        // under, so a file whose two spellings differ is dropped **silently** — the walk says it is visible and this
+        // step removes it. Adding a normalized fallback did not fix the case it was written for
+        // (`CommandService.cpp` still sees 0 facts of `LanguageServer`, while the header *is* in its walk and *has* a
+        // summary), and it moved the scoreboard the wrong way: 4637 (77.1%) → 4609 (76.7%), most likely because more
+        // visible files means more redeclarations and `definitions` answers `Ambiguous` where it used to answer one
+        // declaration. Two changes are tangled there — identity and ambiguity — and one of them should not be made
+        // while the other is unmeasured. See `docs/remaining.md` §F.
         let mut files: Vec<(u32, IncludeVisibility)> = visible
             .into_iter()
             .filter_map(|(key, visibility)| Some((*self.sequence.get(&key)?, visibility)))
