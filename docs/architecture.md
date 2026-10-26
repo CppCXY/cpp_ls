@@ -1507,3 +1507,51 @@ file->            →  class "Item"
 element_type**（同一个测试最后一段）。真实项目这一条以后不必再开探针，夹具 5 秒就能跑。
 
 `cpp_code_analysis` 696 lib + 43 个集成目标全绿，`cpp_ls` release 13 个目标全绿。
+### 9.7 类外定义的"类型"：三份报告，一个原因
+
+三条来自编辑器的报告是同一个缺陷：
+
+```text
+`LuaLexer::LuaReserved` has no member `find`          ← 成员查找问的类叫 LuaLexer::LuaReserved
+hover on `map` 显示 "a type template over _Kty…"        ← 同一行的类型没读到实参
+hover on GetLine 显示 `LuaSource::GetLine GetLine(…)`   ← 返回类型是限定名
+```
+
+```cpp
+std::map<std::string, LuaTokenKind, std::less<>> LuaLexer::LuaReserved = { … };
+std::size_t LuaSource::GetLine(std::size_t offset) const { … }
+```
+
+语法把类外定义的**限定名放进说明符序列**（declarator 里只有参数表），而"说明符里最后一个名字就是类型"这条规则于是把
+**被声明的名字**读成了类型 —— 实测：`Reserved` 的 `type_of` 是 `Some("Lexer::Reserved")`，`GetLine` 的 `returns` 是
+`Some("Lexer::GetLine")`。声明和定义都在索引里，谁先被查到就决定答案。
+
+改法：把**被声明的名字**交给说明符读取器（`type_of_declaration_named` / `read_specifiers_named`），凡是"以 `::` 结尾且
+最后一段正是这个名字"的拼写都不是类型，跳过。变量和返回类型两条路径都要传（`declared_type_of_with`、
+`declared_returns_of_with`）。
+
+真实项目实测（EmmyLuaCodeStyle，`tests/inference_probe.rs`）：
+
+```text
+LuaReserved.  → class "std::map": 101 member(s) ["allocator_type", "at", "at", "const_iterator", …]   （含 find）
+GetLine        → 声明与定义两条事实的 returns 都是 Some("std::size_t")
+```
+
+### 9.8 `.cppls.toml` 的 `read_the_whole_project` 默认改为 `false`
+
+读者报告："进程很慢，我不知道它在做什么" + `Load workspace: 229 translation unit(s) to read as programs`。§8.4 量过价格
+（96 个 TU 热 36 s / 冷 271 s），而每次启动都重付一次（程序的读法不像文件的摘要那样持久化）——**默认改为关闭**。
+打开的文件仍然在静默一秒后被读成程序（这是读者能感知到的部分），失去的是"同一头被两个 TU 读到两份读法"（⑲）。
+
+测试 `the_roots_of_the_project_are_read_in_the_background` 改为在夹具的 `.cppls.toml` 里显式打开，
+`a_project_can_decline_to_read_its_other_roots` 现在测的是默认行为的样子（不再需要声明就会拒绝）。
+`docs/configuration.md` 同步。`cpp_code_analysis` 697 lib + 43 集成全绿，`cpp_ls` release 13 个目标全绿。
+
+**还没修的两条（下一轮）**：
+
+```text
+hover 一个类模板的实例   `std::map<std::string, LuaTokenKind, std::less<>>` 显示成 "a type template over _Kty…"
+                        → 卡片应当优先显示【写出来的拼写】（光标处的 token），而不是事实的重建
+hover 一个匿名 struct    `static const struct { … } priority[]` 的 type_of 是 Some("void")
+                        → 说明符里的匿名类体没有名字，读取器却回落到 void；该让它回落到"文件的原文"
+```

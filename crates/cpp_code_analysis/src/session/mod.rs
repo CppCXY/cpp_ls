@@ -1260,11 +1260,13 @@ impl<F: FileProvider + Clone> Session<F> {
             )),
             units_read: std::collections::HashSet::new(),
             units_attempted: std::collections::HashMap::new(),
+            // **Off unless the project asks for it** — see the field's documentation for the reader's report and the
+            // measured price.
             read_the_whole_project: project_config
                 .config
                 .index
                 .read_the_whole_project
-                .unwrap_or(true),
+                .unwrap_or(false),
             unit_index: std::sync::Mutex::new(None),
             rendered_unit: std::sync::Mutex::new(None),
             last_edit: std::time::Instant::now(),

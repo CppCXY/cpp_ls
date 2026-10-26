@@ -1301,7 +1301,29 @@ pub fn type_of_declaration(
     declarator: Option<&CppSyntaxNode>,
     name: cpp_parser::SourceRange,
 ) -> Type {
-    let base = read_specifiers(specifiers);
+    type_of_declaration_named(specifiers, declarator, name, None)
+}
+
+/// **The same question, told which name is being declared.**
+///
+/// A definition written out of line puts the declarator's **qualified name** in the specifier sequence:
+///
+/// ```text
+/// std::map<std::string, LuaTokenKind, std::less<>> LuaLexer::LuaReserved = { … };
+///                                                   ^^^^^^^^^ the declarator's name
+/// ```
+///
+/// so "the last name in the specifiers is the type" reads the *name* as the type — measured on that line, the fact
+/// recorded `type_of: Some("LuaLexer::LuaReserved")`, and every member lookup on it answered "no member `find`". The
+/// declared name is what tells the two apart, and a caller that has it (the fact builder does, from its binding)
+/// hands it over.
+pub fn type_of_declaration_named(
+    specifiers: &CppSyntaxNode,
+    declarator: Option<&CppSyntaxNode>,
+    name: cpp_parser::SourceRange,
+    declared_name: Option<&str>,
+) -> Type {
+    let base = read_specifiers_named(specifiers, declared_name);
 
     let Some(declarator) = declarator else {
         return base;
@@ -1351,6 +1373,14 @@ fn declared_name_range(declarator: &CppSyntaxNode) -> Option<cpp_parser::SourceR
 /// spellings: this layer does not resolve aliases, so `const Int` and `Int` are already two names for one type, and
 /// a `const` on the base would be a third axis no query here asks about.
 pub(crate) fn read_specifiers(specifiers: &CppSyntaxNode) -> Type {
+    read_specifiers_named(specifiers, None)
+}
+
+/// [`read_specifiers`], with the name the declaration declares — see [`type_of_declaration_named`].
+pub(crate) fn read_specifiers_named(
+    specifiers: &CppSyntaxNode,
+    declared_name: Option<&str>,
+) -> Type {
     let mut builtin: Vec<String> = Vec::new();
     // The **last** name in the sequence, and the last unmodelled node — see the two notes below.
     let mut named: Option<Type> = None;
@@ -1375,7 +1405,18 @@ pub(crate) fn read_specifiers(specifiers: &CppSyntaxNode) -> Type {
             | CppSyntaxKind::TemplateType
             | CppSyntaxKind::TypenameType
             | CppSyntaxKind::QualifiedType => {
-                if let Some(found) = read_named(&node) {
+                // **The declarator's own qualified name is not a type.** An out-of-line definition writes it in the
+                // specifier sequence — `std::map<std::string, LuaTokenKind> LuaLexer::LuaReserved = { … }` — and taking
+                // "the last name" as the type recorded `LuaLexer::LuaReserved`. It is recognisable without guessing: the
+                // spelling ends with `::` and the name being declared, and a *type* never does.
+                let written = node.text().to_string();
+                let written = written.trim();
+                let is_the_declared_name = declared_name.is_some_and(|name| {
+                    written
+                        .strip_suffix(name)
+                        .is_some_and(|prefix| prefix.ends_with("::"))
+                });
+                if !is_the_declared_name && let Some(found) = read_named(&node) {
                     named = Some(found);
                 }
             }

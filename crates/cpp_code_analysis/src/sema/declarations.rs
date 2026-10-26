@@ -268,10 +268,14 @@ pub(crate) fn declared_type_of_with(
 
     let specifiers = specifiers?;
 
-    let found = crate::sema::types::type_of_declaration(
+    // **The declared name is handed over**, because an out-of-line definition writes it in the specifier sequence and
+    // "the last name is the type" reads it as one — see [`crate::sema::types::type_of_declaration_named`].
+    let spelled = binding.name.text();
+    let found = crate::sema::types::type_of_declaration_named(
         &specifiers,
         declarator.as_ref(),
         binding.name_range,
+        Some(spelled.as_str()),
     );
 
     let written = found.to_string();
@@ -1774,10 +1778,15 @@ pub(crate) fn declared_returns_of_with(
     // the node-based reader's fallback (`void`) is the right answer for "this declaration wrote nothing as a type"
     // only when there is a declaration — see the `None` half of this function's contract.
     let specifiers = specifiers?;
+    // **The declarator's own qualified name is not a return type**, for the same reason it is not a variable's type —
+    // `std::size_t LuaSource::GetLine(std::size_t offset)` recorded `returns: Some("LuaSource::GetLine")`, and a hover
+    // showed that as the function's answer where the file wrote `std::size_t`. See
+    // [`crate::sema::types::type_of_declaration_named`].
+    let declared = binding.name.text();
     let spelling = if specifiers.text().to_string().trim().is_empty() {
         String::new()
     } else {
-        crate::sema::types::read_specifiers(&specifiers).to_string()
+        crate::sema::types::read_specifiers_named(&specifiers, Some(declared.as_str())).to_string()
     };
 
     let spelling = format!("{spelling} {before_the_name}");

@@ -490,15 +490,19 @@ pub struct IndexSection {
     pub max_files: Option<usize>,
     /// **May the session read the whole project as one program per translation unit, in the background?**
     ///
-    /// On by default, because that is what makes the *project* queryable rather than only the files a reader has
-    /// opened: every program's per-file facts are filed under the program that made them (⑲), which is what a lookup
-    /// asks for when two translation units read one header differently. What it costs is measured: **36 s of CPU for
-    /// 96 translation units** on a 397-file project with a warm unit cache, and **271 s cold**
-    /// (`tests/project_read_probe.rs`, `docs/architecture.md` §8.4).
+    /// **Off by default since 2026-10-26**, and the reason is a reader's report rather than a measurement: *"the process
+    /// is very slow and I cannot tell what it is doing"*, over a bar that said **229 translation unit(s) to read as
+    /// programs** on a real project. What it costs is measured — **36 s of CPU for 96 translation units** on a 397-file
+    /// project with a warm unit cache, **271 s cold** (`tests/project_read_probe.rs`, `docs/architecture.md` §8.4) — and
+    /// a project ten times that size pays ten times as much for answers no reader asked for.
     ///
-    /// `false` keeps the reader's own translation units (the files they have open, one second after they stop typing)
-    /// and never reads a program nobody is looking at. A caller that knows a project is huge, or a machine that should
-    /// stay cool, says so here.
+    /// What is lost by default: a header that two translation units read differently keeps one reading (the one the
+    /// asking file's own timeline gives), instead of each source getting its own (⑲). What is kept is the part a reader
+    /// notices: **the files they have open are read as programs** one second after they stop typing, so their include
+    /// closures answer from the compiler's reading.
+    ///
+    /// A project that wants the whole thing says `true` here — the per-program readings are better, and the price is
+    /// written down above and in `[index]`'s entry of `docs/configuration.md`.
     #[serde(default)]
     pub read_the_whole_project: Option<bool>,
 }

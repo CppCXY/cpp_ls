@@ -35,6 +35,7 @@ fn what_is_answered_at_a_place() {
     );
     let started = std::time::Instant::now();
     session.did_open(&file, &text);
+
     // **A cooked reading on purpose**: the checks are run over the compiler's view, and a probe that asks for
     // diagnostics without one is answered "nothing to say" rather than "nothing wrong".
     session.want_cooked_reading(&file);

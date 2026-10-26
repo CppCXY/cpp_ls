@@ -839,6 +839,61 @@ fn a_program_too_large_to_read_at_once_is_left_alone() {
     );
 }
 
+/// **An out-of-line definition's type is the type it writes, not its own qualified name.**
+///
+/// Reported from an editor, three times in one sitting, always as a *type* that was really a name:
+///
+/// ```cpp
+/// std::map<std::string, LuaTokenKind, std::less<>> LuaLexer::LuaReserved = { … };   // hover: `LuaLexer::LuaReserved`
+/// std::size_t LuaSource::GetLine(std::size_t offset) const { … }                   // hover: `LuaSource::GetLine`
+/// ```
+///
+/// and the member lookups that followed answered "`LuaLexer::LuaReserved` has no member `find`". The grammar puts a
+/// qualified definition's name in the **specifier sequence** — the declarator holds only the parameter list — so a
+/// reader that takes "the last name of the specifiers" as the type takes the declarator's own name. A definition and
+/// its declaration are both in the index, and whoever asks may get either.
+#[test]
+fn an_out_of_line_definition_records_the_type_it_writes() {
+    let text = "namespace std {\n\
+                template <typename K, typename V> struct map { V &at(const K &key); };\n\
+                }\n\
+                struct Lexer {\n\
+                \x20   static std::map<int, int> Reserved;\n\
+                \x20   std::size_t GetLine(std::size_t offset) const;\n\
+                };\n\
+                std::map<int, int> Lexer::Reserved = {};\n\
+                std::size_t Lexer::GetLine(std::size_t offset) const { return offset; }\n";
+    let files = MemoryFiles::new().with_file("/p/a.cpp", text);
+    let fixture = Memory::new("an-out-of-line-definition", &files);
+    let mut session = fixture.session();
+    session.did_open("/p/a.cpp", text);
+    session.index_everything();
+    let path = std::path::PathBuf::from("/p/a.cpp");
+
+    let summary = session.index().summary(&path).expect("the file is read");
+    for (name, expected) in [
+        ("Reserved", "std::map<int, int>"),
+        ("GetLine", "std::size_t"),
+    ] {
+        let written: Vec<Option<&str>> = summary
+            .declarations
+            .iter()
+            .filter(|fact| fact.name == name)
+            .map(|fact| fact.type_of.as_deref().or(fact.returns.as_deref()))
+            .collect();
+        assert!(
+            written.iter().any(|found| *found == Some(expected)),
+            "`{name}` declares `{expected}`, and one of its facts must say so: {written:?}"
+        );
+        let qualified = format!("::{name}");
+        assert!(
+            !written
+                .iter()
+                .any(|found| found.is_some_and(|found| found.ends_with(&qualified))),
+            "and none of them may record the declarator's own qualified name (`…{qualified}`): {written:?}"
+        );
+    }
+}
 /// **A class template's member answer is substituted with the use's arguments** — `b[0].value` and `b->value`.
 ///
 /// The two reports from an editor (`events[Pos].U` on a `std::vector<MarkEvent>`, `file->setUri` on a
@@ -1254,12 +1309,20 @@ fn the_roots_of_the_project_are_read_in_the_background() {
     let shared = "struct Shared { int size; };\n";
     let a = "#include \"shared.h\"\n";
     let b = "#include \"shared.h\"\nint from_b = 1;\n";
+    // **The project asks for it**, because the setting is off by default now — see `IndexSection`'s documentation for
+    // the reader's report and the measured price of reading every translation unit.
     let files = MemoryFiles::new()
         .with_file("/p/shared.h", shared)
         .with_file("/p/a.cpp", a)
-        .with_file("/p/b.cpp", b);
+        .with_file("/p/b.cpp", b)
+        .with_file("/p/.cppls.toml", "[index]\nread_the_whole_project = true\n");
     let fixture = Memory::new("the-project-is-read", &files);
-    let mut session = fixture.session();
+    let mut session = crate::Session::with_config(
+        "/p",
+        fixture.providers.clone(),
+        crate::WatchFilter::new("/p"),
+        crate::CompilerConfig::default(),
+    );
     session.add_project_files([
         std::path::PathBuf::from("/p/a.cpp"),
         std::path::PathBuf::from("/p/b.cpp"),
