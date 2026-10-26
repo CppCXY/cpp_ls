@@ -126,12 +126,13 @@ fn what_a_unit_read_does_to_the_index() {
         })
         .collect();
     let sum = |rows: &[(PathBuf, usize, usize, usize)], at: usize| -> usize {
-        rows.iter().map(|row| match at {
-            1 => row.1,
-            2 => row.2,
-            _ => row.3,
-        })
-        .sum()
+        rows.iter()
+            .map(|row| match at {
+                1 => row.1,
+                2 => row.2,
+                _ => row.3,
+            })
+            .sum()
     };
     println!(
         "before: {} file(s) in the closure, {} fact(s), {} cooked declaration(s), {} name answer(s)",

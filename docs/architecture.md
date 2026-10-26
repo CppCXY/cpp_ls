@@ -577,3 +577,48 @@ read_the_unit              5.09 s；159 个文件 placed；737 525 token；**0 e
    锁上就是哪一半的停顿 —— 所以接线的方式只能是 `prepare_the_drain`（读锁一侧，与查询并行）算出 `IndexedUnit`，
    `commit_the_drain` 只做 `insert_cooked`。`read_the_unit` 现在把这两半写在了一个 `&mut self` 里，接线前要拆开；
    两个记忆字段（`rendered_unit` / `unit_index`）也要从 `&mut` 改成锁。
+
+### 7.4 ⑯ 接线：整程序读法进了流水线，但带上了一个由数字决定的预算（本次提交）
+
+§7.3 说的三件事都做了：
+
+```text
+拆两半   read_the_unit = prepare_a_unit_reading(&self) + commit_a_unit_reading(&mut self)
+         prepare  走锁之外（读锁一侧）：walk、cook、整程序 parse、sweep —— 5.09 s 的 5.09 s
+         commit   只剩每文件一次 insert_cooked + queue.mark_worked
+记忆字段 rendered_unit / unit_index 从 Option<…> 改成 Mutex<Option<…>>（和 units / definitions 同一形状）
+接线     finish_a_slice 在一份"没有别的活"的 drain 上排一个整程序读：
+           is_idle() && drain.files.is_empty() && drain.environments.is_empty() && 时钟 && 预算
+         根是读者打开的文件（`the_next_unit_to_read`），`units_read` 保证一个程序只读一次
+唤醒     `Session::the_wait_before_a_program_may_be_read` + pump 的一次 sleep：
+         闸门是**时钟**，而时钟不会唤醒任何东西 —— 读者停下打字之后没有任何通知，所以"安全的那一刻"正是 pump 会睡过去
+         的那一秒。pump 睡完剩余时间再回来，闸门因此是延迟而不是死锁
+```
+
+**预算为什么存在，以及它为什么让这个特性在真 C++ 项目上基本不触发。** 读法对程序是线性的：**7.07 MB 源码 →
+5.09 s，即 0.72 s/MB**。prepare 那一半握着**读锁**，而 `didChange` 要写锁，所以那次读多贵，读者在这一刻敲下的
+那个字符就要等多久。服务端自己的写入预算是 1 s（`crates/cpp_ls/tests/latency.rs` 的 `UPDATE_BUDGET`），于是有
+`THE_LARGEST_PROGRAM_READ_AT_ONCE = 1 MiB`（≈0.72 s）。
+
+这条线把所有包含标准库头的 TU 都排除在外了 —— clice 那个闭包是 **7.07 MB**，libstdc++ 的闭包也在同一量级。所以诚实的
+结论是：**这套机制现在是活的、有测试的，但在真项目上几乎不会触发**，因为真正的解法不是调大预算，而是**让这次读不需要
+会话锁**：
+
+```text
+walk                    需要 &Session（units / definitions 两张表、queue）        38 ms
+render + parse + sweep  只需要 unit(Arc) + 每个文件的文本 + 配置 + files 句柄      ~5.0 s
+```
+
+也就是说 5 s 里只有 38 ms 真的需要那把锁。下一步是把 `prepare_a_unit_reading` 拆成"锁内取材料"与"锁外算"，前者产出
+`(Arc<TranslationUnit>, sources, config, files)`，后者是纯函数；服务端那边 `run_blocking` 的三段式（锁内、锁外、锁内）
+是现成的形状（`prepare_a_drain`/`commit_a_drain` 就是这个裁剪）。预算那时可以抬到一个只防"病态闭包"的值，而不是
+现在这个"防人手速"的值。
+
+测试（`crates/cpp_code_analysis/src/session/tests.rs`，两条都断言机器而不是断言意图）：
+
+```text
+a_program_is_read_when_the_reader_stops_editing   打完字一秒钟后，下一个 drain 把程序读了，
+                                                  闭包 4 层下的 deep.h 有了 cooked 读法，HWND__ 落在 api.h
+a_program_too_large_to_read_at_once_is_left_alone 同一个 fixture 加一个 1 MB 的注释头 → 不读，per-file 读法照旧
+```
+

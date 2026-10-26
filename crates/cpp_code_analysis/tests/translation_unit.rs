@@ -227,13 +227,13 @@ fn the_timeline_answers_what_the_per_file_walk_answered() {
             let materialised = answers(&per_file, name, offset);
             let walked = answers(&view, name, offset);
 
-            let positioned = |answer: &(Option<String>, Option<String>, Option<String>, Option<String>)| {
-                (
-                    answer.0.clone(),
-                    answer.1.clone(),
-                    answer.2.clone(),
-                )
-            };
+            let positioned =
+                |answer: &(
+                    Option<String>,
+                    Option<String>,
+                    Option<String>,
+                    Option<String>,
+                )| { (answer.0.clone(), answer.1.clone(), answer.2.clone()) };
 
             // **The positional answer, wherever the fallback has one.** This is the comparison the test exists
             // for: the name at that offset, its body, its parameter list.

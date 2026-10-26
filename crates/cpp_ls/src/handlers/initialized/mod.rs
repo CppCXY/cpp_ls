@@ -726,6 +726,27 @@ async fn index_in_background(context: ServerContextSnapshot) {
             }
             was_pending = false;
 
+            // **A whole program the session owes, and the only thing that can wake it up for it.**
+            //
+            // The session defers reading a program as one piece — a walk, a cook, a parse of the whole program and a
+            // sweep, measured at 5.09 s for 159 files — until nothing has been typed for a moment, because its
+            // preparing half holds the read lock a keystroke's write waits for. That gate is a *clock*, and a clock
+            // wakes nothing: a reader who has stopped typing sends no notification, so the one moment the read is
+            // safe is the one the pump would sleep through. This is the timer that makes the gate a delay rather than
+            // a deadlock, and it sleeps the remainder rather than polling: a completed program is taken off the
+            // schedule (`units_read`), so this fires at most once per open file.
+            if pending == 0
+                && let Some(wait) = context
+                    .analysis()
+                    .with_snapshot(
+                        cpp_code_analysis::Session::the_wait_before_a_program_may_be_read,
+                    )
+                    .flatten()
+            {
+                tokio::time::sleep(wait + IDLE_WAIT).await;
+                continue;
+            }
+
             // **A timeout is not work.** `wait_for_work` answers whether something was queued while the loop waited;
             // going round on `false` ran a *full slice* — a parse wave, a commit, a cook claim, all empty — once a
             // second for as long as the window stayed open. That is the `index slice: … 0 to cook, 0 left` line

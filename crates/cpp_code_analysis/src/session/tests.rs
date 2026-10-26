@@ -555,9 +555,9 @@ fn a_program_whose_files_keep_their_scopes_quarantines_nothing() {
 /// anybody opened it. Here the same fixture as above, asked for the **program** rather than for one file:
 /// `handle.h` is read (it is what the program is made of), and a file the program does not read is not.
 ///
-/// It is a test of a call the pump does **not** make yet, and that is deliberate: wiring it changes answers in a
-/// way that is not explained (the note on [`Session::read_the_unit`] has the three readings and the bisect), and
-/// an unexplained change in answers is not shipped to buy a capability.
+/// It is a test of the call as the *caller* makes it — [`Session::read_the_unit`] is still the API for a caller that
+/// wants a program now. The pipeline's own schedule is
+/// [`a_program_is_read_when_the_reader_stops_editing`] below, which is a different question: *when*.
 #[test]
 fn a_unit_read_reads_the_whole_program_once() {
     let handle = "#include \"deep.h\"\n#define DECLARE_HANDLE(name) struct name##__ { int unused; }; \
@@ -648,6 +648,127 @@ fn a_unit_read_reads_the_whole_program_once() {
             .cooked_declarations(Path::new("/p/other.cpp"))
             .is_none(),
         "a file no program reads and nobody opens has no reading"
+    );
+}
+
+/// **The pipeline reads a whole program once the reader has stopped typing** — the schedule, and its gate.
+///
+/// A unit read is the session's one indivisible piece of work ([`Session::prepare_a_unit_reading`]: a walk, a cook of
+/// every file in include order, a parse of the whole program and a sweep — 5.09 s for a 159-file program measured on
+/// a real project). Its preparing half takes the **read** lock, and a keystroke takes the write one, so a reader
+/// typing during it waits for the whole program. Two things follow, and both are asserted here:
+///
+/// ```text
+/// while the reader is typing      `advance` reads the file it was told about and no program  → the fixture's
+///                                 `deep.h` — two includes below the file opened — has no cooked reading
+/// a second after the last edit    the next drain schedules the program, and the closure's files get one
+/// ```
+///
+/// The second half is what makes the whole closure queryable without anybody asking about it, which is the shape
+/// §5 step two needs: one timeline per translation unit, not one walk per file.
+#[test]
+fn a_program_is_read_when_the_reader_stops_editing() {
+    // **Four includes deep on purpose**: the per-file policy cooks an open file's direct includes and the level under
+    // them (`COOK_TWO_LEVELS_FURTHER`), so `deep.h` — the file this test watches — has to be further down than that
+    // or its reading would be there before the program is read at all.
+    let handle = "#include \"mid.h\"\n#define DECLARE_HANDLE(name) struct name##__ { int unused; }; \
+                  typedef struct name##__ *name\n";
+    let main = "#include \"api.h\"\nHWND h;\n";
+    let files = MemoryFiles::new()
+        .with_file("/p/deep.h", "#define DEEP 1\n")
+        .with_file("/p/mid.h", "#include \"deep.h\"\nstruct Mid { int x; };\n")
+        .with_file("/p/handle.h", handle)
+        .with_file("/p/api.h", "#include \"handle.h\"\nDECLARE_HANDLE(HWND);\n")
+        .with_file("/p/main.cpp", main);
+    let fixture = Memory::new("a-program-when-the-typing-stops", &files);
+    let mut session = fixture.session();
+
+    // **The reader opens the file and types into it**, which is the state the schedule must stay out of.
+    session.did_open("/p/main.cpp", main);
+    session.index_everything();
+    let steps = session.advance(4);
+    assert!(
+        !session
+            .index()
+            .cooked_declarations(Path::new("/p/deep.h"))
+            .is_some(),
+        "nothing read the program while the reader was typing: {:?}",
+        paths(&steps)
+    );
+
+    // **And the clock is the gate**: a second after the last keystroke, the next drain reads one program.
+    std::thread::sleep(super::UNTIL_A_UNIT_MAY_BE_READ + std::time::Duration::from_millis(100));
+    session.advance(1);
+
+    assert!(
+        session
+            .index()
+            .cooked_declarations(Path::new("/p/deep.h"))
+            .is_some(),
+        "the program's own files are read with it, two includes below the file the reader opened"
+    );
+    let found = session
+        .index()
+        .definition("HWND__", Path::new("/p/main.cpp"));
+    let Known::Yes(found) = found else {
+        panic!("the macro's declaration is in the index after the program was read: {found:?}");
+    };
+    assert_eq!(
+        found.file,
+        Path::new("/p/api.h"),
+        "filed under the file that invoked the macro"
+    );
+}
+
+/// **A program too large to read inside a keystroke's budget is left to the per-file reading.**
+///
+/// The other half of the schedule above. A unit read is linear in its program — 0.72 s per megabyte of source
+/// measured — and its preparing half holds the read lock, so a program over
+/// [`THE_LARGEST_PROGRAM_READ_AT_ONCE`] would make a keystroke wait longer than the server's own write budget. Such a
+/// program is not read as one piece: it keeps the per-file reading, which answers for the file a query names and
+/// never blocks anybody.
+///
+/// The fixture is the same shape with one big comment-only header in the middle, so the *choice* is the only thing
+/// that differs between the two tests.
+#[test]
+fn a_program_too_large_to_read_at_once_is_left_alone() {
+    // A megabyte of comment: the file is in the program's closure and contributes nothing but bytes, which is
+    // exactly what the budget is about.
+    let big = "// padding padding padding padding\n".repeat(32 * 1024);
+    assert!(big.len() > super::THE_LARGEST_PROGRAM_READ_AT_ONCE);
+
+    let handle = "#include \"big.h\"\n#include \"mid.h\"\n#define DECLARE_HANDLE(name) struct name##__ { int unused; }; \
+                  typedef struct name##__ *name\n";
+    let main = "#include \"api.h\"\nHWND h;\n";
+    let files = MemoryFiles::new()
+        .with_file("/p/big.h", big)
+        .with_file("/p/deep.h", "#define DEEP 1\n")
+        .with_file("/p/mid.h", "#include \"deep.h\"\nstruct Mid { int x; };\n")
+        .with_file("/p/handle.h", handle)
+        .with_file("/p/api.h", "#include \"handle.h\"\nDECLARE_HANDLE(HWND);\n")
+        .with_file("/p/main.cpp", main);
+    let fixture = Memory::new("a-program-too-large", &files);
+    let mut session = fixture.session();
+
+    session.did_open("/p/main.cpp", main);
+    session.index_everything();
+    std::thread::sleep(super::UNTIL_A_UNIT_MAY_BE_READ + std::time::Duration::from_millis(100));
+    session.advance(1);
+
+    assert!(
+        !session
+            .index()
+            .cooked_declarations(Path::new("/p/deep.h"))
+            .is_some(),
+        "the program is over the budget, so it is not read in one piece"
+    );
+    // …and the reading the file *does* have is there: the open file and its direct includes are cooked as always.
+    assert!(
+        session
+            .index()
+            .cooked_declarations(Path::new("/p/api.h"))
+            .is_some(),
+        "the per-file reading is unaffected by the budget"
     );
 }
 
