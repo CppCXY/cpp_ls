@@ -413,7 +413,7 @@ CommandService.cpp 的编译命令：
 ```text
 ---
 
-## A5. `auto x = std::format(…)` 推不出类型（复现待补）
+## ✅ A5. `auto x = std::format(…)` 推不出类型 —— 2026-10-27 修好（两个真 bug + 引擎接上重载选择）
 
 **现象（编辑器截图，2026-10-27）**：`auto enenn = std::format(FULL_NAME_FORMAT, myName.getFullName(0));`
 的 hover 只有"`enenn` — a variable, declared in a function body"，**没有类型**，因此 inlay hint 也没有。
@@ -464,7 +464,41 @@ template_parameters），缺的是把 `Session::the_declaration_a_call_means` �
 `format_string` / `wformat_string`，而这条判据需要"这个类能不能由这个实参构造"——也就是
 `CppMember` 的构造函数参数表（索引里已经有了：`std::formatter` 那 8 条就是从这里读出来的）。
 
-**下一步要抓的东西（如果还要再验证别的现场）**：
+**2026-10-27 修好：验收标准达到。**
+
+```text
+auto enenn = std::format(FULL_NAME_FORMAT, myName.getFullName(0));
+    →  type_of: basic_string<char, char_traits<char>, allocator<char>>      ✓（std::string）
+auto c = std::format("Full name: {}", myName.getFullName(1));  →  同上         ✓
+auto vec = std::vector<int>();  →  std::vector<int>   ✓
+auto size = vec.size();         →  size_t             ✓
+```
+
+沿路修掉的**两个真 bug**（都不是"这个文件的问题"）：
+
+```text
+① parameters_in 把【任何含 "..." 的形参】当成参数包丢掉
+   (const format_string<_Types...> _Fmt, _Types&&... _Args)  →  ([], true)      ← 整个列表空了
+   (const locale&, const format_string<...>, _Types&&...)     →  只剩第一个
+   后果：std::format 的候选一个形参都没有，排序无从比较，auto 拿不到类型
+   修法：先跳过 <...> 再看 "..."
+   测试：overload.rs::a_template_argument_pack_inside_a_parameter_is_not_the_parameter_pack
+
+② 宽字符串字面量的类型是 const char*
+   L"x {}" 也是 const char*  →  窄宽规则读错半边
+   修法：按编码前缀给 const wchar_t* / char16_t* / char32_t*（测试覆盖 auto b = L"x" 等）
+```
+
+**引擎接上重载选择**（这是"缺的能力"）：
+
+```text
+・同文件多个声明：declaration_of_a_callee 先问 definitions_at，>1 条就走排序（原来取第一条）
+・跨文件同名：index.definitions 的多条走同一个排序（原来直接 Ambiguous）
+・排序用 sema::overload::choose（与签名弹窗、hover 的 → 标记同一套）
+・平局时用【实参的字符宽度】选窄/宽族：仅当恰好一个候选的首个形参写了该宽度才作答，否则保持 Ambiguous
+```
+
+**下一步可能要抓的（如果还要再验别的现场）**：
 
 ```text
 ① 那个 main.cpp 的绝对路径（哪个 workspace / compile_commands.json）

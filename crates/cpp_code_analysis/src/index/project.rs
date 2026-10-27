@@ -3156,30 +3156,40 @@ fn type_of_expression_inner(
     // Read from the **token**, not the text: `1` and `1.0f` and `"abc"` differ by their kind, and a suffix
     // (`10u`, `1.0L`) is part of the literal rather than a separate thing to interpret. A user-defined literal
     // (`10_km`) is deliberately **not** here: its type is whatever the literal operator returns, which is a lookup.
-    if let Some(kind) = expression
+    if let Some((kind, written_as)) = expression
         .children_with_tokens()
         .filter_map(|element| element.into_token())
-        .map(|token| cpp_parser::CppTokenKind::from(token.kind()))
-        .find(|kind| {
+        .map(|token| {
+            (
+                cpp_parser::CppTokenKind::from(token.kind()),
+                token.text().to_string(),
+            )
+        })
+        .find(|(kind, _)| {
             !matches!(
                 kind,
                 cpp_parser::CppTokenKind::Whitespace | cpp_parser::CppTokenKind::Newline
             )
         })
     {
-        let literal =
-            match kind {
-                cpp_parser::CppTokenKind::IntegerLiteral
-                | cpp_parser::CppTokenKind::CharLiteral => Some("int"),
-                cpp_parser::CppTokenKind::FloatingLiteral => Some("double"),
-                cpp_parser::CppTokenKind::BoolLiteral
-                | cpp_parser::CppTokenKind::TrueKeyword
-                | cpp_parser::CppTokenKind::FalseKeyword => Some("bool"),
-                cpp_parser::CppTokenKind::StringLiteral => Some("const char*"),
-                cpp_parser::CppTokenKind::NullptrLiteral
-                | cpp_parser::CppTokenKind::NullptrKeyword => Some("nullptr_t"),
-                _ => None,
-            };
+        let literal = match kind {
+            cpp_parser::CppTokenKind::IntegerLiteral | cpp_parser::CppTokenKind::CharLiteral => {
+                Some("int")
+            }
+            cpp_parser::CppTokenKind::FloatingLiteral => Some("double"),
+            cpp_parser::CppTokenKind::BoolLiteral
+            | cpp_parser::CppTokenKind::TrueKeyword
+            | cpp_parser::CppTokenKind::FalseKeyword => Some("bool"),
+            // **A string literal's element type is its encoding prefix**, which is the one part of a literal's type
+            // the text carries: `L"…"` is `const wchar_t*`, `u8"…"` is `const char*`, and the plain form is too.
+            // Answering `const char*` for every literal made `std::format(L"x {}", 1)` deduce `string` — the width
+            // rule that picks between `format_string` and `wformat_string` was reading the wrong half.
+            cpp_parser::CppTokenKind::StringLiteral => Some(a_string_literals_type(&written_as)),
+            cpp_parser::CppTokenKind::NullptrLiteral | cpp_parser::CppTokenKind::NullptrKeyword => {
+                Some("nullptr_t")
+            }
+            _ => None,
+        };
         if let Some(spelled) = literal {
             // **Parsed, not named.** `Type::named("int")` is a type whose *name* is `int` — a class as far as every
             // later question is concerned — and the same for `const char*`. Measured: a string literal came back as
@@ -3194,6 +3204,28 @@ fn type_of_expression_inner(
                 path.to_path_buf(),
             ));
         }
+    }
+
+    /// **The type of a string literal, from its encoding prefix** — see the literal arm of [`type_of_expression_inner`].
+    ///
+    /// `L` is `wchar_t`, `u8` is `char` (the C++20 `char8_t` is deliberately not introduced: a file that is not compiled as
+    /// C++20 spells neither, and `const char*` is what every reader means by it), `u` is `char16_t` and `U` is `char32_t`.
+    /// A raw string (`LR"(…)"`) carries the same prefix, which is why the test is a prefix rather than a quote.
+    fn a_string_literals_type(written: &str) -> &'static str {
+        let written = written.trim_start();
+        if written.starts_with("u8") {
+            return "const char*";
+        }
+        if written.starts_with('L') {
+            return "const wchar_t*";
+        }
+        if written.starts_with('u') {
+            return "const char16_t*";
+        }
+        if written.starts_with('U') {
+            return "const char32_t*";
+        }
+        "const char*"
     }
 
     // **A functional cast of a template-id is that type.** `std::vector<int>()` — the initialiser behind every
@@ -6056,8 +6088,55 @@ fn declaration_of_a_callee(
     }
 
     // Everything else is a name — `make()`, `Widget()`, `ns::make()` — and the name lookup is the one every other
+    // **Several declarations of this name in this file, and a call that selects one of them.** `definition_at` answers
+    // the *first* declaration of a name in one scope — the rule for a name, documented beside it — and for a call that
+    // is wrong: `std::format("x {}", 1)` and `std::format(L"x {}", 1)` reach different overloads of one name, and only
+    // the arguments say which. Both halves (this one and the index's, below) go through the same ranking.
+    if let Some(call) = the_call_around(callee)
+        && let Known::Yes(bindings) =
+            crate::sema::resolve::definitions_at(scopes, root, end_of_the_written_name(callee))
+        && bindings.len() > 1
+        && let Some(types) =
+            the_types_of_the_arguments(memo, index, declaring, scopes, root, path, &call)
+    {
+        let candidates: Vec<(DeclFact, PathBuf)> = bindings
+            .iter()
+            .map(|binding| (fact_from_binding(root, "", binding), path.to_path_buf()))
+            .collect();
+        if let Some(chosen) = the_one_the_arguments_select(&types, &candidates)
+            && let Some(binding) = bindings.get(chosen)
+        {
+            return Known::Yes(NamedDeclaration::Here(binding.clone()));
+        }
+    }
+
     // question about a name goes through.
-    declaration_of_expression(index, scopes, root, path, callee)
+    let known = declaration_of_expression(index, scopes, root, path, callee);
+
+    // **A name with several declarations, and a call that selects one of them.** `std::format("…", value)` is four
+    // overloads — narrow and wide, with and without a locale — and the name lookup is right to refuse to pick. What
+    // was missing is that the *call* is the tie-breaker: the arguments' types are exactly what a compiler uses, and
+    // the ranking for them already exists (it is what the signature popup and the hover's `→` marker use). Without
+    // this, `auto enenn = std::format(…)` had no initializer type and therefore no type at all.
+    let Known::Unknown(UnknownReason::Ambiguous(name)) = &known else {
+        return known;
+    };
+    // **The call this callee belongs to, however many expression nodes sit between them** — `std::format` parses as
+    // a name inside the call, and a member callee as a member access inside it, so the search is up the parents
+    // rather than one `parent()`.
+    let Some(call) = the_call_around(callee) else {
+        return known;
+    };
+    match the_declaration_the_arguments_pick(
+        memo, index, declaring, scopes, root, path, &call, name,
+    ) {
+        Some((fact, file)) => Known::Yes(NamedDeclaration::Indexed(
+            fact,
+            file,
+            TypeBindings::default(),
+        )),
+        None => known,
+    }
 }
 
 /// Where a call's callee is declared — what a parameter hint is read from.
@@ -6180,6 +6259,200 @@ pub(crate) fn callees_of_a_call(
     }
 }
 
+/// **The `CallExpr` a callee belongs to**, looking up the parents a few levels — see its first caller.
+fn the_call_around(callee: &cpp_parser::CppSyntaxNode) -> Option<cpp_parser::CppSyntaxNode> {
+    let mut node = callee.parent();
+    for _ in 0..4 {
+        let inner = node?;
+        if cpp_parser::CppSyntaxKind::from(inner.kind()) == cpp_parser::CppSyntaxKind::CallExpr {
+            return Some(inner);
+        }
+        node = inner.parent();
+    }
+    None
+}
+/// **Which declaration a call's own arguments select**, when the callee's name has more than one.
+///
+/// The engine used to stop at "several declarations" for a free function, and that is where `auto enenn =
+/// std::format(FULL_NAME_FORMAT, myName.getFullName(0));` lost its type: `std::format` has four overloads visible from
+/// that file (narrow and wide, with and without a locale) and nothing chose between them, so `auto` had no initializer
+/// type to deduce from. The ranking machinery already existed — it is what the signature popup and the hover's `→`
+/// marker use ([`crate::sema::overload::choose`]) — and what was missing was asking it here.
+///
+/// This is the **index** half: the declarations are in other files and the name is qualified. The same-file half is in
+/// [`declaration_of_a_callee`], which has bindings rather than facts, and both go through
+/// [`the_one_the_arguments_select`] so that the two decide alike.
+fn the_declaration_the_arguments_pick(
+    memo: &TypeMemo,
+    index: &ProjectIndex,
+    declaring: &mut dyn FnMut(&Path) -> Option<crate::FileView>,
+    scopes: &crate::ScopeTree,
+    root: &cpp_parser::CppSyntaxNode,
+    path: &Path,
+    call: &cpp_parser::CppSyntaxNode,
+    name: &str,
+) -> Option<(DeclFact, PathBuf)> {
+    let Known::Yes(definitions) = index.definitions(name, path) else {
+        return None;
+    };
+    if definitions.found.len() < 2 {
+        return None;
+    }
+    let candidates: Vec<(DeclFact, PathBuf)> = definitions
+        .found
+        .iter()
+        .map(|definition| (definition.fact.clone(), definition.file.clone()))
+        .collect();
+    let types = the_types_of_the_arguments(memo, index, declaring, scopes, root, path, call)?;
+    let chosen = the_one_the_arguments_select(&types, &candidates)?;
+    candidates.get(chosen).cloned()
+}
+
+/// **The types of a call's arguments**, as spellings — `Unknown` for an argument whose type the engine cannot read.
+fn the_types_of_the_arguments(
+    memo: &TypeMemo,
+    index: &ProjectIndex,
+    declaring: &mut dyn FnMut(&Path) -> Option<crate::FileView>,
+    scopes: &crate::ScopeTree,
+    root: &cpp_parser::CppSyntaxNode,
+    path: &Path,
+    call: &cpp_parser::CppSyntaxNode,
+) -> Option<Vec<Known<String>>> {
+    let arguments = crate::inlay::arguments_of(call)?;
+    Some(
+        arguments
+            .iter()
+            .map(|argument| {
+                match type_of_expression_memoed(
+                    memo, index, declaring, scopes, root, path, argument, 0,
+                ) {
+                    Known::Yes((type_of, _)) => Known::Yes(type_of.to_string()),
+                    Known::No => Known::No,
+                    Known::Unknown(reason) => Known::Unknown(reason),
+                }
+            })
+            .collect(),
+    )
+}
+
+/// **Which of these declarations the arguments select**, as an index into `candidates`.
+///
+/// # The tie the ranker leaves, and the one it is allowed to break
+///
+/// `std::format`'s narrow and wide overloads are spelled `format(const format_string<_Types...> _Fmt, _Types&&...
+/// _Args)` and the same with `wformat_string`; against a call's arguments the ranker answers `Ambiguous`, because the
+/// character width of the format string is a property of the *class* those parameters have, not of their spelling. The
+/// tie-break here is the one a reader makes: **the argument's character width selects the family** — a narrow string
+/// cannot construct a `wformat_string` and a wide one cannot construct a `format_string` — so when exactly one
+/// candidate's *first* parameter is written for the width the call writes, that candidate is the answer. If several
+/// are (or none is definite), the tie stands and the caller keeps its `Ambiguous`: a tie between two candidates of the
+/// same width is a real one.
+fn the_one_the_arguments_select(
+    types: &[Known<String>],
+    candidates: &[(DeclFact, PathBuf)],
+) -> Option<usize> {
+    let built: Vec<crate::sema::overload::Candidate> = candidates
+        .iter()
+        .enumerate()
+        .map(|(at, (fact, _))| {
+            let (declared, variadic) = fact
+                .parameter_list
+                .as_deref()
+                .map(crate::sema::overload::parameters_in)
+                .unwrap_or_default();
+            let names = fact.parameters.clone();
+            let declared_for_ordering = declared.clone();
+            let substituted = match crate::sema::deduction::deduce(&names, &declared, types) {
+                Some(deduced) => (
+                    declared
+                        .iter()
+                        .map(|spelling| {
+                            crate::sema::types::substituted_spelling(spelling, &names, &deduced)
+                        })
+                        .collect::<Vec<String>>(),
+                    true,
+                ),
+                None => (declared, !names.is_empty()),
+            };
+            let candidate = crate::sema::overload::Candidate::new(
+                substituted.0,
+                variadic,
+                format!("declaration {at}"),
+            );
+            if substituted.1 {
+                candidate.with_declaration(declared_for_ordering, names)
+            } else {
+                candidate
+            }
+        })
+        .collect();
+
+    if crate::probes::inference() {
+        eprintln!(
+            "[inference] pick among {} candidates, argument types {types:?}",
+            candidates.len()
+        );
+        for (at, (fact, _)) in candidates.iter().enumerate() {
+            eprintln!(
+                "[inference]   candidate {at}: scope {:?} returns {:?} params {:?}",
+                fact.scope, fact.returns, fact.parameter_list
+            );
+        }
+    }
+    let choice = crate::sema::overload::choose(types, &built);
+    if crate::probes::inference() {
+        eprintln!("[inference]   choice: {choice:?}");
+    }
+    match choice {
+        crate::sema::overload::Choice::One(at) => Some(at),
+        crate::sema::overload::Choice::Ambiguous => {
+            let written = types.iter().find_map(|argument| match argument {
+                Known::Yes(spelling) => the_character_width(spelling),
+                _ => None,
+            })?;
+            let definite: Vec<usize> = candidates
+                .iter()
+                .enumerate()
+                .filter(|(_, (fact, _))| {
+                    fact.parameter_list
+                        .as_deref()
+                        .and_then(|list| {
+                            crate::sema::overload::parameters_in(list)
+                                .0
+                                .into_iter()
+                                .next()
+                        })
+                        .and_then(|first| the_character_width(&first))
+                        == Some(written)
+                })
+                .map(|(at, _)| at)
+                .collect();
+            match definite[..] {
+                [only] => Some(only),
+                _ => None,
+            }
+        }
+        crate::sema::overload::Choice::None => None,
+    }
+}
+/// **Is this spelling written for wide characters, narrow ones, or neither?** — the tie-break
+/// [`the_declaration_the_arguments_pick`] uses, and nothing else does.
+///
+/// `wchar_t` contains `char` and `wstring` contains `string`, so the wide spellings are asked first. `None` for a
+/// spelling that says neither (`int`, `pair<A, B>`), which keeps such a candidate in the running.
+fn the_character_width(spelling: &str) -> Option<bool> {
+    if spelling.contains("wchar_t")
+        || spelling.contains("wstring")
+        || spelling.contains("wformat")
+        || spelling.contains("wint_t")
+    {
+        return Some(true);
+    }
+    if spelling.contains("char") || spelling.contains("string") {
+        return Some(false);
+    }
+    None
+}
 /// **Every declaration of one member name in the object's class** — the member-call half of [`callees_of_a_call`].
 ///
 /// The class comes from the object's **type**, which is the same step [`declaration_of_a_callee`] makes: the two

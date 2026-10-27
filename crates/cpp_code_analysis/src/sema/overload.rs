@@ -523,11 +523,26 @@ pub fn parameters_in(parameter_list: &str) -> (Vec<String>, bool) {
         if parameter.is_empty() {
             return;
         }
-        let (kind, rest) = match parameter.split_once(' ') {
-            Some((kind, rest)) => (kind, rest),
-            None => (parameter, ""),
+        // **`...` declares a pack only where the parameter writes one.** `const format_string<_Types...> _Fmt` has a
+        // *template* argument pack inside its type and is an ordinary parameter — dropping it as the pack erased the
+        // whole list for `std::format`: measured, `(const format_string<_Types...> _Fmt, _Types&&... _Args)` came back
+        // `([], true)` and the locale overload kept only its first parameter, which left the ranking with nothing to
+        // compare and `auto enenn = std::format(…)` with no type. The angles are skipped before the question is asked.
+        let outside_the_arguments = {
+            let mut without = String::new();
+            let mut depth = 0i32;
+            for character in parameter.chars() {
+                match character {
+                    '<' => depth += 1,
+                    '>' => depth -= 1,
+                    _ if depth > 0 => continue,
+                    _ => {}
+                }
+                without.push(character);
+            }
+            without
         };
-        if kind == "..." || rest.contains("...") || parameter.contains("...") {
+        if outside_the_arguments.contains("...") {
             *variadic = true;
             return;
         }
@@ -585,6 +600,46 @@ pub(crate) fn more_specialized(mine: &Candidate, theirs: &Candidate) -> bool {
 }
 
 #[test]
+#[test]
+fn a_template_argument_pack_inside_a_parameter_is_not_the_parameter_pack() {
+    // `std::format`'s own spelling, and the bug the reader had: **any** `...` dropped the parameter, so both of its
+    // overloads came back with an empty list and the ranking had nothing to compare. Measured before the fix:
+    // `(const format_string<_Types...> _Fmt, _Types&&... _Args)` → `([], true)`.
+    assert_eq!(
+        parameters_in("(const format_string<_Types...> _Fmt, _Types&&... _Args)"),
+        (vec!["const format_string<_Types...>".to_string()], true)
+    );
+    assert_eq!(
+        parameters_in(
+            "(const locale& _Loc, const wformat_string<_Types...> _Fmt, _Types&&... _Args)"
+        ),
+        (
+            vec![
+                "const locale&".to_string(),
+                "const wformat_string<_Types...>".to_string()
+            ],
+            true
+        )
+    );
+
+    // **An ordinary parameter is still ordinary**, and a real pack is still the pack — the two halves the fix has to
+    // keep apart.
+    assert_eq!(
+        parameters_in("(int a, double b)"),
+        (vec!["int".to_string(), "double".to_string()], false)
+    );
+    assert_eq!(
+        parameters_in("(const char *format, ...)"),
+        (vec!["const char *format".to_string()], true),
+        "a C-style variadic still ends the list: {:?}",
+        parameters_in("(const char *format, ...)")
+    );
+    assert_eq!(
+        parameters_in("(Args &&... args)"),
+        (Vec::<String>::new(), true)
+    );
+}
+
 fn the_more_specialized_of_two_templates_wins() {
     // The shape that needed it: `take(T*)` and `take(T)` both deduce to `int*` for an `int*` argument, so the
     // ranking ties and the language's answer is partial ordering — `T*` is more specialized.

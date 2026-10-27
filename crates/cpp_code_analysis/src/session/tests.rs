@@ -1002,6 +1002,50 @@ fn a_calls_iterator_answer_reaches_the_element_through_a_trait_alias() {
         "the call's iterator, its `pointer` alias, and the trait alias in it"
     );
 }
+/// **`auto s = std::format("x {}", 1)` has the type of the overload the *arguments* select.**
+///
+/// The engine refused an ambiguous callee name and stopped there, so `auto` had no initializer type and no type at
+/// all — reported from an editor on `auto enenn = std::format(FULL_NAME_FORMAT, myName.getFullName(0));`, where the
+/// card said "a variable" and nothing else. The ranking that decides it already existed (the signature popup and the
+/// hover's `→` marker use it); the callee's declaration simply never asked it.
+///
+/// Measured on the real file after this: `enenn` answers
+/// `basic_string<char, char_traits<char>, allocator<char>>`. The narrow/wide tie is broken by the character width the
+/// arguments' types carry, which is the rule the fix's own comment states.
+#[test]
+fn a_calls_overload_is_the_one_its_arguments_select() {
+    let text = "namespace std {\n\
+                struct string { };\n\
+                struct wstring { };\n\
+                template <class... T> struct format_string { };\n\
+                template <class... T> struct wformat_string { };\n\
+                template <class... T> string format(const format_string<T...>, T &&...);\n\
+                template <class... T> wstring format(const wformat_string<T...>, T &&...);\n\
+                }\n\
+                void g() {\n\
+                \x20   auto narrow = std::format(\"x {}\", 1);\n\
+                \x20   auto wide = std::format(L\"x {}\", 1);\n\
+                }\n";
+    let files = MemoryFiles::new().with_file("/p/a.cpp", text);
+    let fixture = Memory::new("a-calls-selected-overload", &files);
+    let mut session = fixture.session();
+    session.did_open("/p/a.cpp", text);
+    session.index_everything();
+    let path = std::path::PathBuf::from("/p/a.cpp");
+    let view = session.view_of_the_file(&path).expect("a view");
+
+    for (written, expected) in [("auto narrow", "string"), ("auto wide", "wstring")] {
+        let at = text.find(written).expect("the fixture") + "auto ".len();
+        let typed = session.type_at(&view, crate::file::coordinates::ReadingOffset::new(at));
+        let Known::Yes(typed) = typed else {
+            panic!("`{written} = std::format(…)` must have a type: {typed:?}");
+        };
+        assert_eq!(
+            typed.type_of, expected,
+            "the arguments select the overload — {written}"
+        );
+    }
+}
 /// **A name with several declarations and no type they agree on says *that*, rather than "unknown type".**
 ///
 /// Reported from an editor: `auto enenn = std::format(FULL_NAME_FORMAT, myName.getFullName(0));` showed no type at
