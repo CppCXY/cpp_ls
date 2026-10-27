@@ -4567,12 +4567,26 @@ impl NamedDeclaration {
                     return Some(started);
                 };
 
+                // **The class *with* the arguments the use wrote**, because a return type's qualifier may name them:
+                // `_Tree::find` answers `_Mybase::iterator`, and `_Mybase`'s target is
+                // `_Tree<_Tmap_traits<_Kty, _Ty, …>>` — parameter names that only the arguments turn into types
+                // (measured: without them the chain stopped at `conditional<_Test, _Ty1, _Ty2>::type`).
+                let class_spelling = if bindings.is_empty() {
+                    class.to_string()
+                } else {
+                    let arguments: Vec<String> = bindings
+                        .arguments()
+                        .iter()
+                        .map(|argument| argument.to_string())
+                        .collect();
+                    format!("{class}<{}>", arguments.join(", "))
+                };
                 let (finished, _) = finish_a_nested_name(
                     index,
                     scopes,
                     root,
                     path,
-                    class,
+                    &class_spelling,
                     bindings,
                     started,
                     file.clone(),
@@ -6521,8 +6535,21 @@ fn a_spelling_through_the_aliases(
     );
     let inner_parameters = index.template_parameters_for(inner_name, path, &inner_arguments);
     let inner_defaults = index.template_parameter_defaults_for(inner_name, path, &inner_arguments);
-    let Some(fact) = a_member_the_class_declares(index, scopes, root, path, inner_name, &last)
-    else {
+    // **The class as the use wrote it** — with its arguments — because that is what selects a partial specialization
+    // and what lets the qualifier's own aliases (`_Mybase = _Tree_val<_Traits>`) be substituted. Asking the *bare*
+    // name lost the arguments at this step; measured on a real project, `LuaReserved.find(text)` typed as
+    // `_Mybase::iterator` and the chain stopped at `conditional<_Test, _Ty1, _Ty2>::type` — parameter names with
+    // nothing to pair them with (`docs/remaining.md` §A4).
+    let found = a_member_the_class_declares(index, scopes, root, path, &inner, &last);
+    if crate::probes::inference() {
+        eprintln!(
+            "[inference] qualified: {written:?} -> qualifier {qualifier:?} resolved {inner:?}, member {last:?}, fact {:?}",
+            found
+                .as_ref()
+                .map(|fact| (fact.type_of.clone(), fact.pattern.clone()))
+        );
+    }
+    let Some(fact) = found else {
         return written.to_string();
     };
     let Some(target) = fact.type_of.as_deref() else {

@@ -288,6 +288,32 @@ LuaReserved.find(text)  →  type_at: "_Mybase::iterator"     ← 修复后仍�
 下一步（明确）：在这两处之一加打印，确认 `_Mybase` 是在"解析限定符"还是"选声明"处丢的；夹具
 `a_calls_return_type_is_a_qualified_alias_of_its_own_class` 已经把"本仓库内应当怎样"钉住了。
 
+
+
+**2026-10-27 第六批：卡点分成了两半，都有实测证据。**
+
+```text
+[inference] qualified: "_Mybase::iterator" -> qualifier "_Mybase" resolved
+            "_Tree<_Tmap_traits<_Kty, _Ty, less<_Kty>, allocator<pair<const _Kty, _Ty>>, false>>",
+            member "iterator", fact None
+[inference] alias step: "_Mybase::iterator" in Named { name: "std::map", arguments: [] }
+```
+
+两件事：
+
+```text
+① 这次调用拿到的 TypeBindings 是【空的】：class 拼写因此没有实参（`std::map`，不是 `std::map<string, LuaTokenKind, …>`），
+   限定符 `_Mybase` 的目标里 `_Kty`/`_Ty` 就没人代换 —— 残差里的参数名就是这么来的。
+   位置：type_of_a_call → declaration_of_a_callee 造出的 NamedDeclaration 里 bindings 没带上"对象类型的实参"。
+   本轮已经为这条准备好工具：`TypeBindings::arguments()`（新）＋ what_a_call_has 现在把 class 连同实参一起交给
+   finish_a_nested_name —— bindings 一旦非空就直接生效。
+② `_Tree<…>::iterator` 查回 None：`_Tree` 自己没有 `iterator`（它在 `_Tree_val`/`_Tree_base` 基类里），
+   而 a_member_the_class_declares 的 members_of 走基类那一步没拿到它。下一步：给这个查找加打印，确认
+   members_of("std::_Tree") 的基类表与 unlisted。
+```
+
+本轮还留了一处**可用的追踪**：`a_spelling_through_the_aliases` 的限定符分支在 `CPPLS_TRACE_INFERENCE=1` 下会打印
+（written、qualifier、resolved inner、member、命中的 fact），这就是上面这段输出的来源。
 ```text
 LuaLexer.cpp  LuaReserved.find(text)->second
   → class "conditional_t": 0 member(s)     且 CPPLS_TRACE_INFERENCE=1 下【没有任何 alias step 日志】

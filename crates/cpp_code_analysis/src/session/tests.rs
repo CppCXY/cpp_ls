@@ -839,6 +839,43 @@ fn a_program_too_large_to_read_at_once_is_left_alone() {
     );
 }
 
+/// **The same, with everything the real project has that the fixture above does not**: a namespace, a *private*
+/// alias, and the alias declared after the members that use it.
+///
+/// The previous fixture passes and the real `std::_Tree` does not, so the difference has to be one of these three —
+/// this fixture is the instrument that says which.
+#[test]
+fn a_private_namespaced_alias_still_resolves_in_a_return_type() {
+    let text = "namespace std {\n\
+                template <typename T> struct _Tree_base { using iterator = T *; };\n\
+                template <typename T> struct _Tree {\n\
+                public:\n\
+                \x20   _Mybase::iterator find(int key) const;\n\
+                private:\n\
+                \x20   using _Mybase = _Tree_base<T>;\n\
+                };\n\
+                }\n\
+                void f(std::_Tree<int> &t) {\n\
+                \x20   t.find(1);\n\
+                }\n";
+    let files = MemoryFiles::new().with_file("/p/a.cpp", text);
+    let fixture = Memory::new("a-private-namespaced-alias", &files);
+    let mut session = fixture.session();
+    session.did_open("/p/a.cpp", text);
+    session.index_everything();
+    let path = std::path::PathBuf::from("/p/a.cpp");
+    let view = session.view_of_the_file(&path).expect("a view");
+
+    let at = text.find("find(1)").expect("the fixture") + "find".len();
+    let typed = session.type_at(&view, crate::file::coordinates::ReadingOffset::new(at));
+    let Known::Yes(typed) = typed else {
+        panic!("`t.find(1)` must have a type: {typed:?}");
+    };
+    assert_eq!(
+        typed.type_of, "int*",
+        "`_Mybase::iterator` is `_Tree_base<int>::iterator` — a private alias still names a type here"
+    );
+}
 /// **A call whose return type is a *qualified alias of its own class*** — `_Mybase::iterator`, MSVC's spelling.
 ///
 /// Measured on a real project: `LuaReserved.find(text)` typed as `_Mybase::iterator` — `_Tree::find` returns

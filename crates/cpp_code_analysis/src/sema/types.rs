@@ -748,6 +748,16 @@ impl TypeBindings {
         self.names.is_empty() || self.arguments.is_empty()
     }
 
+    /// **The arguments the use wrote**, in the order the class declares its parameters.
+    ///
+    /// A caller that has only a *spelling* of the class (`std::map`, from a member's `scope`) can rebuild it with them —
+    /// `std::map<std::string, LuaTokenKind, …>` — which is what a qualifier inside the member's own return type needs in
+    /// order to resolve: `_Tree<_Tmap_traits<_Kty, _Ty, …>>` names parameters that only the arguments can stand for.
+    /// See `what_a_call_has`, which is the first caller.
+    pub fn arguments(&self) -> &[Type] {
+        &self.arguments
+    }
+
     pub fn as_substitutions(&self) -> TypeSubstitutions<'_> {
         TypeSubstitutions::new(&self.names, &self.arguments)
     }
