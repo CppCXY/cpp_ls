@@ -600,7 +600,6 @@ pub(crate) fn more_specialized(mine: &Candidate, theirs: &Candidate) -> bool {
 }
 
 #[test]
-#[test]
 fn a_template_argument_pack_inside_a_parameter_is_not_the_parameter_pack() {
     // `std::format`'s own spelling, and the bug the reader had: **any** `...` dropped the parameter, so both of its
     // overloads came back with an empty list and the ranking had nothing to compare. Measured before the fix:
@@ -640,6 +639,7 @@ fn a_template_argument_pack_inside_a_parameter_is_not_the_parameter_pack() {
     );
 }
 
+#[test]
 fn the_more_specialized_of_two_templates_wins() {
     // The shape that needed it: `take(T*)` and `take(T)` both deduce to `int*` for an `int*` argument, so the
     // ranking ties and the language's answer is partial ordering — `T*` is more specialized.

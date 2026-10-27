@@ -7670,7 +7670,8 @@ fn resolve_aliases_or_unresolved(
                 // list below already applies, and applying them here as well compounded them: the first
                 // attempt produced `std::vector::std::vector::_Vb_val<_Alloc>::_Alvbase_traits`, with the
                 // enclosing scope twice over and a `_Vb_val<_Alloc>` no fact is named by.
-                let target = parse_type_spelling(&target).class_name()?.to_string();
+                let target =
+                    a_class_name_without_spaces(parse_type_spelling(&target).class_name()?);
 
                 Some((format!("{target}::{}", segments[take..].join("::")), scope))
             })
@@ -7683,7 +7684,7 @@ fn resolve_aliases_or_unresolved(
         // **Read as a type, not as a name**: the target's own arguments are what the class it names was written
         // with, and `base_type_name` — which the name-only walk used — is exactly the part that threw them away.
         let target_type = parse_type_spelling(&target);
-        let Some(target) = target_type.class_name().map(str::to_string) else {
+        let Some(target) = target_type.class_name().map(a_class_name_without_spaces) else {
             break;
         };
         if target.is_empty() {
@@ -7719,6 +7720,8 @@ fn resolve_aliases_or_unresolved(
         // with `::` is absolute and is taken as it stands — that is what the leading `::` is for.
         let candidates: Vec<String> = match &scope {
             Some(prefix) if !target.starts_with("::") => {
+                let prefix = a_class_name_without_spaces(prefix);
+                let prefix = prefix.as_str();
                 let (first, rest) = match target.split_once("::") {
                     Some((first, rest)) => (first, Some(rest)),
                     None => (target.as_str(), None),
@@ -7742,16 +7745,21 @@ fn resolve_aliases_or_unresolved(
         // this index cannot see (a namespace opened by a macro the index did not expand is the ordinary case) and
         // the spelling it would have returned describes nothing. Measured: `std::basic_string` for libstdc++'s
         // `std::string`, and ten false `undefined-field` findings on one file. The caller is told instead.
+        // **A leading `::` says "the global scope", and the index does not key on it.** The rendering writes a macro's
+        // expansion absolutely — `::std::basic_string` — so the accepted candidate is stripped before it becomes the
+        // spelling every later lookup uses: measured, `members_of` answered 0 members with
+        // `NotDeclaredHere("::std::basic_string")` while the very same class is filed as `std::basic_string`.
         let Some(next) = candidates
             .iter()
             .find(|candidate| is_declared(index, scopes, path, candidate))
-            .cloned()
+            .map(|candidate| candidate.trim_start_matches("::").to_string())
         else {
             // **The target is still the answer, and the third slot says it was not found.** A caller that only wants
             // a spelling keeps the one the alias named — `animate_aliases_whose_target_is_not_indexed_reports_the_target`
             // pins that: the missing declaration is `Widget::size`, not `Alias::size` — while a caller that has to
             // decide whether "no members" means an empty class or an unreadable one reads the third slot.
-            return (candidates[0].clone(), carried, Some(candidates[0].clone()));
+            let named = candidates[0].trim_start_matches("::").to_string();
+            return (named.clone(), carried, Some(named));
         };
 
         if next == current {
@@ -7765,6 +7773,18 @@ fn resolve_aliases_or_unresolved(
     (current, carried, None)
 }
 
+/// **A class name with the whitespace taken out** — the rendering writes a macro's expansion spaced, so a target read
+/// out of it is spelled `:: std :: basic_string` rather than `::std::basic_string`.
+///
+/// Not a cosmetic step: every downstream lookup keys on the spelling. Measured on `std::string`'s alias:
+/// `resolve_aliases_or_unresolved` produced `:: std :: basic_string`, `is_declared` answered false for it (nothing is
+/// declared under that spelling), the chain gave up and `members_of` reported **0 members** — so `enenn.size()`, whose
+/// object's type had just been deduced, offered no completion at all.
+fn a_class_name_without_spaces(name: &str) -> String {
+    name.chars()
+        .filter(|character| !character.is_whitespace())
+        .collect()
+}
 /// What an alias points at, and the scope it was declared in, or `None` when the spelling is not an alias.
 ///
 /// # How an alias is recognised

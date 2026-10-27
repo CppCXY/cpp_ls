@@ -1012,6 +1012,55 @@ fn a_calls_iterator_answer_reaches_the_element_through_a_trait_alias() {
 /// Measured on the real file after this: `enenn` answers
 /// `basic_string<char, char_traits<char>, allocator<char>>`. The narrow/wide tie is broken by the character width the
 /// arguments' types carry, which is the rule the fix's own comment states.
+/// **A member list through an alias written with an absolute target** — the shape the renderer produces.
+///
+/// `std::string` is `using string = basic_string<char, …>;`, and a target read out of the **rendering** is spelled
+/// `:: std :: basic_string<char, …>`: the preprocessor writes a macro's expansion spaced and absolute. Every later
+/// lookup keys on the spelling, so the chain gave up (`is_declared` answered false for `:: std :: basic_string`) and
+/// `members_of` answered **0 members** — which is what an editor saw as "the type is deduced but nothing completes
+/// after `enenn.`".
+#[test]
+fn a_member_list_is_reached_through_an_alias_written_absolutely() {
+    let text = "namespace std {\n\
+                template <class T> struct basic_string {\n\
+                \x20   void append(const T &value);\n\
+                \x20   int size() const;\n\
+                };\n\
+                using string = ::std::basic_string<char>;\n\
+                }\n\
+                void g() {\n\
+                \x20   std::string s;\n\
+                \x20   s.\n\
+                }\n";
+    let files = MemoryFiles::new().with_file("/p/a.cpp", text);
+    let fixture = Memory::new("an-absolute-alias-target", &files);
+    let mut session = fixture.session();
+    session.did_open("/p/a.cpp", text);
+    session.index_everything();
+    let path = std::path::PathBuf::from("/p/a.cpp");
+    let view = session.view_of_the_file(&path).expect("a view");
+
+    let at = text.find("s.\n").expect("the fixture") + "s.".len();
+    let completions =
+        session.member_completions(&view, crate::file::coordinates::FileOffset::new(at));
+    let Known::Yes(completions) = completions else {
+        panic!("`s.` must list `basic_string`'s members: {completions:?}");
+    };
+    let mut names: Vec<&str> = completions
+        .members
+        .members
+        .iter()
+        .map(|member| member.fact.name.as_str())
+        .collect();
+    names.sort_unstable();
+    names.dedup();
+    assert_eq!(
+        names,
+        vec!["append", "size"],
+        "the alias's absolute target names a class the index has"
+    );
+}
+
 #[test]
 fn a_calls_overload_is_the_one_its_arguments_select() {
     let text = "namespace std {\n\

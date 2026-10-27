@@ -413,7 +413,7 @@ CommandService.cpp 的编译命令：
 ```text
 ---
 
-## ✅ A5. `auto x = std::format(…)` 推不出类型 —— 2026-10-27 修好（两个真 bug + 引擎接上重载选择）
+## ✅ A5. `auto x = std::format(…)` 推不出类型 / 推出来但没有补全 —— 2026-10-27 修好
 
 **现象（编辑器截图，2026-10-27）**：`auto enenn = std::format(FULL_NAME_FORMAT, myName.getFullName(0));`
 的 hover 只有"`enenn` — a variable, declared in a function body"，**没有类型**，因此 inlay hint 也没有。
@@ -719,3 +719,34 @@ map 元素规则要求恰好两个实参                → >= 2（比较器/分
 ```
 
 现在整份文档里剩下的 `#[ignore]` 只有三处：`completion.rs:1423`（一条测量）、`nested_conditional.rs`、`macros.rs:37`。
+**2026-10-27 续：类型有了，补全没有 —— 渲染器写出来的拼写带空格和绝对限定。**
+
+```text
+enenn.size()  →  class "basic_string": 0 member(s)
+members_of_inner: :: std :: basic_string 什么都没有声明
+```
+
+`std::string` 是 `using string = basic_string<…>;`，而从**渲染**里读出来的目标拼写是 `:: std :: basic_string<…>`
+——预处理器写宏展开时每个 token 之间留空格、并且用绝对限定。所有下游查找都以拼写为键，于是：
+
+```text
+resolve_aliases_or_unresolved 产出 ":: std :: basic_string"
+is_declared(":: std :: basic_string") → false（索引里叫 std::basic_string）
+→ 链放弃 → members_of 答 0 个成员 → enenn. 后面什么都没有
+```
+
+修法两处，都在 `resolve_aliases_or_unresolved`：
+
+```text
+① 读进来的类名去掉所有空白（a_class_name_without_spaces）
+② 被接受的候选去掉开头的 "::"（索引不按全局标记存名字）
+```
+
+实测（`test_cpp` 的副本加一行 `enenn.size();`）：
+
+```text
+class "basic_string": 170 member(s) ["allocator_type", "append", …]      ✓
+```
+
+测试：`session/tests.rs::a_member_list_is_reached_through_an_alias_written_absolutely`
+（`using string = ::std::basic_string<char>;` 这个形状，就是渲染器写出来的那个）。
