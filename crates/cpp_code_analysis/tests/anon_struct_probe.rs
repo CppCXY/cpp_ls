@@ -11,7 +11,7 @@ fn a_typedef_of_an_anonymous_struct_has_members() {
     let _ = std::fs::create_dir_all(&root);
     let source = "\
 typedef struct { int a; int b; } Object;
-typedef struct Named { int c; } Named;
+typedef struct Named { int c; } Named;\nstruct Plain { int d; } plain;
 int f(void) { Object o; return o.a; }
 ";
     std::fs::write(root.join("a.c"), source).expect("written");
@@ -38,8 +38,8 @@ int f(void) { Object o; return o.a; }
     let view = session.view_of_the_file(&root.join("a.c")).expect("a view");
     for asked in ["Object", "Named"] {
         println!(
-            "{asked}: {} posting(s); members_of = {:?}",
-            session.index().scope_postings(asked),
+            "{asked}: {} posting(s), {} visible; members_of = {:?}",
+            session.index().scope_postings(asked), session.index().declarations_in(asked, PathBuf::from(root.join("a.c")).as_path()).len(),
             match session.members_of(&view, asked) {
                 Known::Yes(list) => format!("{:?}", list.members.iter().map(|m| m.fact.name.clone()).collect::<Vec<_>>()),
                 Known::Unknown(reason) => format!("unknown {reason:?}"),

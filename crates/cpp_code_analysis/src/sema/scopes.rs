@@ -478,7 +478,17 @@ impl ScopeWalker<'_> {
                 }
                 self.items(node, parameters);
             }
-            CppSyntaxKind::TypedefDecl => self.typedef_decl(node, scope),
+            // **A `typedef` declares an alias *and* may declare a class body.** `typedef_decl` binds the alias names
+            // (one per declarator); `specifiers` is what walks a `{ … }` into a scope with its members, and it was
+            // never called here — so `typedef struct Named { int c; } Named;` produced **one fact** (the alias,
+            // `type_of: "struct Named { int c; }"`) and no member at all, for the *tagged* spelling as much as the
+            // anonymous one. Measured on the neovim checkout's fixture with `tests/anon_struct_probe.rs`:
+            // `members_of("Object")` answered an empty list, and "a member list built from no visible declaration"
+            // was **21 539 of 40 000 refusals** across that project — C declares almost every struct this way.
+            CppSyntaxKind::TypedefDecl => {
+                self.typedef_decl(node, scope);
+                self.specifiers(node, scope, scope, false);
+            }
             // **A `concept` declares a type-level name, and it declares it in the scope it is written in.**
             //
             // The node was read by the parser and by nothing else: measured, `grep ConceptDecl` over this crate found
@@ -494,6 +504,21 @@ impl ScopeWalker<'_> {
             CppSyntaxKind::UsingDecl => self.using_decl(node, scope),
             CppSyntaxKind::UsingDirective => self.using_directive(node, scope),
             CppSyntaxKind::Declaration => self.declaration(node, scope),
+            // **A `typedef` is a declaration with its own node kind, and it was the only one never walked.**
+            // `typedef struct Named { int c; } Named;` parses as `TypedefDecl > DeclSpecifierSeq > StructDef > ClassBody`,
+            // so the class body and every member in it were skipped: measured on the neovim checkout the reduced fixture
+            // produced **two facts for two typedefs** (the aliases, and nothing else), `members_of("Object")` answered an
+            // empty list, and "a member list built from no visible declaration" was **21 539 of 40 000 refusals** — C
+            // declares almost every struct this way. `tests/anon_struct_probe.rs` is the five-second check.
+            // **A `typedef` is a declaration with its own node kind, and it was the only one never walked.**
+            // `typedef struct Named { int c; } Named;` parses as `TypedefDecl > DeclSpecifierSeq > StructDef > ClassBody`,
+            // and nothing visited it: measured on the neovim checkout's fixture, two typedefs produced **only the two
+            // alias facts**, `members_of("Object")` answered an empty list, and "a member list built from no visible
+            // declaration" was **21 539 of 40 000 refusals** — C declares almost every struct this way.
+            //
+            // Both halves are needed and they are different questions: `typedef_decl` binds the **alias names** (one per
+            // declarator), and `specifiers` is what walks a **class body** into a scope with its members.
+
             CppSyntaxKind::LabelStat => self.label(node, scope),
             // The constructs that open a scope a statement lives in. `CompoundStat` is deliberately absent:
             // whether it opens one is the caller's decision, and is passed down instead.
