@@ -504,21 +504,6 @@ impl ScopeWalker<'_> {
             CppSyntaxKind::UsingDecl => self.using_decl(node, scope),
             CppSyntaxKind::UsingDirective => self.using_directive(node, scope),
             CppSyntaxKind::Declaration => self.declaration(node, scope),
-            // **A `typedef` is a declaration with its own node kind, and it was the only one never walked.**
-            // `typedef struct Named { int c; } Named;` parses as `TypedefDecl > DeclSpecifierSeq > StructDef > ClassBody`,
-            // so the class body and every member in it were skipped: measured on the neovim checkout the reduced fixture
-            // produced **two facts for two typedefs** (the aliases, and nothing else), `members_of("Object")` answered an
-            // empty list, and "a member list built from no visible declaration" was **21 539 of 40 000 refusals** — C
-            // declares almost every struct this way. `tests/anon_struct_probe.rs` is the five-second check.
-            // **A `typedef` is a declaration with its own node kind, and it was the only one never walked.**
-            // `typedef struct Named { int c; } Named;` parses as `TypedefDecl > DeclSpecifierSeq > StructDef > ClassBody`,
-            // and nothing visited it: measured on the neovim checkout's fixture, two typedefs produced **only the two
-            // alias facts**, `members_of("Object")` answered an empty list, and "a member list built from no visible
-            // declaration" was **21 539 of 40 000 refusals** — C declares almost every struct this way.
-            //
-            // Both halves are needed and they are different questions: `typedef_decl` binds the **alias names** (one per
-            // declarator), and `specifiers` is what walks a **class body** into a scope with its members.
-
             CppSyntaxKind::LabelStat => self.label(node, scope),
             // The constructs that open a scope a statement lives in. `CompoundStat` is deliberately absent:
             // whether it opens one is the caller's decision, and is passed down instead.
@@ -713,13 +698,26 @@ impl ScopeWalker<'_> {
         inner: ScopeId,
         kind: BindingKind,
     ) {
-        let declared = declared_name(node);
+        // **The name has to be the one written *before* the body, and that is the whole of the anonymous case.**
+        //
+        // `declared_name` looks along the declarator-to-name path, and for a class whose only child is the body — the
+        // anonymous `struct { int a; int b; }` — that path descends *into* the body and answers the **first member's**
+        // name. Measured with `tests/anon_struct_probe.rs`: `typedef struct { int a; int b; } Object;` produced a class
+        // scope named **`a`**, holding `["a", "b"]`, so a member query for `Object` had nothing to look at — and on the
+        // neovim checkout "a member list built from no visible declaration" was **21 539 of 40 000 refusals**, the
+        // dominant shape of C. A class's own name is always written before its `{`, so anything at or after the body
+        // starts is a member's name and not the class's.
+        let body = first_child(node, CppSyntaxKind::ClassBody);
+        let body_start = body
+            .as_ref()
+            .map(|body| usize::from(body.text_range().start()));
+        let declared = declared_name(node).filter(|(_, range)| {
+            body_start.is_none_or(|start| range.start_offset < start)
+        });
+
         // **`typedef struct { … } Name;`** — the struct has no tag, and the only name the type has is the typedef's, so
-        // the class body's scope takes that name. Without it the members are filed in a scope with **no name at all**
-        // and a member query for `Name` finds none of them: measured on the neovim checkout, `Object`
-        // (`typedef struct { ObjectType type; union { … } data; } Object;`) answered **0 members**, and "a member list
-        // built from no visible declaration" was **21 539 of 40 000 refusals** across that project — the dominant shape
-        // of C, where a struct is almost always declared anonymously behind a typedef.
+        // the class body's scope takes that name. Measured on the neovim checkout: `Object`
+        // (`typedef struct { ObjectType type; union { … } data; } Object;`) answered **0 members**.
         let declared_text = declared
             .as_ref()
             .map(|(name, _)| name.kind.text())
@@ -730,7 +728,7 @@ impl ScopeWalker<'_> {
         }
 
         // `class Widget;` — the name is declared and there is nothing else to say about it.
-        let Some(body) = first_child(node, CppSyntaxKind::ClassBody) else {
+        let Some(body) = body else {
             return;
         };
 

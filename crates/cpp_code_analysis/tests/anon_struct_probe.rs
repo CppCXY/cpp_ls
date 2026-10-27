@@ -36,6 +36,20 @@ int f(void) { Object o; return o.a; }
     }
 
     let view = session.view_of_the_file(&root.join("a.c")).expect("a view");
+    // **The scope tree's own names**, which is where a class body's `scope` comes from: a body with no name here is a
+    // body whose members cannot be asked about by name.
+    for scope in view.scopes.scopes() {
+        println!(
+            "scope {:?}: {:?} -> {:?}",
+            scope.kind,
+            scope.name.as_deref(),
+            scope
+                .bindings
+                .iter()
+                .map(|binding| binding.name.text())
+                .collect::<Vec<_>>()
+        );
+    }
     for asked in ["Object", "Named"] {
         println!(
             "{asked}: {} posting(s), {} visible; members_of = {:?}",
