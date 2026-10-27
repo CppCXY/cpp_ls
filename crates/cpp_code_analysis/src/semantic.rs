@@ -239,8 +239,11 @@ pub fn classified_names(index: &ProjectIndex, view: &FileView) -> Vec<Name> {
     // The one shape that cannot be cached by spelling is a member access, which is a question about a type — see
     // [`member_kinds`], which answers it and is asked once per access rather than once per spelling.
     let mut held: HashMap<&str, Option<NameKind>> = HashMap::new();
-    // **One walk of the include graph per distinct spelling**, for the macros this file did not write — see step 4b.
-    let mut included_macros: HashMap<String, bool> = HashMap::new();
+    // **The file's macro environment, built at most once** — see step 4b and
+    // [`ProjectIndex::macro_names_in_force`]. It used to be a map from spelling to answer, which meant one walk of the
+    // include graph per spelling; on `codeformat.h` that was 526 ms for 521 tokens.
+    let included_macros: std::cell::OnceCell<std::collections::HashSet<String>> =
+        std::cell::OnceCell::new();
     let mut asked: HashMap<String, Option<NameKind>> = HashMap::new();
     let mut out: Vec<Name> = Vec::new();
 
@@ -381,20 +384,16 @@ pub fn classified_names(index: &ProjectIndex, view: &FileView) -> Vec<Name> {
         //     editor: both were drawn as ordinary identifiers while hovering them showed the `#define` perfectly, which
         //     is the analysis saying it knows what the name is and the highlighter never asking.
         //
-        //     Asked **after** the two resolution steps rather than before them, because the answer costs one walk of the
-        //     include graph per name and the common case in a header is a name the index can answer — while a macro that
+        //     Asked **after** the two resolution steps rather than before them, because the answer costs a walk of the
+        //     include graph and the common case in a header is a name the index can answer — while a macro that
         //     *shadows* a resolvable name is rare, and keeps the colour of the name it shadows.
-        let is_a_macro = *included_macros.entry(text.to_string()).or_insert_with(|| {
-            match index.macro_environment(text, &view.path).at(at) {
-                Known::Yes(_) => true,
-                // **A `#define` inside a condition is still a macro to the reader.** `<gtest/gtest.h>` writes
-                // `#define TEST(a, b) …` behind `#if !GTEST_DONT_DEFINE_TEST`, and what is uncertain is whether it
-                // *exists* here — not what the name means. Classified, with the uncertainty left where it belongs (the
-                // hover says it in words).
-                Known::Unknown(crate::UnknownReason::ConditionalCompilation) => true,
-                _ => false,
-            }
-        });
+        //
+        //     **One walk for the whole file**, not one per spelling. Measured on this repository's own
+        //     `codeformat.h`: 521 tokens took **526 ms**, because a header mentions a few hundred names that nothing
+        //     in it declares and each of those walked the include graph. The environment is a property of the *file*,
+        //     and [`ProjectIndex::macro_names_in_force`] is where the single walk lives.
+        let included = included_macros.get_or_init(|| index.macro_names_in_force(&view.path));
+        let is_a_macro = included.contains(&*text);
         if is_a_macro {
             out.push(Name {
                 range,

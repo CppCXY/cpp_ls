@@ -11150,6 +11150,38 @@ impl ProjectIndex {
         }
     }
 
+    /// **Every macro name this file's environment defines**, from **one** walk of the include graph.
+    ///
+    /// # The measurement this exists for
+    ///
+    /// The colouring pass asks "is this spelling a macro" once per identifier it cannot otherwise classify, and it
+    /// used to ask [`ProjectIndex::macro_environment`] — one whole walk of the graph — **per distinct spelling**.
+    /// Measured on this repository's own `codeformat.h`: `semanticTokens` answered **521 tokens in 526 ms**, and the
+    /// walk was essentially all of it (a header mentions a few hundred names nothing in the file declares). One walk
+    /// that collects the names answers every one of them from a hash lookup.
+    ///
+    /// The precision is the same as the per-name form for the case that reaches here: a macro an `#include` brought in
+    /// is in force for the whole file, and a `#define` the file writes itself is answered by
+    /// [`crate::semantic`]'s own step 2, which is already whole-file. An `#undef` of an *included* macro is the one
+    /// shape this cannot express, and it is not expressible in step 2 either.
+    pub fn macro_names_in_force(&self, visible_from: &Path) -> HashSet<String> {
+        let mut names = HashSet::new();
+        let certain = self.certainly_in_the_translation_unit(visible_from);
+
+        self.macro_candidates(
+            visible_from,
+            &mut Vec::new(),
+            false,
+            &mut HashSet::new(),
+            &certain,
+            &mut Collecting::Names(&mut names),
+            &mut self.macros.clone(),
+            None,
+        );
+
+        names
+    }
+
     /// **The macros in force at one point**, as a walk from that file computes them.
     ///
     /// The compilation's own environment (what the compiler predefines and the command line says) plus every fact
@@ -11600,6 +11632,10 @@ impl ProjectIndex {
 /// candidates, which is what `Nothing` says, rather than a name no macro has.
 enum Collecting<'a> {
     Name(&'a str, &'a mut Vec<MacroCandidate>),
+    /// **Every macro name the walk applies**, for a caller that has to ask about many of them — the colouring pass
+    /// asks "is this spelling a macro" once per identifier, and asking the graph once per spelling was 526 ms on a
+    /// real header. See [`Collecting::fact`].
+    Names(&'a mut HashSet<String>),
     /// **Which files this root can see, and how** — filled in as the walk crosses each `#include`.
     ///
     /// This variant is the whole of why the visibility walk is affordable. Asking the same question per *edge* —
@@ -11652,7 +11688,8 @@ impl Seen {
 }
 
 impl Collecting<'_> {
-    /// **One** fact, if the caller is collecting facts about that name.
+    /// **One** fact, if the caller is collecting facts about that name — or **every** name, when it is collecting
+    /// the environment ([`Collecting::Names`]).
     fn fact(
         &mut self,
         summary: &FileSummary,
@@ -11661,6 +11698,16 @@ impl Collecting<'_> {
         path_conditional: bool,
         region: FactReach,
     ) {
+        // **The name-collecting arm, and the reason it exists**: the colouring pass used to ask
+        // `macro_environment(name, file)` once per *spelling* not declared in the file, and each of those is a whole
+        // walk of the include graph. Measured on this project's `codeformat.h` — **526 ms** for 521 tokens, because a
+        // header mentions a few hundred names and each one paid the walk. Collecting every name in one walk answers
+        // all of them from one pass, and the question "is this spelling a macro here" is the same question.
+        if let Collecting::Names(out) = self {
+            out.insert(fact.name.clone());
+            return;
+        }
+
         let Collecting::Name(name, out) = self else {
             return;
         };
@@ -11685,6 +11732,7 @@ impl Collecting<'_> {
     fn reborrow(&mut self) -> Collecting<'_> {
         match self {
             Collecting::Name(name, out) => Collecting::Name(name, out),
+            Collecting::Names(out) => Collecting::Names(out),
             Collecting::Visibility(seen) => Collecting::Visibility(seen),
             Collecting::Nothing => Collecting::Nothing,
         }
