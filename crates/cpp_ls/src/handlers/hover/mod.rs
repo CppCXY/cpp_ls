@@ -495,11 +495,31 @@ fn overloads_markdown(
             declaration.fact.name_range.start_offset,
         ))
     });
-    let mut lines = String::new();
-    for declaration in &found.found {
-        let is_the_one = chosen.as_ref().is_some_and(|(file, at)| {
+    // **How many of them the popup prints.** A name with a dozen overloads — `std::format` has one per character
+    // type and per allocator — drew a page: the reader asked what the name is, and the answer filled the screen and
+    // pushed the sentence that explains it off the bottom (reported from an editor as "hover 结果很多"). The card
+    // prints the declaration the call means (when the cursor is on a call) and the first few others; the count and
+    // where they live are still said, and `go to definition` lists them all.
+    const MAX_SHOWN: usize = 6;
+    let chosen_index = chosen.as_ref().and_then(|(file, at)| {
+        found.found.iter().position(|declaration| {
             *file == declaration.file && *at == declaration.fact.name_range.start_offset
-        });
+        })
+    });
+    let mut shown: Vec<usize> = (0..found.found.len()).collect();
+    if let Some(chosen_at) = chosen_index
+        && chosen_at < shown.len()
+    {
+        let the_one = shown.remove(chosen_at);
+        shown.insert(0, the_one);
+    }
+    let hidden = shown.len().saturating_sub(MAX_SHOWN);
+    shown.truncate(MAX_SHOWN);
+
+    let mut lines = String::new();
+    for index in &shown {
+        let declaration = &found.found[*index];
+        let is_the_one = chosen_index == Some(*index);
         // **A declaration the file's own text splits across a directive has no written type** — see
         // [`DeclFact::split_by_a_directive`]. The handler holds the session, so it asks the reading where the
         // directive is *resolved*: `bits/stl_bvector.h` writes `emplace_back` returning `reference` under
@@ -554,7 +574,10 @@ fn overloads_markdown(
     out.push_str(&format!(
         "\n`{qualified}` — {} declarations. {}\n",
         found.found.len(),
-        if chosen.is_some() {
+        if hidden > 0 {
+            "The ones printed here are the call's own (when the cursor is on one) and the first of the rest — the \
+             count and the files below are complete, and `go to definition` lists them all."
+        } else if chosen.is_some() {
             "The `→` one is what a call here means: the arguments select it, and the others are what a different \
              argument list would reach."
         } else {

@@ -411,6 +411,39 @@ CommandService.cpp 的编译命令：
 后果是一条链，不是一句话：
 
 ```text
+---
+
+## A5. `auto x = std::format(…)` 推不出类型（复现待补）
+
+**现象（编辑器截图，2026-10-27）**：`auto enenn = std::format(FULL_NAME_FORMAT, myName.getFullName(0));`
+的 hover 只有"`enenn` — a variable, declared in a function body"，**没有类型**，因此 inlay hint 也没有。
+同一张图里对 `std::format` 的 hover 一次列出十来个重载（这条已修：hover 现在最多打印 6 条 + 计数）。
+
+**已经验证过的部分**（本仓库夹具，`std::format` 一个/两个重载、变参、返回 `string`）：
+
+```text
+auto s = std::format("%d", n);      →  s 的类型是 string      ✓
+```
+
+所以推不出来是**那个项目自己的声明**里的东西，最可能是这几种之一，按可能性排序：
+
+1. `<format>` 没被索引到（没有 include，或 include 路径不对）——`std::format` 查不到，`type_at` 直接 Unknown；
+2. 重载集里的**第一个**声明返回的不是 `string`（MSVC 的 `format` 有一族 `format_string<…>` 重载，
+   以及 locale 版本），`definition_at` 取第一个的 `returns`；
+3. 第一个实参是宏（`FULL_NAME_FORMAT`），展开后不是字符串字面量，`format_string<_Types…>` 的推导整条失败。
+
+**下一步要抓的东西**（有这三样就能直接定位）：
+
+```text
+① 那个 main.cpp 的绝对路径（哪个 workspace / compile_commands.json）
+② 文件里有没有 #include <format>，以及 .cpp_ls 的 include 路径配置从哪来
+③ 在那边跑一次：
+   CPPLS_PROJECT_ROOT=<workspace> CPPLS_FILE=<main.cpp> CPPLS_NEEDLE='enenn' CPPLS_TYPE=1 CPPLS_TRACE_INFERENCE=1
+   cargo test --release -p cpp_code_analysis --test inference_probe -- --ignored --nocapture
+```
+
+`CPPLS_AT=last` 可把光标放到匹配文本的最后一个字符上（问"这个表达式"而不是"这个名字"）。
+
 # 没有 -I
 #include "LanguageServer.h"        ← 不在 CommandService.cpp 自己的目录里（它在 src/Service/，头在 src/）
   → include 边不存在            ← graph.rs 里没有这条边

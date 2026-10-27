@@ -1065,6 +1065,19 @@ fn an_unscoped_enumerations_member_is_visible_in_the_enclosing_scope() {
         "both the declaration and the use are coloured: {classified:?}"
     );
 
+    // **The declaration answers too.** An enumerator's name is a plain token rather than a `NameExpr`, so
+    // `definitions` at the *definition* used to answer `Unknown(UnparsableName)` — the second half of the editor
+    // report ("在匿名枚举的定义本身没有 hover 结果") — while hovering the use worked.
+    let declaration = text.find("AnotherClass }").expect("the fixture");
+    let found = session.definitions(
+        &view,
+        crate::file::coordinates::ReadingOffset::new(declaration),
+    );
+    let Known::Yes(found) = found else {
+        panic!("the declaration of `AnotherClass` must answer: {found:?}");
+    };
+    assert_eq!(found.found[0].fact.name, "AnotherClass");
+
     // **`enum class` still hides its enumerators**: `Scoped::Hidden` is the only way to name it.
     let hidden = text.find("= Hidden").expect("the fixture") + 2;
     let found = session.definitions(&view, crate::file::coordinates::ReadingOffset::new(hidden));

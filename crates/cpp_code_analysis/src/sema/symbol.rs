@@ -1093,6 +1093,24 @@ impl ScopeTree {
     ///
     /// The file scope is deliberately not "local": a declaration written directly at file scope is visible to every
     /// file that includes this one, which is the whole distinction.
+    /// **The binding a name written at `offset` introduces** — the cursor is on a declaration's own name.
+    ///
+    /// Ordinary lookup answers "which declaration does this *use* refer to"; a name at its own declaration refers to
+    /// itself, and no scope walk was ever asked that. It is the first question every cursor feature asks, and it is
+    /// why hovering an enumerator's **definition** answered nothing while hovering its use answered fine — measured on
+    /// `enum { MyClass = 123, AnotherClass };`, where `definitions` at `AnotherClass`'s own offset answered
+    /// `Unknown(UnparsableName)`: an enumerator's name is a plain token rather than a `NameExpr`, so the reader that
+    /// takes a name's spelling had nothing to read.
+    ///
+    /// First in creation order, which is declaration order for the scopes a file writes: two declarations' name ranges
+    /// do not overlap, so the order only decides a malformed file.
+    pub fn binding_declared_at(&self, offset: usize) -> Option<&Binding> {
+        self.scopes
+            .iter()
+            .flat_map(|scope| scope.bindings.iter())
+            .find(|binding| binding.name_range.contain(offset))
+    }
+
     pub fn declares_a_local(&self, scope: ScopeId) -> bool {
         self.scope_chain(scope).iter().any(|id| {
             matches!(

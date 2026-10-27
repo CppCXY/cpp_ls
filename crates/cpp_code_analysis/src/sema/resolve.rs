@@ -1026,6 +1026,17 @@ pub fn definitions_at(
     offset: usize,
 ) -> Known<Vec<Binding>> {
     let Some((written, _)) = qualified_name_at(root, offset) else {
+        // **An enumerator's own declaration answers with itself, and nothing else does.** Its name is a plain token in
+        // an `EnumeratorDecl` rather than a `NameExpr`, so the reader that takes a name's spelling has nothing to read
+        // — measured on `enum { MyClass = 123, AnotherClass };`, where hover on the *definition* showed nothing while
+        // the use resolved fine. The restriction is the point: an out-of-line definition, a `using namespace`
+        // directive and an `operator+` are also declarations the cursor can sit on, and each of those has an answer
+        // that is **not** its own binding — see the three tests that pin them below.
+        if let Some(binding) = scopes.binding_declared_at(offset)
+            && binding.kind == BindingKind::Enumerator
+        {
+            return Known::Yes(vec![binding.clone()]);
+        }
         return Known::Unknown(UnknownReason::UnparsableName);
     };
 
