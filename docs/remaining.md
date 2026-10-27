@@ -984,3 +984,49 @@ is_locally_ready: true, is_closure_ready: false, pending: 0
 它开始跑，并且是绿的。
 
 
+
+---
+
+## I. 诊断的抽样测量（neovim 的 10 个源文件）—— 2026-10-28
+
+`docs/remaining.md` §H 修的是"答得出/答得对"，这一条量的是**红波浪线**：编辑器里一个文件会冒出多少条、都是什么。
+
+```text
+$env:CPPLS_REAL_PROJECT = "E:\neovim"
+$env:CPPLS_DIAGNOSTIC_FILES = "10"
+cargo test --release -p cpp_code_analysis --test diagnostics_rate -- --ignored --nocapture
+```
+
+每个文件**单独一个 session、按 server 的方式 `did_open` 后只索引它自己**（整工程先索引再问一个**关闭**的文件
+是慢路径：要给它整个闭包做渲染，Windows SDK 上实测单文件十分钟以上；这样是 14 s/文件）。
+
+```text
+10 个文件，19 条发现，4 个文件至少一条
+    9  syntax-error
+    5  braces-around-statements
+    2  include-not-found
+    1  else-after-return
+    1  implicit-bool-conversion
+    1  missing-return
+```
+
+三条读数：
+
+1. **9 条 `syntax-error` 里，`bit.c` 的两条是"没有头文件"的连锁反应**。`bit.c` `#include "lua.h"`，而 neovim
+   的 Lua 是构建时下载的（仓库里没有 `lua.h`），于是 `lua_Number` 是未知名字：`(lua_Number)1437217655L` 被读成
+   "括号表达式 + 字面量"，报 `expected primary expression`。这**和编译器一致**（真实编译同样缺 `lua_Number`），
+   所以它不是解析器的缺陷；缺陷在**呈现**：同一个文件已经有一条 `include-not-found` 说清楚了，再叠一条语法错误
+   只会让读者以为是自己的代码坏了。
+   **下一步的设计问题**（不是随手改）：一个文件有未解析的 `#include` 时，语法错误要不要压低/折叠？现有的先例是
+   片段头文件（`#error` + 首 token 是花括号）那条规则：它就是因为"895 条连锁错误"才写的。
+2. **语法错误的 range 映射可疑**：`bit.c` 报的两条映射回文件是 `(UBits)` 和 `BAD_SAR`（各 7 字节），而真正的
+   错误在 `(lua_Number)` 那一行；把存储的渲染文本（2884 字节）单独解析是 **0 个错误**。所以要么映射偏了，要么
+   诊断来自另一份渲染。**测量方式**：`tests/cook_probe.rs` 的形状（已删）——同一文件三次 `diagnostics`＋
+   `rendering_of` 长度，三遍完全一致，说明不是缓存/时序。
+3. **风格规则默认是开的**：5 条 `braces-around-statements` 全是 neovim 自己的写法（`if (x) return;`），1 条
+   `else-after-return`、1 条 `implicit-bool-conversion` 同理。这不是 bug，是**默认值**问题：一个 `.c` 项目
+   打开就满屏"建议加花括号"，用户会把整个诊断关掉。可以考虑 C 文件默认只开**语义**类（syntax/undefined-field/
+   argument-count），风格类在 `.cppls.toml` 里显式开。
+
+**下一步**：① 未解析 include 的连锁抑制（设计 + 夹具）；② 映射偏了的那条先量清楚（拿一份渲染文本和它的
+`IndexedRendering::diagnostics` 一一对照）；③ 风格规则在 C 里的默认值。
