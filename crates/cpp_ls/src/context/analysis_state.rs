@@ -243,6 +243,24 @@ impl AnalysisState {
         // hypothesis is wrong — and the condition costs a `view()` call on the hot path the shortcut exists for.
         // Withdrawn rather than kept as a plausible-looking change that nothing measured.
 
+        // **The shortcut those paragraphs describe — and which was not here to take.**
+        //
+        // Everything above is the argument for not asking for the write lock, and the function then asked for it
+        // unconditionally: `update_session` is a *write*, and the pump holds the session for reading for a slice (50 ms
+        // is the budget line, and the log warns when a request holds the lock that long). Measured on
+        // `EmmyLuaCodeStyle` with `CPPLS_TRACE_CODE_ACTION=1`: `codeAction` took **56 ms, of which `prepare` was
+        // 54 ms** — and the fix provider itself was **14 µs**. The handler was not slow; it was queueing.
+        //
+        // The condition is the one the doc comments argue for: **a rendering already exists**, so `load` has nothing to
+        // read and `want_cooked_reading` has nothing to request. `view` is a read, and a read does not wait for the
+        // pump's parse.
+        if self
+            .with_snapshot(|session| session.view(path).is_some())
+            .unwrap_or(false)
+        {
+            return true;
+        }
+
         let path = path.to_path_buf();
         let queued = self
             .update_session("prepare a file a request named", move |session| {

@@ -38,24 +38,41 @@ pub async fn on_code_action(
 ) -> RequestOutcome<Vec<CodeActionOrCommand>> {
     let uri = params.text_document.uri;
     let position = params.range.start;
+    // **Where the milliseconds go**, when asked. This request is sent on every caret move and `docs/lsp-status.md`
+    // measured **57 ms for zero actions**, so the first question is which step owns it: waiting for the analysis,
+    // parsing the file, building the rendering, or the fix provider's own queries.
+    let trace = std::env::var_os("CPPLS_TRACE_CODE_ACTION").is_some();
+    let started = std::time::Instant::now();
 
     if let Some(path) = uri_to_file_path(&uri) {
         context.analysis().prepare(&path).await;
     }
+    let prepared = started.elapsed();
 
-    snapshot_query(context.analysis(), cancel_token, move |session| {
+    let answer = snapshot_query(context.analysis(), cancel_token, move |session| {
         let path = uri_to_file_path(&uri)?;
         // **The cursor is read from the file's own text, then mapped into the rendering** — see hover for the
         // measurement: a rendering has the directives resolved and its lines merged, so converting a client's
         // position *through* it names a different place (docs/lsp-status.md, P1 ③).
         let written = session.view_of_the_file(&path)?;
+        let after_the_file = std::time::Instant::now();
         let in_the_file = crate::util::file_offset_at_position(&written, position)?;
         let view = session.view(&path)?;
+        let after_the_rendering = std::time::Instant::now();
         let offset = view.reading_offset_of(
             cpp_code_analysis::file::coordinates::FileOffset::new(in_the_file.get()),
         )?;
 
         let fixes = fixes_of(session, &view, offset);
+        if trace {
+            eprintln!(
+                "[codeAction] file {:?}, rendering {:?}, fixes {:?}, {} action(s)",
+                after_the_file - started,
+                after_the_rendering - after_the_file,
+                after_the_rendering.elapsed(),
+                fixes.len()
+            );
+        }
         Some(
             fixes
                 .into_iter()
@@ -63,7 +80,15 @@ pub async fn on_code_action(
                 .collect(),
         )
     })
-    .await
+    .await;
+    if trace {
+        eprintln!(
+            "[codeAction] prepare {:?}, total {:?}",
+            prepared,
+            started.elapsed()
+        );
+    }
+    answer
 }
 
 /// What a fix provider is given: the cursor, and the few questions every provider asks about it.
