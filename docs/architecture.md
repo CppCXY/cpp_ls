@@ -1671,3 +1671,39 @@ cpp_parser         5 条 CUDA 语法测试（tests/cuda.rs）：限定符、laun
                    以及"普通 C++ 不接受这两样"
 cpp_code_analysis  712 lib + 45 targets；Toolchain 的 cuda 判定与 [compile.cuda] 各有测试
 ```
+---
+
+# 12. 进度条必须自己收尾（以及 CUDA 工程为什么能看见它）
+
+**现象**：打开一个 CUDA 工程后，编辑器底部一直是 `Load workspace: Indexing …`，永远不结束。
+
+**根因**（`git log -S finish_progress_task` 指到 `e22fa00`）：那一轮删掉"后台读整个项目"时，连带删掉了
+`the_bar_owes_an_end` 这个标志，**以及唯一那次 `finish_progress_task` 调用**。于是进度条只有 begin 和 report，
+没有 end。服务端自己的日志明明写着
+
+```text
+INFO cpp_ls::handlers::initialized] the workspace is indexed — the longest an update held the analysis was 97 ms
+INFO cpp_ls::handlers::initialized] wrote 3 shared contribution(s) for the next run
+```
+
+而线上（客户端）从来没有收到 `end`。三个文件的工程也一样，所以这跟 CUDA 没关系——只是 CUDA 工程让一个早已存在的
+缺陷变得显眼：没有任何文件被自动扫描时，用户第一次会去盯着那个进度条。
+
+**修法**：`first_pass` 收尾处（队列排空、日志说 `the workspace is indexed` 的那一刻）发 `end`。
+"Load workspace" 这个承诺就是"索引能回答关于项目文件的问题"，而按需读程序（每个打开的文件一次）是后台细化，
+不该占着这个进度条——这也正是 `e22fa00` 删掉整项目读取之后仍然成立的说法。
+
+**回归测试**：`crates/cpp_ls/tests/progress.rs::a_workspace_load_ends_its_progress_bar`——真的起服务进程、说
+`initialize`/`initialized`/`didOpen`，然后断言线上的 `$/progress` 里 **begin 与 end 一样多**。夹具就是被报告的那个
+CUDA 工程（三个文件），因为它同时覆盖了两件事：`.cu` 只有在 CUDA 工程里才算源文件（`SOURCE_EXTENSIONS` 之外，
+`[compile.cuda]` 或 nvcc 工具链时追加 `cu`/`cuh`），以及 `k<<<g, b>>>(args)` 只有 CUDA 开关打开时才被读成 launch。
+
+```text
+cargo test --release -p cpp_ls --test progress   →  1 passed，0.14 s
+cpp_ls release 14 个目标全绿（此前 13，新增这一个）
+```
+
+**客户端那一半**（`VSCode-Cppls`，commit `5b18468`）：`contributes.languages` 里只有 `cpp`/`c`，`.cu`/`.cuh`
+没有语言 id，客户端根本不会 claim 这些文档。加了 `cuda` 语言、`DOCUMENT_SELECTOR` 的两个 scheme、
+以及 `semanticTokenScopes` 里与 `cpp` 相同的映射（CUDA 文件就是 C++ 加一层，主题应该照常上色）。
+`npm run check-types`、`lint`、`test:unit`（29 条）全绿。

@@ -1168,12 +1168,21 @@ impl<F: FileProvider + Clone> Session<F> {
             .as_ref()
             .map(|database| &database.commands);
         let documents = files.overlay.clone();
+        // **A CUDA project's scan takes `.cu` and `.cuh`**, and a project that is not CUDA does not: the engine's own
+        // list is what a C++ project is made of, and a `.cu` in one is either a vendored file or an accident. With
+        // `[compile.cuda]` (or an `nvcc` toolchain) it is the project's own source, and asking every CUDA project to
+        // write `workspace.source_extensions = ["cu", "cuh"]` in its configuration file would be asking it to restate
+        // what the toolchain already said.
+        let mut extra_extensions = project_config.config.workspace.source_extensions.clone();
+        if config.cuda() {
+            extra_extensions.extend(["cu".to_string(), "cuh".to_string()]);
+        }
         let project = project_files(
             &files,
             &filter,
             &root,
             database,
-            &project_config.config.workspace.source_extensions,
+            &extra_extensions,
             project_config
                 .config
                 .index

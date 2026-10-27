@@ -692,8 +692,20 @@ async fn index_in_background(context: ServerContextSnapshot) {
             // waiting for it are published — after that the loop waits for the next edit.
             if first_pass {
                 first_pass = false;
-                // **Not finished here** — see the note above the program read: the bar's end is owed until nothing is
-                // left to read as a program.
+                // **The bar ends here, and that is the whole of what "Load workspace" promises.** It used to be owed
+                // until every translation unit had been read as a program; that pass is gone (`e22fa00` deleted the
+                // background read of the whole project, because clangd does not pay that price and neither should we),
+                // and the flag that carried the promise went with it — **and so did this call**, which left the bar on
+                // screen for ever. Reported from an editor: "cuda工程一直在加载" — a three-file project, `the workspace
+                // is indexed` in the log, and no `end` on the wire.
+                //
+                // The queue has drained and the index can answer questions about the project's files. A program is read
+                // on demand from here (the pump's own `read_a_program`, one per open file), and a bar for that would be
+                // a bar for work the reader did not ask for.
+                context.status_bar().finish_progress_task(
+                    ProgressTask::LoadWorkspace,
+                    Some("the workspace is indexed".to_string()),
+                );
                 // **The one number that bounds how long a request can have been made to wait.** A query and an update
                 // take the same lock, so this is the worst case *by construction*: if a completion felt slow and this
                 // says 12 ms, the wait was inside that completion's own work rather than in the queue behind the
