@@ -16,42 +16,54 @@ cargo test --release -p cpp_ls --test lsp_status -- --ignored --nocapture
 
 | 功能 | n | 时间 | 说明 |
 |---|---|---|---|
-| `hover` | 2 | 15 ms | `_diagnosticStyle = LuaDiagnosticStyle();` → markdown 卡片 |
+| `hover` | 2 | 9 ms | `_diagnosticStyle = LuaDiagnosticStyle();` → markdown 卡片 |
 | `hover`（类型名） | — | 8 ms | ``` ```cpp class LuaDiagnosticStyle ``` ``` |
-| `hover`（`.cpp` 里的使用） | 2 | 15 ms | 同上，跨文件 |
+| `hover`（`.cpp` 里的使用） | 2 | 9 ms | 同上，跨文件 |
 | `hover`（`.` 之后的成员） | 2 | 8 ms | 成员声明 |
-| `hover`（成员的成员） | 2 | 8 ms | `bool code_style_check` |
-| `typeDefinition`（`auto`） | 3 | 11 ms | `basic_string.h:94` |
+| `hover`（成员的成员） | 2 | 2 ms | `bool code_style_check` |
+| `typeDefinition`（`auto`） | 3 | 10 ms | `basic_string.h:94` |
 | `typeDefinition` | 1 | 2 ms | `LuaDiagnosticStyle.h:10` |
-| `definition`（成员） | 1 | 8 ms | `codeformat.h:56` |
-| `definition`（头文件） | 1 | 7 ms | `codeformat.h:56` |
-| `implementation` | 1 | 12 ms | `CodeFormat.cpp:31` |
+| `definition`（成员） | 1 | 2 ms | `codeformat.h:56` |
+| `definition`（头文件） | 1 | 0 ms | `codeformat.h:56` |
+| `implementation` | 1 | 4 ms | `CodeFormat.cpp:31` |
 | `references` | 6 | 2 ms | `codeformat.cpp:32` 起 |
-| `documentHighlight` | 6 | 10 ms | |
+| `documentHighlight` | 6 | 3 ms | |
 | `prepareRename` | 1 | 8 ms | 占位符 `_diagnosticStyle` |
-| `rename` | 2 | 16 ms | 头 1 处 + 源 6 处 |
+| `rename` | 2 | 9 ms | 头 1 处 + 源 6 处 |
 | `documentSymbol` | 14 | 2 ms | `GetInstance`、`CodeFormat`、`UpdateCodeStyle` |
 | `workspaceSymbol` | 512 | 8 ms | |
-| `foldingRange` | 40 | 7 ms | |
+| `foldingRange` | 40 | 2 ms | |
 | `selectionRange` | 5 | 1 ms | 5 层嵌套 |
-| `semanticTokens` | 521 | **100 ms** | 修前 526 ms，见下 |
-| `inlayHint` | 9 | 67 ms | |
-| `documentLink` | 5 | 9 ms | |
-| `diagnostic` | 0 | 74 ms | 该文件本来是干净的 |
-| `completion`（成员） | 2 | 5 ms | `Editorconfig`、`Workspace` |
+| `semanticTokens` | 521 | **90 ms** | 修前 526 ms，见下 |
+| `inlayHint` | 9 | 58 ms | |
+| `documentLink` | 5 | 2 ms | |
+| `diagnostic` | 0 | 66 ms | 该文件本来是干净的 |
+| `completion`（成员） | 2 | 3 ms | `Editorconfig`、`Workspace` |
 | `signatureHelp` | 1 | 0 ms | `SetupStyle(LuaStyle &style, const FormattingOptions &options)` |
-| `codeAction` | 0 | 57 ms | 光标处没有可用的修复 |
+| `codeAction` | 0 | **2 ms** | 修前 56 ms，见下 |
 | `formatting` | 0 | 2 ms | 文件已经是格式化的 |
 
-## 这次的三个发现
+## 这次的两个发现（都修了）
 
-1. **`semanticTokens` 526 ms → 100 ms**（同一份文本、同样 521 个 token）。原因不是编码，是**着色这一遍对每个拼写都
+1. **`semanticTokens` 526 ms → 90 ms**（同一份文本、同样 521 个 token）。原因不是编码，是**着色这一遍对每个拼写都
    走了一次 include 图**（`macro_environment(name, file)`）。现在整份文件走一次
    （`ProjectIndex::macro_names_in_force`），每个 token 只做一次哈希查找。提交 `d086046`。
-2. **`codeAction` 57 ms 返回 0 个动作**，是这张表里唯一"代价和收益不匹配"的行：它每次光标移动都被请求。下一步要么
-   让"没有可修复的东西"更快地回答，要么把 `include_fix` 之外的 provider 明确列出来。
-3. **`diagnostic` 74 ms / 0 条**（同一行别的时候是 4 ms、110 ms）—— 冷热差三个数量级，说明它主要花在把索引和渲染
-   热起来，而不是在检查；`latency.rs` 的稳态预算才是它的指标。
+2. **`codeAction` 56 ms → 2 ms**，而且**这一处修好让整张表都快了一截**（`hover` 15→9、`documentHighlight` 10→3、
+   `definition` 7→0、`completion` 5→3）。原因不是 handler 慢，是它**在排队**：`prepare` 无条件要**写锁**，而 pump
+   分段持有读锁。加了一条只读快路（"这文件已经有渲染了 → `load` 没东西可读、`want_cooked_reading` 没东西可排"），
+   见提交 `e3ffe03`。测量来自新加的探针 `CPPLS_TRACE_CODE_ACTION=1`：
+
+   ```text
+   [codeAction] file 55.196ms, rendering 879.5µs, fixes 13.9µs, 0 action(s)
+   [codeAction] prepare 54.096ms, total 56.3657ms
+   ```
+
+## 还剩的行
+
+* **`diagnostic` 66 ms / 0 条** —— 同一行别的时候是 4 ms、110 ms，说明它主要在把索引和渲染热起来而不是在检查；
+  稳态预算的指标在 `latency.rs`。
+* **`inlayHint` 58 ms / 9 条** —— 每个 hint 要问被调函数的声明（跨文件），是真实工作；下一步可以只看它是否重复
+  解析同一个 callee。
 
 ## 怎么重跑、怎么判读
 
