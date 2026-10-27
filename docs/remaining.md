@@ -432,7 +432,39 @@ auto s = std::format("%d", n);      →  s 的类型是 string      ✓
    以及 locale 版本），`definition_at` 取第一个的 `returns`；
 3. 第一个实参是宏（`FULL_NAME_FORMAT`），展开后不是字符串字面量，`format_string<_Types…>` 的推导整条失败。
 
-**下一步要抓的东西**（有这三样就能直接定位）：
+**2026-10-27 现场实测（`C:\Users\zc\Desktop\test_cpp\main.cpp`）—— 原因找到了，但它不是"漏读"：
+
+```text
+type_at("enenn")  →  Unknown(Ambiguous("std::format"))        ← 修前是 Unknown(UnknownType("std::format"))
+std::format 在这个项目里能看见【4 个】真重载：
+  format(const format_string<_Types...>, _Types&&...)      → string
+  format(const wformat_string<_Types...>, _Types&&...)     → wstring
+  format(const locale&, const format_string<…>, _Types&&…) → string
+  format(const locale&, const wformat_string<…>, _Types&&…)→ wstring
+另有 8 个同名的【类成员】被 files_declaring 带进来（std::formatter、std::_Formatter_base 等）
+```
+
+结论：**拒绝是正确的**——C++ 要靠"格式串是窄还是宽"选重载，而 hover 用的那个选择器
+`Session::the_declaration_a_call_means` 在这个调用上答的也是 `None`（实测）。所以这不是索引缺东西，
+而是**引擎还没有按实参选重载的能力**。
+
+本轮做的（让它不再"什么都不说"）：
+
+```text
+① type_at 现在保留 Ambiguous 这个理由（此前被压平成 UnknownType，读起来像"名字不存在"）
+   测试：两个头文件各声明 int f() / double f()，`auto x = f();` → Unknown(Ambiguous("f"))
+② hover 的变量卡片在 auto 推不出类型时打印这句话（用分析自己的 describe()，不是第二份意见）：
+   "The type is deduced from the initializer, and that could not be typed: `std::format` is declared more than once
+    in what this file can see, and nothing here chooses between the declarations."
+```
+
+**要真正给出类型，下一步是"按实参选重载"**：现有材料已经够（实参类型、每个候选的 parameter_list、
+template_parameters），缺的是把 `Session::the_declaration_a_call_means` 的那套排序搬进引擎的
+`type_of_a_call`；对 `format` 这一族，判据是**第一个实参的字符宽度**（`char` vs `wchar_t`）对上
+`format_string` / `wformat_string`，而这条判据需要"这个类能不能由这个实参构造"——也就是
+`CppMember` 的构造函数参数表（索引里已经有了：`std::formatter` 那 8 条就是从这里读出来的）。
+
+**下一步要抓的东西（如果还要再验证别的现场）**：
 
 ```text
 ① 那个 main.cpp 的绝对路径（哪个 workspace / compile_commands.json）

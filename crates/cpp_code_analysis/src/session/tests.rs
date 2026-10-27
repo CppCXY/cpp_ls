@@ -1002,6 +1002,39 @@ fn a_calls_iterator_answer_reaches_the_element_through_a_trait_alias() {
         "the call's iterator, its `pointer` alias, and the trait alias in it"
     );
 }
+/// **A name with several declarations and no type they agree on says *that*, rather than "unknown type".**
+///
+/// Reported from an editor: `auto enenn = std::format(FULL_NAME_FORMAT, myName.getFullName(0));` showed no type at
+/// all — no type in the card, no inlay hint — and nothing said why. Measured on the real project, `std::format` has
+/// four overloads visible (narrow and wide, with and without a locale) and the call selects none of them, so refusing
+/// is right; what was wrong is that the refusal said `UnknownType("std::format")`, which reads like a missing name.
+/// `UnknownReason::Ambiguous` has a sentence a reader can act on, and the hover card now prints it.
+#[test]
+fn a_name_whose_declarations_disagree_answers_with_the_disagreement() {
+    // **Two headers, one name, two return types** — the shape `std::format` has: the *index* answers it, so the
+    // scope tree's own "first declaration" rule is not what decides. (A single file's two declarations are resolved by
+    // `definition_at` to the first, which is the ordinary rule for one scope and is pinned by its own tests.)
+    let header = "int f();\n";
+    let other = "double f();\n";
+    let text = "#include \"a.h\"\n#include \"b.h\"\nvoid g() {\n    auto x = f();\n}\n";
+    let files = MemoryFiles::new()
+        .with_file("/p/a.h", header)
+        .with_file("/p/b.h", other)
+        .with_file("/p/a.cpp", text);
+    let fixture = Memory::new("a-disagreeing-name", &files);
+    let mut session = fixture.session();
+    session.did_open("/p/a.cpp", text);
+    session.index_everything();
+    let path = std::path::PathBuf::from("/p/a.cpp");
+    let view = session.view_of_the_file(&path).expect("a view");
+
+    let at = text.find("auto x").expect("the fixture") + "auto ".len();
+    let typed = session.type_at(&view, crate::file::coordinates::ReadingOffset::new(at));
+    match typed {
+        Known::Unknown(crate::UnknownReason::Ambiguous(name)) => assert_eq!(&*name, "f"),
+        other => panic!("`int f()` and `double f()` agree on no type: {other:?}"),
+    }
+}
 /// **An unscoped enumeration's enumerators are visible one scope *out*.** — the C++ rule, and the one place a scope
 /// tree built as a mirror of the syntax gets it wrong.
 ///

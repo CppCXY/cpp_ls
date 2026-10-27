@@ -808,6 +808,28 @@ fn declaration_markdown(
         None => out.push_str(&format!("\n`{}` — {}\n", qualified, kind_words(fact))),
     }
 
+    // **A variable whose type is deduced from an initializer that could not be typed** — say why, rather than
+    // leaving the reader with a popup that mentions no type at all. `auto enenn = std::format(…)` was reported for
+    // exactly this: the card said "a variable" and nothing else, and the reason the analysis had — `std::format` is
+    // declared more than once in what this file can see, with nothing choosing between the declarations — was never
+    // shown. The sentence is the analysis's own (`UnknownReason::describe`), not a second opinion.
+    if matches!(fact.kind, DeclKind::Variable)
+        && fact
+            .type_of
+            .as_deref()
+            .is_none_or(|written| written == "auto")
+        && is_the_viewed_file(view, &found.file)
+        && let Known::Unknown(reason) = session.type_at(
+            view,
+            cpp_code_analysis::file::coordinates::ReadingOffset::new(fact.name_range.start_offset),
+        )
+    {
+        out.push_str(&format!(
+            "\nThe type is deduced from the initializer, and that could not be typed: {}.\n",
+            reason.describe()
+        ));
+    }
+
     if let Some(value) = enumerator {
         out.push_str(&format!(
             "\nValue **{value}** — counted from the enumerators written before it, as a compiler does.\n"

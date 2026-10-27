@@ -5742,6 +5742,9 @@ fn declaration_of_expression(
                 candidates.push(rest);
             }
 
+            // **Whether the index said "more than one" rather than "nothing"**, which is the difference between an
+            // ambiguity a reader can act on and a name nothing declares. See the final arm below.
+            let mut was_ambiguous = false;
             for candidate in candidates {
                 let found: Option<(crate::DeclFact, PathBuf)> =
                     match index.definition(candidate, path) {
@@ -5755,6 +5758,7 @@ fn declaration_of_expression(
                         // `std::cin.` — measured, 8 offsets in one file. Candidates that **disagree**, and functions
                         // (which have no type as a name), keep the `Unknown` that the name query gave.
                         Known::Unknown(UnknownReason::Ambiguous(_)) => {
+                            was_ambiguous = true;
                             agreeing_type(index, path, candidate)
                         }
                         Known::Unknown(_) | Known::No => None,
@@ -5769,10 +5773,17 @@ fn declaration_of_expression(
                 }
             }
 
-            // The declaration is nowhere this analysis can see, so there is no type to read. Reporting the *name*
-            // reason would say "the owner is missing" where what is missing is the type of an expression — a
-            // different answer for a consumer deciding what to tell the user.
-            Known::Unknown(UnknownReason::UnknownType(Box::from(written)))
+            // **Several declarations this file can see, and no type they all agree on.** The reason is kept rather
+            // than flattened into `UnknownType`: `Ambiguous` already has a sentence a reader can act on ("declared
+            // more than once in what this file can see, and nothing here chooses between the declarations"), and it is
+            // what the editor report of `auto enenn = std::format(…)` needed — the popup said nothing at all, and the
+            // reason it had nothing to say was exactly this. Measured on that file: `std::format` has four overloads
+            // visible (narrow and wide, with and without a locale) and none of them is selected by the call.
+            if was_ambiguous {
+                Known::Unknown(UnknownReason::Ambiguous(Box::from(written)))
+            } else {
+                Known::Unknown(UnknownReason::UnknownType(Box::from(written)))
+            }
         }
         // A name this layer cannot place at all is not a type it can read. `No` means the offset is not on a name;
         // any other `Unknown` is already the most specific answer available and is passed through.
