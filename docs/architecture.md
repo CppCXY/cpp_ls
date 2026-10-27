@@ -1784,3 +1784,69 @@ tests/latency.rs（release）  2 passed，6.2 s —— debug 下这两条按文�
 · __CUDA_ARCH__ 永远不定义：它只在 device 编译遍存在（§11.2 已记）
 · <<< >>> 里的补全（grid/block 参数位置）没有特殊语法，按普通表达式补全
 ```
+---
+
+# 14. 有 compile_commands 就"不认识标准库"——一次真实的回归
+
+**报告**：`C:\Users\zc\Desktop\test_module`（CMake + MinGW GCC 15 的 C++23 modules 演示）里，几乎不认识 C++ 标准库。
+用户的猜测是对的：**正是因为工程里有 `compile_commands.json`**。
+
+## 14.1 根因
+
+`CompilerConfig::for_file_with` 里，数据库条目一旦命中，就整段替换 include 路径：
+
+```rust
+let own = config_from_arguments(&arguments, command.directory.clone());
+config.include_paths = own.include_paths;      // ← 连编译器的系统目录一起删掉
+```
+
+而编译器**从不把自己的搜索路径写在命令行上**（`-E -v` 才打印）。这个工程的四条命令是这样：
+
+```text
+c++.exe -std=c++23 -Wall -Wextra -fmodules-ts … -x c++ -o … -c src/main.cpp
+```
+
+一条 `-I` 都没有。于是每个文件的搜索路径变成了**空集**：`<expected>`、`<print>`、`<string>`、`<windows.h>`
+全部 `IncludeNotFound`，`std::expected<double, std::string>` 没有类型。**没有数据库的工程不受影响**——那种情况下
+工具链的路径是唯一来源——所以这个缺陷只在"有数据库"的工程里出现。
+
+实测（`inference_probe`，修复前）：
+
+```text
+7 finding(s):
+  IncludeNotFound at 332: `<expected>` was not found on the include path
+  IncludeNotFound at 377: `<print>` was not found on the include path
+  IncludeNotFound at 421: `<string>` was not found on the include path
+  IncludeNotFound at 454: `<windows.h>` was not found on the include path
+  type_at: Unknown(UnknownType("std::expected<double, std::string>"))
+```
+
+## 14.2 修法
+
+数据库条目替换的是**工程的**目录，不是**编译器的**目录：`is_system == true` 的条目在替换后追加回来（去重），
+顺序是"条目自己的 `-I` 在前，编译器的系统目录在后"——这正是编译器自己的搜索顺序。
+
+```rust
+let system: Vec<IncludePath> = config.include_paths.iter().filter(|p| p.is_system).cloned().collect();
+config.include_paths = own.include_paths;
+for path in system { /* 去重后 push */ }
+```
+
+实测（修复后，同一工程同一文件）：`0 finding(s)`。两条回归测试在
+`include::config::database_search_path_tests`：空条目保留系统目录（并保持 `is_system`）、条目的 `-I` 排在系统目录之前。
+
+## 14.3 顺带暴露的第二个问题（**未解决**，下一步）
+
+修好之后，标准库**真的开始被读了**——于是冷启动的代价第一次露出来：
+
+```text
+test_module（有 .cppls 缓存）   indexed 478 file(s) in 9.3 s
+最小工程（无缓存，<string>+<vector>）  313 s
+```
+
+313 秒是**一次**冷启动读 `<string>`+`<vector>` 闭包（约 450 个头文件）的时间，其中单个文件的
+`[unit] read/walk` 只有 10–40 ms，所以开销不在解析摘要，而在**每个头文件一次 render/cook/parse**。缓存命中后
+是 9 秒。这条路径以前被上面的缺陷挡住了（系统目录被删 → 闭包为空 → 快但不正确），所以没有人量到过。
+
+下一步要做的是把这个 313 s 压下来——并行、或者别把头文件当作完整 TU 来渲染——以及给"第一次打开工程"一个
+可见的进度（现在进度条只报文件数，不报剩下多少标准库）。

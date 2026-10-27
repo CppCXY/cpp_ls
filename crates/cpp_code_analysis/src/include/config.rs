@@ -278,16 +278,39 @@ impl CompilerConfig {
             // **The `@response` file is expanded before anything is read out of the command**, because that is
             // where a CMake build keeps the include paths — see [`CompilerConfig::for_file_with`] for the measured
             // cost of not doing it.
-            let arguments =
-                expand_response_files(&arguments, command.directory.as_deref(), read);
+            let arguments = expand_response_files(&arguments, command.directory.as_deref(), read);
 
             // **The include paths, and only those.** They are what decides which header a name resolves to, so they
             // are the ones that must be this file's; the defines stay project-wide because the **cook** seeds every
             // file's macro environment from the project-wide configuration, and a resolver that disagreed with the
             // cooker about `-DFEATURE_ONLY` would answer about a program nobody compiled. Making the defines per
             // file means making the seed per file, which is the next step rather than half of this one.
+            //
+            // **But the file's command replaces the *project's* directories, never the compiler's.** A compile
+            // command does not spell out its own search path: `g++ -std=c++23 -c x.cpp` names no `-I` for `<string>`,
+            // because those directories are built into the compiler and printed only when it is asked (`-E -v`).
+            // Taking `own.include_paths` alone therefore deleted the standard library for **every** project that has
+            // a database — measured on a four-entry C++23 demo whose commands have no `-I` at all: `<string>`,
+            // `<print>`, `<expected>` and `<windows.h>` were all reported missing, and `std::expected<double,
+            // std::string>` had no type. The system entries are the one part of the search path the entry knows
+            // nothing about, so they survive it — after its own directories, which is the order a compiler searches.
             let own = config_from_arguments(&arguments, command.directory.clone());
+            let system: Vec<IncludePath> = config
+                .include_paths
+                .iter()
+                .filter(|path| path.is_system)
+                .cloned()
+                .collect();
             config.include_paths = own.include_paths;
+            for path in system {
+                let known = config
+                    .include_paths
+                    .iter()
+                    .any(|held| held.directory == path.directory);
+                if !known {
+                    config.include_paths.push(path);
+                }
+            }
         }
 
         // **Every target that describes the file, nearest first.** `[compile].include` has always documented itself
@@ -1271,5 +1294,118 @@ fn define_from_a_config_file(written: &str) -> CommandLineMacro {
     match written.split_once('=') {
         Some((name, value)) => CommandLineMacro::with_value(name.trim(), value),
         None => CommandLineMacro::defined(written.trim()),
+    }
+}
+#[cfg(test)]
+mod database_search_path_tests {
+    use super::*;
+
+    /// **A compile database entry replaces the project's directories, never the compiler's.**
+    ///
+    /// Reported from a project with `compile_commands.json`: "几乎不认识 C++ 标准库了". The database's commands were
+    /// `c++ -std=c++23 ... -c src/main.cpp` — **no `-I` at all**, because a compiler's own search path is built in and
+    /// never written on the command line. Taking that entry's (empty) directory list as the file's whole search path
+    /// therefore deleted `<string>`, `<print>`, `<expected>` and `<windows.h>` from every file of the project: four
+    /// `IncludeNotFound` diagnostics and no type for `std::expected<double, std::string>`.
+    ///
+    /// A project that is *not* behind a database was unaffected — which is why this survived: without one, the
+    /// toolchain's paths are the only ones there are.
+    #[test]
+    fn the_compilers_own_directories_survive_an_empty_database_entry() {
+        let root = PathBuf::from("/p");
+        let file = root.join("src/main.cpp");
+        let database = CompileCommands {
+            commands: vec![CompileCommand {
+                file: file.clone(),
+                directory: Some(root.clone()),
+                // The shape CMake's Ninja generator writes: the standard, warnings, and the input file.
+                arguments: vec![
+                    "c++".to_string(),
+                    "-std=c++23".to_string(),
+                    "-c".to_string(),
+                    file.to_string_lossy().into_owned(),
+                ],
+            }],
+            malformed: 0,
+        };
+
+        let config = CompilerConfig {
+            root: Some(root.clone()),
+            database: Some(std::sync::Arc::new(database)),
+            include_paths: vec![
+                IncludePath::user("/project/include"),
+                IncludePath::system("/gcc/include/c++/15.1.0"),
+                IncludePath::system("/gcc/include-fixed"),
+            ],
+            ..CompilerConfig::default()
+        };
+
+        let per_file = config.for_file(&file);
+        let directories: Vec<&Path> = per_file
+            .include_paths
+            .iter()
+            .map(|path| path.directory.as_path())
+            .collect();
+
+        // The project's own directory is the *entry's* to replace — it is gone, because that entry lists none.
+        assert!(
+            !directories.contains(&Path::new("/project/include")),
+            "the database entry replaces the project's directories: {directories:?}"
+        );
+        // The compiler's are not, and they come after whatever the entry did say.
+        assert_eq!(
+            directories,
+            vec![
+                Path::new("/gcc/include/c++/15.1.0"),
+                Path::new("/gcc/include-fixed")
+            ],
+            "the toolchain's directories are the one part of the search path the entry knows nothing about"
+        );
+        assert!(
+            per_file.include_paths.iter().all(|path| path.is_system),
+            "and they keep their kind, so `#include <…>` still finds them"
+        );
+    }
+
+    /// **A database entry's own `-I` comes first**, and the compiler's directories after it — the order a compiler
+    /// searches, and the reason the fix appends rather than prepends.
+    #[test]
+    fn the_entrys_own_directories_come_before_the_compilers() {
+        let root = PathBuf::from("/p");
+        let file = root.join("src/main.cpp");
+        let database = CompileCommands {
+            commands: vec![CompileCommand {
+                file: file.clone(),
+                directory: Some(root.clone()),
+                arguments: vec![
+                    "c++".to_string(),
+                    "-I/project/generated".to_string(),
+                    "-c".to_string(),
+                    file.to_string_lossy().into_owned(),
+                ],
+            }],
+            malformed: 0,
+        };
+
+        let config = CompilerConfig {
+            root: Some(root),
+            database: Some(std::sync::Arc::new(database)),
+            include_paths: vec![IncludePath::system("/gcc/include")],
+            ..CompilerConfig::default()
+        };
+
+        let directories: Vec<PathBuf> = config
+            .for_file(&file)
+            .include_paths
+            .iter()
+            .map(|path| path.directory.clone())
+            .collect();
+        assert_eq!(
+            directories,
+            vec![
+                PathBuf::from("/project/generated"),
+                PathBuf::from("/gcc/include")
+            ]
+        );
     }
 }
