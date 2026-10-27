@@ -777,7 +777,15 @@ fn declaration_markdown(
     // wants is which set it belongs to and **what number it is** (reported from an editor: "the member has no hover,
     // and if it did it should show the value"). The value is not in the fact: it is computed from the enumerators
     // written before it, which is what the language does and what the raw text of the file holds.
+    // **The value, folded the way a compiler folds it** — `TK_AND = FIRST_RESERVED` and `const int FIRST_RESERVED =
+    // UCHAR_MAX + 1;` are the two shapes an editor reported as "no value shown". The layer is
+    // `sema::constant`, which also says what it refuses; `enumerator_value` stays the question "is this an
+    // enumerator at all", which decides the sentence below.
     let enumerator = enumerator_value(view, fact.name_range.start_offset);
+    let constant_value = session.constant_value_at(
+        view,
+        cpp_code_analysis::file::coordinates::ReadingOffset::new(fact.name_range.start_offset),
+    );
 
     // **The code block is the declaration's own line, and an enumerator's is its name.** [`spells_a_signature`] is
     // false for an enumerator (no type, no parameter list, no return type), so the fallback — the raw text of the
@@ -830,10 +838,13 @@ fn declaration_markdown(
         ));
     }
 
-    if let Some(value) = enumerator {
-        out.push_str(&format!(
-            "\nValue **{value}** — counted from the enumerators written before it, as a compiler does.\n"
-        ));
+    if let Some(value) = constant_value {
+        let how = if enumerator.is_some() {
+            "counted from the enumerators written before it, as a compiler does."
+        } else {
+            "folded from its initializer, as a compiler does."
+        };
+        out.push_str(&format!("\nValue **{value}** — {how}\n"));
     }
 
     // The comment the file writes above the declaration, in the place clangd and the C++ extension put it: after

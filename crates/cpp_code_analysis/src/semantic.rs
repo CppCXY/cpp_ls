@@ -239,6 +239,8 @@ pub fn classified_names(index: &ProjectIndex, view: &FileView) -> Vec<Name> {
     // The one shape that cannot be cached by spelling is a member access, which is a question about a type — see
     // [`member_kinds`], which answers it and is asked once per access rather than once per spelling.
     let mut held: HashMap<&str, Option<NameKind>> = HashMap::new();
+    // **One walk of the include graph per distinct spelling**, for the macros this file did not write — see step 4b.
+    let mut included_macros: HashMap<String, bool> = HashMap::new();
     let mut asked: HashMap<String, Option<NameKind>> = HashMap::new();
     let mut out: Vec<Name> = Vec::new();
 
@@ -372,6 +374,28 @@ pub fn classified_names(index: &ProjectIndex, view: &FileView) -> Vec<Name> {
                 modifiers: Vec::new(),
                 provenance: Provenance::Found,
             });
+        }
+
+        // 4b. **A macro an `#include` brought in.** Step 2 answers for the `#define`s this file writes, and a file that
+        //     uses `<gtest/gtest.h>`'s `TEST(…)` or `LuaIdentify.h`'s `lisxdigit(…)` declares neither — measured from an
+        //     editor: both were drawn as ordinary identifiers while hovering them showed the `#define` perfectly, which
+        //     is the analysis saying it knows what the name is and the highlighter never asking.
+        //
+        //     Asked **after** the two resolution steps rather than before them, because the answer costs one walk of the
+        //     include graph per name and the common case in a header is a name the index can answer — while a macro that
+        //     *shadows* a resolvable name is rare, and keeps the colour of the name it shadows.
+        let is_a_macro = *included_macros
+            .entry(text.to_string())
+            .or_insert_with(|| index.macro_environment(text, &view.path).at(at).is_known());
+        if is_a_macro {
+            out.push(Name {
+                range,
+                kind: NameKind::Macro,
+                declaration: false,
+                modifiers: Vec::new(),
+                provenance: Provenance::Macro,
+            });
+            continue;
         }
 
         // 5. Nothing. No token is emitted: the identifier keeps the client's own colour, which is the honest

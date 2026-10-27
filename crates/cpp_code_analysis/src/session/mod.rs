@@ -6371,6 +6371,39 @@ impl<F: FileProvider + Clone> Session<F> {
         }
     }
 
+    /// **The integer value of the constant declared at `offset`**, when this layer can fold it — an enumerator, or a
+    /// `const`/`constexpr` variable. See [`crate::sema::constant`], which does the folding and says what it refuses.
+    ///
+    /// The macro question — `UCHAR_MAX` is `0xff` — is answered here rather than there because a macro may be defined
+    /// in a header: the index has the body of every `#define` it has read, and the constants of a real header are
+    /// written in terms of the ones `<climits>` brings in.
+    pub fn constant_value_at(&self, view: &FileView, offset: ReadingOffset) -> Option<i64> {
+        let path = view.path.clone();
+        crate::sema::constant::value_at(view, offset.get(), &|name| {
+            self.macro_body_at(&path, offset.get(), name)
+        })
+    }
+
+    /// **An object-like macro's body, as text**, for a name visible at `offset` in this file — `0xff` for
+    /// `UCHAR_MAX`. `None` for a function-like macro (its body is not a value) and for a name that is not a macro
+    /// here.
+    pub fn macro_body_at(&self, path: &Path, offset: usize, name: &str) -> Option<String> {
+        let environment = self.store.index().macro_environment(name, path);
+        let Known::Yes(found) = environment.at(offset) else {
+            return None;
+        };
+        let fact = found.fact();
+        if fact.function_like {
+            return None;
+        }
+        // **The body is a range in the defining file**, because a replacement list is text in *that* file and the fact
+        // deliberately stores a shape rather than a copy of the tokens (see `MacroFact::body_range`).
+        let range = fact.body_range?;
+        let text = self.text(found.file())?;
+        let body = text.get(range.start_offset..range.end_offset())?;
+        (!body.trim().is_empty()).then(|| body.trim().to_string())
+    }
+
     pub fn macro_definition(&self, view: &FileView, offset: ReadingOffset) -> Known<ProjectMacro> {
         macro_across_files(self.store.index(), &view.root, &view.path, offset.get())
     }

@@ -1012,6 +1012,53 @@ fn a_calls_iterator_answer_reaches_the_element_through_a_trait_alias() {
 /// Measured on the real file after this: `enenn` answers
 /// `basic_string<char, char_traits<char>, allocator<char>>`. The narrow/wide tie is broken by the character width the
 /// arguments' types carry, which is the rule the fix's own comment states.
+/// **A constant's value is folded, and an enumerator's initialiser can name one.**
+///
+/// Reported from an editor with two screenshots: `const int FIRST_RESERVED = UCHAR_MAX + 1;` showed no value, and
+/// `enum LuaTokenTypeDetail { TK_AND = FIRST_RESERVED, … }` showed none for `TK_AND` either. The layer that folds it
+/// is `sema::constant` — arithmetic, literals, and names it can be told the value of (a file-local constant, an
+/// enumerator, an object-like macro).
+#[test]
+fn a_constants_value_is_folded_and_an_enumerators_initialiser_reads_it() {
+    let text = "#define UCHAR_MAX 0xff\n\
+                const int FIRST_RESERVED = UCHAR_MAX + 1;\n\
+                enum Kind { TK_AND = FIRST_RESERVED, TK_BREAK, TK_SHIFT = 1 << 4 };\n\
+                int plain = 5;\n";
+    let files = MemoryFiles::new().with_file("/p/a.cpp", text);
+    let fixture = Memory::new("a-folded-constant", &files);
+    let mut session = fixture.session();
+    session.did_open("/p/a.cpp", text);
+    session.index_everything();
+    let path = std::path::PathBuf::from("/p/a.cpp");
+    let view = session.view_of_the_file(&path).expect("a view");
+
+    let value_at = |written: &str| {
+        let at = text.find(written).expect("the fixture");
+        session.constant_value_at(&view, crate::file::coordinates::ReadingOffset::new(at))
+    };
+
+    assert_eq!(
+        value_at("FIRST_RESERVED = "),
+        Some(256),
+        "`UCHAR_MAX + 1` folds: `0xff` + 1"
+    );
+    assert_eq!(
+        value_at("TK_AND"),
+        Some(256),
+        "the enumerator names the constant"
+    );
+    assert_eq!(
+        value_at("TK_BREAK"),
+        Some(257),
+        "and the next one counts on"
+    );
+    assert_eq!(value_at("TK_SHIFT"), Some(16), "`1 << 4` folds");
+    assert_eq!(
+        value_at("plain = 5"),
+        None,
+        "a non-const variable has a value but not a constant one"
+    );
+}
 /// **A member list through an alias written with an absolute target** — the shape the renderer produces.
 ///
 /// `std::string` is `using string = basic_string<char, …>;`, and a target read out of the **rendering** is spelled
