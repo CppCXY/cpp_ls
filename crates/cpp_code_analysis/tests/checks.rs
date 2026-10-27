@@ -1682,7 +1682,6 @@ void f() {
 /// spellings through it — recorded here rather than asserted, because changing it makes this check fire on code it has
 /// never judged before, which is a census to run first.
 #[test]
-#[ignore = "a passed `int` against a written `int width` parses as neither side; see docs/generics.md"]
 fn a_named_parameter_is_checked_too() {
     let source = "\
 void resize(int width) { }

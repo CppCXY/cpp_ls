@@ -607,3 +607,16 @@ map 元素规则要求恰好两个实参                → >= 2（比较器/分
 
 **探针新增开关**：`CPPLS_AT=last` 把光标放在匹配文本的**最后一个字符**上——问"表达式的类型"
 （`_lineOffsetVec[line]`）和问"名字的类型"（`_lineOffsetVec`）是两件事，上面的 `std::size_t&` 就是用它量出来的。
+**2026-10-27 第九批：两条已知红变绿，一处事实层核实。**
+
+```text
+① tests/checks.rs 的 a_named_parameter_is_checked_too —— 去掉 #[ignore]，68 条 checks 全绿
+   根因：parameter_spellings_of 返回【写出来的】`int width`，而比较要的是类型 `int`
+   修法：读出来先过 sema::overload::a_type_without_its_name（analysis 其它地方早就在用同一个 reader）
+   普查：LuaSource.cpp / LuaLexer.cpp 两个真实文件各 0 条发现（这次放开没有制造新的假阳性）
+② tests/types.rs 的 a_trait_a_builtin_decides_selects_the_right_specialization —— 第七批起已绿（41 条 types 全绿）
+③ B1 核实：`std::vector` 的事实现在是 ["_Ty", "_Alloc"] / ["_Alloc"]（token 读取器那次改动把
+   ["class", "class"] 修掉了）；`is_a_parameter_name` 保留为不变式守卫，不再是唯一防线
+```
+
+现在整份文档里剩下的 `#[ignore]` 只有三处：`completion.rs:1423`（一条测量）、`nested_conditional.rs`、`macros.rs:37`。

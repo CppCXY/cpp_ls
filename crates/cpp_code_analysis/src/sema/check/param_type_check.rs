@@ -59,7 +59,15 @@ impl Check for ParamTypeCheck {
             let Some(name) = super::name_declared_by(&function) else {
                 continue;
             };
-            let parameters = super::parameter_spellings_of(&function);
+            // **The name is not part of the type.** `parameter_spellings_of` answers what the file *wrote* — `int
+            // width` — and a comparison against a type has to see `int`; `a_type_without_its_name` is the reader the
+            // rest of the analysis already uses for exactly this (`sema::overload::parameters_in` calls it). Without the
+            // strip, the same call was reported when the parameter was unnamed (`void resize(int)`) and silent when it
+            // was named — which is the shape every real codebase writes.
+            let parameters: Vec<String> = super::parameter_spellings_of(&function)
+                .iter()
+                .map(|spelling| crate::sema::overload::a_type_without_its_name(spelling))
+                .collect();
             if by_name.contains_key(&name) {
                 // **A second declaration of one name is an overload set** — see the module documentation. `None`
                 // is the mark, and the call loop below skips those names without asking anything else.
