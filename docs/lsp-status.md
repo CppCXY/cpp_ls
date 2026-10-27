@@ -35,7 +35,7 @@ cargo test --release -p cpp_ls --test lsp_status -- --ignored --nocapture
 | `foldingRange` | 40 | 2 ms | |
 | `selectionRange` | 5 | 1 ms | 5 层嵌套 |
 | `semanticTokens` | 521 | **90 ms** | 修前 526 ms，见下 |
-| `inlayHint` | 9 | 58 ms | |
+| `inlayHint` | 9 | **15 ms** | 修前 58 ms，见下 |
 | `documentLink` | 5 | 2 ms | |
 | `diagnostic` | 0 | 66 ms | 该文件本来是干净的 |
 | `completion`（成员） | 2 | 3 ms | `Editorconfig`、`Workspace` |
@@ -62,8 +62,9 @@ cargo test --release -p cpp_ls --test lsp_status -- --ignored --nocapture
 
 * **`diagnostic` 66 ms / 0 条** —— 同一行别的时候是 4 ms、110 ms，说明它主要在把索引和渲染热起来而不是在检查；
   稳态预算的指标在 `latency.rs`。
-* **`inlayHint` 58 ms / 9 条** —— 每个 hint 要问被调函数的声明（跨文件），是真实工作；下一步可以只看它是否重复
-  解析同一个 callee。
+* **`inlayHint` 83 ms → 15 ms**（9 条 hint）—— 不是"每条 hint 很贵"，而是**请求范围内每个调用表达式都被解析了一遍**，
+  参数表、被调声明都问完了，才在下一行被"这个参数不在范围内"丢掉。把范围判断提到解析之前即可（提交 `a53d0ce`）。
+  探针 `CPPLS_TRACE_INLAY=1` 一行一个调用，打印被调文件、解析耗时和参数表耗时 —— 它区分的是"查找慢"和"查找太多"。
 
 ## 怎么重跑、怎么判读
 
