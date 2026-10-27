@@ -2084,7 +2084,10 @@ pub fn declared_parameter_defaults_of(root: &CppSyntaxNode, binding: &Binding) -
 /// The walk from the top could not tell the two apart: it returned the **first** template it reached, which is the
 /// outermost. The table is in document order, so the last entry that contains the name is the one that introduces
 /// it.
-fn declared_template_parameters_with(shapes: &DeclarationShapes, binding: &Binding) -> Vec<String> {
+pub(crate) fn declared_template_parameters_with(
+    shapes: &DeclarationShapes,
+    binding: &Binding,
+) -> Vec<String> {
     // **A function template's list is as real as a class template's, and it was being thrown away.**
     //
     // This refused every binding that was not a class, so `template <class _Size_type, class _Unsigned_type>
@@ -2477,7 +2480,10 @@ fn fact_for(
 ///
 /// Empty for the overwhelming majority of templates (the field is a row of `""` and is not stored at all), and empty
 /// for anything that is not a template, which is the same guard [`declared_template_parameters_with`] applies.
-fn declared_parameter_defaults_with(shapes: &DeclarationShapes, binding: &Binding) -> Vec<String> {
+pub(crate) fn declared_parameter_defaults_with(
+    shapes: &DeclarationShapes,
+    binding: &Binding,
+) -> Vec<String> {
     if declared_template_parameters_with(shapes, binding).is_empty() {
         return Vec::new();
     }
@@ -2562,7 +2568,7 @@ fn class_head_of(declaration: &CppSyntaxNode) -> String {
 /// inside, so the innermost class-like shape on that path **is** `enclosing_class_of`'s answer, and the pattern
 /// stored on it is what this returns — including when it is `None`, because a plain `struct Widget` is the answer
 /// for its members and the class *further out* is not.
-fn pattern_of(shapes: &DeclarationShapes, binding: &Binding) -> Option<String> {
+pub(crate) fn pattern_of(shapes: &DeclarationShapes, binding: &Binding) -> Option<String> {
     let mut found = None;
     shapes.on_the_path(the_offset_to_descend_by(binding), |shape| {
         if matches!(

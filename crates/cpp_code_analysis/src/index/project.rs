@@ -6401,6 +6401,29 @@ fn a_spelling_through_the_aliases(
     let Some((qualifier, last)) = split_at_the_last_scope(&core) else {
         // **The lookup without the arrow fallback** — see [`a_member_the_class_declares`]: this walk is *called from* the
         // arrow path, so asking `member_fact` here asks about an arrow, which comes back here.
+        // **An alias template declared elsewhere, before the class is asked.** `conditional_t<false, void, T>` is a
+        // namespace-level alias whose target is `typename conditional<false, void, T>::type`; it is not a member of the
+        // class being walked, and asking that class for it can only fail — which is where a real project's
+        // `find()->second` stopped (`docs/remaining.md` §A4). Following it produces a *qualified* spelling, which the
+        // branch below resolves: the class selects the specialization its arguments name, and the member is read there.
+        if let Some((named, member)) = the_alias_behind(index, path, &core) {
+            let qualified = format!("{named}::{member}");
+            if qualified != core {
+                let followed = a_spelling_through_the_aliases(
+                    index,
+                    scopes,
+                    root,
+                    path,
+                    class,
+                    &qualified,
+                    depth.saturating_sub(1),
+                );
+                if followed != core {
+                    return format!("{leading}{followed}{trailing}");
+                }
+            }
+        }
+
         let Some(fact) =
             a_member_the_class_declares(index, scopes, root, path, &class.to_string(), &core)
         else {
@@ -6449,7 +6472,13 @@ fn a_spelling_through_the_aliases(
     // asks the index for a *bare* name, and the library declares `_Alloc_traits` in a dozen classes: measured, the
     // chain silently continued in `std::basic_string` and answered a type from another class. Stopping answers the
     // last thing that *was* resolved, which is the honest place to hand over.
-    if inner.trim() == qualifier.trim() {
+    // **A qualifier that did not resolve *and is not a class* is where this stops.** The guard used to stop whenever the
+    // recursion came back unchanged, which also stopped at a qualifier that was already the answer —
+    // `conditional<false, void, T>`, a class template applied to arguments, whose `type` lives in a *specialization*
+    // (measured: the answer was the class `conditional` with one member listed, `type`).
+    if inner.trim() == qualifier.trim()
+        && !matches!(members_of(index, scopes, root, path, &inner), Known::Yes(_))
+    {
         return written.to_string();
     }
     let inner_type = crate::sema::types::parse_type_spelling(&inner);
@@ -6475,11 +6504,21 @@ fn a_spelling_through_the_aliases(
     let Some(target) = fact.type_of.as_deref() else {
         return written.to_string();
     };
+    // **The pairing the declaration's own pattern implies**, which is not the positional one: a partial
+    // specialization `conditional<false, T, F>` has two parameters and three slots, so pairing the use's three
+    // arguments by position bound `F` to the *second* and the answer to `type` came out `void` instead of `Item`
+    // (`docs/remaining.md` §A4). The pattern's slots are what say which written argument each parameter takes.
+    let (pattern_parameters, pattern_arguments) = fact
+        .pattern
+        .as_deref()
+        .map(|pattern| the_pairing_its_pattern_implies(pattern, &inner_arguments))
+        .filter(|(parameters, _)| !parameters.is_empty())
+        .unwrap_or_else(|| (inner_parameters.clone(), inner_arguments.clone()));
     let target = crate::sema::types::substituted_spelling_with_defaults(
         target,
-        &inner_parameters,
+        &pattern_parameters,
         &inner_defaults,
-        &inner_arguments,
+        &pattern_arguments,
     );
     let followed =
         a_spelling_through_the_aliases(index, scopes, root, path, &inner_type, &target, depth - 1);
@@ -6510,6 +6549,36 @@ fn a_member_the_class_declares(
         .filter(|member| member.fact.name == name)
         .map(|member| member.fact.clone())
         .find(|fact| fact.type_of.is_some())
+}
+/// **The (parameters, arguments) pairing a declaration's `pattern` implies.**
+///
+/// A partial specialization's pattern names its parameters in *its* slots — `conditional<false, T, F>` has two
+/// parameters and three slots — so the use's arguments do not pair with them by position. Each slot that is a *name*
+/// binds the parameter of that name to the written argument in the same place; a literal slot (`false`, `true`) binds
+/// nothing, which is what makes the specialization apply in the first place.
+fn the_pairing_its_pattern_implies(
+    pattern: &str,
+    written: &[String],
+) -> (Vec<String>, Vec<String>) {
+    let slots = arguments_in_a_spelling(pattern).unwrap_or_default();
+    let mut parameters = Vec::new();
+    let mut arguments = Vec::new();
+    for (at, slot) in slots.iter().enumerate() {
+        let slot = slot.trim();
+        let Some(argument) = written.get(at) else {
+            continue;
+        };
+        let a_name = !slot.is_empty()
+            && slot
+                .chars()
+                .all(|character| character.is_alphanumeric() || character == '_')
+            && !matches!(slot, "true" | "false");
+        if a_name {
+            parameters.push(slot.to_string());
+            arguments.push(argument.clone());
+        }
+    }
+    (parameters, arguments)
 }
 /// `A::b` → (`A`, `b`), split at the last `::` **outside angle brackets** — the same boundary
 /// [`without_the_namespace`] finds from the other side.
@@ -7719,14 +7788,20 @@ fn fact_from_binding_with(
         returns: crate::sema::declarations::declared_returns_of_in(shapes, root, binding),
         split_by_a_directive: crate::sema::declarations::split_by_a_directive_with(shapes, binding),
         bases: crate::sema::declarations::declared_bases_of_with(shapes, binding),
-        // A member list's facts carry no parameters: this path answers *which members* a class has, and substitution
-        // is the caller's step — it is the caller that knows the arguments. See [DeclFact::parameters].
-        parameters: Vec::new(),
+        // **The same three fields the index fills**, because a fact must say the same thing whichever path produced it.
+        //
+        // These were empty here, with the argument that "substitution is the caller's step". Substitution still is —
+        // what these fields carry is the *names* to substitute and the class's written **pattern**, and a caller that
+        // has the use's arguments cannot pair them without them. Measured on a trait alias:
+        // `conditional<false, void, T>::type` answered `void` because the specialization's `pattern` was `None` here
+        // even though the *indexed* fact for the same member carries `conditional<false, T, F>`
+        // (`docs/remaining.md` §A4) — the buffer happened to declare the class, so this path answered instead.
+        parameters: crate::sema::declarations::declared_template_parameters_with(shapes, binding),
         constraints: Vec::new(),
-        parameter_defaults: Vec::new(),
-        // …and no pattern, for the same reason: this path looks a member up **by the class the object already has**,
-        // rather than choosing between classes that share a scope. See [`DeclFact::pattern`].
-        pattern: None,
+        parameter_defaults: crate::sema::declarations::declared_parameter_defaults_with(
+            shapes, binding,
+        ),
+        pattern: crate::sema::declarations::pattern_of(shapes, binding),
         // …but the **parameter list as written** is here, because this is the path a member list's detail line is
         // built from: `size()` and `size_type size() const` are two rows a reader tells apart by exactly this, and
         // the declaration is in the buffer, so reading it costs one walk up the tree. See

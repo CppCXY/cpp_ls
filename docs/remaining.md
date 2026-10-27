@@ -234,6 +234,41 @@ h->   →  class "conditional_t"      连不上，记录为 known red
    选，再谈 pattern。
 
 **目前不要做的事**：把 ②③ 单独合进去而没有配对规则 —— 那样 `h->` 会答 `void`（一个错的类型），而项目自己的规则是
+
+**2026-10-27 第四批：事实层补上了，夹具通了。** 上一批的两条路里走了 ①，而且它确实是根因：
+
+```text
+事实层：fact_from_binding_with（缓冲区里声明的类，成员事实走这条路）
+        以前 parameters: Vec::new()、pattern: None、"substitution 是调用方的事"
+        现在与索引里的事实一致：parameters / parameter_defaults / pattern 都填上
+理由：事实必须"不论来自缓冲区还是索引，说的都是同一件事"；实测同一条 using type = F; 
+     索引里的 pattern 是 Some("conditional<false, T, F>")，缓冲区里是 None，两个答案因此不同
+配套：declared_template_parameters_with / declared_parameter_defaults_with / pattern_of 改为 pub(crate)
+```
+
+再加上上一批撤掉、这一批重新落地的三处（现在有配对规则撑着了）：
+
+```text
+② 别名走查会跟随声明在别处的别名模板（conditional_t<…> → conditional<…>::type）
+③ 限定符本身就是类时不停止（继续问它的 type）
+④ 按【声明的 pattern】配对形参与实参：conditional<false, T, F> 有两个形参、三个槽位，F 取第三个实参
+```
+
+**夹具已转正**（`session/tests.rs::a_trait_alias_selects_the_specialization_its_arguments_name`，不再 `#[ignore]`）：
+
+```text
+template <typename T> struct handle { using value_type = conditional_t<false, void, T>; value_type *operator->(); };
+handle<Item> h; h->     →  class "Item"   ✓
+```
+
+**真实项目仍停在一步之外**，而且这一批的追踪说明原因不在别名走查里：
+
+```text
+LuaLexer.cpp  LuaReserved.find(text)->second
+  → class "conditional_t": 0 member(s)     且 CPPLS_TRACE_INFERENCE=1 下【没有任何 alias step 日志】
+  说明：这一次查询根本没走到箭头/别名走查 —— 对象类型（`find(...)` 的返回类型，`_Tree_iterator<…>`）
+        在这一步之前就已经被当成了 `conditional_t`。下一步要查的是【调用返回类型】那条路
+        （type_of_a_call → what_a_call_has → member_bindings），而不是 a_spelling_through_the_aliases。
 "一个错的类型比没有更糟"。所以这一批只留了 ①（严格更好），②③ 的代码在夹具里被 `#[ignore]` 钉住。
 **形参名**（没被实参代换），说明这一跳走的是**箭头**那条路（`a_spelling_through_the_aliases` 的限定符分支），
 它内部的代换还没像上面那样接上"被查类的 bindings"。下一步就是把同一段搬进那条分支。

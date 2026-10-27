@@ -846,7 +846,6 @@ fn a_program_too_large_to_read_at_once_is_left_alone() {
 /// member list built from the primary has no `type` at all. The lookup therefore has to pick the declaration the *use*
 /// is an instance of — the pattern rule, with the arguments split where the language splits them.
 #[test]
-#[ignore = "known red, and the trace that says why: an alias template applied to arguments is followed to `conditional<false, void, T>::type`, the specializing declaration is found, and the pairing of the use's three arguments with the specialization's two parameters is what is missing. The member fact carries `pattern: None` (measured with CPPLS_TRACE_INFERENCE=1), so `the_pairing_its_pattern_implies` has nothing to read; the fix is to record the class's written pattern on its members in the fact builder (or to select the declaration by arity at the lookup). Until then the answer is a type *called* `conditional_t`, which the arrow cannot follow — this test is the record of it"]
 fn a_trait_alias_selects_the_specialization_its_arguments_name() {
     let text = "struct Item { int value; void grow(); };\n\
                 template <bool B, class T, class F> struct conditional {};\n\
