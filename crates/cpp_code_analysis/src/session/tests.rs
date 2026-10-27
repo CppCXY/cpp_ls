@@ -37,11 +37,17 @@ impl<'a> Memory<'a> {
     }
 
     fn session(&self) -> Session<MemoryFiles> {
+        self.session_with(CompilerConfig::default())
+    }
+
+    /// A session over the same files, with the configuration the caller states — how a test reads a **CUDA** project
+    /// (`CompilerConfig::with_cuda`), or one for a particular compiler.
+    fn session_with(&self, config: CompilerConfig) -> Session<MemoryFiles> {
         Session::with_config(
             &self.root,
             self.providers.clone(),
             WatchFilter::new(&self.root),
-            CompilerConfig::default(),
+            config,
         )
     }
 
@@ -4381,5 +4387,79 @@ fn a_file_is_closure_ready_only_once_what_it_reaches_is_read() {
     assert!(
         !session.is_closure_ready(Path::new("/p/a.cpp")),
         "but a name declared in `deep.h` has no classification, which is the question colouring asks"
+    );
+}
+/// **CUDA's vocabulary is offered in a CUDA project and nowhere else** — the completion half of the family switch.
+///
+/// `__global__` is an identifier to the lexer and a specifier to `nvcc`, so the list of what may be written at a
+/// statement's start depends on the *project*, not on the file: the same text is a kernel definition to a CUDA
+/// toolchain and a declaration of a variable called `__global__` to a C++ one. A list that offered the qualifiers
+/// everywhere would be teaching a spelling no compiler on that project will accept.
+///
+/// Measured through the session rather than through the table, because the interesting question is what a reader sees:
+/// `__dev` is a prefix, and the list has to filter on it, rank the namespace names around it, and stop at the
+/// project boundary.
+#[test]
+fn cuda_words_are_offered_only_by_a_cuda_project() {
+    let text = "void f() {\n    __dev\n}\n";
+    let files = MemoryFiles::new().with_file("/p/a.cu", text);
+    let fixture = Memory::new("cuda-completion", &files);
+    let mut session = fixture.session_with(CompilerConfig::new().with_cuda(true));
+    session.did_open("/p/a.cu", text);
+    session.index_everything();
+
+    let path = std::path::PathBuf::from("/p/a.cu");
+    let view = session.view_of_the_file(&path).expect("a view");
+    let at = text.find("__dev\n").expect("the fixture") + "__dev".len();
+    let labels = |set: &crate::CompletionSet| {
+        set.items
+            .iter()
+            .map(|item| item.label.clone())
+            .collect::<Vec<String>>()
+    };
+
+    let cuda = session.completions(&view, crate::file::coordinates::FileOffset::new(at));
+    let offered = labels(&cuda);
+    assert!(
+        offered.iter().any(|label| label == "__device__"),
+        "a CUDA project completes `__device__`: {offered:?}"
+    );
+
+    // **The same text, read as C++.** The words are gone; what is left is whatever the file itself declares, which for
+    // this fixture is nothing that starts with `__dev`.
+    let mut session = fixture.session();
+    session.did_open("/p/a.cu", text);
+    session.index_everything();
+    let view = session.view_of_the_file(&path).expect("a view");
+    let cpp = session.completions(&view, crate::file::coordinates::FileOffset::new(at));
+    let offered = labels(&cpp);
+    assert!(
+        !offered.iter().any(|label| label.starts_with("__")),
+        "a project that is not CUDA is not offered CUDA's vocabulary: {offered:?}"
+    );
+}
+
+/// **Every kind of CUDA word completes**, not only the qualifiers: a reader typing `thr` wants `threadIdx`, and one
+/// typing `float` wants `float4` beside `float`.
+#[test]
+fn the_built_in_variables_and_vector_types_complete_too() {
+    let text = "void f() {\n    thr\n}\n";
+    let files = MemoryFiles::new().with_file("/p/a.cu", text);
+    let fixture = Memory::new("cuda-completion-kinds", &files);
+    let mut session = fixture.session_with(CompilerConfig::new().with_cuda(true));
+    session.did_open("/p/a.cu", text);
+    session.index_everything();
+    let path = std::path::PathBuf::from("/p/a.cu");
+    let view = session.view_of_the_file(&path).expect("a view");
+    let at = text.find("thr\n").expect("the fixture") + "thr".len();
+    let set = session.completions(&view, crate::file::coordinates::FileOffset::new(at));
+    let labels: Vec<&str> = set.items.iter().map(|item| item.label.as_str()).collect();
+    assert!(
+        labels.contains(&"threadIdx"),
+        "a built-in variable completes: {labels:?}"
+    );
+    assert!(
+        labels.contains(&"threadIdx") && !labels.contains(&"ThreadIdx"),
+        "and it is the spelling that is offered"
     );
 }

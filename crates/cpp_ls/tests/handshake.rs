@@ -4711,3 +4711,146 @@ fn a_request_with_unreadable_params_is_answered_with_invalid_params() {
         "an unreadable request is InvalidParams, not silence: {answer}"
     );
 }
+/// **A CUDA project, over the wire**: the completion list carries CUDA's vocabulary and the popup explains it.
+///
+/// The two features are one question asked twice — *is this project CUDA?* — and the answer decides both, so both are
+/// asserted here against a project that says so in its own file. The vocabulary is not the language server's to
+/// invent: `__global__` is an identifier to the lexer (a legal variable name in C++) and a specifier to `nvcc`, which
+/// makes the *family* the switch rather than the spelling.
+#[test]
+fn a_cuda_project_completes_its_vocabulary_and_explains_it() {
+    let project = Project::new("cuda-vocabulary");
+    // **The project's own word about itself.** `enable` is what a machine without `nvcc` needs; the toolkit is not
+    // installed here either, which is the point: `threadIdx` is answered from the table rather than from a header.
+    project.write(".cppls.toml", "[compile.cuda]\nenable = true\n");
+    let source = "__global__ void add(float *out) {\n    unsigned i = threadIdx.x;\n    __dev\n}\n";
+    project.write("kernels.cu", source);
+    let uri = uri_of(&project.root().join("kernels.cu"));
+
+    let mut server = Server::start(project.root());
+    server.request(
+        1,
+        "initialize",
+        json!({
+            "processId": std::process::id(),
+            "rootUri": uri_of(project.root()),
+            "capabilities": { "window": { "workDoneProgress": true } },
+        }),
+    );
+    server.notify("initialized", json!({}));
+    server.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": { "uri": uri, "languageId": "cuda-cpp", "version": 1, "text": source }
+        }),
+    );
+
+    // **The popup on a built-in variable**: asked until the index has read the file, because a hover that arrives
+    // first is legitimately null. The needle stops *inside* the word — `position_of` answers the offset past it, and
+    // past `threadIdx` is the `.`, whose token is punctuation and whose popup is nothing.
+    let (line, character) = position_of(source, "threadId");
+    let hover = server.ask_until(100, |id| {
+        json!({
+            "id": id,
+            "method": "textDocument/hover",
+            "params": { "textDocument": { "uri": uri }, "position": { "line": line, "character": character } }
+        })
+    });
+    let text = hover["result"]["contents"]["value"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        text.contains("threadIdx"),
+        "the popup says what `threadIdx` is: {text:?}"
+    );
+
+    // **The completion list on a prefix**: `__dev` has one answer, and it is offered with its description.
+    let (line, character) = position_of(source, "__dev");
+    let completion = server.ask_until(200, |id| {
+        json!({
+            "id": id,
+            "method": "textDocument/completion",
+            "params": {
+                "textDocument": { "uri": uri },
+                "position": { "line": line, "character": character },
+                "context": { "triggerKind": 1 }
+            }
+        })
+    });
+    let items = completion["result"]["items"]
+        .as_array()
+        .or_else(|| completion["result"].as_array())
+        .expect("a completion list");
+    let labels: Vec<&str> = items
+        .iter()
+        .filter_map(|item| item["label"].as_str())
+        .collect();
+    assert!(
+        labels.contains(&"__device__"),
+        "a CUDA project completes `__device__`: {labels:?}"
+    );
+
+    let shutdown = server.request(500, "shutdown", Value::Null);
+    assert_eq!(shutdown["result"], Value::Null);
+    server.notify("exit", Value::Null);
+    assert!(server.wait_for_exit());
+}
+
+/// **The other half of the switch**: the same word in a project that is not CUDA is a name, and nothing is offered.
+///
+/// No `.cppls.toml` and no `nvcc` in a database means `config.cuda()` is false, and then `__global__` declares nothing
+/// — which is what a project that has never seen `nvcc` should be told.
+#[test]
+fn a_cpp_project_is_not_offered_cuda_vocabulary() {
+    let project = Project::new("cuda-vocabulary-off");
+    let source = "__global__ void add(float *out) { }\n";
+    project.write("kernels.cu", source);
+    let uri = uri_of(&project.root().join("kernels.cu"));
+
+    let mut server = Server::start(project.root());
+    server.request(
+        1,
+        "initialize",
+        json!({
+            "processId": std::process::id(),
+            "rootUri": uri_of(project.root()),
+            "capabilities": { "window": { "workDoneProgress": true } },
+        }),
+    );
+    server.notify("initialized", json!({}));
+    server.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": { "uri": uri, "languageId": "cpp", "version": 1, "text": source }
+        }),
+    );
+
+    let (line, character) = position_of(source, "__glo");
+    let completion = server.ask_until(100, |id| {
+        json!({
+            "id": id,
+            "method": "textDocument/completion",
+            "params": {
+                "textDocument": { "uri": uri },
+                "position": { "line": line, "character": character },
+                "context": { "triggerKind": 1 }
+            }
+        })
+    });
+    let items = completion["result"]["items"]
+        .as_array()
+        .cloned()
+        .or_else(|| completion["result"].as_array().cloned())
+        .expect("a completion list");
+    assert!(
+        !items
+            .iter()
+            .any(|item| item["label"].as_str() == Some("__global__")),
+        "a project that is not CUDA is not offered CUDA's vocabulary"
+    );
+
+    let shutdown = server.request(500, "shutdown", Value::Null);
+    assert_eq!(shutdown["result"], Value::Null);
+    server.notify("exit", Value::Null);
+    assert!(server.wait_for_exit());
+}

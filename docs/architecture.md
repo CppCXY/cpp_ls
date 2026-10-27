@@ -1707,3 +1707,80 @@ cpp_ls release 14 个目标全绿（此前 13，新增这一个）
 没有语言 id，客户端根本不会 claim 这些文档。加了 `cuda` 语言、`DOCUMENT_SELECTOR` 的两个 scheme、
 以及 `semanticTokenScopes` 里与 `cpp` 相同的映射（CUDA 文件就是 C++ 加一层，主题应该照常上色）。
 `npm run check-types`、`lint`、`test:unit`（29 条）全绿。
+---
+
+# 13. CUDA 的补全与悬停：一个属于"工程家族"的词表
+
+第 11 节解决了"能不能读"，这一节解决"写的时候看得见什么"：补全列表里有没有 `__global__`，悬停 `threadIdx`
+时说什么。
+
+## 13.1 为什么这些词不能进词法器
+
+```text
+__global__ 在 C++ 里是合法变量名，在 nvcc 眼里是说明符。
+把它做成关键字 → 每个定义过这个变量的工程都被读坏。
+```
+
+所以它仍然是 `Identifier`，判定依据是**工程属于哪个 family**（`__CUDACC__` / `nvcc` / `[compile.cuda]`），
+这正是 `ParserConfig::cuda` 和 `CompilerConfig::cuda` 的那一位。词表放在
+`cpp_code_analysis/src/cuda.rs`，三种词、按补全列表的顺序：
+
+```text
+QUALIFIERS      14  __global__ __device__ __host__ __shared__ __constant__ __managed__
+                    __grid_constant__ __restrict__ __launch_bounds__ __maxnreg__ __align__
+                    __cluster_dims__ __forceinline__ __noinline__
+BUILTINS         5  threadIdx blockIdx blockDim gridDim warpSize
+VECTOR_OTHERS    4  dim3 __half __half2 __nv_bfloat16
+VECTOR_FAMILIES 48  char1..4 uchar1..4 short1..4 … float1..4 double1..4（12 族 × 4）
+```
+
+编号族是**宏在编译期展开**的（`vector_family!` + `concat!`）：手写 48 条近似条目，缺一条（`ushort3`）在有人
+打出这个名字之前是看不见的；`every_vector_family_has_one_to_four_components` 就是钉住这件事的测试。
+`words()` 返回迭代器而不建 `Vec`：补全每个键击都跑一次，`Box::leak` 出来的名字是编辑器进程里的慢性泄漏
+（第一版就是这么写的，改掉了）。
+
+## 13.2 补全：只有 family 打开了才给
+
+`completion_at` / `completion_with` / `names` 各多一个 `cuda: bool`，由 `Session::completions` 传
+`self.config.cuda()`。列表里三种词的 kind 不同，因为"如果头文件声明了它们，它们本来就会是那个 kind"：
+
+```text
+限定符      Keyword
+内置变量    Variable
+向量类型    Class
+```
+
+排序沿用表内词条的位置（`Score::KEYWORD`），前缀过滤走同一个 `matching::quality`，所以 `__dev` 只留
+`__device__`，`thr` 留 `threadIdx`。
+
+## 13.3 悬停：文本在 locale 文件里
+
+`handlers/hover/vocabulary.rs::cuda_hover(token, cuda)` 在关键字表之后、Doxygen 命令之前被问；
+`cuda=false` 时直接 `None`，于是 `__global__` 在非 CUDA 工程里就是一个"什么也没声明"的名字——这是诚实答案。
+长文本在 `locales/{en,zh-CN}.yml` 的 `cuda:` 段（35 个平铺键），键名由 `Word::hover_key` 给出；
+缺键时退回到词表的一行描述，所以晚加的词是"薄一点的弹窗"而不是没有弹窗。
+
+## 13.4 验收（实测）
+
+```text
+cpp_code_analysis  lib 719（+7：词表 5 条 + 会话补全 2 条），45 个集成目标
+cpp_ls             lib 108（+3：vocabulary），14 个集成目标（+2：端到端握手）
+tests/handshake.rs  a_cuda_project_completes_its_vocabulary_and_explains_it
+                    a_cpp_project_is_not_offered_cuda_vocabulary
+```
+
+两条握手测试是**走线**的：起真服务进程、`initialize`/`initialized`/`didOpen`，然后
+`textDocument/hover` 在 `__global__`/`threadIdx` 上必须拿到含该词的 markdown，`textDocument/completion` 在
+`__dev` 上必须列出 `__device__`；同一个 `.cu` 在没有 `[compile.cuda]` 的工程里必须**没有** `__global__`。
+
+```text
+tests/latency.rs（release）  2 passed，6.2 s —— debug 下这两条按文件自己的说明会因算术而失败（预算是按 release 定的）
+```
+
+## 13.5 还没做的
+
+```text
+· 补全项的 documentation（选中后右侧的说明）：现在只有 detail 一行；CUDA 词没有声明，所以 resolve 拿不到文档
+· __CUDA_ARCH__ 永远不定义：它只在 device 编译遍存在（§11.2 已记）
+· <<< >>> 里的补全（grid/block 参数位置）没有特殊语法，按普通表达式补全
+```

@@ -300,12 +300,13 @@ pub fn completion_at(
     path: &Path,
     offset: usize,
     headers: &HeaderIndex,
+    cuda: bool,
 ) -> CompletionSet {
     // The context is this function's first question and the only one read from a tree; a caller that has already read
     // it — `Session::completions`, for the two contexts that live in the **file's** own text rather than in the
     // rendering — hands it over instead of having it asked again of the wrong tree.
     let asked = context_at(root, offset);
-    completion_with(index, scopes, root, path, offset, headers, asked)
+    completion_with(index, scopes, root, path, offset, headers, asked, cuda)
 }
 
 /// **The same dispatch with the context already decided**, and the entry point for a caller whose context came from
@@ -322,6 +323,7 @@ pub fn completion_with(
     offset: usize,
     headers: &HeaderIndex,
     context: CompletionContext,
+    cuda: bool,
 ) -> CompletionSet {
     // **The measurement window for one completion**, opened here because this is the entry point the feature has:
     // everything below is the query's own work, and the server's log line splits only the outside of it
@@ -336,10 +338,10 @@ pub fn completion_with(
             members(index, scopes, root, path, &access, offset).set
         }
         CompletionContext::Qualified(position) => {
-            names(index, scopes, root, path, &position, offset, false)
+            names(index, scopes, root, path, &position, offset, false, cuda)
         }
         CompletionContext::Name(position) => {
-            names(index, scopes, root, path, &position, offset, true)
+            names(index, scopes, root, path, &position, offset, true, cuda)
         }
         CompletionContext::DirectiveName { written, range } => directives(&written, range),
         // **A module name is answered by the session, not here**, and the empty set says so rather than guessing:
@@ -357,7 +359,7 @@ pub fn completion_with(
             // `#define NAME`, `#undef NAME`, `#ifdef NAME`: the argument is a *name*, and what may be written is
             // what the program already declares. No keywords and no snippets — a macro's name is an identifier, and
             // a control-flow statement is not one — which is why this goes through the name query only.
-            names(index, scopes, root, path, &position, offset, false)
+            names(index, scopes, root, path, &position, offset, false, cuda)
         }
         CompletionContext::Include {
             written,
@@ -771,6 +773,7 @@ fn names(
     position: &crate::sema::resolve::NamePosition,
     offset: usize,
     with_table: bool,
+    cuda: bool,
 ) -> CompletionSet {
     let mut scored: Vec<Scored> = Vec::new();
     let mut listed_scope = position.scope.clone();
@@ -875,6 +878,30 @@ fn names(
                 matched,
                 item: CompletionItem::word(name, ItemKind::Class, detail),
             });
+        }
+
+        // **CUDA's vocabulary, when the project is CUDA.** `__global__` is an identifier to the lexer and a specifier
+        // to a CUDA compiler, so what may be written here is a fact about the *family* — and offering it in a file no
+        // CUDA compiler will see is a claim that is false. The kinds differ on purpose: a qualifier is a keyword, a
+        // built-in variable is a variable, and a vector type is a class, because that is what each would be if a
+        // toolkit header had declared it.
+        if cuda {
+            for word in crate::cuda::words() {
+                let matched = matching::quality(word.name, &listed_prefix);
+                if matched == matching::NONE {
+                    continue;
+                }
+                let kind = match word.kind {
+                    crate::cuda::WordKind::Qualifier => ItemKind::Keyword,
+                    crate::cuda::WordKind::Builtin => ItemKind::Variable,
+                    crate::cuda::WordKind::VectorType => ItemKind::Class,
+                };
+                scored.push(Scored {
+                    score: Score::new(Score::KEYWORD, 0),
+                    matched,
+                    item: CompletionItem::word(word.name, kind, word.detail),
+                });
+            }
         }
     }
 

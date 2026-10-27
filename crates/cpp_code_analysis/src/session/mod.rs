@@ -6720,6 +6720,7 @@ impl<F: FileProvider + Clone> Session<F> {
                         .map(|headers| headers.clone())
                         .unwrap_or_default(),
                     context,
+                    self.config.cuda(),
                 );
             }
 
@@ -6749,6 +6750,7 @@ impl<F: FileProvider + Clone> Session<F> {
                             .map(|headers| headers.clone())
                             .unwrap_or_default(),
                         context,
+                        self.config.cuda(),
                     );
                 }
                 // **`MacroBody` is here too**: a `#define` line is in the file and not in the rendering, and the
@@ -6770,6 +6772,7 @@ impl<F: FileProvider + Clone> Session<F> {
                             .map(|headers| headers.clone())
                             .unwrap_or_default(),
                         context,
+                        self.config.cuda(),
                     );
                 }
                 // **`Nothing` is an answer, not a miss**: prose, and a directive that takes no argument (`#endif `).
@@ -6800,6 +6803,7 @@ impl<F: FileProvider + Clone> Session<F> {
             &view.path,
             offset.get(),
             &headers,
+            self.config.cuda(),
         )
     }
 

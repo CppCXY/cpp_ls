@@ -1,5 +1,7 @@
-
-use super::{Dialect, Environment, Output, a_cuda_toolchain, parse_search_list, parse_version, search_list_flags};
+use super::{
+    Dialect, Environment, Output, a_cuda_toolchain, parse_search_list, parse_version,
+    search_list_flags,
+};
 
 /// **A CUDA toolchain is recognised from its macros or its name, and that reaches the parser's switch.**
 ///
@@ -13,7 +15,10 @@ fn a_cuda_toolchain_is_recognised_and_turns_the_parsers_switch_on() {
     // **The macro**, with a GNU macro table beside it: `nvcc` on Linux defines both, and the host dialect must not be
     // swallowed by the CUDA reading.
     let macros = super::parse_builtin_macros("#define __GNUC__ 12\n#define __CUDACC__ 1\n");
-    assert!(a_cuda_toolchain(&macros, None), "`__CUDACC__` is nvcc's own word");
+    assert!(
+        a_cuda_toolchain(&macros, None),
+        "`__CUDACC__` is nvcc's own word"
+    );
 
     // **The name**, when there is no macro table to read.
     assert!(
@@ -25,7 +30,10 @@ fn a_cuda_toolchain_is_recognised_and_turns_the_parsers_switch_on() {
     // `__global__` as a qualifier.
     let gnu = super::parse_builtin_macros("#define __GNUC__ 12\n");
     assert!(!a_cuda_toolchain(&gnu, None));
-    assert!(!a_cuda_toolchain(&[], Some(std::path::Path::new("/usr/bin/g++"))));
+    assert!(!a_cuda_toolchain(
+        &[],
+        Some(std::path::Path::new("/usr/bin/g++"))
+    ));
 
     // The switch itself: a CUDA toolchain's configuration turns the parser's flag on, and keeps the host dialect.
     let toolchain = super::Toolchain {
