@@ -6835,6 +6835,7 @@ impl<F: FileProvider + Clone> Session<F> {
         };
 
         let written = expression.text().to_string().trim().to_string();
+
         match crate::index::project::type_of_expression(
             self.store.index(),
             &mut |path| self.view(path),

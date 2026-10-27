@@ -196,6 +196,19 @@ template <bool B, class T, class F> using conditional_t = typename conditional<B
 **怎么验收**：`inference_probe` 在 `LuaSource.cpp` 上 `type_at` 给出 `std::size_t&`；`map<…>::find` 的 `->second`
 答到 `pair<const K, V>::second`；把 `types.rs:924` 的 `#[ignore]` 去掉后绿。
 
+**本轮（2026-10-27 第二批）修掉的那一段**：trait 别名在**嵌套名/成员**那条路上已经通了 ——
+`enable_if_t<__is_same(int,int), double>` 答 `double`（`types.rs` 那条已知红去掉了 `#[ignore]`）。两处根因：
+
+1. `finish_a_nested_name` 的 `asked` 列表在**问之前**就塞进了要问的名字（`chain.push(member)`），于是第一跳被
+   "already asked" 挡掉，答案原样返回成成员名（`Some("type")`）。链里应当只放**已经解析过**的名字。
+2. 代换用的是**对象类型**的 bindings（`Widget` 的），而 `enable_if<…>::type` 里的 `_Ty` 属于 `enable_if`；
+   要按**被查类**的形参和实参建 bindings，且实参必须用 `split_arguments`（**认括号**）拆分 ——
+   `Type::arguments` 会把 `__is_same(int, int)` 拆成两个，实测答 `Some("int)")`。
+
+**残留（真实项目）**：`find()->second` 仍停在 `std::conditional<_Test, _Ty1, _Ty2>::type::second` —— 拼写里是
+**形参名**（没被实参代换），说明这一跳走的是**箭头**那条路（`a_spelling_through_the_aliases` 的限定符分支），
+它内部的代换还没像上面那样接上"被查类的 bindings"。下一步就是把同一段搬进那条分支。
+
 
 ### 其余
 
@@ -204,14 +217,15 @@ template <bool B, class T, class F> using conditional_t = typename conditional<B
 ```text
 tests/checks.rs:1685   a_named_parameter_is_checked_too
                        `int` 实参对 `int width` 形参，两侧都解析不出来（见 docs/generics.md）
-tests/types.rs:853     a_defaulted_template_parameter_of_a_variable_template_substitutes
-                       模板参数的默认值不在事实里，`twice<float>` 答 `U`
-tests/types.rs:922     a_trait_a_builtin_decides_selects_the_right_specialization
-                       声明自身类型上的别名跟随（`enable_if_t<A, B>` 的 `type_of` 是拼写，不是别名目标）
 tests/completion.rs:1423  a_constructors_parameters_are_in_scope
                        一条测量，不是断言
 tests/nested_conditional.rs  生效条件的判断（文件头注释解释了为什么现在会失败）
 tests/macros.rs:37    宏查询的一个已知缺口（文件里有 "# Why this is #[ignore]d"）
+```
+
+**已经不再是红的**：`tests/types.rs` 的 `a_defaulted_template_parameter_of_a_variable_template_substitutes`
+（默认实参进了事实）与 `a_trait_a_builtin_decides_selects_the_right_specialization`（见 §A4，本轮去掉了
+`#[ignore]`，41 条 `types` 全绿）。
 ```
 
 ### C3. 一次未复现的抖动

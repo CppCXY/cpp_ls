@@ -921,7 +921,6 @@ fn a_compiler_builtin_reads_as_a_bool_and_the_librarys_lookalike_does_not() {
 /// and the direction that matters is that an undecided builtin folds to nothing: it stays unequal, no specialization
 /// is chosen, and the answer is "not known" rather than a type from one that may not apply.
 #[test]
-#[ignore = "known red, and the probe that settled why: the answer to this question does not come from the member-access path at all. `type_of_use_in` asks what a **declaration** is, and a declaration whose type is `enable_if_t<A, B>` is answered from `DeclFact::type_of` — the spelling the file wrote — so the alias-following step that now exists on the member-access arm never runs for it. Two ways forward, and they are different work: (1) follow the alias on the declaration's own type as well, which is where `declared_type_of`/the fact's `type_of` is read; or (2) ask the member-access question instead, `w.when_the_same` as an **expression**, which is the path the alias step and the fold were built for. The second is the smaller step and proves the chain end to end"]
 fn a_trait_a_builtin_decides_selects_the_right_specialization() {
     let header = "\
 #pragma once

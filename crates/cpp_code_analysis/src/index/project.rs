@@ -3101,6 +3101,7 @@ pub(crate) fn type_of_expression_memoed(
     let answer = type_of_expression_inner(
         memo, index, declaring, scopes, root, path, expression, depth,
     );
+
     if crate::probes::timing() && started.elapsed().as_millis() > 5 {
         eprintln!(
             "[type_of] {:>5} ms  depth {depth}  {:?}",
@@ -3289,12 +3290,23 @@ fn type_of_expression_inner(
             Known::Yes(named) => {
                 let dt = declared_type(memo, index, declaring, scopes, root, path, &named, depth);
                 match dt {
-                    Known::Yes(type_of) => Known::Yes((
-                        substituted_at_the_use(
-                            index, scopes, root, path, expression, &named, type_of,
-                        ),
-                        named.file(path),
-                    )),
+                    Known::Yes(type_of) => {
+                        // **A declaration whose type is an alias template applied to arguments is finished here**, the
+                        // same way the member arm finishes one. `enable_if_t<__is_same(int, int), double>` is a
+                        // *spelling* the fact records, and the alias's target is `typename enable_if<…, double>::type`
+                        // — a member of a class template applied to arguments, which `member_fact`'s pattern rule
+                        // resolves once it is asked with those arguments. Without this the answer was the member's own
+                        // name (`docs/remaining.md` C2's last known red).
+                        let type_of =
+                            a_trait_alias_resolved(index, scopes, root, path, &named, &type_of)
+                                .unwrap_or(type_of);
+                        Known::Yes((
+                            substituted_at_the_use(
+                                index, scopes, root, path, expression, &named, type_of,
+                            ),
+                            named.file(path),
+                        ))
+                    }
                     Known::Unknown(reason) => Known::Unknown(reason),
                     // The declaration is a function, a class or an alias: none of them has a type *as a name*, which
                     // is the distinction `DeclFact::returns` exists for.
@@ -3893,20 +3905,49 @@ fn type_of_expression_inner(
             // double>::type` — a member of a **class template applied to arguments** — and the walk below is the one
             // that resolves such a member, by the pattern comparison that folds a decidable builtin to the `true`
             // the library wrote its `enable_if` for.
+
             if let Some((named, member)) = the_alias_behind(index, &file, type_of) {
-                let mut chain = vec![fact.name.clone()];
-                chain.push(member.clone());
-                return Known::Yes(finish_a_nested_name(
+                // **The chain is what has already been *resolved*, not what is about to be asked.** Pushing the member
+                // here made the walk refuse its first question — `asked.contains("type")` — and the answer came back as
+                // the member's own name (measured: `Some("type")` where the file means `double`).
+                let chain = vec![fact.name.clone()];
+                // **The bindings of the class the member was found in**, not of the class the *use* names: the walk is
+                // about to read `enable_if<…, double>::type`, whose declaration says `_Ty`, and `_Ty` is `double` here
+                // because that class was applied to `double`. Passing the object's bindings (`Widget`'s, which pair
+                // nothing with nothing) left the parameter's own name standing — measured: `Some("_Ty")`.
+                // **The arguments split where the *language* splits them.** `Type::arguments` (from
+                // `parse_type_spelling`) read `__is_same(int, int)` as two arguments — it does not count parentheses —
+                // so the substitution paired `_Ty` with `int)` and the answer was `Some("int)")`. `split_arguments`
+                // counts brackets and parentheses, which is the rule the pattern comparison already uses; the class
+                // name is the bare one, because a class's parameters are filed under it.
+                let inner = named
+                    .split_once('<')
+                    .map(|(_, rest)| rest.trim_end().strip_suffix('>').unwrap_or(rest))
+                    .unwrap_or_default();
+                let argument_types: Vec<crate::sema::types::Type> =
+                    crate::sema::builtins::split_arguments(inner)
+                        .iter()
+                        .map(|one| crate::sema::types::parse_type_spelling(one))
+                        .collect();
+                let bare_named = named
+                    .split_once('<')
+                    .map(|(head, _)| head.trim())
+                    .unwrap_or(named.as_str());
+                let trait_bindings =
+                    member_bindings(index, scopes, root, path, bare_named, &argument_types);
+                let finished = finish_a_nested_name(
                     index,
                     scopes,
                     root,
                     path,
                     &named,
-                    &bindings,
+                    &trait_bindings,
                     parse_type_spelling(&member),
                     file,
                     chain,
-                ));
+                );
+
+                return Known::Yes(finished);
             }
 
             let finished = bindings.applied_to(&parse_type_spelling(type_of));
@@ -4679,6 +4720,53 @@ fn finish_a_nested_name(
     (current, current_file)
 }
 
+/// **A declaration's type finished when it is an alias template applied to arguments.**
+///
+/// `enable_if_t<__is_same(int, int), double> when_the_same;` records the *spelling*, and what it stands for is
+/// `typename enable_if<__is_same(int, int), double>::type` — a member of a class template applied to arguments. The
+/// two steps are the ones the member arm already takes ([`the_alias_behind`] for the alias, then the member lookup,
+/// which pairs the use's arguments with the class's parameters by pattern): this is the same pair, applied to the one
+/// place they were missing.
+///
+/// `None` for every ordinary declaration — a spelling with no `<` is not an alias template, and that is the cheap
+/// question this asks first.
+fn a_trait_alias_resolved(
+    index: &ProjectIndex,
+    scopes: &crate::ScopeTree,
+    root: &cpp_parser::CppSyntaxNode,
+    path: &Path,
+    named: &NamedDeclaration,
+    written: &Type,
+) -> Option<Type> {
+    let spelling = written.to_string();
+    if !spelling.contains('<') {
+        return None;
+    }
+    let (class, member) = the_alias_behind(index, &named.file(path), &spelling)?;
+    let Known::Yes((fact, _)) = member_fact(index, scopes, root, path, &class, &member, None)
+    else {
+        return None;
+    };
+    let target = fact.type_of.as_deref()?;
+    let arguments: Vec<String> = crate::sema::types::parse_type_spelling(&class)
+        .arguments()
+        .iter()
+        .map(|one| one.to_string())
+        .collect();
+    let bare = crate::sema::types::parse_type_spelling(&class);
+    let Some(class_name) = bare.class_name() else {
+        return None;
+    };
+    let parameters = index.template_parameters_for(class_name, path, &arguments);
+    let defaults = index.template_parameter_defaults_for(class_name, path, &arguments);
+    let resolved = crate::sema::types::substituted_spelling_with_defaults(
+        target,
+        &parameters,
+        &defaults,
+        &arguments,
+    );
+    Some(crate::sema::types::parse_type_spelling(&resolved))
+}
 /// The type a declaration was written with — or, where it wrote `auto`, the type its **initializer** has.
 ///
 /// # What `auto` means here
