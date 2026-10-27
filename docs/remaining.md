@@ -550,3 +550,30 @@ cargo test --release -p cpp_parser -p cpp_formatter
 追踪开关：CPPLS_TRACE_COOKING / CPPLS_TRACE_MEMBERS / CPPLS_TRACE_ANSWERS / CPPLS_TRACE_TIME …
 测量开关：CPPLS_NO_GUARD_FILTER、CPPLS_NO_INFERENCE、CPPLS_NO_INDEX_LOOKUP
 ```
+**2026-10-27 第七批：`find(text)->second` 在真实项目上通了。** 根因不在别名走查，而在**容器元素规则**：
+
+```text
+range_element_of(map) 要求 arguments.len() == 2
+  但 LuaReserved 的类型是 std::map<std::string, LuaTokenKind, std::less<>> ——【三个】实参
+  → "没有元素"，iterator_element_type 放弃，调用退回声明里的 `_Mybase::iterator`（一个依赖类型，谁都打不开）
+修法：map 系列 >= 2、一参容器 >= 1（多出来的是比较器/分配器，不改变元素类型）
+```
+
+实测（EmmyLuaCodeStyle，`CPPLS_TYPE=1`）：
+
+```text
+LuaReserved.find(text)->second   →  LuaTokenKind            ✓（修前：Unknown(NotDeclaredHere("std::conditional<_Test, _Ty1, _Ty2>::type::second"))）
+LuaReserved.find(text)->          →  class "std::pair": 21 member(s) ["first", "first_type", …]   ✓
+```
+
+夹具：`a_maps_find_reaches_the_element_when_the_comparator_is_written`（三实参的 map + `pair` + `->second`）。
+
+**还剩的残差**（诚实记录）：`LuaReserved.find`（**名字**而不是调用）的类型仍是
+`conditional<_Is_set, _Tree_const_iterator<_Scary_val>, _Tree_iterator<_Scary_val>>::type` —— 这是一个**依赖类型**：
+`_Is_set` 是 `_Tree` 的形参，要解开它得实例化 `_Tree`，这不是"跟随拼写"这一层能做的事。眼下它作为答案原样给出（比错的类型好），
+而读者真正会用的 `->` / `->second` 已经能答。
+
+同一批还落地了两处支撑：
+① `a_member_the_class_declares` 恢复 `direct_member` 兜底（特化声明、`members_of` 走不到的成员）；
+② `finish_a_nested_name` 统一把 **class 连同实参**（`bindings.arguments()`）交给限定名解析，
+   于是 `_Mybase = _Tree<_Tmap_traits<std::string, LuaTokenKind, …>>` 里的实参真的代换了（追踪可见）。

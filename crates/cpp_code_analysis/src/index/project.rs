@@ -4566,27 +4566,12 @@ impl NamedDeclaration {
                     // the caller that has the file's aliases, not here.
                     return Some(started);
                 };
-
-                // **The class *with* the arguments the use wrote**, because a return type's qualifier may name them:
-                // `_Tree::find` answers `_Mybase::iterator`, and `_Mybase`'s target is
-                // `_Tree<_Tmap_traits<_Kty, _Ty, …>>` — parameter names that only the arguments turn into types
-                // (measured: without them the chain stopped at `conditional<_Test, _Ty1, _Ty2>::type`).
-                let class_spelling = if bindings.is_empty() {
-                    class.to_string()
-                } else {
-                    let arguments: Vec<String> = bindings
-                        .arguments()
-                        .iter()
-                        .map(|argument| argument.to_string())
-                        .collect();
-                    format!("{class}<{}>", arguments.join(", "))
-                };
                 let (finished, _) = finish_a_nested_name(
                     index,
                     scopes,
                     root,
                     path,
-                    &class_spelling,
+                    class,
                     bindings,
                     started,
                     file.clone(),
@@ -4709,6 +4694,22 @@ fn finish_a_nested_name(
     mut asked: Vec<String>,
 ) -> (Type, PathBuf) {
     for _ in 0..MAX_NESTED_TYPE_DEPTH {
+        // **The class *with* the arguments the use wrote.** A return type's qualifier may name the class's own
+        // parameters — `_Tree::find` answers `_Mybase::iterator`, and `_Mybase` is `_Tree<_Tmap_traits<_Kty, _Ty, …>>` —
+        // and only the arguments turn those into types. The pairing arrives here as `bindings` (the object's type produced
+        // it), so every caller of this walk gets the benefit: measured on a real project, without it the chain stopped at
+        // `conditional<_Test, _Ty1, _Ty2>::type`.
+        let class_with_arguments = if bindings.is_empty() || class.contains('<') {
+            class.to_string()
+        } else {
+            let arguments: Vec<String> = bindings
+                .arguments()
+                .iter()
+                .map(|argument| argument.to_string())
+                .collect();
+            format!("{class}<{}>", arguments.join(", "))
+        };
+        let class = class_with_arguments.as_str();
         // **A *qualified* name of the class's own aliases is followed here first.** `_Tree::find` is declared
         // `_Mybase::iterator find(...)` — a member alias of the very class the function belongs to — and the loop below
         // reads one *bare* name at a time, so this spelling was carried out unchanged and every later step asked about
@@ -4993,10 +4994,14 @@ fn range_element_of(container: &Type) -> Option<String> {
 
     let plain = name.rsplit("::").next().unwrap_or(name);
 
+    // **`>= 2`, not `== 2`.** The element of a map is `pair<const K, V>` whatever else the use wrote, and a use writes
+    // the comparator as often as not: `std::map<std::string, LuaTokenKind, std::less<>>` has three arguments, and
+    // requiring exactly two answered "no element" for the ordinary spelling. Measured: `LuaReserved.find(text)->second`
+    // fell back to the declaration's `_Mybase::iterator` for exactly this reason (`docs/remaining.md` §A4).
     if matches!(
         plain,
         "map" | "unordered_map" | "multimap" | "unordered_multimap"
-    ) && arguments.len() == 2
+    ) && arguments.len() >= 2
     {
         return Some(format!(
             "std::pair<const {}, {}>",
@@ -5004,7 +5009,9 @@ fn range_element_of(container: &Type) -> Option<String> {
         ));
     }
 
-    if arguments.len() == 1
+    // The same allowance for the one-argument containers: a `vector<T, Alloc>` and a `set<K, Compare>` are the same
+    // element as their one-argument spellings.
+    if arguments.len() >= 1
         && matches!(
             plain,
             "vector"
@@ -6011,6 +6018,12 @@ fn declaration_of_a_callee(
             member_access_class_and_arguments(index, scopes, root, path, &class, &object);
         let bindings = member_bindings(index, scopes, root, path, &class, &arguments);
 
+        if crate::probes::inference() {
+            eprintln!(
+                "[inference] callee: object {object:?} -> class {class:?}, arguments {arguments:?}, bindings empty {}",
+                bindings.is_empty()
+            );
+        }
         // The arguments as **spellings**, for the pattern rule — see [`direct_member`].
         let written_arguments: Vec<String> = arguments
             .iter()
@@ -6593,13 +6606,37 @@ fn a_member_the_class_declares(
     class: &str,
     name: &str,
 ) -> Option<DeclFact> {
-    let members = members_of(index, scopes, root, path, class).value()?;
-    members
-        .members
-        .iter()
-        .filter(|member| member.fact.name == name)
-        .map(|member| member.fact.clone())
-        .find(|fact| fact.type_of.is_some())
+    // **First the class's own member list**, which is what walks the bases (`_Ptr_base`'s `element_type` is one) and
+    // which substitutes the class's parameters. A re-exposed alias declares no type of its own, so the declaration
+    // answered is the one that *has* one.
+    let listed = members_of(index, scopes, root, path, class);
+    if crate::probes::inference() {
+        match &listed {
+            Known::Yes(members) => eprintln!(
+                "[inference] member of {class:?}: {} listed, {} unlisted, looking for {name:?}",
+                members.members.len(),
+                members.unlisted.len()
+            ),
+            other => eprintln!("[inference] member of {class:?}: {other:?}"),
+        }
+    }
+    if let Some(found) = listed.value().and_then(|members| {
+        members
+            .members
+            .iter()
+            .filter(|member| member.fact.name == name)
+            .map(|member| member.fact.clone())
+            .find(|fact| fact.type_of.is_some())
+    }) {
+        return Some(found);
+    }
+
+    // **Then the declaration this *use* is an instance of.** A class template's partial specializations share their
+    // primary's scope, and `conditional<false, T, F>::type` is a member of the *specialization*: the member list above
+    // is built from the primary, which has no `type` at all. `direct_member` is the function with that rule — the
+    // pattern comparison, with the arguments read from the spelling — and it is the one lookup that does **not** end by
+    // asking about an `operator->`, which is what keeps this walk out of the arrow's cycle.
+    direct_member(index, scopes, root, path, class, name, None).map(|(fact, _)| fact)
 }
 /// **The (parameters, arguments) pairing a declaration's `pattern` implies.**
 ///

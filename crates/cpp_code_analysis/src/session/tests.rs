@@ -911,6 +911,51 @@ fn a_calls_return_type_is_a_qualified_alias_of_its_own_class() {
         "`_Mybase::iterator` is `base<int>::iterator`, which is `int*`"
     );
 }
+/// **`map<…>::find(k)->second`, with the comparator written out** — the real project's own line.
+///
+/// MSVC's `map` takes four template arguments and `LuaReserved`'s type writes three
+/// (`std::map<std::string, LuaTokenKind, std::less<>>`). The element of a map is `pair<const K, V>` whatever the
+/// comparator is, and the layer's element rule required **exactly two** arguments — so it answered "no element" and the
+/// call fell back to its declaration's `_Mybase::iterator`, which is a dependent type nobody can open. Measured on the
+/// real project before this fixture: `LuaReserved.find(text)->second` → `Unknown(NotDeclaredHere("std::conditional<
+/// _Test, _Ty1, _Ty2>::type::second"))`; after: `LuaTokenKind`.
+#[test]
+fn a_maps_find_reaches_the_element_when_the_comparator_is_written() {
+    let text = "template <typename A, typename B> struct pair { A first; B second; };\n\
+                template <typename K, typename V, typename C> struct map_like {\n\
+                \x20   pair<const K, V> find(const K &key) const;\n\
+                };\n\
+                void f(map_like<int, float, int> &m) {\n\
+                \x20   m.find(1)->second;\n\
+                }\n";
+    let files = MemoryFiles::new().with_file("/p/a.cpp", text);
+    let fixture = Memory::new("a-maps-find-with-a-comparator", &files);
+    let mut session = fixture.session();
+    session.did_open("/p/a.cpp", text);
+    session.index_everything();
+    let path = std::path::PathBuf::from("/p/a.cpp");
+    let view = session.view_of_the_file(&path).expect("a view");
+
+    // **The call itself**, which is the element the iterator rule answers: `pair<const int, float>`.
+    let at = text.find("find(1)").expect("the fixture") + "find".len();
+    let typed = session.type_at(&view, crate::file::coordinates::ReadingOffset::new(at));
+    let Known::Yes(typed) = typed else {
+        panic!("`m.find(1)` must have a type: {typed:?}");
+    };
+    assert!(
+        typed.type_of.contains("pair") && typed.type_of.contains("float"),
+        "the element of the map, not the iterator: {:?}",
+        typed.type_of
+    );
+
+    // **And the member reached through it**: `second` is `float`.
+    let second = text.find("->second").expect("the fixture") + "->".len();
+    let found = session.definitions(&view, crate::file::coordinates::ReadingOffset::new(second));
+    let Known::Yes(found) = found else {
+        panic!("`find(1)->second` must resolve: {found:?}");
+    };
+    assert_eq!(found.found[0].fact.name, "second");
+}
 /// **`map::find(…)`'s answer, the shape the real project has** — the call's type, then the arrow, then the element.
 ///
 /// The previous fixture asked the arrow directly. The real report is one hop longer: `LuaReserved.find(text)` is a
