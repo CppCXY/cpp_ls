@@ -839,6 +839,87 @@ fn a_program_too_large_to_read_at_once_is_left_alone() {
     );
 }
 
+/// **A call whose return type is a *qualified alias of its own class*** — `_Mybase::iterator`, MSVC's spelling.
+///
+/// Measured on a real project: `LuaReserved.find(text)` typed as `_Mybase::iterator` — `_Tree::find` returns
+/// `_Mybase::iterator`, and `_Mybase` is a member alias of the very class the function belongs to. Everything
+/// downstream then asks a class called `_Mybase::iterator` for its members, and the answer is whatever the last hop
+/// happened to be. The finishing walk (`finish_a_nested_name`) reads one *bare* name at a time, which is why it could
+/// not follow this one.
+#[test]
+fn a_calls_return_type_is_a_qualified_alias_of_its_own_class() {
+    let text = "template <typename T> struct base { using iterator = T *; };\n\
+                template <typename T> struct tree {\n\
+                \x20   using _Mybase = base<T>;\n\
+                \x20   _Mybase::iterator find(int key) const;\n\
+                };\n\
+                void f(tree<int> &t) {\n\
+                \x20   t.find(1);\n\
+                }\n";
+    let files = MemoryFiles::new().with_file("/p/a.cpp", text);
+    let fixture = Memory::new("a-qualified-alias-return", &files);
+    let mut session = fixture.session();
+    session.did_open("/p/a.cpp", text);
+    session.index_everything();
+    let path = std::path::PathBuf::from("/p/a.cpp");
+    let view = session.view_of_the_file(&path).expect("a view");
+
+    let at = text.find("find(1)").expect("the fixture") + "find".len();
+    let typed = session.type_at(&view, crate::file::coordinates::ReadingOffset::new(at));
+    let Known::Yes(typed) = typed else {
+        panic!("`t.find(1)` must have a type: {typed:?}");
+    };
+    assert_eq!(
+        typed.type_of, "int*",
+        "`_Mybase::iterator` is `base<int>::iterator`, which is `int*`"
+    );
+}
+/// **`map::find(…)`'s answer, the shape the real project has** — the call's type, then the arrow, then the element.
+///
+/// The previous fixture asked the arrow directly. The real report is one hop longer: `LuaReserved.find(text)` is a
+/// *call*, whose answer is an iterator, whose `operator->` answers a trait alias. On the real project that chain
+/// answered `class "conditional_t": 0 member(s)` **without entering the alias walk at all**, which is what this
+/// fixture is for — it reproduces the same three steps in one file, where a fix takes five seconds to try.
+#[test]
+fn a_calls_iterator_answer_reaches_the_element_through_a_trait_alias() {
+    let text = "template <bool B, class T, class F> struct conditional {};\n\
+                template <class T, class F> struct conditional<false, T, F> { using type = F; };\n\
+                template <bool B, class T, class F>\n\
+                using conditional_t = typename conditional<B, T, F>::type;\n\
+                struct element { int first; int second; };\n\
+                template <typename T> struct tree_iterator {\n\
+                \x20   using pointer = conditional_t<false, void, T> *;\n\
+                \x20   pointer operator->() const;\n\
+                };\n\
+                struct map_like {\n\
+                \x20   using value_type = element;\n\
+                \x20   tree_iterator<value_type> find(int key) const;\n\
+                };\n\
+                void f(map_like &m) {\n\
+                \x20   m.find(1)->second = 2;\n\
+                }\n";
+    let files = MemoryFiles::new().with_file("/p/a.cpp", text);
+    let fixture = Memory::new("a-calls-iterator-through-a-trait", &files);
+    let mut session = fixture.session();
+    session.did_open("/p/a.cpp", text);
+    session.index_everything();
+    let path = std::path::PathBuf::from("/p/a.cpp");
+    let view = session.view_of_the_file(&path).expect("a view");
+
+    let at = text.find("->second").expect("the fixture") + "->".len();
+    let found = session.definitions(&view, crate::file::coordinates::ReadingOffset::new(at));
+    let Known::Yes(found) = found else {
+        panic!("`m.find(1)->second` must resolve: {found:?}");
+    };
+    assert_eq!(
+        (
+            found.found[0].fact.name.as_str(),
+            found.found[0].fact.scope.as_deref()
+        ),
+        ("second", Some("element")),
+        "the call's iterator, its `pointer` alias, and the trait alias in it"
+    );
+}
 /// **A trait alias selects its specialization** — `conditional_t<false, void, T>` is `T`, and the arrow reaches it.
 ///
 /// This is the shape the standard library writes its traits in, and the one the real project stopped on

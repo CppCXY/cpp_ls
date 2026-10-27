@@ -263,6 +263,31 @@ handle<Item> h; h->     →  class "Item"   ✓
 
 **真实项目仍停在一步之外**，而且这一批的追踪说明原因不在别名走查里：
 
+**2026-10-27 第五批：又前进一跳，真实项目卡点换了地方。** 这一批两件事：
+
+```text
+① 夹具 a_calls_iterator_answer_reaches_the_element_through_a_trait_alias
+   `map_like::find(1)->second`（调用 → 迭代器 → pointer 别名 → trait 别名）在本仓库内**直接通过**
+   —— 说明这条链本身没有问题，真实项目的差异在别处
+② finish_a_nested_name 增加"限定名先过别名走查"：`_Mybase::iterator` 这类【自己类的成员别名】
+   以前读不动（那个循环一次只看一个裸名），现在会按类的作用域解析限定符再取成员
+   夹具 a_calls_return_type_is_a_qualified_alias_of_its_own_class：`tree<int>::find(1)` → `int*` ✓
+```
+
+**真实项目的新卡点（实测）**：
+
+```text
+LuaReserved.find(text)  →  type_at: "_Mybase::iterator"     ← 修复后仍然是它
+   · 这个返回值是 `_Tree::find` 的声明拼写；`_Mybase` 是 `_Tree` 自己的成员别名
+   · finish_a_nested_name 的限定名分支【没有让它变化】，说明 `a_spelling_through_the_aliases` 在
+     `std::_Tree` 上没解析出 `_Mybase`（下一步要在这个函数里加 CPPLS_TRACE_INFERENCE 打印确认）
+   · 另一条候选：type_of_a_call 里 `iterator_element_type`（begin/find/… 的特殊处理）
+     对 `std::map<…, std::less<>>` 返回 None，于是走了普通路径
+```
+
+下一步（明确）：在这两处之一加打印，确认 `_Mybase` 是在"解析限定符"还是"选声明"处丢的；夹具
+`a_calls_return_type_is_a_qualified_alias_of_its_own_class` 已经把"本仓库内应当怎样"钉住了。
+
 ```text
 LuaLexer.cpp  LuaReserved.find(text)->second
   → class "conditional_t": 0 member(s)     且 CPPLS_TRACE_INFERENCE=1 下【没有任何 alias step 日志】

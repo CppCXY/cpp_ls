@@ -4695,6 +4695,30 @@ fn finish_a_nested_name(
     mut asked: Vec<String>,
 ) -> (Type, PathBuf) {
     for _ in 0..MAX_NESTED_TYPE_DEPTH {
+        // **A *qualified* name of the class's own aliases is followed here first.** `_Tree::find` is declared
+        // `_Mybase::iterator find(...)` — a member alias of the very class the function belongs to — and the loop below
+        // reads one *bare* name at a time, so this spelling was carried out unchanged and every later step asked about
+        // a class called `_Mybase::iterator` (measured on a real project: `LuaReserved.find(text)` typed as exactly
+        // that). The alias walk resolves it in the class's own scope, which is the same step a member's type goes
+        // through.
+        let spelling = current.to_string();
+        if spelling.contains("::") && !asked.contains(&spelling) {
+            let resolved = a_spelling_through_the_aliases(
+                index,
+                scopes,
+                root,
+                path,
+                &crate::sema::types::parse_type_spelling(class),
+                &spelling,
+                MAX_ALIAS_HOPS,
+            );
+            if resolved != spelling {
+                asked.push(spelling);
+                current = bindings.applied_to(&crate::sema::types::parse_type_spelling(&resolved));
+                continue;
+            }
+        }
+
         let Some(nested) = current.class_name().map(str::to_string) else {
             break;
         };
