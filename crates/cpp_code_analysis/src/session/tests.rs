@@ -4318,6 +4318,7 @@ fn the_compilation_is_known_only_when_the_compiler_answered_with_its_macros() {
         system_include_paths: vec![PathBuf::from("/usr/include")],
         builtin_macros: Vec::new(),
         dialect: None,
+        cuda: false,
         standard: None,
         source: ToolchainSource::SystemHeaders,
         note: Some("no compiler could be asked".to_string()),

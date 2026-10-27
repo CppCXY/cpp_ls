@@ -10,6 +10,11 @@
 //! exclude = ["**/build/**", "third_party/**"]     # what the analysis should not read
 //! source_extensions = ["cuh", "cppm"]             # extensions beyond the engine's own list
 //!
+//! [compile.cuda]                                  # a CUDA project: see `CudaSection`
+//! enable = true                                   # read it as CUDA even without an `nvcc` in the database
+//! toolkit = "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.4"
+//! host_compiler = "cl"                            # the host dialect: cl (MSVC) or g++/clang++ (GNU)
+//!
 //! [compile]
 //! database = "build/compile_commands.json"        # where the compile database is, if discovery guesses wrong
 //! compiler = "clang++"                            # or a path; absent means "the toolchain discovery decides"
@@ -134,6 +139,130 @@ pub struct WorkspaceSection {
     pub source_extensions: Vec<String>,
 }
 
+/// `[compile.cuda]` — a CUDA project's extra configuration.
+///
+/// ```toml
+/// [compile.cuda]
+/// enable = true                                       # read this project as CUDA even if nothing says so
+/// toolkit = "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.4"
+/// host_compiler = "cl"                                # the host dialect: cl (MSVC) or g++/clang++ (GNU)
+/// include = ["third_party/cutlass/include"]           # extra include directories for CUDA units
+/// args = ["-arch=sm_80"]                              # extra flags, appended to whatever won
+/// ```
+///
+/// # What each key is for, and what is deliberately absent
+///
+/// `enable` is the escape hatch of the detection: the analysis reads a project as CUDA when its toolchain is `nvcc`
+/// (`__CUDACC__` in the macro table, or the compiler's name), and a project that has `.cu` files but no compile
+/// database has neither. Saying so here is one line, and it is the same switch — the grammar's CUDA rules, on.
+///
+/// `toolkit` is the key that makes `<cuda_runtime.h>` resolve: the toolkit installs its headers under
+/// `<toolkit>/include` (and, from CUDA 12.8, a CCCL include beside it), and **nothing on the system path knows
+/// that**. The directory is added as a system include path, so `#include <cuda_runtime.h>` and the vector types it
+/// defines (`float4`, `dim3`) become visible without a single line in the project's own headers.
+///
+/// `host_compiler` decides the **dialect**, which is a different question from the CUDA flag: on Windows `nvcc`
+/// drives `cl.exe`, on Linux `g++`, so `__int64` and `__cdecl` are MSVC's names in one project and GNU's in the
+/// other. Only the name is read here — `cl` (and `cl.exe`) means MSVC, anything with `g++`, `gcc` or `clang` in it
+/// means GNU — because the compiler itself is discovered and asked elsewhere.
+///
+/// **`__CUDA_ARCH__` is deliberately not a key.** It is defined **only in the device compilation pass**, so a
+/// language server that defined it for the whole file would evaluate `#if __CUDA_ARCH__ >= 800` in host code that a
+/// compiler never sees. An `arch` key would be a lie of exactly that shape; a project that needs it can put it in
+/// `args` and accept the same lie knowingly.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CudaSection {
+    /// Read this project as CUDA even when the toolchain does not say so — see the section's own note.
+    #[serde(default)]
+    pub enable: bool,
+    /// The CUDA toolkit's installation directory — `…/CUDA/v12.4`. Its `include` (and `include/cccl`, when present)
+    /// are added as system include paths.
+    #[serde(default)]
+    pub toolkit: Option<PathBuf>,
+    /// The host compiler's name, for the **dialect**: `cl` is MSVC, `g++`/`gcc`/`clang++` is GNU.
+    #[serde(default)]
+    pub host_compiler: Option<String>,
+    /// Extra include directories, relative to the workspace root (or absolute), added after the toolkit's own.
+    #[serde(default)]
+    pub include: Vec<PathBuf>,
+    /// Flags appended to whichever set won — the same arrangement [`CompileSection::extra_args`] has.
+    #[serde(default)]
+    pub args: Vec<String>,
+}
+
+impl CudaSection {
+    /// **The configuration this section describes**, applied to what discovery worked out.
+    ///
+    /// One function rather than a handful of edits in the session, because the keys are one statement: a project that
+    /// names a toolkit means "and read the files as CUDA", and splitting that across three call sites is how the
+    /// include path would one day be added without the switch.
+    pub fn applied_to(
+        &self,
+        mut config: crate::include::config::CompilerConfig,
+        root: &std::path::Path,
+    ) -> crate::include::config::CompilerConfig {
+        if self.enable {
+            config = config.with_cuda(true);
+        }
+        if let Some(host) = &self.host_compiler {
+            let name = host
+                .rsplit(['/', '\\'])
+                .next()
+                .unwrap_or(host)
+                .trim_end_matches(".exe");
+            let dialect = if name == "cl" {
+                cpp_parser::Dialect::Msvc
+            } else if name.contains("g++")
+                || name.contains("gcc")
+                || name.contains("clang")
+                || name == "cc"
+                || name == "c++"
+            {
+                cpp_parser::Dialect::Gnu
+            } else {
+                config.dialect()
+            };
+            config = config.with_dialect(dialect);
+        }
+        if let Some(toolkit) = &self.toolkit {
+            // **A relative toolkit is relative to the workspace root**, like every other path in this file: the
+            // process's own directory is wherever the editor was started from, which has nothing to do with the
+            // project. Measured: `toolkit = "cuda"` added `cuda/include`, a relative spelling the include resolver
+            // could not open, and the header it was supposed to bring in was reported missing.
+            let toolkit = if toolkit.is_absolute() {
+                toolkit.clone()
+            } else {
+                root.join(toolkit)
+            };
+            let toolkit = &toolkit;
+            // **The toolkit's own include directories**, which no compiler on the machine answers for: `nvcc` ships
+            // them, and they are not on `PATH` or in any system directory. `cccl` is the CUDA 12.8+ layout, where the
+            // C++ standard library parallel algorithms moved out of `include` — added only when it exists, so an older
+            // toolkit does not gain a directory that is not there.
+            for relative in ["include", "include/cccl"] {
+                let directory = toolkit.join(relative);
+                if relative == "include" || directory.is_dir() {
+                    config
+                        .include_paths
+                        .push(crate::include::config::IncludePath::system(directory));
+                }
+            }
+        }
+        for directory in &self.include {
+            let directory = if directory.is_absolute() {
+                directory.clone()
+            } else {
+                root.join(directory)
+            };
+            config
+                .include_paths
+                .push(crate::include::config::IncludePath::system(directory));
+        }
+        config.extra_args.extend(self.args.iter().cloned());
+        config
+    }
+}
 /// `[compile]` — how this project is built, when the discovered answer is not the right one.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -176,6 +305,12 @@ pub struct CompileSection {
     /// Flags dropped from whichever set won, matched by their **whole** spelling (`-Werror`, `-std=c++17`).
     #[serde(default)]
     pub remove_args: Vec<String>,
+    /// **`[compile.cuda]`** — what this project says about CUDA, when the discovery cannot work it out.
+    ///
+    /// See [`CudaSection`]: the toolkit's location is the one thing no compiler on the machine can answer, because
+    /// `nvcc` is not installed by default and the headers it ships are not on any system path.
+    #[serde(default)]
+    pub cuda: Option<CudaSection>,
     /// Extra include directories, by the directory they apply to; `"*"` applies to the whole project.
     ///
     /// Paths are relative to the workspace root. This exists for the project that compiles one subtree with an
@@ -801,6 +936,81 @@ mod tests {
         parse_config(text, Path::new("/p/.cppls.toml"))
     }
 
+    #[test]
+    fn the_cuda_section_is_read_and_applied() {
+        // **A CUDA project with no `nvcc` on the machine** — the state this section exists for. Every key is one the
+        // discovery cannot answer: where the toolkit is, which compiler the host dialect belongs to, which extra
+        // directories the project's own kernels include.
+        let report = parse(
+            "[compile.cuda]\n\
+             enable = true\n\
+             toolkit = '/opt/cuda-12.4'\n\
+             host_compiler = 'cl.exe'\n\
+             include = ['third_party/cutlass/include']\n\
+             args = ['-arch=sm_80']\n\
+             [compile]\n\
+             standard = 'c++20'\n",
+        );
+        assert_eq!(problems(&report), Vec::<String>::new());
+        let cuda = report
+            .config
+            .compile
+            .cuda
+            .as_ref()
+            .expect("the section is here");
+        assert!(cuda.enable);
+        assert_eq!(cuda.toolkit.as_deref(), Some(Path::new("/opt/cuda-12.4")));
+        assert_eq!(cuda.host_compiler.as_deref(), Some("cl.exe"));
+        assert_eq!(cuda.args, vec!["-arch=sm_80"]);
+
+        // **What it does to the configuration**: the switch on, the dialect from the host compiler — `cl.exe` is
+        // MSVC, whose `__int64` and `__cdecl` are the host compiler's half of a CUDA unit.
+        let config = cuda.applied_to(
+            crate::include::config::CompilerConfig::new(),
+            Path::new("/p"),
+        );
+        assert!(config.cuda(), "`enable` is the parser's CUDA switch");
+        assert_eq!(config.dialect(), cpp_parser::Dialect::Msvc);
+        assert!(
+            config
+                .include_paths
+                .iter()
+                .any(|path| path.directory == Path::new("/opt/cuda-12.4/include")),
+            "the toolkit's include directory is what makes `<cuda_runtime.h>` resolve: {:?}",
+            config.include_paths
+        );
+        assert!(
+            config
+                .include_paths
+                .iter()
+                .any(|path| path.directory == Path::new("/p/third_party/cutlass/include")),
+            "and the project's own are relative to the root: {:?}",
+            config.include_paths
+        );
+        assert!(config.extra_args.iter().any(|arg| arg == "-arch=sm_80"));
+    }
+
+    #[test]
+    fn a_cuda_section_without_enable_does_not_turn_the_reading_on() {
+        // `toolkit` alone says *where the headers are*, not *how to read the files*: a project may want the include
+        // path for an editor that is not parsing its kernels as CUDA (a `.cu` opened as C++), and turning the grammar
+        // on behind that would be a different claim. Only `enable` (or a real `nvcc`) does.
+        let report = parse("[compile.cuda]\ntoolkit = '/opt/cuda'\n");
+        assert_eq!(problems(&report), Vec::<String>::new());
+        let cuda = report.config.compile.cuda.as_ref().expect("the section");
+        let config = cuda.applied_to(
+            crate::include::config::CompilerConfig::new(),
+            Path::new("/p"),
+        );
+        assert!(!config.cuda(), "no `enable`, no CUDA reading");
+        assert!(
+            config
+                .include_paths
+                .iter()
+                .any(|path| path.directory == Path::new("/opt/cuda/include")),
+            "…but the headers are still where the project said"
+        );
+    }
     fn problems(report: &ConfigReport) -> Vec<String> {
         report
             .problems

@@ -8,6 +8,19 @@ use crate::{
 
 pub struct ParserConfig<'cache> {
     pub level: CppLanguageLevel,
+    /// **Is this translation unit CUDA?** — the one switch the grammar's CUDA rules are behind.
+    ///
+    /// A separate question from `level` and from `dialect`, and separate from *both* on purpose: `nvcc` compiles
+    /// CUDA with a host compiler, so a `.cu` file is C++20 *and* MSVC *and* CUDA at once. What this flag adds is the
+    /// syntax those two do not have — the execution-configuration brackets of a kernel launch
+    /// (`kernel<<<grid, block>>>(args)`) and the qualifiers that place a function or a variable on the host or the
+    /// device (`__global__`, `__device__`, `__shared__`, …) — and it is off by default so that a plain C++ file is
+    /// parsed exactly as it was written.
+    ///
+    /// It is set by the analysis from the project's toolchain (`__CUDACC__` in the predefined macros, or an `nvcc`
+    /// command), which is what keeps CUDA's spelling from being accepted in a project that has never seen it: a
+    /// `__global__` in ordinary C++ is a name, not a qualifier, and a `<<<` is three shift operators.
+    pub cuda: bool,
     /// Which compiler's own reserved spellings mean what — see [`Dialect`].
     ///
     /// A separate question from `level`, and the reason is written on [`Dialect`]: `-std=gnu++20` is C++20 *and*
@@ -96,6 +109,7 @@ pub struct ParserConfig<'cache> {
 impl<'cache> ParserConfig<'cache> {
     pub fn new(level: CppLanguageLevel, node_cache: Option<&'cache mut NodeCache>) -> Self {
         Self {
+            cuda: false,
             level,
             dialect: Dialect::default(),
             lexer_config: LexerConfig::new(level),
@@ -111,6 +125,15 @@ impl<'cache> ParserConfig<'cache> {
     /// [`ParserConfig::skip_bodies`] for the measurement, and for the two callers that must not ask for this.
     pub fn with_skipped_bodies(mut self) -> Self {
         self.skip_bodies = true;
+        self
+    }
+
+    /// **Read this translation unit as CUDA** — see [`ParserConfig::cuda`].
+    ///
+    /// Off unless a toolchain said `nvcc`: the launch brackets and the placement qualifiers are then ordinary C++
+    /// (`<<<` is three shifts) rather than syntax this parser invents for a project that never had them.
+    pub fn with_cuda(mut self, cuda: bool) -> Self {
+        self.cuda = cuda;
         self
     }
 
@@ -241,6 +264,7 @@ impl<'cache> ParserConfig<'cache> {
 impl Default for ParserConfig<'_> {
     fn default() -> Self {
         Self {
+            cuda: false,
             level: CppLanguageLevel::default_level(),
             dialect: Dialect::default(),
             lexer_config: LexerConfig::default(),

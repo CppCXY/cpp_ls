@@ -911,4 +911,20 @@ pub enum CppSyntaxKind {
     ///
     /// e.g.: `register int x;`, `register unsigned int r0;`
     RegisterSpec,
+
+    /// **A CUDA kernel launch** — `kernel<<<grid, block, shmem, stream>>>(args)`.
+    ///
+    /// Not C++ at all: `<<<` and `>>>` are lexed as `<<` `<` and `>>` `>`, and in ordinary C++ the line is three
+    /// shifts and a syntax error. `nvcc` reads it as the execution configuration of a call, and so does this parser
+    /// **when the unit is CUDA** ([`crate::ParserConfig::cuda`]) — the child sequence is:
+    ///
+    /// ```text
+    ///   <the kernel expression>  the callee, as written
+    ///   ArgumentList             the configuration: 2 to 4 comma-separated expressions
+    ///   ArgumentList             the call's own arguments, when written
+    /// ```
+    ///
+    /// Declared **last** among the kinds, for the reason [`CppSyntaxKind::AsmStat`] gives: a variant's discriminant
+    /// may not move, because the kind table is a `transmute` bounded by the last variant.
+    CudaLaunchExpr,
 }

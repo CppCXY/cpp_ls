@@ -697,9 +697,19 @@ impl FileView {
     /// [`cpp_parser::IncludedMacro::from_offset`] as **the end of the `#include` that brought the definition in**,
     /// which is an offset in *this* file — the same ruler the parse is reading with. So "is `_STD` a macro here" is
     /// answerable, and answerable correctly.
-    pub fn parse_with(file: &VfsFile, macros: &cpp_parser::MacroEnvironment) -> FileView {
+    /// [`FileView::parse_with`] for a **CUDA** unit — the flag comes from the session's configuration, because a view
+    /// of a `.cu` file (or of a header included by one) must read the placement qualifiers and the launch brackets the
+    /// same way the indexer did. Two readings of one file that disagreed about whether `k<<<1, 1>>>()` is a call would
+    /// be two answers to every question asked about it, and the session's is the one the editor shows.
+    pub fn parse_with_cuda(
+        file: &VfsFile,
+        macros: &cpp_parser::MacroEnvironment,
+        cuda: bool,
+    ) -> FileView {
         let source = file.text.clone();
-        let config = cpp_parser::ParserConfig::default().with_macros_from_includes(macros);
+        let config = cpp_parser::ParserConfig::default()
+            .with_cuda(cuda)
+            .with_macros_from_includes(macros);
         let tree = cpp_parser::CppParser::parse(&source, config);
         let root = tree.get_red_root();
         let scopes = crate::sema::scopes::build_scopes(&root, macros);
@@ -717,6 +727,9 @@ impl FileView {
             written_lines: None,
             reading: Arc::from(Vec::new()),
         }
+    }
+    pub fn parse_with(file: &VfsFile, macros: &cpp_parser::MacroEnvironment) -> FileView {
+        Self::parse_with_cuda(file, macros, false)
     }
 
     /// **A view of what the preprocessor produced**, rather than of the file's own tokens.
@@ -740,9 +753,23 @@ impl FileView {
         file: &VfsFile,
         rendered: &crate::preprocess::cooked::RenderedCooked,
     ) -> FileView {
+        Self::parse_rendering_with_cuda(file, rendered, false)
+    }
+
+    /// [`FileView::parse_rendering`] for a **CUDA** unit — the session's configuration decides, and the reason is the
+    /// one [`FileView::parse_with_cuda`] gives: the reading an editor asks questions about must agree with the reading
+    /// the index was built from.
+    pub fn parse_rendering_with_cuda(
+        file: &VfsFile,
+        rendered: &crate::preprocess::cooked::RenderedCooked,
+        cuda: bool,
+    ) -> FileView {
         let source: Arc<str> = Arc::from(rendered.text.as_str());
         let line_index = Arc::new(LineIndex::parse(&source));
-        let tree = cpp_parser::CppParser::parse(&source, cpp_parser::ParserConfig::default());
+        let tree = cpp_parser::CppParser::parse(
+            &source,
+            cpp_parser::ParserConfig::default().with_cuda(cuda),
+        );
         let root = tree.get_red_root();
         // **No macro bodies**, and the answer is the point rather than a simplification: the text being parsed has
         // no invocations in it, so a body reader would be consulted for names that were already replaced.

@@ -598,11 +598,14 @@ fn search_paths_with(
             .map(|define| (define.name.as_ref(), define.value.as_deref())),
     );
 
+    // **Is this CUDA?** — see [`a_cuda_toolchain`].
+    let cuda = a_cuda_toolchain(&builtin_macros, Some(compiler));
     Some(Toolchain {
         compiler: Some(compiler.to_path_buf()),
         version: parse_version(&combined),
         system_include_paths,
         builtin_macros,
+        cuda,
         dialect,
         standard: standard.map(str::to_string),
         // Overwritten by the caller that knows which step of the order found this compiler.
@@ -1034,11 +1037,16 @@ fn ask_msvc(
         ),
     };
 
+    // **MSVC's toolchain is never CUDA on its own.** A CUDA project on Windows drives `cl` as the host compiler, but
+    // the fact that CL was found says nothing about the driver — `nvcc` is what makes a unit CUDA, and it is found
+    // from the compile database's command, not from the host compiler the platform happens to have.
+    let cuda = a_cuda_toolchain(&builtin_macros, None);
     Some(Toolchain {
         compiler: Some(msvc.toolset.cl.clone()),
         version,
         system_include_paths: msvc.include_paths(),
         builtin_macros,
+        cuda,
         // Knowing the compiler is `cl` is knowing the dialect, whether or not it answered: MSVC's reading of
         // `__int128`, of attributes and of the preprocessor's own syntax is what the parser needs to know.
         dialect: Some(Dialect::Msvc),
@@ -1060,6 +1068,7 @@ fn system_headers_fallback(
         version: None,
         system_include_paths: found.directories,
         builtin_macros: Vec::new(),
+        cuda: false,
         dialect: None,
         // Nothing was asked, so nothing was assumed: the standard is part of what a compiler's answer carries, and
         // there is no compiler here. A project in this state is one where every condition naming `__cplusplus` is
@@ -1074,6 +1083,26 @@ fn system_headers_fallback(
     })
 }
 
+/// **Is this toolchain CUDA?** — `__CUDACC__` in its macro table, or an `nvcc` as the compiler.
+///
+/// The macro is `nvcc`'s own statement about itself, and the name is the fallback for a compiler that could not be
+/// asked: an `nvcc` that answers nothing is still nvcc, which is the rule [`Dialect`] follows for `cl`.
+///
+/// What this is **not** is "the host compiler is MSVC": on Windows a CUDA project drives `cl.exe` as the host
+/// compiler, and finding `cl` says nothing about whether the driver is `nvcc`. The two layers are independent, which
+/// is the whole reason [`Toolchain::cuda`] and [`Toolchain::dialect`] are separate fields.
+fn a_cuda_toolchain(
+    builtin_macros: &[CommandLineMacro],
+    compiler: Option<&std::path::Path>,
+) -> bool {
+    builtin_macros
+        .iter()
+        .any(|macro_| macro_.name.as_ref() == "__CUDACC__")
+        || compiler
+            .and_then(|compiler| compiler.file_name())
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.contains("nvcc"))
+}
 /// A compiler that answered, and what it said.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Toolchain {
@@ -1099,6 +1128,17 @@ pub struct Toolchain {
     /// **Empty is not "none of them are defined"**: it means the compiler could not be asked, which
     /// [`Toolchain::note`] says out loud and which makes every condition naming one of these `Unknown`.
     pub builtin_macros: Vec<CommandLineMacro>,
+    /// **Is this a CUDA toolchain?** — `nvcc`, or a compiler a CUDA project drives.
+    ///
+    /// CUDA is not a dialect of C++ in the sense [`Dialect`] means: `nvcc` compiles host code by *invoking* a host
+    /// compiler (MSVC on Windows, GCC on Linux — `-ccbin` picks it), so a `.cu` file is C++ *and* MSVC-or-GNU *and*
+    /// CUDA at once. This flag is the third layer, and it is what the parser's CUDA rules are behind
+    /// ([`cpp_parser::ParserConfig::cuda`]): the placement qualifiers and the `<<<…>>>` brackets, which are syntax
+    /// neither the language nor either vendor's dialect has.
+    ///
+    /// Read from the macro table (`__CUDACC__` is nvcc's own statement about itself) and, when there is no table,
+    /// from the compiler's *name*: an `nvcc` that could not be asked is still nvcc.
+    pub cuda: bool,
     /// The dialect the parser should read the project's files in, when the toolchain settles it.
     ///
     /// From the macro table when there is one (`_MSC_VER`, `__GNUC__`), and from the compiler's *name* when there
@@ -1344,6 +1384,13 @@ impl Toolchain {
     /// the same conclusion out loud: `ignoring duplicate directory …`.)
     pub fn config(&self, base: &CompilerConfig) -> CompilerConfig {
         let mut config = base.clone();
+
+        // **The CUDA layer, applied before anything else**, because every parse of every file of the program is what
+        // it changes: a project compiled by `nvcc` has `.cu` files and headers written with `__device__` in them, and
+        // the grammar has to know before it reads the first one.
+        if self.cuda {
+            config = config.with_cuda(true);
+        }
 
         // **The standard the compiler was asked about**, when the project did not state one. It is the same
         // question `__cplusplus` answers, and the configuration is where that answer is kept for the layers that

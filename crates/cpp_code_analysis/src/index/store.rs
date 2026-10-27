@@ -2398,6 +2398,9 @@ impl<F: FileProvider> SummaryStore<F> {
             Dialect::Gnu => b'g',
             Dialect::Msvc => b'm',
         });
+        // …and **whether the unit is CUDA**, for the same reason one step stronger: the same text is a kernel
+        // definition to `nvcc` and to nobody else, so a summary made under one reading must never answer the other.
+        bytes.push(if self.config.cuda() { b'c' } else { b'-' });
         bytes.push(0);
 
         // **Whether an include nothing could place may be looked for in the tree**, because it changes which file a

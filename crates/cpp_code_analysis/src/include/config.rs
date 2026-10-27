@@ -150,6 +150,15 @@ pub struct CompilerConfig {
     /// them would serve one target's facts to the other.
     pub dialect: Dialect,
 
+    /// **Read this project as CUDA** — see [`cpp_parser::ParserConfig::cuda`], which is the switch the grammar's
+    /// CUDA rules are behind.
+    ///
+    /// Set by the toolchain (`__CUDACC__` in the predefined macros, or an `nvcc` compiler) and by a project that says
+    /// so in `.cppls.toml`. Not the same question as [`CompilerConfig::dialect`]: `nvcc` compiles host code with a host
+    /// compiler, so a CUDA program is C++ *and* MSVC-or-GNU *and* CUDA — three independent layers, which is why this is
+    /// a flag rather than another [`Dialect`] variant.
+    pub cuda: bool,
+
     /// The directory the compilation was run in.
     ///
     /// A relative `-I` and a relative `#include` are both relative to *this*, not to the file or to the
@@ -376,6 +385,17 @@ impl CompilerConfig {
     /// The dialect in force. [`Dialect::default`] until a toolchain says otherwise.
     pub fn dialect(&self) -> Dialect {
         self.dialect
+    }
+
+    /// **Read this project as CUDA** — see [`CompilerConfig::cuda`].
+    pub fn with_cuda(mut self, cuda: bool) -> Self {
+        self.cuda = cuda;
+        self
+    }
+
+    /// Is this project CUDA? — see [`CompilerConfig::cuda`].
+    pub fn cuda(&self) -> bool {
+        self.cuda
     }
 
     pub fn with_working_directory(mut self, directory: impl Into<PathBuf>) -> Self {

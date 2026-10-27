@@ -1,5 +1,52 @@
 
-use super::{Dialect, Environment, Output, parse_search_list, parse_version, search_list_flags};
+use super::{Dialect, Environment, Output, a_cuda_toolchain, parse_search_list, parse_version, search_list_flags};
+
+/// **A CUDA toolchain is recognised from its macros or its name, and that reaches the parser's switch.**
+///
+/// The three layers a `.cu` file lives in are independent: the standard (`-std=`), the **dialect** (the host compiler
+/// — MSVC on Windows, GCC on Linux, because `nvcc` compiles host code by invoking one), and the **CUDA layer** (the
+/// placement qualifiers and the `<<<…>>>` brackets). This test is about the third: `__CUDACC__` is `nvcc`'s own
+/// statement about itself, an `nvcc` that could not be asked is still `nvcc` by name, and either way the
+/// configuration it produces must have the parser's CUDA switch on.
+#[test]
+fn a_cuda_toolchain_is_recognised_and_turns_the_parsers_switch_on() {
+    // **The macro**, with a GNU macro table beside it: `nvcc` on Linux defines both, and the host dialect must not be
+    // swallowed by the CUDA reading.
+    let macros = super::parse_builtin_macros("#define __GNUC__ 12\n#define __CUDACC__ 1\n");
+    assert!(a_cuda_toolchain(&macros, None), "`__CUDACC__` is nvcc's own word");
+
+    // **The name**, when there is no macro table to read.
+    assert!(
+        a_cuda_toolchain(&[], Some(std::path::Path::new("/usr/local/cuda/bin/nvcc"))),
+        "an nvcc that could not be asked is still nvcc"
+    );
+
+    // **And neither**, which is the ordinary case: g++ and cl are not CUDA, and a project of theirs must not read
+    // `__global__` as a qualifier.
+    let gnu = super::parse_builtin_macros("#define __GNUC__ 12\n");
+    assert!(!a_cuda_toolchain(&gnu, None));
+    assert!(!a_cuda_toolchain(&[], Some(std::path::Path::new("/usr/bin/g++"))));
+
+    // The switch itself: a CUDA toolchain's configuration turns the parser's flag on, and keeps the host dialect.
+    let toolchain = super::Toolchain {
+        compiler: Some("/usr/local/cuda/bin/nvcc".into()),
+        version: None,
+        system_include_paths: Vec::new(),
+        builtin_macros: macros,
+        cuda: true,
+        dialect: Some(Dialect::Gnu),
+        standard: None,
+        source: super::ToolchainSource::CompileDatabase,
+        note: None,
+    };
+    let config = toolchain.config(&super::CompilerConfig::new());
+    assert!(config.cuda(), "the parser must read this project as CUDA");
+    assert_eq!(
+        config.dialect(),
+        Dialect::Gnu,
+        "and the host dialect is still its own"
+    );
+}
 
 /// GCC 15.1.0 (MinGW-w64), trimmed to three entries — the shape is verbatim, including the `..` segments
 /// and the `#include "..."` block that precedes it.
@@ -823,6 +870,7 @@ fn the_directories_are_appended_so_the_project_keeps_its_own_order() {
         version: None,
         system_include_paths: vec!["/gcc/include/c++".into(), "/gcc/include".into()],
         builtin_macros: Vec::new(),
+        cuda: false,
         dialect: None,
         standard: None,
         source: ToolchainSource::Path,
@@ -852,6 +900,7 @@ fn preparing_a_configuration_twice_changes_nothing_the_second_time() {
         version: None,
         system_include_paths: vec!["/gcc/include".into(), "/gcc/include".into()],
         builtin_macros: Vec::new(),
+        cuda: false,
         dialect: None,
         standard: None,
         source: ToolchainSource::Path,
@@ -883,6 +932,7 @@ fn toolchain_of(dialect: Option<Dialect>, include_paths: &[&str]) -> Toolchain {
         version: None,
         system_include_paths: include_paths.iter().map(PathBuf::from).collect(),
         builtin_macros: Vec::new(),
+        cuda: false,
         dialect,
         standard: None,
         source: ToolchainSource::SystemHeaders,

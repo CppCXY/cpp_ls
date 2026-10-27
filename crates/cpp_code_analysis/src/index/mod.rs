@@ -295,7 +295,9 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
         // It is left in the parser rather than deleted because the measurement is the interesting object: the next
         // person to read "64% of nodes are bodies" will reach for this, and the number that says it buys nothing
         // should be in front of them. `ParserConfig::skip_bodies` carries the same figures.
-        let config = ParserConfig::default().with_dialect(self.config.dialect());
+        let config = ParserConfig::default()
+            .with_dialect(self.config.dialect())
+            .with_cuda(self.config.cuda());
 
         let tree = { CppParser::parse(source, config) };
         let summary = { self.index_tree(path, source, &tree, key) };
@@ -411,7 +413,9 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
         // **The stream is already cooked**, so there is nothing for a macro environment to add and a great deal for
         // it to get wrong: its answers are positional in the original file's coordinates while the parser reads the
         // rendering's. See the same note in [`FileIndexer::index`].
-        let config = ParserConfig::default().with_dialect(self.config.dialect());
+        let config = ParserConfig::default()
+            .with_dialect(self.config.dialect())
+            .with_cuda(self.config.cuda());
 
         let tree = { CppParser::parse(&rendered.text, config) };
         let mut summary = { self.index_tree(path, &rendered.text, &tree, key) };
@@ -582,7 +586,11 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
         // **No macro environment** — see the note in [`FileIndexer::index`], and note that this is the one parse
         // where it would have been most tempting and most wrong: `stream.text` is a *concatenation of every file's
         // rendering*, so an offset into it is a coordinate no file in the unit has.
-        let config = || ParserConfig::default().with_dialect(self.config.dialect());
+        let config = || {
+            ParserConfig::default()
+                .with_dialect(self.config.dialect())
+                .with_cuda(self.config.cuda())
+        };
 
         // **One parse, of the stream the caller cooked.**
         //

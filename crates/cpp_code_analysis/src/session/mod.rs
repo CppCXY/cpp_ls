@@ -868,6 +868,14 @@ impl Session<DiskFiles> {
             None => base,
         };
 
+        // **And what the project says about CUDA**, which is the one layer discovery cannot work out on a machine
+        // where `nvcc` is not installed: the toolkit's location, the host compiler's name, extra includes. Applied
+        // after the toolchain so that `enable` can override a discovery that found no `nvcc` — see `CudaSection`.
+        let config = match &project_config.config.compile.cuda {
+            Some(cuda) => cuda.applied_to(config, &root),
+            None => config,
+        };
+
         // **Which compiler this is**, asked of the compiler rather than guessed from the flags: GCC and Clang
         // predefine `__GNUC__`, MSVC predefines `_MSC_VER`, and they arrive in the table the same call that gave
         // the search paths (see `toolchain::discover`). It matters to the *parser*, which has to know what
@@ -3649,7 +3657,11 @@ impl<F: FileProvider + Clone> Session<F> {
         // next query about it finds the rendering built. The same "not now, next time" the diagnostics channel
         // states through `isIncomplete`.
         match self.known_rendering_of(&file.path, &file.text) {
-            Some(rendered) => Some(FileView::parse_rendering(file, &rendered)),
+            Some(rendered) => Some(FileView::parse_rendering_with_cuda(
+                file,
+                &rendered,
+                self.config.cuda(),
+            )),
             None => {
                 if crate::probes::cooking() {
                     // **The two halves of the lookup, printed.** The key is `(path, content_hash(text))`, and a
@@ -3734,7 +3746,11 @@ impl<F: FileProvider + Clone> Session<F> {
         let macros = self
             .known_macros_of(&file.path, &file.text)
             .unwrap_or_default();
-        Some(FileView::parse_with(&file, macros.as_ref()))
+        Some(FileView::parse_with_cuda(
+            &file,
+            macros.as_ref(),
+            self.config.cuda(),
+        ))
     }
 
     /// **The view of a file that a compiler's parser would see**, built if it has to be.
@@ -3769,7 +3785,11 @@ impl<F: FileProvider + Clone> Session<F> {
         let rendered = self.rendering_of(&file.path)?;
         // Remembered, so the next `view` — which cannot build one — finds it.
         self.known_rendering_of(&file.path, &file.text);
-        Some(FileView::parse_rendering(&file, &rendered))
+        Some(FileView::parse_rendering_with_cuda(
+            &file,
+            &rendered,
+            self.config.cuda(),
+        ))
     }
 
     /// The rendering for `text`, **if it is already read** — a hash and a lookup, and nothing else.

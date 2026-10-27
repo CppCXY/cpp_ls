@@ -1589,3 +1589,85 @@ cpp_ls release      13 个目标全绿
 排：hover 的两条（类模板实例拼写、匿名 struct 的 `void`）、一个事实层的真缺陷（`parameters` 是关键字，现在只在用的时候挡）、
 探针的可用性（`members_real`/`signature_real` 仍然硬编码另一台机器的路径）、已知红清单、§7.12 的不确定性、以及两条可选的
 性能工作（打开文件的 TU 每次启动重读；trait 形态的 `element_type`）。每条都写了现象、根因、改哪里、怎么验收。
+---
+
+# 11. CUDA 与 nvcc：三层，不是一个方言
+
+**nvcc 是驱动器，不是另一个 C++ 编译器。** 它把 `.cu` 分成两半：device 代码自己编（cudafe++ → cicc → ptxas），
+**host 代码调用宿主编译器**编——Windows 上是 `cl.exe`（MSVC），Linux 上默认 `g++`（`-ccbin` 选择）。
+NVIDIA 的文档原话是 *"nvcc is a compiler driver"*
+（[CUDA C Programming Guide](https://docs.nvidia.com/cuda/archive/10.1/cuda-c-programming-guide/index.html#2)）。
+
+所以一个 `.cu` 文件同时属于**三层**，任何一层模型化了都不够：
+
+```text
+标准      -std=c++17/20                         CppLanguageLevel
+宿主方言  __int64 / __cdecl / MSVC 的头           Dialect（Gnu | Msvc）
+CUDA 层   __global__ / kernel<<<g, b>>>(args)    ParserConfig::cuda（本次新增，bool）
+```
+
+第三层是**正交的**：Windows 上的 CUDA 工程就是 "C++ + MSVC 方言 + CUDA 扩展"。这也是为什么它是
+`ParserConfig::cuda: bool` 而不是第三个 `Dialect` 变体——一个 `Dialect` 值只能回答"哪家的保留拼写"。
+
+## 11.1 语法层做了什么
+
+```text
+说明符位置：__global__ __device__ __host__ __shared__ __constant__ __managed__ __grid_constant__
+            __noinline__ / __forceinline__（= inline）
+            __launch_bounds__(…) __maxnreg__(…) __align__(…) __cluster_dims__(…)（参数按 token 组保留）
+后缀表达式：kernel<<<grid, block[, shmem[, stream]]>>>(args)  →  CudaLaunchExpr
+            子节点：callee 表达式 + 配置的 ArgumentList + 调用自身的 ArgumentList
+```
+
+两处细节值得记下来，因为都是实测撞到的：
+
+```text
+① `<<<` / `>>>` 在词法上不是 token：`<<<` 是 `<<` + `<`，`>>>` 是三个 `>`（`>>` 会先被最长匹配拿走）。
+   配置里的表达式必须【停在】`>>>` 上，否则 `k<<<1, 32>>>(out)` 会把 `>>>` 读成比较/移位，
+   把调用参数一起吞进配置里（实测：`CudaLaunchExpr` 的 ArgumentList 文本是 `1, 32>>>(out); }`）。
+   判据用字节相邻：连续三个 `>` 只可能是收尾括号，因为 C++ 没有 `>>>` 运算符
+   （`CppParser::at_the_end_of_a_launch_configuration`）。
+② 代价：配置里写裸的比较 `>` 需要加括号——`k<<<(n > 4), 1>>>()` 可以，`k<<<n > 4, 1>>>()` 不行。
+   nvcc 的 `>>>` 是单个 token，所以它没有这个歧义；我们的词法器把 `>`-族一次性拆开，这条限制写在代码注释里。
+```
+
+**不属于语法层的东西**：`dim3`、`threadIdx`、`float4` 等是 **nvcc 头文件里的声明**（`cuda_runtime.h` 会向 `.cu` 预包含），
+不是关键字。它们由 `[compile.cuda].toolkit` 指过去即可，不需要在解析器里造假声明。
+
+## 11.2 配置：`.cppls.toml` 的 `[compile.cuda]`
+
+```toml
+[compile.cuda]
+enable = true                                       # 没有 nvcc 的机器上也按 CUDA 读
+toolkit = "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.4"
+host_compiler = "cl"                                # 宿主方言：cl → MSVC，g++/clang++ → GNU
+include = ["third_party/cutlass/include"]           # 额外的 include 目录（相对工作区根）
+args = ["-arch=sm_80"]                              # 追加到最终 flags
+```
+
+```text
+enable        等价于"发现到 nvcc"：解析器的 CUDA 开关打开
+toolkit       加 <toolkit>/include（存在的话再加 <toolkit>/include/cccl）为 system include
+              相对路径按工作区根解析——实测：写成 "cuda" 而按进程 CWD 解析时，<cuda_runtime.h> 报 not found
+host_compiler 只决定 Dialect，不去探测；探测到的编译器仍是系统头文件的来源
+__CUDA_ARCH__ 【故意】不做成 key：它只在 device 编译遍里有定义，为整个文件定义它会让 host 代码的
+              #if __CUDA_ARCH__ >= 800 走进一个真实编译器永远不会走的去向
+```
+
+## 11.3 验收（实测，`C:\Users\zc\Desktop\test_cuda`）
+
+一个最小 CUDA 工程：`.cppls.toml` 指 `toolkit = "cuda"`，`cuda/include/cuda_runtime.h` 声明 `dim3`/`float4`/
+`threadIdx` 等，`src/kernels.cu` 里有一个 `__global__` kernel 和一次 `add<<<dim3(2, 1), 128>>>(a, out);`。
+
+```text
+诊断         0 finding(s)                     ← 加 [compile.cuda] 之前：IncludeNotFound(<cuda_runtime.h>)
+kernel 调用  definitions: ["::add"]           ← <<< 之后的名字仍然解析到 kernel
+类型         threadIdx.x → unsigned           ← 穿过 toolkit 头文件里的 struct dim3
+配置关掉     同一文件报语法错误               ← 普通 C++ 不认 <<< 与 __launch_bounds__
+```
+
+```text
+cpp_parser         5 条 CUDA 语法测试（tests/cuda.rs）：限定符、launch 表达式、launch 是独立节点、
+                   以及"普通 C++ 不接受这两样"
+cpp_code_analysis  712 lib + 45 targets；Toolchain 的 cuda 判定与 [compile.cuda] 各有测试
+```

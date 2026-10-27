@@ -5964,6 +5964,42 @@ fn an_implementation_keyword(p: &CppParser) -> Option<ImplementationKeyword> {
         return None;
     }
 
+    // **CUDA's placement qualifiers, and only in a CUDA unit.** `nvcc` adds them to the language: they say where a
+    // function or a variable lives (host, device, both, constant memory, shared memory), and to a C++ parser they are
+    // just names — so `__global__ void k() {}` reads as a declaration of a variable `__global__` of type `void`,
+    // followed by `k()` at file scope, which is not a declaration at all. Reported shape: the kernel's own body turned
+    // into an error node and everything after it in the unit was lost.
+    //
+    // Gated on [`CppParser::cuda`] because that is the whole point of the switch: in a project that has never seen
+    // `nvcc`, `__global__` is an ordinary identifier and must keep parsing as one.
+    if p.cuda() {
+        let cuda = match p.current_token_text() {
+            // The placement qualifiers: no semantics to this layer beyond "a specifier stands here".
+            "__global__" | "__device__" | "__host__" | "__shared__" | "__constant__"
+            | "__managed__" | "__grid_constant__" => Some(ImplementationKeyword::Bare),
+            // The inline family: `__forceinline__` is `inline` and nothing else, exactly as MSVC's `__forceinline`.
+            "__forceinline__" | "__noinline__" => {
+                Some(ImplementationKeyword::Means(CppSyntaxKind::InlineSpec))
+            }
+            // **A qualifier written with arguments** — `__launch_bounds__(1024, 2)`, `__maxnreg__(64)`,
+            // `__align__(16)`, `__cluster_dims__(2, 1, 1)`. The arguments are a token group this layer keeps as
+            // written (see `parse_an_implementation_keyword`), the same treatment an asm payload gets.
+            "__launch_bounds__" | "__maxnreg__" | "__align__" | "__cluster_dims__" => {
+                Some(ImplementationKeyword::Bare)
+            }
+            _ => None,
+        };
+        if cuda.is_some() {
+            return cuda;
+        }
+    }
+
+    ordinary_implementation_keyword(p)
+}
+
+/// The spellings that are the compiler's own in **every** dialect — the ones `an_implementation_keyword` answers
+/// before it asks whether the unit is CUDA.
+fn ordinary_implementation_keyword(p: &CppParser) -> Option<ImplementationKeyword> {
     Some(match p.current_token_text() {
         "__restrict" | "__restrict__" => ImplementationKeyword::Qualifier,
         "__forceinline" => ImplementationKeyword::Means(CppSyntaxKind::InlineSpec),
@@ -6323,7 +6359,22 @@ pub(super) fn parse_an_implementation_keyword(p: &mut CppParser) -> CompleteMark
             m.complete(p)
         }
         _ => {
+            // **A qualifier written with arguments keeps them as a token group.** `__launch_bounds__(1024, 2)` is a
+            // specifier followed by a parenthesised list whose contents are the compiler's business (occupancy
+            // hints), so the group is consumed whole rather than read as expressions — the same treatment an `asm`
+            // payload gets, and for the same reason: there is no meaning here to claim. Without it the `(` was left
+            // to the declarator, and a kernel written with `__launch_bounds__` lost the body that followed.
+            let spelling = p.current_token_text().to_string();
             p.bump();
+            if p.cuda()
+                && matches!(
+                    spelling.as_str(),
+                    "__launch_bounds__" | "__maxnreg__" | "__align__" | "__cluster_dims__"
+                )
+                && p.current_token() == CppTokenKind::LeftParen
+            {
+                let _ = super::decls::parse_balanced_token_group(p, CppSyntaxKind::ArgumentList);
+            }
             CompleteMarker::empty()
         }
     }

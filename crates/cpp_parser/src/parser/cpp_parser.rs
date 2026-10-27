@@ -868,6 +868,42 @@ impl<'a> CppParser<'a> {
     ///
     /// Adjacency is by **byte offset**, not by position: `a > > b` is two greater-thans and only the characters
     /// being adjacent makes it a shift. Same test the lexer would have made, made here instead of baked in.
+    /// **Is the cursor on the `>>>` that closes a CUDA kernel launch?** — three `>` with nothing between them.
+    ///
+    /// The lexer splits the whole `>`-family ([`CppParser::joined_operator_at_the_cursor`]), so the question is the
+    /// same adjacency question asked one token further along: the first two are a `RightShift` and the third a lone
+    /// `>`, and only the bytes being adjacent makes it the bracket rather than an operator.
+    ///
+    /// This is what the configuration's expressions must stop at. `a > b` inside the configuration is a comparison and
+    /// `a >> b` a shift, so refusing *every* `>` there would be wrong — but a run of three can only be the closing
+    /// bracket, because no C++ operator is spelled `>>>`.
+    pub(crate) fn at_the_end_of_a_launch_configuration(&self) -> bool {
+        let mut adjacent = 0usize;
+        let mut last_end: Option<usize> = None;
+        let mut index = self.token_index;
+        while adjacent < 3 {
+            let Some(token) = self.tokens.get(index) else {
+                return false;
+            };
+            let kind = CppTokenKind::from(token.kind);
+            index += 1;
+            if crate::is_trivia(kind) {
+                continue;
+            }
+            if kind != CppTokenKind::Greater {
+                return false;
+            }
+            if let Some(end) = last_end
+                && token.range.start_offset != end
+            {
+                return false;
+            }
+            last_end = Some(token.range.end_offset());
+            adjacent += 1;
+        }
+        true
+    }
+
     pub fn joined_operator_at_the_cursor(&self) -> (CppTokenKind, usize) {
         let Some(first) = self.tokens.get(self.token_index) else {
             return (self.current_token, 1);
@@ -990,6 +1026,16 @@ impl<'a> CppParser<'a> {
     /// `__int128`", and only the caller knows which compiler that is.
     pub fn dialect(&self) -> Dialect {
         self.parse_config.dialect
+    }
+
+    /// **Is this translation unit CUDA?** — see [`crate::ParserConfig::cuda`], which is where the switch is set.
+    ///
+    /// The grammar asks this in exactly two places: the specifier sequence (the placement qualifiers:
+    /// `__global__ void k()`, `__device__ int f()`) and the postfix loop (the execution configuration of a launch:
+    /// `k<<<grid, block>>>(args)`). Both are *syntax* the language does not have, so a project that never saw `nvcc`
+    /// must not read them — a `<<<` there is three shifts.
+    pub(crate) fn cuda(&self) -> bool {
+        self.parse_config.cuda
     }
 
     /// Enter a template argument list, recording the bracket depth it began at.

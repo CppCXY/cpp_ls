@@ -34,6 +34,15 @@ use super::{at_requires, expect_token};
 /// it and leaves the `>=` to [`crate::grammar::cpp::types::split_closing_angle`] — the reading `C<D<int>= 3>`
 /// needs, and the one g++ reports as "'`>=` should be '`> =`' to terminate a template argument list".
 fn get_operator_precedence(p: &CppParser, token: CppTokenKind) -> Option<u8> {
+    // **The `>>>` that closes a CUDA launch configuration is not an operator.** Inside the configuration the
+    // expressions are ordinary ones — `a > b` compares and `a >> b` shifts — so what has to stop the loop is the
+    // *run of three*, which no C++ operator is spelled with. See
+    // [`CppParser::at_the_end_of_a_launch_configuration`].
+    if matches!(token, CppTokenKind::Greater | CppTokenKind::RightShift)
+        && p.at_the_end_of_a_launch_configuration()
+    {
+        return None;
+    }
     // A C++ **alternative operator spelling** arrives as an `Identifier`, because the lexer has no keyword for
     // it — so it is recognised by its text and then treated as the operator it stands for. Doing it here, at the
     // one place that asks "is this a binary operator", is what makes `and`, `bitand` and the rest work without
@@ -2008,6 +2017,49 @@ fn parse_postfix_suffixes(
                     // tree as an initializer that is merely incomplete.
                     p.close_marks_above(marks_before);
                     return Err(err);
+                }
+                expr = m.complete(p);
+            }
+            // **A CUDA kernel launch.** `k<<<grid, block>>>(a, b)` is not C++ at all — `<<<` is `<<` and `<` — and
+            // only a CUDA unit may read it that way ([`CppParser::cuda`]): in ordinary C++ the same tokens are three
+            // shifts and a syntax error, so a project that never saw `nvcc` keeps exactly the parse it had.
+            //
+            // The configuration is an `ArgumentList` of its own because it is not a call's argument list: it holds 2
+            // to 4 comma-separated *expressions* (`grid`, `block`, `shared memory bytes`, `stream`), and a consumer
+            // that wants them must be able to tell them from the call's.
+            CppTokenKind::LeftShift if p.cuda() && p.peek_next_token() == CppTokenKind::Less => {
+                let m = expr.precede(p, CppSyntaxKind::CudaLaunchExpr);
+                p.bump(); // `<<`
+                expect_token(p, CppTokenKind::Less)?; // the third `<`
+                let configuration = p.mark(CppSyntaxKind::ArgumentList);
+                loop {
+                    parse_assignment_expr(p)?;
+                    if p.current_token() != CppTokenKind::Comma {
+                        break;
+                    }
+                    p.bump();
+                }
+                configuration.complete(p);
+                // **`>>>` is lexed as three `>`**, not as `>>` and `>`: the lexer's longest match for `>>` is the
+                // shift operator, and it only reaches that length when the third `>` is not there. Both spellings are
+                // accepted, because which one the lexer produced is its business rather than the grammar's.
+                // The closing bracket is three `>` tokens, and the expressions above stop *before* it — see
+                // `get_operator_precedence`. Consuming them is therefore unambiguous here.
+                if p.at_the_end_of_a_launch_configuration() {
+                    p.bump();
+                    p.bump();
+                    p.bump();
+                } else {
+                    expect_token(p, CppTokenKind::Greater)?;
+                }
+                // The call itself, when the launch has arguments written — `k<<<1, 1>>>()` and `k<<<1, 1>>>` are
+                // both legal, and the second is the one a reader writes when the kernel takes nothing.
+                if p.current_token() == CppTokenKind::LeftParen {
+                    let before_the_arguments = p.checkpoint();
+                    if parse_call_arguments(p).is_err() {
+                        p.rollback(before_the_arguments);
+                        decls::parse_balanced_token_group(p, CppSyntaxKind::ArgumentList)?;
+                    }
                 }
                 expr = m.complete(p);
             }
