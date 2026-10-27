@@ -839,6 +839,53 @@ fn a_program_too_large_to_read_at_once_is_left_alone() {
     );
 }
 
+/// **A trait alias selects its specialization** — `conditional_t<false, void, T>` is `T`, and the arrow reaches it.
+///
+/// This is the shape the standard library writes its traits in, and the one the real project stopped on
+/// (`docs/remaining.md` §A4): `std::conditional<false, T, F>::type` is a member of a **partial specialization**, and a
+/// member list built from the primary has no `type` at all. The lookup therefore has to pick the declaration the *use*
+/// is an instance of — the pattern rule, with the arguments split where the language splits them.
+#[test]
+#[ignore = "known red, and the trace that says why: an alias template applied to arguments is followed to `conditional<false, void, T>::type`, the specializing declaration is found, and the pairing of the use's three arguments with the specialization's two parameters is what is missing. The member fact carries `pattern: None` (measured with CPPLS_TRACE_INFERENCE=1), so `the_pairing_its_pattern_implies` has nothing to read; the fix is to record the class's written pattern on its members in the fact builder (or to select the declaration by arity at the lookup). Until then the answer is a type *called* `conditional_t`, which the arrow cannot follow — this test is the record of it"]
+fn a_trait_alias_selects_the_specialization_its_arguments_name() {
+    let text = "struct Item { int value; void grow(); };\n\
+                template <bool B, class T, class F> struct conditional {};\n\
+                template <class T, class F> struct conditional<false, T, F> { using type = F; };\n\
+                template <bool B, class T, class F>\n\
+                using conditional_t = typename conditional<B, T, F>::type;\n\
+                template <typename T> struct handle {\n\
+                \x20   using value_type = conditional_t<false, void, T>;\n\
+                \x20   value_type *operator->() const;\n\
+                };\n\
+                void g(handle<Item> h) {\n\
+                \x20   h->\n\
+                }\n";
+    let files = MemoryFiles::new().with_file("/p/a.cpp", text);
+    let fixture = Memory::new("a-trait-alias-selects", &files);
+    let mut session = fixture.session();
+    session.did_open("/p/a.cpp", text);
+    session.index_everything();
+    let path = std::path::PathBuf::from("/p/a.cpp");
+    let view = session.view_of_the_file(&path).expect("a view");
+
+    let written = "h->";
+    let at = text.find(written).expect("the fixture") + written.len();
+    let completions =
+        session.member_completions(&view, crate::file::coordinates::FileOffset::new(at));
+    let Known::Yes(completions) = completions else {
+        panic!("`{written}` must reach `Item`: {completions:?}");
+    };
+    let names: Vec<&str> = completions
+        .members
+        .members
+        .iter()
+        .map(|member| member.fact.name.as_str())
+        .collect();
+    assert_eq!(
+        completions.class, "Item",
+        "`conditional_t<false, void, T>` is `T`, and the arrow reaches it ({names:?})"
+    );
+}
 /// **`find()->second`**: an arrow whose answer is a *name* the class declares as an alias.
 ///
 /// `std::map::find` answers an iterator, and MSVC's `_Tree_iterator::operator->` is declared as

@@ -206,6 +206,35 @@ template <bool B, class T, class F> using conditional_t = typename conditional<B
    `Type::arguments` 会把 `__is_same(int, int)` 拆成两个，实测答 `Some("int)")`。
 
 **残留（真实项目）**：`find()->second` 仍停在 `std::conditional<_Test, _Ty1, _Ty2>::type::second` —— 拼写里是
+
+**2026-10-27 第三批：又走了两跳，卡在一个更具体的地方。** 这一批加了三样东西（都留着）：
+
+```text
+① a_spelling_through_the_aliases 的实参改用 split_arguments 拆（认括号）
+   此前 Type::arguments 把 enable_if<__is_same(int, int), double> 拆成三段，代换答出 Some("int)")
+② 别名走查会跟随【声明在别处的别名模板】：conditional_t<false, void, T> → conditional<false, void, T>::type
+③ 限定符分支不再因为"递归回来没变"就停：限定符本身就是类时继续问它的成员
+```
+
+夹具 `a_trait_alias_selects_the_specialization_its_arguments_name`（`session/tests.rs`）复现到这一步：
+
+```text
+h->   →  class "conditional_t"      连不上，记录为 known red
+追踪：follow 到 conditional<false, void, T>::type，特化声明找到了，然后卡在【形参配对】
+     特化 conditional<false, T, F> 只有 2 个形参，使用处写了 3 个实参；
+     位置配对把 F 配给了第 2 个实参，答出 void（一个*错的*类型，比"不知道"更糟）。
+```
+
+**下一跳的根因（实测）**：那份成员事实的 `pattern` 是 `None`（`CPPLS_TRACE_INFERENCE=1` 打印），所以"按 pattern
+配对形参与实参"没有东西可读。两条路，任选其一：
+
+1. 在**事实层**把类写出来的 `pattern` 记到它的成员上（`pattern_of` 只在 ClassDef/StructDef/UnionDef 的 *shape*
+   上算，实测成员拿不到）；
+2. 在**查找层**按**实参个数**选声明：`conditional<…>` 的主模板有 3 个形参、特化有 2 个，使用处写了 3 个 —— 先按这个
+   选，再谈 pattern。
+
+**目前不要做的事**：把 ②③ 单独合进去而没有配对规则 —— 那样 `h->` 会答 `void`（一个错的类型），而项目自己的规则是
+"一个错的类型比没有更糟"。所以这一批只留了 ①（严格更好），②③ 的代码在夹具里被 `#[ignore]` 钉住。
 **形参名**（没被实参代换），说明这一跳走的是**箭头**那条路（`a_spelling_through_the_aliases` 的限定符分支），
 它内部的代换还没像上面那样接上"被查类的 bindings"。下一步就是把同一段搬进那条分支。
 

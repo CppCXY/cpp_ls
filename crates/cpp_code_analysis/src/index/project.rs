@@ -6456,11 +6456,16 @@ fn a_spelling_through_the_aliases(
     let Some(inner_name) = inner_type.class_name() else {
         return written.to_string();
     };
-    let inner_arguments: Vec<String> = inner_type
-        .arguments()
-        .iter()
-        .map(|one| one.to_string())
-        .collect();
+    // **The arguments split where the language splits them.** `Type::arguments` does not count parentheses, so
+    // `enable_if<__is_same(int, int), double>` read as three arguments — `__is_same(int`, `int)` and `double` — and a
+    // substitution built on that answered `Some("int)")` (`docs/remaining.md` §A4). `split_arguments` counts brackets
+    // *and* parentheses, the same rule the pattern comparison uses.
+    let inner_arguments: Vec<String> = crate::sema::builtins::split_arguments(
+        inner
+            .split_once('<')
+            .map(|(_, rest)| rest.trim_end().strip_suffix('>').unwrap_or(rest))
+            .unwrap_or_default(),
+    );
     let inner_parameters = index.template_parameters_for(inner_name, path, &inner_arguments);
     let inner_defaults = index.template_parameter_defaults_for(inner_name, path, &inner_arguments);
     let Some(fact) = a_member_the_class_declares(index, scopes, root, path, inner_name, &last)
