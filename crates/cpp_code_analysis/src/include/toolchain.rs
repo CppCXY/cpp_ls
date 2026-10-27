@@ -225,7 +225,7 @@ const COMPILER_NAMES: &[&str] = &["g++", "clang++", "c++", "gcc", "clang", "cc"]
 /// ```text
 /// clang++                                    → (not on PATH)
 /// C:\Program Files\LLVM\bin\clang++.exe      → clang version 18.1.8
-/// g++                                        → C:\Users\zc\Desktop\mingw\mingw64\bin\g++.exe   ← what was used
+/// g++                                        → C:\mingw64\bin\g++.exe                    ← what was used
 /// ```
 ///
 /// So a machine with clang 18 and MSVC 14.51 was analysed against MinGW's libstdc++, which is a *different*

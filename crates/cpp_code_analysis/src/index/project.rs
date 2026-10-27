@@ -3029,6 +3029,9 @@ pub(crate) fn type_of_expression(
 #[derive(Default)]
 pub(crate) struct TypeMemo {
     types: std::cell::RefCell<std::collections::HashMap<(u32, u32), Known<(Type, PathBuf)>>>,
+    /// **The questions being answered right now** — see [`TypeMemo::enter`]. Keyed like `types`, because a node is
+    /// unique within one tree and a tree is not mutated while a query runs.
+    in_flight: std::cell::RefCell<std::collections::HashSet<(u32, u32)>>,
     members:
         std::cell::RefCell<std::collections::HashMap<(String, String), Known<(DeclFact, PathBuf)>>>,
     /// How long the engine has spent, in nanoseconds — the attribution these measurements need.
@@ -3052,6 +3055,35 @@ impl TypeMemo {
     /// **The type of a node already asked about, if it was.**
     fn remembered_type(&self, key: &(u32, u32)) -> Option<Known<(Type, PathBuf)>> {
         self.types.borrow().get(key).cloned()
+    }
+
+    /// **Claim a question, or be told that it is already being answered.**
+    ///
+    /// # Why this is a set and not the depth counter
+    ///
+    /// `depth` bounds a *chain of sub-expressions*, and several call sites deliberately start a **new** question at
+    /// zero, because a type read out of another declaration is not part of the chain that asked for it. That is right
+    /// for `auto x = f(); x.size()` and fatal for a **cycle**: measured on a real C++23 project, one member question
+    /// recursed
+    ///
+    /// ```text
+    /// text_of(site.file).content  →  text_of(site.file)          (a call: its return type is its body's)
+    ///                             →  macro_definitions.lookup(token.text(…))
+    ///                             →  token.text(text_of(site.file).content)   ← the same node again
+    /// ```
+    ///
+    /// with every lap resetting `depth` to 0, until the stack was gone (32 MB did not help). The memo below could not
+    /// stop it either: an answer is remembered **after** it is computed, so a question that re-enters itself finds an
+    /// empty memo, forever.
+    ///
+    /// `false` means "this node is already on the stack above you", and the honest answer there is that the type is
+    /// not knowable from these questions — which is what `Unknown` is for.
+    fn enter(&self, key: (u32, u32)) -> bool {
+        self.in_flight.borrow_mut().insert(key)
+    }
+
+    fn leave(&self, key: &(u32, u32)) {
+        self.in_flight.borrow_mut().remove(key);
     }
 
     /// **One member lookup, remembered by what it was asked.**
@@ -3096,8 +3128,39 @@ pub(crate) fn type_of_expression_memoed(
     if let Some(known) = memo.remembered_type(&key) {
         return known;
     }
+    // **A node already on the stack above this call is a cycle, and no amount of depth bounds it** — see
+    // [`TypeMemo::enter`] for the chain that was measured. The answer names the spelling rather than inventing a type.
+    if !memo.enter(key) {
+        let written = expression
+            .text()
+            .to_string()
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .to_string();
+        return Known::Unknown(UnknownReason::UnknownType(Box::from(written)));
+    }
 
     let started = std::time::Instant::now();
+    // **The recursion, when it is asked to show itself.** `depth` is bounded (`MAX_TYPE_DEPTH`) *per question*, and
+    // several call sites deliberately start a **new** question at 0 — so a cycle that goes through one of them is not
+    // bounded by anything. Measured on a real C++23 project: `module_graph.cpp` overflowed the stack with 32 MB on
+    // `text_of(site.file).content.substr(…).starts_with(name)`, and no log said which questions repeated. One line per
+    // question answers that, and it is the only instrument that can.
+    if std::env::var_os("CPPLS_TRACE_TYPES").is_some() {
+        eprintln!(
+            "[type_of] depth {depth:>2}  {:?}",
+            expression
+                .text()
+                .to_string()
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .chars()
+                .take(60)
+                .collect::<String>()
+        );
+    }
     let answer = type_of_expression_inner(
         memo, index, declaring, scopes, root, path, expression, depth,
     );
@@ -3114,6 +3177,9 @@ pub(crate) fn type_of_expression_memoed(
                 .unwrap_or_default()
         );
     }
+    // **The claim is released before the answer is filed**, and both happen whatever the arm answered: a question
+    // left in flight would make every later ask about the same node answer `Unknown`.
+    memo.leave(&key);
     memo.types.borrow_mut().insert(key, answer.clone());
     memo.spent
         .set(memo.spent.get() + started.elapsed().as_nanos() as u64);

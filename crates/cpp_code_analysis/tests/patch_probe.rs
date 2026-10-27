@@ -20,7 +20,7 @@ use cpp_code_analysis::{DiskFiles, Known, OpenDocuments, Session, SessionFiles, 
 fn project() -> std::path::PathBuf {
     std::env::var_os("CPPLS_PROJECT_ROOT")
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::path::PathBuf::from(r"C:\Users\zc\Desktop\github\clice"))
+        .unwrap_or_else(|| std::path::PathBuf::from(r"E:\clice"))
 }
 
 fn sources_of(root: &std::path::Path) -> Vec<std::path::PathBuf> {

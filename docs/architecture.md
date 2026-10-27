@@ -505,7 +505,7 @@ LSP         lsp_status 表 29 行全绿，hover 1–12 ms，diagnostic 28–29 m
 
 **第一步的完成标准**：facts 全部来自渲染；删除四类补丁后全部套件仍绿（除已知红）；上表每一项不劣化。
 
-> **上表是另一台机器上的数字**（`E:\EmmyLuaCodeStyle`，本机没有这个 checkout）。本机能跑的是 `C:\Users\zc\Desktop\github\clice`
+> **上表是另一台机器上的数字**（`E:\EmmyLuaCodeStyle`，本机没有这个 checkout）。本机能跑的是 `E:\clice`（`git clone https://github.com/clice-io/clice`，Bazel 工程，无 `compile_commands.json`）
 > （397 个文件，60 k 事实，无 `compile_commands.json`），所以 ⑮ 的数字来自它，并且**只用于和同一台机器上的 HEAD 比**，
 > 不与上表相比。`tests/keystroke_probe.rs` 是那台的 `edit_loop` 的替代品：同样的三个问题（重开一个文件、体内按键、
 > 指令按键），打印而不是断言。
@@ -1654,7 +1654,7 @@ __CUDA_ARCH__ 【故意】不做成 key：它只在 device 编译遍里有定义
               #if __CUDA_ARCH__ >= 800 走进一个真实编译器永远不会走的去向
 ```
 
-## 11.3 验收（实测，`C:\Users\zc\Desktop\test_cuda`）
+## 11.3 验收（实测，`CPPLS_REAL_PROJECT=<一个 CUDA 工程>`）
 
 一个最小 CUDA 工程：`.cppls.toml` 指 `toolkit = "cuda"`，`cuda/include/cuda_runtime.h` 声明 `dim3`/`float4`/
 `threadIdx` 等，`src/kernels.cu` 里有一个 `__global__` kernel 和一次 `add<<<dim3(2, 1), 128>>>(a, out);`。
@@ -1788,7 +1788,7 @@ tests/latency.rs（release）  2 passed，6.2 s —— debug 下这两条按文�
 
 # 14. 有 compile_commands 就"不认识标准库"——一次真实的回归
 
-**报告**：`C:\Users\zc\Desktop\test_module`（CMake + MinGW GCC 15 的 C++23 modules 演示）里，几乎不认识 C++ 标准库。
+**报告**：一个 CMake + MinGW GCC 15 的 C++23 modules 演示工程（`CPPLS_REAL_PROJECT=<该工程>`）里，几乎不认识 C++ 标准库。
 用户的猜测是对的：**正是因为工程里有 `compile_commands.json`**。
 
 ## 14.1 根因

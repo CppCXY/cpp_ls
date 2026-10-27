@@ -1847,7 +1847,7 @@ mod tests {
     /// the two together.
     #[test]
     fn a_windows_path_that_is_not_a_c_string_keeps_its_backslashes() {
-        let output = "# 1 \"C:\\Users\\zc\\src\\main.cpp\"\nint x ;\n";
+        let output = "# 1 \"C:\\work\\src\\main.cpp\"\nint x ;\n";
 
         let tokens = tokenize_preprocessed(output);
 
@@ -1855,7 +1855,7 @@ mod tests {
         // that.
         assert_eq!(
             tokens[0].origin(),
-            "c:/users/zc/src/main.cpp:1",
+            "c:/work/src/main.cpp:1",
             "the path survives with its separators, in the spelling comparisons are made in: {tokens:?}"
         );
     }

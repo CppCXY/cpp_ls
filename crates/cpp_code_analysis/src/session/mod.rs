@@ -1205,7 +1205,7 @@ impl<F: FileProvider + Clone> Session<F> {
         // such project has `-I` flags in the same file, and those are *self-reporting*: `Marked::mark_incomplete`
         // takes the claim back the moment an `#include` fails to resolve, and nothing is decided after that.
         //
-        // **Measured on the workspace that asked for this** (`C:\Users\zc\Desktop\cpp_project`: one `main.cpp`,
+        // **Measured on the workspace that asked for this** (`C:\work\one_file_project`: one `main.cpp`,
         // 2678 bytes, no build system of any kind). With the claim tied to a compile database — which is what this
         // line said before — MSVC's whole standard library was unreachable: `declarations_in("std")` was **13**,
         // every one of them from a C header that writes `namespace std` literally; `definition("std::string")`,

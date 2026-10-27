@@ -429,6 +429,43 @@ fn two_declarations_that_disagree_about_the_type_are_still_unknown() {
     assert_eq!(type_of_use_in(&session, "/p/a.cpp", source, "shared"), None);
 }
 
+/// **A deduction cycle terminates instead of taking the stack with it.**
+///
+/// A return type deduced from a body is read by typing the body, and a body may ask about the very expression the
+/// caller started from. The shape below is the measured one, from a real C++23 project (`module_graph.cpp`, found by
+/// running the member scoreboard on `clice` — it overflowed the stack with **32 MB** of it):
+///
+/// ```text
+/// auto text_of(int file) { return lookup(tokens.text(text_of(file).content)); }
+/// …
+/// return text_of(f).content;        ← the question that closes the loop
+/// ```
+///
+/// `text_of(f).content` needs `text_of`'s return type → its body → `tokens.text(…)` → that argument → the same
+/// `.content` again. `MAX_TYPE_DEPTH` cannot stop it: a type read out of another declaration deliberately starts a
+/// **new** question at depth 0, which is right for `auto x = f(); x.size()` and fatal for a cycle. The memo could not
+/// stop it either, because an answer is remembered **after** it is computed.
+///
+/// So the answer is `Unknown` — the type is not knowable from these questions — and the process survives to say so.
+#[test]
+fn a_deduction_cycle_answers_unknown_instead_of_overflowing_the_stack() {
+    let source = "\
+struct Tokens { const char* text(const char* s) const; };
+extern Tokens tokens;
+const char* lookup(const char* key);
+auto text_of(int file) { return lookup(tokens.text(text_of(file).content)); }
+const char* g(int f) { return text_of(f).content; }
+";
+    let session = session_with(&[("/p/cycle.cpp", source)]);
+
+    // The cycle is asked about by the *last* occurrence, which is the one inside `g`.
+    assert_eq!(
+        type_of_use_in(&session, "/p/cycle.cpp", source, "content"),
+        None,
+        "a question that needs its own answer is not answerable, and saying so is the whole point"
+    );
+}
+
 /// The type of the use of a name **in a session the caller built** — the two-file fixtures' way in.
 ///
 /// The offset is the name's **last byte**, not its first, and that is the product's own rule rather than a

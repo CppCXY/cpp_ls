@@ -218,6 +218,11 @@ fn the_member_questions_of_a_real_project_and_how_many_resolve() {
             uncooked += 1;
             continue;
         };
+        // **Which file the walk was in when it died.** A probe that dies without a name has to be bisected by hand;
+        // one line per file costs nothing and names the case (`E:\clice` overflows the stack without it).
+        if std::env::var_os("CPPLS_TRACE_PROGRESS").is_some() {
+            eprintln!("[file] {}", path.display());
+        }
         counted_files += 1;
 
         let mut scoreboard = Scoreboard::default();

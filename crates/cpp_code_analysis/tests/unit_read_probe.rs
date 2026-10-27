@@ -1,7 +1,7 @@
 //! **A probe, not a test**: what reading a whole translation unit as one program does to the index.
 //!
 //! ```text
-//! $env:CPPLS_REAL_PROJECT = "C:\Users\zc\Desktop\github\clice"
+//! $env:CPPLS_REAL_PROJECT = "E:\clice"
 //! cargo test --release -p cpp_code_analysis --test unit_read_probe -- --ignored --nocapture
 //! ```
 //!
@@ -37,7 +37,7 @@ use cpp_code_analysis::{DiskFiles, Known, OpenDocuments, Session, SessionFiles, 
 fn project() -> PathBuf {
     PathBuf::from(
         std::env::var("CPPLS_REAL_PROJECT")
-            .unwrap_or_else(|_| r"C:\Users\zc\Desktop\github\clice".to_string()),
+            .unwrap_or_else(|_| r"E:\clice".to_string()),
     )
 }
 

@@ -980,7 +980,7 @@ fn array_field(object: &str, name: &str) -> Option<Vec<String>> {
 /// the same function reads the database on every platform: `\` is the path separator on Windows and the escape
 /// character in a POSIX shell, and a reader that treats it as POSIX does everywhere deletes the character after
 /// every separator. Measured on a CMake + MinGW project's `compile_commands.json` (a real one, `docs/status.md`
-/// §十三): the compiler arrived as **`C:UserszcDesktopmingwmingw64binc++.exe`**, discovery could not ask that
+/// §十三): the compiler arrived as **`C:toolchainsmingw64binc++.exe`**, discovery could not ask that
 /// program anything, and the session fell back to the machine's other toolchain — MSVC's headers, MSVC's dialect —
 /// for a project built with GCC. Every `#include <print>` in it then resolved to the wrong library or to nothing,
 /// which is what "the editor does not understand this project" looks like from the outside.

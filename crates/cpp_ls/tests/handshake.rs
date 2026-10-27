@@ -4273,8 +4273,15 @@ fn a_declaration_in_the_viewed_file_is_reported_on_its_own_line() {
 #[test]
 #[ignore = "a reading aid for a reported file"]
 fn what_the_completion_answers_here() {
-    let Ok(source) = std::fs::read_to_string(r"C:\Users\ZC\Desktop\stdproj\main.cpp") else {
-        println!("the reported file is not on this machine");
+    // **The file is named by the reader, not by this test.** It used to be a path on one machine, which made the test
+    // a no-op everywhere else *and* put somebody's home directory in the repository. `CPPLS_REPORTED_FILE` is the same
+    // idea the other probes use: the file a report was about, and a skip when it is not given.
+    let Ok(named) = std::env::var("CPPLS_REPORTED_FILE") else {
+        println!("skipped: no CPPLS_REPORTED_FILE (the file a completion report was about)");
+        return;
+    };
+    let Ok(source) = std::fs::read_to_string(&named) else {
+        println!("skipped: {named} is not on this machine");
         return;
     };
 

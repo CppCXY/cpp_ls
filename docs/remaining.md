@@ -432,7 +432,7 @@ auto s = std::format("%d", n);      →  s 的类型是 string      ✓
    以及 locale 版本），`definition_at` 取第一个的 `returns`；
 3. 第一个实参是宏（`FULL_NAME_FORMAT`），展开后不是字符串字面量，`format_string<_Types…>` 的推导整条失败。
 
-**2026-10-27 现场实测（`C:\Users\zc\Desktop\test_cpp\main.cpp`）—— 原因找到了，但它不是"漏读"：
+**2026-10-27 现场实测（一个两文件的 C++ 工程，`CPPLS_FILE=<其中的 main.cpp>`）—— 原因找到了，但它不是"漏读"：
 
 ```text
 type_at("enenn")  →  Unknown(Ambiguous("std::format"))        ← 修前是 Unknown(UnknownType("std::format"))
@@ -752,7 +752,7 @@ class "basic_string": 170 member(s) ["allocator_type", "append", …]      ✓
 （`using string = ::std::basic_string<char>;` 这个形状，就是渲染器写出来的那个）。
 **2026-10-27 第十批：宏来自 include 时的着色与 hover —— 一半是代码，一半是配置。**
 
-`C:\Users\zc\Desktop\github\EmmyLuaCodeStyle\Test\src` 是一个**独立的 CMake 子工程**（自己的 `CMakeLists.txt`，
+`EmmyLuaCodeStyle\Test\src` 是一个**独立的 CMake 子工程**（自己的 `CMakeLists.txt`，
 `target_include_directories` 里有 `${LuaCodeStyle_SOURCE_DIR}/3rd/googletest-1.13.0/googletest/include`），
 而这个仓库**没有任何 `compile_commands.json`**。于是 `<gtest/gtest.h>` 解析不到 → 索引里没有 `TEST` 宏 →
 hover 空、着色也不对。实测证据：
