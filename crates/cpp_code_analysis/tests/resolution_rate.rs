@@ -401,6 +401,32 @@ fn the_member_questions_of_a_real_project_and_how_many_resolve() {
         }
     }
 
+    // **How many of the project's own `#include`s reached a file at all.** Every refusal this scoreboard reports has
+    // the same upstream question: a name is only visible if the header that declares it was *entered*, and a header is
+    // only entered if the directive resolved. Measured on `clice` (Bazel, no compile database): **12.2%** of 68 210
+    // member questions resolved, and 11 866 of the refusals had "no visible declaration of the class" — so the number
+    // below is the one that explains the project rather than the code. `cppls` cannot see a header the *build* found
+    // through a path it does not know, and this is how much that costs.
+    {
+        let mut resolved = 0usize;
+        let mut total = 0usize;
+        for path in &files {
+            let Some(summary) = session.index().summary(path) else {
+                continue;
+            };
+            for include in &summary.includes {
+                total += 1;
+                if include.resolved.is_some() {
+                    resolved += 1;
+                }
+            }
+        }
+        println!(
+            "\n{resolved} of {total} include(s) in the project's own files reached a file ({:.1}%)",
+            100.0 * resolved as f64 / total.max(1) as f64
+        );
+    }
+
     // **One class, on request** — `CPPLS_CLASS=LanguageServer` prints the member list the query builds for it, which
     // is the first thing to look at when the scoreboard names a class: an empty list and a missing class are two
     // different bugs, and the sample line cannot tell them apart from the outside.

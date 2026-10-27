@@ -650,7 +650,16 @@ impl<M: MacroValues + ?Sized> Expander<'_, M> {
                     } else {
                         source[open].token.range.start_offset
                     };
-                    let call_site = SourceRange::new(call_from, arguments.end_offset - call_from);
+                    // **The length is `saturating_sub`, because the two offsets can be in different texts.** A name
+                    // that ended a replacement list was written in a `#define`, and its arguments were written at the
+                    // use; `call_from` therefore comes from whichever text the invocation was spliced out of, and the
+                    // argument list's end from the run being expanded. When the run starts *after* the argument list
+                    // ends — which is what a macro whose body contains a call of itself looks like — the subtraction
+                    // underflows. In release that wrapped into a range nobody could read (a `start` near `u32::MAX`
+                    // with a huge length); in debug it **panicked**, which is how it was found: a cold index of a
+                    // project that includes `<windows.h>` died at `expand.rs:653` in a debug build.
+                    let length = arguments.end_offset.saturating_sub(call_from);
+                    let call_site = SourceRange::new(call_from, length);
                     let invocation = MacroInvocation {
                         name: name.clone(),
                         definition: definition.range,
