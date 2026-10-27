@@ -3818,6 +3818,20 @@ fn valid_cpp_in_the_shapes_recovery_eats() {
             "switch (0) case 0: default: if (a) ; else g();",
             "switch (a) f();",
             "switch (a) case 1 ... 5: break;",
+            // **C99's compound literal**: a braced initializer where a cast's operand goes. neovim's `CSTR_AS_OBJ`
+            // expands to `((Object){ .type = …, .data.string = … })`, and every use of it was `expected primary
+            // expression` before the cast arm learned to read a braced initializer (measured on `src/nvim/main.c`
+            // with `CPPLS_DIAGNOSTICS=1`, five per file).
+            "Object a = (Object){ .type = kObjectTypeString };",
+            "int n = (int){ 3 };",
+            "struct S s = (struct S){ 1, 2 };",
+            // **…but not the same literal one parenthesis deeper.** `((Object){ … })` needs the *contents* of the
+            // parentheses to be told from `void f() requires (x) { }`, so it is on the other list — see
+            // `constructs_the_parser_does_not_read_yet`.
+            // The *statement* form neovim's `ADD_C` expands to: an assignment whose left side is a dereference of a
+            // computed pointer, `(*((a).items + ((a).size++))) = …`. Reported as `expected primary expression` on
+            // `src/nvim/main.c` before this list asked for it.
+            "(*((a).items + ((a).size++))) = (Object){ 1 };",
             "goto end; end: ;",
             "if (a) { }",
             "throw X();",
