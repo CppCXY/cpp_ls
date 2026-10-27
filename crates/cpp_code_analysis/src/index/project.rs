@@ -6185,8 +6185,12 @@ fn a_members_answer_as_a_type(
     // `std::vector<int>` names one of two. The defaults are what the rest stand for — see
     // [`crate::substituted_spelling_with_defaults`], and `lineStartOffset` for the chain that needed it.
     let defaults = index.template_parameter_defaults_for(class, path, &arguments);
-    let substituted =
-        crate::sema::types::substituted_spelling_with_defaults(returns, &parameters, &defaults, &arguments);
+    let substituted = crate::sema::types::substituted_spelling_with_defaults(
+        returns,
+        &parameters,
+        &defaults,
+        &arguments,
+    );
 
     // **The operators and qualifiers the spelling around the name carries**: `const reference&` is `const T&`, and
     // replacing only the name must keep both ends.
@@ -6214,8 +6218,12 @@ fn a_members_answer_as_a_type(
     let Some(target) = fact.type_of.as_deref() else {
         return substituted;
     };
-    let target =
-        crate::sema::types::substituted_spelling_with_defaults(target, &parameters, &defaults, &arguments);
+    let target = crate::sema::types::substituted_spelling_with_defaults(
+        target,
+        &parameters,
+        &defaults,
+        &arguments,
+    );
     // **And the target is a *name* too**, so it is followed before it is answered: `pointer` is `_Val*` in the class
     // that declares it, and `_Alloc_traits::reference` is whatever that alias names. Answering the spelling instead
     // is what made `map::find(text)->second` look `second` up in `_Rb_tree_iterator` rather than in its `pair`.
@@ -6277,9 +6285,9 @@ fn a_spelling_through_the_aliases(
 
     let (leading, core, trailing) = split_the_operators_of(written);
     let a_name = !core.is_empty()
-        && core
-            .chars()
-            .all(|character| character.is_alphanumeric() || matches!(character, '_' | ':' | '<' | '>' | ',' | ' '));
+        && core.chars().all(|character| {
+            character.is_alphanumeric() || matches!(character, '_' | ':' | '<' | '>' | ',' | ' ')
+        });
     if !a_name {
         return written.to_string();
     }
@@ -6287,7 +6295,11 @@ fn a_spelling_through_the_aliases(
     let Some(class_name) = class.class_name() else {
         return written.to_string();
     };
-    let arguments: Vec<String> = class.arguments().iter().map(|one| one.to_string()).collect();
+    let arguments: Vec<String> = class
+        .arguments()
+        .iter()
+        .map(|one| one.to_string())
+        .collect();
     let parameters = index.template_parameters_for(class_name, path, &arguments);
     let defaults = index.template_parameter_defaults_for(class_name, path, &arguments);
     if crate::probes::inference() {
@@ -6299,19 +6311,27 @@ fn a_spelling_through_the_aliases(
 
     // **An unqualified name is a member of this class.**
     let Some((qualifier, last)) = split_at_the_last_scope(&core) else {
-        let Known::Yes((fact, _)) =
-            member_fact(index, scopes, root, path, &class.to_string(), &core, None)
+        // **The lookup without the arrow fallback** — see [`a_member_the_class_declares`]: this walk is *called from* the
+        // arrow path, so asking `member_fact` here asks about an arrow, which comes back here.
+        let Some(fact) =
+            a_member_the_class_declares(index, scopes, root, path, &class.to_string(), &core)
         else {
             return written.to_string();
         };
         let Some(target) = fact.type_of.as_deref() else {
             return written.to_string();
         };
-        let target = crate::sema::types::substituted_spelling_with_defaults(target, &parameters, &defaults, &arguments);
+        let target = crate::sema::types::substituted_spelling_with_defaults(
+            target,
+            &parameters,
+            &defaults,
+            &arguments,
+        );
         if target == core {
             return written.to_string();
         }
-        let followed = a_spelling_through_the_aliases(index, scopes, root, path, class, &target, depth - 1);
+        let followed =
+            a_spelling_through_the_aliases(index, scopes, root, path, class, &target, depth - 1);
         return format!("{leading}{followed}{trailing}");
     };
 
@@ -6323,14 +6343,20 @@ fn a_spelling_through_the_aliases(
     // this line the chain stops at `_Alloc::value_type&`, with it at `std::size_t&` — the difference between a
     // spelling no reader can use and the type they asked for.
     let qualifier = {
-        let substituted = crate::sema::types::substituted_spelling_with_defaults(&qualifier, &parameters, &defaults, &arguments);
+        let substituted = crate::sema::types::substituted_spelling_with_defaults(
+            &qualifier,
+            &parameters,
+            &defaults,
+            &arguments,
+        );
         if substituted.trim().is_empty() {
             qualifier
         } else {
             substituted
         }
     };
-    let inner = a_spelling_through_the_aliases(index, scopes, root, path, class, &qualifier, depth - 1);
+    let inner =
+        a_spelling_through_the_aliases(index, scopes, root, path, class, &qualifier, depth - 1);
     // **A qualifier that did not resolve is where this stops.** Carrying on with the spelling as if it were a class
     // asks the index for a *bare* name, and the library declares `_Alloc_traits` in a dozen classes: measured, the
     // chain silently continued in `std::basic_string` and answered a type from another class. Stopping answers the
@@ -6349,19 +6375,49 @@ fn a_spelling_through_the_aliases(
         .collect();
     let inner_parameters = index.template_parameters_for(inner_name, path, &inner_arguments);
     let inner_defaults = index.template_parameter_defaults_for(inner_name, path, &inner_arguments);
-    let Known::Yes((fact, _)) =
-        member_fact(index, scopes, root, path, inner_name, &last, None)
+    let Some(fact) = a_member_the_class_declares(index, scopes, root, path, inner_name, &last)
     else {
         return written.to_string();
     };
     let Some(target) = fact.type_of.as_deref() else {
         return written.to_string();
     };
-    let target = crate::sema::types::substituted_spelling_with_defaults(target, &inner_parameters, &inner_defaults, &inner_arguments);
-    let followed = a_spelling_through_the_aliases(index, scopes, root, path, &inner_type, &target, depth - 1);
+    let target = crate::sema::types::substituted_spelling_with_defaults(
+        target,
+        &inner_parameters,
+        &inner_defaults,
+        &inner_arguments,
+    );
+    let followed =
+        a_spelling_through_the_aliases(index, scopes, root, path, &inner_type, &target, depth - 1);
     format!("{leading}{followed}{trailing}")
 }
 
+/// **A member this class (or one of its bases) declares, with no arrow fallback.**
+///
+/// `member_fact` ends by asking about an `operator->` when a name is not found — right for a member query, wrong for the
+/// alias walk, which the arrow path itself calls: `pointer` → not found → `operator->` → this walk → `pointer` … is a
+/// cycle, and it was measured as a stack overflow in the fixture that pins the arrow's element type. `members_of` walks
+/// the bases (which is what `_Ptr_base`'s aliases need) and never asks about an arrow.
+///
+/// The declaration preferred is the one that *has* a type: a re-exposed alias (`using typename _Base::value_type;`)
+/// declares none of its own, and answering that one would be answering nothing.
+fn a_member_the_class_declares(
+    index: &ProjectIndex,
+    scopes: &crate::ScopeTree,
+    root: &cpp_parser::CppSyntaxNode,
+    path: &Path,
+    class: &str,
+    name: &str,
+) -> Option<DeclFact> {
+    let members = members_of(index, scopes, root, path, class).value()?;
+    members
+        .members
+        .iter()
+        .filter(|member| member.fact.name == name)
+        .map(|member| member.fact.clone())
+        .find(|fact| fact.type_of.is_some())
+}
 /// `A::b` → (`A`, `b`), split at the last `::` **outside angle brackets** — the same boundary
 /// [`without_the_namespace`] finds from the other side.
 fn split_at_the_last_scope(spelling: &str) -> Option<(String, String)> {
@@ -6496,7 +6552,30 @@ fn the_class_an_arrow_points_at(
         return None;
     }
     let parameters = index.template_parameters_for(&bare, path, &arguments);
-    let substituted = crate::sema::types::substituted_spelling(&returns, &parameters, &arguments);
+    let defaults = index.template_parameter_defaults_for(&bare, path, &arguments);
+    // **The arrow's return is a *name* in the class that declares it**, and it has to be followed before it can be a
+    // class: `_Tree_iterator::operator->` answers `pointer`, which the iterator's own `typedef _Val* pointer;` makes a
+    // `pair<const K, V>*`. Answering `pointer` — or `_Rb_tree_iterator` after `base_type_name` dropped the arguments —
+    // is what made `map::find(text)->second` look `second` up in the iterator rather than in its element
+    // (`docs/remaining.md` A4). The step is the same one a member's recorded type goes through
+    // ([`a_spelling_through_the_aliases`]), applied here because this is the second place a *spelling* is about to be
+    // used as a type.
+    let class_type = crate::sema::types::parse_type_spelling(class);
+    let resolved = a_spelling_through_the_aliases(
+        index,
+        scopes,
+        root,
+        path,
+        &class_type,
+        &returns,
+        MAX_ALIAS_HOPS,
+    );
+    let substituted = crate::sema::types::substituted_spelling_with_defaults(
+        &resolved,
+        &parameters,
+        &defaults,
+        &arguments,
+    );
     let mut target = base_type_name(&substituted).to_string();
 
     // **The member may be a template of its own**, and then its answer names *its* parameter, not the class's:
@@ -8148,8 +8227,7 @@ impl ProjectIndex {
         let sequence = self.sequence.remove(&path).or_else(|| {
             // **Both spellings go**, for the reason the insert keeps both: a file forgotten under one spelling that
             // stayed findable under the other would answer with declarations the index no longer has.
-            self.sequence
-                .remove(&normalize(Path::new(&path)))
+            self.sequence.remove(&normalize(Path::new(&path)))
         });
         if let Some(sequence) = sequence {
             self.order.remove(&sequence);
@@ -16039,17 +16117,16 @@ fn substituted_at_the_use(
             continue;
         }
         let parsed = parse_type_spelling(default);
-        defaults.push(parsed.substituted(&crate::sema::types::TypeSubstitutions::new(
-            &names,
-            &written_arguments,
-        )));
+        defaults.push(
+            parsed.substituted(&crate::sema::types::TypeSubstitutions::new(
+                &names,
+                &written_arguments,
+            )),
+        );
     }
 
-    let substitutions = crate::sema::types::TypeSubstitutions::with_defaults(
-        &names,
-        &written_arguments,
-        &defaults,
-    );
+    let substitutions =
+        crate::sema::types::TypeSubstitutions::with_defaults(&names, &written_arguments, &defaults);
     type_of.substituted(&substitutions)
 }
 /// **An argument spelling as the pattern comparison should see it**: a decidable compiler builtin, folded.

@@ -156,45 +156,45 @@ $env:CPPLS_REAL_PROJECT = "E:\does-not-exist"     → skipped × 3，全绿
 ---
 
 ## 还没修
+### A4. 箭头已经跟随别名了；残差是 **trait 形态的别名**（`conditional_t` / `enable_if_t`）
 
-### A4. 依赖形式的限定别名没有跟随（`LuaReserved.find(text)->second`、`_Tp_alloc_type::value_type&`）
-
-**现象**：`LuaReserved.find(text)->second` 报 "`std::map<…>` has no member second"；`lineStartOffset` 的类型停在
-`_Tp_alloc_type::value_type&`；`LuaReserved` 找不到引用。
-
-**已经做的（`25e5733` 之后的那次改动）**：`a_spelling_through_the_aliases` —— 把一个拼写里**类自己声明的别名**一路跟下去：
+**本轮做完的那一半**（`through_an_operator_arrow` 的第二次改动）：`operator->` 的返回拼写先跑一次
+`a_spelling_through_the_aliases`，再取 pointee。
 
 ```text
-pointer                     → _Val*                 （无限定：问这个类）
-_Alloc_traits::reference    → 先解析限定符，再问它     （限定：先跟限定符）
+修前  find(text)->second  → Unknown(NotDeclaredHere("std::_Rb_tree_iterator::second"))   （把 `pointer` 当成类）
+修后  find(text)->second  → std::conditional<…>::type::second                            （`pointer` 跟到了值类型）
+夹具  an_arrow_through_an_alias_reaches_the_pointee：`map<int,float>::find(1)->second` → `pair::second` ✓
 ```
 
-配套：`split_at_the_last_scope`（角度括号之外的最后一个 `::`）、`split_the_operators_of` 丢 `typename`/`class`/
-`struct`/`union`/`enum`（此前查找被问成 `typename _Alloc_traits`，什么也找不到，然后按**裸名**猜了一个类 —— 实测跟进了
-`std::basic_string` 的 `_Alloc_traits`）、以及"限定符没解析出来就停"的守卫（不再按裸名猜）。
+同时**删掉了第一版用的 thread-local 深度守卫**：仓库里有 `tests/no_global_state.rs` 的 `no_thread_local_state`，它当场
+把那条实现判红。替代方案是 `a_member_the_class_declares` —— 别名走查改用 `members_of`（走基类、从不问箭头），于是
+"箭头 → 别名 → 成员 → 箭头" 这个环从结构上不存在，不需要运行时守卫。**以后写这个文件里的递归，先想这条**。
 
-**现在停在哪（实测，`CPPLS_TRACE_INFERENCE=1` 每一跳都有日志）**：
+**现在的残差（实测）**：`find()->second` 停在 `std::conditional<B, T1, T2>::type`。原因是**trait 别名**：
 
-```text
-vector<size_t>::reference        → typename _Alloc_traits::reference
-_Alloc_traits                   → __gnu_cxx::__alloc_traits<_Tp_alloc_type>
-   …（每一跳都正确）…
-最终                             → _Tp_alloc_type::value_type&
+```cpp
+template <bool B, class T, class F> struct conditional          { using type = T; };   // 主模板
+template <class T, class F>         struct conditional<false,T,F>{ using type = F; };   // 偏特化
+template <bool B, class T, class F> using conditional_t = typename conditional<B,T,F>::type;
 ```
 
-残差全是**没有实参的模板形参**（`_Alloc` 用了默认实参 `std::allocator<size_t>`，而**默认实参不在事实里**）。这和
-C2 里 `a_defaulted_template_parameter_of_a_variable_template_substitutes`（`twice<float>` 答 `U`）是**同一个缺口**，
-也是 `map::find(…)->second` 停下的地方：箭头那一侧还要先按同一套把 `operator->` 的 `pointer` 跟成 `_Val*`。
+`conditional_t<__is_same(...), X, Y>` 要能答 `X`/`Y`，需要"**按实参选偏特化，再读它的 `type`**"。同一形状的还有
+`remove_extent_t`（`shared_ptr` 的 `element_type`，见 E2）和 `enable_if_t`（C2 的
+`a_trait_a_builtin_decides_selects_the_right_specialization`，实测现在答 `"type"` 而不是 `"double"`，**差一步**）。
 
 **下一步（按顺序）**：
 
-1. 事实里记下模板参数的**默认实参**（`declared_template_parameters_with` 旁边的表，`template_parameters_in` 已经在读
-   参数节点，只需要把 `= …` 那一段也留下），并把 `substituted_spelling` 的配对改成"缺实参用默认值"。
-2. 箭头路径（`through_an_operator_arrow`）里对 `operator->` 的返回拼写先跑一次
-   `a_spelling_through_the_aliases`，再取 pointee —— 这是 `find()->second` 的最后一块。
+1. 让 `conditional<B, T1, T2>` 的解析落到**匹配的声明**上：`member_fact`/`direct_member` 已有 `a_pattern_matches` 与
+   builtin 折叠（`__is_same(...)` 折成 `true` 的那套），缺的是"**选声明**"这一步在 trait 别名里也被调用；
+   建议入口：`a_spelling_through_the_aliases` 的限定符分支（`typename conditional<…>::type` 走的就是它）。
+2. `types.rs` 的那条已知红之所以还没被这条链带上，是因为它的答案来自**声明自身**的 `type_of`
+   （`NamedDeclaration::type_of` 的 `Indexed` 分支，`crates/cpp_code_analysis/src/index/project.rs:4360` 一带），而
+   alias/`finish_a_nested_name` 的走查只挂在**成员访问**那条分支上（同文件 3886–3923）。把同一段挂到
+   `Indexed` 分支需要一个能拿到 `index` 的入口（现在的签名没有），这也是那条 ignore 注释里说的"两条不同路"。
 
 **怎么验收**：`inference_probe` 在 `LuaSource.cpp` 上 `type_at` 给出 `std::size_t&`；`map<…>::find` 的 `->second`
-答到 `pair<const K, V>::second`。
+答到 `pair<const K, V>::second`；把 `types.rs:924` 的 `#[ignore]` 去掉后绿。
 
 
 ### 其余

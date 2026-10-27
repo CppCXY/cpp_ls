@@ -839,6 +839,57 @@ fn a_program_too_large_to_read_at_once_is_left_alone() {
     );
 }
 
+/// **`find()->second`**: an arrow whose answer is a *name* the class declares as an alias.
+///
+/// `std::map::find` answers an iterator, and MSVC's `_Tree_iterator::operator->` is declared as
+///
+/// ```cpp
+/// using pointer = _Val*;          // _Val is the tree's value_type — a `pair<const K, V>`
+/// _NODISCARD pointer operator->() const noexcept;
+/// ```
+///
+/// so the arrow's answer is the *spelling* `pointer`, not a class. Answering it as one is what made a real project report
+/// "`std::map<…>` has no member `second`" (`docs/remaining.md` A4): the member lookup asked a class called `pointer`, and
+/// after the arguments were dropped, one called `_Tree_iterator`.
+#[test]
+fn an_arrow_through_an_alias_reaches_the_pointee() {
+    let text = "template <typename K, typename V> struct pair {\n\
+                \x20   K first;\n\
+                \x20   V second;\n\
+                };\n\
+                template <typename T> struct iterator {\n\
+                \x20   using pointer = T *;\n\
+                \x20   pointer operator->() const;\n\
+                };\n\
+                template <typename K, typename V> struct map {\n\
+                \x20   using value_type = pair<const K, V>;\n\
+                \x20   iterator<value_type> find(const K &key) const;\n\
+                };\n\
+                void f(map<int, float> &m) {\n\
+                \x20   m.find(1)->second = 2;\n\
+                }\n";
+    let files = MemoryFiles::new().with_file("/p/a.cpp", text);
+    let fixture = Memory::new("an-arrow-through-an-alias", &files);
+    let mut session = fixture.session();
+    session.did_open("/p/a.cpp", text);
+    session.index_everything();
+    let path = std::path::PathBuf::from("/p/a.cpp");
+    let view = session.view_of_the_file(&path).expect("a view");
+
+    let at = text.find("->second").expect("the fixture") + "->".len();
+    let found = session.definitions(&view, crate::file::coordinates::ReadingOffset::new(at));
+    let Known::Yes(found) = found else {
+        panic!("`find()->second` must resolve through `pointer`: {found:?}");
+    };
+    assert_eq!(
+        (
+            found.found[0].fact.name.as_str(),
+            found.found[0].fact.scope.as_deref()
+        ),
+        ("second", Some("pair")),
+        "the arrow's `pointer` is the value type, and `second` is its member"
+    );
+}
 /// **An out-of-line definition's type is the type it writes, not its own qualified name.**
 ///
 /// Reported from an editor, three times in one sitting, always as a *type* that was really a name:
