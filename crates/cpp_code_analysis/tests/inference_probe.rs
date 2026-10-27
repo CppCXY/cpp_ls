@@ -114,8 +114,15 @@ fn what_is_answered_at_a_place() {
     let view = session.view_of_the_file(&file).expect("a view of the file");
     let mut at = 0;
     while let Some(found) = text[at..].find(&needle) {
-        let offset = at + found;
-        at = offset + needle.len();
+        // **Where the cursor is inside the needle**: at its start by default, at its last character with
+        // `CPPLS_AT=last` — the difference matters for a question about an *expression* (`_lineOffsetVec[line]`)
+        // rather than about the name it begins with.
+        let start = at + found;
+        let offset = match std::env::var("CPPLS_AT").as_deref() {
+            Ok("last") => start + needle.trim_end().len().saturating_sub(1),
+            _ => start,
+        };
+        at = start + needle.len();
         let line = text[..offset].lines().count();
         let snippet: String = text[offset..]
             .lines()

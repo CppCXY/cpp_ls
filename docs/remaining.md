@@ -156,7 +156,7 @@ $env:CPPLS_REAL_PROJECT = "E:\does-not-exist"     → skipped × 3，全绿
 ---
 
 ## 还没修
-### A4. 箭头已经跟随别名了；残差是 **trait 形态的别名**（`conditional_t` / `enable_if_t`）
+### ✅ A4. 依赖形式的限定别名（`LuaReserved.find(text)->second`、`_lineOffsetVec[line]`）—— 2026-10-27 收尾
 
 **本轮做完的那一半**（`through_an_operator_arrow` 的第二次改动）：`operator->` 的返回拼写先跑一次
 `a_spelling_through_the_aliases`，再取 pointee。
@@ -577,3 +577,33 @@ LuaReserved.find(text)->          →  class "std::pair": 21 member(s) ["first",
 ① `a_member_the_class_declares` 恢复 `direct_member` 兜底（特化声明、`members_of` 走不到的成员）；
 ② `finish_a_nested_name` 统一把 **class 连同实参**（`bindings.arguments()`）交给限定名解析，
    于是 `_Mybase = _Tree<_Tmap_traits<std::string, LuaTokenKind, …>>` 里的实参真的代换了（追踪可见）。
+**2026-10-27 第八批：A4 的验收标准两条都达到了。** 实测（EmmyLuaCodeStyle + MSVC，`tests/inference_probe.rs`）：
+
+```text
+LuaReserved.find(text)->second   →  LuaTokenKind                        ✓
+_lineOffsetVec[line]             →  std::size_t&                        ✓（修前停在 _Tp_alloc_type::value_type&）
+LuaReserved.find(text)->         →  class "std::pair": 21 member(s)     ✓
+```
+
+这一条线一路修掉的东西（按发现顺序，全部有夹具）：
+
+```text
+substituted_spelling 拒绝"少写实参"        → 按 C++ 顺序填，缺的留原样
+形参取自偏特化                             → template_parameters_for 按 pattern/arity 选声明
+["class","class"] 这种形参表               → is_a_parameter_name 挡住（根因仍在事实层，未修）
+成员别名指出的基类                          → an_element_type_through_the_members
+trait 形态的 element_type                  → 退到"类模板自己的实参"
+事实来自缓冲区时不带 parameters/pattern     → fact_from_binding_with 补齐（不变式：两条路说同一件事）
+特化的形参—实参配对                         → the_pairing_its_pattern_implies（按 pattern 槽位）
+限定名在 finish_a_nested_name 里走不动       → 增加"限定名先过别名走查"
+调用点拿不到对象实参                        → finish_a_nested_name 用 bindings.arguments() 补上
+map 元素规则要求恰好两个实参                → >= 2（比较器/分配器不影响元素）
+```
+
+**剩下的唯一残差**（不再是"找不到"，而是"依赖类型"）：`LuaReserved.find`（**名字**，不是调用也不是箭头）的答案是
+`conditional<_Is_set, _Tree_const_iterator<_Scary_val>, _Tree_iterator<_Scary_val>>::type`。`_Is_set` 是 `_Tree` 的形参，
+解开它需要实例化 `_Tree`。这是**答案的种类问题**，不是解析链条断了；如果想改善读者体验，可以把它作为一种**显式的答案**
+（例如 hover 显示 `typename …::type（依赖类型，需实例化才能确定）`），列在 E 里。
+
+**探针新增开关**：`CPPLS_AT=last` 把光标放在匹配文本的**最后一个字符**上——问"表达式的类型"
+（`_lineOffsetVec[line]`）和问"名字的类型"（`_lineOffsetVec`）是两件事，上面的 `std::size_t&` 就是用它量出来的。
