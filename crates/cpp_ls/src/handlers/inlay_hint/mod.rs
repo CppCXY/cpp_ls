@@ -46,6 +46,7 @@ pub async fn on_inlay_hint(
 ) -> RequestOutcome<Vec<InlayHint>> {
     let uri = params.text_document.uri;
     let requested = params.range;
+    let started = std::time::Instant::now();
 
     // Read in first, under the write lock: a hint needs the file's text, and a file nobody has read has none. The
     // *callee's* file is not prepared here — the analysis reaches it through the session, which reads it on demand.
@@ -64,6 +65,9 @@ pub async fn on_inlay_hint(
         // nothing at all when there is not. Handlers that reach the index through a name — `hover`, `definition`,
         // `signature_help` — get it from `read_the_modules`; the ones that ask about a *position* say it here.
         context.analysis().catch_up(&path).await;
+        if std::env::var_os("CPPLS_TRACE_INLAY").is_some() {
+            eprintln!("[inlay] prepared and caught up in {:?}", started.elapsed());
+        }
     }
 
     // **A hint no longer waits for the project's index to drain.**
@@ -91,6 +95,7 @@ pub async fn on_inlay_hint(
         // view is the file's own tokens. Asking for a rendering here would silently move every hint by however many
         // lines the directives had taken out, which is the mistake the hover handler had.
         let view = session.view_of_the_file(&path)?;
+        let parsed = started.elapsed();
         let held = session.files().held(&view.path)?;
 
         // **Answered from what is known, rather than withheld until everything is.**
@@ -106,6 +111,13 @@ pub async fn on_inlay_hint(
         // — which is what the report said, in those words. What makes the incomplete answer repairable is the
         // refresh the pump sends when the queue drains, not a refusal here.
         let hints = session.inlay_hints(&view, visible_range(&view, requested)?);
+        if std::env::var_os("CPPLS_TRACE_INLAY").is_some() {
+            eprintln!(
+                "[inlay] view {parsed:?}, hints {:?}, {} hint(s)",
+                started.elapsed() - parsed,
+                hints.len()
+            );
+        }
 
         Some(
             hints

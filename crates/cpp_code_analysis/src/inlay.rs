@@ -83,6 +83,29 @@ where
     let mut declaring: HashMap<PathBuf, FileView> = HashMap::new();
 
     for call in call_expressions(&view.root, range) {
+        // **A call with nothing to hint cannot produce a hint, and resolving it is the expensive part.**
+        //
+        // The containment test below is the one that decides whether any hint is emitted for an argument — and it ran
+        // *after* the callee was resolved. Measured on `EmmyLuaCodeStyle` with `CPPLS_TRACE_INLAY=1`: `inlayHint` spent
+        // **80 ms** in this loop for **nine** hints, and the fourteen calls that did resolve accounted for ~14 ms of
+        // it; the rest was the calls that resolve to nothing and were thrown away one line later. A hint is drawn at
+        // an argument, so "is any argument inside the requested range" is the cheapest sufficient test, and it is
+        // available before any lookup.
+        let Some(arguments) = arguments_of(&call) else {
+            continue;
+        };
+        let asked_about = arguments
+            .iter()
+            .any(|argument| contains(range, argument.text_range().start().into()));
+        if !asked_about {
+            continue;
+        }
+
+        // **Where a hint's milliseconds go**, when asked. `docs/lsp-status.md` measured **58 ms for nine hints**, i.e.
+        // ~6 ms per call, and the two candidates are the callee's resolution and the parameter list's — both of which
+        // read another file. One line per call separates them, and a repeated callee spelling is visible in it.
+        let trace = std::env::var_os("CPPLS_TRACE_INLAY").is_some();
+        let started = std::time::Instant::now();
         let Known::Yes(callee) = callee_of_a_call(
             index,
             &mut |_: &Path| None,
@@ -95,6 +118,7 @@ where
             // wrong parameter is a wrong answer printed into the code.
             continue;
         };
+        let resolved = started.elapsed();
 
         let names =
             parameter_names_for(view, &callee, &mut declaring, &mut view_of).or_else(|| {
@@ -109,14 +133,28 @@ where
                     .as_deref()
                     .and_then(parameter_names_from_text)
             });
+        if trace {
+            eprintln!(
+                "[inlay] {} -> {:?}: callee {:?}, names {:?}, {} name(s)",
+                call.text()
+                    .to_string()
+                    .lines()
+                    .next()
+                    .unwrap_or_default()
+                    .chars()
+                    .take(40)
+                    .collect::<String>(),
+                callee.file.display(),
+                resolved,
+                started.elapsed() - resolved,
+                names.as_ref().map(Vec::len).unwrap_or(0)
+            );
+        }
         let Some(names) = names else {
             continue;
         };
 
-        let Some(arguments) = arguments_of(&call) else {
-            continue;
-        };
-
+        // The arguments were read before the callee: they are what decides whether this call is worth resolving.
         for (argument, name) in arguments.iter().zip(names.iter()) {
             // A parameter with no name breaks the alignment for every parameter *after* it rather than shifting
             // them up: see `parameters_of`. Nothing is hinted for a position nothing declares.
