@@ -896,10 +896,10 @@ cargo test --release -p cpp_ls --test c_project -- --ignored --nocapture
 | `documentSymbol` | 47 | 10 ms | |
 | `semanticTokens` | 2087 | 1296 ms | 修前一直 `null`，见 ⑤ |
 | `inlayHint` | 17 | 11 ms | `al:` |
-| `diagnostic` | 17 | 9 ms | 0 条语法错误；2 条是**项目本身缺的生成头**（`auto/config.h`、`arglist.c.generated.h`），其余是风格建议 |
+| `diagnostic` | **2** | 9 ms | 都是项目缺的生成头（`auto/config.h`、`arglist.c.generated.h`）；无语法错误、无风格误报 |
 | `signatureHelp` | 1 | 19 ms | `do_argfile(exarg_T *eap, int argn)` |
 
-六个缺陷，全部静默或半静默：
+八个缺陷，全部静默或半静默：
 
 **① 参数后面的宏让整个文件读不成声明（解析器）。**
 
@@ -962,5 +962,25 @@ is_locally_ready: true, is_closure_ready: false, pending: 0
 诊断里抓到的）。新增 `crates/cpp_code_analysis/tests/messages.rs`：扫描 crate 自己的源码，每个 `t!` 里的
 `%{name}` 必须在同一个调用里有 `name =` 实参——把 `use_auto` 的实参删掉跑一次，它确实报
 `use_auto.rs:76: `%{name}` has no `name =` argument`。
+
+**⑦ 项目自己写的 `-std=` 没有让 C 文件变成 C。** `cstyle_cast` 一开始就问 `context.is_c()`（"C 没有
+`static_cast`，所以 C 风格的转换在 C 里不是错误"），但答案永远是"没告诉"：`CompilerConfig::language_for` 只看
+**编译命令**和 `extra_args`，而 `.cppls.toml` 的 `[compile] standard` / `args` 里的 `-std=` 落进的是
+**`standard` 字段**——它从来没读过那个字段。实测（neovim `arglist.c`，`args = ["-std=gnu11"]`）：**14 条
+`cstyle-cast`**，每一条都在教一个 C 程序写 `static_cast<int>`。修在 `language_for`（顺序：文件自己的命令 →
+项目的 `standard` → `extra_args` → permissive），钉在
+`checks.rs::a_c_project_is_not_told_to_write_named_casts`（同一个 `(int)d` 在 `.c` 里不报、在 `.cpp` 里照报，
+所以它测的是语言而不是"规则停了"）。
+
+**⑧ `(int)x` 作为实参时被静默丢掉，于是"实参太少"。** `CppExpr` 的 `can_cast` 里**没有 `CastExpr`**，而
+`CppCallExpr::get_args()` 就是 `children::<CppExpr>()`——所以每一个带强转的实参都从实参表里消失了：
+`three((int)x, 2, 3)` 数成 2 个，`argument-count` 于是报"needs 3 and passes fewer"。实测是 `arglist.c` 里最后
+一条诊断（`do_arg_all((int)eap->line2, eap->forceit, eap->cmdidx == CMD_drop)`），也是假的。修法是给
+`CppExpr` 加 `CppCastExpr`（`ast.rs::a_cast_argument_is_counted` 钉根因，
+`checks.rs::a_cast_argument_is_not_a_missing_argument` 钉现象，并且反过来断言"3 个实参给 2 个形参"仍然要报）。
+
+**顺手发现的一个测试没在跑**：`checks.rs` 的 `assign_type_check_stays_quiet_when_the_target_is_a_class_it_cannot_see_into`
+少了 `#[test]`（另一个测试的 `#[test]` 落到了它头上，编译器只给一条 `duplicated attribute` 警告）。补回去以后
+它开始跑，并且是绿的。
 
 

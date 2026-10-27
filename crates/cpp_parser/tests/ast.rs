@@ -363,6 +363,36 @@ fn call_expression_exposes_callee_and_args() {
     assert_eq!(call.get_args().len(), 2);
 }
 
+/// **A cast is an expression, and an argument list that holds one has not lost it.**
+///
+/// `CppExpr` had no `CastExpr` variant, so `can_cast` refused the kind and `CppCallExpr::get_args` —
+/// `children::<CppExpr>()` — **silently dropped every cast from an argument list**: `three((int)x, 2, 3)` counted two
+/// arguments. That is not only about this accessor: `argument-count` asks it how many arguments a call passes, so it
+/// reported a three-argument call as "needs 3 argument(s) and this call passes fewer" — measured on neovim's
+/// `arglist.c` (`do_arg_all((int)eap->line2, eap->forceit, eap->cmdidx == CMD_drop)`), the last finding in that file
+/// and a false one.
+#[test]
+fn a_cast_argument_is_counted() {
+    let (root, _) = unit("void f(int x) { three((int)x, 2, 3); }\n");
+    let call = root
+        .syntax()
+        .descendants()
+        .filter_map(cpp_parser::CppCallExpr::cast)
+        .next()
+        .expect("call expression");
+
+    let args = call.get_args();
+    assert_eq!(
+        args.len(),
+        3,
+        "three arguments, one of them a cast: {args:?}"
+    );
+    assert!(
+        matches!(args.first(), Some(CppExpr::CastExpr(_))),
+        "and the cast is the first of them: {args:?}"
+    );
+}
+
 #[test]
 fn names_report_qualification() {
     let (root, _) = unit("std::vector<int> v;\n");

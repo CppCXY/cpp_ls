@@ -31,6 +31,8 @@ pub enum CppExpr {
     CallExpr(CppCallExpr),
     IndexExpr(CppIndexExpr),
     MemberExpr(CppMemberExpr),
+    /// `(int)x` and the named casts — see [`CppCastExpr`].
+    CastExpr(CppCastExpr),
     InitListExpr(CppInitListExpr),
     DesignatedInitExpr(CppDesignatedInitExpr),
     LambdaExpr(CppLambdaExpr),
@@ -51,6 +53,7 @@ impl CppAstNode for CppExpr {
             CppExpr::CallExpr(node) => node.syntax(),
             CppExpr::IndexExpr(node) => node.syntax(),
             CppExpr::MemberExpr(node) => node.syntax(),
+            CppExpr::CastExpr(node) => node.syntax(),
             CppExpr::InitListExpr(node) => node.syntax(),
             CppExpr::DesignatedInitExpr(node) => node.syntax(),
             CppExpr::LambdaExpr(node) => node.syntax(),
@@ -73,6 +76,7 @@ impl CppAstNode for CppExpr {
                 | CppSyntaxKind::IndexExpr
                 | CppSyntaxKind::MemberExpr
                 | CppSyntaxKind::ArrowExpr
+                | CppSyntaxKind::CastExpr
                 | CppSyntaxKind::InitListExpr
                 | CppSyntaxKind::DesignatedInitExpr
                 | CppSyntaxKind::LambdaExpr
@@ -97,6 +101,7 @@ impl CppAstNode for CppExpr {
             CppSyntaxKind::MemberExpr | CppSyntaxKind::ArrowExpr => {
                 CppMemberExpr::cast(syntax).map(CppExpr::MemberExpr)
             }
+            CppSyntaxKind::CastExpr => CppCastExpr::cast(syntax).map(CppExpr::CastExpr),
             CppSyntaxKind::InitListExpr => CppInitListExpr::cast(syntax).map(CppExpr::InitListExpr),
             CppSyntaxKind::DesignatedInitExpr => {
                 CppDesignatedInitExpr::cast(syntax).map(CppExpr::DesignatedInitExpr)
@@ -334,6 +339,48 @@ impl CppParenExpr {
     }
 }
 
+/// **A cast**: `(int)x`, `(Widget*)p`, and the C++ named casts, which the parser also builds as `CastExpr`.
+///
+/// # Why this type exists at all
+///
+/// It did not, and the omission was silent: `CppExpr`'s `can_cast` had no `CastExpr` kind, so
+/// [`CppCallExpr::get_args`] — which is `children::<CppExpr>()` — **dropped every cast from an argument list**.
+/// `three((int)x, 2, 3)` then counted two arguments, and `argument-count` reported a call that passes three as
+/// "needs 3 argument(s) and this call passes fewer". Measured on neovim's `arglist.c`
+/// (`do_arg_all((int)eap->line2, eap->forceit, eap->cmdidx == CMD_drop)`) — the one remaining finding in that file
+/// after the language and parser fixes, and a false one.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CppCastExpr {
+    syntax: CppSyntaxNode,
+}
+
+impl CppAstNode for CppCastExpr {
+    fn syntax(&self) -> &CppSyntaxNode {
+        &self.syntax
+    }
+
+    fn can_cast(kind: CppSyntaxKind) -> bool {
+        kind == CppSyntaxKind::CastExpr
+    }
+
+    fn cast(syntax: CppSyntaxNode) -> Option<Self> {
+        Self::can_cast(syntax.kind().into()).then_some(Self { syntax })
+    }
+}
+
+impl CppCastExpr {
+    /// What is being cast.
+    pub fn get_operand(&self) -> Option<CppExpr> {
+        self.children::<CppExpr>().next()
+    }
+
+    /// The type it is cast to, when the parser recorded one: `(int)` in `(int)x`, and no type for
+    /// `static_cast<int>(x)` — that spelling carries a template-argument list instead.
+    pub fn get_type_id(&self) -> Option<CppTypeId> {
+        self.child()
+    }
+}
+
 /// A unary expression: `-x`, `!flag`, `*ptr`, `&var`, `++i`, `i++`.
 ///
 /// Prefix and postfix forms share this type; `is_prefix` tells them apart, which matters because
@@ -342,7 +389,6 @@ impl CppParenExpr {
 pub struct CppUnaryExpr {
     syntax: CppSyntaxNode,
 }
-
 impl CppAstNode for CppUnaryExpr {
     fn syntax(&self) -> &CppSyntaxNode {
         &self.syntax

@@ -222,6 +222,16 @@ impl CompilerConfig {
                 cpp_parser::features::LanguageConfig::from_command_line(command.arguments.iter())
             });
         from_the_command
+            // **The project's own `-std=`**, which is where `[compile] standard` and a `-std=` inside
+            // `[compile] args` end up (see `project_config_from_flags`). It was missing here, so a project that
+            // states its language in its own file was read as *not told*: `args = ["-std=gnu11"]` on neovim's
+            // `arglist.c` left the family unknown, and every C++-only rule fired on a C file — measured, **14
+            // `cstyle-cast` findings** telling a C program to write `static_cast`.
+            .or_else(|| {
+                self.standard
+                    .as_deref()
+                    .and_then(cpp_parser::features::LanguageConfig::from_standard_spelling)
+            })
             .or_else(|| {
                 cpp_parser::features::LanguageConfig::from_command_line(self.extra_args.iter())
             })

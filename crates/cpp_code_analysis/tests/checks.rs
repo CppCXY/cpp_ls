@@ -447,12 +447,6 @@ fn assign_type_check_reports_both_places_a_value_is_assigned() {
     );
 }
 
-/// **A class target stays quiet, and this test is the record of why.** `std::string line = 1231;` is not legal C++,
-/// and this layer does not report it: "does `std::string` have a constructor taking an `int`" is a question whose
-/// answer is in a header the analysis has not read, so `convertible_to` answers `Unknown` — and `Unknown` is never
-/// a finding. The alternative is a rule that reports conversions it cannot see, which is what this layer is written
-/// against.
-#[test]
 /// **A name the file declares two ways is not judged** — and the report that made this a rule.
 ///
 /// Reported from an editor as *"an extremely wrong diagnostic"*. `LuaSource.cpp` reads
@@ -494,6 +488,11 @@ fn assign_type_check_stays_quiet_about_a_name_the_file_declares_two_ways() {
     );
 }
 
+/// **A class target stays quiet, and this test is the record of why.** `std::string line = 1231;` is not legal C++,
+/// and this layer does not report it: "does `std::string` have a constructor taking an `int`" is a question whose
+/// answer is in a header the analysis has not read, so `convertible_to` answers `Unknown` — and `Unknown` is never
+/// a finding. The alternative is a rule that reports conversions it cannot see, which is what this layer is written
+/// against.
 #[test]
 fn assign_type_check_stays_quiet_when_the_target_is_a_class_it_cannot_see_into() {
     let source =
@@ -2237,5 +2236,89 @@ void f(Derived d, int n) {
     assert!(
         concept_findings[0].1.contains("derived_from"),
         "{concept_findings:?}"
+    );
+}
+
+/// **The codes one file produces, with the project's own language standard** — the `[compile] standard` / `-std=`
+/// path a `.cppls.toml` takes.
+fn codes_of_with(source: &str, path: &str, standard: Option<&str>) -> Vec<DiagnosticCode> {
+    let files = MemoryFiles::new().with_file(path, source);
+    let providers = SessionFiles::new(OpenDocuments::new(), files);
+    let config = CompilerConfig {
+        standard: standard.map(|standard| standard.into()),
+        ..CompilerConfig::default()
+    };
+    let mut session = Session::with_config("/p", providers, WatchFilter::new("/p"), config);
+    session.add_project_files([std::path::PathBuf::from(path)]);
+    session.want_cooked_reading(std::path::Path::new(path));
+    session.index_everything();
+
+    session
+        .diagnostics(std::path::Path::new(path))
+        .map(|found| {
+            found
+                .checks
+                .iter()
+                .map(|finding| finding.code)
+                .chain(found.errors.iter().map(|error| error.code))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// **A C project is not told to write named casts** — the language has to come from the project's own `-std=`.
+///
+/// `cstyle_cast` asks `CheckContext::is_c()` before it fires, and its own note says why: a C program has no
+/// `static_cast`, so `(Widget*)p` is how it writes that conversion and a rule that called it a mistake would be wrong
+/// about the language. The question was asked, but the answer was always "not told": `CompilerConfig::language_for`
+/// read the file's compile command and `extra_args`, while a project stating `-std=gnu11` in `.cppls.toml` lands in
+/// the config's **`standard`** field — which it never looked at.
+///
+/// Measured through the language server on neovim's `arglist.c` (a C file, `.cppls.toml` with
+/// `args = ["-std=gnu11"]`): **14 `cstyle-cast` findings**, every one of them telling a C program to write
+/// `static_cast<int>`. So this test states the language the way a project does and asks for the findings both ways.
+#[test]
+fn a_c_project_is_not_told_to_write_named_casts() {
+    const SOURCE: &str = "\
+typedef struct { int v; } T;
+int f(void) { double d = 1.5; T t; t.v = (int)d; return t.v; }
+";
+    let in_c = codes_of_with(SOURCE, "/p/a.c", Some("gnu11"));
+    assert!(
+        !in_c.contains(&DiagnosticCode::CStyleCast),
+        "a C program has no named casts, so the rule is not about it: {in_c:?}"
+    );
+
+    // **And the rule is not simply off**: the same cast in a file compiled as C++ is reported, which is what says
+    // this test is about the language rather than about the check having stopped working.
+    let tmp = codes_of_with(SOURCE, "/p/a.cpp", Some("gnu++17"));
+    assert!(
+        tmp.contains(&DiagnosticCode::CStyleCast),
+        "the same cast in C++ is the rule's own case: {tmp:?}"
+    );
+}
+
+/// **A call that passes a cast argument has not passed fewer.** `three((int)x, 2, 3)` is three arguments — see
+/// `cpp_parser`'s `a_cast_argument_is_counted` for the root cause (a `CastExpr` was not a `CppExpr`, so the argument
+/// accessor dropped it). Measured on neovim's `arglist.c`: `do_arg_all((int)eap->line2, eap->forceit, eap->cmdidx ==
+/// CMD_drop)` was "needs 3 argument(s) and this call passes fewer".
+#[test]
+fn a_cast_argument_is_not_a_missing_argument() {
+    const SOURCE: &str = "\
+static void three(int a, int b, int c) { (void)a; (void)b; (void)c; }
+void one(int x) { three((int)x, 2, 3); }
+void two(int x) { three((int)x, 2, x == 0); }
+";
+    let codes = codes_of_with(SOURCE, "/p/a.c", Some("gnu11"));
+    assert!(
+        !codes.contains(&DiagnosticCode::ArgumentCount),
+        "every call here passes three arguments: {codes:?}"
+    );
+
+    // **And a real count is still reported**, so this is not the check having gone quiet.
+    let wrong = "static void two_args(int a, int b) { (void)a; (void)b; }\nvoid f(int x) { two_args((int)x, 2, 3); }\n";
+    assert!(
+        codes_of_with(wrong, "/p/a.c", Some("gnu11")).contains(&DiagnosticCode::ArgumentCount),
+        "three arguments for two parameters is the rule's own case"
     );
 }

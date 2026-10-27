@@ -79,11 +79,12 @@ cargo test --release -p cpp_ls --test c_project -- --ignored --nocapture
 | `documentSymbol` | 47 | 10 ms | |
 | `semanticTokens` | 2087 | **1296 ms** | 修前对每个文件都 `null`（见 §H ⑥） |
 | `inlayHint` | 17 | 11 ms | |
-| `diagnostic` | 17 | 9 ms | 0 条语法错误；2 条是项目缺的生成头 |
+| `diagnostic` | **2** | 9 ms | 两条都是项目本身缺的生成头（`auto/config.h`、`arglist.c.generated.h`），没有语法错误、没有风格误报 |
 | `signatureHelp` | 1 | 19 ms | `do_argfile(exarg_T *eap, int argn)` |
 
-这一轮从这里挖出六个缺陷（参数后的宏让整文件读不成声明、`struct` 被当成类型、链式 hover 取错接收者、宏成员被
-说成"没有这个成员"、宏查询 1.19 s 无 memo、条件 include 让着色永不开始），都记在 `docs/remaining.md` §H。
+这一轮从这里挖出八个缺陷（参数后的宏让整文件读不成声明、`struct` 被当成类型、链式 hover 取错接收者、宏成员被
+说成"没有这个成员"、宏查询 1.19 s 无 memo、条件 include 让着色永不开始、项目的 `-std=` 没让 C 文件变成 C、
+`CastExpr` 不算 `CppExpr` 导致实参被丢），都记在 `docs/remaining.md` §H。
 
 ## 还剩的行
 
