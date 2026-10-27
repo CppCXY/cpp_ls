@@ -699,6 +699,18 @@ pub struct Scope {
     /// The syntax node this scope came from, as a range. `None` for a scope the model synthesised, such as
     /// the file scope of an empty file.
     pub range: Option<SourceRange>,
+    /// **Is this an `enum` whose enumerators are visible in the enclosing scope?** — an *unscoped* enumeration
+    /// (`enum E { … }` or `enum { … }`) yes, an `enum class`/`enum struct` no.
+    ///
+    /// Separate from [`ScopeKind::Enum`] because both forms are that kind, and the difference is exactly the
+    /// lookup rule: an unscoped enumeration's enumerators are also visible one scope out, which is a second
+    /// place to look rather than a second binding — see [`crate::sema::resolve::definitions_at`], which is where
+    /// the extra look happens.
+    ///
+    /// Measured on a file with `enum { MyClass = 123, AnotherClass };` and a use of `AnotherClass` in `main`:
+    /// the name resolved nowhere, so the highlighter drew no token for the use (the client's own fallback
+    /// coloured it as an unknown variable) while the *definition* was coloured correctly.
+    pub unscoped_enum: bool,
     /// The declarations written directly in this scope, by name.
     ///
     /// A `Vec` rather than a map because a name may be declared more than once — overloads, redeclarations, a
@@ -850,6 +862,7 @@ impl ScopeTree {
             kind,
             name: name.map(Box::from),
             range,
+            unscoped_enum: false,
             bindings: Vec::new(),
         });
 

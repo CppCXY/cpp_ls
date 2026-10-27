@@ -1002,6 +1002,77 @@ fn a_calls_iterator_answer_reaches_the_element_through_a_trait_alias() {
         "the call's iterator, its `pointer` alias, and the trait alias in it"
     );
 }
+/// **An unscoped enumeration's enumerators are visible one scope *out*.** — the C++ rule, and the one place a scope
+/// tree built as a mirror of the syntax gets it wrong.
+///
+/// Reported from an editor: `enum { MyClass = 123, AnotherClass };` with `printf("…", AnotherClass)` coloured the
+/// *definition* as an enum member and nothing at all at the use — the client's own fallback drew it as an unknown
+/// variable, "go to definition" found nothing, and the same would be true of hover and completion. The bindings live
+/// in the enum's own scope, which is a **child** of the scope that can see them, so the upward lookup never reached
+/// them; [`crate::sema::resolve::definitions_at`] now looks one scope out for an `enum` and not for an `enum class`.
+#[test]
+fn an_unscoped_enumerations_member_is_visible_in_the_enclosing_scope() {
+    let text = "enum { MyClass = 123, AnotherClass };\n\
+                enum class Scoped { Hidden };\n\
+                int main() {\n\
+                \x20   int a = AnotherClass;\n\
+                \x20   int b = Hidden;\n\
+                }\n";
+    let files = MemoryFiles::new().with_file("/p/a.cpp", text);
+    let fixture = Memory::new("an-unscoped-enum", &files);
+    let mut session = fixture.session();
+    session.did_open("/p/a.cpp", text);
+    session.index_everything();
+    let path = std::path::PathBuf::from("/p/a.cpp");
+    let view = session.view_of_the_file(&path).expect("a view");
+
+    // The use of `AnotherClass` resolves — and the name it resolves to is the enumerator.
+    let at = text.find("= AnotherClass").expect("the fixture") + 2;
+    let found = session.definitions(&view, crate::file::coordinates::ReadingOffset::new(at));
+    let Known::Yes(found) = found else {
+        panic!("a bare `AnotherClass` must resolve: {found:?}");
+    };
+    assert_eq!(
+        found.found[0].fact.name, "AnotherClass",
+        "the enumerator, not the enumeration"
+    );
+
+    // …and it is classified as an **enum member**, which is what the highlighter draws.
+    let classified: Vec<(String, crate::semantic::NameKind)> = session
+        .classified_names(&view)
+        .into_iter()
+        .map(|name| {
+            (
+                text[name.range.start_offset..]
+                    .chars()
+                    .take(12)
+                    .collect::<String>(),
+                name.kind,
+            )
+        })
+        .collect();
+    let kinds: Vec<&crate::semantic::NameKind> = classified
+        .iter()
+        .filter(|(spelled, _)| spelled.starts_with("AnotherClass"))
+        .map(|(_, kind)| kind)
+        .collect();
+    assert!(
+        kinds.contains(&&crate::semantic::NameKind::EnumMember),
+        "the use is an enum member too, not just the declaration: {classified:?}"
+    );
+    assert!(
+        kinds.len() >= 2,
+        "both the declaration and the use are coloured: {classified:?}"
+    );
+
+    // **`enum class` still hides its enumerators**: `Scoped::Hidden` is the only way to name it.
+    let hidden = text.find("= Hidden").expect("the fixture") + 2;
+    let found = session.definitions(&view, crate::file::coordinates::ReadingOffset::new(hidden));
+    assert!(
+        !matches!(&found, Known::Yes(found) if found.found[0].fact.name == "Hidden"),
+        "a scoped enumeration's member is not visible here: {found:?}"
+    );
+}
 /// **A trait alias selects its specialization** — `conditional_t<false, void, T>` is `T`, and the arrow reaches it.
 ///
 /// This is the shape the standard library writes its traits in, and the one the real project stopped on

@@ -1067,6 +1067,32 @@ pub fn definitions_at(
         }
     }
 
+    // **An unscoped enumeration's enumerators are visible one scope *out*.** The bindings live in the enum's own
+    // scope — a *child* of the scope that can see them — so the upward walk above never reaches them, and a bare
+    // `AnotherClass` resolved nowhere. Measured on `enum { MyClass = 123, AnotherClass };` used inside `main()`:
+    // the use got no semantic token (the client coloured it as an unknown variable) while its *definition* was
+    // coloured correctly, and "go to definition" on it found nothing.
+    //
+    // The rule is the language's and it is one direction only: `enum class` hides its enumerators, which is why
+    // the scope records which form it is (see [`crate::Scope::unscoped_enum`]).
+    for ancestor in scopes.scope_chain(innermost) {
+        let Some(scope_data) = scopes.scope(ancestor) else {
+            continue;
+        };
+        for child in scope_data.children.clone() {
+            let Some(child_data) = scopes.scope(child) else {
+                continue;
+            };
+            if !child_data.unscoped_enum {
+                continue;
+            }
+            let found = bindings_named(child_data, &name);
+            if !found.is_empty() {
+                return Known::Yes(found.into_iter().cloned().collect());
+            }
+        }
+    }
+
     if !searched_any_scope {
         return Known::No;
     }

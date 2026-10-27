@@ -775,6 +775,23 @@ impl ScopeWalker<'_> {
             declared_text.as_deref(),
         );
 
+        // **`enum class` hides its enumerators, `enum` does not.** The difference is one lookup step — see
+        // [`crate::sema::resolve::definitions_at`] — and it is read from the head, which is the only place the
+        // language writes it: `enum class E` / `enum struct E` are scoped, and `enum E`, `enum { … }` and
+        // `enum : int { … }` are not.
+        let head: String = node
+            .text()
+            .to_string()
+            .chars()
+            .take_while(|character| *character != '{')
+            .collect();
+        let scoped = head
+            .split(|character: char| character.is_whitespace() || character == ':')
+            .any(|word| matches!(word, "class" | "struct"));
+        if !scoped && let Some(enum_scope) = self.table.scope_mut(scope) {
+            enum_scope.unscoped_enum = true;
+        }
+
         if let Some((name, name_range)) = declared {
             self.bind(outer, name, BindingKind::Enum, node, name_range);
         }

@@ -736,7 +736,9 @@ fn declaration_markdown(
     // editor, on `LuaLexer.cpp`'s `LuaReserved`). So the written spelling becomes the signature line and the
     // subject of the sentence, and the face the fact describes follows it.
     let subject = match written {
-        Some(written) if matches!(fact.kind, DeclKind::Type) && !fact.parameters.is_empty() => written,
+        Some(written) if matches!(fact.kind, DeclKind::Type) && !fact.parameters.is_empty() => {
+            written
+        }
         _ => "",
     };
 
@@ -746,15 +748,6 @@ fn declaration_markdown(
     // declaration that was found rather than the shape of the thing. The signature line is the same reconstruction the
     // overload popup uses, so the two answers cannot disagree — and a declaration whose facts are too thin to spell (a
     // class, a namespace) keeps the raw text rather than a worse guess.
-    let declaration = if !subject.is_empty() {
-        subject.to_string()
-    } else if spells_a_signature(fact) {
-        signature_line(fact)
-    } else {
-        declaration_text(session, Some(view), &found.file, fact)
-    };
-    out.push_str(&code_block(&declaration));
-
     // **An enumerator is drawn as one, with the value the compilation gives it.** `OPR_MUL` is a `Variable` in the
     // fact — that is the kind a name in a scope has, and `DeclKind` has no enumerator — so a card that only asks the
     // fact says "`BinOpr::OPR_MUL` — a variable", which is true and useless: what a reader hovering an enumerator
@@ -762,6 +755,22 @@ fn declaration_markdown(
     // and if it did it should show the value"). The value is not in the fact: it is computed from the enumerators
     // written before it, which is what the language does and what the raw text of the file holds.
     let enumerator = enumerator_value(view, fact.name_range.start_offset);
+
+    // **The code block is the declaration's own line, and an enumerator's is its name.** [`spells_a_signature`] is
+    // false for an enumerator (no type, no parameter list, no return type), so the fallback — the raw text of the
+    // declaration — drew the whole `enum { MyClass = 123, AnotherClass };` body above a card that already says what the
+    // name is and what number it has (reported from an editor, with a screenshot of exactly that). The name is what the
+    // reader asked about, and the value is the next line.
+    let declaration = if !subject.is_empty() {
+        subject.to_string()
+    } else if spells_a_signature(fact) {
+        signature_line(fact)
+    } else if enumerator.is_some() {
+        fact.name.clone()
+    } else {
+        declaration_text(session, Some(view), &found.file, fact)
+    };
+    out.push_str(&code_block(&declaration));
     let qualified = if subject.is_empty() {
         fact.qualified_name()
     } else {
@@ -1336,7 +1345,8 @@ fn the_declarations_start(
     let mut node = cpp_parser::token_at(&view.root, fact.name_range.start_offset)?.parent();
 
     while let Some(current) = node {
-        if cpp_parser::CppSyntaxKind::from(current.kind()) == cpp_parser::CppSyntaxKind::Declaration {
+        if cpp_parser::CppSyntaxKind::from(current.kind()) == cpp_parser::CppSyntaxKind::Declaration
+        {
             return Some(cpp_parser::source_range(current.text_range()).start_offset);
         }
         node = current.parent();
