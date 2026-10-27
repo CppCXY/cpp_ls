@@ -425,9 +425,20 @@ fn member_markdown(
 ) -> String {
     let object = access.object.text().to_string();
     let object = object.trim();
-    let at = cpp_code_analysis::file::coordinates::ReadingOffset::new(usize::from(
-        access.object.text_range().start(),
-    ));
+    // **The type is read at the object's *last* byte, not its first.**
+    //
+    // `type_at` answers for the innermost node the offset sits in, and the first byte of `win->w_buffer` is the `w`
+    // of `win` — a node of type `win_T*`. Asking there for `win->w_buffer->b_fnum` looked `b_fnum` up in `win_T`,
+    // which has no such member, and the popup said so: `` `win_T*` has no member `b_fnum` `` — measured on neovim's
+    // `arglist.c`, where the honest answer is the buffer's member (the header spells it `handle`, and the file
+    // reaches it through `#define b_fnum handle`).
+    //
+    // The last byte is inside the object expression and past the base name, so the node it sits in *is* the chain:
+    // `win->w_buffer` reads as `buf_T*`. A one-token object (`eap`) is unaffected — every byte of it is the same
+    // name — and an object that ends in `)` (`f()->x`) lands on the call, which is what it should be.
+    let at = cpp_code_analysis::file::coordinates::ReadingOffset::new(
+        usize::from(access.object.text_range().end()).saturating_sub(1),
+    );
 
     let cpp_code_analysis::Known::Yes(found) = session.type_at(view, at) else {
         // **Saying "I do not know" is the answer.** A reader who sees this knows the popup is about a type the analysis
@@ -453,6 +464,22 @@ fn member_markdown(
         .iter()
         .find(|member| member.fact.name == access.member)
     else {
+        // **A member written through a macro is not a missing member**, and this is C's ordinary way of renaming a
+        // field: neovim writes `#define b_fnum handle` *inside* `struct file_buffer`, so `buf->b_fnum` is
+        // `buf->handle` after the preprocessor while the file's own text has no member called `b_fnum` at all.
+        //
+        // Measured through the server on neovim's `arglist.c`: the popup said `` `buf_T*` has no member `b_fnum` `` —
+        // true about this reading, and useless to the reader. The expansion is the answer, and it costs **one query
+        // on the miss**, which is why it is asked here rather than for every member hover.
+        if let Some(expansion) =
+            session.macro_body_at(&view.path, access.member_range.start_offset, &access.member)
+        {
+            return format!(
+                "`{}` is a macro here: it expands to `{expansion}`, and `{expansion}` is a member of `{written}`.\n\n\
+                 This hover reads the file's own text, where the macro name is what was written.",
+                access.member
+            );
+        }
         return format!(
             "`{written}` has no member `{}`\n\n`{object}` is a `{written}`.",
             access.member

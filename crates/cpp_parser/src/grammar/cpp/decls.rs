@@ -4320,6 +4320,21 @@ fn parse_parameter(p: &mut CppParser) -> ParseResult {
         return Err(err);
     }
 
+    // **A macro after the parameter's declarator** — `void f(exarg_T *eap FUNC_ATTR_UNUSED)`.
+    //
+    // The same shape [`eat_a_macro_suffix`] was written for one level out, and the same argument: after a
+    // declarator an identifier has no other reading, so a name here costs no valid program while refusing it costs
+    // the whole declaration. Measured on neovim: its `FUNC_ATTR_*` attributes are empty macros that only the
+    // *generated* headers define (`gen_declarations.lua` writes `#define DEFINE_EMPTY_ATTRIBUTES` in front of the
+    // include), so a closure without those headers keeps the name, and then `arglist.c`'s
+    // `void ex_argdedupe(exarg_T *eap FUNC_ATTR_UNUSED) { … }` failed to read as a declaration at all: the file
+    // came back as **one `ExpressionStat`** with a syntax error on every function body's closing brace, and the
+    // editor showed three `syntax-error` diagnostics on a file that compiles.
+    //
+    // C's own spellings of the same position — SAL's `_In_`/`_Out_`, MinGW's calling conventions, `__attribute__` a
+    // project writes as a macro — are all this shape.
+    eat_a_macro_suffix(p);
+
     if p.current_token() == CppTokenKind::Assign {
         p.bump();
         let init = p.mark(CppSyntaxKind::Initializer);

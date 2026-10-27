@@ -772,6 +772,23 @@ pub struct ProjectIndex {
     /// same fact is asked again on every pull that names the declaration: measured on the real project, the
     /// uncached filter took a diagnostic pull from **28 ms to 71 ms** (`lsp_status`).
     guard_answers: std::sync::Mutex<HashMap<(PathBuf, usize, u32), crate::Visibility>>,
+    /// **The macro environment of one `(name, file)`** — [`ProjectIndex::macro_environment`]'s walk, remembered.
+    ///
+    /// The walk is the expensive half of every macro question and it does not depend on the offset, but it was done
+    /// again for every ask. Measured on neovim (`arglist.c`, 853 files in the closure): **1.19 s per walk**, three
+    /// identical walks in a row, and the cost landed on the user as `end`: a hover on a member whose name is a macro
+    /// (`buf->b_fnum`) took **3.2 s**, and took 3.2 s *again* on the next hover. `semanticTokens` paid it too — one
+    /// walk for the whole file's name set, which is what [`ProjectIndex::macro_names_in_force`] is for.
+    ///
+    /// Invalidated exactly like [`ProjectIndex::visibility`]: an entry is dropped when a file it read is re-read (the
+    /// contributors are recorded with it), and the whole map is cleared when a file the index has never seen arrives,
+    /// because that can change how an `#include` resolves for a closure that does not contain it.
+    macro_environments: std::sync::Mutex<HashMap<(String, String), CachedMacroWalk>>,
+    /// **Every macro name in force in one file** — [`ProjectIndex::macro_names_in_force`]'s walk, remembered.
+    ///
+    /// Same measurement, same invalidation: the colouring pass asks about every identifier in the file and this is
+    /// the one question that needs the whole closure, so it is asked once per file rather than once per request.
+    macro_names: std::sync::Mutex<HashMap<String, CachedMacroNames>>,
     definition_answers: std::sync::Mutex<HashMap<(String, String), Known<ProjectDefinitions>>>,
     /// **Every path the index has ever filed**, in normalized form — what tells a *re-read* from a *new file*.
     ///
@@ -817,6 +834,30 @@ struct CachedMemberList {
 /// this is a few tens of megabytes at worst. Cleared whole rather than evicted one at a time: the sets that matter
 /// are "the classes this file mentions", which are asked together.
 const MAX_CACHED_MEMBER_LISTS: usize = 96;
+
+/// One entry of [`ProjectIndex::macro_environments`]: the answer, and **the files it was made of**.
+///
+/// The contributor rule is [`ProjectIndex::visibility`]'s, for the same reason: a walk's answer is a function of the
+/// files it read, so a re-read of one of them invalidates precisely this entry and nothing else.
+#[derive(Debug)]
+struct CachedMacroWalk {
+    contributors: Vec<String>,
+    environment: MacroEnvironment,
+}
+
+/// One entry of [`ProjectIndex::macro_names`] — the same shape, for the whole-name-set walk.
+#[derive(Debug)]
+struct CachedMacroNames {
+    contributors: Vec<String>,
+    names: std::collections::HashSet<String>,
+}
+
+/// How many macro walks each memo may hold before it is emptied.
+///
+/// An environment is one name's candidates (a handful of facts) and a name set is tens of thousands of short strings,
+/// so a few hundred entries is tens of megabytes at worst. Cleared whole when full, like the other memos: the sets
+/// that matter are "the names this file asks about", which are asked together.
+const MAX_CACHED_MACRO_WALKS: usize = 256;
 
 /// How many declaration answers [`ProjectIndex::definition_answers`] may hold before it is emptied.
 ///
@@ -1352,6 +1393,40 @@ impl ProjectIndex {
         let wanted = normalize(path);
         if let Ok(mut known) = self.guard_answers.lock() {
             known.retain(|(file, _, _), _| normalize(file) != wanted);
+        }
+    }
+
+    /// **Drop every macro walk whose closure read `path`** — called wherever the index changes for it.
+    ///
+    /// `known_to_the_index` is [`ProjectIndex::insert_at`]'s question, and the rule is the one that function states for
+    /// the visibility walks: a file the index **already knew** can only change the walks that read it, while a file it
+    /// has never seen can change how an `#include "x.h"` resolves for a closure that does not contain it, so that one
+    /// clears both maps.
+    fn forget_macro_walks(&self, path: &Path, known_to_the_index: bool) {
+        let wanted = normalize(path);
+        if let Ok(mut walks) = self.macro_environments.lock() {
+            if known_to_the_index {
+                walks.retain(|_, cached| {
+                    !cached
+                        .contributors
+                        .iter()
+                        .any(|file| file.as_str() == wanted.as_str())
+                });
+            } else {
+                walks.clear();
+            }
+        }
+        if let Ok(mut names) = self.macro_names.lock() {
+            if known_to_the_index {
+                names.retain(|_, cached| {
+                    !cached
+                        .contributors
+                        .iter()
+                        .any(|file| file.as_str() == wanted.as_str())
+                });
+            } else {
+                names.clear();
+            }
         }
     }
     /// **Drop every member list one of whose contributors is `path`** — called wherever the index changes for it.
@@ -8716,6 +8791,8 @@ impl ProjectIndex {
         // live in another file keeps its answer. See [ProjectIndex::member_lists].
         self.forget_member_lists(path);
         self.forget_guard_answers(path);
+        // …and every macro walk this file was part of, by the rule the visibility memo above states.
+        self.forget_macro_walks(path, known_to_the_index);
         let mut summary = summary;
         summary.path = path.to_path_buf();
 
@@ -8851,6 +8928,9 @@ impl ProjectIndex {
         // A file that is gone is a contributor that changed: every member list it was made of is dropped.
         self.forget_member_lists(Path::new(&path));
         self.forget_guard_answers(Path::new(&path));
+        // **And every macro walk that read it.** A walk that never did cannot answer differently, which is what keeps
+        // a header's answers alive across an edit to the `.c` file that includes it.
+        self.forget_macro_walks(Path::new(&path), true);
 
         for target in include_targets(&summary) {
             if let Some(includers) = self.included_by.get_mut(&target) {
@@ -11142,24 +11222,53 @@ impl ProjectIndex {
     /// The cost is one traversal of the reachable files per caller, so a caller that asks about one position should
     /// use [`ProjectIndex::macro_definition`] and one that asks about many should hold this.
     pub fn macro_environment(&self, name: &str, visible_from: &Path) -> MacroEnvironment {
+        // **The walk is remembered, because it is the whole cost and it is asked again.** Measured on neovim:
+        // 1.19 s per walk, three identical walks in a row, and every repeated question paid it again — see
+        // [`ProjectIndex::macro_environments`] for the numbers and for the invalidation rule.
+        let key = (normalize(visible_from), name.to_string());
+        if let Ok(memo) = self.macro_environments.lock()
+            && let Some(cached) = memo.get(&key)
+        {
+            return cached.environment.clone();
+        }
+
         let mut candidates = Vec::new();
         let certain = self.certainly_in_the_translation_unit(visible_from);
+        // The walk's own visited set is the contributor list — the same evidence [`ProjectIndex::visibility`] keeps.
+        let mut visited = HashSet::new();
 
         self.macro_candidates(
             visible_from,
             &mut Vec::new(),
             false,
-            &mut HashSet::new(),
+            &mut visited,
             &certain,
             &mut Collecting::Name(name, &mut candidates),
             &mut self.macros.clone(),
             None,
         );
 
-        MacroEnvironment {
+        let environment = MacroEnvironment {
             name: name.to_string(),
             candidates,
+        };
+
+        let mut contributors: Vec<String> = visited.into_iter().collect();
+        contributors.sort();
+        if let Ok(mut memo) = self.macro_environments.lock() {
+            if memo.len() >= MAX_CACHED_MACRO_WALKS {
+                memo.clear();
+            }
+            memo.insert(
+                key,
+                CachedMacroWalk {
+                    contributors,
+                    environment: environment.clone(),
+                },
+            );
         }
+
+        environment
     }
 
     /// **Every macro name this file's environment defines**, from **one** walk of the include graph.
@@ -11177,19 +11286,44 @@ impl ProjectIndex {
     /// [`crate::semantic`]'s own step 2, which is already whole-file. An `#undef` of an *included* macro is the one
     /// shape this cannot express, and it is not expressible in step 2 either.
     pub fn macro_names_in_force(&self, visible_from: &Path) -> HashSet<String> {
+        // The same memo as [`ProjectIndex::macro_environment`], keyed by the file alone: the colouring pass asks for
+        // the whole set once per file and it is the one question that needs the closure.
+        let key = normalize(visible_from);
+        if let Ok(memo) = self.macro_names.lock()
+            && let Some(cached) = memo.get(&key)
+        {
+            return cached.names.clone();
+        }
+
         let mut names = HashSet::new();
         let certain = self.certainly_in_the_translation_unit(visible_from);
+        let mut visited = HashSet::new();
 
         self.macro_candidates(
             visible_from,
             &mut Vec::new(),
             false,
-            &mut HashSet::new(),
+            &mut visited,
             &certain,
             &mut Collecting::Names(&mut names),
             &mut self.macros.clone(),
             None,
         );
+
+        let mut contributors: Vec<String> = visited.into_iter().collect();
+        contributors.sort();
+        if let Ok(mut memo) = self.macro_names.lock() {
+            if memo.len() >= MAX_CACHED_MACRO_WALKS {
+                memo.clear();
+            }
+            memo.insert(
+                key,
+                CachedMacroNames {
+                    contributors,
+                    names: names.clone(),
+                },
+            );
+        }
 
         names
     }

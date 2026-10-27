@@ -3278,6 +3278,89 @@ fn hover_shows_the_documentation_and_refuses_a_plain_comment() {
     server.notify("exit", Value::Null);
 }
 
+/// **A hover on the last member of a chain reads the chain, not its head.**
+///
+/// `win->w_buffer->fnum`: the object of the access is `win->w_buffer`, and the *first* byte of that text is the `w`
+/// of `win` — a node whose type is `win_T*`. The hover asked `members_of("win_T*")` for `fnum`, which is not a member
+/// of `win_T` at all, and said so:
+///
+/// ```text
+/// `win_T*` has no member `fnum`
+///
+/// `win->w_buffer` is a `win_T*`.
+/// ```
+///
+/// Measured on neovim's `src/nvim/arglist.c` (`win->w_buffer->b_fnum`; `struct file_buffer` declares the field the
+/// macro `#define b_fnum handle` renames). The last byte of the object is past the base name, so the node it sits in
+/// is the chain itself and its type is `buf_T*` — which is the object's real type and what the answer has to use.
+#[test]
+fn a_hover_on_the_last_member_of_a_chain_reads_the_chain() {
+    const FIXTURE: &str = "\
+typedef struct { int fnum; } buf_T;
+typedef struct { buf_T *w_buffer; int other; } win_T;
+int f(win_T *win) { return win->w_buffer->fnum; }
+";
+    let project = Project::new("hover-chain");
+    project.write("main.c", FIXTURE);
+
+    let mut server = Server::start(project.root());
+    let uri = uri_of(&project.root().join("main.c"));
+
+    server.request(
+        1,
+        "initialize",
+        json!({
+            "processId": std::process::id(),
+            "rootUri": uri_of(project.root()),
+            "capabilities": {
+                "workspace": { "configuration": true, "didChangeWatchedFiles": { "dynamicRegistration": true } },
+                "window": { "workDoneProgress": true },
+            },
+        }),
+    );
+    server.notify("initialized", json!({}));
+    server.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": { "uri": uri, "languageId": "c", "version": 1, "text": FIXTURE }
+        }),
+    );
+
+    // **Inside the member's name**, not on the `->` in front of it: a hover on the operator is a question about the
+    // operator.
+    let line = line_of(FIXTURE, "->w_buffer->fnum");
+    let character = FIXTURE
+        .lines()
+        .nth(line as usize)
+        .and_then(|text| text.find("fnum"))
+        .expect("the fixture writes it")
+        + 2;
+    let answer = server.ask_until(100, |id| {
+        json!({
+            "id": id,
+            "method": "textDocument/hover",
+            "params": {
+                "textDocument": { "uri": uri },
+                "position": { "line": line, "character": character },
+            },
+        })
+    });
+    let text = answer["result"]["contents"]["value"]
+        .as_str()
+        .unwrap_or_else(|| panic!("a markdown answer was expected, got {answer}"));
+    assert!(
+        !text.contains("has no member"),
+        "`fnum` is a member of the chain's type, so nothing may say otherwise: {text}"
+    );
+    assert!(
+        text.contains("int"),
+        "and the popup says what the member is: {text}"
+    );
+
+    server.request(999, "shutdown", Value::Null);
+    server.notify("exit", Value::Null);
+}
+
 /// A hover whose position is the first character of the line containing `needle`.
 fn hover_over(server: &mut Server, first_id: i64, uri: &str, fixture: &str, needle: &str) -> Value {
     let line = line_of(fixture, needle);

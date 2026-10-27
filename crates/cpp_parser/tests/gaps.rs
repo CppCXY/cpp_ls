@@ -4188,6 +4188,11 @@ fn constructs_the_parser_reads() {
             "typedef char *(*LineGetter)(int, void *, int, bool);",
             "char *(*pick)(int);",
             "void *(*start)(void *, unsigned long);",
+            // **A macro written where an attribute goes, after a parameter** — neovim's empty `FUNC_ATTR_*` and the
+            // SAL annotations of every Windows header; see `a_macro_after_a_parameter_keeps_the_function_a_declaration`.
+            "void f(exarg_T *eap FUNC_ATTR_UNUSED) { }",
+            "void g(int a _In_, int b _Out_opt_);",
+            "void h(const char *s FUNC_ATTR_NONNULL_ALL) FUNC_ATTR_NONNULL_RET;",
             // Linkage.
             "extern \"C\" void f();",
             "extern \"C\" { void f(); }",
@@ -7351,6 +7356,62 @@ fn a_pointer_before_a_parenthesised_declarator_ends_at_its_semicolon() {
             .collect();
         assert_eq!(names.len(), 1, "one name, and it is the declarator's: {names:?}");
     }
+}
+
+/// **A macro after a parameter's declarator keeps the function a declaration** — `void f(int x FUNC_ATTR_UNUSED)`.
+///
+/// An attribute written as a macro is the ordinary spelling of "nothing here" in C: neovim's `FUNC_ATTR_*` are empty
+/// macros that only its *generated* headers define, and every Windows header writes SAL annotations (`_In_`,
+/// `_Out_opt_`) in the same position. A closure that does not define the macro keeps the bare name, and the parser
+/// then had no reading for it: the parameter refused, the declaration failed, and the whole file **fell back to an
+/// expression statement** — one `ExpressionStat` node holding every function, with a syntax error on each body's
+/// `}`.
+///
+/// Measured on neovim's `arglist.c` through the language server: three published `syntax-error` diagnostics
+/// (`expected primary expression` at the line of `void ex_argdedupe(…)`, `expected ; after expression` at the
+/// `for (…) {` that follows, and the same pair again twenty lines later) on a file that compiles.
+///
+/// So this asserts the *shape* rather than "no errors": the function is a `Declaration`, the parameter is one
+/// `Parameter` whose text is everything written, the macro is a `MacroCall` inside it, and the declaration after it
+/// is its sibling.
+#[test]
+fn a_macro_after_a_parameter_keeps_the_function_a_declaration() {
+    let source = "void ex_argdedupe(exarg_T *eap FUNC_ATTR_UNUSED) {\n  for (int i = 0; i < 2; i++) { }\n}\nint after;\n";
+    let tree = CppParser::parse(source, ParserConfig::default());
+    let root = tree.get_red_root();
+
+    let top: Vec<CppSyntaxKind> = root
+        .children()
+        .map(|child| CppSyntaxKind::from(child.kind()))
+        .collect();
+    assert_eq!(
+        top,
+        [CppSyntaxKind::Declaration, CppSyntaxKind::Declaration],
+        "the function is a declaration and `int after;` is the next one: {top:?}"
+    );
+
+    let function = root.children().next().expect("the function");
+    assert!(
+        function.text().to_string().starts_with("void ex_argdedupe("),
+        "the declaration is the function: {:?}",
+        function.text().to_string()
+    );
+
+    let parameter = function
+        .descendants()
+        .find(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::Parameter)
+        .expect("the function has a parameter");
+    assert_eq!(
+        parameter.text().to_string(),
+        "exarg_T *eap FUNC_ATTR_UNUSED",
+        "the parameter holds the attribute macro rather than losing it"
+    );
+    assert!(
+        parameter
+            .descendants()
+            .any(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::MacroCall),
+        "and the macro is read as one"
+    );
 }
 
 /// **The class-head scan must not run out of window**: a partial specialisation whose base clause is long.

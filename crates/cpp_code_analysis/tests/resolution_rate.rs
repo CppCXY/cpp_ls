@@ -20,7 +20,7 @@
 //! about a file whose macros are unexpanded is a question about a program nobody compiles.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use cpp_code_analysis::file::coordinates::ReadingOffset;
 use cpp_code_analysis::{DiskFiles, Known, OpenDocuments, Session, SessionFiles, WatchFilter};
@@ -58,6 +58,20 @@ struct Scoreboard {
     by_shape: BTreeMap<&'static str, (usize, usize)>,
     /// A handful of refusals written out, so that the next change starts from a name rather than a number.
     samples: Vec<String>,
+    /// **Questions this scoreboard cannot ask, because the member is written through a macro.**
+    ///
+    /// The walk reads the file's *own text*, and a macro that renames a member — neovim's
+    /// `#define b_fnum handle`, written inside `struct file_buffer` — makes `buf->b_fnum` a question about a name the
+    /// class does not have. Only a rendering expands it, and only the rendering can answer it (measured: the cooked
+    /// reading of `arglist.c` writes `win->w_buffer->handle`, and `handle` is a member of `file_buffer`).
+    ///
+    /// So these are counted apart from `asked`: they are not refusals, they are the pessimism this reading pays for,
+    /// and mixing them into the denominator is what made the last 937-wide bucket look like a defect. The count is
+    /// the price of the "file's own text" rule, stated rather than hidden.
+    written_through_a_macro: usize,
+    /// **Questions the walk invented inside a comment** — a `->` in the prose of a `///` block, which nothing can
+    /// declare. Counted apart for the same reason as the macro bucket: they are not refusals.
+    inside_a_comment: usize,
     /// **Of the refusals that had a receiver type, what was there to choose from** — the split the last measurement
     /// was missing. `NotDeclaredHere` covers "the class is not visible at all" and "the class is visible several times
     /// and the chosen declaration has no such member", and they are different work: the first is the include graph,
@@ -101,6 +115,8 @@ impl Scoreboard {
         self.through_an_arrow += other.through_an_arrow;
         self.resolved += other.resolved;
         self.declined += other.declined;
+        self.written_through_a_macro += other.written_through_a_macro;
+        self.inside_a_comment += other.inside_a_comment;
         self.refused_with_a_type += other.refused_with_a_type;
         for (reason, count) in other.refused {
             *self.refused.entry(reason).or_default() += count;
@@ -137,6 +153,15 @@ impl Scoreboard {
             "of the refusals, {} had a receiver type and {} did not",
             self.refused_with_a_type,
             self.refused.values().sum::<usize>() - self.refused_with_a_type
+        );
+        println!(
+            "and {} question(s) were not asked at all: the member is written through a macro, which only a \
+             rendering can expand",
+            self.written_through_a_macro
+        );
+        println!(
+            "and {} more were not questions: a `->` in a comment, which nothing declares",
+            self.inside_a_comment
         );
 
         println!("\nby receiver shape:");
@@ -207,6 +232,27 @@ fn the_member_questions_of_a_real_project_and_how_many_resolve() {
     let mut counted_files = 0usize;
     let mut uncooked = 0usize;
 
+    // **Every macro name the project defines, collected once.** It is asked per member access, so it has to be
+    // cheap: the exact per-file answer is `ProjectIndex::macro_names_in_force`, which walks the include graph, and
+    // 551 of those walks turned this scoreboard from 5 minutes into **35** (measured, 2026-10-28). A scoreboard that
+    // takes half an hour is not run after every change, which is the only thing it is for.
+    //
+    // The over-approximation is honest: a name is a macro *somewhere in the project*, not necessarily in this file's
+    // environment. A member named like another file's macro would be counted as unaskable, and the direction of that
+    // error is a *higher* reported rate — so the number below is an upper bound, and the macro bucket is the price
+    // of reading the file's own text, not a defect.
+    let project_macros: BTreeSet<String> = session
+        .index()
+        .all_summaries()
+        .into_iter()
+        .flat_map(|(_, summary)| summary.macros.iter())
+        .map(|macro_fact| macro_fact.name.clone())
+        .collect();
+    println!(
+        "the project defines {} macro name(s), which the file's own text cannot expand",
+        project_macros.len()
+    );
+
     for path in &files {
         // **The file's own text, not its rendering** — deliberately, because the number has to be comparable across
         // changes. Cooking every project file means rendering its whole standard-library closure (measured: minutes
@@ -236,6 +282,32 @@ fn the_member_questions_of_a_real_project_and_how_many_resolve() {
                 continue;
             }
             if !asked.insert(access.member_range.start_offset) {
+                continue;
+            }
+
+            // **A member name the file's macros rewrite is not a question this reading can put.** Asked anyway, it
+            // is a guaranteed refusal about a name the class cannot have — `buf->b_fnum` where the header says
+            // `#define b_fnum handle` — and it was the whole of the last 937-wide bucket.
+            if project_macros.contains(&access.member) {
+                scoreboard.written_through_a_macro += 1;
+                continue;
+            }
+
+            // **A `->` after a comment is not a member access.** The tree keeps documentation comments as nodes, and
+            // `// … their group.` immediately followed by `->GET_ONE_EVENT` — a shape recovery produces, not a
+            // compiler — parsed its way into this walk. The *receiver* being the comment is the signature the first
+            // version missed: it asked for a `DocComment` ancestor, and 749 of the 2 096 remaining refusals still
+            // came back `UnparsableName`.
+            if matches!(
+                cpp_parser::CppSyntaxKind::from(access.object.kind()),
+                cpp_parser::CppSyntaxKind::DocComment
+            ) || node.ancestors().any(|ancestor| {
+                matches!(
+                    cpp_parser::CppSyntaxKind::from(ancestor.kind()),
+                    cpp_parser::CppSyntaxKind::DocComment
+                )
+            }) {
+                scoreboard.inside_a_comment += 1;
                 continue;
             }
 

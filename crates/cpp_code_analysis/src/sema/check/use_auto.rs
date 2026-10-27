@@ -75,7 +75,8 @@ impl Check for UseAuto {
                 t!("%{spelling} %{name}", spelling = spelling, name = name),
                 t!(
                     "`%{name}` is declared by its full iterator spelling — write `auto %{name}`, which is the same type and \
-                     cannot disagree with the initialiser"
+                     cannot disagree with the initialiser",
+                    name = name
                 ),
             );
             let _ = range;

@@ -58,6 +58,33 @@ cargo test --release -p cpp_ls --test lsp_status -- --ignored --nocapture
    [codeAction] prepare 54.096ms, total 56.3657ms
    ```
 
+## 经典 C 项目（neovim）
+
+同一个探针的思路，换成一个 C 工程：`crates/cpp_ls/tests/c_project.rs` 打开 `src/nvim/arglist.c`（一个 800 行的
+C 文件，`typedef struct` 到处都是，成员名有被宏改过的），等索引静默后逐功能提问。
+
+```text
+$env:CPPLS_REAL_PROJECT = "E:\neovim"
+cargo test --release -p cpp_ls --test c_project -- --ignored --nocapture
+```
+
+| 功能 | n | 时间 | 说明 |
+|---|---|---|---|
+| `hover`（成员） | 1 | 8 ms | `int addr_count` |
+| `hover`（宏成员） | 1 | 1156 ms / **9 ms** | `b_fnum` 是宏，展开成 `handle`；第二次走 memo |
+| `definition`（成员） | 1 | 10 ms | `ex_cmds_defs.h:121` |
+| `definition`（函数） | 1 | 9 ms | `arglist.c:207` |
+| `references` | 9 | 8 ms | |
+| `completion`（`eap->`） | 35 | 10 ms | 含 `addr_count` |
+| `documentSymbol` | 47 | 10 ms | |
+| `semanticTokens` | 2087 | **1296 ms** | 修前对每个文件都 `null`（见 §H ⑥） |
+| `inlayHint` | 17 | 11 ms | |
+| `diagnostic` | 17 | 9 ms | 0 条语法错误；2 条是项目缺的生成头 |
+| `signatureHelp` | 1 | 19 ms | `do_argfile(exarg_T *eap, int argn)` |
+
+这一轮从这里挖出六个缺陷（参数后的宏让整文件读不成声明、`struct` 被当成类型、链式 hover 取错接收者、宏成员被
+说成"没有这个成员"、宏查询 1.19 s 无 memo、条件 include 让着色永不开始），都记在 `docs/remaining.md` §H。
+
 ## 还剩的行
 
 * **`diagnostic` 66 ms / 0 条** —— 同一行别的时候是 4 ms、110 ms，说明它主要在把索引和渲染热起来而不是在检查；

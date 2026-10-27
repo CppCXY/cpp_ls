@@ -3266,16 +3266,29 @@ impl<F: FileProvider + Clone> Session<F> {
     ///
     /// So the test is the **closure**: every file [`ProjectIndex::visible_files`] reaches, summarized. That walk is
     /// the one every cross-file query already pays (and it is memoized), and the summary lookups are hash reads.
+    ///
+    /// # Only the files that are *certainly* in the translation unit
+    ///
+    /// A `Conditional` edge is a file the preprocessor may never include, and requiring its summary is a wait that
+    /// may have no end. Measured on neovim (`arglist.c`, a warm `.cppls` cache): `pending() == 0`,
+    /// [`Session::is_locally_ready`] `true`, and the closure held exactly two unread files —
+    /// `<windows kits>/um/winbase.inl` and `winuser.inl`, both reached through a **conditional** `#include` and never
+    /// read by anything. So `is_closure_ready` was `false` and `semanticTokens` answered `null` **for every source
+    /// file of the project**, in every session, no matter how long it had been open — a colouring that never starts.
+    ///
+    /// The names such a file declares are exactly the ones the classifier already reports as uncertain (the fact
+    /// carries its guard), so leaving them out of the readiness question costs nothing that was ever certain.
     pub fn is_closure_ready(&self, path: &Path) -> bool {
         if !self.store.index().summary(path).is_some() {
             return false;
         }
 
-        self.store
-            .index()
-            .visible_files(path)
-            .iter()
-            .all(|(file, _)| self.store.index().summary(Path::new(file)).is_some())
+        self.store.index().visible_files(path).iter().all(
+            |(file, visibility)| {
+                *visibility != crate::IncludeVisibility::Unconditional
+                    || self.store.index().summary(Path::new(file)).is_some()
+            },
+        )
     }
 
     /// **Can a question about this file be answered from what has been read?** — the question a *local* request asks.

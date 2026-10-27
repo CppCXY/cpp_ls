@@ -67,7 +67,8 @@ impl Check for CStyleCast {
                 t!("(%{written})", written = written),
                 t!(
                     "this is a C-style cast to `%{written}` — the four named casts say which conversion is meant, and \
-                     `static_cast<%{written}>(…)` is almost always the one"
+                     `static_cast<%{written}>(…)` is almost always the one",
+                    written = written
                 ),
             );
         }

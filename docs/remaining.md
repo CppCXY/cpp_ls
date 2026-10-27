@@ -872,3 +872,95 @@ crates/cpp_code_analysis/tests/types.rs
 3. 剩下的 2 211 条 "a list from no visible declaration" 已经不再是 typedef 的形状，需要下一次单独定位
    （记分板会打印前几条拒绝，`CPPLS_CLASS=<类名>` 可以单独问一个类）。
 
+---
+
+## ✅ H. 经典 C 项目（neovim）：服务端可用性表 + 六个缺陷 —— 2026-10-28
+
+记分板量的是**成员问题**，这一轮量的是**编辑器真正会问的**：一个全新的探针
+`crates/cpp_ls/tests/c_project.rs` 起一个 server，打开 `src/nvim/arglist.c`，等索引静默，然后每个功能问一个
+形状可核对的问题。
+
+```text
+$env:CPPLS_REAL_PROJECT = "E:\neovim"
+cargo test --release -p cpp_ls --test c_project -- --ignored --nocapture
+```
+
+| 功能 | n | 时间 | 答案 |
+|---|---|---|---|
+| `hover`（成员） | 1 | 8 ms | `int addr_count` |
+| `hover`（宏成员） | 1 | 1156 ms / 9 ms | `b_fnum` 在这里是宏，展开成 `handle`（第二次 9 ms） |
+| `definition`（成员） | 1 | 10 ms | `ex_cmds_defs.h:121` |
+| `definition`（函数） | 1 | 9 ms | `arglist.c:207` |
+| `references` | 9 | 8 ms | `arglist.c:83/95/165…` |
+| `completion`（`eap->`） | 35 | 10 ms | 含 `addr_count` |
+| `documentSymbol` | 47 | 10 ms | |
+| `semanticTokens` | 2087 | 1296 ms | 修前一直 `null`，见 ⑤ |
+| `inlayHint` | 17 | 11 ms | `al:` |
+| `diagnostic` | 17 | 9 ms | 0 条语法错误；2 条是**项目本身缺的生成头**（`auto/config.h`、`arglist.c.generated.h`），其余是风格建议 |
+| `signatureHelp` | 1 | 19 ms | `do_argfile(exarg_T *eap, int argn)` |
+
+六个缺陷，全部静默或半静默：
+
+**① 参数后面的宏让整个文件读不成声明（解析器）。**
+
+```c
+void ex_argdedupe(exarg_T *eap FUNC_ATTR_UNUSED) { … }     // neovim 每个 .c 都这么写
+```
+
+`FUNC_ATTR_*` 是空宏，但只有 neovim 的**生成头**定义它（`gen_declarations.lua` 写出 `#define
+DEFINE_EMPTY_ATTRIBUTES`），没有生成头的闭包就只剩一个裸名字。解析器在参数位置没有这个读法：参数失败 → 声明失败
+→ **整个文件退回一个 `ExpressionStat`**，每个函数体的 `}` 都成了错误。实测发布出去的是 3 条 `syntax-error`，
+而行号指向函数名的第一行。修法是在 `parse_parameter` 的末尾复用
+`decls::eat_a_macro_suffix`（"声明符之后一个标识符只可能是宏"），钉在
+`a_macro_after_a_parameter_keeps_the_function_a_declaration`。
+
+**② `struct exarg` 里的关键字被当成了类型。** 语法把 `struct exarg` 读成 `BuiltinType "struct"` +
+`NamedType "exarg"`，builtin 优先返回，于是 `typedef struct exarg exarg_T;` 的类型是 `"struct"`。修在
+`read_specifiers_named`（`struct/class/union/enum` 不进 builtin 列表，有名字时以名字为准）和
+`DECLARATION_SPECIFIERS`（这四个名字加进剥离列表），见 §G ④。
+
+**③ 链式成员的 hover 取的是**链头**的类型。** `win->w_buffer->b_fnum` 的对象表达式是 `win->w_buffer`，而
+hover 用它的**第一个字节**取类型——那是 `win`，类型 `win_T*`——于是卡片说
+`` `win_T*` has no member `b_fnum` ``。取**最后一个字节**就落在链本身里（`buf_T*`）。钉在
+`a_hover_on_the_last_member_of_a_chain_reads_the_chain`（把偏移改回起点后这条测试确实失败，输出就是那行
+`win_T*` 的假答案）。
+
+**④ 通过宏改名的成员被说成"没有这个成员"。** `struct file_buffer` 里写着 `#define b_fnum handle`，文件自己的
+文本里没有 `b_fnum` 这个成员——卡片说 `has no member`，字面正确、对读者无用。现在在"找不到成员"的分支里问一次
+`Session::macro_body_at`（只在 miss 时问一次），卡片说："`b_fnum` 是宏，展开成 `handle`，`handle` 是 `buf_T*`
+的成员"。
+
+**⑤ 每一次宏查询都重新走一遍 include 图。** `macro_environment` / `macro_names_in_force` 都是"一次调用一次
+遍历"，在 neovim 的 853 文件闭包上是 **1.19 s**，连问三遍就是三遍 1.19 s：
+
+```text
+round 0: macro_names_in_force -> 38345 name(s) in 1.1903s
+round 1: 1.5296ms      round 2: 1.52ms
+round 0: macro_body_at(b_fnum) -> Some("handle") in 1.1874s
+round 1: 10.5µs        round 2: 6.9µs
+```
+
+修法：`ProjectIndex` 里加两个 memo（按 `(文件, 名字)` 和按文件），**贡献者列表**跟答案一起存，和 `visibility`
+的失效规则完全一样（被读过的文件重读就丢相关条目，新文件出现就整体清空）。这是 ④ 的 1156 ms → 9 ms，也是
+`semanticTokens` 3.3 s → 1.3 s 的大部分。
+
+**⑥ 有条件 include 的文件让着色**永远**不开始。** `is_closure_ready` 要求闭包里**每个**文件都有摘要，而
+Windows SDK 的 `winbase.h` 在 `#if` 里包含 `winbase.inl`/`winuser.inl`——没有任何东西会去读它们。实测：
+
+```text
+is_locally_ready: true, is_closure_ready: false, pending: 0
+  no summary: …/um/winbase.inl (Conditional)
+  no summary: …/um/winuser.inl (Conditional)
+```
+
+于是 `semanticTokens` 对 neovim 的**每一个**源文件都返回 `null`，永远。修法是只要求**无条件**边上的文件有
+摘要：条件 include 的文件可能根本不在这个 TU 里，等它本来就是等不到的事；而它声明的名字本来就带着
+"conditional" 的不确定性。修后：2087 个 token，1.3 s。
+
+**顺带修掉的两条消息缺陷**：`cstyle_cast` 和 `use_auto` 的 `t!` 少了参数，用户看到的是
+`` this is a C-style cast to `%{written}` `` 和 `` `%{name}` 是… `` 这样的原文（前者是这次在 `arglist.c` 的
+诊断里抓到的）。新增 `crates/cpp_code_analysis/tests/messages.rs`：扫描 crate 自己的源码，每个 `t!` 里的
+`%{name}` 必须在同一个调用里有 `name =` 实参——把 `use_auto` 的实参删掉跑一次，它确实报
+`use_auto.rs:76: `%{name}` has no `name =` argument`。
+
+

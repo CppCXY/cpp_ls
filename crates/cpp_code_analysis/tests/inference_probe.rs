@@ -67,6 +67,27 @@ fn what_is_answered_at_a_place() {
                         "  error {:?} at {} (length {}): {}",
                         error.code, error.start, error.end, error.message
                     );
+                    // **The text the error is about.** A rendering is one long line, so the offset alone says nothing
+                    // a reader can act on; ±60 bytes of the rendering is what turns "expected primary expression at
+                    // 19653" into a name.
+                    if let Some(rendered) = session.rendering_of(&file) {
+                        let start = error.start.min(rendered.text.len());
+                        let end = error.end.min(rendered.text.len()).max(start);
+                        let from = start.saturating_sub(50);
+                        let to = (end + 50).min(rendered.text.len());
+                        if rendered.text.is_char_boundary(from)
+                            && rendered.text.is_char_boundary(to)
+                            && rendered.text.is_char_boundary(start)
+                            && rendered.text.is_char_boundary(end)
+                        {
+                            println!(
+                                "        …{}⟦{}⟧{}…",
+                                &rendered.text[from..start].replace('\n', " "),
+                                &rendered.text[start..end].replace('\n', " "),
+                                &rendered.text[end..to].replace('\n', " "),
+                            );
+                        }
+                    }
                 }
             }
             None => println!("the check layer had nothing to say about the file"),
@@ -99,6 +120,49 @@ fn what_is_answered_at_a_place() {
                             &rendered.text[from..to]
                         );
                     }
+                }
+            }
+            None => println!("the file has no rendering yet"),
+        }
+    }
+
+    // **Is the rendering itself a program?** The check layer's syntax errors are ranges in the rendering, and the
+    // question "is the parser wrong or is the text it was handed wrong" cannot be answered from the ranges alone.
+    // This parses the very text `rendering_of` hands out and prints its own errors: a text that reads clean here was
+    // *not* the text the checks saw, and the two renderings then differ.
+    if std::env::var_os("CPPLS_REPARSE").is_some() {
+        match session.rendering_of(&file) {
+            Some(rendered) => {
+                let tree = cpp_parser::CppParser::parse(
+                    &rendered.text,
+                    cpp_parser::ParserConfig::default(),
+                );
+                let errors = tree
+                    .get_red_root()
+                    .descendants()
+                    .filter(|node| {
+                        cpp_parser::CppSyntaxKind::from(node.kind())
+                            == cpp_parser::CppSyntaxKind::ErrorNode
+                    })
+                    .count();
+                println!(
+                    "--- re-parsing the rendering ({} byte(s)): {errors} error node(s)",
+                    rendered.text.len()
+                );
+                for node in tree.get_red_root().descendants().filter(|node| {
+                    cpp_parser::CppSyntaxKind::from(node.kind())
+                        == cpp_parser::CppSyntaxKind::ErrorNode
+                }) {
+                    let start = usize::from(node.text_range().start());
+                    let end = usize::from(node.text_range().end());
+                    let from = start.saturating_sub(50);
+                    let to = (end + 50).min(rendered.text.len());
+                    println!(
+                        "  …{}⟦{}⟧{}…",
+                        &rendered.text[from..start].replace('\n', " "),
+                        &rendered.text[start..end].replace('\n', " "),
+                        &rendered.text[end..to].replace('\n', " "),
+                    );
                 }
             }
             None => println!("the file has no rendering yet"),
