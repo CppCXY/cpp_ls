@@ -689,7 +689,16 @@ impl ScopeWalker<'_> {
         kind: BindingKind,
     ) {
         let declared = declared_name(node);
-        let declared_text = declared.as_ref().map(|(name, _)| name.kind.text());
+        // **`typedef struct { … } Name;`** — the struct has no tag, and the only name the type has is the typedef's, so
+        // the class body's scope takes that name. Without it the members are filed in a scope with **no name at all**
+        // and a member query for `Name` finds none of them: measured on the neovim checkout, `Object`
+        // (`typedef struct { ObjectType type; union { … } data; } Object;`) answered **0 members**, and "a member list
+        // built from no visible declaration" was **21 539 of 40 000 refusals** across that project — the dominant shape
+        // of C, where a struct is almost always declared anonymously behind a typedef.
+        let declared_text = declared
+            .as_ref()
+            .map(|(name, _)| name.kind.text())
+            .or_else(|| the_typedef_name_around(node));
 
         if let Some((name, name_range)) = declared {
             self.bind(outer, name, kind, node, name_range);
@@ -2401,6 +2410,43 @@ fn specifier_name(specifier: &CppSyntaxNode) -> Option<(Name, cpp_parser::Source
     None
 }
 
+/// **The name a `typedef` gives an anonymous class** — `typedef struct { … } Name;` — or `None` for anything else.
+///
+/// A C struct is usually declared behind a typedef with no tag at all, and the tag is where the grammar puts a class's
+/// name: `declared_name` looks *along the declarator*, and for this shape the declarator belongs to the typedef rather
+/// than to the class, so the class answers "unnamed" and its members are filed under a scope nothing can ask about.
+/// The typedef's own name is the only name the type has, so it is the one the scope takes.
+///
+/// The search is deliberately narrow: **up** to the declaration that starts with `typedef`, and then the **last**
+/// identifier before its `;`. A class with a tag (`typedef struct Foo { … } Foo;`) is answered by `declared_name` first
+/// and never reaches here, which is what keeps a pointer typedef (`typedef struct Foo { … } *FooPtr;`) out — its last
+/// identifier is not a class name, and only the untagged shape can reach this path.
+fn the_typedef_name_around(node: &CppSyntaxNode) -> Option<String> {
+    // **`descendants`, not `children`**: the `typedef` keyword sits inside the declaration's `DeclSpecifierSeq`, not
+    // beside it — the first version of this asked only the direct children and found nothing, so the scope stayed
+    // unnamed and the answer looked exactly as it did before the change.
+    let declaration = node.ancestors().find(|ancestor| {
+        ancestor
+            .descendants_with_tokens()
+            .filter_map(|element| element.into_token())
+            .any(|token| CppTokenKind::from(token.kind()) == CppTokenKind::TypedefKeyword)
+    })?;
+
+    let mut last = None;
+    for element in declaration.descendants_with_tokens() {
+        let Some(token) = element.into_token() else {
+            continue;
+        };
+        match CppTokenKind::from(token.kind()) {
+            CppTokenKind::Semicolon => break,
+            CppTokenKind::Identifier => last = Some(token.text().to_string()),
+            _ => {}
+        }
+    }
+
+    // A name that is the class's own tag (`struct Name { … }`) never reaches here, so anything found is the typedef's.
+    last.filter(|name| !name.is_empty())
+}
 fn declared_name(node: &CppSyntaxNode) -> Option<(Name, cpp_parser::SourceRange)> {
     // The name is looked for *only* along the declarator-to-name path. That restriction is the whole
     // correctness of this function: a search that descends freely finds the first identifier anywhere, which
