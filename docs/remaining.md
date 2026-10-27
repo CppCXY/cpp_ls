@@ -783,3 +783,92 @@ extra_args = ["-I3rd/googletest-1.13.0/googletest/include", "-Iinclude"]
 整个程序会被 cook，`#define` 在渲染里就是无条件事实，`ConditionalCompilation` 自然消失。
 
 探针新增 `CPPLS_MACRO=1`：在光标处打印 `macro_definition` 的答案（宏不是声明，`definitions` 问不到它）。
+
+---
+
+## ✅ G. C 的 `typedef struct { … } Name;` —— 整个项目一半的成员问题 —— 2026-10-28
+
+**这一条不是一个 bug，是四个叠在一起，最后被同一张记分板串起来的。** 起点是
+`E:\neovim`（commit `54f94d6`，`.cppls.toml` 里 `-std=gnu11 -Isrc -Ibuild/cppls/generated`）的记分板：
+
+```text
+修前：551 个文件，80 411 个成员问题，50.4% 解析
+      拒绝里最大的一桶 "a list from no visible declaration" = 21 539
+第一步（typedef 的四条，见下）：80 436 个问题，93.4% 解析（75 140），同一桶 = 2 211
+第二步（函数指针 typedef 吞文件 + `struct` 被当成类型）：**96.1% 解析（77 265）**，同一桶 = **937**
+      单类验收：members_of("exarg_T") 35 个成员（修前 0），members_of("cmdmod_T") 13 个（修前 0）
+```
+
+C 基本只用 `typedef struct { … } Name;` 声明结构体，而这条路径上四个缺陷各自都足以让成员表为空，**每一个
+都是静默的**（没有诊断、树是 lossless 的）：
+
+```text
+① TypedefDecl 的类体从来没被走过        → 一个成员事实都没有（scope 树里没有那个 Class）
+② 类体的名字取到了第一个成员             → the_typedef_name_around 在第一个 `;` 停住（那个 `;` 在体内）
+③ 别名目标记成了类体的**原文**            → `struct { int a; int b; }` 不声明任何东西，
+                                           于是 members_of 返回空表 + unlisted ["{inta;intb;}"]
+④ `struct exarg` 里的关键字被当成了类型    → 别名的目标成了 `struct`，跨文件查询一无所获
+```
+
+第 ④ 条的下面是第五个、也是最凶的一个，**它连累的是整份头文件**：
+
+```text
+typedef char *(*LineGetter)(int, void *, int, bool);      // neovim ex_cmds_defs.h:96
+```
+
+`parse_declarator_with` 先看到 `*`，于是"括号里有名字"那条分支（为 `(*f)(int)` 写的）在错误的 token 上被问，
+答"不是"；接着 `parse_abstract_declarator` 读到 `(*LineGetter)`，把它当成**抽象**声明符——名字没人读，
+`expected )`。恢复是"良构"的：**整个 `TypedefDecl` 一直吃到文件末尾**，`struct exarg` 和第 96 行之后的每一条
+声明都不存在了。实测那份头文件：错误节点 **0 个**，事实 **16 条**（应有 93 条），`exarg_T` 的成员表是空的。
+
+修在哪（一行一处，全部在事实/语法层）：
+
+```text
+crates/cpp_parser/src/grammar/cpp/types.rs::parse_abstract_declarator_with
+        括号组里有名字（且调用方说"后面还可能有名字"）→ 走 parse_parenthesised_declarator，
+        不再当抽象声明符。这就是 LineGetter 那条。
+crates/cpp_code_analysis/src/sema/scopes.rs::item
+        TypedefDecl 也调 specifiers（走类体）；class_like 的名字只取类体**之前**的名字
+crates/cpp_code_analysis/src/sema/scopes.rs::the_typedef_name_around
+        无名类体只在**最近的**声明是 typedef 时才借它的名字（原来 `ancestors()` 一路问到
+        TranslationUnit，于是 `exarg` 里内嵌的匿名 struct 借到了后面一百行的 `SubReplacementString`）
+crates/cpp_code_analysis/src/sema/types.rs::read_specifiers_named
+        ① 类体（struct/union/enum）的 **tag** 现在被读出来；没有 tag 才是"无名类体"（空拼写，不是 void）
+        ② `struct`/`class`/`union`/`enum` 不再进 builtin 列表——语法把 `struct exarg` 读成
+           `BuiltinType "struct"` + `NamedType "exarg"`，而 builtin 先返回，于是类型成了 `struct`
+crates/cpp_code_analysis/src/sema/declarations.rs
+        declared_alias_target_with：typedef 的类体 → 有 tag 就是 tag，没有就是 typedef 自己的名字
+        DECLARATION_SPECIFIERS：`struct/class/union/enum` 加进剥离列表（`typedef struct exarg exarg_T;`
+        的目标从 `struct exarg` 变成 `exarg`）
+```
+
+**钉住它们的**：
+
+```text
+crates/cpp_parser/tests/gaps.rs
+    a_pointer_before_a_parenthesised_declarator_ends_at_its_semicolon
+        断言的是"声明在自己的 `;` 结束、后面那条是兄弟节点"——`assert_reads` 抓不到这个缺陷，
+        因为吞掉整个文件的那棵树是**没有错误**的。
+    以及 constructs_the_parser_reads 里的三条新拼写。
+crates/cpp_code_analysis/tests/types.rs
+    a_typedef_of_a_class_body_names_its_members
+        Object/Named/Plain 三种拼写 + `o.a` 的类型
+    a_struct_defined_after_its_typedef_answers_for_the_alias
+        真实头文件那一组（函数指针 typedef + tag 前后分开 + 内嵌匿名 struct），
+        断言 members_of("exarg_T") == members_of("exarg")
+```
+
+**新增探针** `crates/cpp_parser/tests/parse_probe.rs`（`CPPLS_FILE=<文件>`，没有就跳过）：打印错误节点，
+以及每个**顶层节点**的起始行和它占文件的百分比。这次的缺陷就是靠"一个 `TypedefDecl` 占 99% 的文件"看出来的，
+而错误列表当时是空的——所以这个探针看的是**结构**，不是诊断。
+
+**还没做的（诚实记录）**：
+
+1. `typedef struct { … } *Ptr;`（指针形式）没量过；`((Object){ … })` 括号化的复合字面量仍是语法缺口
+   （`crates/cpp_parser/tests/gaps.rs` 的 gap 列表里）。
+2. 头文件里出现了 `Variable "file" scope None`、`Variable "bar" scope None` 这样的内嵌匿名 struct 成员——
+   它们现在**不再借**别人的名字（这是修好的部分），但仍然没有可查询的 scope（C11 的匿名 struct/union 成员
+   本该是外层的成员，这条没做）。
+3. 剩下的 2 211 条 "a list from no visible declaration" 已经不再是 typedef 的形状，需要下一次单独定位
+   （记分板会打印前几条拒绝，`CPPLS_CLASS=<类名>` 可以单独问一个类）。
+

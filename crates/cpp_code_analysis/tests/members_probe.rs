@@ -29,11 +29,18 @@ use cpp_code_analysis::{DiskFiles, Known, OpenDocuments, Session, SessionFiles, 
 #[test]
 #[ignore = "opens a real project; run with --ignored"]
 fn what_one_class_answers_for_its_members() {
-    let root = PathBuf::from(
-        std::env::var("CPPLS_PROJECT_ROOT").expect("CPPLS_PROJECT_ROOT names the project"),
-    );
-    let file = PathBuf::from(std::env::var("CPPLS_FILE").expect("CPPLS_FILE names a file in it"));
-    let asked = std::env::var("CPPLS_CLASS").expect("CPPLS_CLASS names the class");
+    let (Ok(root), Ok(file), Ok(asked)) = (
+        std::env::var("CPPLS_PROJECT_ROOT"),
+        std::env::var("CPPLS_FILE"),
+        std::env::var("CPPLS_CLASS"),
+    ) else {
+        // **A probe that needs a project skips rather than fails** when this machine has none — see `docs/remaining.md`
+        // §C1. The question it asks is answerable on any project, and a checkout hardcoded here would be one
+        // machine's.
+        eprintln!("skipped: set CPPLS_PROJECT_ROOT, CPPLS_FILE and CPPLS_CLASS");
+        return;
+    };
+    let (root, file) = (PathBuf::from(root), PathBuf::from(file));
 
     let mut session = Session::open(
         &root,

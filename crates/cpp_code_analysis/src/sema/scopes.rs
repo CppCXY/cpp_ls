@@ -707,16 +707,6 @@ impl ScopeWalker<'_> {
         // neovim checkout "a member list built from no visible declaration" was **21 539 of 40 000 refusals**, the
         // dominant shape of C. A class's own name is always written before its `{`, so anything at or after the body
         // starts is a member's name and not the class's.
-        if std::env::var_os("CPPLS_TRACE_SCOPES").is_some() {
-            eprintln!(
-                "[class_like] {:?} children {:?} text {:?}",
-                cpp_parser::CppSyntaxKind::from(node.kind()),
-                node.children()
-                    .map(|child| cpp_parser::CppSyntaxKind::from(child.kind()))
-                    .collect::<Vec<_>>(),
-                node.text().to_string().chars().take(30).collect::<String>()
-            );
-        }
         let body = first_child(node, CppSyntaxKind::ClassBody);
         let body_start = body
             .as_ref()
@@ -2455,15 +2445,34 @@ fn specifier_name(specifier: &CppSyntaxNode) -> Option<(Name, cpp_parser::Source
 /// and never reaches here, which is what keeps a pointer typedef (`typedef struct Foo { … } *FooPtr;`) out — its last
 /// identifier is not a class name, and only the untagged shape can reach this path.
 fn the_typedef_name_around(node: &CppSyntaxNode) -> Option<String> {
-    // **`descendants`, not `children`**: the `typedef` keyword sits inside the declaration's `DeclSpecifierSeq`, not
-    // beside it — the first version of this asked only the direct children and found nothing, so the scope stayed
-    // unnamed and the answer looked exactly as it did before the change.
+    // **The declaration this body belongs to has to *be* the `typedef`.**
+    //
+    // The first version asked "does any ancestor hold a `typedef` token?", and `ancestors()` reaches the
+    // **`TranslationUnit`** — whose descendants hold every `typedef` in the file. So an anonymous class that is a
+    // *member* of another class borrowed the name of the next typedef in the header: measured on neovim's
+    // `ex_cmds_defs.h`, `struct exarg`'s nested `struct { bool file; bool bar; } magic;` was filed under
+    // `exarg::SubReplacementString`, the name of a typedef declared a hundred lines later.
+    //
+    // The nearest declaration-like ancestor is the one that owns the specifiers this body was written in, so it is
+    // the one that answers. Both spellings are accepted — the parser produces a `TypedefDecl` of its own for this,
+    // and a `Declaration` whose text begins with the keyword is the same thing written the general way.
     let declaration = node.ancestors().find(|ancestor| {
-        ancestor
-            .descendants_with_tokens()
-            .filter_map(|element| element.into_token())
-            .any(|token| CppTokenKind::from(token.kind()) == CppTokenKind::TypedefKeyword)
+        matches!(
+            CppSyntaxKind::from(ancestor.kind()),
+            CppSyntaxKind::Declaration | CppSyntaxKind::TypedefDecl
+        )
     })?;
+    let owns_a_typedef = match CppSyntaxKind::from(declaration.kind()) {
+        CppSyntaxKind::TypedefDecl => true,
+        _ => declaration
+            .text()
+            .to_string()
+            .trim_start()
+            .starts_with("typedef"),
+    };
+    if !owns_a_typedef {
+        return None;
+    }
 
     // **Only the identifiers *after* the body count.** The name a typedef gives its type is written outside the braces,
     // and the first version of this stopped at the first `;` — which is `int a;` *inside* the body of

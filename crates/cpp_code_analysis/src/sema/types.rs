@@ -1519,6 +1519,8 @@ pub(crate) fn read_specifiers_named(
     let mut spelling = None;
     // Was a class-like **body** written here without a name in front of it? See the answer below.
     let mut an_unnamed_body = false;
+    // Was an **elaborated keyword** (`struct`, `class`, `union`, `enum`) written here? See the `BuiltinType` arm.
+    let mut elaborated = false;
 
     for child in specifiers.children_with_tokens() {
         let Some(node) = child.into_node() else {
@@ -1529,7 +1531,26 @@ pub(crate) fn read_specifiers_named(
             // The words of a builtin, in order — see the note above about `unsigned long long`.
             CppSyntaxKind::BuiltinType => {
                 let word = node.text().to_string().trim().to_string();
-                if !word.is_empty() {
+                if word.is_empty() {
+                    continue;
+                }
+                // **An elaborated keyword is not a type, and this is where it was being taken for one.** The
+                // grammar reads `struct exarg` as **two** nodes —
+                //
+                // ```text
+                // DeclSpecifierSeq "struct exarg"
+                //   BuiltinType "struct"
+                //   NamedType "exarg"
+                // ```
+                //
+                // — so `builtin` was non-empty and won the answer below, while `named` held the only spelling
+                // anything looks up. Measured: `typedef struct exarg exarg_T;` recorded `type_of: Some("struct")`,
+                // the alias's target (which a cross-file lookup reads out of that field) was `struct`, and
+                // `exarg_T` — the receiver of thousands of member questions in neovim — answered a member list of
+                // zero. `unsigned long long` is unaffected: those words *are* the type.
+                if matches!(word.as_str(), "struct" | "class" | "union" | "enum") {
+                    elaborated = true;
+                } else {
                     builtin.push(word);
                 }
             }
@@ -1584,8 +1605,21 @@ pub(crate) fn read_specifiers_named(
             | CppSyntaxKind::NoexceptSpec
             | CppSyntaxKind::AlignasSpec => {}
             // **An elaborated specifier whose class body is here**: `struct Widget { … }` is a definition, and the
-            // type it declares is named by the `NameExpr` inside it — which the arms above have already returned,
-            // because the body is a *child* of this node rather than a sibling.
+            // type it declares is named by the `NameExpr` inside it — which the arms above do **not** return,
+            // because the name is a *child* of this node rather than a sibling of it:
+            //
+            // ```text
+            // DeclSpecifierSeq "struct Plain { int d; }"
+            //   StructDef "struct Plain { int d; }"
+            //     NameExpr "Plain"          <- the tag, one level down
+            //     ClassBody "{ int d; }"
+            // ```
+            //
+            // Reading it here is what makes `struct Plain { int d; } plain;` type `plain` as `Plain`; before, the
+            // whole sequence was an *anonymous* body to this function, so the fact carried no type at all and
+            // `plain.d` could not be answered. And for a `typedef`, the tag is what the members are filed under
+            // (`typedef struct Tag { int d; } Alias;` files `d` under `Tag`), so the alias's target has to be the
+            // tag rather than the definition's text.
             //
             // **Unless there is no name**, and then this is the only thing in the sequence that says anything at
             // all: `static const struct { unsigned char left; unsigned char right; } priority[] = …` is an
@@ -1596,7 +1630,17 @@ pub(crate) fn read_specifiers_named(
             | CppSyntaxKind::UnionDef
             | CppSyntaxKind::EnumDef
             | CppSyntaxKind::EnumClassDef => {
-                an_unnamed_body = true;
+                let tag = node
+                    .children()
+                    .filter(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::NameExpr)
+                    .map(|child| child.text().to_string().trim().to_string())
+                    .find(|written| !written.is_empty());
+                match tag {
+                    // Assigned rather than only filled when empty: a tag is a name of the declaration's own, and
+                    // the "last name wins" rule below is exactly the one that should apply to it.
+                    Some(tag) => named = Some(Type::named(tag)),
+                    None => an_unnamed_body = true,
+                }
             }
             // **Anything else is not a type's name**, and the rule is the converse of the one above: what a file
             // writes in a specifier sequence that this layer has no rule for is a *keyword* far more often than it
@@ -1635,7 +1679,11 @@ pub(crate) fn read_specifiers_named(
     // the `LuaLexer.cpp` fixture this was written for, and the hover then printed the wrong signature instead of
     // the file's own text. The empty spelling is what [`declared_type_of`] reads as "no type to name", which is
     // the honest answer for a spelling a compiler would print as `struct { … }` and this layer does not model.
-    if an_unnamed_body && spelling.is_none() {
+    //
+    // **An elaborated keyword with no name after it is the same answer**, and it is the leftover half of the
+    // `BuiltinType` note above: `struct` where an unexpanded macro should have named the type. Returning `void`
+    // would claim a type the file never wrote.
+    if (an_unnamed_body || elaborated) && spelling.is_none() {
         return Type::builtin("");
     }
 

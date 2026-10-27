@@ -4250,7 +4250,29 @@ pub fn parse_abstract_declarator_with(
     // (`new (Widget)(1)`) is claimed before this function runs, by the branch that reads a type beginning with
     // one, so nothing that belongs to a type is lost by the gate.
     if p.current_token() == CppTokenKind::LeftParen && read_a_parameter_list_as_the_type {
-        if a_parenthesised_abstract_declarator_follows(p) {
+        // **A group that holds a *name* is this declarator's, not a type's** — and the case that reaches here is
+        // the one where operators were written in front of it:
+        //
+        // ```c
+        // typedef char *(*LineGetter)(int, void *, int, bool);      // neovim's ex_cmds_defs.h:96
+        // ```
+        //
+        // The `*` of `char *` is the type's, the parenthesised `(*LineGetter)` is the declarator's, and this
+        // function is entered with the cursor on that first `*` — it reads the operator, then meets a `(` whose
+        // group holds a name. Read as an *abstract* declarator (the arm below), the group's `LineGetter` had no
+        // reader at all: `expected )` was reported at the name, the declarator was left open, and **the rest of
+        // the file became that declarator's tokens** — measured, the `TypedefDecl` for `LineGetter` spanned
+        // everything to the end of the header, so `struct exarg` and every declaration after line 96 produced no
+        // facts. `members_of("exarg_T")` was empty for the same reason.
+        //
+        // The predicate is the one the caller uses for the unprefixed spelling (`(*f)(int)` with nothing in front
+        // of it), asked here because only now has the operator run been read: a group with a name is a
+        // *declarator*, a group without one is a type, and that is the whole distinction.
+        if name_possible && a_parenthesised_declarator_with_a_name_follows(p) {
+            let _ = container!();
+            parse_parenthesised_declarator(p)?;
+            parse_declarator_suffixes(p)?;
+        } else if a_parenthesised_abstract_declarator_follows(p) {
             let _ = container!();
 
             expect_token(p, CppTokenKind::LeftParen)?;

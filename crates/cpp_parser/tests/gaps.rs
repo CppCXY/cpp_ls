@@ -4182,6 +4182,12 @@ fn constructs_the_parser_reads() {
             "int (*signal(int sig))(int);",
             "using Callback = void (*)(int);",
             "typedef void (*Old)(int);",
+            // **A pointer operator in front of the parenthesised declarator** — `char *(*F)(int)`. Read as an
+            // abstract declarator, the group held a name no rule could take, and the declaration ran on to the end
+            // of the file; see `a_pointer_before_a_parenthesised_declarator_ends_at_its_semicolon`.
+            "typedef char *(*LineGetter)(int, void *, int, bool);",
+            "char *(*pick)(int);",
+            "void *(*start)(void *, unsigned long);",
             // Linkage.
             "extern \"C\" void f();",
             "extern \"C\" { void f(); }",
@@ -7269,6 +7275,82 @@ fn a_parameter_type_may_be_spelled_like_an_implementation_macro() {
             "typedef int (C::*fp)(int);\n",
         ],
     );
+}
+
+/// **A pointer in front of a parenthesised declarator ends at its own `;`** — `typedef char *(*F)(int);`.
+///
+/// The shape is ordinary C (`char *(*LineGetter)(int, void *, int, bool);`, neovim's `ex_cmds_defs.h:96`), and it
+/// failed in the worst way a parser can fail: **silently**. `parse_declarator_with` sees the `*` first, so the
+/// "parentheses with a name inside" branch — which exists for `(*f)(int)` — is asked at the wrong token and says no;
+/// the operator run is then read by `parse_abstract_declarator`, which meets `(*F)` and takes it for an *abstract*
+/// declarator, where the name has no reader and `expected )` is reported.
+///
+/// `assert_reads` cannot catch that, because the recovery was well formed and produced **no error node at all**:
+///
+/// ```text
+/// TypedefDecl "typedef char *(*LineGetter)(int, void *, int, bool);\r \r /// Structure for command definition…"
+///   DeclSpecifierSeq "char"
+///   Declarator "*(*LineGetter)(…);\r\r/// Structure…"          <- runs to the end of the header
+/// ```
+///
+/// Measured on that header: one `TypedefDecl` swallowed everything after line 96, the summary held **16 facts**
+/// instead of 93, `struct exarg` and its thirty members did not exist, and `exarg_T` — the type of every `exarg_T *`
+/// in neovim — answered an empty member list. So this test asserts what the error list cannot: the declaration
+/// **ends where its `;` is**, and the declaration written after it is a sibling of its own.
+#[test]
+fn a_pointer_before_a_parenthesised_declarator_ends_at_its_semicolon() {
+    let first_kind = |declaration: &str| {
+        if declaration.starts_with("typedef") {
+            CppSyntaxKind::TypedefDecl
+        } else {
+            CppSyntaxKind::Declaration
+        }
+    };
+    for declaration in [
+        "typedef char *(*LineGetter)(int, void *, int, bool);",
+        "char *(*pick)(int);",
+        "void *(*start)(void *, unsigned long);",
+        "int *(*allocate)(size_t);",
+    ] {
+        let source = format!("{declaration}\nint after;\n");
+        let tree = CppParser::parse(&source, ParserConfig::default());
+        let root = tree.get_red_root();
+
+        let top: Vec<CppSyntaxKind> = root
+            .children()
+            .map(|child| CppSyntaxKind::from(child.kind()))
+            .collect();
+        // A `typedef` is its own node and an ordinary declaration is a `Declaration`; what matters is that the
+        // second node is the `int after;` and not something inside the first.
+        assert_eq!(
+            top,
+            [first_kind(declaration), CppSyntaxKind::Declaration],
+            "`{declaration}` is one declaration, and `int after;` is the next: {top:?}"
+        );
+
+        let written = root
+            .children()
+            .next()
+            .expect("the typedef")
+            .text()
+            .to_string();
+        assert_eq!(
+            written.trim(),
+            declaration,
+            "the declaration is exactly what was written"
+        );
+
+        // The name is inside the parentheses, which is the reason the group cannot be an abstract declarator.
+        let names: Vec<String> = root
+            .children()
+            .next()
+            .expect("the typedef")
+            .descendants()
+            .filter(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::NameExpr)
+            .map(|node| node.text().to_string())
+            .collect();
+        assert_eq!(names.len(), 1, "one name, and it is the declarator's: {names:?}");
+    }
 }
 
 /// **The class-head scan must not run out of window**: a partial specialisation whose base clause is long.

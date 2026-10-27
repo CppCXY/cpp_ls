@@ -864,6 +864,23 @@ fn declared_alias_target_with(shapes: &DeclarationShapes, binding: &Binding) -> 
     let specifiers = specifiers.as_ref()?;
     let declarator = declarator.as_ref();
 
+    // **A `typedef` of a class body names the class, not the body's text.**
+    //
+    // ```c
+    // typedef struct { int a; int b; } Object;      // the only name this type has is `Object`
+    // typedef struct Tag { int d; } Alias;           // the members are filed under `Tag`
+    // ```
+    //
+    // The general rule below builds the target as "the specifiers minus the declarator's name", which for a body
+    // is the *definition's text*: `struct { int a; int b; }`. Nothing declares that spelling, so following the
+    // alias ended in a name no scope has — measured as the whole of `members_of("Object")` answering an **empty**
+    // list with `unlisted ["{inta;intb;}"]` while its two members sat under the scope `Object`, and as the
+    // **21 539 of 40 000** refusals in neovim's member questions. C declares almost every struct this way, so the
+    // shape is the common one rather than a corner.
+    if let Some(named) = the_class_a_typedef_body_names(specifiers, &binding.name.text()) {
+        return Some(named);
+    }
+
     // No declarator: `typedef struct { … } ;` has no name to bind either, so this cannot be reached with a fact
     // to build — but returning the specifiers is the honest answer if it ever is.
     let Some(declarator) = declarator else {
@@ -883,6 +900,36 @@ fn declared_alias_target_with(shapes: &DeclarationShapes, binding: &Binding) -> 
     let spelling = spelling.split_whitespace().collect::<Vec<_>>().join(" ");
 
     (!spelling.is_empty()).then_some(spelling)
+}
+
+/// **The name a `typedef`'s class body gives the type it declares** — the tag when the body has one, and the
+/// typedef's own name when it does not.
+///
+/// See the call site for the measurement. `typedef_name` is the fallback rather than a guess: a `typedef` is
+/// exactly the construct that gives an unnamed class a name, which is why `typedef struct { … } Object;` can be
+/// used as a type at all — so `Object` *is* the type's name, and any other spelling is one nothing declares.
+fn the_class_a_typedef_body_names(
+    specifiers: &CppSyntaxNode,
+    typedef_name: &str,
+) -> Option<String> {
+    let body = specifiers.children().find(|child| {
+        matches!(
+            CppSyntaxKind::from(child.kind()),
+            CppSyntaxKind::ClassDef
+                | CppSyntaxKind::StructDef
+                | CppSyntaxKind::UnionDef
+                | CppSyntaxKind::EnumDef
+                | CppSyntaxKind::EnumClassDef
+        )
+    })?;
+
+    let tag = body
+        .children()
+        .filter(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::NameExpr)
+        .map(|child| child.text().to_string().trim().to_string())
+        .find(|written| !written.is_empty());
+
+    Some(tag.unwrap_or_else(|| typedef_name.trim().to_string()))
 }
 
 /// `text` with the span `name` occupies removed.
@@ -2262,9 +2309,16 @@ pub(crate) fn declared_bases_of_with(shapes: &DeclarationShapes, binding: &Bindi
 
 /// The specifier keywords that can precede a type without being part of it.
 ///
-/// Deliberately *not* in this list: `unsigned`, `signed`, `long`, `short`, `struct`, `class`, `enum`, `typename`.
-/// The first four are the type itself; the last four name one, and stripping `struct` from `struct Widget` would
-/// leave nothing to look up.
+/// Deliberately *not* in this list: `unsigned`, `signed`, `long`, `short`. Those four *are* the type: stripping
+/// `unsigned` from `unsigned long` leaves a different type.
+///
+/// `struct`, `class`, `union` and `enum` **are** in it, and the first version of this list had them out — on the
+/// reasoning that "stripping `struct` from `struct Widget` would leave nothing to look up". It leaves `Widget`,
+/// which is the only spelling anything looks up (`base_type_name` strips the same four keywords from every
+/// receiver): an elaborated keyword says *what kind of* name follows, not what the name is. Measured, keeping them
+/// cost `typedef struct exarg exarg_T;` its alias target — the target came out as `struct exarg`, a spelling no
+/// scope has, so `exarg_T` answered an empty member list while `struct exarg`'s thirty members sat in the index
+/// under `exarg`.
 const DECLARATION_SPECIFIERS: &[&str] = &[
     "static",
     "extern",
@@ -2281,6 +2335,10 @@ const DECLARATION_SPECIFIERS: &[&str] = &[
     "typedef",
     "const",
     "volatile",
+    "struct",
+    "class",
+    "union",
+    "enum",
 ];
 
 /// The type a specifier sequence spells: its own text, or — when it holds **several names** — from the last one on.

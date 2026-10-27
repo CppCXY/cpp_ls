@@ -1479,3 +1479,136 @@ int f() {
         "unary operator- returns Money"
     );
 }
+
+/// **`typedef struct { … } Name;`** — C's ordinary way of naming a struct, and the shape whose members were missing.
+///
+/// Three questions, and all three are the same one asked of a different spelling:
+///
+/// 1. an **unnamed** body: the typedef's name is the only name the type has, so the class is filed under `Object`
+///    and `members_of("Object")` has to answer `a` and `b`;
+/// 2. a **tagged** body behind an alias: the members are filed under the *tag*, so `members_of("Alias")` has to
+///    follow the alias to `Tag` instead of stopping at the definition's text;
+/// 3. a plain `struct Plain { … } plain;` — a member access on `plain` needs the *variable's* type, and that type is
+///    the tag.
+///
+/// Measured before the fix, on a four-line fixture: the typedef's fact carried
+/// `type_of: Some("struct { int a; int b; }")`, and `members_of("Object")` answered an **empty** list with
+/// `unlisted ["{ int a; int b; }"]` — nothing declares a body's text as a class — while its two members sat under
+/// the scope `Object`. On neovim's checkout "a member list built from no visible declaration" was **21 539 of
+/// 40 000** refusals.
+#[test]
+fn a_typedef_of_a_class_body_names_its_members() {
+    let source = "\
+typedef struct { int a; int b; } Object;
+typedef struct Tag { int d; } Alias;
+struct Plain { int e; } plain;
+int f(void) { Object o; return o.a; }
+int g(void) { return plain.d; }
+";
+    let session = session_with(&[("/p/a.cpp", source)]);
+    let view = session.view("/p/a.cpp").expect("the file is held");
+
+    let members = |class: &str| match session.members_of(&view, class) {
+        cpp_code_analysis::Known::Yes(list) => {
+            assert!(
+                list.unlisted.is_empty(),
+                "`{class}` is fully declared here: {:?}",
+                list.unlisted
+            );
+            list.members
+                .iter()
+                .map(|member| member.fact.name.clone())
+                .collect::<Vec<_>>()
+        }
+        other => panic!("`{class}` has a member list: {other:?}"),
+    };
+
+    assert_eq!(members("Object"), ["a", "b"], "the unnamed body is `Object`");
+    assert_eq!(members("Alias"), ["d"], "the alias follows to its tag");
+    assert_eq!(members("Tag"), ["d"], "and the tag answers on its own");
+    assert_eq!(members("Plain"), ["e"], "a named body with a variable");
+
+    // **And the answers are reachable through the code**, which is what a member list is for: the receiver's type
+    // comes from the declaration, and the member's from the list.
+    assert_eq!(
+        type_of_use(source, "plain").as_deref(),
+        Some("Plain"),
+        "a named body types its variable as the tag"
+    );
+    assert_eq!(
+        type_of_use(source, "o").as_deref(),
+        Some("Object"),
+        "an unnamed body behind a typedef types the variable as the typedef"
+    );
+    assert_eq!(
+        type_of_use(source, "a").as_deref(),
+        Some("int"),
+        "and `o.a` is the member the body declares"
+    );
+}
+
+/// **A real C header's shape** — a tag declared as a typedef first and defined later, behind a function-pointer
+/// typedef that used to swallow the rest of the file.
+///
+/// neovim's `src/nvim/ex_cmds_defs.h` is written exactly like this:
+///
+/// ```c
+/// typedef char *(*LineGetter)(int, void *, int, bool);   // :96
+/// typedef struct exarg exarg_T;                          // :86
+/// struct exarg { char *arg; … int addr_count; … };        // :108
+/// ```
+///
+/// Three separate defects sat on those four lines, and each one was silent:
+///
+/// * the function-pointer typedef **never ended** — its `Declarator` ran to the end of the header, so `struct exarg`
+///   and everything after line 96 produced no facts at all (16 facts for a 800-line header instead of 93);
+/// * the alias's target was recorded as the *elaborated* spelling `struct exarg`, which no scope has, so
+///   `members_of("exarg_T")` answered nothing even once the members existed;
+/// * an anonymous struct that is a **member** of another class borrowed the next typedef's name, so
+///   `struct { bool file; bool bar; } magic;` was filed under `exarg::SubReplacementString`.
+///
+/// The facts are asserted through the queries that use them, and `members("exarg_T") = members("exarg")` is the
+/// whole point: the alias has to reach the tag's members rather than stop at the spelling the file wrote.
+#[test]
+fn a_struct_defined_after_its_typedef_answers_for_the_alias() {
+    let source = "\
+typedef char *(*LineGetter)(int, void *, int, bool);
+typedef struct exarg exarg_T;
+struct exarg { char *arg; int addr_count; struct { bool file; bool bar; } magic; };
+struct exarg raw;
+int f(void) { exarg_T eap; return eap.addr_count; }
+";
+    let session = session_with(&[("/p/a.cpp", source)]);
+    let view = session.view("/p/a.cpp").expect("the file is held");
+
+    let members = |class: &str| match session.members_of(&view, class) {
+        cpp_code_analysis::Known::Yes(list) => list
+            .members
+            .iter()
+            .map(|member| member.fact.name.clone())
+            .collect::<Vec<_>>(),
+        other => panic!("`{class}` has a member list: {other:?}"),
+    };
+
+    let tag = ["addr_count", "arg", "magic"];
+    assert_eq!(members("exarg"), tag, "the tag's own members");
+    assert_eq!(members("exarg_T"), tag, "and the alias reaches them");
+
+    assert_eq!(
+        type_of_use(source, "eap").as_deref(),
+        Some("exarg_T"),
+        "a variable declared with the alias keeps the alias"
+    );
+    assert_eq!(
+        type_of_use(source, "addr_count").as_deref(),
+        Some("int"),
+        "and its member access is typed through the tag's body"
+    );
+    // **The elaborated keyword is not part of the type.** `struct exarg raw;` used to record `struct` — the keyword
+    // alone — because the grammar reads `struct exarg` as a `BuiltinType` plus a `NamedType`, and the builtin won.
+    assert_eq!(
+        type_of_use(source, "raw").as_deref(),
+        Some("exarg"),
+        "`struct exarg` spells the type `exarg`"
+    );
+}
