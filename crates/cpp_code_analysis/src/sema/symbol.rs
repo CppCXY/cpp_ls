@@ -854,6 +854,16 @@ impl ScopeTree {
         range: Option<SourceRange>,
         name: Option<&str>,
     ) -> ScopeId {
+        // **TEMPORARY probe** — the caller of every named scope, resolved by the debug build's symbols.
+        if std::env::var_os("CPPLS_TRACE_SCOPES").is_some() {
+            let backtrace = std::backtrace::Backtrace::force_capture().to_string();
+            if name == Some("a") {
+                for line in backtrace.lines().filter(|line| line.contains(".rs")).take(14) {
+                    eprintln!("[scope-a] {line}");
+                }
+            }
+            eprintln!("[scope] {kind:?} {name:?}");
+        }
         let id = ScopeId(self.scopes.len());
 
         self.scopes.push(Scope {

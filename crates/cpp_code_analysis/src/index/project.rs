@@ -1612,7 +1612,19 @@ fn direct_members(
     // Followed here as well as in `direct_member`, for the same reason it is there: the members of `std::string`
     // are the members of `std::basic_string`, and the member-list query and the single-member query must not
     // disagree about which class a spelling names.
-    let class = &resolve_aliases(index, scopes, root, path, class);
+    //
+    // **…but the literal spelling is asked first**, because an alias's target can be a spelling no scope has:
+    // `typedef struct { int a; int b; } Object;` files its members under **`Object`** — an untagged struct's only name
+    // is the typedef's — while `resolve_aliases` turns that spelling into the struct's own *text*
+    // (`struct { int a; int b; }`), which names nothing. Measured with `tests/anon_struct_probe.rs`: the facts existed
+    // under `Object` (2 postings, 2 visible) and `members_of("Object")` answered an **empty list**. One lookup here
+    // costs nothing and keeps the alias path for the shapes it exists for.
+    let class = if scopes.scope_with_qualified_name(class).is_some() {
+        class.to_string()
+    } else {
+        resolve_aliases(index, scopes, root, path, class)
+    };
+    let class = &class;
 
     if let Some(scope) = scopes.scope_with_qualified_name(class)
         && let Some(data) = scopes.scope(scope)

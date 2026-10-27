@@ -707,6 +707,16 @@ impl ScopeWalker<'_> {
         // neovim checkout "a member list built from no visible declaration" was **21 539 of 40 000 refusals**, the
         // dominant shape of C. A class's own name is always written before its `{`, so anything at or after the body
         // starts is a member's name and not the class's.
+        if std::env::var_os("CPPLS_TRACE_SCOPES").is_some() {
+            eprintln!(
+                "[class_like] {:?} children {:?} text {:?}",
+                cpp_parser::CppSyntaxKind::from(node.kind()),
+                node.children()
+                    .map(|child| cpp_parser::CppSyntaxKind::from(child.kind()))
+                    .collect::<Vec<_>>(),
+                node.text().to_string().chars().take(30).collect::<String>()
+            );
+        }
         let body = first_child(node, CppSyntaxKind::ClassBody);
         let body_start = body
             .as_ref()
@@ -2455,15 +2465,32 @@ fn the_typedef_name_around(node: &CppSyntaxNode) -> Option<String> {
             .any(|token| CppTokenKind::from(token.kind()) == CppTokenKind::TypedefKeyword)
     })?;
 
+    // **Only the identifiers *after* the body count.** The name a typedef gives its type is written outside the braces,
+    // and the first version of this stopped at the first `;` — which is `int a;` *inside* the body of
+    // `typedef struct { int a; int b; } Object;` — so the answer was **`a`**: the class scope took the first member's
+    // name, every use of `Object` asked a class called `a` for its members, and the fixture's
+    // `Class Some("a") -> ["a", "b"]` is what that looked like.
+    let body_end = node
+        .children()
+        .find(|child| {
+            matches!(
+                CppSyntaxKind::from(child.kind()),
+                CppSyntaxKind::ClassBody | CppSyntaxKind::CompoundStat
+            )
+        })
+        .map(|body| usize::from(body.text_range().end()))
+        .unwrap_or(0);
+
     let mut last = None;
     for element in declaration.descendants_with_tokens() {
         let Some(token) = element.into_token() else {
             continue;
         };
-        match CppTokenKind::from(token.kind()) {
-            CppTokenKind::Semicolon => break,
-            CppTokenKind::Identifier => last = Some(token.text().to_string()),
-            _ => {}
+        if usize::from(token.text_range().start()) < body_end {
+            continue;
+        }
+        if CppTokenKind::from(token.kind()) == CppTokenKind::Identifier {
+            last = Some(token.text().to_string());
         }
     }
 
