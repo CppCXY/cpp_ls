@@ -310,8 +310,30 @@ fn hover_of_the_program(
     }
     // …and the rendering's coordinates for a macro written where the cook kept it (a `#define`'s own body, a directive
     // argument), which is what the old path answered.
-    if let Known::Yes(found) = session.macro_definition(view, offset) {
-        return Some(markdown(macro_markdown(session, view, &found)));
+    // **A macro whose `#define` is inside a condition this reading cannot decide** is still a macro to the reader —
+    // `<gtest/gtest.h>` writes `#define TEST(a, b) …` behind `#if !GTEST_DONT_DEFINE_TEST`, and the file that uses
+    // `TEST(Format, LocalStatement)` plainly has it. The popup says what the name is and that its existence depends on
+    // the compilation, rather than saying nothing at all (which is what an editor reported: no hover on `TEST`).
+    match session.macro_definition(view, offset) {
+        Known::Yes(found) => return Some(markdown(macro_markdown(session, view, &found))),
+        Known::Unknown(UnknownReason::ConditionalCompilation) => {
+            let name = session
+                .definitions(view, offset)
+                .value()
+                .and_then(|found| found.found.first().map(|one| one.fact.name.clone()));
+            let _ = name;
+            let written = cpp_parser::token_at(&view.root, offset.get())
+                .map(|token| token.text().to_string())
+                .unwrap_or_default();
+            if !written.is_empty() {
+                return Some(markdown(format!(
+                    "`{written}` — a macro whose `#define` is inside a conditional block, so whether it exists here \
+                     depends on the compilation. The analysis is reporting what the header says, not what a compiler \
+                     concluded."
+                )));
+            }
+        }
+        Known::Unknown(_) | Known::No => {}
     }
 
     // **The spelling the cursor sits on**, when it is a template-id use. Read once here rather than inside the card:

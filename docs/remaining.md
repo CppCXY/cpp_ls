@@ -750,3 +750,36 @@ class "basic_string": 170 member(s) ["allocator_type", "append", …]      ✓
 
 测试：`session/tests.rs::a_member_list_is_reached_through_an_alias_written_absolutely`
 （`using string = ::std::basic_string<char>;` 这个形状，就是渲染器写出来的那个）。
+**2026-10-27 第十批：宏来自 include 时的着色与 hover —— 一半是代码，一半是配置。**
+
+`C:\Users\zc\Desktop\github\EmmyLuaCodeStyle\Test\src` 是一个**独立的 CMake 子工程**（自己的 `CMakeLists.txt`，
+`target_include_directories` 里有 `${LuaCodeStyle_SOURCE_DIR}/3rd/googletest-1.13.0/googletest/include`），
+而这个仓库**没有任何 `compile_commands.json`**。于是 `<gtest/gtest.h>` 解析不到 → 索引里没有 `TEST` 宏 →
+hover 空、着色也不对。实测证据：
+
+```text
+（无 .cppls.toml）macro:  索引里根本没有 TEST
+（加 .cppls.toml）macro:  Unknown(ConditionalCompilation)   ← 找到了，但 #define 在 #if !GTEST_DONT_DEFINE_TEST 里
+```
+
+可用的配置（放在工作区根，实测能让 include 解析、索引到 `TEST` 宏）：
+
+```toml
+[compile]
+extra_args = ["-I3rd/googletest-1.13.0/googletest/include", "-Iinclude"]
+```
+
+本轮为此改的两处：
+
+```text
+① semantic 的宏分类现在也接受 ConditionalCompilation —— #if 里的 #define 对读者仍然是宏，
+   不确定的是"它在这里存不存在"，不是"这个名字是什么"（这个不确定性由 hover 用文字说明）
+② hover 对 ConditionalCompilation 的宏给出卡片（原来什么都不显示）：
+   "`TEST` — a macro whose #define is inside a conditional block, so whether it exists here depends on the
+    compilation. The analysis is reporting what the header says, not what a compiler concluded."
+```
+
+**要彻底变成"确定的宏"**，需要一份编译数据库（`cmake -DCMAKE_EXPORT_COMPILE_COMMANDS=ON`）：有了它，
+整个程序会被 cook，`#define` 在渲染里就是无条件事实，`ConditionalCompilation` 自然消失。
+
+探针新增 `CPPLS_MACRO=1`：在光标处打印 `macro_definition` 的答案（宏不是声明，`definitions` 问不到它）。

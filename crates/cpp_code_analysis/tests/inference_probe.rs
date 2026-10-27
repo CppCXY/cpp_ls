@@ -156,6 +156,16 @@ fn what_is_answered_at_a_place() {
             other => println!("{line}: …{snippet}\n     completions: {other:?}"),
         }
 
+        // **What macro the name at the cursor is**, when `CPPLS_MACRO=1`: the cross-file answer a hover on a macro
+        // shows. A macro is not a declaration, so `definitions` says nothing about it.
+        if std::env::var_os("CPPLS_MACRO").is_some() {
+            let found = session.macro_definition(
+                &view,
+                cpp_code_analysis::file::coordinates::ReadingOffset::new(offset),
+            );
+            println!("     macro: {found:?}");
+        }
+
         // And what the cursor on the needle's last character resolves to.
         let definitions = session.definitions(
             &view,

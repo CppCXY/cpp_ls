@@ -384,9 +384,17 @@ pub fn classified_names(index: &ProjectIndex, view: &FileView) -> Vec<Name> {
         //     Asked **after** the two resolution steps rather than before them, because the answer costs one walk of the
         //     include graph per name and the common case in a header is a name the index can answer — while a macro that
         //     *shadows* a resolvable name is rare, and keeps the colour of the name it shadows.
-        let is_a_macro = *included_macros
-            .entry(text.to_string())
-            .or_insert_with(|| index.macro_environment(text, &view.path).at(at).is_known());
+        let is_a_macro = *included_macros.entry(text.to_string()).or_insert_with(|| {
+            match index.macro_environment(text, &view.path).at(at) {
+                Known::Yes(_) => true,
+                // **A `#define` inside a condition is still a macro to the reader.** `<gtest/gtest.h>` writes
+                // `#define TEST(a, b) …` behind `#if !GTEST_DONT_DEFINE_TEST`, and what is uncertain is whether it
+                // *exists* here — not what the name means. Classified, with the uncertainty left where it belongs (the
+                // hover says it in words).
+                Known::Unknown(crate::UnknownReason::ConditionalCompilation) => true,
+                _ => false,
+            }
+        });
         if is_a_macro {
             out.push(Name {
                 range,
