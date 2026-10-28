@@ -4463,3 +4463,70 @@ fn the_built_in_variables_and_vector_types_complete_too() {
         "and it is the spelling that is offered"
     );
 }
+/// **A module implementation unit sees the interface unit's declarations without importing it.**
+///
+/// `math.cpp` writes `module math;` (no `export`, no `import`) and defines `Vec2::length`, whose body reads `x_` — a
+/// member only `math.cppm` declares. A compiler accepts that because a module implementation unit implicitly imports
+/// its own module's interface unit, so the analysis has to model the same edge; it did not, and the reading of a real
+/// project was measured: `x_` and `square(x_)` resolved to nothing, every hover in the file was empty, and a
+/// completion inside a member function listed two hundred names, all of them macros and functions from the headers
+/// the file includes and not one member of `Vec2`.
+#[test]
+fn an_implementation_unit_sees_its_interface_units_declarations() {
+    let interface_text = "export module math;\n\
+                          export struct Vec2 {\n\
+                          \x20   double x_;\n\
+                          \x20   double square(double value) const { return value * value; }\n\
+                          \x20   double length() const;\n\
+                          };\n";
+    let unit_text = "module;\n\
+                     #include <cmath>\n\
+                     module math;\n\
+                     double Vec2::length() const { return std::sqrt(square(x_)); }\n";
+
+    let files = MemoryFiles::new()
+        .with_file("/p/math.cppm", interface_text)
+        .with_file("/p/math.cpp", unit_text);
+    let fixture = Memory::new("implementation-unit", &files);
+    let mut session = fixture.session();
+    session.add_project_files([
+        std::path::PathBuf::from("/p/math.cppm"),
+        std::path::PathBuf::from("/p/math.cpp"),
+    ]);
+    session.did_open("/p/math.cpp", unit_text);
+    session.index_everything();
+    // **The read the server does before answering a name question**: `import`s, and now the implementation unit's own
+    // interface.
+    session.read_the_modules_a_file_imports(std::path::Path::new("/p/math.cpp"));
+    session.index_everything();
+    while session.pending_work() > 0 {
+        session.advance(64);
+    }
+
+    let path = std::path::PathBuf::from("/p/math.cpp");
+    let view = session.view_of_the_file(&path).expect("a view");
+
+    // **`x_` is a member of `Vec2`**, and it is declared in the interface unit alone.
+    let at = unit_text.find("x_)").expect("the fixture") + 1;
+    let typed = session.type_at(&view, crate::file::coordinates::ReadingOffset::new(at));
+    assert!(
+        matches!(&typed, Known::Yes(found) if found.type_of.contains("double")),
+        "`x_` must have the type the interface unit gives it: {typed:?}"
+    );
+
+    // **And a member function of the class completes with its members**, not with the headers' macros.
+    let at = unit_text.find("sqrt(").expect("the fixture") + "sqrt(".len();
+    let members = session.member_completions(&view, crate::file::coordinates::FileOffset::new(at));
+    if let Known::Yes(members) = members {
+        let names: Vec<&str> = members
+            .members
+            .members
+            .iter()
+            .map(|member| member.fact.name.as_str())
+            .collect();
+        assert!(
+            names.contains(&"x_") || names.contains(&"square"),
+            "a member of `Vec2` must be offered: {names:?}"
+        );
+    }
+}

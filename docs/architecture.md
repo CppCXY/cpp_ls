@@ -1881,4 +1881,74 @@ LLVM/absl 也不在 checkout 里，所以 56% 的 include 根本没有目标文�
 
 **能做的两件事**（按收益排序）：给没有数据库的工程一个**路径推断**（工程内同名头文件的索引，`fuzzy_includes`
 已经有一半）；以及把"include 解析率"作为诊断暴露给用户 —— 44% 时任何推理都救不了。
+---
 
+# 15. 模块的实现单元，和 `import std;` 的两半
+
+## 15.1 实现单元隐式导入自己的接口单元（已修）
+
+`test_module/src/math.cpp` 是这样写的：
+
+```cpp
+module;
+#include <cmath>
+#include <format>
+#include <stdexcept>
+module math;                                   // 没有 export，也没有 import
+
+namespace math {
+double Vec2::length() const { return std::sqrt(square(x_) + square(y_)); }
+}
+```
+
+`Vec2`、`x_`、`square` 都只声明在 `math.cppm` 里。C++ 允许这种"分离实现"：**模块实现单元隐式导入自己模块的
+主接口单元**，所以这些名字在实现单元里可见，GCC 也这样编。分析里没有这条边，于是：
+
+```text
+修复前   hover square(x_) → 空； x_ → 空； 成员补全 200 项，全是头文件里的宏和函数，没有一个是 Vec2 的成员
+修复后   hover square(x_) → "`square(x_)` — has type `double`"
+        成员补全 → divide length scaled to_string x x_ y y_（Vec2 的成员）以及 math 命名空间
+```
+
+修法是一条边，出现在两处、因为两个问题不同：**可见性走查**（`macro_candidates` 的模块边）和**按需读取**
+（`modules_in_view_of` —— 否则实现单元因为什么都没 import，接口单元永远不会被读进来）。两处条件相同：
+`!is_interface && partition.is_none()`，只跨主模块，不碰分区单元（那是另一套规则）。
+
+回归测试：`session::tests::an_implementation_unit_sees_its_interface_units_declarations`（内存工程，
+`math.cppm` + `math.cpp`，断言 `x_` 的类型与成员补全）。
+
+## 15.2 `import std;`：GCC 的 `std` 模块是**转发**，不是声明（已定位，未修）
+
+MinGW GCC 15 的 std 模块源是 `<c++>/bits/std.cc`：`module;` + `#include <bits/stdc++.h>` + `export module std;`
++ 几千行 `export namespace std { using std::vector; … }`。也就是说**真正的实体都在被 include 的头文件里**，
+模块里只有转发声明。
+
+我们的可见性模型里，模块边（`import`）只把**接口单元自己的声明**带进视野，不跟着它的 `#include` 走
+（这是刻意的：`import` 不是 `#include`，不该把宏环境也带进来）。于是导入方看到的是那些 `using` 声明
+（`kind: Other`，没有类型、没有成员），而不是头文件里的类。实测（服务端，`test_module`）：
+
+```text
+std::vector<int> v; 的成员    "`std::vector<int>` has no member `push_back` — the class is out of the index, or a base is"
+std::println 的悬停            ```cpp using std::println; ``` — Declared in std.cc:2113:14（那条转发，不是函数）
+```
+
+所以用户的第二个观察有一半是对的：**`println` 是能"找到"的**，找到的是 `std.cc` 里的 `using std::println;`；
+`vector` 的成员找不到，是因为类被那条 `using` 挡在后面。这既不是 Mingw 的错，也不是宏的错，而是
+"接口单元的 include 闭包算不算模块接口"这个问题没有建模。
+
+下一步（按代价从低到高）：
+
+```text
+1. 跨模块边时也把接口单元的 #include 闭包带进可见性，但仍按 exported 过滤 —— 对 MSVC 的 std.ixx 无害
+   （它只有 include，没有 export namespace 块），对 GCC 的 std.cc 正好把类带进来；
+   前提是"导出一个 using 声明 = 导出它命名的实体"，所以过滤要对 using 目标放行。
+2. 给 using 声明记下目标（`using std::vector;` → target `std::vector`），让定义/悬停跟随它 ——
+   这一条同时会修好 `std::println` 的悬停（现在显示的是转发行）。
+3. 把 bits/stdc++.h 那样的"全库 include"当作 std 模块的接口闭包缓存起来，避免每个导入方各自重算。
+```
+
+## 15.3 关于"313 秒"
+
+那是我在**debug 配置**下量的（`cargo test --release` 之前的那次跑的是 debug 的 probe），release 下同一个工程
+冷启动是 **4.6 s / 478 个文件**、`bits/std.cc` 读入 **761 ms**。§14.3 的数字需要按这一条更正：
+慢的是 debug 构建，不是标注库闭包本身。

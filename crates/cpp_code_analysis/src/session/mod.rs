@@ -3283,12 +3283,14 @@ impl<F: FileProvider + Clone> Session<F> {
             return false;
         }
 
-        self.store.index().visible_files(path).iter().all(
-            |(file, visibility)| {
+        self.store
+            .index()
+            .visible_files(path)
+            .iter()
+            .all(|(file, visibility)| {
                 *visibility != crate::IncludeVisibility::Unconditional
                     || self.store.index().summary(Path::new(file)).is_some()
-            },
-        )
+            })
     }
 
     /// **Can a question about this file be answered from what has been read?** — the question a *local* request asks.
@@ -5612,6 +5614,22 @@ impl<F: FileProvider + Clone> Session<F> {
                 // …and the file that module is declared in, when the index knows it: a module brought in by a
                 // module is as much a file nobody has read as one the file wrote itself.
                 if let Some(interface) = self.store.index().interface_unit_of(imported) {
+                    pending.push(PathBuf::from(interface));
+                }
+            }
+
+            // **A module implementation unit implicitly imports its own interface unit**, so `module math;` alone is
+            // a reason to read `math.cppm` — the visibility walk crosses the same edge. Without this the file is
+            // never read in, because it imports nothing: measured on `test_module/src/math.cpp`, whose every name
+            // resolved to nothing until the interface unit was in the index.
+            if !summary.modules.is_interface
+                && summary.modules.partition.is_none()
+                && let Some(module) = &summary.modules.module
+                && !wanted.iter().any(|held| held == module.as_ref())
+            {
+                wanted.push(module.to_string());
+
+                if let Some(interface) = self.store.index().interface_unit_of(module) {
                     pending.push(PathBuf::from(interface));
                 }
             }

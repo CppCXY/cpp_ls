@@ -11506,6 +11506,26 @@ impl ProjectIndex {
             collecting.crossed_a_module(&normalize(Path::new(interface)));
         }
 
+        // **A module implementation unit implicitly imports its own interface unit** — `module math;` in a file that
+        // is not `export module math;` gives that unit every name the interface declares, without an `import`
+        // anywhere. A compiler relies on it: `math.cpp` defines `Vec2::length` and reads `x_`, which only
+        // `math.cppm` declares.
+        //
+        // Measured on `test_module/src/math.cpp` before this existed: `x_` and `square(x_)` in the bodies resolved to
+        // nothing, the hover was empty, and the completion inside a member function listed 200 names — every one of
+        // them a macro or a function from the headers `math.cpp` includes, and not one member of `Vec2`.
+        //
+        // Only the *primary* module is crossed into: a partition implementation unit (`module m:part;`) is a
+        // different question with its own rules, and `partition.is_none()` keeps this from answering it wrongly.
+        if !summary.modules.is_interface
+            && summary.modules.partition.is_none()
+            && let Some(module) = &summary.modules.module
+            && let Some(interface) = self.module_interfaces.get(module.as_ref())
+        {
+            collecting.crossed(interface, IncludeVisibility::Unconditional, true);
+            collecting.crossed_a_module(&normalize(Path::new(interface)));
+        }
+
         // What this walk made of this file's regions, recorded the first time each is asked about. The answer is
         // the one the *condition's own point* gives, and the first fact or include inside a region is the first
         // point at which the walk can ask — before anything inside the region has been applied. Asking again later
