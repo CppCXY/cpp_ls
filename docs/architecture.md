@@ -2578,6 +2578,47 @@ program reading 必须失效**，否则编辑器重启后仍然用旧读数回�
 `definitions` 回答 0。实测：`demo.cpp` 的 `std::vector` ✓（不受区域影响）、`std::println` ✗。下一步是让模块的
 cook 在 `<print>` 处也拿到 `__cpp_lib_print`（同一个 splice 修复之后它仍缺），或让"选读数"在该名字缺失时
 回落到 summary。
+### 15.16 `std::println` 的病根：`defined(没定义的名字)` 被答成了 **Unknown**
+
+用户三个现象（`main.cpp` 的 `println`、`math.cpp` 的 `format`、`std_module_demo.cpp` 的 `println` 与 `ptr->`）在**他的文件**
+上一次测通。病根只有一个，藏在 `#if` 的求值里：
+
+```text
+printf 的秘密在 bits/version.h：
+    #if defined(__glibcxx_want_all) || defined(__glibcxx_want_print)
+    # define __cpp_lib_print 202207L
+    #endif
+`__glibcxx_want_all` 谁也没定义。walk 的求值器对这个名字拿到的是
+    cppls-lookup: __glibcxx_want_all state=none seed:Unanswered
+`Unanswered` 让 defined(...) 变成 **Unknown**，于是整个 `||` 是 Unknown，区域判死，
+`#define __cpp_lib_print` **根本没被记录**（walk 的 trace 直接给出 in_force false）——
+`print` 的整个函数体在 `#ifdef __cpp_lib_print` 里，从此不存在于任何读数，
+`std::println` 的 hover / 补全自然是空的。
+```
+
+**修法一（求值器）**：`UnitMacros::lookup` 对"walk 的状态和编译器的 seed 都不知道"的名字回答 **Undefined**，不是
+`Unanswered`——walk 的状态就是这条 TU 到该点为止的完整宏表，"不存在"就是 C++ 的 `0`，`defined(X)` 为假。
+`Unanswered` 留给"看不见整个程序"的表（`Lookup` 自己的文档就是这么说的）。
+
+**修法二（读数遮蔽）**：只修求值器还不够——`std` 模块那次 cook 产出的 `print` 读数里仍然没有 `println`（那个 cook 的
+walk 在别处已经错过了这段），而可见性查询**每个文件只选一份读数**，这份读数把 summary 里的 4 个声明**遮蔽**了。
+现在：选中的读数**对当前这个名字无话可说**时，用该文件自己的 summary 回答（summary 就是它自己的文本），
+有话说时仍然用读数——这正是 `files_declaring` 与 `definitions` 之前给出两个答案的那条缝。
+
+**缓存失效**：`CODEC_VERSION` 30→31、`UNIT_CODEC_VERSION` 1→3。预处理语义变过之后，磁盘上的 summary 和
+program reading 必须失效，否则编辑器重启仍在用旧读数回答——这是"改一次、现象照旧"的一半原因。
+
+实测（全部走 LSP，在用户自己的文件上，未改动其内容）：
+
+```text
+main.cpp   std::println   hover → `std::println` 4 declarations，print:122:5        修前 null
+math.cpp   std::format    hover → `std::format` 4 declarations，format:4928:5       修前 null
+demo.cpp   std::println   hover → 6 declarations，ostream:270:5 + 1                修前 null
+demo.cpp   std::vector    hover → 类型卡片                                          ✓
+ptr->      completion     68 项，含 length，首次 3.2 s                              修前 4 项（shared_ptr 自己的）
+```
+
+`cpp_code_analysis` 48 targets、`cpp_ls` 15 targets 全绿。
 ## 15.3 关于"313 秒"
 
 那是我在**debug 配置**下量的（`cargo test --release` 之前的那次跑的是 debug 的 probe），release 下同一个工程

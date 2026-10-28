@@ -10237,7 +10237,28 @@ impl ProjectIndex {
                 .get(key)
                 .and_then(|readings| readings.reading(reading));
 
+            // **A reading that does not hold the name cannot answer for it, and the summary is the file's own text.**
+            // The choice above is the right default — it is the asking program's reading — but a program's reading is a
+            // rendering, and a name can be missing from it for a reason that is about *that cook* rather than about the
+            // file: `print`'s whole body sits under `#ifdef __cpp_lib_print`, and a module's cook that lost the
+            // feature-test macro contributed a reading of `print` with **no** `println` while the summary had all
+            // four — and that reading shadowed the summary for every query, which is what a hover on `std::println`
+            // answered `null` for. So the chosen reading is used when it has something to say about this question, and
+            // the summary when it does not.
+            // **A reading that does not hold the name cannot answer for it, and the summary is the file's own text.**
+            // The choice above is the right default — it is the asking program's reading — but a program's reading is a
+            // rendering, and a name can be missing from it for a reason that is about *that cook* rather than about the
+            // file: `print`'s whole body sits under `#ifdef __cpp_lib_print`, and a module's cook contributed a
+            // reading of `print` with **no** `println` while the summary had all four — that reading shadowed the
+            // summary for every query, which is what a hover on `std::println` answered `null` for. So the chosen
+            // reading is used when it has something to say about this question, and the summary when it does not.
             let (facts, reading): (&[DeclFact], u32) = match cooked {
+                Some(cooked) if cooked.declarations.iter().any(&accepts) => {
+                    (cooked.declarations.as_slice(), reading)
+                }
+                Some(_) if summary.declarations.iter().any(&accepts) => {
+                    (summary.declarations.as_slice(), 0)
+                }
                 Some(cooked) => (cooked.declarations.as_slice(), reading),
                 None => (summary.declarations.as_slice(), 0),
             };

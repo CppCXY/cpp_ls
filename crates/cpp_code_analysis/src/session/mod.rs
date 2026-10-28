@@ -5475,11 +5475,23 @@ impl<F: FileProvider + Clone> Session<F> {
             return false;
         };
         let path = std::path::PathBuf::from(&key);
-        // **The walk needs the unit's summary**, and the queue may not have reached the unit yet — the pump adds it and
-        // asks for a cook, and a request that runs first would ask for a program read of a file nothing has read yet.
-        // One file, read here.
+        // **The whole closure must be summarised before the program is read.** A walk over files the index has not read
+        // contributes what it can — and then the reading is filed and marked read, so the *partial* program reading
+        // shadows every summary from then on. Measured: in the editor `definitions("std::println", demo.cpp)` answered
+        // **0** while the same query in a session that indexed the closure first answered **6**; the difference was
+        // exactly this — the request path read `bits/std.cc` before its 400 headers had summaries, so `<print>`'s body
+        // was missing from the reading the query then used.
+        //
+        // The queue is what reads them: `want_the_closure_cooked` walks the includes and queues them, and the drain is
+        // the same one the request path already pays for a module (measured: 1.7 s of summaries for `std`, once).
         if self.store.index().summary(&path).is_none() {
             self.load(&path);
+        }
+        self.want_the_closure_cooked(&path);
+        let mut rounds = 0;
+        while self.pending() > 0 && rounds < 2_000 {
+            self.advance(256);
+            rounds += 1;
         }
         let reading = self.read_the_unit(&path);
         // **Marked read only when it was.** A reading that could not be built has to stay retryable, or the unit keeps
