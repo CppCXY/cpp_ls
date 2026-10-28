@@ -2290,6 +2290,41 @@ shared_ptr_base.h 里 operator-> 的事实（原始读数）：
 
 顺带说明为什么它看起来像"替换失败"：替换那一层（`f8f4715`、`fc71d1c`）都已经是对的，只是**事实根本没走到**
 那一步。
+### 15.9 那条作用域泄漏：第一个错位的类是 `__sp_array_delete`，可疑形状没有复现
+
+把 `shared_ptr_base.h` 的原始解析按类作用域打出来（偏移 → 父偏移）：
+
+```text
+_Sp_counted_ptr_inplace@16561  parent@16499
+  _Impl@16640                  parent@16561
+  ?@19558                      parent@16561     ← 那个匿名 union 所在的特化
+  _Sp_counted_array_base@20876 parent@20846
+  __sp_array_delete@25467      parent@16561     ← 错的：它在命名空间里
+  __shared_count@25618         parent@25587
+  __shared_ptr_access@38760    parent@38654     ← 于是后面全部挂在 _Sp_counted_ptr_inplace 底下
+```
+
+**第一个错位的是 `__sp_array_delete`**（第 883 行附近），它被记成 `_Sp_counted_ptr_inplace` 的嵌套类；从那之后
+每个类都多一层。
+
+按最像的形状做了最小复现——`#if` 的两个分支各给一个类头、共用一个基类子句和一个类体：
+
+```cpp
+template<typename _Tp, typename _Alloc, _Lock_policy _Lp>
+  requires is_same_v<...> class X<_Tp, _Alloc, _Lp> final
+template<typename _Tp, template<typename> class _Alloc, _Lock_policy _Lp>
+  class X<_Tp, _Alloc<...>, _Lp> final
+  : public Base<_Lp> { void inside(); };
+struct After { void after(); };
+```
+
+结果：**没有复现**——`After` 仍然在命名空间里（`Class After (parent std)`），那个双类头被当作"没有类体的声明"
+吸收了，只是 `inside` 丢了。所以真实头文件里的那一处是**另一个**形状，得在 582–883 行之间二分：
+把这段按声明切开、逐段喂给解析器，找出第一个让 `_Sp_counted_ptr_inplace` 不闭合的声明。
+
+这轮到此为止的原因：这条线索在**解析器的原始读数**里，需要二分一个 67 KB、`#if` 密集的系统头；
+在拿到最小复现之前动解析器的花括号配对，风险远大于收益。仓库里保留的是两处已经量到收益的修复
+（`f8f4715`、`fc71d1c`）和 §15.6–15.9 的完整测量链。
 ## 15.3 关于"313 秒"
 
 那是我在**debug 配置**下量的（`cargo test --release` 之前的那次跑的是 debug 的 probe），release 下同一个工程
