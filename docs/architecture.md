@@ -2107,6 +2107,48 @@ std:: 补全                   println/print/expected/unexpected 都在（200 �
 回归测试：`handlers/hover` 的
 `a_return_type_that_is_a_macros_name_is_read_without_the_macros`（`defs.h` 定义两个宏、`wincon.h` 只写声明，
 断言纠正成 `WINBOOL`；`std::size_t` 这种没有宏定义的名字原样保留）。
+### 15.5 补全与推断的三个报告：两个不成立，一个是 lambda 不是作用域
+
+报告（`test_module`，C++23）：`std::numbers::pi` 没有悬停和补全；`if (const auto result = …)` 没有推断；
+`std::expected` 没有补全；`std::shared_ptr` 没有补全。
+
+用**正确的光标**量（见下面这条教训）之后：
+
+```text
+shapes.cppm  std::numbers::pi            definition → numbers 里的 pi（type_of: double）✓
+shapes.cppm  std::numbers::            补全 26 项，含 pi / inv_pi / phi ✓
+main.cpp     std::                    补全 200 项，含 expected / unexpected / println / make_shared ✓
+main.cpp     if (const auto result …)   lambda 里的 result：definition → NotDeclaredHere ✗  ← 真的
+```
+
+**根因**：`ScopeKind::Lambda` 这个枚举值存在，但**从来没有任何地方创建过它**。`auto show = [](double a) { … };`
+的语法树是 `InitDeclarator(Declarator(… LambdaExpr …))`——lambda 是**声明符的孩子**，而
+`declarator_as` 只读声明符的名字和参数列表、从不遍历它的孩子；`item()` 也没有 `LambdaExpr` 分支。于是
+lambda 体里的每一条声明都不在作用域树里，也就不会进索引。实测同一个函数体：
+
+```text
+auto show = [](double a) { if (int inner = 1) { g(inner); } };    4 条事实（f, g, h, show）
+同一个体写成普通函数                                              5 条（多出 inner）
+```
+
+修法两处，缺一不可：
+
+```text
+① item() 增加 LambdaExpr 分支 → 开一个 ScopeKind::Lambda 作用域，绑定它的参数，把一个 CompoundStat 体走进去
+② declaration_parts 在走完声明符之后，对每个声明符子树里的 LambdaExpr 调一次 lambda()
+   （初始化器里的 lambda 不会经过语句遍历，它整个挂在声明符下面）
+```
+
+实测（`main.cpp`）：`result` 的 `definition` 从 `NotDeclaredHere` 变成 `Yes(... local: true)`，同一位置的补全里
+也有 `result` 了；fixture 里 lambda 的参数 `a` 和体内的 `inner` 都成了事实（4 → 6）。
+
+回归测试：`tests/scopes.rs` 的 `a_lambda_body_is_its_own_scope`（断言 `Lambda` 作用域存在、参数 `a` 绑定在它里面、
+体内声明 `inner` 在树里）和 `a_lambda_inside_a_statement_is_a_scope_too`。
+
+**量的时候踩的坑，写下来**：`Session::definition`/`completions` 要的是**渲染后文本**里的偏移，而探针里的
+`text.find(needle)` 给的是**文件文本**的偏移；两者在指针之前有宏展开时会错位，于是 `std::numbers::pi`
+一路报 `UnparsableName`——量的是探针而不是分析。正确做法（也是 hover handler 的做法）：
+`view.reading_offset_of(FileOffset::new(written))`。
 ## 15.3 关于"313 秒"
 
 那是我在**debug 配置**下量的（`cargo test --release` 之前的那次跑的是 debug 的 probe），release 下同一个工程

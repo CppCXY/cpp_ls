@@ -2497,6 +2497,55 @@ fn a_nested_class_ends_where_its_brace_ends() {
         );
     }
 }
+/// **A lambda is a scope, and a lambda written in an initialiser is written inside the declarator.**
+///
+/// `auto show = [](double a) { if (const auto inner = f(1, 2)) { g(inner); } };` parses as
+/// `InitDeclarator(Declarator(… LambdaExpr …))` — the lambda is a **child of the declarator** — and no walk reached
+/// it: `ScopeKind::Lambda` existed with no constructor, and `declarator_as` reads a declarator for its name and
+/// parameters without walking its children. So every declaration in a lambda body was absent from the scope tree and
+/// therefore from the index. Reported from an editor: `if (const auto result = safe_divide(a, b))` written inside
+/// `auto show_division = [](double a, double b) { … };` had no hover, no completion and no deduced type.
+///
+/// Measured on this fixture before the fix: four facts (`f`, `g`, `h`, `show`) where the same body as a free
+/// function filed five — the missing one was the body's own `inner`; the lambda's own parameter `a` was missing too.
+#[test]
+fn a_lambda_body_is_its_own_scope() {
+    let source = "int f(int, int);\nvoid g(int);\nvoid h() {\n    auto show = [](double a) { if (int inner = 1) { g(inner); } };\n}\n";
+    let table = scopes(source);
+    let shape = shape(&table);
+    println!("{shape}");
+
+    let lambda = table
+        .scopes()
+        .iter()
+        .position(|scope| scope.kind == ScopeKind::Lambda)
+        .expect("a lambda scope");
+    assert!(
+        kind_of(&table, cpp_code_analysis::ScopeId(lambda), "a").is_some(),
+        "the lambda's parameter is bound in its own scope: {shape}"
+    );
+    assert!(
+        shape.contains("inner"),
+        "and a declaration in its body is a declaration: {shape}"
+    );
+}
+
+/// **A lambda written directly in a body** — the other place `item()` has to know about one.
+#[test]
+fn a_lambda_inside_a_statement_is_a_scope_too() {
+    let source = "void g(int);\nvoid h() {\n    auto show = [](double a) { g(1); };\n}\n";
+    let table = scopes(source);
+    let shape = shape(&table);
+    println!("{shape}");
+    assert!(
+        table
+            .scopes()
+            .iter()
+            .any(|scope| scope.kind == ScopeKind::Lambda),
+        "the lambda declares a scope of its own: {shape}"
+    );
+}
+
 /// **A call statement whose callee is qualified binds nothing** — the most-vexing-parse shape, at file scope.
 ///
 /// `std::iter_swap(__result, __b);` parses as a `Declaration`: the specifier is `std::iter_swap` and the declarator

@@ -501,6 +501,12 @@ impl ScopeWalker<'_> {
             // signature of a template — is saying the right thing about it. A new kind would have to be taught to all
             // of them to say the same.
             CppSyntaxKind::ConceptDecl => self.concept_decl(node, scope),
+            // **A lambda declares a scope of its own**, and nothing created one: `ScopeKind::Lambda` existed
+            // with no constructor. Reported from an editor — `if (const auto result = safe_divide(a, b))` inside
+            // `auto show_division = [](double a, double b) { … };` had no hover, no completion and no deduced
+            // type, because everything inside the lambda was unbound. Measured: the body's declarations were
+            // **absent from the index entirely**, where the same body outside a lambda filed them.
+            CppSyntaxKind::LambdaExpr => self.lambda(node, scope),
             CppSyntaxKind::UsingDecl => self.using_decl(node, scope),
             CppSyntaxKind::UsingDirective => self.using_directive(node, scope),
             CppSyntaxKind::Declaration => self.declaration(node, scope),
@@ -711,9 +717,8 @@ impl ScopeWalker<'_> {
         let body_start = body
             .as_ref()
             .map(|body| usize::from(body.text_range().start()));
-        let declared = declared_name(node).filter(|(_, range)| {
-            body_start.is_none_or(|start| range.start_offset < start)
-        });
+        let declared = declared_name(node)
+            .filter(|(_, range)| body_start.is_none_or(|start| range.start_offset < start));
 
         // **`typedef struct { … } Name;`** — the struct has no tag, and the only name the type has is the typedef's, so
         // the class body's scope takes that name. Measured on the neovim checkout: `Object`
@@ -1326,6 +1331,19 @@ impl ScopeWalker<'_> {
 
         // The body of a function, which the grammar puts beside the declarator rather than inside it. Walking
         // it into the scope the declarator opened is what makes a local variable local.
+        // **A lambda written in a declarator's own subtree.** `declarator_as` reads a declarator for its name
+        // and its parameters and never walks its children, so `auto f = [](int x) { … };` — where the lambda is
+        // **inside** the declarator — reached nothing. `item()`'s own `LambdaExpr` arm covers the ones a
+        // statement walk meets; this covers the ones written in an initialiser.
+        for declarator in declarators(node) {
+            for lambda in declarator
+                .descendants()
+                .filter(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::LambdaExpr)
+            {
+                self.lambda(&lambda, outer);
+            }
+        }
+
         if let Some(function) = function_scope
             && let Some(body) = body
         {
@@ -1849,6 +1867,36 @@ impl ScopeWalker<'_> {
     }
 
     /// `done:` — a label, which lives in a name space of its own.
+    /// **A lambda's scope**: the parameters it writes, and the body they are in scope for.
+    ///
+    /// The node is a child of a declarator — `auto f = [](double a) { … };` is
+    /// `InitDeclarator(Declarator(… LambdaExpr …))` — and no walk reached it: `item()` had no arm for it, so
+    /// every declaration written in a lambda body was missing from the scope tree and therefore from the index.
+    /// Measured on the fixture: four facts (`f`, `g`, `h`, `show`) where the same body as a free function
+    /// filed five — the missing one was the body's own `inner`, and the lambda's parameter `a` was missing too.
+    ///
+    /// A `CompoundStat` would open a `Block` on its own, but a lambda is a *function* without a name: its
+    /// parameters belong in a scope the body is inside, which is why this is `ScopeKind::Lambda` and not a block.
+    fn lambda(&mut self, node: &CppSyntaxNode, scope: ScopeId) {
+        let inner = self.table.create_scope(
+            ScopeKind::Lambda,
+            Some(scope),
+            Some(cpp_parser::source_range(node.text_range())),
+        );
+        for list in node
+            .children()
+            .filter(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::ParameterList)
+        {
+            self.parameters(&list, inner);
+        }
+        for body in node
+            .children()
+            .filter(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::CompoundStat)
+        {
+            self.items(&body, inner);
+        }
+    }
+
     fn label(&mut self, node: &CppSyntaxNode, scope: ScopeId) {
         if let Some((name, name_range)) = declared_name(node) {
             self.bind(scope, name, BindingKind::Label, node, name_range);
