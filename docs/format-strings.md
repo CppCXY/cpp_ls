@@ -5,8 +5,8 @@
 > 还剩 Phase 3（相邻字面量拼接、hover、诊断），见 §9。
 >
 > ```text
-> scanner   crates/cpp_code_analysis/src/sema/format.rs         13 个单测 + 表驱动
-> locator   同上（literals_in）                                  15 个会话级测试
+> scanner   crates/cpp_code_analysis/src/sema/format.rs          10 个测试、80+ 例（tests/format_scanner.rs）
+> locator   同上（literals_in）+ Session::format_literals        15 个测试（tests/format.rs）+ 1 个耗时测量
 > 接线      crates/cpp_ls/src/handlers/semantic_token/format.rs  3 个编码级测试
 > 配置      [highlight]                                          project/config.rs
 > 探针      crates/cpp_ls/tests/format_status.rs                 真工程、真服务器、读回线上数据
@@ -39,6 +39,10 @@ scanf("%3d %[a-z] %n", &n, name, &used);
 | `%*d` | `*` | `formatArgument`（宽度来自实参） |
 | `%[a-z]` | 整段 | `formatSpecifier`，`[a-z]` 是 `formatConversion` |
 | `%n` | 整段 | `formatSpecifier`（`%n` 不取地址，见 §7） |
+
+**这张表说的是"哪个子区间属于哪个概念"，不是说输出去的 range 互相嵌套**：协议的 token 不能重叠（见 §3.1、
+§5 的最后一段），所以真正发出去的是**相邻的几段** —— `{:.3f}` 发成 `{:.3`（`formatSpecifier`）、`f`
+（`formatConversion`）、`}`（`formatSpecifier`）。看上去一样，但每个客户端都画得出来。
 
 **非目标（本阶段不做）**：
 
