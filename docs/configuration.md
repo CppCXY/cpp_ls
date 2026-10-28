@@ -173,23 +173,32 @@ on_change_ms = 300       # how long a file's diagnostics wait for typing to stop
 [hover]
 enable = true            # whether hover answers at all
 
-[highlight]              # which strings are format strings, and are coloured inside
-format_strings = true    # std::format / std::print / std::println / std::format_to … and fmt::'s
-printf = true            # the C library's printf family
-scanf = true             # …and scanf's, scansets included
-extra = ["mylib::logf"]  # our own wrappers in printf's syntax: format string is the first argument
-extra_format = ["mylib::log"]   # our own wrappers in std::format's syntax
+[format]
+enable = true            # the colouring, the popup and the completion — `false` is all three at once
+std = true               # `{…}` — std::format / std::print / fmt::format, fmt::print …
+printf = true            # `%…` — printf, fprintf, snprintf, fmt::printf, fmt::sprintf …
+scanf = true             # `%…` with scansets — scanf, sscanf …
+
+[format.functions]       # our own, keyed by the name the analysis RESOLVES them to
+"mylib::logf" = "printf"                                 # printf's syntax, format string first
+"mylib::log" = "std"
+"mylib::trace" = { syntax = "printf", argument = 1 }     # `trace(level, fmt, …)`
 ```
 
-`[highlight]` has three switches and two lists, and **the default is on** for each family: whether a string is a
-format string is something the analysis can prove about the text, so it does not wait for a project to opt in. A
-family set to `false` costs nothing at all — the pass answers before it looks at a token.
+**One section for one feature**, and the default is on for every grammar: whether a string is a format string is
+something the analysis can prove about the text, so it does not wait for a project to opt in — and a grammar set to
+`false` costs nothing at all, because the pass answers before it looks at a token. `enable = false` turns the colour,
+the popup and the completion off together; they are three faces of one question and a project that turned it off gets
+none of them.
 
-The two lists are **separate by syntax** because one list could only mean one: `mylib::logf` is given `printf`'s
-`%d`, `mylib::log` is given `std::format`'s `{}`, and a single list would have to guess. Both are matched against
-the **resolved** qualified name, so a local function that happens to be spelled `logf` is not read as the wrapper.
-See `docs/format-strings.md` for what the colouring sends and why the vocabulary is four custom token types plus
-three standard fallbacks.
+**The project's own functions are a table keyed by name** rather than a list, for one reason: a wrapper has a
+*position*. `mylib::trace(level, fmt, …)` puts the format string second, which `{ syntax = "printf", argument = 1 }`
+says and a list of names cannot. A bare string means the common case — that syntax, the first argument. Either form is
+matched against the **resolved** qualified name, so `using mylib::logf;` works and a local `logf` that is something
+else is not read as the wrapper.
+
+See `docs/format-strings.md` for what the colouring sends (four custom token types plus three standard fallbacks), what
+the popup says, and what the completion offers.
 
 ---
 

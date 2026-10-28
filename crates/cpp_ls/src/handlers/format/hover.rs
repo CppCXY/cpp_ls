@@ -16,7 +16,7 @@
 //!
 //! # What produces the words
 //!
-//! [`cpp_code_analysis::sema::format::describe`] — the **same module that decides which bytes are a piece**, so the
+//! [`cpp_code_analysis::format::describe`] — the **same module that decides which bytes are a piece**, so the
 //! explanation of `%-8.2` cannot disagree with the colouring of `%-8.2`. This file decides only what a popup looks
 //! like: the title, the list, and which grammar the string was read as.
 //!
@@ -28,11 +28,11 @@
 //! The check is Phase 3's other half and it is not here.
 
 use cpp_code_analysis::file::coordinates::FileOffset;
-use cpp_code_analysis::sema::format::{self, FormatKind, FormatLiteral, PieceKind};
+use cpp_code_analysis::format::{self, FormatKind, FormatLiteral, PieceKind};
 use cpp_code_analysis::{DiskFiles, FileView, Session};
 use lsp_types::Hover;
 
-use super::markdown;
+use crate::handlers::hover::markdown;
 
 /// **The popup for the format piece at `in_the_file`**, or `None` when the cursor is not inside one.
 ///
@@ -47,14 +47,10 @@ pub fn format_string_hover(
         return None;
     }
 
-    let config = crate::handlers::semantic_token::format::config_from(
-        &session.project_config().config.highlight,
-    );
-    // **A project that switched the colouring off gets no popup either**: the two are one feature, and a popup
-    // explaining bytes the editor is not drawing would be answering a question the reader did not ask.
-    if config.is_off() {
-        return None;
-    }
+    // **The one translation**, from [`super::config_for`]: a project that turned the feature off gets no popup, which
+    // is the same answer the colouring gives — the three faces are one feature and `[format] enable = false` is all
+    // of it.
+    let config = super::config_for(session)?;
 
     let literals = session.format_literals(view, &config);
     let source = view.source.as_ref();

@@ -9,7 +9,7 @@
 //! # What this layer is, and what it is not
 //!
 //! Nothing here decides **which** literal is a format string or **what** its parts are: that is
-//! [`cpp_code_analysis::sema::format`], a pure walk with no LSP in it, and this file is the three lines that turn
+//! [`cpp_code_analysis::format`], a pure walk with no LSP in it, and this file is the three lines that turn
 //! its answer into claims. The split is the one the module's other passes already make — [`super::push_names`] gets a
 //! list of names and paints them — and it is what lets the same walk serve a check later ("this format string wants
 //! three arguments and the call passes two") without a second implementation of either grammar.
@@ -36,10 +36,9 @@
 //! An escape has **no fallback on purpose**: `string` is the colour it already has, and sending a token to repaint a
 //! literal as a literal is one token of answer for no difference on screen.
 
-use cpp_code_analysis::HighlightSection;
-use cpp_code_analysis::sema::format::{FormatConfig, FormatLiteral, PieceKind};
+use cpp_code_analysis::format::{FormatLiteral, PieceKind};
 
-use super::{Builder, Modifier, TypeKind};
+use crate::handlers::semantic_token::{Builder, Modifier, TypeKind};
 
 /// **What a piece is drawn as**, custom type first and the standard one it falls back to.
 ///
@@ -77,20 +76,5 @@ pub fn draw(builder: &mut Builder<'_>, literals: &[FormatLiteral]) {
                 builder.push_range(start, end, fallback, Modifier::none());
             }
         }
-    }
-}
-
-/// **The project's `[highlight]` section, as the analysis's own configuration.**
-///
-/// The defaults are decided here rather than in the section so that `.cppls.toml` stays *data* — see the note on
-/// [`cpp_code_analysis::ProjectConfig`] — and `None` therefore means "on": a project that has written no
-/// configuration gets the colouring, because whether a string is a format string is not a matter of taste.
-pub fn config_from(section: &HighlightSection) -> FormatConfig {
-    FormatConfig {
-        std_format: section.format_strings.unwrap_or(true),
-        printf: section.printf.unwrap_or(true),
-        scanf: section.scanf.unwrap_or(true),
-        extra: section.extra.clone(),
-        extra_format: section.extra_format.clone(),
     }
 }

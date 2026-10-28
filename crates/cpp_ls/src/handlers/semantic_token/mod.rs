@@ -56,8 +56,6 @@ use crate::context::{RequestOutcome, ServerContextSnapshot, snapshot_query};
 use crate::util::uri_to_file_path;
 
 mod builder;
-pub(crate) mod format;
-
 pub use builder::{Builder, Modifier, TypeKind};
 
 /// The legend, as advertised in `initialize` and as the encoding numbers it — see [`Builder::legend`].
@@ -289,7 +287,7 @@ pub fn encode(
     names: &[Name],
     drawable: &Option<Vec<SemanticTokenType>>,
     multi_line_support: bool,
-    formats: &[cpp_code_analysis::sema::format::FormatLiteral],
+    formats: &[cpp_code_analysis::format::FormatLiteral],
 ) -> Vec<SemanticToken> {
     let mut builder = Builder::new(file, drawable.as_deref(), multi_line_support);
     push_names(&mut builder, names);
@@ -299,7 +297,7 @@ pub fn encode(
     // **Last, and that is the whole ordering rule.** Every piece is inside a string literal, where no name, keyword
     // or command lives, so the order does not matter for correctness — it matters for the day something *does* want
     // to claim a literal, because first claim wins and this is the pass that knows least about the program.
-    format::draw(&mut builder, formats);
+    crate::handlers::format::draw(&mut builder, formats);
 
     if builder.unplaceable() > 0 {
         log::debug!(
@@ -605,7 +603,9 @@ pub async fn on_semantic_tokens(
         // **The format strings of the file**, read from its own text — and only when a project has not turned every
         // family off, which is the one state in which the pass costs nothing at all.
         let formats = {
-            let config = format::config_from(&session.project_config().config.highlight);
+            let Some(config) = crate::handlers::format::config_for(session) else {
+                return Some(SemanticTokensResult::Tokens(SemanticTokens { result_id: None, data: encode(held, Some(&view), &names, &drawable, multi_line, &[]) }));
+            };
             if config.is_off() {
                 Vec::new()
             } else {
@@ -1914,12 +1914,11 @@ void f(int width, double d) {
         let file = session.files().held(&path).expect("the file is held");
         let names = session.classified_names(&view);
 
-        let off = cpp_code_analysis::sema::format::FormatConfig {
+        let off = cpp_code_analysis::format::FormatConfig {
             std_format: false,
             printf: false,
             scanf: false,
-            extra: Vec::new(),
-            extra_format: Vec::new(),
+            functions: Vec::new(),
         };
         assert!(off.is_off());
         assert!(

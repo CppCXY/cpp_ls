@@ -32,12 +32,16 @@
 //! [hover]
 //! enable = true
 //!
-//! [highlight]                                     # the format strings of this project
-//! format_strings = true                           # std::format / std::print / fmt::
-//! printf = true                                   # the C library's printf family
-//! scanf = true                                    # …and scanf's
-//! extra = ["mylib::logf"]                         # our own wrappers, printf syntax, format string first
-//! extra_format = ["mylib::log"]                   # and std::format syntax
+//! [format]                                        # where this project's format strings are
+//! enable = true                                   # colouring, popup and completion, all three
+//! std = true                                      # `{…}` — std::format / fmt::format
+//! printf = true                                   # `%…` — printf, fprintf, fmt::printf
+//! scanf = true                                    # `%…` with scansets — scanf, sscanf
+//!
+//! [format.functions]                              # our own, by the resolved qualified name
+//! "mylib::logf" = "printf"
+//! "mylib::log" = "std"
+//! "mylib::trace" = { syntax = "printf", argument = 1 }
 //! ```
 //!
 //! # Measured, on a project with no compile database at all
@@ -113,7 +117,7 @@ pub const PROJECT_CONFIG_FILE: &str = ".cppls.toml";
 /// Everything `.cppls.toml` can say, after parsing.
 ///
 /// The sections that only a language server reads ([`DiagnosticsSection`], [`HoverSection`],
-/// [`HighlightSection`]) are here as **data**: this crate parses and validates one file, so that two crates cannot
+/// [`FormatSection`]) are here as **data**: this crate parses and validates one file, so that two crates cannot
 /// disagree about what it says — the meaning of `diagnostics.on_change_ms` lives in the server, and what lives here is
 /// the key and its type.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -123,7 +127,7 @@ pub struct ProjectConfig {
     pub index: IndexSection,
     pub diagnostics: DiagnosticsSection,
     pub hover: HoverSection,
-    pub highlight: HighlightSection,
+    pub format: FormatSection,
     /// **The language this project's messages are written in** — `locale = "zh-CN"`.
     ///
     /// The one key that stands alone rather than in a section, because it is a preference about the *editor*: what
@@ -664,39 +668,108 @@ pub struct HoverSection {
     pub enable: Option<bool>,
 }
 
-/// `[highlight]` — **which strings are format strings**, read by the language server.
+/// `[format]` — **where this project's format strings are**, read by the language server.
 ///
-/// Three families, each with its own switch, and the defaults are **on**: a project that says nothing gets the
-/// colouring, because "there is a format string here" is a fact about the text that this server can prove — unlike
-/// the checks a project may want to opt into. `false` is how a family is turned off; nothing else in the analysis
-/// reads this section.
+/// ```toml
+/// [format]
+/// enable = true          # the whole feature: the colouring inside a literal, the popup on a part of one, the
+///                        # completions inside one. `false` is all three at once.
+/// std = true             # `{…}` — std::format / std::print / fmt::format …
+/// printf = true          # `%…` — printf, fprintf, snprintf, fmt::printf …
+/// scanf = true           # `%…` with scansets — scanf, sscanf …
 ///
-/// The two lists are the project's own wrappers, and they are **separate by syntax** on purpose: `mylib::logf` takes
-/// `printf`'s format language and `mylib::log` takes `std::format`'s, and a single list could only mean one of them.
-/// An entry is matched against the **resolved** qualified name (see `docs/format-strings.md` §6), so a local function
-/// that happens to be spelled the same is not read as a wrapper.
+/// [format.functions]     # the project's own, by the name the analysis **resolves** them to
+/// "mylib::logf" = "printf"                        # printf's syntax, the format string first
+/// "mylib::log" = "std"
+/// "mylib::trace" = { syntax = "printf", argument = 1 }   # `trace(level, fmt, …)`
+/// ```
+///
+/// # Why it is shaped this way
+///
+/// **One section named for the feature, not for one of its three faces.** It began as `[highlight]` with
+/// `format_strings` / `extra_format` in it, which was wrong twice over: the same question decides a popup and a
+/// completion as well as a colour, and two list keys spelled that differently could only be understood by reading
+/// which one took `{}` and which took `%`. So the section is `[format]`, each grammar switch is named after the
+/// grammar it switches, and **a project's own functions are one table keyed by name** — the syntax is the value, so
+/// nothing has to be remembered.
+///
+/// **A table rather than a list because a wrapper has a position.** `mylib::trace(level, fmt, …)` puts the format
+/// string second, and a list of names cannot say so; `{ syntax = "printf", argument = 1 }` can. A bare string is the
+/// common case and means "the first argument".
+///
+/// **Matched on the resolved qualified name** (see `docs/format-strings.md` §3.2), so `using mylib::logf;` works and
+/// an unrelated local `logf` is still not read as one.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct HighlightSection {
+pub struct FormatSection {
+    /// The whole feature. `Some(false)` turns the colouring, the popup and the completions off together.
+    #[serde(default)]
+    pub enable: Option<bool>,
     /// `std::format` / `print` / `println` / `format_to` … and the `fmt` library's names.
     #[serde(default)]
-    pub format_strings: Option<bool>,
-    /// The C library's `printf` family.
+    pub std: Option<bool>,
+    /// The C library's `printf` family, and `fmt::printf`'s.
     #[serde(default)]
     pub printf: Option<bool>,
     /// The C library's `scanf` family.
     #[serde(default)]
     pub scanf: Option<bool>,
-    /// **The project's own wrappers in `printf`'s syntax**, with the format string as the first argument.
+    /// **The project's own format functions**, keyed by the qualified name the analysis resolves them to.
     ///
-    /// ```toml
-    /// extra = ["mylib::logf", "telemetry::trace"]
-    /// ```
+    /// A string value is the syntax, with the format string first: `"mylib::logf" = "printf"`. A table value says
+    /// where the format string is: `"mylib::trace" = { syntax = "printf", argument = 1 }`.
     #[serde(default)]
-    pub extra: Vec<String>,
-    /// The project's own wrappers in **`std::format`'s** syntax, format string first.
-    #[serde(default)]
-    pub extra_format: Vec<String>,
+    pub functions: BTreeMap<String, FunctionEntry>,
+}
+
+/// **One of a project's own format functions** — the syntax it takes, and which argument is the format string.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(untagged)]
+pub enum FunctionEntry {
+    /// `"mylib::logf" = "printf"` — the first argument is the format string.
+    Syntax(String),
+    /// `"mylib::trace" = { syntax = "printf", argument = 1 }`.
+    Detailed {
+        syntax: String,
+        #[serde(default)]
+        argument: Option<usize>,
+    },
+}
+
+impl FunctionEntry {
+    /// The syntax as the analysis names it, or `None` for a name this build does not have — which is reported to the
+    /// user by [`validate`] rather than silently ignored.
+    pub fn syntax(&self) -> Option<FormatSyntax> {
+        let written = match self {
+            FunctionEntry::Syntax(syntax) => syntax,
+            FunctionEntry::Detailed { syntax, .. } => syntax,
+        };
+        match written.trim() {
+            "std" => Some(FormatSyntax::Std),
+            "printf" => Some(FormatSyntax::Printf),
+            "scanf" => Some(FormatSyntax::Scanf),
+            _ => None,
+        }
+    }
+
+    /// Which argument holds the format string — `0` when the entry does not say.
+    pub fn argument(&self) -> usize {
+        match self {
+            FunctionEntry::Syntax(_) => 0,
+            FunctionEntry::Detailed { argument, .. } => argument.unwrap_or(0),
+        }
+    }
+}
+
+/// **The three grammars a format string can be written in**, as the configuration spells them.
+///
+/// Here rather than in [`crate::format`] so that the analysis's own vocabulary and the file's do not become one
+/// thing: the file's job is to say what a person wrote, and `crate::format::FormatKind` is what the scanner reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FormatSyntax {
+    Std,
+    Printf,
+    Scanf,
 }
 
 /// How bad a configuration problem is.
@@ -854,8 +927,8 @@ pub fn parse_config(text: &str, path: &Path) -> ConfigReport {
                 Ok(decoded) => report.config.hover = decoded,
                 Err(problem) => report.problems.push(problem),
             },
-            "highlight" => match decode::<HighlightSection>(section, name) {
-                Ok(decoded) => report.config.highlight = decoded,
+            "format" => match decode::<FormatSection>(section, name) {
+                Ok(decoded) => report.config.format = decoded,
                 Err(problem) => report.problems.push(problem),
             },
             // **[locale]** — the language this project's messages are written in.
@@ -879,7 +952,7 @@ pub fn parse_config(text: &str, path: &Path) -> ConfigReport {
             },
             unknown => report.problems.push(ConfigProblem::error(format!(
                 "[{unknown}] is not a section this server reads (workspace, compile, index, diagnostics, hover, \
-                 highlight), and `locale` is the one key that stands alone, so nothing under it is in effect"
+                 format), and `locale` is the one key that stands alone, so nothing under it is in effect"
             ))),
         }
     }
@@ -958,6 +1031,50 @@ fn validate(report: &mut ConfigReport) {
         }
     }
 
+    // **`[format.functions]`: a syntax this build does not have, and a name that is not a name.**
+    //
+    // The section decodes without them (a `BTreeMap<String, FunctionEntry>` takes any string as a value), so this is
+    // the only place that can say so — and it must, because a function listed with a syntax nobody reads is a
+    // project that believes it configured something. The entries are *dropped* rather than kept: the analysis would
+    // otherwise have to carry a "this one is broken" state in a type that has no room for it.
+    let broken: Vec<String> = report
+        .config
+        .format
+        .functions
+        .iter()
+        .filter(|(_, entry)| entry.syntax().is_none())
+        .map(|(name, _)| name.clone())
+        .collect();
+    for name in broken {
+        let written = match report.config.format.functions.get(&name) {
+            Some(FunctionEntry::Syntax(syntax)) | Some(FunctionEntry::Detailed { syntax, .. }) => {
+                syntax.clone()
+            }
+            None => String::new(),
+        };
+        report.problems.push(ConfigProblem::warning(format!(
+            "format.functions names {name:?} with the syntax {written:?}, which is not one this server reads \
+             (std, printf, scanf), so that function is not read"
+        )));
+        report.config.format.functions.remove(&name);
+    }
+
+    for (name, entry) in &report.config.format.functions {
+        if !name.contains("::") {
+            report.problems.push(ConfigProblem::warning(format!(
+                "format.functions has {name:?}, which is not a qualified name; an unqualified entry would claim \
+                 every function of that spelling in the project, including the standard library's"
+            )));
+        }
+        if entry.argument() > 3 {
+            report.problems.push(ConfigProblem::warning(format!(
+                "format.functions gives {name:?} the argument {}, which is past the point any format function puts \
+                 its format string",
+                entry.argument()
+            )));
+        }
+    }
+
     if report
         .config
         .compile
@@ -984,38 +1101,82 @@ mod tests {
         parse_config(text, Path::new("/p/.cppls.toml"))
     }
 
-    /// **`[highlight]` is read**, and a key it does not have is reported rather than silently ignored — a project
-    /// that switched a family off, and whose key was misspelled, would otherwise never know the colouring never
-    /// stopped.
+    /// **`[format]` is read**, and a key it does not have is reported rather than silently ignored — a project that
+    /// switched a grammar off, and whose key was misspelled, would otherwise never know the colouring never stopped.
+    ///
+    /// The table of the project's own functions is the half the old `[highlight]` could not express at all: **which
+    /// argument holds the format string**. Both spellings are asserted — a bare syntax string and the table form —
+    /// because both are what a person writes.
     #[test]
-    fn the_highlight_section_is_read() {
+    fn the_format_section_is_read() {
         let report = parse(
-            "[highlight]\nformat_strings = false\nprintf = false\nextra = [\"mylib::logf\"]\n\
-             extra_format = [\"mylib::log\"]\n",
+            "[format]\nenable = true\nstd = false\nprintf = false\n\n[format.functions]\n\
+             \"mylib::logf\" = \"printf\"\n\
+             \"mylib::log\" = \"std\"\n\
+             \"mylib::trace\" = { syntax = \"printf\", argument = 1 }\n",
         );
 
-        assert_eq!(report.config.highlight.format_strings, Some(false));
-        assert_eq!(report.config.highlight.printf, Some(false));
+        assert_eq!(report.config.format.enable, Some(true));
+        assert_eq!(report.config.format.std, Some(false));
+        assert_eq!(report.config.format.printf, Some(false));
         // **A key the section does not name keeps its default**, which is "on" — the server reads `None` that way.
-        assert_eq!(report.config.highlight.scanf, None);
-        assert_eq!(report.config.highlight.extra, ["mylib::logf"]);
-        assert_eq!(report.config.highlight.extra_format, ["mylib::log"]);
+        assert_eq!(report.config.format.scanf, None);
+        assert_eq!(
+            report
+                .config
+                .format
+                .functions
+                .get("mylib::logf")
+                .and_then(FunctionEntry::syntax),
+            Some(FormatSyntax::Printf)
+        );
+        assert_eq!(
+            report
+                .config
+                .format
+                .functions
+                .get("mylib::trace")
+                .map(|entry| (entry.syntax(), entry.argument())),
+            Some((Some(FormatSyntax::Printf), 1)),
+            "the table form says which argument is the format string"
+        );
+        assert_eq!(
+            report
+                .config
+                .format
+                .functions
+                .get("mylib::log")
+                .map(FunctionEntry::argument),
+            Some(0),
+            "a bare string means the first argument"
+        );
         assert!(report.problems.is_empty(), "{:?}", problems(&report));
 
-        // A project with no `[highlight]` at all is the ordinary case: everything default, nothing wrong.
+        // A project with no `[format]` at all is the ordinary case: everything default, nothing wrong.
         let report = parse("[workspace]\nexclude = [\"build/**\"]\n");
-        assert_eq!(report.config.highlight, HighlightSection::default());
+        assert_eq!(report.config.format, FormatSection::default());
         assert!(report.problems.is_empty());
 
         // …and a misspelled key is *this* section's problem, not the file's.
-        let report = parse("[highlight]\nprintff = false\n");
-        assert_eq!(report.config.highlight, HighlightSection::default());
+        let report = parse("[format]\nprintff = false\n");
+        assert_eq!(report.config.format, FormatSection::default());
         assert_eq!(report.problems.len(), 1);
         assert!(
-            report.problems[0].message.contains("[highlight]"),
+            report.problems[0].message.contains("[format]"),
             "{:?}",
             problems(&report)
         );
+
+        // **A syntax this build does not have is reported and the rest of the section is kept.** A function that is
+        // silently never read is a project believing it configured something.
+        let report = parse("[format.functions]\n\"mylib::logf\" = \"printff\"\n");
+        assert_eq!(report.problems.len(), 1);
+        assert!(
+            report.problems[0].message.contains("printff"),
+            "the message names the value: {:?}",
+            problems(&report)
+        );
+        assert!(report.problems[0].message.contains("std, printf, scanf"));
     }
 
     #[test]

@@ -47,7 +47,6 @@ use crate::context::{RequestOutcome, ServerContextSnapshot, snapshot_query};
 use crate::util::{file_offset_at_position, uri_to_file_path};
 
 /// The two vocabularies a popup has an answer for and the analysis does not: keywords, and Doxygen's commands.
-mod format;
 mod vocabulary;
 
 /// How much of a declaration's text is shown before it is elided.
@@ -307,7 +306,7 @@ fn hover_of_the_program(
     // `size_t` in decimal and `{:#x}` is hex with a prefix, and both are inside a literal that no declaration
     // describes. Asked here — after the header, before every name question — because a string literal is not a name
     // and the queries below would spend their time finding that out.
-    if let Some(found) = format::format_string_hover(session, view, in_the_file) {
+    if let Some(found) = crate::handlers::format::format_string_hover(session, view, in_the_file) {
         return Some(found);
     }
 
@@ -807,7 +806,7 @@ fn signature_line(fact: &DeclFact) -> String {
     }
 }
 
-fn markdown(value: String) -> Hover {
+pub(crate) fn markdown(value: String) -> Hover {
     Hover {
         contents: HoverContents::Markup(MarkupContent {
             kind: MarkupKind::Markdown,

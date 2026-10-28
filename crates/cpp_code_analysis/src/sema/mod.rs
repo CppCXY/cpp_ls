@@ -17,7 +17,6 @@ pub mod constant;
 pub mod convert;
 pub mod declarations;
 pub mod deduce;
-pub mod format;
 pub mod model;
 pub mod module_info;
 pub mod modules;

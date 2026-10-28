@@ -39,9 +39,9 @@ pub mod discovery;
 
 pub use build::{COMPILE_DATABASE_FILE, Database, DatabaseOrigin, find_database};
 pub use config::{
-    CompileSection, ConfigProblem, ConfigReport, DiagnosticsSection, HighlightSection,
-    HoverSection, IndexSection, PROJECT_CONFIG_FILE, ProjectConfig, Severity, TargetSection,
-    WorkspaceSection, load_config, parse_config, target_for, targets_for,
+    CompileSection, ConfigProblem, ConfigReport, DiagnosticsSection, FormatSection, FormatSyntax,
+    FunctionEntry, HoverSection, IndexSection, PROJECT_CONFIG_FILE, ProjectConfig, Severity,
+    TargetSection, WorkspaceSection, load_config, parse_config, target_for, targets_for,
 };
 pub use discovery::{DiscoveryProblem, ProjectDiscovery, discover};
 

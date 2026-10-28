@@ -7365,7 +7365,7 @@ impl<F: FileProvider + Clone> Session<F> {
         names
     }
 
-    /// **Every format string in this file, with what each part of it is** — see [`crate::sema::format`].
+    /// **Every format string in this file, with what each part of it is** — see [`crate::format`].
     ///
     /// ```cpp
     /// std::println("值 = {:.3f}", x);    `{:.3f}` is a specifier and `f` a conversion
@@ -7387,12 +7387,12 @@ impl<F: FileProvider + Clone> Session<F> {
     /// a `(` is C++'s most-vexing-parse shape and the grammar takes the declaration reading (`std::sort(v.begin(),
     /// v.end());` is read the same way — a defect of its own, recorded in `docs/remaining.md`). The format string is
     /// there either way, and where the parser put it is not a question this pass has an opinion about: the call is
-    /// "a `(` whose arguments are…", which the token stream says exactly. See [`crate::sema::format::literals_in`].
+    /// "a `(` whose arguments are…", which the token stream says exactly. See [`crate::format::literals_in`].
     pub fn format_literals(
         &self,
         view: &FileView,
-        config: &crate::sema::format::FormatConfig,
-    ) -> Vec<crate::sema::format::FormatLiteral> {
+        config: &crate::format::FormatConfig,
+    ) -> Vec<crate::format::FormatLiteral> {
         // **A rendering is not this pass's text.** Its tree's tokens are the cook's, and a range in it names a place
         // in a string the reader has never seen.
         if view.written_text().is_some() {
@@ -7426,7 +7426,7 @@ impl<F: FileProvider + Clone> Session<F> {
             })
         };
 
-        crate::sema::format::literals_in(
+        crate::format::literals_in(
             &view.source,
             view.tree.get_tokens(),
             config,

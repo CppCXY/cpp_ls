@@ -16,7 +16,7 @@
 //! a case of each. If the parser ever learns to read the statement as a call, these tests keep passing, which is the
 //! point.
 
-use cpp_code_analysis::sema::format::{FormatConfig, FormatKind, PieceKind};
+use cpp_code_analysis::format::{ExtraFunction, FormatConfig, FormatKind, PieceKind};
 use cpp_code_analysis::{
     CompilerConfig, MemoryFiles, OpenDocuments, Session, SessionFiles, WatchFilter,
 };
@@ -318,7 +318,13 @@ void f() {
     );
 
     let mut config = everything();
-    config.extra = vec!["mylib::logf".to_string()];
+    // **The shape `[format.functions]` has after it is read**: a name, the grammar it takes, and which argument the
+    // format string is. There is no `extra`/`extra_format` pair any more — one table says both.
+    config.functions = vec![ExtraFunction {
+        name: "mylib::logf".to_string(),
+        syntax: FormatKind::Printf,
+        argument: 0,
+    }];
     assert_eq!(
         formats(source, &config),
         vec![r#"printf "a=%d" [specifier:% conversion:d]"#],
@@ -351,8 +357,7 @@ void f(int x) {
         std_format: false,
         printf: false,
         scanf: false,
-        extra: Vec::new(),
-        extra_format: Vec::new(),
+        functions: Vec::new(),
     };
     assert_eq!(formats(source, &off), Vec::<String>::new());
 }
@@ -445,5 +450,47 @@ fn what_the_walk_costs() {
         path.display(),
         source.len(),
         names.len(),
+    );
+}
+
+/// **`fmt`'s two syntaxes**, and the one name whose argument position depends on which library declares it.
+///
+/// `fmt` is where `std::format` came from, so `fmt::format` / `fmt::print` take the same `{…}` grammar — but the
+/// library also kept the C syntax, and those names are **not** `printf` renamed:
+///
+/// ```text
+/// sprintf(buffer, format, …)     the C library\s — the format string is the SECOND argument
+/// fmt::sprintf(format, …)        fmt\s          — the format string is the FIRST
+/// ```
+///
+/// One table keyed by spelling cannot hold both, which is why the scope decides for that one name (see
+/// `format::locator::the_format_kind_of`). The other `fmt::` names either agree with their C counterpart
+/// (`fmt::printf` is `%` at argument 0, `fmt::fprintf` takes the stream first) or are `fmt`\s alone.
+#[test]
+fn the_fmt_library_s_two_syntaxes_are_both_read() {
+    let source = r#"
+void f(int n, char* buf) {
+    fmt::printf("%d\n", n);
+    fmt::fprintf(stderr, "%d\n", n);
+    fmt::sprintf("%d", n);
+    std::sprintf(buf, "%d", n);
+    fmt::format("{}", n);
+    fmt::print("{:>8}", n);
+    fmt::format_to(out, "{}", n);
+}
+"#;
+    assert_eq!(
+        formats(source, &everything()),
+        vec![
+            // The printf syntax, at the position each library puts it.
+            r#"printf "%d\n" [specifier:% conversion:d]"#,
+            r#"printf "%d\n" [specifier:% conversion:d]"#,
+            r#"printf "%d" [specifier:% conversion:d]"#,
+            r#"printf "%d" [specifier:% conversion:d]"#,
+            // …and the std syntax, which is the same grammar `fmt` gave the standard.
+            r#"std "{}" [specifier:{}]"#,
+            r#"std "{:>8}" [specifier:{:>8}]"#,
+            r#"std "{}" [specifier:{}]"#,
+        ]
     );
 }

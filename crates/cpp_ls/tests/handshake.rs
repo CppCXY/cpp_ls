@@ -5233,7 +5233,7 @@ fn a_cpp_project_is_not_offered_cuda_vocabulary() {
 ///
 /// The other thing a reader points at that no declaration describes: `%zu` is a `size_t` in decimal, `{:.3f}` is
 /// fixed-point with three digits, and the only place a reader is already looking is the line of code. The words come
-/// from `sema::format::describe` — the module that decides which bytes are a *piece* — so the explanation cannot
+/// from `ormat::describe` — the module that decides which bytes are a *piece* — so the explanation cannot
 /// disagree with the colouring.
 ///
 /// Three assertions, in the order the feature is built:
@@ -5331,6 +5331,115 @@ void f(double d, int n) {
     assert!(
         !text.contains("conversion"),
         "a string nothing formats is left to the reader: {text:?}"
+    );
+
+    server.request(999, "shutdown", Value::Null);
+    server.notify("exit", Value::Null);
+}
+
+/// **A completion inside a format string offers the grammar, and only the grammar.**
+///
+/// `printf("%5.` is followed by a conversion letter and by nothing else, so the language's own list — the names in
+/// scope — is a list of things that cannot be written there. The request is asked at three positions that are one
+/// character apart and the answers differ because the grammar does:
+///
+/// ```text
+///   printf("%|")     every conversion, with what each one means
+///   printf("%5.|")   the same, after the precision
+///   printf("%d|")    nothing, and *nothing* is the answer — not the names in scope
+/// ```
+///
+/// The third is the one that matters: a fall-through to the ordinary list there is the defect this branch exists to
+/// prevent, and a client that received it would show `printf`, `n`, `main` inside a format string.
+#[test]
+fn a_completion_inside_a_format_string_is_the_grammar_s_own() {
+    const FIXTURE: &str = "\
+#include <cstdio>
+struct width { int value; };
+void f(double d, int n) {
+    std::printf(\"%5.\", d);
+}
+";
+    let project = Project::new("completion-format");
+    project.write("main.cpp", FIXTURE);
+
+    let mut server = Server::start(project.root());
+    let uri = uri_of(&project.root().join("main.cpp"));
+
+    server.request(
+        1,
+        "initialize",
+        json!({
+            "processId": std::process::id(),
+            "rootUri": uri_of(project.root()),
+            "capabilities": {
+                "workspace": { "configuration": true, "didChangeWatchedFiles": { "dynamicRegistration": true } },
+                "window": { "workDoneProgress": true },
+                "textDocument": { "completion": { "completionItem": { "snippetSupport": true } } },
+            },
+        }),
+    );
+    server.notify("initialized", json!({}));
+    server.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": { "uri": uri, "languageId": "cpp", "version": 1, "text": FIXTURE }
+        }),
+    );
+
+    // **The cursor goes just before the closing quote**, which is where a conversion belongs: `"%5.` has its width and
+    // its precision and is waiting for the letter.
+    let line = line_of(FIXTURE, "%5.");
+    let character = FIXTURE
+        .lines()
+        .nth(line as usize)
+        .and_then(|text| text.find("%5."))
+        .expect("the fixture writes it")
+        + 3;
+    let ask = |server: &mut Server, id: i64| -> Vec<Value> {
+        let answer = server.ask_until(id, |id| {
+            json!({
+                "id": id,
+                "method": "textDocument/completion",
+                "params": {
+                    "textDocument": { "uri": uri },
+                    "position": { "line": line, "character": character },
+                },
+            })
+        });
+        answer["result"]["items"]
+            .as_array()
+            .or_else(|| answer["result"].as_array())
+            .cloned()
+            .unwrap_or_else(|| panic!("a completion list was expected, got {answer}"))
+    };
+
+    let items = ask(&mut server, 100);
+    assert!(!items.is_empty(), "a conversion list was expected");
+    let labels: Vec<&str> = items
+        .iter()
+        .filter_map(|item| item["label"].as_str())
+        .collect();
+    for conversion in ["d", "f", "s", "x", "p"] {
+        assert!(
+            labels.contains(&conversion),
+            "`{conversion}` is a conversion: {labels:?}"
+        );
+    }
+    assert!(
+        !labels.contains(&"printf"),
+        "and the names in scope are not offered here: {labels:?}"
+    );
+    // The item says what the conversion does, which is the reason the list is worth showing at all.
+    let fixed = items
+        .iter()
+        .find(|item| item["label"] == json!("f"))
+        .expect("`f` is in the list");
+    assert!(
+        fixed["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("fixed-point")),
+        "the one-line meaning: {fixed}"
     );
 
     server.request(999, "shutdown", Value::Null);

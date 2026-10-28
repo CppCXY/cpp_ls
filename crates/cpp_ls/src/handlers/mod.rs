@@ -30,6 +30,7 @@ mod document_highlight;
 mod document_link;
 mod document_symbol;
 mod folding_range;
+mod format;
 mod formatting;
 mod hover;
 pub mod implementation;

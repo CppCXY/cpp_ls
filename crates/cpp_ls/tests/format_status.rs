@@ -484,3 +484,94 @@ fn literals_of(text: &str) -> Vec<(usize, usize)> {
     }
     spans
 }
+
+/// **The completions inside the file's first format string**, asked at the position just inside a `{`.
+///
+/// A probe rather than a check, for the reason the rest of this file is: it prints what a client would show. The
+/// unit and protocol tests own the assertions (`format_scanner::a_conversion_is_offered_where_one_can_go`,
+/// `handshake::a_completion_inside_a_format_string_is_the_grammar_s_own`).
+#[test]
+#[ignore = "spawns a server over a real project; run with --ignored"]
+fn what_a_completion_inside_a_format_string_offers() {
+    let project = project();
+    if !project.is_dir() {
+        eprintln!("skipped: {} is not here", project.display());
+        return;
+    }
+    let file = the_file(&project);
+    let Ok(text) = std::fs::read_to_string(&file) else {
+        eprintln!("skipped: {} is not readable", file.display());
+        return;
+    };
+    // Inside the first `{` **of the format string**, which is the position a reader is at after typing one. Not the
+    // function body's brace, which is the first `{` in the file — the first version of this probe completed there and
+    // printed the keyword list, which is correct behaviour at `int main() {` and nothing to do with this feature.
+    let Some(at) = text
+        .find("format(")
+        .and_then(|call| text[call..].find('{').map(|at| call + at + 1))
+    else {
+        eprintln!("skipped: the file has no format string with a `{{`");
+        return;
+    };
+
+    let mut line_starts = vec![0usize];
+    for (offset, ch) in text.char_indices() {
+        if ch == '\n' {
+            line_starts.push(offset + 1);
+        }
+    }
+    let line = line_starts.partition_point(|start| *start <= at) - 1;
+    let character: usize = text[line_starts[line]..at]
+        .chars()
+        .map(char::len_utf16)
+        .sum();
+
+    let mut server = Server::start(&project);
+    let uri = uri_of(&file);
+    server.request(
+        1,
+        "initialize",
+        json!({
+            "processId": std::process::id(),
+            "rootUri": uri_of(&project),
+            "capabilities": {
+                "textDocument": { "completion": { "completionItem": { "snippetSupport": true } } },
+            },
+        }),
+    );
+    server.notify("initialized", json!({}));
+    server.notify(
+        "textDocument/didOpen",
+        json!({ "textDocument": { "uri": uri, "languageId": "cpp", "version": 1, "text": text } }),
+    );
+
+    let started = Instant::now();
+    let answer = server.request(
+        100,
+        "textDocument/completion",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": { "line": line, "character": character },
+        }),
+    );
+    let took = started.elapsed().as_millis();
+    let items = answer["result"]["items"]
+        .as_array()
+        .or_else(|| answer["result"].as_array())
+        .cloned()
+        .unwrap_or_default();
+    println!(
+        "--- completion at {}:{} ({} ms), {} item(s)",
+        line + 1,
+        character,
+        took,
+        items.len()
+    );
+    for item in items.iter().take(40) {
+        println!(
+            "  {:<6} {}",
+            item["label"].as_str().unwrap_or(""),
+            item["detail"].as_str().unwrap_or("")
+        );
+    }
+}

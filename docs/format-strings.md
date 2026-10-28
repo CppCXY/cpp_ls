@@ -8,7 +8,7 @@
 > scanner   crates/cpp_code_analysis/src/sema/format.rs          10 个测试、80+ 例（tests/format_scanner.rs）
 > locator   同上（literals_in）+ Session::format_literals        15 个测试（tests/format.rs）+ 1 个耗时测量
 > 接线      crates/cpp_ls/src/handlers/semantic_token/format.rs  3 个编码级测试
-> 配置      [highlight]                                          project/config.rs
+> 配置      [format]                                             project/config.rs
 > 探针      crates/cpp_ls/tests/format_status.rs                 真工程、真服务器、读回线上数据
 > ```
 
@@ -163,7 +163,7 @@ literal 的 token 下标 i
            scanf 家族（含 `%[` 的那几个）
 2. 作用域  裸名（`printf`）按名字认——它是 C 库的约定名，没有命名空间可撞；
            `format` 是 `std`/`fmt` 的，所以裸名必须**解析**到 `std::` 或 `fmt::` 才算
-3. 拼写    `std::`、`::`、`fmt::`、`fmt::v11::` 是库的；其它限定名是项目自己的，只有 `[highlight]` 能说它是包装
+3. 拼写    `std::`、`::`、`fmt::`、`fmt::v11::` 是库的；其它限定名是项目自己的，只有 `[format.functions]` 能说它是包装
 ```
 
 **解析用的是绑定，不是 `definitions`**：`definitions` 回答"跳到哪里"，它的 `DeclFact::scope` 填的是**光标处
@@ -308,22 +308,39 @@ token，所以"整段包着子段"只能画成相邻的段。
 放在 `.cppls.toml`，与 `[hover] enable` 同一个读取路径（`config.rs` 的 section 结构）：
 
 ```toml
-[highlight]
-format_strings = true              # std::format / print 家族 + fmt:: 的
-printf = true                      # printf 家族
-scanf = true                       # scanf 家族
-extra = ["mylib::logf"]            # 项目自己的包装，printf 语法，格式串在第一个实参
-extra_format = ["mylib::log"]      # 项目自己的包装，std::format 语法
+[format]
+enable = true                      # 上色 / 弹窗 / 补全，三个一起关
+std = true                         # `{…}`：std::format / std::print / fmt::format / fmt::print
+printf = true                      # `%…`：printf 家族，以及 fmt::printf / fmt::sprintf
+scanf = true                       # `%…` + scanset：scanf 家族
+
+[format.functions]                 # 项目自己的，键是**解析后**的限定名
+"mylib::logf" = "printf"                                # printf 语法，格式串在第一个实参
+"mylib::log" = "std"
+"mylib::trace" = { syntax = "printf", argument = 1 }    # trace(level, fmt, …)
 ```
 
 * **默认全开**：`.cppls.toml` 里的 `None` 就是开 —— "这个字符串是格式串"是能从文本证明的事实，不是口味，
   所以不像诊断那样要项目点头；
-* 三个都关（且两个列表为空）时这一步完全不跑：`FormatConfig::is_off()` 在 handler 边缘判，scanner 不知道
-  配置存在；
-* **分成两张表**是因为一个列表只能说一种语法：`mylib::logf` 收 printf 的 `%d`，`mylib::log` 收 `{}`，
-  同名列没法两全；
-* `extra` 匹配的是**解析后的限定名**（`definition_at` 拿绑定、`qualified_name_of` 拼作用域），所以
-  `using mylib::logf;` 之后裸写 `logf(…)` 也算，而项目里另一个同名的 `logf` 不算。
+* 三个文法都关（且 `functions` 为空）时这一步完全不跑：`FormatConfig::is_off()` 在 handler 边缘判，scanner
+  不知道配置存在；
+* **自己的函数是一张按名字键的表，不是列表**，因为包装函数有**位置**：`mylib::trace(level, fmt, …)` 的格式串
+  在第二个实参，`{ syntax = "printf", argument = 1 }` 说得出来，一串名字说不出来。裸字符串就是常见情形
+  （那种语法、第一个实参）；
+* 两种写法都按**解析后的限定名**匹配（`definition_at` 拿绑定、`qualified_name_of` 拼作用域），所以
+  `using mylib::logf;` 之后裸写 `logf(…)` 也算，而项目里另一个同名的 `logf` 不算；
+* 写错的 `syntax` 是**报告并丢掉那一条**（warning），不是静默忽略：一个以为配好了、其实从没跑过的函数是最难查的。
+
+### 6.1 为什么不再叫 `[highlight]`、不再用 `extra` / `extra_format`
+
+第一版是 `[highlight]` + `format_strings` + `printf` + `scanf` + `extra` + `extra_format`，三个毛病：
+
+1. **段落名只说了一个面**：同一份配置现在决定上色、弹窗和补全，叫 `[highlight]` 会让读的人以为关掉它只影响颜色；
+2. **`format_strings` 与 `extra_format` 拼写太像、含义不同**（一个是"开不开 std 文法"，一个是"额外的 std 语法
+   包装"），两个列表只能靠读文档才知道哪个收 `{}` 哪个收 `%d`；
+3. **列表表达不了位置**，而位置是一个包装函数唯一真正需要说的事。
+
+现在是 `[format]`、每个开关以文法命名、自己的函数一张表，`syntax` 和 `argument` 都写在值里。
 
 ---
 
@@ -452,7 +469,7 @@ scanf("%[a-z]", name)      光标在 `[a-z]`    →  set: one or more characters
 两条边界，都是"宁可不说"：
 
 * **不是格式串的字符串没有弹窗**（`const char *plain = "…%d…";` 不弹），因为"这个字符串是格式串"是调用决定的；
-* **`[highlight]` 全关时这一层也不跑** —— 弹窗解释的是编辑器不画的东西，等于回答一个没人问的问题；
+* **`[format] enable = false` 时这一层也不跑** —— 弹窗解释的是编辑器不画的东西，等于回答一个没人问的问题；
 * 说明里**不判断实参类型**：那是诊断，而且是会在模板实例化上看走眼的那一类。弹窗只说语法自己说的话。
 
 测试：`format_scanner::a_piece_explains_itself`（表驱动，14 组：两种 C 文法 + std 的 flags/width/precision/
@@ -482,3 +499,47 @@ length/scanset/positional/`*`/`%%`/未闭合 field）和
   （字面量 + 可解析的实参类型）。
 * **不追 C++26 的 `std::format_string` 变化**：若标准库把格式串改为 `format_string<Args...>` 构造，
   locator 的"第几个实参"表仍然成立（位置没变），不受影响。
+
+### 9.2 补全 —— 光标处能写什么
+
+`crates/cpp_code_analysis/src/format/complete.rs`（词表与"这里能不能写"）+ `handlers/format/complete.rs`
+（变成 `CompletionItem`）。
+
+```text
+printf("%|", x)        → d i u o x X e E f F g G a A c s p n m   每个带一句意思
+printf("%5.|", x)      → 同一张表（宽度/精度之后仍是转换字符）
+printf("%|8d", x)      → 不给：光标右边还有宽度，读者在打 `%8d`
+printf("%d|", x)       → 不给，而且**什么都不给** —— 不是"退回语言自己的列表"
+std::format("{:|}", x) → d b o x X c s e f g a p ?，外加 < > ^ + # 0 . { L`nstd::format("{|}", x)  → `:`（后面可以写规格）和 `}`（空字段）—— 在 `{` 后面不能写类型，语法要求先有冒号
+scanf("%*|", &n)       → 转换字符（抑制赋值之后照样要一个）
+```
+
+三条设计：
+
+1. **它替换，不是插入**：在 `%d` 的 `d` 上选 `x` 得到 `%x`，不是 `%dx`；在 `%` 后面选则是一个插入（空区间）。
+2. **它替代语言自己的列表**：格式串里没有名字、没有类型，`"%5."` 后面只能是转换字符，所以这里答
+   `Some(items)`（哪怕是空的）而不是"落到普通补全"。空列表是一条事实（这里什么都写不了），
+   `is_incomplete: false` 也一样 —— 文法是封闭的，客户端不必再问。
+3. **`"%5."` 本身要算格式串**：一个还没打出转换字符的 `%` 产生不了 piece（scanner 不会给"不是转换的 `%`"上色），
+   而定位器原来会把"没有 piece 的字面量"整条丢掉 —— 于是补全在那个**最该出列表的位置**上什么也找不到。
+   现在没有 piece 的格式串照样保留：上色本来就不发 token，弹窗没有可解释的，只有补全需要它。
+
+测试：`format_scanner::a_conversion_is_offered_where_one_can_go`（14 个位置的给/不给）、
+`format_scanner::a_completion_replaces_the_spelling_under_the_cursor`、
+`handshake::a_completion_inside_a_format_string_is_the_grammar_s_own`（线上：`"%5.` 处给转换表、
+带 `detail`、且**不含** `printf` 这种作用域里的名字）。
+
+### 9.3 `fmt` 的两种文法
+
+`docs/format-strings.md` §3.2 的表里 `fmt::` 一直是认的，这一轮补上它**另一半**（printf 语法）：
+
+```text
+fmt::format / fmt::print / fmt::println / fmt::format_to …   `{…}`，与 std 同一套
+fmt::printf / fmt::fprintf                                    `%…`
+fmt::sprintf                                                  `%…`，格式串在**第一个**实参
+std::sprintf                                                  C 的，格式串在**第二个**实参
+```
+
+最后两行是**同一个拼写、不同位置** —— 一张按名字索引的表放不下，所以 `sprintf` 的位置由作用域决定
+（`format::locator::the_format_kind_of` 里那一个 `match`）。`fmt::runtime(…)` 不认：那是程序算出来的格式串，
+没有字面量可读。

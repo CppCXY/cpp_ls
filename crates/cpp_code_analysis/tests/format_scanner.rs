@@ -12,7 +12,7 @@
 //! a byte range, because a range is what the code computes and a reader cannot check it by eye. The ranges are
 //! asserted on top of that where the arithmetic is the thing under test (`a_pieces_range_is_inside_the_literal`).
 
-use cpp_code_analysis::sema::format::{FormatKind, PieceKind, pieces_in};
+use cpp_code_analysis::format::{FormatKind, PieceKind, pieces_in};
 
 /// The pieces of one literal, as `(kind, the bytes it covers)`.
 fn pieces(literal: &str, kind: FormatKind) -> Vec<(&'static str, &str)> {
@@ -441,7 +441,7 @@ fn a_token_that_is_not_a_literal_is_ignored() {
 /// The pairs are `(label, value)`: the labels are the grammar's words, the values the reading.
 #[test]
 fn a_piece_explains_itself() {
-    use cpp_code_analysis::sema::format::describe;
+    use cpp_code_analysis::format::describe;
 
     /// The explanation of the piece covering `needle`, as `label: value` strings.
     fn of(literal: &str, needle: &str, kind: FormatKind) -> Vec<String> {
@@ -535,5 +535,93 @@ fn a_piece_explains_itself() {
     assert_eq!(
         of(r#""{""#, "{", FormatKind::Std),
         vec!["field: formatted the way the argument's type defaults to"]
+    );
+}
+
+/// **What may be typed at a position** — the completion list, and the positions it refuses.
+#[test]
+fn a_conversion_is_offered_where_one_can_go() {
+    use cpp_code_analysis::format::completions_at;
+
+    /// The labels offered at the byte of `|` in `literal`.
+    fn at(literal: &str, kind: FormatKind) -> Vec<String> {
+        let at = literal.find('|').expect("the fixture marks the cursor");
+        let without = literal.replace('|', "");
+        completions_at(&without, kind, at)
+            .into_iter()
+            .map(|item| item.label)
+            .collect()
+    }
+
+    // Right after the `%`, and after the flags/width/precision — the two places a conversion goes.
+    assert!(at(r#""%|""#, FormatKind::Printf).contains(&"d".to_string()));
+    assert!(at(r#""%-8.2|""#, FormatKind::Printf).contains(&"f".to_string()));
+    assert!(at(r#""%5.|""#, FormatKind::Printf).contains(&"x".to_string()));
+    assert!(at(r#""%ll|""#, FormatKind::Printf).contains(&"u".to_string()));
+    assert!(
+        !at(r#""%*|""#, FormatKind::Scanf).is_empty(),
+        "after a suppression a conversion goes"
+    );
+    assert!(
+        at(r#""%[a-z]|""#, FormatKind::Scanf).is_empty(),
+        "after a whole scanset there is nothing left to say"
+    );
+    assert!(at(r#""%|""#, FormatKind::Scanf).contains(&"s".to_string()));
+    assert!(at(r#""{:|}""#, FormatKind::Std).contains(&"d".to_string()));
+    assert!(
+        at(r#""{:>10|""#, FormatKind::Std).contains(&"f".to_string()),
+        "after a width the type still goes"
+    );
+
+    // **And the positions it refuses**, each because the grammar says nothing may go there.
+    assert!(
+        at(r#""%%|""#, FormatKind::Printf).is_empty(),
+        "after an escape"
+    );
+    assert!(
+        at(r#""%d|""#, FormatKind::Printf).is_empty(),
+        "after a whole conversion"
+    );
+    assert!(
+        at(r#""%-|8d""#, FormatKind::Printf).is_empty(),
+        "in the middle of the flags"
+    );
+    assert_eq!(
+        at(r#""{|}""#, FormatKind::Std),
+        vec![":", "}"],
+        "right after `{{` the field continues with a specification or ends — not with a type, and an argument \\
+         index is not something this layer can know"
+    );
+    assert!(
+        at(r#""hello |world""#, FormatKind::Printf).is_empty(),
+        "prose"
+    );
+}
+
+/// **A completion replaces the character it is offered on**, so that completing `x` over `%d` gives `%x`.
+#[test]
+fn a_completion_replaces_the_spelling_under_the_cursor() {
+    use cpp_code_analysis::format::completions_at;
+
+    let literal = r#""%d""#;
+    let at = literal.find('d').expect("the fixture writes it");
+    let items = completions_at(literal, FormatKind::Printf, at);
+    let x = items
+        .iter()
+        .find(|item| item.label == "x")
+        .expect("`x` is a conversion");
+    assert_eq!(
+        (&literal[x.start..x.end], x.end - x.start),
+        ("d", 1),
+        "the edit covers the `d`, so the result is `%x` and not `%dx`"
+    );
+
+    // At the position a conversion goes — the empty one after `%` — the edit is empty, so nothing is deleted.
+    let literal = r#""%""#;
+    let at = literal.find('"').expect("the closing quote");
+    let items = completions_at(literal, FormatKind::Printf, at);
+    assert!(
+        items.iter().all(|item| item.start == item.end),
+        "an insertion, not a replacement"
     );
 }

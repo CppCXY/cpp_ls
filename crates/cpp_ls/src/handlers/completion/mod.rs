@@ -158,6 +158,34 @@ pub async fn on_completion(
         let viewed = viewing.elapsed().as_millis();
         let offset = file_offset_at_position(&view, position)?;
 
+        // **Inside a format string the vocabulary is the grammar's, not the language's.**
+        //
+        // `printf("%5.` is followed by a conversion letter and by nothing else; a list of the names in scope there is
+        // a list of things that cannot be written. So the format list replaces the ordinary one — *including when it
+        // is empty*, which is why this answers `Some(empty)` rather than `None`: falling through would offer the very
+        // list this branch exists to suppress.
+        //
+        // Read first, before the index is asked anything, because it needs no index: one token walk of the file.
+        if let Some(held) = session.files().held(&view.path)
+            && let Some(items) = crate::handlers::format::complete::format_string_complete(
+                session, &view, held, offset,
+            )
+        {
+            log::debug!(
+                "completion: {} format-string item(s) at {}:{}",
+                items.len(),
+                position.line,
+                position.character
+            );
+            return Some(CompletionResponse::List(lsp_types::CompletionList {
+                // **Complete**, unlike the language's own list: the grammar's vocabulary is closed, so a client may
+                // filter it without asking again. An empty one says "nothing may go here", which is a fact and not a
+                // temporary state.
+                is_incomplete: false,
+                items,
+            }));
+        }
+
         let finding = std::time::Instant::now();
         let found = session.completions(&view, offset);
         // **Which half of the query this was.** A completion's own work is the only part of its latency that no lock
