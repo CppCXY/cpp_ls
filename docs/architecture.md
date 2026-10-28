@@ -2221,6 +2221,39 @@ template <class T> struct Ptr : Base<T> {};  void f() { Ptr<S> p; p-> } → 0 �
 它**不 cooking**；而 `pending_work()` 把 cooking 积压也算在内。所以 `while pending_work() > 0 { advance(64) }`
 这样的探针在"有 26 个文件等 cooking"时会转 3000 轮也不停——那是探针的循环写错了，不是会话的活锁（泵是两阶段都跑的）。
 判断"索引是否收敛"用 `pending()`（队列本身），判断"会话是否空闲"才用 `pending_work()`。
+### 15.7 `shared_ptr<std::string>::operator->` 停在最后一步：事实里没有返回类型
+
+`import std;` 的文件里，测量到的情况（本轮最后的状态）：
+
+```text
+std::string s; s.                                      → 68 项 ✓
+std::vector<int> v; v.                                 → 138 项 ✓
+std::shared_ptr<std::string> ptr; ptr->                → 4 项 ✗（是 shared_ptr 自己的成员：
+                                                         operator= / shared_ptr / element_type / weak_type）
+```
+
+那 4 项说明 `the_class_after_the_operator` 的箭头分支退回了"对象自己的类"，即 `operator_returns_of` 返回 `None`。
+逐步量下来的链条：
+
+```text
+① 窄查询 member_fact("std::shared_ptr<std::string>", "operator->") 找不到（它在基类里）；
+② 兜底 members_of("std::shared_ptr<std::string>") 给出 12 个成员，`operator->` 在其中，
+   declared_in 是基类；本轮已能让"模板基类 + typedef"代入（fixture 里 Ptr<S> → c_str ✓）；
+③ 但那个成员 fact 的 **returns 是 None**：`an_operator_return_is_usable` 拒绝记录"命名了本类 typedef
+   的返回类型"（`element_type*`，element_type = _Tp），因为未代入的 typedef 名曾让 undefined-field 报
+   60 个假阳性。于是 operator_returns_of 在 `fact.returns?` 处直接返回 None。
+④ 试过在"同一运算符的另一份读数"里找 `element_type *`：索引里确实有（shared_ptr_base.h，
+   scope 是 `std::_Sp_counted_ptr_inplace::__shared_ptr_access`），但它的 scope 和兜底找到的那个成员
+   对不上，按 scope 相等的匹配拿不到。
+```
+
+所以下一步是**给运算符的 fact 留下返回类型**，并把"这是本类 typedef、要代入后再用"记成一个字段，
+让 `undefined-field` 继续跳过它、而成员查找能用它——那是 fact 形态 + 使用方一起改的一件事，不是一行。
+本轮试的三处（不 bail、跳过多读数、按 scope 找替代）都**没有让那 4 项变成 68 项**，因此全部撤回，
+仓库里留下的仍然是 `f8f4715`（arrow）与 `fc71d1c`（模板基类代入 + typedef 代入，带测试）。
+
+**这一轮量到的另一件事**（省下以后的时间）：`Session::advance` 只跑索引阶段，不 cooking，所以探针里
+`while pending_work() > 0 { advance(64) }` 在有 cooking 积压时会空转 3000 轮；要看索引是否收敛用 `pending()`。
 ## 15.3 关于"313 秒"
 
 那是我在**debug 配置**下量的（`cargo test --release` 之前的那次跑的是 debug 的 probe），release 下同一个工程
