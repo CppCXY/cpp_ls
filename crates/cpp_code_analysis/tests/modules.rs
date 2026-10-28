@@ -2027,4 +2027,17 @@ fn a_module_unit_is_read_as_a_translation_unit() {
             .any(|declaration| &*declaration.name == "Widget"),
         "and `Widget` is one of its declarations: {declarations:?}"
     );
+    // **And a question asked from the importer is asked of the module's build.** `import std;` is not an `#include`:
+    // the importer's own text was never read as a program — a unit read of it is one file with no `std` in it — so the
+    // program this file is compiled with is the module's. Answering with it is what makes `std::string`'s lookups use
+    // the readings the module was built from, instead of whichever program read a header most recently.
+    assert_eq!(
+        session
+            .index()
+            .the_program_that_read(std::path::Path::new("/p/std_demo.cpp")),
+        session
+            .index()
+            .the_program_that_read(std::path::Path::new("/inc/bits/std.cc")),
+        "a file that imports a module is compiled with the module's build"
+    );
 }

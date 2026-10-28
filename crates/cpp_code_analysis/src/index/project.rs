@@ -8093,11 +8093,43 @@ fn resolve_aliases_or_unresolved(
         // expansion absolutely — `::std::basic_string` — so the accepted candidate is stripped before it becomes the
         // spelling every later lookup uses: measured, `members_of` answered 0 members with
         // `NotDeclaredHere("::std::basic_string")` while the very same class is filed as `std::basic_string`.
-        let Some(next) = candidates
+        // **A name the standard library brings into a namespace with a using-declaration, or one an inline namespace
+        // holds, is one namespace in.** libstdc++'s ABI-1 `std::string` is `typedef basic_string<char> string;` in
+        // `std`, and the class it names is `std::__cxx11::basic_string` — the `using __cxx11::basic_string;` that makes
+        // `std::basic_string` a name is a *using-declaration*, which the index does not record as a declaration. The
+        // candidate list above is exact spellings, so it finds neither, and the walk used to give up one namespace
+        // short: measured on `import std;`, `members_of("std::string")` answered **0 members** with
+        // `NotDeclaredHere("std::basic_string")` while `std::__cxx11::basic_string` was in the index all along.
+        //
+        // The search is C++'s own rule for inline namespaces (the name is visible in the enclosing namespace), aimed by
+        // the candidate the alias's target was written in, and it prefers the **fewest extra segments** — the nearest
+        // enclosing scope, which is the one lookup would have reached first.
+        let nested = |candidate: &str| {
+            let (prefix, name) = candidate.rsplit_once("::")?;
+            let mut best: Option<(usize, String)> = None;
+            for found in index.files_declaring(name, path) {
+                if found.fact.kind != crate::DeclKind::Type || found.fact.type_of.is_some() {
+                    continue;
+                }
+                let Some(scope) = found.fact.scope.as_deref() else {
+                    continue;
+                };
+                let Some(rest) = scope.strip_prefix(prefix)?.strip_prefix("::") else {
+                    continue;
+                };
+                let depth = rest.split("::").count();
+                if depth == 1 && best.as_ref().is_none_or(|(least, _)| depth < *least) {
+                    best = Some((depth, format!("{scope}::{name}")));
+                }
+            }
+            best.map(|(_, spelling)| spelling)
+        };
+        let found = candidates
             .iter()
             .find(|candidate| is_declared(index, scopes, path, candidate))
             .map(|candidate| candidate.trim_start_matches("::").to_string())
-        else {
+            .or_else(|| candidates.iter().find_map(|candidate| nested(candidate)));
+        let Some(next) = found else {
             // **The target is still the answer, and the third slot says it was not found.** A caller that only wants
             // a spelling keeps the one the alias named — `animate_aliases_whose_target_is_not_indexed_reports_the_target`
             // pins that: the missing declaration is `Widget::size`, not `Alias::size` — while a caller that has to
@@ -9435,7 +9467,32 @@ impl ProjectIndex {
     /// the one read most recently. That is the honest limit of a lookup that is not told the translation unit, and
     /// it is written down here rather than guessed at the call sites.
     pub fn the_program_that_read(&self, path: &Path) -> Option<u64> {
-        self.cooked.get(&normalize(path))?.last
+        if let Some(program) = self
+            .cooked
+            .get(&normalize(path))
+            .and_then(|readings| readings.last)
+        {
+            return Some(program);
+        }
+        // **A file that imports a module is compiled with that module's build.** `import std;` is not an `#include`:
+        // the importing file's own text was never read as a program (there is nothing in it to read — the names come
+        // from the module), and the declarations it uses were read by the **module's** translation unit. Answering with
+        // that program is what makes every lookup asked from this file use the readings the module was built from,
+        // instead of whichever program read a header most recently.
+        let summary = self.summaries.get(&normalize(path))?;
+        for name in &summary.modules.imports {
+            let Some(interface) = self.module_interfaces.get(name.as_ref()) else {
+                continue;
+            };
+            if let Some(program) = self
+                .cooked
+                .get(&normalize(Path::new(interface.as_str())))
+                .and_then(|readings| readings.last)
+            {
+                return Some(program);
+            }
+        }
+        None
     }
 
     /// Forget what a file **was read as**, keeping its summary.

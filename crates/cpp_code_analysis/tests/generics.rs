@@ -274,3 +274,57 @@ void f() {
         "two bases down, `operator->` returns `element_type*` and `element_type` is `S`: {labels:?}"
     );
 }
+
+/// **A name the standard library brings into a namespace with a using-declaration is one namespace in.**
+///
+/// libstdc++'s ABI-1 `std::string` is `typedef basic_string<char> string;` in `std`, and the class it names is
+/// `std::__cxx11::basic_string`: the `using __cxx11::basic_string;` that makes `std::basic_string` a name is a
+/// *using-declaration*, which the index does not record as a declaration. The alias walk resolved the target by exact
+/// spelling only, found neither `std::basic_string` nor `basic_string`, and gave up one namespace short —
+/// measured on `import std;`, `members_of("std::string")` answered **0 members** with
+/// `NotDeclaredHere("std::basic_string")` while `std::__cxx11::basic_string` was in the index all along.
+///
+/// The fixture writes the same shape without libstdc++: `string`'s target is unqualified, and the only declaration of
+/// `basic_string` sits in `std::__cxx11`.
+#[test]
+fn an_alias_target_one_namespace_in_is_found() {
+    let source = "\
+namespace std {
+namespace __cxx11 {
+struct basic_string {
+    void push_back();
+    void clear();
+};
+}
+using string = basic_string;
+}
+void f() {
+    std::string text;
+    text.;
+}
+";
+    let files = MemoryFiles::new().with_file("/p/a.cpp", source);
+    let mut session = Session::with_config(
+        "/p",
+        SessionFiles::new(OpenDocuments::new(), files),
+        WatchFilter::new("/p"),
+        CompilerConfig::default().with_standard("c++23"),
+    );
+    session.add_project_files([std::path::PathBuf::from("/p/a.cpp")]);
+    session.index_everything();
+    let mut rounds = 0;
+    while session.pending() > 0 && rounds < 200 {
+        session.advance(16);
+        rounds += 1;
+    }
+    let view = session
+        .view_of_the_file(std::path::Path::new("/p/a.cpp"))
+        .expect("a view");
+    let at = source.find("text.").expect("the fixture") + 5;
+    let set = session.completions(&view, FileOffset::new(at));
+    let labels: Vec<&str> = set.items.iter().map(|item| item.label.as_str()).collect();
+    assert!(
+        labels.contains(&"push_back") && labels.contains(&"clear"),
+        "`std::string` is `std::__cxx11::basic_string`, one namespace in from where its alias says `basic_string`: {labels:?}"
+    );
+}

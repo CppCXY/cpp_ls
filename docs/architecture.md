@@ -2498,6 +2498,51 @@ slice 5: items 0
 · the_reading_for 程序读数优先于 own cook → 不变；
 · the_program_that_read 对导入模块的文件答"模块的程序"→ 不变。
 ```
+### 15.14 修好了：`std::__cxx11::basic_string` 与"这个文件是按哪个程序编译的"
+
+§15.13 把翻转定位到"`std::basic_string` 的声明来源消失，而 ABI=1 的 `std::__cxx11::basic_string` 从来没被找到"。两处
+一起补上，翻转就不存在了。
+
+**1. 别名目标在"里面一层命名空间"里。** libstdc++ 用 `using __cxx11::basic_string;` 把 ABI=1 的类引进 `std`，
+而 using-declaration 不是我们索引里的 declaration，所以 `std::basic_string` 这个名字查不到。解析器现在在候选拼写
+（`std::basic_string`、`basic_string`）都失败后，按**别名目标所在的反向作用域**再找一层：
+`<prefix>::<一层>::<name>`，取"多出来层数最少"的那个（C++ 对内联命名空间/using-declaration 的查找规则）：
+
+```text
+std::string  →  basic_string<char>（别名，写在 std 里）
+             →  std::basic_string        ✗ 没有
+             →  basic_string             ✗ 没有
+             →  std::__cxx11::basic_string ✓ 232 个成员
+```
+
+**2. 一个导入模块的文件，是按模块的程序编译的。** `import std;` 不是 `#include`：这个文件自己的文本从来没有被当作
+程序读过（读它只会得到"1 个文件、33 个 token"、里面没有 `std` 的读数），它用到的声明是**模块那个翻译单元**读出来的。
+`ProjectIndex::the_program_that_read` 现在对这样的文件回答**模块接口单元的程序**，于是从这个文件发出的每个查询都
+使用模块构建时的那份读数，而不是"最后读过某个头文件的任意程序"——后者正是 pump 跑到某个工程文件时把
+`bits/basic_string.h` 换成另一份读数、把 68 项打成 0 的原因。
+
+实测（`test_module`，只写 `import std;` 的文件，光标在 `ptr->` 后，走 LSP `textDocument/completion`）：
+
+```text
+修前  0 s: 68 项   4 s: 68 项   10 s: 0 项   20 s: 0 项
+修后  0 s: 68 项   4 s: 68 项   10 s: 68 项  20 s: 68 项      isIncomplete 全为 false
+      （首次 1.7–7 s 是模块的程序读；之后 8–95 ms）
+```
+
+session 级也一样：修前 start 68 → slice 5 起 0；修后 start 68，连续 12 个 `advance(64)` 全是 68。
+
+回归测试：
+
+```text
+tests/generics.rs  an_alias_target_one_namespace_in_is_found
+    namespace std { namespace __cxx11 { struct basic_string { push_back; clear; }; }
+                    using string = basic_string; }        ← 与 libstdc++ 同形
+    std::string text; text.  → 必须列出 push_back / clear
+tests/modules.rs   a_module_unit_is_read_as_a_translation_unit（补了一条断言）
+    the_program_that_read(导入者) == the_program_that_read(模块接口单元)
+```
+
+`cpp_code_analysis` 48 targets、`cpp_ls` 15 targets 全绿。
 ## 15.3 关于"313 秒"
 
 那是我在**debug 配置**下量的（`cargo test --release` 之前的那次跑的是 debug 的 probe），release 下同一个工程
