@@ -2660,3 +2660,30 @@ fn one_file_session(source: &str) -> (Session<MemoryFiles>, cpp_code_analysis::F
 fn at_the_end_of(source: &str, needle: &str) -> usize {
     source.find(needle).expect("the fixture writes it") + needle.len()
 }
+
+/// **A pointee that is not a class has no members, and that answer is final.**
+///
+/// `int* p; p->` walks the pointer, finds `int`, and `int` names no class — so the list is empty *and complete*. The
+/// distinction is the protocol's: an empty list marked `isIncomplete` tells a client to ask again, and here nothing
+/// can change, so the popup would stand empty for ever. It is where `std::vector<int> v; v.begin()->` lands too: the
+/// iterator's arrow reaches `int`.
+#[test]
+fn a_pointee_that_is_not_a_class_answers_nothing_and_is_complete() {
+    let source = "\
+int f() {
+    int* p = nullptr;
+    p->
+    return 0;
+}
+";
+    let (session, view) = one_file_session(source);
+    let offered = session.completions(
+        &view,
+        cpp_code_analysis::file::coordinates::FileOffset::new(at_the_end_of(source, "p->")),
+    );
+    assert!(offered.items.is_empty(), "{:?}", offered.items);
+    assert!(
+        !offered.incomplete,
+        "`int` is not missing anything: the list is final"
+    );
+}

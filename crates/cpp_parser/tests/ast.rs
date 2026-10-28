@@ -1032,3 +1032,50 @@ fn a_function_definition_holds_its_body() {
         );
     }
 }
+
+/// **An incomplete `x->` must not delete the declaration written after it** — the shape a reader is in the middle of
+/// typing produces on every keystroke.
+///
+/// `a->` on its own is an expression statement whose member name is missing; the expression rule answers that with a
+/// `MissingNode` rather than a failure (a cursor is not a syntax error), and the statement then wants its `;` where it
+/// finds `int`. The **recovery** for that skipped to the following `;` — which is the `;` of `int second = 1;`, so the
+/// declaration was consumed as rubble and never entered the tree:
+///
+/// ```text
+/// before the fix:  CompoundStat holds Declaration "a->" and ExpressionStat "second = 2;"   — no `second` at all
+/// ```
+///
+/// Everything downstream reads the tree, so while a reader types `obj->` the declarations below the cursor go dark:
+/// their types are unknown, their members cannot be completed, and their uses are reported as undeclared names.
+#[test]
+fn a_declaration_after_an_incomplete_member_access_is_still_a_declaration() {
+    let source = "\
+struct Widget { int size; };
+int f() {
+    Widget* a = nullptr;
+    a->
+    int second = 1;
+    second = 2;
+}
+";
+    let tree = CppParser::parse(source, ParserConfig::default());
+    let declarations: Vec<String> = tree
+        .get_red_root()
+        .descendants()
+        .filter(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::Declaration)
+        .map(|node| node.text().to_string().trim().to_string())
+        .collect();
+
+    assert!(
+        declarations
+            .iter()
+            .any(|declaration| declaration == "int second = 1;"),
+        "the declaration after the cursor is in the tree: {declarations:?}"
+    );
+    assert!(
+        declarations
+            .iter()
+            .any(|declaration| declaration == "Widget* a = nullptr;"),
+        "and so is the one before it: {declarations:?}"
+    );
+}

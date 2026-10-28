@@ -584,6 +584,18 @@ fn the_element_type_pointed_at(
         .iter()
         .any(|member| matches!(member.fact.name.as_str(), "operator->" | "operator*"))
     {
+        if crate::probes::members() {
+            let names: Vec<&str> = members
+                .members
+                .iter()
+                .map(|member| member.fact.name.as_str())
+                .filter(|name| name.starts_with("operator"))
+                .collect();
+            eprintln!(
+                "element_type: {class} is not pointer-like ({} member(s), operators {names:?})",
+                members.members.len()
+            );
+        }
         return None;
     }
     let arguments: Vec<String> = written
@@ -591,7 +603,47 @@ fn the_element_type_pointed_at(
         .iter()
         .map(|argument| argument.to_string())
         .collect();
-    crate::index::project::element_type_of(index, scopes, root, path, class, class, &arguments)
+    let walked =
+        crate::index::project::element_type_of(index, scopes, root, path, class, class, &arguments);
+
+    // **A spelling only counts when it names a *class*.** `_Ptr_base` — `shared_ptr`'s base — says
+    // `using element_type = remove_extent_t<_Ty>;`, and that is an **alias template**: substituted at the use it is
+    // `remove_extent_t<std::string>`, whose target is `typename remove_extent<T>::type`, a trait evaluation rather
+    // than a spelling. Following it reaches a class template with no arguments, no members and no way back — which is
+    // exactly what `shared_ptr<std::string> p; p->` answered: nothing.
+    //
+    // For a class that takes an arrow through its own operator, **its own argument is the element** — that is what
+    // `shared_ptr<T>`, `unique_ptr<T>` and `weak_ptr<T>` mean, and it is the same rule
+    // `the_class_an_arrow_points_at` states for the other reader of this question.
+    match walked {
+        Some(pointee) if leads_to_members(index, scopes, root, path, &pointee) => Some(pointee),
+        _ => arguments
+            .first()
+            .filter(|first| leads_to_members(index, scopes, root, path, first))
+            .cloned(),
+    }
+}
+
+/// **Can a member query be asked about this spelling at all?** — the test for "is this a type, or a dead end?".
+///
+/// Deliberately asked of the *member list* rather than of the declaration: `std::string` is an **alias** of
+/// `basic_string<char, …>` and its members are 58; `remove_extent_t<std::string>` is an **alias template** whose target
+/// is a trait evaluation and whose member list is empty. The distinction that matters here is exactly that one, and a
+/// kind/`type_of` test gets it backwards on the case this exists for.
+///
+/// The list is cached by the index, and the walk for a class with no declaration answers immediately, so this is a
+/// hash lookup in the common case.
+fn leads_to_members(
+    index: &ProjectIndex,
+    scopes: &ScopeTree,
+    root: &CppSyntaxNode,
+    path: &Path,
+    name: &str,
+) -> bool {
+    matches!(
+        crate::index::project::members_of(index, scopes, root, path, name),
+        Known::Yes(list) if !list.members.is_empty()
+    )
 }
 
 fn members(
@@ -657,10 +709,26 @@ fn members(
     let Some((class, followed_a_pointer)) =
         the_class_after_the_operator(index, scopes, root, path, &written, access.arrow)
     else {
-        return refused(format!(
-            "the type of `{}` is `{written}`, which names no class to list members of",
-            access.object.text().to_string().trim()
-        ));
+        // **A type that names no class has no members, and that is a fact rather than a gap.** Every way of working
+        // the type out has already been taken by the time `the_class_after_the_operator` answers `None` — it follows
+        // pointers, a class's own `operator->` and `element_type` — so what is left is a type that is not a class at
+        // all: `int`, `double`, `void`, a function pointer. `int* p; p->` therefore answers "nothing here", and it is
+        // **complete**: `isIncomplete` would make a client ask again for an answer that cannot change, which is the
+        // shape of a popup that stays empty for ever.
+        return MemberAnswer {
+            set: CompletionSet {
+                scope: String::new(),
+                prefix,
+                replace,
+                truncated: false,
+                incomplete: false,
+                items: Vec::new(),
+            },
+            why: format!(
+                "the type of `{}` is `{written}`, which names no class to list members of",
+                access.object.text().to_string().trim()
+            ),
+        };
     };
 
     let found = match crate::index::project::members_of(index, scopes, root, path, &class) {

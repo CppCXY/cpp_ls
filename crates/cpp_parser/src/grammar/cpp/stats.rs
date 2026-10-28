@@ -114,6 +114,10 @@ pub fn parse_stats(p: &mut CppParser) {
     // ```
     let mut unclosed_braces = 0isize;
 
+    // **The one offset at which the recovery already decided not to skip** — see the Err arm below, where this
+    // keeps a statement that fails twice at the same token from spinning the loop.
+    let mut the_last_early_exit = usize::MAX;
+
     // **Where this block began**, so that a file boundary crossed after it can end it. A scope may not cross a file
     // boundary: a header that opens a `namespace` and never closes it must not hold the files spliced after it. See
     // [`ParserConfig::with_file_boundaries`], and note that the boundaries are empty for a parse of one
@@ -159,7 +163,14 @@ pub fn parse_stats(p: &mut CppParser) {
         match parse_stat(p) {
             Ok(_) => {}
             Err(err) => {
-                p.push_error(err);
+                // **One mistake, one error.** A statement that is re-read at the same token — which is what the
+                // early exit below does when the cursor is already at the next statement — fails in the same place
+                // and would report the same thing twice. Measured: `int b = ;` at file scope, where a fixture that
+                // pins "one error, in the second declaration" started seeing two, both at the same offset.
+                let before = p.current_token_index();
+                if before != the_last_early_exit {
+                    p.push_error(err);
+                }
 
                 // `?` early returns inside `parse_stat` leave markers open. Close them before
                 // recovering, otherwise the event stream stays unbalanced and corrupts the rest
@@ -172,7 +183,30 @@ pub fn parse_stats(p: &mut CppParser) {
                 unclosed_braces += p.brace_balance_since(before_events).max(0);
 
                 // Skip to next semicolon or closing brace for error recovery…
-                let before = p.current_token_index();
+                //
+                // **Unless a new statement starts here**, which is not a recovery at all: a statement that ended
+                // because its `;` was missing has already ended — the rules above emit a `MissingNode` for exactly
+                // that — and the token at the cursor belongs to the *next* statement. Skipping to the following `;`
+                // deletes it, and the deletion is invisible: measured on
+                //
+                // ```cpp
+                //     A* a = nullptr;
+                //     a->                  // ← what a reader's cursor is in the middle of
+                //     int second = 1;      // ← this Declaration was not in the tree at all
+                //     second = 2;          // ← …and so `second` was undeclared for the rest of the file
+                // ```
+                //
+                // where three `X->` in a row left only the first with a type. Every completion and every check after
+                // the cursor reads the tree, so while a reader types `obj->` the rest of their function goes dark.
+                //
+                // `continue` rather than falling through to the guard below: nothing was consumed, and that guard
+                // leaves the *block* when nothing was consumed. The one-per-offset note is what keeps this from
+                // spinning — a statement that fails again at the same token takes the skip below.
+                if before != the_last_early_exit && begins_a_statement(p) {
+                    the_last_early_exit = before;
+                    continue;
+                }
+                the_last_early_exit = usize::MAX;
                 while !p.is_eof()
                     && p.current_token() != CppTokenKind::Semicolon
                     && p.current_token() != CppTokenKind::RightBrace
@@ -210,6 +244,109 @@ pub fn parse_stats(p: &mut CppParser) {
             }
         }
     }
+}
+
+/// **Could a statement of its own begin at this token?** — the question the recovery in [`parse_stats`] asks before
+/// skipping tokens, because a statement that ended for want of a `;` has already ended and what follows belongs to the
+/// next one.
+///
+/// Deliberately **narrower than the statement dispatcher**: a name can continue an expression (`x = a b` is not
+/// recoverable by starting a statement at `b`), so a bare identifier answers `no` here and keeps the old skip — unless
+/// it is followed by a name, which is the `Type name` shape no expression has.
+fn begins_a_statement(p: &mut CppParser) -> bool {
+    match p.current_token() {
+        CppTokenKind::IfKeyword
+        | CppTokenKind::WhileKeyword
+        | CppTokenKind::DoKeyword
+        | CppTokenKind::ForKeyword
+        | CppTokenKind::SwitchKeyword
+        | CppTokenKind::TryKeyword
+        | CppTokenKind::ReturnKeyword
+        | CppTokenKind::CoReturnKeyword
+        | CppTokenKind::CoYieldKeyword
+        | CppTokenKind::BreakKeyword
+        | CppTokenKind::ContinueKeyword
+        | CppTokenKind::GotoKeyword
+        | CppTokenKind::ThrowKeyword
+        | CppTokenKind::LeftBrace => true,
+        // `auto x = …` is a declaration; `decltype` is already in the builtin list below.
+        CppTokenKind::AutoKeyword => true,
+        // **`Type name`** — `std::unique_ptr<std::string> b;`, `Widget w;`, `Foo* p;`. A name cannot be followed by
+        // another name in an expression, so reading this shape as the start of a declaration takes nothing away from
+        // a program that parses; it is the shape a reader's cursor sits above while they type `obj->` on the line
+        // before it.
+        CppTokenKind::Identifier => a_type_and_a_name_follow(p),
+        kind => exprs::starter_of_a_builtin_type(kind) || decls::can_begin_a_declaration(kind),
+    }
+}
+
+/// `Type name` written at the cursor — see [`begins_a_statement`], which asks this for a leading identifier.
+///
+/// The scan is the shape: `ident (:: ident)* [<…>] [*|&|const]* ident`, followed by a token that can follow a
+/// declarator. Template arguments are counted by depth because they nest (`vector<vector<int>>`), and the scan is
+/// bounded because this runs on a recovery path, where the input is by definition something the grammar refused.
+fn a_type_and_a_name_follow(p: &CppParser) -> bool {
+    const MAX_TOKENS: usize = 96;
+    let kind = |offset: usize| p.peek_token_kind_at(offset..offset + 1).first().copied();
+
+    if !matches!(kind(0), Some(CppTokenKind::Identifier)) {
+        return false;
+    }
+    let mut at = 1usize;
+    while at < MAX_TOKENS {
+        match kind(at) {
+            Some(CppTokenKind::Scope) if matches!(kind(at + 1), Some(CppTokenKind::Identifier)) => {
+                at += 2
+            }
+            Some(CppTokenKind::Less) => {
+                let mut depth = 0usize;
+                loop {
+                    match kind(at) {
+                        Some(CppTokenKind::Less) => {
+                            depth += 1;
+                            at += 1;
+                        }
+                        // `>>` closes two: `vector<vector<int>>` is how every container is written — and the lexer
+                        // produces it on demand, so this reads the two `Greater` tokens it is split into.
+                        Some(CppTokenKind::Greater) => {
+                            depth = depth.saturating_sub(1);
+                            at += 1;
+                        }
+                        Some(_) => at += 1,
+                        None => return false,
+                    }
+                    if depth == 0 {
+                        break;
+                    }
+                    if at >= MAX_TOKENS {
+                        return false;
+                    }
+                }
+            }
+            _ => break,
+        }
+    }
+    while matches!(
+        kind(at),
+        Some(CppTokenKind::Star | CppTokenKind::Ampersand | CppTokenKind::ConstKeyword)
+    ) {
+        at += 1;
+    }
+    if !matches!(kind(at), Some(CppTokenKind::Identifier)) {
+        return false;
+    }
+    matches!(
+        kind(at + 1),
+        Some(
+            CppTokenKind::Assign
+                | CppTokenKind::Semicolon
+                | CppTokenKind::LeftParen
+                | CppTokenKind::LeftBracket
+                | CppTokenKind::LeftBrace
+                | CppTokenKind::Comma
+                | CppTokenKind::Colon
+        )
+    )
 }
 
 fn block_follow(p: &CppParser) -> bool {

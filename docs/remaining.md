@@ -1211,7 +1211,7 @@ the_report 的重发/并集   → 旧发现留在屏幕上（一直留）
 
 ---
 
-## M. 指针/智能指针的 `->`：修好的、还剩的（2026-10-29）
+## M. 指针/智能指针的 `->`：三个缺陷，两个修好、一个纠正并修好（2026-10-29）
 
 报告来自编辑器截图：`std::string* message = new std::string(…); message->` 只给出一项
 `operator basic_string_view<_Elem, _Traits>`；用户补一句"智能指针也是错误的"。查下来是**三个独立的东西**。
@@ -1267,35 +1267,77 @@ std::vector<int> v; v.begin()->       →   0 项，isIncomplete true           
 `completion::a_smart_pointers_arrow_reaches_what_element_type_names`（两个都先看着它在修前失败）。
 
 ### M3. 还剩的两种：`shared_ptr` 和容器的 iterator —— **没修**
+### M3. `shared_ptr` 与容器的 iterator：同一处"跟不下去"—— 修好
 
-两者都答 0 项并标 `incomplete`（诚实，但也没用）。定位到的原因不同：
+修好 M2 之后剩下的两种，原因其实是**一个**：`element_type` 走到的名字**不是一个能问成员的类型**。
 
-* `shared_ptr` 的 `operator->` 是**成员模板**
-  （`template <class _Ty2 = _Ty, enable_if_t<!is_array_v<_Ty2>, int> = 0> _Ty2* operator->()`），
-  而 `members_of("std::shared_ptr")` 的成员表里**没有** `operator->` 这一项，所以 M2 的守卫直接把它挡掉了。
-  下一步是让成员模板也进成员表（或让守卫改成"有 `element_type` 且（有 `operator*` 或没成员表）"），
-  并在 `element_type` 走 `_Ptr_base` 时把 `_Ty` 代换进去（§9.4 说这条链已经走通，但 `shared_ptr` 这一侧还没实测）。
-* `v.begin()` 的迭代器类：`type_of_expression` 对 `v.begin()` 有没有类型要先测
-  （`CPPLS_TRACE_TYPES=1`），本次没查。
-
-两者的探针都在：`crates/cpp_ls/tests/arrow_status.rs`（`CPPLS_ARROW=n` 选第几个 `->`）。
-
-### M4. 顺带发现：`X->` 后面那条声明会被解析器吃掉 —— **没修，但要记**
-
-写 `a->`（还没打成员名）时，**下一条声明会从树里消失**：
-
-```cpp
-int main() {
-    A* a = nullptr;
-    a->
-    int second = 1;     // ← 树里没有这个 Declaration
-    second = 2;         // ← 它的 BinaryExpr 还在
-}
+```text
+shared_ptr<T> 的基类 _Ptr_base 写着：using element_type = remove_extent_t<_Ty>;
+                                  → 代换后是 remove_extent_t<std::string>，一个**别名模板**，
+                                    目标是 typename remove_extent<T>::type —— 一次 trait 求值，不是一个拼写
+                                  → 跟着它走到 "remove_extent_t"，一个没有实参、没有成员的类模板 → 0 项
 ```
 
-解析器对 `a->` 的处理是好的（`emit_missing_node` + 结束这个表达式），问题在语句层：缺 `;` 的恢复**跳到下一个 `;`**，
-于是 `int second = 1` 被一起丢掉了。编辑器里这意味着"光标后面那一整段声明在打字期间不可见"，
-补全/诊断都会短暂失去它们（本次的探针就被它骗过一次：连写三个 `X->`，只有第一个能解析出类型）。
-修法是"缺 `;` 且下一个 token 能开一条声明时，补一个 missing `;` 而不是跳过"。
+修法是一句判断改对：**"这个名字能不能问成员"要问成员表本身**，而不是问声明的 kind ——
+`std::string` 是**别名**（`using string = basic_string<…>`，58 个成员），`remove_extent_t<…>` 是**别名模板**
+（0 个）。用 kind/`type_of` 判会把这两种恰好判反（实测：`unique_ptr<std::string>` 因此从 58 项退回 14 项）。
 
+```text
+walked = element_type 的结果
+if walked 问得出非空成员表        → 用它
+else 类的**第一个实参**能问出成员 → 用它（shared_ptr<T> / unique_ptr<T> / weak_ptr<T> 的 element 就是 T）
+else                              → 不是 pointer-like 的箭头，退回 operator-> 的声明返回类型
+```
+
+第二行的规则不是为 STL 特判：**一个自己定义 `operator->` 的类模板，它的 element 就是它自己的参数**，
+`the_class_an_arrow_points_at`（project.rs 里另一位读同一问题的人）早就是这么写的，这里只是让箭头那条路也用它。
+
+顺带一处"答对的空"：**指针指向的不是类时，空表就是最终答案**。`int* p; p->`、`v.begin()->`（`vector<int>`）
+都不该标 `isIncomplete` —— 客户端会一直重问一个永远不会变的答案。
+
+实测（临时工程 + 真实 MSVC STL，暖缓存）：
+
+```text
+std::string*                        → 58 项  append/assign/at   ✓
+std::unique_ptr<std::string>        → 58 项  append/assign/at   ✓
+std::shared_ptr<std::string>        → 58 项  append/assign/at   ✓（修前 0 项 + incomplete）
+std::unique_ptr<Foo>                →  1 项  x                  ✓
+std::shared_ptr<Foo>                →  1 项  x                  ✓（修前 0 项）
+std::vector<std::string> v; v.begin()->  → 68 项  append/assign/at  ✓
+std::vector<int> v; v.begin()->     →  0 项，isIncomplete **false** ✓（int 不欠任何东西）
+```
+
+测试：`completion::a_smart_pointers_arrow_reaches_what_element_type_names`（先把 `the_element_type_pointed_at`
+改成永远 `None` 看它失败）、`completion::a_pointee_that_is_not_a_class_answers_nothing_and_is_complete`。
+
+### M4. `X->` 后面那条声明：一半是解析器的恢复，一半不是 —— 修好，另一半记下来
+
+先纠正 M4 第一版的结论。`a->` 后面跟一条**标识符开头**的声明时，解析器根本没出错：
+
+```cpp
+    m->
+    std::unique_ptr<std::string> b;      // 解析成 (m->std) :: unique_ptr < std::string > b
+```
+
+C++ 不认换行，`-> std` 是**合法**的成员名，所以这棵树是文法允许的读法（编译器会报"没有这个成员"，
+但那不是"少了一条声明"）。所以这条不能靠恢复修 —— 也说明补全在那种位置上本来就无从下手。
+
+**真正会吃掉声明的是关键字开头的那种**，而它确实是恢复的 bug：
+
+```cpp
+    A* a = nullptr;
+    a->                  // 成员名缺失（`int` 是关键字，不是标识符）→ MissingNode，表达式结束
+    int second = 1;      // 缺 `;` 的恢复**跳到下一个 `;`**，把这条声明一起丢了
+    second = 2;          // ← 于是 `second` 在文件余下部分都是"未声明"
+```
+
+修法在 `parse_stats` 的 `Err` 分支：跳过之前先问一句"这里是不是已经开始了**下一条语句**"
+（`begins_a_statement`：语句关键字、内置类型的首词、`auto`、声明锚点、以及 `Type name` 这个表达式不可能有的形状）。
+是的话就 `continue`，让语句循环去读它。同一 offset 只让一次，防止一个反复失败的语句把循环卡住。
+
+测试：`cpp_parser::ast::a_declaration_after_an_incomplete_member_access_is_still_a_declaration`
+（把新增的判断改成 `false` 看它失败：修前那棵树里 `int second = 1;` 根本不存在）。
+编辑器的意义：读着打 `obj->` 的那几百毫秒里，光标后面每一条声明都还在。
+
+---
 ---

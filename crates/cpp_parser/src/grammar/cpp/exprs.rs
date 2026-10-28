@@ -2969,7 +2969,7 @@ fn starts_a_requires_expression(p: &CppParser) -> bool {
 }
 
 /// Parse a requires-expression: `requires (params) { requirement... }`.
-fn starter_of_a_builtin_type(kind: CppTokenKind) -> bool {
+pub(super) fn starter_of_a_builtin_type(kind: CppTokenKind) -> bool {
     matches!(
         kind,
         // `bool` is a `BoolLiteral` in this lexer rather than a keyword of its own — measured, the keyword table says
