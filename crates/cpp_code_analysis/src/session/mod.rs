@@ -6698,6 +6698,8 @@ impl<F: FileProvider + Clone> Session<F> {
             prefix: written.to_string(),
             replace: range,
             truncated: false,
+            // A module name is a file on disk, not a fact the index has to have read: nothing here can be missing.
+            incomplete: false,
             items,
         }
     }

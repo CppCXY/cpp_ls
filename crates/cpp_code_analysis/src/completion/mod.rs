@@ -255,6 +255,15 @@ pub struct CompletionSet {
     /// reading files and exactly wrong when the answer was merely capped — the retry would return the same capped
     /// list for ever.
     pub truncated: bool,
+    /// **Was the analysis itself incomplete** — a class this answer depends on that could not be read?
+    ///
+    /// The protocol's `isIncomplete` means one thing: *ask again later*. `truncated` is a budget, and re-asking
+    /// returns the same list; this is the other kind — a class whose facts the index does not have yet, so the
+    /// members are **missing rather than few**. Measured on a real project: `std::string* message; message->`
+    /// offered **one** item on the first keystroke (`operator basic_string_view`, the only member the raw reading of
+    /// `<xstring>` had at file scope) and **58** once the file was cooked. A list that looks final and holds a
+    /// quarter of the truth is worse than an empty one, because the reader believes it.
+    pub incomplete: bool,
 }
 
 impl Default for CompletionSet {
@@ -265,6 +274,7 @@ impl Default for CompletionSet {
             prefix: String::new(),
             replace: SourceRange::new(0, 0),
             truncated: false,
+            incomplete: false,
         }
     }
 }
@@ -478,34 +488,36 @@ pub(crate) fn the_class_after_the_operator(
     let mut current = written.clone();
     for _ in 0..4 {
         if let Some(class) = current.class_name().map(str::to_string) {
-            // **A `.` on a class with `operator->` still means the pointee.** `config.Editorconfig.` where
-            // `Editorconfig` is a `std::shared_ptr<LuaEditorConfig>` offered `operator=`, `element_type` and
-            // `weak_type` — the members of `shared_ptr`, which is not what the reader is writing; C++ wants `->` and
-            // the members are the pointee's. Following the operator here reports `followed_a_pointer`, and that is
-            // what makes the completion **replace the `.` with `->`**, so the reader gets the spelling C++ needs and
-            // not only the right list.
-            if !arrow
-                && let Some(returns) = crate::index::project::operator_returns_of(
-                    index,
-                    &mut |_: &Path| None,
-                    scopes,
-                    root,
-                    path,
-                    &current,
-                    "operator->",
-                )
+            // **1. A pointer-like class says what its arrow reaches, in `element_type`** — the standard's own
+            // protocol, which `std::pointer_traits` is written in terms of and which `unique_ptr`, `shared_ptr` and
+            // `weak_ptr` all take part in. It is asked **first**, because on those classes the arrow's declared
+            // return type is a member alias of a dependent `typename …::type`:
+            //
+            // ```cpp
+            // _NODISCARD pointer operator->() const noexcept;         // unique_ptr
+            // using pointer = typename _Get_deleter_pointer_type<_Ty, remove_reference_t<_Dx>>::type;
+            // ```
+            //
+            // Following *that* lands on a trait template — or, when the fact carries no readable return type at all,
+            // on nothing, which is how the answer became the smart pointer's **own** members. Measured on a real
+            // project: `std::unique_ptr<int> p; p->` offered `get`/`get_deleter` (none of which can be written after
+            // that arrow) and `std::unique_ptr<std::string> p; p->` offered nothing.
+            //
+            // It is asked **only of a class that declares `operator->`** — that is what "pointer-like" means, and it
+            // is what keeps an ordinary pointer from being stolen: `std::string* p; p->` must reach `std::string`,
+            // whose member list has no `operator->`, so the pointer is stripped by the arm below instead of `p->`
+            // becoming `basic_string::value_type`'s members (`char`'s, of which there are none).
+            if let Some(pointee) =
+                the_element_type_pointed_at(index, scopes, root, path, &class, &current)
             {
-                current = crate::sema::types::parse_type_spelling(&returns);
+                current = crate::sema::types::parse_type_spelling(&pointee);
                 followed_a_pointer = true;
                 continue;
             }
-            if !arrow {
-                return Some((class, followed_a_pointer));
-            }
-            // **A class takes the arrow through its own `operator->`**, and a class without one is where the arrow
-            // stops: a plain `struct` on the left of `->` is ill-formed, and its members are the honest answer for a
-            // reader who typed one by mistake.
-            let Some(returns) = crate::index::project::operator_returns_of(
+            // **2. A class's own `operator->`, when its declared return type can be read.** For an `arrow` this is
+            // the chain continuing; for a `.` it is a reader who typed the wrong operator, which is reported by
+            // `followed_a_pointer` so that the completion can rewrite the `.` as `->`.
+            let returns = crate::index::project::operator_returns_of(
                 index,
                 &mut |_: &Path| None,
                 scopes,
@@ -513,10 +525,16 @@ pub(crate) fn the_class_after_the_operator(
                 path,
                 &current,
                 "operator->",
-            ) else {
+            );
+            let Some(returns) = returns else {
+                // **3. Where the arrow stops.** A plain `struct` on the left of `->` is ill-formed, and its members
+                // are the honest answer for a reader who typed one by mistake.
                 return Some((class, followed_a_pointer));
             };
             current = crate::sema::types::parse_type_spelling(&returns);
+            if !arrow {
+                followed_a_pointer = true;
+            }
             continue;
         }
         match current.pointee() {
@@ -531,6 +549,49 @@ pub(crate) fn the_class_after_the_operator(
         .class_name()
         .map(str::to_string)
         .map(|class| (class, followed_a_pointer))
+}
+
+/// **What a pointer-like class's arrow reaches**, asked of the index's own walk — see
+/// [`crate::index::project::element_type_of`], which is the one implementation of that rule.
+///
+/// # Why the member list is asked first
+///
+/// A class is **pointer-like** when it declares `operator->`; `element_type` is then the standard's answer to what
+/// that arrow reaches. The two must be asked together, because `element_type`/`value_type` alone are far too common:
+/// `std::string` has `value_type = char`, so asking them of *any* class turned `std::string* p; p->` into "the members
+/// of `char`" — measured, sixty-eight members became zero. So the guard is the operator, read from the class's member
+/// list (which walks bases and, unlike the single-member query, never asks about an arrow — `member_fact` falls back to
+/// `the_class_after_the_operator`, and this function is called from there).
+///
+/// The **arguments the use wrote** (`["std::string"]` for `std::unique_ptr<std::string>`) are what its `element_type`
+/// is substituted with, and the class is passed to `template_parameters_for` **qualified**: with the bare `unique_ptr`
+/// the walk reached the primary template's parameters and answered `_Ty` unsubstituted, which then pointed the arrow at
+/// a class called `_Ty`.
+fn the_element_type_pointed_at(
+    index: &ProjectIndex,
+    scopes: &ScopeTree,
+    root: &CppSyntaxNode,
+    path: &Path,
+    class: &str,
+    written: &crate::sema::types::Type,
+) -> Option<String> {
+    let Known::Yes(members) = crate::index::project::members_of(index, scopes, root, path, class)
+    else {
+        return None;
+    };
+    if !members
+        .members
+        .iter()
+        .any(|member| matches!(member.fact.name.as_str(), "operator->" | "operator*"))
+    {
+        return None;
+    }
+    let arguments: Vec<String> = written
+        .arguments()
+        .iter()
+        .map(|argument| argument.to_string())
+        .collect();
+    crate::index::project::element_type_of(index, scopes, root, path, class, class, &arguments)
 }
 
 fn members(
@@ -550,6 +611,10 @@ fn members(
             prefix: prefix.clone(),
             replace,
             truncated: false,
+            // **"Not worked out" is not "nothing there".** Every refusal below is a missing fact — the type of the
+            // object, or the class it names — so the client has to be told to ask again, and the handler's
+            // `isIncomplete` is the only way to say so.
+            incomplete: true,
             items: Vec::new(),
         },
         why,
@@ -600,6 +665,11 @@ fn members(
 
     let found = match crate::index::project::members_of(index, scopes, root, path, &class) {
         Known::Yes(found) => found,
+        // **The class was not found, which on a real project is usually "not read yet".** `<xstring>` declares
+        // `basic_string` inside `_STD_BEGIN`/`_STD_END`, so the class is at *file* scope until that header is
+        // cooked — and a member list for it is empty (or holds the handful of members the raw reading happened to
+        // place) until then. Told to ask again, the client retries on the next keystroke and gets the real list;
+        // told nothing, it shows the list it got and the reader believes it.
         Known::Unknown(reason) => {
             return MemberAnswer {
                 set: CompletionSet {
@@ -607,6 +677,7 @@ fn members(
                     prefix,
                     replace,
                     truncated: false,
+                    incomplete: true,
                     items: Vec::new(),
                 },
                 why: reason.describe(),
@@ -621,6 +692,7 @@ fn members(
                     prefix,
                     replace,
                     truncated: false,
+                    incomplete: true,
                     items: Vec::new(),
                 },
                 why: format!("`{class}` is not a class this analysis can see"),
@@ -737,12 +809,18 @@ fn members(
         format!("`{class}` is declared and has no members this analysis can see")
     };
 
+    // **A list that names where it stops is an incomplete answer**, and the client has to be able to tell it from a
+    // complete one — `MemberList::unlisted` is exactly that field (the bases this walk could not open, with why). The
+    // list is still offered: a partial list plus "ask again later" is better than a partial list that looks final.
+    let incomplete = !members.unlisted.is_empty();
+
     MemberAnswer {
         set: CompletionSet {
             scope: class.to_string(),
             prefix,
             replace,
             truncated,
+            incomplete,
             items,
         },
         why,
@@ -914,6 +992,8 @@ fn names(
         prefix: listed_prefix,
         replace,
         truncated,
+        // A name list is not a member list: nothing here can be *missing* because a class was not read.
+        incomplete: false,
     }
 }
 
@@ -938,6 +1018,7 @@ fn directives(written: &str, range: SourceRange) -> CompletionSet {
         prefix: written.to_string(),
         replace: range,
         truncated: false,
+        incomplete: false,
         items,
     }
 }
@@ -1049,6 +1130,7 @@ fn doc_comments(
         prefix: written.to_string(),
         replace: range,
         truncated: false,
+        incomplete: false,
         items,
     }
 }
@@ -1096,6 +1178,7 @@ fn macro_body(
         prefix: written.to_string(),
         replace: range,
         truncated: false,
+        incomplete: false,
         items,
     }
 }
@@ -1173,6 +1256,7 @@ fn condition(
         prefix: written.to_string(),
         replace: range,
         truncated: false,
+        incomplete: false,
         items,
     }
 }
@@ -1218,6 +1302,7 @@ fn headers_for(
         prefix: written.to_string(),
         replace: range,
         truncated: headers.truncated(),
+        incomplete: false,
         items,
     }
 }

@@ -1127,7 +1127,7 @@ a_completion_asked_while_the_index_fills_comes_back_within_the_budget
 ### 实测（用户自己的工程，冷缓存）
 
 ```text
-$env:CPPLS_FORMAT_PROJECT = "C:\Users\zc\Desktop\cpp"
+$env:CPPLS_FORMAT_PROJECT = "<一个真实工程>"
 cargo test --release -p cpp_ls --test diagnostics_status -- --ignored --nocapture
 ```
 
@@ -1208,3 +1208,94 @@ commit，断言 commit 被拒、`diagnostics` 没有答案；然后用新文本�
 the_report 的重发/并集   → 旧发现留在屏幕上（一直留）
 在飞的 cook 提交旧文本   → 旧发现被当成新文本的答案（一直留）
 ```
+
+---
+
+## M. 指针/智能指针的 `->`：修好的、还剩的（2026-10-29）
+
+报告来自编辑器截图：`std::string* message = new std::string(…); message->` 只给出一项
+`operator basic_string_view<_Elem, _Traits>`；用户补一句"智能指针也是错误的"。查下来是**三个独立的东西**。
+
+### M1. 冷暖决定答案，而答案没说自己是冷的 —— 修好
+
+`<xstring>` 里的 `basic_string` 声明在 `_STD_BEGIN` / `_STD_END` 之间：**生**摘要里这个类是文件作用域的，
+**熟**摘要里才在 `namespace std`。所以冷会话的第一次 `message->` 拿到的是一个"半个类"的成员表。
+
+```text
+冷（didOpen 后第一次）：  0 项，isIncomplete true   ← 修前是 1 项（operator basic_string_view），isIncomplete **false**
+750 ms 后：              58 项，isIncomplete false
+```
+
+修法两处：
+
+* `CompletionSet::incomplete` —— 成员查询自己说"我不完整"（类查不到 / `MemberList::unlisted` 非空），
+  handler 把它 OR 进 `isIncomplete`。协议里那个字段只有一个意思：*待会儿再问*。
+* `remember_member_list` **不再缓存"用生事实造出来的表"**：贡献文件里只要有一个还没有熟读，
+  这张表就不进缓存（`cooked_reading` 一票否决）。修前那张一项的表会被缓存到会话结束——它的贡献文件没变。
+
+### M2. 智能指针的箭头：`element_type` 要**先问**，但要先问清楚"你是不是 pointer-like" —— 修好（unique_ptr）
+
+`<memory>` 的 `unique_ptr::operator->` 返回 `pointer`，而 `pointer` 是
+
+```cpp
+using pointer = typename _Get_deleter_pointer_type<_Ty, remove_reference_t<_Dx>>::type;
+```
+
+一个依赖的 `typename …::type`。跟着它走会落到 trait 模板上（或者落到一个叫 `pointer`、没有成员的"类"），
+于是答案退化成**智能指针自己的成员**（`get`、`get_deleter`、`operator*`）——那些写完 `->` 一个都写不出来。
+
+标准自己的答案是 `std::pointer_traits<Ptr>::element_type`，`unique_ptr` / `shared_ptr` / `weak_ptr` 都声明它。
+项目里**已经有**这条规则的实现（`index::project::element_type_of`，§9.4/§9.5 的产物，会走基类别名、会代换），
+这一轮只是让它被箭头那条路**先问**，并且给出正确的守卫：
+
+```text
+守卫 = 类自己声明了 operator-> 或 operator*        否则 std::string 会被"偷走"：
+string* p; p->  →  basic_string::value_type = char  →  char 没有成员  →  68 项变 0 项（实测）
+```
+
+实测（临时工程 + 真实 MSVC STL，暖缓存）：
+
+```text
+std::string*                          →  58 项，append/assign/at…            ✓（修前冷 0-1 项）
+std::unique_ptr<std::string>          →  58 项，append/assign/at…            ✓（修前 0 项，或 get/get_deleter）
+std::unique_ptr<Foo>（本地类，1 个成员） →   1 项，x                            ✓（修前 0 项）
+std::shared_ptr<std::string>          →   0 项，isIncomplete true            ✗ 见 M3
+std::vector<int> v; v.begin()->       →   0 项，isIncomplete true            ✗ 见 M3
+```
+
+测试：`completion::a_member_answer_that_is_missing_facts_is_marked_incomplete`、
+`completion::a_smart_pointers_arrow_reaches_what_element_type_names`（两个都先看着它在修前失败）。
+
+### M3. 还剩的两种：`shared_ptr` 和容器的 iterator —— **没修**
+
+两者都答 0 项并标 `incomplete`（诚实，但也没用）。定位到的原因不同：
+
+* `shared_ptr` 的 `operator->` 是**成员模板**
+  （`template <class _Ty2 = _Ty, enable_if_t<!is_array_v<_Ty2>, int> = 0> _Ty2* operator->()`），
+  而 `members_of("std::shared_ptr")` 的成员表里**没有** `operator->` 这一项，所以 M2 的守卫直接把它挡掉了。
+  下一步是让成员模板也进成员表（或让守卫改成"有 `element_type` 且（有 `operator*` 或没成员表）"），
+  并在 `element_type` 走 `_Ptr_base` 时把 `_Ty` 代换进去（§9.4 说这条链已经走通，但 `shared_ptr` 这一侧还没实测）。
+* `v.begin()` 的迭代器类：`type_of_expression` 对 `v.begin()` 有没有类型要先测
+  （`CPPLS_TRACE_TYPES=1`），本次没查。
+
+两者的探针都在：`crates/cpp_ls/tests/arrow_status.rs`（`CPPLS_ARROW=n` 选第几个 `->`）。
+
+### M4. 顺带发现：`X->` 后面那条声明会被解析器吃掉 —— **没修，但要记**
+
+写 `a->`（还没打成员名）时，**下一条声明会从树里消失**：
+
+```cpp
+int main() {
+    A* a = nullptr;
+    a->
+    int second = 1;     // ← 树里没有这个 Declaration
+    second = 2;         // ← 它的 BinaryExpr 还在
+}
+```
+
+解析器对 `a->` 的处理是好的（`emit_missing_node` + 结束这个表达式），问题在语句层：缺 `;` 的恢复**跳到下一个 `;`**，
+于是 `int second = 1` 被一起丢掉了。编辑器里这意味着"光标后面那一整段声明在打字期间不可见"，
+补全/诊断都会短暂失去它们（本次的探针就被它骗过一次：连写三个 `X->`，只有第一个能解析出类型）。
+修法是"缺 `;` 且下一个 token 能开一条声明时，补一个 missing `;` 而不是跳过"。
+
+---

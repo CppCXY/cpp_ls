@@ -2512,3 +2512,151 @@ fn an_arrow_is_read_as_an_arrow() {
         other => panic!("a member access is what follows a dot, not {other:?}"),
     }
 }
+
+/// **A member answer says whether it is missing members**, and a client has to be told.
+///
+/// `isIncomplete` in the protocol means one thing — *ask again later* — and a member list has two ways of being
+/// short: the budget (`truncated`, where asking again returns the same list) and the **analysis** (`incomplete`:
+/// a class this answer depends on has not been read). Measured on a real project: `std::string* message; message->`
+/// answered **one** item on the first keystroke (`operator basic_string_view`, all the raw reading of `<xstring>` had
+/// at file scope) and **58** once the header was cooked — and the one-item list went out with `isIncomplete: false`,
+/// so the client showed it as the answer. See `docs/completion.md`.
+#[test]
+fn a_member_answer_that_is_missing_facts_is_marked_incomplete() {
+    // **A class nothing declares**: the honest answer is "not yet", not "no members".
+    let unknown = "\
+int f() {
+    no_such_class* p = nullptr;
+    p->
+    return 0;
+}
+";
+    let (session, view) = one_file_session(unknown);
+    let offered = session.completions(
+        &view,
+        cpp_code_analysis::file::coordinates::FileOffset::new(at_the_end_of(unknown, "p->")),
+    );
+    assert!(offered.items.is_empty(), "{:?}", offered.items);
+    assert!(
+        offered.incomplete,
+        "a class this analysis cannot see is a missing fact, so the client must be allowed to ask again"
+    );
+
+    // **A class it can see**: complete, and the flag says so.
+    let known = "\
+struct Widget { int size; int grow; };
+int f() {
+    Widget* p = nullptr;
+    p->
+    return 0;
+}
+";
+    let (session, view) = one_file_session(known);
+    let offered = session.completions(
+        &view,
+        cpp_code_analysis::file::coordinates::FileOffset::new(at_the_end_of(known, "p->")),
+    );
+    let labels: Vec<&str> = offered
+        .items
+        .iter()
+        .map(|item| item.label.as_str())
+        .collect();
+    assert_eq!(labels, vec!["grow", "size"], "the pointee's members");
+    assert!(
+        !offered.incomplete,
+        "nothing is missing here, so the list stands as it is"
+    );
+}
+
+/// **A smart pointer's arrow reaches the pointee, through `element_type`** — the standard's pointer-like protocol.
+///
+/// `<memory>`'s `unique_ptr::operator->` returns `pointer`, a member typedef whose target is a dependent
+/// `typename _Get_deleter_pointer_type<…>::type`: an engine that does not instantiate metafunctions cannot follow
+/// that declaration, and before this it fell back to the *smart pointer's own* members. Measured on a real project:
+/// `std::unique_ptr<int> p; p->` offered `get`, `get_deleter` and `operator*` — none of which can be written after
+/// that arrow — and `std::unique_ptr<std::string> p; p->` offered nothing at all.
+///
+/// `element_type` is what `std::pointer_traits` is written in terms of, so this is the standard's answer rather than
+/// a guess about one class; a class that is not pointer-like declares none, and nothing else is affected.
+#[test]
+fn a_smart_pointers_arrow_reaches_what_element_type_names() {
+    let header = "\
+namespace std {
+template <class T> struct pointers {
+    typedef typename T::pointer pointer;
+};
+template <class T> struct unique_ptr {
+    T* stored;
+    typedef T element_type;
+    typedef typename pointers<T>::pointer pointer;
+    pointer operator->() const;
+    T& operator*() const;
+    int get() const;
+};
+struct string { int size() const; const char* c_str() const; };
+}
+";
+    let source = "\
+#include \"smart.h\"
+int f() {
+    std::unique_ptr<std::string> p;
+    p->
+    return 0;
+}
+";
+    let files = MemoryFiles::new()
+        .with_file("/p/smart.h", header)
+        .with_file("/p/a.cpp", source);
+    let providers = SessionFiles::new(OpenDocuments::new(), files);
+    let mut session = Session::with_config(
+        "/p",
+        providers,
+        WatchFilter::new("/p"),
+        CompilerConfig::default(),
+    );
+    session.add_project_files([
+        std::path::PathBuf::from("/p/smart.h"),
+        std::path::PathBuf::from("/p/a.cpp"),
+    ]);
+    session.index_everything();
+    let view = cooked_view(&mut session, "/p/a.cpp");
+
+    let offered = session.completions(
+        &view,
+        cpp_code_analysis::file::coordinates::FileOffset::new(at_the_end_of(source, "p->")),
+    );
+    let labels: Vec<&str> = offered
+        .items
+        .iter()
+        .map(|item| item.label.as_str())
+        .collect();
+    assert!(
+        labels.contains(&"size") && labels.contains(&"c_str"),
+        "`element_type` says the arrow reaches `std::string`: {labels:?}"
+    );
+    assert!(
+        !labels.contains(&"get"),
+        "the smart pointer's own members cannot be written after its arrow: {labels:?}"
+    );
+}
+
+/// One file in one project, cooked, with a view of it — the shape the two tests above share.
+fn one_file_session(source: &str) -> (Session<MemoryFiles>, cpp_code_analysis::FileView) {
+    let files = MemoryFiles::new().with_file("/p/a.cpp", source);
+    let providers = SessionFiles::new(OpenDocuments::new(), files);
+    let mut session = Session::with_config(
+        "/p",
+        providers,
+        WatchFilter::new("/p"),
+        CompilerConfig::default(),
+    );
+    session.add_project_files([std::path::PathBuf::from("/p/a.cpp")]);
+    session.index_everything();
+    let view = cooked_view(&mut session, "/p/a.cpp");
+    (session, view)
+}
+
+/// The file offset just after the first `needle` — where a cursor sits when the reader has typed it.
+fn at_the_end_of(source: &str, needle: &str) -> usize {
+    source.find(needle).expect("the fixture writes it") + needle.len()
+}

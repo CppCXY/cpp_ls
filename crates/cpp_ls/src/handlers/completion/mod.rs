@@ -218,7 +218,13 @@ pub async fn on_completion(
             // layer cannot see. None of them is a fact about the prefix.
             is_incomplete: found.items.is_empty()
                 || !session.is_locally_ready(&path)
-                || found.truncated,
+                || found.truncated
+                // **…and when the analysis stopped short.** A member list can be *missing* members because the class
+                // it needs has not been read yet: `std::string* message; message->` offered **one** item on the first
+                // keystroke (`operator basic_string_view`, the only member the raw reading of `<xstring>` had at file
+                // scope) and **58** once that header was cooked. That is the same "ask again later" an empty list
+                // gets — and without it a partial list looks final, which is the defect this arm was added for.
+                || found.incomplete,
             items: found
                 .items
                 .iter()

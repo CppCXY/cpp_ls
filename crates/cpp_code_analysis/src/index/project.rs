@@ -1321,11 +1321,20 @@ impl ProjectIndex {
     ///
     /// A list with an `unlisted` base **is** remembered, tagged with [`CachedMemberList::read_at`]: the gap is a
     /// statement about the files that have been read, so the entry is valid only while that set does not grow.
+    ///
+    /// # And a list made of facts that are not cooked is not remembered at all
+    ///
+    /// A summary is written from the file's **own text** first and revised when the file is **cooked**, and the two
+    /// disagree about scope: `_STD_BEGIN` is a name to a reader and `namespace std {` to a compiler, so a class's
+    /// members move — and appear — when its header is cooked. Measured on a real project's `<xstring>`:
+    /// `std::string* message; message->` offered **one** member before the cook and **58** after, and the
+    /// one-member list was then served from this cache for the rest of the session, because none of its contributors
+    /// changed and the class was found. A list of uncooked facts is therefore *not* cached: `cooked_reading` answers
+    /// for each contributor, and one miss means the facts may still be revised.
     fn remember_member_list(&self, key: (String, PathBuf), list: &MemberList) {
         if list.members.is_empty() {
             return;
         }
-        let read_at = self.summaries.len();
 
         let mut contributors: Vec<PathBuf> = Vec::new();
         for member in &list.members {
@@ -1333,6 +1342,14 @@ impl ProjectIndex {
                 contributors.push(member.file.clone());
             }
         }
+        if contributors
+            .iter()
+            .any(|file| self.cooked_reading(file).is_none())
+        {
+            return;
+        }
+
+        let read_at = self.summaries.len();
 
         if let Ok(mut known) = self.member_lists.lock() {
             if known.len() >= MAX_CACHED_MEMBER_LISTS {
@@ -7548,6 +7565,28 @@ fn is_a_builtin_name(name: &str) -> bool {
 ///
 /// Both are read from the class or a base (a `shared_ptr`'s `element_type` is `_Ptr_base`'s), and both are substituted
 /// with the arguments the use wrote, because the declaration spells them with the class's own parameter names.
+///
+/// # Two callers, one rule
+///
+/// [`the_arrow_a_member_returns_through`] asks this only when its own walk reached a name nothing declares (a member
+/// template's parameter). `completion`'s arrow walk asks it **first**, for any class that declares one, and the
+/// difference is a defect measured on a real project: `std::unique_ptr<int> p; p->` offered `get` and `get_deleter`
+/// — the smart pointer's *own* members, none of which can be written after that arrow — because `operator->` returns
+/// `pointer`, a member alias of `typename _Get_deleter_pointer_type<…>::type`, and that name *is* declared, so the
+/// walk followed it into a trait template instead of the class it produces. `element_type` is the standard's own
+/// answer to this question (`std::pointer_traits` is written in terms of it) and it is one lookup away.
+pub fn element_type_of(
+    index: &ProjectIndex,
+    scopes: &crate::ScopeTree,
+    root: &cpp_parser::CppSyntaxNode,
+    path: &Path,
+    class: &str,
+    bare: &str,
+    arguments: &[String],
+) -> Option<String> {
+    the_element_type_of(index, scopes, root, path, class, bare, arguments)
+}
+
 fn the_element_type_of(
     index: &ProjectIndex,
     scopes: &crate::ScopeTree,
