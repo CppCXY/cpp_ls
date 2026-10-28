@@ -2457,6 +2457,47 @@ start: 68   slice 0..4: 68    slice 5: 0    slice 6..: 0
 块单元的声明**内联进导入者的读数**——这正是第 5 个 slice 之后视图换了一份、`std` 消失的根源。要做的是让
 `view_of_the_file` 对一个导入模块的文件，用**模块单元的读数**拼出它的渲染（或让 `import std;` 在渲染期展开成
 该单元的声明），而不是让两份读数并存在 `the_reading_for` 里靠优先序猜。
+### 15.13 翻转的机理量到了：`std::basic_string` 的**声明来源**在第五个 slice 消失
+
+上一节停在"index 的事实没变、变的是提问文件那一侧"。把 `files_declaring` 逐 slice 打出来，翻转点看得见了：
+
+```text
+slice 4: items 68
+  basic_string 的声明来自：string, stringfwd.h, basic_string.h ×2, cow_string.h ×12
+  shared_ptr   的声明来自：shared_ptr.h ×3, shared_ptr_base.h
+
+slice 5: items 0
+  basic_string 的声明来自：string, stringfwd.h, basic_string.h ×2      ← cow_string.h 的 12 个没了
+  shared_ptr   的声明来自：shared_ptr.h ×3, shared_ptr_base.h          ← 没变
+```
+
+`cow_string.h` 是 libstdc++ 的 **COW 实现**，它那 12 个 `basic_string` 声明是 **COW 实现**；它们此前被计入，是因为某次读数把
+`_GLIBCXX_USE_CXX11_ABI` 判成了 0。到 slice 5，一次重新走查把它判回 1，那些声明随之消失——**这次消失是对的**。
+问题在下一步：ABI=1 时真正的类是 `std::__cxx11::basic_string`，而 `std::string`（`typedef basic_string<char> string;`
+写在 `std` 里）的别名解析只试 `std::basic_string` / `basic_string`，两个都不存在，于是"`std::basic_string` 什么也没声明"，
+`std::string` 的成员列表是 0。
+
+所以缺的是两件编译器本来就有的东西，任选其一（都不大）：
+
+```text
+1. **using-declaration 要记成声明**。libstdc++ 用 `using __cxx11::basic_string;` 把 ABI=1 的类引进 `std`，
+   `std::basic_string` 因此是**存在**的名字；我们的索引没有把 using-declaration 当一个 declaration，
+   所以这个名字在索引里查不到。
+2. 或者：别名目标在"别名所在作用域"里找不到时，再按**内层命名空间**找一次（`std::__cxx11::basic_string`），
+   并按"多出来的层数最少"排序——这正是 C++ 对 inline namespace 的查找规则，`__cxx11` 靠 using-declaration 达到同样效果。
+```
+
+为什么只在 slice 5 之后出现：slice 4 之前，`cow_string.h` 的 COW 声明**冒充**了 `std::basic_string`（232 个成员），
+别名解析"碰巧"命中；那次走查被纠正后，冒充者消失，真正的缺口才露出来。也就是说**这个洞一直都在**，
+只是被一个错误的读数挡住了。
+
+同轮的其它尝试（都撤回，没有让翻转消失）：
+```text
+· 模块内联进渲染（interface_units + walk 帧）→ 全盘 0，撤回；
+· 别名候选"先按原样再前缀"→ 报错名字从 std::pmr::std::basic_string 变成 std::basic_string，项数不变；
+· the_reading_for 程序读数优先于 own cook → 不变；
+· the_program_that_read 对导入模块的文件答"模块的程序"→ 不变。
+```
 ## 15.3 关于"313 秒"
 
 那是我在**debug 配置**下量的（`cargo test --release` 之前的那次跑的是 debug 的 probe），release 下同一个工程
