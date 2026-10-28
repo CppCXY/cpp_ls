@@ -449,9 +449,35 @@ fn member_markdown(
             access.member, access.member
         );
     };
-
     let written = found.type_of;
-    let cpp_code_analysis::Known::Yes(list) = session.members_of(view, &written) else {
+    // **An arrow reaches the pointee's members**, and the completion already says so (`the_class_after_the_operator`):
+    // `ptr->c_str` on a `std::shared_ptr<std::string>` is `std::string`'s `c_str`, and asking `members_of` about the
+    // *written* type instead is what made this popup say "`std::shared_ptr<std::string>` has no member `c_str`" while
+    // the list at the same cursor offered 187 members of `std::string`.
+    //
+    // **But the handle's own members answer too.** `ptr->reset` is not in the list the completion offers (a smart
+    // pointer's `reset`/`get` are the handle's, not the pointee's), and a reader who writes it gets a popup: the
+    // pointee is asked first, then the type as written. The two readers stay one — the first step is
+    // `the_class_after_the_operator`, the second is the class the type names.
+    let reached = match access.arrow {
+        true => session.the_class_after_the_operator(view, &written, true),
+        false => None,
+    };
+    let mut list = None;
+    for class in reached.iter().chain(std::iter::once(&written)) {
+        if let cpp_code_analysis::Known::Yes(candidates) = session.members_of(view, class) {
+            if candidates
+                .members
+                .iter()
+                .any(|member| member.fact.name == access.member)
+            {
+                list = Some(candidates);
+                break;
+            }
+            list = list.or(Some(candidates));
+        }
+    }
+    let Some(list) = list else {
         return format!(
             "`{written}` has no member `{}`\n\n`{object}` is a `{written}`, and its members could not be read — the \
              class is out of the index, or a base is.",

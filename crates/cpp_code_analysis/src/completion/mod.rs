@@ -465,7 +465,7 @@ pub fn why_no_members(
 ///
 /// **Bounded.** A class whose `operator->` returns itself (a proxy) is a loop, and four hops is past every real chain
 /// measured: `shared_ptr<T>` is two, a `unique_ptr` is two, a container iterator is two.
-fn the_class_after_the_operator(
+pub(crate) fn the_class_after_the_operator(
     index: &ProjectIndex,
     scopes: &ScopeTree,
     root: &CppSyntaxNode,

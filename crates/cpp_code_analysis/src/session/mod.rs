@@ -5389,14 +5389,97 @@ impl<F: FileProvider + Clone> Session<F> {
     /// project: a project with two hundred translation units does not read two hundred programs because one file is
     /// open. [`Session::read_a_unit_of_the_project`] is the caller that wants all of them, and the pipeline's own
     /// schedule is [`Session::a_unit_may_be_read_now`] — this is the caller that says "now" regardless of the clock.
+    /// **Is a module unit still waiting to be read as a program?** — the question a request asks before deciding that
+    /// there is nothing to do.
+    ///
+    /// A unit the index already *names* is not a unit the index has *read*: the pump's queue puts it in the project and
+    /// asks for a cook, and the program read is a separate step. A caller that skipped the step because the module was
+    /// named answered a hover from the raw summaries — measured, "`std::shared_ptr<std::string>` has no member
+    /// `c_str`" while the completion at the same cursor offered 187 of `std::string`'s members.
+    pub fn a_module_unit_is_waiting_for_its_program(&self) -> bool {
+        self.programs_wanted
+            .iter()
+            .any(|key| !self.units_read.contains(key.as_str()))
+    }
+
+    /// **Which class a `.` or `->` written against a type reaches** — the completion's own reader, for a caller that
+    /// has a type and needs the class whose members the operator names.
+    ///
+    /// The hover used to ask `members_of` about the *written* type, so `ptr->c_str` on a `std::shared_ptr<std::string>`
+    /// looked `c_str` up in `shared_ptr` — measured, "`std::shared_ptr<std::string>` has no member `c_str`" while the
+    /// completion at the same cursor offered 187 of `std::string`'s members. One reader for the question is what makes
+    /// the two agree; see [`crate::completion::the_class_after_the_operator`].
+    pub fn the_class_after_the_operator(
+        &self,
+        view: &crate::FileView,
+        written: &str,
+        arrow: bool,
+    ) -> Option<String> {
+        let written = crate::sema::types::parse_type_spelling(written);
+        crate::completion::the_class_after_the_operator(
+            self.store.index(),
+            &view.scopes,
+            &view.root,
+            &view.path,
+            &written,
+            arrow,
+        )
+        .map(|(class, _)| class)
+    }
+
+    /// **Read one queued module unit as a program, now** — the compiler's reading of a module, for a caller that is
+    /// about to answer a question the module supplies a name for.
+    ///
+    /// A request cannot wait for the pump: a hover on `ptr->c_str` in a file that says `import std;` arrived before the
+    /// unit had been read as a program, and the member list of `std::shared_ptr<std::string>` was built from the
+    /// closure's **raw** headers — measured, the hover said "`std::shared_ptr<std::string>` has no member `c_str`"
+    /// while the completion at the same cursor offered 187 of `std::string`'s members. The unit read is what makes the
+    /// two agree, and it is a one-off per session: `units_read` keeps the pump from doing it again.
+    ///
+    /// `false` when nothing is queued, so a caller can loop until the queue is empty.
+    pub fn read_a_module_unit(&mut self) -> bool {
+        let Some(key) = self
+            .programs_wanted
+            .iter()
+            .find(|key| !self.units_read.contains(*key))
+            .cloned()
+        else {
+            return false;
+        };
+        let path = std::path::PathBuf::from(&key);
+        // **The walk needs the unit's summary**, and the queue may not have reached the unit yet — the pump adds it and
+        // asks for a cook, and a request that runs first would ask for a program read of a file nothing has read yet.
+        // One file, read here.
+        if self.store.index().summary(&path).is_none() {
+            self.load(&path);
+        }
+        let reading = self.read_the_unit(&path);
+        // **Marked read only when it was.** A reading that could not be built has to stay retryable, or the unit keeps
+        // its raw summaries for the rest of the session.
+        if reading.is_some() {
+            self.units_read.insert(key);
+        }
+        reading.is_some()
+    }
+
     pub fn read_a_looked_at_unit(&mut self) -> Option<UnitReading> {
         let root = self.the_next_unit_to_read()?;
 
         let reading = self.read_the_unit(&root);
-        self.units_read.insert(queue_key(&root));
+        // **A reading that could not be built is retried, not marked done.** This used to mark the root read whatever
+        // happened, and for a module unit that was fatal: the unit's summary is queued rather than read when the pump
+        // first names it, so the first program read found nothing, marked it read, and the whole closure kept its raw
+        // summaries for the rest of the session — measured as a hover that said "`std::shared_ptr<std::string>` has no
+        // member `c_str`" while the completion at the same cursor offered 187 of `std::string`'s members. Three
+        // attempts and it is treated as unreadable, which is the policy `commit_a_program` already had.
+        let key = queue_key(&root);
+        let attempts = self.units_attempted.entry(key.clone()).or_insert(0);
+        *attempts += 1;
+        if reading.is_some() || *attempts >= 3 {
+            self.units_read.insert(key);
+        }
         reading
     }
-
     /// **Queue the interface units of the modules the open files import**, for the pump to read like any other file.
     ///
     /// The counterpart of [`Session::read_the_modules_a_file_imports`], and the difference is who pays. That one
@@ -5467,6 +5550,12 @@ impl<F: FileProvider + Clone> Session<F> {
             // <bits/stdc++.h>`, and its `export namespace std { using std::… }` blocks after it).
             self.add_project_files([unit.clone()]);
             self.want_cooked_reading(unit);
+            // **And a translation unit, read as one.** The cook above renders the text of the unit itself only
+            // (`#include` is a boundary), so the library's headers keep their raw summaries — and a raw summary of
+            // `shared_ptr_base.h` files `__shared_ptr_access` as a nested class of `_Sp_counted_ptr_inplace`. The
+            // request path reads it as a program (`read_a_module_unit`) before answering, because a hover that arrives
+            // first says "no member" about a name the completion at the same cursor offers.
+            self.programs_wanted.insert(queue_key(unit));
         }
         found.len()
     }

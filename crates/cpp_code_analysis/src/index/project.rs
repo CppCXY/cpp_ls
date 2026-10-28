@@ -1961,10 +1961,34 @@ pub fn member_completions_at(
     // with. Measured: with the stripped spelling the step declined for want of arguments and the list was the
     // handle's.
     let spelled = written.to_string();
+    // **One answer to "which class does this access reach".** The completion's `the_class_after_the_operator` is the
+    // reader of that question — it follows a pointer, a class's own `operator->`, a base's (through the substitution
+    // composed along the base chain), and the base's `element_type` typedef — and this query used a second
+    // implementation that followed only the first two. The two disagreed exactly where a reader notices: on
+    // `std::shared_ptr<std::string>`, the completion listed `std::string`'s sixty-eight members while a hover on one
+    // of them answered "`std::shared_ptr<std::string>` has no member `c_str`". Asking the completion's answer first
+    // makes the list and the hover one answer; `the_class_an_arrow_points_at` stays as the fallback for the shapes it
+    // reaches that this one does not (an alias chain the substitution cannot follow).
+    // **The shared answer is used only when it names a class**, and that is not a formality: the completion's reader
+    // substitutes what it can and answers with the spelling that is left, so a member template's `_Ty2*` comes back
+    // as `_Ty2` — a name nothing declares, which a member lookup would answer "no members" for with confidence. The
+    // older reader below is the one that walks `element_type` and the aliases for exactly those shapes, so the two
+    // are tried in that order rather than one replacing the other.
+    let names_a_class = |name: &str| {
+        let bare = base_type_name(name);
+        index
+            .files_declaring(bare, path)
+            .iter()
+            .any(|found| found.fact.kind == crate::DeclKind::Type && found.fact.type_of.is_none())
+    };
     let class = match access.arrow {
-        true => {
-            the_class_an_arrow_points_at(index, scopes, root, path, &spelled, None).unwrap_or(class)
-        }
+        true => crate::completion::the_class_after_the_operator(
+            index, scopes, root, path, &written, true,
+        )
+        .map(|(class, _)| class)
+        .filter(|class| names_a_class(class))
+        .or_else(|| the_class_an_arrow_points_at(index, scopes, root, path, &spelled, None))
+        .unwrap_or(class),
         false => class,
     };
 

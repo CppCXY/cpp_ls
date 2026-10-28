@@ -3361,6 +3361,116 @@ int f(win_T *win) { return win->w_buffer->fnum; }
     server.notify("exit", Value::Null);
 }
 
+/// **A hover after an arrow reads the pointee's members**, the same reader the completion uses.
+///
+/// `h->load()` on a `Handle<Config>` is `Config::load`: the handle declares `T* operator->()`. The hover used to ask
+/// `members_of` about the *written* type, so it looked `load` up in `Handle` — measured through the server on a real
+/// project, "`std::shared_ptr<std::string>` has no member `c_str`" while the completion at the same cursor offered 187
+/// members of `std::string`. `h.get()` must still answer with the handle's own member, which is why the pointee is
+/// asked first and the handle second.
+#[test]
+fn a_hover_after_an_arrow_reads_the_pointees_members() {
+    const FIXTURE: &str = "\
+struct Config { void load(); };
+template <class T>
+struct Handle {
+    T* operator->();
+    T* get() const;
+    void reset();
+};
+void f() {
+    Handle<Config> h;
+    h->load();
+    h.get();
+}
+";
+    let project = Project::new("hover_arrow");
+    project.write("main.cpp", FIXTURE);
+
+    let mut server = Server::start(project.root());
+    let main_uri = uri_of(&project.root().join("main.cpp"));
+    server.request(
+        1,
+        "initialize",
+        json!({
+            "processId": std::process::id(),
+            "rootUri": uri_of(project.root()),
+            "capabilities": {
+                "workspace": { "configuration": true },
+                "window": { "workDoneProgress": true },
+            },
+        }),
+    );
+    server.notify("initialized", json!({}));
+    server.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": { "uri": main_uri, "languageId": "cpp", "version": 1, "text": FIXTURE }
+        }),
+    );
+
+    let pointee = hover_at(&mut server, 100, &main_uri, FIXTURE, "h->load", 3);
+    let text = pointee["result"]["contents"]["value"]
+        .as_str()
+        .unwrap_or_else(|| panic!("a markdown answer was expected, got {pointee}"));
+    assert!(
+        text.contains("Config") && text.contains("load"),
+        "`h->load` is `Config::load`, through the handle's `operator->`: {text}"
+    );
+
+    let handle = hover_at(&mut server, 200, &main_uri, FIXTURE, "h.get", 2);
+    let text = handle["result"]["contents"]["value"]
+        .as_str()
+        .unwrap_or_else(|| panic!("a markdown answer was expected, got {handle}"));
+    assert!(
+        text.contains("get") && text.contains("Handle"),
+        "`h.get` is the handle's own member, asked second: {text}"
+    );
+
+    server.request(300, "shutdown", Value::Null);
+    server.notify("exit", Value::Null);
+}
+
+/// A hover whose position is the first byte of `needle` in the fixture — for a member name, which
+/// [`hover_over`] cannot address (it hovers at the start of the line).
+/// A hover whose position is `into` bytes into the **last** occurrence of `needle` — for a member name, which
+/// [`hover_over`] cannot address (it hovers at the start of the line), searched from the end so a declaration
+/// carrying the same text does not win.
+fn hover_at(
+    server: &mut Server,
+    first_id: i64,
+    uri: &str,
+    fixture: &str,
+    needle: &str,
+    into: usize,
+) -> Value {
+    let at = fixture.rfind(needle).expect("the fixture writes it") + into;
+    let before = &fixture[..at];
+    let line: u64 = before
+        .matches('\n')
+        .count()
+        .try_into()
+        .expect("a fixture this size fits in a u32");
+    let character: u64 = before
+        .rsplit('\n')
+        .next()
+        .unwrap_or_default()
+        .chars()
+        .count()
+        .try_into()
+        .expect("a line this size fits in a u32");
+    server.ask_until(first_id, |id| {
+        json!({
+            "id": id,
+            "method": "textDocument/hover",
+            "params": {
+                "textDocument": { "uri": uri },
+                "position": { "line": line, "character": character },
+            },
+        })
+    })
+}
+
 /// A hover whose position is the first character of the line containing `needle`.
 fn hover_over(server: &mut Server, first_id: i64, uri: &str, fixture: &str, needle: &str) -> Value {
     let line = line_of(fixture, needle);

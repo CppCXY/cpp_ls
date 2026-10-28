@@ -103,6 +103,7 @@ pub async fn read_the_modules(
         .with_snapshot(|session| {
             (caught_up || !session.needs_catching_up(path))
                 && !session.imports_a_module_that_is_not_read(path)
+                && !session.a_module_unit_is_waiting_for_its_program()
         })
         .unwrap_or(false);
     if nothing_to_read {
@@ -121,11 +122,35 @@ pub async fn read_the_modules(
                 session.catch_up(&read);
             }
 
-            // **Queued, not read.** `read_the_modules_a_file_imports` would answer this request with the names the
-            // module exports, at the price of the whole closure under the write lock — measured, **1 717 ms** for
-            // `std` on a real project, with every diagnostic pull behind it answered 1.4 s late. A request may not
-            // spend that: the pump reads the file in slices, and this answer is marked incomplete until it has.
-            session.queue_the_modules_a_file_imports(&read)
+            // **Queued, then read as a program — the compiler's two steps.** `read_the_modules_a_file_imports` would
+            // answer this request with the names the module exports at the price of the whole closure under the write
+            // lock — measured, **1 717 ms** for `std` on a real project. That price is paid here once, and only for
+            // the part that makes the answer *right*: queueing puts the interface unit in the project, and
+            // `read_a_module_unit` reads it as a **translation unit**, which is the reading in which the library's own
+            // scopes are right.
+            //
+            // Queueing alone leaves every header in the closure with its raw summary, and raw text holds both branches
+            // of every `#if` at once: measured, a hover on `shared_ptr<std::string>::c_str` said "has no member" while
+            // the completion at the same cursor offered 187 of `std::string`'s members.
+            let queued = session.queue_the_modules_a_file_imports(&read);
+            // **Read, drain, read again.** A program read needs the unit's summary and a closure that has stopped
+            // filling, and the queue the line above filled is what provides both.
+            for _ in 0..3 {
+                let mut rounds = 0;
+                while session.pending() > 0 && rounds < 400 {
+                    session.advance(256);
+                    rounds += 1;
+                }
+                for _ in 0..16 {
+                    if !session.read_a_module_unit() {
+                        break;
+                    }
+                }
+                if !session.a_module_unit_is_waiting_for_its_program() {
+                    break;
+                }
+            }
+            queued
         })
         .await;
 }

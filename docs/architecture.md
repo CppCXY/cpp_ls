@@ -2370,6 +2370,53 @@ tests/modules.rs   a_module_unit_is_read_as_a_translation_unit
 ```
 
 9 个 target 全绿（`cpp_code_analysis` lib 723 + 48 targets）。
+### 15.11 补全对了、hover 不对：两条成员查询用了两个读者
+
+上一轮把**补全**修好（`ptr->` 68 项），用户转头报了另一件事：同一个光标上 **hover** 还是"`std::shared_ptr<std::string>`
+has no member `c_str`"，而 `reset` 能识别。原因不是读数、不是替换，而是**两个查询各有一套"箭头指向哪个类"的实现**：
+
+```text
+· 补全：completion::the_class_after_the_operator —— 跟指针、跟本类的 operator->、跟基类的（沿基类链复合代入）、
+  跟基类的 element_type typedef；
+· hover 的成员查询：session.members_of(view, &written) —— 直接拿【写出来的类型】查成员，
+  shared_ptr 里当然没有 c_str。
+· Session::member_completions（另一个查询）用的是第三套 the_class_an_arrow_points_at。
+```
+
+实测（`test_module`，`probe_import_ptr.cpp`，`ptr->c_str()` / `ptr->reset()`）：
+
+```text
+修之前 hover      `std::shared_ptr<std::string>` has no member `c_str`（1.9 s 后回答）
+修之后 hover      `_CharT * c_str()` —— std::basic_string::c_str，cow_string.h:2376（首次 1.9 s：模块程序读）
+                  `void reset()` —— std::__shared_ptr::reset，shared_ptr_base.h:1648（之后 2.3 ms）
+member_completions 187 项（std::string 的），c_str 在其中
+```
+
+改动（都是"一个事实一个读者"）：
+
+```text
+· completion::the_class_after_the_operator 变成 pub(crate)；
+· Session::member_completions 先问它，答案【只有确实命名了一个类】时才用——成员模板的 `_Ty2*` 会答成 `_Ty2`，
+  那种形状仍走 the_class_an_arrow_points_at（它专门处理 element_type / 别名链）；
+· Session::the_class_after_the_operator(view, written, arrow) 暴露给 hover；
+· hover 的 member_markdown：箭头先问 pointee 的成员，没有再问【句柄自己】的（`ptr->reset` 是句柄的成员），
+  两处都问不到才说 "has no member"。
+```
+
+**还有一处非修不可的**：请求路径上模块单元从来没被当程序读。`read_the_modules` 只 `queue_the_modules_a_file_imports`
+（把单元放进项目、请求一份 cook），于是闭包头文件全是原始摘要——正是 §15.8 的那个作用域错位。现在同一处补上
+`read_a_module_unit()`（三次：读摘要 → drain → 再读），并且两处早退条件都加上"还有模块单元没被当程序读"这一个问题，
+否则它会以"模块已经能指到文件"为由跳过。`read_a_looked_at_unit` 也改了：**读失败不再标记为已读**（三次后放弃），
+否则一次过早的尝试就让整个会话停在原始摘要上。
+
+回归测试：
+
+```text
+cpp_ls/tests/handshake.rs  a_hover_after_an_arrow_reads_the_pointees_members
+    Handle<T>{ T* operator->(); T* get(); } 上 h->load() → Config::load；h.get() → 句柄自己的 get
+```
+
+`cpp_code_analysis` 48 targets、`cpp_ls` 15 targets 全绿。
 ## 15.3 关于"313 秒"
 
 那是我在**debug 配置**下量的（`cargo test --release` 之前的那次跑的是 debug 的 probe），release 下同一个工程
