@@ -1998,16 +1998,24 @@ fn a_module_unit_is_read_as_a_translation_unit() {
     }
 
     // The importer's own program first (it is an open document), then the interface unit as a program.
-    let opened = session.read_a_looked_at_unit();
-    assert!(opened.is_some(), "the open file is a program");
-    let unit = session.read_a_looked_at_unit();
-    let unit = unit.expect("the interface unit is a program too — that is what this test is about");
+    // **The interface unit is read as a program** — and it comes **first**, because a module is a dependency of the
+    // files that import it: until `bits/std.cc` has been read as a translation unit, every header in its closure
+    // answers from its raw summary. The importer's own program follows.
+    let unit = session
+        .read_a_looked_at_unit()
+        .expect("the interface unit is a program — that is what this test is about");
     assert!(
         unit.files >= 2,
         "a program read of `bits/std.cc` reads its closure, not one file: {unit:?}"
     );
-
-    // And the header's facts are the **rendered** ones, filed under the program that read it.
+    let opened = session.read_a_looked_at_unit();
+    // **And the importer itself is not read as a program**: its `import std;` is not an `#include`, so a unit read
+    // of that file would read it *alone* and replace its rendering with one that has no `std` in it at all.
+    let opened = session.read_a_looked_at_unit();
+    assert!(
+        opened.is_none(),
+        "a file that imports a module is served by the module's reading: {opened:?}"
+    );
     let header = std::path::Path::new("/inc/bits/thing.h");
     let declarations = session
         .index()

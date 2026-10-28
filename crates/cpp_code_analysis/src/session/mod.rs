@@ -5309,9 +5309,37 @@ impl<F: FileProvider + Clone> Session<F> {
 
     /// The root a program read would be for, ignoring the clock — see [`Session::the_program_to_read`].
     fn the_next_unit_to_read(&self) -> Option<PathBuf> {
+        // **The module interface units first, then the open documents.** A module is a *dependency* of the files that
+        // import it: until `bits/std.cc` has been read as a translation unit, every header in its closure answers from
+        // its raw summary, and an `import std;` file's completions are wrong for as long as that lasts. They are
+        // units of the project too, and they are nobody's open document.
+        let mut wanted: Vec<PathBuf> = self
+            .programs_wanted
+            .iter()
+            .filter(|key| !self.units_read.contains(*key))
+            .map(PathBuf::from)
+            .collect();
+        wanted.sort();
+        if let Some(unit) = wanted.into_iter().next() {
+            // The size budget does not apply to a module unit: its closure is the standard library and is larger than
+            // the budget by construction, so refusing it is refusing the module.
+            return Some(unit);
+        }
+
         let open = self.documents.paths().into_iter().find(|path| {
             !self.units_read.contains(&queue_key(path))
                 && !self.the_program_is_too_large_to_read_at_once(path)
+                // **A file that imports a module is not read as a program.** Its `import std;` is not an `#include`:
+                // the unit walk would read the file *alone* — measured, 1 file and 33 tokens — and replace its
+                // rendering with one that has no `std` in it at all, after which every completion in the file is
+                // empty. The module's own unit is what supplies those declarations, and it is read instead
+                // (`programs_wanted`, above); the file keeps the reading its own text gives it, with the module's
+                // facts reached through `module_interfaces`.
+                && self
+                    .store
+                    .index()
+                    .summary(path)
+                    .is_none_or(|summary| summary.modules.imports.is_empty())
         });
         if open.is_some() {
             return open;
@@ -5556,6 +5584,11 @@ impl<F: FileProvider + Clone> Session<F> {
             // request path reads it as a program (`read_a_module_unit`) before answering, because a hover that arrives
             // first says "no member" about a name the completion at the same cursor offers.
             self.programs_wanted.insert(queue_key(unit));
+            // **And queued for the index**, without which nothing ever reads the unit at all: `add_project_files`
+            // only records that the file is part of the project, and a file nothing queues keeps no summary — so the
+            // pump's program read declined three times and marked the unit unreadable, and `ptr->` stayed at the raw
+            // list. The read-now variant queues it the same way.
+            self.queue.again(unit.clone(), Priority::Open, 0);
         }
         found.len()
     }

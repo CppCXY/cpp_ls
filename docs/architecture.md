@@ -2417,6 +2417,46 @@ cpp_ls/tests/handshake.rs  a_hover_after_an_arrow_reads_the_pointees_members
 ```
 
 `cpp_code_analysis` 48 targets、`cpp_ls` 15 targets 全绿。
+### 15.12 补全：第一次是对的，第五个 pump slice 之后变成 0 项——还没修完
+
+用 LSP 直接量 `textDocument/completion`（`test_module`，`import std;` 的文件，光标在 `ptr->` 之后）：
+
+```text
+第 1 次请求     68 项（append / append_range / assign / …），5.1 s（冷：读模块单元 351 文件 769 237 token）
+之后            `ptr->` 68 项、`ptr.` 68 项、`ptr->c` 25 项（首项 c_str）、`ptr->cs` 10 项
+第 5 个 slice   一次性变成 0 项，且此后再也不恢复
+```
+
+第 5 个 slice 的定位（session 级复现，逐个 `advance(64)`，`pending` 全程为 0）：
+
+```text
+start: 68   slice 0..4: 68    slice 5: 0    slice 6..: 0
+```
+
+排除了的事实：`slice 5` 没有 cooking（`CPPLS_TRACE_COOKING=1` 显示 read 0、cooked 0、backlog 0），也没有索引工作
+（`pending` 0→0）；`cooked_reading(shared_ptr_base.h)` 仍然在，`operator->` 的 scope 仍然是 `std::__shared_ptr_access`。
+所以**索引里关于那个头文件的事实没变**，变的是**提问文件那一侧**——`view_of_the_file` / 类解析这条链，
+在第 5 个 slice 之后拿到了另一份 view（同一个文件此前被 "own cook" 插入过一份单文件读数，这次读数在
+`the_reading_for` 的优先序里能压过程序读数；我试过把它降到程序读数之后，68 项仍然在 slice 5 掉到 0，
+说明不是那一个选择）。
+
+已经确认并保留的改动（都有实测支撑）：
+
+```text
+· 模块单元被当作翻译单元读（cc193a7）——这是 68 项的前提；
+· 请求路径上 read_the_modules 入队 → drain → read_a_module_unit（同步），第一次请求就有 68 项；
+· queue_the_modules_a_file_imports 必须把单元也【入索引队列】（queue.again），否则泵的程序读三次都拿不到摘要、
+  把单元标记为不可读，之后永远停在 4 项；
+· the_next_unit_to_read 把模块单元排在打开的文件之前（模块是被导入文件的依赖）；
+· 导入模块的文件【不】当程序读：它的 `import std;` 不是 #include，单独读会得到 1 文件 33 token 的读数，
+  把该文件的渲染换成一份没有 `std` 的文本，之后该文件里所有补全为 0；
+· read_a_looked_at_unit 读失败不再标记已读（三次后放弃）。
+```
+
+**下一步（明确的、不绕过问题的）**：`import std;` 在编译器那里等价于"把模块的声明放进这个 TU"，而我们没有把模
+块单元的声明**内联进导入者的读数**——这正是第 5 个 slice 之后视图换了一份、`std` 消失的根源。要做的是让
+`view_of_the_file` 对一个导入模块的文件，用**模块单元的读数**拼出它的渲染（或让 `import std;` 在渲染期展开成
+该单元的声明），而不是让两份读数并存在 `the_reading_for` 里靠优先序猜。
 ## 15.3 关于"313 秒"
 
 那是我在**debug 配置**下量的（`cargo test --release` 之前的那次跑的是 debug 的 probe），release 下同一个工程

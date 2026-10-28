@@ -122,19 +122,18 @@ pub async fn read_the_modules(
                 session.catch_up(&read);
             }
 
-            // **Queued, then read as a program — the compiler's two steps.** `read_the_modules_a_file_imports` would
-            // answer this request with the names the module exports at the price of the whole closure under the write
-            // lock — measured, **1 717 ms** for `std` on a real project. That price is paid here once, and only for
-            // the part that makes the answer *right*: queueing puts the interface unit in the project, and
-            // `read_a_module_unit` reads it as a **translation unit**, which is the reading in which the library's own
-            // scopes are right.
+            // **Queued, then read as a program — the compiler's two steps.** Queueing is instant and puts the
+            // interface unit in the project; reading it as a **translation unit** is what makes the names *right*,
+            // because it renders every header in the closure inside this unit's environment (`#if` decided once)
+            // instead of leaving them with raw summaries, where `shared_ptr_base.h` writes a class head three times
+            // under `#if`/`#else` and its scopes mis-pair — measured, a completion after `ptr->` offered the
+            // `shared_ptr`'s own four members instead of `std::string`'s sixty-eight.
             //
-            // Queueing alone leaves every header in the closure with its raw summary, and raw text holds both branches
-            // of every `#if` at once: measured, a hover on `shared_ptr<std::string>::c_str` said "has no member" while
-            // the completion at the same cursor offered 187 of `std::string`'s members.
+            // **Paid here, once per session, because the answer is wrong without it** — and a client that cancels is
+            // retried on the next keystroke, which finds the reading already made (**2.4 ms** measured against
+            // **484 ms** for the cold program read). The drain is what gives the walk a summary to start from and a
+            // closure that has stopped filling; three rounds is the same bound `commit_a_program` uses.
             let queued = session.queue_the_modules_a_file_imports(&read);
-            // **Read, drain, read again.** A program read needs the unit's summary and a closure that has stopped
-            // filling, and the queue the line above filled is what provides both.
             for _ in 0..3 {
                 let mut rounds = 0;
                 while session.pending() > 0 && rounds < 400 {
