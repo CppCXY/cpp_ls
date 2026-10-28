@@ -7324,6 +7324,75 @@ impl<F: FileProvider + Clone> Session<F> {
         names
     }
 
+    /// **Every format string in this file, with what each part of it is** — see [`crate::sema::format`].
+    ///
+    /// ```cpp
+    /// std::println("值 = {:.3f}", x);    `{:.3f}` is a specifier and `f` a conversion
+    /// printf("%-8.2f|%*d", y, w);        a specifier, a conversion, and a width taken from an argument
+    /// scanf("%3d %[a-z]", &n, name);     and the scanset
+    /// ```
+    ///
+    /// # Why the *written* reading, and only the written reading
+    ///
+    /// A colour is painted on the text the reader has in the buffer, and the answers here are **file offsets**. A
+    /// rendering's offsets are its own (see [`FileView::file_offset_of`]), and a format string is a *literal*: the cook
+    /// never expands one, but it does move everything after the macros it did expand. So this reads
+    /// [`Session::view_of_the_file`] and refuses a rendering — the same rule `push_doc_commands` one layer up states
+    /// for a comment, and for the same reason.
+    ///
+    /// # Why the tokens rather than the tree
+    ///
+    /// `std::println("…", x);` is, to this parser, a **declaration**: a statement that begins with a qualified name and
+    /// a `(` is C++'s most-vexing-parse shape and the grammar takes the declaration reading (`std::sort(v.begin(),
+    /// v.end());` is read the same way — a defect of its own, recorded in `docs/remaining.md`). The format string is
+    /// there either way, and where the parser put it is not a question this pass has an opinion about: the call is
+    /// "a `(` whose arguments are…", which the token stream says exactly. See [`crate::sema::format::literals_in`].
+    pub fn format_literals(
+        &self,
+        view: &FileView,
+        config: &crate::sema::format::FormatConfig,
+    ) -> Vec<crate::sema::format::FormatLiteral> {
+        // **A rendering is not this pass's text.** Its tree's tokens are the cook's, and a range in it names a place
+        // in a string the reader has never seen.
+        if view.written_text().is_some() {
+            return Vec::new();
+        }
+
+        // **A name the file does not qualify is resolved, and only where it decides something**: `format("…")` after
+        // `using namespace std;` is the standard one, and a project's own `format` is not.
+        //
+        // The instrument is the **binding** and its scope, not `definitions`: that query answers "where do I jump to"
+        // and fills `DeclFact::scope` with the qualifier *the cursor wrote*, which for a bare name is no scope at
+        // all — measured, a bare `format(…)` resolved to `format` with `scope: None` in both spellings of the using
+        // (`using namespace std;` and `using std::format;`). What this needs is the namespace the declaration sits
+        // in, which is the scope the binding lives in, and `ScopeTree::qualified_name_of` spells it.
+        //
+        // A **using-declaration** is the one shape that still answers with the wrong thing: `using std::format;`
+        // binds the name to the using-declaration itself (which is where go-to-definition goes), so the spelling
+        // resolves to `format` at file scope and is refused. `using namespace std;` is followed properly, and a
+        // qualified `std::format(…)` needs neither.
+        let mut qualified_name = |offset: usize| -> Option<String> {
+            let reading = view.reading_offset_of(FileOffset::new(offset))?;
+            let Known::Yes(binding) =
+                crate::sema::resolve::definition_at(&view.scopes, &view.root, reading.get())
+            else {
+                return None;
+            };
+            let name = binding.name.identifier_text()?;
+            Some(match view.scopes.qualified_name_of(binding.scope) {
+                Some(scope) if !scope.is_empty() => format!("{scope}::{name}"),
+                _ => name.to_string(),
+            })
+        };
+
+        crate::sema::format::literals_in(
+            &view.source,
+            view.tree.get_tokens(),
+            config,
+            &mut qualified_name,
+        )
+    }
+
     /// **The ranges to select at a cursor, in the file's own coordinates** — the third fact that belongs to the text
     /// the *reader* is looking at rather than to the text the compiler reads.
     ///

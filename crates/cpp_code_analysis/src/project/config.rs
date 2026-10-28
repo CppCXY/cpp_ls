@@ -31,6 +31,13 @@
 //!
 //! [hover]
 //! enable = true
+//!
+//! [highlight]                                     # the format strings of this project
+//! format_strings = true                           # std::format / std::print / fmt::
+//! printf = true                                   # the C library's printf family
+//! scanf = true                                    # …and scanf's
+//! extra = ["mylib::logf"]                         # our own wrappers, printf syntax, format string first
+//! extra_format = ["mylib::log"]                   # and std::format syntax
 //! ```
 //!
 //! # Measured, on a project with no compile database at all
@@ -105,9 +112,10 @@ pub const PROJECT_CONFIG_FILE: &str = ".cppls.toml";
 
 /// Everything `.cppls.toml` can say, after parsing.
 ///
-/// The sections that only a language server reads ([`DiagnosticsSection`], [`HoverSection`]) are here as **data**:
-/// this crate parses and validates one file, so that two crates cannot disagree about what it says — the meaning
-/// of `diagnostics.on_change_ms` lives in the server, and what lives here is the key and its type.
+/// The sections that only a language server reads ([`DiagnosticsSection`], [`HoverSection`],
+/// [`HighlightSection`]) are here as **data**: this crate parses and validates one file, so that two crates cannot
+/// disagree about what it says — the meaning of `diagnostics.on_change_ms` lives in the server, and what lives here is
+/// the key and its type.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProjectConfig {
     pub workspace: WorkspaceSection,
@@ -115,6 +123,7 @@ pub struct ProjectConfig {
     pub index: IndexSection,
     pub diagnostics: DiagnosticsSection,
     pub hover: HoverSection,
+    pub highlight: HighlightSection,
     /// **The language this project's messages are written in** — `locale = "zh-CN"`.
     ///
     /// The one key that stands alone rather than in a section, because it is a preference about the *editor*: what
@@ -655,6 +664,41 @@ pub struct HoverSection {
     pub enable: Option<bool>,
 }
 
+/// `[highlight]` — **which strings are format strings**, read by the language server.
+///
+/// Three families, each with its own switch, and the defaults are **on**: a project that says nothing gets the
+/// colouring, because "there is a format string here" is a fact about the text that this server can prove — unlike
+/// the checks a project may want to opt into. `false` is how a family is turned off; nothing else in the analysis
+/// reads this section.
+///
+/// The two lists are the project's own wrappers, and they are **separate by syntax** on purpose: `mylib::logf` takes
+/// `printf`'s format language and `mylib::log` takes `std::format`'s, and a single list could only mean one of them.
+/// An entry is matched against the **resolved** qualified name (see `docs/format-strings.md` §6), so a local function
+/// that happens to be spelled the same is not read as a wrapper.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HighlightSection {
+    /// `std::format` / `print` / `println` / `format_to` … and the `fmt` library's names.
+    #[serde(default)]
+    pub format_strings: Option<bool>,
+    /// The C library's `printf` family.
+    #[serde(default)]
+    pub printf: Option<bool>,
+    /// The C library's `scanf` family.
+    #[serde(default)]
+    pub scanf: Option<bool>,
+    /// **The project's own wrappers in `printf`'s syntax**, with the format string as the first argument.
+    ///
+    /// ```toml
+    /// extra = ["mylib::logf", "telemetry::trace"]
+    /// ```
+    #[serde(default)]
+    pub extra: Vec<String>,
+    /// The project's own wrappers in **`std::format`'s** syntax, format string first.
+    #[serde(default)]
+    pub extra_format: Vec<String>,
+}
+
 /// How bad a configuration problem is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Severity {
@@ -810,6 +854,10 @@ pub fn parse_config(text: &str, path: &Path) -> ConfigReport {
                 Ok(decoded) => report.config.hover = decoded,
                 Err(problem) => report.problems.push(problem),
             },
+            "highlight" => match decode::<HighlightSection>(section, name) {
+                Ok(decoded) => report.config.highlight = decoded,
+                Err(problem) => report.problems.push(problem),
+            },
             // **[locale]** — the language this project's messages are written in.
             //
             // A bare key rather than a section, because it is about the *editor*: `locale = "zh-CN"` is the same
@@ -830,8 +878,8 @@ pub fn parse_config(text: &str, path: &Path) -> ConfigReport {
                 )),
             },
             unknown => report.problems.push(ConfigProblem::error(format!(
-                "[{unknown}] is not a section this server reads (workspace, compile, index, diagnostics, hover), \
-                 and `locale` is the one key that stands alone, so nothing under it is in effect"
+                "[{unknown}] is not a section this server reads (workspace, compile, index, diagnostics, hover, \
+                 highlight), and `locale` is the one key that stands alone, so nothing under it is in effect"
             ))),
         }
     }
@@ -934,6 +982,40 @@ mod tests {
 
     fn parse(text: &str) -> ConfigReport {
         parse_config(text, Path::new("/p/.cppls.toml"))
+    }
+
+    /// **`[highlight]` is read**, and a key it does not have is reported rather than silently ignored — a project
+    /// that switched a family off, and whose key was misspelled, would otherwise never know the colouring never
+    /// stopped.
+    #[test]
+    fn the_highlight_section_is_read() {
+        let report = parse(
+            "[highlight]\nformat_strings = false\nprintf = false\nextra = [\"mylib::logf\"]\n\
+             extra_format = [\"mylib::log\"]\n",
+        );
+
+        assert_eq!(report.config.highlight.format_strings, Some(false));
+        assert_eq!(report.config.highlight.printf, Some(false));
+        // **A key the section does not name keeps its default**, which is "on" — the server reads `None` that way.
+        assert_eq!(report.config.highlight.scanf, None);
+        assert_eq!(report.config.highlight.extra, ["mylib::logf"]);
+        assert_eq!(report.config.highlight.extra_format, ["mylib::log"]);
+        assert!(report.problems.is_empty(), "{:?}", problems(&report));
+
+        // A project with no `[highlight]` at all is the ordinary case: everything default, nothing wrong.
+        let report = parse("[workspace]\nexclude = [\"build/**\"]\n");
+        assert_eq!(report.config.highlight, HighlightSection::default());
+        assert!(report.problems.is_empty());
+
+        // …and a misspelled key is *this* section's problem, not the file's.
+        let report = parse("[highlight]\nprintff = false\n");
+        assert_eq!(report.config.highlight, HighlightSection::default());
+        assert_eq!(report.problems.len(), 1);
+        assert!(
+            report.problems[0].message.contains("[highlight]"),
+            "{:?}",
+            problems(&report)
+        );
     }
 
     #[test]

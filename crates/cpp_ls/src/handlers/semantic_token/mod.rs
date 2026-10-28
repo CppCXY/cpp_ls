@@ -56,6 +56,7 @@ use crate::context::{RequestOutcome, ServerContextSnapshot, snapshot_query};
 use crate::util::uri_to_file_path;
 
 mod builder;
+mod format;
 
 pub use builder::{Builder, Modifier, TypeKind};
 
@@ -288,12 +289,17 @@ pub fn encode(
     names: &[Name],
     drawable: &Option<Vec<SemanticTokenType>>,
     multi_line_support: bool,
+    formats: &[cpp_code_analysis::sema::format::FormatLiteral],
 ) -> Vec<SemanticToken> {
     let mut builder = Builder::new(file, drawable.as_deref(), multi_line_support);
     push_names(&mut builder, names);
     push_keywords(&mut builder, view);
     push_module_declarations(&mut builder, view);
     push_doc_commands(&mut builder, view);
+    // **Last, and that is the whole ordering rule.** Every piece is inside a string literal, where no name, keyword
+    // or command lives, so the order does not matter for correctness — it matters for the day something *does* want
+    // to claim a literal, because first claim wins and this is the pass that knows least about the program.
+    format::draw(&mut builder, formats);
 
     if builder.unplaceable() > 0 {
         log::debug!(
@@ -595,9 +601,21 @@ pub async fn on_semantic_tokens(
         }
 
         let names = session.classified_names(&view);
+
+        // **The format strings of the file**, read from its own text — and only when a project has not turned every
+        // family off, which is the one state in which the pass costs nothing at all.
+        let formats = {
+            let config = format::config_from(&session.project_config().config.highlight);
+            if config.is_off() {
+                Vec::new()
+            } else {
+                session.format_literals(&view, &config)
+            }
+        };
+
         Some(SemanticTokensResult::Tokens(SemanticTokens {
             result_id: None,
-            data: encode(held, Some(&view), &names, &drawable, multi_line),
+            data: encode(held, Some(&view), &names, &drawable, multi_line, &formats),
         }))
     })
     .await
@@ -679,7 +697,7 @@ constexpr bool is_assignable_v = __is_assignable(To, From);
         let file = session.files().held(&path).expect("the file is held");
         let names = session.classified_names(&view);
 
-        let tokens = encode(file, Some(&view), &names, &None, false);
+        let tokens = encode(file, Some(&view), &names, &None, false, &[]);
         let at_type = by_offset(text, &tokens);
 
         for (word, expected, why) in [
@@ -715,7 +733,10 @@ constexpr bool is_assignable_v = __is_assignable(To, From);
             lsp_types::SemanticTokenType::VARIABLE,
             lsp_types::SemanticTokenType::TYPE_PARAMETER,
         ]);
-        let fallback = by_offset(text, &encode(file, Some(&view), &names, &standard, false));
+        let fallback = by_offset(
+            text,
+            &encode(file, Some(&view), &names, &standard, false, &[]),
+        );
         let at = text[..text
             .find("is_trivially_destructible_v")
             .expect("the fixture writes it")]
@@ -829,7 +850,7 @@ constexpr bool is_assignable_v = __is_assignable(To, From);
         let rounds = 20;
         let mut drawn = 0;
         for _ in 0..rounds {
-            drawn = encode(file, Some(&view), &names, &None, false).len();
+            drawn = encode(file, Some(&view), &names, &None, false, &[]).len();
         }
         let each = started.elapsed() / rounds;
 
@@ -845,6 +866,11 @@ constexpr bool is_assignable_v = __is_assignable(To, From);
     ///
     /// The deltas are relative, so a test that read them directly would be asserting about arithmetic rather than
     /// about colour. This rebuilds absolute positions from the line starts, which is what a client does with them.
+    ///
+    /// **The column is UTF-16 code units and the key is bytes**, so the two are not the same number: a line with `值`
+    /// in it is three bytes per unit, and keying the byte offset of the line's start with the protocol's column put
+    /// every token on that line at the wrong key. That was invisible for as long as every fixture was ASCII — the
+    /// format-string fixture is the first one that is not, and it found this.
     fn by_offset(
         text: &str,
         tokens: &[lsp_types::SemanticToken],
@@ -866,9 +892,30 @@ constexpr bool is_assignable_v = __is_assignable(To, From);
             } else {
                 token.delta_start
             };
-            if let Some(start) = line_starts.get(line) {
-                out.insert(start + character as usize, token.token_type);
-            }
+            let Some(&line_start) = line_starts.get(line) else {
+                continue;
+            };
+            let line_end = line_starts
+                .get(line + 1)
+                .copied()
+                .unwrap_or(text.len())
+                .min(text.len());
+            let column = text
+                .get(line_start..line_end)
+                .map(|body| {
+                    let mut utf16 = 0u32;
+                    let mut bytes = 0usize;
+                    for ch in body.chars() {
+                        if utf16 >= character {
+                            break;
+                        }
+                        utf16 += ch.len_utf16() as u32;
+                        bytes += ch.len_utf8();
+                    }
+                    bytes
+                })
+                .unwrap_or(0);
+            out.insert(line_start + column, token.token_type);
         }
         out
     }
@@ -910,7 +957,7 @@ constexpr bool is_assignable_v = __is_assignable(To, From);
         let view = session.view_of_the_file(&path).expect("a view");
         let file = session.files().held(&path).expect("the file is held");
         let names = session.classified_names(&view);
-        let tokens = encode(file, Some(&view), &names, &None, false);
+        let tokens = encode(file, Some(&view), &names, &None, false, &[]);
         let at_type = by_offset(text, &tokens);
 
         let a_type = index_of(TypeKind::Type);
@@ -981,7 +1028,7 @@ constexpr bool is_assignable_v = __is_assignable(To, From);
         let view = session.view_of_the_file(&path).expect("a view");
         let file = session.files().held(&path).expect("the file is held");
         let names = session.classified_names(&view);
-        let tokens = encode(file, Some(&view), &names, &None, false);
+        let tokens = encode(file, Some(&view), &names, &None, false, &[]);
         let at_type = by_offset(text, &tokens);
 
         let a_keyword = index_of(TypeKind::Keyword);
@@ -1037,7 +1084,7 @@ constexpr bool is_assignable_v = __is_assignable(To, From);
             name(start, spelling.len(), NameKind::Variable, true)
         };
         let names = vec![at("alpha"), at("beta"), at("gamma")];
-        let tokens = encode(file, None, &names, &None, false);
+        let tokens = encode(file, None, &names, &None, false, &[]);
 
         let mut line = 0u32;
         let mut character = 0u32;
@@ -1095,12 +1142,12 @@ constexpr bool is_assignable_v = __is_assignable(To, From);
         names.insert(1, namespace);
 
         // With everything drawable: three tokens.
-        assert_eq!(encode(file, None, &names, &None, false).len(), 3);
+        assert_eq!(encode(file, None, &names, &None, false, &[]).len(), 3);
 
         // With namespaces unsupported: two, and the second variable's delta is measured from the *first variable*
         // — the skipped token is not a step in the walk.
         let drawable = Some(vec![SemanticTokenType::VARIABLE]);
-        let tokens = encode(file, None, &names, &drawable, false);
+        let tokens = encode(file, None, &names, &drawable, false, &[]);
         assert_eq!(tokens.len(), 2);
         assert_eq!((tokens[0].delta_line, tokens[0].delta_start), (0, 4));
         assert_eq!(
@@ -1123,7 +1170,7 @@ constexpr bool is_assignable_v = __is_assignable(To, From);
             name(text.len() + 40, 4, NameKind::Variable, true),
         ];
 
-        assert_eq!(encode(file, None, &names, &None, false).len(), 1);
+        assert_eq!(encode(file, None, &names, &None, false, &[]).len(), 1);
     }
 
     /// **The advertised legend and the numbers in an answer are one list**, and this is the assertion that keeps
@@ -1200,7 +1247,7 @@ constexpr bool is_assignable_v = __is_assignable(To, From);
         let view = session.view_of_the_file(&path).expect("a view");
         let file = session.files().held(&path).expect("the file is held");
         let names = session.classified_names(&view);
-        let tokens = encode(file, Some(&view), &names, &None, false);
+        let tokens = encode(file, Some(&view), &names, &None, false, &[]);
 
         assert!(!tokens.is_empty(), "the fixture must produce tokens");
 
@@ -1321,7 +1368,7 @@ constexpr bool is_assignable_v = __is_assignable(To, From);
         let view = session.view_of_the_file(&path).expect("a view");
         let file = session.files().held(&path).expect("the file is held");
         let names = session.classified_names(&view);
-        let tokens = encode(file, Some(&view), &names, &None, false);
+        let tokens = encode(file, Some(&view), &names, &None, false, &[]);
         let at_type = by_offset(text, &tokens);
 
         let a_command = index_of(TypeKind::DocCommand);
@@ -1369,7 +1416,7 @@ constexpr bool is_assignable_v = __is_assignable(To, From);
         let view = session.view_of_the_file(&path).expect("a view");
         let file = session.files().held(&path).expect("the file is held");
         let names = session.classified_names(&view);
-        let tokens = encode(file, Some(&view), &names, &None, false);
+        let tokens = encode(file, Some(&view), &names, &None, false, &[]);
         let at_offset = by_offset(text, &tokens);
 
         let at = |needle: &str| {
@@ -1449,7 +1496,7 @@ int f(int value);
         let view = session.view_of_the_file(&path).expect("a view");
         let file = session.files().held(&path).expect("the file is held");
         let names = session.classified_names(&view);
-        let tokens = encode(file, Some(&view), &names, &None, false);
+        let tokens = encode(file, Some(&view), &names, &None, false, &[]);
         let at_type = by_offset(text, &tokens);
         for (offset, kind) in &at_type {
             let word = &text[*offset..(*offset + 12).min(text.len())];
@@ -1480,7 +1527,6 @@ int f(int value);
         );
     }
 
-    #[test]
     /// **Every declaration-specifier keyword is drawn as one** — the list in `kind_of_keyword`, asked of the real
     /// token stream rather than read off the match arms.
     ///
@@ -1499,7 +1545,7 @@ int f(int value);
         let view = session.view_of_the_file(&path).expect("a view");
         let file = session.files().held(&path).expect("the file is held");
         let names = session.classified_names(&view);
-        let tokens = encode(file, Some(&view), &names, &None, false);
+        let tokens = encode(file, Some(&view), &names, &None, false, &[]);
         let at_type = by_offset(text, &tokens);
 
         for word in ["explicit", "virtual", "constexpr", "const", "noexcept"] {
@@ -1511,6 +1557,12 @@ int f(int value);
             );
         }
     }
+    /// **A keyword is drawn as what it is**, which is not one answer: a type, a qualifier, a value and a statement
+    /// word are four things a reader scans for, and a theme colours them apart. See [`kind_of_keyword`].
+    ///
+    /// `bool` and `true` are the case that needs the *spelling*: the lexer's table says `"bool" => BoolLiteral`, so
+    /// the type and the literal arrive as one token kind, and only the text tells them apart.
+    #[test]
     fn a_keyword_is_drawn_as_what_it_is() {
         // **`auto` is in the fixture on purpose**: a reader asked for "`auto`, `const` and their kind in the blue a
         // type has, not the keyword colour" — a control-flow word says something about the syntax, while these say
@@ -1522,7 +1574,7 @@ int f(int value);
         let view = session.view_of_the_file(&path).expect("a view");
         let file = session.files().held(&path).expect("the file is held");
         let names = session.classified_names(&view);
-        let tokens = encode(file, Some(&view), &names, &None, false);
+        let tokens = encode(file, Some(&view), &names, &None, false, &[]);
         let at_type = by_offset(text, &tokens);
 
         for (word, expected, why) in [
@@ -1594,7 +1646,7 @@ int f(int value);
         let file = session.files().held(&path).expect("the file is held");
         let names = session.classified_names(&view);
 
-        let tokens = encode(file, Some(&view), &names, &None, false);
+        let tokens = encode(file, Some(&view), &names, &None, false, &[]);
         // **`int` is a type and `struct` is a keyword**, and this is the test that says which is which: a theme
         // colours `type` and `keyword` differently on purpose, and `int size` should have `int` the colour of a
         // type — the same colour as `Widget`, not the colour of `struct`.
@@ -1688,7 +1740,7 @@ int f(int value);
         let names = vec![name(4, 5, NameKind::Variable, true)];
         let drawable = Some(vec![SemanticTokenType::COMMENT, SemanticTokenType::STRING]);
 
-        assert!(encode(file, None, &names, &drawable, false).is_empty());
+        assert!(encode(file, None, &names, &drawable, false, &[]).is_empty());
     }
 
     /// The number the encoding sends for a type, for a test that wants to name it rather than spell it.
@@ -1697,5 +1749,192 @@ int f(int value);
     /// [`TypeKind::to_u32`] — so a test that asks for it cannot disagree with the encoder about it.
     fn index_of(kind: TypeKind) -> u32 {
         kind.to_u32()
+    }
+
+    /// **A format string's parts are drawn, and the text around them is left to the client.**
+    ///
+    /// The three grammars in one file, asserted on the encoded tokens by absolute offset — decoded the way a client
+    /// decodes them — because a *colour* is what the answer is about and a mapping in between could still lose it.
+    ///
+    /// The offsets are found with `find` rather than written down, so a fixture edit cannot leave the assertions
+    /// pointing at different characters.
+    #[test]
+    fn a_format_string_is_drawn_piece_by_piece() {
+        let text = "\
+void f(int y, double d, char* s) {
+    printf(\"%-8.2f|%d\", d, y);
+    scanf(\"%3d\", &y);
+    std::string message = std::format(\"值 = {:.3f}\", d);
+}
+";
+        let (session, path) = a_held_file(text);
+        let view = session.view_of_the_file(&path).expect("a view");
+        let file = session.files().held(&path).expect("the file is held");
+        let names = session.classified_names(&view);
+        let formats = session.format_literals(&view, &Default::default());
+        assert_eq!(formats.len(), 3, "three format strings: {formats:#?}");
+        let tokens = encode(file, Some(&view), &names, &None, false, &formats);
+        let at_type = by_offset(text, &tokens);
+
+        // `printf("%-8.2f|%d", …)`: the specifier, its conversion, and the second conversion's own two pieces.
+        let printf = text.find(r#""%-8.2f|%d""#).expect("the fixture writes it");
+        for (offset, expected, why) in [
+            (
+                printf + 1,
+                TypeKind::FormatSpecifier,
+                "`%-8.2` is the field's syntax",
+            ),
+            (
+                printf + 6,
+                TypeKind::FormatConversion,
+                "`f` is its conversion",
+            ),
+            (
+                printf + 8,
+                TypeKind::FormatSpecifier,
+                "the second conversion's `%`",
+            ),
+            (printf + 9, TypeKind::FormatConversion, "and its `d`"),
+        ] {
+            assert_eq!(at_type.get(&offset), Some(&index_of(expected)), "{why}");
+        }
+        assert_eq!(
+            at_type.get(&(printf + 7)),
+            None,
+            "the `|` between two conversions is text, and is not painted"
+        );
+
+        // `scanf("%3d", …)`: the width is the specifier's and the conversion is the `d`.
+        let scanf = text.find(r#""%3d""#).expect("the fixture writes it");
+        assert_eq!(
+            at_type.get(&(scanf + 1)),
+            Some(&index_of(TypeKind::FormatSpecifier))
+        );
+        assert_eq!(
+            at_type.get(&(scanf + 3)),
+            Some(&index_of(TypeKind::FormatConversion))
+        );
+
+        // `std::format("值 = {:.3f}", …)`: the field, its conversion, and the closing brace — with a **multi-byte**
+        // character in the literal, which is why the offsets are bytes and the client's columns are not.
+        let format = text
+            .find(r#""值 = {:.3f}""#)
+            .expect("the fixture writes it");
+        // The opening quote, then `值 = ` — **seven bytes and four characters**, which is the whole point of the
+        // offsets being the file's bytes rather than a client's columns.
+        let field = format + 1 + "值 = ".len();
+        for (offset, expected, why) in [
+            (field, TypeKind::FormatSpecifier, "`{:.3`"),
+            // `{`, `:`, `.`, `3`, `f`, `}` — the conversion is the fifth byte of the field.
+            (field + 4, TypeKind::FormatConversion, "`f`"),
+            (field + 5, TypeKind::FormatSpecifier, "`}`"),
+        ] {
+            assert_eq!(at_type.get(&offset), Some(&index_of(expected)), "{why}");
+        }
+
+        // **The escapes are drawn too**, and from the client's point of view they are the only piece of a `%%`.
+        let escaped = "\
+void g() {
+    printf(\"100%%\\n\");
+}
+";
+        let (session, path) = a_held_file(escaped);
+        let view = session.view_of_the_file(&path).expect("a view");
+        let file = session.files().held(&path).expect("the file is held");
+        let names = session.classified_names(&view);
+        let formats = session.format_literals(&view, &Default::default());
+        let tokens = encode(file, Some(&view), &names, &None, false, &formats);
+        let at_type = by_offset(escaped, &tokens);
+        let literal = escaped.find(r#""100%%\n""#).expect("the fixture writes it");
+        assert_eq!(
+            at_type.get(&(literal + 4)),
+            Some(&index_of(TypeKind::FormatEscape)),
+            "`%%` is an escape: {at_type:?}"
+        );
+    }
+
+    /// **A client that knows none of the four custom types still sees the field, the argument and the conversion.**
+    ///
+    /// This is the half that makes the feature work without a theme: the client advertises the **standard** types
+    /// only — which is every client today — and each piece is answered with the standard type it falls back to. The
+    /// escape has none, on purpose: its colour is the literal's own.
+    #[test]
+    fn a_client_without_the_custom_types_is_answered_with_their_fallbacks() {
+        let text = "\
+void f(int width, double d) {
+    printf(\"%*d|%%\", width, 1);
+}
+";
+        let (session, path) = a_held_file(text);
+        let view = session.view_of_the_file(&path).expect("a view");
+        let file = session.files().held(&path).expect("the file is held");
+        let names = session.classified_names(&view);
+        let formats = session.format_literals(&view, &Default::default());
+
+        // The four standard types, and nothing custom — the shape a client that has not heard of these sends.
+        let standard = Some(vec![
+            SemanticTokenType::REGEXP,
+            SemanticTokenType::PARAMETER,
+            SemanticTokenType::KEYWORD,
+            SemanticTokenType::STRING,
+            SemanticTokenType::VARIABLE,
+        ]);
+        let tokens = encode(file, Some(&view), &names, &standard, false, &formats);
+        let at_type = by_offset(text, &tokens);
+
+        let literal = text.find(r#""%*d|%%""#).expect("the fixture writes it");
+        assert_eq!(
+            at_type.get(&(literal + 1)),
+            Some(&index_of(TypeKind::Regexp)),
+            "the field's syntax falls back to `regexp`, which is the pattern language it is"
+        );
+        assert_eq!(
+            at_type.get(&(literal + 2)),
+            Some(&index_of(TypeKind::Parameter)),
+            "an argument reference falls back to `parameter`"
+        );
+        assert_eq!(
+            at_type.get(&(literal + 3)),
+            Some(&index_of(TypeKind::Keyword)),
+            "a conversion falls back to `keyword`"
+        );
+        assert_eq!(
+            at_type.get(&(literal + 5)),
+            None,
+            "an escape has no fallback: the literal already has the colour it would be given"
+        );
+    }
+
+    /// **A project that turns every family off pays nothing and gets its file back exactly as it was.**
+    #[test]
+    fn a_project_that_turned_the_colouring_off_gets_no_format_tokens() {
+        let text = "void f() { printf(\"%d\", 1); }\n";
+        let (session, path) = a_held_file(text);
+        let view = session.view_of_the_file(&path).expect("a view");
+        let file = session.files().held(&path).expect("the file is held");
+        let names = session.classified_names(&view);
+
+        let off = cpp_code_analysis::sema::format::FormatConfig {
+            std_format: false,
+            printf: false,
+            scanf: false,
+            extra: Vec::new(),
+            extra_format: Vec::new(),
+        };
+        assert!(off.is_off());
+        assert!(
+            session.format_literals(&view, &off).is_empty(),
+            "the walk does not even look at a token"
+        );
+
+        // And with the pass given nothing, the answer is byte-for-byte what it was before the feature existed.
+        let without = encode(file, Some(&view), &names, &None, false, &[]);
+        let literal = text.find(r#""%d""#).expect("the fixture writes it");
+        let at_type = by_offset(text, &without);
+        assert_eq!(
+            at_type.get(&(literal + 1)),
+            None,
+            "no token inside the literal: {at_type:?}"
+        );
     }
 }

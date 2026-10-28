@@ -81,6 +81,33 @@ pub enum TypeKind {
     /// draw it — [`Builder::push_range`] drops a type the client did not advertise — so the pass falls back to
     /// `variable`, which is what that client showed before this existed.
     VariableTemplate,
+    /// **A format string's field** — the `{:.3f}` of `std::format`, the `%-8.2` of `printf`.
+    ///
+    /// One of the four types that colour *inside* a string literal, where no other pass has anything to say: the
+    /// client draws a literal as one colour, and the parts of it that are a program of their own — a field, the
+    /// argument it names, the conversion it ends in — are invisible. See
+    /// [`crate::handlers::semantic_token::format`] for what decides which literal is one and `docs/format-strings.md`
+    /// for the design.
+    ///
+    /// **Custom, and with a fallback the client does know**: a client that advertises none of these four gets
+    /// `regexp` for a field, `parameter` for an argument reference and `keyword` for a conversion — the closest
+    /// standard types — so the colouring works out of the box in an editor whose theme has never heard of them.
+    FormatSpecifier,
+    /// **A reference to an argument**: `{0}`, `{name}`, `%1$`, `*`.
+    FormatArgument,
+    /// **A conversion**: the `f` of `{:.3f}`, the `d` of `%d`, the `[a-z]` of `%[a-z]`.
+    FormatConversion,
+    /// **An escape**: `{{`, `}}`, `%%` — a literal brace or percent, which takes no argument.
+    ///
+    /// Its fallback is *nothing*: the client's own string colour already draws it, and a `string` token would be the
+    /// same colour at the price of one token.
+    FormatEscape,
+    /// **A regular expression** — not this server's own, and here only as the fallback for a format field.
+    ///
+    /// The protocol has had `regexp` since 3.16 and every client advertises it; a theme draws it as the pattern
+    /// language it is, and a format specifier *is* one. It is in the legend so that [`Builder::push_range`] can send
+    /// it, which is the one thing this server needs from it.
+    Regexp,
 }
 
 impl TypeKind {
@@ -104,6 +131,11 @@ impl TypeKind {
             TypeKind::Operator => 14,
             TypeKind::DocCommand => 15,
             TypeKind::VariableTemplate => 16,
+            TypeKind::FormatSpecifier => 17,
+            TypeKind::FormatArgument => 18,
+            TypeKind::FormatConversion => 19,
+            TypeKind::FormatEscape => 20,
+            TypeKind::Regexp => 21,
         }
     }
 
@@ -131,6 +163,15 @@ impl TypeKind {
             // cannot draw it — `Builder::push_range` drops it — so the caller falls back to `variable`, which is what
             // that client would have shown before this existed. See `push_names`.
             TypeKind::VariableTemplate => SemanticTokenType::new("variableTemplate"),
+            // **The four format-string types**, and the reason they are custom: the protocol has no vocabulary for
+            // the language inside a format string, and a theme that wants to draw `{:.3f}` apart from its
+            // surrounding literal needs a name for it. Each has a standard fallback in the pass that sends it — see
+            // `format::draw`.
+            TypeKind::FormatSpecifier => SemanticTokenType::new("formatSpecifier"),
+            TypeKind::FormatArgument => SemanticTokenType::new("formatArgument"),
+            TypeKind::FormatConversion => SemanticTokenType::new("formatConversion"),
+            TypeKind::FormatEscape => SemanticTokenType::new("formatEscape"),
+            TypeKind::Regexp => SemanticTokenType::REGEXP,
         }
     }
 
@@ -153,6 +194,11 @@ impl TypeKind {
         TypeKind::Operator,
         TypeKind::DocCommand,
         TypeKind::VariableTemplate,
+        TypeKind::FormatSpecifier,
+        TypeKind::FormatArgument,
+        TypeKind::FormatConversion,
+        TypeKind::FormatEscape,
+        TypeKind::Regexp,
     ];
 }
 

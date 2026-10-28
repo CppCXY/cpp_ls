@@ -1030,3 +1030,66 @@ cargo test --release -p cpp_code_analysis --test diagnostics_rate -- --ignored -
 
 **下一步**：① 未解析 include 的连锁抑制（设计 + 夹具）；② 映射偏了的那条先量清楚（拿一份渲染文本和它的
 `IndexedRendering::diagnostics` 一一对照）；③ 风格规则在 C 里的默认值。
+
+## J. 格式字符串这一轮顺带查出的两件事 —— 2026-10-29
+
+`docs/format-strings.md` 那个功能的实现记录在那儿，这一条只记**不属于它、但被它查出来**的东西。
+
+### J1. 语句以"限定名 + `(`"开头时被读成声明（most-vexing-parse 只判了一半）
+
+```cpp
+std::println("value = {}", x);          → Declaration（不是 CallExpr）
+std::sort(v.begin(), v.end());          → Declaration
+ns::xyz("f", 1);                        → Declaration
+printf("value = %d", x);                → ExpressionStat → CallExpr   ✓
+xyz("e", 1);                            → ExpressionStat → CallExpr   ✓
+std::string(s);                         → Declaration                  ✓ 本来就该是
+std::string(s2, n2);                    → Declaration                  ✗ 应该是表达式语句
+```
+
+按 [stmt.ambig]，`T(a, b);` 只有在**它能是一份声明**时才是声明，而 `(s2, n2)` 不是 declarator（一个括号里只能有
+一个 declarator），`("value = {}", x)` 更不是。这个解析器在 `decls.rs` 的
+`parse_function_suffix_or_initializer` 末尾有一段"最后一个读法：初始化器"（注释写着"runs only where the
+alternative is an error"），但那个前提不成立 —— 备选不是错误，是**回溯成表达式语句**。所以：
+
+* `std::sort(...)` 的 `CallExpr` 没了 → `argument-count`、签名帮助、hover 的调用侧这一整条链都失效；
+* 修法：那段兜底在 `!a_name_was_parsed(p, declarator_from)` 时**不要**吃括号，让 `parse_declaration` 失败、
+  语句层回溯。风险是要跑全套（`tests/direct_init.rs` 33 KB 就是钉这块的）。
+* 这条**不在**格式字符串的范围内：那一层走 token 流，两种读法都读得出（`docs/format-strings.md` §3.2）。
+
+### J2. `definitions` 的 `DeclFact::scope` 是**光标处的限定符**，不是声明的命名空间
+
+```cpp
+namespace std { std::string format(const char*); }
+using namespace std;
+format("{}", 1);        definitions → DeclFact { name: "format", scope: None }
+std::format("{}", 1);   definitions → DeclFact { name: "format", scope: Some("std") }   ← 光标写了 std
+```
+
+`ProjectDefinition::from_binding` 的 `scope` 参数来自 `qualified_name_at(root, offset)`，也就是**你写没写**。
+对"跳到哪里"够用（甚至更好），对"这个名字在哪个命名空间里"就答不了 —— go-to-definition 的落点和命名空间
+归属是两个问题。要后者：`sema::resolve::definition_at` 拿 `Binding`，再
+`ScopeTree::qualified_name_of(binding.scope)`（格式字符串的定位器就是这么做的）。
+
+顺带：`using std::format;` 之后裸写 `format(…)` 时，那个名字绑在 **using 声明自己**身上（`DeclKind::Other`），
+所以上面那条路也只能拼出文件作用域的 `format`。要把 using 声明跟一层才认得出目标。
+
+## K. 两条已知的红线（2026-10-29，都不是格式字符串带来的）
+
+### K1. `cpp_ls --test latency` 的第一次 completion 超预算 —— 与这一轮无关，但现在是红的
+
+```text
+a_completion_asked_while_the_index_fills_comes_back_within_the_budget
+  预算 2500 ms，实测本机：
+    带格式字符串的改动    #0: 3195 ms（之后 25–36 ms）
+    把改动 stash 掉（HEAD）#0: 3591 ms（之后 25–36 ms）
+```
+
+两次都超，且 HEAD 更慢，所以**不是这一轮引入的**：第一次请求在等整个空工程的首次索引（一个临时工程，
+每次新建、无缓存，闭包是 MSVC 的 STL）。预算 2500 ms 是当初在这台机器上量的，现在同样条件下是 3.1–3.6 s。
+要处理就得先量"冷启动那 3 秒花在哪"，那是另一件事（§H 的冷启动数字有相似之处）。
+**没改预算**：把 2500 改成 4000 会把一条真实的性能回归藏起来。
+
+### K2. `std::println("…", x);` 这类语句没有 `CallExpr`（§J1 的同一条）
+
+格式字符串绕开了它（走 token 流），但 `argument-count`、签名帮助还没有。见 §J1。

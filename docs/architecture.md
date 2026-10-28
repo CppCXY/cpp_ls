@@ -2706,3 +2706,37 @@ fs.c                77 ms      45 ms      8–13 ms
 2. 首触时先按文件自己的文本回答（hover 的名字查询本来就可以只靠 scopes），把 cook 留给后台；
 3. 大工程的冷启动：831 文件 33 s ≈ 40 ms/文件，与 §14.3 的"每个头文件一次 render/cook/parse"是同一件事。
 ```
+
+## 16.4 格式字符串的高亮（已实现，实测）
+
+`docs/format-strings.md` 是设计与数字的全文；这一节只记结论和它在整台机器里的位置。
+
+**做了什么**：`std::format` / `std::print` / `std::println` / `fmt::` 的 `{…}`，`printf` 家庭的 `%…`，
+`scanf` 家庭的 `%[…]`，都在字符串**内部**逐段着色（field / 实参引用 / 转换字符 / 转义）。扫描器是纯函数
+（`sema/format.rs`，不建 session、不碰索引），定位器回答"这个字面量是不是某个已知调用的整实参"，接线在
+`handlers/semantic_token/format.rs`。
+
+**legend 22 项**（+4 自定义 +1 `regexp` 回退）。实测的关键一条：**VS Code 和 neovim 在 `initialize` 里都只报
+标准类型**，所以自定义的四个名字根本不会发出去 —— 用户屏幕上看到的是 `regexp` / `parameter` / `keyword`
+三个回退。也就是说这个功能**默认就有颜色**，主题愿意配才升级到四个精确类型。
+
+**实测**（`tests/format_status.rs`，真服务器、读回线上数据；数字见 `docs/format-strings.md` §8）：
+
+```text
+C:\Users\zc\Desktop\cpp\main.cpp        std::format("Hello, {}!") 的 `{}` → regexp / formatSpecifier
+%TEMP%\cppls-format-fixture\main.c      17 个 piece：%-8.2 f  % * d  % 1$ s  %3 d  % [a-z]  % n
+%TEMP%\cppls-format-fixture\format.cpp  {:.3 f }  {:{ }  }  —— 含 std::println 那种被读成声明的语句
+一次 semanticTokens/full                  3–9 ms（整份回答，不只是这一层）
+```
+
+**过程中发现的、不属于这个功能的两件事**（都记在 `docs/remaining.md`）：
+
+1. **语句以"限定名 + `(`"开头时被读成声明**（most-vexing-parse）：`std::println("…", x);`、
+   `std::sort(v.begin(), v.end());` 都没有 `CallExpr`，于是 signature help、参数个数检查一起失效。格式字符串
+   因为走 token 流而不受影响，但那两个功能受影响。
+2. **`definitions` 的 `DeclFact::scope` 填的是光标处的限定符**，不是声明的命名空间 —— 裸名一律 `None`。
+   要"这个名字在哪个命名空间里"得走 `definition_at` + `ScopeTree::qualified_name_of`。
+
+**这一层的成本**（neovim `message.c`，114 KB / 29 599 token / 88 个字面量）：格式串走一趟 **36.5 µs**，
+而同一次回答里 `classified_names` 是 **1.46 s** —— 也就是说这一层在真文件上占不到千分之一，不需要缓存也
+不需要 token 上限。数字的来源：`cargo test --release -p cpp_code_analysis --test format -- --ignored`。

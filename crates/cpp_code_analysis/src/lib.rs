@@ -191,8 +191,8 @@ pub use paths::{
 pub use preprocess::{FilePreprocessing, PositionalMacros, preprocess};
 pub use project::{
     CONFIGURATION_FILE_NAMES, CompileSection, ConfigProblem, ConfigReport, Database,
-    DatabaseOrigin, DiagnosticsSection, DiscoveryProblem, HoverSection, IndexSection,
-    PROJECT_CONFIG_FILE, ProjectConfig, ProjectDiscovery, Severity, WorkspaceSection,
+    DatabaseOrigin, DiagnosticsSection, DiscoveryProblem, HighlightSection, HoverSection,
+    IndexSection, PROJECT_CONFIG_FILE, ProjectConfig, ProjectDiscovery, Severity, WorkspaceSection,
     find_database, load_config, parse_config,
 };
 pub use summary::ModuleReading;

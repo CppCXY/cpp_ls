@@ -172,7 +172,24 @@ on_change_ms = 300       # how long a file's diagnostics wait for typing to stop
 
 [hover]
 enable = true            # whether hover answers at all
+
+[highlight]              # which strings are format strings, and are coloured inside
+format_strings = true    # std::format / std::print / std::println / std::format_to … and fmt::'s
+printf = true            # the C library's printf family
+scanf = true             # …and scanf's, scansets included
+extra = ["mylib::logf"]  # our own wrappers in printf's syntax: format string is the first argument
+extra_format = ["mylib::log"]   # our own wrappers in std::format's syntax
 ```
+
+`[highlight]` has three switches and two lists, and **the default is on** for each family: whether a string is a
+format string is something the analysis can prove about the text, so it does not wait for a project to opt in. A
+family set to `false` costs nothing at all — the pass answers before it looks at a token.
+
+The two lists are **separate by syntax** because one list could only mean one: `mylib::logf` is given `printf`'s
+`%d`, `mylib::log` is given `std::format`'s `{}`, and a single list would have to guess. Both are matched against
+the **resolved** qualified name, so a local function that happens to be spelled `logf` is not read as the wrapper.
+See `docs/format-strings.md` for what the colouring sends and why the vocabulary is four custom token types plus
+three standard fallbacks.
 
 ---
 
