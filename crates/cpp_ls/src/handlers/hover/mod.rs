@@ -677,6 +677,82 @@ fn overloads_markdown(
 /// One declaration, as the line a hover shows: `string format(const _Fmt, _Args...)`.
 /// Can the facts spell this declaration as a signature? A return type, a parameter list or a written type is what the
 /// reconstruction needs; a class or a namespace has none of them, and keeps its raw text.
+/// **The return type a specifier sequence has once the macros in it are dropped** — `WINBOOL` for
+/// `WINBASEAPI WINBOOL WINAPI SetConsoleOutputCP(…)`.
+///
+/// The question is asked only when the card's return type **ends in a name the project defines as a macro**
+/// ([`crate::ProjectIndex::files_defining_macro`], a name-table lookup). Then the written text before the declarator
+/// is read out of the file, split into identifiers, and every identifier that is a macro somewhere is dropped — which
+/// is what a compiler's expansion leaves — and what remains is the type.
+///
+/// `None` means "leave the fact's answer alone" — the ordinary case, and also every case the text cannot answer: a
+/// declaration whose written text holds no specifiers (a constructor, a `using`), or one where dropping the macros
+/// would leave nothing.
+fn the_type_the_macros_leave<F: cpp_code_analysis::FileProvider + Clone>(
+    session: &Session<F>,
+    file: &std::path::Path,
+    fact: &DeclFact,
+    returns: &str,
+) -> Option<String> {
+    let last = returns.split_whitespace().next_back()?;
+    if !last
+        .chars()
+        .all(|character| character.is_alphanumeric() || character == '_' || character == ':')
+    {
+        return None;
+    }
+    if session.index().files_defining_macro(last).is_empty() {
+        return None;
+    }
+
+    let text = session.text(file)?;
+    let before = text.get(..fact.name_range.start_offset)?;
+    // The specifiers are what stands between the end of the previous declaration and this name: a `;`, `{`, `}`,
+    // `#` or a blank line ends them. Read by line rather than by token, because the card is showing a spelling and
+    // not parsing a declaration.
+    let mut specifiers = String::new();
+    for line in before.lines().rev() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') || line.ends_with(';') || line.ends_with('{') {
+            if !specifiers.is_empty() {
+                break;
+            }
+            continue;
+        }
+        if line.ends_with('}') {
+            break;
+        }
+        specifiers.insert_str(0, line);
+        specifiers.insert(0, ' ');
+        // Two lines is the most a return type is ever broken across in practice, and a third would be a guess.
+        if specifiers.matches(' ').count() > 24 {
+            break;
+        }
+    }
+    if specifiers.trim().is_empty() {
+        return None;
+    }
+
+    let mut kept: Vec<&str> = Vec::new();
+    for word in specifiers.split_whitespace() {
+        let trimmed = word.trim_matches(|character: char| {
+            !(character.is_alphanumeric() || character == '_' || character == ':')
+        });
+        if trimmed.is_empty() {
+            continue;
+        }
+        if session.index().files_defining_macro(trimmed).is_empty() {
+            kept.push(word);
+        }
+    }
+    if kept.is_empty() {
+        return None;
+    }
+
+    let spelling = kept.join(" ");
+    let spelling = spelling.trim().to_string();
+    (!spelling.is_empty() && spelling != returns).then_some(spelling)
+}
 fn spells_a_signature(fact: &DeclFact) -> bool {
     fact.returns.is_some() || fact.parameter_list.is_some() || fact.type_of.is_some()
 }
@@ -808,7 +884,25 @@ fn declaration_markdown(
     found: &ProjectDefinition,
     written: Option<&str>,
 ) -> String {
-    let fact = &found.fact;
+    // **A return type read as a macro's name is corrected here.** `wincon.h` writes
+    //
+    // ```c
+    // WINBASEAPI WINBOOL WINAPI SetConsoleOutputCP(UINT wCodePageID);
+    // ```
+    //
+    // and its own text defines neither `WINBASEAPI` nor `WINAPI` — they arrive from the includer (`windows.h`).
+    // The grammar's rule for a sequence of names is "the last one wins" (it is what fixes
+    // `_NODISCARD _CONSTEXPR20 reference back()`), which picks `WINAPI`, so the card read "a function returning
+    // `WINAPI`" — reported from an editor, with a screenshot. The index knows better: the name table says which
+    // names are macros anywhere in the project (`files_defining_macro`), and the written specifier sequence minus
+    // those names is the type the compiler would have seen. See `the_type_the_macros_leave`.
+    let mut corrected = found.fact.clone();
+    if let Some(returns) = corrected.returns.clone()
+        && let Some(better) = the_type_the_macros_leave(session, &found.file, &corrected, &returns)
+    {
+        corrected.returns = Some(better);
+    }
+    let fact = &corrected;
     let mut out = String::new();
 
     // **The instantiation the reader wrote is the signature they asked about.** A class template's fact describes
@@ -1699,6 +1793,74 @@ mod tests {
         assert_eq!(enumerator_value(&view, offset), None);
     }
 
+    /// **A return type read as a macro's name is corrected from the names that are not macros.**
+    ///
+    /// The shape is `wincon.h`'s: `WINBASEAPI WINBOOL WINAPI SetConsoleOutputCP(UINT)`, where the two macro names
+    /// are defined by a *different* header (the includer's), so the file's own text cannot expand them. The grammar
+    /// takes the last name of the specifier sequence — the rule that fixes `_NODISCARD _CONSTEXPR20 reference
+    /// back()` — which is `WINAPI`, and the card said "a function returning `WINAPI`" (reported from an editor).
+    /// The index knows both names are macros, so the type left after dropping them is `WINBOOL`.
+    #[test]
+    fn a_return_type_that_is_a_macros_name_is_read_without_the_macros() {
+        let definition = "#define WINBASEAPI __declspec(dllimport)\n#define WINAPI __attribute__((__stdcall__))\n";
+        let declaration = "#include \"defs.h\"\nWINBASEAPI WINBOOL WINAPI SetConsoleOutputCP(UINT wCodePageID);\n";
+        let files = cpp_code_analysis::MemoryFiles::new()
+            .with_file("/p/defs.h", definition)
+            .with_file("/p/wincon.h", declaration)
+            .with_file("/p/main.cpp", "#include \"wincon.h\"\n");
+        let mut session = cpp_code_analysis::Session::with_config(
+            "/p",
+            cpp_code_analysis::SessionFiles::new(cpp_code_analysis::OpenDocuments::new(), files),
+            cpp_code_analysis::WatchFilter::new("/p"),
+            cpp_code_analysis::CompilerConfig::default(),
+        );
+        session.add_project_files([std::path::PathBuf::from("/p/main.cpp")]);
+        session.load("/p/wincon.h");
+        session.index_everything();
+        while session.pending_work() > 0 {
+            session.advance(64);
+        }
+
+        let fact = session
+            .index()
+            .summary(std::path::Path::new("/p/wincon.h"))
+            .and_then(|summary| {
+                summary
+                    .declarations
+                    .iter()
+                    .find(|declaration| &*declaration.name == "SetConsoleOutputCP")
+            })
+            .expect("the declaration")
+            .clone();
+        let corrected = the_type_the_macros_leave(
+            &session,
+            std::path::Path::new("/p/wincon.h"),
+            &fact,
+            fact.returns.as_deref().unwrap_or_default(),
+        );
+        assert_eq!(
+            corrected.as_deref(),
+            Some("WINBOOL"),
+            "the two macro names drop out and the type that is left is `WINBOOL` (the fact said {:?})",
+            fact.returns
+        );
+
+        // **And a name that is not a macro is left alone.** `std::size_t` has no definers, so the card keeps the
+        // fact's spelling rather than reconstructing anything.
+        let other = DeclFact {
+            returns: Some("std::size_t".to_string()),
+            ..fact.clone()
+        };
+        assert_eq!(
+            the_type_the_macros_leave(
+                &session,
+                std::path::Path::new("/p/wincon.h"),
+                &other,
+                "std::size_t"
+            ),
+            None
+        );
+    }
     /// **中文表加载成功，而且和英文表用的是同一组 key。**
     ///
     /// 一张译文表最容易出的错不是翻译错，而是 key 拼错或漏了 —— 那样 rust-i18n 会安静地回落成英文，看起来像

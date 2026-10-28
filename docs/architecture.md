@@ -2063,6 +2063,50 @@ std::println 的悬停     没有 popup    6 个重载的签名列表（实测�
 the_unit_walks_its_files_once          改成"帧 = 进入次数，不是文件数"（a.h 无 guard，被进入两次）
 an_unguarded_header_is_read_again…     新的微型 version.h：第二个读者要的宏，只有第二次读才定义
 ```
+### 15.4 头文件不是它自己 TU 的根，`WINAPI` 也不是返回类型（两条报告，一并修）
+
+报告两张图：`SetConsoleOutputCP` 的返回类型显示成 `WINAPI`；`#include <print>` 后补不出 `println`、`std::expected` 没有悬停。
+
+第二条在 §15.2.3 的走查修复之后已经好了（实测：`print` 38 条声明、`println` 4 条事实、`std::expected` 悬停正常）。
+第一条是另一个缺陷，链条如下：
+
+```text
+wincon.h:276   WINBASEAPI WINBOOL WINAPI SetConsoleOutputCP(UINT wCodePageID);
+wincon.h        只 include 了 _mingw_unicode.h 和 winapifamily.h —— WINAPI / WINBASEAPI 由【包含它的文件】提供
+                （windows.h 在它之前 include windef.h）
+```
+
+于是"把 wincon.h 当成根走一遍再 cook"得到的环境里没有这两个宏，改写后的文本仍是拼写原样，
+而 `read_specifiers` 的规则是**取最后一个名字**（正是修 `_NODISCARD _CONSTEXPR20 reference back()` 的那条），
+最后一个名字是 `WINAPI` —— 卡片就写成"a function returning `WINAPI`"。更糟的是这份更差的 reading **会赢**：
+cooked reading 的优先级高于文件自己的 summary。
+
+两处修法：
+
+```text
+① session::cooking_materials
+   · 会话里已经持有一个包含该文件的 unit（通常是工程里那个 TU）→ 就用它的环境 cook，不重新走
+   · 否则，如果一个文件被别的文件 include 且自己没有编译命令 → 干脆不 cook：
+     它自己的 summary 本来就是对它文本的读取，而"用空环境 cook 一遍"只会更差
+② handlers::hover
+   · 卡片的返回类型如果以"工程里某处定义过的宏名"结尾（files_defining_macro，一次名字表查询），
+     就把声明前的拼写文本按标识符切开、丢掉是宏的那些，剩下的是编译器会看到的类型
+```
+
+实测（`test_module`，服务器侧，首次悬停）：
+
+```text
+                              修复前                          修复后
+SetConsoleOutputCP 的卡片     WINAPI SetConsoleOutputCP(...)  WINBOOL SetConsoleOutputCP(UINT wCodePageID)
+                               "a function returning WINAPI"   "a function returning WINBOOL"
+std::expected 悬停            正常                            正常
+std::println 悬停             4 个重载                        4 个重载
+std:: 补全                   println/print/expected/unexpected 都在（200 项）
+```
+
+回归测试：`handlers/hover` 的
+`a_return_type_that_is_a_macros_name_is_read_without_the_macros`（`defs.h` 定义两个宏、`wincon.h` 只写声明，
+断言纠正成 `WINBOOL`；`std::size_t` 这种没有宏定义的名字原样保留）。
 ## 15.3 关于"313 秒"
 
 那是我在**debug 配置**下量的（`cargo test --release` 之前的那次跑的是 debug 的 probe），release 下同一个工程

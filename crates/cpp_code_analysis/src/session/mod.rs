@@ -5181,6 +5181,7 @@ impl<F: FileProvider + Clone> Session<F> {
             // **Filed under the program that read it**, not under the file: the same header read by two translation
             // units is two readings, and a lookup asks for the asking file's one
             // (`ProjectIndex::the_reading_for`). See `Readings` in `index/project.rs`.
+
             self.store
                 .index_mut()
                 .insert_cooked_in_a_program(&path, program, cooked);
@@ -5721,15 +5722,54 @@ impl<F: FileProvider + Clone> Session<F> {
         // *sticks*: it is filed as the file's cooked reading, and nothing re-cooks a file that has one. Leaving the
         // file uncooked keeps it wanted (`want_the_closure_cooked` asks for every open file without a reading), so
         // a later drain renders it when the timeline is the whole program. See [`HeldUnit`].
-        let (unit, provisional) = self.unit_and_state_of(&path)?;
-        if provisional {
-            // **A provisional timeline with an empty queue is stale, not pending.** It was walked while files its
-            // closure needed were still queued; with the queue drained a fresh walk is of the whole program. Ask for
-            // that walk next time by dropping the held one — otherwise this cook refuses for ever and whoever asked
-            // asks again (`unit_and_state_of` rebuilds a dropped unit on its next call).
-            if self.queue.pending() == 0 {
-                self.held_units().remove(&queue_key(&path));
+        // **A header is not the root of its own translation unit**, and cooking one as if it were is a *wrong* answer
+        // rather than a smaller one.
+        //
+        // `wincon.h` writes `WINBASEAPI WINBOOL WINAPI SetConsoleOutputCP(UINT wCodePageID);` and includes neither
+        // `windef.h` nor `windows.h` — those arrive from the **includer**, and `windows.h` includes them before it.
+        // So a timeline rooted at `wincon.h` itself has no `WINAPI` and no `WINBASEAPI` in force, the cook leaves the
+        // specifiers spelled out, and [`crate::sema::types::read_specifiers`] takes the **last** name of the sequence
+        // (the rule that fixes `_NODISCARD _CONSTEXPR20 reference back()`) — which here is `WINAPI`. Measured: the
+        // hover on `SetConsoleOutputCP` said "a function returning `WINAPI`", the declaration says `WINBOOL`, and the
+        // *wrong* one won, because a cooked reading outranks the file's own summary.
+        //
+        // Two rules, in this order:
+        //
+        // 1. **A unit that already contains the file is the environment to use.** The project's translation unit is
+        //    normally held (it was walked when its file was read), and its timeline is exactly the state at the
+        //    header's inclusion — no walk, no guess.
+        // 2. **Otherwise a file that some indexed file includes is not cooked on its own at all.** Its summary is
+        //    already a reading of its text; a second one made from an empty environment is worse than no answer, and
+        //    the risk of it winning is what this branch removes.
+        let mut unit = None;
+        {
+            let held_units = self.held_units();
+            for held in held_units.values() {
+                if held.provisional {
+                    continue;
+                }
+                if held.unit.environment_of(&path).is_some() {
+                    unit = Some(std::sync::Arc::clone(&held.unit));
+                    break;
+                }
             }
+        }
+        let unit = match unit {
+            Some(unit) => unit,
+            None => {
+                let included = !self.store.index().includers_of(&path).is_empty();
+                let has_a_command = self
+                    .config
+                    .database
+                    .as_ref()
+                    .is_some_and(|database| database.command_for(&path).is_some());
+                if included && !has_a_command && !self.documents.is_open(&path) {
+                    return None;
+                }
+                self.unit_and_state_of(&path)?.0
+            }
+        };
+        if unit.environment_of(&path).is_none() {
             return None;
         }
 
@@ -7664,6 +7704,13 @@ struct UnitTable {
 }
 
 impl UnitTable {
+    /// The units this session is holding, borrowed — for a caller asking *about* them rather than for one by name.
+    /// The cook is such a caller: "does any held unit contain this header" is a question about all of them and about
+    /// none of them in particular.
+    fn values(&self) -> impl Iterator<Item = &HeldUnit> {
+        self.held.values()
+    }
+
     fn get(&mut self, key: &str) -> Option<(bool, std::sync::Arc<crate::TranslationUnit>)> {
         self.clock += 1;
         let held = self.held.get_mut(key)?;
