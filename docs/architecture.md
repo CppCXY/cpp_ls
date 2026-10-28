@@ -2254,6 +2254,42 @@ std::shared_ptr<std::string> ptr; ptr->                → 4 项 ✗（是 share
 
 **这一轮量到的另一件事**（省下以后的时间）：`Session::advance` 只跑索引阶段，不 cooking，所以探针里
 `while pending_work() > 0 { advance(64) }` 在有 cooking 积压时会空转 3000 轮；要看索引是否收敛用 `pending()`。
+### 15.8 真正挡住 `shared_ptr` 的不是替换，是**作用域记错了**
+
+上一节把链子推到"事实里没有返回类型"，继续量下去发现那一层的上游还有一个更基础的错。把兜底成员的列表打出来：
+
+```text
+[list] std::shared_ptr for operator->: 12 个成员，declared_in 全是 std::shared_ptr
+       （_Assignable、_Constructible、element_type、operator= ×6、shared_ptr ×2、weak_type）
+       unlisted: "_Lp (NotDeclaredHere(\"_Lp\"))"
+```
+
+`shared_ptr` 的基类 `__shared_ptr`、再上一层的 `__shared_ptr_access` **一个成员都没进来**。查事实的作用域：
+
+```text
+shared_ptr_base.h 里 operator-> 的事实（原始读数）：
+   scope = "std::_Sp_counted_ptr_inplace::__shared_ptr_access"     ← 错的
+   scope = "std::_Sp_counted_ptr_inplace::_Sp_counted_array_base::_Iter"
+```
+
+而头文件里 `__shared_ptr_access` 是 **std 命名空间下的类**（第 1351 行），`_Sp_counted_ptr_inplace` 在它前面
+几百行（582 行起）。所以原始读数里 `_Sp_counted_ptr_inplace` 的**作用域没有闭合**，它之后的所有类都被记成它的
+嵌套类——`direct_members("std::__shared_ptr_access")` 因此一个成员也找不到，箭头自然跟不下去。
+
+`import std;` 的会话里这个头文件**没有自己的 cooked 读数**（`cooked_declarations` 是 `None`）；模块那一步把事实
+按"程序"入档（`insert_cooked_in_a_program`），而成员列表读的是文件自己的读数。
+
+下一步（按顺序）：
+
+```text
+1. 找 582–660 之间让 `_Sp_counted_ptr_inplace` 括号没闭合的那个形状（两处特化定义 + `#if` 分支，
+   `_Sp_overwrite_tag` 那组最可疑），修在解析/作用域层；
+2. 在那之前，成员列表遇到"这个类一个成员都没有、但基类列表非空"时，应当去看**程序读数**里同一批事实的作用域
+   （它们是从渲染文本读的，作用域是对的），而不是把空列表当成"这个类没有成员"。
+```
+
+顺带说明为什么它看起来像"替换失败"：替换那一层（`f8f4715`、`fc71d1c`）都已经是对的，只是**事实根本没走到**
+那一步。
 ## 15.3 关于"313 秒"
 
 那是我在**debug 配置**下量的（`cargo test --release` 之前的那次跑的是 debug 的 probe），release 下同一个工程
