@@ -2543,6 +2543,41 @@ tests/modules.rs   a_module_unit_is_read_as_a_translation_unit（补了一条断
 ```
 
 `cpp_code_analysis` 48 targets、`cpp_ls` 15 targets 全绿。
+### 15.15 预处理：**同一次 include 不能按"文件"跳过，只能按"投影"跳过**
+
+用户报 `std::println` 没有 hover。在**他的文件**（`main.cpp`，`#include <print>`）上量到的链条：
+
+```text
+files_declaring("println", main.cpp) = 4 个事实（print，scope std）   ← 知识在
+definitions("std::println", main.cpp) = 0                              ← 查询丢掉了全部 4 个
+definitions("std::format",  main.cpp) = 0（没 include <format>，正确）
+math.cpp 的 std::format → 4 ✓
+```
+
+`print` 的正文在 `#ifdef __cpp_lib_print` 里，而 `__cpp_lib_print` 由 `bits/version.h` 在
+`__glibcxx_want_print` 被定义**之后**才给出——`version.h` **故意没有 include guard**，每个标准头都靠
+`#define __glibcxx_want_X` + `#include <bits/version.h>` 来"认领"自己要的特性宏。编译器因此会**再读一遍**
+`version.h` 并**按当时的环境**重新判定每个 `#if`。
+
+我们的 walk 把"已经 splice 过的文件"记成 `HashSet<PathBuf>`，于是 `<print>` 里的第二次 include **被整文件跳过**：
+`__cpp_lib_print` 没有定义，`println` 所在区域被判死，四个声明全被 `definitions` 丢掉，而 `files_declaring`
+（不过滤区域）仍然看得见它们——这正是"事实在、答案空"。
+
+修法（`summary.rs`）：`spliced` 改成 `HashMap<PathBuf, u64>`，键是 **`walk_cache::key`（文件 + 内容 +
+投影摘要）**，投影就是该文件自己的 `#if` 提到的那些宏的取值。同一文件在**不同环境**下再被 include 时不再跳过，
+而在同一环境下仍然只走一次（省时且不重复贡献）。session 级实测：`definitions("std::println", main.cpp)`
+**0 → 4**。
+
+同时把 `CODEC_VERSION` 30 → 31、`UNIT_CODEC_VERSION` 1 → 2：预处理语义改过之后，**磁盘上旧的 summary 和
+program reading 必须失效**，否则编辑器重启后仍然用旧读数回答——这一步不做，前面所有预处理修复在真实会话里都
+看不见（这也是"改一次、问题照旧"的原因之一）。
+
+仍未闭合的一环（已定位到一行）：`ProjectIndex` 的可见性查询**每个文件只选一份读数**
+（`project.rs:10259` 的 `the_reading_for(file, asking)`）。`import std;` 的文件其 `println` 只能来自 `std`
+模块那份 program reading；如果那份读数里 `print` 的区域仍然是死的，summary 里的 4 个事实就被这份读数**遮蔽**，
+`definitions` 回答 0。实测：`demo.cpp` 的 `std::vector` ✓（不受区域影响）、`std::println` ✗。下一步是让模块的
+cook 在 `<print>` 处也拿到 `__cpp_lib_print`（同一个 splice 修复之后它仍缺），或让"选读数"在该名字缺失时
+回落到 summary。
 ## 15.3 关于"313 秒"
 
 那是我在**debug 配置**下量的（`cargo test --release` 之前的那次跑的是 debug 的 probe），release 下同一个工程

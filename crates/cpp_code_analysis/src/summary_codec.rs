@@ -224,7 +224,7 @@ const MAGIC: &[u8; 8] = b"CPPLSSUM";
 /// reader is standing. Measured on `auto lineStartOffset = _lineOffsetVec[line]`: the alias chain followed every hop
 /// correctly and stopped at `_Alloc::value_type&`; with the default it reaches `std::size_t&`. See
 /// [`crate::DeclFact::parameter_defaults`] and [`crate::substituted_spelling_with_defaults`].
-pub const CODEC_VERSION: u32 = 30;
+pub const CODEC_VERSION: u32 = 31;
 
 /// Write a summary as bytes.
 ///

@@ -39,7 +39,7 @@ use crate::summary::{RenderedUnit, UnitMessage, UnitSpan};
 const MAGIC: [u8; 4] = [b'U', b'N', b'I', b'T'];
 
 /// Bumped when the layout changes; an older record is then unreachable rather than misread.
-pub const UNIT_CODEC_VERSION: u32 = 1;
+pub const UNIT_CODEC_VERSION: u32 = 2;
 
 #[derive(Debug)]
 pub enum DecodeError {

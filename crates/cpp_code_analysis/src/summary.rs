@@ -3393,7 +3393,7 @@ struct Walked<'a> {
     conditional_by_frame: Vec<usize>,
     /// **Files a spliced contribution entered**, owned rather than borrowed: `seen` holds the caller's `&'a Path`s and
     /// a contribution holds `PathBuf`s, so the question is asked of both.
-    spliced: std::collections::HashSet<std::path::PathBuf>,
+    spliced: std::collections::HashMap<std::path::PathBuf, u64>,
     /// Bodies of definitions a condition guards that came out **in force** — the second channel.
     /// The body, the fact's `function_like`, and the parameter list — the two things expansion needs and reading
     /// does not. A function-like body **with** its parameters is expandable; without them it is not.
@@ -3546,20 +3546,20 @@ fn walk_one_file<'a>(
     // Two things still stop a second read: `#pragma once` (below, once the summary is in hand), and a **bound on the
     // nesting depth** — a cycle of unguarded headers is the one shape the file's own rule cannot end. GCC's
     // `#include` nesting limit is 200, and this is that number.
-    if walked.spliced.contains(path) {
+    // **Skipped only when no key can be told** — see the key-aware check after `sharing`.
+    if (!share || walked.timeline.is_none()) && walked.spliced.contains_key(path) {
         if std::env::var_os("CPPLS_SPLICE_TRACE").is_some() {
             eprintln!("leave early (already spliced): {}", path.display());
         }
         return None;
     }
-
     let already_read = !seen.insert(path);
     if std::env::var_os("CPPLS_SPLICE_TRACE").is_some() {
         eprintln!(
             "enter: {} | already seen {}, depth {depth}, spliced {}, timeline {}",
             path.display(),
             already_read,
-            walked.spliced.contains(path),
+            walked.spliced.contains_key(path),
             walked.timeline.is_some(),
         );
     }
@@ -3633,9 +3633,24 @@ fn walk_one_file<'a>(
             crate::index::walk_census::projection_digest(path, source, defined_in_force),
         )
     });
+    // **The skip is per projection, not per file.** The compiler re-reads a file on every `#include` and re-answers
+    // its `#if`s against the environment of that moment — and libstdc++ needs that: `bits/version.h` has no include
+    // guard *on purpose*, so `<print>` can `#define __glibcxx_want_print` and re-include it. A skip keyed by the path
+    // alone dropped the second read, `__cpp_lib_print` was never defined, `println`'s whole region was judged false,
+    // and every hover on `std::println` answered nothing (`files_declaring` still showed the four facts, `definitions`
+    // dropped all four). The key is the file, its contents **and the projection** — the values of the names its own
+    // conditions read — which is exactly what a re-read depends on.
+    if let Some(key) = sharing
+        && walked.spliced.get(path) == Some(&key)
+    {
+        if std::env::var_os("CPPLS_SPLICE_TRACE").is_some() {
+            eprintln!("leave early (spliced under this projection): {}", path.display());
+        }
+        return None;
+    }
     if let Some(key) = sharing
         && cache.lookup(key).is_some()
-        && !walked.spliced.contains(path)
+        && !walked.spliced.contains_key(path)
     {
         crate::index::walk_census::a_splice();
         if splice_a_contribution(
@@ -4118,7 +4133,7 @@ fn splice_a_contribution<'a>(
             // re-entered one would duplicate its evidence, which is a different unit. Measured: this is what kept
             // `a_declaration_only_a_macro_makes_is_found_once_the_session_has_cooked_the_file` red.
             let already_entered = cache.lookup(child).is_some_and(|child| {
-                seen.contains(child.file.as_path()) || walked.spliced.contains(&child.file)
+                seen.contains(child.file.as_path()) || walked.spliced.contains_key(&child.file)
             });
             if !already_entered {
                 splice_a_contribution(
@@ -4196,7 +4211,7 @@ fn splice_a_contribution<'a>(
             contribution.events.len(),
         );
     }
-    walked.spliced.insert(file);
+    walked.spliced.insert(file, key);
 
     true
 }
