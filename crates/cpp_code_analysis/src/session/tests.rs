@@ -4607,3 +4607,64 @@ fn a_modules_includes_define_what_a_later_condition_asks() {
             .collect::<Vec<_>>()
     );
 }
+
+/// **A cook that outlived the text it was made from is dropped.**
+///
+/// Reported from an editor, and the second half of "编辑不一定改变诊断": a `didChange` deleting a `;` was followed by
+/// one pull, and the pull answered **`reading Cooked, 0 error(s)`** — a cooked reading of the *previous* text,
+/// filed under the current one. The cause is the shape of cooking itself: it is two halves under two locks
+/// (`render_a_cooked` then `commit_a_cooked`), and the pump claims a file, renders it in the background, and
+/// commits — so an edit that lands in between is committed *over*. Nothing re-cooks a file that has a cooked
+/// reading, which is what made it permanent rather than momentary.
+///
+/// The commit now compares the hash of the text the rendering was made from against the file's text, and this test
+/// is that comparison driven by hand: claim, edit, render, commit.
+#[test]
+fn a_cook_of_text_that_has_since_changed_is_not_filed() {
+    let files = MemoryFiles::new().with_file("/p/a.cpp", "int main() { return 0; }\n");
+    let memory = Memory::new("stale-cook", &files);
+    let mut session = memory.session();
+    let path = PathBuf::from("/p/a.cpp");
+    session.add_project_files([path.clone()]);
+    session.load(&path);
+    session.index_everything();
+
+    // **The claim**, which is what the pump does before it renders: materials carry the text *and* its hash.
+    let materials = session
+        .cooking_materials(&path)
+        .expect("the file has a summary and a unit");
+    let rendered = session
+        .render_a_cooked(&materials)
+        .expect("the renderer reads the file's own text");
+
+    // **The edit**, between the two halves — exactly where a reader's keystroke lands.
+    let changed = "int main() { return 0 }\n";
+    session.did_change(&path, changed);
+
+    // The commit must refuse it: this rendering is of text nobody has any more.
+    assert!(
+        session.commit_a_cooked(rendered).is_none(),
+        "a rendering of text that has since changed may not be filed under the new text"
+    );
+    assert!(
+        session.diagnostics(&path).is_none(),
+        "and the file has no cooked reading, so nothing answers with the old text's errors"
+    );
+
+    // **The honest path still works**: cook the new text and the answer is the new text's.
+    session.did_change(&path, "int main() { return 0; }\n");
+    session.advance(64);
+    assert!(
+        session.cook(&path).is_some(),
+        "the pump re-cooks the file it dropped"
+    );
+    let found = session
+        .diagnostics(&path)
+        .expect("a cooked reading of the current text");
+    assert_eq!(
+        found.errors.len(),
+        0,
+        "the text has its `;` back: {:?}",
+        found.errors
+    );
+}

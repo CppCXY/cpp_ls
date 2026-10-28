@@ -65,6 +65,19 @@ pub fn diagnose_file(session: &Session<DiskFiles>, path: &Path) -> Option<(Uri, 
     let held = session.files().held(path)?;
 
     let found = session.diagnostics(path)?;
+    // **What the answer is made of**, for the case that matters: an answer that is empty or absent right after an
+    // edit. The numbers say which channel was empty and whether the reading was the cooked one, and without them a
+    // pull that answers `[]` to a file with a missing `;` is indistinguishable from a file that parses.
+    debug!(
+        "diagnose {}: {} byte(s) held, reading {:?}, {} error(s), {} unplaced, {} note(s), {} check(s)",
+        path.display(),
+        held.text.len(),
+        found.reading,
+        found.errors.len(),
+        found.unplaced,
+        found.notes.len(),
+        found.checks.len(),
+    );
     if found.unplaced > 0 {
         // **Said out loud rather than dropped.** A reading whose errors land in another file's macro bodies cannot
         // show them here, and a client that shows an empty list must not be read as "this file is clean" when the

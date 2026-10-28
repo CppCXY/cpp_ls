@@ -913,6 +913,21 @@ impl Session<DiskFiles> {
 /// Owned rather than borrowed on purpose: the caller has to let go of the session between
 /// `Session::cooking_materials` and `Session::render_a_cooked`, so nothing here may borrow it. The unit is an
 /// `Arc` the cache already holds, and the seed is a table built from the index's own macros.
+/// **A file, rendered and parsed, waiting to be filed** — and the hash of the text it was made from.
+///
+/// The hash is the whole reason this is a struct rather than the pair it used to be. A cook is **two halves under
+/// two locks** ([`Session::render_a_cooked`] and [`Session::commit_a_cooked`]) and the file can be edited between
+/// them — at which point the reading describes text nobody has any more. Committing it files a stale reading *under
+/// the new text*, and nothing re-cooks a file that has a cooked reading: measured, a pull right after an edit
+/// answered `reading Cooked, 0 error(s)` for a file whose `;` had just been deleted. `text_hash` is what lets the
+/// commit say "this is not the text any more" and drop it.
+pub struct RenderedCook {
+    /// `cache::content_hash` of the text the rendering was made from.
+    pub text_hash: u64,
+    pub indexed: crate::IndexedRendering,
+    pub reading: CookedReading,
+}
+
 pub struct CookingMaterials {
     /// The index's own spelling of the path, which is what every other layer keys on.
     pub path: PathBuf,
@@ -922,6 +937,9 @@ pub struct CookingMaterials {
     pub unit: std::sync::Arc<crate::TranslationUnit>,
     /// The file's own text.
     pub text: String,
+    /// **The hash of that text**, which is what the commit compares the file's text against — see
+    /// [RenderedCook].
+    pub text_hash: u64,
     /// What the compilation defines, before the file's own `#define`s.
     pub seed: MacroTable,
     /// The names the file's raw reading already declares, so the render's addition can be counted.
@@ -5873,7 +5891,7 @@ impl<F: FileProvider + Clone> Session<F> {
     pub fn cook(&mut self, path: impl AsRef<Path>) -> Option<CookedReading> {
         let materials = self.cooking_materials(path.as_ref())?;
         let rendered = self.render_a_cooked(&materials)?;
-        Some(self.commit_a_cooked(rendered))
+        self.commit_a_cooked(rendered)
     }
 
     /// **Everything a cook needs that is cheap to gather** — and it takes `&self`, which is the whole point of it.
@@ -5964,6 +5982,7 @@ impl<F: FileProvider + Clone> Session<F> {
         }
 
         let text = self.files.read(&path)?;
+        let text_hash = crate::cache::content_hash(&text);
         let seed = MacroTable::from_marked(self.store.index().macros());
 
         Some(CookingMaterials {
@@ -5971,6 +5990,7 @@ impl<F: FileProvider + Clone> Session<F> {
             key,
             unit,
             text,
+            text_hash,
             seed,
             already_declared,
         })
@@ -5983,15 +6003,13 @@ impl<F: FileProvider + Clone> Session<F> {
     ///
     /// The unit and the seed are moved in rather than borrowed because the caller has to let go of the session
     /// between the two halves — that is the whole point of the split — and a borrow of `&self` cannot survive it.
-    pub fn render_a_cooked(
-        &self,
-        materials: &CookingMaterials,
-    ) -> Option<(crate::IndexedRendering, CookedReading)> {
+    pub fn render_a_cooked(&self, materials: &CookingMaterials) -> Option<RenderedCook> {
         let CookingMaterials {
             path,
             key,
             unit,
             text,
+            text_hash,
             seed,
             already_declared,
         } = materials;
@@ -6021,28 +6039,58 @@ impl<F: FileProvider + Clone> Session<F> {
             unplaced: indexed.unplaced,
             mapped: indexed.mapped,
         };
-        Some((indexed, reading))
+        Some(RenderedCook {
+            text_hash: *text_hash,
+            indexed,
+            reading,
+        })
     }
 
     /// **Put a rendered reading into the index** — one insert, and it is the whole of what needs `&mut self`.
-    pub fn commit_a_cooked(
-        &mut self,
-        reading: (crate::IndexedRendering, CookedReading),
-    ) -> CookedReading {
-        let (indexed, reading) = reading;
+    ///
+    /// # The one check, and the defect it answers
+    ///
+    /// The rendering was made from the text the session held when the cook was **claimed**, and the file can be
+    /// edited between the claim and this call. Committing then would file a reading of text nobody has, *under the
+    /// current text* — and nothing re-cooks a file that has a cooked reading, so the wrong answer is permanent until
+    /// the next edit. Measured through the protocol: a `didChange` deleting a `;`, then one pull —
+    /// `reading Cooked, 0 error(s)` for a file that does not parse. So a reading whose text is no longer the file's
+    /// is **dropped**, and the file is asked for again: the edit that made it stale already queued a cook (see
+    /// [`Session::buffer_changed`]), and asking again here costs a hash lookup.
+    pub fn commit_a_cooked(&mut self, rendered: RenderedCook) -> Option<CookedReading> {
+        let RenderedCook {
+            text_hash,
+            indexed,
+            reading,
+        } = rendered;
         let path = indexed.summary.path.clone();
+
+        // **The check.** `self.text` is the file's text *now*, and the hash it is compared against is the one the
+        // rendering was made from. A file that has become unreadable is the same answer — nothing to file.
+        let current = self
+            .text(&path)
+            .map(|text| crate::cache::content_hash(&text));
+        if current != Some(text_hash) {
+            if crate::probes::cooking() {
+                eprintln!(
+                    "commit_a_cooked: dropped {} | the text changed while it was being rendered",
+                    path.display()
+                );
+            }
+            self.want_cooked_reading(&path);
+            return None;
+        }
+
         // **The rendering is remembered, not dropped.** This is the half that was missing, and its absence is why
         // `Session::view` could answer `None` for a file whose rendering had *just* been built and parsed: the facts
         // went into the index and the tree went in the bin, so nothing could reconstruct the reading until some
         // other path happened to remember one. With this, "the file has been read the way a compiler reads it" and
         // "the reading is available to a query" are the same state — which is what the rest of this layer assumes.
         //
-        // Keyed by content hash exactly as `commit_the_drain` keys it, so the two writers of this cache cannot
-        // disagree about what a cache entry means.
-        if let Some(text) = self.text(&path)
-            && let Ok(mut known) = self.renderings.lock()
-        {
-            let key = (path.clone(), crate::cache::content_hash(&text));
+        // Keyed by the hash of the text it was **made from** — the same one the check above just compared — rather
+        // than by a second read of the file, so the entry cannot describe one text under another's key.
+        if let Ok(mut known) = self.renderings.lock() {
+            let key = (path.clone(), text_hash);
             let before = known.len();
             let weight = indexed.rendered.weight();
             known.insert(key, std::sync::Arc::clone(&indexed.rendered), weight);
@@ -6055,20 +6103,19 @@ impl<F: FileProvider + Clone> Session<F> {
                 );
             }
         } else if crate::probes::cooking() {
-            // **The other way this can silently not happen**: `self.text` answers `None` (the file is no longer
-            // readable) or the lock is poisoned, and both leave the cache exactly as it was while the facts go into
-            // the index — "read" and "available" apart again, which is the state this whole change is about.
+            // **The other way this can silently not happen**: the cache lock is poisoned, which leaves it exactly as
+            // it was while the facts go into the index — "read" and "available" apart again, which is the state this
+            // whole change is about.
             eprintln!(
-                "commit_a_cooked: NOT inserted {} | readable {} | lock {}",
+                "commit_a_cooked: NOT inserted {} | lock {}",
                 path.display(),
-                self.text(&path).is_some(),
                 self.renderings.lock().is_ok()
             );
         }
         {
             self.store.index_mut().insert_cooked(&path, indexed.into());
         }
-        reading
+        Some(reading)
     }
 
     /// **Which files the next cooking slice is for** — the queue pop, and the only part of taking a slice that needs
@@ -6133,10 +6180,7 @@ impl<F: FileProvider + Clone> Session<F> {
     }
 
     /// **Lex, render and parse a slice's worth of materials** — the expensive half, under a read lock.
-    pub fn render_them(
-        &self,
-        materials: Vec<CookingMaterials>,
-    ) -> Vec<(crate::IndexedRendering, CookedReading)> {
+    pub fn render_them(&self, materials: Vec<CookingMaterials>) -> Vec<RenderedCook> {
         let tracing = crate::probes::cooking();
         materials
             .into_iter()
@@ -6154,13 +6198,10 @@ impl<F: FileProvider + Clone> Session<F> {
     }
 
     /// **Put a slice's worth of rendered readings into the index** — one insert each, under the write lock.
-    pub fn commit_them(
-        &mut self,
-        rendered: Vec<(crate::IndexedRendering, CookedReading)>,
-    ) -> Vec<CookedReading> {
+    pub fn commit_them(&mut self, rendered: Vec<RenderedCook>) -> Vec<CookedReading> {
         rendered
             .into_iter()
-            .map(|reading| self.commit_a_cooked(reading))
+            .filter_map(|reading| self.commit_a_cooked(reading))
             .collect()
     }
 

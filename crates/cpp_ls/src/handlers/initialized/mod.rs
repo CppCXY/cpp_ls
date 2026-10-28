@@ -503,7 +503,7 @@ async fn index_in_background(context: ServerContextSnapshot) {
                     // was ever refused and the closure walk wanted them again on the next drain.
                     let built: Vec<std::path::PathBuf> = rendered
                         .iter()
-                        .map(|(indexed, _)| indexed.summary.path.clone())
+                        .map(|rendered| rendered.indexed.summary.path.clone())
                         .collect();
                     Some((session.prepare_the_drain(drain), rendered, built))
                 })

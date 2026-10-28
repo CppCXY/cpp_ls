@@ -1159,3 +1159,52 @@ handshake::a_finding_about_deleted_text_does_not_survive_a_busy_index
    协议级。这两条**修前也过**（fixture 一秒钟就 settle，`unsettled` 状态抓不住），留着是防回归的护栏，
    不是复现 —— 复现靠上面那条规则级测试和真工程探针，两处的失败数字都在这一节里。
 ```
+
+### L1. 第二个根因：**在飞的那次 cook 会覆盖新文本**
+
+`713e146` 之后，探针还是偶发地答 `[]`（一次 `;` 删掉之后的那一问）。日志（`CPPLS_TEST_LOG_LEVEL=debug`）把三个
+事实摆在一起：
+
+```text
+apply_upto: applying event 2 (Changed …)            ← 编辑确实被应用了
+cook slice: asked 1, rendered 1, … 1 stored, 0 re-read
+diagnose …/main.cpp: 99 byte(s) held, reading Cooked, 0 error(s)   ← 99 字节是坏文本，答案却是"0 错"
+```
+
+99 字节是**新的**（坏的）文本，而答案来自**旧的** cooked reading。原因是 cooking 的形状：
+
+```text
+pump:  claim_cooking ──> cooking_materials（拿到 text + 它的 hash）
+                          render_a_cooked（读锁，慢：render + parse）   ← 用户在这里敲键
+                          commit_a_cooked（写锁）──> insert_cooked
+```
+
+`commit_a_cooked` 原来用 `self.text(&path)`（**当前**文本）算 hash 去缓存渲染 —— 于是把旧文本的渲染**登记在新文本的
+名下**，facts 也按新文本进索引。而"已经有 cooked reading 的文件不会再被 cook"（`want_the_closure_cooked` 的规则），
+所以这个错答案会一直留着，直到下一次编辑。
+
+修法：`CookingMaterials` 带上它读到的那份文本的 hash，`render_a_cooked` 把它装进一个新的 `RenderedCook`，
+`commit_a_cooked` 拿它和**现在的**文本比：
+
+```rust
+if current != Some(text_hash) {
+    // 文本已经不是渲染时那份了：丢掉，并且再要一次 cook
+    self.want_cooked_reading(&path);
+    return None;
+}
+```
+
+缓存也改用**渲染时那份**文本的 hash 作键（原来用当前文本的），这样缓存项不可能"一个文本的内容挂在另一个文本的键上"。
+
+测试：`session::tests::a_cook_of_text_that_has_since_changed_is_not_filed` —— 手工走 claim → 编辑 → render →
+commit，断言 commit 被拒、`diagnostics` 没有答案；然后用新文本正常 cook 一遍，答案是新文本的（0 条错误）。
+**把那一行检查改成 `if false` 之后这条测试立刻失败**，失败信息就是它自己的断言。
+
+修完之后 `cargo test -p cpp_ls --test handshake` **连跑六次全绿**（修之前大约三次里失败一次）。
+
+两个根因是同一句话的两个来源，都得修：
+
+```text
+the_report 的重发/并集   → 旧发现留在屏幕上（一直留）
+在飞的 cook 提交旧文本   → 旧发现被当成新文本的答案（一直留）
+```
