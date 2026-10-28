@@ -2149,6 +2149,51 @@ auto show = [](double a) { if (int inner = 1) { g(inner); } };    4 条事实（
 `text.find(needle)` 给的是**文件文本**的偏移；两者在指针之前有宏展开时会错位，于是 `std::numbers::pi`
 一路报 `UnparsableName`——量的是探针而不是分析。正确做法（也是 hover handler 的做法）：
 `view.reading_offset_of(FileOffset::new(written))`。
+### 15.6 `import std;` 里的补全：两个未修的缺口，及其原因（实测）
+
+报告（`std_module_demo.cpp`，只有 `import std;`）：`std::print` 的补全里没有 `println`；`ptr->` 没有补全。
+
+先量到的事实（`std_module_demo.cpp`，光标的**渲染偏移**用 `view.reading_offset_of` 换算）：
+
+```text
+可见文件 475；print / bits/std.cc / shared_ptr.h / memory / string 都在其中
+事实数：println 4、print 3、shared_ptr 5、make_shared 6、vector 11、format 35
+光标在 `std::` 之后：补全 55 项，含 println、print ✓
+```
+
+也就是说 **`import std;` 的可见性是好的**，`std::` 之后确实有 `println`。两个缺口在别处：
+
+```text
+① `ptr->` 之后（什么都没打）：0 项
+   上下文是对的（Member { object: ptr, member: "" }），`ptr` 的类型也解析出来了
+   （type_at(ptr) → Yes { type_of: "std::shared_ptr<std::string>" }），但成员列表是空的。
+   而且 MemberAccess::arrow 在这个"文本回退"里被**硬编码成 false** —— `ptr->` 被当成 `ptr.`。
+   现有测试证明 operator-> 链本身是通的（`a_dot_on_a_class_with_operator_arrow_lists_the_pointee` 等），
+   所以剩下的原因指向 libstdc++ 的 `shared_ptr` 把 `operator->` 写在**模板基类** `__shared_ptr` 里，
+   而基类实参的代入（`__shared_ptr<_Tp, _Lp>`）没有被跟随。
+
+② `ptr->` 下面一行写 `std::print`：补全 0 项（上一行普通时是 55 项）
+   原因是**错误恢复**：未完成的 `ptr->` 与下一行被解析成**同一个**成员访问节点，
+   于是"`print` 的补全"变成了"`ptr` 的成员"。
+```
+
+两处都试过改，又都**撤回**了（不留下没有量到收益的改动）：
+
+```text
+· arrow 改成按运算符文本判断（`->` → true）：本身是对的，也加过单测；
+· 给文本回退加"运算符必须与光标同一行"的守卫：修好了 ②，但
+  `a_dot_on_a_class_with_operator_arrow_lists_the_pointee` 变红——跨行的成员访问
+  （`obj\n    .method()`）是合法写法，按行拒绝会把它一起拒掉。
+```
+
+下一步（按可信度排序）：
+
+```text
+1. `MemberAccess::arrow` 改成由运算符文本决定（一行，独立可验证）；
+2. ② 的守卫要按"运算符之后到光标之间是不是一个新语句"判断，而不是"有没有换行"——
+   跨行成员访问的下一行以 `.`/`->` 开头，`std::print` 不是；
+3. ① 需要模板基类的实参代入：`shared_ptr` 的 `operator->` 在 `__shared_ptr<_Tp, _Lp>` 里。
+```
 ## 15.3 关于"313 秒"
 
 那是我在**debug 配置**下量的（`cargo test --release` 之前的那次跑的是 debug 的 probe），release 下同一个工程
