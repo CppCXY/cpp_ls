@@ -514,9 +514,9 @@ fn the_unit_walks_its_files_once() {
         &cpp_code_analysis::WalkCache::new(),
     );
 
-    // `a.h` is included twice (`c.h` and `b.h` both take it) and walked once: the guard idiom means a second read
-    // defines nothing new, which is the rule `walk_one_file` states. Every file is read at most once for the whole
-    // unit — where the per-file reading read the closure of each file, so `a.h` was read once per consumer.
+    // **Every file is read at most once**, which is the walk's promise about *reading*: a summary is what a file is
+    // read into, and the per-file reading used to read the closure of each file (`a.h` once per consumer). The walk
+    // reads the summaries; the frames below are entries, not reads.
     for path in ["/p/a.h", "/p/b.h", "/p/c.h", "/p/main.cpp"] {
         assert!(
             provider.reads_of(path) <= 1,
@@ -524,7 +524,106 @@ fn the_unit_walks_its_files_once() {
             provider.reads_of(path)
         );
     }
-    assert_eq!(timeline.files().count(), 4, "four files, one walk");
+
+    // **A frame per *entry*, which is not a file per frame.** `a.h` is included twice (`c.h` and `b.h` both take it)
+    // and it has no guard — `#define A 1` and nothing else — so a preprocessor reads it twice, and this walk now says
+    // so. That is the rule `walk_one_file` states: the second read is decided by the **file's own text** (`#pragma
+    // once`, or the `#ifndef X / #define X` idiom whose name the walk recognises), never by the walk's own memory of
+    // having been there. Skipping it in the walk was wrong for every *unguarded* file, and libstdc++'s
+    // `bits/version.h` — included by every header to add its own feature-test macros — is exactly such a file: see
+    // `an_unguarded_header_is_read_again_and_defines_what_its_second_reader_asked_for`.
+    let frames: Vec<&Path> = timeline.files().collect();
+    assert_eq!(frames.len(), 5, "four files, five entries: {frames:?}");
+    assert_eq!(
+        frames
+            .iter()
+            .filter(|path| **path == Path::new("/p/a.h"))
+            .count(),
+        2,
+        "`a.h` has no guard, so both includes read it: {frames:?}"
+    );
+}
+
+/// **A file with no guard is read again, and what its second read defines is in force for the second reader.**
+///
+/// This is libstdc++'s `bits/version.h` in miniature, and the whole of `import std;`'s missing `std::println`: the
+/// file is an *override header* — it defines whatever feature-test macro the header that includes it asked for, and
+/// it is deliberately not guarded, because the second include is the point. A walk that reads each file once sees
+/// only the first reader's request: `HAS_PRINT` never exists, `print`'s body (`#ifdef HAS_PRINT`) is dropped, and its
+/// summary holds 0 declarations.
+#[test]
+fn an_unguarded_header_is_read_again_and_defines_what_its_second_reader_asked_for() {
+    let files = [
+        (
+            "/p/version.h",
+            "#ifdef WANT_PRINT\n#define HAS_PRINT 1\n#endif\n",
+        ),
+        ("/p/print.h", "#define WANT_PRINT\n#include \"version.h\"\n"),
+        (
+            "/p/a.h",
+            "#include \"version.h\"\n#ifdef HAS_PRINT\nint a_print;\n#endif\n",
+        ),
+        (
+            "/p/b.h",
+            "#include \"print.h\"\n#ifdef HAS_PRINT\nint b_print;\n#endif\n",
+        ),
+        ("/p/main.cpp", "#include \"a.h\"\n#include \"b.h\"\n"),
+    ];
+
+    let mut provider = MemoryFiles::new();
+    for (path, text) in files {
+        provider.insert(path, text);
+    }
+    let mut config = CompilerConfig::default();
+    config = config.with_include_path(PathBuf::from("/p"));
+    let indexer = FileIndexer::new(&provider, &config);
+    let key = SummaryKey::new(0, 0);
+
+    let mut summaries = HashMap::new();
+    let mut sources = HashMap::new();
+    for (path, text) in files {
+        let path = PathBuf::from(path);
+        summaries.insert(path.clone(), indexer.index(&path, text, key));
+        sources.insert(path, (*text).to_string());
+    }
+
+    let seed = Marked::default();
+    let look_up = |wanted: &Path| {
+        Some((
+            summaries.get(wanted)?,
+            sources.get(wanted).map(String::as_str).unwrap_or(""),
+        ))
+    };
+    let mut definitions = MacroDefinitions::default();
+    let timeline = TranslationUnit::walk(
+        summaries.get(Path::new("/p/main.cpp")).expect("indexed"),
+        look_up,
+        &seed,
+        &mut definitions,
+        false,
+        &cpp_code_analysis::WalkCache::new(),
+    );
+
+    // **`version.h` was entered twice**, once from each reader's chain, and the second entry — the one `print.h`
+    // makes — is the one that asks for `HAS_PRINT`. So `b.h`, which reaches it through `print.h`, has the macro; and
+    // `a.h`, whose chain asked for nothing, does not. That asymmetry *is* the semantics: a walk that reads each file
+    // once gives `b.h` the same answer as `a.h`, which is what made `print`'s declarations disappear.
+    let at_the_end = |path: &str| sources.get(Path::new(path)).map_or(0, String::len);
+    let a = timeline
+        .environment_of(Path::new("/p/a.h"))
+        .expect("`a.h` has an environment");
+    assert!(
+        a.kind_of("HAS_PRINT", at_the_end("/p/a.h")).is_none(),
+        "`a.h` asked `version.h` for nothing, so nothing was defined"
+    );
+    let b = timeline
+        .environment_of(Path::new("/p/b.h"))
+        .expect("`b.h` has an environment");
+    assert!(
+        b.kind_of("HAS_PRINT", at_the_end("/p/b.h")).is_some(),
+        "`b.h` reaches `version.h` through `print.h`, which asks for `HAS_PRINT` — the second read is the one that \
+         defines it"
+    );
 }
 
 /// **A unit can be kept and read back** — the cache layer's acceptance, on a fixture rather than a corpus.

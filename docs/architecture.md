@@ -1982,7 +1982,7 @@ std::println 的悬停            ```cpp using std::println; ``` — Declared in
 `std.cppm` 先 include `feature.h`（`#define FEATURE 1`），再 include `library.h`（`#if FEATURE` 里 include
 `detail.h`），消费者 `import std;` 后 `v.` 必须列出 `push_back`）。诚实地说：这条测试在**未修**时也通过，
 因为内存夹具里的 `#if FEATURE` 判成 `Unknown`（Conditional 仍可见），复现靠的是上面真实工程的探针数字。
-### 15.2.2 `std::println` 剩下的那一半：实测到哪一步（未修）
+### 15.2.2 `std::println` 剩下的那一半：走查把每个文件只读了一次（已修）
 
 `print`（`<print>` 的实现文件，`include/c++/print`）现在**在可见集合里**，但它的 summary 是空的：
 
@@ -2014,6 +2014,54 @@ bits/version.h:   #if defined(__glibcxx_want_print) … #define __cpp_lib_print 
    `#define __glibcxx_want_print` 是否被应用、version.h 的 `__cpp_lib_print` 是否被定义；
 2. 如果没应用，问题在"嵌套 include 的宏状态"（渲染器 vs 走查两套状态），那是与 §15.2.1 同源的第二处；
 3. 如果应用了而声明仍为空，问题在 `file_what_was_found` 的归位（渲染的 span 映射回 print 时失败会被记为 unplaced）。
+```
+### 15.2.3 根因：照抄编译器的预处理，而不是"每个文件只读一次"
+
+真正的原因在**走查**（`summary.rs` 的 `walk_one_file`）里，而且是它自己写在注释里的假设：
+
+```rust
+// Each file is read once per walk. A preprocessor would re-read one that is included twice, but the guard
+// idiom (`#ifndef X / #define X`) is what every header in this corpus uses…
+if !seen.insert(path) || walked.spliced.contains(path) { return None; }
+```
+
+**预处理器每次都重读被包含的文件**；让第二次读"什么也不贡献"的不是走查的记忆，而是文件**自己的文本**——`#ifndef X / #define X`
+在第二次读时求值为假。把这条规则搬进走查，只对**按构造幂等**的文件成立（`#pragma once`，索引里记为
+`guards.visit_once`）。libstdc++ 的 `bits/version.h` 恰恰**故意没有 guard**——每个 libstdc++ 头都 include 它一次，
+让它加进"这个头想要的那个 feature-test 宏"（`#define __glibcxx_want_print` 然后 `#include <bits/version.h>`）。
+走查只读一次（从 `<version>` 那一次），于是 `__cpp_lib_print` 永远不存在，`print` 的整个文件体
+（`#ifdef __cpp_lib_print`）被判为未激活，它的 summary 就是 **0 条声明**。
+
+修法三件事：
+
+```text
+① 重入：没有被 guard 的文件，每次被 include 都重新进入（和预处理器一样）
+② 短路：`#pragma once`，或文件自己的 guard（`guards.own_guard` 的 region 里就是那个宏名）已经在状态里
+        → 直接返回。这不是优化：libstdc++ 闭包是有巨大扇入的 DAG（`bits/c++config.h` 被约两百个头包含），
+        重走文件体会走 DAG 的**路径数**——第一次尝试就死在 8 GB 分配上
+③ 深度上限 200（GCC 的 #include 嵌套上限），这是无 guard 的环唯一能被终止的地方
+```
+
+另外 `index_unit_rendering` 里把**同一文件的多条切片合并**：一个文件被进入两次就有两条切片，而调用方按
+路径存一份 reading——不合并的话第二条（通常是空的）会把第一条覆盖掉。
+
+实测（`test_module`，`import std;`，MinGW GCC 15）：
+
+```text
+                        修复前        修复后
+print 的声明数          0             38
+println 的事实          0             4（6 个重载含 ostream 里的）
+std::println 的悬停     没有 popup    6 个重载的签名列表（实测服务端 767 ms，首次）
+索引                    4.6 s         7.4 s
+读 std 模块            0.76 s        3.2 s
+大工程（neovim 831 文件） 29.9 s      29.3 s（无退化）
+```
+
+回归测试：`translation_unit.rs` 里
+
+```text
+the_unit_walks_its_files_once          改成"帧 = 进入次数，不是文件数"（a.h 无 guard，被进入两次）
+an_unguarded_header_is_read_again…     新的微型 version.h：第二个读者要的宏，只有第二次读才定义
 ```
 ## 15.3 关于"313 秒"
 

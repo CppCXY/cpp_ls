@@ -1570,6 +1570,7 @@ fn walk_the_translation_unit<'a>(
             from_offset,
             None,
             0,
+            0,
             &mut seen,
             &mut look_up,
             seed,
@@ -1836,6 +1837,7 @@ impl TranslationUnit {
             &root.path,
             0,
             None,
+            0,
             0,
             &mut seen,
             &mut look_up,
@@ -3487,11 +3489,38 @@ struct Bases {
     dead: usize,
 }
 
+/// **The macro name an include guard tests** — `_GLIBCXX_CXX_CONFIG` for a file that opens with
+/// `#ifndef _GLIBCXX_CXX_CONFIG`.
+///
+/// Read from the region's stored condition rather than from the file's first line: `guards.own_guard` already names
+/// the region the idiom opens, and the branch that opens it holds exactly the name (`GuardBranch::condition` is "the
+/// name for `#ifdef`/`#ifndef`"). `None` for a guard this cannot read, which makes the caller read the file again —
+/// the safe direction, because a re-read whose guard *is* in force costs a walk of skipped facts and nothing else.
+fn guard_name_of(file: &FileSummary, region: u32) -> Option<&str> {
+    let conditional = file.guards.conditionals.get(region as usize)?;
+    let first = conditional.branches.first()?;
+    if !matches!(
+        first.kind,
+        crate::DirectiveKind::Ifdef | crate::DirectiveKind::Ifndef
+    ) {
+        return None;
+    }
+
+    let name = first.condition.as_deref()?.trim();
+    (!name.is_empty() && !name.contains(char::is_whitespace)).then_some(name)
+}
+/// **How deep `#include`s may nest** — a preprocessor's own limit, and the one thing that ends a cycle of *unguarded*
+/// headers. GCC's is 200 (`-fmax-include-depth` is the knob for a deeper one); this is that number, and it is a bound
+/// rather than a visited-set because a preprocessor genuinely re-reads a file every time it is included.
+const MAX_INCLUDE_DEPTH: usize = 200;
+
 fn walk_one_file<'a>(
     path: &'a std::path::Path,
     from_offset: usize,
     parent: Option<u32>,
     from_in_parent: usize,
+    // How deep in `#include`s this file is — 0 for the root, bounded by `MAX_INCLUDE_DEPTH`.
+    depth: usize,
     seen: &mut std::collections::HashSet<&'a std::path::Path>,
     look_up: &mut impl FnMut(&std::path::Path) -> Option<(&'a FileSummary, &'a str)>,
     seed: &Marked,
@@ -3501,22 +3530,41 @@ fn walk_one_file<'a>(
     share: bool,
     cache: &crate::index::walk_cache::WalkCache,
 ) -> Option<u64> {
-    // Each file is read once per walk. A preprocessor would re-read one that is included twice, but the guard
-    // idiom (`#ifndef X / #define X`) is what every header in this corpus uses, and a second read of a guarded
-    // file defines nothing new.
+    // **A preprocessor re-reads an included file every time it is included, and the file's own text is what makes
+    // the repeat contribute nothing.** The `#ifndef X / #define X` idiom is a *condition in the file*, evaluated like
+    // any other: it says false the second time, so the body is skipped. Skipping the second read in the walk instead
+    // is only the same thing for a file that is idempotent by construction — `#pragma once`, which the index records
+    // as `guards.visit_once`.
+    //
+    // The difference is not theoretical, and it is why `import std;` had no `std::println`: libstdc++'s
+    // `bits/version.h` is deliberately **unguarded** — every libstdc++ header includes it to add the feature-test
+    // macros *that header* asks for (`#define __glibcxx_want_print` then `#include <bits/version.h>`) — so a walk
+    // that entered it once, from `<version>`, never defined `__cpp_lib_print` for `print`, and `print`'s whole body
+    // (inside `#ifdef __cpp_lib_print`) was dropped: its summary held **0 declarations**, and every `std::println`
+    // answered `NotDeclaredHere`.
+    //
+    // Two things still stop a second read: `#pragma once` (below, once the summary is in hand), and a **bound on the
+    // nesting depth** — a cycle of unguarded headers is the one shape the file's own rule cannot end. GCC's
+    // `#include` nesting limit is 200, and this is that number.
+    if walked.spliced.contains(path) {
+        if std::env::var_os("CPPLS_SPLICE_TRACE").is_some() {
+            eprintln!("leave early (already spliced): {}", path.display());
+        }
+        return None;
+    }
+
+    let already_read = !seen.insert(path);
     if std::env::var_os("CPPLS_SPLICE_TRACE").is_some() {
         eprintln!(
-            "enter: {} | already seen {}, spliced {}, timeline {}",
+            "enter: {} | already seen {}, depth {depth}, spliced {}, timeline {}",
             path.display(),
-            seen.contains(path),
+            already_read,
             walked.spliced.contains(path),
             walked.timeline.is_some(),
         );
     }
-    if !seen.insert(path) || walked.spliced.contains(path) {
-        if std::env::var_os("CPPLS_SPLICE_TRACE").is_some() {
-            eprintln!("leave early (already read): {}", path.display());
-        }
+    if depth >= MAX_INCLUDE_DEPTH {
+        walked.includes_skipped += 1;
         return None;
     }
 
@@ -3531,6 +3579,28 @@ fn walk_one_file<'a>(
         // whole unit's evidence.
         return None;
     };
+
+    // **`#pragma once`, and the include guard: the two ways the file itself decides a second read.**
+    //
+    // `#pragma once` is recorded as `guards.visit_once`. The guard idiom (`#ifndef X / #define X`) is not special to
+    // a preprocessor — it is a condition, and on the second read it is false, so the body is not read. The walk
+    // **knows** the idiom (`guards.own_guard` is the region it opens) and the region holds the name it tests, so the
+    // second read is a hash lookup rather than a walk of a body whose every fact would be skipped anyway.
+    //
+    // That is not an optimisation: without it, re-entry is **exponential**. The libstdc++ closure is a DAG with heavy
+    // fan-in (`bits/c++config.h` is included by some two hundred headers), so a walk that re-reads bodies walks the
+    // DAG's number of *paths*, not its number of files. Measured: the first attempt at re-entry died on an 8 GB
+    // allocation while indexing `import std;`.
+    if already_read && file.guards.visit_once {
+        return None;
+    }
+    if already_read
+        && let Some(own) = file.guards.own_guard
+        && let Some(name) = guard_name_of(file, own)
+        && unit.definitions.contains_key(name)
+    {
+        return None;
+    }
 
     // **The projection census, and the sharing key** — `index::walk_census` counts what a cache would save,
     // `index::walk_cache` is where it would be saved, and `docs/walk-redesign.md` §11 has the numbers.
@@ -3817,6 +3887,7 @@ fn walk_one_file<'a>(
                 include.range.start_offset + include.range.length,
                 frame,
                 include.range.start_offset + include.range.length,
+                depth + 1,
                 seen,
                 look_up,
                 seed,

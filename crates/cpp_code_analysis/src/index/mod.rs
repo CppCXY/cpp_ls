@@ -651,6 +651,33 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
             &mut unplaced,
         );
 
+        // **One entry per file, however many times the walk entered it.** A preprocessor re-reads an included file
+        // every time it is included — `bits/version.h` is the shape, unguarded and included by every libstdc++
+        // header — so a unit's stream holds one *slice* per entry, and the second slice is usually empty (the
+        // file's own guard is false). `files` is per slice, which is right for the tokens and wrong for the answer:
+        // the caller files one reading per path, so a duplicate would replace the first with an empty one. Merged
+        // here, in the order the entries happened, and the counters summed.
+        let mut merged: Vec<(std::path::PathBuf, crate::CookedFile)> =
+            Vec::with_capacity(files.len());
+        let mut where_to: std::collections::HashMap<std::path::PathBuf, usize> =
+            std::collections::HashMap::new();
+        for (path, cooked) in files {
+            match where_to.get(&path) {
+                Some(&index) => {
+                    let held = &mut merged[index].1;
+                    held.declarations.extend(cooked.declarations);
+                    held.macros.extend(cooked.macros);
+                    held.diagnostics.extend(cooked.diagnostics);
+                    held.unplaced += cooked.unplaced;
+                }
+                None => {
+                    where_to.insert(path.clone(), merged.len());
+                    merged.push((path, cooked));
+                }
+            }
+        }
+        let files = merged;
+
         crate::IndexedUnit {
             files,
             unplaced,
