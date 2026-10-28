@@ -1,4 +1,4 @@
-//! **A diagnostic does not disappear because the analysis is between readings.**
+//! **The answer a pull gives right after an edit is about that edit.**
 //!
 //! The report that produced this file: "诊断依然在频繁地闪现" — squiggles that appear and vanish while typing. The
 //! server is pull-only (`textDocument/diagnostic`), so the delivery cannot be the cause: what a client is shown is
@@ -12,17 +12,19 @@
 //!   refresh     the client asks again → the findings come back
 //! ```
 //!
-//! `AnalysisState::last_reports` breaks the cycle: a pull that cannot answer repeats the last report the file was
-//! given. The unit test for the rule lives beside it (`document_diagnostic::tests`), and this is the protocol-level
-//! version: a file with a real finding is edited, and the very next pull must still report it.
+//! The first attempt at a fix was a memory — `AnalysisState::last_reports`, a pull that could not answer repeating
+//! the last report the file was given. It stopped the flash and it **caused a worse defect**: a file that had been
+//! corrected kept reporting the findings from the moment in between, for as long as the index was busy, which on a
+//! real project is minutes (reported from an editor with a screenshot; see `document_diagnostic::the_report`).
 //!
-//! # What this test can and cannot prove
+//! The memory is gone and this test is what says it is not needed: the pull path **cooks the file before it answers**
+//! (`AnalysisState::prepare_for_a_diagnostic`), so the answer right after an edit is already the answer for the new
+//! text. What this test proves is therefore the property a user sees — the finding is there on the pull that follows
+//! the edit, and it is still there three pulls later with no edit in between — and it proves it *without* a memory:
+//! the number comes from the current reading each time.
 //!
-//! It can prove that the answer never *shrinks* to nothing between two pulls with no diagnostic in between. It
-//! cannot force the race that used to lose the finding (a pull landing between the edit and the cook), because the
-//! pull path itself cooks the file — so on a fast machine the immediate pull may already have the reading. That is
-//! why the assertion is "≥ 1 finding, and never 0 after being ≥ 1", which is the property a user sees, rather than
-//! "exactly the old report came back".
+//! It cannot force the race that used to lose the finding (a pull landing between the edit and the cook), because the
+//! pull path does the cook itself. That is the point rather than a gap: there is no window left to race in.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};

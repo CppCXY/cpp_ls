@@ -1167,6 +1167,180 @@ fn an_error_typed_into_an_open_file_is_answered() {
     server.notify("exit", Value::Null);
 }
 
+/// **A diagnostic about text that is no longer there must go away on the next pull.**
+///
+/// Reported from an editor, with a screenshot: the file had been typed into and corrected, and it was completely
+/// correct — and the Problems panel still showed the two findings from the moment in between (`missing-return` on
+/// `int main() {` and `expected ';' after expression` on the `return 0;` line). Editing again did not always clear
+/// them. That is the worst failure this channel has, because a reader has no way to tell a stale squiggle from a
+/// real one, and every later finding becomes untrustworthy.
+///
+/// The cause was not a `resultId` (this server sends `resultId: None` and always a **full** report). It was the
+/// handler's own rule: `document_diagnostic::the_report` **repeated** the last report when the analysis had no answer
+/// and **unioned** it with the current one when the checks were withheld. Both were written to stop diagnostics
+/// flashing while the index filled, and both keep a finding about deleted text alive indefinitely.
+///
+/// The sequence is the reported one, in order: the file is clean, an edit breaks it, the edit is taken back.
+#[test]
+fn a_diagnostic_about_deleted_text_is_gone_by_the_next_pull() {
+    let project = Project::new("diagnostics-clear-after-a-fix");
+    project.write("main.cpp", CLEAN_CPP);
+
+    let mut server = Server::start(project.root());
+    let main_uri = uri_of(&project.root().join("main.cpp"));
+
+    server.request(
+        1,
+        "initialize",
+        json!({
+            "processId": std::process::id(),
+            "rootUri": uri_of(project.root()),
+            "capabilities": {
+                "workspace": { "configuration": true, "didChangeWatchedFiles": { "dynamicRegistration": true } },
+                "window": { "workDoneProgress": true },
+            },
+        }),
+    );
+    server.notify("initialized", json!({}));
+    server.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": { "uri": main_uri, "languageId": "cpp", "version": 1, "text": CLEAN_CPP }
+        }),
+    );
+
+    // 1. The clean file, pulled once so the server has a report to be stale about.
+    server.pull_diagnostics(100, &main_uri);
+
+    // 2. The edit that breaks it — one `;` short.
+    server.notify(
+        "textDocument/didChange",
+        json!({
+            "textDocument": { "uri": main_uri, "version": 2 },
+            "contentChanges": [{ "text": EDITED_CPP }],
+        }),
+    );
+    let broken = server.pull_diagnostics(200, &main_uri);
+    assert!(
+        broken
+            .iter()
+            .any(|diagnostic| diagnostic["message"].is_string()),
+        "the missing `;` is found: {broken:?}"
+    );
+
+    // 3. The fix — the file the session started with, byte for byte.
+    server.notify(
+        "textDocument/didChange",
+        json!({
+            "textDocument": { "uri": main_uri, "version": 3 },
+            "contentChanges": [{ "text": CLEAN_CPP }],
+        }),
+    );
+
+    // **What a reader must see: no diagnostic about text that is gone.** A file this small has nothing else to
+    // report — no includes, no checks that can fire — so the whole list has to be empty.
+    let fixed = server.pull_diagnostics(300, &main_uri);
+    assert!(
+        fixed.is_empty(),
+        "the file is byte-for-byte the one that was clean before the edit, so nothing may be reported: {fixed:?}"
+    );
+
+    server.request(999, "shutdown", Value::Null);
+    server.notify("exit", Value::Null);
+}
+
+/// **A pull while the index is still busy must not answer with a finding about text that is gone.**
+///
+/// The same reported sequence as above, on a project whose index **does not settle** when the pull arrives: the
+/// handler decides `settled` from `Session::pending_work() == 0`, and a project of eighty headers is still being
+/// read. That state is not exotic — it is what a real project looks like for its first seconds and, on a big one,
+/// for minutes — and in it the handler used to answer with the **union** of the current findings and the last
+/// report it had sent. A finding about a `;` the reader deleted an edit ago was in the union, and nothing removed
+/// it: the client had no reason to ask again, because it had just asked.
+///
+/// So this is the same bug as the test above, at the state that makes it *permanent* rather than momentary. The
+/// two tests are kept apart because they can fail independently: one is the report's rule, the other is when the
+/// rule is reached.
+#[test]
+fn a_finding_about_deleted_text_does_not_survive_a_busy_index() {
+    let project = Project::new("diagnostics-while-busy");
+
+    // **Eighty headers in a chain**, so the session has work left when the pull arrives — `PREPARE_INDEX_SLICE` is
+    // 24 files, and the pull's own slice drains a quarter of it. Each header includes the next, so main.cpp's
+    // closure is the whole chain.
+    for index in 0..80 {
+        let next = if index + 1 < 80 {
+            format!("#include \"h{}.h\"\n", index + 1)
+        } else {
+            String::new()
+        };
+        project.write(
+            &format!("h{index}.h"),
+            &format!("#pragma once\n{next}struct S{index} {{ int f; }};\n"),
+        );
+    }
+    let clean = "#include \"h0.h\"\nint main() { return 0; }\n";
+    let broken = "#include \"h0.h\"\nint main() { return 0 }\n";
+    project.write("main.cpp", clean);
+
+    let mut server = Server::start(project.root());
+    let main_uri = uri_of(&project.root().join("main.cpp"));
+
+    server.request(
+        1,
+        "initialize",
+        json!({
+            "processId": std::process::id(),
+            "rootUri": uri_of(project.root()),
+            "capabilities": {
+                "workspace": { "configuration": true, "didChangeWatchedFiles": { "dynamicRegistration": true } },
+                "window": { "workDoneProgress": true },
+            },
+        }),
+    );
+    server.notify("initialized", json!({}));
+    server.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": { "uri": main_uri, "languageId": "cpp", "version": 1, "text": clean }
+        }),
+    );
+    server.pull_diagnostics(100, &main_uri);
+
+    server.notify(
+        "textDocument/didChange",
+        json!({
+            "textDocument": { "uri": main_uri, "version": 2 },
+            "contentChanges": [{ "text": broken }],
+        }),
+    );
+    let found = server.pull_diagnostics(200, &main_uri);
+    assert!(
+        found
+            .iter()
+            .any(|diagnostic| diagnostic["message"].is_string()),
+        "the missing `;` is a parse error: {found:?}"
+    );
+
+    // The fix, as the editor sends it — the file the session opened, byte for byte.
+    server.notify(
+        "textDocument/didChange",
+        json!({
+            "textDocument": { "uri": main_uri, "version": 3 },
+            "contentChanges": [{ "text": clean }],
+        }),
+    );
+    let fixed = server.pull_diagnostics(300, &main_uri);
+    assert!(
+        fixed.is_empty(),
+        "the `;` is back and the file is the one that was clean before the edit, so nothing may be reported: \
+         {fixed:?}"
+    );
+
+    server.request(999, "shutdown", Value::Null);
+    server.notify("exit", Value::Null);
+}
+
 /// The clean file [`an_error_typed_into_an_open_file_is_answered`] opens, and the same file one `;` short.
 const CLEAN_CPP: &str = "int g();\nstruct Name {\n    int middleName;\n    void print(int i) {\n        \
                          middleName = i;\n    }\n};\n";

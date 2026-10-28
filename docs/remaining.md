@@ -1093,3 +1093,69 @@ a_completion_asked_while_the_index_fills_comes_back_within_the_budget
 ### K2. `std::println("…", x);` 这类语句没有 `CallExpr`（§J1 的同一条）
 
 格式字符串绕开了它（走 token 流），但 `argument-count`、签名帮助还没有。见 §J1。
+
+## L. 诊断"残留"：改对了还要显示旧错误 —— 2026-10-29 修好
+
+用户报的：文件已经完全正确（截图里 `std::format("Hello, {}! {:<10}", "world", "C++")`），Problems 里还挂着
+上一次编辑瞬间的两条（`missing-return` @ `int main() {`、`syntax-error expected ';'` @ `return 0;`），
+而且"编辑不一定会改变诊断的结果"。用户怀疑是 `resultId` —— **不是**：这个服务器每条报告都是
+`result_id: None` 的 full report。
+
+### 根因：handler 自己的"别闪"规则
+
+`document_diagnostic::the_report`（原来是三态）：
+
+```text
+分析有答案 且 settled   → 用这份答案，并记下来
+分析有答案 但 unsettled → 用这份答案 ∪ 上一次发出去的报告    ← 旧发现从这里回来
+分析没答案              → 直接重发上一次的报告               ← 旧发现从这里回来
+```
+
+`settled = pending_work() == 0`，而 `pending_work` 把**整个工程**的索引队列 + **烹饪 backlog** + 第二遍都算进去。
+一个 `<format>`/`<string>` 工程的闭包有几百个头文件要 cook，这些**全在 `pending_work` 里**，于是"unsettled"这个
+状态在一次会话里能持续几十秒到几分钟 —— 期间每一次 pull 都在跟上一份报告求并集。屏幕上就是截图那样：错误
+跟着上一次编辑走进来了，而且没有任何东西会把它拿走。
+
+两条都是"防闪"加的（`docs/remaining.md` 与 `analysis_state.rs` 的注释写着它防的是什么）。**闪一下是暂时的，
+残留不是**，所以整条记忆被删掉：`AnalysisState::last_reports`、`remember_report`、`forget_report`、并集、
+重发、`resultId`（本来就没有）—— 现在报告**就是**分析对当前文本的答案，空就是空。
+
+配套的一半是**别让答案缺**：`checks_may_be_trusted` 从"整个工程的队列都空了"改成
+`is_closure_ready(path) && !its_closure_is_owed(path)` —— 只问**这个文件自己的闭包**读没读全。这正是 pull 路径
+刚 cook 完那一刻的状态，所以一次 pull 就能给出完整答案，不需要"先空着、稍后补上"。
+
+### 实测（用户自己的工程，冷缓存）
+
+```text
+$env:CPPLS_FORMAT_PROJECT = "C:\Users\zc\Desktop\cpp"
+cargo test --release -p cpp_ls --test diagnostics_status -- --ignored --nocapture
+```
+
+探针按用户的实际操作顺序走：**原样 → 删掉第一个 `;` → 放回去 → 再拉一次**（每一步都打印 item 数和规则/位置）。
+
+```text
+                    第 1 步   第 2 步   第 3 步   第 4 步
+修前（HEAD）           0         1         1         1     ← 删掉的 `;` 那条永远在
+修后                   0         1         0         0
+```
+
+第 1 步 0 条；第 2 步一条 `syntax-error @ 5:17`；第 3 步把 `;` 放回去，修前仍然是那一条，修后 0 条。
+
+**为什么一定要冷缓存**：`.cppls` 是热的时候，闭包早就在索引里，`pending_work()` 一次 pull 内就归零，
+`settled` 为真 —— 修前的代码也答对。这正是这个 bug 难复现的原因，也是它为什么在真工程上"时有时无"。
+冷缓存下 `pending_work()` 几十秒不为零，并集就每 pull 都生效。
+
+### 测试
+
+```text
+document_diagnostic::a_report_is_the_answer_for_the_text_that_is_there_now
+   规则级。修前实测失败，失败信息就是那条残留：
+   "an empty answer is the answer: a finding about deleted text may not come back:
+    [Diagnostic { message: \"expected `;` after expression\", … }]"
+diagnostic::the_checks_are_gated_on_this_file_s_closure_and_the_errors_are_not
+   闸门级：只问本文件闭包
+handshake::a_diagnostic_about_deleted_text_is_gone_by_the_next_pull
+handshake::a_finding_about_deleted_text_does_not_survive_a_busy_index
+   协议级。这两条**修前也过**（fixture 一秒钟就 settle，`unsettled` 状态抓不住），留着是防回归的护栏，
+   不是复现 —— 复现靠上面那条规则级测试和真工程探针，两处的失败数字都在这一节里。
+```

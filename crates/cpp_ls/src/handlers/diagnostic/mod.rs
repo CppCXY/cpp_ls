@@ -58,27 +58,7 @@ use log::debug;
 /// and the file's own text otherwise. This layer's job is the wire format: offsets become positions through the
 /// VFS's line index (not through a parse of the file, which the layered answer no longer needs) and the message
 /// becomes a [`Diagnostic`].
-/// **Test-only**: the list without the "was the analysis settled" flag.
-///
-/// The handler uses [`diagnose_file_with_state`] — the flag is what keeps an empty report from being read as a
-/// verdict — and the fixture in `context::analysis_state` wants only the list.
-#[cfg(test)]
 pub fn diagnose_file(session: &Session<DiskFiles>, path: &Path) -> Option<(Uri, Vec<Diagnostic>)> {
-    diagnose_file_with_state(session, path).map(|(uri, items, _settled)| (uri, items))
-}
-
-/// [`diagnose_file`], and **whether the analysis had nothing left to do when it answered**.
-///
-/// An empty answer while the pump still has work is not a claim a client should act on: the check layer reads facts
-/// that are still being filed, so "no findings" there can become a finding a moment later — measured with
-/// `tests/diagnostics_stable.rs` on a four-line file, seven consecutive pulls answered "clean" before the finding
-/// appeared. The pull handler repeats the last report for that state instead of sending it; see
-/// `document_diagnostic::the_report`. `diagnose_file` keeps the old signature for callers that only want the list.
-pub fn diagnose_file_with_state(
-    session: &Session<DiskFiles>,
-    path: &Path,
-) -> Option<(Uri, Vec<Diagnostic>, bool)> {
-    let settled = session.pending_work() == 0;
     let uri = path_to_uri(path)?;
     // Held by the VFS: this is the text — the buffer when the file is open, the disk otherwise — the offsets below
     // are offsets into, and the index that turns them into a line and a column.
@@ -131,10 +111,10 @@ pub fn diagnose_file_with_state(
         .chain(module_notes(&found.notes, held))
         // **And what the checks found**, which is the third channel of `FileDiagnostics` — see `check_findings`.
         //
-        // **Withheld while the index is still filling**, and it is the only channel that has to be. A parse error is
-        // about the text the reader wrote and is the same answer at any index state; a *check* reads the index.
-        // `undefined-field` asks which members a class has, and a class whose header has not been read yet answers
-        // "none" — reported from a lightweight project as
+        // **Withheld while *this file's* reading is incomplete**, and it is the only channel that has to be. A parse
+        // error is about the text the reader wrote and is the same answer at any index state; a *check* reads the
+        // index. `undefined-field` asks which members a class has, and a class whose header has not been read yet
+        // answers "none" — reported from a lightweight project as
         //
         // ```text
         // anotherVec has no member `push_back`      cppls(undefined-field)
@@ -144,10 +124,8 @@ pub fn diagnose_file_with_state(
         // and editing any character made the finding go away. The member was in the index; the report was computed
         // before the index had finished, and a check turns every hole in it into a claim about correct code.
         //
-        // `Session::pending_work` is the session's own count of what is outstanding, asked here rather than guessed
-        // — the index queue plus the cooking backlog, both of which have to be empty before a member list is the
-        // whole truth. The withholding ends by itself: the pump drains, this becomes zero, and the client's next
-        // pull carries the checks. Withholding costs a moment; publishing costs a claim the reader cannot check.
+        // What is withheld is now `checks_may_be_trusted`'s question and nothing coarser: the answer must not
+        // disappear and come back, but it also must not wait for files this one cannot see.
         .chain(if checks_may_be_trusted(session, &path) {
             check_findings(&found.checks, held).collect::<Vec<Diagnostic>>()
         } else {
@@ -155,7 +133,7 @@ pub fn diagnose_file_with_state(
         })
         .collect();
 
-    Some((uri, diagnostics, settled))
+    Some((uri, diagnostics))
 }
 
 /// **May a check's finding be published yet?** — the gate described where it is used.
@@ -171,17 +149,23 @@ pub fn diagnose_file_with_state(
 /// while hovering that same name answered **three declarations**, and editing any character made the finding go
 /// away. The member was in the index; the report was computed before the index had finished.
 ///
+/// # What the question is, and what it used to be
+///
+/// `Session::is_closure_ready` — the file's summary exists and every file it **unconditionally includes** has one —
+/// plus "nothing about this file or its closure is queued for the second pass" (`its_closure_is_owed`). That is
+/// exactly the set of facts a check about this file reads, which is why it is the right question rather than a
+/// conservative one.
+///
+/// It used to be `pending() == 0 && pending_cooking() == 0 && !its_closure_is_owed(path)` — the **project's** queues.
+/// On a real project those are non-zero for as long as it takes to read the whole project, so every check was
+/// withheld for that whole window, and a pull that arrived during it carried parse errors only. The handler used to
+/// paper over the difference by repeating the previous report; the repetition is gone (see
+/// `document_diagnostic::the_report`) and this is the half that makes its absence affordable.
+///
 /// A named function rather than the expression at the call site, because it is the *decision* and it should be
 /// readable and testable as one — the session state that drives it is not something a fixture can hold still.
 pub fn checks_may_be_trusted(session: &Session<DiskFiles>, path: &std::path::Path) -> bool {
-    // The index queue **plus** the cooking backlog: a summary can be read before its rendering is built, and a
-    // check that walks scopes wants both.
-    // **The file`s own closure, not the whole project.** `pending_work()` now counts the second pass, and the
-    // second pass is the whole project`s backlog: gating on it withheld every finding for the ~120 s the backlog took
-    // on a real project, while the answers those findings need were already in the index. A check about *this* file
-    // reads this file and its includes, so that is the question — and `its_closure_is_owed` is the same walk the
-    // cross-file queries already pay.
-    session.pending() == 0 && session.pending_cooking() == 0 && !session.its_closure_is_owed(path)
+    session.is_closure_ready(path) && !session.its_closure_is_owed(path)
 }
 
 /// **What the semantic checks found** — one diagnostic per finding, with the rule's own code and severity.
@@ -383,16 +367,20 @@ mod tests {
     /// so only the checks wait. Withholding both is what the first attempt did, and it hid an unclosed brace until
     /// the project finished loading — `a_pulling_client_gets_a_report_and_not_null` caught that.
     ///
-    /// # What this test can and cannot reach
+    /// # What the gate asks, and what it asked
     ///
-    /// It asserts the decision and the half of what it gates that a fixture can hold: a **parse error** is
-    /// published, on a settled index, from the same `found.errors` channel the withheld state reads. The
-    /// *mid-index* state is not driven, and that is stated rather than worked around: `pending_work` is the index
-    /// queue plus the cooking backlog, and a fixture that queues a file finds the next `advance` drain it — the
-    /// state is a race against the pump, not a value a fixture can hold still. That is why the decision is a named
-    /// function with a claim of its own instead of an expression inline.
+    /// `is_closure_ready` (this file and the headers it unconditionally includes are read) plus `!its_closure_is_owed`
+    /// (nothing about them waits for the second pass) — the facts a check about *this* file reads, and no more. It
+    /// used to be the project's queues (`pending()`, `pending_cooking()`), which on a real project are non-zero for
+    /// as long as reading the project takes; the handler covered the difference by repeating its previous report,
+    /// and that repetition is what showed a corrected file its own old findings. Both are gone, so the fixture here
+    /// asserts the narrower question directly: the file's closure is read, so its checks are trusted — while its
+    /// errors are published either way.
+    ///
+    /// It does not drive the *mid-index* state: that is a race against the pump, not a value a fixture can hold
+    /// still, which is why the decision is a named function with a claim of its own.
     #[test]
-    fn the_checks_are_gated_on_the_index_and_the_errors_are_not() {
+    fn the_checks_are_gated_on_this_file_s_closure_and_the_errors_are_not() {
         let (session, path) = a_project_in_a_scratch_directory_named(
             "cppls-gate",
             // A `;` is missing, so this text really does not parse — and the second line shadows a standard name,
@@ -402,14 +390,16 @@ mod tests {
              int g() { return 1 }\n",
         );
 
-        assert_eq!(
-            checks_may_be_trusted(&session, &path),
-            session.pending_work() == 0,
-            "the gate is `pending_work() == 0` and nothing else"
+        // **The closure, not the project.** The fixture's file includes nothing, so its closure is itself — read,
+        // and not owed a re-read. A gate that also waited for `pending_work()` would answer the same thing *here*
+        // and a different thing on a real project, which is exactly the difference that made findings vanish.
+        assert!(
+            session.is_closure_ready(&path),
+            "the fixture's own file is read, so its closure is ready"
         );
         assert!(
             checks_may_be_trusted(&session, &path),
-            "this fixture's index is settled, so its checks are trusted"
+            "…so its checks are trusted"
         );
 
         let (_, found) = diagnose_file(&session, &path).expect("the file is held");

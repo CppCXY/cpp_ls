@@ -6,26 +6,36 @@
 //! holding a diagnostic about text that is gone; a pulled answer is computed when it is asked for, so it cannot be
 //! overtaken by the edit that follows it.
 //!
-//! # Two defects this handler had, and why they are one question
+//! # The rule, and the three defects it took to find it
 //!
-//! **It returned `null`.** A `RequestOutcome::Missing` becomes a JSON `null` response, and a client that asked for a
-//! `DocumentDiagnosticReport` drops it — so the diagnostics it already had stayed on screen, which is exactly
-//! "输入代码之后诊断不改变". The answer to "I could not read this file" is an **empty full report**, which is a
-//! valid `DocumentDiagnosticReport` and the only thing a client can act on.
+//! **A pull answers what the analysis says about the text that is there now, and nothing else.** Three defects were
+//! three different ways of breaking that sentence, and each was reported from an editor:
 //!
-//! **It asked before the file was ready.** [`AnalysisState::prepare`] *queues* a file for cooking and returns; the
-//! query then ran with no reading and produced the `Missing` above. Pull diagnostics are answered on demand, so the
-//! work has to happen **here**, before the query — that is [`AnalysisState::prepare_for_a_diagnostic`].
+//! ```text
+//! it returned `null`      a client drops a `null` and keeps what it had   → "输入代码之后诊断不改变"
+//! it asked too early      no reading yet, so the answer was `null` again  → the same symptom
+//! it remembered           the last report was repeated, and unioned with  → a corrected file kept the findings
+//!                         the current one while the checks were withheld     from the moment in between
+//! ```
 //!
-//! Both are the same mistake from two sides: treating "not ready" as "nothing to say". A client pulls precisely
-//! because it wants an answer *now*, and one that has to be asked again is one that will not be.
+//! The third is the one that lasted, because it *looks* like a fix: repeating the last report stops the list
+//! flashing while the index fills. What it also does is keep a finding about a `;` the reader deleted one edit ago on
+//! screen for as long as the index is busy — which on a real project is until the whole project has been read, and a
+//! reader has no way to tell that squiggle from a real one. **A flash is momentary and a stale finding is not**, so
+//! the memory is gone: no `last_reports`, no union, and no `resultId` either (`result_id` is `None` in every report,
+//! because this server has nothing to diff against and claiming "unchanged" is a claim it cannot support).
+//!
+//! The other two are still answered here — an unreadable file is an **empty full report**, which is a valid
+//! `DocumentDiagnosticReport` and the only thing a client can act on — and the work is done **before** the query, so
+//! that "not ready yet" cannot become "nothing to say": [`AnalysisState::prepare_for_a_diagnostic`] reads, indexes and
+//! cooks the file under the write lock, which is what makes the answer about the text the client just sent.
 //!
 //! The work still goes through [`analysis_query`], which is what that mechanism is for: a client re-requests the
 //! same file as the user keeps typing, and an answer already being computed for the same key is **replaced** rather
 //! than duplicated (the older task is cancelled and the newer one's answer is the only one sent).
 
 use lsp_types::{
-    DocumentDiagnosticParams, DocumentDiagnosticReport, DocumentDiagnosticReportResult,
+    Diagnostic, DocumentDiagnosticParams, DocumentDiagnosticReport, DocumentDiagnosticReportResult,
     FullDocumentDiagnosticReport, RelatedFullDocumentDiagnosticReport,
 };
 use tokio_util::sync::CancellationToken;
@@ -54,46 +64,18 @@ pub async fn on_pull_document_diagnostic(
         context.request_manager(),
         &cache_key,
         Some(cancel_token),
-        move |session| Some(super::diagnose_file_with_state(session, &for_the_query)),
+        move |session| Some(super::diagnose_file(session, &for_the_query)),
     )
     .await;
 
     outcome.map(|found| {
-        // **What this pull can answer, and what it says when it cannot.**
-        //
-        // Two states produce a report a client must not act on. `diagnose_file` answers `None` when the analysis has
-        // no cooked reading for the file — the state right after every edit, until the pump cooks it — and it
-        // answers a list *without the check layer* while the index still has work (`checks_may_be_trusted`). Either
-        // one, sent as it stands, tells the client "this file is clean", it clears the squiggles the user is looking
-        // at, and the refresh that follows the cook makes them come back: that is the flash, and both are claims the
-        // server cannot support.
-        //
-        // So a pull with no answer repeats the last report the file was given, and a pull whose checks were
-        // **withheld** unions what it has with that report — a parse error that just appeared is shown at once, and
-        // the findings that are merely unconfirmed stay on screen until the analysis settles and the real answer
-        // replaces them. `AnalysisState::last_reports` holds that report; the rule is `the_report` below.
-        let (found, settled) = match found {
-            Some((_, items, settled)) => (Some(items), settled),
-            None => (None, false),
-        };
-        let was = found.as_ref().map(|items| items.len());
-        let (items, to_remember) =
-            the_report(found, context.analysis().last_report(&path), settled);
-        log::debug!(
-            "pull: {} -> {} item(s) (analysis said {:?}, settled {settled}, repeated {})",
-            path.display(),
-            items.len(),
-            was,
-            to_remember.is_none()
-        );
-        if let Some(items) = to_remember {
-            context
-                .analysis()
-                .remember_report(path.clone(), std::sync::Arc::new(items));
-        }
+        let items = the_report(found.map(|(_, items)| items));
+        log::debug!("pull: {} -> {} item(s)", path.display(), items.len());
         DocumentDiagnosticReport::Full(RelatedFullDocumentDiagnosticReport {
             related_documents: None,
             full_document_diagnostic_report: FullDocumentDiagnosticReport {
+                // **Never a `resultId`**: this server keeps no per-document result to diff against, so every answer
+                // is the whole list and a client has no reason to hold one of ours.
                 result_id: None,
                 items,
             },
@@ -102,54 +84,18 @@ pub async fn on_pull_document_diagnostic(
     })
 }
 
-/// **The one rule this handler applies**: an answer from the analysis wins and is remembered; no answer repeats the
-/// last one; a file never answered is empty.
+/// **The one rule this handler applies**: the report is the answer for the text that is there now.
 ///
-/// Split out to be testable as a rule rather than as a protocol exchange — the three cases the test below covers are
-/// the whole content of "diagnostics do not flash", and the middle one is the case that made them flash. The second
-/// return value is what the caller should remember: `None` when the answer came from the memory, because repeating
-/// it must not refresh it.
+/// An identity, and named so that the identity is the thing that can be read and tested. It used to do more — repeat
+/// the last report when the analysis had no answer, and union it with the current one while the checks were withheld
+/// — and that is deleted, with the measurement in the module documentation: a corrected file kept reporting the
+/// findings from the moment in between, for as long as the index was busy.
 ///
-/// **Three states, and the second is the one that made diagnostics flash.** A `settled` answer is the analysis's
-/// final word and replaces what the client holds. An unsettled one is a report whose *check layer was withheld*
-/// because the index still has work: it is merged with the last report rather than replacing it, so a parse error
-/// that just appeared is shown at once while the findings that are merely unconfirmed stay on screen. No answer at
-/// all repeats the last report.
-fn the_report(
-    found: Option<Vec<lsp_types::Diagnostic>>,
-    last: Option<std::sync::Arc<Vec<lsp_types::Diagnostic>>>,
-    settled: bool,
-) -> (
-    Vec<lsp_types::Diagnostic>,
-    Option<Vec<lsp_types::Diagnostic>>,
-) {
-    let held = last.map(|held| (*held).clone());
-    match found {
-        Some(items) if settled => (items.clone(), Some(items)),
-        Some(items) => {
-            let mut merged = items;
-            if let Some(held) = held {
-                for diagnostic in held {
-                    if !merged
-                        .iter()
-                        .any(|sent| the_same_diagnostic(sent, &diagnostic))
-                    {
-                        merged.push(diagnostic);
-                    }
-                }
-            }
-            (merged, None)
-        }
-        None => (held.unwrap_or_default(), None),
-    }
-}
-
-/// The identity a client uses to draw one diagnostic: the range, the rule, and the message.
-///
-/// Two reports that differ only in item order are the same picture, so the merge above has to recognise an item it
-/// already has — and `lsp_types::Diagnostic` does not implement `PartialEq`.
-fn the_same_diagnostic(one: &lsp_types::Diagnostic, other: &lsp_types::Diagnostic) -> bool {
-    one.range == other.range && one.code == other.code && one.message == other.message
+/// The second argument of the old signature is gone with it, and so is the state behind it
+/// (`AnalysisState::last_reports`): an answer that is *only* the analysis's cannot be stale, because there is nothing
+/// to be stale with.
+fn the_report(found: Option<Vec<Diagnostic>>) -> Vec<Diagnostic> {
+    found.unwrap_or_default()
 }
 
 /// A `DocumentDiagnosticReport` saying nothing is wrong, which is a valid answer to a pull request.
@@ -178,39 +124,38 @@ mod tests {
         }
     }
 
-    /// **The middle state is the one that made diagnostics flash**: a report computed while the check layer was
-    /// withheld. Replacing the client's report with it removes the findings that were only *unconfirmed*, and the
-    /// refresh after the cook puts them back — a diagnostic that blinks at every keystroke.
+    /// **A pull answers what the analysis says now.** Reported from an editor, with a screenshot: a file that had
+    /// been typed into and *corrected* — completely correct at the time of the report — still showed the two findings
+    /// from the moment in between, and editing again did not necessarily clear them.
+    ///
+    /// The cause was this handler's own rule. It **repeated** the last report it had sent when the analysis had no
+    /// answer, and **unioned** the last report with the current one whenever the checks were withheld. Both were
+    /// written to stop the list flashing while the index filled; both keep a finding about text that no longer exists
+    /// on screen for as long as the state lasts, and on a real project that state lasts until the whole project is
+    /// read. A reader cannot tell a stale squiggle from a real one, so every later finding becomes untrustworthy —
+    /// which is worse than a flash.
+    ///
+    /// So the rule is an identity: the report is the current answer, empty or not. `None` — the analysis could not
+    /// read the file at all — is an **empty** report, not an old one.
     #[test]
-    fn an_unsettled_report_keeps_what_the_client_already_holds() {
-        let held = std::sync::Arc::new(vec![a_diagnostic("from the last report")]);
-
-        // A settled answer is the final word, even when it is empty.
-        let (sent, remember) =
-            the_report(Some(Vec::new()), Some(std::sync::Arc::clone(&held)), true);
-        assert!(sent.is_empty());
+    fn a_report_is_the_answer_for_the_text_that_is_there_now() {
+        // The analysis answered, and its answer is empty: the file is clean, and saying so is the point. There is
+        // nothing left in the handler that could put an older finding back — that is the assertion.
         assert!(
-            remember.is_some(),
-            "the settled answer is what gets repeated"
+            the_report(Some(Vec::new())).is_empty(),
+            "an empty answer is the answer: the file is clean"
         );
 
-        // An unsettled one is merged: the parse error it has, plus the finding it could not confirm.
-        let (sent, remember) = the_report(
-            Some(vec![a_diagnostic("a parse error")]),
-            Some(std::sync::Arc::clone(&held)),
-            false,
+        // No answer at all: empty, because an old report would describe a text nobody is looking at.
+        assert!(
+            the_report(None).is_empty(),
+            "a pull that cannot answer says nothing, not the last thing it said"
         );
-        assert_eq!(sent.len(), 2, "{sent:?}");
-        assert!(remember.is_none(), "an unsettled report is not remembered");
 
-        // No answer at all repeats the last report.
-        let (sent, remember) = the_report(None, Some(held), false);
+        // And what the analysis says goes out unchanged, in its own order.
+        let current = vec![a_diagnostic("a real finding")];
+        let sent = the_report(Some(current.clone()));
         assert_eq!(sent.len(), 1);
-        assert!(remember.is_none());
-
-        // Nothing was ever said: empty, and nothing to remember.
-        let (sent, remember) = the_report(None, None, false);
-        assert!(sent.is_empty());
-        assert!(remember.is_none());
+        assert_eq!(sent[0].message, current[0].message);
     }
 }
