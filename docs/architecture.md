@@ -1982,6 +1982,39 @@ std::println 的悬停            ```cpp using std::println; ``` — Declared in
 `std.cppm` 先 include `feature.h`（`#define FEATURE 1`），再 include `library.h`（`#if FEATURE` 里 include
 `detail.h`），消费者 `import std;` 后 `v.` 必须列出 `push_back`）。诚实地说：这条测试在**未修**时也通过，
 因为内存夹具里的 `#if FEATURE` 判成 `Unknown`（Conditional 仍可见），复现靠的是上面真实工程的探针数字。
+### 15.2.2 `std::println` 剩下的那一半：实测到哪一步（未修）
+
+`print`（`<print>` 的实现文件，`include/c++/print`）现在**在可见集合里**，但它的 summary 是空的：
+
+```text
+include/c++/print        可见 ✓            print 的 summary: 0 条声明（println: 0）
+print 的 cooked 声明     None              bits/version.h 的 summary: 381 个宏，但没有 __cpp_lib_print
+println / std::println   files_declaring → 0 条；definition → NotDeclaredHere
+```
+
+原因链（读数不是猜的）：
+
+```text
+print:            #define __glibcxx_want_print     ← 第 38 行，print 自己定义
+                  #include <bits/version.h>        ← 第 39 行
+                  #ifdef __cpp_lib_print           ← 第 41 行，整个文件体都在里面
+bits/version.h:   #if defined(__glibcxx_want_print) … #define __cpp_lib_print 202207L …
+```
+
+也就是说这两个文件的声明/宏**只有以它们自己为 TU、按顺序展开时才存在**；而我们给它们的 summary 是"别人（标准库闭包）
+渲染时的残片"——那个渲染里 `print` 的文件体被判为未激活，于是 0 条声明。`bits/std.cc` 本身**已经**被 cook
+（`want_cooked_reading` 在 `queue_the_modules_the_open_files_import` 里就有，`cooked_declarations(std.cc)` 存在），
+但那次 cook 也没有把 `print` 的声明落下来——下一步要回答的正是这一点：渲染 `std.cc` 时到达
+`#include <print>` 那一刻的宏状态里有没有 `__glibcxx_want_print`/`__cpp_lib_print`。
+
+下一步的建议（仍然是"先量再改"）：
+
+```text
+1. 打开 CPPLS_TRACE_COOKING（或临时在渲染器的 #ifdef 判定处打一行），看 std.cc 的渲染里 print 的
+   `#define __glibcxx_want_print` 是否被应用、version.h 的 `__cpp_lib_print` 是否被定义；
+2. 如果没应用，问题在"嵌套 include 的宏状态"（渲染器 vs 走查两套状态），那是与 §15.2.1 同源的第二处；
+3. 如果应用了而声明仍为空，问题在 `file_what_was_found` 的归位（渲染的 span 映射回 print 时失败会被记为 unplaced）。
+```
 ## 15.3 关于"313 秒"
 
 那是我在**debug 配置**下量的（`cargo test --release` 之前的那次跑的是 debug 的 probe），release 下同一个工程
