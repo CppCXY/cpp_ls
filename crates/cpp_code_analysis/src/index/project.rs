@@ -4432,18 +4432,88 @@ pub(crate) fn operator_returns_of(
     // `operator *` and `operator*` are the same operator with a space in it. Comparing without whitespace makes the
     // two spellings one question, and the bare symbol is accepted as well because a reader that recorded only the
     // operator's own token answered `*`.
-    list.members
+    let found = list.members.iter().find(|member| {
+        let name: String = member
+            .fact
+            .name
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect();
+        name == wanted || name == symbol
+    })?;
+    let returns = found.fact.returns.clone()?;
+
+    // **An operator inherited from a base answers in the base's spelling.** `template <class T> struct Base { T*
+    // operator->(); }; template <class T> struct Ptr : Base<T> {};` — `Ptr<S>`'s arrow is `Base<S>::operator->`,
+    // whose return type is written `T*`: read literally that is a class called `T`, which has no members, so the
+    // completion after `ptr->` offered **nothing**. It has to be read through the base clause's arguments (and those
+    // through the derived class's own), which is what this asks before the class's own parameters are tried.
+    // Measured on that fixture: 0 items before, the pointee's members after; the same shape is libstdc++'s
+    // `shared_ptr`, whose `operator->` is declared in `__shared_ptr<_Tp, _Lp>`.
+    if found.declared_in != class
+        && let Some(substituted) = a_base_operators_return(
+            index,
+            scopes,
+            root,
+            path,
+            &class,
+            &found.declared_in,
+            &returns,
+            parameter_names,
+            &written_arguments,
+        )
+    {
+        return Some(substituted);
+    }
+
+    Some(crate::sema::types::substituted_spelling(
+        &returns,
+        parameter_names,
+        &written_arguments,
+    ))
+}
+
+/// **A base's operator return, read through the base clause's arguments.** `None` when the clause that names this
+/// base cannot be found or its arguments cannot be read — the caller then answers with the spelling as written, which
+/// is what this function refines.
+fn a_base_operators_return(
+    index: &ProjectIndex,
+    scopes: &crate::ScopeTree,
+    root: &cpp_parser::CppSyntaxNode,
+    path: &Path,
+    class: &str,
+    declared_in: &str,
+    returns: &str,
+    parameter_names: &[String],
+    written_arguments: &[String],
+) -> Option<String> {
+    let Known::Yes(bases) = bases_of(index, scopes, root, path, class) else {
+        return None;
+    };
+    // **The base list carries the clause's arguments as their own entries.** `bases_of(Ptr)` answers
+    // `["Base", "T"]` for `struct Ptr : Base<T> {}` — the class and the names *inside* its clause, which is what the
+    // lookup does with them (`_Tp` and `_Lp` really can be a base's name). So the arguments of the base we found are
+    // the entries right after it, and how many there are is the base template's arity.
+    let at = bases.iter().position(|written| {
+        resolved_in_the_enclosing_scopes(index, scopes, path, class, written) == declared_in
+    })?;
+    let arity = index.template_parameters_for(declared_in, path, &[]).len();
+    let arguments: Vec<String> = bases
         .iter()
-        .find(|member| {
-            let name: String = member
-                .fact
-                .name
-                .chars()
-                .filter(|character| !character.is_whitespace())
-                .collect();
-            name == wanted || name == symbol
+        .skip(at + 1)
+        .take(arity)
+        .map(|argument| {
+            // Read through the derived class's own parameters first: `Base<T>`'s argument is `T`, and `T` is `S` at
+            // the use (`Ptr<S>`), which is the substitution the base's `T*` needs.
+            crate::sema::types::substituted_spelling(argument, parameter_names, written_arguments)
         })
-        .and_then(|member| member.fact.returns.clone())
+        .collect();
+    let parameters = index.template_parameters_for(declared_in, path, &arguments);
+    Some(crate::sema::types::substituted_spelling(
+        returns,
+        &parameters,
+        &arguments,
+    ))
 }
 
 fn unary_operand_with(
@@ -8882,7 +8952,6 @@ impl ProjectIndex {
             self.module_interfaces
                 .insert(module.to_string(), path.clone());
         }
-
 
         self.names
             .add_declarations(sequence, 0, &summary.declarations);

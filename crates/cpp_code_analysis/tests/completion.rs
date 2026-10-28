@@ -2483,17 +2483,27 @@ fn an_arrow_is_read_as_an_arrow() {
     let tree = cpp_parser::CppParser::parse(text, cpp_parser::ParserConfig::default());
     let root = tree.get_red_root();
 
-    let arrow = cpp_code_analysis::completion::context_at(&root, text.find("p->").expect("fixture") + 3);
+    let arrow =
+        cpp_code_analysis::completion::context_at(&root, text.find("p->").expect("fixture") + 3);
     match arrow {
         cpp_code_analysis::completion::CompletionContext::Member(access) => {
-            assert!(access.arrow, "the operator written is `->`, so this is an arrow access");
-            assert!(access.member.is_empty(), "nothing is typed after the operator yet");
+            assert!(
+                access.arrow,
+                "the operator written is `->`, so this is an arrow access"
+            );
+            assert!(
+                access.member.is_empty(),
+                "nothing is typed after the operator yet"
+            );
         }
         other => panic!("a member access is what follows an arrow, not {other:?}"),
     }
 
     // And the other spelling: `v.member` is a dot, and the member is written.
-    let dot = cpp_code_analysis::completion::context_at(&root, text.find("v.member").expect("fixture") + 4);
+    let dot = cpp_code_analysis::completion::context_at(
+        &root,
+        text.find("v.member").expect("fixture") + 4,
+    );
     match dot {
         cpp_code_analysis::completion::CompletionContext::Member(access) => {
             assert!(!access.arrow, "a `.` is not an arrow");

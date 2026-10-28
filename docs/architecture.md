@@ -2189,11 +2189,38 @@ auto show = [](double a) { if (int inner = 1) { g(inner); } };    4 条事实（
 下一步（按可信度排序）：
 
 ```text
-1. `MemberAccess::arrow` 改成由运算符文本决定（一行，独立可验证）；
+1. ✓ `MemberAccess::arrow` 改成由运算符文本决定（`f8f4715`，带单测）；
 2. ② 的守卫要按"运算符之后到光标之间是不是一个新语句"判断，而不是"有没有换行"——
    跨行成员访问的下一行以 `.`/`->` 开头，`std::print` 不是；
-3. ① 需要模板基类的实参代入：`shared_ptr` 的 `operator->` 在 `__shared_ptr<_Tp, _Lp>` 里。
+3. ① 已经**缩到最小复现**（见下）：`shared_ptr` 的 `operator->` 在模板基类 `__shared_ptr<_Tp, _Lp>` 里。
 ```
+**① 的最小复现**（`MemoryFiles`，同一份文件内，与标准库无关）：
+
+```text
+struct S { void c_str(); };
+struct Ptr { S* operator->(); };          void f() { Ptr p; p-> }   → 1 项：c_str        ✓
+template <class T> struct Base { T* operator->(); };
+template <class T> struct Ptr : Base<T> {};  void f() { Ptr<S> p; p-> } → 0 项          ✗
+```
+
+**已修（`a_base_operators_return`）**：兜底分支找到的成员若 `declared_in` 不是当前类，就用**基类子句的实参**
+代入它的 `returns`。基类实参的来源是 `bases_of` 的列表本身——`struct Ptr : Base<T> {}` 的基类列表是
+`["Base", "T"]`（类名加子句里的名字，查询一直这么用它们），所以找到基类之后取它后面的、数量等于该基类模板
+参数个数的条目，先用派生类的实参代换一遍，再用它们读基类的 `returns`。实测（同一 fixture）：
+`Ptr<S> p; p->` 从 **0 项** 变成 **1 项 `c_str`**，而"自己的类"和"非模板基类"两种情形保持正确。
+
+**但 `std::shared_ptr<std::string> ptr; ptr->` 仍然是 0 项**，而同一个会话里 `std::string s; s.` 也是 **0 项**——
+所以那条报告的后半段不在 `operator->` 上，而在**没有 `import std;` 时标准库类的成员列表**：同一项目里
+`import std;` 的文件里 `std::vector<int> v; v.` 有 138 项（`bits/std.cc` 的 cooked 读数把整个库带进索引），
+而只有 `#include <string>` 的文件里是 0 项。下一步查的就是这个差别。
+于是根因是 `ProjectIndex::operator_returns_of` 的**兜底分支**：它在成员列表里找到基类的
+`operator->` 之后，**把 `returns` 原样返回**（`T*`），没有用基类实参（`Base<T>` 里的 `T = S`）代入——
+`T*` 的指向类就是 `T`，它的成员当然一个也没有。修法在这一处：找到的成员若 `declared_in` 不是当前类，
+就用**基类子句的实参**代入它的 `returns`。
+**量的时候又踩的坑（记下来）**：`Session::advance` 只是**索引**阶段（弹队列、读文件、排队它 include 的东西），
+它**不 cooking**；而 `pending_work()` 把 cooking 积压也算在内。所以 `while pending_work() > 0 { advance(64) }`
+这样的探针在"有 26 个文件等 cooking"时会转 3000 轮也不停——那是探针的循环写错了，不是会话的活锁（泵是两阶段都跑的）。
+判断"索引是否收敛"用 `pending()`（队列本身），判断"会话是否空闲"才用 `pending_work()`。
 ## 15.3 关于"313 秒"
 
 那是我在**debug 配置**下量的（`cargo test --release` 之前的那次跑的是 debug 的 probe），release 下同一个工程

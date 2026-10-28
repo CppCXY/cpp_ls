@@ -180,3 +180,49 @@ fn an_instantiated_member_list_records_the_arguments() {
         Some("int&".to_string())
     );
 }
+
+/// **An `operator->` inherited from a template base reaches the pointee.** `Ptr<S>`'s arrow is
+/// `Base<S>::operator->`, whose return type is written `T*`; read literally that is a class called `T`, which has no
+/// members — so the completion after `ptr->` was **empty**. It has to be read through the base clause's arguments
+/// (and those through the derived class's own). Measured on the fixture: 0 items before, the pointee's member after.
+///
+/// The shape is libstdc++'s `std::shared_ptr`, whose `operator->` is declared in `__shared_ptr<_Tp, _Lp>` — which is
+/// the report this came from: `std::shared_ptr<std::string> ptr; ptr->` offered nothing.
+#[test]
+fn an_operator_in_a_template_base_reaches_the_pointee() {
+    let source = "\
+struct S { void c_str(); };
+template <class T>
+struct Base { T* operator->(); };
+template <class T>
+struct Ptr : Base<T> {};
+void f() {
+    Ptr<S> p;
+    p->;
+}
+";
+    let files = MemoryFiles::new().with_file("/p/a.cpp", source);
+    let mut session = Session::with_config(
+        "/p",
+        SessionFiles::new(OpenDocuments::new(), files),
+        WatchFilter::new("/p"),
+        CompilerConfig::default().with_standard("c++23"),
+    );
+    session.add_project_files([std::path::PathBuf::from("/p/a.cpp")]);
+    session.index_everything();
+    let mut rounds = 0;
+    while session.pending() > 0 && rounds < 200 {
+        session.advance(16);
+        rounds += 1;
+    }
+    let view = session
+        .view_of_the_file(std::path::Path::new("/p/a.cpp"))
+        .expect("a view");
+    let at = source.find("p->").expect("the fixture") + 3;
+    let set = session.completions(&view, FileOffset::new(at));
+    let labels: Vec<&str> = set.items.iter().map(|item| item.label.as_str()).collect();
+    assert!(
+        labels.contains(&"c_str"),
+        "`Ptr<S>::operator->` returns `S*`, so the members are `S`'s: {labels:?}"
+    );
+}
