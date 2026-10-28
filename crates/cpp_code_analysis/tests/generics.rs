@@ -226,3 +226,51 @@ void f() {
         "`Ptr<S>::operator->` returns `S*`, so the members are `S`'s: {labels:?}"
     );
 }
+
+/// **An `operator->` two bases down, whose return names the base's own typedef.** This is libstdc++'s `shared_ptr`
+/// exactly: `shared_ptr<_Tp> : __shared_ptr<_Tp, _Lp> : __shared_ptr_access<_Tp, _Lp, …>`, where the operator is
+/// `element_type* operator->()` and `element_type` is `using element_type = _Tp;` in that base. The completion after
+/// `ptr->` offered the `shared_ptr`'s own four names — measured on a real project, `append`/`c_str` were unreachable.
+///
+/// Two things have to be right for it: the substitution has to be **composed along the base chain** (`_Tp` at the
+/// deepest level is `S` at the use), and the return type has to be read through the base's **typedef**.
+#[test]
+fn an_operator_two_bases_down_names_a_typedef_of_its_base() {
+    let source = "\
+struct S { void c_str(); };
+template <class T, class U>
+struct Leaf { using element_type = T; element_type* operator->(); };
+template <class T>
+struct Mid : Leaf<T, int> {};
+template <class T>
+struct Ptr : Mid<T> {};
+void f() {
+    Ptr<S> p;
+    p->;
+}
+";
+    let files = MemoryFiles::new().with_file("/p/a.cpp", source);
+    let mut session = Session::with_config(
+        "/p",
+        SessionFiles::new(OpenDocuments::new(), files),
+        WatchFilter::new("/p"),
+        CompilerConfig::default().with_standard("c++23"),
+    );
+    session.add_project_files([std::path::PathBuf::from("/p/a.cpp")]);
+    session.index_everything();
+    let mut rounds = 0;
+    while session.pending() > 0 && rounds < 200 {
+        session.advance(16);
+        rounds += 1;
+    }
+    let view = session
+        .view_of_the_file(std::path::Path::new("/p/a.cpp"))
+        .expect("a view");
+    let at = source.find("p->").expect("the fixture") + 3;
+    let set = session.completions(&view, FileOffset::new(at));
+    let labels: Vec<&str> = set.items.iter().map(|item| item.label.as_str()).collect();
+    assert!(
+        labels.contains(&"c_str"),
+        "two bases down, `operator->` returns `element_type*` and `element_type` is `S`: {labels:?}"
+    );
+}

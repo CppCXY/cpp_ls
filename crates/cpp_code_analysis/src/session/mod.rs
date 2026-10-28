@@ -488,6 +488,19 @@ pub struct Session<F: FileProvider = DiskFiles> {
     /// Cleared wherever [Session::units] is: a unit read is a reading of the same timeline, so anything that
     /// moves inside it makes this list a claim about a reading that no longer describes its closure.
     units_read: std::collections::HashSet<String>,
+    /// **Translation units the session has been told to read as programs** that are not open documents — the module
+    /// interface units, in practice.
+    ///
+    /// `import std;` names a module, not a file, so nothing in the project includes `bits/std.cc`: it arrives through
+    /// [`Session::queue_the_modules_a_file_imports`], and from then on it is one of the project's units. A compiler
+    /// reads it as a translation unit — the whole closure, rendered in *its* environment — which is the only reading
+    /// in which the library's own scopes are right: read raw, `shared_ptr_base.h`'s `_Sp_counted_ptr_inplace` never
+    /// closes (its class head is written three times under `#if`/`#else`) and every class after it is filed as its
+    /// nested class.
+    ///
+    /// [`Session::the_next_unit_to_read`] considers these after the open documents, so the pump reads a module once,
+    /// at the same budget as any other unit read, and never before a reader's own file.
+    programs_wanted: std::collections::HashSet<String>,
     /// **How often a root's program was attempted and declined** — see [`Session::commit_a_program`]. A root that
     /// cannot be walked yet is retried, but not for ever: three attempts and it keeps the reading the per-file path
     /// gave it.
@@ -1258,6 +1271,7 @@ impl<F: FileProvider + Clone> Session<F> {
                 MAX_WALKS_BY_CONTENT_BYTES,
             )),
             units_read: std::collections::HashSet::new(),
+            programs_wanted: std::collections::HashSet::new(),
             units_attempted: std::collections::HashMap::new(),
             unit_index: std::sync::Mutex::new(None),
             rendered_unit: std::sync::Mutex::new(None),
@@ -5295,10 +5309,27 @@ impl<F: FileProvider + Clone> Session<F> {
 
     /// The root a program read would be for, ignoring the clock — see [`Session::the_program_to_read`].
     fn the_next_unit_to_read(&self) -> Option<PathBuf> {
-        self.documents.paths().into_iter().find(|path| {
+        let open = self.documents.paths().into_iter().find(|path| {
             !self.units_read.contains(&queue_key(path))
                 && !self.the_program_is_too_large_to_read_at_once(path)
-        })
+        });
+        if open.is_some() {
+            return open;
+        }
+
+        // **Then the module interface units**, which are units of the project too and are nobody's open document. The
+        // size budget does not apply to them: it exists to keep a *keystroke* from waiting for a program the reader is
+        // not looking at, and a module unit's read is what `import std;` answers from — `bits/std.cc`'s closure is
+        // larger than the budget by construction (it is the whole standard library), so refusing it is refusing the
+        // module.
+        let mut wanted: Vec<PathBuf> = self
+            .programs_wanted
+            .iter()
+            .filter(|key| !self.units_read.contains(*key))
+            .map(PathBuf::from)
+            .collect();
+        wanted.sort();
+        wanted.into_iter().next()
     }
 
     /// **The next translation unit of the project nobody has read** — gone.
@@ -5397,6 +5428,12 @@ impl<F: FileProvider + Clone> Session<F> {
                 // opens with `#include <bits/stdc++.h>` — and a summary of the raw text is the reading without a
                 // macro expansion, which for a module source is the reading without most of the names.
                 self.add_project_files([unit.clone()]);
+                // **And a translation unit, so it is read as one.** The per-file cook beside this is the cheap half — it
+                // renders the unit's own text, with `#include` as a boundary — and it is what makes the names appear
+                // quickly; the *program* read is what makes them **right**, because it renders every header in the
+                // closure inside this unit's environment. Recorded rather than run: the pump reads a unit at its own
+                // budget (`the_next_unit_to_read`).
+                self.programs_wanted.insert(queue_key(&unit));
                 self.want_cooked_reading(&unit);
                 queued += 1;
             }
@@ -5497,10 +5534,29 @@ impl<F: FileProvider + Clone> Session<F> {
             self.add_project_files(found.clone());
 
             for unit in found {
-                // Queued in the **open** half, and re-armed rather than added: a file that arrived days ago with the
-                // project scan is sitting in the rest half behind everything else, and the point of this call is
-                // that a reader is waiting for a name in it.
-                self.queue.again(unit, Priority::Open, 0);
+                // **The interface unit is a translation unit, so it is read the way a compiler reads one.** This used
+                // to queue the unit for a *per-file* cook and drain the index behind it — and a per-file cook renders
+                // one file with `#include` as a boundary, so every header in the closure kept its **raw** summary,
+                // where both branches of every `#if` are present in the text at once and no compiler would ever see
+                // that stream.
+                //
+                // Measured on `shared_ptr_base.h` read raw: `_Sp_counted_ptr_inplace`'s class body never closes —
+                // the class head is written three times under `#if`/`#else` — so `__shared_ptr_access`, hundreds of
+                // lines later, is filed as a *nested* class of it, and every member of the real `__shared_ptr_access`
+                // is unreachable: `std::shared_ptr<std::string>::operator->` cannot be found, and a completion after
+                // `ptr->` offers the `shared_ptr`'s own four names instead of `std::string`'s sixty-eight.
+                //
+                // `read_the_unit` is the compiler's reading: it walks the closure, renders each file **in this
+                // unit's environment** (`#if` decided once, macros expanded), parses that once, and files every file's
+                // declarations from it — `insert_cooked_in_a_program`, which is the reading a query about that file
+                // asks for (`ProjectIndex::the_reading_for`). Its cost is the closure walk, which this call already
+                // paid: **6 151 ms** for `std` on a cold machine, 547.7 ms warm.
+                //
+                // It is *recorded* here rather than run here because the walk needs the unit's summary, which is
+                // queued below and read by the drain — the first round would find nothing. `the_next_unit_to_read`
+                // hands it to the pump as a program like any other, which is also what keeps a module's six seconds
+                // out of the write lock a request is waiting on.
+                self.programs_wanted.insert(queue_key(&unit));
             }
 
             // **Everything this made reachable, read** — the interface units, the headers they include, and the

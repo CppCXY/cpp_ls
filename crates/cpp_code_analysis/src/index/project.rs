@@ -4473,6 +4473,32 @@ pub(crate) fn operator_returns_of(
     ))
 }
 
+/// **A return type that is one bare name plus its operators** — `element_type*` gives `("element_type", "*")`, and
+/// `None` for anything else (a qualified name, a template-id, a reference). Only the bare shape can name a member
+/// typedef of the class whose operator wrote it; anything richer is a type the substitution already handles.
+fn a_bare_type_and_its_operators(written: &str) -> Option<(&str, String)> {
+    let trimmed = written.trim();
+    let name_len = trimmed
+        .chars()
+        .take_while(|character| character.is_alphanumeric() || *character == '_')
+        .count();
+    if name_len == 0 {
+        return None;
+    }
+    let (name, rest) = trimmed.split_at(name_len);
+    let suffix: String = rest
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect();
+    if !suffix
+        .chars()
+        .all(|character| matches!(character, '*' | '&'))
+    {
+        return None;
+    }
+    Some((name, suffix))
+}
+
 /// **A base's operator return, read through the base clause's arguments.** `None` when the clause that names this
 /// base cannot be found or its arguments cannot be read — the caller then answers with the spelling as written, which
 /// is what this function refines.
@@ -4494,26 +4520,97 @@ fn a_base_operators_return(
     // `["Base", "T"]` for `struct Ptr : Base<T> {}` — the class and the names *inside* its clause, which is what the
     // lookup does with them (`_Tp` and `_Lp` really can be a base's name). So the arguments of the base we found are
     // the entries right after it, and how many there are is the base template's arity.
-    let at = bases.iter().position(|written| {
-        resolved_in_the_enclosing_scopes(index, scopes, path, class, written) == declared_in
-    })?;
-    let arity = index.template_parameters_for(declared_in, path, &[]).len();
-    let arguments: Vec<String> = bases
-        .iter()
-        .skip(at + 1)
-        .take(arity)
-        .map(|argument| {
-            // Read through the derived class's own parameters first: `Base<T>`'s argument is `T`, and `T` is `S` at
-            // the use (`Ptr<S>`), which is the substitution the base's `T*` needs.
-            crate::sema::types::substituted_spelling(argument, parameter_names, written_arguments)
-        })
-        .collect();
-    let parameters = index.template_parameters_for(declared_in, path, &arguments);
+    // **The operator may be inherited through more than one level.** libstdc++'s `shared_ptr<_Tp> : __shared_ptr<_Tp,
+    // _S_single> : __shared_ptr_access<_Tp, _Lp, false, false>` declares `operator->` two bases down, so looking only
+    // at the direct base clause finds nothing and the return type stays the unsubstituted `element_type *`. The
+    // substitution is therefore composed along the chain: each base clause's arguments are read through the previous
+    // level's parameters.
+    let (parameters, arguments) = the_arguments_of_a_base(
+        index,
+        scopes,
+        root,
+        path,
+        class,
+        declared_in,
+        parameter_names,
+        written_arguments,
+        0,
+    )?;
+    // **The base's return type may name one of its own typedefs.** `__shared_ptr_access` writes
+    // `element_type* operator->()` and `element_type` is `using element_type = _Tp;` *inside* it — so substituting
+    // `_Tp` alone never reaches it: the pointee comes out as a class called `element_type`, which has no members, and
+    // the completion after `shared_ptr<std::string>::operator->` is empty. A bare name is read as a member of the
+    // class that declared the operator, substituted, and the operators around it put back on.
+    if let Some((name, suffix)) = a_bare_type_and_its_operators(returns)
+        && let Known::Yes((alias, _)) =
+            member_fact(index, scopes, root, path, declared_in, name, None)
+        && let Some(target) = alias.type_of.clone()
+    {
+        let substituted =
+            crate::sema::types::substituted_spelling(&target, &parameters, &arguments);
+        return Some(format!("{substituted}{suffix}"));
+    }
+
     Some(crate::sema::types::substituted_spelling(
         returns,
         &parameters,
         &arguments,
     ))
+}
+
+/// **The substitution that reaches `wanted` from `class` along the base clauses** — its template parameters and their
+/// arguments, composed one level at a time.
+fn the_arguments_of_a_base(
+    index: &ProjectIndex,
+    scopes: &crate::ScopeTree,
+    root: &cpp_parser::CppSyntaxNode,
+    path: &Path,
+    class: &str,
+    wanted: &str,
+    parameters: &[String],
+    arguments: &[String],
+    depth: usize,
+) -> Option<(Vec<String>, Vec<String>)> {
+    if depth > 6 {
+        return None;
+    }
+    let leaf = |spelling: &str| spelling.rsplit("::").next().unwrap_or(spelling).to_string();
+    let Known::Yes(bases) = bases_of(index, scopes, root, path, class) else {
+        return None;
+    };
+    let mut at = 0usize;
+    while at < bases.len() {
+        let written = &bases[at];
+        let resolved = resolved_in_the_enclosing_scopes(index, scopes, path, class, written);
+        let arity = index.template_parameters_for(&resolved, path, &[]).len();
+        let of_the_base: Vec<String> = bases
+            .iter()
+            .skip(at + 1)
+            .take(arity)
+            .map(|argument| {
+                crate::sema::types::substituted_spelling(argument, parameters, arguments)
+            })
+            .collect();
+        let of_the_base_parameters = index.template_parameters_for(&resolved, path, &of_the_base);
+        if leaf(&resolved) == leaf(wanted) {
+            return Some((of_the_base_parameters, of_the_base));
+        }
+        if let Some(found) = the_arguments_of_a_base(
+            index,
+            scopes,
+            root,
+            path,
+            &resolved,
+            wanted,
+            &of_the_base_parameters,
+            &of_the_base,
+            depth + 1,
+        ) {
+            return Some(found);
+        }
+        at += 1 + arity;
+    }
+    None
 }
 
 fn unary_operand_with(

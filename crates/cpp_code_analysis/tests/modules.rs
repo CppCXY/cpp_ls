@@ -1945,3 +1945,78 @@ fn the_interface_unit_of_an_imported_module_can_be_queued_instead_of_read() {
 
     let _ = DiskFiles;
 }
+
+/// **A module interface unit is read as a translation unit, and its closure's facts come from that reading.**
+///
+/// `import std;` names a module, not a file, so nothing includes `bits/std.cc`; it arrives through
+/// `queue_the_modules_a_file_imports`. It used to be queued for a *per-file* cook, whose renderer treats `#include`
+/// as a boundary — so every header in the closure kept its **raw** summary, and a raw summary of a header that writes
+/// a class head twice under `#if`/`#else` mis-pairs its braces: measured on libstdc++'s `shared_ptr_base.h`,
+/// `__shared_ptr_access` was filed as a nested class of `_Sp_counted_ptr_inplace` and every one of its members became
+/// unreachable.
+///
+/// The compiler's reading is the program read: the closure walked, every file rendered **in this unit's environment**,
+/// parsed once, and every file's declarations filed from the rendered text. This pins that the session now does that
+/// for a module unit — the unit is a program the pump reads, not only a file it cooks.
+#[test]
+fn a_module_unit_is_read_as_a_translation_unit() {
+    use cpp_code_analysis::{OpenDocuments, SessionFiles, WatchFilter};
+
+    let std_cc = "module;\n#include <bits/thing.h>\nexport module std;\nexport namespace std { }\n";
+    let thing = "namespace std {\nstruct Widget {\n    void go();\n};\n}\n";
+    let demo = "import std;\nint main() { return 0; }\n";
+    let files = MemoryFiles::new()
+        .with_file("/inc/bits/std.cc", std_cc)
+        .with_file("/inc/bits/thing.h", thing)
+        .with_file("/p/std_demo.cpp", demo);
+    let mut config = CompilerConfig::new();
+    config.include_paths = vec![cpp_code_analysis::IncludePath::system("/inc")];
+    let mut session = Session::with_config(
+        "/p",
+        SessionFiles::new(OpenDocuments::new(), files),
+        WatchFilter::new("/p"),
+        config,
+    );
+    session.add_project_files([std::path::PathBuf::from("/p/std_demo.cpp")]);
+    session.did_open("/p/std_demo.cpp", demo);
+    session.index_everything();
+    let mut rounds = 0;
+    while session.pending() > 0 && rounds < 200 {
+        session.advance(16);
+        rounds += 1;
+    }
+
+    assert_eq!(
+        session.read_the_modules_a_file_imports(std::path::Path::new("/p/std_demo.cpp")),
+        1,
+        "the request path finds the interface unit"
+    );
+    let mut rounds = 0;
+    while session.pending() > 0 && rounds < 400 {
+        session.advance(16);
+        rounds += 1;
+    }
+
+    // The importer's own program first (it is an open document), then the interface unit as a program.
+    let opened = session.read_a_looked_at_unit();
+    assert!(opened.is_some(), "the open file is a program");
+    let unit = session.read_a_looked_at_unit();
+    let unit = unit.expect("the interface unit is a program too — that is what this test is about");
+    assert!(
+        unit.files >= 2,
+        "a program read of `bits/std.cc` reads its closure, not one file: {unit:?}"
+    );
+
+    // And the header's facts are the **rendered** ones, filed under the program that read it.
+    let header = std::path::Path::new("/inc/bits/thing.h");
+    let declarations = session
+        .index()
+        .cooked_declarations(header)
+        .expect("the header has a reading from the unit that included it");
+    assert!(
+        declarations
+            .iter()
+            .any(|declaration| &*declaration.name == "Widget"),
+        "and `Widget` is one of its declarations: {declarations:?}"
+    );
+}

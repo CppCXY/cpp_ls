@@ -2325,6 +2325,51 @@ struct After { void after(); };
 这轮到此为止的原因：这条线索在**解析器的原始读数**里，需要二分一个 67 KB、`#if` 密集的系统头；
 在拿到最小复现之前动解析器的花括号配对，风险远大于收益。仓库里保留的是两处已经量到收益的修复
 （`f8f4715`、`fc71d1c`）和 §15.6–15.9 的完整测量链。
+### 15.10 按编译器的方式修好了：模块单元是一个**翻译单元**，就该按程序读
+
+§15.8–15.9 停在"原始读数里 `_Sp_counted_ptr_inplace` 没闭合"。那条线索的根不是解析器的花括号，而是**我们给这个
+头文件建的是原始读数**——原始文本里 `#if`/`#else` 两个分支同时在场（类头写了三次），任何编译器都不会看到那样的
+文本流。编译器的做法是**先预处理**：`#if` 只留一支，然后一个 TU 一次解析。所以修法不是给解析器打补丁，而是让模块
+单元按编译器的读法来读：
+
+```text
+· 一个模块接口单元（bits/std.cc）是一个翻译单元，它 include 的每个头文件都在【它的环境】里被渲染、解析一次，
+  每个文件的声明都从渲染文本入档（insert_cooked_in_a_program）——
+  这正是 Session::read_the_unit 已有的路径，也是 ProjectIndex::the_reading_for 之后查询读的那份读数；
+· 所以模块单元现在被记进 programs_wanted，由泵按"程序"读（the_next_unit_to_read 在打开的文件之后考虑它们，
+  且对它们不套 8 MB 的预算——stdio 模块的闭包按定义就超过它）。
+```
+
+实测（`test_module`，`src/probe_import_ptr.cpp`，`import std;`）：
+
+```text
+索引                          2.4 s
+模块单元入队 + 读闭包摘要       501 ms
+打开的文件作为程序             0.6 ms（1 文件）
+模块单元作为程序               484 ms（344 文件，755 818 token）
+ptr-> 的补全                   68 项，99 ms —— append / append_range / assign / at / back …
+之前的同一处                   4 项（shared_ptr 自己的 operator= / element_type / weak_type …）
+```
+
+顺手补完的两处（都在同一条链上，各自可独立验证）：
+
+```text
+· 基类链上的实参代入：shared_ptr → __shared_ptr → __shared_ptr_access，operator-> 在两跳之外的基类里，
+  用 the_arguments_of_a_base 逐跳复合（每层基类子句的实参先用上一层的形参代换）；
+· 基类自己的 typedef：operator-> 写的是 element_type*，element_type 是那个基类里的 using = _Tp，
+  所以还要按"裸名字 + 指针/引用后缀"把 typedef 代进去（a_bare_type_and_its_operators）。
+```
+
+回归测试：
+
+```text
+tests/generics.rs  an_operator_two_bases_down_names_a_typedef_of_its_base
+                   （S、Leaf<T,U>、Mid<T> : Leaf<T,int>、Ptr<T> : Mid<T>，p-> 必须给出 c_str）
+tests/modules.rs   a_module_unit_is_read_as_a_translation_unit
+                   （模块单元被当作程序读，闭包里的头文件拿到渲染读数，Widget 在其声明里）
+```
+
+9 个 target 全绿（`cpp_code_analysis` lib 723 + 48 targets）。
 ## 15.3 关于"313 秒"
 
 那是我在**debug 配置**下量的（`cargo test --release` 之前的那次跑的是 debug 的 probe），release 下同一个工程
