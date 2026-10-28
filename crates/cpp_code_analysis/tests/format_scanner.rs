@@ -434,3 +434,106 @@ fn a_token_that_is_not_a_literal_is_ignored() {
         );
     }
 }
+
+/// **What a piece means**, which is what the hover prints — the same module answers both, so the explanation of
+/// `%-8.2` cannot disagree with the colouring of `%-8.2`.
+///
+/// The pairs are `(label, value)`: the labels are the grammar's words, the values the reading.
+#[test]
+fn a_piece_explains_itself() {
+    use cpp_code_analysis::sema::format::describe;
+
+    /// The explanation of the piece covering `needle`, as `label: value` strings.
+    fn of(literal: &str, needle: &str, kind: FormatKind) -> Vec<String> {
+        let mut found = Vec::new();
+        pieces_in(literal, kind, &mut found);
+        let at = literal.find(needle).expect("the fixture writes it");
+        let piece = found
+            .iter()
+            .find(|piece| piece.start <= at && at < piece.end)
+            .unwrap_or_else(|| panic!("{needle:?} is inside a piece of {literal}"));
+        describe(literal, kind, piece)
+            .into_iter()
+            .map(|(label, value)| format!("{label}: {value}"))
+            .collect()
+    }
+
+    // A printf conversion, letter by letter.
+    assert_eq!(
+        of(r#""%.2f""#, "f", FormatKind::Printf),
+        vec!["type: fixed-point decimal — a `double` written as `-.--`"],
+        "the conversion the reader looks up"
+    );
+    assert_eq!(
+        of(r#""%zu""#, "u", FormatKind::Printf),
+        vec!["type: unsigned decimal"],
+        "…and what the letter after the length modifier means"
+    );
+    // The flags, width, precision and length, each read separately.
+    assert_eq!(
+        of(r#""%-8.2f""#, "-8.2", FormatKind::Printf),
+        vec!["flags: left-aligned", "width: 8", "precision: 2"]
+    );
+    assert_eq!(
+        of(r#""%#llx""#, "#ll", FormatKind::Printf),
+        vec![
+            "flags: an alternative form (`0x`, a leading `0`)",
+            "length: a `long long`"
+        ]
+    );
+    // A `%` with nothing else says what it is rather than nothing at all.
+    assert_eq!(
+        of(r#""%d""#, "%", FormatKind::Printf),
+        vec!["conversion: introduced by `%`; the letter after any flags and width says which"]
+    );
+    // The two things that take an argument without being a conversion.
+    assert_eq!(
+        of(r#""%*d""#, "*", FormatKind::Printf),
+        vec!["argument: the width or precision comes from an argument"]
+    );
+    assert_eq!(
+        of(r#""%1$s""#, "1$", FormatKind::Printf),
+        vec!["argument: number 1, counted from 1 — and this conversion does not advance the count"]
+    );
+    // scanf's scanset, and its suppression.
+    assert_eq!(
+        of(r#""%[a-z]""#, "[a-z]", FormatKind::Scanf),
+        vec!["set: one or more characters from `a-z`"]
+    );
+    assert_eq!(
+        of(r#""%[^,]\n""#, "[^,]", FormatKind::Scanf),
+        vec!["set: one or more characters **not** in `,`"]
+    );
+    assert_eq!(
+        of(r#""%*d""#, "*", FormatKind::Scanf),
+        vec!["argument: assigns nothing: the conversion is read and discarded"]
+    );
+    // std::format: the fields and its own presentation types.
+    assert_eq!(
+        of(r#""{:>10}""#, ">10", FormatKind::Std),
+        vec!["align: right", "width: 10"]
+    );
+    assert_eq!(
+        of(r#""{:*<8}""#, "*<8", FormatKind::Std),
+        vec!["fill: `*`", "align: left", "width: 8"]
+    );
+    assert_eq!(
+        of(r#""{:.3f}""#, "f", FormatKind::Std),
+        vec!["type: fixed-point decimal"]
+    );
+    assert_eq!(
+        of(r#""{:#x}""#, "#", FormatKind::Std),
+        vec!["flags: an alternative form (`0x`, `0b`, a leading `0`)"],
+        "a std flag, whose alternative form is not printf's"
+    );
+    assert_eq!(
+        of(r#""{}""#, "{}", FormatKind::Std),
+        vec!["field: formatted the way the argument's type defaults to"]
+    );
+    // **A field being typed still explains itself**: `{` alone is a field whose specification has not been written,
+    // and saying "the argument's default formatting" is more useful than an empty popup a keystroke later.
+    assert_eq!(
+        of(r#""{""#, "{", FormatKind::Std),
+        vec!["field: formatted the way the argument's type defaults to"]
+    );
+}

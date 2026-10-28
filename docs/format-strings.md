@@ -423,7 +423,8 @@ cargo test --release -p cpp_code_analysis --test format -- --ignored --nocapture
 ```text
 Phase 1  scanner(Std) + legend + LSP 接线 + 测试                        ✓ 已完成
 Phase 2  printf / scanf 文法 + 实参位置表 + 配置                        ✓ 已完成
-Phase 3  相邻字面量拼接、constexpr 值、hover（"%.2f = 定点两位小数"）、
+Phase 3  hover（"%.2f 是什么"）                                        ✓ 已完成
+         相邻字面量拼接、constexpr 值、                                  未做
          诊断（格式串与实参个数/类型不匹配，复用 pieces + 实参类型）      未做
 ```
 
@@ -431,6 +432,33 @@ Phase 1 的验收（`C:\Users\zc\Desktop\cpp` 的 `main.cpp`）**达成**：`std
 在服务器输出里是一个独立 token，关闭配置后完全恢复原样（§8 的数字就是这台机器上跑出来的）。
 
 Phase 3 之前还剩一件小事：`using std::format;` 之后裸写 `format(…)` 不认（§3.2 末尾）。
+
+### 9.1 hover —— 光标下那几个字节是什么意思
+
+`crates/cpp_ls/src/handlers/hover/format.rs`，词来自 `sema::format::describe`（**和决定 piece 的是同一个模块**，
+所以"`%-8.2` 是什么"和"`%-8.2` 画哪几个字节"不可能说两套话）：
+
+```text
+printf("%-8.2f", x)        光标在 `-8.2` 上  →  **`-8.2`** — a `printf` conversion's flags, width and precision
+                                              - flags: left-aligned
+                                              - width: 8
+                                              - precision: 2
+                           光标在 `f` 上     →  **`f`** — a `printf` conversion
+                                              - type: fixed-point decimal — a `double` written as `-.--`
+std::format("{:*<8}", s)   光标在 `*<8` 上   →  fill: `*` / align: left / width: 8
+scanf("%[a-z]", name)      光标在 `[a-z]`    →  set: one or more characters from `a-z`
+```
+
+两条边界，都是"宁可不说"：
+
+* **不是格式串的字符串没有弹窗**（`const char *plain = "…%d…";` 不弹），因为"这个字符串是格式串"是调用决定的；
+* **`[highlight]` 全关时这一层也不跑** —— 弹窗解释的是编辑器不画的东西，等于回答一个没人问的问题；
+* 说明里**不判断实参类型**：那是诊断，而且是会在模板实例化上看走眼的那一类。弹窗只说语法自己说的话。
+
+测试：`format_scanner::a_piece_explains_itself`（表驱动，14 组：两种 C 文法 + std 的 flags/width/precision/
+length/scanset/positional/`*`/`%%`/未闭合 field）和
+`handshake::a_hover_inside_a_format_string_explains_the_part_it_is_on`（线上：conversion、width+flag、
+以及"普通字符串没有弹窗"）。
 
 ---
 
@@ -441,6 +469,9 @@ Phase 3 之前还剩一件小事：`using std::format;` 之后裸写 `format(…
   （并把名字加进 `tokenTypes`）才是四个精确类型。同一段代码两种客户端各跑一次的数字在 §8。
 * **认识的函数有限**：默认只认标准名，项目的包装函数通过 `extra`/`extra_format` 加。实测的假阳性防护：
   `app::format("…")`、`record("…", 1)`、`printf(a + "%d")`、`printf("%s", "text")` 全都不画。
+* **`"%" PRIu64` 这种拼不出来**：字面量里夹着一个宏，宏的文本不在这一层手里（相邻的纯字面量拼接也没做，见 §9），
+  所以整段跳过而不是画半个。
+* **hover 不判断实参类型**：那是诊断那一半，而且是最容易在模板上看走眼的一半。弹窗只说语法自己说的话。
 * **性能**：一次 `semanticTokens/full` 3–9 ms（整个请求，不只是这一层）。**不需要缓存**：最初担心的
   "每个字面量一次 `definitions`" 没有发生 —— 裸名才解析，而且 `definition_at` 是作用域链查找。
 * **不重做库的检查**：格式串是否合法由编译器/库负责，我们只画。将来做诊断时也只在"能确定"的形态上报。

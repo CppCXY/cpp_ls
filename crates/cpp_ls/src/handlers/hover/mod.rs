@@ -47,6 +47,7 @@ use crate::context::{RequestOutcome, ServerContextSnapshot, snapshot_query};
 use crate::util::{file_offset_at_position, uri_to_file_path};
 
 /// The two vocabularies a popup has an answer for and the analysis does not: keywords, and Doxygen's commands.
+mod format;
 mod vocabulary;
 
 /// How much of a declaration's text is shown before it is elided.
@@ -300,6 +301,14 @@ fn hover_of_the_program(
     // answer to the question the line asks.
     if let Known::Yes(header) = session.header_at(view, in_the_file) {
         return Some(markdown(header_markdown(&header)));
+    }
+
+    // **And the format string**, which is the other thing a reader points at and the index cannot answer: `%zu` is a
+    // `size_t` in decimal and `{:#x}` is hex with a prefix, and both are inside a literal that no declaration
+    // describes. Asked here — after the header, before every name question — because a string literal is not a name
+    // and the queries below would spend their time finding that out.
+    if let Some(found) = format::format_string_hover(session, view, in_the_file) {
+        return Some(found);
     }
 
     // **A member access is a question about the object's type, not about the name.** `z.append(…)` used to fall through

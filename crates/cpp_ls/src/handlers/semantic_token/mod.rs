@@ -56,7 +56,7 @@ use crate::context::{RequestOutcome, ServerContextSnapshot, snapshot_query};
 use crate::util::uri_to_file_path;
 
 mod builder;
-mod format;
+pub(crate) mod format;
 
 pub use builder::{Builder, Modifier, TypeKind};
 

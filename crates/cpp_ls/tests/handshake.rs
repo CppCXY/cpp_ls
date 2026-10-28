@@ -5228,3 +5228,111 @@ fn a_cpp_project_is_not_offered_cuda_vocabulary() {
     server.notify("exit", Value::Null);
     assert!(server.wait_for_exit());
 }
+
+/// **A hover inside a format string explains the bytes under the cursor.**
+///
+/// The other thing a reader points at that no declaration describes: `%zu` is a `size_t` in decimal, `{:.3f}` is
+/// fixed-point with three digits, and the only place a reader is already looking is the line of code. The words come
+/// from `sema::format::describe` — the module that decides which bytes are a *piece* — so the explanation cannot
+/// disagree with the colouring.
+///
+/// Three assertions, in the order the feature is built:
+///
+/// ```text
+///   inside a printf conversion       the type it converts, and the flags/width/precision beside it
+///   inside a std::format field       the specification's own parts
+///   inside a plain string            nothing — a string is not a format string unless a call says it is
+/// ```
+#[test]
+fn a_hover_inside_a_format_string_explains_the_part_it_is_on() {
+    const FIXTURE: &str = "\
+#include <cstdio>
+struct width { int value; };
+void f(double d, int n) {
+    std::printf(\"%-8.2f|%zu\", d, n);
+    const char *plain = \"not a format string %d\";
+    (void)plain;
+}
+";
+    let project = Project::new("hover-format");
+    project.write("main.cpp", FIXTURE);
+
+    let mut server = Server::start(project.root());
+    let uri = uri_of(&project.root().join("main.cpp"));
+
+    server.request(
+        1,
+        "initialize",
+        json!({
+            "processId": std::process::id(),
+            "rootUri": uri_of(project.root()),
+            "capabilities": {
+                "workspace": { "configuration": true, "didChangeWatchedFiles": { "dynamicRegistration": true } },
+                "window": { "workDoneProgress": true },
+            },
+        }),
+    );
+    server.notify("initialized", json!({}));
+    server.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": { "uri": uri, "languageId": "cpp", "version": 1, "text": FIXTURE }
+        }),
+    );
+
+    // **A position on a byte of a spelling**, found in the fixture rather than counted.
+    let at = |needle: &str, within: usize| -> (u32, u32) {
+        let line = line_of(FIXTURE, needle);
+        let offset = FIXTURE
+            .lines()
+            .nth(line as usize)
+            .and_then(|text| text.find(needle))
+            .unwrap_or_else(|| panic!("the fixture writes {needle:?}"))
+            + within;
+        (line as u32, offset as u32)
+    };
+    let ask = |server: &mut Server, id: i64, (line, character): (u32, u32)| -> String {
+        let answer = server.ask_until(id, |id| {
+            json!({
+                "id": id,
+                "method": "textDocument/hover",
+                "params": {
+                    "textDocument": { "uri": uri },
+                    "position": { "line": line, "character": character },
+                },
+            })
+        });
+        answer["result"]["contents"]["value"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string()
+    };
+
+    // Inside the `f` of `%.2f` — the conversion, and the sentence a reader wants.
+    let text = ask(&mut server, 100, at("%-8.2f", 5));
+    assert!(
+        text.contains("fixed-point decimal"),
+        "the conversion's meaning: {text:?}"
+    );
+
+    // Inside the width: the grammar's own words for the numbers in front of the letter.
+    let text = ask(&mut server, 101, at("%-8.2f", 2));
+    assert!(
+        text.contains("width") && text.contains('8'),
+        "the width: {text:?}"
+    );
+    assert!(
+        text.contains("left-aligned"),
+        "and the flag before it: {text:?}"
+    );
+
+    // A string that no call passes anywhere is not a format string, so there is no popup for its `%d`.
+    let text = ask(&mut server, 102, at("not a format string", 17));
+    assert!(
+        !text.contains("conversion"),
+        "a string nothing formats is left to the reader: {text:?}"
+    );
+
+    server.request(999, "shutdown", Value::Null);
+    server.notify("exit", Value::Null);
+}
