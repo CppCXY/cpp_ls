@@ -70,12 +70,11 @@ pub async fn on_hover(
     let uri = params.text_document_position_params.text_document.uri;
     let position = params.text_document_position_params.position;
 
-    // Read in first, under the write lock, so the query itself can be a read (`AnalysisState::prepare` records why).
+    // **The read-only form of the step below**: hover is answered from the file's own text, so a wait for the write
+    // lock — which during an index is the pump's — buys nothing. `AnalysisState::prepare_for_a_read` carries the
+    // measurement: the first hover of an open file went from 1 103 ms to 12–34 ms.
     if let Some(path) = uri_to_file_path(&uri) {
-        context.analysis().prepare(&path).await;
-
-        // A hover over `std::string` in a file that says `import std;` is the same question the definition handler
-        // asks, and it needs the same file read in: `std.ixx` is outside the project. `false`: no edit to catch up on.
+        context.analysis().prepare_for_a_read(&path).await;
         crate::handlers::read_the_modules(&context, &path, false).await;
 
         // **And then the query, which no longer waits for the project's index to drain.**

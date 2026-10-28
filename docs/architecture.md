@@ -2046,6 +2046,21 @@ expression"——而这个宏在被展开后于每个使用点报两条 "expecte
 也就是说 hover 本身不是热点，**第一次**才是：它要先把文件读进 index 并为它建渲染，而一个 831 文件工程的冷启动
 要 33 s。这解释了"hover 有点慢，不知道在做什么"：慢的是首触，不是每次悬停。
 
+**修了一半（已实测）**：hover 的答案取自文件**自己的文本**（`handlers::hover` 自己写着这一点，用的是
+`view_of_the_file`），它不需要渲染——而 `AnalysisState::prepare` 为了"load + 排队 cook"去拿**写锁**，冷索引期间
+那把锁在 pump 手里，于是首触排到别人的一段工作后面。新增 `AnalysisState::prepare_for_a_read`：先 `try_read`
+看一眼这个文件的 summary 在不在，在就**直接返回**，不在才退回旧的 `prepare`。
+
+```text
+                 修复前首触   修复后首触   之后每次
+charset.c        1 103 ms     570 ms      8–10 ms
+mbyte.c            193 ms     121 ms      17–21 ms
+fs.c                77 ms      45 ms      8–13 ms
+```
+
+剩下的 570 ms 是诚实的：那一刻这个文件的 summary 还没有（`didOpen` 把它排进队列，pump 还没读到），hover 没有
+可用的读法可依，只能等。下一步是"只把这一个文件在**读**这一侧读进来"，那是比这次更大的改动。
+
 下一步（按代价）：
 
 ```text

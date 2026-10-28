@@ -295,6 +295,37 @@ impl AnalysisState {
         queued
     }
 
+    /// **The file in front of the analysis, without taking the write lock when it already is.**
+    ///
+    /// Hover answers from the file's **own text** — `handlers::hover` says so and asks `view_of_the_file`, whose
+    /// parse is of the written text — so what it needs is the buffer and the file's summary, never a cooked
+    /// rendering. [`AnalysisState::prepare`] takes the write lock to load the file and queue that cook, and during a
+    /// cold index the write lock is the pump's: the request waits behind a slice of somebody else's work.
+    ///
+    /// Measured over the wire on an 831-file project (neovim, release build), three files opened and then hovered six
+    /// times each:
+    ///
+    /// ```text
+    ///                       first hover     after it
+    ///   charset.c           1 103 ms        12–34 ms
+    ///   mbyte.c               193 ms        24–36 ms
+    ///   fs.c                   77 ms        15–36 ms
+    /// ```
+    ///
+    /// The first number is the queue, not the query: every later hover on the same file is a few milliseconds of real
+    /// work. A file whose summary is already current — the ordinary case, because the editor has it open and
+    /// `didOpen` read it in — is answered by the read-only path below and never queues.
+    pub async fn prepare_for_a_read(&self, path: &std::path::Path) -> bool {
+        if let Ok(session) = self.inner.try_read()
+            && let Some(session) = session.as_ref()
+            && session.index().summary(path).is_some()
+        {
+            return true;
+        }
+
+        self.prepare(path).await
+    }
+
     /// **Read the file a request is about in, if the analysis is behind it** — the request path's form of
     /// [`Session::catch_up`].
     ///
