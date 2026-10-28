@@ -100,3 +100,26 @@ cargo test --release -p cpp_ls --test c_project -- --ignored --nocapture
 * 单点问题：`CPPLS_PROJECT_ROOT` / `CPPLS_FILE` / `CPPLS_NEEDLE` 加 `cpp_code_analysis` 的 `inference_probe`；
   `CPPLS_TYPE=1` 打印某处的类型，`CPPLS_DIAGNOSTICS=1` 打印整个文件的检查结果。
 * 一个功能"答得出"和"答得对"是两件事：这张表管前者，`docs/remaining.md` §A/§C 记的是后者的已知缺口。
+
+## 格式字符串（`{…}` / `%…`）
+
+同一个探针的思路再来一次，这次读的是**字符串字面量里面**：`crates/cpp_ls/tests/format_status.rs` 起真服务器、
+用真正的 `initialize`（客户端能力可选两套），然后把 `semanticTokens/full` 的回答**按客户端的方式解码**回
+文本，逐条打印。
+
+```text
+$env:CPPLS_FORMAT_PROJECT = "C:\Users\zc\Desktop\cpp"
+$env:CPPLS_FORMAT_CLIENT  = "standard"     # 或 full：把四个自定义类型也报进 tokenTypes
+cargo test --release -p cpp_ls --test format_status -- --ignored --nocapture
+```
+
+| 文件 | 结果 | 时间 |
+|---|---|---|
+| `C:\Users\zc\Desktop\cpp\main.cpp` | `std::format("Hello, {}!")` 的 `{}`：standard 客户端 `regexp`，full 客户端 `formatSpecifier` | 整份回答 8 token，第二次 <1 ms |
+| `%TEMP%\cppls-format-fixture\main.c` | `"%-8.2f\|%*d\|%1$s\|%%"` 拆成 `%-8.2` `f` `%` `*` `d` `%` `1$` `s` `%%`；`"%3d %[a-z] %n"` 拆成 `%3` `d` `%` `[a-z]` `%` `n` | 17 个 piece |
+| `%TEMP%\cppls-format-fixture\format.cpp` | `{:.3` `f` `}`、`{:` `{}` `}`（动态宽度），含 `std::println(…)` 那种被解析成声明的语句 | 10 个 piece |
+| neovim `src/nvim/message.c` | `%.*s`、`%d`、`%s`；一次 `semanticTokens/full` 5929 token | 格式串这一趟 **36.5 µs**，整回答 5.5 s（`classified_names` 1.46 s，既有成本） |
+
+**客户端那一半是量出来的**：`vscode-languageclient` 在 `initialize` 里只报标准 `tokenTypes`，所以屏幕上是
+`regexp` / `parameter` / `keyword` 三个回退；同一段代码还写着 `overlappingTokenSupport = false`，所以"整段
+包着子段"必须画成相邻的段（`docs/format-strings.md` §3.1、§5）。

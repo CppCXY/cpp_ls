@@ -338,11 +338,10 @@ fn what_the_format_colouring_sends() {
     // classified), and a client would cache that empty list until the next edit — which is the shape of a defect,
     // so the probe prints both numbers rather than taking the first answer that parses.
     let mut id = 10;
-    let mut answer: Option<Value> = None;
     let mut asks = 0;
     let mut empty_answers = 0usize;
     let mut first_raw = Value::Null;
-    loop {
+    let answer = loop {
         let started = Instant::now();
         let response = server.request(
             id,
@@ -360,9 +359,8 @@ fn what_the_format_colouring_sends() {
                 first_raw = response["result"].clone();
             }
             if count > 0 {
-                answer = Some(response["result"].clone());
                 println!("first answer that holds a token: {took} ms");
-                break;
+                break response["result"].clone();
             }
             empty_answers += 1;
         }
@@ -371,14 +369,11 @@ fn what_the_format_colouring_sends() {
             return;
         }
         std::thread::sleep(Duration::from_millis(500));
-    }
+    };
     println!(
         "first non-null answer: {empty_answers} empty answer(s) before the first one that held a token \
          {first_raw}"
     );
-    let Some(answer) = answer else {
-        return;
-    };
 
     let again = {
         let started = Instant::now();
@@ -412,10 +407,20 @@ fn what_the_format_colouring_sends() {
             .any(|(start, end)| *start < offset && offset < *end)
     };
 
+    // **The four custom types and the three they fall back to.** The fallbacks are what a client with a standard
+    // `tokenTypes` list actually receives, so leaving them out would print an empty table for the ordinary case —
+    // the first version of this filter did exactly that after a rewrite, and said "0 format tokens" about a file
+    // the server was colouring.
     let interesting = |kind: &str| {
         matches!(
             kind,
-            "formatSpecifier" | "formatArgument" | "formatConversion" | "formatEscape" | "string"
+            "formatSpecifier"
+                | "formatArgument"
+                | "formatConversion"
+                | "formatEscape"
+                | "regexp"
+                | "parameter"
+                | "keyword"
         )
     };
     let mut shown = 0usize;

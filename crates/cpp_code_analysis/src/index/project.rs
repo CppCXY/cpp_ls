@@ -4537,7 +4537,9 @@ fn a_base_operators_return(
     parameter_names: &[String],
     written_arguments: &[String],
 ) -> Option<String> {
-    let Known::Yes(bases) = bases_of(index, scopes, root, path, class) else {
+    // The base list is asked for as a **precondition**: this returns before any substitution when the class's clause
+    // cannot be read. The value is dropped on purpose — [`the_arguments_of_a_base`] below reads what is in it.
+    let Known::Yes(_) = bases_of(index, scopes, root, path, class) else {
         return None;
     };
     // **The base list carries the clause's arguments as their own entries.** `bases_of(Ptr)` answers
