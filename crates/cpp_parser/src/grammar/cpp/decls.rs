@@ -3767,18 +3767,30 @@ pub fn parse_braced_initializer(p: &mut CppParser) -> ParseResult {
         }
 
         // A designated initializer: `.field = 1` (C++20) or `[index] = 1`.
+        //
+        // **A designator list, not one designator.** C99 6.7.8 has `designator-list = designator | designator-list
+        // designator`, and C++20 kept it: `{ .data.integer = i }` names a subobject two levels down, and nvim's
+        // `helpers.h` is written that way (`#define INTEGER_OBJ(i) ((Object){ .type = …, .data.integer = i })`).
+        // Reading one designator and then expecting `=` turned the second `.` into "expected `;` after expression" —
+        // and because the macro is *expanded* before it is parsed, every use of `INTEGER_OBJ(…)` reported two
+        // "expected primary expression" errors inside its own expansion. Measured: `(Object){ .type = 1,
+        // .data.integer = 2 };` produced one error before this, none after.
         if p.current_token() == CppTokenKind::Dot || p.current_token() == CppTokenKind::LeftBracket
         {
             let designator = p.mark(CppSyntaxKind::DesignatedInitExpr);
-            if p.current_token() == CppTokenKind::Dot {
-                p.bump();
-                if p.current_token() == CppTokenKind::Identifier {
+            loop {
+                if p.current_token() == CppTokenKind::Dot {
                     p.bump();
+                    if p.current_token() == CppTokenKind::Identifier {
+                        p.bump();
+                    }
+                } else if p.current_token() == CppTokenKind::LeftBracket {
+                    p.bump();
+                    let _ = parse_expr(p);
+                    let _ = expect_token(p, CppTokenKind::RightBracket);
+                } else {
+                    break;
                 }
-            } else {
-                p.bump();
-                let _ = parse_expr(p);
-                let _ = expect_token(p, CppTokenKind::RightBracket);
             }
             if p.current_token() == CppTokenKind::Assign {
                 p.bump();

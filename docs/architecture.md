@@ -1952,3 +1952,70 @@ std::println 的悬停            ```cpp using std::println; ``` — Declared in
 那是我在**debug 配置**下量的（`cargo test --release` 之前的那次跑的是 debug 的 probe），release 下同一个工程
 冷启动是 **4.6 s / 478 个文件**、`bits/std.cc` 读入 **761 ms**。§14.3 的数字需要按这一条更正：
 慢的是 debug 构建，不是标注库闭包本身。
+---
+
+# 16. `.c` 文件不是 C++、链式 designator、以及 hover 到底花在哪
+
+## 16.1 `cstyle-cast` 在 C 文件里（已修）
+
+报告附截图：vim 的 `charset.c` 里 `(unsigned)c` 被波浪线标成 C-style cast，还建议写 `static_cast`——C 没有。
+
+规则本身是好的：`cstyle_cast` 第一行就 `if context.is_c() { return; }`。坏的是**上一层**：那个工程没有
+`compile_commands.json` 条目、没有 `[compile] standard`、没有 `-std=`，于是 `language_for` 落到
+`LanguageConfig::permissive`（两个 family 都算），`family()` 返回 `None`，`is_c()` 为 false——**没被配置的工程被
+每一条 C++ 专属规则当成 C++ 读**。
+
+修法：`CompilerConfig::language_for` 在"什么都没说"之前多认一步——**扩展名**。`.c` / `.i` 是 C，这是每个编译器
+的判断，也是编辑器打开文件时的判断；`.h` 故意不在里面（头文件被哪个语言包含就是哪个，猜错是把同样的误报搬到
+另一个 family）。
+
+```text
+修复前  charset.c → cstyle-cast（还有该工程其它 .c 文件上的同类误报）
+修复后  charset.c → 0 finding(s)（实测，831 个文件的工程）
+```
+
+测试：`tests/checks.rs::a_c_style_cast_is_reported_in_cpp_and_not_in_c`（同一段文本，`.cpp` 有一条、`.c` 没有）。
+
+## 16.2 链式 designator：`.data.integer = i`（已修）
+
+截图 2 的宏来自 nvim 的 `helpers.h`：
+
+```c
+#define INTEGER_OBJ(i) ((Object){ \
+    .type = kObjectTypeInteger, \
+    .data.integer = i })
+```
+
+宏本身没问题；问题在**展开后**。C99 6.7.8 的 `designator-list` 允许一串 designator（`.data.integer` 是两级），
+C++20 保留了它；解析器只读**一个** designator 然后期待 `=`，于是第二个 `.` 变成 "expected `;` after
+expression"——而这个宏在被展开后于每个使用点报两条 "expected primary expression"。
+
+```text
+修复前  (Object){ .type = 1, .data.integer = 2 };   → 1 error
+修复后  …                                            → 0 error
+        真实工程 src/nvim/api/autocmd.c（用到 INTEGER_OBJ）→ 0 finding(s)
+```
+
+修法是那个位置的一个 `loop {}`：`.ident` 和 `[expr]` 交替，直到不是 designator 为止。测试：新增
+`crates/cpp_parser/tests/designators.rs`（四种形状 + 一次 lossless 检查 + "每个元素一个节点"）。
+
+## 16.3 hover 的时间去哪了（已量，未优化）
+
+在 neovim 工程（831 个文件，冷启动 33.3 s）上量 `textDocument/hover` 的**往返**时间：
+
+```text
+第一次   390 ms      ← 文件还没读过：prepare（读入 + 建渲染）+ read_the_modules + 查询
+之后     7.5–22 ms   ← 同一个文件、同一个位置，反复问
+```
+
+也就是说 hover 本身不是热点，**第一次**才是：它要先把文件读进 index 并为它建渲染，而一个 831 文件工程的冷启动
+要 33 s。这解释了"hover 有点慢，不知道在做什么"：慢的是首触，不是每次悬停。
+
+下一步（按代价）：
+
+```text
+1. 把 prepare 的首触成本量到具体阶段（CPPLS_TRACE_TIME=1 现在只覆盖 unit/visibility/member 三处，
+   prepare 与 cook 的路径没有 trace 行）——先量再改；
+2. 首触时先按文件自己的文本回答（hover 的名字查询本来就可以只靠 scopes），把 cook 留给后台；
+3. 大工程的冷启动：831 文件 33 s ≈ 40 ms/文件，与 §14.3 的"每个头文件一次 render/cook/parse"是同一件事。
+```

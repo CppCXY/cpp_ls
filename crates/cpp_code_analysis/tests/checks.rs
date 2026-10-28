@@ -18,7 +18,13 @@ use cpp_code_analysis::{
 /// The ask and the pump are both here because a rendering is built when something asks for it: see
 /// `tests/completion.rs`'s `cooked_view` for the note every fixture in this workspace shares.
 fn codes_of(source: &str) -> Vec<DiagnosticCode> {
-    let files = MemoryFiles::new().with_file("/p/a.cpp", source);
+    codes_of_a_file("/p/a.cpp", source)
+}
+
+/// [`codes_of`] with the **file name the caller chooses**, because the language a file is read as depends on it: a
+/// `.c` file is C, and a rule that is only about C++ must not fire there.
+fn codes_of_a_file(path: &str, source: &str) -> Vec<DiagnosticCode> {
+    let files = MemoryFiles::new().with_file(path, source);
     let providers = SessionFiles::new(OpenDocuments::new(), files);
     let mut session = Session::with_config(
         "/p",
@@ -26,12 +32,12 @@ fn codes_of(source: &str) -> Vec<DiagnosticCode> {
         WatchFilter::new("/p"),
         CompilerConfig::default(),
     );
-    session.add_project_files([std::path::PathBuf::from("/p/a.cpp")]);
-    session.want_cooked_reading(std::path::Path::new("/p/a.cpp"));
+    session.add_project_files([std::path::PathBuf::from(path)]);
+    session.want_cooked_reading(std::path::Path::new(path));
     session.index_everything();
 
     session
-        .diagnostics(std::path::Path::new("/p/a.cpp"))
+        .diagnostics(std::path::Path::new(path))
         .map(|found| {
             found
                 .checks
@@ -2320,5 +2326,31 @@ void two(int x) { three((int)x, 2, x == 0); }
     assert!(
         codes_of_with(wrong, "/p/a.c", Some("gnu11")).contains(&DiagnosticCode::ArgumentCount),
         "three arguments for two parameters is the rule's own case"
+    );
+}
+
+/// **A C-style cast is not a rule about C.** Reported from an editor with a screenshot: `(unsigned)c` inside vim's
+/// `charset.c` — a binary search over a character array — was underlined as "a C-style cast", with the advice to
+/// write `static_cast`, which C does not have.
+///
+/// The rule already refused to fire on C (`CheckContext::is_c`), so the defect was one layer down: the **language of
+/// the file** was unknown. That project has no compile database entry, no `[compile] standard` and no `-std=`, so
+/// `LanguageConfig::permissive` answered "both families", `family()` was `None`, and `is_c()` was false — an
+/// unconfigured project was read as C++ by every C++-only rule.
+///
+/// A `.c` file is C: that is what every compiler decides by, and what the editor decided when it opened the file, so
+/// `CompilerConfig::language_for` now falls back to the extension before it falls back to "both".
+#[test]
+fn a_c_style_cast_is_reported_in_cpp_and_not_in_c() {
+    let source = "int f(double c) { return (unsigned)c; }\n";
+
+    assert!(
+        codes_of_a_file("/p/a.cpp", source).contains(&DiagnosticCode::CStyleCast),
+        "the fixture must produce the finding where the rule applies"
+    );
+
+    assert!(
+        !codes_of_a_file("/p/a.c", source).contains(&DiagnosticCode::CStyleCast),
+        "…and not in a `.c` file, where `(unsigned)c` is how the conversion is written"
     );
 }

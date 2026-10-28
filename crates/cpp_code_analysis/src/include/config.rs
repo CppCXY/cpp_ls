@@ -235,6 +235,22 @@ impl CompilerConfig {
             .or_else(|| {
                 cpp_parser::features::LanguageConfig::from_command_line(self.extra_args.iter())
             })
+            // **A `.c` file is C.** When nothing above has said what the file is — no database entry, no
+            // `[compile] standard`, no `-std=` — the extension is what every compiler decides by, and it is what the
+            // *editor* decided too when it opened the file. Without this the family was unknown, `is_c()` answered
+            // false, and every C++-only rule fired on C: measured on vim's `charset.c`, `(unsigned)c` in a binary
+            // search was underlined as a C-style cast — a diagnostic telling a C program to write `static_cast`,
+            // which the language does not have.
+            //
+            // `.h` is deliberately not here: a header is included by whichever language includes it, and guessing
+            // would put the same false positive on the other family.
+            .or_else(|| {
+                matches!(
+                    file.extension().and_then(|extension| extension.to_str()),
+                    Some("c") | Some("i")
+                )
+                .then(cpp_parser::features::LanguageConfig::c)
+            })
             .unwrap_or_else(cpp_parser::features::LanguageConfig::permissive)
     }
 

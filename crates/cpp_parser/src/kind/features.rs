@@ -484,6 +484,25 @@ impl LanguageConfig {
     }
 
     /// `-std=gnu89`, which several system compilers still default to.
+    /// **C, with nothing from C++** — the language a `.c` file is, and every C standard at once.
+    ///
+    /// Used where the *extension* is the only thing that says what the file is: no compile database entry, no
+    /// `[compile] standard`, no `-std=`. Every compiler decides that way — `gcc x.c` is C and `g++ x.c` is C++, and
+    /// the extension is what decides — so a reader who opens a `.c` file in a project that has stated nothing must
+    /// get C's rules rather than a permissive blur of both.
+    ///
+    /// Every C standard and the GNU extensions, because a `.c` file written for C23 and one written for C89 are both
+    /// `.c`; what this is asked is the *family*, and `family()` answers `C` for any of them.
+    pub const fn c() -> Self {
+        Self::new()
+            .with_standard(Standard::C89)
+            .with_standard(Standard::C99)
+            .with_standard(Standard::C11)
+            .with_standard(Standard::C17)
+            .with_standard(Standard::C23)
+            .with_vendor(Vendor::Gnu)
+    }
+
     pub const fn gnu_c89() -> Self {
         Self::new()
             .with_standard(Standard::C89)
