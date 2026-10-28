@@ -1917,7 +1917,7 @@ double Vec2::length() const { return std::sqrt(square(x_) + square(y_)); }
 回归测试：`session::tests::an_implementation_unit_sees_its_interface_units_declarations`（内存工程，
 `math.cppm` + `math.cpp`，断言 `x_` 的类型与成员补全）。
 
-## 15.2 `import std;`：GCC 的 `std` 模块是**转发**，不是声明（已定位，未修）
+## 15.2 `import std;`：GCC 的 `std` 模块是**转发**，不是声明（已修一半）
 
 MinGW GCC 15 的 std 模块源是 `<c++>/bits/std.cc`：`module;` + `#include <bits/stdc++.h>` + `export module std;`
 + 几千行 `export namespace std { using std::vector; … }`。也就是说**真正的实体都在被 include 的头文件里**，
@@ -1947,6 +1947,41 @@ std::println 的悬停            ```cpp using std::println; ``` — Declared in
 3. 把 bits/stdc++.h 那样的"全库 include"当作 std 模块的接口闭包缓存起来，避免每个导入方各自重算。
 ```
 
+### 15.2.1 根因与修法（实测）
+
+`bits/std.cc` 读进来之后，它的 include 闭包**没有折叠自身的宏定义**：模块走查（`walk_the_module_edges`）
+只记录"每个 include 通向哪个文件"，从不把被包含文件里的 `#define` 应用到它携带的宏状态里。而
+`bits/stdc++.h` 的标准头块是 `#if _GLIBCXX_HOSTED`，`_GLIBCXX_HOSTED` 由 `bits/c++config.h`
+（`#define _GLIBCXX_HOSTED __STDC_HOSTED__`）定义，那个头由**块上面**的 include 带进来。于是：
+
+```text
+#if _GLIBCXX_HOSTED     → 宏未定义 → 判为 Inactive → 整块（含 #include <vector>）被丢弃
+后果一    include/c++/vector 不在可见集合里
+后果二    std::vector 只剩 bits/std.cc 里的 using std::vector; 一条事实（kind Other，没有成员）
+后果三    成员补全 0 项，hover 说 "the class is out of the index"
+```
+
+修法：进入一个模块单元时，**先把该单元自己的无条件宏定义折叠进状态**，再判断它的 include
+（`apply_fact(state, fact, false, FactReach::Active)`，只对 `FactGuard::Unconditional`）。
+递归下去时，`c++config.h` 的定义也就进了同一个状态。
+
+实测（`test_module`，`import std;`，MinGW GCC 15）：
+
+```text
+                可见文件    std::vector 的事实            `v.` 的成员
+修复前          327        1（std.cc 的 using）            0
+修复后          475        3（含 bits/stl_vector.h 的类）   138（allocator_type append_range assign …）
+```
+
+剩下的一半：`std::println` 仍然 `NotDeclaredHere`。它的声明在 `<print>`（`bits/print.h`）里，条件比
+`_GLIBCXX_HOSTED` 深一层（`#if __cpp_lib_print >= 202207L` 之类），而 `std.cc` 里那条
+`using std::println;` 也在 `#if __cpp_lib_print` 里 —— 同一个"per-file 宏状态"问题的另一个实例。下一步按
+§15.2 的第 2 步走：给 using 声明记下目标，让定义/悬停跟随它，并把 `#include` 闭包的宏状态做成可复用的。
+
+**回归测试**：`session::tests::a_modules_includes_define_what_a_later_condition_asks`（内存工程：
+`std.cppm` 先 include `feature.h`（`#define FEATURE 1`），再 include `library.h`（`#if FEATURE` 里 include
+`detail.h`），消费者 `import std;` 后 `v.` 必须列出 `push_back`）。诚实地说：这条测试在**未修**时也通过，
+因为内存夹具里的 `#if FEATURE` 判成 `Unknown`（Conditional 仍可见），复现靠的是上面真实工程的探针数字。
 ## 15.3 关于"313 秒"
 
 那是我在**debug 配置**下量的（`cargo test --release` 之前的那次跑的是 debug 的 probe），release 下同一个工程

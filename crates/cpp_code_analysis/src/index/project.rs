@@ -8870,6 +8870,7 @@ impl ProjectIndex {
         // Only an **interface unit** is recorded: an implementation unit declares the module and is not what an
         // importer sees, so pointing `import m;` at one would attribute its declarations to a module that never
         // exported them. A file that declares no module, or declares one as an implementation, records nothing.
+
         self.module_interfaces
             .retain(|_, declaring| declaring != &path);
         if summary.modules.is_interface
@@ -8881,6 +8882,7 @@ impl ProjectIndex {
             self.module_interfaces
                 .insert(module.to_string(), path.clone());
         }
+
 
         self.names
             .add_declarations(sequence, 0, &summary.declarations);
@@ -10275,6 +10277,26 @@ impl ProjectIndex {
         let Some(summary) = self.summaries.get(&path) else {
             return;
         };
+
+        // **The unit's own definitions, folded in before its includes are judged.** A module interface unit is a
+        // *translation unit*: a header it includes can define what a later `#if` in the same unit asks about, and a
+        // walk that only recorded *where* each include leads — as this one did — judged those questions with an
+        // environment that never learned anything.
+        //
+        // Measured on `import std;` with MinGW GCC 15: `bits/std.cc` includes `bits/stdc++.h`, whose standard-header
+        // block is guarded by `#if _GLIBCXX_HOSTED`; `_GLIBCXX_HOSTED` is `#define`d in `bits/c++config.h`, which the
+        // headers *above* that block include. The guard therefore read as undefined, the verdict was `Inactive`, and
+        // the block — `#include <vector>` among a hundred others — was dropped: `include/c++/vector` was not in the
+        // visible set, `std::vector` had only the `using std::vector;` re-export as its fact, and the member list was
+        // empty.
+        //
+        // Only the **unconditional** facts are folded: a definition inside a condition this walk has not decided is a
+        // value it cannot stand behind, and leaving it out is the honest reading.
+        for fact in &summary.macros {
+            if fact.guard == FactGuard::Unconditional {
+                apply_fact(state, fact, false, FactReach::Active);
+            }
+        }
 
         let mut verdicts: HashMap<(u32, usize), Option<bool>> = HashMap::new();
 

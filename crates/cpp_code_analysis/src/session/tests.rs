@@ -4530,3 +4530,80 @@ fn an_implementation_unit_sees_its_interface_units_declarations() {
         );
     }
 }
+/// **A module's interface unit is a translation unit**: a header it includes can define what a later `#if` asks.
+///
+/// This is the shape GCC ships the standard module in, in miniature. `bits/std.cc` is `module;` +
+/// `#include <bits/stdc++.h>` + `export module std;` + a few thousand `using std::x;` re-exports, and
+/// `bits/stdc++.h`'s standard-header block is guarded by `#if _GLIBCXX_HOSTED` — a macro that `bits/c++config.h`
+/// defines and that the headers *above* the block include first.
+///
+/// The module walk recorded *where* each include led and never folded a file's own definitions into its state, so
+/// `_GLIBCXX_HOSTED` read as undefined, the block answered `Inactive`, and `#include <vector>` was dropped. Measured on
+/// `test_module` with MinGW GCC 15: `include/c++/vector` was not in the visible set, `std::vector` had only the
+/// `using std::vector;` re-export as its fact, and the member list was empty — "the class is out of the index".
+#[test]
+fn a_modules_includes_define_what_a_later_condition_asks() {
+    let interface_text = "module;\n\
+                          #include \"feature.h\"\n\
+                          #include \"library.h\"\n\
+                          export module std;\n\
+                          export namespace std\n\
+                          {\n\
+                          \x20   using std::vector;\n\
+                          }\n";
+    let consumer_text = "import std;\nvoid f() { std::vector<int> v; v.push_back(1); }\n";
+
+    let files = MemoryFiles::new()
+        .with_file("/p/std.cppm", interface_text)
+        .with_file("/p/feature.h", "#define FEATURE 1\n")
+        .with_file(
+            "/p/library.h",
+            "#if FEATURE\n#include \"detail.h\"\n#endif\n",
+        )
+        .with_file(
+            "/p/detail.h",
+            "namespace std { template <class T> struct vector { void push_back(const T &value); }; }\n",
+        )
+        .with_file("/p/a.cpp", consumer_text);
+    let fixture = Memory::new("a-modules-includes", &files);
+    let mut session = fixture.session();
+    session.add_project_files([
+        std::path::PathBuf::from("/p/std.cppm"),
+        std::path::PathBuf::from("/p/library.h"),
+        std::path::PathBuf::from("/p/detail.h"),
+        std::path::PathBuf::from("/p/a.cpp"),
+    ]);
+    session.did_open("/p/a.cpp", consumer_text);
+    session.index_everything();
+    // The read the server does before answering a name question, and the drain that follows it.
+    session.read_the_modules_a_file_imports(std::path::Path::new("/p/a.cpp"));
+    session.index_everything();
+    while session.pending_work() > 0 {
+        session.advance(64);
+    }
+
+    let path = std::path::PathBuf::from("/p/a.cpp");
+    let view = session.view_of_the_file(&path).expect("a view");
+
+    // **The class is what `std::vector` names**, not the re-export in the interface unit.
+    let at = consumer_text.find("push_back").expect("the fixture") + 2;
+    let member = session.member_completions(&view, crate::file::coordinates::FileOffset::new(at));
+    let Known::Yes(member) = member else {
+        panic!("`v.` must be answered: {member:?}");
+    };
+    assert_eq!(
+        member.class, "std::vector",
+        "the object's type is the class the header declares"
+    );
+    assert_eq!(
+        member.members.members.len(),
+        1,
+        "and its member list is the class's: {:?}",
+        member
+            .members
+            .members
+            .iter()
+            .map(|member| member.fact.name.as_str())
+            .collect::<Vec<_>>()
+    );
+}
