@@ -2471,3 +2471,34 @@ void f() {
         "and the insertion carries the operator the member can actually follow"
     );
 }
+
+/// **`->` is not `.`** — the flag the completion of a member follows `operator->` with.
+///
+/// `MemberAccess::arrow` was hard-coded `false` by the text fallback, so a cursor after `ptr->` was answered as if
+/// the reader had typed `ptr.`: a class whose members live behind `operator->` was looked up for its **own** members.
+/// The operator's own spelling is the only evidence there is, and it is one token to read.
+#[test]
+fn an_arrow_is_read_as_an_arrow() {
+    let text = "void f(Widget* p, Widget v) {\n    p->\n    v.member\n}\n";
+    let tree = cpp_parser::CppParser::parse(text, cpp_parser::ParserConfig::default());
+    let root = tree.get_red_root();
+
+    let arrow = cpp_code_analysis::completion::context_at(&root, text.find("p->").expect("fixture") + 3);
+    match arrow {
+        cpp_code_analysis::completion::CompletionContext::Member(access) => {
+            assert!(access.arrow, "the operator written is `->`, so this is an arrow access");
+            assert!(access.member.is_empty(), "nothing is typed after the operator yet");
+        }
+        other => panic!("a member access is what follows an arrow, not {other:?}"),
+    }
+
+    // And the other spelling: `v.member` is a dot, and the member is written.
+    let dot = cpp_code_analysis::completion::context_at(&root, text.find("v.member").expect("fixture") + 4);
+    match dot {
+        cpp_code_analysis::completion::CompletionContext::Member(access) => {
+            assert!(!access.arrow, "a `.` is not an arrow");
+            assert_eq!(access.member, "member");
+        }
+        other => panic!("a member access is what follows a dot, not {other:?}"),
+    }
+}

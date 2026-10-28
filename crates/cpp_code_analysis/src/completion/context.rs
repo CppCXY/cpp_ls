@@ -389,11 +389,16 @@ fn member_access_from_the_text(
     // the whole name.
     let object = resolve::name_ending_before_an_operator(root, at)?;
 
+    // **`->` is not `.`, and this was hard-coded `false`.** The flag is what makes the members of a
+    // `std::shared_ptr<std::string>` be the `std::string`'s members (`operator->` followed) rather than the
+    // `shared_ptr`'s own. The operator's own spelling is the only evidence there is, and it is one token to read.
+    let arrow = operator.text().to_string().ends_with('>');
+
     Some(resolve::MemberAccess {
         object,
         member: String::new(),
         member_range: SourceRange::new(at, 0),
-        arrow: false,
+        arrow,
     })
 }
 
