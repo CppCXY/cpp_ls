@@ -3064,5 +3064,27 @@ test_cpp/coroutine.cpp   0
 `a_declared_name_is_not_reported_and_a_later_one_is`（**先用后声明照样报**——那是 C++ 自己的规则）、
 `the_rule_is_quiet_where_a_name_may_be_declared_elsewhere`（宏、模板体、lambda、头文件四种沉默）。
 
-**还没做的**（下一步）：被调用者（`printh("…", 12)` 在它定义之前也是错的，而那是 **call** 不是成员访问）。
-那一步的风险在 ADL —— 非限定调用可能由实参类型的关联命名空间找到，所以规则得先能证明"实参里没有类类型"。
+### 16.7.1 被调用者：`printh("…", 12)`
+
+上一条留下的另一半。`main.cpp` 第 74 行 `printh("1231313", 12)`，而 `void printh(…)` 定义在第 83 行 —— 同一种
+错，同一片沉默。现在**调用**的被调用者（裸标识符）也走同一套可见性判断，多出来的一条守卫是 **ADL**：
+
+```text
+非限定调用可能被实参类型的关联命名空间找到 → 只有当**每个实参的类型都是语言已知的**（builtin 没有关联
+命名空间）才说话；实参类型算不出来 = "可能是类" = 沉默
+```
+
+宏体在 checks 看到之前就已经展开，所以被判定的是**宏体里那个名字**：它声明了就沉默，真没声明才报 —— 那确实
+是程序里缺的名字。实测（真服务器，每文件连拉六轮、每轮间隔 3 秒）：
+
+```text
+test_cpp/main.cpp        7 条诊断，其中 2 条 undefined-name
+                         line 28: `myName` is not declared: nothing this file can see names it
+                         line 74: `printh` is not declared: nothing this file can see names it
+test_cpp/test.cpp        0
+test_cpp/test.h          1（cstyle-cast —— `(char *)malloc(…)`，这条也是真的）
+test_cpp/coroutine.cpp   0
+```
+
+测试：`checks.rs::a_call_to_a_name_nothing_declares_is_reported` —— 一条发现加三种沉默（ADL 实参 `swap(w, w)`、
+宏体里调用已声明的函数、头文件声明的被调用者）。
