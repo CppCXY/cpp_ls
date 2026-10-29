@@ -543,6 +543,42 @@ fn drawable_types(supported: Option<Vec<SemanticTokenType>>) -> Option<Vec<Seman
     }
 }
 
+/// **The custom types this server draws that a client's own list cannot name.**
+///
+/// The capability list is the *standard* vocabulary: `namespace`, `type`, `regexp`, … — a client has no way to say
+/// "and `formatSpecifier`", because the type is ours. A client that draws it anyway (through a theme mapping in its
+/// extension) is one whose editor we recognise, and for that one the four format types are added to the list here.
+///
+/// Measured before this: the format pass fell back to `regexp` for every client, and the reader's report was
+/// "格式部分的高亮太暗了…semantic token 标准里面没有提供合适的颜色". The custom types were always sent *first* —
+/// [`Builder::push_range`] refused them for want of a name in this list, and `draw.rs`'s fallback then painted
+/// `regexp`.
+///
+/// Only the four format types are added. `variableTemplate` is deliberately **not**: its fallback is `variable`,
+/// which every theme colours, while a client that has no mapping for it would draw nothing at all.
+fn extended_with_the_custom_types(
+    drawable: Option<Vec<SemanticTokenType>>,
+    client: crate::context::ClientId,
+) -> Option<Vec<SemanticTokenType>> {
+    // `None` means "the client said nothing" — everything is sent already, custom types included.
+    let mut drawable = drawable?;
+    if !client.is_vscode() {
+        return Some(drawable);
+    }
+    for kind in [
+        TypeKind::FormatSpecifier,
+        TypeKind::FormatArgument,
+        TypeKind::FormatConversion,
+        TypeKind::FormatEscape,
+    ] {
+        let name = kind.to_semantic_token_type();
+        if !drawable.contains(&name) {
+            drawable.push(name);
+        }
+    }
+    Some(drawable)
+}
+
 /// Whether the client can draw a token whose range spans lines, which the builder needs to split one for a client
 /// that cannot. Read from the same capability block as [`drawable_types`], and `false` is the safe reading: a
 /// split token is more tokens than necessary, while an unsplit one is a token the client draws wrongly.
@@ -558,7 +594,10 @@ pub async fn on_semantic_tokens(
     let uri = params.text_document.uri;
     // **Which kinds the client can draw**, read before the query so that the closure below is a plain function of
     // the session: the client's capabilities are not part of the analysis, and the legend they filter is fixed.
-    let drawable = drawable_types(context.lsp_features().semantic_token_types());
+    let drawable = extended_with_the_custom_types(
+        drawable_types(context.lsp_features().semantic_token_types()),
+        context.lsp_features().client_id(),
+    );
     let multi_line = multi_line_support(&context);
 
     if let Some(path) = uri_to_file_path(&uri) {
@@ -1905,6 +1944,53 @@ void f(int width, double d) {
         );
     }
 
+    /// **A VS Code client is sent the custom format types; every other client keeps the standard fallbacks.**
+    ///
+    /// A client's capability list is the *standard* vocabulary, so `formatSpecifier` is never in it — and the format
+    /// pass then falls back to `regexp`, which is the colour a reader reported as "太暗了". The editor is recognised
+    /// from `initialize.clientInfo` (`ClientId::VSCode`), and only for it are the four names added: a client with no
+    /// theme mapping for them would draw *nothing*, which is why the fallback stays for everyone else.
+    #[test]
+    fn a_vscode_client_is_sent_the_custom_format_types() {
+        let standard = vec![
+            lsp_types::SemanticTokenType::REGEXP,
+            lsp_types::SemanticTokenType::KEYWORD,
+        ];
+        let drawn =
+            extended_with_the_custom_types(Some(standard.clone()), crate::context::ClientId::VSCode)
+                .expect("a client that named its types keeps a list");
+        for name in [
+            "formatSpecifier",
+            "formatArgument",
+            "formatConversion",
+            "formatEscape",
+        ] {
+            assert!(
+                drawn
+                    .iter()
+                    .any(|kind| *kind == lsp_types::SemanticTokenType::new(name)),
+                "{name} is missing from {drawn:?}"
+            );
+        }
+
+        // Everyone else keeps exactly what the client sent: their theme has no name for the custom types, and a token
+        // nobody can draw is one the [fallback](draw) has to keep painting.
+        let kept = extended_with_the_custom_types(
+            Some(standard.clone()),
+            crate::context::ClientId::Neovim,
+        )
+        .expect("a client that named its types keeps a list");
+        assert_eq!(
+            kept, standard,
+            "no custom type is added for a client whose theme has no name for it"
+        );
+
+        // "Said nothing" is "send everything", which already includes the custom types.
+        assert!(
+            extended_with_the_custom_types(None, crate::context::ClientId::VSCode).is_none(),
+            "a client with no capability list gets the whole legend, custom types included"
+        );
+    }
     /// **A project that turns every family off pays nothing and gets its file back exactly as it was.**
     #[test]
     fn a_project_that_turned_the_colouring_off_gets_no_format_tokens() {

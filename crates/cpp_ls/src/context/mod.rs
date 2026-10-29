@@ -35,11 +35,15 @@ pub struct ServerContext {
 }
 
 impl ServerContext {
-    pub fn new(conn: Arc<Connection>, client_capabilities: ClientCapabilities) -> Self {
+    pub fn new(
+        conn: Arc<Connection>,
+        client_capabilities: ClientCapabilities,
+        client_id: ClientId,
+    ) -> Self {
         let client = Arc::new(ClientProxy::new(conn));
 
         let analysis = Arc::new(AnalysisState::new());
-        let lsp_features = Arc::new(LspFeatures::new(client_capabilities));
+        let lsp_features = Arc::new(LspFeatures::new(client_capabilities, client_id));
         let status_bar = Arc::new(StatusBar::new(
             client.clone(),
             lsp_features.supports_work_done_progress(),

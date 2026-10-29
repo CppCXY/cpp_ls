@@ -32,8 +32,15 @@ impl LspServer {
             set_locale(locale);
         }
 
-        let server_context =
-            context::ServerContext::new(connection.connection.clone(), params.capabilities.clone());
+        // **Which editor asked**, from `initialize.clientInfo` (and the `--editor` argument, when a caller passed
+        // one). The capability list cannot answer this: a client names the standard semantic token types it knows,
+        // so a custom type is never in it even for a client whose theme can draw it.
+        let client_id = crate::context::get_client_id(&params.client_info);
+        let server_context = context::ServerContext::new(
+            connection.connection.clone(),
+            params.capabilities.clone(),
+            client_id,
+        );
 
         Self {
             connection,

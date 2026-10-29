@@ -1,16 +1,31 @@
 use lsp_types::ClientCapabilities;
 
+use super::client_id::ClientId;
+
 #[derive(Debug)]
 pub struct LspFeatures {
     client_capabilities: ClientCapabilities,
+    /// **Which editor this is**, from `initialize.clientInfo` — the question a *custom* semantic token type turns on,
+    /// because whether a client can draw one is not in its capability list. See
+    /// [`LspFeatures::client_id`].
+    client_id: ClientId,
 }
 
 #[allow(unused)]
 impl LspFeatures {
-    pub fn new(client_capabilities: ClientCapabilities) -> Self {
+    pub fn new(client_capabilities: ClientCapabilities, client_id: ClientId) -> Self {
         Self {
             client_capabilities,
+            client_id,
         }
+    }
+
+    /// **Which editor asked.** A client's capability list names the *standard* semantic token types it knows, so a
+    /// custom one (`formatSpecifier`) is never in it — even for a client that draws it through its own theme
+    /// mapping. This is the fact that decides whether a custom type is still worth sending; see
+    /// [`crate::handlers::semantic_token`] and `draw.rs`'s note on the fallbacks.
+    pub fn client_id(&self) -> ClientId {
+        self.client_id
     }
 
     pub fn supports_multiline_tokens(&self) -> bool {
