@@ -2716,9 +2716,10 @@ fs.c                77 ms      45 ms      8–13 ms
 （`sema/format.rs`，不建 session、不碰索引），定位器回答"这个字面量是不是某个已知调用的整实参"，接线在
 `handlers/semantic_token/format.rs`。
 
-**legend 22 项**（+4 自定义 +1 `regexp` 回退）。实测的关键一条：**VS Code 和 neovim 在 `initialize` 里都只报
-标准类型**，所以自定义的四个名字根本不会发出去 —— 用户屏幕上看到的是 `regexp` / `parameter` / `keyword`
-三个回退。也就是说这个功能**默认就有颜色**，主题愿意配才升级到四个精确类型。
+**legend 22 项**（+4 自定义 +1 `regexp` 回退）。实测的关键一条：**客户端在 `initialize` 里只报标准类型**，所以
+自定义的四个名字按能力表会被过滤掉，屏幕上看到的是 `regexp` / `parameter` / `keyword` 三个回退。也就是说这个
+功能**默认就有颜色**。VS Code 是唯一的例外，它现在收到四个精确类型（扩展做了 `semanticTokenScopes` 映射）——
+见 §16.5。
 
 **实测**（`tests/format_status.rs`，真服务器、读回线上数据；数字见 `docs/format-strings.md` §8）：
 
@@ -2740,3 +2741,103 @@ C:\Users\zc\Desktop\cpp\main.cpp        std::format("Hello, {}!") 的 `{}` → r
 **这一层的成本**（neovim `message.c`，114 KB / 29 599 token / 88 个字面量）：格式串走一趟 **36.5 µs**，
 而同一次回答里 `classified_names` 是 **1.46 s** —— 也就是说这一层在真文件上占不到千分之一，不需要缓存也
 不需要 token 上限。数字的来源：`cargo test --release -p cpp_code_analysis --test format -- --ignored`。
+
+## 16.5 指针的 `->` 补全：两个缺陷，和 VS Code 的例外
+
+读者报告："基本指针的补全是错的"（截图：`std::string * x; x->` 只弹出一项
+`operator basic_string_view<_Elem, _Traits>`），以及"格式部分的高亮太暗了……如果检测到是 VS Code 就用自定义
+高亮，像 rust-analyzer 一样"。前者是两个独立缺陷，后者是一处客户端分支。
+
+### 16.5.1 箭头上的插入文本带上了操作符
+
+`completion::members` 在 `followed_a_pointer` 时给每个 item 的 `insert` 加 `->`，并把替换范围左扩一个字节：
+
+```rust
+let (replace, items) = if followed_a_pointer {
+    let operator = replace.start_offset.saturating_sub(1);
+    // item.insert = format!("->{}", item.insert);
+    (SourceRange::new(operator, replace.length + 1), items)
+}
+```
+
+这个改写的语义是"读者在**指针**上打了 `.`，答案给的是 `->`"——而 `followed_a_pointer` 说的是"为了找到类而
+跟了指针"，对 `p->` 本身同样成立。实测（`test_module`，真服务器，`std::string * x; x->`）：
+
+```text
+修复前  item.insert = "->append"   textEdit.range = 覆盖 `>` 的 1 字节   → 接受后写成 x-->append
+修复后  item.insert = "append"     textEdit.range = 光标处的空范围      → x->append
+        `p.`（指针上打点）仍给出 insert "->size"、范围覆盖 `.`          → p->size
+```
+
+改法是把条件收紧成 `followed_a_pointer && !access.arrow`：箭头是读者自己打对的，只有点号是那个"操作符与答案
+不一致"的情形。测试：`tests/completion.rs::an_arrow_on_a_pointer_inserts_the_name_and_not_the_operator`、
+`a_dot_on_a_pointer_still_rewrites_the_operator`。
+
+### 16.5.2 未完成的 `->` 吞掉了下一条语句
+
+比上一条严重得多：`p->` 是光标**正在**的位置，不是"读失败的程序"。实测的语法树：
+
+```cpp
+p->
+
+    Widget w;
+    w.
+```
+
+```text
+修复前  CompoundStat
+          ExpressionStat "p->\n\n    Widget"     ← 下一条声明的类型名被当成了成员名
+          ExpressionStat "w."                    ← `Widget w;` 不是声明，`w` 没有类型
+        `w.` 的补全：0 项（`p->` 自己 2 项，看起来"只有第一条能用"）
+
+修复后  ExpressionStat "p->"                     ← 缺名字，走 MissingNode 分支
+        Declaration  "Widget w;"
+        ExpressionStat "w."                      ← `w.` 补全 2 项（length / size）
+```
+
+两处根因，各修一处：
+
+1. **成员名可以跨行**：`exprs.rs` 在 `.`/`->` 之后直接吃下一个 `Identifier`，不看换行。成员访问的这一行就是
+   它的边界——成员写在下一行是合法 C++ 但没有任何 formatter 会那样排版（断行都发生在操作符**之前**），而
+   "操作符在行尾"是每个字面量编辑中的常态。现在要求 `lines_between(operator_end, next_start) == 0`，否则走
+   "缺名字"分支（零宽 `MissingNode` + 错误），下一条语句归它自己。
+2. **恢复时不认 `ident .` / `ident ->` 开头的新语句**：`stats.rs::begins_a_statement` 只认 `Type name`
+   形状（`a_type_and_a_name_follow`），于是裸标识符答"不是新语句"，跳过逻辑把 `v.member` 整条删掉。加
+   `a_member_access_follows`（`ident` 后跟 `.`/`->`），这个形状不可能延续前一个表达式（`a b.c` 不合法）。
+
+测试：`a_statement_below_an_unfinished_arrow_still_answers`（以及既有的 `an_arrow_is_read_as_an_arrow` 在同一
+个 fixture 里断言两个位置）。`cpp_parser` 33 个 target 全绿，说明"成员名跨行"的收紧没有别的依赖。
+
+### 16.5.3 VS Code：四个自定义类型 + 扩展里的 `semanticTokenScopes`
+
+`drawable_types` 按客户端的 `textDocument.semanticTokens.tokenTypes` 过滤，而那是**标准词表**：客户端没有
+办法说"我还认 `formatSpecifier`"，因为名字是本服务端的。于是四个自定义类型永远被拒，`draw.rs` 的回退把
+field 画成 `regexp`——读者说的"太暗"。
+
+现在 `initialize.clientInfo` 决定这件事：`ClientId::VSCode`（含 Cursor / Windsurf / VSCodium 等分支）时，把
+四个格式类型追加进可画集合，客户端的主题映射就有东西可映射；其他客户端不变（neovim 没有映射，发过去等于
+不画，回退反而有颜色）。扩展侧 `VSCode-Cppls/package.json` 增加顶层 `semanticTokenScopes`：
+
+```json
+"semanticTokenScopes": [
+  { "language": "cpp", "scopes": {
+      "formatSpecifier": ["constant.other"],
+      "formatArgument": ["variable.parameter"],
+      "formatConversion": ["keyword.other"],
+      "formatEscape": ["constant.character.escape"] } }
+]
+```
+
+实测（真服务器、同一个文件、只换 `clientInfo`，`test_module/src/probe_tokens.cpp`）：
+
+```text
+printf("%d %s %*.*f %%", …)  第 9 行
+Visual Studio Code   9:12 formatSpecifier  9:13 formatConversion  9:19 formatArgument  9:24 formatEscape
+Neovim               9:12 regexp           9:13 keyword           9:19 parameter        9:24（无）
+
+std::format("{:.2f} {:>8}", …)  第 10 行
+Visual Studio Code   10:33 formatSpecifier …
+```
+
+单测：`handlers/semantic_token/mod.rs::a_vscode_client_is_sent_the_custom_format_types`（VS Code 追加四个名字，
+其他客户端保持原列表，`None` 仍是"全发"）。
