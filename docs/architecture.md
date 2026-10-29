@@ -3088,3 +3088,34 @@ test_cpp/coroutine.cpp   0
 
 测试：`checks.rs::a_call_to_a_name_nothing_declares_is_reported` —— 一条发现加三种沉默（ADL 实参 `swap(w, w)`、
 宏体里调用已声明的函数、头文件声明的被调用者）。
+
+### 16.7.2 `->` 也查了：跟着箭头走，走不到就不说
+
+`p->missing` 一直是沉默的，而且是有理由的：`_session->Send(…)` 报过 `` `_session` has no member `Send` `` —— 接收者是
+`std::shared_ptr<Session>`，被查的是 `shared_ptr` 自己的成员表，而程序要的成员在 `operator->` 后面。当时的结论是
+"箭头不算证据"。
+
+引擎后来为了 `ptr->` 的补全已经会跟箭头了（指针解引用、类自己的 `operator->`、类的 `element_type`），所以这条规则
+现在问同一件事：新的 `SemanticModel::the_class_after_an_arrow` 只是**借用**
+`completion::the_class_after_the_operator`，不重写第二套。两条守卫：
+
+```text
+只在真的跟了指针时才说   followed_a_pointer 为假 = `p->size` 对一个普通 Widget —— 那行代码本身已经错，
+                        再报它的成员只是噪声
+跟不到就不说             `struct Pointer { Missing *operator->(); }; pointer->Run()` —— 指向的类型读不出来，
+                        于是什么也不说，而不是退回"接收者自己的类"
+```
+
+实测（真服务器）：
+
+```text
+probe_arrow.cpp   struct Session { int size; };  session->size;  session->missing;
+                  1 条：undefined-field@8  `session` has no member `missing`
+                  `session->size` 不报
+
+test_cpp 回归     main.cpp 仍是 7 条（5 unused + 2 undefined-name @28/@74）
+                  coroutine.cpp 仍是 0 条
+```
+
+原来钉"箭头不判"的测试（`a_member_reached_through_an_arrow_is_not_judged_as_missing`）换成了
+`an_arrow_is_judged_against_the_class_it_reaches`：指向类的成员要判、缺失要报、跟不到的箭头沉默。
