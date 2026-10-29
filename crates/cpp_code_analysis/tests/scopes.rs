@@ -2268,9 +2268,20 @@ fn an_unnamed_scope_is_transparent() {
     );
 }
 
-/// An unnamed class is a dead end: a member of it is reachable by no qualified name at all.
+/// **An unnamed class takes the name of the variable it declares**, which is the only key its members can have.
+///
+/// ```c
+/// namespace ns { struct { int member; } value; }
+/// ```
+///
+/// This used to assert a dead end — "`ns::member` is not a name, and neither is `member`" — and that was true while
+/// nothing could reach such a class: its members were filed in a scope with no name, so a member question about `value`
+/// had nowhere to look. `struct { … } bits;` is how C declares a type it never names, and the declarator is the only
+/// spelling in the declaration that can serve as a key, so the scope takes it — and `sema::types` keys the variable's
+/// type by the same name, which is what makes `bits.three` answerable. See
+/// `an_unnamed_struct_type_is_keyed_by_the_variable_it_declares` in `tests/types.rs`.
 #[test]
-fn an_unnamed_class_cuts_the_qualified_name_off() {
+fn an_unnamed_class_takes_the_name_of_the_variable_it_declares() {
     let table = scopes("namespace ns { struct { int member; } value; }\n");
 
     let class = table
@@ -2281,8 +2292,8 @@ fn an_unnamed_class_cuts_the_qualified_name_off() {
 
     assert_eq!(
         table.qualified_name_of(cpp_code_analysis::ScopeId(class)),
-        None,
-        "`ns::member` is not a name, and neither is `member`"
+        Some("ns::value".to_string()),
+        "the declarator's name is the segment, under the namespace it was written in"
     );
 }
 

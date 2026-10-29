@@ -723,10 +723,15 @@ impl ScopeWalker<'_> {
         // **`typedef struct { … } Name;`** — the struct has no tag, and the only name the type has is the typedef's, so
         // the class body's scope takes that name. Measured on the neovim checkout: `Object`
         // (`typedef struct { ObjectType type; union { … } data; } Object;`) answered **0 members**.
+        //
+        // **And `struct { … } bits;` — the variable's name**, for the same reason one step further out: the type has no
+        // spelling at all, and the members must be reachable from *something*. `sema::types` keys such a variable's type
+        // by its own name (see the note there), so this is the other half of that agreement.
         let declared_text = declared
             .as_ref()
             .map(|(name, _)| name.kind.text())
-            .or_else(|| the_typedef_name_around(node));
+            .or_else(|| the_typedef_name_around(node))
+            .or_else(|| Self::the_declarators_name_around(node));
 
         if let Some((name, name_range)) = declared {
             self.bind(outer, name, kind, node, name_range);
@@ -1198,30 +1203,41 @@ impl ScopeWalker<'_> {
     /// holds is not the node the class was read from, so a search that stopped at the first Declaration answered "not a
     /// member" for the one shape this question exists for.
     /// Does anything **name the object** after the class-like body — the magic of struct { … } magic;?
-///
-/// `declarators(node)` cannot answer it: the node the class path is handed is the declaration the *body* came from,
-/// and the declarator sits beside it rather than inside it (measured: struct { bool file; bool bar; } magic; answered
-/// "no declarator" and its fields were bound into the enclosing struct). The text after the body is the question
-/// itself — a member without a name is an anonymous member, and one with a name owns its contents.
-fn declares_a_name_after_the_body(node: &CppSyntaxNode, body: &CppSyntaxNode) -> bool {
-    // **The declaration, one level up.** The node a class-like specifier is read from is not always the whole
-    // declaration — struct { bool file; } magic; reaches this path with the *body's* node, whose text stops at the
-    // closing brace, so the name magic is outside it. The nearest ancestor that is a Declaration, or the node
-    // itself when there is none.
-    let declaration = node
-        .ancestors()
-        .find(|ancestor| CppSyntaxKind::from(ancestor.kind()) == CppSyntaxKind::Declaration)
-        .unwrap_or_else(|| node.clone());
-    let text = declaration.text().to_string();
-    let body_text = body.text().to_string();
-    let Some(at) = text.rfind(&body_text) else {
-        return false;
-    };
-    text[at + body_text.len()..]
-        .chars()
-        .any(|character| character.is_alphanumeric() || character == '_')
-}
-fn sits_in_a_class_body(node: &CppSyntaxNode) -> bool {
+    ///
+    /// `declarators(node)` cannot answer it: the node the class path is handed is the declaration the *body* came from,
+    /// and the declarator sits beside it rather than inside it (measured: struct { bool file; bool bar; } magic; answered
+    /// "no declarator" and its fields were bound into the enclosing struct). The text after the body is the question
+    /// itself — a member without a name is an anonymous member, and one with a name owns its contents.
+    fn declares_a_name_after_the_body(node: &CppSyntaxNode, body: &CppSyntaxNode) -> bool {
+        // **The declaration, one level up.** The node a class-like specifier is read from is not always the whole
+        // declaration — struct { bool file; } magic; reaches this path with the *body's* node, whose text stops at the
+        // closing brace, so the name magic is outside it. The nearest ancestor that is a Declaration, or the node
+        // itself when there is none.
+        let declaration = node
+            .ancestors()
+            .find(|ancestor| CppSyntaxKind::from(ancestor.kind()) == CppSyntaxKind::Declaration)
+            .unwrap_or_else(|| node.clone());
+        let text = declaration.text().to_string();
+        let body_text = body.text().to_string();
+        let Some(at) = text.rfind(&body_text) else {
+            return false;
+        };
+        text[at + body_text.len()..]
+            .chars()
+            .any(|character| character.is_alphanumeric() || character == '_')
+    }
+    /// The **declarator's** name in the declaration that holds this class-like specifier — struct { … } bits; → its.
+    ///
+    /// The other half of the agreement with `sema::types`: a variable whose type is an unnamed struct is keyed by its own
+    /// name, so the class scope has to carry that name or the members are reachable from nowhere.
+    fn the_declarators_name_around(node: &CppSyntaxNode) -> Option<String> {
+        let declaration = node
+            .ancestors()
+            .find(|ancestor| CppSyntaxKind::from(ancestor.kind()) == CppSyntaxKind::Declaration)?;
+        let declaration = cpp_parser::CppDeclaration::cast(declaration)?;
+        declaration.get_name_text()
+    }
+    fn sits_in_a_class_body(node: &CppSyntaxNode) -> bool {
         for ancestor in node.ancestors() {
             match CppSyntaxKind::from(ancestor.kind()) {
                 CppSyntaxKind::ClassBody => return true,

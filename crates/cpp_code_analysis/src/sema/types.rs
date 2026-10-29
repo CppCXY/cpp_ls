@@ -1504,6 +1504,41 @@ fn declared_name_range(declarator: &CppSyntaxNode) -> Option<cpp_parser::SourceR
 /// The qualifiers are dropped rather than modelled, and the reason is the same one [`Type`] gives for keeping
 /// spellings: this layer does not resolve aliases, so `const Int` and `Int` are already two names for one type, and
 /// a `const` on the base would be a third axis no query here asks about.
+/// Is this builtin specifier's text a **	ypeof/decltype spelling** — C23's, GNU's, or C++'s own?
+fn is_a_typeof_spelling(word: &str) -> bool {
+    let name = word.split('(').next().unwrap_or(word).trim();
+    matches!(
+        name,
+        "typeof" | "typeof_unqual" | "__typeof__" | "__typeof" | "__decltype" | "decltype"
+    )
+}
+
+/// The type a 	ypeof(…)/decltype(…) specifier denotes, when its payload is a **type-id**.
+///
+/// `None` when the payload is an expression — 	ypeof(value) — because that answer needs the semantic model and this
+/// reader is given a tree and nothing else.
+fn the_type_a_typeof_names(node: &CppSyntaxNode) -> Option<Type> {
+    // The payload is the node inside the parentheses; a type-id is written as a TypeId holding a
+    // DeclSpecifierSeq, which is the node this reader understands.
+    let payload = node.descendants().find(|child| {
+        matches!(
+            CppSyntaxKind::from(child.kind()),
+            CppSyntaxKind::TypeId | CppSyntaxKind::DeclSpecifierSeq
+        )
+    })?;
+    let specifiers = if CppSyntaxKind::from(payload.kind()) == CppSyntaxKind::DeclSpecifierSeq {
+        payload
+    } else {
+        payload
+            .children()
+            .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::DeclSpecifierSeq)?
+    };
+    let read = read_specifiers_named(&specifiers, None);
+    // An elaborated name is the type's *name* on its own: struct point reaches this reader as a specifier sequence
+    // holding BuiltinType "struct" and NamedType "point", and the answer is point — which is what a member list is
+    // keyed under. A payload that resolved to nothing is not an answer.
+    (!read.to_string().trim().is_empty()).then_some(read)
+}
 pub(crate) fn read_specifiers(specifiers: &CppSyntaxNode) -> Type {
     read_specifiers_named(specifiers, None)
 }
@@ -1550,6 +1585,20 @@ pub(crate) fn read_specifiers_named(
                 // zero. `unsigned long long` is unaffected: those words *are* the type.
                 if matches!(word.as_str(), "struct" | "class" | "union" | "enum") {
                     elaborated = true;
+                } else if is_a_typeof_spelling(&word) {
+                    // **`typeof(struct point)` *is* the type it names.** The payload of a `typeof`/`decltype` specifier
+                    // is a type-id when the language allows one (C23's `typeof`, GNU's `__typeof__`), and the spelling
+                    // is not: without this the fact recorded `typeof(struct point)`, which no scope and no member list
+                    // has ever heard of. Measured on a nine-file C corpus: `origin.x` and `other_pointer->x` answered
+                    // nothing, and `copy` recorded `typeof(value)` as its own type.
+                    //
+                    // An **expression** payload (`typeof(value)`) still needs the semantic model, which the fact builder
+                    // does not have — it keeps its spelling here and the query path resolves it. See
+                    // `docs/remaining.md` §N11.
+                    match the_type_a_typeof_names(&node) {
+                        Some(denoted) => named = Some(denoted),
+                        None => builtin.push(word),
+                    }
                 } else {
                     builtin.push(word);
                 }
@@ -1683,6 +1732,25 @@ pub(crate) fn read_specifiers_named(
     // **An elaborated keyword with no name after it is the same answer**, and it is the leftover half of the
     // `BuiltinType` note above: `struct` where an unexpanded macro should have named the type. Returning `void`
     // would claim a type the file never wrote.
+    // **A variable whose type is an unnamed struct declared inline is keyed by the variable's own name.**
+    //
+    // ```c
+    // struct { unsigned three : 3; } bits = {5};        /* C's anonymous type — everywhere in real headers */
+    // union { long integer; double real; } anonymous_union = {0};
+    // ```
+    //
+    // The type has no spelling, which is what `an_unnamed_body` says — but its **members were filed somewhere**, and the
+    // only name that can key them is the declarator's: `bits.three` needs `members_of("bits")` and `type_at(bits)` to
+    // agree on one spelling. The scope walk names the anonymous class scope after the same declarator (see the note in
+    // `build_scopes`), so the two sides meet. Measured on a nine-file C corpus: three member questions
+    // (`bits.three`, `bits.signed_wide`, `anonymous_union.integer`) answered nothing.
+    if an_unnamed_body
+        && let Some(name) = declared_name
+        && !name.is_empty()
+    {
+        return Type::named(name);
+    }
+
     if (an_unnamed_body || elaborated) && spelling.is_none() {
         return Type::builtin("");
     }

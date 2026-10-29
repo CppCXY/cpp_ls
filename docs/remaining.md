@@ -167,3 +167,34 @@ functions.c operation / compare     函数指针局部变量（`int (*operation)
 gnu.c     value                     `__auto_type` → 应推断成 `int`，现在是字面拼写
 c23.c     copy                      `typeof(value)` → 应是 `int`
 ```
+
+### N12. 匿名类型的成员还差「查询路径」这一半
+
+```text
+                 findings   parse errors   members   types
+第四轮               0           0           45/50     29/33
+第五轮               0           0           46/50     30/34
+```
+
+这一轮修的两条：
+
+* **`typeof(type-id)`** —— `typeof(struct point) origin` 的事实类型现在是 `point`（`origin.x` 由 FAIL 变 PASS）。
+* **无名类型的键** —— `struct { unsigned three : 3; } bits = {5};` 的事实现在是 `type bits`，成员 `three` 的 scope 是
+  `Some("bits")`，作用域树里的类作用域也取了声明符的名字（`an_unnamed_class_takes_the_name_of_the_variable_it_declares`
+  原来是断言"无名类是死路"，那条断言在"没人能访问到它"的年代是对的，现在改掉了）。
+
+**还差的是查询路径**：`type_at(bits)` 仍然答**空类型**（`CPPLS_C_FACTS` 显示事实是 `bits`，但 `type_at` 从渲染树里
+重新推导声明类型时没带声明符名字，于是走 `an_unnamed_body` 那条空拼写分支）。所以 `bits.three` /
+`anonymous_union.integer` 还是 0 offered。下一轮第一件事：`sema::types::type_of_declaration_named` 的**调用方**在
+查询路径上是哪个、为什么不传 `declared_name`（事实路径传了，见 `sema/declarations.rs:279`）。
+
+剩下 4 行成员 + 4 行类型：
+
+```text
+types.c  anonymous_union.integer   同上（查询路径）
+c23.c    bits.three / bits.signed_wide  同上
+gnu.c    other_pointer->x          `typeof(other) *other_pointer` —— expression 载荷的 typeof（需要模型）
+gnu.c    value                     `__auto_type` → 应推断成 initialiser 的类型
+c23.c    copy                      `typeof(value)` —— 同上，expression 载荷
+functions.c operation / compare    函数指针局部变量（`int (*operation)(int, int)`）→ `<no type>`
+```

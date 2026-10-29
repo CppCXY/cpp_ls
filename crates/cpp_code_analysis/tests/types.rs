@@ -1648,3 +1648,49 @@ struct line {
         "the union is anonymous, so `integer` is `line`'s member: {members:?}"
     );
 }
+
+/// **A variable whose type is an unnamed struct declared inline**, and its members.
+///
+/// ```c
+/// struct { unsigned three : 3; } bits = {5};
+/// return (int)bits.three;
+/// ```
+///
+/// The type has no spelling, so the only key the members can have is the declarator's name — measured on a nine-file C
+/// corpus, `bits.three` and `bits.signed_wide` (and `anonymous_union.integer`) answered nothing.
+#[test]
+fn an_unnamed_struct_type_is_keyed_by_the_variable_it_declares() {
+    let source = "int f(void) { struct { unsigned three : 3; unsigned four : 3; } bits = {5, 1}; return (int)bits.three; }\n";
+    let session = session_with(&[("/p/a.c", source)]);
+    let view = session.view("/p/a.c").expect("the file is held");
+
+    // **The fact is what this test can assert today**, and the gap is worth naming: the summary records
+    // `type_of: Some("bits")` and files `three` under scope `bits`, while `type_at` on a *use* of `bits` still answers
+    // an empty type — that path re-derives the declaration's type without the declarator's name. See
+    // `docs/remaining.md` §N12.
+    let summary = session
+        .parsed_summary(std::path::Path::new("/p/a.c"))
+        .expect("the file has a summary");
+    let bits = summary
+        .declarations
+        .iter()
+        .find(|fact| fact.name.as_str() == "bits")
+        .expect("`bits` is declared");
+    assert_eq!(
+        bits.type_of.as_deref(),
+        Some("bits"),
+        "the type is keyed by the variable's own name"
+    );
+    let members = match session.members_of(&view, "bits") {
+        cpp_code_analysis::Known::Yes(list) => list
+            .members
+            .iter()
+            .map(|member| member.fact.name.clone())
+            .collect::<Vec<_>>(),
+        other => panic!("`bits` has a member list: {other:?}"),
+    };
+    assert!(
+        members.iter().any(|name| name == "three"),
+        "and its members are filed under that name: {members:?}"
+    );
+}

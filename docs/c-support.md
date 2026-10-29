@@ -196,3 +196,22 @@ $env:CPPLS_C_NAMES = "div"  # 打印索引里这个名字的事实
 
 剩下的 9 个失败全是**类型推断**：`typeof(expr)`、`typeof(type)`、`__auto_type`、无名 union 类型的局部变量、
 函数指针局部变量。见 `docs/remaining.md` §N11。
+
+## 8. 第五轮：`typeof` 与匿名类型的键
+
+```text
+                 findings   parse errors   members   types
+第四轮               0           0           45/50     29/33
+第五轮               0           0           46/50     30/34
+```
+
+* **`typeof(struct point) origin`** 的事实类型现在是 `point`（`origin.x` 由 FAIL 变 PASS）。原来是整个拼写
+  `typeof(struct point)`，没有任何作用域或成员表认识它。
+* **`struct { … } bits = {5};` 的键是变量名 `bits`**：作用域树把匿名类作用域命名为声明符，`sema::types` 把变量的类型
+  也命名为同一个拼写——**两层必须一致**，否则成员永远找不到。摘要里现在是 `type bits`、`three` 的 `scope Some("bits")`。
+
+**还差一半**：`type_at(bits)` 仍答空类型——查询路径重新推导声明类型时没带声明符名字，走了 `an_unnamed_body` 的空拼写
+分支。事实对、成员归位，但补全还是空。`docs/remaining.md` §N12 写明了下一步该看哪个调用方。
+
+探针新增 `CPPLS_C_FACTS=<文件>`：打印一个文件的**每一条**事实（名字、kind、type、local、scope）。"这个声明到底有没有
+被记录、给了什么类型"是名字查不出来的问题，也正是靠它看出"事实对、查询错"。

@@ -337,6 +337,14 @@ const MEMBERS: &[MemberRow] = &[
 
 /// The type questions: the declared name, and what the file says its type is.
 const TYPES: &[TypeRow] = &[
+    // **A variable whose type is an unnamed struct declared inline** — the type's key is the variable's own name, so
+    // `bits.three` can be answered. See `an_unnamed_struct_type_is_keyed_by_the_variable_it_declares`.
+    TypeRow {
+        file: "src/c23.c",
+        needle: "} bits = {5, -3};",
+        name: "bits",
+        expected: "bits",
+    },
     // types.c — every arithmetic type, in a member and in a local.
     TypeRow {
         file: "src/types.c",
@@ -905,7 +913,28 @@ fn drain(session: &mut Session<DiskFiles>) -> usize {
 /// `CPPLS_C_NAMES="functions_selector,functions_aborts,div,ldiv"` prints every fact filed under each name, with the
 /// file it came from, its kind, its type and its parameter list. A name with no fact at all is a declaration the
 /// summary did not record; a fact with an empty type is a declaration it recorded but could not read.
+///
+/// `CPPLS_C_FACTS="src/c23.c"` prints **every** fact of one file, which is the question a name cannot answer: whether a
+/// declaration was recorded at all, and what type the summary gave it.
 fn dump_names(session: &Session<DiskFiles>, root: &Path) {
+    if let Ok(file) = std::env::var("CPPLS_C_FACTS") {
+        let path = root.join(&file);
+        println!("\n--- every declaration of {file}");
+        if let Some(summary) = session.parsed_summary(&path) {
+            for fact in &summary.declarations {
+                println!(
+                    "  {:<28} {:<12} type {:<28} local {} scope {:?}",
+                    fact.name,
+                    format!("{:?}", fact.kind),
+                    fact.type_of.as_deref().unwrap_or("<none>"),
+                    fact.local,
+                    fact.scope
+                );
+            }
+        } else {
+            println!("  no summary");
+        }
+    }
     let Ok(names) = std::env::var("CPPLS_C_NAMES") else {
         return;
     };
