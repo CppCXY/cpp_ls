@@ -43,7 +43,7 @@ use crate::Visibility;
 use crate::file::paths::normalize_path;
 use crate::include::graph::Marked;
 use crate::preprocess::directive::IncludeForm;
-use crate::sema::types::{Type, TypeBindings, parse_type_spelling, type_of_declaration};
+use crate::sema::types::{Type, TypeBindings, parse_type_spelling};
 use crate::summary::{DeclFact, DeclKind, FactGuard, FileSummary, MacroFact};
 use crate::symbol::{Known, UnknownReason};
 
@@ -4918,11 +4918,42 @@ impl NamedDeclaration {
                     })
                 })?;
 
-                Some(type_of_declaration(
+                // *query* path only, deliberately. `struct { unsigned three : 3; } bits;` has a type with no spelling,
+                // and the members live in the class scope that `build_scopes` names after this declarator, so the two
+                // sides meet only if this answer uses the same key.
+                //
+                // The *fact* keeps the empty spelling, and that is not an oversight: a hover on a file-scope
+                // `static const struct { … } priority[]` prints the declaration's own text, and naming that type
+                // `priority` made the hover say `priority[] priority;` (measured: one handshake test went red). So the
+                // key exists where a member question needs it and nowhere a reader reads a type.
+                let written = crate::sema::types::type_of_declaration_named(
                     &specifiers,
                     Some(&declarator),
                     binding.name_range,
-                ))
+                    binding.name.identifier_text(),
+                );
+                // **Only inside a function body.** A file-scope `static const struct { … } priority[]` keeps the empty
+                // spelling, because a reader hovering it is shown the declaration's own text — naming its type made
+                // that hover print `priority[] priority;` (measured: `a_hover_names_the_instantiation_and_never_invents_a_void`
+                // went red). The member questions this key exists for are all about locals.
+                let keyed_by_the_declarator = scopes
+                    .scope_at(binding.name_range.start_offset)
+                    .is_some_and(|scope| {
+                        scopes.scope_chain(scope).into_iter().any(|id| {
+                            scopes
+                                .scope(id)
+                                .is_some_and(|data| data.kind == crate::ScopeKind::Function)
+                        })
+                    });
+                match (
+                    written.to_string().is_empty(),
+                    an_unnamed_class_body(&specifiers),
+                ) {
+                    (true, Some(_)) if keyed_by_the_declarator => {
+                        Some(Type::named(binding.name.identifier_text()?))
+                    }
+                    _ => Some(written),
+                }
             }
             // **Read from the spelling**, which is all the index has: a fact is a `String` on disk and the file
             // it came from is not open. `parse_type_spelling` is the bridge, and `class_name` the one field of
@@ -5382,6 +5413,23 @@ fn declared_type(
     // the step that is right here — an alias *declared in this file* has a target this can read directly — and the
     // note on [`the_alias_behind`] for where the other step belongs.
     let placeholder = declaration.to_string();
+    // **A `typeof`/`__typeof__` specifier whose payload is an *expression*** — `typeof(value) copy = value;` — is
+    // the type of that expression, and only the semantic layer can answer it: the reader of the *syntax* hands back
+    // the spelling, `typeof(value)`, which no scope and no member list has heard of. The fact builder has the same
+    // gap, so a summary records the spelling too; see `docs/remaining.md` §N13.
+    if let Some(payload) = a_typeof_payload(root, named) {
+        if let Known::Yes((type_of, _)) = type_of_expression(
+            index,
+            &mut |_: &Path| None,
+            scopes,
+            root,
+            path,
+            &payload,
+            depth + 1,
+        ) {
+            return Known::Yes(type_of);
+        }
+    }
     if !writes_auto(&placeholder) {
         return Known::Yes(declaration);
     }
@@ -5451,7 +5499,12 @@ fn declared_type(
 fn writes_auto(written: &str) -> bool {
     written
         .split(|character: char| !character.is_alphanumeric() && character != '_')
-        .any(|word| word == "auto")
+        // **`__auto_type` is GNU's spelling of the same placeholder**, and it is one *word* here, so comparing against
+        // `auto` alone missed it: `__auto_type value = 41;` had a fact typed `int` — the fact builder deducts — while
+        // `type_at(value)` answered `__auto_type`, because this predicate is what decides whether the deduction is
+        // asked for at all. Measured on a nine-file C corpus, and pinned by
+        // `gnu_auto_type_is_deduced_from_its_initializer`.
+        .any(|word| word == "auto" || word == "__auto_type")
 }
 
 /// **The element type of the range a `for` head binds** — `for (auto x : v)` answers `int` for a `vector<int>`.
@@ -5606,6 +5659,66 @@ fn initializer_type(
 /// and put back together the way the file would have spelled the type it let `auto` stand for.
 ///
 /// The declarator's operators are its text with the name taken out: `& r ` is `&`, `* p ` is `*`, `p ` is nothing.
+/// The **expression a 	ypeof/__typeof__ specifier names**, when that is what its payload is.
+///
+/// `None` for the type-id form (`typeof(struct point)`), which the syntax reader already resolves, and for every
+/// declaration that has no 	ypeof at all.
+fn a_typeof_payload(
+    root: &cpp_parser::CppSyntaxNode,
+    named: &NamedDeclaration,
+) -> Option<cpp_parser::CppSyntaxNode> {
+    let NamedDeclaration::Here(binding) = named else {
+        return None;
+    };
+    let declarator = node_covering(root, binding.name_range.start_offset, binding.range)?;
+    let specifiers = declarator.ancestors().find_map(|node| {
+        node.children().find(|child| {
+            cpp_parser::CppSyntaxKind::from(child.kind())
+                == cpp_parser::CppSyntaxKind::DeclSpecifierSeq
+        })
+    })?;
+    let typeof_node = specifiers.children().find(|child| {
+        let text = child.text().to_string();
+        let name = text
+            .trim()
+            .split('(')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        matches!(
+            name.as_str(),
+            "typeof" | "typeof_unqual" | "__typeof__" | "__typeof" | "__decltype" | "decltype"
+        )
+    })?;
+    // The payload is the node inside the parentheses. A type-id has a TypeId child and is not this question.
+    typeof_node.children().find(|child| {
+        !matches!(
+            cpp_parser::CppSyntaxKind::from(child.kind()),
+            cpp_parser::CppSyntaxKind::TypeId | cpp_parser::CppSyntaxKind::DeclSpecifierSeq
+        )
+    })
+}
+/// Does this specifier sequence hold an **unnamed class body** — `struct { … }` with no tag of its own?
+///
+/// The shape whose type has no spelling, which the query path keys by the declarator's name. See the note on
+/// `NamedDeclaration::type_of`.
+fn an_unnamed_class_body(
+    specifiers: &cpp_parser::CppSyntaxNode,
+) -> Option<cpp_parser::CppSyntaxNode> {
+    let body = specifiers.children().find(|child| {
+        matches!(
+            cpp_parser::CppSyntaxKind::from(child.kind()),
+            cpp_parser::CppSyntaxKind::ClassDef
+                | cpp_parser::CppSyntaxKind::StructDef
+                | cpp_parser::CppSyntaxKind::UnionDef
+        )
+    })?;
+    let tag = body.children().any(|child| {
+        cpp_parser::CppSyntaxKind::from(child.kind()) == cpp_parser::CppSyntaxKind::NameExpr
+    });
+    (!tag).then_some(body)
+}
 fn deduction_inputs(
     root: &cpp_parser::CppSyntaxNode,
     named: &NamedDeclaration,
@@ -5728,7 +5841,11 @@ fn auto_substituted(written: &str, deduced: &Type) -> Option<String> {
         while at < bytes.len() && is_word(bytes[at]) {
             at += 1;
         }
-        if &written[start..at] == "auto" {
+        // **`__auto_type` is the same placeholder written with GNU's spelling**, and it is one word in this scan — so
+        // comparing against `auto` alone left it unreplaced, and the whole deduction answered nothing: measured,
+        // `__auto_type value = 41;` went from `__auto_type` to *no type at all*. Pinned by
+        // `gnu_auto_type_is_deduced_from_its_initializer`.
+        if matches!(&written[start..at], "auto" | "__auto_type") {
             found = Some((start, at));
             break;
         }

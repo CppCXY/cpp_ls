@@ -198,3 +198,36 @@ gnu.c    value                     `__auto_type` → 应推断成 initialiser �
 c23.c    copy                      `typeof(value)` —— 同上，expression 载荷
 functions.c operation / compare    函数指针局部变量（`int (*operation)(int, int)`）→ `<no type>`
 ```
+
+### N13. 类型推断查询路径修完之后的 3 项
+
+```text
+                 findings   parse errors   members   types
+第五轮               0           0           46/50     30/34
+第六轮               0           0           49/50     32/34
+```
+
+这一轮修的（都在**查询路径**，不是解析）：
+
+* **`type_of_declaration_named` 的调用方少传了声明名** —— 事实里是 `type bits`，查询却答空。补上之后
+  `bits.three` / `anonymous_union.integer` 从 0 offered 变 PASS。
+* **`__auto_type` 是 GNU 的 `auto`** —— 两处门控（`deduce.rs` 的占位符判断、`writes_auto`/`auto_substituted` 的按词扫描）
+  只认 `auto`，于是 `__auto_type value = 41;` 的事实是 `int`、查询却答 `__auto_type`。
+* **`typeof(表达式)` 的载荷** —— `typeof(value) copy` 里只有语义层能回答，`declared_type` 现在把载荷交给
+  `type_of_expression`；`copy : int` 与 `other_pointer->x`（`typeof(other) *` → `point*`）同时转绿。
+* **`typeof(nullptr)` 不是 type-id** —— `starts_a_type_id` 把 `nullptr` 当类型会让 `typeof(nullptr) nothing = nullptr;`
+  报错（加规则时新引入的唯一一条错误，已修）。
+
+**一处取舍，写在这里免得下次重犯**：把"无名类型的键"放进 `read_specifiers_named`（事实也带名字）会让
+`static const struct { … } priority[]` 的 hover 变成 `priority[] priority;`——一条 handshake 测试立刻变红。
+所以键只加在**局部变量的查询路径**上：`bits`/`anonymous_union` 能查成员，文件作用域的 hover 保持"声明原文"。
+
+剩下 3 项：
+
+```text
+c23.c  bits.signed_wide   struct bits 的第二个位域 `_BitInt(13) signed_wide : 13;` 没被记录
+                           —— `_BitInt` 打头的声明还需要"可以是声明"的锚点，我试过，锚点会让
+                           `_BitInt(37) wide = (_BitInt(37))1 << 30;` 的初始化器失败，所以撤回了
+functions.c operation / compare  `binary_op operation = add;`（函数指针 typedef）→ `<no type>`；
+                           fixture 里能过，只在"typedef 在头文件里"时不复现，下一轮第一步查这个差别
+```

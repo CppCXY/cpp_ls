@@ -1664,22 +1664,14 @@ fn an_unnamed_struct_type_is_keyed_by_the_variable_it_declares() {
     let session = session_with(&[("/p/a.c", source)]);
     let view = session.view("/p/a.c").expect("the file is held");
 
-    // **The fact is what this test can assert today**, and the gap is worth naming: the summary records
-    // `type_of: Some("bits")` and files `three` under scope `bits`, while `type_at` on a *use* of `bits` still answers
-    // an empty type — that path re-derives the declaration's type without the declarator's name. See
-    // `docs/remaining.md` §N12.
-    let summary = session
-        .parsed_summary(std::path::Path::new("/p/a.c"))
-        .expect("the file has a summary");
-    let bits = summary
-        .declarations
-        .iter()
-        .find(|fact| fact.name.as_str() == "bits")
-        .expect("`bits` is declared");
+    // **The *query* is what this test asserts, and the fact deliberately stays empty.** A file-scope
+    // `static const struct { … } priority[]` is hovered as the declaration's own text, and naming that type made the
+    // hover read `priority[] priority;` — so the key exists where a member question needs it (the query path, for a
+    // local) and nowhere a reader reads a type. See `docs/remaining.md` §N13.
     assert_eq!(
-        bits.type_of.as_deref(),
+        type_of_use(source, "bits").as_deref(),
         Some("bits"),
-        "the type is keyed by the variable's own name"
+        "the query path keys the type by the variable's own name"
     );
     let members = match session.members_of(&view, "bits") {
         cpp_code_analysis::Known::Yes(list) => list
@@ -1692,5 +1684,38 @@ fn an_unnamed_struct_type_is_keyed_by_the_variable_it_declares() {
     assert!(
         members.iter().any(|name| name == "three"),
         "and its members are filed under that name: {members:?}"
+    );
+}
+
+/// **`__auto_type` is GNU's `auto`**, and its type is its initialiser's.
+///
+/// Measured on a nine-file C corpus: `__auto_type value = 41;` had a *fact* typed `int` (the fact builder deducts) while
+/// `type_at(value)` answered `__auto_type` — the query path reads the syntax and the placeholder check did not know the
+/// GNU spelling.
+#[test]
+fn gnu_auto_type_is_deduced_from_its_initializer() {
+    let source = "int f(void) { __auto_type value = 41; return value; }\n";
+    assert_eq!(
+        type_of_use(source, "value").as_deref(),
+        Some("int"),
+        "the placeholder's type is the initialiser's"
+    );
+}
+/// **A variable whose type is a function-pointer typedef** — `binary_op operation = add;`.
+///
+/// `binary_op` is `typedef int (*binary_op)(int, int);`, and the declaration's type is that alias's name — the
+/// spelling the file wrote. Measured on a nine-file C corpus: `operation` and `compare` answered `<no type>`, so
+/// `operation(1, 2)` could not be resolved as a call of a known signature.
+#[test]
+fn a_function_pointer_typedef_names_the_variable_it_types() {
+    let source = "\
+typedef int (*binary_op)(int left, int right);
+static int add(int left, int right) { return left + right; }
+int f(void) { binary_op operation = add; return operation(1, 2); }
+";
+    assert_eq!(
+        type_of_use(source, "operation").as_deref(),
+        Some("binary_op"),
+        "the alias's name is the type the file wrote"
     );
 }

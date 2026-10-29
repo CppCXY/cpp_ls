@@ -1732,25 +1732,6 @@ pub(crate) fn read_specifiers_named(
     // **An elaborated keyword with no name after it is the same answer**, and it is the leftover half of the
     // `BuiltinType` note above: `struct` where an unexpanded macro should have named the type. Returning `void`
     // would claim a type the file never wrote.
-    // **A variable whose type is an unnamed struct declared inline is keyed by the variable's own name.**
-    //
-    // ```c
-    // struct { unsigned three : 3; } bits = {5};        /* C's anonymous type — everywhere in real headers */
-    // union { long integer; double real; } anonymous_union = {0};
-    // ```
-    //
-    // The type has no spelling, which is what `an_unnamed_body` says — but its **members were filed somewhere**, and the
-    // only name that can key them is the declarator's: `bits.three` needs `members_of("bits")` and `type_at(bits)` to
-    // agree on one spelling. The scope walk names the anonymous class scope after the same declarator (see the note in
-    // `build_scopes`), so the two sides meet. Measured on a nine-file C corpus: three member questions
-    // (`bits.three`, `bits.signed_wide`, `anonymous_union.integer`) answered nothing.
-    if an_unnamed_body
-        && let Some(name) = declared_name
-        && !name.is_empty()
-    {
-        return Type::named(name);
-    }
-
     if (an_unnamed_body || elaborated) && spelling.is_none() {
         return Type::builtin("");
     }

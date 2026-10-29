@@ -33,11 +33,16 @@ use super::expect_token;
 /// Only the tokens that *cannot* begin an expression: a builtin type specifier, an elaborated specifier, or a
 /// cv-qualifier. A name, a literal and a `(` all begin expressions and are left to the expression rule.
 fn starts_a_type_id(p: &CppParser) -> bool {
-    is_type_specifier_keyword(p.current_token())
-        || matches!(
-            p.current_token(),
-            CppTokenKind::ConstKeyword | CppTokenKind::VolatileKeyword
-        )
+    // **`nullptr` is a value, not a type.** The kind table lists it with the type specifiers because
+    // `decltype(nullptr)` exists — that is C++'s spelling of a *value*'s type — so `typeof(nullptr)` is the
+    // expression reading, and taking it for a type-id reported `expected primary expression` at the `nullptr`
+    // (measured on a nine-file C corpus: one new error the moment this rule was added).
+    p.current_token() != CppTokenKind::NullptrKeyword
+        && (is_type_specifier_keyword(p.current_token())
+            || matches!(
+                p.current_token(),
+                CppTokenKind::ConstKeyword | CppTokenKind::VolatileKeyword
+            ))
 }
 pub fn is_type_specifier_keyword(kind: CppTokenKind) -> bool {
     matches!(

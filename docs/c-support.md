@@ -215,3 +215,21 @@ $env:CPPLS_C_NAMES = "div"  # 打印索引里这个名字的事实
 
 探针新增 `CPPLS_C_FACTS=<文件>`：打印一个文件的**每一条**事实（名字、kind、type、local、scope）。"这个声明到底有没有
 被记录、给了什么类型"是名字查不出来的问题，也正是靠它看出"事实对、查询错"。
+
+## 9. 第六轮：类型推断的查询路径
+
+```text
+                 findings   parse errors   members   types
+第五轮               0           0           46/50     30/34
+第六轮               0           0           49/50     32/34
+```
+
+四条都在**查询路径**上，解析和事实层早已正确：
+
+* `type_of_declaration_named` 的查询调用方少传了声明名（事实传了）→ `bits.three`、`anonymous_union.integer` 转绿。
+* `__auto_type` 是 GNU 的 `auto`，两处只认 `auto` 的门控都补上 → `value : int`。
+* `typeof(表达式)` 的载荷交给 `type_of_expression` → `copy : int`、`other_pointer->x` 转绿。
+* `typeof(nullptr)` 是表达式不是 type-id（新规则引入的唯一一条错误，当场修掉）。
+
+**取舍**：无名类型的键只加在局部变量的查询上。放进事实层会让 `priority[]` 的 hover 变成 `priority[] priority;`，
+一条 handshake 测试立刻变红——"读者看到的类型"和"成员查询要的键"不是同一个问题。
