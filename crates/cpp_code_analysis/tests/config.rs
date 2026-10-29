@@ -414,6 +414,11 @@ fn braces_inside_strings_do_not_confuse_the_reader() {
 
 /// A Windows path in a database is spelled with doubled separators in JSON, which the reader has to undo
 /// or every include in the project fails to resolve.
+///
+/// **The assertion is on the normalized spelling, not on `Path` equality.** `PathBuf::from("C:\proj")` and
+/// `PathBuf::from("C:/proj")` are one path on Windows — a separator is a separator there — and two on a system that
+/// has no such rule, which is where this test failed. What the rest of the crate relies on is the normalized
+/// spelling: one separator, forward.
 #[test]
 fn escaped_separators_in_a_path_are_unescaped() {
     let database = parse_compile_commands(
@@ -425,5 +430,10 @@ fn escaped_separators_in_a_path_are_unescaped() {
         .command_for(Path::new("a.cpp"))
         .expect("an entry")
         .to_config();
-    assert_eq!(config.working_directory, Some(PathBuf::from("C:/proj")));
+    let directory = config.working_directory.expect("the database names one");
+    assert_eq!(
+        cpp_code_analysis::normalize_path(&directory, false),
+        "C:/proj",
+        "the doubled separators are folded into the one spelling comparisons are made in"
+    );
 }
