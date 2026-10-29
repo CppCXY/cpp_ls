@@ -150,3 +150,45 @@ fn a_typeof_specifier_takes_a_type() {
         ],
     );
 }
+
+/// **`_BitInt` as a declaration's own type, and as a cast inside its initialiser** — C23.
+///
+/// ```c
+/// _BitInt(37) wide = (_BitInt(37))1 << 30;
+/// unsigned _BitInt(7) small = 100;
+/// ```
+///
+/// The first spelling had no declaration anchor at all: `_BitInt` is a contextual keyword (an identifier followed by a
+/// `(`), so the statement was read as an expression. Adding the anchor made this line fail — the initialiser's cast
+/// `(_BitInt(37))` needs the same rule in `is_a_type_in_parentheses` — which is why both halves are pinned here together.
+/// Measured on a nine-file C corpus: `struct bits` answered one of its two members.
+#[test]
+fn a_bitint_type_in_a_declaration_and_in_a_cast_parses() {
+    // **C23's language, because `_BitInt` is C23's.** `assert_all_parse` parses with `ParserConfig::default()`, which is
+    // C++17 — and in C++17 `_BitInt` is an ordinary identifier, so every one of these shapes is *supposed* to fail there.
+    // The first version of this test asked the default and reported a failure that was the harness's, not the grammar's.
+    use cpp_parser::features::LanguageConfig;
+    let language = LanguageConfig::from_flag("-std=c23").expect("a flag");
+    let mut failed = Vec::new();
+    for (name, source) in [
+        (
+            "a declaration and a cast",
+            "void f(void) { _BitInt(37) wide = (_BitInt(37))1 << 30; (void)wide; }",
+        ),
+        (
+            "with an unsigned specifier in front",
+            "void f(void) { unsigned _BitInt(7) small = 100; (void)small; }",
+        ),
+        (
+            "a bit-field in a struct",
+            "struct bits { unsigned _BitInt(3) three : 3; _BitInt(13) signed_wide : 13; };",
+        ),
+    ] {
+        let config = cpp_parser::ParserConfig::default().with_language(language.clone());
+        let tree = cpp_parser::CppParser::parse(source, config);
+        if !tree.get_errors().is_empty() {
+            failed.push(format!("{name}: {:?}", tree.get_errors()));
+        }
+    }
+    assert!(failed.is_empty(), "C23 _BitInt: {failed:#?}");
+}

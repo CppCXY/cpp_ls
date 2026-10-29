@@ -4842,6 +4842,40 @@ pub(super) fn can_begin_a_declaration(kind: CppTokenKind) -> bool {
     )
 }
 
+/// Does a **`_BitInt(width) declarator`** shape start at the cursor — C23's integer type in a declaration?
+///
+/// `	ext
+/// _BitInt(37) wide = …;      a declaration: an identifier follows the )
+/// f(x);                      a call: a ; or an operator follows it
+/// `
+///
+/// The width is a constant expression, so the parentheses are balanced and the token after the matching `)` is what
+/// separates the two readings. The feature gate is the language's: `_BitInt` is C23's, and a C11 file has an ordinary
+/// identifier there.
+fn a_bitint_declaration_starts_here(p: &CppParser) -> bool {
+    if p.current_token_text() != "_BitInt"
+        || p.peek_next_token() != CppTokenKind::LeftParen
+        || !p.language().support(crate::features::Feature::BitInt)
+    {
+        return false;
+    }
+    let mut depth = 0isize;
+    for (index, kind) in p.peek_token_kind_at(1..64).iter().enumerate() {
+        match kind {
+            CppTokenKind::LeftParen => depth += 1,
+            CppTokenKind::RightParen => {
+                depth -= 1;
+                if depth == 0 {
+                    return p.peek_token_kind_at(index + 2..index + 3).first()
+                        == Some(&CppTokenKind::Identifier);
+                }
+            }
+            CppTokenKind::Eof | CppTokenKind::None => return false,
+            _ => {}
+        }
+    }
+    false
+}
 pub fn starts_declaration(p: &mut CppParser) -> bool {
     match p.current_token() {
         // `concept` is **not** an anchor, and the omission is a decision: the word is contextual, and a statement

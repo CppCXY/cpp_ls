@@ -233,3 +233,14 @@ $env:CPPLS_C_NAMES = "div"  # 打印索引里这个名字的事实
 
 **取舍**：无名类型的键只加在局部变量的查询上。放进事实层会让 `priority[]` 的 hover 变成 `priority[] priority;`，
 一条 handshake 测试立刻变红——"读者看到的类型"和"成员查询要的键"不是同一个问题。
+
+## 10. 第八轮：`_BitInt` 的声明锚点
+
+`_BitInt(width) declarator` 现在被当作声明（前瞻跨过宽度的括号，要求 `)` 之后是 identifier，这样 `f(x);` 仍然是调用）。
+三种拼写由一条**显式用 C23 语言**跑的测试钉住:声明、`(_BitInt(37))` cast、位域。
+
+第一版测试用 `ParserConfig::default()`（C++17）跑,报的失败是测试自己的——C++17 里 `_BitInt` 就是普通标识符。
+**测一个 C23 构造必须显式给 C23 配置**,这条记在 §N15。
+
+成员/类型仍是 49/50、32/34:剩下的 `struct bits` 第二个位域与 `functions.c` 的函数指针 typedef 各有一个确切的
+下一步(见 §N15)。

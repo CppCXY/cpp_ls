@@ -254,3 +254,26 @@ functions.c operation / compare  `binary_op operation = add;`（函数指针 typ
 
 新加的那条测试（`a_function_pointer_typedef_from_a_header`）钉住的是引擎的**展开**行为，刻意只断言形状
 （`contains("int") && contains("(int, int)")`）——拼写的规范化（`const` 丢没丢、`*` 在不在）不是这个测试要管的事。
+
+### N15. `_BitInt` 的锚点进来了，剩下的两项各有确切位置
+
+```text
+                 findings   parse errors   members   types
+第七轮               0           0           49/50     32/34
+第八轮               0           0           49/50     32/34
+```
+
+**进来的**：`_BitInt(width) declarator` 现在被认作声明（`a_bitint_declaration_starts_here`：跨过宽度的括号，
+看 `)` 后面是不是 identifier），并且有一条**用 C23 语言**跑的测试钉住三种拼写——声明、cast、位域。
+第一版测试用 `ParserConfig::default()`（C++17）测，报的"失败"是测试自己的问题：C++17 里 `_BitInt` 本来就是普通
+标识符。这一条值得记：**测一个 C23 构造，必须显式给 C23 的语言配置**。
+
+**还没进来的**：`struct bits` 的第二个位域 `_BitInt(13) signed_wide : 13;` 仍然没有事实，而
+`unsigned _BitInt(3) three : 3;` 有。两者唯一的差别是**作为类型的 specifier 以什么开头**，所以下一个假设是
+位域宽度之后对 `;` 的处理（`parse_member` 里 `:` 之后的那段），而不是 specifier 读取本身。查法：把
+`struct bits { unsigned _BitInt(3) three : 3; _BitInt(13) signed_wide : 13; };` 放进一个 session 测试，
+断言 `parsed_summary` 里两条都在——现在只会有一条。
+
+**以及** `functions.c` 的 `operation`/`compare`：事实是 `type binary_op`，查询答 `<no type>`，fixture（同样的
+typedef 在头文件里）答 `int (*)(int, int)`。差别在 `functions.c` 自己的内容，下一轮在
+`declared_type` → `NamedDeclaration::type_of` 上打点。
