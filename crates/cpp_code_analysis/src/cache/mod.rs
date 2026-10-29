@@ -31,9 +31,9 @@
 //! different parser is not "probably still fine", it is a **silent** wrong answer. Bumping the number is the one
 //! invalidation that must never be forgotten, so it lives in the key rather than in a migration step.
 //!
-//! It was forgotten, for many rounds — which is why the key also carries a **measurement** of the readers
-//! ([`READING_FINGERPRINT`], computed by `build.rs`): a rule that depends on remembering is a rule that gets
-//! missed, and this one is cheap to compute and impossible to miss.
+//! It was forgotten, for many rounds — which is why the key also carries a **fingerprint of the readers**
+//! ([`READING_FINGERPRINT`]), taken from the versions the build already carries: a rule that depends on remembering is
+//! a rule that gets missed, and this one is a constant of the package.
 //!
 //! # Why the macro environment is *not* in the key
 //!
@@ -76,9 +76,9 @@ use std::path::{Path, PathBuf};
 /// **Bump on any change that could make an old summary wrong.** See the module documentation for why this is part
 /// of the key rather than handled by a migration.
 ///
-/// A source change is caught automatically by [`READING_FINGERPRINT`], so this is for the changes that leave no
-/// trace in the sources this workspace owns: a dependency bump that changes a reading, or a build whose inputs
-/// differ some other way. The number is still the blunt instrument — every entry becomes unreachable.
+/// A parser change reaches the key through [`READING_FINGERPRINT`], which carries `cpp_parser`'s version. A change to
+/// *this* crate''s own readings leaves no such trace, so it is this number that is bumped — the same lever a
+/// dependency bump uses. The number is still the blunt instrument: every entry becomes unreachable.
 ///
 /// # Why this moved for version 14 of the codec
 ///
@@ -89,59 +89,62 @@ use std::path::{Path, PathBuf};
 /// decodes but says something this build would not write is the case this constant exists for.
 pub const FORMAT_VERSION: u32 = 3;
 
-/// The fingerprint of the code that **reads** a file into a summary, computed by `build.rs` from the text of the
-/// grammar and of this crate's semantic layer.
+/// **The fingerprint of the readers a summary was built by**, in the key.
 ///
 /// # Why this is not [`FORMAT_VERSION`]
 ///
-/// The two answer different questions. `FORMAT_VERSION` is a **decision** — "I changed something, throw the store
-/// away" — and it is only as good as the memory of whoever changed it. This is a **measurement** of the readers
-/// themselves, so it cannot be forgotten, and it is what the module documentation means by "a summary written by a
-/// different parser is a silent wrong answer": the parser moved for many rounds while `FORMAT_VERSION` stayed at 1,
-/// and every entry on disk was quietly describing an older reader.
+/// A manual number is only as good as the memory of whoever changed the code, and this one was forgotten for many
+/// rounds: the grammar moved while `FORMAT_VERSION` stayed at 1, and every entry on disk quietly described an older
+/// reader. So the key also carries a number that is computed rather than remembered.
+///
+/// # Why it is computed from versions, and not from a hash of the sources
+///
+/// A `build.rs` used to hash this crate's `src` and `cpp_parser/src` and pass the result in as
+/// `CPP_READING_FINGERPRINT`. That was the right idea and it could not be **published**: `cargo publish` builds the
+/// crate from the `.crate` archive, where `../cpp_parser/src` does not exist, so the verification build panicked
+/// before the crate could be uploaded.
+///
+/// What replaces it is computed from what the archive does contain:
+///
+/// * `cpp_parser::VERSION` — the parser's sources move with its version, and a released binary is the only one
+///   whose cache survives a restart into a different parser;
+/// * this crate's own `CARGO_PKG_VERSION` and [`FORMAT_VERSION`] — the numbers that move when a *reading* of this
+///   crate changes.
+///
+/// # The cost, written down rather than hidden
+///
+/// A grammar edit **between two versions** — a local build, a debug session — is a cache that still answers for the
+/// old grammar, and `FORMAT_VERSION` is the lever for that during development, exactly as it is for a dependency
+/// bump that changes a reading. A build that wants a different number can raise `FORMAT_VERSION`; nothing is
+/// forgotten silently, and no file outside the package is read.
 ///
 /// # It is still computable before the file is parsed
 ///
-/// A constant of the binary, so a lookup can happen before the parse — which is the property the key must keep,
-/// and the reason the macro environment could not stay in it. Nothing here reads a source file at run time: the
-/// hash is computed while *building* (see `build.rs`), and a change to any of those sources changes the constant,
-/// so the whole store becomes unreachable and the next query re-indexes.
-///
-/// # What it does not cover
-///
-/// Anything outside the hashed directories — a workspace dependency's source, a compiler flag. Those remain
-/// `FORMAT_VERSION`'s job.
-pub const READING_FINGERPRINT: u64 = parse_fingerprint(env!("CPP_READING_FINGERPRINT"));
+/// A constant of the binary, so a lookup can happen before the parse — which is the property the key must keep, and
+/// the reason the macro environment could not stay in it.
+pub const READING_FINGERPRINT: u64 = {
+    let mut hash = FNV_OFFSET_BASIS;
+    hash = fnv1a(hash, cpp_parser::VERSION.as_bytes());
+    hash = fnv1a(hash, env!("CARGO_PKG_VERSION").as_bytes());
+    hash = fnv1a(hash, &FORMAT_VERSION.to_le_bytes());
+    hash
+};
 
-/// The hexadecimal fingerprint `build.rs` emitted, as a number.
-///
-/// A `const fn` rather than `u64::from_str_radix` because the value has to be a constant: it is written into the
-/// key of every cache file name, and a runtime parse would be a runtime error in a code path that has no way to
-/// report one.
-const fn parse_fingerprint(text: &str) -> u64 {
-    let bytes = text.as_bytes();
-    let mut value = 0u64;
+/// FNV-1a's 64-bit offset basis and prime — fixed by definition, so the number does not move when a compiler is
+/// upgraded.
+const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+/// **FNV-1a, as a `const fn`** — the fingerprint has to be a constant: it is written into the key of every cache
+/// file name, and a runtime hash is a runtime failure waiting for a code path with no way to report one.
+const fn fnv1a(mut hash: u64, bytes: &[u8]) -> u64 {
     let mut index = 0;
-
     while index < bytes.len() {
-        let digit = match bytes[index] {
-            b'0'..=b'9' => bytes[index] - b'0',
-            b'a'..=b'f' => bytes[index] - b'a' + 10,
-            b'A'..=b'F' => bytes[index] - b'A' + 10,
-            // `_` separators are allowed so the constant can be regrouped by hand; anything else is a build script
-            // that emitted something other than a number.
-            b'_' => {
-                index += 1;
-                continue;
-            }
-            _ => panic!("CPP_READING_FINGERPRINT is not hexadecimal"),
-        };
-
-        value = value * 16 + digit as u64;
+        hash ^= bytes[index] as u64;
+        hash = hash.wrapping_mul(FNV_PRIME);
         index += 1;
     }
-
-    value
+    hash
 }
 
 /// How much the summary cache may hold before a sweep starts removing the oldest entries.
@@ -326,10 +329,10 @@ mod tests {
 
     #[test]
     fn the_key_carries_a_measurement_of_the_readers() {
-        // The component that makes "the parser moved, so the store is void" impossible to forget: it is not a
-        // decision someone has to remember to make, it is a number computed from the sources that decide what a
-        // summary contains (`build.rs`). A zero here would mean the build script found nothing to hash — which is
-        // the one way this could silently stop working, since a constant component invalidates nothing.
+        // The component that makes "the parser moved, so the store is void" impossible to forget: it is not a decision
+        // someone has to remember to make, it is a number computed from the versions that decide what a summary
+        // contains. A zero here would mean the computation broke — the one way this could silently stop working,
+        // since a constant component invalidates nothing.
         assert_ne!(
             super::READING_FINGERPRINT,
             0,

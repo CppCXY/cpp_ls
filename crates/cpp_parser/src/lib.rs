@@ -23,6 +23,13 @@ pub use symbols::{
     SymbolMap, SymbolTable, a_body_opens_an_inline_namespace, shape_of_a_body, shape_of_a_body_at,
 };
 pub use syntax::*;
+
+/// **The version of this crate, as `Cargo.toml` states it.**
+///
+/// `env!("CARGO_PKG_VERSION")` answers only for the crate it is written in, and a consumer's cache key needs the
+/// *parser's* version: a summary written by another grammar is a wrong answer, not a missing one. This is the one
+/// place that reads the number, so the key and the package cannot disagree.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub use text::{LineIndex, Reader, SourceRange};
 
 #[macro_use]
