@@ -2687,3 +2687,84 @@ int f() {
         "`int` is not missing anything: the list is final"
     );
 }
+
+/// A session over one **open** file, drained — the state a completion is asked in.
+///
+/// `did_open` rather than [`cooked_view`], and the difference is not incidental: a *cook* answers a question about a
+/// file from its summary, and the rendering that comes back is condensed onto one line (measured here:
+/// `"struct Widget { int size; }; void f() { Widget * p; p-> Widget w; w. }"` for a five-line file). A completion is
+/// asked about the file the reader has **open**, whose rendering is its own text with its own line breaks — and line
+/// breaks are what a recovery rule can read. See the module documentation of `cpp_parser`'s `exprs.rs` on the member
+/// name that must be on the operator's line.
+fn a_pointer_fixture(text: &'static str) -> (Session<MemoryFiles>, cpp_code_analysis::FileView) {
+    let memory = MemoryFiles::new().with_file("/p/a.cpp", text);
+    let providers = SessionFiles::new(OpenDocuments::new(), memory);
+    let mut session = Session::with_config(
+        "/p",
+        providers,
+        WatchFilter::new("/p"),
+        CompilerConfig::default(),
+    );
+    session.did_open("/p/a.cpp", text);
+    session.add_project_files([std::path::PathBuf::from("/p/a.cpp")]);
+    session.index_everything();
+    let mut rounds = 0;
+    while session.pending() > 0 && rounds < 400 {
+        session.advance(16);
+        rounds += 1;
+    }
+    let view = session
+        .view("/p/a.cpp")
+        .expect("the open file's own reading");
+    (session, view)
+}
+
+/// **An arrow on a pointer inserts the member's name, and only the name.**
+///
+/// Measured before this: `Widget* p; p->` answered the pointee's members with `insert: "->length"` and a replacement
+/// range grown one byte to the left, over the `>` — accepting an item wrote `p-->length`. The rewrite is for the one
+/// case where the operator typed and the answer disagree, a `.` on a pointer; on `->` the reader already typed the
+/// right operator, so the name is the whole insertion and the range is empty where the name goes.
+#[test]
+fn an_arrow_on_a_pointer_inserts_the_name_and_not_the_operator() {
+    let text = "struct Widget { int size; int length; };\nvoid f()\n{\nWidget * p;\np->\n}\n";
+    let (mut session, view) = a_pointer_fixture(text);
+    let at = text.find("p->").expect("the fixture writes it") + 3;
+    let set = session.completions(&view, cpp_code_analysis::file::coordinates::FileOffset::new(at));
+
+    let mut labels: Vec<&str> = set.items.iter().map(|item| item.label.as_str()).collect();
+    labels.sort_unstable();
+    assert_eq!(labels, ["length", "size"], "the pointee's members, not names: {set:?}");
+    for item in &set.items {
+        assert_eq!(
+            item.insert, item.label,
+            "the arrow is the reader's, not part of what a member inserts"
+        );
+    }
+    assert_eq!(
+        (set.replace.start_offset, set.replace.length),
+        (at, 0),
+        "nothing is written after the operator, so the range is empty where the name goes"
+    );
+}
+
+/// **A `.` on a pointer is still rewritten to `->`** — the one case the rewrite is for.
+///
+/// `p.size` on a `Widget*` does not compile, and C++ has no such member; the list is the pointee's, which is what the
+/// reader meant, and the operator they typed is the half that is wrong. So the insertion gains `->` and the range
+/// grows one byte left to cover the `.`.
+#[test]
+fn a_dot_on_a_pointer_still_rewrites_the_operator() {
+    let text = "struct Widget { int size; };\nvoid f()\n{\nWidget * p;\np.\n}\n";
+    let (mut session, view) = a_pointer_fixture(text);
+    let at = text.find("p.\n").expect("the fixture writes it") + 2;
+    let set = session.completions(&view, cpp_code_analysis::file::coordinates::FileOffset::new(at));
+
+    assert_eq!(set.items.len(), 1, "one member: {set:?}");
+    assert_eq!(set.items[0].insert, "->size", "the operator is part of the insertion");
+    assert_eq!(
+        (set.replace.start_offset, set.replace.length),
+        (at - 1, 1),
+        "the `.` is replaced along with the name's position"
+    );
+}

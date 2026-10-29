@@ -846,7 +846,12 @@ fn members(
     // So the operator is replaced as part of the insertion: the range grows one byte to the left (the `.`) and every
     // insert text gains the `->`. The handler keeps the rewrite for a client that cannot interpolate snippets by
     // noticing the prefix, and a client that filters on the label is unaffected (the label stays the member's name).
-    let (replace, items) = if followed_a_pointer {
+    // **…and only when the operator typed was the wrong one.** `followed_a_pointer` says "a pointer was followed to
+    // find the class", which is also true of `p->` itself — and on an arrow this rewrite made every insert
+    // `->append` with a range grown one byte left over the `>`, so accepting an item wrote `p-->append`. A reader on
+    // `p->` typed the right operator; the rewrite is for the one case where the operator and the answer disagree,
+    // which is a `.` on a pointer.
+    let (replace, items) = if followed_a_pointer && !access.arrow {
         let operator = replace.start_offset.saturating_sub(1);
         let items: Vec<crate::completion::CompletionItem> = items
             .into_iter()
