@@ -1769,3 +1769,34 @@ int f(void) { binary_op operation = add; comparer *compare = 0; return operation
         "and so does the other typedef: {compare}"
     );
 }
+
+/// **A member whose specifier starts with `_BitInt(N)` is not recorded**, and one that starts with `unsigned` is.
+///
+/// `struct bits { unsigned _BitInt(3) three : 3; _BitInt(13) signed_wide : 13; };` — the corpus's own shape, and the
+/// measurement is the *summary*, because the facts are what a member list is built from.
+#[test]
+#[ignore = "a member whose specifier begins `_BitInt(N)` is dropped, while `unsigned _BitInt(N)` is kept — docs/remaining.md §N16"]
+fn both_bitfields_of_a_bitint_struct_are_recorded() {
+    let source = "\
+struct bits {
+    unsigned _BitInt(3) three : 3;
+    _BitInt(13) signed_wide : 13;
+    _BitInt(5) plain;
+    unsigned _BitInt(4) other : 2;
+};
+";
+    let session = session_with(&[("/p/a.c", source)]);
+    let summary = session
+        .parsed_summary(std::path::Path::new("/p/a.c"))
+        .expect("the file has a summary");
+    let names: Vec<&str> = summary
+        .declarations
+        .iter()
+        .map(|fact| fact.name.as_str())
+        .collect();
+    eprintln!("facts: {names:?}");
+    assert!(
+        names.contains(&"three") && names.contains(&"signed_wide") && names.contains(&"plain"),
+        "both bit-fields and the plain member are members: {names:?}"
+    );
+}

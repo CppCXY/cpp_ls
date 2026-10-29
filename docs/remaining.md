@@ -277,3 +277,22 @@ functions.c operation / compare  `binary_op operation = add;`（函数指针 typ
 **以及** `functions.c` 的 `operation`/`compare`：事实是 `type binary_op`，查询答 `<no type>`，fixture（同样的
 typedef 在头文件里）答 `int (*)(int, int)`。差别在 `functions.c` 自己的内容，下一轮在
 `declared_type` → `NamedDeclaration::type_of` 上打点。
+
+### N16. 最后一条成员差的**最小复现**（下一轮从这里开始）
+
+```c
+struct bits {
+    unsigned _BitInt(3) three : 3;   // 记录 ✓
+    _BitInt(13) signed_wide : 13;    // 丢掉 ✗
+    _BitInt(5) plain;                // 丢掉 ✗
+    unsigned _BitInt(4) other : 2;   // 记录 ✓
+};
+```
+
+`parsed_summary` 里只有 `three` 和 `other`。所以**不是位域的问题**：任何 **specifier 以 `_BitInt(` 开头**的成员都被丢掉，
+而以 `unsigned` 开头的都留下。位域那条（`signed_wide`）只是这个更一般缺陷的一个实例。
+
+测试已经写好并 `#[ignore]`：`both_bitfields_of_a_bitint_struct_are_recorded`（`tests/types.rs`）。下一轮的工作是
+在 `parse_decl_specifier_seq_with` 里看清楚：specifier 循环在调用 [`parse_a_specifier`] 之前，是否先用
+"这个 token 能不能开始一个 specifier" 的判断把 `_BitInt`（一个 Identifier）拒掉了。语法规则本身已经有了
+（`a_bitint_declaration_starts_here` + specifier 里的 `_BitInt` 分支），所以差的是**类体成员那条路径上的同一个判断**。
