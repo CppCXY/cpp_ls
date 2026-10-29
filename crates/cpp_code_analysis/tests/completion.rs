@@ -2768,3 +2768,58 @@ fn a_dot_on_a_pointer_still_rewrites_the_operator() {
         "the `.` is replaced along with the name's position"
     );
 }
+
+/// **`co_await` has the type its awaiter's `await_resume()` returns.**
+///
+/// ```cpp
+/// task<payload> greet();
+/// task<int> use() { auto s = co_await greet(); s. }   // `s` is a `payload`
+/// ```
+///
+/// The awaited expression is a `UnaryExpr` with a `co_await` token, and without an arm for it `s` was a type nobody
+/// knew: measured on `test_cpp/coroutine.cpp`, completion after `auto s = co_await greet("x"); s.` answered
+/// **nothing**, while the coroutine parsed, hovered and coloured correctly. The awaiter is the operand's own type
+/// (`task<T>` is its own awaiter) and the value is `await_resume()`'s return type, read through the class's template
+/// arguments — `T` becomes `payload` — which is the same substitution the member lookups already do.
+#[test]
+fn an_awaited_value_has_the_type_await_resume_returns() {
+    let text = "\
+struct payload {
+    int size() const;
+    int length() const;
+};
+
+template <typename T>
+struct task {
+    struct promise_type {
+        task get_return_object() { return task{}; }
+        std::suspend_always initial_suspend() { return {}; }
+        std::suspend_always final_suspend() noexcept { return {}; }
+        void return_value(T v) {}
+        void unhandled_exception() {}
+    };
+    bool await_ready() const noexcept { return false; }
+    void await_suspend(std::coroutine_handle<>) {}
+    T await_resume() { return T{}; }
+};
+
+task<payload> greet();
+
+task<int> use() {
+    auto s = co_await greet();
+    s.
+    co_return 0;
+}
+";
+    let (mut session, view) = a_pointer_fixture(text);
+    let at = text.find("    s.\n").expect("the fixture writes it") + 6;
+    let set = session.completions(&view, cpp_code_analysis::file::coordinates::FileOffset::new(at));
+
+    let mut labels: Vec<&str> = set.items.iter().map(|item| item.label.as_str()).collect();
+    labels.sort_unstable();
+    assert_eq!(
+        labels,
+        ["length", "size"],
+        "the awaited value is a `payload`, so its members are what a completion offers: {set:?}"
+    );
+}

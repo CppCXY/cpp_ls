@@ -2354,3 +2354,90 @@ fn a_c_style_cast_is_reported_in_cpp_and_not_in_c() {
         "…and not in a `.c` file, where `(unsigned)c` is how the conversion is written"
     );
 }
+
+/// **A class nested in another one has members, and its own members are not "undefined".**
+///
+/// `class outer { public: class inner { inner(bool e) : at_end_(e) {} bool operator!=(const inner &other) const
+/// { return at_end_ != other.at_end_; } private: bool at_end_ = true; }; };` — the class is `outer::inner`, and
+/// every use inside `outer` spells it `inner`. The member list for that spelling came back **empty**, so
+/// `undefined-field` reported `` `other` has no member `at_end_` `` on a class that declares it, while the class's
+/// own field was invisible to completion too: `definition("inner")` was ambiguous between the class (scope `outer`)
+/// and its **constructor** (a declaration named `inner` in scope `outer::inner`), and an ambiguous class was read as
+/// "that class has nothing written in it". Measured on `test_cpp/coroutine.cpp`, whose `generator<T>::iterator` is
+/// this shape: two false findings from one lookup.
+#[test]
+fn a_nested_class_has_its_members() {
+    let nested = "\
+class outer {
+  public:
+    class inner {
+      public:
+        inner(bool e) : at_end_(e) {}
+        bool operator!=(const inner &other) const { return at_end_ != other.at_end_; }
+      private:
+        bool at_end_ = true;
+    };
+};
+";
+    assert_eq!(
+        codes_of(nested),
+        [],
+        "a member written in the class is not undefined: {:?}",
+        codes_of(nested)
+    );
+
+    // …and the rule still speaks when a member really is not there: the fix must not silence the check.
+    let missing = "\
+class outer {
+  public:
+    class inner {
+      public:
+        int at_end_ = 0;
+    };
+};
+void f() { outer::inner i; i.missing_; }
+";
+    assert_eq!(
+        codes_of(missing),
+        [DiagnosticCode::UndefinedField],
+        "a member the nested class does not declare is still reported"
+    );
+}
+
+/// **A coroutine is not a function that forgot to return.**
+///
+/// A body that writes `co_yield`, `co_return` or `co_await` is a coroutine, and the value contract lives on
+/// `promise_type` (`return_void`, `return_value`, `yield_value`) — so a `generator<int>` that only yields is
+/// complete. Measured on `test_cpp/coroutine.cpp`: `generator<int> countdown(int from) { for (…) { co_yield i; } }`
+/// answered "this function is declared to return `generator<int>` and its body has no `return`", on a file that
+/// compiles and runs in GCC 15.1.
+#[test]
+fn a_coroutine_body_has_no_missing_return() {
+    for (name, source) in [
+        (
+            "co_yield",
+            "generator make(int from) {\n    for (int i = 0; i < from; ++i) { co_yield i; }\n}\n",
+        ),
+        (
+            "co_return",
+            "int compute(int v) {\n    co_return v + 1;\n}\n",
+        ),
+        (
+            "co_await",
+            "int wait(int v) {\n    int x = co_await v;\n    return x;\n}\n",
+        ),
+    ] {
+        assert_eq!(
+            codes_of(source),
+            [],
+            "{name}: a coroutine body needs no `return`"
+        );
+    }
+
+    // The rule itself is unchanged for an ordinary function.
+    assert_eq!(
+        codes_of("int count() {\n}\n"),
+        [DiagnosticCode::MissingReturn],
+        "a plain function with no return is still reported"
+    );
+}

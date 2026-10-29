@@ -160,6 +160,32 @@ impl Check for MissingReturn {
                 continue;
             }
 
+            // **A coroutine decides what it returns with its promise, not with a `return`.**
+            //
+            // A body that writes `co_return`, `co_yield` or `co_await` is a coroutine body, and the standard puts
+            // the value contract on `promise_type` — `return_void()`, `return_value(v)`, `yield_value(v)` — so a
+            // `generator<int>` coroutine that only ever yields is **complete**: falling off its end calls
+            // `return_void()`. Reporting it was measured on `test_cpp/coroutine.cpp`: `generator<int> countdown(int
+            // from) { for (…;) { co_yield i; } }` answered "this function is declared to return `generator<int>` and
+            // its body has no `return`", against a file that compiles and runs.
+            //
+            // Asked of the **tokens**, not of the statement kinds: `co_yield` is parsed as a throw statement and
+            // `co_return` as a return statement, so the tree cannot tell a coroutine from an ordinary function
+            // without this spelling test — and `co_await` alone is enough to know the body is one.
+            let is_a_coroutine = body.descendants_with_tokens().any(|element| {
+                element.into_token().is_some_and(|token| {
+                    matches!(
+                        cpp_parser::CppTokenKind::from(token.kind()),
+                        cpp_parser::CppTokenKind::CoAwaitKeyword
+                            | cpp_parser::CppTokenKind::CoYieldKeyword
+                            | cpp_parser::CppTokenKind::CoReturnKeyword
+                    )
+                })
+            });
+            if is_a_coroutine {
+                continue;
+            }
+
             // **A `return` anywhere is enough.** See the module documentation: "not every path returns" is a
             // control-flow question and this layer answers from a tree.
             let has_a_return = body

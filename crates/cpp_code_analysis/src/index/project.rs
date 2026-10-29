@@ -1737,6 +1737,38 @@ fn direct_members(
         );
     }
 
+    // **A class nested inside another one, spelled without its outer class.**
+    //
+    // `class outer { public: class inner { … }; };` declares a class whose qualified name is `outer::inner`, while
+    // every use written inside `outer` spells it `inner` — and so does every parameter list there:
+    // `bool operator!=(const inner &other) const`. The lookup above asks the table for the bare spelling, which is
+    // not a key, so the answer fell through to the index, where `definition("inner")` is **Ambiguous**: the class is
+    // `inner` in scope `outer`, and its constructor is a declaration named `inner` in scope `outer::inner`. An
+    // ambiguous class answered `Known::Yes(empty)` — "that class has nothing written in it" — and `undefined-field`
+    // therefore reported **every member** of the class: measured, `` `other` has no member `at_end_` `` on
+    // `coroutine.cpp`, whose `generator<T>::iterator` is exactly this shape, and a completion on such a class
+    // offered its constructor and nothing else.
+    //
+    // The scope is in the table and keyed correctly; only the spelling differs, so one scan for a class scope whose
+    // last segment is this name answers it. Two such classes is a real ambiguity and answers nothing.
+    if let Some(scope) = a_class_nested_in_another(scopes, class)
+        && let Some(data) = scopes.scope(scope)
+    {
+        let shapes = crate::sema::declarations::DeclarationShapes::of(root);
+        let qualified = scopes.qualified_name_of(scope).unwrap_or_else(|| class.to_string());
+        return Known::Yes(
+            data.bindings
+                .iter()
+                .map(|binding| {
+                    (
+                        path.to_path_buf(),
+                        fact_from_binding_with(&shapes, root, &qualified, binding),
+                    )
+                })
+                .collect(),
+        );
+    }
+
     let found = index.declarations_in(class, path);
     if !found.is_empty() {
         return Known::Yes(
@@ -1805,6 +1837,35 @@ fn direct_members(
             Known::Unknown(UnknownReason::NotDeclaredHere(Box::from(class.as_str())))
         }
     }
+}
+
+/// **The scope of a class whose last name segment is `class`**, when exactly one scope has that name and a
+/// qualification — see the call site, which is where the measurement is.
+///
+/// A table with two of them is an ambiguity and answers `None`: guessing between two nested classes named `inner`
+/// would make a member list about a class the reader did not write, and a wrong member list is worse than no list.
+fn a_class_nested_in_another(
+    scopes: &crate::ScopeTree,
+    class: &str,
+) -> Option<crate::ScopeId> {
+    let mut found = None;
+    for (index, scope) in scopes.scopes().iter().enumerate() {
+        if scope.kind != crate::ScopeKind::Class || scope.name.as_deref() != Some(class) {
+            continue;
+        }
+        let id = crate::ScopeId(index);
+        match scopes.qualified_name_of(id) {
+            // Keyed by the spelling asked about: the caller's own branch handles it.
+            Some(qualified) if qualified == class => return None,
+            Some(_) => {}
+            None => continue,
+        }
+        if found.is_some() {
+            return None;
+        }
+        found = Some(id);
+    }
+    found
 }
 
 /// The names in a level that take part in **hiding**: every member that has a name at all.
@@ -3339,6 +3400,39 @@ fn type_of_expression_inner(
         return Known::Unknown(UnknownReason::UnknownType(Box::from(written)));
     }
 
+    // **`co_await e` has the type of `e`'s awaiter's `await_resume()`.**
+    //
+    // ```cpp
+    // task<std::string> greet(std::string name);
+    // task<std::string> f() { auto s = co_await greet("x"); s. }   // `s` is a std::string
+    // ```
+    //
+    // Without this the awaited expression was read as a `UnaryExpr` and fell through to the name case, so `s` was a
+    // type nobody knew: measured on `test_cpp/coroutine.cpp`, completion after `s.` on
+    // `auto s = co_await greet("x");` answered **nothing**, while the coroutine itself parsed and hovered. The
+    // awaiter is the operand's own type — `task<T>` is its own awaiter — and the value is what
+    // `await_resume()` returns, which [`operator_returns_of`] already reads for any member *with the class's
+    // template arguments substituted* (`task<std::string>`'s `T` becomes `std::string`), so the two questions are
+    // one call and no second substitution rule.
+    //
+    // A type that declares no `await_resume` is not an error this layer can name — the compiler's diagnosis is
+    // better — so it answers `Unknown`, which is what keeps the completion after an unknown awaited value empty
+    // rather than wrong.
+    if let Some(operand) = a_co_awaits_operand(expression) {
+        let awaited = type_of_expression_memoed(
+            memo, index, declaring, scopes, root, path, &operand, depth + 1,
+        );
+        if let Known::Yes((awaiter, _)) = awaited
+            && let Some(returns) =
+                operator_returns_of(index, declaring, scopes, root, path, &awaiter, "await_resume")
+            && !returns.trim().is_empty()
+        {
+            let settled = crate::sema::types::parse_type_spelling(&returns);
+            return Known::Yes((settled, path.to_path_buf()));
+        }
+        return Known::Unknown(UnknownReason::UnknownType(Box::from(written)));
+    }
+
     // **A literal's type is the one thing about it nobody has to look up.**
     //
     // `auto x = 1;` is a declaration whose type the file spells in a form no name can carry, and the reader had
@@ -4512,6 +4606,26 @@ pub(crate) fn operator_returns_of(
         parameter_names,
         &written_arguments,
     ))
+}
+
+/// **The operand of a `co_await`, when this node is one.**
+///
+/// `co_await e` is parsed as a `UnaryExpr` whose first token is the keyword — see `exprs.rs`, where the arm exists
+/// because the keyword was in `is_expression_keyword` and no rule consumed it. The operand is the node after the
+/// keyword; a tree with none (a malformed `co_await` being typed at) answers `None`, and the caller falls through
+/// to the shapes that do not need one.
+fn a_co_awaits_operand(
+    expression: &cpp_parser::CppSyntaxNode,
+) -> Option<cpp_parser::CppSyntaxNode> {
+    if cpp_parser::CppSyntaxKind::from(expression.kind()) != cpp_parser::CppSyntaxKind::UnaryExpr {
+        return None;
+    }
+    let mut children = expression.children_with_tokens();
+    let keyword = children.find_map(|element| element.into_token()).filter(|token| {
+        cpp_parser::CppTokenKind::from(token.kind()) == cpp_parser::CppTokenKind::CoAwaitKeyword
+    })?;
+    let _ = keyword;
+    children.find_map(|element| element.into_node())
 }
 
 /// **A return type that is one bare name plus its operators** — `element_type*` gives `("element_type", "*")`, and
