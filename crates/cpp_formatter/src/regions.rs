@@ -93,10 +93,9 @@ fn marker_of(line: &str) -> Option<Marker> {
     let text = line.trim();
     let body = if let Some(rest) = text.strip_prefix("//") {
         rest
-    } else if let Some(rest) = text.strip_prefix("/*") {
-        rest.trim_end_matches("*/")
     } else {
-        return None;
+        let rest = text.strip_prefix("/*")?;
+        rest.trim_end_matches("*/")
     };
     let body = body.trim().trim_start_matches(':').trim();
     let mut words = body.split_whitespace();
@@ -104,8 +103,8 @@ fn marker_of(line: &str) -> Option<Marker> {
         return None;
     }
     let rest: Vec<&str> = words.collect();
-    let off = rest.iter().any(|word| *word == "off");
-    let on = rest.iter().any(|word| *word == "on");
+    let off = rest.contains(&"off");
+    let on = rest.contains(&"on");
     match (off, on) {
         (true, _) => Some(Marker::Off),
         (_, true) => Some(Marker::On),

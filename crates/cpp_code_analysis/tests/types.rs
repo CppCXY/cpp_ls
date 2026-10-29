@@ -1523,7 +1523,11 @@ int g(void) { return plain.d; }
         other => panic!("`{class}` has a member list: {other:?}"),
     };
 
-    assert_eq!(members("Object"), ["a", "b"], "the unnamed body is `Object`");
+    assert_eq!(
+        members("Object"),
+        ["a", "b"],
+        "the unnamed body is `Object`"
+    );
     assert_eq!(members("Alias"), ["d"], "the alias follows to its tag");
     assert_eq!(members("Tag"), ["d"], "and the tag answers on its own");
     assert_eq!(members("Plain"), ["e"], "a named body with a variable");

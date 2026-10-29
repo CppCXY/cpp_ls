@@ -74,7 +74,7 @@ pub fn conversion(
     let Some(class) = bare.class_name().filter(|class| !class.is_empty()) else {
         return Conversion::Unknown;
     };
-    match answer_the_class_question(&class) {
+    match answer_the_class_question(class) {
         Some(true) => Conversion::NeedsABuild,
         Some(false) => Conversion::Refused,
         None => Conversion::Unknown,

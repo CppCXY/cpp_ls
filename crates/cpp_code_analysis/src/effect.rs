@@ -85,7 +85,7 @@ impl Macros {
     pub fn values_of(&self, names: &[String]) -> Vec<Option<String>> {
         names
             .iter()
-            .map(|name| self.definitions.get(name).map(|held| body_text(held)))
+            .map(|name| self.definitions.get(name).map(body_text))
             .collect()
     }
 }
@@ -181,7 +181,7 @@ pub fn effect_of(surface: &Surface, environment: &Macros) -> Effect {
         active: bool,
     }
     let mut regions: Vec<Region> = Vec::new();
-    let active = |regions: &[Region]| regions.last().map_or(true, |region| region.active);
+    let active = |regions: &[Region]| regions.last().is_none_or(|region| region.active);
 
     for event in &surface.events {
         match event {
@@ -527,7 +527,7 @@ impl<'a, R: Reads> Chain<'a, R> {
         self.walked.evaluated += 1;
         let mut regions: Vec<(bool, bool, bool)> = Vec::new();
         let active =
-            |regions: &Vec<(bool, bool, bool)>| regions.last().map_or(true, |region| region.2);
+            |regions: &Vec<(bool, bool, bool)>| regions.last().is_none_or(|region| region.2);
         for event in &surface.events {
             match event {
                 Event::If {

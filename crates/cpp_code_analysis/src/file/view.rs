@@ -516,7 +516,7 @@ pub fn in_prose(text: &str, offset: usize) -> bool {
         });
     at.is_some_and(|token| {
         matches!(
-            cpp_parser::CppTokenKind::from(token.kind),
+            token.kind,
             cpp_parser::CppTokenKind::LineComment
                 | cpp_parser::CppTokenKind::BlockComment
                 | cpp_parser::CppTokenKind::StringLiteral

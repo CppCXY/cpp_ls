@@ -470,10 +470,7 @@ pub fn name_level_offsets<F: cpp_code_analysis::FileProvider + Clone>(
                         )
                     })
                 });
-                match view.as_ref() {
-                    Some(view) => Some((class, view)),
-                    None => None,
-                }
+                view.as_ref().map(|view| (class, view))
             }
             None => None,
         };

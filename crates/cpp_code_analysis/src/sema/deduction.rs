@@ -110,7 +110,7 @@ fn bind(bound: &mut HashMap<String, String>, name: &str, argument: &str) -> bool
 }
 
 /// **`T*` as `("", "T", "*")`** — the text before and after the first template parameter the spelling names.
-fn around_a_name<'a>(parameter: &'a str, names: &[String]) -> Option<(String, String, String)> {
+fn around_a_name(parameter: &str, names: &[String]) -> Option<(String, String, String)> {
     for name in names {
         let mut from = 0usize;
         while let Some(at) = parameter[from..].find(name.as_str()) {
@@ -347,8 +347,6 @@ pub fn template_parameters_before(source: &str, name_offset: usize) -> Vec<Strin
 fn the_name_in(parameter: &str) -> Option<String> {
     let without_default = parameter.split('=').next().unwrap_or(parameter);
     let identifier = without_default
-        .split(|character: char| !(character.is_alphanumeric() || character == '_'))
-        .filter(|word| !word.is_empty())
-        .next_back()?;
+        .split(|character: char| !(character.is_alphanumeric() || character == '_')).rfind(|word| !word.is_empty())?;
     Some(identifier.to_string())
 }

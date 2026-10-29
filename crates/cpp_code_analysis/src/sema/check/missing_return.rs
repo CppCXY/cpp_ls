@@ -65,7 +65,7 @@ fn declares_the_enclosing_class(function: &cpp_parser::CppSyntaxNode) -> bool {
                     .find(|child| {
                         matches!(CppSyntaxKind::from(child.kind()), CppSyntaxKind::ClassBody)
                     })
-                    .map(|body| {
+                    .and_then(|body| {
                         ancestor
                             .descendants_with_tokens()
                             .filter_map(|element| element.into_token())
@@ -77,8 +77,7 @@ fn declares_the_enclosing_class(function: &cpp_parser::CppSyntaxNode) -> bool {
                             })
                             .last()
                             .map(|token| token.text().to_string())
-                    })
-                    .flatten();
+                    });
                 return declared.as_deref() == Some(name.trim_start_matches('~'));
             }
             // A function written inside a function body is a local class or a lambda's, and neither is this

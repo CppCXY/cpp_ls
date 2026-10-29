@@ -1956,9 +1956,11 @@ void f(int width, double d) {
             lsp_types::SemanticTokenType::REGEXP,
             lsp_types::SemanticTokenType::KEYWORD,
         ];
-        let drawn =
-            extended_with_the_custom_types(Some(standard.clone()), crate::context::ClientId::VSCode)
-                .expect("a client that named its types keeps a list");
+        let drawn = extended_with_the_custom_types(
+            Some(standard.clone()),
+            crate::context::ClientId::VSCode,
+        )
+        .expect("a client that named its types keeps a list");
         for name in [
             "formatSpecifier",
             "formatArgument",

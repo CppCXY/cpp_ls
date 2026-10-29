@@ -397,11 +397,7 @@ fn closest(candidates: &[Callee], passed: usize) -> Option<&Callee> {
     candidates.iter().min_by_key(|callee| {
         if passed > callee.written {
             passed - callee.written
-        } else if passed < callee.required {
-            callee.required - passed
-        } else {
-            0
-        }
+        } else { callee.required.saturating_sub(passed) }
     })
 }
 

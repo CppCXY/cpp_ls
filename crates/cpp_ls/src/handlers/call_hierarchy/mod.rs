@@ -207,7 +207,7 @@ pub fn incoming_calls_of<F: FileProvider + Clone>(
             .entry(file.clone())
             .or_insert_with(|| {
                 Some(cpp_code_analysis::FileView::parse_with(
-                    &held,
+                    held,
                     &cpp_parser::MacroEnvironment::default(),
                 ))
             })
@@ -225,8 +225,8 @@ pub fn incoming_calls_of<F: FileProvider + Clone>(
             continue;
         };
         let (Some(start), Some(end)) = (
-            position_in_file(&held, range.start_offset),
-            position_in_file(&held, range.end_offset()),
+            position_in_file(held, range.start_offset),
+            position_in_file(held, range.end_offset()),
         ) else {
             continue;
         };
@@ -363,12 +363,12 @@ fn the_caller_of<F: FileProvider + Clone>(
             }
             let uri = path_to_uri(file)?;
             let range = span(
-                &held,
+                held,
                 usize::from(node.text_range().start()),
                 usize::from(node.text_range().end()),
             )?;
             let selection_range = span(
-                &held,
+                held,
                 usize::from(name_node.text_range().start()),
                 usize::from(name_node.text_range().end()),
             )?;

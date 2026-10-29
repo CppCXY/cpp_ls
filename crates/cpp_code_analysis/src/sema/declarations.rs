@@ -2485,7 +2485,7 @@ fn fact_for(
     // **The class's name as the declaration wrote it, when that name carries a pattern.** See [`DeclFact::pattern`]
     // for the wrong answer this exists to remove — a partial specialization's member answering for an instantiation
     // that does not match it.
-    let pattern = pattern_of(&shapes, binding);
+    let pattern = pattern_of(shapes, binding);
 
     // **Is the scope this declaration reports one the file's text could actually see?**
     //
@@ -2560,11 +2560,9 @@ pub(crate) fn declared_parameter_defaults_with(
     // **A row of "no default" is not stored.** The field is cloned and compared per fact, and most templates have no
     // default at all: storing the empties would put sixteen bytes on every class template in the standard library to
     // say nothing.
-    defaults
+    if defaults
         .iter()
-        .any(|default| !default.is_empty())
-        .then_some(defaults)
-        .unwrap_or_default()
+        .any(|default| !default.is_empty()) { defaults } else { Default::default() }
 }
 
 /// **A class declaration's own text, up to its body** — read child by child instead of from the node.

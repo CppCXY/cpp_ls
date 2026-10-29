@@ -1,4 +1,3 @@
-
 use super::SummaryStore;
 use crate::file::paths::MemoryFiles;
 use crate::include::config::CompilerConfig;

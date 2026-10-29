@@ -95,7 +95,7 @@ impl Check for AccessInvisible {
             };
             let crate::Known::Yes(members) = context
                 .model
-                .members_of(&object.class_name().unwrap_or_default())
+                .members_of(object.class_name().unwrap_or_default())
             else {
                 continue;
             };
@@ -231,7 +231,7 @@ fn visibility_of(class: &CppSyntaxNode, offset: usize) -> Access {
             continue;
         };
         in_force = match specifier.get_keyword().map(|keyword| {
-            cpp_parser::CppTokenKind::from(cpp_parser::CppKind::from(keyword.syntax().kind()))
+            cpp_parser::CppTokenKind::from(keyword.syntax().kind())
         }) {
             Some(cpp_parser::CppTokenKind::PublicKeyword) => Access::Public,
             Some(cpp_parser::CppTokenKind::ProtectedKeyword) => Access::Protected,
@@ -260,7 +260,7 @@ fn default_access_of(class: &CppSyntaxNode) -> Access {
             .filter_map(|element| element.into_token())
             .find(|token| {
                 matches!(
-                    CppTokenKind::from(CppKind::from(token.kind())),
+                    CppTokenKind::from(token.kind()),
                     CppTokenKind::ClassKeyword
                         | CppTokenKind::StructKeyword
                         | CppTokenKind::UnionKeyword
@@ -268,7 +268,7 @@ fn default_access_of(class: &CppSyntaxNode) -> Access {
             })
     });
 
-    match keyword.map(|token| CppTokenKind::from(CppKind::from(token.kind()))) {
+    match keyword.map(|token| CppTokenKind::from(token.kind())) {
         Some(CppTokenKind::ClassKeyword) => Access::Private,
         _ => Access::Public,
     }

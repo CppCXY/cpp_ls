@@ -90,7 +90,11 @@ fn shape_of(node: &cpp_parser::CppSyntaxNode) -> &'static str {
             let has_brackets = node
                 .children_with_tokens()
                 .any(|element| element.as_token().is_some_and(|token| token.text() == "["));
-            if has_brackets { "a subscript" } else { "a member" }
+            if has_brackets {
+                "a subscript"
+            } else {
+                "a member"
+            }
         }
         CppSyntaxKind::UnaryExpr => {
             let text = node.text().to_string();
@@ -165,8 +169,11 @@ impl Scoreboard {
         );
 
         println!("\nby receiver shape:");
-        let mut shapes: Vec<(&str, (usize, usize))> =
-            self.by_shape.iter().map(|(shape, counts)| (*shape, *counts)).collect();
+        let mut shapes: Vec<(&str, (usize, usize))> = self
+            .by_shape
+            .iter()
+            .map(|(shape, counts)| (*shape, *counts))
+            .collect();
         shapes.sort_by_key(|(_, (asked, _))| std::cmp::Reverse(*asked));
         for (shape, (asked, resolved)) in shapes {
             let rate = 100.0 * resolved as f64 / asked.max(1) as f64;
@@ -343,17 +350,18 @@ fn the_member_questions_of_a_real_project_and_how_many_resolve() {
                     // **Where the chain stopped**: a receiver type is what the member lookup needs, and a refusal
                     // that has one failed *in* the type; one without failed *before* it.
                     let object = cpp_parser::source_range(access.object.text_range());
-                    let receiver = match session.type_at(&view, ReadingOffset::new(object.start_offset)) {
-                        Known::Yes(found) => {
-                            scoreboard.refused_with_a_type += 1;
-                            *scoreboard
-                                .types_that_failed
-                                .entry(found.type_of.clone())
-                                .or_default() += 1;
-                            found.type_of
-                        }
-                        _ => "?".to_string(),
-                    };
+                    let receiver =
+                        match session.type_at(&view, ReadingOffset::new(object.start_offset)) {
+                            Known::Yes(found) => {
+                                scoreboard.refused_with_a_type += 1;
+                                *scoreboard
+                                    .types_that_failed
+                                    .entry(found.type_of.clone())
+                                    .or_default() += 1;
+                                found.type_of
+                            }
+                            _ => "?".to_string(),
+                        };
                     if scoreboard.samples.len() < 400 {
                         let line = view
                             .source
@@ -378,10 +386,8 @@ fn the_member_questions_of_a_real_project_and_how_many_resolve() {
                             // measurement was missing: a refusal with *no* visible declaration is visibility, one
                             // with several is the choice between them, and `NotDeclaredHere` reports both the same
                             // way. `members_of` then says what the chosen one answered.
-                            let declared = session
-                                .index()
-                                .declarations_in(&class, &view.path)
-                                .len();
+                            let declared =
+                                session.index().declarations_in(&class, &view.path).len();
                             let choice = match session.members_of(&view, &class) {
                                 Known::Yes(list) => {
                                     let has = list
@@ -421,7 +427,9 @@ fn the_member_questions_of_a_real_project_and_how_many_resolve() {
                                     )
                                 }
                                 Known::Unknown(reason) => {
-                                    format!("{declared} visible declaration(s), no list: {reason:?}")
+                                    format!(
+                                        "{declared} visible declaration(s), no list: {reason:?}"
+                                    )
                                 }
                                 Known::No => format!("{declared} visible declaration(s), no list"),
                             }
@@ -516,13 +524,15 @@ fn the_member_questions_of_a_real_project_and_how_many_resolve() {
             println!(
                 "\n{asked}: {} fact(s) filed under that scope, {} visible from {}",
                 session.index().scope_postings(&asked),
-                session
-                    .index()
-                    .declarations_in(&asked, &somewhere)
-                    .len(),
+                session.index().declarations_in(&asked, &somewhere).len(),
                 somewhere.display()
             );
-            for (file, fact) in session.index().every_fact_named("SendRequest").iter().take(6) {
+            for (file, fact) in session
+                .index()
+                .every_fact_named("SendRequest")
+                .iter()
+                .take(6)
+            {
                 println!(
                     "  SendRequest in {}: scope {:?} qualified {:?}",
                     file.file_name().unwrap_or_default().to_string_lossy(),
@@ -569,7 +579,11 @@ fn the_member_questions_of_a_real_project_and_how_many_resolve() {
                     for (seen, _) in visible.iter().take(5) {
                         println!(
                             "    {seen}: summary {}",
-                            if session.index().summary(std::path::Path::new(seen)).is_some() {
+                            if session
+                                .index()
+                                .summary(std::path::Path::new(seen))
+                                .is_some()
+                            {
                                 "found"
                             } else {
                                 "MISSING"
@@ -599,7 +613,10 @@ fn the_member_questions_of_a_real_project_and_how_many_resolve() {
                     for member in list.members.iter().take(40) {
                         println!(
                             "  {:?} {:?} scope {:?} type {:?}",
-                            member.fact.kind, member.fact.name, member.fact.scope, member.fact.type_of
+                            member.fact.kind,
+                            member.fact.name,
+                            member.fact.scope,
+                            member.fact.type_of
                         );
                     }
                 }

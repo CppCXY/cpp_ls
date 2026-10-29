@@ -59,7 +59,9 @@ fn what_one_class_answers_for_its_members() {
         started.elapsed()
     );
 
-    let view = session.view_of_the_file(&file).expect("a view of the asking file");
+    let view = session
+        .view_of_the_file(&file)
+        .expect("a view of the asking file");
     println!(
         "\n{asked}: {} fact(s) filed under that scope, {} visible from {}",
         session.index().scope_postings(&asked),
@@ -72,7 +74,10 @@ fn what_one_class_answers_for_its_members() {
     for (where_it_is, fact) in session.index().every_fact_named(&asked) {
         println!(
             "  declared in {}: kind {:?} scope {:?} type_of {:?}",
-            where_it_is.file_name().unwrap_or_default().to_string_lossy(),
+            where_it_is
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy(),
             fact.kind,
             fact.scope,
             fact.type_of

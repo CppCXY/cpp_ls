@@ -1521,7 +1521,7 @@ pub fn name_references(
         let at: Vec<cpp_parser::SourceRange> = tokens
             .iter()
             .filter(|token| {
-                cpp_parser::CppTokenKind::from(token.kind) == cpp_parser::CppTokenKind::Identifier
+                token.kind == cpp_parser::CppTokenKind::Identifier
                     && text
                         .get(token.range.start_offset..token.range.end_offset())
                         .is_some_and(|spelled| spelled == name)

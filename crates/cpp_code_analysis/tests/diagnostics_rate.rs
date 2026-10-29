@@ -168,7 +168,8 @@ fn the_diagnostics_of_a_real_projects_files() {
         "\n{} file(s) asked, {total} finding(s), {files_with_findings} file(s) with at least one",
         sources.len()
     );
-    let mut codes: Vec<(&String, usize)> = by_code.iter().map(|(code, count)| (code, *count)).collect();
+    let mut codes: Vec<(&String, usize)> =
+        by_code.iter().map(|(code, count)| (code, *count)).collect();
     codes.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
     for (code, count) in codes {
         println!("  {count:>5}  {code}");
@@ -181,6 +182,4 @@ fn the_diagnostics_of_a_real_projects_files() {
             println!("{entry}");
         }
     }
-
-
 }

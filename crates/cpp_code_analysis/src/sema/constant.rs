@@ -260,16 +260,16 @@ fn tokens_of(written: &str) -> Vec<(CppTokenKind, String)> {
     let tree = cpp_parser::CppParser::parse(written, cpp_parser::ParserConfig::default());
     let source = written.to_string();
     tree.get_tokens()
-        .into_iter()
+        .iter()
         .filter(|token| {
-            let kind = CppTokenKind::from(token.kind);
+            let kind = token.kind;
             !cpp_parser::is_trivia(kind)
         })
         .map(|token| {
             let start = token.range.start_offset.min(source.len());
             let end = token.range.end_offset().min(source.len());
             (
-                CppTokenKind::from(token.kind),
+                token.kind,
                 source[start..end].to_string(),
             )
         })

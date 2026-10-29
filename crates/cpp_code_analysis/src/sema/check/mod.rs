@@ -117,12 +117,12 @@ mod macro_parentheses;
 pub mod macro_redefined;
 pub mod missing_return;
 pub mod param_type_check;
+pub mod redefinition;
 pub mod return_type_mismatch;
 mod simplify_boolean_expr;
 pub mod syntax_error;
 pub mod undefined_field;
 pub mod undefined_name;
-pub mod redefinition;
 pub mod unnecessary_branch;
 pub mod unused;
 mod use_auto;
@@ -404,7 +404,7 @@ impl<'a> CheckContext<'a> {
             .file_offset_of_end(crate::file::coordinates::ReadingOffset::new(
                 range.end_offset(),
             ))
-            .map_or(start, |end| end);
+            .unwrap_or(start);
         SourceRange::new(start.get(), end.get().saturating_sub(start.get()))
     }
 
@@ -427,11 +427,10 @@ impl<'a> CheckContext<'a> {
         // over the wrong line, and the cook already answers the question per token: `RenderedSpan::written` is `None`
         // exactly where the text came from somewhere else. Asking it here is the same lesson as the AST layer — the
         // machinery existed, and this layer was re-deriving a worse version of it by comparing texts.
-        if let Some(in_the_reading) = in_the_reading {
-            if !self.view.was_written_here(in_the_reading) {
+        if let Some(in_the_reading) = in_the_reading
+            && !self.view.was_written_here(in_the_reading) {
                 return;
             }
-        }
         self.findings.push(Finding {
             range,
             name: name.into(),
@@ -670,7 +669,7 @@ pub fn literal_condition_of(condition: &cpp_parser::CppSyntaxNode) -> Option<Str
         .descendants_with_tokens()
         .filter_map(|element| element.into_token())
     {
-        match CppTokenKind::from(CppKind::from(token.kind())) {
+        match CppTokenKind::from(token.kind()) {
             CppTokenKind::LeftParen
             | CppTokenKind::RightParen
             | CppTokenKind::Whitespace
@@ -944,7 +943,7 @@ pub fn function_head(function: &cpp_parser::CppSyntaxNode) -> Option<FunctionHea
             let gap = source_between(&own_text, function_starts, previous_end, start);
             returns.push_str(gap);
         }
-        returns.push_str(&token.text().to_string());
+        returns.push_str(token.text());
         previous_end = Some(end);
     }
     for specifier in NOT_A_TYPE {

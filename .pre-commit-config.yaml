@@ -1,0 +1,37 @@
+repos:
+  - repo: local
+    hooks:
+      - id: fmt
+        name: fmt
+        description: run cargo fmt
+        entry: cargo fmt
+        language: system
+        types: [rust]
+        args: ["--all"]
+        pass_filenames: false
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+        exclude: '^crates/emmylua_ls/std_i18n/.*\.yaml$'
+      - id: end-of-file-fixer
+        exclude: '^crates/emmylua_ls/std_i18n/.*\.yaml$'
+      - id: fix-byte-order-marker
+      - id: mixed-line-ending
+        args: [--fix=lf]
+        stages: [manual]
+      - id: check-added-large-files
+      - id: check-yaml
+      - id: check-toml
+      - id: check-json
+        exclude: ^.vscode/
+      - id: check-merge-conflict
+      - id: check-shebang-scripts-are-executable
+        exclude_types: [rust]
+      - id: check-symlinks
+      - id: destroyed-symlinks
+      - id: check-vcs-permalinks
+  - repo: https://github.com/crate-ci/typos
+    rev: master
+    hooks:
+      - id: typos

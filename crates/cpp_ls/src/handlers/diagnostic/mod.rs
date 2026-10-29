@@ -139,7 +139,7 @@ pub fn diagnose_file(session: &Session<DiskFiles>, path: &Path) -> Option<(Uri, 
         //
         // What is withheld is now `checks_may_be_trusted`'s question and nothing coarser: the answer must not
         // disappear and come back, but it also must not wait for files this one cannot see.
-        .chain(if checks_may_be_trusted(session, &path) {
+        .chain(if checks_may_be_trusted(session, path) {
             check_findings(&found.checks, held).collect::<Vec<Diagnostic>>()
         } else {
             Vec::new()

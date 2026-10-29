@@ -99,7 +99,10 @@ mod tests {
         let source = "int f() {\n    co_return 1;\n}\n";
         let token = token_of(source, "co_return", false);
         let text = keyword_hover(&token).expect("a keyword with an entry has a popup");
-        assert!(text.contains("co_return"), "the popup names the word: {text}");
+        assert!(
+            text.contains("co_return"),
+            "the popup names the word: {text}"
+        );
     }
     /// **Every word in the table has a popup in every locale**, because a missing key is a popup that says only the
     /// one-line description — the failure this test exists to make loud.

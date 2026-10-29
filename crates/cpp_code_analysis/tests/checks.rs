@@ -2535,7 +2535,11 @@ void f() {
     auto g = [&w]() { w.size; };
 }
 ";
-    assert_eq!(codes_of(lambda), [], "a capture is not a name the scope tree holds");
+    assert_eq!(
+        codes_of(lambda),
+        [],
+        "a capture is not a name the scope tree holds"
+    );
 
     // A name a header declares — here the header is the second file of the fixture.
     let from_a_header = "\
@@ -2676,7 +2680,10 @@ void f(int count) {
     int count = 2;
 }
 ";
-    assert_eq!(codes_of(shadows_a_parameter), [DiagnosticCode::Redefinition]);
+    assert_eq!(
+        codes_of(shadows_a_parameter),
+        [DiagnosticCode::Redefinition]
+    );
 }
 
 /// **The five repeats that are not a redefinition** — see [`a_name_declared_twice_in_one_scope_is_reported`].

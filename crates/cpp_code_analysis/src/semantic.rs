@@ -393,7 +393,7 @@ pub fn classified_names(index: &ProjectIndex, view: &FileView) -> Vec<Name> {
         //     in it declares and each of those walked the include graph. The environment is a property of the *file*,
         //     and [`ProjectIndex::macro_names_in_force`] is where the single walk lives.
         let included = included_macros.get_or_init(|| index.macro_names_in_force(&view.path));
-        let is_a_macro = included.contains(&*text);
+        let is_a_macro = included.contains(text);
         if is_a_macro {
             out.push(Name {
                 range,

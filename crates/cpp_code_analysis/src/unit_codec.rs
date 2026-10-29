@@ -36,7 +36,7 @@ use cpp_parser::SourceRange;
 use crate::summary::{RenderedUnit, UnitMessage, UnitSpan};
 
 /// What a unit record starts with — `3 665 265 456` in little endian is `UNIT`, and it is not a summary's magic.
-const MAGIC: [u8; 4] = [b'U', b'N', b'I', b'T'];
+const MAGIC: [u8; 4] = *b"UNIT";
 
 /// Bumped when the layout changes; an older record is then unreachable rather than misread.
 pub const UNIT_CODEC_VERSION: u32 = 3;
@@ -348,7 +348,7 @@ mod tests {
 
 /// A second magic, because an `IndexedUnit` is not a rendering: the two live under different keys in the same
 /// database and a decoder that confused them would answer with the other one.
-const INDEX_MAGIC: [u8; 4] = [b'U', b'I', b'D', b'X'];
+const INDEX_MAGIC: [u8; 4] = *b"UIDX";
 
 /// **A unit's facts, as bytes** — the sweep's output for every file the parse covered.
 ///

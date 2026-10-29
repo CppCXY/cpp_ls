@@ -276,7 +276,7 @@ pub(crate) fn rank(parameter: &str, argument: &Known<String>) -> Match {
         return Match::Promotion;
     }
 
-    match parse_type_spelling(&argument).convertible_to(&parse_type_spelling(parameter)) {
+    match parse_type_spelling(argument).convertible_to(&parse_type_spelling(parameter)) {
         Known::Yes(()) => Match::Conversion,
         Known::No => Match::NotViable,
         Known::Unknown(_) => Match::Unranked,

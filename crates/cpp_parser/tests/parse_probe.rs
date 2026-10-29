@@ -43,7 +43,10 @@ fn how_one_file_parses() {
         .map(|node| {
             let text = node.text().to_string().replace('\n', " ");
             let text: String = text.chars().take(60).collect();
-            format!("line {}: {text:?}", line_of(usize::from(node.text_range().start())))
+            format!(
+                "line {}: {text:?}",
+                line_of(usize::from(node.text_range().start()))
+            )
         })
         .collect();
 

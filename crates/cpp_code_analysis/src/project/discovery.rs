@@ -199,11 +199,10 @@ fn standard_in(arguments: &[String]) -> Option<String> {
                 return non_empty(value);
             }
         }
-        if SEPARATED.contains(&argument.as_str()) {
-            if let Some(value) = arguments.get(at + 1) {
+        if SEPARATED.contains(&argument.as_str())
+            && let Some(value) = arguments.get(at + 1) {
                 return non_empty(value);
             }
-        }
     }
     None
 }

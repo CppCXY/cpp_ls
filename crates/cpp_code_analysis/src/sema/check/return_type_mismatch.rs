@@ -40,7 +40,7 @@ impl Check for ReturnTypeMismatch {
         // **This file's own functions** - see CheckContext::own_syntax_nodes.
         for function in context
             .own_syntax_nodes()
-            .filter(|node| super::is_a_function_definition(node))
+            .filter(super::is_a_function_definition)
             .collect::<Vec<_>>()
         {
             let Some(declared) = return_type_of(&function) else {

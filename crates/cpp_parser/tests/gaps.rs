@@ -7354,7 +7354,11 @@ fn a_pointer_before_a_parenthesised_declarator_ends_at_its_semicolon() {
             .filter(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::NameExpr)
             .map(|node| node.text().to_string())
             .collect();
-        assert_eq!(names.len(), 1, "one name, and it is the declarator's: {names:?}");
+        assert_eq!(
+            names.len(),
+            1,
+            "one name, and it is the declarator's: {names:?}"
+        );
     }
 }
 
@@ -7392,7 +7396,10 @@ fn a_macro_after_a_parameter_keeps_the_function_a_declaration() {
 
     let function = root.children().next().expect("the function");
     assert!(
-        function.text().to_string().starts_with("void ex_argdedupe("),
+        function
+            .text()
+            .to_string()
+            .starts_with("void ex_argdedupe("),
         "the declaration is the function: {:?}",
         function.text().to_string()
     );

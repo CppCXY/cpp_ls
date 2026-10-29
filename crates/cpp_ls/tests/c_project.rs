@@ -233,7 +233,12 @@ fn first_line(result: &Value) -> String {
         text.to_string()
     } else if let Some(list) = contents.as_array() {
         list.iter()
-            .filter_map(|entry| entry.get("value").and_then(Value::as_str).or(entry.as_str()))
+            .filter_map(|entry| {
+                entry
+                    .get("value")
+                    .and_then(Value::as_str)
+                    .or(entry.as_str())
+            })
             .collect::<Vec<_>>()
             .join(" ")
     } else {
@@ -400,11 +405,7 @@ fn a_classic_c_file_answers_what_it_holds() {
     // pays for the rendering (measured: 1.4 s against 10 ms once it exists), and that cost belongs to the cold-start
     // measurement, not to a row about whether a feature answers.
     if let Some(place) = at(&text, "addr_count", 0) {
-        let _ = server.request(
-            900_001,
-            "textDocument/hover",
-            position(&source_uri, place),
-        );
+        let _ = server.request(900_001, "textDocument/hover", position(&source_uri, place));
     }
     if let Some(place) = at(&text, "alist_add(", 60) {
         let _ = server.request(
@@ -429,11 +430,7 @@ fn a_classic_c_file_answers_what_it_holds() {
     // **A member of a struct the file reaches through a typedef** — `exarg_T *eap; eap->addr_count`.
     if let Some(place) = at(&text, "addr_count", 0) {
         let started = Instant::now();
-        let result = server.request(
-            next(),
-            "textDocument/hover",
-            position(&source_uri, place),
-        );
+        let result = server.request(next(), "textDocument/hover", position(&source_uri, place));
         rows.push(Row {
             feature: "hover (member)",
             answered: !result.is_null(),
@@ -447,11 +444,7 @@ fn a_classic_c_file_answers_what_it_holds() {
     // `struct file_buffer` declares. This is the C shape that only a *rendering* can answer.
     if let Some(place) = at(&text, "b_fnum", 0) {
         let started = Instant::now();
-        let result = server.request(
-            next(),
-            "textDocument/hover",
-            position(&source_uri, place),
-        );
+        let result = server.request(next(), "textDocument/hover", position(&source_uri, place));
         rows.push(Row {
             feature: "hover (macro member)",
             answered: !result.is_null(),
@@ -515,7 +508,12 @@ fn a_classic_c_file_answers_what_it_holds() {
             answered: !found.is_empty(),
             count: found.len(),
             ms: started.elapsed().as_millis(),
-            note: found.iter().take(3).cloned().collect::<Vec<_>>().join(" | "),
+            note: found
+                .iter()
+                .take(3)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(" | "),
         });
     }
 
@@ -736,12 +734,11 @@ fn a_classic_c_file_answers_what_it_holds() {
     // the two numbers is the difference between "this feature is slow" and "this file was cold".
     if let Some(place) = at(&text, "b_fnum", 0) {
         let started = Instant::now();
-        let _ = server.request(
-            950_001,
-            "textDocument/hover",
-            position(&source_uri, place),
+        let _ = server.request(950_001, "textDocument/hover", position(&source_uri, place));
+        println!(
+            "again: hover (macro member)     {} ms",
+            started.elapsed().as_millis()
         );
-        println!("again: hover (macro member)     {} ms", started.elapsed().as_millis());
     }
     if let Some(place) = at(&text, "addr_count", 0) {
         let started = Instant::now();
@@ -750,7 +747,10 @@ fn a_classic_c_file_answers_what_it_holds() {
             "textDocument/definition",
             position(&source_uri, place),
         );
-        println!("again: definition (member)      {} ms", started.elapsed().as_millis());
+        println!(
+            "again: definition (member)      {} ms",
+            started.elapsed().as_millis()
+        );
     }
     if let Some(place) = after_the_operator(&text, "do_argfile(eap", 0) {
         let started = Instant::now();
@@ -762,7 +762,10 @@ fn a_classic_c_file_answers_what_it_holds() {
                 "position": { "line": place.line, "character": place.character },
             }),
         );
-        println!("again: signatureHelp           {} ms", started.elapsed().as_millis());
+        println!(
+            "again: signatureHelp           {} ms",
+            started.elapsed().as_millis()
+        );
     }
 
     // **The rendering is what made two of those rows possible**, and saying how long the table took is the difference

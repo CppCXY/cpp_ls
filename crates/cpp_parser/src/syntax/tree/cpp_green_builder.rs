@@ -17,6 +17,7 @@ use crate::{
 /// out of sync with the parser's marker stack; the flat list keeps that property for the same reason, since a node's
 /// span is still exactly what its `start_node` recorded, and the index arithmetic is confined to this one file.
 #[derive(Debug, Clone)]
+#[derive(Default)]
 enum CppGreenElement {
     Node {
         kind: CppSyntaxKind,
@@ -29,14 +30,10 @@ enum CppGreenElement {
     },
     /// A slot whose element has been taken. Never emitted: it exists so that a taken element does not shift the
     /// indices of the ones around it.
+    #[default]
     Gap,
 }
 
-impl Default for CppGreenElement {
-    fn default() -> Self {
-        CppGreenElement::Gap
-    }
-}
 
 /// A builder for a rowan green tree specialised for C++.
 ///

@@ -186,7 +186,7 @@ where
                     // under the class's name. Without this the popup was empty for the most ordinary line of code
                     // there is, in every header the session has not cooked.
                     let from_the_index =
-                        constructors_in_the_index(index, &view.path, &spelling, active);
+                        constructors_in_the_index(index, &view.path, spelling, active);
                     if !from_the_index.is_empty() {
                         signatures.extend(from_the_index);
                         rankable.push((Vec::new(), Vec::new()));
@@ -217,7 +217,7 @@ where
         // while the hover on `LuaParser` listed the two constructors with their parameters. A constructor's list is a
         // fact, so the popup can be built from facts alone — the same fallback as `candidate.parameters` below.
         if sources.is_empty() && candidate.parameters.is_none() {
-            let from_the_index = constructors_in_the_index(index, &view.path, &spelling, active);
+            let from_the_index = constructors_in_the_index(index, &view.path, spelling, active);
             if !from_the_index.is_empty() {
                 signatures.extend(from_the_index);
                 rankable.push((Vec::new(), Vec::new()));
@@ -435,12 +435,12 @@ fn constructors_of(declared_in: &FileView, name_offset: usize) -> Vec<Callee> {
             .descendants_with_tokens()
             .filter_map(|element| element.into_token())
             .find(|token| {
-                CppTokenKind::from(CppKind::from(token.kind())) == CppTokenKind::Identifier
+                CppTokenKind::from(token.kind()) == CppTokenKind::Identifier
             })
         else {
             continue;
         };
-        if name.text().to_string() != class_name {
+        if name.text() != class_name {
             continue;
         }
         constructors.push(Callee {

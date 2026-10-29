@@ -2730,11 +2730,18 @@ fn an_arrow_on_a_pointer_inserts_the_name_and_not_the_operator() {
     let text = "struct Widget { int size; int length; };\nvoid f()\n{\nWidget * p;\np->\n}\n";
     let (mut session, view) = a_pointer_fixture(text);
     let at = text.find("p->").expect("the fixture writes it") + 3;
-    let set = session.completions(&view, cpp_code_analysis::file::coordinates::FileOffset::new(at));
+    let set = session.completions(
+        &view,
+        cpp_code_analysis::file::coordinates::FileOffset::new(at),
+    );
 
     let mut labels: Vec<String> = set.items.iter().map(|item| item.label.clone()).collect();
     labels.sort_unstable();
-    assert_eq!(labels, ["length", "size"], "the pointee's members, not names: {set:?}");
+    assert_eq!(
+        labels,
+        ["length", "size"],
+        "the pointee's members, not names: {set:?}"
+    );
     for item in &set.items {
         assert_eq!(
             item.insert, item.label,
@@ -2758,10 +2765,16 @@ fn a_dot_on_a_pointer_still_rewrites_the_operator() {
     let text = "struct Widget { int size; };\nvoid f()\n{\nWidget * p;\np.\n}\n";
     let (mut session, view) = a_pointer_fixture(text);
     let at = text.find("p.\n").expect("the fixture writes it") + 2;
-    let set = session.completions(&view, cpp_code_analysis::file::coordinates::FileOffset::new(at));
+    let set = session.completions(
+        &view,
+        cpp_code_analysis::file::coordinates::FileOffset::new(at),
+    );
 
     assert_eq!(set.items.len(), 1, "one member: {set:?}");
-    assert_eq!(set.items[0].insert, "->size", "the operator is part of the insertion");
+    assert_eq!(
+        set.items[0].insert, "->size",
+        "the operator is part of the insertion"
+    );
     assert_eq!(
         (set.replace.start_offset, set.replace.length),
         (at - 1, 1),
@@ -2813,7 +2826,10 @@ task<int> use() {
 ";
     let (mut session, view) = a_pointer_fixture(text);
     let at = text.find("    s.\n").expect("the fixture writes it") + 6;
-    let set = session.completions(&view, cpp_code_analysis::file::coordinates::FileOffset::new(at));
+    let set = session.completions(
+        &view,
+        cpp_code_analysis::file::coordinates::FileOffset::new(at),
+    );
 
     let mut labels: Vec<String> = set.items.iter().map(|item| item.label.clone()).collect();
     labels.sort_unstable();
@@ -2942,7 +2958,10 @@ void f() { enable_if_t<true, payload> p{}; p. }
 fn member_labels_at(source: &'static str, needle: &str) -> Vec<String> {
     let (mut session, view) = a_pointer_fixture(source);
     let at = source.find(needle).expect("the fixture writes it") + needle.len();
-    let set = session.completions(&view, cpp_code_analysis::file::coordinates::FileOffset::new(at));
+    let set = session.completions(
+        &view,
+        cpp_code_analysis::file::coordinates::FileOffset::new(at),
+    );
     let mut labels: Vec<String> = set.items.iter().map(|item| item.label.clone()).collect();
     labels.sort_unstable();
     labels

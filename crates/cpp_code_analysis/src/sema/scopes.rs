@@ -1937,7 +1937,7 @@ impl ScopeWalker<'_> {
                 // The second is right; the first included a newline that belongs to the file. Trimmed here rather
                 // than narrowed to the name, because [`crate::DeclFact::range`] is documented as *"the whole
                 // declaration, for a go-to-definition highlight"* — that is the answer callers want, minus the trivia.
-                range: without_trailing_trivia(&node),
+                range: without_trailing_trivia(node),
                 name_range,
                 scope,
                 origin: None,

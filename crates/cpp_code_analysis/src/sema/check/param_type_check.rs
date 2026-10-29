@@ -53,7 +53,7 @@ impl Check for ParamTypeCheck {
         // **This file's own functions** - see CheckContext::own_syntax_nodes.
         for function in context
             .own_syntax_nodes()
-            .filter(|node| super::is_a_function_definition(node))
+            .filter(super::is_a_function_definition)
             .collect::<Vec<_>>()
         {
             let Some(name) = super::name_declared_by(&function) else {
@@ -68,12 +68,15 @@ impl Check for ParamTypeCheck {
                 .iter()
                 .map(|spelling| crate::sema::overload::a_type_without_its_name(spelling))
                 .collect();
-            if by_name.contains_key(&name) {
-                // **A second declaration of one name is an overload set** — see the module documentation. `None`
-                // is the mark, and the call loop below skips those names without asking anything else.
-                by_name.insert(name, None);
-            } else {
-                by_name.insert(name, Some(parameters));
+            match by_name.entry(name) {
+                std::collections::hash_map::Entry::Occupied(mut e) => {
+                    // **A second declaration of one name is an overload set** — see the module documentation. `None`
+                    // is the mark, and the call loop below skips those names without asking anything else.
+                    e.insert(None);
+                }
+                std::collections::hash_map::Entry::Vacant(e) => {
+                    e.insert(Some(parameters));
+                }
             }
         }
 

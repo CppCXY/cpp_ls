@@ -9,7 +9,9 @@
 //! `a_hover_names_the_instantiation_and_never_invents_a_void` for the two hover reports, and
 //! `the_two_reported_hovers_answer_on_the_project_they_came_from` for the project they came from).
 
-use cpp_code_analysis::{CompilerConfig, MemoryFiles, OpenDocuments, Session, SessionFiles, WatchFilter};
+use cpp_code_analysis::{
+    CompilerConfig, MemoryFiles, OpenDocuments, Session, SessionFiles, WatchFilter,
+};
 
 fn session_with(files: &[(&str, &str)]) -> Session<MemoryFiles> {
     let mut memory = MemoryFiles::new();
@@ -23,7 +25,11 @@ fn session_with(files: &[(&str, &str)]) -> Session<MemoryFiles> {
         WatchFilter::new("/p"),
         CompilerConfig::default(),
     );
-    session.add_project_files(files.iter().map(|(path, _)| std::path::PathBuf::from(*path)));
+    session.add_project_files(
+        files
+            .iter()
+            .map(|(path, _)| std::path::PathBuf::from(*path)),
+    );
     for (path, _) in files {
         session.want_cooked_reading(std::path::Path::new(path));
     }

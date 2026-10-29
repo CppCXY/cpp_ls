@@ -684,7 +684,7 @@ impl CacheDb {
     /// How many rows each table holds, and how large the file is — the numbers a probe prints.
     pub fn sizes(&self) -> Result<DatabaseSizes> {
         let read = self.database.begin_read()?;
-        let count = |length: usize| length as usize;
+        let count = |length: usize| length;
         Ok(DatabaseSizes {
             files: count(read.open_table(FILES)?.len()? as usize),
             summaries: count(read.open_table(SUMMARIES)?.len()? as usize),
@@ -813,7 +813,7 @@ impl SummaryCache {
         };
         pending.0.push((cache_key, bytes));
         if pending.0.len() >= BATCH {
-            flush(&self.database, &mut *pending);
+            flush(&self.database, &mut pending);
         }
     }
 
@@ -851,7 +851,7 @@ impl SummaryCache {
     /// Commit whatever the buffer holds — the end of a slice.
     pub fn flush(&self) {
         if let Ok(mut pending) = self.pending.lock() {
-            flush(&self.database, &mut *pending);
+            flush(&self.database, &mut pending);
         }
     }
 

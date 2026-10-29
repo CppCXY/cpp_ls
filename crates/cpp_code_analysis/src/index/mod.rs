@@ -717,9 +717,8 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
             // [`preprocess_with`], which is where the rule and its cost are stated.
             match self.seed {
                 Some(seed) => {
-                    let started =
-                        crate::preprocess::preprocess_with_a_seed(source, tree.get_tokens(), seed);
-                    started
+                    
+                    crate::preprocess::preprocess_with_a_seed(source, tree.get_tokens(), seed)
                 }
                 None => crate::preprocess::preprocess(source, tree.get_tokens()),
             }

@@ -339,7 +339,9 @@ pub fn completion_with(
     // everything below is the query's own work, and the server's log line splits only the outside of it
     // (`view`/`completions`). Opt-in, on `CPPLS_TRACE_COMPLETION`, like this crate's other traces — see
 
-    let answer = match context {
+    
+
+    match context {
         CompletionContext::Nothing => CompletionSet {
             replace: SourceRange::new(offset, 0),
             ..CompletionSet::default()
@@ -394,9 +396,7 @@ pub fn completion_with(
             range,
             wants,
         } => doc_comments(index, path, &written, range, wants),
-    };
-
-    answer
+    }
 }
 
 /// **What the completion made of a cursor** — the one diagnosis this layer is worth logging.
@@ -537,12 +537,10 @@ pub(crate) fn the_class_after_the_operator(
             }
             continue;
         }
-        match current.pointee() {
-            Some(pointee) => {
-                followed_a_pointer = true;
-                current = (*pointee).clone();
-            }
-            None => return None,
+        {
+            let pointee = current.pointee()?;
+            followed_a_pointer = true;
+            current = (*pointee).clone();
         }
     }
     current

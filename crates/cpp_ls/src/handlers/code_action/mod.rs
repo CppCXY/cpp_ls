@@ -182,8 +182,7 @@ impl<F: FileProvider + Clone> FixContext<'_, F> {
                             TextEdit {
                                 range: Range { start: at, end: at },
                                 new_text: text,
-                            }
-                            .into(),
+                            },
                         )],
                     },
                 ])),

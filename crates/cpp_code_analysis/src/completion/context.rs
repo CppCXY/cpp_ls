@@ -220,7 +220,7 @@ pub fn doc_comment_at(root: &CppSyntaxNode, offset: usize) -> Option<CompletionC
         // on, and `/**`/`/*!` is what makes it documentation.
         match (before.rfind("/*"), before.rfind("*/")) {
             (Some(opened), closed) => {
-                let still_open = closed.map_or(true, |closed| closed < opened);
+                let still_open = closed.is_none_or(|closed| closed < opened);
                 still_open
                     && (before[opened..].starts_with("/**") || before[opened..].starts_with("/*!"))
             }

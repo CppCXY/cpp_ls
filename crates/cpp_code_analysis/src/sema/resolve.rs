@@ -496,11 +496,10 @@ pub fn name_position_at(root: &CppSyntaxNode, offset: usize) -> Option<NamePosit
             return None;
         }
 
-        if let Some(token) = cpp_parser::token_at(root, offset) {
-            if inside_a_comment_or_a_literal(&token) {
+        if let Some(token) = cpp_parser::token_at(root, offset)
+            && inside_a_comment_or_a_literal(&token) {
                 return None;
             }
-        }
 
         // **The word being typed is read from the token stream when no name node holds it.**
         //

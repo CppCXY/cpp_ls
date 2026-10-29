@@ -784,7 +784,8 @@ fn a_comma_expression_inside_a_parenthesised_initializer_parses() {
 /// start of a line begins a statement rather than continuing the failed one.
 #[test]
 fn a_member_name_is_not_on_the_next_line() {
-    let source = "struct Widget { int size; };\nvoid f()\n{\nWidget * p;\np->\n\nWidget w;\nw.size;\n}\n";
+    let source =
+        "struct Widget { int size; };\nvoid f()\n{\nWidget * p;\np->\n\nWidget w;\nw.size;\n}\n";
     let tree = CppParser::parse(source, ParserConfig::default());
     let body = tree
         .get_red_root()

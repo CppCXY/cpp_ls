@@ -74,7 +74,7 @@ pub async fn on_goto_implementation(
         let mut seen: Vec<(String, String)> = Vec::new();
         found.retain(|location| {
             let key = (location.uri.to_string(), format!("{:?}", location.range));
-            if seen.iter().any(|held| *held == key) {
+            if seen.contains(&key) {
                 false
             } else {
                 seen.push(key);
@@ -193,11 +193,10 @@ pub fn implementations_of<F: FileProvider + Clone>(
     let mut owners: Vec<String> = Vec::new();
     for (_, summary) in &summaries {
         for fact in &summary.declarations {
-            if fact.name == name {
-                if let Some(scope) = fact.scope.as_deref() {
+            if fact.name == name
+                && let Some(scope) = fact.scope.as_deref() {
                     owners.push(last_segment(scope).to_string());
                 }
-            }
         }
     }
 

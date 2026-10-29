@@ -1811,8 +1811,10 @@ fn parse_postfix_suffixes(
                 // the start of a line), not after it — so a member on the next line is a shape no real file has
                 // and an incomplete edit is the shape millions of files have. The access simply ends here and
                 // the missing-name branch below says what is missing.
-                let same_line =
-                    p.lines_between(operator_range.end_offset(), p.current_token_range().start_offset) == 0;
+                let same_line = p.lines_between(
+                    operator_range.end_offset(),
+                    p.current_token_range().start_offset,
+                ) == 0;
 
                 // `decltype(t)::template rebind<U>` and `x.template rebind<U>` are the same disambiguator as the
                 // one in the qualified-name loop below: `template` marks the `<` after the name as the start of
@@ -2505,11 +2507,9 @@ fn parse_primary_expr(p: &mut CppParser, fold_operand: bool) -> ParseResult {
                 // everything it accepts is checked below — which also means it no longer has to be exact.
                 if p.current_token() == CppTokenKind::Less
                     && types::could_start_template_arguments(p)
-                {
-                    if !read_a_template_id_here(p) {
+                    && !read_a_template_id_here(p) {
                         break;
                     }
-                }
 
                 if p.current_token() == CppTokenKind::Scope {
                     p.bump();

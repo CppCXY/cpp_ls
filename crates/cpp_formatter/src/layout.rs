@@ -295,20 +295,17 @@ pub fn template_angles(stream: &Stream<'_>, roles: &Roles) -> Vec<bool> {
     for index in 0..stream.tokens.len() {
         if stream.tokens[index].kind == cpp_parser::CppTokenKind::Less
             && roles.is_template_angle(stream.tokens[index].start)
-        {
-            if let Some(close) = matching_angle(stream, index) {
+            && let Some(close) = matching_angle(stream, index) {
                 angles[index] = true;
                 angles[close] = true;
             }
-        }
     }
     for index in 0..stream.tokens.len() {
-        if stream.tokens[index].kind == cpp_parser::CppTokenKind::Less && !angles[index] {
-            if let Some(close) = matching_angle(stream, index) {
+        if stream.tokens[index].kind == cpp_parser::CppTokenKind::Less && !angles[index]
+            && let Some(close) = matching_angle(stream, index) {
                 angles[index] = true;
                 angles[close] = true;
             }
-        }
     }
     angles
 }

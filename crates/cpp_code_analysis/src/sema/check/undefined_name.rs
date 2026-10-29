@@ -67,10 +67,7 @@ impl Check for UndefinedName {
             let at = usize::from(token.text_range().start());
 
             // A keyword is not a name: `this->size` and, in some grammars, `super`.
-            if matches!(
-                CppTokenKind::from(token.kind()),
-                CppTokenKind::ThisKeyword
-            ) {
+            if matches!(CppTokenKind::from(token.kind()), CppTokenKind::ThisKeyword) {
                 continue;
             }
 
@@ -96,7 +93,10 @@ impl Check for UndefinedName {
                 DiagnosticCode::UndefinedName,
                 cpp_parser::source_range(token.text_range()),
                 name.clone(),
-                t!("`%{name}` is not declared: nothing this file can see names it", name = name),
+                t!(
+                    "`%{name}` is not declared: nothing this file can see names it",
+                    name = name
+                ),
             );
         }
 
@@ -148,7 +148,10 @@ impl Check for UndefinedName {
                 DiagnosticCode::UndefinedName,
                 cpp_parser::source_range(token.text_range()),
                 name.clone(),
-                t!("`%{name}` is not declared: nothing this file can see names it", name = name),
+                t!(
+                    "`%{name}` is not declared: nothing this file can see names it",
+                    name = name
+                ),
             );
         }
     }
@@ -177,16 +180,13 @@ fn an_argument_may_take_part_in_adl(
 /// **A type spelling the language already knows** — the ones with no associated namespace.
 fn is_a_builtin_spelling(written: &str) -> bool {
     const BUILTIN: &[&str] = &[
-        "void", "bool", "char", "char8_t", "char16_t", "char32_t", "wchar_t", "short", "int", "long",
-        "float", "double", "signed", "unsigned",
+        "void", "bool", "char", "char8_t", "char16_t", "char32_t", "wchar_t", "short", "int",
+        "long", "float", "double", "signed", "unsigned",
     ];
     written
         .split(|character: char| !character.is_alphanumeric() && character != '_')
         .filter(|word| !word.is_empty())
-        .all(|word| {
-            BUILTIN.contains(&word)
-                || matches!(word, "const" | "volatile" | "constexpr")
-        })
+        .all(|word| BUILTIN.contains(&word) || matches!(word, "const" | "volatile" | "constexpr"))
 }
 
 /// **The single identifier an expression is written as**, or `None` — see the call site.
@@ -244,18 +244,13 @@ fn in_a_lambda(context: &CheckContext<'_>, at: usize) -> bool {
     let Some(scope) = context.model.scopes().scope_at(at) else {
         return false;
     };
-    context
-        .model
-        .scopes()
-        .scope_chain(scope)
-        .iter()
-        .any(|id| {
-            context
-                .model
-                .scopes()
-                .scope(*id)
-                .is_some_and(|data| data.kind == crate::ScopeKind::Lambda)
-        })
+    context.model.scopes().scope_chain(scope).iter().any(|id| {
+        context
+            .model
+            .scopes()
+            .scope(*id)
+            .is_some_and(|data| data.kind == crate::ScopeKind::Lambda)
+    })
 }
 
 /// **Does anything name `name` where this use is written?**
@@ -271,7 +266,8 @@ fn a_declaration_is_visible(context: &CheckContext<'_>, name: &str, at: usize) -
             };
             // A class body is a *complete-class context*: everything it declares is visible everywhere inside it,
             // including a member written after the function that uses it. Every other scope is read top to bottom.
-            let from_anywhere = matches!(data.kind, crate::ScopeKind::Class | crate::ScopeKind::Enum);
+            let from_anywhere =
+                matches!(data.kind, crate::ScopeKind::Class | crate::ScopeKind::Enum);
             for binding in &data.bindings {
                 if binding.name.identifier_text() != Some(name) {
                     continue;

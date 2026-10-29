@@ -35,10 +35,7 @@ use std::time::Instant;
 use cpp_code_analysis::{DiskFiles, Known, OpenDocuments, Session, SessionFiles, WatchFilter};
 
 fn project() -> PathBuf {
-    PathBuf::from(
-        std::env::var("CPPLS_REAL_PROJECT")
-            .unwrap_or_else(|_| r"E:\clice".to_string()),
-    )
+    PathBuf::from(std::env::var("CPPLS_REAL_PROJECT").unwrap_or_else(|_| r"E:\clice".to_string()))
 }
 
 fn entry(root: &std::path::Path) -> PathBuf {

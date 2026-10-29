@@ -1755,7 +1755,9 @@ fn direct_members(
         && let Some(data) = scopes.scope(scope)
     {
         let shapes = crate::sema::declarations::DeclarationShapes::of(root);
-        let qualified = scopes.qualified_name_of(scope).unwrap_or_else(|| class.to_string());
+        let qualified = scopes
+            .qualified_name_of(scope)
+            .unwrap_or_else(|| class.to_string());
         return Known::Yes(
             data.bindings
                 .iter()
@@ -1844,10 +1846,7 @@ fn direct_members(
 ///
 /// A table with two of them is an ambiguity and answers `None`: guessing between two nested classes named `inner`
 /// would make a member list about a class the reader did not write, and a wrong member list is worse than no list.
-fn a_class_nested_in_another(
-    scopes: &crate::ScopeTree,
-    class: &str,
-) -> Option<crate::ScopeId> {
+fn a_class_nested_in_another(scopes: &crate::ScopeTree, class: &str) -> Option<crate::ScopeId> {
     let mut found = None;
     for (index, scope) in scopes.scopes().iter().enumerate() {
         if scope.kind != crate::ScopeKind::Class || scope.name.as_deref() != Some(class) {
@@ -2384,8 +2383,8 @@ pub fn name_completions_traced(
     path: &Path,
     offset: usize,
 ) -> Known<NameCompletions> {
-    let answer = name_completions_at(index, scopes, root, path, offset);
-    answer
+    
+    name_completions_at(index, scopes, root, path, offset)
 }
 
 /// Every name visible from a cursor with no qualifier written: the scope chain, then the index.
@@ -3420,11 +3419,25 @@ fn type_of_expression_inner(
     // rather than wrong.
     if let Some(operand) = a_co_awaits_operand(expression) {
         let awaited = type_of_expression_memoed(
-            memo, index, declaring, scopes, root, path, &operand, depth + 1,
+            memo,
+            index,
+            declaring,
+            scopes,
+            root,
+            path,
+            &operand,
+            depth + 1,
         );
         if let Known::Yes((awaiter, _)) = awaited
-            && let Some(returns) =
-                operator_returns_of(index, declaring, scopes, root, path, &awaiter, "await_resume")
+            && let Some(returns) = operator_returns_of(
+                index,
+                declaring,
+                scopes,
+                root,
+                path,
+                &awaiter,
+                "await_resume",
+            )
             && !returns.trim().is_empty()
         {
             let settled = crate::sema::types::parse_type_spelling(&returns);
@@ -4547,7 +4560,7 @@ pub(crate) fn operator_returns_of(
         }
     }
 
-    let class_view = class_file.as_deref().and_then(|at| (declaring)(at));
+    let class_view = class_file.as_deref().and_then((declaring));
     let (class_scopes, class_root, class_path) = match &class_view {
         Some(view) => (&view.scopes, &view.root, view.path.as_path()),
         None => (scopes, root, path),
@@ -4621,9 +4634,11 @@ fn a_co_awaits_operand(
         return None;
     }
     let mut children = expression.children_with_tokens();
-    let keyword = children.find_map(|element| element.into_token()).filter(|token| {
-        cpp_parser::CppTokenKind::from(token.kind()) == cpp_parser::CppTokenKind::CoAwaitKeyword
-    })?;
+    let keyword = children
+        .find_map(|element| element.into_token())
+        .filter(|token| {
+            cpp_parser::CppTokenKind::from(token.kind()) == cpp_parser::CppTokenKind::CoAwaitKeyword
+        })?;
     let _ = keyword;
     children.find_map(|element| element.into_node())
 }
@@ -5520,7 +5535,7 @@ fn range_element_of(container: &Type) -> Option<String> {
 
     // The same allowance for the one-argument containers: a `vector<T, Alloc>` and a `set<K, Compare>` are the same
     // element as their one-argument spellings.
-    if arguments.len() >= 1
+    if !arguments.is_empty()
         && matches!(
             plain,
             "vector"
@@ -6058,7 +6073,7 @@ fn deduce_the_parameters(
     written_list: Option<&str>,
     argument_types: &[Type],
 ) -> Vec<Type> {
-    let mut deduced: Vec<Type> = names.iter().map(|name| Type::named(name)).collect();
+    let mut deduced: Vec<Type> = names.iter().map(Type::named).collect();
     if names.is_empty() || argument_types.is_empty() {
         return deduced;
     }
@@ -7869,13 +7884,12 @@ fn member_fact_inner(
     // class is found.
     if !class.contains("::") {
         let bare = without_arguments(class);
-        if let Some(declared_in) = qualified_from_the_index(index, path, bare) {
-            if let Some(found) =
+        if let Some(declared_in) = qualified_from_the_index(index, path, bare)
+            && let Some(found) =
                 direct_member(index, scopes, root, path, &declared_in, member, arguments)
             {
                 return Known::Yes(found);
             }
-        }
     }
 
     // Inherited members, **level by level**: a member of a direct base hides a member of that base's own base,
@@ -7891,7 +7905,7 @@ fn member_fact_inner(
     // looked up by", and asking "who declares `_Tp`" is a whole-index name query. Measured on `LuaSyntaxTree.cpp`,
     // `member_fact(std::vector, size_t)` — a member the class does not have — cost **370–389 ms** per call, eight
     // times, which was 2 280 ms of the file's inference.
-    let parameters = class_template_parameters(index, scopes, root, path, &class);
+    let parameters = class_template_parameters(index, scopes, root, path, class);
     let mut level: Vec<(String, String)> = bases_of(index, scopes, root, path, class)
         .value()
         .unwrap_or_default()
@@ -8823,8 +8837,8 @@ fn bases_of(
     path: &Path,
     class: &str,
 ) -> Known<Vec<String>> {
-    let answer = bases_of_inner(index, scopes, root, path, class);
-    answer
+    
+    bases_of_inner(index, scopes, root, path, class)
 }
 
 fn bases_of_inner(
@@ -9091,7 +9105,6 @@ fn the_trailing_argument_list(written: &str) -> Option<usize> {
 }
 
 pub(crate) fn base_type_name(written: &str) -> &str {
-
     let mut name = written.trim();
 
     // **Template arguments, and only the ones at the END of the spelling.**
@@ -11069,15 +11082,15 @@ impl ProjectIndex {
             }
         }
 
-        let files = order
+        
+
+        order
             .into_iter()
             .filter_map(|path| {
                 best.get(&path)
                     .map(|visibility| (path.clone(), *visibility))
             })
-            .collect();
-
-        files
+            .collect()
     }
 
     /// Which declaration a name written in `visible_from` refers to, across the project.
@@ -11611,7 +11624,7 @@ impl ProjectIndex {
                 // missing: only *aliases* were followed (`type_of` is an alias's target), while a `using`-declared
                 // enum has no target at all and its `qualified_name` is the only spelling its members are stored
                 // under.
-                if let Some(qualified) = self.qualified_name_of_the_entity(&alias.fact, &prefix) {
+                if let Some(qualified) = self.qualified_name_of_the_entity(alias.fact, &prefix) {
                     return Some(format!("{qualified}::{}", segments[take..].join("::")));
                 }
 

@@ -3803,7 +3803,7 @@ impl<F: FileProvider + Clone> Session<F> {
             .known_macros_of(&file.path, &file.text)
             .unwrap_or_default();
         Some(FileView::parse_with_cuda(
-            &file,
+            file,
             macros.as_ref(),
             self.config.cuda(),
         ))
@@ -4340,7 +4340,7 @@ impl<F: FileProvider + Clone> Session<F> {
             config,
             // **The language this file is compiled as**, which is what makes a C-only rule quiet in C: the compile flags say
             // `-std=c11`, and `cstyle_cast` is then not a rule about this file at all.
-            self.config_for(&key).language_for(&key),
+            self.config_for(key).language_for(key),
         ))
     }
 
@@ -5977,9 +5977,7 @@ impl<F: FileProvider + Clone> Session<F> {
                 self.unit_and_state_of(&path)?.0
             }
         };
-        if unit.environment_of(&path).is_none() {
-            return None;
-        }
+        unit.environment_of(&path)?;
 
         let text = self.files.read(&path)?;
         let text_hash = crate::cache::content_hash(&text);
@@ -6916,11 +6914,10 @@ impl<F: FileProvider + Clone> Session<F> {
         // of, so a cursor in one arrives at the scope walk as an ordinary position and the answer is the file's names,
         // offered into a sentence. Measured: `a_comment_and_a_literal_offer_nothing` failed against this query while
         // `completions` was already refusing.
-        if let Some(written) = view.written_text() {
-            if crate::file::view::in_prose(written, offset.get()) {
+        if let Some(written) = view.written_text()
+            && crate::file::view::in_prose(written, offset.get()) {
                 return Known::Unknown(UnknownReason::NotDeclaredHere(Box::from("")));
             }
-        }
 
         let Some(offset) = view.reading_offset_of(offset) else {
             // The cursor is not in the rendering at all — in a region a macro replaced, or past its end. There is no
@@ -7309,7 +7306,7 @@ impl<F: FileProvider + Clone> Session<F> {
             };
             let end = view
                 .file_offset_of(ReadingOffset::new(name.range.end_offset()))
-                .map_or(start, |end| end);
+                .unwrap_or(start);
             name.range =
                 cpp_parser::SourceRange::new(start.get(), end.get().saturating_sub(start.get()));
             placed.push(name);

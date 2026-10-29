@@ -37,12 +37,9 @@ fn project() -> PathBuf {
 fn a_split_return_type_is_read_from_the_rendering() {
     let project = project();
     // The header this project's `<vector>` resolves to — the same one the report's popup showed.
-    let header = PathBuf::from(
-        std::env::var("CPPLS_STL_HEADER").unwrap_or_else(|_| {
-            r"C:\mingw64\lib\gcc\x86_64-w64-mingw32\15.1.0\include\c++\bits\stl_bvector.h"
-                .to_string()
-        }),
-    );
+    let header = PathBuf::from(std::env::var("CPPLS_STL_HEADER").unwrap_or_else(|_| {
+        r"C:\mingw64\lib\gcc\x86_64-w64-mingw32\15.1.0\include\c++\bits\stl_bvector.h".to_string()
+    }));
 
     let mut session = Session::open(
         project.clone(),
@@ -126,12 +123,9 @@ fn a_split_return_type_is_read_from_the_rendering() {
 #[ignore = "opens a real project; run with --ignored"]
 fn a_dead_branch_is_not_an_answer() {
     let project = project();
-    let header = std::path::PathBuf::from(
-        std::env::var("CPPLS_STL_VECTOR").unwrap_or_else(|_| {
-            r"C:\mingw64\lib\gcc\x86_64-w64-mingw32\15.1.0\include\c++\bits\stl_vector.h"
-                .to_string()
-        }),
-    );
+    let header = std::path::PathBuf::from(std::env::var("CPPLS_STL_VECTOR").unwrap_or_else(|_| {
+        r"C:\mingw64\lib\gcc\x86_64-w64-mingw32\15.1.0\include\c++\bits\stl_vector.h".to_string()
+    }));
 
     let mut session = Session::open(
         project.clone(),
@@ -186,12 +180,9 @@ fn a_dead_branch_is_not_an_answer() {
 #[ignore = "opens a real project; run with --ignored"]
 fn the_rendering_is_the_reading() {
     let project = project();
-    let header = std::path::PathBuf::from(
-        std::env::var("CPPLS_STL_HEADER").unwrap_or_else(|_| {
-            r"C:\mingw64\lib\gcc\x86_64-w64-mingw32\15.1.0\include\c++\bits\stl_bvector.h"
-                .to_string()
-        }),
-    );
+    let header = std::path::PathBuf::from(std::env::var("CPPLS_STL_HEADER").unwrap_or_else(|_| {
+        r"C:\mingw64\lib\gcc\x86_64-w64-mingw32\15.1.0\include\c++\bits\stl_bvector.h".to_string()
+    }));
     let text = std::fs::read_to_string(&header).expect("the header reads");
 
     let mut session = Session::open(

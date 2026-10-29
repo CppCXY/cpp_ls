@@ -431,8 +431,8 @@ impl<'a> CppParser<'a> {
     /// all of `text` (invariant I1). Problems are reported through [`CppSyntaxTree::get_errors`]
     /// and through `ErrorNode`/`MissingNode` nodes, not through a `Result`.
     pub fn parse(text: &'a str, config: ParserConfig<'a>) -> CppSyntaxTree {
-        let tree = Self::parse_inner(text, config).0;
-        tree
+        
+        Self::parse_inner(text, config).0
     }
 
     /// Like [`CppParser::parse`], but also reports the raw event stream's balance.
@@ -885,7 +885,7 @@ impl<'a> CppParser<'a> {
             let Some(token) = self.tokens.get(index) else {
                 return false;
             };
-            let kind = CppTokenKind::from(token.kind);
+            let kind = token.kind;
             index += 1;
             if crate::is_trivia(kind) {
                 continue;

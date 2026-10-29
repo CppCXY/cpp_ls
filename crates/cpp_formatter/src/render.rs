@@ -728,11 +728,9 @@ fn planned_indent(
                 | cpp_parser::CppTokenKind::LeftBrace
                 | cpp_parser::CppTokenKind::RightBrace
         )
-    {
-        if let Some(indent) = blocks[index - 1] {
+        && let Some(indent) = blocks[index - 1] {
             return Some((indent, true));
         }
-    }
     if matches!(
         stream.tokens[index].kind,
         cpp_parser::CppTokenKind::LeftShift | cpp_parser::CppTokenKind::RightShift

@@ -298,7 +298,7 @@ fn joining_would_merge(left: &str, right: &str) -> bool {
     match tokens.first() {
         // **By range, not by text**: a lexer token carries where it is rather than what it says, and "the first
         // token is exactly the left spelling" is the same claim as "the first token ends where the left one does".
-        Some(first) => usize::from(first.range.end_offset()) != left.len(),
+        Some(first) => first.range.end_offset() != left.len(),
         // A join that lexes to nothing is one the lexer refused; separating is the direction that cannot invent a
         // token, so the answer is that it would.
         None => true,
@@ -1418,8 +1418,8 @@ pub fn cook_with_search(
                         .push((*kind, message.clone(), spanned.range.start_offset));
                 }
             }
-            DirectiveKind::Pragma => {
-                if was_live {
+            DirectiveKind::Pragma
+                if was_live => {
                     let first = tokens.partition_point(|token| {
                         token.range.start_offset < spanned.range.start_offset
                     });
@@ -1440,7 +1440,6 @@ pub fn cook_with_search(
                         }
                     }
                 }
-            }
             _ => {}
         }
 

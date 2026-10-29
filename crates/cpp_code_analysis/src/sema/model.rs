@@ -197,7 +197,7 @@ impl<'a> SemanticModel<'a> {
     fn members_of_uncached(&self, class: &str) -> Known<MemberList> {
         let listed = project::members_of(self.index, self.scopes, self.root, self.path, class);
         // **The class's arguments, written through its members** — see [`project::substituted_members`].
-        project::substituted_members(self.index, &self.path, class, listed)
+        project::substituted_members(self.index, self.path, class, listed)
     }
 
     /// **The class a `->` reaches, and whether a pointer was followed to get there.**

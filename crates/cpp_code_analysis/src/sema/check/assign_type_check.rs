@@ -265,14 +265,11 @@ fn report_if_it_does_not_convert(
     // **One facility, shared with `param-type-check`** — `sema::convert` normalises the spelling (a `const std::string&`
     // assignment target is `Reference { to: Named(..) }`, and `class_name()` answers `None` for a reference), asks the type
     // relation first and the index only for the class question, and answers `Unknown` — silence — when neither can speak.
-    match crate::sema::convert::conversion(&from, written, |class| {
+    if crate::sema::convert::conversion(&from, written, |class| {
         super::a_class_can_be_built_from(context, class, &from)
-    }) {
-        crate::sema::convert::Conversion::Refused => {
-            report(context, expression, name, how, written);
-            return;
-        }
-        _ => {}
+    }) == crate::sema::convert::Conversion::Refused {
+        report(context, expression, name, how, written);
+        return;
     }
 
     // **The class case, which the conversion relation cannot answer.** `convertible_to` lives in the type engine and
@@ -284,7 +281,7 @@ fn report_if_it_does_not_convert(
     // query holds one file and the parameters are written in another — so the answer is a fact the cook already
     // produced rather than a walk over a rendered header. A class from `<string>` is as answerable as one written two
     // lines up, which is the point: **the finding is about this file, the knowledge is the project's.**
-    if super::a_class_can_be_built_from(context, &target.class_name().unwrap_or_default(), &from)
+    if super::a_class_can_be_built_from(context, target.class_name().unwrap_or_default(), &from)
         == Some(false)
     {
         report(context, expression, name, how, written);

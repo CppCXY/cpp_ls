@@ -185,7 +185,10 @@ impl Server {
             return Vec::new();
         };
         let mut lines = Vec::new();
-        let mut paths: Vec<_> = entries.filter_map(Result::ok).map(|entry| entry.path()).collect();
+        let mut paths: Vec<_> = entries
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .collect();
         paths.sort();
         for path in paths {
             let Ok(text) = std::fs::read_to_string(path) else {
@@ -365,7 +368,10 @@ fn the_two_reported_hovers_answer_on_the_project_they_came_from() {
     let lexer_text = std::fs::read_to_string(&lexer).expect("the file reads");
     let define_text = std::fs::read_to_string(&define).expect("the file reads");
     let lexer_uri = format!("file:///{}", lexer.display().to_string().replace('\\', "/"));
-    let define_uri = format!("file:///{}", define.display().to_string().replace('\\', "/"));
+    let define_uri = format!(
+        "file:///{}",
+        define.display().to_string().replace('\\', "/")
+    );
 
     // Where the two names are written, read off the file rather than stated by hand.
     let (instance_line, instance_character) = position_of(&lexer_text, "LuaReserved = ", "map");
@@ -491,7 +497,10 @@ fn the_pump_goes_idle_without_a_client_asking() {
         return;
     }
     let text = std::fs::read_to_string(&source).expect("the file reads");
-    let uri = format!("file:///{}", source.display().to_string().replace('\\', "/"));
+    let uri = format!(
+        "file:///{}",
+        source.display().to_string().replace('\\', "/")
+    );
 
     let mut server = Server::start(&project);
     let answer = server.request(
