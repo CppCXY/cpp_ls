@@ -2876,3 +2876,93 @@ node scripts/check-manifest.mjs      → ok 4 custom types declared, 3 languages
 `check-manifest.mjs`（`npm run verify:manifest`，挂在 `pretest` 上）钉的正是这次踩的坑：不允许顶层那份拷贝、
 四个类型必须声明、三种语言都要映射、scope 必须是非空字符串、grammars 不能丢。拿**改回顶层**的清单跑它，
 退出码 1 并打印 `semanticTokenScopes/semanticTokenTypes must not sit at the top level …`——这条是量过的。
+
+## 16.6 协程：一样本、两处假阳性、一个类型
+
+样本在 `C:\Users\zc\Desktop\test_cpp\coroutine.cpp`（225 行）：一个惰性的 `task<T>`、一个 `generator<T>`、
+一个手写 awaiter、`co_await` / `co_yield` / `co_return`，以及驱动它们的主函数。**它本身是可编译可运行的**：
+
+```text
+g++ -std=c++20 -Wall -Wextra -O1 coroutine.cpp   → 无警告
+运行输出：compute = 9 / hello, cpp! / 4 3 2 1 / sum = 10
+```
+
+下面是**同一台服务器**读这个文件（以及同一目录的 `main.cpp`/`test.cpp`/`test.h`）的实测，一栏是改前、一栏是
+改后。改前的每一条都是这个样本暴露出来的。
+
+### 16.6.1 诊断：0 条是真的，2 条是假的
+
+```text
+改前  coroutine.cpp: 2 item(s)
+        undefined-field  line 138  `other` has no member `at_end_`
+        missing-return   line 204  this function is declared to return `generator<int>` and its body has no `return`
+改后  coroutine.cpp: 0 item(s)
+```
+
+两条各有根因，且都不在协程本身：
+
+**① 嵌套类没有成员。** `generator<T>::iterator` 是**嵌套类**，`iterator` 这个名字在类体里处处这么写
+（`const iterator &other`），而查成员时用的是 `inner`/`iterator` 这个裸拼写。`members_of` 依次问：作用域表里
+有没有这个限定名（否，表里是 `generator::iterator`）→ 索引里 `declarations_in("iterator")`（空）→
+`definition("iterator")`，而它**歧义**：一条是类（scope `generator`），一条是**构造函数**（也叫 `iterator`，
+scope `generator::iterator`）。歧义的类曾按"这个类什么都没写"回答（`Known::Yes(空)`），于是
+`undefined-field` 把类里每个成员都报成不存在——`other.at_end_`、以及 `iterator i; i.` 的补全只剩构造函数。
+
+修法（`index/project.rs::direct_members`）：限定名查不到时，在**作用域表里**找"名字的最后一段等于该拼写、且有
+限定名"的类作用域；唯一就按它读成员（`generator::iterator`），有第二个就叫歧义、什么都不答。只在唯一时用，
+是因为猜错的成员表比没有更糟。
+
+**② 协程体不需要 `return`。** `generator<int> countdown(int from) { for (…) { co_yield i; } }` 的值契约在
+`promise_type`（`return_void`/`yield_value`）上，落到底就是 `return_void()`——它是完整的。`missing-return`
+只问"有没有 `return` 语句"，而 `co_yield` 在语法树里是 **throw 语句**、`co_return` 是 return 语句，所以靠树
+形状分不出协程。修法（`sema/check/missing_return.rs`）：体内出现 `co_await`/`co_yield`/`co_return` 任一
+**token** 就按协程处理，不报。普通函数照旧报（有测试钉着）。
+
+**未知 field 的告警本身是好的**，实测（同一服务器，`probe_fields.cpp`）：
+
+```text
+struct Widget { int size; };  w.size;          → 不报
+                              w.weight;        → undefined-field: `w` has no member `weight`
+Name n;                       n.nope;          → undefined-field: `n` has no member `nope`
+std::string s;                s.bogus_member;  → undefined-field: `s` has no member `bogus_member`
+```
+
+### 16.6.2 `co_await` 的类型：0 项 → 68 项
+
+```cpp
+auto s = co_await greet("x");
+s.                      // 改前 0 项；改后 68 项（std::string 的成员）
+```
+
+`co_await e` 是 `UnaryExpr` 里的一个关键字 token，没有类型规则，`s` 于是是"谁也不知道的类型"。加的一条
+（`type_of_expression_inner`）：被等待表达式的类型是 **awaiter**（`task<T>` 自己就是 awaiter），值是它
+`await_resume()` 的返回类型——而那正是 `operator_returns_of` 已有的问题（把类模板实参代换进去，`T` → 
+`std::string`），所以是一处调用而不是第二套代换。类里没有 `await_resume` 时答 `Unknown`（编译器的诊断更准），
+补全因此是空的而不是错的。
+
+顺带的效果：hover 在 `co_await async_int(base)` 上现在答 "`co_await async_int(base)` — has type `int`"。
+
+### 16.6.3 协程上已经成立的，和还差的一处
+
+```text
+解析            co_await / co_yield / co_return 都进表达式/语句规则，225 行 0 语法错误
+语义 token      co_return / co_await → keyword；task / generator / promise_type → type
+hover           task、promise_type、await_resume、coroutine_handle::from_promise 都有内容
+补全            computed.（task<int>）→ 10 项：await_ready/await_resume/await_suspend/done/operator=/take/…
+                co_await 的结果（std::string）→ 68 项
+诊断            0 条（见上）
+```
+
+**还差的**（如实记下，没有本钱在本轮修）：
+
+```text
+task<int>::handle_type h;  h.      → 答的是 task 的成员，不是 coroutine_handle 的
+                                     （类作用域里 `using handle_type = std::coroutine_handle<promise_type>;`
+                                       这种"嵌套 typedef 指向模板 id"没有解析）
+`promise_type` 只有写成完整拼写时才可达（task<int>::promise_type），裸的 `promise_type p;` 同上
+co_return / co_yield 关键字本身没有 hover（co_await 有，因为它的表达式有类型了）
+```
+
+测试：`tests/checks.rs::a_nested_class_has_its_members`、`a_coroutine_body_has_no_missing_return`、
+`tests/completion.rs::an_awaited_value_has_the_type_await_resume_returns`。套件：`cpp_parser` 33、
+`cpp_code_analysis` 50、`cpp_ls --release` 18 个 target 全绿。
