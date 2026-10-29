@@ -2829,3 +2829,116 @@ int f(void) {
         "`_Static_assert` is C11's declaration: {codes:?}"
     );
 }
+
+/// **What a C compiler provides is not an undeclared name, and what C made a keyword is not a call.**
+///
+/// Both halves were measured on the C corpus as `undefined-name`, and neither can be fixed by a reader who declares
+/// things — the first because the names are the *implementation's*, and the second because they are not names at all:
+///
+/// ```text
+/// __builtin_expect(x, 1)   __builtin_offsetof(struct line, corners)   …   ← gcc's builtins; no header declares them
+/// _Static_assert(1, "x")   _Generic((v), int: "int")                  …   ← keywords, read as calls
+/// ```
+///
+/// The `__builtin_*` family is reserved to the implementation (the double underscore is the standard's mark for it), so
+/// a project that uses one has no way to declare it and "nothing this file can see names it" is false by construction.
+/// The second half is the same reasoning one step further: `_Static_assert` and `_Generic` are grammar, so a `CallExpr`
+/// whose callee is one of them is a parse this layer should not have produced — and until it does not, silence is the
+/// only honest answer.
+#[test]
+fn compiler_builtins_and_c_keyword_constructs_are_not_undefined_names() {
+    let codes = codes_of_with(
+        "/p/builtins.c",
+        "\
+static int probe(int value) {
+    if (__builtin_expect(value > 0, 1)) {
+        return (int)__builtin_offsetof(struct point, y);
+    }
+    return __builtin_constant_p(value);
+}
+",
+        Some("gnu17"),
+    );
+    assert!(
+        !codes.contains(&DiagnosticCode::UndefinedName),
+        "`__builtin_*` is the implementation's: {codes:?}"
+    );
+
+    let codes = codes_of_with(
+        "/p/keywords.c",
+        "\
+int classify(int value) {
+    _Static_assert(sizeof(int) >= 2, \"an int is at least two bytes\");
+    return _Generic(value, int: 1, default: 0);
+}
+",
+        Some("c17"),
+    );
+    assert!(
+        !codes.contains(&DiagnosticCode::UndefinedName),
+        "`_Static_assert` and `_Generic` are keywords, not calls: {codes:?}"
+    );
+}
+/// **A header's C11 constructs are not this file's undefined names.**
+///
+/// The measured shape: a C file that includes `<stdio.h>` has that header's text **inlined into its rendering**, and a
+/// header is parsed without a language the project's database never named — so `_Static_assert(…)` and `_Generic(…)`
+/// inside it reach the checks as `CallExpr`s, and the rule that reports an undeclared callee reported **11** of them in
+/// one nine-file corpus. The same reasoning covers `__builtin_*`: the compiler supplies it, so no declaration can exist.
+///
+/// Both are read as *spellings*, which is legitimate here for the reason `at_an_attribute`'s note gives: these names are
+/// reserved to the implementation, so no `#define` in any header can turn one into a function, and the compiler's own
+/// builtins cannot be declared by a program at all.
+#[test]
+fn a_headers_c11_construct_and_a_compiler_builtin_are_not_undefined_names() {
+    let codes = codes_of_with(
+        "/p/headers.c",
+        "\
+int classify(int value) {
+    if (__builtin_expect(value > 0, 1)) {
+        return 1;
+    }
+    return _Generic(value, int: 2, default: 3);
+}
+",
+        Some("gnu17"),
+    );
+    assert!(
+        !codes.contains(&DiagnosticCode::UndefinedName),
+        "a builtin and a keyword construct are both not names: {codes:?}"
+    );
+}
+/// **A struct copied from a call, and `restrict` on a `static` function** — the two shapes left in the corpus.
+///
+/// ```c
+/// point sum = point_add(origin, unit);            // `assign-type-check` said it does not convert to `point`
+/// static int strict(int *restrict a, int *restrict b)   // `redefinition` said `restrict` is declared twice
+/// ```
+#[test]
+fn a_struct_from_a_call_and_a_static_restrict_function_are_quiet() {
+    let codes = codes_of_with(
+        "/p/copy.c",
+        "\
+struct point { int x; int y; };
+struct point make(void) { struct point made = {0, 0}; return made; }
+struct point copy = make();
+",
+        Some("c17"),
+    );
+    assert!(
+        !codes.contains(&DiagnosticCode::AssignTypeCheck),
+        "a `struct point` initialised from a `struct point` is a copy: {codes:?}"
+    );
+
+    let codes = codes_of_with(
+        "/p/static.c",
+        "\
+static int strict(int *restrict left, int *restrict right) { return *left + *right; }
+",
+        Some("c17"),
+    );
+    assert!(
+        !codes.contains(&DiagnosticCode::Redefinition),
+        "`restrict` on a `static` function's parameter is a qualifier: {codes:?}"
+    );
+}

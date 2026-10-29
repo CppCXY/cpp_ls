@@ -1413,6 +1413,22 @@ fn could_take_an_arithmetic_value(parameter: &str) -> Option<bool> {
 pub fn run(context: CheckContext<'_>) -> Vec<Finding> {
     let mut context = context;
 
+    // **A reading the parser could not finish gets no semantic findings.**
+    //
+    // Every rule below asks the tree and the index about a *program*, and a tree with a syntax error is not the
+    // program: the parse recovered somewhere, and what it recovered into is a guess. Measured on a nine-file C corpus:
+    // a single unread construct (`__typeof__(struct point) origin = {1, 2};`) left one file's summary unusable and
+    // produced **20 findings** — every call and every member in it "not declared", not one of them about the reader's
+    // code. Nothing is hidden by this: the parse errors are published by the channel built for them
+    // (`FileDiagnostics::errors`, which `diagnose_file` sends first), and the text-level rules below still run — an
+    // include that is not on the search path and a macro redefined are facts about the file whoever could parse it.
+    run_check::<include_not_found::IncludeNotFound>(&mut context);
+    run_check::<macro_redefined::MacroRedefined>(&mut context);
+    run_check::<macro_parentheses::MacroParentheses>(&mut context);
+    if !context.errors.is_empty() {
+        return std::mem::take(&mut context.findings);
+    }
+
     // **`syntax_error` is NOT run, and this is where the duplicate was.**
     //
     // It is the one check that does not reason about the program — it republishes what the parser already answered —
@@ -1435,8 +1451,9 @@ pub fn run(context: CheckContext<'_>) -> Vec<Finding> {
     // The **order** that check's own note argues for is kept by construction: `diagnose_file` chains `found.errors`
     // before `check_findings`, so a reader is still told what to fix before what the fixed text will still be wrong
     // about.
-    run_check::<include_not_found::IncludeNotFound>(&mut context);
-    run_check::<macro_redefined::MacroRedefined>(&mut context);
+    //
+    // `include_not_found`, `macro_redefined` and `macro_parentheses` are **not** here: they read the file's text rather
+    // than the tree, so they run at the top of this function, where a file that did not parse still gets them.
     run_check::<unused::Unused>(&mut context);
     // **The style rules**, named after clang-tidy's own — see each module for what it will say and why it is worth saying.
     // They are registered and do nothing yet: a rule with a name, a code and a test is what the next pass fills in.
@@ -1448,7 +1465,8 @@ pub fn run(context: CheckContext<'_>) -> Vec<Finding> {
     run_check::<else_after_return::ElseAfterReturn>(&mut context);
     run_check::<cstyle_cast::CStyleCast>(&mut context);
     run_check::<use_auto::UseAuto>(&mut context);
-    run_check::<macro_parentheses::MacroParentheses>(&mut context);
+    // `macro_parentheses` is **not** here: it reads macro facts rather than the tree, so it runs with the other
+    // text-level rules at the top of this function — where a file that did not parse still gets it.
     // **The first rule that cannot be written from the text**: whether `if (x)` is a conversion depends on `x`'s **type**,
     // which is the scope tree and the index, not the spelling.
     run_check::<implicit_bool_conversion::ImplicitBoolConversion>(&mut context);

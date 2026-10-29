@@ -137,6 +137,16 @@ impl Check for UndefinedName {
             if context.model.names_a_template_parameter(&name, at) {
                 continue;
             }
+            // **A keyword spelling is never a callee, and a builtin is never a name a project declares.**
+            //
+            // Both guards exist because the *reading* can put a construct this layer knows is not a call into a
+            // `CallExpr`: a header parsed without the C11 features turns `_Static_assert(…)` and `_Generic(…)` into one
+            // (`<stdio.h>`, inlined into a C file, is where those came from — measured, **11 findings** on one
+            // nine-file C corpus), and `__builtin_expect(…)` is supplied by the compiler and declared nowhere. Neither
+            // is a claim about the reader's code, so neither is a finding.
+            if is_a_keyword_construct(&name) || is_the_implementations_builtin(&name) {
+                continue;
+            }
             if a_declaration_is_visible(context, &name, at) {
                 continue;
             }
@@ -178,6 +188,50 @@ fn an_argument_may_take_part_in_adl(
 }
 
 /// **A type spelling the language already knows** — the ones with no associated namespace.
+/// **Spellings that are grammar, not names** — see the call half of [`UndefinedName::check`].
+///
+/// Every one of them is a keyword in the dialect that has it, so a `CallExpr` whose callee is one is a reading this
+/// layer produced out of a construct it did not recognise: `_Static_assert(…)` and `_Generic(…)` in a header parsed
+/// without the C11 features are the two measured shapes.
+fn is_a_keyword_construct(name: &str) -> bool {
+    matches!(
+        name,
+        "_Static_assert"
+            | "static_assert"
+            | "_Generic"
+            | "_Atomic"
+            | "_Alignas"
+            | "alignas"
+            | "_Alignof"
+            | "alignof"
+            | "_Noreturn"
+            | "_Thread_local"
+            | "thread_local"
+            | "typeof"
+            | "typeof_unqual"
+            | "__typeof__"
+            | "__typeof"
+            | "_BitInt"
+            | "noexcept"
+            | "decltype"
+            | "sizeof"
+            | "offsetof"
+    )
+}
+
+/// **Names the implementation reserves for itself** — `__builtin_expect`, `__sync_fetch_and_add`, `_InterlockedAdd`.
+///
+/// The double underscore (and MSVC's leading underscore plus a capital) is the standard's own mark for "this belongs to
+/// the implementation", and a project that uses one has no way to declare it: the compiler supplies it. "Nothing this
+/// file can see names it" is therefore true of every such name and says nothing about the program.
+fn is_the_implementations_builtin(name: &str) -> bool {
+    name.starts_with("__builtin_")
+        || name.starts_with("__sync_")
+        || name.starts_with("__atomic_")
+        || name.starts_with("__builtin")
+        || name.starts_with("_Interlocked")
+        || name.starts_with("_mm")
+}
 fn is_a_builtin_spelling(written: &str) -> bool {
     const BUILTIN: &[&str] = &[
         "void", "bool", "char", "char8_t", "char16_t", "char32_t", "wchar_t", "short", "int",

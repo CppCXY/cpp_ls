@@ -649,20 +649,63 @@ fn the_c_corpus_parses_and_its_members_resolve() {
             if cooked { "" } else { "  NOT COOKED" }
         );
         if let Some(found) = &found {
+            // **The rendering, because that is the text a finding's offset is into.** A file whose rendering inlines its
+            // include closure has the whole C library before its own first line, so a finding's *file* line cannot be
+            // computed from its offset — but the rendering line and the text at the offset say whether the finding is
+            // about this file's code or about a header's.
+            let rendering = session
+                .view(path)
+                .map(|view| view.source.to_string())
+                .unwrap_or_default();
+            // **A window around the offset**, because the cook renders a file as one long line — a line here is
+            // always 1, and the answer a reader needs is "which text is this claim about".
+            let where_at = |offset: usize| -> String {
+                // **Which text the offset is into is not a constant.** The ranges the check layer reports are in the
+                // *written* file's coordinates for some rules and the rendering's for others, so the shorter text wins
+                // only when the offset fits in it.
+                let text = if offset < rendering.len() {
+                    &rendering
+                } else {
+                    &text
+                };
+                let from = offset.saturating_sub(48).min(text.len());
+                let to = (offset + 48).min(text.len());
+                let before = text[..from]
+                    .char_indices()
+                    .rev()
+                    .next()
+                    .map_or(from, |(at, _)| at);
+                let after = text[to..]
+                    .char_indices()
+                    .next()
+                    .map_or(text.len(), |(at, _)| to + at);
+                format!("…{}…", text[before..after].trim())
+            };
             for error in found.errors.iter().take(6) {
                 println!(
-                    "      line {}: {}",
-                    line_of(&text, error.start),
-                    error.message.chars().take(110).collect::<String>()
+                    "      {}  ← {}",
+                    where_at(error.start),
+                    error.message.chars().take(90).collect::<String>()
                 );
             }
-            for check in found.checks.iter().take(3) {
-                println!(
-                    "      line {}: {} [{}]",
-                    line_of(&text, check.range.start_offset),
-                    check.message.chars().take(90).collect::<String>(),
-                    check.code.name()
-                );
+            // **Every finding, grouped by code** — the list is the work list, and three samples per file is how the
+            // first version of this probe hid that one code accounted for all of them. `CPPLS_C_ALL` lifts the cap.
+            let mut by_code: BTreeMap<&str, Vec<&cpp_code_analysis::Finding>> = BTreeMap::new();
+            for check in &found.checks {
+                by_code.entry(check.code.name()).or_default().push(check);
+            }
+            let shown_when_capped = 3;
+            let all = std::env::var_os("CPPLS_C_ALL").is_some();
+            for (code, entries) in by_code {
+                println!("      [{code}] {} finding(s)", entries.len());
+                let shown = if all { entries.len() } else { shown_when_capped };
+                for check in entries.iter().take(shown) {
+                    println!(
+                        "        {}  ← {}",
+                        where_at(check.range.start_offset),
+                        check.message.chars().take(80).collect::<String>()
+                    );
+                }
             }
         }
     }

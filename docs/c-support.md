@@ -108,11 +108,45 @@ types:   25/33 correct
    c23.c 的 _BitInt 位域 2 条、gnu.c 的 __typeof__ 变量 1 条，其余是上面 ①④ 的连带。
 ```
 
-## 4. 怎么再跑一次
+## 4. 第二次测量：findings 65 → 18
+
+又修了三条，每条都先看着它失败：
+
+| 缺陷 | 症状（实测） | 修法 |
+|---|---|---|
+| **解析失败的文件仍然产出语义诊断** | `__typeof__(struct point) origin = {1,2};` 一条读不懂，同一文件里**每个调用、每个成员**都报 "not declared"（gnu.c 20 条） | `check::run` 先跑读**文本**的规则（include 找不到、宏重定义、宏括号），文件有语法错误就到此为止：解析错误由它自己的通道发，派生出来的断言都是猜的 |
+| `_Static_assert(…)` / `_Generic(…)` 被当成调用 | 11 条 `undefined-name`，全部来自**被内联进来的头文件**（那里解析时没有 C11 特性） | `undefined_name` 的调用侧：C 的关键字构造和 `__builtin_*` 永远不是"未声明的名字" |
+| `macro_parentheses` 注册了两次 | preprocessor.c 的 5 条变成 10 条 | 它读宏事实而不是树，移到读文本的那一组，只跑一次 |
+
+```text
+                 findings   parse errors   members   types
+第一次              89          9            26/50     25/33
+修 braced-init      65          9            26/50     25/33
+修 (void)/restrict  65          9            26/50     25/33
+第二轮              18          9            26/50     25/33
+```
+
+探针现在打印**命中点前后 48 字节的渲染文本**（cook 把渲染压成一行，行号没有意义），所以剩下 18 条逐条定位得到：
+
+```text
+library.c       5  div/ldiv/lldiv/labs/llabs    ← ①：<stdlib.h> 解析到 C++ 的 cstdlib
+types.c         2  creal/cimag                  ← ①：<complex.h> 同理
+aggregates.c    1  parse error: NULL → __null   ← ①：libstdc++ 的 NULL 拼写
+functions.c     3  functions_selector/functions_aborts（索引里其实有）+ sum 的 assign-type-check
+preprocessor.c  6  5 条 macro-parentheses 误报 + 1 条语句表达式里同名局部变量的 redefinition
+types.c         2  匿名 union 成员 line.integer / static 函数参数上的 restrict
+```
+
+也就是说：**18 条里有 8 条只有 ① 一个根因**（C 工程用了 C++ 的头文件搜索路径），而那一条同时是
+`aggregates.c` 那条解析错误的根因。
+
+## 5. 怎么再跑一次
 
 ```powershell
 Remove-Item -Recurse -Force C:\Users\zc\Desktop\cpp\.cppls   # 冷缓存
 cargo test --release -p cpp_code_analysis --test c_corpus -- --ignored --nocapture
+$env:CPPLS_C_ALL = "1"      # 不截断 finding 列表
+$env:CPPLS_C_NAMES = "div"  # 打印索引里这个名字的事实
 ```
 
 改了语料之后先 `cmake --build build`——语料编译不过的时候，"分析报错"就不再是缺陷，而是预期。
