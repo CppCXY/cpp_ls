@@ -237,6 +237,17 @@ fn callees_in_this_file(
             spellings.push(crate::sema::overload::a_type_without_its_name(&written_as));
         }
 
+        // **`(void)` is C's spelling of *no parameters*, and it is not one parameter of type `void`.** Counting it as
+        // one made every `int f(void);` in a C project a function that needs an argument: measured on a nine-file C
+        // corpus, `f(void)` called as `f()` produced **two** findings on one line — *"takes 1 argument(s) and this
+        // call passes fewer"* from here, and *"is not declared"* from another reader. The rule is the language's: a
+        // parameter list of exactly one unnamed `void` declares nothing.
+        if written == 1 && spellings.len() == 1 && spellings[0].trim() == "void" {
+            written = 0;
+            required = 0;
+            spellings.clear();
+        }
+
         // A declaration and its definition name the same function; the same list twice is one candidate, not an
         // ambiguous call to something nobody overloaded.
         let declared = callees.entry(name).or_default();
@@ -380,6 +391,15 @@ fn the_callee_in(parameters: &str) -> Option<Callee> {
         &mut variadic,
         &mut spellings,
     );
+
+    // **`(void)` is the C spelling of *no parameters*** — the same rule the token half applies, and it has to be
+    // applied here too or a declaration read from **another file** keeps the wrong arity: `int f(void);` answered one
+    // parameter, so a call `f()` in a file that merely includes the header was reported as passing too few.
+    if written == 1 && spellings.len() == 1 && spellings[0].trim() == "void" {
+        written = 0;
+        required = 0;
+        spellings.clear();
+    }
 
     Some(Callee {
         required,

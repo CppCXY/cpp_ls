@@ -2729,3 +2729,103 @@ void f() {
 ";
     assert_eq!(codes_of(shadowing), []);
 }
+
+/// **A braced initialiser and a `const` copy are not failed conversions** — two C shapes that produced a finding each
+/// on every aggregate in a real C project.
+///
+/// Measured on a corpus of nine C files (one per feature area): `assign-type-check` was **13 of the 20 findings**
+/// in the file that declares the aggregates, every one of them a line that gcc compiles without a warning:
+///
+/// ```c
+/// static const point ORIGIN = {0, 0};                 // the list is the object's own initialiser
+/// static struct value a_value = {.kind = VALUE_REAL};  // …with designators
+/// point origin = ORIGIN;                               // a const object copied into a value
+/// ```
+///
+/// The first two are `InitListExpr`s: a braced list is not a value with a type, it is the *initialiser of the target's
+/// type*, and the standard judges it element by element — there is nothing for a conversion question to compare. The
+/// third is a `const point` being copied into a `point`, which is what every C program does with a file-scope constant.
+#[test]
+fn a_braced_initialiser_and_a_const_copy_are_not_failed_conversions() {
+    // The aggregate itself, with a list and with a designator.
+    let codes = codes_of_a_file(
+        "/p/corpus.c",
+        "\
+struct point { int x; int y; };
+struct point origin = {0, 0};
+struct point unit = {.x = 1, .y = 1};
+",
+    );
+    assert!(
+        !codes.contains(&DiagnosticCode::AssignTypeCheck),
+        "a braced initialiser is the initialiser of the target's own type: {codes:?}"
+    );
+
+    // A `const` object copied into a value of the same type.
+    let codes = codes_of_a_file(
+        "/p/corpus.c",
+        "\
+struct point { int x; int y; };
+static const struct point origin = {0, 0};
+struct point copy = origin;
+",
+    );
+    assert!(
+        !codes.contains(&DiagnosticCode::AssignTypeCheck),
+        "a `const` object converts to its own unqualified type: {codes:?}"
+    );
+}
+
+/// **Three plain C spellings the findings should know nothing about.**
+///
+/// Each one was measured on the C corpus — nine files, one per feature area — as a finding gcc's silence contradicts:
+///
+/// ```c
+/// int f(void);  int g(void) { return f(); }         // `(void)` is ZERO parameters, not one
+/// int sum(int *restrict a, int *restrict b);        // `restrict` is a qualifier, not a name
+/// int f(void) { _Static_assert(1, "x"); return 0; } // `_Static_assert` is a declaration, not a call
+/// ```
+///
+/// The first fired twice (`a call passes fewer arguments` and, through a second reader, `not declared`), the second
+/// as `redefinition`, and the third as `undefined-name` — one file each in a corpus where nothing is wrong.
+#[test]
+fn the_c_spellings_void_restrict_and_static_assert_produce_no_finding() {
+    let codes = codes_of_a_file(
+        "/p/void.c",
+        "\
+int f(void);
+int g(void) { return f(); }
+",
+    );
+    assert!(
+        !codes.contains(&DiagnosticCode::ArgumentCount),
+        "`(void)` declares no parameters: {codes:?}"
+    );
+
+    let codes = codes_of_with(
+        "/p/restrict.c",
+        "\
+int sum(int *restrict left, int *restrict right) { return *left + *right; }
+",
+        Some("c17"),
+    );
+    assert!(
+        !codes.contains(&DiagnosticCode::Redefinition),
+        "`restrict` qualifies a pointer and declares nothing: {codes:?}"
+    );
+
+    let codes = codes_of_with(
+        "/p/assert.c",
+        "\
+int f(void) {
+    _Static_assert(1, \"a compile-time claim\");
+    return 0;
+}
+",
+        Some("c17"),
+    );
+    assert!(
+        !codes.contains(&DiagnosticCode::UndefinedName),
+        "`_Static_assert` is C11's declaration: {codes:?}"
+    );
+}
