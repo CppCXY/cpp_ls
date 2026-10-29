@@ -1,6 +1,6 @@
 [package]
 name = "cpp_parser"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "A lossless C++ parser over the preprocessed text: the tree every layer above it reads."
 license = "MIT"

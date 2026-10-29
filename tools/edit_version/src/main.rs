@@ -19,7 +19,7 @@ use std::process::ExitCode;
 
 /// **The crates whose `version` in `[workspace.dependencies]` has to match the tag.** `edit_version` and the
 /// tools are not published, so they are not listed.
-const PUBLISHED: [&str; 3] = ["cpp_parser", "cpp_code_analysis", "cpp_ls"];
+const PUBLISHED: [&str; 4] = ["cpp_parser", "cpp_formatter", "cpp_code_analysis", "cpp_ls"];
 
 fn main() -> ExitCode {
     let Some(reference) = std::env::args().nth(1) else {

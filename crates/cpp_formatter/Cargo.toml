@@ -1,6 +1,6 @@
 [package]
 name = "cpp_formatter"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "A C++ formatter with clang-format's configuration surface."
 license = "MIT"
