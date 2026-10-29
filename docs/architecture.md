@@ -2953,14 +2953,29 @@ hover           task、promise_type、await_resume、coroutine_handle::from_prom
 诊断            0 条（见上）
 ```
 
-**还差的**（如实记下，没有本钱在本轮修）：
+**三个关键字都有 popup 了**（本轮补的）：`co_await` / `co_yield` / `co_return` 在 `locales/en.yml` 与
+`zh-CN.yml` 的 `keyword:` 段里各一条，走的是 `constexpr` 那条同一条路（`vocabulary::keyword_hover`，键是拼写
+而不是变体名）。实测（真服务器，`coroutine.cpp`）：
+
+```text
+hover co_return  → **`co_return [e]`** — finish a coroutine, handing the value to its promise.
+hover co_yield   → **`co_yield e`** — suspend this coroutine and produce `e`.
+hover co_await   → `co_await async_int(base)` — has type `int`
+```
+
+`co_await` 保留的是**表达式类型**那条（程序自己的答案先于词表），比一句语法说明有用；`co_yield`/`co_return`
+没有类型可答，于是落到词表。测试：`vocabulary.rs::every_coroutine_keyword_has_its_popup_in_every_locale`。
+
+**还差的**（如实记下）：
 
 ```text
 task<int>::handle_type h;  h.      → 答的是 task 的成员，不是 coroutine_handle 的
                                      （类作用域里 `using handle_type = std::coroutine_handle<promise_type>;`
-                                       这种"嵌套 typedef 指向模板 id"没有解析）
+                                       这种"嵌套 typedef 指向模板 id"没有解析：实测 `direct_members` 收到的
+                                       类名已经是 `outer` 而不是 `outer<int>::handle_type`，缩小发生在
+                                       `the_class_after_the_operator` 之前的那一层；这一轮试的
+                                       `alias_target_of` 前缀剥离没有改善，已撤回）
 `promise_type` 只有写成完整拼写时才可达（task<int>::promise_type），裸的 `promise_type p;` 同上
-co_return / co_yield 关键字本身没有 hover（co_await 有，因为它的表达式有类型了）
 ```
 
 测试：`tests/checks.rs::a_nested_class_has_its_members`、`a_coroutine_body_has_no_missing_return`、
