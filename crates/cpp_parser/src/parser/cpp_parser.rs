@@ -1027,6 +1027,16 @@ impl<'a> CppParser<'a> {
         self.parse_config.dialect
     }
 
+    /// **Which language the file is**, as the grammar's feature switches — see [`crate::ParserConfig::with_language`].
+    ///
+    /// Read where a construct is a *language* feature rather than a dialect's spelling: `_Generic` is C11's, so a
+    /// C++17 parse must see the identifier and only a C11-and-later one may read the associations. The lexer already
+    /// asks the same configuration ([`crate::lexer::LexerConfig::language`]), so a rule that asks here cannot disagree
+    /// with it about what the file is.
+    pub fn language(&self) -> crate::features::LanguageConfig {
+        self.parse_config.language()
+    }
+
     /// **Is this translation unit CUDA?** — see [`crate::ParserConfig::cuda`], which is where the switch is set.
     ///
     /// The grammar asks this in exactly two places: the specifier sequence (the placement qualifiers:

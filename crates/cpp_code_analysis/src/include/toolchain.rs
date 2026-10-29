@@ -214,6 +214,72 @@ impl Environment {
 /// others are the ones people actually install. `cl` is not here — see the module documentation.
 const COMPILER_NAMES: &[&str] = &["g++", "clang++", "c++", "gcc", "clang", "cc"];
 
+/// **Which language's search list the compiler is asked for** — see [`search_paths_with`]'s `-x`.
+///
+/// It has to be asked for, because one compiler answers twice and the answers differ: `gcc -x c++ -E -v -` lists
+/// `…/include/c++`, `…/include/c++/x86_64-w64-mingw32` and `…/include/c++/backward`, while `gcc -x c -E -v -` lists only
+/// the three C directories. For a **pure C project** the first list is wrong in a way that costs declarations rather
+/// than messages: `<stdlib.h>` under it resolves to libstdc++'s wrapper, whose `div`/`ldiv`/`lldiv` are `long`/`long
+/// long` overloads, so `div(7, 2)` reported "not declared"; `<complex.h>` likewise, and libstdc++'s `NULL` is `__null`,
+/// which the C grammar does not read. Measured on a nine-file C corpus: nine findings and one parse error, one cause.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Language {
+    C,
+    Cpp,
+}
+
+impl Language {
+    /// **The language of the file being analysed**, which is what the search list is for.
+    ///
+    /// The standard the build states comes first — `-std=c17` is the project saying so — and the extension second,
+    /// which is the rule a compiler applies and the rule [`CompilerConfig::for_file`] already uses. `.h` is deliberately
+    /// **not** decided here: a header belongs to whichever language includes it, and the C++ list is the wider of the
+    /// two, so it is the one that cannot lose a file the other would have found.
+    fn of(for_file: &Path, standard: Option<&str>) -> Language {
+        if let Some(stated) = standard {
+            let stated = stated
+                .trim_start_matches("-std=")
+                .trim_start_matches("/std:");
+            let c_family = stated.starts_with('c') && !stated.starts_with("c++");
+            if c_family {
+                return Language::C;
+            }
+            if stated.starts_with("c++") || stated.starts_with("gnu++") {
+                return Language::Cpp;
+            }
+        }
+        match for_file
+            .extension()
+            .and_then(|extension| extension.to_str())
+        {
+            Some("c") | Some("i") => Language::C,
+            _ => Language::Cpp,
+        }
+    }
+
+    /// The `-x` value the driver wants.
+    fn as_driver_flag(self) -> &'static str {
+        match self {
+            Language::C => "c",
+            Language::Cpp => "c++",
+        }
+    }
+
+    /// **The newest standard to assume when nothing states one**, per language.
+    ///
+    /// C++ has two spellings to try before giving up (`c++23`, then `c++2b`, then no flag); C's newest is `c23` and
+    /// every gcc from 14 accepts that spelling, so one candidate and then no flag is the same ladder one rung shorter.
+    fn assumed_standards(self) -> &'static [&'static str] {
+        match self {
+            Language::C => &ASSUMED_STANDARDS_GNU_C,
+            Language::Cpp => &ASSUMED_STANDARDS_GNU,
+        }
+    }
+}
+
+/// The C spellings of "the newest": `c23`, then `c17` for a compiler too old to know the name.
+const ASSUMED_STANDARDS_GNU_C: [&str; 2] = ["c23", "c17"];
+
 /// The compilers looked for **where an installer puts them**, because `PATH` is not where they are.
 ///
 /// # The measurement this list exists for
@@ -545,13 +611,19 @@ pub fn search_paths(
     compiler: &Path,
     standard: Option<&str>,
     flags: &[String],
+    language: Language,
 ) -> Option<Toolchain> {
     // **What the project stated, or the newest the compiler takes.** See [`ASSUMED_STANDARDS_GNU`]: the last
     // candidate is "no flag at all", so a compiler that knows neither spelling is still asked rather than skipped.
-    for candidate in standards_to_try(standard, &ASSUMED_STANDARDS_GNU) {
-        if let Some(found) =
-            search_paths_with(runner, compiler, candidate, standard.is_none(), flags)
-        {
+    for candidate in standards_to_try(standard, language.assumed_standards()) {
+        if let Some(found) = search_paths_with(
+            runner,
+            compiler,
+            candidate,
+            standard.is_none(),
+            flags,
+            language,
+        ) {
             return Some(found);
         }
     }
@@ -566,19 +638,20 @@ fn search_paths_with(
     standard: Option<&str>,
     assumed: bool,
     flags: &[String],
+    language: Language,
 ) -> Option<Toolchain> {
-    // `-E` stops after preprocessing, `-v` prints what the driver is doing, `-x c++` says which language's
-    // directories to list (without it, `g++` would still list C++'s, but `gcc` would list C's), and `-` reads an
-    // empty translation unit from standard input. `-dM` adds the predefined macros to that output.
+    // `-E` stops after preprocessing, `-v` prints what the driver is doing, `-x` says which language's directories to
+    // list (see [`Language`]: it is the difference between the three C directories and the eight C++ ones), and `-`
+    // reads an empty translation unit from standard input. `-dM` adds the predefined macros to that output.
     //
     // **The project's own search-list flags go with them**, before the language: `--target` and `--gcc-toolchain`
     // are what decide which compiler and which library this project builds against — see [`search_list_flags`].
-    let language = standard.map(|standard| format!("-std={standard}"));
+    let standard_flag = standard.map(|standard| format!("-std={standard}"));
     let mut arguments: Vec<&str> = vec!["-dM", "-E", "-v"];
     arguments.extend(flags.iter().map(String::as_str));
-    arguments.extend(["-x", "c++"]);
-    if let Some(language) = &language {
-        arguments.push(language);
+    arguments.extend(["-x", language.as_driver_flag()]);
+    if let Some(standard_flag) = &standard_flag {
+        arguments.push(standard_flag);
     }
     arguments.push("-");
 
@@ -794,6 +867,10 @@ pub fn discover_with(
     // [`ASSUMED_STANDARD_MSVC`] for why the last case is not left to the compiler's own default.
     let standard = statement.standard_for(for_file, &mut |path| files.read(path));
 
+    // **Which language's search list to ask for** — see [Language]. It comes from the standard when the build states
+    // one, and from the file's extension otherwise, which is the rule a compiler applies.
+    let language = Language::of(for_file, standard.as_deref());
+
     // **What the project`s own command says about its compiler`s search list** — a target, a GCC toolchain, a
     // sysroot. See [`search_list_flags`] for the measurement that made this necessary.
     let search_flags: Vec<String> = statement
@@ -813,6 +890,7 @@ pub fn discover_with(
             standard.as_deref(),
             &search_flags,
             for_file,
+            language,
         ) {
             return Some(toolchain.claiming(*source));
         }
@@ -832,6 +910,7 @@ pub fn discover_with(
             standard.as_deref(),
             &search_flags,
             for_file,
+            language,
         ) {
             return Some(toolchain.claiming(ToolchainSource::Environment));
         }
@@ -868,6 +947,7 @@ pub fn discover_with(
             standard.as_deref(),
             &search_flags,
             for_file,
+            language,
         ) {
             return Some(toolchain.claiming(ToolchainSource::Path));
         }
@@ -931,6 +1011,7 @@ fn ask(
     standard: Option<&str>,
     flags: &[String],
     for_file: &Path,
+    language: Language,
 ) -> Option<Toolchain> {
     let found = locate(files, name, environment)?;
 
@@ -938,7 +1019,7 @@ fn ask(
         return ask_msvc(runner, layout, standard, Some(found), for_file);
     }
 
-    search_paths(runner, &found, standard, flags)
+    search_paths(runner, &found, standard, flags, language)
 }
 
 /// Is this Microsoft's compiler?

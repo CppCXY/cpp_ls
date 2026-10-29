@@ -3704,10 +3704,12 @@ impl<F: FileProvider + Clone> Session<F> {
         // next query about it finds the rendering built. The same "not now, next time" the diagnostics channel
         // states through `isIncomplete`.
         match self.known_rendering_of(&file.path, &file.text) {
-            Some(rendered) => Some(FileView::parse_rendering_with_cuda(
+            // **Parsed as the language the file is**, not as the parser's default: see
+            // [`FileView::parse_rendering_in`] — `restrict`, C23's literals and the GNU extensions all depend on it.
+            Some(rendered) => Some(FileView::parse_rendering_in(
                 file,
                 &rendered,
-                self.config.cuda(),
+                &self.config_for(&file.path),
             )),
             None => {
                 if crate::probes::cooking() {
@@ -3832,10 +3834,10 @@ impl<F: FileProvider + Clone> Session<F> {
         let rendered = self.rendering_of(&file.path)?;
         // Remembered, so the next `view` — which cannot build one — finds it.
         self.known_rendering_of(&file.path, &file.text);
-        Some(FileView::parse_rendering_with_cuda(
+        Some(FileView::parse_rendering_in(
             &file,
             &rendered,
-            self.config.cuda(),
+            &self.config_for(&file.path),
         ))
     }
 

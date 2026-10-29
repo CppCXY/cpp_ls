@@ -79,3 +79,33 @@ gnu.c:130/136     语句表达式 `({ … })`、计算 goto
   项目，但它是"诊断落在哪一行"这个问题至今没有单一答案的证据，值得单独查一次。
 
 ---
+
+### N8. 第三轮之后剩下的 9 条（每条都定位到文本）
+
+`18 → 9`，parse error 9 条不变，成员 26/50 → 30/50。剩下的每一条都能在文件里指出来：
+
+```text
+preprocessor.c  [argument-count] 5   strlen(CORPUS_TYPE_NAME(x)) —— 实参计数把宏展开里的逗号算成了外层调用的
+preprocessor.c  [macro-parentheses] 1  CORPUS_DEFINE_POINT 的 body 以续行反斜杠开头，形状判断先 trim 掉它就好
+preprocessor.c  [redefinition] 1     语句表达式里的局部变量（CORPUS_SQUARE 展开两次）被当成同一作用域重定义
+types.c         [redefinition] 1     int *restrict right —— 带 include 的文件里第二个参数的 restrict 仍是名字
+types.c         [undefined-field] 1  匿名 union 的成员 line.integer
+aggregates.c    1 parse error        (const char[]){"compound literal"} 数组
+c23.c           4 parse errors       _BitInt(37)、typeof(struct point)、[[fallthrough]] 前后
+gnu.c           4 parse errors       &&label、goto *table[i]、__typeof__(struct point)、case -5 ... -1
+```
+
+其中 `restrict` 那一条**在最小 fixture 里不复现**（`c17` 下 `static int f(int *restrict a, int *restrict b)` 是干净的），
+说明它依赖这个文件的其他内容——下一轮第一件要查的事，查法是用 `CPPLS_C_SHOW` 把渲染里那段 `restrict signature`
+打印出来，看 cook 到底把它变成了什么。
+
+### N9. X-macro 的 `##` 粘接是坏的（`#[ignore]` 的测试）
+
+`an_x_macro_pastes_its_names`：`#define LIST(X) X(red, 0) X(green, 1)`、`#define ENTRY(n, v) COLOUR_##n = value,`
+用在 `enum e { LIST(ENTRY) COUNT };` 里，渲染中 `COLOUR_##n` **原样留着 `##`**，于是解析报 `;` 缺失。
+
+它和 `body_range` 的宽度无关（把宽度改回最宽也一样失败），所以不是这一轮的回归；根因在 `paste_at` 的位置记账：
+`parse_body` 记的是 `body.tokens` 的下标，`substitute` 用的是 `significant_tokens` 的下标，中间隔着 `remap_positions`
+——下一个 round 从那里开始，第一条命令是给 `substitute` 打印 `paste_at` 与 `body_tokens`。
+
+---

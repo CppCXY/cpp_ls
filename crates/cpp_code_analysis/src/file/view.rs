@@ -764,12 +764,44 @@ impl FileView {
         rendered: &crate::preprocess::cooked::RenderedCooked,
         cuda: bool,
     ) -> FileView {
+        Self::parse_rendering_with_the_files_own_language(file, rendered, cuda, None)
+    }
+
+    /// **A rendering parsed as the language the file is**, which is not a detail: the parser's feature set decides
+    /// whether `restrict` is a qualifier, whether `0b1011'0110` is a literal, whether `[[fallthrough]]` is an attribute
+    /// and whether a statement expression is one. `ParserConfig::default()` is C++17 in this crate, and a rendering
+    /// parsed that way answers about a language the file is not — measured on a nine-file C corpus: a `restrict`
+    /// parameter reported as a redefinition (a name, not the qualifier), and C23's literals and attributes as syntax
+    /// errors.
+    ///
+    /// The language comes from the file's own [`crate::CompilerConfig`] — its `-std=`, its `.c` extension, what the
+    /// project said — which is the same answer [`crate::CompilerConfig::language_for`] gives the lexer.
+    pub fn parse_rendering_in(
+        file: &VfsFile,
+        rendered: &crate::preprocess::cooked::RenderedCooked,
+        config: &crate::CompilerConfig,
+    ) -> FileView {
+        Self::parse_rendering_with_the_files_own_language(
+            file,
+            rendered,
+            config.cuda(),
+            Some(config.language_for(&file.path)),
+        )
+    }
+
+    fn parse_rendering_with_the_files_own_language(
+        file: &VfsFile,
+        rendered: &crate::preprocess::cooked::RenderedCooked,
+        cuda: bool,
+        language: Option<cpp_parser::features::LanguageConfig>,
+    ) -> FileView {
         let source: Arc<str> = Arc::from(rendered.text.as_str());
         let line_index = Arc::new(LineIndex::parse(&source));
-        let tree = cpp_parser::CppParser::parse(
-            &source,
-            cpp_parser::ParserConfig::default().with_cuda(cuda),
-        );
+        let mut parser_config = cpp_parser::ParserConfig::default().with_cuda(cuda);
+        if let Some(language) = language {
+            parser_config = parser_config.with_language(language);
+        }
+        let tree = cpp_parser::CppParser::parse(&source, parser_config);
         let root = tree.get_red_root();
         // **No macro bodies**, and the answer is the point rather than a simplification: the text being parsed has
         // no invocations in it, so a body reader would be consulted for names that were already replaced.

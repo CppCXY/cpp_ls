@@ -657,19 +657,14 @@ fn the_c_corpus_parses_and_its_members_resolve() {
                 .view(path)
                 .map(|view| view.source.to_string())
                 .unwrap_or_default();
-            // **A window around the offset**, because the cook renders a file as one long line — a line here is
-            // always 1, and the answer a reader needs is "which text is this claim about".
+            // **A window around the offset in the file**, because every range the diagnostics channel reports has been
+            // mapped into the file — `add_in_the_file` for a rule that reads the summary, `map_into_the_file` for one
+            // that reads the rendering — so the file is the text an offset is into, and the rendering is only there to
+            // say what the cook made of the file.
             let where_at = |offset: usize| -> String {
-                // **Which text the offset is into is not a constant.** The ranges the check layer reports are in the
-                // *written* file's coordinates for some rules and the rendering's for others, so the shorter text wins
-                // only when the offset fits in it.
-                let text = if offset < rendering.len() {
-                    &rendering
-                } else {
-                    &text
-                };
-                let from = offset.saturating_sub(48).min(text.len());
-                let to = (offset + 48).min(text.len());
+                let text = &text;
+                let from = offset.saturating_sub(64).min(text.len());
+                let to = (offset + 64).min(text.len());
                 let before = text[..from]
                     .char_indices()
                     .rev()
@@ -679,7 +674,12 @@ fn the_c_corpus_parses_and_its_members_resolve() {
                     .char_indices()
                     .next()
                     .map_or(text.len(), |(at, _)| to + at);
-                format!("…{}…", text[before..after].trim())
+                format!(
+                    "…{}«{}»{}…",
+                    text[before..offset.min(after)].trim_end(),
+                    text[offset.min(after)..offset.min(after).max(offset.min(after))].trim(),
+                    text[offset.min(after)..after].trim_start()
+                )
             };
             for error in found.errors.iter().take(6) {
                 println!(
@@ -698,7 +698,11 @@ fn the_c_corpus_parses_and_its_members_resolve() {
             let all = std::env::var_os("CPPLS_C_ALL").is_some();
             for (code, entries) in by_code {
                 println!("      [{code}] {} finding(s)", entries.len());
-                let shown = if all { entries.len() } else { shown_when_capped };
+                let shown = if all {
+                    entries.len()
+                } else {
+                    shown_when_capped
+                };
                 for check in entries.iter().take(shown) {
                     println!(
                         "        {}  ← {}",
@@ -868,7 +872,15 @@ fn dump_names(session: &Session<DiskFiles>, root: &Path) {
     println!("\n--- declarations: what the index holds under each name");
     // **Where the toolchain said the headers are**: for a C project they must be the C ones (cstdlib is C++'s, and
     // a <stdlib.h> that resolves to it leaves div undeclared — measured).
+    println!(
+        "  named compilers: {:?}",
+        session.discovery().named_compilers()
+    );
     if let Some(toolchain) = session.toolchain() {
+        println!(
+            "  toolchain compiler: {:?}  version: {:?}",
+            toolchain.compiler, toolchain.version
+        );
         let paths: Vec<String> = toolchain
             .include_paths()
             .iter()
@@ -876,7 +888,9 @@ fn dump_names(session: &Session<DiskFiles>, root: &Path) {
             .collect();
         println!("  toolchain include paths: {paths:?}");
     }
-    let probe = root.join("src").join("main.c");
+    let probe = std::env::var_os("CPPLS_C_PROBE_FILE")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| root.join("src").join("main.c"));
     for name in names
         .split(',')
         .map(str::trim)
@@ -888,17 +902,34 @@ fn dump_names(session: &Session<DiskFiles>, root: &Path) {
                 for definition in &found.found {
                     let fact = &definition.fact;
                     println!(
-                        "    {:?}  {:?}  type {:?}  parameters {:?}",
+                        "    {:?}  {:?}  type {:?}  parameters {:?}  returns {:?}",
                         definition.file.file_name().unwrap_or_default(),
                         fact.kind,
                         fact.type_of.as_ref().map(|t| t.to_string()),
-                        fact.parameter_list
+                        fact.parameter_list,
+                        fact.returns.as_ref().map(|t| t.to_string())
                     );
                 }
             }
             Known::No => println!("  {name}: no fact at all (the name query declined)"),
             Known::Unknown(reason) => println!("  {name}: unknown — {}", reason.describe()),
         }
+    }
+
+    // **A slice of one file's rendering**, for the questions a finding cannot answer on its own: `CPPLS_C_SHOW` names
+    // the file and a needle, and the probe prints 400 bytes of the *rendering* around the first occurrence.
+    if let Some(show) = std::env::var_os("CPPLS_C_SHOW")
+        && let Some(show) = show.to_str()
+        && let Some((file, needle)) = show.split_once('|')
+        && let Some(view) = session.view(std::path::Path::new(file))
+        && let Some(at) = view.source.find(needle)
+    {
+        let from = at.saturating_sub(200).min(view.source.len());
+        let to = (at + 1600).min(view.source.len());
+        println!(
+            "  rendering of {file} around {needle:?}:\n{}",
+            &view.source[from..to]
+        );
     }
 }
 fn name_of(path: &Path) -> String {

@@ -313,9 +313,11 @@ impl Feature {
             // C++ — each feature to the standard that introduced it.
             Auto | Lambda | RvalueReferences | VariadicTemplates | AliasTemplates | Attributes
             | StaticAssert | RawStrings | AlignasCpp | ThreadLocal => S(Standard::Cpp11),
-            GenericLambda | VariableTemplates | BinaryLiterals | DigitSeparators => {
-                S(Standard::Cpp14)
-            }
+            GenericLambda | VariableTemplates => S(Standard::Cpp14),
+            // **Two routes each, because C23 took both from C++14.** `0b1011` and `1'000'000` were C++14's and became
+            // C's in C23, so a `-std=c23` file that writes them is a file that compiles — and this table said it did
+            // not, which was two of the syntax errors a nine-file C corpus produced (`c23.c`'s literals).
+            BinaryLiterals | DigitSeparators => AnyOf(&[S(Standard::Cpp14), S(Standard::C23)]),
             StructuredBindings
             | IfConstexpr
             | FoldExpressions

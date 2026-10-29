@@ -2384,6 +2384,20 @@ fn parse_primary_expr(p: &mut CppParser, fold_operand: bool) -> ParseResult {
             }
         }
 
+        // **C11's `_Generic ( … )` before any name is read**, because it *starts* like a name: the arm below takes every
+        // identifier, so an arm placed after it is never reached — which is exactly where this rule was first written,
+        // and the file kept reporting `expected `;`` while the rule looked present. `_Generic` is a contextual keyword
+        // (no token kind names it) and `_Generic (` is a shape no ordinary name position has: a name followed by an
+        // argument list is a call, and C11 says this one is a selection.
+        CppTokenKind::Identifier
+            if p.current_token_text() == "_Generic"
+                && p.peek_next_token() == CppTokenKind::LeftParen
+                && p.language()
+                    .support(crate::features::Feature::GenericSelection) =>
+        {
+            parse_generic_selection(p)
+        }
+
         CppTokenKind::Identifier
         | CppTokenKind::Scope
         | CppTokenKind::OperatorKeyword
@@ -2784,11 +2798,64 @@ fn parse_primary_expr(p: &mut CppParser, fold_operand: bool) -> ParseResult {
             Ok(m.complete(p))
         }
 
+        // **C11's `_Generic ( assignment-expression , association , … )`** — see [`parse_generic_selection`].
+        //
+        // `_Generic` is a *contextual* keyword: no token kind names it, so the arm is an identifier whose text is the
+        // spelling and whose next token is a `(`, which no ordinary identifier position can be. The feature is the
+        // language's — C11, and a C++ compiler takes it as an extension only where a vendor says so — so a C++17 file
+        // that writes `_Generic` still sees it as a call, which is what it is there.
+        CppTokenKind::Identifier
+            if p.current_token_text() == "_Generic"
+                && p.peek_next_token() == CppTokenKind::LeftParen
+                && p.language()
+                    .support(crate::features::Feature::GenericSelection) =>
+        {
+            parse_generic_selection(p)
+        }
+
         _ => Err(CppParseError::syntax_error_from(
             &t!("expected primary expression"),
             p.current_token_range(),
         )),
     }
+}
+
+/// **C11's generic selection** — `_Generic ( assignment-expression , association , … )`.
+///
+/// ```text
+/// _Generic((value), int: "int", double: "double", default: "other")
+/// ```
+///
+/// An association is a *type-name* and an expression, or `default` and an expression. The type-name is read by
+/// [`types::parse_type_id`], which is what a `sizeof` and a cast use, so `char*` and `const char*` — the two the corpus
+/// writes — are read by the same rule that reads them anywhere else. Each expression is read at
+/// [`Level::Assignment`], so the comma that separates associations stays the separator rather than becoming the comma
+/// operator: `_Generic(x, int: a, default: c)` is two associations, and a reader that took the comma would see one.
+fn parse_generic_selection(p: &mut CppParser) -> ParseResult {
+    let m = p.mark(CppSyntaxKind::GenericSelectionExpr);
+    p.bump(); // `_Generic`
+    expect_token(p, CppTokenKind::LeftParen)?;
+
+    // The controlling expression.
+    parse_assignment_expr(p)?;
+
+    while p.current_token() == CppTokenKind::Comma {
+        p.bump();
+        // `default : expression`, or `type-name : expression`. `default` is a keyword, so which arm this is needs no
+        // lookahead: a type-name can never begin with it.
+        if p.current_token() == CppTokenKind::DefaultKeyword {
+            p.bump();
+        } else {
+            types::parse_type_id(p)?;
+        }
+        expect_token(p, CppTokenKind::Colon)?;
+        parse_assignment_expr(p)?;
+    }
+
+    if let Err(err) = expect_token(p, CppTokenKind::RightParen) {
+        p.push_error(err);
+    }
+    Ok(m.complete(p))
 }
 
 /// Parse `( expression )` as a node of its own, keeping the parentheses.

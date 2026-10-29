@@ -11477,6 +11477,24 @@ impl ProjectIndex {
     /// copies because the rule it applies — a declaration the file writes itself wins over one it includes, ordered
     /// by file then offset, with the conditional ones counted rather than offered — is the part of a definition
     /// answer that is easy to get subtly different in two places.
+    /// **Are these two declarations one entity** — a function declared in a header and defined in the file that includes
+    /// it — rather than two things that share a spelling?
+    ///
+    /// Only a function, and only when the parameter list agrees: `f(void)` in a header and `f(void)` in the file are one
+    /// function, while `Widget` in a header and `Widget` in the file are two types. The comparison is of what the facts
+    /// record, so it is an answer about spellings rather than about types — a parameter list written differently
+    /// (`(int n)` against `(int)`) reads as two entities, which keeps the previous behaviour for that case.
+    fn one_entity_declared_twice(
+        left: &VisibleDeclaration<'_>,
+        right: &VisibleDeclaration<'_>,
+    ) -> bool {
+        left.fact.kind == DeclKind::Function
+            && right.fact.kind == DeclKind::Function
+            && left.fact.name == right.fact.name
+            && left.fact.scope == right.fact.scope
+            && left.fact.parameter_list == right.fact.parameter_list
+    }
+
     fn certain_declarations(
         &self,
         name: &str,
@@ -11512,7 +11530,26 @@ impl ProjectIndex {
         // Overloads of one name written *here* are still several declarations, and they are all answers.
         let own = normalize(visible_from);
         if candidates.iter().any(|found| normalize(&found.file) == own) {
-            candidates.retain(|found| normalize(&found.file) == own);
+            // **Except one function the header declares and this file defines.** Those are one *entity*, and the
+            // header's declaration is the one that makes a use **above** the definition legal — the shape a C file has
+            // when its declarations live in a header: `corpus.h` declares `functions_selector` at the top, the call is
+            // at line 61, the definition at line 182. Dropping the header's fact left the call with no declaration
+            // before it, and `undefined-name` reported it. Measured on a nine-file C corpus: two findings, and
+            // reproduced in `tests/checks.rs` with the declaration in a header.
+            //
+            // The rule above still holds for everything else: a header's `Widget` and this file's `Widget` are two
+            // entities, and only a *function* whose parameter list agrees is the same one written twice.
+            let local: Vec<VisibleDeclaration<'_>> = candidates
+                .iter()
+                .filter(|found| normalize(&found.file) == own)
+                .cloned()
+                .collect();
+            candidates.retain(|found| {
+                normalize(&found.file) == own
+                    || local
+                        .iter()
+                        .any(|kept| Self::one_entity_declared_twice(kept, found))
+            });
         }
 
         // **A declaration in a branch this compilation does not take is not an answer.** libstdc++ declares

@@ -296,8 +296,8 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
         // should be in front of them. `ParserConfig::skip_bodies` carries the same figures.
         let config = ParserConfig::default()
             .with_dialect(self.config.dialect())
-            .with_cuda(self.config.cuda());
-
+            .with_cuda(self.config.cuda())
+            .with_language(self.config.language_for(path));
         let tree = { CppParser::parse(source, config) };
         let summary = { self.index_tree(path, source, &tree, key) };
         // **Destroying the tree is work**, and it is timed because it is not free and not obvious: a file's tree is
@@ -410,8 +410,8 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
         // rendering's. See the same note in [`FileIndexer::index`].
         let config = ParserConfig::default()
             .with_dialect(self.config.dialect())
-            .with_cuda(self.config.cuda());
-
+            .with_cuda(self.config.cuda())
+            .with_language(self.config.language_for(path));
         let tree = { CppParser::parse(&rendered.text, config) };
         let mut summary = { self.index_tree(path, &rendered.text, &tree, key) };
         let report = { summary.map_into_the_file(rendered) };
@@ -1323,12 +1323,32 @@ fn deguard_the_files_own_guard(facts: &mut [&mut FactGuard], region: usize) {
 /// The range of a macro's **replacement list** inside its `#define` — see [`crate::summary::MacroFact::body_range`].
 ///
 /// Derived from the body's own tokens, never searched for: each token carries the range it was lexed at, so the
-/// span from the first to the last *is* the body, whatever spelling the directive used around it.
+/// span from the first to the last is the body, whatever spelling the directive used around it.
+///
+/// **The last *significant* token, because the body keeps trivia and the trivia runs past the list.** The lexer
+/// preserves whitespace and comments so a macro's text can be reprinted, and those tokens carry ranges too: taking the
+/// last of *all* of them made the body run on into whatever followed it — the doc comment above the next `#define`, or
+/// the next directive itself. Measured on a nine-file C corpus: six `macro-parentheses` findings whose bodies were
+/// `"corpus"\n\n/* A function-like macro … */\n`, and one `redefinition` for a macro compared against text that was not
+/// its body.
+///
+/// **The start is not narrowed the same way, and that is deliberate.** `body_text` is sliced from this range and the
+/// expander hands *its* token slice to the paste operator, whose positions were recorded against the body as written —
+/// so changing the start would move every `##` in the project by one token. See `docs/remaining.md` §N8, where the
+/// X-macro paste this interacts with is measured.
 fn body_range_of(
     definition: &crate::preprocess::macros::MacroDef,
 ) -> Option<cpp_parser::SourceRange> {
     let first = definition.body.tokens.first()?;
-    let last = definition.body.tokens.last()?;
+    let last = definition
+        .body
+        .significant()
+        .last()
+        // **A body with no significant token keeps the old answer**, which is the trivia after the name — #define
+        // GUARDED_H has no replacement list, and the environment built from these facts and the macro table built
+        // from the same text must agree about that: ffect::tests::the_chain_agrees_with_the_walk_on_every_file`r
+        // compares them name by name, and answering None here made the two disagree about every include guard.
+        .or_else(|| definition.body.tokens.last())?;
     let start = first.range.start_offset;
     let end = last.range.start_offset + last.range.length;
     Some(cpp_parser::SourceRange::new(

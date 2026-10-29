@@ -247,6 +247,14 @@ pub enum CppSyntaxKind {
     /// e.g.: sizeof(int), sizeof(expression)
     SizeofExpr,
 
+    /// A C11 **generic selection** — `_Generic(expr, type: value, …, default: value)`.
+    ///
+    /// Its own node rather than a call, because an association is a `type: expression` pair and nothing about a call's
+    /// argument list is that shape. It had no rule at all until a macro's body range was fixed and the corpus's
+    /// `CORPUS_TYPE_NAME(value)` began to reach the parser with its real text: four syntax errors on a file gcc compiles
+    /// cleanly, `expected }, but get string literal` among them.
+    GenericSelectionExpr,
+
     /// typeid expression - get type info
     /// e.g.: typeid(int), typeid(expression)
     TypeidExpr,

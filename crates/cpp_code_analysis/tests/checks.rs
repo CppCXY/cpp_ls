@@ -2942,3 +2942,306 @@ static int strict(int *restrict left, int *restrict right) { return *left + *rig
         "`restrict` on a `static` function's parameter is a qualifier: {codes:?}"
     );
 }
+/// **A calling convention between the return type and the name is not part of the type.**
+///
+/// MinGW's `<stdlib.h>` writes the standard library this way — `extern div_t __cdecl div (int, int);` — and the
+/// declaration's type came out as a spelling that names no type, so `div_t divided = div(7, 2);` was reported as
+/// "does not convert to `div_t`". Measured on a nine-file C corpus: three findings (`div`, `ldiv`, `lldiv`), the whole
+/// `library.c` aggregate.
+#[test]
+fn a_calling_convention_before_the_name_is_not_part_of_the_return_type() {
+    let codes = codes_of_with(
+        "/p/cdecl.c",
+        "\
+typedef struct { int quot; int rem; } div_t;
+extern div_t __cdecl div(int numerator, int denominator);
+div_t divided = div(7, 2);
+",
+        Some("gnu17"),
+    );
+    assert!(
+        !codes.contains(&DiagnosticCode::AssignTypeCheck),
+        "`__cdecl` is a calling convention, not a type: {codes:?}"
+    );
+}
+/// **A type reached through two typedefs is the same type** — `div_t` → `_div_t` → the struct, which is how MinGW
+/// spells every standard library type.
+///
+/// The one-level fixture above passes; the two-level one is where `div_t divided = div(7, 2);` was reported as "does not
+/// convert to `div_t`" — the reading resolves `div_t` to `_div_t` on one side of the comparison and compares that
+/// against the file's own `div_t` on the other.
+#[test]
+fn a_type_behind_two_typedefs_converts_to_itself() {
+    let codes = codes_of_with(
+        "/p/two_levels.c",
+        "\
+typedef struct { int quot; int rem; } _div_t;
+typedef _div_t div_t;
+extern div_t div(int numerator, int denominator);
+div_t divided = div(7, 2);
+",
+        Some("gnu17"),
+    );
+    assert!(
+        !codes.contains(&DiagnosticCode::AssignTypeCheck),
+        "`div_t` and the type of `div(…)` are one type: {codes:?}"
+    );
+}
+/// **The same conversion, with the declaration in a header** — the shape the corpus has, and the one the one-file
+/// fixtures above cannot reproduce.
+///
+/// `library.c` writes `div_t divided = div(7, 2);` with both names in `<stdlib.h>`; the checker said the value "does
+/// not convert to `div_t`". The difference from the one-file fixture is where the declaration lives, so the fixture has
+/// to live in two files too.
+#[test]
+fn a_conversion_whose_declaration_is_in_a_header_is_still_a_conversion() {
+    let header = "\
+#ifndef STDLIB_H
+#define STDLIB_H
+typedef struct { int quot; int rem; } _div_t;
+typedef _div_t div_t;
+extern div_t __cdecl div(int numerator, int denominator);
+#endif
+";
+    let source = "\
+#include \"stdlib.h\"
+div_t divided = div(7, 2);
+";
+    let files = MemoryFiles::new()
+        .with_file("/p/stdlib.h", header)
+        .with_file("/p/library.c", source);
+    let providers = SessionFiles::new(OpenDocuments::new(), files);
+    let config = CompilerConfig {
+        standard: Some("gnu17".into()),
+        ..CompilerConfig::default()
+    };
+    let mut session = Session::with_config("/p", providers, WatchFilter::new("/p"), config);
+    session.add_project_files([
+        std::path::PathBuf::from("/p/stdlib.h"),
+        std::path::PathBuf::from("/p/library.c"),
+    ]);
+    session.want_cooked_reading(std::path::Path::new("/p/library.c"));
+    session.index_everything();
+    while session.pending_work() > 0 {
+        session.advance(64);
+    }
+    let codes: Vec<DiagnosticCode> = session
+        .diagnostics(std::path::Path::new("/p/library.c"))
+        .map(|found| {
+            found
+                .checks
+                .into_iter()
+                .map(|finding| finding.code)
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(
+        !codes.contains(&DiagnosticCode::AssignTypeCheck),
+        "`div_t` from a header is the same type as `div_t` in the file: {codes:?}"
+    );
+}
+/// **A declaration in a header counts even when the same file defines the function later** — the corpus's
+/// `functions_selector`/`functions_aborts` shape.
+///
+/// `functions.c` calls `functions_selector()` at line 61 and defines it at line 182, with the declaration in
+/// `corpus.h` — which is included at the top. The use is therefore declared, and the index says so when asked from
+/// another file; asked from the file itself it answered only the **definition**, which is after the use, so the check
+/// read the call as undeclared. Measured: two findings on one C corpus.
+#[test]
+fn a_header_declaration_counts_even_when_the_definition_is_later_in_the_file() {
+    let header = "\
+#ifndef STDLIB_H
+#define STDLIB_H
+typedef struct { int quot; int rem; } _div_t;
+typedef _div_t div_t;
+extern div_t div(int numerator, int denominator);
+#endif
+";
+    let source = "\
+#include \"stdlib.h\"
+div_t divided = div(7, 2);
+div_t div(int numerator, int denominator) {
+    div_t result;
+    result.quot = numerator / denominator;
+    result.rem = numerator % denominator;
+    return result;
+}
+";
+    let files = MemoryFiles::new()
+        .with_file("/p/stdlib.h", header)
+        .with_file("/p/library.c", source);
+    let providers = SessionFiles::new(OpenDocuments::new(), files);
+    let config = CompilerConfig {
+        standard: Some("gnu17".into()),
+        ..CompilerConfig::default()
+    };
+    let mut session = Session::with_config("/p", providers, WatchFilter::new("/p"), config);
+    session.add_project_files([
+        std::path::PathBuf::from("/p/stdlib.h"),
+        std::path::PathBuf::from("/p/library.c"),
+    ]);
+    session.want_cooked_reading(std::path::Path::new("/p/library.c"));
+    session.index_everything();
+    while session.pending_work() > 0 {
+        session.advance(64);
+    }
+    let codes: Vec<DiagnosticCode> = session
+        .diagnostics(std::path::Path::new("/p/library.c"))
+        .map(|found| {
+            found
+                .checks
+                .into_iter()
+                .map(|finding| finding.code)
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(
+        !codes.contains(&DiagnosticCode::UndefinedName),
+        "the header declares `div` before the use: {codes:?}"
+    );
+}
+/// **Only the macro whose body is an expression without parentheses is this rule's finding.**
+///
+/// Measured on a nine-file C corpus: five findings, and every one of them was about a macro whose body is not an
+/// unparenthesised expression — a statement expression (`({ … })`), a declaration (`static const point p = {…}`), an
+/// X-macro fragment (`NAME##x = v,`), and two calls (`fprintf(…)`, `STRINGIFY(v)`). Each is a body a caller cannot
+/// splice anything into.
+#[test]
+fn only_an_unparenthesised_expression_body_is_a_macro_parentheses_finding() {
+    let codes = codes_of_a_file(
+        "/p/macros.c",
+        "\
+#define TWICE(x) x * 2
+#define CALL(f, v) f(v)
+#define STRINGIFY(v) #v
+#define DECLARE(name, v) static int name = (v)
+#define FRAGMENT(name) COLOUR_##name = 1,
+// **The corpus's own shapes**, with the line continuations that make a body more than one line: a statement
+// expression, a `do { } while (0)`, and a declaration list.
+#define STATEMENT(x)    \
+    ({                  \
+        int t = (x);    \
+        t * t;          \
+    })
+#define ASSERT(c)         \
+    do {                  \
+        if (!(c)) {       \
+        }                 \
+    } while (0)
+#define DEFINE(name, v)      \
+    static int name = (v)
+",
+    );
+    assert!(
+        codes.contains(&DiagnosticCode::MacroParentheses),
+        "`x * 2` is the shape this rule exists for: {codes:?}"
+    );
+    assert_eq!(
+        codes
+            .iter()
+            .filter(|code| **code == DiagnosticCode::MacroParentheses)
+            .count(),
+        1,
+        "and it is the only one: {codes:?}"
+    );
+}
+
+/// **A `_Generic` selection whose associations name types parses**, which is the whole point of the construct.
+///
+/// Found by fixing the macro body range: `CORPUS_TYPE_NAME(value)` is
+/// `_Generic((value), int:"int", double:"double", long:"long", char*:"char *", const char*:"const char *", default:"other")`,
+/// and once the pasted text stopped carrying the comment that followed it, the file's rendering began to report
+/// `expected `;``, `unexpected token`, and `expected }, but get string literal` — four syntax errors on a file gcc
+/// compiles without a warning.
+#[test]
+fn a_generic_selection_with_typed_associations_parses() {
+    let codes = codes_of_with(
+        "\
+static int name_of(int value) {
+    return (int)strlen(_Generic((value), int: \"int\", double: \"double\", long: \"long\", char*: \"char *\", const char*: \"const char *\", default: \"other\"));
+}
+",
+        "/p/generic.c",
+        Some("gnu17"),
+    );
+    assert!(
+        !codes.contains(&DiagnosticCode::SyntaxError),
+        "a `_Generic` with six associations is C11: {codes:?}"
+    );
+}
+
+/// **The corpus's `_Generic` macro, pasted where it is used** — the shape that produced four syntax errors.
+///
+/// The macro is written over three continued lines and uses six associations; the use is inside a call
+/// (`strlen(TYPE_NAME(v))`), which is where the paste lands.
+#[test]
+fn a_generic_macro_pasted_into_a_call_parses() {
+    let codes = codes_of_with(
+        "\
+#define CORPUS_TYPE_NAME(value) _Generic((value), \
+    int: \"int\",                                 \
+    double: \"double\",                          \
+    long: \"long\",                              \
+    char *: \"char *\",                          \
+    const char *: \"const char *\",              \
+    default: \"other\")
+static int name_of(int integer) {
+    return (int)strlen(CORPUS_TYPE_NAME(integer));
+}
+",
+        "/p/generic_macro.c",
+        Some("gnu17"),
+    );
+    assert!(
+        !codes.contains(&DiagnosticCode::SyntaxError),
+        "the macro's body is one `_Generic` selection: {codes:?}"
+    );
+}
+/// **An X-macro's `##` pasting still pastes** — the shape `CORPUS_COLOURS(CORPUS_ENUM_ENTRY)` has.
+///
+/// Found while fixing the macro body range: the enum produced by `LIST(ENTRY)` reported `expected `;`` where the pasted
+/// name should be, as if `COLOUR_##name` had reached the parser with its `##` still in it — which is what the rendering
+/// shows. **Known red, and independent of the body range**: it fails the same way with the range at its widest, so it is
+/// a defect in the paste operator's position bookkeeping rather than in this change. See `docs/remaining.md` §N8.
+#[test]
+#[ignore = "the X-macro paste leaves `##` in the expansion — docs/remaining.md §N8"]
+fn an_x_macro_pastes_its_names() {
+    let codes = codes_of_with(
+        "\
+#define LIST(X) X(red, 0) X(green, 1)
+#define ENTRY(name, value) COLOUR_##name = value,
+enum colours { LIST(ENTRY) COLOUR_COUNT };
+static const char *const NAMES[] = {LIST(NAME_ENTRY) \"count\"};
+#define NAME_ENTRY(name, value) #name,
+",
+        "/p/xmacro.c",
+        Some("gnu17"),
+    );
+    assert!(
+        !codes.contains(&DiagnosticCode::SyntaxError),
+        "the pasted names are identifiers: {codes:?}"
+    );
+}
+/// **A call whose only argument is a macro that expands to a `_Generic`** counts as one argument.
+///
+/// The corpus writes `strlen(CORPUS_TYPE_NAME(integer))`, where the macro's body is one `_Generic` selection with six
+/// `type: value` associations — and `argument-count` reported **five** of those calls as passing too few arguments to
+/// `strlen`, which takes one. The commas inside the expansion are the selection's, not the call's.
+#[test]
+fn a_macro_that_expands_to_a_generic_selection_is_one_argument() {
+    let codes = codes_of_with(
+        "\
+#include <string.h>
+#define TYPE_NAME(value) _Generic((value), int: \"int\", double: \"double\", default: \"other\")
+static int name_of(int integer) {
+    return (int)strlen(TYPE_NAME(integer));
+}
+",
+        "/p/one_argument.c",
+        Some("gnu17"),
+    );
+    assert!(
+        !codes.contains(&DiagnosticCode::ArgumentCount),
+        "one argument, six associations inside it: {codes:?}"
+    );
+}

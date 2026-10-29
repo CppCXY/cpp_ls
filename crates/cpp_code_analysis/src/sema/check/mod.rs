@@ -1198,6 +1198,22 @@ pub fn a_class_can_be_built_from(
         return None;
     }
 
+    // **A value that is itself a class is not a question this can answer.**
+    //
+    // The `Some(false)` at the end of this function means *"an aggregate cannot be built from one scalar value"* —
+    // which is true, and is not every case that reaches it: copy-initialisation of an aggregate from an object of its
+    // own type is legal C, and it is what `div_t divided = div(7, 2);` writes. Measured on a nine-file C corpus (and
+    // reproduced in `tests/checks.rs` with the declaration in a header): three findings in one function, for
+    // `div`/`ldiv`/`lldiv`, where the value's type *is* the target's — through two typedefs, `div_t` → `_div_t` — the
+    // conversion relation answered `Implicit` for the spelling and `Unknown` for the class, and the aggregate arm then
+    // called a legal copy "does not convert".
+    //
+    // `parameters_that_could_accept` already refuses to decide for a non-arithmetic value; this is the same refusal one
+    // level up, where the constructor loop is not there to make it.
+    if !value.is_arithmetic() {
+        return None;
+    }
+
     // **The class's own members, not its whole inheritance graph.** `members_of` answers the question a *reader*
     // asks — what can be written after `.` — and walks the base chain to do it: measured on `test_module`'s
     // `import std;` file, `members_of("std::vector")` is **ten bases and 583 ms of walking**, while the class's own

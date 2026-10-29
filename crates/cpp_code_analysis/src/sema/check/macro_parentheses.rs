@@ -41,7 +41,20 @@ impl Check for MacroParentheses {
                 Some((fact.name.clone(), range.start_offset, range.end_offset()))
             })
             .collect();
-
+        if std::env::var_os("CPPLS_TRACE_MACROS").is_some() {
+            eprintln!(
+                "macros in {}: written {} chars, {} bodies",
+                context.path.display(),
+                context.written.len(),
+                bodies.len()
+            );
+            for (name, start, end) in &bodies {
+                eprintln!(
+                    "  {name} @ {start}..{end} = {:?}",
+                    context.written.get(*start..*end)
+                );
+            }
+        }
         for (name, start, end) in bodies {
             let body = context.written.get(start..end).unwrap_or("").trim();
             // A body that is one token, a braced initialiser, a call, or already parenthesised is not this rule's shape.
@@ -52,10 +65,28 @@ impl Check for MacroParentheses {
             {
                 continue;
             }
+            // **Three shapes that are not an expression at all**, measured on a nine-file C corpus where every one of
+            // them was a finding:
+            //
+            //     #define DECLARE(name, v) static int name = (v)   a declaration: its `=` is a declarator's
+            //     #define FRAGMENT(name)   COLOUR_##name = 1,      an X-macro fragment: `##` and a trailing `,`
+            //     #define CALL(f, v)       f(v)                    a call, whose arguments are already grouped
+            //
+            // A caller's expression is spliced into the *parenthesised* place in all three, so there is no precedence to
+            // get wrong — and a rule that reports them teaches a reader to ignore it on the one shape that matters.
+            if starts_a_declaration(body) || body.contains("##") || is_a_call(body) {
+                continue;
+            }
             if !has_a_loose_operator(body) {
                 continue;
             }
-            context.add(
+            // **`add_in_the_file`, because a `#define` is not in the rendering.** A directive is consumed before the
+            // parse, so the rendering has no offset for it: `add` maps a *rendering* range into the file, and handing it
+            // a file range put the squiggle wherever that offset happened to land — measured on a nine-file C corpus,
+            // five findings on the *uses* of macros whose definitions were elsewhere, with the `%` of a format string
+            // inside the body text deciding some of them. In the small case it did not land at all: every finding was
+            // dropped as unplaced, so `#define TWICE(x) x * 2` was never reported.
+            context.add_in_the_file(
                 DiagnosticCode::MacroParentheses,
                 cpp_parser::SourceRange::new(start, end - start),
                 name.clone(),
@@ -67,6 +98,80 @@ impl Check for MacroParentheses {
     }
 }
 
+/// Does this replacement list **begin a declaration** rather than an expression?
+///
+/// A body that starts with a storage class, a qualifier or a type is a declaration — `static int name = (v)` — and its
+/// `=` belongs to the declarator, so a caller's expression cannot collide with it. The list is the words that can begin
+/// one; a body starting with anything else (a name, a literal, a unary operator) is an expression and stays this rule's
+/// question.
+fn starts_a_declaration(body: &str) -> bool {
+    const DECLARATION_WORDS: &[&str] = &[
+        "static",
+        "extern",
+        "const",
+        "volatile",
+        "inline",
+        "register",
+        "typedef",
+        "using",
+        "struct",
+        "class",
+        "union",
+        "enum",
+        "namespace",
+        "template",
+        "auto",
+        "void",
+        "char",
+        "short",
+        "int",
+        "long",
+        "float",
+        "double",
+        "signed",
+        "unsigned",
+        "bool",
+        "_Bool",
+        "size_t",
+    ];
+    body.split_whitespace()
+        .next()
+        .is_some_and(|first| DECLARATION_WORDS.contains(&first))
+}
+
+/// Is the whole body **one call** — `f(v)`, `fprintf(stderr, fmt, …)`?
+///
+/// The parenthesised argument list groups whatever the caller passes, so the precedence question this rule asks does
+/// not arise. A call with an operator *after* it (`f(x) + 1`) is not this shape and stays a finding.
+fn is_a_call(body: &str) -> bool {
+    let Some(open) = body.find('(') else {
+        return false;
+    };
+    // The callee is a name, and nothing else: `a > b(c)` is a comparison whose right side happens to be a call.
+    let callee = body[..open].trim();
+    if callee.is_empty()
+        || !callee
+            .chars()
+            .all(|character| character.is_alphanumeric() || character == '_' || character == ':')
+    {
+        return false;
+    }
+    // …and the group runs to the end of the body.
+    let mut depth = 0i32;
+    for (at, character) in body.char_indices().skip(open) {
+        match character {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return body[at + 1..].trim().is_empty();
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
 /// Does the replacement list contain an operator that binds looser than a primary expression, outside any nested
 /// parentheses? A leading `-` or `!` is unary, and `->`, `>>` and `::` are not binary operators.
 fn has_a_loose_operator(body: &str) -> bool {

@@ -609,8 +609,14 @@ fn a_compiler_that_answers_gives_its_directories_its_version_and_its_macros() {
         output: GCC,
     };
 
-    let toolchain =
-        search_paths(&runner, Path::new("/usr/bin/g++"), None, &[]).expect("the fixture answers");
+    let toolchain = search_paths(
+        &runner,
+        Path::new("/usr/bin/g++"),
+        None,
+        &[],
+        super::Language::Cpp,
+    )
+    .expect("the fixture answers");
 
     assert_eq!(
         toolchain.compiler.as_deref(),
@@ -639,7 +645,13 @@ fn a_program_that_is_not_a_compiler_is_not_asked_twice() {
         output: "usage: g++ [options] file\n",
     };
     assert_eq!(
-        search_paths(&runner, Path::new("/usr/bin/g++"), None, &[]),
+        search_paths(
+            &runner,
+            Path::new("/usr/bin/g++"),
+            None,
+            &[],
+            super::Language::Cpp
+        ),
         None
     );
 }
@@ -692,8 +704,14 @@ fn a_standard_the_caller_names_is_passed_to_the_compiler() {
     };
 
     // The fixture's `run` asserts the arguments, so reaching this line at all means `-std=c++20` was passed.
-    let toolchain = search_paths(&runner, Path::new("/usr/bin/g++"), Some("c++20"), &[])
-        .expect("the fixture answers");
+    let toolchain = search_paths(
+        &runner,
+        Path::new("/usr/bin/g++"),
+        Some("c++20"),
+        &[],
+        super::Language::Cpp,
+    )
+    .expect("the fixture answers");
     assert_eq!(
         toolchain.compiler.as_deref(),
         Some(Path::new("/usr/bin/g++"))
@@ -1166,5 +1184,90 @@ fn the_search_list_flags_of_a_command_are_taken_and_nothing_else() {
             "/opt/inc".to_string(),
         ],
         "a flag whose value is the next token takes that token with it"
+    );
+}
+
+/// **A `.c` file is asked for the C search list, and for the C standards.**
+///
+/// One compiler answers twice and the answers are different sets of directories — `gcc -x c++ -E -v -` lists
+/// `…/include/c++`, `…/include/c++/<target>` and `…/include/c++/backward`, `gcc -x c -E -v -` lists only the three C
+/// ones. Asking the C++ question about a C file costs declarations rather than messages: `<stdlib.h>` resolves to
+/// libstdc++'s wrapper, whose `div`/`ldiv`/`lldiv` are `long` overloads, and libstdc++'s `NULL` is `__null`, which the C
+/// grammar does not read. Measured on a nine-file C corpus: **nine findings and one parse error, one cause**.
+///
+/// Both halves are asserted here, because either alone is not enough: `-x c` chooses the directories, and the *assumed*
+/// ladder (`c23`, then `c17`) chooses what `__STDC_VERSION__` says when the project states no standard.
+#[test]
+fn a_c_file_is_asked_with_the_c_language_and_the_c_standards() {
+    use std::cell::RefCell;
+
+    struct Recording {
+        asked: RefCell<Vec<Vec<String>>>,
+        output: &'static str,
+    }
+
+    impl super::CommandRunner for Recording {
+        fn run(
+            &self,
+            _program: &Path,
+            arguments: &[&str],
+            _environment: &[(std::ffi::OsString, std::ffi::OsString)],
+        ) -> Option<super::Output> {
+            self.asked.borrow_mut().push(
+                arguments
+                    .iter()
+                    .map(|argument| argument.to_string())
+                    .collect(),
+            );
+            Some(super::Output {
+                stdout: String::new(),
+                stderr: self.output.to_string(),
+                status: Some(0),
+                succeeded: true,
+            })
+        }
+    }
+
+    const C_SEARCH_LIST: &str = "\
+#include \"...\" search starts here:
+#include <...> search starts here:
+ C:/tools/mingw64/bin/../lib/gcc/x86_64-w64-mingw32/15.1.0/include
+ C:/tools/mingw64/bin/../lib/gcc/x86_64-w64-mingw32/15.1.0/include-fixed
+ C:/tools/mingw64/bin/../x86_64-w64-mingw32/include
+End of search list.
+";
+
+    let runner = Recording {
+        asked: RefCell::new(Vec::new()),
+        output: C_SEARCH_LIST,
+    };
+    let found = super::search_paths(
+        &runner,
+        Path::new("/usr/bin/cc"),
+        None,
+        &[],
+        super::Language::C,
+    )
+    .expect("the fixture answers");
+    let asked = runner.asked.borrow();
+    let first = &asked[0];
+    assert!(
+        first.windows(2).any(|pair| pair == ["-x", "c"]),
+        "the C directories, not the C++ ones: {first:?}"
+    );
+    assert!(
+        !first.iter().any(|argument| argument == "c++"),
+        "nothing here names C++: {first:?}"
+    );
+    assert!(
+        first
+            .iter()
+            .any(|argument| argument == "-std=c23" || argument == "-std=c17"),
+        "the assumed standard is one of C's: {first:?}"
+    );
+    assert!(
+        found.system_include_paths.len() == 3,
+        "the fixture's three C directories: {:?}",
+        found.system_include_paths
     );
 }
