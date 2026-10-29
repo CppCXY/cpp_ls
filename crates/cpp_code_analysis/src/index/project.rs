@@ -8324,6 +8324,24 @@ fn a_class_name_without_spaces(name: &str) -> String {
 /// documents: a **type** fact with a `type_of` is an alias, and a class is a type fact without one. That is the
 /// whole of the test, and it is one test rather than a new field on purpose — the field was already there for
 /// variables, and what an alias *has* is a type in the same sense: the one it points at.
+/// **Every balanced `<…>` group removed** — `outer<int>::handle_type` becomes `outer::handle_type`.
+///
+/// A type spelling, so the only `<` that can appear is a template argument list's. Nesting is counted forwards
+/// because `Box<Pair<int, int>>` has to close at the right `>`.
+fn without_template_arguments(written: &str) -> String {
+    let mut stripped = String::with_capacity(written.len());
+    let mut depth = 0usize;
+    for character in written.chars() {
+        match character {
+            '<' => depth += 1,
+            '>' if depth > 0 => depth -= 1,
+            _ if depth == 0 => stripped.push(character),
+            _ => {}
+        }
+    }
+    stripped
+}
+
 fn alias_target_of(
     index: &ProjectIndex,
     scopes: &crate::ScopeTree,
@@ -8331,6 +8349,19 @@ fn alias_target_of(
     path: &Path,
     class: &str,
 ) -> Option<(String, Option<String>)> {
+    // **A qualifier's arguments are not the alias's arguments, and they have to come off first.**
+    //
+    // The split below separates an alias's **own** template argument list (`enable_if_t<int, double>`) and takes the
+    // first `<` it finds. In `outer<int>::handle_type` the first `<` opens the *qualifier's* list, so the head became
+    // `outer` — the class itself, which is not an alias — and the walk never found the member typedef. Measured:
+    // `outer<int>::handle_type h; h.` offered `outer`'s own members while `outer::handle_type h;` (the same class
+    // without the argument) offered the target's. Stripping runs only when the `<` is left of the last `::`, which is
+    // exactly the shape of a qualified name whose qualifier is a template-id.
+    let stripped_qualifier = without_template_arguments(class);
+    let class = match (class.rfind('<'), class.rfind("::")) {
+        (Some(argument_list), Some(scope)) if argument_list < scope => stripped_qualifier.as_str(),
+        _ => class,
+    };
     // **The arguments come off before the name is looked up, and go back on afterwards.**
     //
     // `enable_if_t<int, double>` is an alias *template*, and the index files it under the bare name `enable_if_t` —
@@ -9031,20 +9062,60 @@ fn class_of_the_enclosing_definition(scopes: &crate::ScopeTree, offset: usize) -
 /// this walk, because the walk does not ask "which name space"; it asks for the qualified spelling the index keys
 /// on, and a global declaration's spelling is its bare name. Keeping the prefix made `::Widget w;` — the type
 /// spelling a consumer hands over verbatim from `DeclFact.type_of` — fail to find a class sitting in the buffer.
+/// **Where the `<` is that opens a template argument list running to the end of `written`.**
+///
+/// `None` for a spelling with no such group — `outer<int>::handle_type` ends with `type`, so its `<` belongs to a
+/// *qualifier* and is not a list of the type's own. Nesting is counted backwards so `Box<Pair<int, int>>` answers the
+/// `Box` opening and not the `Pair` one.
+fn the_trailing_argument_list(written: &str) -> Option<usize> {
+    if !written.ends_with('>') {
+        return None;
+    }
+    let mut depth = 0usize;
+    for (at, character) in written.char_indices().rev() {
+        match character {
+            '>' => depth += 1,
+            '<' => {
+                if depth == 0 {
+                    return None;
+                }
+                depth -= 1;
+                if depth == 0 {
+                    return Some(at);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 pub(crate) fn base_type_name(written: &str) -> &str {
+
     let mut name = written.trim();
 
-    // Template arguments: the members of `std::vector<int>` are the members of `std::vector`'s primary template,
-    // which is the most useful answer available without instantiating anything.
-    if let Some(position) = name.find('<') {
-        name = name[..position].trim();
+    // **Template arguments, and only the ones at the END of the spelling.**
+    //
+    // The members of `std::vector<int>` are the members of `std::vector`'s primary template, which is the most useful
+    // answer available without instantiating anything. But a **member** of a class template is spelled
+    // `outer<int>::handle_type`, and cutting at the first `<` turns that into `outer` — the class, not the member —
+    // so every question below was asked about the wrong type. Measured: `outer<int>::handle_type h; h.` offered
+    // `outer`'s own typedefs, and a coroutine's `task<int>::handle_type` offered `await_ready`/`take` instead of
+    // `resume`/`promise`. The declarators and the leading `::` are taken off first so that the group at the end is
+    // really the end (`std::vector<int>*` and `::std::vector<int>` both arrive here).
+    loop {
+        let before = name;
+        // Declarators written after the type: `Widget*`, `Widget&`, `Widget&&`.
+        name = name.trim_end_matches(['*', '&']).trim();
+        // The global name space, which for a qualified spelling is no prefix at all.
+        name = name.strip_prefix("::").unwrap_or(name).trim();
+        if let Some(opening) = the_trailing_argument_list(name) {
+            name = name[..opening].trim();
+        }
+        if name == before {
+            break;
+        }
     }
-
-    // Declarators written after the type: `Widget*`, `Widget&`, `Widget&&`.
-    name = name.trim_end_matches(['*', '&']).trim();
-
-    // The global name space, which for a qualified spelling is no prefix at all.
-    name = name.strip_prefix("::").unwrap_or(name).trim();
 
     // An elaborated specifier: `struct Widget` and `Widget` name one class, and only the second is a spelling the
     // index matches.

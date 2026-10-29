@@ -2732,7 +2732,7 @@ fn an_arrow_on_a_pointer_inserts_the_name_and_not_the_operator() {
     let at = text.find("p->").expect("the fixture writes it") + 3;
     let set = session.completions(&view, cpp_code_analysis::file::coordinates::FileOffset::new(at));
 
-    let mut labels: Vec<&str> = set.items.iter().map(|item| item.label.as_str()).collect();
+    let mut labels: Vec<String> = set.items.iter().map(|item| item.label.clone()).collect();
     labels.sort_unstable();
     assert_eq!(labels, ["length", "size"], "the pointee's members, not names: {set:?}");
     for item in &set.items {
@@ -2815,11 +2815,135 @@ task<int> use() {
     let at = text.find("    s.\n").expect("the fixture writes it") + 6;
     let set = session.completions(&view, cpp_code_analysis::file::coordinates::FileOffset::new(at));
 
-    let mut labels: Vec<&str> = set.items.iter().map(|item| item.label.as_str()).collect();
+    let mut labels: Vec<String> = set.items.iter().map(|item| item.label.clone()).collect();
     labels.sort_unstable();
     assert_eq!(
         labels,
         ["length", "size"],
         "the awaited value is a `payload`, so its members are what a completion offers: {set:?}"
     );
+}
+
+/// **A member typedef of a class template names the class it points at.**
+///
+/// ```cpp
+/// template <typename T> struct outer { using handle_type = body; };
+/// outer<int>::handle_type h;  h.        // the members of `body`, not of `outer`
+/// ```
+///
+/// The spelling of such a type is `outer<int>::handle_type`, and two readers cut it at the **first** `<`:
+/// `base_type_name` — which is what `members_of` starts from, so the class asked about was `outer` — and
+/// `alias_target_of`, whose head split exists for an *alias template's own* arguments (`enable_if_t<int, double>`).
+/// Measured: the completion offered `outer`'s own typedefs (`handle_type`) while the same class written without the
+/// argument answered the target's members, and a coroutine's `task<int>::handle_type h; h.` offered `await_ready`/
+/// `take` instead of `resume`/`promise`.
+///
+/// The three shapes below are one test because they share the one helper: stripping a **qualifier's** argument list
+/// must leave an alias template's own arguments alone.
+#[test]
+fn a_member_typedef_of_a_class_template_names_its_target() {
+    let plain = "\
+struct body {
+    int size() const;
+    int length() const;
+};
+struct outer {
+    using handle_type = body;
+};
+void f() { outer::handle_type h{}; h. }
+";
+    assert_eq!(
+        member_labels_at(plain, "h."),
+        ["length", "size"],
+        "a class member typedef, without arguments"
+    );
+
+    let templated = "\
+struct body {
+    int size() const;
+    int length() const;
+};
+template <typename T>
+struct outer {
+    using handle_type = body;
+};
+void f() { outer<int>::handle_type h{}; h. }
+";
+    assert_eq!(
+        member_labels_at(templated, "h."),
+        ["length", "size"],
+        "the same typedef on a class template: the argument belongs to the use, not to the name"
+    );
+
+    // A member typedef whose target is itself a template-id, which is what a coroutine's `handle_type` is.
+    let coroutine = "\
+namespace std {
+template <typename P>
+struct coroutine_handle {
+    static coroutine_handle from_promise(P &promise);
+    void resume();
+    void destroy();
+    bool done() const;
+    P &promise() const;
+    void *address() const;
+};
+}
+template <typename T>
+struct task {
+    struct promise_type { };
+    using handle_type = std::coroutine_handle<promise_type>;
+};
+void f() { task<int>::handle_type h{}; h. }
+";
+    let labels = member_labels_at(coroutine, "h.");
+    for wanted in ["resume", "destroy", "promise", "address", "from_promise"] {
+        assert!(
+            labels.iter().any(|label| label.as_str() == wanted),
+            "`task<int>::handle_type` is a `coroutine_handle`, so it has `{wanted}`: {labels:?}"
+        );
+    }
+
+    // A **nested class** addressed through its outer class's template-id is the same spelling shape, and it must not
+    // lose its own members to it: `outer<int>::promise_type` is a class declared inside `outer`.
+    let nested_class = "\
+template <typename T>
+struct outer {
+    struct promise_type {
+        T get_return_object();
+        std::suspend_always initial_suspend();
+        T return_value(T v);
+    };
+};
+void f() { outer<int>::promise_type p{}; p. }
+";
+    assert_eq!(
+        member_labels_at(nested_class, "p."),
+        ["get_return_object", "initial_suspend", "return_value"],
+        "a nested class named through its outer class's template-id keeps its own members"
+    );
+
+    // …and an alias template's own arguments still substitute, which the same split is responsible for.
+    let alias_template = "\
+template <bool B, typename T = void>
+struct enable_if { using type = T; };
+template <bool B, typename T = void>
+using enable_if_t = typename enable_if<B, T>::type;
+struct payload { int size() const; };
+void f() { enable_if_t<true, payload> p{}; p. }
+";
+    assert_eq!(
+        member_labels_at(alias_template, "p."),
+        ["size"],
+        "an alias template's arguments are substituted, not stripped"
+    );
+}
+
+/// The member labels offered after `needle` in a one-file fixture, sorted.
+fn member_labels_at(source: &'static str, needle: &str) -> Vec<String> {
+    let (mut session, view) = a_pointer_fixture(source);
+    let at = source.find(needle).expect("the fixture writes it") + needle.len();
+    let set = session.completions(&view, cpp_code_analysis::file::coordinates::FileOffset::new(at));
+    let mut labels: Vec<String> = set.items.iter().map(|item| item.label.clone()).collect();
+    labels.sort_unstable();
+    labels
 }
