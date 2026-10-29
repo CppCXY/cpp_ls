@@ -1,0 +1,134 @@
+name: Rust
+
+on:
+  push:
+    branches:
+     - main
+    tags:
+     - "*"
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches:
+     - main
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-22.04,   target: x86_64-unknown-linux-gnu,    platform: linux-x64,     cross: general }
+          - { os: ubuntu-22.04,   target: x86_64-unknown-linux-gnu,    platform: linux-x64,     cross: zigbuild, glibc: 2.17 }
+          - { os: ubuntu-22.04,   target: aarch64-unknown-linux-gnu,   platform: linux-aarch64, cross: zigbuild, glibc: 2.17 }
+          - { os: ubuntu-22.04,   target: riscv64gc-unknown-linux-gnu, platform: linux-riscv64, cross: cross }
+          - { os: ubuntu-22.04,   target: x86_64-unknown-linux-musl,   platform: linux-musl,    cross: cross }
+          - { os: macos-latest,   target: x86_64-apple-darwin,         platform: darwin-x64,    cross: general }
+          - { os: macos-latest,   target: aarch64-apple-darwin,        platform: darwin-arm64,  cross: general }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc,      platform: win32-x64,     cross: general }
+          - { os: windows-latest, target: i686-pc-windows-msvc,        platform: win32-ia32,    cross: general }
+          - { os: windows-latest, target: aarch64-pc-windows-msvc,     platform: win32-arm64,   cross: general }
+    runs-on: ${{ matrix.os }}
+    env:
+      PACKAGE_ARGS: -p cpp_ls -p cpp_formatter
+      BINARY_NAMES: cpp_ls
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: edit version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          echo "current ref ${{ github.ref }}"
+          cargo run -p edit_version -- ${{ github.ref }}
+      - name: Build - General
+        if: ${{ matrix.cross == 'general' }}
+        shell: bash
+        run: |
+          rustup target add ${{ matrix.target }}
+          cargo build --release --target ${{ matrix.target }} $PACKAGE_ARGS
+      - name: Build - cross
+        if: ${{ matrix.cross == 'cross' }}
+        shell: bash
+        run: |
+          cargo install cross
+          cross build --release --target ${{ matrix.target }} $PACKAGE_ARGS
+      - name: Build -zigbuild
+        if: ${{ matrix.cross == 'zigbuild' }}
+        shell: bash
+        run: |
+          rustup target add ${{ matrix.target }}
+          cargo install --locked cargo-zigbuild
+          pip3 install ziglang
+          cargo zigbuild --release --target ${{ matrix.target }}.${{ matrix.glibc }} $PACKAGE_ARGS
+      - name: Stage binaries
+        shell: bash
+        run: |
+          if [ "${{ matrix.cross }}" = "zigbuild" ]; then
+            artifact_platform="${{ matrix.platform }}-glibc.${{ matrix.glibc }}"
+            target_dir="${{ matrix.target }}"
+          else
+            artifact_platform="${{ matrix.platform }}"
+            target_dir="${{ matrix.target }}"
+          fi
+
+          mkdir -p "$GITHUB_WORKSPACE/artifact"
+          binaries=($BINARY_NAMES)
+          for binary in "${binaries[@]}"; do
+            bundle_dir="$GITHUB_WORKSPACE/artifact/${binary}-${artifact_platform}"
+            mkdir -p "$bundle_dir"
+
+            source_path="$GITHUB_WORKSPACE/target/${target_dir}/release/${binary}"
+            if [ "${{ runner.os }}" = "Windows" ]; then
+              source_path="${source_path}.exe"
+            fi
+
+            cp "$source_path" "$bundle_dir/"
+          done
+      - name: Upload
+        if: ${{ matrix.cross != 'zigbuild' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-${{ matrix.platform }}
+          path: ${{ github.workspace }}/artifact/
+      - name: Upload zigbuild
+        if: ${{ matrix.cross == 'zigbuild' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-${{ matrix.platform }}-glibc.${{ matrix.glibc }}
+          path: ${{ github.workspace }}/artifact/
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - name: Download
+        uses: actions/download-artifact@v4
+      - name: Compress artifacts
+        shell: bash
+        run: |
+          shopt -s nullglob
+
+          for dir in build-*/*; do
+            [ -d "$dir" ] || continue
+
+            base_name="$(basename "$dir")"
+            if [[ "$base_name" == *win32* ]]; then
+              zip -j "${base_name}.zip" "$dir"/*.exe
+            else
+              chmod +x "$dir"/*
+              tar -zcvf "${base_name}.tar.gz" -C "$dir" .
+            fi
+          done
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          draft: false
+          generate_release_notes: true
+          files: |
+            *.zip
+            *.tar.gz
+
+          token: ${{ secrets.RELEASE }}
