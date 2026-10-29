@@ -2966,17 +2966,44 @@ hover co_await   → `co_await async_int(base)` — has type `int`
 `co_await` 保留的是**表达式类型**那条（程序自己的答案先于词表），比一句语法说明有用；`co_yield`/`co_return`
 没有类型可答，于是落到词表。测试：`vocabulary.rs::every_coroutine_keyword_has_its_popup_in_every_locale`。
 
-**还差的**（如实记下）：
+### 16.6.4 类模板的成员：`task<int>::handle_type` 是 `coroutine_handle`
+
+上一轮记下的那个缺口（`handle_type` 答成外层类的成员）这一轮修掉了，根因是两个读者都按**第一个 `<`** 切类型拼写：
 
 ```text
-task<int>::handle_type h;  h.      → 答的是 task 的成员，不是 coroutine_handle 的
-                                     （类作用域里 `using handle_type = std::coroutine_handle<promise_type>;`
-                                       这种"嵌套 typedef 指向模板 id"没有解析：实测 `direct_members` 收到的
-                                       类名已经是 `outer` 而不是 `outer<int>::handle_type`，缩小发生在
-                                       `the_class_after_the_operator` 之前的那一层；这一轮试的
-                                       `alias_target_of` 前缀剥离没有改善，已撤回）
-`promise_type` 只有写成完整拼写时才可达（task<int>::promise_type），裸的 `promise_type p;` 同上
+base_type_name(`outer<int>::handle_type`)   → `outer`      ← 每个成员问题都从它开始，于是问的是类本身
+alias_target_of(`outer<int>::handle_type`)  → 未找到      ← 它按第一个 `<` 取"别名自己的实参"，取到的是限定符的
 ```
+
+"按第一个 `<` 切"对**别名模板自己的实参**（`enable_if_t<int, double>`）是对的，对限定符里的模板实参是错的。修法
+把两处各自收窄：
+
+```text
+base_type_name          只去掉**拼写末尾**的模板实参（`the_trailing_argument_list`，配平计数，
+                        `Box<Pair<int, int>>` 仍然答 `Box`）
+alias_target_of         当 `<` 在最后一个 `::` **左边**时，先把**限定符**的实参剥掉
+                        （`without_template_arguments`），再走原来的切分
+```
+
+实测（真服务器，`test_cpp/coroutine.cpp`，`main` 里插一行）：
+
+```text
+task<int>::handle_type h{}; h.
+  改前  10 项：await_ready / await_resume / await_suspend / done / operator= / take …（task 自己的成员）
+  改后  11 项：address / destroy / done / from_address / from_promise / operator bool /
+              operator coroutine_handle<> / operator() …（std::coroutine_handle 的成员）
+
+同一次回答里别的数字没有变：computed. 10 项、co_await greet("x") 的结果 68 项（std::string）、诊断 0 条
+```
+
+嵌套类走同一条拼写（`outer<int>::promise_type p{}; p.`）也跟着对了：实测答 `get_return_object`、
+`initial_suspend`、`return_value`；裸写 `promise_type p{};`（在类自己的成员函数里）同样答得出来。测试在
+`completion.rs::a_member_typedef_of_a_class_template_names_its_target`，**先红后绿**：修前那个形状答的是
+`["handle_type"]`，修后是目标的成员；同一个测试里还钉着"别名模板的实参仍然要被代换"（`enable_if_t<true,
+payload> p.` → `size`），以及没有实参的普通成员 typedef。
+
+这一轮改的两处都是**共享**代码（`base_type_name` 有 12 个调用点），所以三个套件全跑过：`cpp_parser` 33、
+`cpp_code_analysis` 50、`cpp_ls --release` 18 全绿。
 
 测试：`tests/checks.rs::a_nested_class_has_its_members`、`a_coroutine_body_has_no_missing_return`、
 `tests/completion.rs::an_awaited_value_has_the_type_await_resume_returns`。套件：`cpp_parser` 33、
