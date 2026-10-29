@@ -275,7 +275,13 @@ fn begins_a_statement(p: &mut CppParser) -> bool {
         // another name in an expression, so reading this shape as the start of a declaration takes nothing away from
         // a program that parses; it is the shape a reader's cursor sits above while they type `obj->` on the line
         // before it.
-        CppTokenKind::Identifier => a_type_and_a_name_follow(p),
+        // **`obj.member` / `obj->member`, which an expression cannot continue into.** `a b.c` is not a valid
+        // continuation of anything, so `ident .` is a statement of its own — and it is what the line below a reader's
+        // unfinished `x->` holds: measured, `p->\n    v.member` skipped the whole `v.member` statement (a bare
+        // identifier answered "no" here and the skip took it to the `}`), so every completion and every check after
+        // the cursor read a tree without it. `full.size()` on the line after an unfinished arrow is the shape a
+        // reader reports as "补全全是错的".
+        CppTokenKind::Identifier => a_type_and_a_name_follow(p) || a_member_access_follows(p),
         kind => exprs::starter_of_a_builtin_type(kind) || decls::can_begin_a_declaration(kind),
     }
 }
@@ -285,6 +291,18 @@ fn begins_a_statement(p: &mut CppParser) -> bool {
 /// The scan is the shape: `ident (:: ident)* [<…>] [*|&|const]* ident`, followed by a token that can follow a
 /// declarator. Template arguments are counted by depth because they nest (`vector<vector<int>>`), and the scan is
 /// bounded because this runs on a recovery path, where the input is by definition something the grammar refused.
+/// **`ident .` / `ident ->` at the cursor** — a member-expression statement, see [`begins_a_statement`].
+///
+/// Deliberately only the operator: `ident ident` is the declaration shape (and `a_type_and_a_name_follow` asks it),
+/// while `ident .` and `ident ->` have no reading that continues the expression before them, so the narrow test
+/// takes nothing away from a program that parses.
+fn a_member_access_follows(p: &CppParser) -> bool {
+    matches!(
+        p.peek_token_kind_at(1..2).first().copied(),
+        Some(CppTokenKind::Dot | CppTokenKind::Arrow)
+    )
+}
+
 fn a_type_and_a_name_follow(p: &CppParser) -> bool {
     const MAX_TOKENS: usize = 96;
     let kind = |offset: usize| p.peek_token_kind_at(offset..offset + 1).first().copied();

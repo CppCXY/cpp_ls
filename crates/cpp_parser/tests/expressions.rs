@@ -771,3 +771,49 @@ fn a_comma_expression_inside_a_parenthesised_initializer_parses() {
         assert!(errors.is_empty(), "{text}: {errors:?}");
     }
 }
+
+/// **An unfinished `->` ends at its line, and the statement below it is still a statement.**
+///
+/// The member-access rule used to take the next line's first identifier as the member name: `p->` followed by
+/// `Widget w;` parsed as one `ExpressionStat "p-> Widget"` and the declaration was gone. Everything that reads the
+/// tree after a cursor read a tree without it — measured on a real project through the completion query, `w.` on the
+/// line below answered **nothing** while `p->` itself answered its two members: the shape a reader reports as
+/// "基本指针的补全是全错的".
+///
+/// Two rules, and this pins both: a member name must be on the operator's line, and an `ident .` / `ident ->` at the
+/// start of a line begins a statement rather than continuing the failed one.
+#[test]
+fn a_member_name_is_not_on_the_next_line() {
+    let source = "struct Widget { int size; };\nvoid f()\n{\nWidget * p;\np->\n\nWidget w;\nw.size;\n}\n";
+    let tree = CppParser::parse(source, ParserConfig::default());
+    let body = tree
+        .get_red_root()
+        .descendants()
+        .find(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::CompoundStat)
+        .expect("the body of `f`");
+    let shapes: Vec<String> = body
+        .children()
+        .map(|node| {
+            format!(
+                "{:?} {:?}",
+                CppSyntaxKind::from(node.kind()),
+                node.text().to_string().trim()
+            )
+        })
+        .collect();
+
+    assert!(
+        shapes.contains(&"ExpressionStat \"p->\"".to_string()),
+        "the arrow ends where its line does: {shapes:?}"
+    );
+    assert!(
+        shapes
+            .iter()
+            .any(|shape| shape.starts_with("Declaration") && shape.contains("Widget w")),
+        "the declaration below the arrow is a declaration: {shapes:?}"
+    );
+    assert!(
+        shapes.contains(&"ExpressionStat \"w.size;\"".to_string()),
+        "and the member expression below it is still its own statement: {shapes:?}"
+    );
+}

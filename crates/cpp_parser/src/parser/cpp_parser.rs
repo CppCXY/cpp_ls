@@ -1857,7 +1857,7 @@ impl<'a> CppParser<'a> {
     /// `0` means "on the same line", which is how `/* a */ /* b */` stays one group. Counting the
     /// newlines between them rather than asking a line index is both simpler and more accurate here:
     /// the question is about the gap, not about where the lines are.
-    fn lines_between(&self, from: usize, to: usize) -> usize {
+    pub(crate) fn lines_between(&self, from: usize, to: usize) -> usize {
         if to <= from {
             return 0;
         }

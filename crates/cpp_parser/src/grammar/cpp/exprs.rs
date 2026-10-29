@@ -1798,13 +1798,28 @@ fn parse_postfix_suffixes(
             CppTokenKind::Dot | CppTokenKind::Arrow => {
                 // 成员访问
                 let m = expr.precede(p, CppSyntaxKind::IndexExpr);
+                let operator_range = p.current_token_range();
                 p.bump(); // consume '.' or '->'
+
+                // **A member name that starts on the next line is not this access's member.** A reader typing
+                // `p->` leaves the operator at the end of a line, and the recovery used to take the next
+                // statement's first identifier as the member name: measured, `p->\n\n    Widget w;\n    w.` parsed
+                // as one `ExpressionStat "p->\n\n    Widget"`, the declaration of `w` disappeared, and the
+                // completion after `w.` answered nothing while a hover on `w` said it was not declared.
+                //
+                // Legal C++ allows the break — and every formatter puts it *before* the operator (`.member` at
+                // the start of a line), not after it — so a member on the next line is a shape no real file has
+                // and an incomplete edit is the shape millions of files have. The access simply ends here and
+                // the missing-name branch below says what is missing.
+                let same_line =
+                    p.lines_between(operator_range.end_offset(), p.current_token_range().start_offset) == 0;
 
                 // `decltype(t)::template rebind<U>` and `x.template rebind<U>` are the same disambiguator as the
                 // one in the qualified-name loop below: `template` marks the `<` after the name as the start of
                 // template arguments. It is accepted in both positions or neither, because which of the two a
                 // reader meets depends only on whether the object has a name.
-                if p.current_token() == CppTokenKind::TemplateKeyword
+                if same_line
+                    && p.current_token() == CppTokenKind::TemplateKeyword
                     && matches!(
                         p.peek_next_token(),
                         CppTokenKind::Identifier | CppTokenKind::OperatorKeyword
@@ -1817,7 +1832,7 @@ fn parse_postfix_suffixes(
                 // `x.Base::template f<T>()`. Each segment before a `::` is part of the name, and it is the last one
                 // that is the member. MSVC's `<atomic>` writes `const_cast<atomic*>(this)->_Base::store(_Value)`
                 // in thirty places, and every one of them was `expected ;`.
-                while p.current_token() == CppTokenKind::Identifier {
+                while same_line && p.current_token() == CppTokenKind::Identifier {
                     if p.peek_next_token() == CppTokenKind::Less {
                         // A template-id qualifier, `Outer<T>::f`: kept only when a `::` follows the arguments, which
                         // is what separates it from a comparison written after a member access.
@@ -1845,7 +1860,7 @@ fn parse_postfix_suffixes(
                     }
                 }
 
-                if p.current_token() == CppTokenKind::Identifier {
+                if same_line && p.current_token() == CppTokenKind::Identifier {
                     p.bump();
                     // The member's template arguments, when it has any — `x.template f<int>()` needs the
                     // arguments to be *attached* here, because `f<int>()` read as a comparison would compare
@@ -1863,7 +1878,7 @@ fn parse_postfix_suffixes(
                             p.rollback(before_the_arguments);
                         }
                     }
-                } else if p.current_token() == CppTokenKind::OperatorKeyword {
+                } else if same_line && p.current_token() == CppTokenKind::OperatorKeyword {
                     // An **explicit call to a member operator**: `x.operator<(...)`, `x.operator->()`,
                     // `x.operator std::string_view()`. The name after a `.` is an operator name as much as a
                     // member name is, and the same reader a declaration's operator name goes through is what
@@ -1878,7 +1893,7 @@ fn parse_postfix_suffixes(
                             p.rollback(before_the_arguments);
                         }
                     }
-                } else if p.current_token() == CppTokenKind::Tilde {
+                } else if same_line && p.current_token() == CppTokenKind::Tilde {
                     // A **pseudo-destructor call**: `p->~T()`, `x.~basic_string()`, `x.~int()`.
                     //
                     // `~name` is how a destructor is spelled, in an expression as much as in a declaration, and what
@@ -1905,7 +1920,7 @@ fn parse_postfix_suffixes(
                             name.complete(p);
                             continue;
                         }
-                        while p.current_token() == CppTokenKind::Identifier {
+                        while same_line && p.current_token() == CppTokenKind::Identifier {
                             p.bump();
                             // **The name's template arguments**, the same `<` ambiguity the identifier branch above
                             // resolves the same way: read them and keep them only if what follows can follow a
