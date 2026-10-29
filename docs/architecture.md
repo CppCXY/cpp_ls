@@ -3119,3 +3119,32 @@ test_cpp 回归     main.cpp 仍是 7 条（5 unused + 2 undefined-name @28/@74�
 
 原来钉"箭头不判"的测试（`a_member_reached_through_an_arrow_is_not_judged_as_missing`）换成了
 `an_arrow_is_judged_against_the_class_it_reaches`：指向类的成员要判、缺失要报、跟不到的箭头沉默。
+
+### 16.7.3 `redefinition`：一个作用域里同名声明两次
+
+`test_cpp/main.cpp` 在 `main` 里声明了**三次** `auto x`（第 22、39、56 行）—— 没有编译器会接受，而分析对此一直
+沉默。新规则报"同一作用域里同名变量的第二次及以后的声明"，两个方向都收得很窄：
+
+```text
+只看没有第二种读法的 kinds   只有 BindingKind::Variable。函数名在同一作用域是**重载集**，类名是
+                            前向声明 + 定义，using 声明是同义词 —— 都合法，判了就是在报编译器接受的代码
+只看读者会写的作用域        函数体、块、lambda。类体里可以有前向声明 + 定义；文件作用域
+                            `extern int value;` + `int value = 0;` 是同一个实体
+```
+
+宏产生的 binding（`origin` 非空）跳过：它的 range 在宏体里，报出来会指着一行读者只写了一次的代码。**同一个
+range 出现两次**视为同一声明被记了两遍，不算重定义。
+
+**实测**（真服务器，样本工程）：
+
+```text
+main.cpp       7 → 9 条
+               + redefinition@39  `x` is already declared in this scope
+               + redefinition@56  `x` is already declared in this scope
+test.h         不变（1 条，cstyle-cast@18）
+coroutine.cpp  0
+```
+
+测试：`checks.rs::a_name_declared_twice_in_one_scope_is_reported`（普通局部、`auto` 两次的形状、参数被局部同名遮蔽）
+与 `a_repeat_the_language_has_a_reading_for_is_quiet`（两个块、两个重载、前向声明 + 定义、`extern` + 定义、嵌套块
+遮蔽）。代码计数 26。
