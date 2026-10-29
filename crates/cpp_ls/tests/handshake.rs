@@ -412,6 +412,45 @@ fn a_client_can_open_a_file_and_get_diagnostics_a_definition_and_a_hover() {
     );
 }
 
+/// **`shutdown` ends the process even when the client never sends `exit`.**
+///
+/// The protocol asks for `exit` after the shutdown answer, and a client that sends it gets to see the answer
+/// first. A client that only says `shutdown` — and holds the pipe open, the way an editor does — is still a
+/// client that expects the process to end: waiting for a notification that will not come is a server an editor
+/// has to kill, which is what happened (the wait was thirty seconds, and the process outlived it).
+#[test]
+fn a_shutdown_ends_the_process_while_the_client_keeps_the_pipe() {
+    let project = Project::new("shutdown-without-exit");
+    project.write("main.cpp", "int main() { return 0; }\n");
+
+    let mut server = Server::start(project.root());
+    server.request(
+        1,
+        "initialize",
+        json!({
+            "processId": std::process::id(),
+            "rootUri": uri_of(project.root()),
+            "capabilities": {
+                "workspace": { "configuration": true, "didChangeWatchedFiles": { "dynamicRegistration": true } },
+                "window": { "workDoneProgress": true },
+            },
+        }),
+    );
+    server.notify("initialized", json!({}));
+
+    // Let the workspace come up, the way a client has been talking to the server for a while before it closes.
+    server.pull_diagnostics(90, &uri_of(&project.root().join("main.cpp")));
+
+    let shutdown = server.request(901, "shutdown", Value::Null);
+    assert_eq!(shutdown["result"], Value::Null);
+
+    // **No `exit`, and `stdin` stays open** — the server holds it, so only its own code can end the process.
+    assert!(
+        server.wait_for_exit(),
+        "the process must end after shutdown, not wait for an exit notification"
+    );
+}
+
 /// The project's own `.cppls.toml` is read by the engine and honoured by the **server**.
 ///
 /// The engine's tests prove the file is parsed; what they cannot prove is that a setting in it reaches the layer

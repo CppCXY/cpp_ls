@@ -3,13 +3,15 @@ use std::error::Error;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
-use super::error::ExitError;
+/// **How long after the shutdown answer the `exit` notification is waited for.** Long enough for a client that sends
+/// it immediately, short enough that a client that never sends one does not leave the process waiting.
+const EXIT_WAIT: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// Async wrapper for LSP Connection with tokio support
 pub struct AsyncConnection {
     pub(crate) connection: Arc<Connection>,
     receiver: mpsc::UnboundedReceiver<Message>,
-    _receiver_task: tokio::task::JoinHandle<()>,
+    _receiver_task: std::thread::JoinHandle<()>,
 }
 
 impl AsyncConnection {
@@ -18,15 +20,21 @@ impl AsyncConnection {
         let (tx, rx) = mpsc::unbounded_channel();
         let connection = Arc::new(connection);
 
-        // Spawn blocking task to convert sync receiver to async
+        // **A plain thread, not `spawn_blocking`.** This loop blocks on stdin, and a blocking *task* is a task the
+        // runtime waits for when it is dropped: the process answered `shutdown`, printed its goodbye, and then stayed
+        // alive until the client closed the pipe — measured, and the whole of one report. A thread that is simply
+        // detached ends with the process, which is the answer `shutdown` asks for.
         let connection_clone = connection.clone();
-        let receiver_task = tokio::task::spawn_blocking(move || {
-            for msg in &connection_clone.receiver {
-                if tx.send(msg).is_err() {
-                    break; // Receiver closed
+        let receiver_task = std::thread::Builder::new()
+            .name("cpp_ls-reader".to_string())
+            .spawn(move || {
+                for msg in &connection_clone.receiver {
+                    if tx.send(msg).is_err() {
+                        break; // Receiver closed
+                    }
                 }
-            }
-        });
+            })
+            .expect("the reader thread starts");
 
         Self {
             connection,
@@ -49,6 +57,15 @@ impl AsyncConnection {
     }
 
     /// Handle shutdown request
+    ///
+    /// **`shutdown` is answered, and the process ends.** The protocol asks for an `exit` notification afterwards, and
+    /// a client that sends it gets to see the answer first — but a client that only sends `shutdown` is a client that
+    /// expects the process to end, and waiting for a notification that may never come is a server an editor has to
+    /// kill. Measured: the wait used to be thirty seconds, and a client that stops after `shutdown` left the process
+    /// alive for all of it.
+    ///
+    /// The wait is bounded rather than skipped because the answer has to reach the client: `exit` normally arrives
+    /// within milliseconds of the response, and a longer wait only delays the ending.
     pub async fn handle_shutdown(
         &mut self,
         req: &lsp_server::Request,
@@ -58,22 +75,19 @@ impl AsyncConnection {
         }
         let resp = Response::new_ok(req.id.clone(), ());
         let _ = self.connection.sender.send(resp.into());
-        match tokio::time::timeout(std::time::Duration::from_secs(30), self.receiver.recv()).await {
-            Ok(Some(Message::Notification(n))) if n.method == "exit" => (),
+
+        match tokio::time::timeout(EXIT_WAIT, self.receiver.recv()).await {
+            Ok(Some(Message::Notification(n))) if n.method == "exit" => {}
+            // Anything else after `shutdown` is a client that does not follow the protocol; ending is still better
+            // than waiting for a message that will not come.
             Ok(Some(msg)) => {
-                return Err(Box::new(ExitError(format!(
-                    "unexpected message during shutdown: {msg:?}"
-                ))));
+                log::debug!("after shutdown, before exit: {msg:?}");
             }
             Ok(None) => {
-                return Err(Box::new(ExitError(
-                    "channel closed while waiting for exit notification".to_owned(),
-                )));
+                log::debug!("the client closed the connection after shutdown");
             }
             Err(_) => {
-                return Err(Box::new(ExitError(
-                    "timed out waiting for exit notification".to_owned(),
-                )));
+                log::debug!("no exit notification within {EXIT_WAIT:?}; ending anyway");
             }
         }
         Ok(true)
