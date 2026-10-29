@@ -877,7 +877,7 @@ mod tests {
     /// every **use** stays — deciding which entity a use belongs to needs that file's scopes, which is a parse this
     /// layer does not do (module documentation).
     #[test]
-    fn another_entitys_declaration_of_the_same_spelling_is_not_a_reference() {
+    fn another_entity_declaration_of_the_same_spelling_is_not_a_reference() {
         let files = MemoryFiles::new()
             .with_file(
                 "/p/name.h",

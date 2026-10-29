@@ -1864,7 +1864,7 @@ fn a_qualified_definition_carries_its_parameter_list() {
 /// follower of `iterator` was the `#`, which is neither an identifier nor a specifier, so the name was refused the
 /// type position and became the *declarator*. A directive is transparent to that question now.
 #[test]
-fn a_member_whos_return_type_a_directive_separates_is_a_member() {
+fn a_member_whose_return_type_a_directive_separates_is_a_member() {
     let session = session_with(&[(
         "/p/a.cpp",
         "struct C {\n    int x;\n    CONSTEXPR\n    iterator\n#if __cplusplus >= 201103L\n    erase(const_iterator p)\n    { return p; }\n#else\n    erase(iterator p)\n    { return p; }\n#endif\n    int size();\n};\n",

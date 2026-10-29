@@ -3442,7 +3442,7 @@ impl<F: FileProvider + Clone> Session<F> {
                 // a caller that calls it twice is asking twice.
                 if let Some(collected) = self.collect_the_cache() {
                     log::debug!(
-                        "cache: collected {} summar(ies), {} rendering(s), {} projection(s)",
+                        "cache: collected {} summary(ies), {} rendering(s), {} projection(s)",
                         collected.summaries,
                         collected.renderings,
                         collected.projections

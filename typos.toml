@@ -8,6 +8,27 @@ extend-ignore-re = [
   "(?i)\\b(?:\\w*typ|typ_\\w*)\\b",
 ]
 
+# **Words this project writes on purpose.** The spell check reads English prose, and three kinds of token here are not
+# that: hyphenated compounds whose first half it wants to respell (`mis-nesting`, `mis-paired` → `miss`), compiler and
+# tool spellings quoted verbatim (`-Iinclude`, `/Fo`, `PARM` inside `_GLIBCXX_NOEXCEPT_PARM`, `_S_nd`, `SEH`), and
+# fixtures whose whole point is a misspelling (`IndentWidht`, `exlude`, `standrad` are what a test asserts the error
+# message quotes back) or a wrong result the tests report (`aanotherVec`).
+[default.extend-words]
+mis = "mis"
+PARM = "PARM"
+Iinclude = "Iinclude"
+seh = "seh"
+SEH = "SEH"
+nd = "nd"
+gam = "gam"
+thr = "thr"
+forr = "forr"
+aanother = "aanother"
+reversable = "reversable"
+Widht = "Widht"
+exlude = "exlude"
+standrad = "standrad"
+Fo = "Fo"
 [files]
 extend-exclude = [
   "CHANGELOG.md",

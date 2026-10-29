@@ -755,7 +755,7 @@ void Second::update() { _value = 2; }
     /// scope question — and for a `.cpp` the class is not a scope but the prefix of a qualified definition
     /// (`void First::update()`), which is the case this test pins.
     #[test]
-    fn is_not_another_classs_member_and_the_header_declaration_counts() {
+    fn is_not_another_class_member_and_the_header_declaration_counts() {
         let files = MemoryFiles::new()
             .with_file("/p/base.h", BASE_H)
             .with_file("/p/use.cpp", USE_CPP);
@@ -966,7 +966,7 @@ void Second::update() {
     /// every unqualified `_value` there `Second`'s — and it is, except the one behind `.`. The receiver's type decides,
     /// with the same inference every other query uses.
     #[test]
-    fn is_the_receivers_and_a_bare_name_is_the_enclosing_classs() {
+    fn is_the_receivers_and_a_bare_name_is_the_enclosing_class() {
         let files = MemoryFiles::new()
             .with_file("/p/base.h", BASE_H)
             .with_file("/p/use.cpp", USE_CPP);

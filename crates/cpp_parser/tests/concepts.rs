@@ -303,7 +303,7 @@ fn a_constraint_keeps_its_template_id_when_a_declaration_follows() {
 fn the_two_words_are_ordinary_names_everywhere_else() {
     // `requires` and `concept` are **contextual keywords**: the standard gives them a meaning in particular
     // positions and leaves them as perfectly good identifiers everywhere else. The lexer used to hand both over as
-    // keyword tokens, which made every one of these programs unparseable — a variable named `requires` is not an
+    // keyword tokens, which made every one of these programs unparsable — a variable named `requires` is not an
     // exotic thing to write, and the lexer was telling the grammar something the grammar does not believe.
     //
     // Both now arrive as `Identifier`, and the grammar asks for the *spelling* where the standard gives the word a

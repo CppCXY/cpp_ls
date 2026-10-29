@@ -3473,7 +3473,7 @@ pub fn could_start_template_arguments(p: &CppParser) -> bool {
 /// and the stop set catches it if there is none.
 ///
 /// Treating every comma as fatal was tried and is what made a multi-argument template-id with a
-/// nested template-id in it unparseable, which is exactly the shape `Vec<std::vector<int>, 3>` has.
+/// nested template-id in it unparsable, which is exactly the shape `Vec<std::vector<int>, 3>` has.
 ///
 /// # Where it must not be shallow
 ///
@@ -4582,7 +4582,7 @@ fn a_parenthesised_abstract_declarator_follows(p: &CppParser) -> bool {
     //
     // It took better evidence to see this one: in the per-file reading a macro chain kept the calling convention
     // unexpanded, so the tokens were the ordinary names and the shape was never reached. The one-walk
-    // `TranslationUnit` expands what the compiler expands, and 	ype_traits:409 became that file's first error.
+    // `TranslationUnit` expands what the compiler expands, and 	type_traits:409 became that file's first error.
     || (written_like_a_macro(p.peek_token_text_at(1))
         && pointer_to_member_operator_length(p, 2).is_some_and(|length| {
             p.peek_token_kind_at(2 + length..3 + length) == [CppTokenKind::RightParen]

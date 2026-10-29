@@ -81,7 +81,7 @@ fn every_offset_of_the_declaration_reports_it() {
 
 /// A class is a declaration, and a member of it is documented by its own comment rather than by the class's.
 #[test]
-fn a_member_is_not_documented_by_the_classs_comment() {
+fn a_member_is_not_documented_by_the_class_comment() {
     let source = "/// The class.\nstruct S {\n    /// The n.\n    int n;\n};\n";
 
     assert_eq!(

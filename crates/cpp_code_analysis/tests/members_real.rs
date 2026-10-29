@@ -34,7 +34,7 @@ fn project() -> Option<PathBuf> {
 
 #[test]
 #[ignore = "opens a real project; run with --ignored"]
-fn a_classs_member_list_and_its_postings_agree() {
+fn a_class_member_list_and_its_postings_agree() {
     let Some(project) = project() else {
         eprintln!("skipped: no project (set CPPLS_REAL_PROJECT)");
         return;

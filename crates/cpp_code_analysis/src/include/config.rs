@@ -1395,7 +1395,7 @@ mod database_search_path_tests {
     /// **A database entry's own `-I` comes first**, and the compiler's directories after it — the order a compiler
     /// searches, and the reason the fix appends rather than prepends.
     #[test]
-    fn the_entrys_own_directories_come_before_the_compilers() {
+    fn the_entries_own_directories_come_before_the_compilers() {
         let root = PathBuf::from("/p");
         let file = root.join("src/main.cpp");
         let database = CompileCommands {

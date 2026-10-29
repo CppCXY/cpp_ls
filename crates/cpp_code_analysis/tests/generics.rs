@@ -75,7 +75,7 @@ fn type_of_use(source: &str, spelling: &str) -> Option<String> {
 /// because no `std::vector` has one. This is the case a reader reported: a hover and a completion that disagreed about
 /// the same expression.
 #[test]
-fn a_member_list_is_the_instantiated_classs() {
+fn a_member_list_is_the_instantiated_class() {
     let source = format!("{VECTOR}void f() {{\n    std::vector<int> z;\n    z.\n}}\n");
     let offered = members_after(&source, "z.\n");
     assert!(
@@ -90,7 +90,7 @@ fn a_member_list_is_the_instantiated_classs() {
 
 /// **The same, through an alias**: `using string = basic_string<char>;` reads as `basic_string<char>` everywhere.
 #[test]
-fn an_alias_to_an_instantiation_offers_that_classs_members() {
+fn an_alias_to_an_instantiation_offers_that_class_members() {
     let source = "\
 namespace std {
 template <class T>

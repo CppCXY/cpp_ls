@@ -1843,7 +1843,7 @@ int main()
 /// today `value_type` is still a name to `convertible_to`, which answers `Unknown`, and a check that cannot compare
 /// says nothing.
 #[test]
-fn a_member_parameter_written_with_the_classs_alias_is_checked() {
+fn a_member_parameter_written_with_the_class_alias_is_checked() {
     let header = "\
 namespace std {
 template <class _Tp>

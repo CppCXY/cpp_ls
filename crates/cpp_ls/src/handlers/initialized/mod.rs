@@ -403,7 +403,7 @@ async fn index_in_background(context: ServerContextSnapshot) {
                     // gigabytes", and the answer to "which part" is then in hand instead of guessed at.
                     if pending_now == 0 && taken > 0 {
                         log::info!(
-                            "index drained: cache {} rendering(s) ({} KB), {} translation unit(s), {} summar(ies), \\
+                            "index drained: cache {} rendering(s) ({} KB), {} translation unit(s), {} summary(ies), \\
                              {} fact(s), {} macro(s), {} cooked file(s) / {} cooked declaration(s)",
                             sizes.renderings,
                             sizes.rendering_bytes / 1024,

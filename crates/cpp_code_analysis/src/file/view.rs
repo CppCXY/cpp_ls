@@ -546,7 +546,7 @@ pub fn might_be_documented(text: &str, offset: usize) -> bool {
     //
     // Measured, and it is the whole of a net loss that stood for two rounds: dropping unconditionally fixed
     // `every_offset_of_the_declaration_reports_it` and `the_declarations_documentation_travels_with_the_signature`
-    // and lost `a_member_is_not_documented_by_the_classs_comment`,
+    // and lost `a_member_is_not_documented_by_the_class_comment`,
     // `a_member_documented_by_a_nested_comment_is_found_too` and `the_check_never_rejects_a_comment_the_parser_finds`
     // (25 passing assertions against 24). The three ask at offsets whose last line is `    /// The n.` — the trace
     // this was found with reads:

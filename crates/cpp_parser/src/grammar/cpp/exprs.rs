@@ -951,7 +951,7 @@ fn parse_unary_expr(p: &mut CppParser, fold_operand: bool) -> ParseResult {
         // ::delete static_cast<_Ty*>(_Target);
         // ```
         //
-        // so `void f(S* p) { ::delete p; }` was unparseable — and `cl.exe` accepts all of `::delete p`,
+        // so `void f(S* p) { ::delete p; }` was unparsable — and `cl.exe` accepts all of `::delete p`,
         // `::delete[] p` and `::delete` on a value. It is the whole of the one remaining diagnostic in `<any>`.
         CppTokenKind::Scope if p.peek_next_token() == CppTokenKind::DeleteKeyword => {
             parse_delete_expr(p, fold_operand)

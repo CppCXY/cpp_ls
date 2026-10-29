@@ -151,7 +151,7 @@ fn what_a_keystroke_costs() {
 
     let sizes = session.cache_sizes();
     println!(
-        "cache afterwards: {} summar(ies), {} unit(s), {} fact(s)",
+        "cache afterwards: {} summary(ies), {} unit(s), {} fact(s)",
         sizes.summaries, sizes.units, sizes.facts
     );
 

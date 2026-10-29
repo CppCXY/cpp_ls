@@ -300,7 +300,7 @@ void Second::update() { _value = 2; }
     /// with the cursor on `_value` sees nothing highlighted, and the answer is a query away: the same rule Find
     /// References applies, restricted to the file the client is showing.
     #[test]
-    fn is_highlighted_in_this_file_and_another_classs_is_not() {
+    fn is_highlighted_in_this_file_and_another_class_is_not() {
         let files = MemoryFiles::new()
             .with_file("/p/base.h", BASE_H)
             .with_file("/p/use.cpp", USE_CPP);

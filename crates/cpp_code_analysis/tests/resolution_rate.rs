@@ -467,7 +467,7 @@ fn the_member_questions_of_a_real_project_and_how_many_resolve() {
             .filter(|(_, spellings)| spellings.len() > 1)
             .collect();
         println!(
-            "\n{} summar(ies), {} distinct file(s) by identity, {} in the index twice",
+            "\n{} summary(ies), {} distinct file(s) by identity, {} in the index twice",
             by_identity.values().map(Vec::len).sum::<usize>(),
             by_identity.len(),
             duplicated.len()

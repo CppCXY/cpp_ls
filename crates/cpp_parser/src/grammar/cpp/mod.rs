@@ -92,7 +92,7 @@ fn expect_token(p: &mut CppParser, token: CppTokenKind) -> Result<(), CppParseEr
 ///
 /// A word in this family must therefore be lexed as an `Identifier` and recognised by its *spelling* here. The
 /// alternative — a keyword token, with the name reading refused — is what the two constraint words used to do,
-/// and it made `int requires = 1;` unparseable while telling the lexer something the grammar does not believe.
+/// and it made `int requires = 1;` unparsable while telling the lexer something the grammar does not believe.
 ///
 /// The caller must also ask what *follows*: a spelling alone never settles the reading, because `requires(x);` is
 /// a call and `requires (T t) { }` is a requires-expression.

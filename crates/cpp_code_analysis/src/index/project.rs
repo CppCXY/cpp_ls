@@ -14410,7 +14410,7 @@ mod tests {
     }
 
     #[test]
-    fn a_member_of_the_standard_librarys_string_resolves_into_basic_string() {
+    fn a_member_of_the_standard_library_string_resolves_into_basic_string() {
         // The case: `basic_string` is where every member is declared, and the
         // alias's target is written **unqualified** inside `namespace std`, so following it needs the alias's own
         // scope. Getting that wrong looks up a global `basic_string` and finds nothing.
@@ -15983,7 +15983,7 @@ void f(Derived& d) {
     }
 
     #[test]
-    fn a_completion_on_this_offers_the_enclosing_classs_members() {
+    fn a_completion_on_this_offers_the_enclosing_class_members() {
         // `this` needs no inference — the scope chain already knows which class it is — which makes it the one
         // completion inside a class body that works before the object has a name.
         let source = "struct Widget {\n  int size;\n  void grow() {\n    this->\n  }\n};\n";

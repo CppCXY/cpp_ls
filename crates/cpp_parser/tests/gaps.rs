@@ -7500,7 +7500,7 @@ fn a_calling_convention_may_precede_a_pointer_to_members_class_name() {
             "void h(int (C::*p)(int));\n",
             // The two spellings that were **not** read when this test was written, and are now: the calling
             // convention *and* a ref-qualifier, in a template argument and in an alias's type-id. They were the
-            // first error of 	ype_traits once the one-walk translation unit expanded what the compiler expands.
+            // first error of 	type_traits once the one-walk translation unit expanded what the compiler expands.
             "template <class R, class A, class... T> struct X<R (__cdecl A::*)(T...) &> { };\n",
             "using m = void (__cdecl A::*)() &;\n",
             "using m = void (__cdecl A::*)(int) const;\n",

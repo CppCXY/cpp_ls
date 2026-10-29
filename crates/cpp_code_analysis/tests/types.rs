@@ -922,7 +922,7 @@ float f() {
 /// `__`-prefixed names are intrinsics. A table that listed both spellings would have made `std::is_same<A, B>` read
 /// as `bool`.
 #[test]
-fn a_compiler_builtin_reads_as_a_bool_and_the_librarys_lookalike_does_not() {
+fn a_compiler_builtin_reads_as_a_bool_and_the_library_lookalike_does_not() {
     use cpp_code_analysis::sema::types::parse_type_spelling;
 
     for builtin in [
@@ -1408,7 +1408,7 @@ int f() {
 /// 还差最后一步:operator 成员目前**不在** `members_of` 的名单里(事实层没有给它建名字),所以查找永远返回 None,
 /// 表达式落回"操作数类型相同"或迭代器模型。规则和接线都已完成,缺的是事实层的名字 —— 见下一节的记录。
 #[test]
-fn a_classs_own_operators_have_their_declared_return_type() {
+fn a_class_own_operators_have_their_declared_return_type() {
     let source = "\
 struct Money {
     int cents;

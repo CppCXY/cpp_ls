@@ -368,7 +368,7 @@ fn what_a_unit_read_does_to_the_index() {
 
     let sizes = session.cache_sizes();
     println!(
-        "cache: {} summar(ies), {} cooked file(s) / {} declaration(s)",
+        "cache: {} summary(ies), {} cooked file(s) / {} declaration(s)",
         sizes.summaries, sizes.cooked_files, sizes.cooked_declarations
     );
 }
