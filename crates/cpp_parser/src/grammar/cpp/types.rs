@@ -4441,6 +4441,23 @@ fn eat_cv_qualifiers(p: &mut CppParser) {
             continue;
         }
 
+        // **C99's `restrict`**, the one spelling this list was missing. The compiler's own `__restrict`/`__restrict__`
+        // are [`an_implementation_keyword`]'s; the *standard* spelling is an ordinary identifier, so it stood in the
+        // same position with nothing to read it — and `static int restrict_sum(int *restrict left, int *restrict right)`
+        // came out as two parameters *named* `restrict`, with `left` and `right` standing after them as macro suffixes.
+        // The two then collided and `redefinition` reported the second (measured on a nine-file C corpus, and pinned by
+        // `a_restrict_parameter_after_other_declarations_is_not_a_name`). The feature is the language's: C99 and later,
+        // or GNU's dialect — a strict C++ file has an ordinary identifier called `restrict`, and says so.
+        if p.current_token() == CppTokenKind::Identifier
+            && p.current_token_text() == "restrict"
+            && p.language().support(crate::features::Feature::Restrict)
+        {
+            let m = p.mark(CppSyntaxKind::RestrictQual);
+            p.bump();
+            m.complete(p);
+            continue;
+        }
+
         if an_implementation_keyword(p).is_some() {
             parse_an_implementation_keyword(p);
             continue;

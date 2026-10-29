@@ -15172,6 +15172,43 @@ mod tests {
             .collect()
     }
 
+    /// **An anonymous union's members are the enclosing struct's members** — `line.integer` in a C corpus.
+    ///
+    /// ```c
+    /// struct line {
+    ///     struct point from;
+    ///     union { long integer; double real; };   // no member name between the struct and the union
+    ///     char colour;
+    /// };
+    /// ```
+    ///
+    /// C11's anonymous members put `integer` and `real` in `line`'s member space. The scope walk reached the
+    /// declaration, saw one with no name, walked its body — and the body's declarations landed in a scope of their own
+    /// instead of in `line`, so a completion after `line.` offered four of the six names.
+    #[test]
+    fn an_anonymous_unions_members_belong_to_the_struct() {
+        let source = "struct point { int x; int y; };\n\
+struct line {\n\
+    struct point from;\n\
+    union { long integer; double real; };\n\
+    char colour;\n\
+};\n";
+        let found = members_of_class(&[], "/p/a.c", source, "line");
+        let Known::Yes(list) = found else {
+            panic!("`line` is declared here: {found:?}");
+        };
+        assert!(
+            names(&list).contains(&"integer"),
+            "the union is anonymous, so its members are `line`'s: {:?}",
+            names(&list)
+        );
+        assert!(
+            names(&list).contains(&"real"),
+            "and so is `real`: {:?}",
+            names(&list)
+        );
+    }
+
     #[test]
     fn a_class_declared_more_than_once_still_reports_the_bases_it_could_not_read() {
         // MSVC's `<istream>`, in miniature: the class, and an explicit instantiation of it. Measured on the real

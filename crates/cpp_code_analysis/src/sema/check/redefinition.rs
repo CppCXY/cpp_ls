@@ -69,6 +69,33 @@ impl Check for Redefinition {
                 if binding.origin.is_some() {
                     continue;
                 }
+                // **`T * T;` is a multiplication, not a declaration**, and this is the one place that can say so.
+                //
+                // C resolves the shape by the *name*: `T * x;` is a declaration when `T` is a typedef name and a
+                // multiplication when it is a variable. The scope walk has no symbol table when it binds, so
+                // `#define SQUARE(v) ({ int s = (v); s * s; })` — used **once** — recorded two variables called `s`,
+                // and this rule reported the second: measured on a nine-file C corpus, one finding, and pinned by
+                // `the_corpus_square_body_reads_its_last_statement_as_an_expression`.
+                //
+                // Both sides being the *same spelling* is what makes this decidable here: a pointer declaration
+                // `T * T;` needs `T` to name a type, and a name that names a type is bound as one — which
+                // [`a_kind_that_cannot_be_repeated`] already refuses to judge. The binding's own range covers the
+                // *declarator* (`"*corpus_square"`), so the type is read from the text just before it.
+                let declarator: &str = context
+                    .source
+                    .get(binding.range.start_offset..binding.range.end_offset())
+                    .unwrap_or("");
+                let specifier = context
+                    .source
+                    .get(..binding.range.start_offset)
+                    .unwrap_or("")
+                    .trim_end()
+                    .rsplit(|character: char| !(character.is_alphanumeric() || character == '_'))
+                    .next()
+                    .unwrap_or("");
+                if declarator.trim_start().starts_with('*') && specifier == name {
+                    continue;
+                }
 
                 match declared.get(name) {
                     // The *same* range twice is one declaration recorded twice, not two declarations.

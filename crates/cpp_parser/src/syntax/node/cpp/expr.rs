@@ -37,6 +37,8 @@ pub enum CppExpr {
     DesignatedInitExpr(CppDesignatedInitExpr),
     LambdaExpr(CppLambdaExpr),
     ThisExpr(CppThisExpr),
+    /// A C11 generic selection — `_Generic(x, int: "int", default: "other")`.
+    GenericSelectionExpr(CppGenericSelectionExpr),
     /// An expression the parser could not classify, kept so the tree stays lossless.
     ErrorNode(CppUnknownExpr),
 }
@@ -59,6 +61,7 @@ impl CppAstNode for CppExpr {
             CppExpr::LambdaExpr(node) => node.syntax(),
             CppExpr::ThisExpr(node) => node.syntax(),
             CppExpr::ErrorNode(node) => node.syntax(),
+            CppExpr::GenericSelectionExpr(node) => node.syntax(),
         }
     }
 
@@ -82,6 +85,7 @@ impl CppAstNode for CppExpr {
                 | CppSyntaxKind::LambdaExpr
                 | CppSyntaxKind::ClosureExpr
                 | CppSyntaxKind::ThisExpr
+                | CppSyntaxKind::GenericSelectionExpr
                 | CppSyntaxKind::ErrorNode
         )
     }
@@ -110,6 +114,9 @@ impl CppAstNode for CppExpr {
                 CppLambdaExpr::cast(syntax).map(CppExpr::LambdaExpr)
             }
             CppSyntaxKind::ThisExpr => CppThisExpr::cast(syntax).map(CppExpr::ThisExpr),
+            CppSyntaxKind::GenericSelectionExpr => {
+                CppGenericSelectionExpr::cast(syntax).map(CppExpr::GenericSelectionExpr)
+            }
             CppSyntaxKind::ErrorNode => CppUnknownExpr::cast(syntax).map(CppExpr::ErrorNode),
             _ => None,
         }
@@ -793,6 +800,31 @@ impl CppAstNode for CppThisExpr {
             .filter_map(|it| it.into_token())
             .any(|token| token.kind() == CppKind::Token(CppTokenKind::ThisKeyword));
         (Self::can_cast(syntax.kind().into()) && is_this).then_some(Self { syntax })
+    }
+}
+
+/// **C11's generic selection** — `_Generic(expr, type: value, …, default: value)`.
+///
+/// Its own expression kind rather than an `ErrorNode`, because everything that walks expressions has to see it:
+/// `CppCallExpr::get_args` filters its children through [`CppExpr::cast`], so a selection the cast did not know was
+/// dropped from a call's argument list — `strlen(TYPE_NAME(x))` counted **zero** arguments for `strlen`, which takes
+/// one, and `argument-count` reported five of those calls on a nine-file C corpus.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CppGenericSelectionExpr {
+    syntax: CppSyntaxNode,
+}
+
+impl CppAstNode for CppGenericSelectionExpr {
+    fn syntax(&self) -> &CppSyntaxNode {
+        &self.syntax
+    }
+
+    fn can_cast(kind: CppSyntaxKind) -> bool {
+        kind == CppSyntaxKind::GenericSelectionExpr
+    }
+
+    fn cast(syntax: CppSyntaxNode) -> Option<Self> {
+        Self::can_cast(syntax.kind().into()).then_some(Self { syntax })
     }
 }
 

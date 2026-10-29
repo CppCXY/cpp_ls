@@ -3199,20 +3199,18 @@ static int name_of(int integer) {
 }
 /// **An X-macro's `##` pasting still pastes** — the shape `CORPUS_COLOURS(CORPUS_ENUM_ENTRY)` has.
 ///
-/// Found while fixing the macro body range: the enum produced by `LIST(ENTRY)` reported `expected `;`` where the pasted
-/// name should be, as if `COLOUR_##name` had reached the parser with its `##` still in it — which is what the rendering
-/// shows. **Known red, and independent of the body range**: it fails the same way with the range at its widest, so it is
-/// a defect in the paste operator's position bookkeeping rather than in this change. See `docs/remaining.md` §N8.
+/// Found while fixing the macro body range, and the *first* version of this test was wrong in a way worth recording:
+/// it used `NAME_ENTRY` before defining it, which is a C error, so the `SyntaxError` it asserted against was its own.
+/// With the definitions in order the paste is correct — `COLOUR_##name` becomes `COLOUR_red` — and the test now says so.
 #[test]
-#[ignore = "the X-macro paste leaves `##` in the expansion — docs/remaining.md §N8"]
 fn an_x_macro_pastes_its_names() {
     let codes = codes_of_with(
         "\
 #define LIST(X) X(red, 0) X(green, 1)
 #define ENTRY(name, value) COLOUR_##name = value,
+#define NAME_ENTRY(name, value) #name,
 enum colours { LIST(ENTRY) COLOUR_COUNT };
 static const char *const NAMES[] = {LIST(NAME_ENTRY) \"count\"};
-#define NAME_ENTRY(name, value) #name,
 ",
         "/p/xmacro.c",
         Some("gnu17"),
@@ -3224,15 +3222,19 @@ static const char *const NAMES[] = {LIST(NAME_ENTRY) \"count\"};
 }
 /// **A call whose only argument is a macro that expands to a `_Generic`** counts as one argument.
 ///
-/// The corpus writes `strlen(CORPUS_TYPE_NAME(integer))`, where the macro's body is one `_Generic` selection with six
+/// The corpus writes `strlen(CORPUS_TYPE_NAME(integer))`, where the macro body is one `_Generic` selection with six
 /// `type: value` associations — and `argument-count` reported **five** of those calls as passing too few arguments to
 /// `strlen`, which takes one. The commas inside the expansion are the selection's, not the call's.
+///
+/// The declaration is written here rather than included, because the rule needs a `strlen` it can see: a fixture whose
+/// `<string.h>` does not resolve has no callee and the rule says nothing, which is how the first version of this test
+/// passed while the corpus failed.
 #[test]
 fn a_macro_that_expands_to_a_generic_selection_is_one_argument() {
     let codes = codes_of_with(
         "\
-#include <string.h>
-#define TYPE_NAME(value) _Generic((value), int: \"int\", double: \"double\", default: \"other\")
+extern unsigned long long strlen(const char *text);
+#define TYPE_NAME(value) _Generic((value), int: \"int\", double: \"double\", long: \"long\", default: \"other\")
 static int name_of(int integer) {
     return (int)strlen(TYPE_NAME(integer));
 }
@@ -3242,6 +3244,85 @@ static int name_of(int integer) {
     );
     assert!(
         !codes.contains(&DiagnosticCode::ArgumentCount),
-        "one argument, six associations inside it: {codes:?}"
+        "one argument, four associations inside it: {codes:?}"
+    );
+}
+
+/// **A local declared inside a statement expression is not a redefinition** when the macro is expanded twice.
+///
+/// `#define CORPUS_SQUARE(v) ({ int corpus_square = (v); corpus_square * corpus_square; })` used twice in one function
+/// declares `corpus_square` twice — in two *different* statement-expression scopes, which is legal C. `redefinition`
+/// reported the second one.
+#[test]
+fn a_local_in_a_statement_expression_is_not_a_redefinition() {
+    let codes = codes_of_with(
+        "\
+#define SQUARE(value) ({ int squared = (value); squared * squared; })
+static int twice(int first, int second) {
+    int a = SQUARE(first);
+    int b = SQUARE(second);
+    return a + b;
+}
+",
+        "/p/statement.c",
+        Some("gnu17"),
+    );
+    assert!(
+        !codes.contains(&DiagnosticCode::Redefinition),
+        "two statement expressions, two scopes: {codes:?}"
+    );
+}
+/// **The corpus's own `CORPUS_SQUARE`, expanded once**, is not a redefinition.
+///
+/// The body ends with `corpus_square *corpus_square;` — which is *statement-shaped like a declaration* (`T *name;`) and
+/// is an expression here, because `corpus_square` is a variable and not a type. With that statement read as a
+/// declaration, the block holds two bindings of the name and `redefinition` reports the second.
+#[test]
+fn the_corpus_square_body_reads_its_last_statement_as_an_expression() {
+    let codes = codes_of_with(
+        "\
+#define SQUARE(value)    \
+    ({                   \
+        int corpus_square = (value); \
+        corpus_square *corpus_square; \
+    })
+static int squared(int value) {
+    int total = 0;
+    total += SQUARE(value);
+    return total;
+}
+",
+        "/p/square.c",
+        Some("gnu17"),
+    );
+    assert!(
+        !codes.contains(&DiagnosticCode::Redefinition),
+        "`corpus_square *corpus_square;` is a multiplication: {codes:?}"
+    );
+}
+
+/// **`restrict` on a pointer parameter, at file scope, in a file that has declarations before it.**
+///
+/// `static int restrict_sum(int *restrict left, int *restrict right)` is the corpus's line, and the one-parameter
+/// fixture that passes did not carry the preceding declarations — so this one does.
+#[test]
+fn a_restrict_parameter_after_other_declarations_is_not_a_name() {
+    let codes = codes_of_with(
+        "\
+static int a_const_int = 7;
+static int *const const_pointer = (int *)&a_const_int;
+static const int *const const_pointer_to_const = &a_const_int;
+static volatile int a_volatile_int = 3;
+static volatile const int volatile_const_int = 4;
+static int restrict_sum(int *restrict left, int *restrict right) {
+    return *left + *right;
+}
+",
+        "/p/restrict.c",
+        Some("c17"),
+    );
+    assert!(
+        !codes.contains(&DiagnosticCode::Redefinition),
+        "two `restrict` parameters are two qualifiers: {codes:?}"
     );
 }

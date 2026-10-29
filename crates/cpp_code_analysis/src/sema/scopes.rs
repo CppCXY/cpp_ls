@@ -745,12 +745,23 @@ impl ScopeWalker<'_> {
             return;
         }
 
-        let scope = self.table.create_named_scope(
-            ScopeKind::Class,
-            Some(inner),
-            Some(cpp_parser::source_range(node.text_range())),
-            declared_text.as_deref(),
-        );
+        // **An anonymous member's body is the enclosing class's body**, which is what an *anonymous union* means:
+        // `struct line { union { long integer; double real; }; char colour; };` puts `integer` and `real` in `line`'s
+        // member space, and C11 and C++ say so in as many words. This walk created a scope with no name for such a
+        // body, so its members were reachable from nowhere — measured on a nine-file C corpus, `line.integer` reported
+        // "no member `integer`" and a completion after `line.` offered four of the six names. Pinned by
+        // `an_anonymous_unions_members_belong_to_the_struct`.
+        let anonymous_member = declared_text.is_none() && Self::sits_in_a_class_body(node);
+        let scope = if anonymous_member {
+            inner
+        } else {
+            self.table.create_named_scope(
+                ScopeKind::Class,
+                Some(inner),
+                Some(cpp_parser::source_range(node.text_range())),
+                declared_text.as_deref(),
+            )
+        };
 
         // The body is this scope, so its members land here rather than in a block inside it.
         self.items_in_scope(node, scope, &[CppSyntaxKind::ClassBody]);
@@ -1173,6 +1184,21 @@ impl ScopeWalker<'_> {
     /// places: `template <typename T> class Array { T x; }` declares `Array` where the template was written and
     /// puts `x` in a scope that can see `T`. For an ordinary declaration the two are the same scope, which is
     /// what `inner` being passed as `outer` means at the call sites.
+    /// Is this declaration **written inside another class's body** — an anonymous member?
+    ///
+    /// Every ancestor is walked and only a statement block or the translation unit stops it: the declaration a class body
+    /// holds is not the node the class was read from, so a search that stopped at the first Declaration answered "not a
+    /// member" for the one shape this question exists for.
+    fn sits_in_a_class_body(node: &CppSyntaxNode) -> bool {
+        for ancestor in node.ancestors() {
+            match CppSyntaxKind::from(ancestor.kind()) {
+                CppSyntaxKind::ClassBody => return true,
+                CppSyntaxKind::CompoundStat | CppSyntaxKind::TranslationUnit => return false,
+                _ => {}
+            }
+        }
+        false
+    }
     fn declaration_parts(&mut self, node: &CppSyntaxNode, outer: ScopeId, inner: ScopeId) {
         // `f(x);` and `int(x);` have the same token shape, so the grammar reads both as a declaration — the
         // most vexing parse, and no parser without a table of type names can tell them apart. What it *can* say

@@ -41,22 +41,17 @@ impl Check for MacroParentheses {
                 Some((fact.name.clone(), range.start_offset, range.end_offset()))
             })
             .collect();
-        if std::env::var_os("CPPLS_TRACE_MACROS").is_some() {
-            eprintln!(
-                "macros in {}: written {} chars, {} bodies",
-                context.path.display(),
-                context.written.len(),
-                bodies.len()
-            );
-            for (name, start, end) in &bodies {
-                eprintln!(
-                    "  {name} @ {start}..{end} = {:?}",
-                    context.written.get(*start..*end)
-                );
-            }
-        }
         for (name, start, end) in bodies {
-            let body = context.written.get(start..end).unwrap_or("").trim();
+            // **The body as the *replacement list*, with the line splices taken out.** A multi-line `#define` writes a
+            // backslash at the end of every line but the last, and the first token of the body can be that backslash:
+            // `#define CORPUS_DEFINE_POINT(name, x, y) \` followed by `static const point name = …` is a *declaration*,
+            // and a body judge that sees `\` where it expected `static` reported it. `is_dropped_in_a_body` drops
+            // splices when the definition is parsed, so this is the same rule applied to the text a reader sees.
+            let body = context
+                .written
+                .get(start..end)
+                .unwrap_or("")
+                .trim_start_matches(['\\', ' ', '\t', '\n', '\r']);
             // A body that is one token, a braced initialiser, a call, or already parenthesised is not this rule's shape.
             if body.is_empty()
                 || body.starts_with('(')
@@ -65,6 +60,7 @@ impl Check for MacroParentheses {
             {
                 continue;
             }
+
             // **Three shapes that are not an expression at all**, measured on a nine-file C corpus where every one of
             // them was a finding:
             //
