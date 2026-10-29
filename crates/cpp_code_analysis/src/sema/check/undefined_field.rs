@@ -85,10 +85,28 @@ impl Check for UndefinedField {
                 continue;
             }
 
-            let crate::Known::Yes(members) = context
-                .model
-                .members_of(&object.class_name().unwrap_or_default())
-            else {
+            // **An arrow is followed, not skipped.**
+            //
+            // Measured on EmmyLuaCodeStyle: `_session->Send(std::move(message))` was reported as "`_session` has no
+            // member `Send`" — the receiver is a `std::shared_ptr<Session>`, whose member list is `shared_ptr`'s, and
+            // the member the program means is behind `operator->`. That measurement is why an arrow used to say
+            // nothing at all. Following it needs the pointee's type, which the engine now answers for completion
+            // (`ptr->` on a pointer, a smart pointer's `operator->`, a class's `element_type`), so the same rule is
+            // asked here.
+            //
+            // **Only when a pointer was actually followed.** A class that is not pointer-like and declares no
+            // `operator->` leaves `followed_a_pointer` false — `p->size` on a plain `Widget` is already ill-formed
+            // code, and a second finding about its members would be noise.
+            let class = if access.arrow {
+                match context.model.the_class_after_an_arrow(&object) {
+                    Some((reached, true)) => reached,
+                    _ => continue,
+                }
+            } else {
+                object.class_name().unwrap_or_default().to_string()
+            };
+
+            let crate::Known::Yes(members) = context.model.members_of(&class) else {
                 // Not known to be a class, or known and never read — see the module documentation.
                 continue;
             };
@@ -111,15 +129,6 @@ impl Check for UndefinedField {
             // answered differently because this check treated "not in the part I read" as "not there". The list is
             // only an answer when it is complete.
             if !members.unlisted.is_empty() {
-                continue;
-            }
-
-            // **An arrow is not evidence.** Measured on EmmyLuaCodeStyle: `_session->Send(std::move(message))` was
-            // reported as "`_session` has no member `Send`" — the receiver is a `std::shared_ptr<Session>`, whose
-            // member list is `shared_ptr`'s, and the member the program means is behind `operator->`. Following that
-            // needs the pointee's type, which this check does not ask; until it does, an arrow says nothing rather
-            // than something wrong, which is the direction the module documents.
-            if access.arrow {
                 continue;
             }
 

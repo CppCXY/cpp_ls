@@ -1078,42 +1078,56 @@ void g() {
         codes_of(source)
     );
 }
-/// **An arrow reaches through something this check cannot see.**
+/// **An arrow is judged against the class it reaches**, and only when the engine can follow it.
 ///
-/// Measured on EmmyLuaCodeStyle: `_session->Send(std::move(message))` was reported as "`_session` has no member
+/// Measured on EmmyLuaCodeStyle: `_session->Send(std::move(message))` was once reported as "`_session` has no member
 /// `Send`" — the receiver is a `std::shared_ptr<Session>`, whose member list is `shared_ptr`'s, and the member the
-/// program means is behind `operator->`. The guard says an arrow is not evidence; the second half says the check still
-/// reports a `.` on a class whose member list really does not have the name, so the guard cannot become a blanket
-/// silence.
+/// program means is behind `operator->`. The answer was to skip arrows, which then missed `p->Missing()` on a plain
+/// `Session*` — a class whose member list *is* the answer. Both halves are pinned here: the pointee's members are
+/// judged, and an arrow nothing can follow is silence.
 #[test]
-fn a_member_reached_through_an_arrow_is_not_judged_as_missing() {
-    let through_an_arrow = "\
+fn an_arrow_is_judged_against_the_class_it_reaches() {
+    let through_a_pointer = "\
 struct Session {
     void Run();
 };
-void g(Session* session) {
+void g(Session *session) {
     session->Run();
+}
+";
+    assert_eq!(codes_of(through_a_pointer), [], "`Run` is the pointee's");
+
+    let a_missing_member = "\
+struct Session {
+    void Run();
+};
+void g(Session *session) {
     session->Missing();
 }
 ";
-    assert!(
-        !codes_of(through_an_arrow).contains(&DiagnosticCode::UndefinedField),
-        "the pointee's members are not this check's question: {:?}",
-        codes_of(through_an_arrow)
+    assert_eq!(
+        codes_of(a_missing_member),
+        [DiagnosticCode::UndefinedField],
+        "`Session` has no `Missing`, and the arrow reaches `Session`"
     );
 
-    let through_a_dot = "\
+    // **The receiver's own class is not the answer**: a class whose `operator->` returns something this layer
+    // cannot type is silence, not a finding about the memb* its own list does not have either.
+    let an_untraceable_arrow = "\
 struct Session {
     void Run();
 };
-void g(Session session) {
-    session.Missing();
+struct Pointer {
+    Missing *operator->();
+};
+void g(Pointer pointer) {
+    pointer->Run();
 }
 ";
-    assert!(
-        codes_of(through_a_dot).contains(&DiagnosticCode::UndefinedField),
-        "and a `.` on a class whose member list has no such name is still reported: {:?}",
-        codes_of(through_a_dot)
+    assert_eq!(
+        codes_of(an_untraceable_arrow),
+        [],
+        "the pointee cannot be typed, so nothing is said"
     );
 }
 /// **A member call is not judged against a free function of the same name.**

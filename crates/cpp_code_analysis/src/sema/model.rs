@@ -200,6 +200,26 @@ impl<'a> SemanticModel<'a> {
         project::substituted_members(self.index, &self.path, class, listed)
     }
 
+    /// **The class a `->` reaches, and whether a pointer was followed to get there.**
+    ///
+    /// One implementation of the rule — a pointer's pointee, a class's own `operator->`, `element_type` — borrowed
+    /// from [`crate::completion::the_class_after_the_operator`], which `ptr->` completion has used since the smart
+    /// pointers landed. `undefined-field` asks it for an arrow, which it used to skip outright: "an arrow is not
+    /// evidence" was the right answer while nothing here could follow one.
+    pub fn the_class_after_an_arrow(
+        &self,
+        written: &crate::sema::types::Type,
+    ) -> Option<(String, bool)> {
+        crate::completion::the_class_after_the_operator(
+            self.index,
+            self.scopes,
+            self.root,
+            self.path,
+            written,
+            true,
+        )
+    }
+
     /// **The members written in the class itself** — no base walk, no substitution.
     ///
     /// [`SemanticModel::members_of`] is the reader's question (what can be written after `.`), and it walks the base
