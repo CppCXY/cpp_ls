@@ -178,11 +178,41 @@ fn the_version_line_is_the_one_the_compiler_printed() {
         Some("clang version 18.1.8")
     );
 
-    // The line a looser rule would answer with — `Configured with:` mentions a version, and it is not the
-    // compiler's. A wrong version string is worse than none, because it is used to explain wrong analyses.
+    // **The line a looser rule would answer with.** GCC's `-v` output also prints how it was built, and that line
+    // mentions the version too; the colon and the flags before the name are what say it is not the compiler naming
+    // itself. A wrong version string is worse than none, because it is what explains a wrong analysis.
     assert_eq!(
-        parse_version(&GCC.replace("gcc version", "Configured with gcc version")),
+        parse_version(
+            "Configured with: ../configure --prefix=/usr --with-gcc-major-version-only gcc version 15.1.0\n"
+        ),
         None
+    );
+    // A name followed by something that is not a version is not a version line either.
+    assert_eq!(parse_version("clang version unknown\n"), None);
+
+    // **A distribution's own build puts its name first**: Ubuntu's clang and Apple's clang both do, and with the
+    // narrow rule the version was `None` on those machines — the measured failure this list exists for.
+    assert_eq!(
+        parse_version("Ubuntu clang version 18.1.3 (1ubuntu1)\nTarget: x86_64-pc-linux-gnu\n")
+            .as_deref(),
+        Some("Ubuntu clang version 18.1.3 (1ubuntu1)")
+    );
+    assert_eq!(
+        parse_version(
+            "Apple clang version 15.0.0 (clang-1500.0.40.1)\nTarget: arm64-apple-darwin23.0.0\n"
+        )
+        .as_deref(),
+        Some("Apple clang version 15.0.0 (clang-1500.0.40.1)")
+    );
+    assert_eq!(
+        parse_version("Debian clang version 16.0.6 (15~deb12u1)").as_deref(),
+        Some("Debian clang version 16.0.6 (15~deb12u1)")
+    );
+    // A distribution that prints GCC's own line is unchanged: `gcc version` is first there.
+    assert_eq!(
+        parse_version("Using built-in specs.\ngcc version 13.2.0 (Ubuntu 13.2.0-23ubuntu4) ")
+            .as_deref(),
+        Some("gcc version 13.2.0 (Ubuntu 13.2.0-23ubuntu4)")
     );
 }
 

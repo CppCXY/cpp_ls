@@ -1,6 +1,6 @@
 # cpp_ls
 
-A **C and C++ language server written in Rust**, implemented by an AI agent: the parser, the preprocessor, the semantic
+A **C and C++ language server written in Rust**, implemented by Deepseek: the parser, the preprocessor, the semantic
 analysis and the LSP layer are all in this repository. No clangd, no compiler daemon, and no `compile_commands.json`
 required.
 

@@ -1484,16 +1484,37 @@ pub fn parse_search_list(output: &str) -> Vec<PathBuf> {
 
 /// The compiler's version line, when it printed one this can recognise.
 ///
-/// Recognised rather than guessed: the line has to *start* with `gcc version` or `clang version`. A looser rule
-/// — "the line with `version` in it" — would answer with `Configured with:` for the MinGW build measured here,
-/// and a version string used to explain a wrong analysis must not be a plausible-looking wrong one.
+/// **Recognised by shape, not by a list of distributions.** The line is the compiler naming itself: `gcc` or `clang`,
+/// then `version`, then a dotted number. Whatever the distribution puts in front of that is its own name — `Ubuntu
+/// clang version 18.1.3 (1ubuntu1)`, `Apple clang version 15.0.0 (clang-1500.0.40.1)`, `Red Hat clang version …` —
+/// and a list of them would be wrong the day a runner uses one that is not on it.
+///
+/// Two things are required, and both are what separates this line from the ones around it:
+///
+/// * **the words before the compiler's name are plain words** — no `:`, no `=`, no path: GCC's `-v` output also
+///   contains `Configured with: … gcc version …`, which is a line about how the compiler was built, and a wrong
+///   version string used to explain a wrong analysis is worse than none;
+/// * **a digit follows `version`** — `Thread model: posix` and `InstalledDir: /usr/bin` are not versions.
 pub fn parse_version(output: &str) -> Option<String> {
-    output
-        .lines()
-        .map(str::trim)
-        .find(|line| line.starts_with("gcc version") || line.starts_with("clang version"))
-        .map(str::to_string)
-}
+    const NAMES: [&str; 2] = ["clang version ", "gcc version "];
+    output.lines().map(str::trim).find_map(|line| {
+        // The name's own length, not the first one's: `gcc version ` is two characters shorter than `clang version `,
+        // and counting from the wrong one read `15.1.0` as `.1.0` and answered `None` for a GCC that had answered.
+        let (at, name) = NAMES
+            .iter()
+            .filter_map(|name| line.find(name).map(|at| (at, *name)))
+            .min_by_key(|(at, _)| *at)?;
+        let prefix = &line[..at];
+        let version = &line[at + name.len()..];
 
+        let before_is_a_name = prefix.split_whitespace().all(|word| {
+            word.chars()
+                .all(|character| character.is_ascii_alphabetic())
+        });
+        let after_is_a_number = version.starts_with(|character: char| character.is_ascii_digit());
+
+        (before_is_a_name && after_is_a_number).then(|| line.to_string())
+    })
+}
 #[cfg(test)]
 mod tests;
