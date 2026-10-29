@@ -24,4 +24,5 @@
 "this function is declared to return `%{declared}` and its body has no `return`": "这个函数声明返回 `%{declared}`，但函数体里没有 `return`"
 "`%{object}` has no member `%{member}`": "`%{object}` 没有成员 `%{member}`"
 "`%{name}` is not declared: nothing this file can see names it": "`%{name}` 没有声明 —— 这个文件能看到的范围内找不到它"
+"`%{name}` is already declared in this scope": "`%{name}` 在这个作用域里已经声明过了"
 "`%{passed}` does not satisfy `%{concept}`, which constrains the parameter this argument is passed for": "`%{passed}` 不满足 `%{concept}`，而收到这个实参的形参正是被它约束的"

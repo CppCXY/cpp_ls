@@ -2642,3 +2642,83 @@ void f() {
         "`log_name` is declared in the header"
     );
 }
+
+/// **A name declared twice in one scope**, and the five repeats that are not that.
+///
+/// `test_cpp/main.cpp` writes `auto x = 123;` on line 22 and `auto x = anotherVec[1];` on line 39 — one function, two
+/// variables of one name, which no compiler accepts. The rule judges the scopes a reader writes (a function body, a
+/// block, a lambda) and only the bindings that have no second reading: a function name in one scope is an **overload
+/// set**, a class name is a forward declaration and its definition, and a file-scope variable may be `extern` in one
+/// place and defined in another. Each of those is a case below.
+#[test]
+fn a_name_declared_twice_in_one_scope_is_reported() {
+    let twice = "\
+void f() {
+    int count = 1;
+    int count = 2;
+}
+";
+    assert_eq!(codes_of(twice), [DiagnosticCode::Redefinition]);
+
+    // The shape the sample project writes: `auto` twice, so the types disagree as well.
+    let twice_with_auto = "\
+struct W { int size; };
+void f() {
+    auto x = 123;
+    auto x = W{};
+}
+";
+    assert_eq!(codes_of(twice_with_auto), [DiagnosticCode::Redefinition]);
+
+    // A parameter and a local of the same name are two declarations in the function's scope.
+    let shadows_a_parameter = "\
+void f(int count) {
+    int count = 2;
+}
+";
+    assert_eq!(codes_of(shadows_a_parameter), [DiagnosticCode::Redefinition]);
+}
+
+/// **The five repeats that are not a redefinition** — see [`a_name_declared_twice_in_one_scope_is_reported`].
+#[test]
+fn a_repeat_the_language_has_a_reading_for_is_quiet() {
+    // Two blocks: two scopes.
+    let two_blocks = "\
+void f() {
+    { int count = 1; }
+    { int count = 2; }
+}
+";
+    assert_eq!(codes_of(two_blocks), []);
+
+    // Two overloads: one name, two declarations, one entity — the language's own reading.
+    let overloads = "\
+void run();
+void run(int value);
+void f() { run(); run(1); }
+";
+    assert_eq!(codes_of(overloads), []);
+
+    // A forward declaration and its definition.
+    let forward_and_definition = "\
+class Widget;
+class Widget { int size; };
+";
+    assert_eq!(codes_of(forward_and_definition), []);
+
+    // `extern` then a definition, at file scope.
+    let extern_and_definition = "\
+extern int value;
+int value = 0;
+";
+    assert_eq!(codes_of(extern_and_definition), []);
+
+    // A nested block may shadow: the inner name is a different scope's.
+    let shadowing = "\
+void f() {
+    int count = 1;
+    { int count = 2; }
+}
+";
+    assert_eq!(codes_of(shadowing), []);
+}
