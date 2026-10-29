@@ -1719,3 +1719,53 @@ int f(void) { binary_op operation = add; return operation(1, 2); }
         "the alias's name is the type the file wrote"
     );
 }
+
+/// **A function-pointer typedef declared in a *header*** — the corpus's shape, and the one the one-file fixture misses.
+///
+/// `corpus.h` writes `typedef int (*binary_op)(int left, int right);` and `functions.c` uses it as
+/// `binary_op operation = add;`. Measured on a nine-file C corpus: `operation` and `compare` answered `<no type>`,
+/// while every other local in every other file answered. The one-file fixture in `types.rs` passes, so what is being
+/// measured here is the **cross-file** spelling: a binding whose type names a typedef the file did not write.
+#[test]
+fn a_function_pointer_typedef_from_a_header_types_its_variable() {
+    let header = "\
+typedef int (*binary_op)(int left, int right);
+typedef int comparer(const void *left, const void *right);
+";
+    let source = "\
+#include \"corpus.h\"
+#include <stddef.h>
+#include <stdio.h>
+static int add(int left, int right) { return left + right; }
+int f(void) { binary_op operation = add; comparer *compare = 0; return operation(1, 2) + (compare != 0); }
+";
+    let session = session_with(&[("/p/corpus.h", header), ("/p/a.c", source)]);
+    let view = session.view("/p/a.c").expect("the file is held");
+
+    let type_at = |needle: &str| {
+        let offset = source.find(needle).expect("the needle is written") + 1;
+        let reading = view
+            .reading_offset_of(cpp_code_analysis::file::coordinates::FileOffset::new(
+                offset,
+            ))
+            .expect("the cursor is in the rendering");
+        match session.type_at(&view, reading) {
+            cpp_code_analysis::Known::Yes(found) => Some(found.type_of),
+            _ => None,
+        }
+    };
+
+    // **The engine expands the alias**, and that is the better answer — `int (*)(int, int)` is the type, while
+    // `binary_op` is its name. This fixture therefore pins the *expansion*; what the corpus answers (nothing at all for
+    // the same shape) is still open, and `docs/remaining.md` §N14 records it.
+    let operation = type_at("binary_op operation").expect("the variable has a type");
+    assert!(
+        operation.contains("int") && operation.contains("(int, int)"),
+        "a function-pointer typedef expands to the type it names: {operation}"
+    );
+    let compare = type_at("comparer *compare").expect("the pointer has a type");
+    assert!(
+        compare.contains("int") && compare.contains("void"),
+        "and so does the other typedef: {compare}"
+    );
+}

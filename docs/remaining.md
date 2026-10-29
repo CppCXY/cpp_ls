@@ -231,3 +231,26 @@ c23.c  bits.signed_wide   struct bits 的第二个位域 `_BitInt(13) signed_wid
 functions.c operation / compare  `binary_op operation = add;`（函数指针 typedef）→ `<no type>`；
                            fixture 里能过，只在"typedef 在头文件里"时不复现，下一轮第一步查这个差别
 ```
+
+### N14. 第六轮结束时剩下的 3 项（都试过，都没成）
+
+```text
+                 findings   parse errors   members   types
+第六轮(结束)        0           0           49/50     32/34
+```
+
+1. **`c23.c bits.signed_wide`** —— `struct bits` 的第二个位域 `_BitInt(13) signed_wide : 13;` 没有被记录。
+   原因是 `_BitInt(` 打头的语句不被当成声明（`starts_declaration` 只看首 token，`_BitInt` 是个 identifier）。
+   这一轮试了带前瞻的锚点（跨过宽度括号，看 `)` 后面是不是 identifier），**锚点生效但 `_BitInt(37) wide =
+   (_BitInt(37))1 << 30;` 的初始化器随即解析失败**，于是撤回了——`git checkout` 恢复了 `decls.rs`。
+   下一轮从那条 fixture 开始：`assert_all_parse` 一条 `void f(void) { _BitInt(37) wide = (_BitInt(37))1 << 30; }`，
+   先看清错误落在哪，再决定锚点要不要带"初始化器里的 cast 也认 `_BitInt`"。
+
+2. **`functions.c operation` / `compare`** —— 语料里答 `<no type>`。但**同样的形状放进两文件 fixture 是过的**：
+   `binary_op operation = add;` 在 fixture 里答 `int (*)(int, int)`（引擎会把函数指针 typedef 展开，这比别名名字更好）。
+   所以差别在 `functions.c` 自己的内容里，下一轮第一步：`CPPLS_C_FACTS=src/functions.c` 已经看到事实是
+   `type binary_op` ✓，接着在 `type_at` 那条路上打断点（`declared_type` → `NamedDeclaration::type_of`），看它为什么
+   连语法都读不出来。
+
+新加的那条测试（`a_function_pointer_typedef_from_a_header`）钉住的是引擎的**展开**行为，刻意只断言形状
+（`contains("int") && contains("(int, int)")`）——拼写的规范化（`const` 丢没丢、`*` 在不在）不是这个测试要管的事。
