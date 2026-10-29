@@ -183,7 +183,7 @@ fn the_version_line_is_the_one_the_compiler_printed() {
     // itself. A wrong version string is worse than none, because it is what explains a wrong analysis.
     assert_eq!(
         parse_version(
-            "Configured with: ../configure --prefix=/usr --with-gcc-major-version-only gcc version 15.1.0\n"
+            "Configured with: ../configure --prefix=/usr --with-gcc-major-version-only gcc version 1.2.3\n"
         ),
         None
     );
@@ -191,28 +191,26 @@ fn the_version_line_is_the_one_the_compiler_printed() {
     assert_eq!(parse_version("clang version unknown\n"), None);
 
     // **A distribution's own build puts its name first**: Ubuntu's clang and Apple's clang both do, and with the
-    // narrow rule the version was `None` on those machines — the measured failure this list exists for.
+    // narrow rule the version was `None` on those machines. The numbers are placeholders: what is pinned is the
+    // *shape* — a distribution name, then the compiler's, then `version`, then a number — not a machine's version.
     assert_eq!(
-        parse_version("Ubuntu clang version 18.1.3 (1ubuntu1)\nTarget: x86_64-pc-linux-gnu\n")
+        parse_version("Ubuntu clang version 1.2.3\nTarget: x86_64-pc-linux-gnu\n").as_deref(),
+        Some("Ubuntu clang version 1.2.3")
+    );
+    assert_eq!(
+        parse_version("Apple clang version 1.2.3 (clang-1000)\nTarget: arm64-apple-darwin23.0.0\n")
             .as_deref(),
-        Some("Ubuntu clang version 18.1.3 (1ubuntu1)")
+        Some("Apple clang version 1.2.3 (clang-1000)")
     );
     assert_eq!(
-        parse_version(
-            "Apple clang version 15.0.0 (clang-1500.0.40.1)\nTarget: arm64-apple-darwin23.0.0\n"
-        )
-        .as_deref(),
-        Some("Apple clang version 15.0.0 (clang-1500.0.40.1)")
-    );
-    assert_eq!(
-        parse_version("Debian clang version 16.0.6 (15~deb12u1)").as_deref(),
-        Some("Debian clang version 16.0.6 (15~deb12u1)")
+        parse_version("Debian clang version 1.2.3").as_deref(),
+        Some("Debian clang version 1.2.3")
     );
     // A distribution that prints GCC's own line is unchanged: `gcc version` is first there.
     assert_eq!(
-        parse_version("Using built-in specs.\ngcc version 13.2.0 (Ubuntu 13.2.0-23ubuntu4) ")
+        parse_version("Using built-in specs.\ngcc version 1.2.3 (Ubuntu 1.2.3-1ubuntu4) ")
             .as_deref(),
-        Some("gcc version 13.2.0 (Ubuntu 13.2.0-23ubuntu4)")
+        Some("gcc version 1.2.3 (Ubuntu 1.2.3-1ubuntu4)")
     );
 }
 
