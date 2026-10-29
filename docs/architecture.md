@@ -2816,17 +2816,7 @@ field 画成 `regexp`——读者说的"太暗"。
 
 现在 `initialize.clientInfo` 决定这件事：`ClientId::VSCode`（含 Cursor / Windsurf / VSCodium 等分支）时，把
 四个格式类型追加进可画集合，客户端的主题映射就有东西可映射；其他客户端不变（neovim 没有映射，发过去等于
-不画，回退反而有颜色）。扩展侧 `VSCode-Cppls/package.json` 增加顶层 `semanticTokenScopes`：
-
-```json
-"semanticTokenScopes": [
-  { "language": "cpp", "scopes": {
-      "formatSpecifier": ["constant.other"],
-      "formatArgument": ["variable.parameter"],
-      "formatConversion": ["keyword.other"],
-      "formatEscape": ["constant.character.escape"] } }
-]
-```
+不画，回退反而有颜色）。
 
 实测（真服务器、同一个文件、只换 `clientInfo`，`test_module/src/probe_tokens.cpp`）：
 
@@ -2841,3 +2831,48 @@ Visual Studio Code   10:33 formatSpecifier …
 
 单测：`handlers/semantic_token/mod.rs::a_vscode_client_is_sent_the_custom_format_types`（VS Code 追加四个名字，
 其他客户端保持原列表，`None` 仍是"全发"）。
+
+#### 16.5.3.1 拿到了 token 却没上色：`semanticTokenScopes` 是 `contributes` 里的贡献点
+
+服务端发对了（scope inspector 明确写着 `semantic token type: formatSpecifier`），屏幕上却是字符串色
+（`textmate token: My-name-is-{} (13)`、`string.quoted.double.cpp`、`#CE9178`）。**自定义语义类型没有自己的
+颜色**，VS Code 的取值顺序是：主题的 `semanticTokenColors` → 扩展在 `semanticTokenScopes` 里给的 TextMate
+scope → 都没有就保持 TextMate 原色。当时写成了 `package.json` 顶层的 `semanticTokenScopes`，而 VS Code 只读
+`contributes.semanticTokenScopes`——**顶层那份被静默忽略**：JSON 合法、`vsce package` 也过，只有屏幕上没有
+变化。
+
+按 rust-analyzer 的形状写（`editors/code/package.json`，这两个都是 `contributes` 的成员）：
+
+```json
+"contributes": {
+  "semanticTokenTypes": [
+    { "id": "formatSpecifier", "description": "Style for the specification of a format field" }
+  ],
+  "semanticTokenScopes": [
+    { "language": "cpp", "scopes": {
+        "formatSpecifier": ["keyword.other"],
+        "formatArgument": ["variable.parameter"],
+        "formatConversion": ["constant.numeric"],
+        "formatEscape": ["constant.character.escape"] } }
+  ]
+}
+```
+
+rust-analyzer 的 `formatSpecifier` 映射到 `punctuation.section.embedded.rust`（它的截图里 `{}` 是 `#569cd6`，
+Dark+ 的关键字蓝）。我们取的是**每个主题都会配色的 scope**，并且第一个就是同一个蓝：`keyword.other`
+（`{:.3f}`）、`variable.parameter`（`{0}`/`%1$`/`*`）、`constant.numeric`（`f`/`d`/`s`/`[a-z]`）、
+`constant.character.escape`（`{{`/`}}`/`%%`）。主题作者仍可以用 `semanticTokenColors` 直接按类型覆盖。
+
+**这不是 syntax（TextMate grammar）的问题**：语义 token 叠在 TextMate 之上，两个都贡献颜色，语法只决定
+没有语义覆盖时的底色——那份重写过的 `cpp.tmLanguage.json` 在这里不参与。
+
+验证方式（GUI 之外能做的两条）：
+
+```text
+npx vsce package --no-dependencies   → 15 files, 5.72 MB  清单通过 schema
+node scripts/check-manifest.mjs      → ok 4 custom types declared, 3 languages mapped, 3 grammars
+```
+
+`check-manifest.mjs`（`npm run verify:manifest`，挂在 `pretest` 上）钉的正是这次踩的坑：不允许顶层那份拷贝、
+四个类型必须声明、三种语言都要映射、scope 必须是非空字符串、grammars 不能丢。拿**改回顶层**的清单跑它，
+退出码 1 并打印 `semanticTokenScopes/semanticTokenTypes must not sit at the top level …`——这条是量过的。
