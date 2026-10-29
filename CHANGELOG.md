@@ -5,7 +5,7 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [0.1.0] — 2026-10-29
 
-The first release. A C, C++ and CUDA language server written from scratch in Rust — parser, preprocessor, semantic
+The first release. A C and C++ language server written from scratch in Rust — parser, preprocessor, semantic
 analysis and the protocol layer are all in this repository, with no clangd, no compiler daemon and no
 `compile_commands.json` requirement.
 
@@ -14,7 +14,7 @@ analysis and the protocol layer are all in this repository, with no clangd, no c
 - **Preprocessor first**: macros are expanded, conditional compilation is resolved for the branches actually in force,
   and `#include`s are inlined; the resulting *rendering* is what gets parsed, which is why a file that has never
   compiled still resolves.
-- **C, C++ (through C++23) and CUDA**: `.h` is C++, `.cu`/`.cuh` are CUDA, and `<<<…>>>` launch blocks are part of the
+- **C and C++ (through C++23)**: `.h` is C++ and the language is read through its preprocessor. CUDA is a special toolchain case — `.cu`/`.cuh`, `<<<…>>>` launch blocks and the CUDA keywords, configured with a `[cuda]` section — rather than a first-class target:
   grammar.
 - **Coroutines**: `co_await`, `co_yield` and `co_return` are parsed, typed (`co_await` answers what `await_resume`
   returns), hovered and exempted from the missing-return rule.
