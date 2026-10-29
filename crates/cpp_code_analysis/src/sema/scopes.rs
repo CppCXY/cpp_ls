@@ -751,7 +751,15 @@ impl ScopeWalker<'_> {
         // body, so its members were reachable from nowhere — measured on a nine-file C corpus, `line.integer` reported
         // "no member `integer`" and a completion after `line.` offered four of the six names. Pinned by
         // `an_anonymous_unions_members_belong_to_the_struct`.
-        let anonymous_member = declared_text.is_none() && Self::sits_in_a_class_body(node);
+        // **And no declarator**, which is what tells an anonymous *member* from a member that has a name:
+        // `struct { bool file; bool bar; } magic;` declares `magic` — the body's contents are `magic`'s members, not the
+        // enclosing struct's — while `union { long integer; double real; };` declares no name at all, so its members are
+        // the struct's (C11's anonymous member, and the rule above). Measured: without the declarator test,
+        // `struct exarg { … struct { bool file; bool bar; } magic; }` answered four members instead of three, because
+        // `file` and `bar` were bound into `exarg`.
+        let anonymous_member = declared_text.is_none()
+            && !Self::declares_a_name_after_the_body(node, &body)
+            && Self::sits_in_a_class_body(node);
         let scope = if anonymous_member {
             inner
         } else {
@@ -1189,7 +1197,31 @@ impl ScopeWalker<'_> {
     /// Every ancestor is walked and only a statement block or the translation unit stops it: the declaration a class body
     /// holds is not the node the class was read from, so a search that stopped at the first Declaration answered "not a
     /// member" for the one shape this question exists for.
-    fn sits_in_a_class_body(node: &CppSyntaxNode) -> bool {
+    /// Does anything **name the object** after the class-like body — the magic of struct { … } magic;?
+///
+/// `declarators(node)` cannot answer it: the node the class path is handed is the declaration the *body* came from,
+/// and the declarator sits beside it rather than inside it (measured: struct { bool file; bool bar; } magic; answered
+/// "no declarator" and its fields were bound into the enclosing struct). The text after the body is the question
+/// itself — a member without a name is an anonymous member, and one with a name owns its contents.
+fn declares_a_name_after_the_body(node: &CppSyntaxNode, body: &CppSyntaxNode) -> bool {
+    // **The declaration, one level up.** The node a class-like specifier is read from is not always the whole
+    // declaration — struct { bool file; } magic; reaches this path with the *body's* node, whose text stops at the
+    // closing brace, so the name magic is outside it. The nearest ancestor that is a Declaration, or the node
+    // itself when there is none.
+    let declaration = node
+        .ancestors()
+        .find(|ancestor| CppSyntaxKind::from(ancestor.kind()) == CppSyntaxKind::Declaration)
+        .unwrap_or_else(|| node.clone());
+    let text = declaration.text().to_string();
+    let body_text = body.text().to_string();
+    let Some(at) = text.rfind(&body_text) else {
+        return false;
+    };
+    text[at + body_text.len()..]
+        .chars()
+        .any(|character| character.is_alphanumeric() || character == '_')
+}
+fn sits_in_a_class_body(node: &CppSyntaxNode) -> bool {
         for ancestor in node.ancestors() {
             match CppSyntaxKind::from(ancestor.kind()) {
                 CppSyntaxKind::ClassBody => return true,

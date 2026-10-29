@@ -287,6 +287,9 @@ pub enum Feature {
     Elifdef,
     // ---- vendor extensions ----
     StatementExpression,
+    /// **The address of a label** — `&&here`, GNU's operand for a computed `goto`. It is what an interpreter's dispatch
+    /// table is built from, and it is the one `&&` that is not a logical operator.
+    LabelsAsValues,
     ElvisOperator,
     AsmBlock,
     NestedFunction,
@@ -353,7 +356,9 @@ impl Feature {
             }
 
             // Vendors.
-            StatementExpression | ElvisOperator | AsmBlock | NestedFunction => V(Vendor::Gnu),
+            StatementExpression | ElvisOperator | AsmBlock | NestedFunction | LabelsAsValues => {
+                V(Vendor::Gnu)
+            }
             RestrictGnu | Int128 => V(Vendor::Gnu),
             Typeof => AnyOf(&[S(Standard::C23), V(Vendor::Gnu)]),
             StructuredExceptionHandling | Interface => V(Vendor::Msvc),
@@ -423,6 +428,7 @@ impl Feature {
             EmptyInitializer => "empty initializer",
             Elifdef => "#elifdef",
             StatementExpression => "statement expression",
+            LabelsAsValues => "the address of a label",
             ElvisOperator => "elvis operator",
             AsmBlock => "asm block",
             NestedFunction => "nested function",

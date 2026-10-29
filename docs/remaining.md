@@ -109,3 +109,25 @@ gnu.c           4 parse errors       &&label、goto *table[i]、__typeof__(struc
 ——下一个 round 从那里开始，第一条命令是给 `substitute` 打印 `paste_at` 与 `body_tokens`。
 
 ---
+
+### N10. 只剩 9 条 parse error（findings 已经清零）
+
+`18 → 0`，成员 26/50 → 31/50。剩下的全是**解析器还不认识的构造**，每条都带文件与原文：
+
+```text
+aggregates.c  1   (const char []){"compound literal"}          复合字面量 + 数组类型
+c23.c         4   _BitInt(37)、typeof(struct point)、[[fallthrough]] 位置、constexpr
+gnu.c         4   &&state_zero、goto *TABLE[state]、__typeof__(struct point)、case -5 ... -1
+```
+
+顺序建议（每条都是独立的一小块语法）：
+
+1. **`&&label` + `goto *expr`**（gnu.c 两条）——GNU 的计算跳转，表达式层一个 `CppTokenKind::AmpAmp` 后跟 label 的
+   特例，加一条 `goto` 的 `*` 形式。
+2. **`case -5 ... -1`**（gnu.c）——case 范围，`...` 在常量表达式之间。
+3. **`typeof(struct point)`**（c23.c/gnu.c）——`typeof` 后面接 type-id 而不是表达式。
+4. **`_BitInt(37)`**（c23.c）——带宽度参数的内建类型。
+5. **`(const char []){…}`**（aggregates.c）——复合字面量的数组拼写。
+6. **`[[fallthrough]]` 的位置**（c23.c）——属性在 `case` 前的语句位置。
+
+---

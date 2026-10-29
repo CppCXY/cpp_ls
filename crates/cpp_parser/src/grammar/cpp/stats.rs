@@ -1984,6 +1984,27 @@ fn parse_goto_statement(p: &mut CppParser) -> ParseResult {
     let m = p.mark(CppSyntaxKind::GotoStat);
 
     p.bump(); // Consume 'goto'
+
+    // **GNU's computed `goto`** — `goto *table[state];`, which is how an interpreter dispatches. The `*` is the
+    // operator rather than a dereference of a label, and the operand is an ordinary expression: without this arm the
+    // statement stopped after `goto` and reported `expected ;, but get *` (measured on a nine-file C corpus, and pinned
+    // by `a_computed_goto_and_a_negative_case_range_parse`).
+    if p.current_token() == CppTokenKind::Star
+        && p.language()
+            .support(crate::features::Feature::LabelsAsValues)
+    {
+        p.bump();
+        if let Err(err) = crate::grammar::cpp::exprs::parse_expr(p) {
+            p.close_marks_above(base);
+            return Err(err);
+        }
+        if let Err(err) = expect_token(p, CppTokenKind::Semicolon) {
+            p.close_marks_above(base);
+            return Err(err);
+        }
+        return Ok(m.complete(p));
+    }
+
     if p.current_token() == CppTokenKind::Identifier {
         p.bump();
     }

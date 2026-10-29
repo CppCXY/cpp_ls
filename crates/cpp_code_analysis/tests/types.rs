@@ -1614,3 +1614,37 @@ int f(void) { exarg_T eap; return eap.addr_count; }
         "`struct exarg` spells the type `exarg`"
     );
 }
+
+/// **An anonymous union declared in a *header*, asked about from a file that includes it** — the corpus's shape.
+///
+/// `struct line` is in `corpus.h` with `union { long integer; double real; };` inside it, and the use is
+/// `line.integer` in `types.c`. The one-file fixture passes; this is the two-file one, where the members come from the
+/// header's facts rather than from the queried file's scope tree.
+#[test]
+fn an_anonymous_unions_members_are_facts_of_the_struct_it_is_declared_in() {
+    let header = "\
+struct line {
+    char colour;
+    union {
+        long integer;
+        double real;
+    }; /* anonymous */
+};
+";
+    let source = "#include \"corpus.h\"\nint f(struct line *line) { return (int)line->integer; }\n";
+    let session = session_with(&[("/p/corpus.h", header), ("/p/a.c", source)]);
+    let view = session.view("/p/a.c").expect("the file is held");
+
+    let members = match session.members_of(&view, "line") {
+        cpp_code_analysis::Known::Yes(list) => list
+            .members
+            .iter()
+            .map(|member| member.fact.name.clone())
+            .collect::<Vec<_>>(),
+        other => panic!("`line` has a member list: {other:?}"),
+    };
+    assert!(
+        members.iter().any(|name| name == "integer"),
+        "the union is anonymous, so `integer` is `line`'s member: {members:?}"
+    );
+}

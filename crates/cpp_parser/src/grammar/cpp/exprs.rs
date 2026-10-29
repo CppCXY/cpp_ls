@@ -1381,7 +1381,25 @@ fn an_operand_follows_the_parentheses(p: &CppParser) -> bool {
         }
     }
 
-    starts_an_operand(p, offset)
+    starts_an_operand(p, offset) || a_braced_initialiser_follows(p, offset)
+}
+
+/// Does a **braced initialiser** follow at `offset` — C99's *array-typed* compound literal?
+///
+/// ```c
+/// const char *text = (const char[]){"compound"};
+/// int n = ((int[]){1, 2})[index];
+/// ```
+///
+/// The type name ends in `[]`, so no `*` closes the group and no ordinary operand follows; the whole construct was
+/// reported `expected primary expression` at the type (measured on a nine-file C corpus, `aggregates.c`'s one syntax
+/// error — and the reason every member of that file went unoffered).
+///
+/// **Here rather than in [`starts_an_operand`]**, which also answers whether a `<…>` is a template argument list:
+/// `Vec<int[4]>{}` is a braced initialisation of a template-id, and counting `{` as an operand there turned its `<` into
+/// a comparison — measured, `an_array_type_is_read_as_a_type_and_an_index_as_an_expression` went red.
+fn a_braced_initialiser_follows(p: &CppParser, offset: usize) -> bool {
+    p.peek_token_kind_at(offset..offset + 1).first() == Some(&CppTokenKind::LeftBrace)
 }
 
 /// Does the significant token `offset` places ahead of the cursor **begin an operand**?
@@ -2382,6 +2400,28 @@ fn parse_primary_expr(p: &mut CppParser, fold_operand: bool) -> ParseResult {
                     Err(err)
                 }
             }
+        }
+
+        // **GNU's `&&label`** — the address of a label, which is the value a computed `goto` jumps to:
+        //
+        // ```c
+        // static void *const TABLE[] = {&&state_zero, &&state_one};
+        // goto *TABLE[state];
+        // ```
+        //
+        // `&&` in expression position is otherwise a syntax error (it is the short-circuit operator and has no left
+        // operand here), so this arm takes nothing away from a program that parses. Measured on a nine-file C corpus:
+        // two of `gnu.c`'s four syntax errors, `expected primary expression` at the `&&` and then `expected ;, but get *`
+        // at the `goto`.
+        CppTokenKind::LogicalAnd
+            if p.peek_next_token() == CppTokenKind::Identifier
+                && p.language()
+                    .support(crate::features::Feature::LabelsAsValues) =>
+        {
+            let m = p.mark(CppSyntaxKind::UnaryExpr);
+            p.bump(); // `&&`
+            p.bump(); // the label's name
+            Ok(m.complete(p))
         }
 
         // **C11's `_Generic ( … )` before any name is read**, because it *starts* like a name: the arm below takes every

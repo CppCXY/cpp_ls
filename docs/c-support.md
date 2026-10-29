@@ -150,3 +150,30 @@ $env:CPPLS_C_NAMES = "div"  # 打印索引里这个名字的事实
 ```
 
 改了语料之后先 `cmake --build build`——语料编译不过的时候，"分析报错"就不再是缺陷，而是预期。
+
+## 6. 第三轮之后：findings 清零
+
+```text
+                 findings   parse errors   members   types
+第二轮              18          9            30/50     25/33
+第三轮               0          6            31/50     25/33
+```
+
+九条 finding 全部修掉，每条都有先看着它失败的测试：
+
+| 缺陷 | 症状 | 修法 |
+|---|---|---|
+| `_Generic` 不是 `CppExpr` | `strlen(TYPE_NAME(x))` 的实参计数是 **0**，报"参数太少" | 加 `CppSyntaxKind::GenericSelectionExpr` 和它的 AST 类型，`CppCallExpr::get_args` 才看得见它 |
+| `T * T;` 被当成声明 | `({ int s = (v); s * s; })` 用一次就报"`s` 重复声明" | `redefinition` 读声明符（`*s`）和它前面的名字，同一个拼写就是乘法 |
+| C99 的 `restrict` 没有语法规则 | `int *restrict left` 里 `restrict` 变成参数名，两个参数撞车 | `eat_cv_qualifiers` 加一条 `Feature::Restrict` 的分支，产出 `RestrictQual` |
+| 匿名 union 的成员无处可去 | `struct line` 只有 4 个成员而不是 6 个 | 没有名字、没有声明符、又在另一个类体里的类体，其成员绑到外层类的作用域 |
+| 宏的替换表范围越界 | `macro-parentheses` 拿格式字符串里的 `%` 报错 | `body_range_of` 取最后一个*显著* token；没有替换表的宏（`#define GUARDED_H`）保持旧答案，因为宏表和 include 环境必须一致 |
+| `&&label` / `goto *` | gnu.c 4 条解析错误里的 2 条 | 新的 `Feature::LabelsAsValues`，主表达式一条 `&&` + 名字的分支，`goto` 一条 `*` 表达式的分支 |
+| 数组类型的复合字面量 | `(const char[]){"compound"}` 报 `expected primary expression` | `an_operand_follows_the_parentheses` 认 `{`；**不能**放进 `starts_an_operand`（那会让 `Vec<int[4]>{}` 的 `<` 变成比较） |
+| `sizeof(union { int i; double d; })` | 类型里的成员被判"声明了没用过" | `unused` 看最内层作用域：类作用域里的声明是成员，不是局部变量 |
+
+剩下的 6 条解析错误：`c23.c` 4 条（`_BitInt(37)`、`typeof(struct point)`、`[[fallthrough]]` 的位置、`constexpr`），
+`gnu.c` 2 条（`__typeof__(struct point)`、case range 剩下的形状）。见 `docs/remaining.md` §N10。
+
+**下一轮第一件事**：`aggregates.c` 的 11 行成员检查现在全是 `0 offered` —— 这个文件刚刚才解析成功，这是第一次真正看它；
+先确认探针的 needle→offset 映射，再看 `completions` 对一个"头文件里的结构体"的局部变量回答什么。

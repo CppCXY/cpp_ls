@@ -68,3 +68,53 @@ fn the_gnu_gaps_are_named() {
         ],
     );
 }
+
+/// **The corpus's own GNU shapes** — a label as a value, a computed `goto`, and a case range with a negative end.
+///
+/// ```c
+/// static void *const TABLE[] = {&&state_zero, &&state_one};   // `&&label`: the address of a label
+/// goto *TABLE[state];                                        // computed `goto`
+/// case -5 ... -1:                                            // a range whose left end is negative
+/// ```
+///
+/// Measured on a nine-file C corpus: four syntax errors in `gnu.c`, every one of them one of these three shapes (and
+/// the fourth a `typeof(struct point)`, which the other test covers).
+#[test]
+fn a_computed_goto_and_a_negative_case_range_parse() {
+    assert_all_parse(
+        "GNU control flow",
+        &[
+            (
+                "the address of a label",
+                "void f(void) { static void *const table[] = {&&here}; goto *table[0]; here: return; }",
+            ),
+            (
+                "a case range with a negative end",
+                "void f(int n) { switch (n) { case -5 ... -1: break; default: break; } }",
+            ),
+        ],
+    );
+}
+
+/// **An array-typed compound literal** — `(const char[]){"compound"}` and `(int[]){1, 2}`.
+///
+/// C99's compound literal with an *array* type: the type name ends in `[]`, and the braced list that follows is the
+/// value. The object form (`(point){.x = 3}`) has been read since neovim's `CSTR_AS_OBJ` was reported, so the array
+/// spelling is the part that was missing — measured on a nine-file C corpus, `aggregates.c`'s one syntax error, and the
+/// reason every member of that file went unoffered.
+#[test]
+fn an_array_typed_compound_literal_parses() {
+    assert_all_parse(
+        "compound literals",
+        &[
+            (
+                "an array type",
+                "void f(void) { const char *text = (const char[]){\"compound\"}; (void)text; }",
+            ),
+            (
+                "an array of ints, subscripted",
+                "void f(int index) { int n = ((int[]){1, 2})[index]; (void)n; }",
+            ),
+        ],
+    );
+}

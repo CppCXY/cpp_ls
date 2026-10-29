@@ -42,6 +42,18 @@ fn is_a_header(path: &std::path::Path) -> bool {
 }
 
 /// `_name` is a name the writer chose not to use — see the module documentation.
+
+/// Is the declaration at t (a **rendering** offset) a **member of a type** rather than a local variable?
+///
+/// The innermost scope decides, and only a class scope counts — see the call site for why the chain below the
+/// innermost one is not the question.
+fn declares_a_member(context: &CheckContext<'_>, at: usize) -> bool {
+    let scopes = context.model.scopes();
+    scopes
+        .scope_at(at)
+        .and_then(|scope| scopes.scope(scope))
+        .is_some_and(|data| data.kind == crate::ScopeKind::Class)
+}
 fn is_deliberately_unused(name: &str) -> bool {
     name.starts_with('_')
 }
@@ -126,6 +138,16 @@ impl Check for Unused {
             if !inside_a_body {
                 continue;
             }
+            // **A member of a type is not a local variable**, even when the type is written inside a body:
+            // `sizeof(union { int i; double d; })` declares a union and its two members inline, and both members were
+            // reported "declared here and never used" — a type in an unevaluated context has no reader to use it.
+            // Measured on a nine-file C corpus: two findings in `aggregates.c`, and they appeared the moment that file
+            // parsed. The *innermost* scope is what decides: a member-function local sits in a block scope, whose chain
+            // merely passes through the class.
+            if declares_a_member(context, at.get()) {
+                continue;
+            }
+
             if is_deliberately_unused(&fact.name) || !is_a_candidate(&fact.name) {
                 continue;
             }
