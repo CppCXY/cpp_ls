@@ -72,6 +72,35 @@ mod tests {
         cpp_parser::token_at(&tree.get_red_root(), at).expect("a token at the offset")
     }
 
+    /// **The three coroutine keywords have a popup in every locale, and the table answers for them.**
+    ///
+    /// `co_await`, `co_yield` and `co_return` are keywords to this lexer ([`cpp_parser::is_keyword`]), so the popup a
+    /// reader gets on `constexpr` was the popup they were missing: measured on `test_cpp/coroutine.cpp`, hover on
+    /// `co_return` and `co_yield` answered **nothing** while `co_await` answered its expression's type. The table is
+    /// the locale file, so the fix is an entry per word per language — and a test that a word without one is loud.
+    #[test]
+    fn every_coroutine_keyword_has_its_popup_in_every_locale() {
+        const EN: &str = include_str!("../../../locales/en.yml");
+        const ZH: &str = include_str!("../../../locales/zh-CN.yml");
+
+        for word in ["co_await", "co_yield", "co_return"] {
+            for (name, source) in [("en", EN), ("zh-CN", ZH)] {
+                let key = format!("{word}:");
+                assert!(
+                    source
+                        .lines()
+                        .any(|line| line.trim_start().starts_with(&key)),
+                    "`{word}` has no entry in {name}.yml"
+                );
+            }
+        }
+
+        // …and the table is what the popup goes through, so a parsed token answers.
+        let source = "int f() {\n    co_return 1;\n}\n";
+        let token = token_of(source, "co_return", false);
+        let text = keyword_hover(&token).expect("a keyword with an entry has a popup");
+        assert!(text.contains("co_return"), "the popup names the word: {text}");
+    }
     /// **Every word in the table has a popup in every locale**, because a missing key is a popup that says only the
     /// one-line description — the failure this test exists to make loud.
     ///
