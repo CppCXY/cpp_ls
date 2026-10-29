@@ -177,3 +177,22 @@ $env:CPPLS_C_NAMES = "div"  # 打印索引里这个名字的事实
 
 **下一轮第一件事**：`aggregates.c` 的 11 行成员检查现在全是 `0 offered` —— 这个文件刚刚才解析成功，这是第一次真正看它；
 先确认探针的 needle→offset 映射，再看 `completions` 对一个"头文件里的结构体"的局部变量回答什么。
+
+## 7. 第四轮：解析错误清零
+
+```text
+                 findings   parse errors   members   types
+第三轮               0           6           45/50     29/33
+第四轮               0           0           45/50     29/33
+```
+
+九条解析错误全部消失，语料 **508 条声明、9 个文件、零语法错误**：`typeof(type-id)`（C23 + GNU 两条路线）、
+`typeof_unqual`、`_BitInt(37)`、`&&label`、`goto *expr`、数组类型的复合字面量。
+
+**必须记下来的一件事：成员/类型的旧数字是探针自己在测缓存。** `renderings` 缓存按权重有界，先 cook 的文件被后面的
+挤掉，`Session::view` 于是答 `None`，探针把它读成"引擎什么都没提供"——`aggregates.c` 和 `gnu.c` 的每一行都是
+`0 offered`，而最后 cook 的 `types.c` 全过。每问一行之前重新 cook 一次，真实数字是 **45/50 和 29/33**（旧数字
+31/50、25/33）。这条写在这里是因为它会重演：任何"先批量准备、再批量提问"的探针都会踩到同一个坑。
+
+剩下的 9 个失败全是**类型推断**：`typeof(expr)`、`typeof(type)`、`__auto_type`、无名 union 类型的局部变量、
+函数指针局部变量。见 `docs/remaining.md` §N11。

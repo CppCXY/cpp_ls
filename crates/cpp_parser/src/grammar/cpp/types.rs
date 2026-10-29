@@ -27,6 +27,18 @@ use super::expect_token;
 /// Includes the C++20 module keywords (`module`, `import`) because they are *contextual*: the lexer
 /// hands them over as identifiers, and they only matter in `parse_decl_specifier_seq` when the
 /// enclosing declaration says so.
+/// Does the cursor start a **type-id** rather than an expression — the payload of C23's `typeof` and GNU's
+/// `__typeof__`?
+///
+/// Only the tokens that *cannot* begin an expression: a builtin type specifier, an elaborated specifier, or a
+/// cv-qualifier. A name, a literal and a `(` all begin expressions and are left to the expression rule.
+fn starts_a_type_id(p: &CppParser) -> bool {
+    is_type_specifier_keyword(p.current_token())
+        || matches!(
+            p.current_token(),
+            CppTokenKind::ConstKeyword | CppTokenKind::VolatileKeyword
+        )
+}
 pub fn is_type_specifier_keyword(kind: CppTokenKind) -> bool {
     matches!(
         kind,
@@ -1446,6 +1458,24 @@ fn parse_one_decl_specifier_inner(
             return Ok(parse_an_implementation_keyword(p));
         }
 
+        // **C23's `_BitInt(N)`** — an integer type whose width is a constant expression. It is a *contextual* keyword
+        // (`_BitInt` is an ordinary identifier outside this position), so it is an identifier followed by a `(` and a
+        // width, and the width is what tells it from a call: `_BitInt(37) wide;` declares a type, while `f(37)` is a
+        // call. Measured on a nine-file C corpus: the last syntax error, in `c23.c`, which left the `struct bits` that
+        // holds it unrecovered and took that struct's member answers with it.
+        CppTokenKind::Identifier
+            if p.current_token_text() == "_BitInt"
+                && p.peek_next_token() == CppTokenKind::LeftParen
+                && p.language().support(crate::features::Feature::BitInt) =>
+        {
+            let m = p.mark(CppSyntaxKind::BuiltinType);
+            p.bump(); // `_BitInt`
+            expect_token(p, CppTokenKind::LeftParen)?;
+            super::exprs::parse_assignment_expr(p)?;
+            expect_token(p, CppTokenKind::RightParen)?;
+            return Ok(m.complete(p));
+        }
+
         // A **type this target's compiler adds to the language**: `__int128`, `_Float16`, `__int64`. Read here
         // rather than in the skip above, because a `BuiltinType` is what tells the caller a type has been named —
         // see [`a_type_the_compiler_spells`].
@@ -1573,11 +1603,21 @@ fn parse_one_decl_specifier_inner(
             if p.current_token() == CppTokenKind::LeftParen {
                 expect_token(p, CppTokenKind::LeftParen)?;
 
-                // The payload is an expression — `decltype(a + b)`, `noexcept(f())` — with **one exception**:
-                // `decltype(auto)` holds a type, and `auto` is a keyword that no expression rule accepts, so
-                // the expression reading reported `expected primary expression` against it. The two readings
-                // are told apart by the one token that cannot be an expression.
-                if p.current_token() == CppTokenKind::AutoKeyword {
+                // The payload is an expression — `decltype(a + b)`, `noexcept(f())` — with **two exceptions**: a
+                // *type*, which C23's `typeof` and GNU's `__typeof__` both allow, and `auto`, which is the same thing
+                // written with a keyword no expression rule accepts.
+                //
+                // Measured on a nine-file C corpus: `typeof(struct point) origin = {3, 4};` reported `expected primary
+                // expression` at the `struct` — four of `c23.c`'s syntax errors and two of `gnu.c`'s, and they took
+                // every member and type answer about those files down with them.
+                //
+                // The two readings are told apart by the tokens that cannot begin an expression: a builtin type
+                // specifier, an elaborated specifier (`struct`, `union`, `enum`, `class`), or a cv-qualifier. A name,
+                // a literal and a `(` all begin expressions and stay on that side.
+                if p.current_token() == CppTokenKind::AutoKeyword
+                    || (p.language().support(crate::features::Feature::Typeof)
+                        && starts_a_type_id(p))
+                {
                     parse_type_id(p)?;
                 } else {
                     super::exprs::parse_expr(p)?;

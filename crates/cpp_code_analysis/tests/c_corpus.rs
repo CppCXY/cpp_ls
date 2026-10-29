@@ -723,6 +723,18 @@ fn the_c_corpus_parses_and_its_members_resolve() {
 
     dump_names(&session, &root);
 
+    // **Re-cook the files whose rendering the cache has dropped**, and the reason is a measurement rather than a
+    // convenience: the rendering cache is bounded by weight, so a file cooked early is evicted by the ones after it, and
+    // `Session::view` then answers `None` for it — which the member and type rows below read as "the engine offered
+    // nothing". Measured: `aggregates.c` and `gnu.c` answered `0 offered` for **every** row while `types.c`, cooked
+    // last, answered all of them; `CPPLS_TRACE_VIEW` showed `summary true, held true` and no rendering. A cook is
+    // idempotent, so asking again costs the cook it never had.
+    for path in &files {
+        if session.view(path).is_none() && session.cook(path).is_none() {
+            println!("  WARN  {} has no reading to ask about", path.display());
+        }
+    }
+
     // ---------------------------------------------------------------------------------------------------------
     // members
     // ---------------------------------------------------------------------------------------------------------
@@ -751,7 +763,35 @@ fn the_c_corpus_parses_and_its_members_resolve() {
         };
         let cursor = found_at + operator_at + width;
 
+        // **A file's rendering can be evicted while the loop moves on**, and then every row about it answers `0` — see
+        // the note on the pre-pass above. Cooking it again here is the only way to ask the *engine* rather than the
+        // cache: the cook is a cache hit when the rendering is still held, and a rebuild when it is not.
+        if session.view(&path).is_none() {
+            session.cook(&path);
+        }
         let labels = member_labels(&session, &path, cursor);
+        if labels.is_empty() && std::env::var_os("CPPLS_TRACE_MEMBERS").is_some() {
+            match session.view(&path) {
+                Some(view) => println!(
+                    "  trace: {} rendering {} chars, reading offset {:?}",
+                    row.file,
+                    view.source.len(),
+                    view.reading_offset_of(FileOffset::new(cursor))
+                ),
+                None => println!("  trace: {} no view", row.file),
+            }
+        }
+        if labels.is_empty() && std::env::var_os("CPPLS_TRACE_MEMBERS").is_some() {
+            match session.view(&path) {
+                Some(view) => println!(
+                    "  trace: {} rendering {} chars, reading offset {:?}",
+                    row.file,
+                    view.source.len(),
+                    view.reading_offset_of(FileOffset::new(cursor))
+                ),
+                None => println!("  trace: {} no view", row.file),
+            }
+        }
         let pass = labels.iter().any(|label| label == row.expected);
         let entry = member_by_file.entry(row.file).or_default();
         entry.0 += 1;
@@ -921,9 +961,27 @@ fn dump_names(session: &Session<DiskFiles>, root: &Path) {
     if let Some(show) = std::env::var_os("CPPLS_C_SHOW")
         && let Some(show) = show.to_str()
         && let Some((file, needle)) = show.split_once('|')
-        && let Some(view) = session.view(std::path::Path::new(file))
-        && let Some(at) = view.source.find(needle)
     {
+        // **The file's own text is searched too**, because the point of the probe is to answer "did the cook keep this",
+        // and "the needle is not in the rendering" is an answer worth printing rather than a silent nothing.
+        let held = std::fs::read_to_string(file).unwrap_or_default();
+        println!(
+            "  show: {file} held {} chars, needle in the file: {}, view: {}",
+            held.len(),
+            held.contains(needle),
+            session.view(std::path::Path::new(file)).is_some()
+        );
+        let Some(view) = session.view(std::path::Path::new(file)) else {
+            println!("  show: no view");
+            return;
+        };
+        let Some(at) = view.source.find(needle) else {
+            println!(
+                "  show: the rendering has no {needle:?} ({} chars)",
+                view.source.len()
+            );
+            return;
+        };
         let from = at.saturating_sub(200).min(view.source.len());
         let to = (at + 1600).min(view.source.len());
         println!(

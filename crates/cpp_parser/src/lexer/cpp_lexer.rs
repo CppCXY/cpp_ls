@@ -191,7 +191,7 @@ impl<'a> CppLexer<'a> {
             // spellings, `__decltype` is MSVC's, and all four are the same token *when the configuration says so* and an
             // ordinary identifier when it does not — which is what a strict `-std=c++20` parse must see, and what the
             // `typeof` test in `extensions_gnu.rs` pins from the other side.
-            "__typeof__" | "__typeof" | "__decltype" | "typeof"
+            "__typeof__" | "__typeof" | "__decltype" | "typeof" | "typeof_unqual"
                 if self
                     .lexer_config
                     .language()

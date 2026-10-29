@@ -118,3 +118,35 @@ fn an_array_typed_compound_literal_parses() {
         ],
     );
 }
+
+/// **`typeof` and `__typeof__` take a *type*, not only an expression** — C23 and GNU.
+///
+/// ```c
+/// typeof(struct point) origin = {3, 4};
+/// __typeof__(const int) frozen = 1;
+/// typeof(value) copy = value;          // the expression form, which already parsed
+/// ```
+///
+/// The specifier rule read `decltype`'s payload as an expression, and a `struct` cannot begin one, so the declaration
+/// failed — measured on a nine-file C corpus, six syntax errors over two files (`c23.c`, `gnu.c`), and with them every
+/// member and type answer about those files.
+#[test]
+fn a_typeof_specifier_takes_a_type() {
+    assert_all_parse(
+        "typeof",
+        &[
+            (
+                "typeof with an elaborated type",
+                "void f(void) { typeof(struct point) origin = {3, 4}; (void)origin; }",
+            ),
+            (
+                "__typeof__ with a qualified type",
+                "void f(void) { __typeof__(const int) frozen = 1; (void)frozen; }",
+            ),
+            (
+                "typeof with an expression",
+                "void f(int value) { typeof(value) copy = value; (void)copy; }",
+            ),
+        ],
+    );
+}

@@ -3690,7 +3690,21 @@ impl<F: FileProvider + Clone> Session<F> {
             .summary(requested)
             .map(|summary| summary.path.clone())
             .unwrap_or_else(|| requested.to_path_buf());
+        // **A miss is otherwise indistinguishable from "never cooked"**, which is what made a file that *had* been
+        // cooked answer `None` for every query about it. See `CPPLS_TRACE_VIEW`.
+        if std::env::var_os("CPPLS_TRACE_VIEW").is_some() {
+            eprintln!(
+                "view: asked {:?} key {:?} summary {} held {}",
+                requested,
+                key,
+                self.store.index().summary(requested).is_some(),
+                self.vfs.held(&key).is_some()
+            );
+        }
         let file = self.vfs.held(&key)?;
+        if std::env::var_os("CPPLS_TRACE_VIEW").is_some() {
+            eprintln!("view: file.path {:?} hash {:?}", file.path, crate::cache::content_hash(&file.text));
+        }
 
         // **The rendering, or a request for it — never the file's own tokens.**
         //
@@ -6075,6 +6089,9 @@ impl<F: FileProvider + Clone> Session<F> {
         // than by a second read of the file, so the entry cannot describe one text under another's key.
         if let Ok(mut known) = self.renderings.lock() {
             let key = (path.clone(), text_hash);
+            if std::env::var_os("CPPLS_TRACE_VIEW").is_some() {
+                eprintln!("commit: path {:?} hash {:?}", path, text_hash);
+            }
             let before = known.len();
             let weight = indexed.rendered.weight();
             known.insert(key, std::sync::Arc::clone(&indexed.rendered), weight);

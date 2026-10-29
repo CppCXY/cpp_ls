@@ -131,3 +131,39 @@ gnu.c         4   &&state_zero、goto *TABLE[state]、__typeof__(struct point)�
 6. **`[[fallthrough]]` 的位置**（c23.c）——属性在 `case` 前的语句位置。
 
 ---
+
+### N11. 解析错误清零，剩下的是**类型推断**
+
+```text
+                 findings   parse errors   members   types
+第三轮               0           6           45/50     29/33
+第四轮               0           0           45/50     29/33
+```
+
+九条解析错误全部修掉（`508` 条声明，9 个文件零错误）：
+
+| 构造 | 文件 | 修法 |
+|---|---|---|
+| `&&label`、`goto *table[i]` | gnu.c | `Feature::LabelsAsValues`：主表达式一条 `&&` + 名字；`goto` 一条 `*` 表达式 |
+| `case -5 ... -1` | gnu.c | 随 `&&label` 一起通过（左端是一元负号常量） |
+| `typeof(struct point)` / `__typeof__(const int)` | c23.c、gnu.c | specifier 的 `decltype` 分支在 `Feature::Typeof` 下接受 **type-id** 载荷 |
+| `typeof_unqual(x)` | c23.c | lexer 的 `typeof` 拼写表 |
+| `_BitInt(37)` | c23.c | specifier 里 `_BitInt` + `(` 宽度 `)`，按 `Feature::BitInt` 门控 |
+| `(const char[]){"compound"}` | aggregates.c | `an_operand_follows_the_parentheses` 认 `{`（不能放 `starts_an_operand`） |
+| `sizeof(union { … })` 的假 unused | aggregates.c | `unused` 看最内层作用域（类作用域=成员） |
+
+**探针本身的一个大 bug**：`renderings` 缓存按权重有界，先 cook 的文件会被后面的挤掉，于是成员/类型检查读到的是"没渲染"而不是"引擎答不出"——
+`aggregates.c`、`gnu.c` 的每一行都 `0 offered`，而最后 cook 的 `types.c` 全过。修法：每问一行前若 `view` 为空就重新 cook
+（`member_labels` 调用点）。**45/50 与 29/33 是修了这个之后才看到的真实数字**（之前是 31/50、25/33）。
+
+剩下的 5 个成员 / 4 个类型全是**类型推断**，不是解析：
+
+```text
+types.c   anonymous_union.integer   无名的 union 类型局部变量（`} anonymous_union = {0};`）的类型无从命名
+gnu.c     other_pointer->x          `typeof(other) *other_pointer` —— typeof 的**推断**
+c23.c     origin.x                  `typeof(struct point) origin` —— 同上
+c23.c     bits.three / bits.signed_wide  `struct bits` 的位域（含 `_BitInt(37) wide;`）成员没列出
+functions.c operation / compare     函数指针局部变量（`int (*operation)(int, int)`）→ `<no type>`
+gnu.c     value                     `__auto_type` → 应推断成 `int`，现在是字面拼写
+c23.c     copy                      `typeof(value)` → 应是 `int`
+```
