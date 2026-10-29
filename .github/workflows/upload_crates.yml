@@ -22,7 +22,7 @@ jobs:
           # `cpp_code_analysis` cannot be packaged until `cpp_parser` is resolvable from the registry — the first
           # release would otherwise fail on its own dependencies. Ten attempts, twenty seconds apart, is five minutes
           # of patience for a lag that is normally one.
-          for dir in cpp_{parser,code_analysis,ls}; do
+          for dir in cpp_{parser,formatter,code_analysis,ls}; do
             pushd "crates/$dir"
             for attempt in 1 2 3 4 5 6 7 8 9 10; do
               if cargo publish --allow-dirty; then
