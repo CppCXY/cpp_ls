@@ -45,9 +45,9 @@ impl Check for UndefinedField {
         // anything about `a.b` since it was written, while compiling and looking correct.
         //
         // **The two halves are timed apart, because they fail for different reasons.** Measured on
-        // `LuaSyntaxTree.cpp`: collecting 74 accesses takes **262 µs** and the loop over them **98 ms** — so this
-        // check is not a tree walk that got slow, it is 74 type questions (`type_of` per access, 6 inference
-        // questions each), and the work is in the engine. Cheap when off; see `docs/interactive-cost.md`.
+        // `LuaSyntaxTree.cpp`: collecting 74 accesses takes **262 µs** and the loop over them **98
+        // ms** — so this check is not a tree walk that got slow, it is 74 type questions (`type_of`
+        // per access, 6 inference questions each), and the work is in the engine.
         let traced = crate::probes::timing();
         let started = traced.then(std::time::Instant::now);
         let accesses = context.member_accesses();

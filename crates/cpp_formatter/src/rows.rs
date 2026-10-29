@@ -1,8 +1,8 @@
 //! **`AlignArrayOfStructures: Left` — the columns of a braced table.**
 //!
-//! P1 of `docs/cpp-format.md` §十, the last aligner the corpus asks for. A table is a run of adjacent lines that each
-//! open with `{`; its cells are the tokens between top-level commas. clang-format pads every cell to the widest one in
-//! its column, so the commas and closing braces line up:
+//! A table is a run of adjacent lines that each open with `{`; its cells are the tokens between
+//! top-level commas. clang-format pads every cell to the widest one in its column, so the commas
+//! and closing braces line up:
 //!
 //! ```text
 //! {"and",      TK_AND     },

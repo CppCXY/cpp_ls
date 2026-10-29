@@ -334,12 +334,10 @@ impl AnalysisState {
     ///
     /// # Why the middle phase runs on a blocking thread of its own
     ///
-    /// Because it is the session's **only** indivisible piece of work, and the walk's 44 ms is the only part that has
-    /// to hold the lock a keystroke waits for. Measured over the wire, before the split: a unit read inside the
-    /// writer held it for **all of it**, which is why the capability sat unused for several rounds
-    /// (`docs/architecture.md` §7.4). Nothing about it needs an `async` context, so it must not occupy an `async`
-    /// one: a 4.9 second task on the runtime would take the executor away from every request in flight — the same
-    /// reason `run_blocking` exists.
+    /// Because it is the session's **only** indivisible piece of work, and the walk's 44 ms is the
+    /// only part that has to hold the lock a keystroke waits for. Nothing about it needs an `async`
+    /// context, so it must not occupy an `async` one: a 4.9 second task on the runtime would take
+    /// the executor away from every request in flight — the same reason `run_blocking` exists.
     ///
     /// Returns whether a program was attempted. `false` when none was owed, or when the clock
     /// ([`cpp_code_analysis::Session::the_program_to_read`]) or the size budget said no.

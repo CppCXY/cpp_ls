@@ -2200,7 +2200,7 @@ fn parse_primary_expr(p: &mut CppParser, fold_operand: bool) -> ParseResult {
             // generated file writes a message with a conditional middle in:
             //
             // ```c
-            // const char* info = "[" 
+            // const char* info = "["
             // #if defined(__clang__)
             //   "ON"
             // #else
@@ -2874,13 +2874,12 @@ fn parse_parenthesized_expression(p: &mut CppParser) -> ParseResult {
         m.undo(p);
         return Err(err);
     }
-    // **A parenthesised compound literal** — `((Object){ .type = … })` — is *not* read here yet, and the `{` after a
-    // `)` is why: it is a function body in `void f() requires (x) { }` and a braced initializer in
-    // `((Object){ 1 })`, and telling them apart needs the *contents* of the parentheses rather than the token after
-    // them. The version of this that accepted every `{` broke both concepts fixtures above (`requires (sizeof(T) > 1)
-    // { }`), which is the honest outcome: a rule that cannot tell a body from an initializer must not guess. The cast
-    // arm does read the single-parenthesis spelling (`(Object){ … }`), and `docs/remaining.md` §G records the nested
-    // one with the shape it needs: a probe of `( Name )` followed by `{`.
+    // **A parenthesised compound literal** — `((Object){ .type = … })` — is *not* read here yet,
+    // and the `{` after a `)` is why: it is a function body in `void f() requires (x) { }` and a
+    // braced initializer in `((Object){ 1 })`, and telling them apart needs the *contents* of the
+    // parentheses rather than the token after them. The version of this that accepted every `{`
+    // broke both concepts fixtures above (`requires (sizeof(T) > 1) { }`), which is the honest
+    // outcome: a rule that cannot tell a body from an initializer must not guess.
     Ok(m.complete(p))
 }
 

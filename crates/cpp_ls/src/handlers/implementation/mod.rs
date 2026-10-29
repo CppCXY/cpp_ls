@@ -18,11 +18,12 @@
 //!
 //! # What is not answered, and why that is deliberate
 //!
-//! * **Nothing** for a name with no class or member behind it — a local, a namespace, a macro. "Implementations of a
-//!   local" is not a question with a wrong answer, it is a question with no answer, and `null` says so.
-//! * **Nothing** from classes the index has not read yet: the scan is over the summaries the session holds, and a
-//!   partial index gives a partial list rather than a guess. `docs/usability.md` records why a partial list is the
-//!   honest answer for a read.
+//! * **Nothing** for a name with no class or member behind it — a local, a namespace, a macro.
+//!
+//! "Implementations of a local" is not a question with a wrong answer, it is a question with no
+//! answer, and `null` says so. **Nothing** from classes the index has not read yet: the scan is
+//! over the summaries the session holds, and a partial index gives a partial list rather than a
+//! guess.
 
 use cpp_code_analysis::{FileProvider, Known, Session};
 use lsp_types::{

@@ -1,4 +1,3 @@
-//! **A classic C project, through the server** — the C half of `docs/lsp-status.md`.
 //!
 //! ```text
 //! $env:CPPLS_REAL_PROJECT = "E:\neovim"

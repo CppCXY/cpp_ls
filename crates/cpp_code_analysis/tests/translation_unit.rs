@@ -360,10 +360,9 @@ fn a_files_environment_carries_the_state_of_the_unit_it_is_read_in() {
 /// one unit can be written under one spelling and read back under the other. The frames were keyed raw, so
 /// `environment_of` answered `None` for the file the unit was **built for**.
 ///
-/// What that cost is not a missing hover: `render_a_cooked` declines on `environment_of(path)?`, the cook slice drops
-/// the file instead of cooking it, and `want_the_closure_cooked` asks for it again on the next idle drain — for ever.
-/// Measured on `EmmyLuaCodeStyle`: **9 987** `did not render` lines for one header in twenty seconds, with the index
-/// queue and the cook queue both empty (see `docs/cold-start-cpu.md`).
+/// What that cost is not a missing hover: `render_a_cooked` declines on `environment_of(path)?`,
+/// the cook slice drops the file instead of cooking it, and `want_the_closure_cooked` asks for it
+/// again on the next idle drain — for ever.
 #[test]
 fn a_file_is_found_in_its_timeline_however_its_path_is_spelled() {
     let files = [

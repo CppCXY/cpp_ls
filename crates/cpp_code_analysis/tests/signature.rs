@@ -193,15 +193,14 @@ void g() {
 }
 /// **A template candidate is ranked as the function the call instantiates.**
 ///
-/// The distinguishing fixture: two templates whose declared spellings (`T*` and `T`) say nothing about an `int*`
-/// argument — without deduction both are `Match::Unranked` and the call is ambiguous, so nothing is chosen. With it,
-/// the first is `int*` (exact) and the second is `int` against an `int*` (not viable), so the `T*` one is chosen and
-/// comes first. If deduction silently stopped working, this test would still pass its first half and the signature
-/// would be the `T` one — so the assertion is on **which** of the two.
-/// **The fixture's argument is a pointer variable, not `&n`** — measured: `take(&n)` produces **no call node at all**
-/// (`call_around` answers `None`), so the address-of expression as a call argument is a parser defect of its own,
-/// recorded in `docs/overloads.md` §12. With `int* p = &n; take(p);` the callees are found (two candidates, both with
-/// their parameter lists) and the deduction is what decides between them.
+/// The distinguishing fixture: two templates whose declared spellings (`T*` and `T`) say nothing
+/// about an `int*` argument — without deduction both are `Match::Unranked` and the call is
+/// ambiguous, so nothing is chosen. With it, the first is `int*` (exact) and the second is `int`
+/// against an `int*` (not viable), so the `T*` one is chosen and comes first. If deduction silently
+/// stopped working, this test would still pass its first half and the signature would be the `T`
+/// one — so the assertion is on **which** of the two. With `int* p = &n; take(p);` the callees are
+/// found (two candidates, both with their parameter lists) and the deduction is what decides
+/// between them.
 #[test]
 fn a_template_candidate_is_ranked_as_the_function_the_call_instantiates() {
     let source = "\

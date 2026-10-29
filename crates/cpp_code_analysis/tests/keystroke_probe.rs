@@ -16,7 +16,7 @@
 //! ```text
 //! how long does it take      the number a reader feels, per keystroke, after the project is settled
 //! is it read as the program  `Step::with_the_environment` — a file read as *text* while a reader is typing in it
-//!                            is the window `docs/architecture.md` §5's four patch layers exist for
+//!                            is the window the four patch layers exist for
 //! ```
 //!
 //! # Why two halves

@@ -13,9 +13,7 @@ fn store(name: &str, files: &MemoryFiles) -> (SummaryStore<MemoryFiles>, std::pa
     let root = std::env::temp_dir().join("cppls-store-tests").join(name);
     let _ = std::fs::remove_dir_all(&root);
 
-    // **The database, like every other caller.** These tests used to assert the shape of the *file* cache;
-    // what they are about is a hit — a second store that does not parse again — and the database answers that
-    // question the same way the directory did (see `docs/refactor-cache-and-startup.md` M1).
+    // **The database, like every other caller.**
     let store = SummaryStore::with_provider(&root, CompilerConfig::default(), files.clone());
     (store, root)
 }

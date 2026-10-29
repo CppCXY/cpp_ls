@@ -1,4 +1,3 @@
-//! **What every LSP feature answers on a real project** — the self-test behind `docs/lsp-status.md`.
 //!
 //! ```text
 //! $env:CPPLS_REAL_PROJECT = "E:\EmmyLuaCodeStyle"

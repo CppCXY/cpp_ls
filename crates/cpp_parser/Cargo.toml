@@ -2,6 +2,12 @@
 name = "cpp_parser"
 version = "0.1.0"
 edition = "2024"
+description = "A lossless C++ parser over the preprocessed text: the tree every layer above it reads."
+license = "MIT"
+authors = ["CppCXY"]
+repository = "https://github.com/CppCXY/cpp_ls"
+keywords = ["cpp", "language-server"]
+categories = ["development-tools"]
 
 [[bin]]
 name = "cpp_dump"

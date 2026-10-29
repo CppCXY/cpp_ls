@@ -122,10 +122,10 @@ pub async fn on_completion(
     // to degrade rather than lie, so an index that is still filling gives **fewer** items and never wrong ones, and
     // opening a file used to show a popup of nothing but keywords while hover worked.
     //
-    // What the wait was actually buying is the answer to a question about **one file**, and it was the wrong question
-    // to ask the whole project. clangd's design states the rule this now follows, in as many words: *"we don't wait
-    // for it to be up-to-date. Since completion is extremely time sensitive, it just uses whichever is immediately
-    // available."* (see `docs/status.md` §2 for the quotation and the rest of the argument).
+    // What the wait was actually buying is the answer to a question about **one file**, and it was
+    // the wrong question to ask the whole project. clangd's design states the rule this now
+    // follows, in as many words: *"we don't wait for it to be up-to-date. Since completion is
+    // extremely time sensitive, it just uses whichever is immediately available."*
     //
     // The work that makes the immediate answer a good one happens **before** this point and it is about this file:
     // `AnalysisState::prepare` puts the file's text in reach, `AnalysisState::catch_up` reads the file and the

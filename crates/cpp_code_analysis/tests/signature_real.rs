@@ -1,4 +1,4 @@
-//! **Does a real call site answer a signature?** — `docs/lsp-status.md` P2 ⑤, asked at the analysis layer.
+//! **Does a real call site answer a signature?** —
 //!
 //! ```text
 //! $env:CPPLS_REAL_PROJECT = "E:\EmmyLuaCodeStyle"
@@ -23,8 +23,8 @@ use cpp_code_analysis::{DiskFiles, OpenDocuments, Session, SessionFiles, WatchFi
 
 /// The project to open — **from the environment, and only when it is there**.
 ///
-/// A probe that hardcodes one machine's checkout fails on the next machine; `None` means "no project here", which the
-/// test turns into a skip. See `docs/remaining.md` §C1.
+/// A probe that hardcodes one machine's checkout fails on the next machine; `None` means "no
+/// project here", which the test turns into a skip.
 fn project() -> Option<PathBuf> {
     let named = std::env::var_os("CPPLS_REAL_PROJECT")
         .map(PathBuf::from)

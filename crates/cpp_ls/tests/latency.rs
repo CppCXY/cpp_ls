@@ -78,9 +78,8 @@ const COMPLETION_BUDGET: Duration = Duration::from_millis(2500);
 
 /// **The bound a completion takes once the index has settled**, in milliseconds.
 ///
-/// The doc's own keystroke budget, and the number `docs/status.md` §1 records for the tenth request: *"steady
-/// state, tenth request — 9 ms"*. It is asserted separately from `COMPLETION_BUDGET` because the two fail for
-/// different reasons and a single loose bound cannot tell them apart — a regression that made every completion a
+/// It is asserted separately from `COMPLETION_BUDGET` because the two fail for different reasons
+/// and a single loose bound cannot tell them apart — a regression that made every completion a
 /// hundred milliseconds would pass a 2500 ms bound and must not.
 ///
 /// Measured on this fixture: 4–10 ms, against 353–1479 ms before the write-lock work of this round.
@@ -131,6 +130,9 @@ int main() {
 /// looks at.
 #[test]
 fn a_completion_asked_while_the_index_fills_comes_back_within_the_budget() {
+    if not_the_product() {
+        return;
+    }
     let project = Project::new("latency");
     project.write("main.cpp", MAIN_CPP);
 
@@ -213,16 +215,15 @@ fn a_completion_asked_while_the_index_fills_comes_back_within_the_budget() {
         every = every.join(", "),
     );
 
-    // **And the steady state, at the number a keystroke is actually budgeted.** Asserted apart from the bound above
-    // because the two fail for different reasons: a completion that is slow while the index fills has one cause
-    // (`ProjectIndex::visibility_answers` is cleared by every insert), and one slow *after* it has settled has
-    // another, and only the second is a regression in what this round of work achieved.
-    // **One attempt may include a render, and a render is work rather than latency.** A completion whose file has not been
-    // cooked yet pays for the cook inside its own request; measured on this fixture, one request in the steady state takes
-    // 116-123 ms and lands on the same index every run (the eighth or ninth), while every other attempt is 4-40 ms. That is
-    // the cook of the file the cursor is in (9-269 ms per file, measured in `docs/usability.md`), not a query that got slow —
-    // so the rule is "a couple of attempts may pay for a render, and each one inside a render's own budget", which is what
-    // the two assertions below say. The median assertion is what catches a query that regressed.
+    // **And the steady state, at the number a keystroke is actually budgeted.** Asserted apart from
+    // the bound above because the two fail for different reasons: a completion that is slow while
+    // the index fills has one cause (`ProjectIndex::visibility_answers` is cleared by every
+    // insert), and one slow *after* it has settled has another, and only the second is a regression
+    // in what this round of work achieved. **One attempt may include a render, and a render is work
+    // rather than latency.** A completion whose file has not been cooked yet pays for the cook
+    // inside its own request; measured on this fixture, one request in the steady state takes
+    // 116-123 ms and lands on the same index every run (the eighth or ninth), while every other
+    // attempt is 4-40 ms. The median assertion is what catches a query that regressed.
     //
     // **Two, not one, measured.** The window's boundary is 50 ms and the attempts near it are not distinct populations: a
     // render budget of 116-123 ms sits beside a second attempt at 51-60 ms often enough that "at most one" failed
@@ -252,7 +253,6 @@ fn a_completion_asked_while_the_index_fills_comes_back_within_the_budget() {
         A_RENDER_MAY_TAKE.as_millis(),
         slow_steady.join("\n"),
     );
-    // **And the rest**, which is the number `docs/status.md` is about.
     let slow_after_the_render: Vec<String> = over
         .iter()
         .skip(RENDERS_IN_THE_WINDOW)
@@ -273,6 +273,9 @@ fn a_completion_asked_while_the_index_fills_comes_back_within_the_budget() {
 /// helps. Both are failures, but they are different failures, and only one of them is about a lock.
 #[test]
 fn no_update_holds_the_analysis_for_longer_than_its_budget() {
+    if not_the_product() {
+        return;
+    }
     let project = Project::new("latency-hold");
     project.write("main.cpp", MAIN_CPP);
 
@@ -501,3 +504,15 @@ fn read_messages(stdout: ChildStdout, tx: Sender<Value>) {
 /// `Read` is needed by `read_exact` above and is not otherwise named.
 #[allow(unused_imports)]
 use std::io::Read as _;
+
+/// **A debug build measures the compiler, not the server.** Every test here returns early instead of failing on
+/// arithmetic — see the module documentation, where the two profiles' numbers are written down.
+fn not_the_product() -> bool {
+    if cfg!(debug_assertions) {
+        eprintln!(
+            "skipped: this measures a debug build, which says nothing about the product — run it with --release"
+        );
+        return true;
+    }
+    false
+}

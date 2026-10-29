@@ -331,7 +331,6 @@ fn the_first_completion_on_a_real_project_says_where_its_time_went() {
     }
 }
 
-/// **The two hovers `docs/remaining.md` §A reports, asked of the project they were reported on.**
 ///
 /// ```text
 /// A1  `std::map<std::string, LuaTokenKind, std::less<>> LuaLexer::LuaReserved = {`

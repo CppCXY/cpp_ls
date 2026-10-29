@@ -57,18 +57,16 @@ pub async fn on_signature_help(
         crate::handlers::read_the_modules(&context, &path, false).await;
         // **And then the query, which no longer waits for the project's index to drain.**
         //
-        // The wait was `AnalysisState::settle`, asking whether the *whole project's* indexing queue was empty —
-        // because the callee's declaration is usually in a header whose facts arrive later. What the answer needs is
-        // this file's own closure, and `read_the_modules` above is what reads it (it catches the summary up first).
-        // See `docs/status.md` §5.2.
+        // The wait was `AnalysisState::settle`, asking whether the *whole project's* indexing queue
+        // was empty — because the callee's declaration is usually in a header whose facts arrive
+        // later. What the answer needs is this file's own closure, and `read_the_modules` above is
+        // what reads it (it catches the summary up first).
     }
 
     snapshot_query(context.analysis(), cancel_token, move |session| {
         let path = uri_to_file_path(&uri)?;
-        // **The cursor is read from the file's own text, then mapped into the rendering** — see `hover` for the
-        // measurement: a rendering has the directives resolved and its lines merged, so converting a client's position
-        // *through* it names a different place (`docs/lsp-status.md`, P1 ③). This handler answered `null` for every
-        // call site on a real project before the two steps were done in this order.
+        // This handler answered `null` for every call site on a real project before the two steps
+        // were done in this order.
         let written = session.view_of_the_file(&path)?;
         let in_the_file = crate::util::file_offset_at_position(&written, position)?;
         let view = session.view(&path)?;

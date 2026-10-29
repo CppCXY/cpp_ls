@@ -1,9 +1,8 @@
 //! **The one question three checks ask**: can a value of this type be used where that type is expected?
 //!
-//! `assign-type-check`, `param-type-check` and `return-type-mismatch` each assembled the answer themselves, which is how one
-//! of them lost a step without the others noticing. `docs/type-checking.md` records the four boundaries found that way, and
-//! three of the four were **normalisation** — a reference standing in front of the named type, a pointer read as an
-//! arithmetic value, a spelling carrying `const` into a comparison. That work belongs here, done once.
+//! `assign-type-check`, `param-type-check` and `return-type-mismatch` each assembled the answer
+//! themselves, which is how one of them lost a step without the others noticing. That work belongs
+//! here, done once.
 //!
 //! # The one rule that must not be lost
 //!

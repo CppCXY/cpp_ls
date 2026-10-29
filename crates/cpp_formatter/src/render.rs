@@ -1,9 +1,7 @@
 //! **The renderer: the source with new whitespace, and not one other byte changed.**
 //!
-//! P0a (`docs/cpp-format.md` §十): the line structure and the indentation stay exactly as the input had them; every
-//! gap that is **on one line and holds no comment** is rewritten to the width [`crate::space::between`] decides.
-//! Every other gap — a newline, an indentation, a comment, the whitespace around a comment — is copied out of the
-//! source verbatim.
+//! Every other gap — a newline, an indentation, a comment, the whitespace around a comment — is
+//! copied out of the source verbatim.
 //!
 //! That asymmetry is the whole safety argument: the token text is copied from the source (never re-serialised), and
 //! the only region ever replaced is a run of spaces/tabs that contains no comment and no newline. A file formatted
@@ -72,14 +70,12 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
     let mut line_was_bracket_placed = false;
     let mut line_column = 0usize;
 
-    // **A `#` line is copied, not spaced.** Its internal spacing is the preprocessor's (`#  include` is legal,
-    // `#include <a/b.h>` is the usual), and `docs/cpp-format.md` leaves `#define` bodies to P4 — a P0 that re-spaced
-    // a directive would be a formatter that breaks macros. Measured before this guard: **143** gaps on the LuaParser
-    // corpus where `#` and the directive name were pulled apart.
-    // **P2: the breaks a column limit forces.** With `ColumnLimit: 0` — what the corpus asks for — nothing here
-    // runs and the output is exactly what P0b/P1 produce. With a real limit, `breaks::break_line` says where a long
-    // logical line has to break, and those breaks are inserted (existing source breaks are kept: this pass adds
-    // breaks, it does not re-flow).
+    // **A `#` line is copied, not spaced.** Measured before this guard: **143** gaps on the
+    // LuaParser corpus where `#` and the directive name were pulled apart. **P2: the breaks a
+    // column limit forces.** With `ColumnLimit: 0` — what the corpus asks for — nothing here runs
+    // and the output is exactly what P0b/P1 produce. With a real limit, `breaks::break_line` says
+    // where a long logical line has to break, and those breaks are inserted (existing source breaks
+    // are kept: this pass adds breaks, it does not re-flow).
     let mut forced_breaks = vec![false; stream.tokens.len()];
     if style.count(StyleOption::ColumnLimit) > 0 {
         for line in crate::breaks::logical_lines(&stream) {
@@ -478,9 +474,7 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
     // makes that impossible: it is a property of the lexer, not of the rules. Measured on the corpus before this
     // check existed: one header (`LuaParseError.h`) came out with a different token stream than it went in with.
     //
-    // The fallback is the whole file, unchanged. A file that cannot be formatted without changing what it says is
-    // a file this tool declines to touch — which is the only honest failure mode for a formatter, and it makes
-    // invariant I1 (`docs/cpp-format.md` §七) hold by construction rather than by testing.
+    // The fallback is the whole file, unchanged.
     if same_tokens(&stream, &out) {
         out
     } else {

@@ -34,9 +34,8 @@ fn what_one_class_answers_for_its_members() {
         std::env::var("CPPLS_FILE"),
         std::env::var("CPPLS_CLASS"),
     ) else {
-        // **A probe that needs a project skips rather than fails** when this machine has none — see `docs/remaining.md`
-        // §C1. The question it asks is answerable on any project, and a checkout hardcoded here would be one
-        // machine's.
+        // The question it asks is answerable on any project, and a checkout hardcoded here would be
+        // one machine's.
         eprintln!("skipped: set CPPLS_PROJECT_ROOT, CPPLS_FILE and CPPLS_CLASS");
         return;
     };

@@ -261,13 +261,14 @@ impl CompilerConfig {
     /// **[`CompilerConfig::for_file`] with the file reads the caller's**, which is what a test needs and what a
     /// caller holding an unsaved buffer would need.
     ///
-    /// The reads are here because a compile command may name a **response file** and keep its include paths inside
-    /// it: CMake writes `@CMakeFiles/<target>.dir/includes_CXX.rsp` for the Makefile and Ninja generators alike, and
-    /// on a real project *every* entry of its database was that shape. Expanding it only for the language standard
-    /// (which is what happened before) left the per-file include paths of such a project **empty** — measured:
-    /// `CommandService.cpp` cannot see `LanguageServer.h` from one directory up, so the include edge is never built,
-    /// `LanguageServer`'s 32 member facts are invisible from that file, and every member query that starts there
-    /// refuses. See `docs/remaining.md` §F.
+    /// The reads are here because a compile command may name a **response file** and keep its
+    /// include paths inside it: CMake writes `@CMakeFiles/<target>.dir/includes_CXX.rsp` for the
+    /// Makefile and Ninja generators alike, and on a real project *every* entry of its database was
+    /// that shape. Expanding it only for the language standard (which is what happened before) left
+    /// the per-file include paths of such a project **empty** — measured: `CommandService.cpp`
+    /// cannot see `LanguageServer.h` from one directory up, so the include edge is never built,
+    /// `LanguageServer`'s 32 member facts are invisible from that file, and every member query that
+    /// starts there refuses.
     pub fn for_file_with(
         &self,
         file: &Path,
@@ -1002,14 +1003,12 @@ fn array_field(object: &str, name: &str) -> Option<Vec<String>> {
 ///
 /// # A backslash is a separator before it is an escape
 ///
-/// The rule is **"a backslash escapes only whitespace and a quote"**, and it is one rule rather than two because
-/// the same function reads the database on every platform: `\` is the path separator on Windows and the escape
-/// character in a POSIX shell, and a reader that treats it as POSIX does everywhere deletes the character after
-/// every separator. Measured on a CMake + MinGW project's `compile_commands.json` (a real one, `docs/status.md`
-/// §十三): the compiler arrived as **`C:toolchainsmingw64binc++.exe`**, discovery could not ask that
-/// program anything, and the session fell back to the machine's other toolchain — MSVC's headers, MSVC's dialect —
-/// for a project built with GCC. Every `#include <print>` in it then resolved to the wrong library or to nothing,
-/// which is what "the editor does not understand this project" looks like from the outside.
+/// The rule is **"a backslash escapes only whitespace and a quote"**, and it is one rule rather
+/// than two because the same function reads the database on every platform: `\` is the path
+/// separator on Windows and the escape character in a POSIX shell, and a reader that treats it as
+/// POSIX does everywhere deletes the character after every separator. Every `#include <print>` in
+/// it then resolved to the wrong library or to nothing, which is what "the editor does not
+/// understand this project" looks like from the outside.
 ///
 /// So a backslash before a letter, a digit or another backslash is **kept**: `C:\Users\zc` is a path, `-I a\ b` is
 /// an escaped space, `"a \"quoted\" b"` is a quoted run with two quotation marks in it. `\\server\share` keeps both

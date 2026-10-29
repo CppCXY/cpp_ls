@@ -194,9 +194,7 @@ pub struct SummaryKey {
     /// its own gets. A non-zero value is a reading that knew its includes' `#define`s, and it is the answer to the
     /// question the second pass exists for: `_STD` is `::std::` under one environment and a plain name under none.
     ///
-    /// It is in the key because a summary is a function of it — see `docs/refactor-cache-and-startup.md` §三之二:
-    /// two roots that include one header under the same macros share the reading, and under different macros they do
-    /// not. Without this part the two would share one entry and one of them would be wrong.
+    /// Without this part the two would share one entry and one of them would be wrong.
     pub env_hash: u64,
     pub format_version: u32,
     /// The readers themselves — see [`READING_FINGERPRINT`]. Not a parameter of [`SummaryKey::new`], because no

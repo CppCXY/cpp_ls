@@ -270,9 +270,8 @@ impl<F: FileProvider> Vfs<F> {
     /// The table itself, for a caller that wants to walk ids.
     /// **What the table is holding** — `(files, text bytes, line-index bytes)` for `MemoryReport`.
     ///
-    /// There is **no budget here and no eviction**: every file the session has ever read keeps its text and its line
-    /// index for the life of the session. That is the finding `docs/memory-audit.md` reports, and this method is how
-    /// the finding is measured rather than guessed.
+    /// There is **no budget here and no eviction**: every file the session has ever read keeps its
+    /// text and its line index for the life of the session.
     pub fn accounting(&self) -> (usize, usize, usize) {
         let mut files = 0usize;
         let mut text = 0usize;

@@ -103,11 +103,11 @@ pub fn position_in_file(file: &VfsFile, offset: usize) -> Option<Position> {
 ///
 /// # Why the line *index* is a parameter
 ///
-/// Because this is called **once per token** by anything that answers in a client's positions, and the first
-/// version found the line by counting: `source.split_inclusive('\n').nth(line)`, which reads the file from byte
-/// zero for every token. Quadratic — measured on a 236 KB file of 164 000 tokens, the semantic token pass spent
-/// **2.1 s** in it, six calls per claim (two in the claim, two in the build, and the scan each time). With the
-/// index it is `get_line_offset`, a binary search, and the pass fell to **11 ms** (docs/status.md §十四).
+/// Because this is called **once per token** by anything that answers in a client's positions, and
+/// the first version found the line by counting: `source.split_inclusive('\n').nth(line)`, which
+/// reads the file from byte zero for every token. Quadratic — measured on a 236 KB file of 164 000
+/// tokens, the semantic token pass spent **2.1 s** in it, six calls per claim (two in the claim,
+/// two in the build, and the scan each time).
 pub fn line_body<'a>(source: &'a str, index: &LineIndex, line: usize) -> Option<&'a str> {
     let start = usize::from(index.get_line_offset(line)?);
     let end = index

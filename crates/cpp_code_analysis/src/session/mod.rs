@@ -382,9 +382,8 @@ impl FileProvider for OpenDocuments {
 ///   walked        the whole closure read and a timeline built    — and written for the next run
 /// ```
 ///
-/// `walked` is the number `docs/status.md` stage 1 is judged by: typing in a file's **body** must not
-/// make it move, because the body is not an input to the file's own timeline. Before the root of a unit was keyed
-/// on its preamble it moved on every keystroke, and no other number in this crate would have shown it.
+/// Before the root of a unit was keyed on its preamble it moved on every keystroke, and no other
+/// number in this crate would have shown it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct UnitStats {
     pub from_memory: usize,
@@ -1408,8 +1407,6 @@ impl<F: FileProvider + Clone> Session<F> {
     /// are the index, which is bounded by the project and is the part that is supposed to be large.
     /// **The summary database, when `CPPLS_CACHE_DB` turned it on** — rows and bytes.
     ///
-    /// `None` is the file cache, which is still the default until the database is measured on a real project; see
-    /// `docs/refactor-cache-and-startup.md` M1.
     pub fn summary_database_sizes(&self) -> Option<cache::cache_db::DatabaseSizes> {
         self.store.summary_database_sizes()
     }
@@ -1466,11 +1463,11 @@ impl<F: FileProvider + Clone> Session<F> {
 
     /// **What every table the session owns is holding, in bytes** — see [`crate::MemoryReport`].
     ///
-    /// [`Session::cache_sizes`] answers "how many entries", which is the wrong unit for the question a five-gigabyte
-    /// report asks: an entry is a `#define` or a rendering, and the two differ by six orders of magnitude. This is
-    /// the same inventory in bytes, one field per table, and it is the instrument `docs/memory-audit.md` is built on.
-    /// **How many walk contributions this session's store holds** — a diagnostic, and the number the sharing test
-    /// asserts. The table itself is the store's; see [`crate::index::walk_cache::WalkCache`].
+    /// [`Session::cache_sizes`] answers "how many entries", which is the wrong unit for the
+    /// question a five-gigabyte report asks: an entry is a `#define` or a rendering, and the two
+    /// differ by six orders of magnitude. **How many walk contributions this session's store
+    /// holds** — a diagnostic, and the number the sharing test asserts. The table itself is the
+    /// store's; see [`crate::index::walk_cache::WalkCache`].
     pub fn walk_contributions_held(&self) -> usize {
         self.store.contributions().held()
     }
@@ -2242,11 +2239,9 @@ impl<F: FileProvider + Clone> Session<F> {
     ///
     /// # Why it is not a second opinion about anything
     ///
-    /// It asks the two questions the mutation itself asks, of the same state: the VFS's own `held` table, the
-    /// index's own cooked-reading slot, and the cooking queue's own membership set ([`Cooking::wants`], which reads
-    /// the set [`Cooking::want`] inserts into). Nothing here re-derives a fact another way — the failure this crate
-    /// has already paid for twice (see `docs/status.md` §2) is two implementations of one question, and a predicate
-    /// that answered a *different* question would be the third.
+    /// It asks the two questions the mutation itself asks, of the same state: the VFS's own `held`
+    /// table, the index's own cooked-reading slot, and the cooking queue's own membership set
+    /// ([`Cooking::wants`], which reads the set [`Cooking::want`] inserts into).
     ///
     /// Conservative in the safe direction: `false` means "take the lock and do the work", which is always correct.
     /// `true` means the two calls above would each do nothing, so skipping them changes no answer — the query that
@@ -2609,10 +2604,7 @@ impl<F: FileProvider + Clone> Session<F> {
         // go through the pass like a parsed one, and the pass decides: a file that mentions no bodied macro is
         // skipped there for nothing, while one that does is rendered.
         //
-        // The cost is that a warm start re-reads what a cold one re-reads. That is the bill for not having the
-        // environment in the key, and paying it is the honest half of the migration — the other half is
-        // `docs/architecture.md` §5 steps 2–4: the directive summary and the unit walk can compute the environment
-        // **before** the file is parsed, which is what makes a rendering-carrying entry findable again.
+        // The cost is that a warm start re-reads what a cold one re-reads.
         //
         // **And not the files that were parsed *with* their environment.** This pass exists to repair a reading
         // made without one, and `Step::with_the_environment` is the mark that says the repair has already happened
@@ -2935,13 +2927,10 @@ impl<F: FileProvider + Clone> Session<F> {
             return 0;
         };
 
-        // **A refinement that could not be taken is retried, not dropped.** The pass refuses to render a file whose
-        // closure is not in the index yet (see [`SummaryStore::a_timeline_of_its_own`]), and dropping such a file
-        // would make "is this file's summary a rendering" depend on *when* the pass reached it — which is the
-        // difference two runs of one project kept showing (`docs/architecture.md` §7.12). So while there is still
-        // work in the queue the file goes back on it, and once the index is complete it is left alone: a dependency
-        // nothing will ever index is a fact about the project, not about timing, and the file keeps the reading the
-        // first pass gave it.
+        // **A refinement that could not be taken is retried, not dropped.** So while there is still
+        // work in the queue the file goes back on it, and once the index is complete it is left
+        // alone: a dependency nothing will ever index is a fact about the project, not about
+        // timing, and the file keeps the reading the first pass gave it.
         let waiting: Vec<PathBuf> = plan.waiting_for_the_index().to_vec();
         let re_read = self.store.commit_the_re_read(plan);
         if !waiting.is_empty() && self.pending_work() > 0 {
@@ -3332,10 +3321,10 @@ impl<F: FileProvider + Clone> Session<F> {
     /// nothing else in the project. A project of five hundred sources whose *other* files are still queued is fully
     /// able to answer about the one the editor has open.
     ///
-    /// The measured cost of the confusion: opening a real project queued 1122 files, and every local request was
-    /// refused until the last of them — including a second pass that re-reads 773 files at about half a second each,
-    /// so the refusal lasted **minutes** after the answers were already available. See `docs/status.md` §九 and
-    /// `docs/cold-start-cpu.md`.
+    /// The measured cost of the confusion: opening a real project queued 1122 files, and every
+    /// local request was refused until the last of them — including a second pass that re-reads 773
+    /// files at about half a second each, so the refusal lasted **minutes** after the answers were
+    /// already available.
     ///
     /// The asymmetry with [`Session::pending`] is deliberate and is the whole of this method: a **project-wide**
     /// question — a reference search, a rename, a workspace symbol — genuinely needs coverage, and those handlers keep
@@ -3410,19 +3399,19 @@ impl<F: FileProvider + Clone> Session<F> {
                 committed
             };
 
-            // **The second pass is work, and this loop used to return while it was owed.** `advance` drains up to
-            // [`RE_READ_SLICE`] of the backlog per call, and the backlog is filled by a cold start; the loop below
-            // ended at `read 0, cooked 0`, which is exactly the state a session is in while it still owes re-reads.
-            // Measured on `EmmyLuaCodeStyle` (cold summary cache): `index_everything` returned with **1 205 files**
-            // owed, 302 slices and **27.3 s** of work left — and every one of those slices reported `nothing bodied`,
-            // so the value it bought was not visible in any answer. The cost *was* visible: the next keystroke's pump
-            // slice took four of those files and four unit walks, and typing was **65 ms instead of 10** for about
-            // three hundred keystrokes. A caller that says "index everything" is owed this too.
-            // **The second pass is owed, and this loop does not pay it.** `8e976e1` folded it in here, and the
-            // measurement is `docs/edit-latency.md` §「冷启动的第二遍」: a cold start of `EmmyLuaCodeStyle` went from
-            // **12.6 s to 135.6 s**, because the pass walks a unit per re-read file — **1 621 walks** for 1 761
-            // files, at ~75 ms each. The pump already drains it, four files a slice, and `pending_work` counts it, so
-            // the work still happens; what the loop bought was paying for it *before* the session answered anything.
+            // **The second pass is work, and this loop used to return while it was owed.**
+            // `advance` drains up to [`RE_READ_SLICE`] of the backlog per call, and the backlog is
+            // filled by a cold start; the loop below ended at `read 0, cooked 0`, which is exactly
+            // the state a session is in while it still owes re-reads. Measured on
+            // `EmmyLuaCodeStyle` (cold summary cache): `index_everything` returned with **1 205
+            // files** owed, 302 slices and **27.3 s** of work left — and every one of those slices
+            // reported `nothing bodied`, so the value it bought was not visible in any answer. The
+            // cost *was* visible: the next keystroke's pump slice took four of those files and four
+            // unit walks, and typing was **65 ms instead of 10** for about three hundred
+            // keystrokes. A caller that says "index everything" is owed this too. **The second pass
+            // is owed, and this loop does not pay it.** The pump already drains it, four files a
+            // slice, and `pending_work` counts it, so the work still happens; what the loop bought
+            // was paying for it *before* the session answered anything.
             if read == 0 && cooked == 0 {
                 if tracing {
                     // **The cache as the pump leaves it.** If this is non-zero and a request still misses, the key
@@ -3517,13 +3506,15 @@ impl<F: FileProvider + Clone> Session<F> {
 
     /// **How many files the second pass has still to re-read** — the backlog `advance` drains four at a time.
     ///
-    /// A third kind of pending work, and the one no count used to name: [`Session::pending`] is the index queue and
-    /// [`Session::pending_cooking`] the cook queue, while the `parsed_since_the_last_pass` backlog is drained only by
-    /// a slice's tail and only while the index queue is empty. Measured on `EmmyLuaCodeStyle` right after
-    /// `index_everything` returned, on a cold summary cache: **1 205 files**, which took **302 slices and 27.3 s** to
-    /// clear — and every one of those slices reported `nothing bodied`, so the whole tail rebuilt no summary at all.
-    /// Until it was cleared, the next keystroke's slice paid for four of those files and four unit walks: measured
-    /// **65 ms a keystroke** instead of 10, for about three hundred keystrokes. See `docs/edit-latency.md`.
+    /// A third kind of pending work, and the one no count used to name: [`Session::pending`] is the
+    /// index queue and [`Session::pending_cooking`] the cook queue, while the
+    /// `parsed_since_the_last_pass` backlog is drained only by a slice's tail and only while the
+    /// index queue is empty. Measured on `EmmyLuaCodeStyle` right after `index_everything`
+    /// returned, on a cold summary cache: **1 205 files**, which took **302 slices and 27.3 s** to
+    /// clear — and every one of those slices reported `nothing bodied`, so the whole tail rebuilt
+    /// no summary at all. Until it was cleared, the next keystroke's slice paid for four of those
+    /// files and four unit walks: measured **65 ms a keystroke** instead of 10, for about three
+    /// hundred keystrokes.
     pub fn re_read_backlog(&self) -> usize {
         self.parsed_since_the_last_pass.len()
     }
@@ -4538,11 +4529,11 @@ impl<F: FileProvider + Clone> Session<F> {
             None => {
                 // **The file the index cannot describe in full, and the order that answers it.**
                 //
-                // A file a reader is editing has no summary — [`Session::did_change`] drops it — so the walk has no
-                // root to start from, and until this existed the file's timeline was unobtainable exactly while the
-                // reader was working on it. Its **directives** are the part of it that can be read without a parse,
-                // and they are also the part the walk needs first, because they name the includes. That is the order
-                // `docs/architecture.md` §5 fixes: **the directives, then the unit, then the parse**.
+                // A file a reader is editing has no summary — [`Session::did_change`] drops it — so
+                // the walk has no root to start from, and until this existed the file's timeline
+                // was unobtainable exactly while the reader was working on it. Its **directives**
+                // are the part of it that can be read without a parse, and they are also the part
+                // the walk needs first, because they name the includes.
                 //
                 // The fallback is for a file a reader is looking at, and only for one: a directive reading is a lex
                 // and a directive scan, which is cheap but not free, and the project's other ten thousand files have
@@ -4835,8 +4826,6 @@ impl<F: FileProvider + Clone> Session<F> {
 
     /// **What this session's translation units have cost it.** See [`UnitStats`].
     ///
-    /// The number to watch is `walked`: it is a closure read and a timeline built, and the design in
-    /// `docs/status.md` says a keystroke in a file's **body** must leave it where it was.
     pub fn unit_stats(&self) -> UnitStats {
         use std::sync::atomic::Ordering::Relaxed;
 
@@ -5002,11 +4991,12 @@ impl<F: FileProvider + Clone> Session<F> {
             return Some(cached.clone());
         }
 
-        // **The database may already have this program.** The key is a hash over every `(path, content)` the closure
-        // entered, so a rendering filed under it is this rendering — and reading it back is a decode instead of a
-        // cook. Measured: the cook is **899 ms** for a 1 991 163-byte program, which is the whole reason a unit read
-        // could not be repeated; the decode is the difference between a second unit read costing a second and
-        // costing a moment. See `docs/refactor-cache-and-startup.md` M4.
+        // **The database may already have this program.** The key is a hash over every `(path,
+        // content)` the closure entered, so a rendering filed under it is this rendering — and
+        // reading it back is a decode instead of a cook. Measured: the cook is **899 ms** for a 1
+        // 991 163-byte program, which is the whole reason a unit read could not be repeated; the
+        // decode is the difference between a second unit read costing a second and costing a
+        // moment.
         if let Some(cached) = self.store.cached_unit(key) {
             if let Ok(mut known) = self.rendered_unit.lock() {
                 *known = Some((key, cached.clone()));
@@ -5196,9 +5186,7 @@ impl<F: FileProvider + Clone> Session<F> {
         let mut placed = 0usize;
         for (path, cooked) in indexed.files {
             placed += 1;
-            // **And the queue is told, so no per-file step reads it again.** A unit read files the facts of every
-            // file in the program; the per-file queue would otherwise parse each of them a second time — the
-            // measurement is the whole of `docs/clangd-model.md` §二.
+            // **And the queue is told, so no per-file step reads it again.**
             self.queue.mark_worked(&path);
             // **The summary is left alone, and that is a measurement rather than an omission.** The tempting next
             // step here is "replace the file's summary declarations with the program's reading of it", and it is
@@ -5380,12 +5368,8 @@ impl<F: FileProvider + Clone> Session<F> {
 
     // **The next translation unit of the project nobody has read** — gone.
     //
-    // A background pass used to read every root of the project as a program, and it is deleted rather than disabled: a
-    // reader reported the process as "very slow, and I cannot tell what it is doing" over a progress bar that counted
-    // **229 translation unit(s) to read as programs**, and the measured price was 36 s warm / 271 s cold for 96 of
-    // them on a 397-file project — paid again on every start, because a program's reading is not persisted
-    // (`docs/architecture.md` §8.4). `clangd` does not do this either: it parses a translation unit when a file is
-    // opened or asked about. A file nobody has open keeps the reading its own text gives it, and the reader's own
+    // `clangd` does not do this either: it parses a translation unit when a file is opened or asked
+    // about. A file nobody has open keeps the reading its own text gives it, and the reader's own
     // files still get the compiler's reading one second after they stop typing.
     //
     // What is lost is only ⑲'s widest case — the same header read two ways by two programs *neither of which is
@@ -5766,17 +5750,17 @@ impl<F: FileProvider + Clone> Session<F> {
         let mut interner = PathInterner::new(self.files.is_case_insensitive());
         let mut scanner = ModuleScanner::new(&self.files, &self.config);
 
-        // **The directory, not the file.** `ModuleScanner::resolve_module`'s naming convention looks for a module
-        // "beside the importing file", which it does by joining the name onto the directory it is given — and this
-        // call passed the importing *file*, so every candidate became `<dir>/main.cpp/math.cppm`, which is not a
-        // path any filesystem has. The result was not an error but a silence: `read_the_modules_a_file_imports`
-        // answered **0** for every file, `imports_a_module_that_is_not_read` stayed true for ever, and a request in
-        // a module file therefore took the session's write lock on **every keystroke** to discover that there was
-        // nothing to read. Measured on a C++23 modules project (`docs/status.md` §十三): `import math;` from
-        // `src/main.cpp` with `src/math.cppm` beside it, reported as "no file in this project declares module
-        // `math`". The other two callers of this resolution (`scan_imports`, `module_reading`) already pass a
-        // directory, which is why the standard-module tests passed: their module is found through an include path's
-        // sibling `modules/` directory, and the broken first entry was never the one that answered.
+        // **The directory, not the file.** `ModuleScanner::resolve_module`'s naming convention
+        // looks for a module "beside the importing file", which it does by joining the name onto
+        // the directory it is given — and this call passed the importing *file*, so every candidate
+        // became `<dir>/main.cpp/math.cppm`, which is not a path any filesystem has. The result was
+        // not an error but a silence: `read_the_modules_a_file_imports` answered **0** for every
+        // file, `imports_a_module_that_is_not_read` stayed true for ever, and a request in a module
+        // file therefore took the session's write lock on **every keystroke** to discover that
+        // there was nothing to read. The other two callers of this resolution (`scan_imports`,
+        // `module_reading`) already pass a directory, which is why the standard-module tests
+        // passed: their module is found through an include path's sibling `modules/` directory, and
+        // the broken first entry was never the one that answered.
         let directory =
             crate::paths::parent_normalized(importing, self.files.is_case_insensitive());
 
@@ -6262,11 +6246,9 @@ impl<F: FileProvider + Clone> Session<F> {
 
     /// **Read one file the way the compiler does, and put that reading in the index.**
     ///
-    /// The main path of `docs/architecture.md` §5 step one: the file's own text is lexed once, rendered, and the
-    /// *rendering* is what the parser reads — every fact's range is mapped back into the file by
-    /// [`crate::FileIndexer::index_rendering`]. Its key carries the environment the rendering was cooked under, so a
-    /// header included by two translation units with different macros gets two readings rather than one that is wrong
-    /// for one of them.
+    /// Its key carries the environment the rendering was cooked under, so a header included by two
+    /// translation units with different macros gets two readings rather than one that is wrong for
+    /// one of them.
     ///
     /// Returns the summary it committed. Costs the cook (a cached rendering is a hash and a lookup) plus the parse of
     /// the rendered text; `tests/rendering_real.rs` measures both halves.
@@ -6285,12 +6267,9 @@ impl<F: FileProvider + Clone> Session<F> {
     }
     /// **A declaration's fact, read from the *rendering*** — the reading where a directive is resolved.
     ///
-    /// For a fact whose [`DeclFact::split_by_a_directive`] is set the summary declines to name a type: the file's own
-    /// text states one per branch and the written reading cannot know which is live. The rendering deleted the
-    /// inactive branch, so *its* summary has a single answer — `reference` for libstdc++'s `emplace_back`, where the
-    /// written text says `void` (measured over three headers: 12 of 1589 facts, by the census probe that has since
-    /// been folded into `tests/patch_probe.rs` — 65 of 59 956 facts a lookup can see are still `split` on a real
-    /// project, see `docs/architecture.md` §8.3).
+    /// For a fact whose [`DeclFact::split_by_a_directive`] is set the summary declines to name a
+    /// type: the file's own text states one per branch and the written reading cannot know which is
+    /// live.
     ///
     /// **Cost.** The rendering itself is the artifact a cook produces — a hash and a lookup when it is cached — and
     /// the summary of its text is computed here, so a caller pays one parse of the rendered text per split
@@ -6466,11 +6445,7 @@ impl<F: FileProvider + Clone> Session<F> {
 
     /// **The closure a file's own directives name, and whether every file in it has been read.**
     ///
-    /// `None` when one of them has not. That is deliberately the strict answer rather than a list with a hole in
-    /// it: a walk that cannot look a file up stops there and treats it as a file that defines nothing, which is the
-    /// right reading for a header outside the analysis and the wrong one for a header **nobody has read yet** — the
-    /// rendering made from such a timeline is the macro left unexpanded, which is worse than the file's own text
-    /// (see [`HeldUnit`], and `docs/architecture.md` §5 for the measurement that says so).
+    /// `None` when one of them has not.
     ///
     /// The root itself is exempt: the whole reason this exists is a file whose summary the index does not have.
     fn the_closure_of_the_directives(
@@ -7383,11 +7358,9 @@ impl<F: FileProvider + Clone> Session<F> {
     ///
     /// # Why the tokens rather than the tree
     ///
-    /// `std::println("…", x);` is, to this parser, a **declaration**: a statement that begins with a qualified name and
-    /// a `(` is C++'s most-vexing-parse shape and the grammar takes the declaration reading (`std::sort(v.begin(),
-    /// v.end());` is read the same way — a defect of its own, recorded in `docs/remaining.md`). The format string is
-    /// there either way, and where the parser put it is not a question this pass has an opinion about: the call is
-    /// "a `(` whose arguments are…", which the token stream says exactly. See [`crate::format::literals_in`].
+    /// The format string is there either way, and where the parser put it is not a question this
+    /// pass has an opinion about: the call is "a `(` whose arguments are…", which the token stream
+    /// says exactly. See [`crate::format::literals_in`].
     pub fn format_literals(
         &self,
         view: &FileView,
@@ -7529,11 +7502,9 @@ impl<F: FileProvider + Clone> Session<F> {
 
     /// **Which of these declarations a call at this offset means** — an index into `parameter_lists`.
     ///
-    /// The same resolution the argument checks and the signature popup use, asked over the declarations a caller already
-    /// holds: a hover has the facts of the name under the cursor and needs to know which of them the call selects. The
-    /// answer must not depend on the index having read the declaring file *as a source of parsed signatures* — the
-    /// parameters are in the facts (`DeclFact::parameter_list`) — because a hover on a call whose header is not yet in
-    /// the index is exactly the case that made the signature query answer nothing (`docs/overloads.md` §18).
+    /// The same resolution the argument checks and the signature popup use, asked over the
+    /// declarations a caller already holds: a hover has the facts of the name under the cursor and
+    /// needs to know which of them the call selects.
     ///
     /// `None` when the offset is not on a call, when no candidate is viable, or when the choice is ambiguous — the three
     /// answers a reader should see nothing marked for.
@@ -7581,10 +7552,9 @@ impl<F: FileProvider + Clone> Session<F> {
                     .as_deref()
                     .map(crate::sema::overload::parameters_in)
                     .unwrap_or_default();
-                // **A template candidate is ranked as what the call instantiates**, when the caller could read its
-                // header: `take(T*)` and `take(T)` say nothing about an `int*`, and deduced they say `int*` and `int`.
-                // The names are the caller's because they come from the declaring file's text, which a fact does not
-                // carry — `docs/overloads.md` §21.
+                // **A template candidate is ranked as what the call instantiates**, when the caller
+                // could read its header: `take(T*)` and `take(T)` say nothing about an `int*`, and
+                // deduced they say `int*` and `int`.
                 let names = template_parameters.get(at).cloned().unwrap_or_default();
                 // Kept for the partial ordering, which compares what the *declarations* wrote, not what the call
                 // substituted — and the substitution below consumes `declared`.
@@ -7808,13 +7778,11 @@ impl<F: FileProvider + Clone> Session<F> {
     /// outline, and a type a macro declares does not. So this reads the view it is given — the file's own parse
     /// ([`Session::view_of_the_file`]) — and never the index's summary.
     ///
-    /// **That used to be worded "the index's summary when it has one, and the buffer's own parse when it does not",
-    /// and the difference is no longer a fallback but a wrong answer.** While a summary was the file's own text
-    /// reading, the two sources agreed about everything an outline shows. A summary is now built from the **rendering**
-    /// (`docs/architecture.md` §5), where a dead branch is deleted and a macro call is expanded — so an outline read
-    /// from one showed `HWND` (declared by a `DECLARE_HANDLE(HWND)`, which the file never writes as a declaration) and
-    /// hid the `Dead` class the reader was editing. Measured in `cpp_ls`'s
-    /// `the_outline_shows_the_file_and_not_the_compiler`, which is what says the two readings must not be mixed here.
+    /// **That used to be worded "the index's summary when it has one, and the buffer's own parse
+    /// when it does not", and the difference is no longer a fallback but a wrong answer.** While a
+    /// summary was the file's own text reading, the two sources agreed about everything an outline
+    /// shows. Measured in `cpp_ls`'s `the_outline_shows_the_file_and_not_the_compiler`, which is
+    /// what says the two readings must not be mixed here.
     ///
     /// # What it costs, and why that is not a regression
     ///
@@ -7959,9 +7927,10 @@ pub struct CookedReading {
 /// enough for the units a reader is working in (the open files' roots and the headers they name) and small enough
 /// that a project of a thousand sources does not hold a thousand timelines.
 ///
-/// **A count is not a budget.** Measured on `EmmyLuaCodeStyle`, a unit is **6.2 MB** after the second pass — sixteen
-/// of them are 99 MB, and a header-heavier project would have sixteen units of 25 MB without this constant changing.
-/// So the table is bounded by **bytes** as well: [`MAX_UNIT_BYTES`]. See `docs/memory-audit.md`.
+/// **A count is not a budget.** Measured on `EmmyLuaCodeStyle`, a unit is **6.2 MB** after the
+/// second pass — sixteen of them are 99 MB, and a header-heavier project would have sixteen units
+/// of 25 MB without this constant changing. So the table is bounded by **bytes** as well:
+/// [`MAX_UNIT_BYTES`].
 const MAX_UNITS: usize = 16;
 
 /// **How many bytes of translation units the session keeps** — the budget the count above cannot express.
@@ -8323,8 +8292,7 @@ impl Work {
     /// that only wants to know whether there is work to do must be able to ask it without doing any.
     ///
     /// One implementation, two callers: [`Work::forget`] decides what to forget with it and
-    /// [`Session::needs_catching_up`] decides whether to take the write lock with it. A second spelling of "is this
-    /// file queued" is exactly the shape of defect `docs/status.md` §2 records twice.
+    /// [`Session::needs_catching_up`] decides whether to take the write lock with it.
     fn is_queued(&self, path: &Path) -> bool {
         matches!(
             self.standing.get(&queue_key(path)),

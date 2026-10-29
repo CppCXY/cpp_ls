@@ -1,7 +1,7 @@
 //! **Logical lines: the unit a line breaker works on.**
 //!
-//! P2 of `docs/cpp-format.md` §十. Everything up to here decides *columns* — where a token sits once the breaks are
-//! known. The breaker needs the other half: which tokens belong together, i.e. clang-format's `UnwrappedLine`.
+//! Everything up to here decides *columns* — where a token sits once the breaks are known. The
+//! breaker needs the other half: which tokens belong together, i.e. clang-format's `UnwrappedLine`.
 //!
 //! # The subset this module implements
 //!
@@ -191,7 +191,6 @@ mod tests {
 // The break search (P2's second half): where to split one logical line so that it fits.
 // ---------------------------------------------------------------------------------------------------------------
 
-/// The penalties of one style that the search uses (`docs/cpp-format.md` §十 P2).
 #[derive(Debug, Clone, Copy)]
 pub struct Penalties {
     /// Per column a line runs past the limit — clang-format's `PenaltyExcessCharacter`.

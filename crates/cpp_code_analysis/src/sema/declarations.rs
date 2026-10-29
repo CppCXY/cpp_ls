@@ -268,14 +268,14 @@ pub(crate) fn declared_type_of_with(
 
     let specifiers = specifiers?;
 
-    // **The declared name is handed over, because an out-of-line definition writes it in the specifier sequence** —
-    // see [`crate::sema::types::type_of_declaration_named`]. **Except for a `typedef`**, whose specifier sequence is
-    // its *type* and nothing else: `typedef typename _Base::reference reference;` writes the name twice, once inside
-    // the type and once as the declared one, and the out-of-line rule (a qualified spelling that ends in the declared
-    // name is the declarator's own name, not a type) then threw the **type** away and left nothing — which reads as
-    // `void`. Measured on libstdc++'s `vector`: `operator[]` returns `reference`, `reference`'s own `type_of` was
-    // `void`, so `_lineOffsetVec[line]` typed as `void` and a hover on the `auto` variable printed `void`
-    // (`docs/remaining.md` §A3). An alias is exactly the case where the two spellings must not be reconciled.
+    // **The declared name is handed over, because an out-of-line definition writes it in the
+    // specifier sequence** — see [`crate::sema::types::type_of_declaration_named`]. **Except for a
+    // `typedef`**, whose specifier sequence is its *type* and nothing else: `typedef typename
+    // _Base::reference reference;` writes the name twice, once inside the type and once as the
+    // declared one, and the out-of-line rule (a qualified spelling that ends in the declared name
+    // is the declarator's own name, not a type) then threw the **type** away and left nothing —
+    // which reads as `void`. An alias is exactly the case where the two spellings must not be
+    // reconciled.
     let spelled = match binding.kind {
         BindingKind::Typedef => None,
         _ => Some(binding.name.text()),
@@ -784,14 +784,10 @@ fn declares_a_shape(kind: CppSyntaxKind) -> bool {
             // were the only ones still paying a descent from the root.
             | CppSyntaxKind::UnionDef
             | CppSyntaxKind::EnumDef
-            // **A namespace and a concept declare no specifiers, and are shapes for a different reason: their own
-            // names have to be *on the path*.** `exported_at` is answered from the shapes containing an offset, so a
-            // declaration kind that never becomes a shape is a declaration whose name is in no exported region —
-            // measured on a C++23 module: `export namespace math { export int add(int); }` recorded `add` as
-            // exported and `math` as **not**, so an importing file's completion never offered `math` (and
-            // `math::add` could not be typed without it) while `docs/status.md` §十三 had the namespace in the index.
-            // The same held for `export namespace math { template <typename T> concept Number = …; }`: a concept has
-            // no declarator either, so `math::Number` was invisible to importers.
+            // **A namespace and a concept declare no specifiers, and are shapes for a different
+            // reason: their own names have to be *on the path*.** The same held for `export
+            // namespace math { template <typename T> concept Number = …; }`: a concept has no
+            // declarator either, so `math::Number` was invisible to importers.
             | CppSyntaxKind::NamespaceDecl
             | CppSyntaxKind::ConceptDecl
     )
@@ -2645,12 +2641,10 @@ pub(crate) fn pattern_of(shapes: &DeclarationShapes, binding: &Binding) -> Optio
 ///
 /// # Why this is a fact about one file and nothing else
 ///
-/// A local declaration cannot be named from another file — not by an `#include`, not by a qualified name, not by
-/// any path through the include graph. So every use of one is in the file that declares it, and a table keyed by
-/// the declaration's own offset is a **single-file fact**: it needs no closure, no macro environment and no
-/// timeline. That is the invariant IntelliJ's stub contract states (*"all information stored in the stub tree
-/// depends only on the contents of the file for which stubs are being built"*) and the one `docs/status.md`
-/// §3.2 records that our summary layer does not satisfy — so this is the first table in the index that does.
+/// A local declaration cannot be named from another file — not by an `#include`, not by a qualified
+/// name, not by any path through the include graph. So every use of one is in the file that
+/// declares it, and a table keyed by the declaration's own offset is a **single-file fact**: it
+/// needs no closure, no macro environment and no timeline.
 ///
 /// # Why the key is an offset and not a name
 ///

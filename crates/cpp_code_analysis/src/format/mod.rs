@@ -32,10 +32,9 @@
 //!   {}          Specifier "{}"                       (the two merge: one kind, contiguous)
 //! ```
 //!
-//! [§1 of `docs/format-strings.md`] describes the pieces as *containment* ("`formatSpecifier` is the whole field,
-//! `formatConversion` is a sub-range of it"); this is that description written as the runs a client can draw. The
-//! colour a reader sees is the same — the field's own syntax is one colour and its conversion another — and every
-//! client can draw it, including the ones that do not say they can draw overlapping tokens.
+//! The colour a reader sees is the same — the field's own syntax is one colour and its conversion
+//! another — and every client can draw it, including the ones that do not say they can draw
+//! overlapping tokens.
 //!
 //! # What it must never do
 //!
@@ -58,7 +57,6 @@
 //! They were one file while there were two consumers; the third is what made it worth saying which part answers
 //! which question.
 //!
-//! [`§1 of docs/format-strings.md`]: ../../../docs/format-strings.md
 
 use cpp_parser::SourceRange;
 

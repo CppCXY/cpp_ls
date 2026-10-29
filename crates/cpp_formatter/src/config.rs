@@ -10,8 +10,6 @@
 //! ignore. That is the same rule `.cppls.toml` follows: a file a user writes by hand gets a real parser, and the
 //! part that is not supported is named rather than skipped.
 //!
-//! An **unknown key is an error too**, and that is not our invention: clang-format does the same
-//! (`error: unknown key 'BogusKey'`, exit code 1 — measured; see `docs/cpp-format.md` §五).
 //!
 //! # The style is an array, not a map
 //!

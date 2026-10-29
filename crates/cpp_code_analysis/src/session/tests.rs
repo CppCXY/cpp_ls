@@ -1267,10 +1267,8 @@ fn an_unscoped_enumerations_member_is_visible_in_the_enclosing_scope() {
 }
 /// **A trait alias selects its specialization** — `conditional_t<false, void, T>` is `T`, and the arrow reaches it.
 ///
-/// This is the shape the standard library writes its traits in, and the one the real project stopped on
-/// (`docs/remaining.md` §A4): `std::conditional<false, T, F>::type` is a member of a **partial specialization**, and a
-/// member list built from the primary has no `type` at all. The lookup therefore has to pick the declaration the *use*
-/// is an instance of — the pattern rule, with the arguments split where the language splits them.
+/// The lookup therefore has to pick the declaration the *use* is an instance of — the pattern rule,
+/// with the arguments split where the language splits them.
 #[test]
 fn a_trait_alias_selects_the_specialization_its_arguments_name() {
     let text = "struct Item { int value; void grow(); };\n\
@@ -1320,9 +1318,7 @@ fn a_trait_alias_selects_the_specialization_its_arguments_name() {
 /// _NODISCARD pointer operator->() const noexcept;
 /// ```
 ///
-/// so the arrow's answer is the *spelling* `pointer`, not a class. Answering it as one is what made a real project report
-/// "`std::map<…>` has no member `second`" (`docs/remaining.md` A4): the member lookup asked a class called `pointer`, and
-/// after the arguments were dropped, one called `_Tree_iterator`.
+/// so the arrow's answer is the *spelling* `pointer`, not a class.
 #[test]
 fn an_arrow_through_an_alias_reaches_the_pointee() {
     let text = "template <typename K, typename V> struct pair {\n\
@@ -1758,11 +1754,8 @@ fn a_member_through_an_operator_arrow_is_the_pointees() {
 }
 /// **`index.read_the_whole_project = false` keeps the reader's own programs and nothing else.**
 ///
-/// The setting exists because the two reads are worth different things: a file the reader has open is a program they
-/// are about to ask about, and one nobody has open is speculative — 36 s of CPU for 96 translation units on the
-/// project this was measured on (`docs/architecture.md` §8.4). A project that says so gets the first and not the
-/// second, and the clock says it too: with the setting off there is nothing for the pump to wait for once the reader's
-/// own programs are read.
+/// A project that says so gets the first and not the second, and the clock says it too: with the
+/// setting off there is nothing for the pump to wait for once the reader's own programs are read.
 #[test]
 fn a_project_can_decline_to_read_its_other_roots() {
     let shared = "struct Shared { int size; };\n";
@@ -2360,9 +2353,8 @@ fn the_first_macro_a_header_defines_invalidates_the_readings_that_include_it() {
 
 /// **Typing in a file's body does not cost the walk of its closure, and typing above the body does.**
 ///
-/// This is the acceptance of `docs/status.md` stage 1, and it is written as a *count* rather than a
-/// duration because the design is about what gets recomputed. The numbers are [`Session::unit_stats`]'s:
-/// `walked` is a closure read and a timeline built, `from_disk` is the entry that replaces it.
+/// The numbers are [`Session::unit_stats`]'s: `walked` is a closure read and a timeline built,
+/// `from_disk` is the entry that replaces it.
 ///
 /// The fixture is two sessions over one cache directory, because the disk entry is the thing under test: a
 /// unit walked by the first session is what the second has to be served, and the in-memory table would hide
@@ -2470,13 +2462,9 @@ fn typing_in_a_body_does_not_cost_the_walk_a_translation_unit_is() {
 /// **A file this session already has a unit for is read *with* that unit's environment, and the second pass is
 /// not paid for it.**
 ///
-/// This is `docs/status.md` §5.2 steps 1–3, and it is the enabling half of stage 2 rather than a
-/// saving of its own: measured with `examples/keystroke.rs`, there is **no second parse to remove** for the
-/// ordinary edit, because the second pass's filter only selects a file whose scopes could depend on a macro
-/// body. What it buys is that the *first* parse is the right one — which is the thing that has to be true
-/// before the rendering can be skipped, because the rendering is what repairs a reading made without an
-/// environment.
-/// Two sessions, and the difference between them is the whole claim:
+/// What it buys is that the *first* parse is the right one — which is the thing that has to be true
+/// before the rendering can be skipped, because the rendering is what repairs a reading made
+/// without an environment. Two sessions, and the difference between them is the whole claim:
 ///
 /// ```text
 ///   cold   nothing is in memory, so there is no environment to read the file against — today's path, and the
@@ -2697,10 +2685,10 @@ fn an_include_added_to_a_header_invalidates_the_readings_that_include_it() {
 /// did — nearly every keystroke is in a body, and re-walking the closure for each of them was most of what a
 /// keystroke cost.
 ///
-/// **The second half is `docs/status.md` stage 1.** Dropping the whole table was the first version of
-/// this rule and it invalidated up to `MAX_UNITS` units to invalidate one — including, on the next keystroke,
-/// the one the file needed. A file that merely *includes* the edited one has a timeline of its own, and it is
-/// still the same directives at the same offsets: `ns.h` knows nothing about `api.h`.
+/// Dropping the whole table was the first version of this rule and it invalidated up to `MAX_UNITS`
+/// units to invalidate one — including, on the next keystroke, the one the file needed. A file that
+/// merely *includes* the edited one has a timeline of its own, and it is still the same directives
+/// at the same offsets: `ns.h` knows nothing about `api.h`.
 #[test]
 fn a_unit_survives_typing_in_a_body_and_not_a_change_to_a_directive() {
     let ns = "#define BEGIN_NS namespace one {\n#define END_NS }\n";
@@ -3700,7 +3688,6 @@ fn a_keystroke_in_a_body_reads_the_file_through_its_timeline() {
 /// ([`super::MAX_UNIT_BYTES`], [`super::MAX_UNITS`]), so after a project is indexed the file a reader opens has no
 /// entry. The step then used to parse the file's own bytes and leave the repair to the idle pass.
 ///
-/// What this pins is the order `docs/architecture.md` §5 names — **the directives, then the unit, then the parse**:
 ///
 /// ```text
 /// directives   the file's includes, read without a parse (`SummaryStore::directive_summary`)
@@ -3776,11 +3763,9 @@ fn a_file_opened_after_the_index_was_built_is_read_through_a_walked_timeline() {
 
 /// **A file whose program nobody has read yet is read as text, and that is the honest answer rather than a worse one.**
 ///
-/// The guard on the walk above, and the reason it is a condition rather than a retry: a timeline that stops at a file
-/// it cannot look up is a timeline of a *smaller* program — the macro is left unexpanded in the rendering — and a
-/// rendering is written down and believed. `docs/architecture.md` §5 measures the two and concludes that **a partial
-/// environment renders worse than the raw reading**, so a file whose closure is not in the index yet is read as text
-/// and the idle pass refines it once the closure is there.
+/// The guard on the walk above, and the reason it is a condition rather than a retry: a timeline
+/// that stops at a file it cannot look up is a timeline of a *smaller* program — the macro is left
+/// unexpanded in the rendering — and a rendering is written down and believed.
 #[test]
 fn a_file_whose_program_has_not_been_read_yet_is_still_read_as_text() {
     let project = Project::new("opened-before-the-program");

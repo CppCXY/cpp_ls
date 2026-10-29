@@ -77,9 +77,9 @@ pub async fn on_inlay_hint(
     // client has no reason to ask again. The wait was `AnalysisState::settle`, which asked whether the *whole
     // project's* queue was empty with a two-second budget.
     //
-    // The question that matters is about this file, and it is answered above: `prepare` puts the file's text in
-    // reach, `catch_up` puts its declarations in the index, `read_the_modules` reads what it imports. See
-    // `docs/status.md` §1 for the argument and [`AnalysisState::catch_up`] for what replaced the wait.
+    // The question that matters is about this file, and it is answered above: `prepare` puts the
+    // file's text in reach, `catch_up` puts its declarations in the index, `read_the_modules` reads
+    // what it imports.
 
     snapshot_query(context.analysis(), cancel_token, move |session| {
         let path = uri_to_file_path(&uri)?;

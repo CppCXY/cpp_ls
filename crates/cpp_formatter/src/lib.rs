@@ -1,4 +1,4 @@
-//! **A C++ formatter whose configuration is clang-format's.** See `docs/cpp-format.md`.
+//! **A C++ formatter whose configuration is clang-format's.**
 //!
 //! The crate is built in the order the design document measures, and each module says which step of that order it
 //! is:

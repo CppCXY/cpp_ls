@@ -1,7 +1,6 @@
 //! **A rule, checked by a test instead of by review**: the analysis keeps its state in its own objects, not in
 //! threads or in the process.
 //!
-//! `docs/memory-audit.md` §3.2 states the rule and lists what broke it:
 //!
 //! ```text
 //! · a `thread_local!` projection memo in the walk census  — fixed: one mutex-guarded map, because a diagnostic
@@ -47,7 +46,7 @@ fn no_thread_local_state() {
     }
     assert!(
         offenders.is_empty(),
-        "state belongs to an owner, not to a thread (docs/memory-audit.md §3.2): {offenders:#?}"
+        "state belongs to an owner, not to a thread: {offenders:#?}"
     );
 }
 
@@ -70,7 +69,7 @@ fn no_new_process_wide_caches() {
     }
     assert!(
         offenders.is_empty(),
-        "a process-wide cache outlives the session that owns it (docs/memory-audit.md §3.2); either own it in a \
+        "a process-wide cache outlives the session that owns it; either own it in a \
          session or add it to ALLOWED with a reason: {offenders:#?}"
     );
 }

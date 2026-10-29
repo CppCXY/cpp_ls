@@ -112,7 +112,6 @@ pub struct SummaryStore<F: FileProvider = DiskFiles> {
     /// every summary built after it — [`SummaryStore::prepare_telling`] consults this map — so the record is made
     /// where it was always made, at the start of the pass, and the lock is what makes that legal from `&self`.
     dead_macros: std::sync::Mutex<std::collections::HashMap<PathBuf, Vec<usize>>>,
-    /// **The summaries in one database** — `CPPLS_CACHE_DB=1`, and `docs/refactor-cache-and-startup.md` M1.
     ///
     /// Opened on first use rather than in `with_provider`, because the cache directory is only final after
     /// `with_cache_directory` and a store that opened the wrong directory would be a store with two caches.
@@ -164,10 +163,8 @@ const MAX_INCLUDE_SEARCHES: usize = 8192;
 pub struct ReRead {
     /// The files whose reading changed, and whether each may be written down.
     rebuilt: Vec<(FileSummary, bool)>,
-    /// **Files this pass could not read yet**, because the closure they need is not in the index yet — see
-    /// [`SummaryStore::a_timeline_of_its_own`]. A caller puts them back on its queue so that a later drain refines
-    /// them; without that, "was this file refined" would depend on *when* in the index the pass reached it, which is
-    /// the difference two runs of one project kept showing (`docs/architecture.md` §7.12).
+    /// **Files this pass could not read yet**, because the closure they need is not in the index
+    /// yet — see [`SummaryStore::a_timeline_of_its_own`].
     not_yet: Vec<PathBuf>,
 }
 
@@ -683,9 +680,6 @@ impl<F: FileProvider> SummaryStore<F> {
     /// The key carries the environment the rendering was cooked under ([`SummaryKey::env_hash`]), so two translation
     /// units that define different macros get two summaries rather than one that is wrong for one of them.
     ///
-    /// **The disk cache is not written here yet**, deliberately: this is the first half of the migration in
-    /// `docs/architecture.md` §5, and a cache entry whose key is right but whose *content* has not been compared
-    /// against the old path on a real project would be a silent wrong answer for the next run.
     pub fn index_the_rendering(
         &mut self,
         path: &Path,
@@ -772,12 +766,13 @@ impl<F: FileProvider> SummaryStore<F> {
     /// and [`SummaryStore::commit`] — the half that needs `&mut self` — applied to them in whatever order the caller
     /// wants the index to see them.
     pub fn prepare(&self, path: &Path) -> Prepared {
-        // **And no early include scan**, which is a whole lex of the file that nothing here reads: the scan exists
-        // so that a *wave* can put a file's includes on a shared frontier while this one is still being parsed
-        // ([`SummaryStore::prepare_closure`]), and a caller preparing one file has no frontier to feed. The
-        // includes come out of the parse either way — `summary.includes` is the same answer — so the only thing
-        // this gives up is being told about them a moment sooner, and what it saves is measured per keystroke,
-        // because a rebuilt summary is exactly what an edit produces. See `docs/status.md` §5.2.
+        // **And no early include scan**, which is a whole lex of the file that nothing here reads:
+        // the scan exists so that a *wave* can put a file's includes on a shared frontier while
+        // this one is still being parsed ([`SummaryStore::prepare_closure`]), and a caller
+        // preparing one file has no frontier to feed. The includes come out of the parse either way
+        // — `summary.includes` is the same answer — so the only thing this gives up is being told
+        // about them a moment sooner, and what it saves is measured per keystroke, because a
+        // rebuilt summary is exactly what an edit produces.
         self.prepare_inner(path, None, None)
     }
 
@@ -953,8 +948,6 @@ impl<F: FileProvider> SummaryStore<F> {
         // answers this session; it is only the cache that must not remember it.
         let stored = !from_a_rendering && !has_unresolved_includes(&summary);
         if stored {
-            // **The database, and only the database** — the per-directory `summaries/*.bin` files are gone with
-            // `cache.redb` taking their place (see `docs/refactor-cache-and-startup.md` M1/M5).
             //
             // A failed write is not a failed lookup: the answer is in hand and in the index. Reporting it would turn
             // a read-only checkout — a perfectly ordinary way to work — into a broken editor.
@@ -981,9 +974,6 @@ impl<F: FileProvider> SummaryStore<F> {
     /// **The summary of one file, read as the program reads it** — lex, render through `unit`, parse the rendering,
     /// and put the file's directives back beside it.
     ///
-    /// The three steps are the architecture's (`docs/architecture.md` §3) and every caller that has a timeline must
-    /// pay them, so they live in one place: [`SummaryStore::prepare_with_the_timeline`] here, and
-    /// [`SummaryStore::prepare_the_re_read`] for the files the pump refines afterwards.
     ///
     /// `FileMacros` is the one type that can answer a cook's questions out of a walk — the view is a **position** in
     /// the timeline and the definitions are the `Arc` bodies its indices point into — which is why this takes the
@@ -1809,10 +1799,6 @@ impl<F: FileProvider> SummaryStore<F> {
                 continue;
             }
 
-            // **Which files one drain re-reads**, on `CPPLS_TRACE_COOKING=1` — the number beside each drain is 16, and
-            // *which* sixteen is the question that decides what the index holds: measured, two runs of one project
-            // differ by 120 declarations in a system header, and the only remaining candidate is this set
-            // (`docs/architecture.md` §7.12).
             if tracing {
                 eprintln!("re-read candidate: {}", path.display());
             }
@@ -1824,12 +1810,11 @@ impl<F: FileProvider> SummaryStore<F> {
 
             // **A caller that cannot walk a timeline keeps the reading this pass has always had.**
             //
-            // The two arms exist for two callers, and they want different things. The session has the machinery to
-            // walk a file's own closure (`Session::walk_the_timelines`) and wants the reading the other arm produces —
-            // a rendering — so that a file is one reading whichever arm reached it (`docs/architecture.md` §7.12).
-            // `SummaryStore::index_includes_from` and the tests have no walker and want the *evidence* a raw reading
-            // keeps: which macro invocations opened which scopes (`Summary::macro_readings`), which a rendering does
-            // not have because it has expanded them away. See `tests/scopes.rs`.
+            // The two arms exist for two callers, and they want different things.
+            // `SummaryStore::index_includes_from` and the tests have no walker and want the
+            // *evidence* a raw reading keeps: which macro invocations opened which scopes
+            // (`Summary::macro_readings`), which a rendering does not have because it has expanded
+            // them away. See `tests/scopes.rs`.
             if !walk_its_own {
                 let key = SummaryKey::new(content_hash(source), self.context_hash(path));
                 let indexer =
@@ -1851,11 +1836,9 @@ impl<F: FileProvider> SummaryStore<F> {
                 FileIndexer::new(&self.files, &self.config).with_seed(self.index.macros());
             // **A file no slice unit covers is read through its own timeline**, walked here rather than skipped.
             //
-            // This arm used to fix the scopes macros open and leave every `#if` branch standing, while the timeline
-            // arm above *rendered* — so the same file was two different readings depending on whether a unit covering
-            // it happened to be in hand. Measured (`docs/architecture.md` §7.12): `xfilesystem_abi.h` answered **365**
-            // declarations through this arm and **245** through the other, which is the whole of the "same project,
-            // two answers" difference the probes kept reporting.
+            // This arm used to fix the scopes macros open and leave every `#if` branch standing,
+            // while the timeline arm above *rendered* — so the same file was two different readings
+            // depending on whether a unit covering it happened to be in hand.
             //
             // Walking the file's own closure costs ~38 ms and is cached by content (`walked_by_content`), and it is
             // what the other arm is: a rendering of the file in the environment its own reading was built with.
@@ -1942,10 +1925,8 @@ impl<F: FileProvider> SummaryStore<F> {
             // correctly forgotten and re-queued, and the index **handed back the stored `std` reading** — the whole
             // invalidation chain working, defeated by a cache entry that could not tell the two worlds apart.
             //
-            // The disk entry the first pass wrote stays, and it is the honest one: a reading of the text with no
-            // environment claimed. This pass refines it in memory. Making the rendering storable is what
-            // [`SummaryKey::env_hash`] is for, and it needs a caller that can compute the same hash at lookup time —
-            // `docs/architecture.md` §5 steps 2–4, not this branch.
+            // The disk entry the first pass wrote stays, and it is the honest one: a reading of the
+            // text with no environment claimed. This pass refines it in memory.
             let stored = false;
             if tracing {
                 eprintln!("re-read: {} through its timeline", path.display());
@@ -2124,13 +2105,11 @@ impl<F: FileProvider> SummaryStore<F> {
         let mut queue: std::collections::VecDeque<std::path::PathBuf> =
             std::collections::VecDeque::new();
         queue.push_back(root.path.clone());
-        // **Only a closure the index can describe in full is rendered.** A walk taken while the queue is still filling
-        // sees the includes that happen to be indexed yet, so its rendering is of *part of the program* — a reading
-        // that will change again when the rest arrives. Whether that happened used to depend on how warm the cache
-        // was, and it is the last difference between two runs of one project: measured, the same closure held 43 483
-        // declarations in one run and 42 604 in another, and every file that moved was one whose walk had been taken
-        // early (`docs/architecture.md` §7.12). A file whose closure is not all here keeps the summary the first pass
-        // built, which is a reading of its own text and does not depend on timing at all.
+        // **Only a closure the index can describe in full is rendered.** A walk taken while the
+        // queue is still filling sees the includes that happen to be indexed yet, so its rendering
+        // is of *part of the program* — a reading that will change again when the rest arrives. A
+        // file whose closure is not all here keeps the summary the first pass built, which is a
+        // reading of its own text and does not depend on timing at all.
         let mut complete = true;
         while let Some(file) = queue.pop_front() {
             let key = normalize_path(&file, cfg!(windows));

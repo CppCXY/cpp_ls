@@ -173,10 +173,9 @@ fn the_shape_of(spelling: &str) -> String {
 
 /// **The template parameters a declaration owns**, read from the text before it.
 ///
-/// A heuristic, and stated as one — the same one `signature.rs` grew for the same reason: `DeclFact` has no template
-/// header, so the nearest `template` before the declaration's name is the only evidence there is. A `;` between the
-/// header's `>` and the name means the header belongs to a declaration that ended in between, and the answer is empty
-/// (`docs/overloads.md` §13 is the fixture that measured that).
+/// A heuristic, and stated as one — the same one `signature.rs` grew for the same reason:
+/// `DeclFact` has no template header, so the nearest `template` before the declaration's name is
+/// the only evidence there is.
 pub fn template_parameters_before(source: &str, name_offset: usize) -> Vec<String> {
     let before = &source[..name_offset.min(source.len())];
     let Some(at) = before.rfind("template") else {

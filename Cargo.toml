@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/*",
+    "tools/*"
 ]
 
 # Every entry here is used by at least one crate. The table was inherited from the Lua project this server's shell
@@ -10,9 +11,9 @@ members = [
 # has to check rather than trust.
 [workspace.dependencies]
 # local
-cpp_parser = { path = "crates/cpp_parser" }
-    cpp_formatter = { path = "crates/cpp_formatter" }
-cpp_code_analysis = { path = "crates/cpp_code_analysis" }
+cpp_parser = { path = "crates/cpp_parser", version = "0.1.0" }
+    cpp_formatter = { path = "crates/cpp_formatter", version = "0.1.0" }
+cpp_code_analysis = { path = "crates/cpp_code_analysis", version = "0.1.0" }
 
 # external
 lsp-server = "0.10.0"

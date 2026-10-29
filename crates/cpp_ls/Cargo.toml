@@ -2,6 +2,12 @@
 name = "cpp_ls"
 version = "0.1.0"
 edition = "2024"
+description = "A C, C++ and CUDA language server."
+license = "MIT"
+authors = ["CppCXY"]
+repository = "https://github.com/CppCXY/cpp_ls"
+keywords = ["cpp", "language-server"]
+categories = ["development-tools"]
 
 [dependencies]
 # The engine: the parser and the analysis layer are the two crates this server exists to serve.

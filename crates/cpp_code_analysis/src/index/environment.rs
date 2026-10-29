@@ -384,11 +384,12 @@ pub fn a_guard_holds<M: crate::MacroValues>(
     offset: usize,
     macros_at: impl Fn(usize) -> M,
 ) -> bool {
-    // **This was the one function worth counting, and the count is why it is now fast.** A counter here reported nine
-    // million calls and 271 s of a 465 s index of a real project — 84% of the walk — which is what sent the search
-    // into `visibility_of` and then into the two debug-trace gates that turned out to be the cost. Removing those
-    // took this function to 124 s. The counter is gone because it reported a *total*, and a total is not what needs
-    // watching any more; the stage timer around the walk still shows whether this path regresses. See `docs/status.md`.
+    // **This was the one function worth counting, and the count is why it is now fast.** A counter
+    // here reported nine million calls and 271 s of a 465 s index of a real project — 84% of the
+    // walk — which is what sent the search into `visibility_of` and then into the two debug-trace
+    // gates that turned out to be the cost. Removing those took this function to 124 s. The counter
+    // is gone because it reported a *total*, and a total is not what needs watching any more; the
+    // stage timer around the walk still shows whether this path regresses.
     a_guard_holds_measured(file, guard, offset, macros_at)
 }
 

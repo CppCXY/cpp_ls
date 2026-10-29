@@ -25,7 +25,6 @@
 //! a regression test waiting for its fix, not a passing assertion. `the_chain_agrees_with_the_walk_on_every_file`
 //! (in `src/effect.rs`) is the broader comparison that found it, and the three names it disagrees on are all this.
 //!
-//! Found by the oracle for the effect model, `docs/exact-index-design.md` §七.
 
 use std::collections::HashMap;
 use std::path::PathBuf;

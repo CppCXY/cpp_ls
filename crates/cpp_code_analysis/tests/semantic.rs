@@ -1856,10 +1856,9 @@ fn a_qualified_definition_carries_its_parameter_list() {
 /// #endif
 /// ```
 ///
-/// The index reads a file's **own text** first, where the directives still stand (a rendering resolves them — see
-/// `docs/cooked.md`), so this shape is what the facts are built from until the file is cooked. Measured before the
-/// fix: `facts_probe` on `bits/stl_vector.h` answered **0** facts for `erase` and 2 for `push_back`, so
-/// `members_of("std::vector")` said "no member `erase`" — the last false-positive diagnostic on a real project.
+/// Measured before the fix: `facts_probe` on `bits/stl_vector.h` answered **0** facts for `erase`
+/// and 2 for `push_back`, so `members_of("std::vector")` said "no member `erase`" — the last
+/// false-positive diagnostic on a real project.
 ///
 /// The cause was [`cpp_parser::grammar`]'s follower question ("does a declarator still follow this name?"): the
 /// follower of `iterator` was the `#`, which is neither an identifier nor a specifier, so the name was refused the
@@ -1955,13 +1954,12 @@ fn a_function_returning_a_reference_keeps_its_parameter_list() {
 /// (the rendering says so; measured over three headers, 12 of 1589 facts disagreed with the rendering about the return
 /// type, every one of them this shape).
 ///
-/// **Which branch is live is the preprocessor's answer, and the summary now has it.** The written reading could not
-/// know it — a summary was keyed by the text and the configuration, and `__cplusplus` is neither — so the fact used to
-/// decline to name a type at all (`DeclFact::split_by_a_directive`). The reading a summary holds is the **rendering**'s
-/// now (`docs/architecture.md` §5), so the branch this compilation takes is the branch it names: here `__cplusplus` is
-/// not defined, so `#else` is compiled and `make` returns `void`. The other branch is proved where a compiler defines
-/// it — `rendering_real.rs`'s `the_rendering_is_the_reading`, on libstdc++'s `stl_bvector.h`, where
-/// `#if __cplusplus > 201402L` holds and `emplace_back` returns `reference`.
+/// **Which branch is live is the preprocessor's answer, and the summary now has it.** The written
+/// reading could not know it — a summary was keyed by the text and the configuration, and
+/// `__cplusplus` is neither — so the fact used to decline to name a type at all
+/// (`DeclFact::split_by_a_directive`). The other branch is proved where a compiler defines it —
+/// `rendering_real.rs`'s `the_rendering_is_the_reading`, on libstdc++'s `stl_bvector.h`, where `#if
+/// __cplusplus > 201402L` holds and `emplace_back` returns `reference`.
 ///
 /// A declaration whose specifiers are not split keeps its type, which is the other half of the rule.
 #[test]

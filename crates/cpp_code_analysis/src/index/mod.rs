@@ -29,9 +29,8 @@
 //! honest answer rather than a missing one: the file said `#include "widget.h"` and nothing here knows where
 //! that is.
 
-// **Wire in progress** — `docs/walk-redesign.md` §11.2 lists the five edits that make it live. Until the splice is in,
-// the type and its fields are read by nothing but their own tests, and an allow here is the honest way to say so
-// rather than a green build bought by deleting the tests.
+// Until the splice is in, the type and its fields are read by nothing but their own tests, and an
+// allow here is the honest way to say so rather than a green build bought by deleting the tests.
 #[allow(dead_code)]
 pub mod walk_cache;
 pub mod walk_cache_codec;
@@ -287,10 +286,10 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
         // 16% and `sweep` *up* 10% — while costing three capabilities that three tests then failed on (a local has no
         // name entry in the index, another file's local is not the answer, and a check inside a body does not fire).
         //
-        // The reason is in the two numbers: node building is about a quarter of `parse`, so removing two thirds of
-        // the nodes removes a sixth of the stage; and the walks that dominate — `sweep`, and inside it `facts` — are
-        // per-**declaration** and do not care how deep the statements around a declaration were nested. See
-        // `docs/status.md` §3.5.
+        // The reason is in the two numbers: node building is about a quarter of `parse`, so
+        // removing two thirds of the nodes removes a sixth of the stage; and the walks that
+        // dominate — `sweep`, and inside it `facts` — are per-**declaration** and do not care how
+        // deep the statements around a declaration were nested.
         //
         // It is left in the parser rather than deleted because the measurement is the interesting object: the next
         // person to read "64% of nodes are bodies" will reach for this, and the number that says it buys nothing
@@ -337,11 +336,7 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
         fold_quoted_header_names(source, &mut tokens);
 
         let mut interner = PathInterner::new(cfg!(windows));
-        // **This file's compilation, not the project's** — see `CompilerConfig::for_file`. A CMake target keeps its
-        // `-I` flags in a `@response` file, and resolving against the project-wide configuration is what left
-        // `CommandService.cpp` unable to find `#include "LanguageServer.h"` one directory up: the summary recorded
-        // the directive with no path, the include edge was never built, and that class's 32 member facts were invisible
-        // from the file (`docs/remaining.md` §F).
+        // **This file's compilation, not the project's** — see `CompilerConfig::for_file`.
         let per_file = self.config.for_file(path);
         let resolver = IncludeResolver::new(self.files, &per_file);
         let directory = path.parent().unwrap_or(Path::new("."));
@@ -742,11 +737,7 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
             { build_facts(&scopes, &preprocessing, &root, &errors) };
 
         let mut interner = PathInterner::new(cfg!(windows));
-        // **This file's compilation, not the project's** — see `CompilerConfig::for_file`. A CMake target keeps its
-        // `-I` flags in a `@response` file, and resolving against the project-wide configuration is what left
-        // `CommandService.cpp` unable to find `#include "LanguageServer.h"` one directory up: the summary recorded
-        // the directive with no path, the include edge was never built, and that class's 32 member facts were invisible
-        // from the file (`docs/remaining.md` §F).
+        // **This file's compilation, not the project's** — see `CompilerConfig::for_file`.
         let per_file = self.config.for_file(path);
         let resolver = IncludeResolver::new(self.files, &per_file);
         let directory = path.parent().unwrap_or(Path::new("."));
@@ -899,11 +890,10 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
     /// reads nothing else from a [`FileSummary`]). None of the three needs a parse — they come from the lexer and
     /// the directive scanner — so this is the summary a caller can have **before** the file is parsed.
     ///
-    /// That is the piece the cold start is missing. `TranslationUnit::walk` requires `index.summary(file)` for every
-    /// file of the closure, so an environment exists only *after* the closure is indexed, which is why the first
-    /// parse is provisional and why a second pass has to re-read 1 001 files. With this, the walk can run *first* and
-    /// the parse can be given its environment — the plan is `docs/exact-index-design.md` §2.2 ③④, and this function
-    /// is ②.
+    /// That is the piece the cold start is missing. `TranslationUnit::walk` requires
+    /// `index.summary(file)` for every file of the closure, so an environment exists only *after*
+    /// the closure is indexed, which is why the first parse is provisional and why a second pass
+    /// has to re-read 1 001 files.
     ///
     /// # The one thing that is not from the directives
     ///
@@ -931,11 +921,7 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
         };
 
         let mut interner = PathInterner::new(cfg!(windows));
-        // **This file's compilation, not the project's** — see `CompilerConfig::for_file`. A CMake target keeps its
-        // `-I` flags in a `@response` file, and resolving against the project-wide configuration is what left
-        // `CommandService.cpp` unable to find `#include "LanguageServer.h"` one directory up: the summary recorded
-        // the directive with no path, the include edge was never built, and that class's 32 member facts were invisible
-        // from the file (`docs/remaining.md` §F).
+        // **This file's compilation, not the project's** — see `CompilerConfig::for_file`.
         let per_file = self.config.for_file(path);
         let resolver = IncludeResolver::new(self.files, &per_file);
         let directory = path.parent().unwrap_or(Path::new("."));

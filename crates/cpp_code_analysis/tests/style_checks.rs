@@ -328,9 +328,8 @@ fn a_parameter_list_is_not_a_cast() {
 /// **A rule is not always a rule in both languages**: a C program has no `static_cast`, so a C-style cast is the only cast
 /// there is.
 ///
-/// The same source, two compile flags: `-std=c++17` is told to name the cast it meant, `-std=c11` is not — because the
-/// alternative the message recommends does not exist in that language. This is what `CheckContext::is_c` is for, and it is
-/// the same distinction `docs/syntax.md` draws for the parser.
+/// The same source, two compile flags: `-std=c++17` is told to name the cast it meant, `-std=c11`
+/// is not — because the alternative the message recommends does not exist in that language.
 #[test]
 fn a_c_style_cast_is_not_a_rule_in_c() {
     let source = "void f(double n) {\n    int i = (int)n;\n    (void)i;\n}\n";

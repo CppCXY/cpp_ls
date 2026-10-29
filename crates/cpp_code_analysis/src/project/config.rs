@@ -695,8 +695,6 @@ pub struct HoverSection {
 /// string second, and a list of names cannot say so; `{ syntax = "printf", argument = 1 }` can. A bare string is the
 /// common case and means "the first argument".
 ///
-/// **Matched on the resolved qualified name** (see `docs/format-strings.md` §3.2), so `using mylib::logf;` works and
-/// an unrelated local `logf` is still not read as one.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FormatSection {

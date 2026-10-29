@@ -1,10 +1,8 @@
 //! # `textDocument/codeAction` — the fixes this server knows how to make
 //!
-//! A **framework of one provider per kind of fix**, rather than a match on the diagnostics a client happened to send.
-//! The reason is in what the diagnostics are worth on real code: the checks fire rarely and deliberately (see
-//! `docs/cold-start-cpu.md`'s census), so an action that exists only for a fired diagnostic would almost never be
-//! offered. The actions worth having are **request-driven** — a question about the cursor, answered with an edit — and
-//! a diagnostic is one input to that question rather than its owner.
+//! A **framework of one provider per kind of fix**, rather than a match on the diagnostics a client
+//! happened to send. The actions worth having are **request-driven** — a question about the cursor,
+//! answered with an edit — and a diagnostic is one input to that question rather than its owner.
 //!
 //! ```text
 //! FixContext    the cursor: the session, the view, the offset, and the client's range
@@ -38,9 +36,7 @@ pub async fn on_code_action(
 ) -> RequestOutcome<Vec<CodeActionOrCommand>> {
     let uri = params.text_document.uri;
     let position = params.range.start;
-    // **Where the milliseconds go**, when asked. This request is sent on every caret move and `docs/lsp-status.md`
-    // measured **57 ms for zero actions**, so the first question is which step owns it: waiting for the analysis,
-    // parsing the file, building the rendering, or the fix provider's own queries.
+    // **Where the milliseconds go**, when asked.
     let trace = std::env::var_os("CPPLS_TRACE_CODE_ACTION").is_some();
     let started = std::time::Instant::now();
 
@@ -51,9 +47,6 @@ pub async fn on_code_action(
 
     let answer = snapshot_query(context.analysis(), cancel_token, move |session| {
         let path = uri_to_file_path(&uri)?;
-        // **The cursor is read from the file's own text, then mapped into the rendering** — see hover for the
-        // measurement: a rendering has the directives resolved and its lines merged, so converting a client's
-        // position *through* it names a different place (docs/lsp-status.md, P1 ③).
         let written = session.view_of_the_file(&path)?;
         let after_the_file = std::time::Instant::now();
         let in_the_file = crate::util::file_offset_at_position(&written, position)?;

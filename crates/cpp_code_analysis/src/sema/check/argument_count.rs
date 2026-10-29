@@ -74,11 +74,9 @@ impl Check for ArgumentCount {
             let Some(callee) = call.get_callee() else {
                 continue;
             };
-            // **A member call is not a free function of that name.** `_session.Run(…)` was judged against a free
-            // `Run()` that takes no arguments — measured on EmmyLuaCodeStyle: **19 of the project's 40 findings** came
-            // from this one line, and another 6 from the same shape in `undefined-field` (`docs/cold-start-cpu.md`).
-            // Resolving the member needs the object's type, which is a different question with its own false positives;
-            // until that answer is trusted here, staying silent is the direction this module documents.
+            // **A member call is not a free function of that name.** Resolving the member needs the
+            // object's type, which is a different question with its own false positives; until that
+            // answer is trusted here, staying silent is the direction this module documents.
             if let Some(access) = super::member_access_above(callee.syntax()) {
                 judge_a_member_call(context, &call, &access);
                 continue;

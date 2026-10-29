@@ -1,7 +1,7 @@
 //! **How deep each line sits.**
 //!
-//! P0b of `docs/cpp-format.md` §十. At `ColumnLimit: 0` — the corpus's configuration — clang-format leaves the
-//! programmer's line *breaks* alone and decides only the indentation, so that is what this module decides.
+//! At `ColumnLimit: 0` — the corpus's configuration — clang-format leaves the programmer's line
+//! *breaks* alone and decides only the indentation, so that is what this module decides.
 //!
 //! # Two kinds of line
 //!
@@ -32,9 +32,9 @@
 //!
 //! # Why the tree is not the source of the number
 //!
-//! A pretty-printer would compute the column from the node it is printing. This project does not: the tokens decide,
-//! and the tree only answers questions the tokens cannot (`docs/cpp-format.md` §一). The level below is a consequence
-//! of brace structure alone, which is why it is one pass and why it cannot disagree with the tokens it describes.
+//! A pretty-printer would compute the column from the node it is printing. The level below is a
+//! consequence of brace structure alone, which is why it is one pass and why it cannot disagree
+//! with the tokens it describes.
 
 use crate::config::Style;
 use crate::options::StyleOption;

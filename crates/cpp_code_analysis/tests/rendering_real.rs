@@ -166,8 +166,6 @@ fn a_dead_branch_is_not_an_answer() {
         );
     }
 }
-/// **The main path of `docs/architecture.md` §5 step one**: one file, lexed once, rendered, and the *rendering*
-/// parsed — every fact's range mapped back into the file.
 ///
 /// The assertions are the ones the old path could not make:
 ///

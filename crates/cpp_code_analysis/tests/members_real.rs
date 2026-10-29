@@ -1,4 +1,3 @@
-//! **One class, two answers** — `docs/lsp-status.md` P2 ⑥, asked of the real project.
 //!
 //! ```text
 //! $env:CPPLS_REAL_PROJECT = "E:\EmmyLuaCodeStyle"
@@ -24,9 +23,8 @@ use cpp_code_analysis::{DiskFiles, Known, OpenDocuments, Session, SessionFiles, 
 
 /// The project to open — **from the environment, and only when it is there**.
 ///
-/// A probe that hardcodes one machine's checkout is a probe that fails on the next machine, and the question it asks is
-/// answerable on any project. `None` is "this machine has no project", which the tests turn into a skip rather than a
-/// failure; see `docs/remaining.md` §C1.
+/// A probe that hardcodes one machine's checkout is a probe that fails on the next machine, and the
+/// question it asks is answerable on any project.
 fn project() -> Option<PathBuf> {
     let named = std::env::var_os("CPPLS_REAL_PROJECT")
         .map(PathBuf::from)

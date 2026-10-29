@@ -2,6 +2,12 @@
 name = "cpp_code_analysis"
 version = "0.1.0"
 edition = "2024"
+description = "The analysis layer of cpp_ls: the preprocessor, symbol scopes, type inference and the semantic checks."
+license = "MIT"
+authors = ["CppCXY"]
+repository = "https://github.com/CppCXY/cpp_ls"
+keywords = ["cpp", "language-server"]
+categories = ["development-tools"]
 
 [dependencies]
 cpp_parser.workspace = true

@@ -435,18 +435,15 @@ async fn index_in_background(context: ServerContextSnapshot) {
                             report,
                         );
 
-                        // **The pages are deliberately not handed back.** The measurement says the resident set
-                        // is ~515 MB of free pages the allocator holds (`docs/memory-audit.md` §M1 之后), and the
-                        // decision is to keep them: the next index burst, the next cook and the next keystroke ask
-                        // for exactly that memory, and a working-set trim would only make them fault it back in.
-                        // What was worth having is the *number* — `MemoryReport` in the file above — and the
-                        // budgets that keep the live tables bounded.
+                        // **The pages are deliberately not handed back.** What was worth having is
+                        // the *number* — `MemoryReport` in the file above — and the budgets that
+                        // keep the live tables bounded.
                     }
                     if taken > 0 || prepared_count > 0 || !drain.is_empty() || !claimed.is_empty() {
-                        // inside the slice that was. The numbers here are the split — prepared under the read lock,
-                        // committed under the write one — so the next reader sees whether it was the parse, the
-                        // insert or the queueing without re-instrumenting. `docs/cold-start-cpu.md` asks for exactly
-                        // this and the request was recorded there rather than in a plan.
+                        // inside the slice that was. The numbers here are the split — prepared
+                        // under the read lock, committed under the write one — so the next reader
+                        // sees whether it was the parse, the insert or the queueing without
+                        // re-instrumenting.
                         log::info!(
                             "index slice: prepared {prepared_count}, committed {taken}, write lock held {held} ms, \
                              {cooking} to cook, {pending_now} left",
@@ -715,9 +712,8 @@ async fn index_in_background(context: ServerContextSnapshot) {
                     context.analysis().worst_write_hold()
                 );
 
-                // **Written for the next run** — `docs/walk-redesign.md` §8 step 4. After the drain, so it holds
-                // everything this run learned; the entries carry their own identity, so a stale file is inert rather
-                // than wrong.
+                // After the drain, so it holds everything this run learned; the entries carry their
+                // own identity, so a stale file is inert rather than wrong.
                 context
                     .analysis()
                     .update_session("save the sharing cache", |session| {
@@ -788,9 +784,6 @@ async fn index_in_background(context: ServerContextSnapshot) {
             // the gate a delay rather than a deadlock, and it sleeps the remainder rather than polling: a completed
             // program is taken off the schedule (`units_read`), so this fires at most once per open file.
             //
-            // `read_a_program` is three phases — the walk under the read lock, the 4.9 s of cook/parse/sweep with
-            // **no lock at all**, and the inserts under the writer — which is why a real project's program can be read
-            // now and could not be before (`docs/architecture.md` §7.4).
 
             if pending == 0
                 && let Some(wait) = context

@@ -1,4 +1,3 @@
-//! **The on-disk cache, as one embedded database** — the storage half of `docs/refactor-cache-and-startup.md`.
 //!
 //! The directory this replaces held **1 854 files / 160.6 MB** on a real project: 1 768 summaries (69 MB), 85 `.tu`
 //! files (85.6 MB) and a 6 MB `sharing.bin`. Three costs came with that shape, and each is what a database removes:

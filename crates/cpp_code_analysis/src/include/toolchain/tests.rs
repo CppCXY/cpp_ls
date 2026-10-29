@@ -69,7 +69,7 @@ const GCC: &str = "\
 Using built-in specs.
 COLLECT_GCC=C:\\tools\\mingw64\\bin\\g++.exe
 Target: x86_64-w64-mingw32
-gcc version 15.1.0 (x86_64-win32-seh-rev0, Built by MinGW-Builds project) 
+gcc version 15.1.0 (x86_64-win32-seh-rev0, Built by MinGW-Builds project)
 COLLECT_GCC_OPTIONS='-E' '-v' '-shared-libgcc' '-mtune=core2' '-march=nocona'
 ignoring duplicate directory \"C:/tools/mingw64/lib/gcc/../../lib/gcc/x86_64-w64-mingw32/15.1.0/include/c++\"
 #include \"...\" search starts here:

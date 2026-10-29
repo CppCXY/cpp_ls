@@ -208,10 +208,6 @@ fn a_backslash_escapes_the_next_character() {
 
 /// **A Windows path keeps its separators** — the defect that made a CMake+MinGW project be analysed by MSVC.
 ///
-/// A compile database on Windows spells every path with `\`, and the splitter treated each one as the POSIX escape
-/// character: the compiler arrived as `C:toolchainsmingw64binc++.exe`, discovery could not run it, and the
-/// session fell back to the machine's other toolchain — MSVC's headers and MSVC's dialect for a GCC build, which is
-/// every `#include <print>` resolving to the wrong library or to nothing (`docs/status.md` §十三).
 #[test]
 fn a_windows_path_keeps_its_separators() {
     assert_eq!(

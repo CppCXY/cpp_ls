@@ -1,12 +1,9 @@
 #![allow(dead_code)]
-//! **The projection's reuse ratio, and the memo that makes it cheap** — the number `docs/walk-redesign.md` says stands
-//! between the sharing design and abandoning it, and the key it is measured with.
 //!
 //! # The key, and why it is a projection
 //!
-//! The design's first key was the **whole environment**: the set of names in force when a file is entered. Measured
-//! (`docs/walk-redesign.md` §9, §10): it never repeats — every root defines its own macros before it reaches a shared
-//! header, so 99,238 entries fell into 67,554 pairs and a cache would have bought **1.5×**.
+//! The design's first key was the **whole environment**: the set of names in force when a file is
+//! entered.
 //!
 //! The refinement is a projection: a file's conditions depend only on the **names those conditions mention**.
 //!
@@ -57,11 +54,9 @@ fn distinct() -> &'static Mutex<HashSet<u64>> {
 
 /// The names each file's conditions mention, keyed by path and a cheap fingerprint — see [`projection_of`].
 ///
-/// **A process-wide memo, not a thread-local one.** It was `thread_local! { RefCell<HashMap<…>> }`, which meant one
-/// copy of every file's projection per thread that ever walked — unbounded in threads, and `forget_projections`
-/// could only clear the calling thread's. The census is a diagnostic that is off unless `CPPLS_WALK_CENSUS` is set,
-/// so a single mutex-guarded map is both correct and small; the rule it follows is the one
-/// `docs/memory-audit.md` §3.2 states: no `thread_local!`, because state belongs to an owner, not to a thread.
+/// **A process-wide memo, not a thread-local one.** It was `thread_local! { RefCell<HashMap<…>> }`,
+/// which meant one copy of every file's projection per thread that ever walked — unbounded in
+/// threads, and `forget_projections` could only clear the calling thread's.
 fn projections() -> &'static Mutex<HashMap<std::path::PathBuf, (u64, Arc<Vec<(Box<str>, u64)>>)>> {
     static PROJECTIONS: OnceLock<
         Mutex<HashMap<std::path::PathBuf, (u64, Arc<Vec<(Box<str>, u64)>>)>>,

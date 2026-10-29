@@ -3246,8 +3246,6 @@ fn a_completion_item_resolves_to_its_declarations_documentation() {
     server.notify("exit", Value::Null);
 }
 
-/// **The instantiation the reader wrote, and a type with no spelling** — `docs/remaining.md` §A1 and §A2, over the
-/// wire.
 ///
 /// Two reports, one card each:
 ///
@@ -3997,9 +3995,6 @@ fn the_chosen_template_overload_is_shown_instantiated() {
 }
 /// **The overload a call means is marked in the list, and the mark is the argument's choice.**
 ///
-/// Two measurements stand behind it: asking `signatures_at` from a hover never answered (§18 of `docs/overloads.md`) —
-/// it needs the declaring file parsed as a source of signatures, which a hover on a call does not prepare — and the
-/// fact-based query answers from the declarations the hover already holds.
 /// **The overload a call means is the first location `textDocument/definition` answers.**
 ///
 /// The protocol allows a list and a client shows it in order, so the first entry is what a reader who does not pick gets

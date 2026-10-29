@@ -12,9 +12,8 @@
 //! number is the product; the *reasons* in the second are the work list, and one of them — `UnknownType` — is the
 //! template-reasoning wall: the receiver's type could not be built, so the member could not be looked up.
 //!
-//! The scoreboard exists because "the types got better" is not measurable and "these three names resolve now" is too
-//! small to steer by. A rate over a whole project is, and it is the number every change below is judged by:
-//! `docs/remaining.md` §A4's default-argument work, the alias chain, and whatever comes after them.
+//! The scoreboard exists because "the types got better" is not measurable and "these three names
+//! resolve now" is too small to steer by.
 //!
 //! It reads the **rendering** of each file (`Session::view`), because that is what a hover reads: a member question
 //! about a file whose macros are unexpanded is a question about a program nobody compiles.

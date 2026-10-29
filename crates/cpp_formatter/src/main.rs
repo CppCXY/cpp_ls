@@ -9,8 +9,6 @@
 //!   -output-replacements-xml  print the edits as clang-format`s XML instead of the formatted text
 //! ```
 //!
-//! The flags are spelled the way clang-format spells them so that an editor plugin can be pointed at this binary
-//! unchanged (see `docs/cpp-format.md` §九).
 
 use std::io::Read;
 use std::path::{Path, PathBuf};

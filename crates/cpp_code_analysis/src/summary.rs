@@ -1171,8 +1171,8 @@ impl MacroDefinitions {
     /// **What the definition cache is holding** — `(entries, bytes)`.
     ///
     /// The map has **no cap**: every `#define` ever read back for an evaluation stays, keyed by
-    /// `(path, offset)` — and the key owns the path, so one entry per definition is a path per definition. It is
-    /// invalidated per file ([`MacroDefinitions::forget`]), never evicted. See `docs/memory-audit.md`.
+    /// `(path, offset)` — and the key owns the path, so one entry per definition is a path per
+    /// definition. It is invalidated per file ([`MacroDefinitions::forget`]), never evicted.
     pub fn accounting(&self) -> (usize, usize) {
         let mut bytes = 0usize;
         for (key, definition) in &self.parsed {
@@ -1207,12 +1207,11 @@ impl MacroDefinitions {
         fact: &MacroFact,
     ) -> Option<std::sync::Arc<MacroDef>> {
         let key = (std::sync::Arc::from(path), fact.range.start_offset);
-        // **The key allocates, and it stays that way because the measurement said the allocation is 1 s of a 250 s
-        // index.** A counter was put here to answer "what fraction of lookups are hits" — five million lookups per
-        // index at 98.7%, so the waste is real and the fix is not obvious: a pointer-keyed index would be the cheap
-        // answer and the unsafe one, because a path that is replaced could then hand one file's definition to
-        // another. The counter is gone; the number it produced is in `docs/status.md`, and that number — not the
-        // shape of this line — is what a second attempt should start from.
+        // **The key allocates, and it stays that way because the measurement said the allocation is
+        // 1 s of a 250 s index.** A counter was put here to answer "what fraction of lookups are
+        // hits" — five million lookups per index at 98.7%, so the waste is real and the fix is not
+        // obvious: a pointer-keyed index would be the cheap answer and the unsafe one, because a
+        // path that is replaced could then hand one file's definition to another.
         if let Some(known) = self.parsed.get(&key) {
             return known.clone();
         }
@@ -1658,13 +1657,10 @@ pub struct TranslationUnit {
     /// The frame a file was entered as, the **first** time the walk reached it. A file included twice is walked
     /// once (see `walk_one_file`), so a second entry has no frame of its own.
     ///
-    /// **Keyed by the normalized spelling**, because the same file reaches a walk in more than one: a project file is
-    /// listed by a directory scan as `C:\Users\…\LSP.h` and included by its neighbours as `c:/users/…/lsp.h`, and a
-    /// cache entry is keyed by the normalized form — so one unit can be written under one spelling and read back
-    /// under the other. Keyed raw, [`TranslationUnit::environment_of`] answered `None` for the file the unit was
-    /// **built for**, which is a header that can never be cooked: `render_a_cooked` declines, the cook slice drops
-    /// it, and `want_the_closure_cooked` asks for it again on the next idle drain, for ever (see the cook loop in
-    /// `docs/cold-start-cpu.md`).
+    /// **Keyed by the normalized spelling**, because the same file reaches a walk in more than one:
+    /// a project file is listed by a directory scan as `C:\Users\…\LSP.h` and included by its
+    /// neighbours as `c:/users/…/lsp.h`, and a cache entry is keyed by the normalized form — so one
+    /// unit can be written under one spelling and read back under the other.
     entered: std::collections::HashMap<String, u32>,
     /// The same two counters [`ClosureEvidence`] reports, for the same reason: they say whether the corpus was
     /// conditional at all and whether the environment could answer.
@@ -3615,26 +3611,25 @@ fn walk_one_file<'a>(
         return None;
     }
 
-    // **The projection census, and the sharing key** — `index::walk_census` counts what a cache would save,
-    // `index::walk_cache` is where it would be saved, and `docs/walk-redesign.md` §11 has the numbers.
     let defined_in_force = |name: &str| unit.definitions.contains_key(name);
     crate::index::walk_census::entered(path, source, defined_in_force);
 
-    // **The sharing key, and the splice** — §4.3. The key is the file and the *projection*: the values of the names
-    // its conditions read, measured at 37× reuse. Contributions are kept honest by being cleared whenever a summary
-    // is invalidated, so no content hash is carried — see `index::walk_cache`.
-    // **Off until the order is right.** A contribution currently keeps its state changes and its include edges in two
-    // lists, and the splice replays all of the changes before recursing the edges — but the walk interleaves them **by
-    // offset**: a `#define` written after an `#include` must take effect after it. Measured: one semantics test failed
-    // (`a_declaration_only_a_macro_makes_is_found_once_the_session_has_cooked_the_file`), which is what an order error
-    // looks like from the outside. See `docs/walk-redesign.md` §11.5.
-    // **`share` is the caller's answer to "is this unit complete?"** — and it has to be the caller's, because the
-    // closure it walks is the caller's: `look_up` can only answer for the files the closure holds, so a unit built
-    // while the closure was still growing is missing files the index has since read. `session` already calls that a
-    // *provisional* unit and refuses to store one; the sharing cache has the same reason and must be neither written
-    // nor read for one. That was the third divergence, measured: `look_up(child)` answered `None` inside a growing
-    // closure, the child contributed nothing, and a later complete unit hit that contribution and lost the subtree
-    // under it. See `docs/walk-redesign.md` §11.8.
+    // **The sharing key, and the splice** — §4.3. The key is the file and the *projection*: the
+    // values of the names its conditions read, measured at 37× reuse. Contributions are kept honest
+    // by being cleared whenever a summary is invalidated, so no content hash is carried — see
+    // `index::walk_cache`. **Off until the order is right.** A contribution currently keeps its
+    // state changes and its include edges in two lists, and the splice replays all of the changes
+    // before recursing the edges — but the walk interleaves them **by offset**: a `#define` written
+    // after an `#include` must take effect after it. Measured: one semantics test failed
+    // (`a_declaration_only_a_macro_makes_is_found_once_the_session_has_cooked_the_file`), which is
+    // what an order error looks like from the outside. **`share` is the caller's answer to "is this
+    // unit complete?"** — and it has to be the caller's, because the closure it walks is the
+    // caller's: `look_up` can only answer for the files the closure holds, so a unit built while
+    // the closure was still growing is missing files the index has since read. `session` already
+    // calls that a *provisional* unit and refuses to store one; the sharing cache has the same
+    // reason and must be neither written nor read for one. That was the third divergence, measured:
+    // `look_up(child)` answered `None` inside a growing closure, the child contributed nothing, and
+    // a later complete unit hit that contribution and lost the subtree under it.
     let sharing = (share && walked.timeline.is_some()).then(|| {
         crate::index::walk_cache::key(
             path,
@@ -3996,7 +3991,6 @@ fn walk_one_file<'a>(
     None
 }
 
-/// **Splice a shared contribution** — `docs/walk-redesign.md` §4.3's memoized traversal.
 ///
 /// One frame for the file, its state changes replayed in order, its own evidence rebuilt from its own events, and then
 /// each **edge** it recorded spliced recursively under that frame. Nothing is re-decided and no text is read.
@@ -4039,9 +4033,8 @@ fn splice_a_contribution<'a>(
     timeline.frames.push(built);
     timeline.events.extend(events);
 
-    // **A file's own facts and the includes it took are one sequence in the source**, and the walk visits them in
-    // offset order. Replaying every change first would apply a `#define` written after an `#include` before it —
-    // a different program, and measured as one failing semantics test (`docs/walk-redesign.md` §11.5).
+    // **A file's own facts and the includes it took are one sequence in the source**, and the walk
+    // visits them in offset order.
     for body in &contribution.bodies {
         walked.conditional_bodies.insert(
             body.name.clone(),
@@ -4428,12 +4421,12 @@ impl SummaryGuards {
     ///
     /// The file's own guard is left out: it is not a condition — see [`SummaryGuards::own_guard`].
     pub fn conditions_of(&self, region: u32) -> Vec<ConditionAt> {
-        // **It allocates a `Vec` on every call, and it stays that way because the measurement said not to bother.**
-        // `visibility_of` calls this once per guard — nine million times in an index of a real project — so the
-        // allocation looked like the cost. A counter said otherwise: nine million calls producing 37 M conditions,
-        // **100-300 ns each**, about two seconds in total. The cost was in what the conditions are then used for, not
-        // in making the list. The counter is gone; `docs/status.md` keeps the number, which is the thing that says
-        // this line is not worth changing.
+        // **It allocates a `Vec` on every call, and it stays that way because the measurement said
+        // not to bother.** `visibility_of` calls this once per guard — nine million times in an
+        // index of a real project — so the allocation looked like the cost. A counter said
+        // otherwise: nine million calls producing 37 M conditions, **100-300 ns each**, about two
+        // seconds in total. The cost was in what the conditions are then used for, not in making
+        // the list.
         let mut found = Vec::new();
         let mut current = Some(region);
 

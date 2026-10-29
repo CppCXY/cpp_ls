@@ -1,8 +1,7 @@
 //! **The format-string scanner**, asked of literals rather than of files.
 //!
-//! Every case here is a **literal token's text** — quotes and prefix included — and what comes back is the runs a
-//! client would paint. Nothing in this file builds a session, an index or a tree: the scanner is a pure function over
-//! a `&str`, and that is the whole point of putting it in its own module (see `docs/format-strings.md` §3.1).
+//! Every case here is a **literal token's text** — quotes and prefix included — and what comes back
+//! is the runs a client would paint.
 //!
 //! ```text
 //! cargo test -p cpp_code_analysis --test format_scanner

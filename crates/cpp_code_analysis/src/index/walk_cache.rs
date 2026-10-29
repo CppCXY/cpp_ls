@@ -1,12 +1,10 @@
-//! **A file's contribution to a translation unit, shared between units** — `docs/walk-redesign.md` §4.2 and §8 step 2.
 //!
 //! # What a contribution is
 //!
-//! When the walk enters a file it produces, in order: the macro state changes the file makes, the timeline frames and
-//! events for the file and everything it includes, the unconditional facts that become the unit's evidence, the bodies
-//! of conditional definitions that came out in force, and the `#define`s it decided are not compiled. Those are a pure
-//! function of *(the file, the values of the names its conditions read)* — which is the projection whose reuse ratio
-//! was measured at **37×** (`crate::index::walk_census`, `docs/walk-redesign.md` §11).
+//! When the walk enters a file it produces, in order: the macro state changes the file makes, the
+//! timeline frames and events for the file and everything it includes, the unconditional facts that
+//! become the unit's evidence, the bodies of conditional definitions that came out in force, and
+//! the `#define`s it decided are not compiled.
 //!
 //! So the contribution is stored keyed by that projection, and a later unit that reaches the same file with the same
 //! projection **splices** it instead of walking: the frames and events are copied with their indices rebased, and the
@@ -80,9 +78,8 @@ pub(crate) struct ConditionalBody {
 
 /// **What one file contributed** — its own frame, its own facts, and the edges it took.
 ///
-/// **Not its subtree.** The first version stored the subtree, and a chain of depth *d* then kept *d* copies of every
-/// file's work; measured, that cost more than the walks it saved (`docs/walk-redesign.md` §11.3). A contribution is
-/// one file, and the edges are how a splice reaches the rest — the memoized traversal §4.3 describes.
+/// **Not its subtree.** A contribution is one file, and the edges are how a splice reaches the rest
+/// — the memoized traversal §4.3 describes.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Contribution {
     /// The file this contribution is for.
@@ -115,10 +112,8 @@ impl StateChange {
 
     /// **Where in its file the change was written** — the key a splice interleaves by.
     ///
-    /// A file's own facts and the includes it takes are one sequence in the source, and the walk visits them in offset
-    /// order. A contribution that replayed all of its changes before recursing its edges would apply a `#define`
-    /// written after an `#include` before it — a different program, and measured as one failing semantics test
-    /// (`docs/walk-redesign.md` §11.5).
+    /// A file's own facts and the includes it takes are one sequence in the source, and the walk
+    /// visits them in offset order.
     pub(crate) fn at(&self) -> usize {
         match self {
             StateChange::Defined { at, .. } => *at,
@@ -163,11 +158,9 @@ pub(crate) fn key(file: &std::path::Path, content: u64, projection: u64) -> u64 
 ///
 /// # Why this is a session's table and not a process-wide one
 ///
-/// It was a `thread_local` (one copy of every file's timeline per thread), then a `static Mutex` (one copy for the
-/// whole process, outliving the session it was built for). Both say the same wrong thing: a memo whose owner is
-/// nobody. `docs/memory-audit.md` §3.2 states the rule this now follows — **state belongs to an owner** — so the
-/// table is a field of [`crate::index::store::SummaryStore`], the store whose `revision` keys it, and a second
-/// session over another project has its own.
+/// It was a `thread_local` (one copy of every file's timeline per thread), then a `static Mutex`
+/// (one copy for the whole process, outliving the session it was built for). Both say the same
+/// wrong thing: a memo whose owner is nobody.
 ///
 /// # Why its size is bounded
 ///

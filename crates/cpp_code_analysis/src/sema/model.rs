@@ -32,11 +32,9 @@
 //!
 //! # Why the memo needs no invalidation rule
 //!
-//! Because the model **is the request**. It borrows a view that was built for this call and it dies with it, so
-//! there is nothing to invalidate and no staleness to reason about — the property this crate has paid for three
-//! times is the one it must not have to reason about again (see `docs/status.md` §2). A long-lived cache of the
-//! same answers would need a key, an eviction rule and a story about what happens when a file moves underneath it;
-//! this needs none of the three.
+//! Because the model **is the request**. A long-lived cache of the same answers would need a key,
+//! an eviction rule and a story about what happens when a file moves underneath it; this needs none
+//! of the three.
 //!
 //! # What it is not
 //!
@@ -175,10 +173,6 @@ impl<'a> SemanticModel<'a> {
 
     /// **The members of a class, inherited ones included** — see [`project::members_of`].
     ///
-    /// The substitution needs no file: the class's parameter names are in its **fact**, so the model's resolver —
-    /// which hands out *renderings* — is not asked for anything, and the answer is the same one `Session::members_of`
-    /// gives (`docs/status.md` §十五 ④: it was not, because this call passed the rendering to a function reading the
-    /// file's own text at the fact's offsets).
     pub fn members_of(&self, class: &str) -> Known<MemberList> {
         // **Memoised, because the same class is asked dozens of times per file.** Measured on one header of a real project:
         // `std::vector<heap_entry>` was asked **64 times** and each answer cost about **589 ms** — 37 seconds of a file that
@@ -278,9 +272,6 @@ impl<'a> SemanticModel<'a> {
 
     /// What [`SemanticModel::type_of`] has cost so far: `(inferences run, answers reused)`.
     ///
-    /// The two numbers that say whether a memo is working, and the reason this type has a counter at all: an
-    /// instrument that cannot tell "cheap because cached" from "cheap because there was nothing to do" is the
-    /// mistake this crate has already made once (see `docs/status.md` §6.1).
     pub fn inference_stats(&self) -> (usize, usize) {
         (self.inferred.get(), self.reused.get())
     }

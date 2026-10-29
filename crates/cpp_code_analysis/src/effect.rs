@@ -7,7 +7,6 @@
 //! effect(surface, environment) = define/undef events that are *active* under that environment, in order
 //! ```
 //!
-//! # The three properties this buys (see `docs/exact-index-design.md` §七)
 //!
 //! ```text
 //! ①  composition: a translation unit's macro table = fold(apply, effect of each included file). One hash lookup
@@ -280,10 +279,9 @@ fn decide(flavour: ConditionFlavour, tokens: &[Token], environment: &Macros) -> 
 
 /// The spelling of a definition's body — what a name's *value* is for a condition, and for the key.
 fn body_text(definition: &MacroDef) -> String {
-    // **Every token of the body, as written.** The first version returned the *first* token only, and the oracle test
-    // in `docs/exact-index-design.md` §七 caught it at once: `#define WITH_ARGS(x) ((x) + 1)` answered `"("`.
-    // Whitespace is kept because `#define A (1)` and `#define A(1)` are different macros, and a caller comparing two
-    // readings should see the text it wrote.
+    // **Every token of the body, as written.** Whitespace is kept because `#define A (1)` and
+    // `#define A(1)` are different macros, and a caller comparing two readings should see the text
+    // it wrote.
     let mut out = String::new();
     for token in &definition.body.tokens {
         out.push_str(&token.text);

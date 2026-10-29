@@ -101,9 +101,8 @@ where
             continue;
         }
 
-        // **Where a hint's milliseconds go**, when asked. `docs/lsp-status.md` measured **58 ms for nine hints**, i.e.
-        // ~6 ms per call, and the two candidates are the callee's resolution and the parameter list's — both of which
-        // read another file. One line per call separates them, and a repeated callee spelling is visible in it.
+        // **Where a hint's milliseconds go**, when asked. One line per call separates them, and a
+        // repeated callee spelling is visible in it.
         let trace = std::env::var_os("CPPLS_TRACE_INLAY").is_some();
         let started = std::time::Instant::now();
         let Known::Yes(callee) = callee_of_a_call(
@@ -122,12 +121,9 @@ where
 
         let names =
             parameter_names_for(view, &callee, &mut declaring, &mut view_of).or_else(|| {
-                // **A declaration whose file has no rendering still has names.** The list is in its *fact*, which
-                // the index keeps as text — so the reading is made from the text instead of from the tree. This is
-                // the difference between `push_back(_Val: …)` and `printf(…)` on the same line of a real file: a
-                // member's names come from `members_of`'s facts and needed no tree, a free function's came from
-                // `parameter_list_of` and did — and a system header nobody has opened has no rendering, so the hint
-                // was silently absent (`docs/status.md` §十五).
+                // **A declaration whose file has no rendering still has names.** The list is in its
+                // *fact*, which the index keeps as text — so the reading is made from the text
+                // instead of from the tree.
                 callee
                     .parameters
                     .as_deref()

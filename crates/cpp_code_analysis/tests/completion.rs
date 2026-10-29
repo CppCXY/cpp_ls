@@ -1863,7 +1863,7 @@ fn a_documentation_comment_offers_its_commands_and_their_names() {
     let source = "\
 /// Frobnicates the widget.
 /// @par
-/// @param 
+/// @param\x20
 int frobnicate(const Widget& widget, int count);
 
 struct Widget { int size; };
@@ -1915,7 +1915,9 @@ struct Widget { int size; };
     );
 
     // **After `@param `** — the parameters of the declaration the comment documents, and nothing else.
-    let after_param = source.find("/// @param ").expect("the fixture") + "/// @param ".len();
+    // **The space after `@param` is written `\x20` in the fixture**, so the file has no trailing whitespace
+    // for a hook to trim and the string still ends the command with the space this half asserts about.
+    let after_param = source.find("/// @param").expect("the fixture") + "/// @param ".len();
     match session.members_of(&view, "Source") {
         cpp_code_analysis::Known::Yes(list) => println!(
             "members_of(Source) → {:?}",
@@ -2515,12 +2517,13 @@ fn an_arrow_is_read_as_an_arrow() {
 
 /// **A member answer says whether it is missing members**, and a client has to be told.
 ///
-/// `isIncomplete` in the protocol means one thing — *ask again later* — and a member list has two ways of being
-/// short: the budget (`truncated`, where asking again returns the same list) and the **analysis** (`incomplete`:
-/// a class this answer depends on has not been read). Measured on a real project: `std::string* message; message->`
-/// answered **one** item on the first keystroke (`operator basic_string_view`, all the raw reading of `<xstring>` had
-/// at file scope) and **58** once the header was cooked — and the one-item list went out with `isIncomplete: false`,
-/// so the client showed it as the answer. See `docs/completion.md`.
+/// `isIncomplete` in the protocol means one thing — *ask again later* — and a member list has two
+/// ways of being short: the budget (`truncated`, where asking again returns the same list) and the
+/// **analysis** (`incomplete`: a class this answer depends on has not been read). Measured on a
+/// real project: `std::string* message; message->` answered **one** item on the first keystroke
+/// (`operator basic_string_view`, all the raw reading of `<xstring>` had at file scope) and **58**
+/// once the header was cooked — and the one-item list went out with `isIncomplete: false`, so the
+/// client showed it as the answer.
 #[test]
 fn a_member_answer_that_is_missing_facts_is_marked_incomplete() {
     // **A class nothing declares**: the honest answer is "not yet", not "no members".

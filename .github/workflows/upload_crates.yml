@@ -18,9 +18,23 @@ jobs:
 
       - name: Publish
         run: |
+          # **In dependency order, with a wait after each.** crates.io's index lags a publish by seconds to a minute, and
+          # `cpp_code_analysis` cannot be packaged until `cpp_parser` is resolvable from the registry — the first
+          # release would otherwise fail on its own dependencies. Ten attempts, twenty seconds apart, is five minutes
+          # of patience for a lag that is normally one.
           for dir in cpp_{parser,code_analysis,ls}; do
             pushd "crates/$dir"
-            cargo publish --allow-dirty
+            for attempt in 1 2 3 4 5 6 7 8 9 10; do
+              if cargo publish --allow-dirty; then
+                break
+              fi
+              if [ "$attempt" = "10" ]; then
+                echo "publishing $dir failed after $attempt attempts"
+                exit 1
+              fi
+              echo "attempt $attempt failed; the registry may not have the previous crate yet — waiting"
+              sleep 20
+            done
             popd
           done
         env:

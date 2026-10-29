@@ -236,7 +236,7 @@ enum Position {
     AtTheFirstArgumentUnlessItIsAStream,
 }
 
-/// **The functions this server reads, by name.** `docs/format-strings.md` §3.2 is the rule this implements.
+/// **The functions this server reads, by name.**
 ///
 /// The list is deliberately short and every entry is a name the standard (or a library everyone has) declares: a
 /// name this table guessed would paint a string a project meant as data. A project's own functions come in through

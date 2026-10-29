@@ -1,8 +1,7 @@
 //! **Where the spaces go between two tokens that stay on the same line.**
 //!
-//! This is the first half of the formatter (P0a of `docs/cpp-format.md` §十): line structure and indentation are left
-//! exactly as the input had them, and only the whitespace *inside* a line is rewritten. The second half (breaks and
-//! indent) is `layout.rs`, which will call into this module for the same-line decisions.
+//! The second half (breaks and indent) is `layout.rs`, which will call into this module for the
+//! same-line decisions.
 //!
 //! # How a decision is made
 //!

@@ -197,8 +197,8 @@ says and a list of names cannot. A bare string means the common case — that sy
 matched against the **resolved** qualified name, so `using mylib::logf;` works and a local `logf` that is something
 else is not read as the wrapper.
 
-See `docs/format-strings.md` for what the colouring sends (four custom token types plus three standard fallbacks), what
-the popup says, and what the completion offers.
+The colouring sends four custom token types plus three standard fallbacks; the same rule decides what the popup
+says, and what the completion offers.
 
 ---
 

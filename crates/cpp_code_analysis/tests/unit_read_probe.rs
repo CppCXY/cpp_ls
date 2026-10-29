@@ -8,10 +8,8 @@
 //! # The question, and why it is a probe
 //!
 //! [`Session::read_the_unit`] reads a closure as **one program**: one rendering, one parse
-//! ([`cpp_code_analysis::FileIndexer::index_unit_rendering`]), every fact filed under the file that wrote it, and
-//! every file in the closure marked read so the per-file queue skips it. That is the shape `docs/architecture.md`
-//! §5 step two needs — *one timeline per translation unit, not one walk per file* — and it is **not wired** into the
-//! pump because of the numbers this probe prints.
+//! ([`cpp_code_analysis::FileIndexer::index_unit_rendering`]), every fact filed under the file that
+//! wrote it, and every file in the closure marked read so the per-file queue skips it.
 //!
 //! The previous attempt at wiring it changed three readings the wrong way and could not say why (the note on
 //! `read_the_unit` records them: `declarations_in("std")` 2008 → 1959, and two `definition` counts). The guess here
@@ -175,10 +173,8 @@ fn what_a_unit_read_does_to_the_index() {
         std::fs::write(into, rows.join("\n")).expect("the dump path is writable");
     }
 
-    // **The render on its own**, because the next step in `docs/architecture.md` §7.4 depends on how the 5 s
-    // divides: the walk needs the session, and the cook, the parse and the sweep are functions of the unit and its
-    // texts. The memo then answers the same program inside `read_the_unit`, so what is left there is the parse and
-    // the sweep.
+    // The memo then answers the same program inside `read_the_unit`, so what is left there is the
+    // parse and the sweep.
     let started = Instant::now();
     let rendered = session.render_the_unit(&file);
     let rendering = started.elapsed();

@@ -1,9 +1,7 @@
 //! **A session that has nothing to do must tell the client nothing.**
 //!
-//! The report that produced this file: "the server keeps showing diagnostics and taking them away again, and it
-//! sits on one core, just because I opened a file". Its log showed `index slice: prepared 0, committed 0 … 4 to
-//! cook, 2 left` every ~250 ms for minutes after the index had drained — a cooking queue that never emptied (see
-//! `docs/cook-loop.md` for the two causes and their fix).
+//! The report that produced this file: "the server keeps showing diagnostics and taking them away
+//! again, and it sits on one core, just because I opened a file".
 //!
 //! A unit test cannot see that: it is a property of the **flow** between the pump, the session and the client. This
 //! one can: it starts the real server over stdio, opens a file, waits for the workspace to settle, and then watches
@@ -16,10 +14,8 @@
 //!
 //! # Why the client advertises refresh support
 //!
-//! Because it is what VSCode sends for a pull-diagnostics setup, and a test that hid the capability would prove
-//! nothing about a server that wanted to use it. The inlay-hint and semantic-token refreshes are still real, and are
-//! what the edit budget below is about; the **diagnostic** refresh is asserted to be absent, because asking a pull
-//! client to ask again is what made it ask in a loop (see `docs/cook-loop.md`).
+//! Because it is what VSCode sends for a pull-diagnostics setup, and a test that hid the capability
+//! would prove nothing about a server that wanted to use it.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};

@@ -19,8 +19,6 @@
 //! siblings is the signature. Both are printed here, next to the error nodes, so that one run answers "did this
 //! file read, and if not, where did it stop reading".
 //!
-//! The probe takes its file from `CPPLS_FILE` and **skips** when that is absent — a probe that needs one machine's
-//! checkout must not fail on the next machine (see `docs/remaining.md` §C1).
 
 use cpp_parser::{CppParser, CppSyntaxKind, ParserConfig};
 

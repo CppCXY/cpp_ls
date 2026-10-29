@@ -85,9 +85,9 @@ pub async fn on_hover(
         // 250 ms, at 1 s and at 3 s, and the report was "`endl` has no hover" rather than "it is slow". The wait was
         // `AnalysisState::settle`, which asked whether the *whole project's* indexing queue was empty.
         //
-        // What the answer actually needs is this file, and it is read in above: `prepare` puts the file's text in
-        // reach, `read_the_modules` catches the summary up and reads what it imports. The global question was never a
-        // prerequisite for either. See `docs/status.md` §5.2.
+        // What the answer actually needs is this file, and it is read in above: `prepare` puts the
+        // file's text in reach, `read_the_modules` catches the summary up and reads what it
+        // imports. The global question was never a prerequisite for either.
     }
 
     snapshot_query(context.analysis(), cancel_token, move |session| {
@@ -113,12 +113,8 @@ pub async fn on_hover(
         // reading and two of its offsets: the **file's** for the two text-shaped questions, the **rendering's** for
         // everything else.
         //
-        // **The cursor is read from the file's own text, then mapped into the rendering.** The two offsets below are
-        // different numbers and both are needed: a client sends a line and a column of the text it shows, while a
-        // rendering has the directives resolved and its lines merged — `file_offset_at_position(&view, position)` did
-        // the conversion *through* the rendering, which names a different place, and that is the defect that made
-        // `implementation` answer `null` on a real project (`docs/lsp-status.md`). The two steps are done in the order
-        // that cannot drift.
+        // **The cursor is read from the file's own text, then mapped into the rendering.** The two
+        // steps are done in the order that cannot drift.
         let written = session.view_of_the_file(&path)?;
         let in_the_file = file_offset_at_position(&written, position)?;
         // **The hover answers from the file's own text, not from its rendering** — and that is a fix, not a
@@ -545,21 +541,18 @@ fn overloads_markdown(
 ) -> String {
     // **Which of them this call means, if the reader is on a call.**
     //
-    // `Session::signatures_at` already ranks the declarations and puts the chosen one **first** — the same resolver the
-    // argument checks and the signature popup use — so this is a read of an answer that exists, not a second opinion.
-    // It is `None` when the cursor is not on a call at all (a bare `std::format`), and then the list is all there is
-    // and the old sentence is still the honest one.
-    // **Which of them this call means.** The query resolves the call's arguments against the declarations' own
-    // parameter lists — the facts this hover already holds — so it does not need the index to have read the declaring
-    // file as a source of parsed signatures. §18 of `docs/overloads.md` is the measurement that made that matter.
+    // `Session::signatures_at` already ranks the declarations and puts the chosen one **first** —
+    // the same resolver the argument checks and the signature popup use — so this is a read of an
+    // answer that exists, not a second opinion. It is `None` when the cursor is not on a call at
+    // all (a bare `std::format`), and then the list is all there is and the old sentence is still
+    // the honest one. **Which of them this call means.**
     let chosen = view.and_then(|view| {
         let parameter_lists: Vec<Option<String>> = found
             .found
             .iter()
             .map(|declaration| declaration.fact.parameter_list.clone())
             .collect();
-        // The template names are the caller's, because they come from the declaring file's text and a fact does not
-        // carry them — `docs/overloads.md` §21. One `text` read per declaration, and the files are held afterwards.
+        // One `text` read per declaration, and the files are held afterwards.
         let template_parameters: Vec<Vec<String>> = found
             .found
             .iter()

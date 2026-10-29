@@ -402,11 +402,10 @@ impl<'a, F: FileProvider> ModuleScanner<'a, F> {
     ///
     /// # `directory` is a **directory**
     ///
-    /// The importing file's own directory, which is what [`candidate_paths`](Self::candidate_paths) joins a name
-    /// onto. A caller that passes the importing *file* gets `<dir>/main.cpp/math.cppm` for every candidate, no
-    /// filesystem has that path, and the answer is `UnknownModule` — a silence, not an error. That is what
-    /// `Session::module_interface_units_of` did (`docs/status.md` §十三), and it is why this parameter is named for
-    /// what it holds rather than for where it came from.
+    /// The importing file's own directory, which is what [`candidate_paths`](Self::candidate_paths)
+    /// joins a name onto. A caller that passes the importing *file* gets `<dir>/main.cpp/math.cppm`
+    /// for every candidate, no filesystem has that path, and the answer is `UnknownModule` — a
+    /// silence, not an error.
     pub fn resolve_module(
         &mut self,
         name: &str,

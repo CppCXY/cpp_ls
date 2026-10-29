@@ -3,10 +3,9 @@
 //!
 //! # Why this exists, and what it is not
 //!
-//! `docs/memory-audit.md` starts from a measured fact: an editor session on `EmmyLuaCodeStyle` reached **5 GB**. The
-//! resident set says *that* it happened; it does not say **which table** grew, and a plan built on a total is a plan
-//! that will move the total somewhere else. So every structure that can grow is asked for its own size, and
-//! [`MemoryReport`] is the answer in one place.
+//! The resident set says *that* it happened; it does not say **which table** grew, and a plan built
+//! on a total is a plan that will move the total somewhere else. So every structure that can grow
+//! is asked for its own size, and [`MemoryReport`] is the answer in one place.
 //!
 //! The numbers are **estimates with a stated method**: for each entry, `size_of` of the struct plus the bytes of the
 //! heap strings it owns. They are not exact (`malloc` overhead, a `HashMap`'s spare capacity and the allocator's own
@@ -73,9 +72,8 @@ pub struct MemoryReport {
 
     /// **Timelines remembered by closure content** — the dedup table, entries and estimated bytes.
     ///
-    /// The one table in this report that is **unbounded**: one entry per distinct closure a walk has produced, never
-    /// evicted. See `docs/memory-audit.md`; on the 1 273-file corpus it is the largest single holder after a cold
-    /// start.
+    /// The one table in this report that is **unbounded**: one entry per distinct closure a walk
+    /// has produced, never evicted.
     pub walks_by_content_entries: usize,
     pub walks_by_content_bytes: usize,
 }

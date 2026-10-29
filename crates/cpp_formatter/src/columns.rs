@@ -1,10 +1,9 @@
 //! **The column model: what a column number means.**
 //!
-//! Every decision this crate makes about *where* something sits — an aligned trailing comment, a continuation line, a
-//! column limit — is a decision in columns, and a column is not a byte and not a `char`: a tab moves to the next tab
-//! stop, a CJK character occupies two cells in a terminal and in clang-format's own model, a combining mark occupies
-//! none. Two passes that each count characters differently disagree in exactly the files that contain any of those,
-//! which is the shape of the two failed aligner attempts recorded in `docs/cpp-format.md` §十七–§十八.
+//! Every decision this crate makes about *where* something sits — an aligned trailing comment, a
+//! continuation line, a column limit — is a decision in columns, and a column is not a byte and not
+//! a `char`: a tab moves to the next tab stop, a CJK character occupies two cells in a terminal and
+//! in clang-format's own model, a combining mark occupies none.
 //!
 //! So there is one model, here, and everything that needs a column asks it.
 

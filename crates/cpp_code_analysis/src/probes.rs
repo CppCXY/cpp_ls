@@ -2,9 +2,8 @@
 //!
 //! # Why this module exists
 //!
-//! These are debugging switches: `CPPLS_TRACE_MEMBERS=1` prints why a member query answered what it answered,
-//! `CPPLS_TRACE_DIAGNOSTICS=1` prints the stage table. They are worth keeping — two of the findings recorded in
-//! `docs/status.md` came out of them — but they were written as
+//! These are debugging switches: `CPPLS_TRACE_MEMBERS=1` prints why a member query answered what it
+//! answered, `CPPLS_TRACE_DIAGNOSTICS=1` prints the stage table.
 //!
 //! ```text
 //! if std::env::var_os("CPPLS_TRACE_COOKING").is_some() { … }
@@ -73,16 +72,14 @@ switch! {
     no_index_lookup => "CPPLS_NO_INDEX_LOOKUP", "Answer every declaration query `NotDeclaredHere`, so that a pull's cost can be split into the engine and the index — the sibling of `CPPLS_NO_INFERENCE`.";
 
     inference => "CPPLS_TRACE_INFERENCE", "What a member answer was substituted with, and the type it became — the switch two editor reports needed.";
-    answers => "CPPLS_TRACE_ANSWERS", "What one name query found: how many declarations, of which kinds, in which files — the question `docs/index-lookup.md` turned on (2288 `_Tp` answers, none of them a class).";
+    answers => "CPPLS_TRACE_ANSWERS", "What one name query found: how many declarations, of which kinds, in which files — the question a hover on a template parameter turned on (2288 `_Tp` answers, none of them a class).";
 }
 
 /// **Do not filter a candidate whose declaration is written in a `#if` region.**
 ///
-/// The measurement behind deleting the lookup-time guard patch: with ⑱ (a file with a rendering is read through it)
-/// the filter has almost nothing left to remove, and "almost nothing" is a number this crate asks for rather than a
-/// claim. Seeded from `CPPLS_NO_GUARD_FILTER` once, and settable at run time so that **one process** can answer the
-/// same questions both ways — two processes would differ by the corpus as well as by the patch (the summaries of two
-/// system headers are not identical between runs; see `docs/architecture.md` §7.12).
+/// The measurement behind deleting the lookup-time guard patch: with ⑱ (a file with a rendering is
+/// read through it) the filter has almost nothing left to remove, and "almost nothing" is a number
+/// this crate asks for rather than a claim.
 pub fn no_guard_filter() -> bool {
     static SEEDED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
     SEEDED.get_or_init(|| {
@@ -102,7 +99,6 @@ pub fn set_no_guard_filter(on: bool) {
 }
 
 static NO_GUARD_FILTER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-/// **Count how many distinct summaries a session asks for** — the working set `docs/memory-audit.md` M3 needs.
 ///
 /// The question the plan turns on is not "how many files are indexed" but "how many of them a session actually reads
 /// summary by summary". A window over the redb rows is only worth its cost if that number is small compared with the

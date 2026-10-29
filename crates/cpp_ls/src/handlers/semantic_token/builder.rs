@@ -83,11 +83,10 @@ pub enum TypeKind {
     VariableTemplate,
     /// **A format string's field** — the `{:.3f}` of `std::format`, the `%-8.2` of `printf`.
     ///
-    /// One of the four types that colour *inside* a string literal, where no other pass has anything to say: the
-    /// client draws a literal as one colour, and the parts of it that are a program of their own — a field, the
-    /// argument it names, the conversion it ends in — are invisible. See
-    /// [`crate::handlers::semantic_token::format`] for what decides which literal is one and `docs/format-strings.md`
-    /// for the design.
+    /// One of the four types that colour *inside* a string literal, where no other pass has
+    /// anything to say: the client draws a literal as one colour, and the parts of it that are a
+    /// program of their own — a field, the argument it names, the conversion it ends in — are
+    /// invisible.
     ///
     /// **Custom, and with a fallback the client does know**: a client that advertises none of these four gets
     /// `regexp` for a field, `parameter` for an argument reference and `keyword` for a conversion — the closest

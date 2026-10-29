@@ -2274,13 +2274,13 @@ pub fn name_completions_at(
     // `WIDTH` offered 89 names without itself. A macro is offered with `MacroLike`, which the ranking already places after
     // variables and before keywords, and it is a `ThisFile` provenance because that is where a `#define` lives.
     let mut names = names;
-    // **The macro tail belongs to an ordinary name position, not to a `::`-qualified one.** A macro is not a member
-    // of anything: `std::NOATOM` is legal only because the preprocessor replaced the name before the compiler saw it,
-    // and a reader who typed `std::` is asking about `std`. Appending the macros there was not merely noise — it
-    // **crowded the list out**: with an empty prefix the ranking falls through to the label, and every macro of the
-    // headers the file includes sorts before every lowercase name, so `ITEM_BUDGET` was spent on `NOATOM`, `_WINDOWS_`,
-    // `_GLIBCXX_…` and `string`, `format`, `expected` were cut. Measured on a real C++23 project: 200 items after
-    // `std::`, **none of them a name from `std`**, while `declarations_in("std")` held 2352 (`docs/status.md` §十三).
+    // **The macro tail belongs to an ordinary name position, not to a `::`-qualified one.** A macro
+    // is not a member of anything: `std::NOATOM` is legal only because the preprocessor replaced
+    // the name before the compiler saw it, and a reader who typed `std::` is asking about `std`.
+    // Appending the macros there was not merely noise — it **crowded the list out**: with an empty
+    // prefix the ranking falls through to the label, and every macro of the headers the file
+    // includes sorts before every lowercase name, so `ITEM_BUDGET` was spent on `NOATOM`,
+    // `_WINDOWS_`, `_GLIBCXX_…` and `string`, `format`, `expected` were cut.
     if position.scope.is_empty()
         && let Some(summary) = index.summary(path)
     {
@@ -2290,12 +2290,13 @@ pub fn name_completions_at(
         // reachable only through the macro environment, which is the hover's query, not this one's.
         // **The position is carried, not just the name.**
         //
-        // The item's identity — the `(file, offset)` a client echoes back to `completionItem/resolve` — is the
-        // declaration's **name range**, and a macro has no declaration fact: the item is built from a clone of the
-        // file's first declaration (see the loop below). Without the macro's own range in hand the clone kept the
-        // template's, so resolve looked up `int main()` and the popup showed `FULL_NAME_FORMAT` with the detail
-        // **`int ()`**. Measured twice: once before the clone's fields were cleared, and again after they were,
-        // because the range was the field nobody had replaced. See `docs/status.md` §十五 and §二十.
+        // The item's identity — the `(file, offset)` a client echoes back to
+        // `completionItem/resolve` — is the declaration's **name range**, and a macro has no
+        // declaration fact: the item is built from a clone of the file's first declaration (see the
+        // loop below). Without the macro's own range in hand the clone kept the template's, so
+        // resolve looked up `int main()` and the popup showed `FULL_NAME_FORMAT` with the detail
+        // **`int ()`**. Measured twice: once before the clone's fields were cleared, and again
+        // after they were, because the range was the field nobody had replaced.
         let mut offered_macros: Vec<(&str, bool, cpp_parser::SourceRange)> = Vec::new();
         for fact in &summary.macros {
             offered_macros.push((fact.name.as_str(), fact.function_like, fact.range));
@@ -2322,12 +2323,10 @@ pub fn name_completions_at(
             // `Default` (its `DeclKind`, `SourceRange` and `FactGuard` do not), and adding one for this would put a
             // meaningless declaration shape in the type.
             //
-            // **What the clone keeps is the shape and nothing else**, and that is a correction rather than a
-            // tidy-up: everything the template said about *itself* — the return type, the parameter list, the
-            // template parameters, the bases — belongs to a different declaration, and this fact speaks for a
-            // macro. Measured from an editor: `#define FULL_NAME_FORMAT "Full name: {}"` was listed with the detail
-            // **`int ()`**, which is `int main()`'s signature — the first declaration of the file, cloned field for
-            // field, and read back by `completionItem/resolve` (`docs/status.md` §十五).
+            // **What the clone keeps is the shape and nothing else**, and that is a correction
+            // rather than a tidy-up: everything the template said about *itself* — the return type,
+            // the parameter list, the template parameters, the bases — belongs to a different
+            // declaration, and this fact speaks for a macro.
             let Some(template) = summary.declarations.first() else {
                 continue;
             };
@@ -3624,12 +3623,13 @@ fn type_of_expression_inner(
                 let dt = declared_type(memo, index, declaring, scopes, root, path, &named, depth);
                 match dt {
                     Known::Yes(type_of) => {
-                        // **A declaration whose type is an alias template applied to arguments is finished here**, the
-                        // same way the member arm finishes one. `enable_if_t<__is_same(int, int), double>` is a
-                        // *spelling* the fact records, and the alias's target is `typename enable_if<…, double>::type`
-                        // — a member of a class template applied to arguments, which `member_fact`'s pattern rule
-                        // resolves once it is asked with those arguments. Without this the answer was the member's own
-                        // name (`docs/remaining.md` C2's last known red).
+                        // **A declaration whose type is an alias template applied to arguments is
+                        // finished here**, the same way the member arm finishes one.
+                        // `enable_if_t<__is_same(int, int), double>` is a *spelling* the fact
+                        // records, and the alias's target is `typename enable_if<…, double>::type`
+                        // — a member of a class template applied to arguments, which
+                        // `member_fact`'s pattern rule resolves once it is asked with those
+                        // arguments.
                         let type_of =
                             a_trait_alias_resolved(index, scopes, root, path, &named, &type_of)
                                 .unwrap_or(type_of);
@@ -4487,9 +4487,8 @@ pub(crate) fn operator_returns_of(
     // the callers answer a comparison `bool` and an arithmetic its operand's type, which is right for every
     // arithmetic alias.
     //
-    // Measured on EmmyLuaCodeStyle's `LuaParser/src/File/LuaSource.cpp`: `implicit-bool-conversion` **265 → 93 ms**.
-    // `assign-type-check` did **not** move (963–1 131 ms), so this was not the whole of its cost — see the note in
-    // `docs/status.md` §四十 ② for what is excluded next.
+    // Measured on EmmyLuaCodeStyle's `LuaParser/src/File/LuaSource.cpp`: `implicit-bool-conversion`
+    // **265 → 93 ms**.
     let declared = index.files_declaring(&class, path);
     let first = declared.first()?;
     if first.fact.type_of.is_some() {
@@ -5166,10 +5165,8 @@ impl NamedDeclaration {
 
     /// **The declaration's parameter list, as its fact holds it** — `(const char* __format, ...)`.
     ///
-    /// `None` for a binding in the file being edited, whose list is read from the tree the caller already has. The
-    /// indexed half is what a caller needs when that file has no **rendering**: a hint's parameter names used to
-    /// come only from a tree, so a call into a header nobody had cooked had no hint at all — `printf(...)` beside a
-    /// `push_back(...)` whose names came from the index is what a reader sees of that (`docs/status.md` §十五).
+    /// `None` for a binding in the file being edited, whose list is read from the tree the caller
+    /// already has.
     fn parameter_list(&self) -> Option<String> {
         match self {
             NamedDeclaration::Here(_) => None,
@@ -5519,10 +5516,10 @@ fn range_element_of(container: &Type) -> Option<String> {
 
     let plain = name.rsplit("::").next().unwrap_or(name);
 
-    // **`>= 2`, not `== 2`.** The element of a map is `pair<const K, V>` whatever else the use wrote, and a use writes
-    // the comparator as often as not: `std::map<std::string, LuaTokenKind, std::less<>>` has three arguments, and
-    // requiring exactly two answered "no element" for the ordinary spelling. Measured: `LuaReserved.find(text)->second`
-    // fell back to the declaration's `_Mybase::iterator` for exactly this reason (`docs/remaining.md` §A4).
+    // **`>= 2`, not `== 2`.** The element of a map is `pair<const K, V>` whatever else the use
+    // wrote, and a use writes the comparator as often as not: `std::map<std::string, LuaTokenKind,
+    // std::less<>>` has three arguments, and requiring exactly two answered "no element" for the
+    // ordinary spelling.
     if matches!(
         plain,
         "map" | "unordered_map" | "multimap" | "unordered_multimap"
@@ -7227,13 +7224,11 @@ fn a_spelling_through_the_aliases(
 
     // **An unqualified name is a member of this class.**
     let Some((qualifier, last)) = split_at_the_last_scope(&core) else {
-        // **The lookup without the arrow fallback** — see [`a_member_the_class_declares`]: this walk is *called from* the
-        // arrow path, so asking `member_fact` here asks about an arrow, which comes back here.
-        // **An alias template declared elsewhere, before the class is asked.** `conditional_t<false, void, T>` is a
-        // namespace-level alias whose target is `typename conditional<false, void, T>::type`; it is not a member of the
-        // class being walked, and asking that class for it can only fail — which is where a real project's
-        // `find()->second` stopped (`docs/remaining.md` §A4). Following it produces a *qualified* spelling, which the
-        // branch below resolves: the class selects the specialization its arguments name, and the member is read there.
+        // **The lookup without the arrow fallback** — see [`a_member_the_class_declares`]: this
+        // walk is *called from* the arrow path, so asking `member_fact` here asks about an arrow,
+        // which comes back here. **An alias template declared elsewhere, before the class is
+        // asked.** Following it produces a *qualified* spelling, which the branch below resolves:
+        // the class selects the specialization its arguments name, and the member is read there.
         if let Some((named, member)) = the_alias_behind(index, path, &core) {
             let qualified = format!("{named}::{member}");
             if qualified != core {
@@ -7313,9 +7308,7 @@ fn a_spelling_through_the_aliases(
     let Some(inner_name) = inner_type.class_name() else {
         return written.to_string();
     };
-    // **The arguments split where the language splits them.** `Type::arguments` does not count parentheses, so
-    // `enable_if<__is_same(int, int), double>` read as three arguments — `__is_same(int`, `int)` and `double` — and a
-    // substitution built on that answered `Some("int)")` (`docs/remaining.md` §A4). `split_arguments` counts brackets
+    // **The arguments split where the language splits them.** `split_arguments` counts brackets
     // *and* parentheses, the same rule the pattern comparison uses.
     let inner_arguments: Vec<String> = crate::sema::builtins::split_arguments(
         inner
@@ -7325,11 +7318,9 @@ fn a_spelling_through_the_aliases(
     );
     let inner_parameters = index.template_parameters_for(inner_name, path, &inner_arguments);
     let inner_defaults = index.template_parameter_defaults_for(inner_name, path, &inner_arguments);
-    // **The class as the use wrote it** — with its arguments — because that is what selects a partial specialization
-    // and what lets the qualifier's own aliases (`_Mybase = _Tree_val<_Traits>`) be substituted. Asking the *bare*
-    // name lost the arguments at this step; measured on a real project, `LuaReserved.find(text)` typed as
-    // `_Mybase::iterator` and the chain stopped at `conditional<_Test, _Ty1, _Ty2>::type` — parameter names with
-    // nothing to pair them with (`docs/remaining.md` §A4).
+    // **The class as the use wrote it** — with its arguments — because that is what selects a
+    // partial specialization and what lets the qualifier's own aliases (`_Mybase =
+    // _Tree_val<_Traits>`) be substituted.
     let found = a_member_the_class_declares(index, scopes, root, path, &inner, &last);
     if crate::probes::inference() {
         eprintln!(
@@ -7345,10 +7336,7 @@ fn a_spelling_through_the_aliases(
     let Some(target) = fact.type_of.as_deref() else {
         return written.to_string();
     };
-    // **The pairing the declaration's own pattern implies**, which is not the positional one: a partial
-    // specialization `conditional<false, T, F>` has two parameters and three slots, so pairing the use's three
-    // arguments by position bound `F` to the *second* and the answer to `type` came out `void` instead of `Item`
-    // (`docs/remaining.md` §A4). The pattern's slots are what say which written argument each parameter takes.
+    // The pattern's slots are what say which written argument each parameter takes.
     let (pattern_parameters, pattern_arguments) = fact
         .pattern
         .as_deref()
@@ -7580,13 +7568,11 @@ fn the_class_an_arrow_points_at(
     }
     let parameters = index.template_parameters_for(&bare, path, &arguments);
     let defaults = index.template_parameter_defaults_for(&bare, path, &arguments);
-    // **The arrow's return is a *name* in the class that declares it**, and it has to be followed before it can be a
-    // class: `_Tree_iterator::operator->` answers `pointer`, which the iterator's own `typedef _Val* pointer;` makes a
-    // `pair<const K, V>*`. Answering `pointer` — or `_Rb_tree_iterator` after `base_type_name` dropped the arguments —
-    // is what made `map::find(text)->second` look `second` up in the iterator rather than in its element
-    // (`docs/remaining.md` A4). The step is the same one a member's recorded type goes through
-    // ([`a_spelling_through_the_aliases`]), applied here because this is the second place a *spelling* is about to be
-    // used as a type.
+    // **The arrow's return is a *name* in the class that declares it**, and it has to be followed
+    // before it can be a class: `_Tree_iterator::operator->` answers `pointer`, which the
+    // iterator's own `typedef _Val* pointer;` makes a `pair<const K, V>*`. The step is the same one
+    // a member's recorded type goes through ([`a_spelling_through_the_aliases`]), applied here
+    // because this is the second place a *spelling* is about to be used as a type.
     let class_type = crate::sema::types::parse_type_spelling(class);
     let resolved = a_spelling_through_the_aliases(
         index,
@@ -8728,10 +8714,7 @@ fn fact_from_binding_with(
         // name cost was measured: a class whose member is `operator[]` answered `members_of → [""]`, so an operator
         // was invisible to a member list — and a completion after `.`, a hover and every member query with it.
         //
-        // Only the **name**, and not yet an operator's `returns`: giving the engine an operator's return type made
-        // `implicit-bool-conversion` and `undefined-field` descend per expression for the first time and cost
-        // `LuaSyntaxTree.cpp` 207 → 510 ms (measured; see `docs/semantics-todo.md` §④). The name alone is a fact
-        // about the declaration and changes no inference.
+        // The name alone is a fact about the declaration and changes no inference.
         name: binding.name.text(),
         // `None` for an empty spelling, which is what a caller listing the names of a **body** passes: a local has
         // no qualified scope at all, and `Some("")` would be a scope that matches nothing while looking like one.
@@ -8759,12 +8742,10 @@ fn fact_from_binding_with(
         bases: crate::sema::declarations::declared_bases_of_with(shapes, binding),
         // **The same three fields the index fills**, because a fact must say the same thing whichever path produced it.
         //
-        // These were empty here, with the argument that "substitution is the caller's step". Substitution still is —
-        // what these fields carry is the *names* to substitute and the class's written **pattern**, and a caller that
-        // has the use's arguments cannot pair them without them. Measured on a trait alias:
-        // `conditional<false, void, T>::type` answered `void` because the specialization's `pattern` was `None` here
-        // even though the *indexed* fact for the same member carries `conditional<false, T, F>`
-        // (`docs/remaining.md` §A4) — the buffer happened to declare the class, so this path answered instead.
+        // These were empty here, with the argument that "substitution is the caller's step".
+        // Substitution still is — what these fields carry is the *names* to substitute and the
+        // class's written **pattern**, and a caller that has the use's arguments cannot pair them
+        // without them.
         parameters: crate::sema::declarations::declared_template_parameters_with(shapes, binding),
         constraints: Vec::new(),
         parameter_defaults: crate::sema::declarations::declared_parameter_defaults_with(
@@ -9295,12 +9276,13 @@ impl ProjectIndex {
             let sequence = self.next_sequence;
             self.next_sequence += 1;
             self.order.insert(sequence, path.clone());
-            // **The key is normalized when it is written**, not when it is asked for. Two readers arrive at this map
-            // with two spellings of the same file: the visibility walk hands back the *normalized* paths it built the
-            // graph from (`e:/p/app.cpp`), and every query arrives with the path a client or a summary used
-            // (`E:/p/app.cpp`). Storing only the second spelling meant the first was dropped silently — the walk said
-            // the file was visible, `visible_in_order_of` did not find it, and the query answered as if the file had
-            // never been included. `docs/remaining.md` §F has the measurement that led here.
+            // **The key is normalized when it is written**, not when it is asked for. Two readers
+            // arrive at this map with two spellings of the same file: the visibility walk hands
+            // back the *normalized* paths it built the graph from (`e:/p/app.cpp`), and every query
+            // arrives with the path a client or a summary used (`E:/p/app.cpp`). Storing only the
+            // second spelling meant the first was dropped silently — the walk said the file was
+            // visible, `visible_in_order_of` did not find it, and the query answered as if the file
+            // had never been included.
             self.sequence.insert(path.clone(), sequence);
             self.sequence.insert(normalize(Path::new(&path)), sequence);
 
@@ -9432,11 +9414,10 @@ impl ProjectIndex {
     ///
     /// # Why the probe counter is on this line
     ///
-    /// `docs/memory-audit.md` M3 asks whether the index has to be **resident**: 1 273 files cost 59 MB, and a
-    /// 10 000-file project would cost ~460 MB, so the plan is a bounded resident window over the redb rows. Whether
-    /// that is worth 73 call sites changing their return type depends on the **working set** — how many distinct
-    /// summaries a session actually touches — and that number can only be counted here, at the one place every
-    /// reader goes through. `CPPLS_TRACE_SUMMARIES=1` turns it on.
+    /// Whether that is worth 73 call sites changing their return type depends on the **working
+    /// set** — how many distinct summaries a session actually touches — and that number can only be
+    /// counted here, at the one place every reader goes through. `CPPLS_TRACE_SUMMARIES=1` turns it
+    /// on.
     pub fn summary(&self, path: &Path) -> Option<&FileSummary> {
         if crate::probes::summaries() {
             crate::probes::a_summary_was_asked_for(path);
@@ -10339,12 +10320,11 @@ impl ProjectIndex {
         // a handful of hundreds even when the project holds a hundred thousand files, so the cost of the question is
         // the size of the closure and not the size of the project.
         //
-        // …and **which of them are in view only through a module import**: those are the files where a declaration
-        // counts only if it is exported, and the distinction is per file rather than per fact because a file reached
-        // by `#include` has no such restriction at all.
-        // **What the walk costs per question** — the number `docs/interactive-cost.md` needs to tell a slow pull
-        // apart: `[gather]` says how long a declaration query took, this says how much of it was the graph.
-        // **The translation unit this question is asked from** — the reading every file's answer is chosen by.
+        // …and **which of them are in view only through a module import**: those are the files
+        // where a declaration counts only if it is exported, and the distinction is per file rather
+        // than per fact because a file reached by `#include` has no such restriction at all. **The
+        // translation unit this question is asked from** — the reading every file's answer is
+        // chosen by.
         let asking = self.the_program_that_read(visible_from);
         let walk_started = std::time::Instant::now();
         let asks_before = CONDITION_ASKS.load(std::sync::atomic::Ordering::Relaxed);
@@ -10552,13 +10532,14 @@ impl ProjectIndex {
         // The next step is therefore to make the **identity** unique — one file, one summary, one sequence number, one
         // set of postings — and only then to stop dropping the spelling. Either half alone is a regression.
         //
-        // **That was the hypothesis, and it has been counted: it is false.** The index holds 1581 summaries for 1581
-        // distinct identities and **not one file twice**, so the loss is not a duplicate summary. What is left is the
-        // only other thing a wider view changes: which declarations exist *at all* for a name — and the scoreboard
-        // says every refusal with a receiver type had **no visible declaration of the class** (47) or a list built
-        // from none (30), so the 28 lost questions are ones where one visible declaration used to be enough and two
-        // now are not. Neither experiment is in the tree; the next round starts from this number, not from a theory.
-        // See `docs/remaining.md` §F.
+        // **That was the hypothesis, and it has been counted: it is false.** The index holds 1581
+        // summaries for 1581 distinct identities and **not one file twice**, so the loss is not a
+        // duplicate summary. What is left is the only other thing a wider view changes: which
+        // declarations exist *at all* for a name — and the scoreboard says every refusal with a
+        // receiver type had **no visible declaration of the class** (47) or a list built from none
+        // (30), so the 28 lost questions are ones where one visible declaration used to be enough
+        // and two now are not. Neither experiment is in the tree; the next round starts from this
+        // number, not from a theory.
         let mut files: Vec<(u32, IncludeVisibility)> = visible
             .into_iter()
             .filter_map(|(key, visibility)| Some((*self.sequence.get(&key)?, visibility)))
@@ -11246,9 +11227,9 @@ impl ProjectIndex {
     /// leaving the order alone would make the list depend on hashing, and a client's peek list would reorder
     /// itself between two identical requests.
     pub fn definitions(&self, name: &str, visible_from: &Path) -> Known<ProjectDefinitions> {
-        // **A measurement switch, not a behaviour**: what a diagnostics pull costs *without* the index lookups —
-        // the sibling of `CPPLS_NO_INFERENCE`, and it exists to tell "the engine" from "the index" before either is
-        // optimised. See `docs/interactive-cost.md`.
+        // **A measurement switch, not a behaviour**: what a diagnostics pull costs *without* the
+        // index lookups — the sibling of `CPPLS_NO_INFERENCE`, and it exists to tell "the engine"
+        // from "the index" before either is optimised.
         if crate::probes::no_index_lookup() {
             return Known::Unknown(UnknownReason::NotDeclaredHere(Box::from(name)));
         }

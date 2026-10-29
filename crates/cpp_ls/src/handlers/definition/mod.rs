@@ -82,9 +82,9 @@ pub async fn on_goto_definition_handler(
         // at all** while the fourth answered correctly. The wait added for it was `AnalysisState::settle`, which
         // asked whether the *whole project's* indexing queue was empty.
         //
-        // The question that matters is about this file's own closure, and `read_the_modules` above is what answers it:
-        // it catches this file's summary up and reads the files it reaches that nobody has read. See
-        // `docs/status.md` §5.2.
+        // The question that matters is about this file's own closure, and `read_the_modules` above
+        // is what answers it: it catches this file's summary up and reads the files it reaches that
+        // nobody has read.
     }
 
     snapshot_query(context.analysis(), cancel_token, move |session| {
@@ -364,8 +364,6 @@ fn chosen_definition(
         .iter()
         .map(|declaration| declaration.fact.parameter_list.clone())
         .collect();
-    // The template names are the caller's, because they are in the declaring file's text and a fact does not carry
-    // them — `docs/overloads.md` §21.
     let template_parameters: Vec<Vec<String>> = found
         .found
         .iter()

@@ -1,4 +1,3 @@
-//! **The defects `docs/remaining.md` §A and §B reported, as fixtures** — one test per defect.
 //!
 //! ```text
 //! cargo test --release -p cpp_code_analysis --test reported_defects -- --nocapture

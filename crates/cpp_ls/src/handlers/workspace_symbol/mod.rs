@@ -148,9 +148,8 @@ mod tests {
     /// search during a project's first minute looking like a command that does not work. The second half is the same
     /// call once the queue is empty, which is what makes the first half a statement about timing.
     ///
-    /// (`docs/latency.md` keeps the record of the opposite mistake, in `references`.)
-    /// The protocol's
-    /// response has no "and there may be more", so a partial search is a false answer rather than a smaller one.
+    /// The protocol's response has no "and there may be more", so a partial search is a false
+    /// answer rather than a smaller one.
     ///
     /// The state is built rather than waited for — a project list with the file queued and nothing read — and the
     /// second half is the same call once the queue is empty, which is what makes the first half about timing rather
