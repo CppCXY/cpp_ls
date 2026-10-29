@@ -3008,3 +3008,61 @@ payload> p.` → `size`），以及没有实参的普通成员 typedef。
 测试：`tests/checks.rs::a_nested_class_has_its_members`、`a_coroutine_body_has_no_missing_return`、
 `tests/completion.rs::an_awaited_value_has_the_type_await_resume_returns`。套件：`cpp_parser` 33、
 `cpp_code_analysis` 50、`cpp_ls --release` 18 个 target 全绿。
+
+## 16.7 `undefined-name`：名字被当成对象用了，而没有任何地方声明它
+
+`undefined-field` 问的是"这个成员在不在"，前提是**能算出接收者的类型**；而一个没有任何声明的名字没有类型，于是
+它一直是所有规则里最安静的那一类。实测（`test_cpp/main.cpp`）：
+
+```text
+line 28   auto enenn = std::format(FULL_NAME_FORMAT, myName.getFullName(0));
+line 47   Name myName("John", "F.", "Doe");
+```
+
+`myName` 在第 28 行被当成对象用，而它的声明在 19 行之后——编译器会报错，服务器当时什么也没说。新的规则
+`undefined-name` 补的就是这一格。
+
+**只查成员访问的对象**，而且只在这个对象是**一个裸标识符**的时候：
+
+```text
+查        myName.getFullName(0)     一个标识符，必须能找到声明
+不查      a.b.c                     对象是表达式；内层的 `a` 会各自被查
+不查      this->size / std::string  关键字、限定名
+不查      (*p).size()               表达式
+```
+
+**四条沉默**，每条都来自一种"名字可能在别处被声明"的实测形态：
+
+```text
+宏          渲染里已经展开，但接收者仍可能是宏自己的拼写 → 查文件自己的 macro 表，命中就不说
+模板        任何 template <…> 里的访问都是依赖的；`T::value` 的成员只在实例化时存在
+            （实现上的坑：`template` 头是它所参数化声明的**兄弟**，不是祖先 ——
+              `Declaration [TemplateDecl, DeclSpecifierSeq [StructDef …]]`，
+              所以向上走 parents 永远看不到它；要问的是"每个祖先的声明节点是否带 TemplateDecl"）
+lambda      capture 是作用域树不记录的声明 → lambda 体整块不判
+未知答案    没人读的头、项目里没有的模块、歧义的名字 —— 都是"没读到"，不是"没声明"
+            （只有 `NotDeclaredHere` 算发现；第一版把所有 `Unknown` 都当"已声明"，于是它一言不发 —— 量出来的）
+```
+
+"算不算声明"是语言自己的规则：文件的作用域链上，**局部名从声明处开始可见**，而**类成员在整个类里可见**
+（complete-class context），所以位置过滤对类/枚举作用域不适用；另一侧是**另一个文件**里的声明（头文件经由
+`#include` 到达这里）。**本文件**里的声明不再经索引判一次，因为索引记的是文件偏移、作用域树记的是渲染偏移，
+展开过指令之后两者不能逐个比较。
+
+**实测**（真服务器，冷启动后按 3 秒一次连拉四轮，前 ~9 秒是空的——索引还没读完，之后四轮一致）：
+
+```text
+test_cpp/main.cpp        6 条诊断，其中 1 条 undefined-name
+                         line 28: `myName` is not declared: nothing this file can see names it
+test_cpp/test.cpp        0
+test_cpp/test.h          1（不是这条规则）
+test_cpp/coroutine.cpp   0
+```
+
+代码计数从 24 变 25（`style_checks.rs` 的普查），中文译文在 `crates/cpp_code_analysis/locales/zh-CN.yml`。
+测试：`checks.rs::a_name_that_nothing_declares_is_reported`、
+`a_declared_name_is_not_reported_and_a_later_one_is`（**先用后声明照样报**——那是 C++ 自己的规则）、
+`the_rule_is_quiet_where_a_name_may_be_declared_elsewhere`（宏、模板体、lambda、头文件四种沉默）。
+
+**还没做的**（下一步）：被调用者（`printh("…", 12)` 在它定义之前也是错的，而那是 **call** 不是成员访问）。
+那一步的风险在 ADL —— 非限定调用可能由实参类型的关联命名空间找到，所以规则得先能证明"实参里没有类类型"。
