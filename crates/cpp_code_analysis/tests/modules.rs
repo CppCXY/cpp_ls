@@ -2008,7 +2008,7 @@ fn a_module_unit_is_read_as_a_translation_unit() {
         unit.files >= 2,
         "a program read of `bits/std.cc` reads its closure, not one file: {unit:?}"
     );
-    let opened = session.read_a_looked_at_unit();
+    let _opened = session.read_a_looked_at_unit();
     // **And the importer itself is not read as a program**: its `import std;` is not an `#include`, so a unit read
     // of that file would read it *alone* and replace its rendering with one that has no `std` in it at all.
     let opened = session.read_a_looked_at_unit();

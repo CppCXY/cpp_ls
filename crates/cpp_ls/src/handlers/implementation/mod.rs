@@ -194,9 +194,10 @@ pub fn implementations_of<F: FileProvider + Clone>(
     for (_, summary) in &summaries {
         for fact in &summary.declarations {
             if fact.name == name
-                && let Some(scope) = fact.scope.as_deref() {
-                    owners.push(last_segment(scope).to_string());
-                }
+                && let Some(scope) = fact.scope.as_deref()
+            {
+                owners.push(last_segment(scope).to_string());
+            }
         }
     }
 

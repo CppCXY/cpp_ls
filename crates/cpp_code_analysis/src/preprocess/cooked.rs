@@ -1418,28 +1418,25 @@ pub fn cook_with_search(
                         .push((*kind, message.clone(), spanned.range.start_offset));
                 }
             }
-            DirectiveKind::Pragma
-                if was_live => {
-                    let first = tokens.partition_point(|token| {
-                        token.range.start_offset < spanned.range.start_offset
-                    });
-                    let last = tokens.partition_point(|token| {
-                        token.range.start_offset < spanned.range.end_offset()
-                    });
+            DirectiveKind::Pragma if was_live => {
+                let first = tokens
+                    .partition_point(|token| token.range.start_offset < spanned.range.start_offset);
+                let last = tokens
+                    .partition_point(|token| token.range.start_offset < spanned.range.end_offset());
 
-                    // **`push_macro`/`pop_macro` are the two pragmas that act on the macro table**, so they are
-                    // handled rather than printed — see [`push_and_pop_macro`]. Measured: cl.exe **drops both** from
-                    // its `-E` output (`#pragma push_macro("msvc")` at `vcruntime.h:323` appears zero times in the
-                    // compiler's stream for `#include <vector>`), which is why the first version of this — print
-                    // every pragma — made us differ by exactly those tokens.
-                    if !push_and_pop_macro(spanned, source, spanned.range.start_offset, &mut live) {
-                        let before = out.tokens.len();
-                        expand_run(source, tokens, first, last, &live, &mut out);
-                        if out.tokens.len() > before {
-                            out.pragma_lines.push(before..out.tokens.len());
-                        }
+                // **`push_macro`/`pop_macro` are the two pragmas that act on the macro table**, so they are
+                // handled rather than printed — see [`push_and_pop_macro`]. Measured: cl.exe **drops both** from
+                // its `-E` output (`#pragma push_macro("msvc")` at `vcruntime.h:323` appears zero times in the
+                // compiler's stream for `#include <vector>`), which is why the first version of this — print
+                // every pragma — made us differ by exactly those tokens.
+                if !push_and_pop_macro(spanned, source, spanned.range.start_offset, &mut live) {
+                    let before = out.tokens.len();
+                    expand_run(source, tokens, first, last, &live, &mut out);
+                    if out.tokens.len() > before {
+                        out.pragma_lines.push(before..out.tokens.len());
                     }
                 }
+            }
             _ => {}
         }
 

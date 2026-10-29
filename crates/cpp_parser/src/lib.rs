@@ -68,6 +68,9 @@ pub fn normalise_locale(locale: &str) -> String {
     normalised
 }
 
+/// **The syntax a parse accepts**, as a set of standards and vendors — see [eatures].
+pub use kind::features;
+
 #[cfg(test)]
 mod locale_tests {
     use super::normalise_locale;
@@ -91,6 +94,3 @@ mod locale_tests {
         }
     }
 }
-
-/// **The syntax a parse accepts**, as a set of standards and vendors — see [eatures].
-pub use kind::features;

@@ -378,10 +378,7 @@ fn the_member_questions_of_a_real_project_and_how_many_resolve() {
                         } else {
                             // The class the member query would use — a pointer's pointee, since `p->m` asks about the
                             // class the pointer names. `members_of` is given that spelling, not the pointer.
-                            let class = receiver
-                                .trim_end_matches(|character: char| matches!(character, '*' | '&'))
-                                .trim()
-                                .to_string();
+                            let class = receiver.trim_end_matches(['*', '&']).trim().to_string();
                             // **How many declarations of that class this file can see**, which is the number the last
                             // measurement was missing: a refusal with *no* visible declaration is visibility, one
                             // with several is the choice between them, and `NotDeclaredHere` reports both the same

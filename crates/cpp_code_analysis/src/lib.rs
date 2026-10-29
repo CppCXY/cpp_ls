@@ -42,6 +42,18 @@
 // It puts our token stream beside a real `-E`'s and reports where they differ, by mechanism; see its module
 // documentation for why that is the measurement every other module is judged by. It is first in this list because
 // everything below it is a claim, and it is the way to check one.
+// **Two lints this crate answers with a rationale rather than a change.**
+//
+// `too_many_arguments`: a question in this layer is asked with `(index, scopes, root, path)` — the engine's context,
+// which every walk already carries — and then with what the question is *about*. The four are not a data clump to
+// bundle: a caller borrows them from the session it holds, so a struct would be rebuilt per call to re-borrow the
+// same four fields. The largest of these functions is `walk_one_file` at thirteen, and it is a recursion over the
+// preprocessor's state, not a public API.
+//
+// `type_complexity`: the memo tables are spelled out where they are declared —
+// `RefCell<HashMap<(u32, u32), Known<(Type, PathBuf)>>>` is the answer to "what have I already been asked", and naming
+// it `TypeMemo` would move the shape away from the one place a reader checks it against the code that inserts into it.
+#![allow(clippy::too_many_arguments, clippy::type_complexity)]
 #[macro_use]
 extern crate rust_i18n;
 

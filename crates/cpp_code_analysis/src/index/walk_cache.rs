@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 //! **A file's contribution to a translation unit, shared between units** — `docs/walk-redesign.md` §4.2 and §8 step 2.
 //!
 //! # What a contribution is

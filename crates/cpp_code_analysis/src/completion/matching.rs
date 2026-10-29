@@ -303,7 +303,9 @@ mod tests {
         assert_eq!(quality("string", "str"), PREFIX);
         assert_eq!(quality("string", "STRING"), PREFIX);
         assert_eq!(quality("String", "str"), PREFIX);
-        assert!(PREFIX > WORD_START);
+        // **The ranking, checked at compile time**: the constants are the table beside them, and a reordering that broke
+        // it would fail the build rather than a test in a suite nobody runs.
+        const _: () = assert!(PREFIX > WORD_START);
     }
 
     #[test]
@@ -335,7 +337,7 @@ mod tests {
         // one than a name it begins.
         assert!(quality("to_string", "string") <= WORD_PREFIX);
         assert_eq!(quality("to_string", "to"), PREFIX);
-        assert!(WORD_PREFIX < WORD_START);
+        const _: () = assert!(WORD_PREFIX < WORD_START);
     }
 
     #[test]

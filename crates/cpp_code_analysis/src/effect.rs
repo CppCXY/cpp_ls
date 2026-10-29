@@ -366,6 +366,11 @@ impl Surfaces {
     pub fn len(&self) -> usize {
         self.held.lock().map(|held| held.len()).unwrap_or(0)
     }
+
+    /// **Nothing held** — the same question as `len() == 0`, written where a caller looks for it.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 }
 
 /// **How the chain reads files**: a provider and an include resolver, both as plain functions so that a caller can
@@ -725,13 +730,10 @@ mod tests {
         let mut applied = Macros::new();
         effect_of(&surface, &Macros::new()).apply(&mut applied);
         assert_eq!(
-            applied.get("WITH_ARGS").map(|held| body_text(held)),
+            applied.get("WITH_ARGS").map(body_text),
             Some("((x) + 1)".to_string())
         );
-        assert_eq!(
-            applied.get("PLAIN").map(|held| body_text(held)),
-            Some("(1)".to_string())
-        );
+        assert_eq!(applied.get("PLAIN").map(body_text), Some("(1)".to_string()));
     }
 
     /// A small include graph, in memory: the reader and resolver a chain needs.
@@ -926,7 +928,7 @@ mod tests {
             for name in names {
                 let from_chain = table
                     .get(name)
-                    .map(|held| body_text(held))
+                    .map(body_text)
                     .map(|text| text.trim().to_string());
                 let from_walk = view
                     .body_text_of(name, usize::MAX)

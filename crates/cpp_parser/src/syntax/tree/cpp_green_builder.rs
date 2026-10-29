@@ -16,8 +16,7 @@ use crate::{
 /// why the correction used to live in the grammar rules instead of here. Its note argued the nesting could not drift
 /// out of sync with the parser's marker stack; the flat list keeps that property for the same reason, since a node's
 /// span is still exactly what its `start_node` recorded, and the index arithmetic is confined to this one file.
-#[derive(Debug, Clone)]
-#[derive(Default)]
+#[derive(Debug, Clone, Default)]
 enum CppGreenElement {
     Node {
         kind: CppSyntaxKind,
@@ -33,7 +32,6 @@ enum CppGreenElement {
     #[default]
     Gap,
 }
-
 
 /// A builder for a rowan green tree specialised for C++.
 ///

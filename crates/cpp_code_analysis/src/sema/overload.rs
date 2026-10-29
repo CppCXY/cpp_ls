@@ -89,7 +89,7 @@ impl Candidate {
     }
 
     /// **The same candidate, marked as a template** — the one difference a tie is broken on.
-    pub(crate) fn as_a_template(mut self) -> Self {
+    pub(crate) fn into_a_template(mut self) -> Self {
         self.is_a_template = true;
         self
     }
@@ -447,7 +447,7 @@ mod tests {
     fn an_ordinary_function_beats_a_template_that_is_equally_good() {
         // The language's rule: a tie between a template and an ordinary function goes to the ordinary one. Both are
         // `Exact` for an `int` argument — the template after its deduction, which the caller does, not this module.
-        let candidates = vec![candidate(&["T"]).as_a_template(), candidate(&["int"])];
+        let candidates = vec![candidate(&["T"]).into_a_template(), candidate(&["int"])];
         assert_eq!(
             choose(&[a_type("int")], &candidates),
             Choice::One(1),
@@ -456,8 +456,8 @@ mod tests {
 
         // Two templates are still a tie, and a tie is still ambiguous: the rule above is about the *ordinary* one.
         let both = vec![
-            candidate(&["T"]).as_a_template(),
-            candidate(&["T"]).as_a_template(),
+            candidate(&["T"]).into_a_template(),
+            candidate(&["T"]).into_a_template(),
         ];
         assert_eq!(choose(&[a_type("int")], &both), Choice::Ambiguous);
     }

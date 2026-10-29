@@ -151,23 +151,23 @@ const fn parse_fingerprint(text: &str) -> u64 {
 /// only grows is a `.cppls` that one day is the largest thing in the checkout.
 pub const CACHE_BUDGET_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
-/// Sweep `<cache>/summaries`: remove what can never be served, then the oldest until the rest fits `budget_bytes`.
-///
-/// # Why this is needed, and why it is safe to run beside a session
-///
-/// The key contains [`READING_FINGERPRINT`], which is a hash of the readers' source, so **every change to a reader
-/// makes every entry written before it unreachable** — not wrong, just never asked for again. Nothing removed them.
-/// A developer of this crate, or a user upgrading it, left a whole project's worth of summaries behind each time.
-///
-/// A sweep only ever removes files a cache miss would rebuild: an unreachable file is never looked up, and a file
-/// removed for being old is one the next run re-derives. A file that disappears between the directory listing and
-/// the removal is somebody else's sweep, and is not an error. Writes are `.tmp` then rename
-/// ([`crate::index::write_summary`]), so a sweep never sees half a summary; a `.tmp` it finds is removed only when
-/// it is old enough that no writer can still own it.
-///
-/// A missing cache directory is an empty cache, and the sweep does not create it.
-///
-/// "Oldest" is by modification time — a hit does not rewrite an entry, so this is *first written*, not *last used*,
+// Sweep `<cache>/summaries`: remove what can never be served, then the oldest until the rest fits `budget_bytes`.
+//
+// # Why this is needed, and why it is safe to run beside a session
+//
+// The key contains [`READING_FINGERPRINT`], which is a hash of the readers' source, so **every change to a reader
+// makes every entry written before it unreachable** — not wrong, just never asked for again. Nothing removed them.
+// A developer of this crate, or a user upgrading it, left a whole project's worth of summaries behind each time.
+//
+// A sweep only ever removes files a cache miss would rebuild: an unreachable file is never looked up, and a file
+// removed for being old is one the next run re-derives. A file that disappears between the directory listing and
+// the removal is somebody else's sweep, and is not an error. Writes are `.tmp` then rename
+// ([`crate::index::write_summary`]), so a sweep never sees half a summary; a `.tmp` it finds is removed only when
+// it is old enough that no writer can still own it.
+//
+// A missing cache directory is an empty cache, and the sweep does not create it.
+//
+// "Oldest" is by modification time — a hit does not rewrite an entry, so this is *first written*, not *last used*,
 
 /// The directory name this crate keeps its cache in, under the project root.
 ///
@@ -378,11 +378,11 @@ mod tests {
         crate::index::write_summary(&summary, directory).expect("the summary is written")
     }
 
-    /// A summary another reader wrote is garbage the moment the reader changes; nothing else is touched.
+    // A summary another reader wrote is garbage the moment the reader changes; nothing else is touched.
 
-    /// Over budget, the oldest go first — and only as many as it takes.
+    // Over budget, the oldest go first — and only as many as it takes.
 
-    /// A project that has never been cached has nothing to sweep, and asking must not create the directory.
+    // A project that has never been cached has nothing to sweep, and asking must not create the directory.
 
     #[test]
     fn the_layout_is_sharded_and_inside_the_project() {

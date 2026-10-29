@@ -797,8 +797,7 @@ mod tests {
                     format!(
                         "{}:{line}:{}",
                         file.file_name().unwrap().to_string_lossy(),
-                        text[reference.range.start_offset..reference.range.end_offset()]
-                            .to_string()
+                        &text[reference.range.start_offset..reference.range.end_offset()]
                     )
                 })
                 .collect(),

@@ -46,10 +46,7 @@ fn spelled(rendered: &str) -> Vec<String> {
                     | cpp_parser::CppTokenKind::BlockComment
             )
         })
-        .map(|token| {
-            rendered[usize::from(token.range.start_offset)..usize::from(token.range.end_offset())]
-                .to_string()
-        })
+        .map(|token| rendered[token.range.start_offset..token.range.end_offset()].to_string())
         .collect()
 }
 

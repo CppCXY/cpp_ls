@@ -178,12 +178,10 @@ impl<F: FileProvider + Clone> FixContext<'_, F> {
                             uri: uri.clone(),
                             version: None,
                         },
-                        edits: vec![lsp_types::OneOf3::Left(
-                            TextEdit {
-                                range: Range { start: at, end: at },
-                                new_text: text,
-                            },
-                        )],
+                        edits: vec![lsp_types::OneOf3::Left(TextEdit {
+                            range: Range { start: at, end: at },
+                            new_text: text,
+                        })],
                     },
                 ])),
                 change_annotations: None,

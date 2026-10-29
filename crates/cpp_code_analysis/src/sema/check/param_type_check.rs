@@ -249,7 +249,6 @@ fn check_the_arguments(
 ///
 /// `None` when the index knows no such function, knows several (an overload set, which this check declines), or when the
 /// declaration has no parameter list to compare against.
-
 fn the_index_declares_one(context: &CheckContext<'_>, name: &str) -> Option<Vec<String>> {
     // **The file's own summary first, then the index.** The summary holds what this file declares; `definitions` answers for
     // the rest of the project. A name declared once in either is one parameter list; several is an overload set, which this

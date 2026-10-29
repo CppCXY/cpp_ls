@@ -2560,9 +2560,11 @@ pub(crate) fn declared_parameter_defaults_with(
     // **A row of "no default" is not stored.** The field is cloned and compared per fact, and most templates have no
     // default at all: storing the empties would put sixteen bytes on every class template in the standard library to
     // say nothing.
-    if defaults
-        .iter()
-        .any(|default| !default.is_empty()) { defaults } else { Default::default() }
+    if defaults.iter().any(|default| !default.is_empty()) {
+        defaults
+    } else {
+        Default::default()
+    }
 }
 
 /// **A class declaration's own text, up to its body** — read child by child instead of from the node.
@@ -4061,6 +4063,35 @@ pub fn template_parameters_for<'a>(scopes: &'a ScopeTree, fact: &DeclFact) -> Ve
 
     found
 }
+/// **Does this declaration's specifier sequence hold a directive line?** — see [`DeclFact::split_by_a_directive`].
+///
+/// The text is the one the written type was read from: `_GLIBCXX20_CONSTEXPR\n\treference\n#else\n\tvoid\n#endif` for
+/// libstdc++'s `emplace_back`. A `#` at the start of a line inside it is the parser's own spelling of "this
+/// declaration was written for two configurations", and it costs one `to_string` of a specifier node per declaration.
+pub fn split_by_a_directive_with(shapes: &DeclarationShapes, binding: &Binding) -> bool {
+    shapes
+        .specifiers_at(the_offset_to_descend_by(binding))
+        .map(|node| node.text().to_string())
+        // **A *conditional* directive, and only a conditional one.** The flag means "the written reading states two
+        // types and cannot know which is live", which is `#if`/`#ifdef`/`#ifndef`/`#elif`/`#else`/`#endif` and nothing
+        // else. The first version asked whether *any* line of the specifier sequence starts with `#`, and a
+        // `#pragma warning(push)` between the type and the name answered yes: measured on MSVC's `<vector>`, whose
+        // rendering — which has every branch resolved — still carried the flag on `emplace_back`, so a hover asked a
+        // second reading for a question the first had already answered.
+        .is_some_and(|text| {
+            text.lines().any(|line| {
+                let Some(directive) = line.trim_start().strip_prefix('#') else {
+                    return false;
+                };
+                let word: &str = directive
+                    .trim_start()
+                    .split(|character: char| !character.is_ascii_alphanumeric())
+                    .next()
+                    .unwrap_or_default();
+                matches!(word, "if" | "ifdef" | "ifndef" | "elif" | "else" | "endif")
+            })
+        })
+}
 
 #[cfg(test)]
 mod tests {
@@ -4936,33 +4967,4 @@ int Box<int>::Inner::deep = 0;
         );
         assert_eq!(of("plain").returns.as_deref(), Some("void"));
     }
-}
-/// **Does this declaration's specifier sequence hold a directive line?** — see [`DeclFact::split_by_a_directive`].
-///
-/// The text is the one the written type was read from: `_GLIBCXX20_CONSTEXPR\n\treference\n#else\n\tvoid\n#endif` for
-/// libstdc++'s `emplace_back`. A `#` at the start of a line inside it is the parser's own spelling of "this
-/// declaration was written for two configurations", and it costs one `to_string` of a specifier node per declaration.
-pub fn split_by_a_directive_with(shapes: &DeclarationShapes, binding: &Binding) -> bool {
-    shapes
-        .specifiers_at(the_offset_to_descend_by(binding))
-        .map(|node| node.text().to_string())
-        // **A *conditional* directive, and only a conditional one.** The flag means "the written reading states two
-        // types and cannot know which is live", which is `#if`/`#ifdef`/`#ifndef`/`#elif`/`#else`/`#endif` and nothing
-        // else. The first version asked whether *any* line of the specifier sequence starts with `#`, and a
-        // `#pragma warning(push)` between the type and the name answered yes: measured on MSVC's `<vector>`, whose
-        // rendering — which has every branch resolved — still carried the flag on `emplace_back`, so a hover asked a
-        // second reading for a question the first had already answered.
-        .is_some_and(|text| {
-            text.lines().any(|line| {
-                let Some(directive) = line.trim_start().strip_prefix('#') else {
-                    return false;
-                };
-                let word: &str = directive
-                    .trim_start()
-                    .split(|character: char| !character.is_ascii_alphanumeric())
-                    .next()
-                    .unwrap_or_default();
-                matches!(word, "if" | "ifdef" | "ifndef" | "elif" | "else" | "endif")
-            })
-        })
 }

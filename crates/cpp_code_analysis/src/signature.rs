@@ -407,7 +407,7 @@ where
 /// `assign_type_check` refuse to judge a class it could not see. Where the declaration is open, reading it is both
 /// simpler and more certain.
 fn constructors_of(declared_in: &FileView, name_offset: usize) -> Vec<Callee> {
-    use cpp_parser::{CppAstNode, CppAstToken, CppClassDef, CppDeclaration, CppKind, CppTokenKind};
+    use cpp_parser::{CppAstNode, CppAstToken, CppClassDef, CppDeclaration, CppTokenKind};
 
     let Some(class) = declared_in
         .root
@@ -434,9 +434,7 @@ fn constructors_of(declared_in: &FileView, name_offset: usize) -> Vec<Callee> {
             .syntax()
             .descendants_with_tokens()
             .filter_map(|element| element.into_token())
-            .find(|token| {
-                CppTokenKind::from(token.kind()) == CppTokenKind::Identifier
-            })
+            .find(|token| CppTokenKind::from(token.kind()) == CppTokenKind::Identifier)
         else {
             continue;
         };
@@ -655,9 +653,7 @@ fn directly_initialized_at(root: &CppSyntaxNode, offset: usize) -> Option<(Strin
                 break;
             }
         }
-        let Some(child) = child else {
-            return None;
-        };
+        let child = child?;
         if CppSyntaxKind::from(child.kind()) == CppSyntaxKind::ParameterList {
             // Up from the list: the declarator must hold **only** the list — `(int a)` and not `f(int a)` — and the
             // declaration must not be a function definition (a body after it is a different thing entirely).

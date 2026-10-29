@@ -1074,7 +1074,8 @@ fn an_auto_is_deduced_from_its_initializer() {
     // all — so a consumer cannot tell `auto f()` from a function whose return type the reader could not read. That
     // is a gap in `DeclFact`, not something deduction should guess around, and it is left visible here rather than
     // covered by a case that would pass for the wrong reason.
-    for name in ["no_initializer"] {
+    {
+        let name = "no_initializer";
         let fact = facts
             .iter()
             .find(|fact| fact.name == name && fact.type_of.as_deref() == Some("auto"))

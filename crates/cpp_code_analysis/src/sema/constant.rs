@@ -268,10 +268,7 @@ fn tokens_of(written: &str) -> Vec<(CppTokenKind, String)> {
         .map(|token| {
             let start = token.range.start_offset.min(source.len());
             let end = token.range.end_offset().min(source.len());
-            (
-                token.kind,
-                source[start..end].to_string(),
-            )
+            (token.kind, source[start..end].to_string())
         })
         .collect()
 }
@@ -283,10 +280,7 @@ fn an_expression(
     names: &mut dyn FnMut(&str) -> Option<i64>,
 ) -> Option<i64> {
     let mut value = a_shifted_expression(tokens, at, names)?;
-    loop {
-        let Some((_, text)) = tokens.get(*at) else {
-            break;
-        };
+    while let Some((_, text)) = tokens.get(*at) {
         // **The operator is consumed before the right operand is read** — the one bug this parser had, and it read as
         // arithmetic working for `+` and `-` only: those two fell through to `a_primary`'s *unary* arms and `1 + 2`
         // happened to come out 3, while `10 / 3` read `/` as its right operand and answered nothing.
@@ -312,10 +306,7 @@ fn a_shifted_expression(
     names: &mut dyn FnMut(&str) -> Option<i64>,
 ) -> Option<i64> {
     let mut value = a_bitwise_expression(tokens, at, names)?;
-    loop {
-        let Some((_, text)) = tokens.get(*at) else {
-            break;
-        };
+    while let Some((_, text)) = tokens.get(*at) {
         let operator = text.as_str();
         if !matches!(operator, "<<" | ">>") {
             break;
@@ -340,10 +331,7 @@ fn a_bitwise_expression(
     names: &mut dyn FnMut(&str) -> Option<i64>,
 ) -> Option<i64> {
     let mut value = a_term(tokens, at, names)?;
-    loop {
-        let Some((_, text)) = tokens.get(*at) else {
-            break;
-        };
+    while let Some((_, text)) = tokens.get(*at) {
         let operator = text.as_str();
         if !matches!(operator, "|" | "^" | "&") {
             break;
@@ -366,10 +354,7 @@ fn a_term(
     names: &mut dyn FnMut(&str) -> Option<i64>,
 ) -> Option<i64> {
     let mut value = a_primary(tokens, at, names)?;
-    loop {
-        let Some((_, text)) = tokens.get(*at) else {
-            break;
-        };
+    while let Some((_, text)) = tokens.get(*at) {
         let operator = text.as_str();
         if !matches!(operator, "*" | "/" | "%") {
             break;

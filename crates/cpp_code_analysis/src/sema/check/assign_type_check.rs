@@ -267,7 +267,8 @@ fn report_if_it_does_not_convert(
     // relation first and the index only for the class question, and answers `Unknown` — silence — when neither can speak.
     if crate::sema::convert::conversion(&from, written, |class| {
         super::a_class_can_be_built_from(context, class, &from)
-    }) == crate::sema::convert::Conversion::Refused {
+    }) == crate::sema::convert::Conversion::Refused
+    {
         report(context, expression, name, how, written);
         return;
     }

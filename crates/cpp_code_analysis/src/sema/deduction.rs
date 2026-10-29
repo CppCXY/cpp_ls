@@ -171,6 +171,62 @@ fn the_shape_of(spelling: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// **The template parameters a declaration owns**, read from the text before it.
+///
+/// A heuristic, and stated as one — the same one `signature.rs` grew for the same reason: `DeclFact` has no template
+/// header, so the nearest `template` before the declaration's name is the only evidence there is. A `;` between the
+/// header's `>` and the name means the header belongs to a declaration that ended in between, and the answer is empty
+/// (`docs/overloads.md` §13 is the fixture that measured that).
+pub fn template_parameters_before(source: &str, name_offset: usize) -> Vec<String> {
+    let before = &source[..name_offset.min(source.len())];
+    let Some(at) = before.rfind("template") else {
+        return Vec::new();
+    };
+    let header = &before[at..];
+    let Some(open) = header.find('<') else {
+        return Vec::new();
+    };
+    let Some(close) = header[open..].find('>') else {
+        return Vec::new();
+    };
+    if header[open + close..].contains(';') {
+        return Vec::new();
+    }
+    let inside = &header[open + 1..open + close];
+
+    let mut names = Vec::new();
+    let mut depth = 0i32;
+    let mut part = String::new();
+    for character in inside.chars() {
+        match character {
+            '<' | '(' | '[' => depth += 1,
+            '>' | ')' | ']' => depth -= 1,
+            ',' if depth == 0 => {
+                if let Some(name) = the_name_in(&part) {
+                    names.push(name);
+                }
+                part.clear();
+                continue;
+            }
+            _ => {}
+        }
+        part.push(character);
+    }
+    if let Some(name) = the_name_in(&part) {
+        names.push(name);
+    }
+    names
+}
+
+/// The last identifier of one `template` parameter, which is its name: `typename T` → `T`, `int N` → `N`.
+fn the_name_in(parameter: &str) -> Option<String> {
+    let without_default = parameter.split('=').next().unwrap_or(parameter);
+    let identifier = without_default
+        .split(|character: char| !(character.is_alphanumeric() || character == '_'))
+        .rfind(|word| !word.is_empty())?;
+    Some(identifier.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -294,59 +350,4 @@ mod tests {
             "`std::map<int, int>` does not begin with `std::vector<`, so nothing binds and the answer is no"
         );
     }
-}
-
-/// **The template parameters a declaration owns**, read from the text before it.
-///
-/// A heuristic, and stated as one — the same one `signature.rs` grew for the same reason: `DeclFact` has no template
-/// header, so the nearest `template` before the declaration's name is the only evidence there is. A `;` between the
-/// header's `>` and the name means the header belongs to a declaration that ended in between, and the answer is empty
-/// (`docs/overloads.md` §13 is the fixture that measured that).
-pub fn template_parameters_before(source: &str, name_offset: usize) -> Vec<String> {
-    let before = &source[..name_offset.min(source.len())];
-    let Some(at) = before.rfind("template") else {
-        return Vec::new();
-    };
-    let header = &before[at..];
-    let Some(open) = header.find('<') else {
-        return Vec::new();
-    };
-    let Some(close) = header[open..].find('>') else {
-        return Vec::new();
-    };
-    if header[open + close..].contains(';') {
-        return Vec::new();
-    }
-    let inside = &header[open + 1..open + close];
-
-    let mut names = Vec::new();
-    let mut depth = 0i32;
-    let mut part = String::new();
-    for character in inside.chars() {
-        match character {
-            '<' | '(' | '[' => depth += 1,
-            '>' | ')' | ']' => depth -= 1,
-            ',' if depth == 0 => {
-                if let Some(name) = the_name_in(&part) {
-                    names.push(name);
-                }
-                part.clear();
-                continue;
-            }
-            _ => {}
-        }
-        part.push(character);
-    }
-    if let Some(name) = the_name_in(&part) {
-        names.push(name);
-    }
-    names
-}
-
-/// The last identifier of one `template` parameter, which is its name: `typename T` → `T`, `int N` → `N`.
-fn the_name_in(parameter: &str) -> Option<String> {
-    let without_default = parameter.split('=').next().unwrap_or(parameter);
-    let identifier = without_default
-        .split(|character: char| !(character.is_alphanumeric() || character == '_')).rfind(|word| !word.is_empty())?;
-    Some(identifier.to_string())
 }

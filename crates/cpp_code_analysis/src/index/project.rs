@@ -1194,6 +1194,7 @@ pub(crate) fn classes_the_cursor_is_in(
 ///   [`DeclFact::bases`] — and filtering on a guess would hide members a consumer can legitimately see.
 /// * No instantiation. A template class lists the members it was written with; a base written `Base<int>` is
 ///   looked up as the class `Base`.
+///
 /// **The members written in the class itself** — [`members_of`]'s first step, and nothing else.
 ///
 /// [`members_of`] answers the question a *reader* asks ("what can I write after `.`"), and it walks the base chain
@@ -2383,7 +2384,6 @@ pub fn name_completions_traced(
     path: &Path,
     offset: usize,
 ) -> Known<NameCompletions> {
-    
     name_completions_at(index, scopes, root, path, offset)
 }
 
@@ -4560,7 +4560,7 @@ pub(crate) fn operator_returns_of(
         }
     }
 
-    let class_view = class_file.as_deref().and_then((declaring));
+    let class_view = class_file.as_deref().and_then(declaring);
     let (class_scopes, class_root, class_path) = match &class_view {
         Some(view) => (&view.scopes, &view.root, view.path.as_path()),
         None => (scopes, root, path),
@@ -4873,6 +4873,11 @@ fn pointee_type_name(written: &str) -> Option<String> {
 /// thing for a consumer to be told.
 ///
 /// [`UnknownType`]: UnknownReason::UnknownType
+// **A big variant, kept inline on purpose.** `Known` answers for every expression the engine types, and boxing the
+// found case would put an allocation on the hot path of every member lookup to save the difference between 392 and
+// 48 bytes in an enum that lives for the length of one question. The variants are also matched on by value in a
+// dozen places, where the box would be a deref at each site.
+#[allow(clippy::large_enum_variant)]
 enum NamedDeclaration {
     /// A binding of the file being edited. Its spellings come from the tree the caller has.
     Here(crate::Binding),
@@ -5044,9 +5049,7 @@ impl NamedDeclaration {
                             &fact.parameters,
                             written_arguments,
                         );
-                        let Some(declared_in) = declaring(file.as_path()) else {
-                            return None;
-                        };
+                        let declared_in = declaring(file.as_path())?;
                         let Known::Yes(binding) = crate::sema::resolve::definition_at(
                             &declared_in.scopes,
                             &declared_in.root,
@@ -5317,9 +5320,7 @@ fn a_trait_alias_resolved(
         .map(|one| one.to_string())
         .collect();
     let bare = crate::sema::types::parse_type_spelling(&class);
-    let Some(class_name) = bare.class_name() else {
-        return None;
-    };
+    let class_name = bare.class_name()?;
     let parameters = index.template_parameters_for(class_name, path, &arguments);
     let defaults = index.template_parameter_defaults_for(class_name, path, &arguments);
     let resolved = crate::sema::types::substituted_spelling_with_defaults(
@@ -7887,9 +7888,9 @@ fn member_fact_inner(
         if let Some(declared_in) = qualified_from_the_index(index, path, bare)
             && let Some(found) =
                 direct_member(index, scopes, root, path, &declared_in, member, arguments)
-            {
-                return Known::Yes(found);
-            }
+        {
+            return Known::Yes(found);
+        }
     }
 
     // Inherited members, **level by level**: a member of a direct base hides a member of that base's own base,
@@ -8837,7 +8838,6 @@ fn bases_of(
     path: &Path,
     class: &str,
 ) -> Known<Vec<String>> {
-    
     bases_of_inner(index, scopes, root, path, class)
 }
 
@@ -11081,8 +11081,6 @@ impl ProjectIndex {
                 pending.push((next, step, depth + 1));
             }
         }
-
-        
 
         order
             .into_iter()

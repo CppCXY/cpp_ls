@@ -67,11 +67,11 @@ pub fn is_disabled(spans: &[(usize, usize)], offset: usize) -> bool {
 /// ask one question per iteration.
 pub fn per_token(stream: &Stream<'_>, spans: &[(usize, usize)]) -> Vec<bool> {
     let mut flags = vec![false; stream.tokens.len()];
-    for index in 0..stream.tokens.len() {
+    for (index, disabled) in flags.iter_mut().enumerate() {
         let gap = &stream.gaps[index];
         // The gap belongs to the span when its *end* is inside it (a gap that starts the span includes the newline
         // before the `off` line, and rewriting that newline would move the marker).
-        flags[index] = is_disabled(spans, gap.start.max(gap.end.saturating_sub(1)))
+        *disabled = is_disabled(spans, gap.start.max(gap.end.saturating_sub(1)))
             || is_disabled(spans, stream.tokens[index].start);
     }
     flags

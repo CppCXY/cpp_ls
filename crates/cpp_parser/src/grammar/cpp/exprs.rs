@@ -1143,37 +1143,37 @@ fn is_a_type_in_parentheses(p: &CppParser) -> bool {
     }
 }
 
-/// Is the "an operand follows" evidence **usable here**?
-///
-/// Two rules consult that evidence — the cast's `)` ([`is_a_type_in_parentheses`]) and the template-id's `>`
-/// ([`parse_primary_expr`]'s name branch) — and both need the same exception, which is why the question is asked
-/// once, here.
-///
-/// Inside a **clause**, the token after the construct may be the *declaration* the clause constrains rather than
-/// a stray operand, and that declaration usually begins with a type — an identifier or a keyword:
-///
-/// ```text
-/// template <typename T> requires C<T> T value = T{};       after the template-id
-/// template <typename T> requires (C<T>) T value = T{};     after the parenthesised constraint
-/// ```
-///
-/// Reading `C<T>` back, or taking `(C<T>) T` for a cast, leaves the clause eating the declaration's own type.
-///
-/// **Parentheses are what tell the two cases apart**, and it is not a guess: a `ParenExpr` that is still open means
-/// the *constraint itself* is still going, so an operand there cannot be a declaration —
-/// `requires (N < 0 || N > 3)` is the shape — while at the clause's top level the operand can only be what
-/// follows the clause.
-/// **Reads the template-id at the cursor, or puts the tokens back.**
-///
-/// `true` when the `<` really began arguments and they are now part of the name; `false` when it was a comparison,
-/// in which case every token the attempt consumed has been rolled back and the caller must end the name.
-///
-/// Extracted from the name loop because two places in it need the same reading — the ordinary turn of the loop, and
-/// the run of names a macro prefix leaves behind (`MACRO name<targs>(…)`, where the `<` arrives **after** the run
-/// has taken the name and the loop is about to end). Writing it twice would be two readers for one shape, free to
-/// disagree about which `<` is a template-id.
-///
-/// The `false` answer is not "it did not parse": `n < 0 || n > 100000` parses perfectly well as `n<0 || n>`, so
+// Is the "an operand follows" evidence **usable here**?
+//
+// Two rules consult that evidence — the cast's `)` ([`is_a_type_in_parentheses`]) and the template-id's `>`
+// ([`parse_primary_expr`]'s name branch) — and both need the same exception, which is why the question is asked
+// once, here.
+//
+// Inside a **clause**, the token after the construct may be the *declaration* the clause constrains rather than
+// a stray operand, and that declaration usually begins with a type — an identifier or a keyword:
+//
+// ```text
+// template <typename T> requires C<T> T value = T{};       after the template-id
+// template <typename T> requires (C<T>) T value = T{};     after the parenthesised constraint
+// ```
+//
+// Reading `C<T>` back, or taking `(C<T>) T` for a cast, leaves the clause eating the declaration's own type.
+//
+// **Parentheses are what tell the two cases apart**, and it is not a guess: a `ParenExpr` that is still open means
+// the *constraint itself* is still going, so an operand there cannot be a declaration —
+// `requires (N < 0 || N > 3)` is the shape — while at the clause's top level the operand can only be what
+// follows the clause.
+// **Reads the template-id at the cursor, or puts the tokens back.**
+//
+// `true` when the `<` really began arguments and they are now part of the name; `false` when it was a comparison,
+// in which case every token the attempt consumed has been rolled back and the caller must end the name.
+//
+// Extracted from the name loop because two places in it need the same reading — the ordinary turn of the loop, and
+// the run of names a macro prefix leaves behind (`MACRO name<targs>(…)`, where the `<` arrives **after** the run
+// has taken the name and the loop is about to end). Writing it twice would be two readers for one shape, free to
+// disagree about which `<` is a template-id.
+//
+// The `false` answer is not "it did not parse": `n < 0 || n > 100000` parses perfectly well as `n<0 || n>`, so
 
 /// **Can this token not follow an expression?** — `N<3> struct`, where the `struct` proves the `<` was a comparison.
 ///

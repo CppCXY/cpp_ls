@@ -258,130 +258,6 @@ impl RegisterCapabilities for TypeDefinitionCapabilities {
         server.type_definition_provider = Some(TypeDefinitionProviderCapability::Simple(true));
     }
 }
-#[cfg(test)]
-mod tests {
-    use std::path::PathBuf;
-
-    use cpp_code_analysis::{
-        CompilerConfig, MemoryFiles, OpenDocuments, Session, SessionFiles, WatchFilter,
-    };
-
-    use super::{the_name_of_a_type, type_definitions_of};
-
-    fn session() -> Session<MemoryFiles> {
-        let files = MemoryFiles::new().with_file(
-            "/p/base.h",
-            "struct Widget {\n    int size() const;\n};\nWidget make();\n",
-        );
-        let files = files.with_file(
-            "/p/a.cpp",
-            "#include \"base.h\"\nvoid f() {\n    Widget w;\n    auto made = make();\n    w.size();\n}\n",
-        );
-        let providers = SessionFiles::new(OpenDocuments::new(), files);
-        let mut session = Session::with_config(
-            "/p",
-            providers,
-            WatchFilter::new("/p"),
-            CompilerConfig::default(),
-        );
-        session.add_project_files([PathBuf::from("/p/base.h"), PathBuf::from("/p/a.cpp")]);
-        session.index_everything();
-        session
-    }
-
-    fn offset_of(source: &str, needle: &str) -> usize {
-        source.find(needle).expect("the fixture writes it") + 1
-    }
-
-    /// **A variable's type, and an `auto`'s deduced type, both answer the class's declaration.**
-    ///
-    /// The `auto` case is the one the feature exists for: the type is written nowhere in the file, so a reader cannot
-    /// find it without the inference — and the inference here is the same one the hover shows.
-    #[test]
-    fn a_variable_and_an_auto_answer_the_types_declaration() {
-        let session = session();
-        let path = PathBuf::from("/p/a.cpp");
-        let held = session.files().held(&path).expect("the file is held");
-        let source = held.text.to_string();
-        let view = session.view_of_the_file(&path).expect("the file parses");
-
-        for needle in ["Widget w;"] {
-            let at = offset_of(&source, needle);
-            let found = type_definitions_of(&session, &view, at);
-            println!(
-                "{needle} → {:?}",
-                found
-                    .iter()
-                    .map(|location| (location.uri.path(), location.range.start.line + 1))
-                    .collect::<Vec<_>>()
-            );
-            assert_eq!(found.len(), 1, "{needle}: one declaration of `Widget`");
-            assert!(
-                found[0].uri.path().ends_with("base.h"),
-                "{needle}: and it is in the header that declares the class"
-            );
-            assert_eq!(
-                found[0].range.start.line, 0,
-                "{needle}: `struct Widget` is line 1 of base.h"
-            );
-        }
-
-        // **A class name is its own type definition** — `std::string s;` asks where `string` is declared, and the
-        // answer is the class, not the variable.
-        let at = offset_of(&source, "Widget w;");
-        let found = type_definitions_of(&session, &view, at + "Widget".len() - 1);
-        assert_eq!(
-            found.len(),
-            1,
-            "the class name answers its own declaration: {found:?}"
-        );
-    }
-    /// **A builtin has no declaration to go to**, so the answer is empty rather than the variable's own declaration —
-    /// which would be Go to Definition wearing another name.
-    #[test]
-    fn an_int_answers_nothing() {
-        let session = session();
-        let held = session
-            .files()
-            .held(&PathBuf::from("/p/a.cpp"))
-            .expect("held");
-        let source = held.text.to_string();
-        let view = session
-            .view_of_the_file(&PathBuf::from("/p/a.cpp"))
-            .expect("parses");
-        // **On `size`, not on `w`** — a cursor on the object asks about the object, which is the right answer for that
-        // caret and not what this test is about.
-        let at = offset_of(&source, "w.size") + 1;
-        let found = type_definitions_of(&session, &view, at);
-        println!("w.size → {found:?}");
-        // `w.size` is a call to a member returning `int`: `int` has no declaration to go to, and the object's class is
-        // **not** the answer — that would be the class of the thing the member is called on.
-        assert!(
-            found.is_empty(),
-            "an int has no type declaration, and the object is not it: {found:?}"
-        );
-    }
-
-    /// The spelling → name rule, which every answer goes through.
-    #[test]
-    fn a_spelling_gives_the_name_a_declaration_is_filed_under() {
-        for (spelling, name) in [
-            ("Widget", "Widget"),
-            ("const Widget&", "Widget"),
-            ("ns::Widget", "Widget"),
-            ("Widget<T>", "Widget"),
-            ("const ns::Widget<T>&", "Widget"),
-            ("struct Widget *", "Widget"),
-            ("int", "int"),
-        ] {
-            assert_eq!(
-                the_name_of_a_type(spelling).as_deref(),
-                Some(name),
-                "{spelling}"
-            );
-        }
-    }
-}
 /// The two ends of the identifier chain `offset` is inside — `(start, end)`, both inside the chain's last identifier
 /// when it is qualified (`ns::Widget` → the `Widget` part).
 ///
@@ -439,4 +315,129 @@ fn the_members_type<F: FileProvider + Clone>(
         .returns
         .clone()
         .or_else(|| member.fact.type_of.clone())
+}
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use cpp_code_analysis::{
+        CompilerConfig, MemoryFiles, OpenDocuments, Session, SessionFiles, WatchFilter,
+    };
+
+    use super::{the_name_of_a_type, type_definitions_of};
+
+    fn session() -> Session<MemoryFiles> {
+        let files = MemoryFiles::new().with_file(
+            "/p/base.h",
+            "struct Widget {\n    int size() const;\n};\nWidget make();\n",
+        );
+        let files = files.with_file(
+            "/p/a.cpp",
+            "#include \"base.h\"\nvoid f() {\n    Widget w;\n    auto made = make();\n    w.size();\n}\n",
+        );
+        let providers = SessionFiles::new(OpenDocuments::new(), files);
+        let mut session = Session::with_config(
+            "/p",
+            providers,
+            WatchFilter::new("/p"),
+            CompilerConfig::default(),
+        );
+        session.add_project_files([PathBuf::from("/p/base.h"), PathBuf::from("/p/a.cpp")]);
+        session.index_everything();
+        session
+    }
+
+    fn offset_of(source: &str, needle: &str) -> usize {
+        source.find(needle).expect("the fixture writes it") + 1
+    }
+
+    /// **A variable's type, and an `auto`'s deduced type, both answer the class's declaration.**
+    ///
+    /// The `auto` case is the one the feature exists for: the type is written nowhere in the file, so a reader cannot
+    /// find it without the inference — and the inference here is the same one the hover shows.
+    #[test]
+    fn a_variable_and_an_auto_answer_the_types_declaration() {
+        let session = session();
+        let path = PathBuf::from("/p/a.cpp");
+        let held = session.files().held(&path).expect("the file is held");
+        let source = held.text.to_string();
+        let view = session.view_of_the_file(&path).expect("the file parses");
+
+        {
+            let needle = "Widget w;";
+            let at = offset_of(&source, needle);
+            let found = type_definitions_of(&session, &view, at);
+            println!(
+                "{needle} → {:?}",
+                found
+                    .iter()
+                    .map(|location| (location.uri.path(), location.range.start.line + 1))
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(found.len(), 1, "{needle}: one declaration of `Widget`");
+            assert!(
+                found[0].uri.path().ends_with("base.h"),
+                "{needle}: and it is in the header that declares the class"
+            );
+            assert_eq!(
+                found[0].range.start.line, 0,
+                "{needle}: `struct Widget` is line 1 of base.h"
+            );
+        }
+
+        // **A class name is its own type definition** — `std::string s;` asks where `string` is declared, and the
+        // answer is the class, not the variable.
+        let at = offset_of(&source, "Widget w;");
+        let found = type_definitions_of(&session, &view, at + "Widget".len() - 1);
+        assert_eq!(
+            found.len(),
+            1,
+            "the class name answers its own declaration: {found:?}"
+        );
+    }
+    /// **A builtin has no declaration to go to**, so the answer is empty rather than the variable's own declaration —
+    /// which would be Go to Definition wearing another name.
+    #[test]
+    fn an_int_answers_nothing() {
+        let session = session();
+        let held = session
+            .files()
+            .held(PathBuf::from("/p/a.cpp"))
+            .expect("held");
+        let source = held.text.to_string();
+        let view = session
+            .view_of_the_file(PathBuf::from("/p/a.cpp"))
+            .expect("parses");
+        // **On `size`, not on `w`** — a cursor on the object asks about the object, which is the right answer for that
+        // caret and not what this test is about.
+        let at = offset_of(&source, "w.size") + 1;
+        let found = type_definitions_of(&session, &view, at);
+        println!("w.size → {found:?}");
+        // `w.size` is a call to a member returning `int`: `int` has no declaration to go to, and the object's class is
+        // **not** the answer — that would be the class of the thing the member is called on.
+        assert!(
+            found.is_empty(),
+            "an int has no type declaration, and the object is not it: {found:?}"
+        );
+    }
+
+    /// The spelling → name rule, which every answer goes through.
+    #[test]
+    fn a_spelling_gives_the_name_a_declaration_is_filed_under() {
+        for (spelling, name) in [
+            ("Widget", "Widget"),
+            ("const Widget&", "Widget"),
+            ("ns::Widget", "Widget"),
+            ("Widget<T>", "Widget"),
+            ("const ns::Widget<T>&", "Widget"),
+            ("struct Widget *", "Widget"),
+            ("int", "int"),
+        ] {
+            assert_eq!(
+                the_name_of_a_type(spelling).as_deref(),
+                Some(name),
+                "{spelling}"
+            );
+        }
+    }
 }

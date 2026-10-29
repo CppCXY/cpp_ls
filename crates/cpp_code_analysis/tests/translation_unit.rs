@@ -626,15 +626,15 @@ fn an_unguarded_header_is_read_again_and_defines_what_its_second_reader_asked_fo
     );
 }
 
-/// **A unit can be kept and read back** — the cache layer's acceptance, on a fixture rather than a corpus.
-///
-/// Three properties, and the second is the one that makes it usable rather than merely fast:
-///
-/// 1. an entry written by one run is served to the next;
-/// 2. what is served **answers exactly like what was walked** — a cache of macro state that decodes into a
-///    slightly different timeline produces a *reading*, not a diagnostic, and every rule downstream would then
-///    answer about a header nobody has;
-/// 3. a file in the closure whose contents moved **refuses** the entry, which is the whole validity key.
+// **A unit can be kept and read back** — the cache layer's acceptance, on a fixture rather than a corpus.
+//
+// Three properties, and the second is the one that makes it usable rather than merely fast:
+//
+// 1. an entry written by one run is served to the next;
+// 2. what is served **answers exactly like what was walked** — a cache of macro state that decodes into a
+//    slightly different timeline produces a *reading*, not a diagnostic, and every rule downstream would then
+//    answer about a header nobody has;
+// 3. a file in the closure whose contents moved **refuses** the entry, which is the whole validity key.
 // **`a_walked_unit_can_be_kept_and_read_back` is gone, with the cache it tested.** A built timeline is no
 // longer persisted: it outlives the files it was built from, and rebuilding one is 38 ms — see
 // `Session::translation_unit_of`. The other tests in this file are about the walk itself, which is unchanged.
@@ -1386,7 +1386,7 @@ fn a_file_cooks_the_same_through_the_unit_as_through_a_table_of_its_own() {
         cpp_code_analysis::FileMacros::new(timeline.root_environment(), &shared, Some(&seed), true);
 
     assert_eq!(
-        with_seed.definition("LATE").map(&body_of),
+        with_seed.definition("LATE").map(body_of),
         Some("(x)".to_string()),
         "api.h's `#define LATE(x) (x)` arrives through the include and is in force over the seed's `99` \
          (main.cpp's own `LATE(x) [x]` is the *own* layer, which the cook adds — not this one)"
@@ -1403,7 +1403,7 @@ fn a_file_cooks_the_same_through_the_unit_as_through_a_table_of_its_own() {
     // so this is a *known gap* rather than a behaviour this round introduced. Fixing it means a third state in
     // the layer ("certainly not defined here"), which is worth doing on purpose and with its own measurement.
     assert_eq!(
-        with_seed.definition("OBJECT").map(&body_of),
+        with_seed.definition("OBJECT").map(body_of),
         Some("99".to_string()),
         "the unit's `#undef` does not reach the cook's table — see the note above"
     );

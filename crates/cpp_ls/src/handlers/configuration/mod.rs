@@ -69,12 +69,11 @@ mod tests {
     /// that decides it is the whole configuration, so a new field is included the day it is added.
     #[test]
     fn two_configurations_with_the_same_settings_are_equal() {
+        // Every field is written out, which is the point of the test: a field added to the struct later has to be
+        // written here too, and the comparison then covers it by construction.
         let one = crate::handlers::ClientConfig {
             client_id: ClientId::Other,
             exclude: vec!["**/build/**".to_string()],
-            // The rest by default, which is what `..` is for here: this test is about the comparison covering every
-            // field, so a field added later is included the day it is added rather than needing an edit here.
-            ..Default::default()
         };
         let other = one.clone();
         assert_eq!(one, other);

@@ -499,6 +499,144 @@ fn same_tokens(before: &tokens::Stream<'_>, after: &str) -> bool {
             .all(|(mine, theirs)| mine.kind == theirs.kind && mine.text == theirs.text)
 }
 
+/// **The column a line gets, and whether it is a block line** (which is what updates `statement_indent`).
+///
+/// Three answers, in this order: a line inside a constructor initializer list goes to the list's own column; a block
+/// line takes the brace structure's answer; anything else is a continuation, whose column is the aligner's and is
+/// computed here because the emitted columns are known here and nowhere earlier.
+/// The indentation the source gives the line this gap opens: the spaces after its last newline, if the gap holds
+/// nothing but line breaks and that indentation.
+fn source_indent(source: &str, gap: &tokens::Gap) -> Option<usize> {
+    let text = source.get(gap.start..gap.end)?;
+    let after_last_newline = text.rsplit(char::from(10)).next().unwrap_or(text);
+    let only_spaces = after_last_newline
+        .chars()
+        .all(|character| character == char::from(32) || character == char::from(9));
+    if only_spaces && gap.newlines > 0 {
+        Some(after_last_newline.chars().count())
+    } else {
+        None
+    }
+}
+
+fn planned_indent(
+    index: usize,
+    stream: &tokens::Stream<'_>,
+    blocks: &[Option<usize>],
+    stack: &[usize],
+    statement_indent: usize,
+    style: &Style,
+    in_ctor_init: bool,
+    ctor_column: Option<usize>,
+    in_initializer: bool,
+    angle_column: Option<usize>,
+    enum_column: Option<usize>,
+) -> Option<(usize, bool)> {
+    let first = stream.tokens[index].kind;
+    if std::env::var_os("CPPFMT_DEBUG").is_some() {
+        eprintln!(
+            "planned: index={index} token={:?} in_ctor_init={in_ctor_init} ctor_column={ctor_column:?} block={:?} stack={}",
+            stream.tokens[index].text,
+            blocks[index],
+            stack.len()
+        );
+    }
+    // **A preprocessor directive starts at column 0** (`IndentPPDirectives: None`, which is clang-format`s
+    // default): `#if` inside a function body belongs against the margin, and the source`s own column is not kept.
+    if first == cpp_parser::CppTokenKind::Hash {
+        return Some((0, true));
+    }
+    let is_a_brace = matches!(
+        first,
+        cpp_parser::CppTokenKind::LeftBrace | cpp_parser::CppTokenKind::RightBrace
+    );
+    if in_ctor_init && !is_a_brace {
+        return Some((ctor_column.unwrap_or(statement_indent), false));
+    }
+    // **Inside a braced initializer the block rules do not apply**: the element is a continuation, indented by
+    // `ContinuationIndentWidth` from the declaration (measured: clang-format writes 8 for a table declared at 0).
+    if in_initializer && first != cpp_parser::CppTokenKind::RightBrace {
+        // **The base is the line that opened the list**, not whatever block line came last: a struct body`s members
+        // leave `statement_indent` at their level (4), while the table that follows belongs at 0 + the continuation
+        // width (measured on LuaDefine.h: clang-format writes those rows and their comment at 8).
+        let base = (0..index)
+            .rev()
+            .find(|earlier| !stream.gaps[*earlier].newlines.eq(&0) && blocks[*earlier].is_some())
+            .and_then(|earlier| blocks[earlier])
+            .unwrap_or(statement_indent);
+        return Some((layout::continuation(stack, base, first, style), false));
+    }
+    // **A line that continues a template argument list aligns after its `<`**, even where the block rules have an
+    // answer: at file scope the block answer for `using S2 = Scenario<` gives 0, which is where those lines came out.
+    // **A `requires` clause is a continuation of the declaration**, indented by `IndentWidth` (not
+    // `ContinuationIndentWidth`): clang-format writes `    ~T()` then `        requires(...)` — measured on the
+    // snippet corpus, where we put it at the block level instead.
+    // **A `<<` chain that continues on the next line** starts a continuation of the *block*, not of the previous
+    // line: clang-format writes the `<<` at the block`s indent plus `ContinuationIndentWidth` (measured on
+    // `std::cout` split over two lines: 8 in a function body, 12 inside a loop at 4).
+    // **A statement may start with a unary operator**: `*q = a + b;` after `int *q = p;` is a new statement,
+    // not a continuation of the line above — the previous token is a `;`, and the block rules own the column.
+    if matches!(
+        first,
+        cpp_parser::CppTokenKind::Star | cpp_parser::CppTokenKind::Ampersand
+    ) && index > 0
+        && matches!(
+            stream.tokens[index - 1].kind,
+            cpp_parser::CppTokenKind::Semicolon
+                | cpp_parser::CppTokenKind::LeftBrace
+                | cpp_parser::CppTokenKind::RightBrace
+        )
+        && let Some(indent) = blocks[index - 1]
+    {
+        return Some((indent, true));
+    }
+    if matches!(
+        stream.tokens[index].kind,
+        cpp_parser::CppTokenKind::LeftShift | cpp_parser::CppTokenKind::RightShift
+    ) {
+        let base = blocks[index].unwrap_or(statement_indent);
+        return Some((
+            base + style.count(StyleOption::ContinuationIndentWidth),
+            false,
+        ));
+    }
+    if stream.tokens[index].text == "requires" {
+        return Some((
+            statement_indent + style.count(StyleOption::IndentWidth),
+            false,
+        ));
+    }
+    // **An item of an enumeration written on the opening line aligns under the first item**:
+    // `enum class Wide { A,` then `B,` at the column after the `{ ` (not the block indent).
+    if let Some(column) = enum_column
+        && blocks[index].is_some()
+        // The `}` that closes the body goes back to the declaration`s own column, not the items`.
+        && stream.tokens[index].kind != cpp_parser::CppTokenKind::RightBrace
+    {
+        return Some((column, false));
+    }
+    if let Some(column) = angle_column
+        && blocks[index].is_some()
+    {
+        return Some((column, false));
+    }
+    if let Some(indent) = blocks[index] {
+        return Some((indent, true));
+    }
+    if stack.is_empty() && !layout::starts_a_continuation(stream, index) {
+        return None;
+    }
+    if first == cpp_parser::CppTokenKind::Comma
+        && let Some(column) = ctor_column
+    {
+        return Some((column, false));
+    }
+    Some((
+        layout::continuation(stack, statement_indent, first, style),
+        false,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -639,141 +777,4 @@ mod tests {
             .collect();
         assert_eq!(before, after);
     }
-}
-
-/// **The column a line gets, and whether it is a block line** (which is what updates `statement_indent`).
-///
-/// Three answers, in this order: a line inside a constructor initializer list goes to the list's own column; a block
-/// line takes the brace structure's answer; anything else is a continuation, whose column is the aligner's and is
-/// computed here because the emitted columns are known here and nowhere earlier.
-/// The indentation the source gives the line this gap opens: the spaces after its last newline, if the gap holds
-/// nothing but line breaks and that indentation.
-fn source_indent(source: &str, gap: &tokens::Gap) -> Option<usize> {
-    let text = source.get(gap.start..gap.end)?;
-    let after_last_newline = text.rsplit(char::from(10)).next().unwrap_or(text);
-    let only_spaces = after_last_newline
-        .chars()
-        .all(|character| character == char::from(32) || character == char::from(9));
-    if only_spaces && gap.newlines > 0 {
-        Some(after_last_newline.chars().count())
-    } else {
-        None
-    }
-}
-
-fn planned_indent(
-    index: usize,
-    stream: &tokens::Stream<'_>,
-    blocks: &[Option<usize>],
-    stack: &[usize],
-    statement_indent: usize,
-    style: &Style,
-    in_ctor_init: bool,
-    ctor_column: Option<usize>,
-    in_initializer: bool,
-    angle_column: Option<usize>,
-    enum_column: Option<usize>,
-) -> Option<(usize, bool)> {
-    let first = stream.tokens[index].kind;
-    if std::env::var_os("CPPFMT_DEBUG").is_some() {
-        eprintln!(
-            "planned: index={index} token={:?} in_ctor_init={in_ctor_init} ctor_column={ctor_column:?} block={:?} stack={}",
-            stream.tokens[index].text,
-            blocks[index],
-            stack.len()
-        );
-    }
-    // **A preprocessor directive starts at column 0** (`IndentPPDirectives: None`, which is clang-format`s
-    // default): `#if` inside a function body belongs against the margin, and the source`s own column is not kept.
-    if first == cpp_parser::CppTokenKind::Hash {
-        return Some((0, true));
-    }
-    let is_a_brace = matches!(
-        first,
-        cpp_parser::CppTokenKind::LeftBrace | cpp_parser::CppTokenKind::RightBrace
-    );
-    if in_ctor_init && !is_a_brace {
-        return Some((ctor_column.unwrap_or(statement_indent), false));
-    }
-    // **Inside a braced initializer the block rules do not apply**: the element is a continuation, indented by
-    // `ContinuationIndentWidth` from the declaration (measured: clang-format writes 8 for a table declared at 0).
-    if in_initializer && first != cpp_parser::CppTokenKind::RightBrace {
-        // **The base is the line that opened the list**, not whatever block line came last: a struct body`s members
-        // leave `statement_indent` at their level (4), while the table that follows belongs at 0 + the continuation
-        // width (measured on LuaDefine.h: clang-format writes those rows and their comment at 8).
-        let base = (0..index)
-            .rev()
-            .find(|earlier| !stream.gaps[*earlier].newlines.eq(&0) && blocks[*earlier].is_some())
-            .and_then(|earlier| blocks[earlier])
-            .unwrap_or(statement_indent);
-        return Some((layout::continuation(stack, base, first, style), false));
-    }
-    // **A line that continues a template argument list aligns after its `<`**, even where the block rules have an
-    // answer: at file scope the block answer for `using S2 = Scenario<` gives 0, which is where those lines came out.
-    // **A `requires` clause is a continuation of the declaration**, indented by `IndentWidth` (not
-    // `ContinuationIndentWidth`): clang-format writes `    ~T()` then `        requires(...)` — measured on the
-    // snippet corpus, where we put it at the block level instead.
-    // **A `<<` chain that continues on the next line** starts a continuation of the *block*, not of the previous
-    // line: clang-format writes the `<<` at the block`s indent plus `ContinuationIndentWidth` (measured on
-    // `std::cout` split over two lines: 8 in a function body, 12 inside a loop at 4).
-    // **A statement may start with a unary operator**: `*q = a + b;` after `int *q = p;` is a new statement,
-    // not a continuation of the line above — the previous token is a `;`, and the block rules own the column.
-    if matches!(
-        first,
-        cpp_parser::CppTokenKind::Star | cpp_parser::CppTokenKind::Ampersand
-    ) && index > 0
-        && matches!(
-            stream.tokens[index - 1].kind,
-            cpp_parser::CppTokenKind::Semicolon
-                | cpp_parser::CppTokenKind::LeftBrace
-                | cpp_parser::CppTokenKind::RightBrace
-        )
-        && let Some(indent) = blocks[index - 1] {
-            return Some((indent, true));
-        }
-    if matches!(
-        stream.tokens[index].kind,
-        cpp_parser::CppTokenKind::LeftShift | cpp_parser::CppTokenKind::RightShift
-    ) {
-        let base = blocks[index].unwrap_or(statement_indent);
-        return Some((
-            base + style.count(StyleOption::ContinuationIndentWidth),
-            false,
-        ));
-    }
-    if stream.tokens[index].text == "requires" {
-        return Some((
-            statement_indent + style.count(StyleOption::IndentWidth),
-            false,
-        ));
-    }
-    // **An item of an enumeration written on the opening line aligns under the first item**:
-    // `enum class Wide { A,` then `B,` at the column after the `{ ` (not the block indent).
-    if let Some(column) = enum_column
-        && blocks[index].is_some()
-        // The `}` that closes the body goes back to the declaration`s own column, not the items`.
-        && stream.tokens[index].kind != cpp_parser::CppTokenKind::RightBrace
-    {
-        return Some((column, false));
-    }
-    if let Some(column) = angle_column
-        && blocks[index].is_some()
-    {
-        return Some((column, false));
-    }
-    if let Some(indent) = blocks[index] {
-        return Some((indent, true));
-    }
-    if stack.is_empty() && !layout::starts_a_continuation(stream, index) {
-        return None;
-    }
-    if first == cpp_parser::CppTokenKind::Comma
-        && let Some(column) = ctor_column
-    {
-        return Some((column, false));
-    }
-    Some((
-        layout::continuation(stack, statement_indent, first, style),
-        false,
-    ))
 }

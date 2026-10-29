@@ -150,7 +150,7 @@ fn start_spaces(code: &str, comment: &str, minimum: usize) -> usize {
         minimum
     }
 }
-/// Split one line into (code, comment) when it has a trailing comment; `None` for a line that has none.
+// Split one line into (code, comment) when it has a trailing comment; `None` for a line that has none.
 
 ///
 /// The scan skips string and character literals so that `const char *s = "// not a comment";` stays code, and a line

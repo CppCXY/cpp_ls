@@ -1016,9 +1016,7 @@ impl ScopeTree {
         let at = self.by_start.partition_point(|(start, _)| *start <= offset);
         let mut current = at.checked_sub(1).map(|index| self.by_start[index].1);
         while let Some(id) = current {
-            let Some(scope) = self.scopes.get(id.index()) else {
-                return None;
-            };
+            let scope = self.scopes.get(id.index())?;
             if let Some(range) = scope.range
                 && offset >= range.start_offset
                 && offset <= range.end_offset()

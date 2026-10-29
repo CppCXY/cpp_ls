@@ -15,6 +15,10 @@
 //! sits. Until then [`format`] keeps the input's line structure, which makes the tool safe to run on a file and
 //! lets the spacing decisions be audited against clang-format on their own (`examples/spacing_audit.rs`).
 
+// **`render_line` takes its eleven pieces rather than a struct**: each one is a distinct input to one mathematical
+// step of the layout (a width, a gap, a role), and a struct would put a name on the tuple the step is.
+#![allow(clippy::too_many_arguments)]
+
 pub mod breaks;
 pub mod columns;
 pub mod config;
@@ -108,7 +112,7 @@ mod tests {
         let source = "int  a = 1;\nint  b = 2;\n";
         let out = format_range(source, &Style::default_style(), 1, 1);
         assert_eq!(
-            out.lines().nth(0),
+            out.lines().next(),
             Some("int  a = 1;"),
             "line 0 is not in the range"
         );

@@ -1142,7 +1142,7 @@ fn a_completion_after_an_edit_is_about_the_file_the_edit_wrote() {
     // window stays open until `catch_up` below closes it.
     let held = session.files().held("/p/a.cpp").expect("the file is held");
     let view =
-        cpp_code_analysis::FileView::parse_with(&held, &cpp_parser::MacroEnvironment::default());
+        cpp_code_analysis::FileView::parse_with(held, &cpp_parser::MacroEnvironment::default());
 
     // **Without the catch-up**: the header's summary is the old one, so `Widget` still has only `size`.
     let stale = session.completions(
@@ -2230,7 +2230,7 @@ fn a_member_is_completed_in_a_separated_definition() {
     // `_offset` is a member too, but a name beginning with `_` inside a body is the implementation's by this crate's rule
     // (see `unused`'s note), so the assertion is the plain-named member — which is what the completion had none of before.
     assert!(
-        labels.iter().any(|label| *label == "_offset"),
+        labels.contains(&"_offset"),
         "the body of a separated definition names the class's own members: {labels:?}"
     );
 }
@@ -2728,7 +2728,7 @@ fn a_pointer_fixture(text: &'static str) -> (Session<MemoryFiles>, cpp_code_anal
 #[test]
 fn an_arrow_on_a_pointer_inserts_the_name_and_not_the_operator() {
     let text = "struct Widget { int size; int length; };\nvoid f()\n{\nWidget * p;\np->\n}\n";
-    let (mut session, view) = a_pointer_fixture(text);
+    let (session, view) = a_pointer_fixture(text);
     let at = text.find("p->").expect("the fixture writes it") + 3;
     let set = session.completions(
         &view,
@@ -2763,7 +2763,7 @@ fn an_arrow_on_a_pointer_inserts_the_name_and_not_the_operator() {
 #[test]
 fn a_dot_on_a_pointer_still_rewrites_the_operator() {
     let text = "struct Widget { int size; };\nvoid f()\n{\nWidget * p;\np.\n}\n";
-    let (mut session, view) = a_pointer_fixture(text);
+    let (session, view) = a_pointer_fixture(text);
     let at = text.find("p.\n").expect("the fixture writes it") + 2;
     let set = session.completions(
         &view,
@@ -2824,7 +2824,7 @@ task<int> use() {
     co_return 0;
 }
 ";
-    let (mut session, view) = a_pointer_fixture(text);
+    let (session, view) = a_pointer_fixture(text);
     let at = text.find("    s.\n").expect("the fixture writes it") + 6;
     let set = session.completions(
         &view,
@@ -2956,7 +2956,7 @@ void f() { enable_if_t<true, payload> p{}; p. }
 
 /// The member labels offered after `needle` in a one-file fixture, sorted.
 fn member_labels_at(source: &'static str, needle: &str) -> Vec<String> {
-    let (mut session, view) = a_pointer_fixture(source);
+    let (session, view) = a_pointer_fixture(source);
     let at = source.find(needle).expect("the fixture writes it") + needle.len();
     let set = session.completions(
         &view,

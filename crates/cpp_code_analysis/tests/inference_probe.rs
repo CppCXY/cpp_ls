@@ -82,9 +82,9 @@ fn what_is_answered_at_a_place() {
                         {
                             println!(
                                 "        …{}⟦{}⟧{}…",
-                                &rendered.text[from..start].replace('\n', " "),
-                                &rendered.text[start..end].replace('\n', " "),
-                                &rendered.text[end..to].replace('\n', " "),
+                                rendered.text[from..start].replace('\n', " "),
+                                rendered.text[start..end].replace('\n', " "),
+                                rendered.text[end..to].replace('\n', " "),
                             );
                         }
                     }
@@ -111,15 +111,15 @@ fn what_is_answered_at_a_place() {
                 // **The text around one offset**, for a diagnostic that names a *rendering* offset: a syntax error's
                 // range is in the rendering's coordinates, and a rendering is one long line, so "the first N lines"
                 // cannot show it. `CPPLS_RENDERING_AT=<offset>` prints ±200 bytes instead.
-                if let Ok(at) = std::env::var("CPPLS_RENDERING_AT") {
-                    if let Ok(at) = at.parse::<usize>() {
-                        let from = at.saturating_sub(200);
-                        let to = (at + 200).min(rendered.text.len());
-                        println!(
-                            "--- the rendering at {at} (bytes {from}..{to}) ---\n{}",
-                            &rendered.text[from..to]
-                        );
-                    }
+                if let Ok(at) = std::env::var("CPPLS_RENDERING_AT")
+                    && let Ok(at) = at.parse::<usize>()
+                {
+                    let from = at.saturating_sub(200);
+                    let to = (at + 200).min(rendered.text.len());
+                    println!(
+                        "--- the rendering at {at} (bytes {from}..{to}) ---\n{}",
+                        &rendered.text[from..to]
+                    );
                 }
             }
             None => println!("the file has no rendering yet"),
@@ -159,9 +159,9 @@ fn what_is_answered_at_a_place() {
                     let to = (end + 50).min(rendered.text.len());
                     println!(
                         "  …{}⟦{}⟧{}…",
-                        &rendered.text[from..start].replace('\n', " "),
-                        &rendered.text[start..end].replace('\n', " "),
-                        &rendered.text[end..to].replace('\n', " "),
+                        rendered.text[from..start].replace('\n', " "),
+                        rendered.text[start..end].replace('\n', " "),
+                        rendered.text[end..to].replace('\n', " "),
                     );
                 }
             }

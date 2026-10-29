@@ -1405,7 +1405,7 @@ fn an_out_of_line_definition_records_the_type_it_writes() {
             .map(|fact| fact.type_of.as_deref().or(fact.returns.as_deref()))
             .collect();
         assert!(
-            written.iter().any(|found| *found == Some(expected)),
+            written.contains(&Some(expected)),
             "`{name}` declares `{expected}`, and one of its facts must say so: {written:?}"
         );
         let qualified = format!("::{name}");

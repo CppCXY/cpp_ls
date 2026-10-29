@@ -251,14 +251,10 @@ impl Concept {
                     // class nobody has read answers `Unknown` there and stays quiet here.
                     crate::Known::No => Some(false),
                     crate::Known::Yes(()) => Some(true),
-                    crate::Known::Unknown(_) => Some(
-                        match crate::sema::convert::conversion(passed, &target.to_string(), |_| {
-                            None
-                        }) {
-                            crate::sema::convert::Conversion::Refused => false,
-                            _ => true,
-                        },
-                    ),
+                    crate::Known::Unknown(_) => Some(!matches!(
+                        crate::sema::convert::conversion(passed, &target.to_string(), |_| None),
+                        crate::sema::convert::Conversion::Refused
+                    )),
                 }
             }
         }

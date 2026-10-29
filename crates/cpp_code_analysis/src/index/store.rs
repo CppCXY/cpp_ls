@@ -524,9 +524,10 @@ impl<F: FileProvider> SummaryStore<F> {
     /// **Start a generation**, so a collection can tell this run's rows from the last one's.
     pub fn begin_generation(&mut self) {
         if let Some(database) = self.summary_database()
-            && let Ok(generation) = database.begin_generation() {
-                self.generation = generation;
-            }
+            && let Ok(generation) = database.begin_generation()
+        {
+            self.generation = generation;
+        }
     }
 
     /// **A unit rendering the database already has**, by the closure key `Session::render_the_unit` computes.
@@ -861,7 +862,8 @@ impl<F: FileProvider> SummaryStore<F> {
             // **The database, and only the database.**
             let stored = self
                 .summary_database()
-                .and_then(|database| database.summary(key)).ok_or(());
+                .and_then(|database| database.summary(key))
+                .ok_or(());
             if let Ok(stored) = stored
                 && stored.key == key
             {

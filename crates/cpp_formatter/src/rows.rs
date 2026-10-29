@@ -126,11 +126,12 @@ fn align_run(
     for row in run {
         let mut natural = vec![0usize; stream.tokens.len()];
         let mut column = 0usize;
-        for index in row.open..=row.close {
+        for (offset, column_at) in natural[row.open..=row.close].iter_mut().enumerate() {
+            let index = row.open + offset;
             if index > row.open {
                 column += space::between(stream, index, roles, style);
             }
-            natural[index] = column;
+            *column_at = column;
             column += stream.tokens[index].text.chars().count();
         }
         let mut cells: Vec<Vec<usize>> = vec![Vec::new()];

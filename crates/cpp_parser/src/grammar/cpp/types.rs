@@ -726,11 +726,11 @@ fn a_specifier_follows_the_group_reading_ahead(p: &CppParser, name_offset: usize
     false
 }
 
-/// Is the name `offset` tokens past the cursor a macro whose **whole body** is a declaration-specifier list?
-///
-/// **Gone with the macro table.** The body was the evidence and the grammar has none: the text it reads has been
-/// preprocessed, so a name in it is a name. See [`a_specifier_follows_the_group`], which keeps the shape half of the
-/// question and is what the run-of-annotations reading runs on now.
+// Is the name `offset` tokens past the cursor a macro whose **whole body** is a declaration-specifier list?
+//
+// **Gone with the macro table.** The body was the evidence and the grammar has none: the text it reads has been
+// preprocessed, so a name in it is a name. See [`a_specifier_follows_the_group`], which keeps the shape half of the
+// question and is what the run-of-annotations reading runs on now.
 
 /// Does a **parameter list** follow the run of `[[…]]` attributes at the cursor?
 ///
@@ -3271,24 +3271,24 @@ fn parse_enumerator_body(p: &mut CppParser) -> ParseResult {
     Ok(m.complete(p))
 }
 
-/// Does the macro written at the cursor supply the **`::` a qualified name starts with**?
-///
-/// The question is asked of the replacement list's **last** token, and it has to be asked of the body rather than
-/// of the name, because no spelling answers it: `_STD` is three letters that could stand for anything, and
-/// `#define _STD ::std::` is a fact about a header. A body that ends at a `::` is a nested-name-specifier, so the
-/// name after the invocation continues the same qualified name — which is what makes `_STD addressof(*p)` one
-/// expression and `_STD reverse_iterator<iterator>` one type, instead of two names in a row.
-///
-/// **One predicate, two grammars**: the segment loops of [`parse_name`] here and of `parse_primary_expr` in
-/// `exprs.rs` ask the same question, and the second copy is where the exception gets forgotten. A buffer parsed with
-/// no include closure gets `None` — nobody says — and keeps today's reading:
-/// the invocation is a name of its own, and the name after it is the syntax error it looks like.
-/// **Does the name at the cursor stand for a *nested-name-specifier* — `#define _STD ::std::`?**
-///
-/// **Gone with the macro table**, and this one is worth a note because it had a real effect: `_STD addressof(*p)`
-/// read as one qualified name when the closure knew what `_STD` expands to. That is the preprocessor's business and
-/// the cooked stream settles it — `_STD` is replaced by `::std::` before this grammar runs, and there is nothing
-/// left to ask. See `crate::preprocess::cook`, which is where the substitution happens.
+// Does the macro written at the cursor supply the **`::` a qualified name starts with**?
+//
+// The question is asked of the replacement list's **last** token, and it has to be asked of the body rather than
+// of the name, because no spelling answers it: `_STD` is three letters that could stand for anything, and
+// `#define _STD ::std::` is a fact about a header. A body that ends at a `::` is a nested-name-specifier, so the
+// name after the invocation continues the same qualified name — which is what makes `_STD addressof(*p)` one
+// expression and `_STD reverse_iterator<iterator>` one type, instead of two names in a row.
+//
+// **One predicate, two grammars**: the segment loops of [`parse_name`] here and of `parse_primary_expr` in
+// `exprs.rs` ask the same question, and the second copy is where the exception gets forgotten. A buffer parsed with
+// no include closure gets `None` — nobody says — and keeps today's reading:
+// the invocation is a name of its own, and the name after it is the syntax error it looks like.
+// **Does the name at the cursor stand for a *nested-name-specifier* — `#define _STD ::std::`?**
+//
+// **Gone with the macro table**, and this one is worth a note because it had a real effect: `_STD addressof(*p)`
+// read as one qualified name when the closure knew what `_STD` expands to. That is the preprocessor's business and
+// the cooked stream settles it — `_STD` is replaced by `::std::` before this grammar runs, and there is nothing
+// left to ask. See `crate::preprocess::cook`, which is where the substitution happens.
 
 /// Parse a name: `foo`, `ns::foo`, `::foo`, `Foo<int>`, `ns::Foo<int>::type`.
 ///

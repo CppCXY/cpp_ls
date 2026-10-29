@@ -523,10 +523,8 @@ mod tests {
             .files()
             .held("/p/items.cpp")
             .expect("the file is held");
-        let view = cpp_code_analysis::FileView::parse_with(
-            &held,
-            &cpp_parser::MacroEnvironment::default(),
-        );
+        let view =
+            cpp_code_analysis::FileView::parse_with(held, &cpp_parser::MacroEnvironment::default());
         let on_the_use = ITEMS_CPP
             .find("MAX_ITEMS")
             .expect("the fixture uses the macro");
@@ -553,10 +551,8 @@ mod tests {
             .files()
             .held("/p/items.cpp")
             .expect("the file is held");
-        let view = cpp_code_analysis::FileView::parse_with(
-            &held,
-            &cpp_parser::MacroEnvironment::default(),
-        );
+        let view =
+            cpp_code_analysis::FileView::parse_with(held, &cpp_parser::MacroEnvironment::default());
         let edit = workspace_edit_of_renaming_a_macro(
             &session,
             &view,

@@ -2173,7 +2173,6 @@ fn declares_a_body(node: &CppSyntaxNode) -> bool {
 ///
 /// `false` for every node that is not a `Declaration`, because the other declaration kinds state their name
 /// differently and already handle an absent one — an anonymous namespace, an unnamed `class {}`.
-
 fn is_unnamed_declaration(node: &CppSyntaxNode) -> bool {
     if CppSyntaxKind::from(node.kind()) != CppSyntaxKind::Declaration {
         return false;

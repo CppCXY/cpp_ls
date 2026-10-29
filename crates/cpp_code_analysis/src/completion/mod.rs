@@ -339,8 +339,6 @@ pub fn completion_with(
     // everything below is the query's own work, and the server's log line splits only the outside of it
     // (`view`/`completions`). Opt-in, on `CPPLS_TRACE_COMPLETION`, like this crate's other traces — see
 
-    
-
     match context {
         CompletionContext::Nothing => CompletionSet {
             replace: SourceRange::new(offset, 0),

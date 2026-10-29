@@ -6732,7 +6732,8 @@ fn an_annotation_may_follow_a_specifier_the_loop_mistook_for_a_type() {
     );
 
     // The neighbour that never needed the evidence still reads.
-    for source in ["template <class T> _Post_equal_to_(x) int f(T x) { return x; }\n"] {
+    {
+        let source = "template <class T> _Post_equal_to_(x) int f(T x) { return x; }\n";
         let tree = CppParser::parse(source, ParserConfig::default());
         assert_eq!(tree.get_errors(), [], "{source:?}");
     }

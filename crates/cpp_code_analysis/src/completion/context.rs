@@ -728,6 +728,37 @@ fn inside_a_comment_or_a_literal(root: &CppSyntaxNode, offset: usize) -> bool {
         .any(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::DocComment)
 }
 
+/// **The name being typed in a condition** — `#if VERS|`, `#if defined(VERS|`, or the blank after the operator.
+///
+/// `segment_written` is handed the text from the argument`s start to the cursor and answers the word the cursor is
+/// in; the `>`/`<`/`!`/`(`/`)` of an expression are not name characters, so a condition like
+/// `#if VERSION >= 3 && defined(FEATURE|)` needs no special case — the word is whatever follows the last one.
+fn condition_argument(
+    rest: &str,
+    at: usize,
+    written_before_cursor: usize,
+    offset: usize,
+) -> CompletionContext {
+    let _ = written_before_cursor;
+    let trimmed = rest.trim_start();
+    let skipped = rest.len() - trimmed.len();
+
+    // **The word the cursor is in**, which is not the first word of the argument: `defined(FEATU|)` has `defined`
+    // in front of it, and answering with that word would offer the operators for a name being typed.
+    let word_start = trimmed
+        .rfind(|character: char| {
+            !(character.is_alphanumeric()
+                || character == '_'
+                || character == '.'
+                || character == '/'
+                || character == '-')
+        })
+        .map_or(0, |found| found + 1);
+    let (written, range) =
+        segment_written(&trimmed[word_start..], at + skipped + word_start, offset);
+    CompletionContext::Condition { written, range }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -932,35 +963,4 @@ mod tests {
             );
         }
     }
-}
-
-/// **The name being typed in a condition** — `#if VERS|`, `#if defined(VERS|`, or the blank after the operator.
-///
-/// `segment_written` is handed the text from the argument`s start to the cursor and answers the word the cursor is
-/// in; the `>`/`<`/`!`/`(`/`)` of an expression are not name characters, so a condition like
-/// `#if VERSION >= 3 && defined(FEATURE|)` needs no special case — the word is whatever follows the last one.
-fn condition_argument(
-    rest: &str,
-    at: usize,
-    written_before_cursor: usize,
-    offset: usize,
-) -> CompletionContext {
-    let _ = written_before_cursor;
-    let trimmed = rest.trim_start();
-    let skipped = rest.len() - trimmed.len();
-
-    // **The word the cursor is in**, which is not the first word of the argument: `defined(FEATU|)` has `defined`
-    // in front of it, and answering with that word would offer the operators for a name being typed.
-    let word_start = trimmed
-        .rfind(|character: char| {
-            !(character.is_alphanumeric()
-                || character == '_'
-                || character == '.'
-                || character == '/'
-                || character == '-')
-        })
-        .map_or(0, |found| found + 1);
-    let (written, range) =
-        segment_written(&trimmed[word_start..], at + skipped + word_start, offset);
-    CompletionContext::Condition { written, range }
 }

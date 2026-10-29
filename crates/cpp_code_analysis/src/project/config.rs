@@ -539,9 +539,7 @@ fn pattern_specificity(pattern: &str, path: &[String]) -> Option<usize> {
                 .max();
         }
 
-        let Some((component, remaining)) = path.split_first() else {
-            return None;
-        };
+        let (component, remaining) = path.split_first()?;
         if !component_matches(head, component) {
             return None;
         }

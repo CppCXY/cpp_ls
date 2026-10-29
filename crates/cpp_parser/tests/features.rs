@@ -149,13 +149,8 @@ fn typeof_arrives_by_either_route() {
     assert!(c23.support(Feature::Typeof));
 
     let strict_cpp = LanguageConfig::new().with_standard(Standard::Cpp23);
-    assert!(
-        !strict_cpp
-            .support(Feature::Typeof)
-            .then_some(true)
-            .unwrap_or(false)
-            && !strict_cpp.support(Feature::Typeof)
-    );
+    // `typeof` is a GNU/MSVC extension: C23 has it, and no C++ standard does.
+    assert!(!strict_cpp.support(Feature::Typeof));
 }
 
 /// **An unconfigured parse accepts nothing**, which is the conservative direction: a caller that forgot to configure gets

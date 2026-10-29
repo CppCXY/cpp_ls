@@ -355,7 +355,7 @@ fn every_feature_answers_what_the_project_holds() {
             &|result| {
                 let contents = result["contents"].to_string();
                 let declarations = contents.matches("declaration").count();
-                (declarations, format!("{}", trim(&contents)))
+                (declarations, trim(&contents).to_string())
             },
         );
     }
@@ -398,7 +398,7 @@ fn every_feature_answers_what_the_project_holds() {
                 let contents = result["contents"].to_string();
                 (
                     contents.matches("bool").count(),
-                    format!("{}", trim(&contents)),
+                    trim(&contents).to_string(),
                 )
             },
         );
@@ -616,7 +616,7 @@ fn every_feature_answers_what_the_project_holds() {
             let depth = result
                 .as_array()
                 .and_then(|array| array.first())
-                .map(|first| depth_of_selection(first))
+                .map(depth_of_selection)
                 .unwrap_or(0);
             (depth, format!("{depth} nested range(s)"))
         },
@@ -713,16 +713,16 @@ fn every_feature_answers_what_the_project_holds() {
         // `SetupStyle(style, options);` is a static member called with two arguments. The rest are the file's own
         // candidates, in order.
         let mut ordered = candidates.clone();
-        if let Some(line) = text.lines().position(|body| body.contains("SetupStyle(")) {
-            if let Some(column) = text.lines().nth(line).and_then(|body| body.find('(')) {
-                ordered.insert(
-                    0,
-                    Position {
-                        line: line as u32,
-                        character: (column + 3) as u32,
-                    },
-                );
-            }
+        if let Some(line) = text.lines().position(|body| body.contains("SetupStyle("))
+            && let Some(column) = text.lines().nth(line).and_then(|body| body.find('('))
+        {
+            ordered.insert(
+                0,
+                Position {
+                    line: line as u32,
+                    character: (column + 3) as u32,
+                },
+            );
         }
         let mut best: Option<(u32, u32, usize, String)> = None;
         for call_at in ordered.iter().take(12) {

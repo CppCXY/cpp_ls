@@ -1213,11 +1213,9 @@ int f() {
     let view = session.view("/p/a.cpp").expect("a view");
     let type_of = |needle: &str| {
         let at = source.find(needle).expect("the fixture writes it")
-            + needle.len().saturating_sub(
-                needle
-                    .trim_start_matches(|c: char| c == '=' || c == ' ' || c == '(' || c == ')')
-                    .len(),
-            );
+            + needle
+                .len()
+                .saturating_sub(needle.trim_start_matches(['=', ' ', '(', ')']).len());
         let reading = view
             .reading_offset_of(cpp_code_analysis::file::coordinates::FileOffset::new(at))
             .expect("the cursor is in the rendering");

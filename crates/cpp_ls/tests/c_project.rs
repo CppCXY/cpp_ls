@@ -88,23 +88,6 @@ fn after_the_operator(text: &str, needle: &str, from_line: usize) -> Option<Plac
     None
 }
 
-/// Where the cursor goes for a **call's arguments**: right after the callee's `(`.
-fn inside_the_call(text: &str, callee: &str, from_line: usize) -> Option<Place> {
-    let written = format!("{callee}(");
-    for (line, body) in text.lines().enumerate() {
-        if line < from_line {
-            continue;
-        }
-        if let Some(column) = body.find(&written) {
-            return Some(Place {
-                line: line as u32,
-                character: column as u32 + written.len() as u32,
-            });
-        }
-    }
-    None
-}
-
 fn position(uri: &str, at: Place) -> Value {
     json!({
         "textDocument": { "uri": uri },
@@ -415,8 +398,8 @@ fn a_classic_c_file_answers_what_it_holds() {
         );
     }
     println!(
-        "{:<26} {:<8} {:<5} {:<7} {}",
-        "feature", "answered", "n", "ms", "note"
+        "{:<26} {:<8} {:<5} {:<7} note",
+        "feature", "answered", "n", "ms"
     );
 
     let mut rows: Vec<Row> = Vec::new();

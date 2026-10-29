@@ -29,7 +29,7 @@
 //! cannot control.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use cpp_parser::SourceRange;
 
@@ -454,9 +454,9 @@ pub fn decode_indexed_unit(bytes: &[u8]) -> Result<crate::IndexedUnit, DecodeErr
 
 /// The fields a `FileSummary` needs and a `CookedFile` does not have, filled with the empty answer — see
 /// [`encode_indexed_unit`].
-fn as_a_summary(path: &PathBuf, cooked: &crate::CookedFile) -> crate::FileSummary {
+fn as_a_summary(path: &Path, cooked: &crate::CookedFile) -> crate::FileSummary {
     crate::FileSummary {
-        path: path.clone(),
+        path: path.to_path_buf(),
         key: crate::SummaryKey::new(0, 0),
         declarations: cooked.declarations.clone(),
         macros: cooked.macros.clone(),

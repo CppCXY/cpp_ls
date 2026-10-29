@@ -142,9 +142,9 @@ fn a_workspace_load_ends_its_progress_bar() {
     while Instant::now() < deadline && !(begun > 0 && ended >= begun) {
         let Ok(message) = messages
             .recv_timeout(Duration::from_millis(250))
-            .or_else(|error| match error {
-                RecvTimeoutError::Timeout => Err(()),
-                RecvTimeoutError::Disconnected => Err(()),
+            .map_err(|error| match error {
+                RecvTimeoutError::Timeout => (),
+                RecvTimeoutError::Disconnected => (),
             })
             .map_err(|_| RecvTimeoutError::Timeout)
         else {
@@ -180,6 +180,9 @@ fn a_workspace_load_ends_its_progress_bar() {
     }
 
     let _ = child.kill();
+    // **Reaped, not just killed**: a killed process that is never waited on stays a zombie until this test process
+    // exits, and a suite that spawns a server per test would collect them.
+    let _ = child.wait();
     assert!(
         begun > 0,
         "the server said nothing about loading the workspace"

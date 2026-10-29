@@ -428,9 +428,10 @@ impl<'a> CheckContext<'a> {
         // exactly where the text came from somewhere else. Asking it here is the same lesson as the AST layer — the
         // machinery existed, and this layer was re-deriving a worse version of it by comparing texts.
         if let Some(in_the_reading) = in_the_reading
-            && !self.view.was_written_here(in_the_reading) {
-                return;
-            }
+            && !self.view.was_written_here(in_the_reading)
+        {
+            return;
+        }
         self.findings.push(Finding {
             range,
             name: name.into(),
@@ -624,13 +625,13 @@ impl<'a> CheckContext<'a> {
     }
 }
 
-/// **Every function *definition* in this file** - a node with both a parameter list and a body.
-///
-/// Recognised by **shape** rather than by node kind, and that is not tidiness: measured, `int count() { }` at file
-/// scope is **not** a `FunctionDef` in this grammar - the dump shows a `NameExpr`, a `ParameterList` and a
-/// `CompoundStat` with no function node around them - so every check that filtered on that kind reported nothing,
-/// on every file, while looking correct. A definition is what has a parameter list and a body; which node the
-/// grammar wrapped them in is its business.
+// **Every function *definition* in this file** - a node with both a parameter list and a body.
+//
+// Recognised by **shape** rather than by node kind, and that is not tidiness: measured, `int count() { }` at file
+// scope is **not** a `FunctionDef` in this grammar - the dump shows a `NameExpr`, a `ParameterList` and a
+// `CompoundStat` with no function node around them - so every check that filtered on that kind reported nothing,
+// on every file, while looking correct. A definition is what has a parameter list and a body; which node the
+// grammar wrapped them in is its business.
 
 /// **The condition of an `if`/`while`/`switch`, taken from the node and never from its text.**
 ///
@@ -662,7 +663,7 @@ pub fn condition_of(statement: &cpp_parser::CppSyntaxNode) -> Option<cpp_parser:
 /// so a token's kind is only usable once unwrapped. `examples/token_kinds.rs` prints both halves for any source,
 /// which is how a round spent believing the wrong thing about this API was settled.
 pub fn literal_condition_of(condition: &cpp_parser::CppSyntaxNode) -> Option<String> {
-    use cpp_parser::{CppKind, CppTokenKind};
+    use cpp_parser::CppTokenKind;
 
     let mut words = Vec::new();
     for token in condition

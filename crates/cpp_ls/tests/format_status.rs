@@ -171,7 +171,7 @@ fn decoded(
 
     let mut out = Vec::new();
     let (mut line, mut character) = (0u32, 0u32);
-    for token in numbers.chunks_exact(5) {
+    for token in numbers.as_chunks::<5>().0 {
         let (delta_line, delta_start, length, token_type) = (
             token[0] as u32,
             token[1] as u32,

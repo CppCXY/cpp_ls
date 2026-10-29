@@ -431,7 +431,6 @@ impl<'a> CppParser<'a> {
     /// all of `text` (invariant I1). Problems are reported through [`CppSyntaxTree::get_errors`]
     /// and through `ErrorNode`/`MissingNode` nodes, not through a `Result`.
     pub fn parse(text: &'a str, config: ParserConfig<'a>) -> CppSyntaxTree {
-        
         Self::parse_inner(text, config).0
     }
 

@@ -157,10 +157,7 @@ fn the_call_a_literal_is_in(
     let mut first = name_end;
     let mut qualified = false;
     let mut member = false;
-    loop {
-        let Some(before_this) = previous_significant(tokens, first) else {
-            break;
-        };
+    while let Some(before_this) = previous_significant(tokens, first) {
         match tokens[before_this].kind {
             CppTokenKind::Scope => {
                 // A leading `::` — `::printf`, the global scope. It is part of the spelling but not a qualifier:
@@ -382,9 +379,7 @@ fn the_format_kind_of(
         return Some(entry.syntax);
     }
 
-    let Some(&(_, kind, position)) = THE_TABLE.iter().find(|(name, _, _)| *name == bare) else {
-        return None;
-    };
+    let &(_, kind, position) = THE_TABLE.iter().find(|(name, _, _)| *name == bare)?;
 
     // **One name whose position depends on the library that declares it.** `sprintf` is the C library's
     // `sprintf(buffer, format, …)` — the format string is the second argument — and `fmt::sprintf(format, …)` is

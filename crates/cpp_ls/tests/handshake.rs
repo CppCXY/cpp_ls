@@ -4804,7 +4804,7 @@ fn probe_the_cpu_shape_of_the_real_project() {
         *repeated.entry(shape).or_insert(0) += 1;
     }
     let mut worst: Vec<(String, usize)> = repeated.into_iter().collect();
-    worst.sort_by(|left, right| right.1.cmp(&left.1));
+    worst.sort_by_key(|entry| std::cmp::Reverse(entry.1));
     println!("the most repeated line shapes:");
     for (shape, count) in worst.iter().take(8) {
         println!("  {count:>7} x {shape}");

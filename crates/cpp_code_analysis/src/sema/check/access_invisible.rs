@@ -230,9 +230,10 @@ fn visibility_of(class: &CppSyntaxNode, offset: usize) -> Access {
             // A member or anything else: the label in force is unchanged.
             continue;
         };
-        in_force = match specifier.get_keyword().map(|keyword| {
-            cpp_parser::CppTokenKind::from(keyword.syntax().kind())
-        }) {
+        in_force = match specifier
+            .get_keyword()
+            .map(|keyword| cpp_parser::CppTokenKind::from(keyword.syntax().kind()))
+        {
             Some(cpp_parser::CppTokenKind::PublicKeyword) => Access::Public,
             Some(cpp_parser::CppTokenKind::ProtectedKeyword) => Access::Protected,
             Some(cpp_parser::CppTokenKind::PrivateKeyword) => Access::Private,
@@ -248,7 +249,7 @@ fn visibility_of(class: &CppSyntaxNode, offset: usize) -> Access {
 /// `class` is private and `struct`/`union` are public — the language's rule, and the reason the keyword is a token
 /// this asks for rather than a word compared against a header's spelling.
 fn default_access_of(class: &CppSyntaxNode) -> Access {
-    use cpp_parser::{CppAstNode, CppClassDef, CppKind, CppTokenKind};
+    use cpp_parser::{CppAstNode, CppClassDef, CppTokenKind};
 
     // **By token kind, not by the token's word.** This crate's rowan kind is `CppKind` — the wrapper around
     // `Node(CppSyntaxKind)` and `Token(CppTokenKind)` — so a token's kind has to be unwrapped before it means

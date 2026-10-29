@@ -8,6 +8,10 @@
 use cpp_parser::{CppParser, ParserConfig};
 
 /// Parse each `(name, source)` pair and fail with the whole list of those that produced an error.
+// Every test binary that includes `mod common;` gets this function, and not all of them call it — the ones that
+// only parse one file, for instance — so the dead-code lint is answered here rather than by deleting a helper half
+// the binaries use.
+#[allow(dead_code)]
 pub fn assert_all_parse(standard: &str, constructs: &[(&str, &str)]) {
     let mut failed: Vec<(&str, String)> = Vec::new();
     for (name, source) in constructs {

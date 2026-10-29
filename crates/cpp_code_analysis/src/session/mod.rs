@@ -1327,7 +1327,7 @@ impl<F: FileProvider + Clone> Session<F> {
         &self.root
     }
 
-    /// The configuration every summary in this session is keyed against.
+    // The configuration every summary in this session is keyed against.
 
     /// **The configuration one file is analysed with** — its own command from the compilation database, plus its
     /// target's include directories and defines.
@@ -3528,8 +3528,8 @@ impl<F: FileProvider + Clone> Session<F> {
         self.parsed_since_the_last_pass.len()
     }
 
-    /// **Drop everything the cook queue is waiting for, and say how much it was.**
-    ///
+    // **Drop everything the cook queue is waiting for, and say how much it was.**
+    //
 
     /// **Is this file`s summary about to be revised?** — the second pass has it queued for a re-read.
     ///
@@ -4866,9 +4866,9 @@ impl<F: FileProvider + Clone> Session<F> {
         walked
     }
 
-    /// **What a unit rooted at `path` is keyed on** — the file's preamble, when its text is in reach.
-    ///
-    /// A file that cannot be read is [`RootKey::WholeText`], which is the rule that can only ever be less
+    // **What a unit rooted at `path` is keyed on** — the file's preamble, when its text is in reach.
+    //
+    // A file that cannot be read is [`RootKey::WholeText`], which is the rule that can only ever be less
 
     /// **What makes two timelines the same timeline: the closure's content, hashed.**
     ///
@@ -5378,18 +5378,18 @@ impl<F: FileProvider + Clone> Session<F> {
         wanted.into_iter().next()
     }
 
-    /// **The next translation unit of the project nobody has read** — gone.
-    ///
-    /// A background pass used to read every root of the project as a program, and it is deleted rather than disabled: a
-    /// reader reported the process as "very slow, and I cannot tell what it is doing" over a progress bar that counted
-    /// **229 translation unit(s) to read as programs**, and the measured price was 36 s warm / 271 s cold for 96 of
-    /// them on a 397-file project — paid again on every start, because a program's reading is not persisted
-    /// (`docs/architecture.md` §8.4). `clangd` does not do this either: it parses a translation unit when a file is
-    /// opened or asked about. A file nobody has open keeps the reading its own text gives it, and the reader's own
-    /// files still get the compiler's reading one second after they stop typing.
-    ///
-    /// What is lost is only ⑲'s widest case — the same header read two ways by two programs *neither of which is
-    /// open*. Everything a reader can look at keeps its per-program reading.
+    // **The next translation unit of the project nobody has read** — gone.
+    //
+    // A background pass used to read every root of the project as a program, and it is deleted rather than disabled: a
+    // reader reported the process as "very slow, and I cannot tell what it is doing" over a progress bar that counted
+    // **229 translation unit(s) to read as programs**, and the measured price was 36 s warm / 271 s cold for 96 of
+    // them on a 397-file project — paid again on every start, because a program's reading is not persisted
+    // (`docs/architecture.md` §8.4). `clangd` does not do this either: it parses a translation unit when a file is
+    // opened or asked about. A file nobody has open keeps the reading its own text gives it, and the reader's own
+    // files still get the compiler's reading one second after they stop typing.
+    //
+    // What is lost is only ⑲'s widest case — the same header read two ways by two programs *neither of which is
+    // open*. Everything a reader can look at keeps its per-program reading.
 
     /// **Is this program over [`THE_LARGEST_PROGRAM_READ_AT_ONCE`]?** — asked before the read, so a keystroke never
     /// waits for one that is too big.
@@ -6203,11 +6203,11 @@ impl<F: FileProvider + Clone> Session<F> {
             .collect()
     }
 
-    /// **Everything a cook needs, gathered under the write lock and then used without it.**
-    ///
-    /// Owned rather than borrowed on purpose: the caller has to let go of the session between
-    /// [`Session::cooking_materials`] and [`Session::render_a_cooked`], so nothing here may borrow it. The unit is an
-    /// `Arc` the cache already holds, and the seed is a table built from the index's own macros.
+    // **Everything a cook needs, gathered under the write lock and then used without it.**
+    //
+    // Owned rather than borrowed on purpose: the caller has to let go of the session between
+    // [`Session::cooking_materials`] and [`Session::render_a_cooked`], so nothing here may borrow it. The unit is an
+    // `Arc` the cache already holds, and the seed is a table built from the index's own macros.
 
     /// **The rendering of one file** — what the preprocessor produces from it, as text.
     ///
@@ -6915,9 +6915,10 @@ impl<F: FileProvider + Clone> Session<F> {
         // offered into a sentence. Measured: `a_comment_and_a_literal_offer_nothing` failed against this query while
         // `completions` was already refusing.
         if let Some(written) = view.written_text()
-            && crate::file::view::in_prose(written, offset.get()) {
-                return Known::Unknown(UnknownReason::NotDeclaredHere(Box::from("")));
-            }
+            && crate::file::view::in_prose(written, offset.get())
+        {
+            return Known::Unknown(UnknownReason::NotDeclaredHere(Box::from("")));
+        }
 
         let Some(offset) = view.reading_offset_of(offset) else {
             // The cursor is not in the rendering at all — in a region a macro replaced, or past its end. There is no

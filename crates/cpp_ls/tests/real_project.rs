@@ -155,10 +155,10 @@ impl Server {
             if stdout.read_exact(&mut body).is_err() {
                 return;
             }
-            if let Ok(message) = serde_json::from_slice(&body) {
-                if into.send(message).is_err() {
-                    return;
-                }
+            if let Ok(message) = serde_json::from_slice(&body)
+                && into.send(message).is_err()
+            {
+                return;
             }
         }
     }
@@ -402,7 +402,7 @@ fn the_two_reported_hovers_answer_on_the_project_they_came_from() {
     // **Asked until the index has the answer**, which is the deal the protocol offers (`isIncomplete`): a project
     // this size is still being read when the first request arrives, and `null` there means *ask again*, not *there
     // is nothing*. The deadline is what turns a missing answer into a failure worth reading.
-    let mut hover = |server: &mut Server, id: i64, uri: &str, line: u64, character: u64| {
+    let hover = |server: &mut Server, id: i64, uri: &str, line: u64, character: u64| {
         let deadline = Instant::now() + Duration::from_secs(90);
         let mut next = id;
         loop {

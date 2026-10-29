@@ -1495,23 +1495,23 @@ constexpr bool is_assignable_v = __is_assignable(To, From);
         );
     }
 
-    /// A client that asks for semantic tokens but names no type this server uses gets an empty list rather than a
-    /// legend it cannot read.
-    /// **Keywords do not share one colour**, which is the report this answers.
-    ///
-    /// *"These are rendered as keywords, but keywords differ and should not share a colour — `this` should be the
-    /// same colour as `bool`."* Every keyword used to be sent as `keyword`, so a type, a qualifier, a value and a
-    /// statement word were one shade. The classification is [`kind_of_keyword`]'s, and this is the table it promises:
-    ///
-    /// ```text
-    /// bool int char void      a type
-    /// const constexpr static  a modifier
-    /// this nullptr true false a value — `variable`, which is the analogy the report draws with `bool`
-    /// return if class sizeof  a keyword
-    /// ```
-    ///
-    /// The offsets are found with `find` rather than written down, so a fixture edit cannot leave the assertions
-    /// pointing at different words.
+    // A client that asks for semantic tokens but names no type this server uses gets an empty list rather than a
+    // legend it cannot read.
+    // **Keywords do not share one colour**, which is the report this answers.
+    //
+    // *"These are rendered as keywords, but keywords differ and should not share a colour — `this` should be the
+    // same colour as `bool`."* Every keyword used to be sent as `keyword`, so a type, a qualifier, a value and a
+    // statement word were one shade. The classification is [`kind_of_keyword`]'s, and this is the table it promises:
+    //
+    // ```text
+    // bool int char void      a type
+    // const constexpr static  a modifier
+    // this nullptr true false a value — `variable`, which is the analogy the report draws with `bool`
+    // return if class sizeof  a keyword
+    // ```
+    //
+    // The offsets are found with `find` rather than written down, so a fixture edit cannot leave the assertions
+    // pointing at different words.
 
     /// **A doc command is drawn from the written text** — the rendering has no comments in it at all.
     ///

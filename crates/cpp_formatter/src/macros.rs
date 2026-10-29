@@ -54,12 +54,12 @@ pub fn align_escaped_newlines(output: &str, style: &Style) -> String {
             .map(|line| code_width(&lines[line]))
             .max()
             .unwrap_or(0);
-        for line in start..end {
+        for line in lines[start..end].iter_mut() {
             let target = match policy {
-                "Left" => code_width(&lines[line]) + 1,
+                "Left" => code_width(line) + 1,
                 _ => width + 1,
             };
-            lines[line] = aligned(&lines[line], target);
+            *line = aligned(line, target);
         }
         index = end;
     }

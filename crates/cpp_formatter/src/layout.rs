@@ -77,14 +77,14 @@ fn apply_macro_blocks(indents: &mut [Option<usize>], stream: &Stream<'_>, style:
     }
     let width = style.count(StyleOption::IndentWidth);
     let mut extra = 0usize;
-    for index in 0..stream.tokens.len() {
+    for (index, indent) in indents.iter_mut().enumerate() {
         let starts_a_line = index == 0 || stream.gaps[index].newlines > 0;
         let text = stream.tokens[index].text;
         if starts_a_line && !end.is_empty() && text == end {
             extra = extra.saturating_sub(width);
         }
-        if let Some(indent) = indents[index] {
-            indents[index] = Some(indent + extra);
+        if let Some(given) = *indent {
+            *indent = Some(given + extra);
         }
         if starts_a_line && !begin.is_empty() && text == begin {
             extra += width;
@@ -259,7 +259,7 @@ pub fn continuation(
 pub fn enum_body_braces(stream: &Stream<'_>) -> Vec<bool> {
     use cpp_parser::CppTokenKind::*;
     let mut braces = vec![false; stream.tokens.len()];
-    for index in 0..stream.tokens.len() {
+    for (index, is_an_enum) in braces.iter_mut().enumerate() {
         if stream.tokens[index].kind != LeftBrace {
             continue;
         }
@@ -268,7 +268,7 @@ pub fn enum_body_braces(stream: &Stream<'_>) -> Vec<bool> {
             cursor -= 1;
             match stream.tokens[cursor].kind {
                 EnumKeyword => {
-                    braces[index] = true;
+                    *is_an_enum = true;
                     break;
                 }
                 Semicolon | LeftBrace | RightBrace => break,
@@ -295,17 +295,20 @@ pub fn template_angles(stream: &Stream<'_>, roles: &Roles) -> Vec<bool> {
     for index in 0..stream.tokens.len() {
         if stream.tokens[index].kind == cpp_parser::CppTokenKind::Less
             && roles.is_template_angle(stream.tokens[index].start)
-            && let Some(close) = matching_angle(stream, index) {
-                angles[index] = true;
-                angles[close] = true;
-            }
+            && let Some(close) = matching_angle(stream, index)
+        {
+            angles[index] = true;
+            angles[close] = true;
+        }
     }
     for index in 0..stream.tokens.len() {
-        if stream.tokens[index].kind == cpp_parser::CppTokenKind::Less && !angles[index]
-            && let Some(close) = matching_angle(stream, index) {
-                angles[index] = true;
-                angles[close] = true;
-            }
+        if stream.tokens[index].kind == cpp_parser::CppTokenKind::Less
+            && !angles[index]
+            && let Some(close) = matching_angle(stream, index)
+        {
+            angles[index] = true;
+            angles[close] = true;
+        }
     }
     angles
 }
@@ -585,6 +588,42 @@ fn is_a_case_label(stream: &Stream<'_>, index: usize) -> bool {
     matches!(stream.tokens[index].kind, CaseKeyword | DefaultKeyword)
 }
 
+/// **How many braced initializer lists are open at each token**, which is what tells the block rules to keep out:
+/// the lines inside `= { … }` are continuations (`ContinuationIndentWidth` from the declaration), not block lines.
+///
+/// `classify_braces` already decides which braces are initializers; this is the depth that follows from it, kept as
+/// its own pass so that the two rules stay independent.
+pub fn init_depths(stream: &Stream<'_>, roles: &Roles) -> Vec<isize> {
+    // **The same classification `blocks` uses**: an initializer brace is one `classify_braces` calls `Nothing`. Two
+    // copies of this predicate drifted once already — the roles miss `} priority[] = {`, and the depth stayed 0, so
+    // the elements of that table never saw a list. Deriving it from the classifier keeps one answer.
+    let braces = classify_braces(stream, roles, "None", false);
+    let mut depths = vec![0isize; stream.tokens.len()];
+    let mut open: Vec<bool> = Vec::new();
+    let mut depth: isize = 0;
+    for (index, token) in stream.tokens.iter().enumerate() {
+        depths[index] = depth;
+        match token.kind {
+            CppTokenKind::LeftBrace => {
+                let is_initializer = braces[index] == Brace::Nothing;
+                open.push(is_initializer);
+                if is_initializer {
+                    depth += 1;
+                }
+            }
+            CppTokenKind::RightBrace => {
+                if let Some(is_initializer) = open.pop()
+                    && is_initializer
+                {
+                    depth -= 1;
+                }
+            }
+            _ => {}
+        }
+    }
+    depths
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -774,40 +813,4 @@ mod tests {
         // A constructor initializer list uses its own option: 4 from the signature's indent.
         assert_eq!(continuation(&[], 4, CppTokenKind::Colon, &style), 8);
     }
-}
-
-/// **How many braced initializer lists are open at each token**, which is what tells the block rules to keep out:
-/// the lines inside `= { … }` are continuations (`ContinuationIndentWidth` from the declaration), not block lines.
-///
-/// `classify_braces` already decides which braces are initializers; this is the depth that follows from it, kept as
-/// its own pass so that the two rules stay independent.
-pub fn init_depths(stream: &Stream<'_>, roles: &Roles) -> Vec<isize> {
-    // **The same classification `blocks` uses**: an initializer brace is one `classify_braces` calls `Nothing`. Two
-    // copies of this predicate drifted once already — the roles miss `} priority[] = {`, and the depth stayed 0, so
-    // the elements of that table never saw a list. Deriving it from the classifier keeps one answer.
-    let braces = classify_braces(stream, roles, "None", false);
-    let mut depths = vec![0isize; stream.tokens.len()];
-    let mut open: Vec<bool> = Vec::new();
-    let mut depth: isize = 0;
-    for (index, token) in stream.tokens.iter().enumerate() {
-        depths[index] = depth;
-        match token.kind {
-            CppTokenKind::LeftBrace => {
-                let is_initializer = braces[index] == Brace::Nothing;
-                open.push(is_initializer);
-                if is_initializer {
-                    depth += 1;
-                }
-            }
-            CppTokenKind::RightBrace => {
-                if let Some(is_initializer) = open.pop()
-                    && is_initializer
-                {
-                    depth -= 1;
-                }
-            }
-            _ => {}
-        }
-    }
-    depths
 }
