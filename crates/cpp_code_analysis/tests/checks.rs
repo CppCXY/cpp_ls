@@ -2441,3 +2441,131 @@ fn a_coroutine_body_has_no_missing_return() {
         "a plain function with no return is still reported"
     );
 }
+
+/// **A name used as an object, where nothing declares it.**
+///
+/// `missing.size()` is the shape a reader writes while thinking of a variable they have not declared — or have just
+/// renamed — and until this rule existed the editor said nothing at all: `undefined-field` needs the receiver's *type*,
+/// and a name with no declaration has none. Measured on `test_cpp/main.cpp`, whose `myName.getFullName(0)` is declared
+/// ten lines below the use and was silently accepted.
+#[test]
+fn a_name_that_nothing_declares_is_reported() {
+    let source = "\
+struct Widget { int size; };
+void f() {
+    missing.size;
+}
+";
+    assert_eq!(
+        codes_of(source),
+        [DiagnosticCode::UndefinedName],
+        "nothing declares `missing`"
+    );
+}
+
+/// **The same access, on a name that is declared, is not this rule's business** — and a name declared later in the
+/// same file is not visible yet, which is the language's own rule rather than an inference.
+#[test]
+fn a_declared_name_is_not_reported_and_a_later_one_is() {
+    let declared = "\
+struct Widget { int size; };
+void f() {
+    Widget w;
+    w.size;
+}
+";
+    assert_eq!(codes_of(declared), [], "`w` is declared two lines up");
+
+    let later = "\
+struct Widget { int size; };
+void f() {
+    w.size;
+}
+Widget w;
+";
+    assert_eq!(
+        codes_of(later),
+        [DiagnosticCode::UndefinedName],
+        "`w` is declared after the use, so it is not visible there"
+    );
+}
+
+/// **The four silences the rule is written around**: a macro, a template body, a lambda body, and a header.
+#[test]
+fn the_rule_is_quiet_where_a_name_may_be_declared_elsewhere() {
+    // A macro whose expansion is a declared name: the rendering makes the receiver `w`, which resolves.
+    let macro_defined = "\
+struct Widget { int size; };
+#define receiver w
+void f() {
+    Widget w;
+    receiver.size;
+}
+";
+    assert_eq!(codes_of(macro_defined), []);
+
+    // A template body is dependent: `count` may come from a base that exists only at instantiation.
+    let templated = "\
+template <class T>
+struct Derived : T {
+    void f() { count.size; }
+};
+";
+    assert_eq!(codes_of(templated), [], "a template body is not judged");
+
+    // A lambda's capture is a declaration the scope tree does not bind.
+    let lambda = "\
+struct Widget { int size; };
+void f() {
+    Widget w;
+    auto g = [&w]() { w.size; };
+}
+";
+    assert_eq!(codes_of(lambda), [], "a capture is not a name the scope tree holds");
+
+    // A name a header declares — here the header is the second file of the fixture.
+    let from_a_header = "\
+#include \"b.h\"
+void f() {
+    from_header.size;
+}
+";
+    let header = "\
+struct Widget { int size; };
+extern Widget from_header;
+";
+    let codes: Vec<DiagnosticCode> = codes_of_a_two_file_fixture(from_a_header, header);
+    assert_eq!(codes, [], "`from_header` is declared in the header");
+}
+
+/// [`codes_of`] for a fixture that needs a header beside its source.
+fn codes_of_a_two_file_fixture(source: &str, header: &str) -> Vec<DiagnosticCode> {
+    let files = MemoryFiles::new()
+        .with_file("/p/a.cpp", source)
+        .with_file("/p/b.h", header);
+    let providers = SessionFiles::new(OpenDocuments::new(), files);
+    let mut session = Session::with_config(
+        "/p",
+        providers,
+        WatchFilter::new("/p"),
+        CompilerConfig::default(),
+    );
+    session.add_project_files([
+        std::path::PathBuf::from("/p/a.cpp"),
+        std::path::PathBuf::from("/p/b.h"),
+    ]);
+    session.want_cooked_reading(std::path::Path::new("/p/a.cpp"));
+    session.want_cooked_reading(std::path::Path::new("/p/b.h"));
+    session.index_everything();
+    session
+        .diagnostics(std::path::Path::new("/p/a.cpp"))
+        .map(|found| {
+            found
+                .checks
+                .iter()
+                .map(|finding| finding.code)
+                .chain(found.errors.iter().map(|error| error.code))
+                .collect()
+        })
+        .unwrap_or_default()
+}

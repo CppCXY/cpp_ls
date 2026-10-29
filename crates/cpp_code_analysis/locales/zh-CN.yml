@@ -23,4 +23,5 @@
 "this branch always runs: the condition `%{condition}` is a literal true, so the `if` decides nothing": "这个分支永远会走：条件 `%{condition}` 是字面量 true，这个 `if` 什么也没决定"
 "this function is declared to return `%{declared}` and its body has no `return`": "这个函数声明返回 `%{declared}`，但函数体里没有 `return`"
 "`%{object}` has no member `%{member}`": "`%{object}` 没有成员 `%{member}`"
+"`%{name}` is not declared: nothing this file can see names it": "`%{name}` 没有声明 —— 这个文件能看到的范围内找不到它"
 "`%{passed}` does not satisfy `%{concept}`, which constrains the parameter this argument is passed for": "`%{passed}` 不满足 `%{concept}`，而收到这个实参的形参正是被它约束的"

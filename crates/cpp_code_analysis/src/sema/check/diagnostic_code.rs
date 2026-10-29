@@ -48,6 +48,8 @@ pub enum DiagnosticCode {
     AssignTypeCheck,
     /// A member access on a type that does not declare that member — see [`super::undefined_field`].
     UndefinedField,
+    /// A name nothing declares is read at this position — see [`super::undefined_name`].
+    UndefinedName,
     /// A declaration nothing uses — see [`super::unused`].
     Unused,
     /// A branch the program cannot take, or a condition that is already decided — see
@@ -107,11 +109,12 @@ impl DiagnosticCode {
     /// what it says about types, then what it says about a whole body, then the two that are about the reading
     /// rather than the program. A consumer that shows a settings screen, or a test that asserts every rule has a
     /// name and a module, iterates this.
-    pub const ALL: [DiagnosticCode; 24] = [
+    pub const ALL: [DiagnosticCode; 25] = [
         DiagnosticCode::SyntaxError,
         DiagnosticCode::ParamTypeCheck,
         DiagnosticCode::AssignTypeCheck,
         DiagnosticCode::UndefinedField,
+        DiagnosticCode::UndefinedName,
         DiagnosticCode::Unused,
         DiagnosticCode::UnnecessaryBranch,
         DiagnosticCode::ArgumentCount,
@@ -145,6 +148,7 @@ impl DiagnosticCode {
             DiagnosticCode::ParamTypeCheck => "param-type-check",
             DiagnosticCode::AssignTypeCheck => "assign-type-check",
             DiagnosticCode::UndefinedField => "undefined-field",
+            DiagnosticCode::UndefinedName => "undefined-name",
             DiagnosticCode::Unused => "unused",
             DiagnosticCode::UnnecessaryBranch => "unnecessary-branch",
             DiagnosticCode::ArgumentCount => "argument-count",
@@ -194,6 +198,7 @@ impl DiagnosticCode {
             DiagnosticCode::ParamTypeCheck => RuleSeverity::Error,
             DiagnosticCode::AssignTypeCheck => RuleSeverity::Error,
             DiagnosticCode::UndefinedField => RuleSeverity::Error,
+            DiagnosticCode::UndefinedName => RuleSeverity::Error,
             DiagnosticCode::ArgumentCount => RuleSeverity::Error,
             DiagnosticCode::ReturnTypeMismatch => RuleSeverity::Error,
             DiagnosticCode::ConceptNotSatisfied => RuleSeverity::Error,

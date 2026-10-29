@@ -121,6 +121,7 @@ pub mod return_type_mismatch;
 mod simplify_boolean_expr;
 pub mod syntax_error;
 pub mod undefined_field;
+pub mod undefined_name;
 pub mod unnecessary_branch;
 pub mod unused;
 mod use_auto;
@@ -1455,6 +1456,7 @@ pub fn run(context: CheckContext<'_>) -> Vec<Finding> {
     run_check::<assignment_in_condition::AssignmentInCondition>(&mut context);
     run_check::<unnecessary_branch::UnnecessaryBranch>(&mut context);
     run_check::<undefined_field::UndefinedField>(&mut context);
+    run_check::<undefined_name::UndefinedName>(&mut context);
     run_check::<argument_count::ArgumentCount>(&mut context);
     run_check::<param_type_check::ParamTypeCheck>(&mut context);
     run_check::<assign_type_check::AssignTypeCheck>(&mut context);
