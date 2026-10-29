@@ -20,7 +20,7 @@
 //! once per distinct file, and everything downstream compares numbers.
 
 use std::collections::HashMap;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 /// A file's identity within one analysis.
 ///
@@ -481,46 +481,61 @@ pub fn normalize_path(path: &Path, case_insensitive: bool) -> String {
     // `\\?\UNC\server\share` comes back as `\\server\share`, which is the same path in the spelling the rest of
     // this crate compares.
     let raw = path.to_string_lossy();
-    let stripped = raw
-        .strip_prefix(r"\\?\UNC\")
-        .map(|rest| format!(r"\\{rest}"))
-        .or_else(|| raw.strip_prefix(r"\\?\").map(str::to_string));
-    let path = match &stripped {
-        Some(stripped) => Path::new(stripped),
-        None => path,
+    let text: String = match raw.strip_prefix(r"\\?\UNC\") {
+        Some(rest) => format!(r"\\{rest}"),
+        None => match raw.strip_prefix(r"\\?\") {
+            Some(rest) => rest.to_string(),
+            None => raw.into_owned(),
+        },
     };
+    let text = text.as_str();
 
+    // **The prefix is text, not a `std::path` component.** `Path::components()` reads a drive letter or a UNC root
+    // only on Windows, so the rule this function exists for was invisible to a test run anywhere else — and a
+    // rendering made on one machine may be read on another. Splitting the spelling itself makes the answer the same
+    // everywhere, which is what "normalized" has to mean for two spellings to compare equal.
     let mut parts: Vec<String> = Vec::new();
+    let mut rest: &str = text;
 
-    for component in path.components() {
-        match component {
-            Component::Prefix(prefix) => {
-                parts.push(prefix.as_os_str().to_string_lossy().into_owned())
-            }
-            Component::RootDir => {
-                // A prefix directly before the root is part of it: `C:` + `/` is `C:/`.
-                if let Some(last) = parts.last_mut()
-                    && last.ends_with(':')
-                {
-                    last.push('/');
-                    continue;
+    if let Some(unc) = rest.strip_prefix(r"\\") {
+        // `\\server\share\dir` — the first two segments are the root, and they are kept in that spelling.
+        let mut segments = unc.split(['/', '\\']);
+        let server = segments.next().unwrap_or_default();
+        let share = segments.next().unwrap_or_default();
+        if !server.is_empty() {
+            parts.push(format!(r"\\{server}\{share}"));
+            rest = unc
+                .get(server.len() + 1 + share.len()..)
+                .unwrap_or_default();
+        }
+    } else if rest.len() >= 2 && rest.as_bytes()[1] == b':' {
+        // `C:` is a *prefix*, not a directory: `C:\a` is `C:/a`. A drive with no separator after it (`C:foo`) is
+        // drive-relative, and the answer keeps the prefix as it was written.
+        let drive = &rest[..2];
+        rest = &rest[2..];
+        let rooted = rest.starts_with('/') || rest.starts_with('\\');
+        parts.push(if rooted {
+            format!("{drive}/")
+        } else {
+            drive.to_string()
+        });
+    } else if rest.starts_with('/') || rest.starts_with('\\') {
+        parts.push("/".to_string());
+    }
+
+    for segment in rest.split(['/', '\\']) {
+        match segment {
+            "" | "." => {}
+            ".." => match parts.last() {
+                // `..` above the root is defined to be the root: `/../a.h` and `/a.h` are one file. Above a
+                // relative path it is kept, because there it changes what the path means.
+                Some(last) if is_a_root(last) => {}
+                Some(last) if last != ".." => {
+                    parts.pop();
                 }
-                parts.push("/".to_string());
-            }
-            Component::CurDir => {}
-            Component::ParentDir => {
-                // `..` pops a real directory. It is kept when there is nothing to pop — above a relative
-                // path's start that changes what the path means — but **not** above the root, where `..`
-                // is defined to be the root itself: `/../a.h` and `/a.h` are one file.
-                match parts.last() {
-                    Some(last) if last == "/" || last.ends_with(":/") => {}
-                    Some(last) if last != ".." => {
-                        parts.pop();
-                    }
-                    _ => parts.push("..".to_string()),
-                }
-            }
-            Component::Normal(name) => parts.push(name.to_string_lossy().into_owned()),
+                _ => parts.push("..".to_string()),
+            },
+            name => parts.push(name.to_string()),
         }
     }
 
@@ -541,6 +556,13 @@ pub fn normalize_path(path: &Path, case_insensitive: bool) -> String {
     }
 }
 
+/// **Is this part a root rather than a directory?** — `/`, `C:/`, and a UNC root (`\\server\share`). `..` at a root is
+/// the root itself, and popping it would leave a relative path where an absolute one was written.
+fn is_a_root(part: &str) -> bool {
+    part == "/"
+        || part.ends_with(":/")
+        || (part.starts_with(r"\\") && part.matches('\\').count() >= 2)
+}
 /// Join a directory and a relative path, then normalize.
 pub fn join_normalized(directory: &Path, relative: &Path, case_insensitive: bool) -> PathBuf {
     let joined = directory.join(relative);

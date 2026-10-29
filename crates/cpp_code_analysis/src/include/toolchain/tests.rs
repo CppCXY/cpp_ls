@@ -393,19 +393,25 @@ fn a_bare_name_is_searched_on_the_path_and_a_path_is_used_where_it_says() {
 
 #[test]
 fn the_path_is_searched_in_the_order_the_names_are_tried() {
-    // Nothing in the environment: the machine's default is whatever is installed, and `g++` is tried before
-    // `clang++` because that is the order a person reading `COMPILER_NAMES` expects.
-    let files = MemoryFiles::new().with_file("/usr/bin/clang++", "");
-    let found = find_compiler(&files, None, Path::new("/p/main.cpp"), &environment());
-    assert_eq!(found, Some(Path::new("/usr/bin/clang++").to_path_buf()));
+    // **The directory is not a conventional install root** (`/usr/bin`, `/opt/homebrew/bin`, …), because a compiler
+    // found *there* is step 3's answer rather than this test's: with the fixture in `/usr/bin`, a Unix-like machine
+    // found `clang++` before `PATH` was consulted at all, while Windows looked for `/usr/bin/clang++.exe` and found
+    // nothing. `PATH` is what this test is about, so the fixture lives only on it.
+    let mut environment = environment();
+    environment.path = vec![Path::new("/p/bin").into()];
+
+    // `g++` is tried before `clang++`, because that is the order a person reading `COMPILER_NAMES` expects.
+    let files = MemoryFiles::new().with_file("/p/bin/clang++", "");
+    let found = find_compiler(&files, None, Path::new("/p/main.cpp"), &environment);
+    assert_eq!(found, Some(Path::new("/p/bin/clang++").to_path_buf()));
 
     let files = MemoryFiles::new()
-        .with_file("/usr/bin/clang++", "")
-        .with_file("/usr/bin/g++", "");
-    let found = find_compiler(&files, None, Path::new("/p/main.cpp"), &environment());
+        .with_file("/p/bin/clang++", "")
+        .with_file("/p/bin/g++", "");
+    let found = find_compiler(&files, None, Path::new("/p/main.cpp"), &environment);
     assert_eq!(
         found,
-        Some(Path::new("/usr/bin/g++").to_path_buf()),
+        Some(Path::new("/p/bin/g++").to_path_buf()),
         "the first name on the list that exists, not the first directory that has any of them"
     );
 

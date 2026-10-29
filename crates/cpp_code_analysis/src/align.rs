@@ -1441,6 +1441,17 @@ mod tests {
     use super::*;
     use cpp_parser::SourceRange;
 
+    /// **The spelling an origin is recorded in.** Case is folded on Windows only — two files that differ in
+    /// case are one file there and two here — so a test that asserted the folded spelling everywhere would be
+    /// asserting the Windows rule on a file system that does not have it.
+    fn as_recorded(path: &str) -> String {
+        if cfg!(windows) {
+            path.to_lowercase()
+        } else {
+            path.to_string()
+        }
+    }
+
     fn plain(spellings: &[&str]) -> Vec<StreamToken> {
         spellings
             .iter()
@@ -1803,15 +1814,15 @@ mod tests {
             ],
             "the markers are not tokens: {tokens:?}"
         );
-        assert_eq!(tokens[0].origin(), "c:/src/main.cpp:1");
+        assert_eq!(tokens[0].origin(), as_recorded("C:/src/main.cpp:1"));
         assert_eq!(
             tokens[6].origin(),
-            "c:/inc/xstring:1",
+            as_recorded("C:/inc/xstring:1"),
             "the header's own tokens carry the header's name and line: {tokens:?}"
         );
         assert_eq!(
             tokens[11].origin(),
-            "c:/src/main.cpp:7",
+            as_recorded("C:/src/main.cpp:7"),
             "and the file comes back when the marker says so"
         );
     }
@@ -1829,12 +1840,11 @@ mod tests {
         let tokens = tokenize_preprocessed(output);
 
         assert_eq!(spelled(&tokens), ["int", "x", ";"]);
-        let expected = if cfg!(windows) {
-            "c:/src/main.cpp:12"
-        } else {
-            "C:/src/main.cpp:12"
-        };
-        assert_eq!(tokens[0].origin(), expected, "{tokens:?}");
+        assert_eq!(
+            tokens[0].origin(),
+            as_recorded("C:/src/main.cpp:12"),
+            "{tokens:?}"
+        );
     }
 
     /// **A path with a backslash that is not a C escape keeps its backslash, and is normalized like every other
@@ -1855,7 +1865,7 @@ mod tests {
         // that.
         assert_eq!(
             tokens[0].origin(),
-            "c:/work/src/main.cpp:1",
+            as_recorded("C:/work/src/main.cpp:1"),
             "the path survives with its separators, in the spelling comparisons are made in: {tokens:?}"
         );
     }
