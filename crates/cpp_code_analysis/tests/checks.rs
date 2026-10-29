@@ -2569,3 +2569,62 @@ fn codes_of_a_two_file_fixture(source: &str, header: &str) -> Vec<DiagnosticCode
         })
         .unwrap_or_default()
 }
+
+/// **A call to a name nothing declares**, and the one argument shape that keeps the rule quiet.
+///
+/// ```cpp
+/// void f() { printh("x", 12); }     // nothing declares `printh`
+/// ```
+///
+/// Measured on `test_cpp/main.cpp`: `printh("1231313", 12)` on line 74, with `void printh(…)` defined on line 83 — a
+/// call a compiler rejects and this server accepted. The extra guard a *receiver* does not need is **ADL**: an
+/// unqualified call may be found through the namespaces of its arguments' types, so a call with a class-typed (or
+/// unreadable) argument is silence, and only a call whose arguments are all builtins can be called undeclared.
+#[test]
+fn a_call_to_a_name_nothing_declares_is_reported() {
+    let undeclared = "\
+void f() {
+    printh(\"x\", 12);
+}
+";
+    assert_eq!(
+        codes_of(undeclared),
+        [DiagnosticCode::UndefinedName],
+        "nothing declares `printh`, and its arguments are a string literal and an int"
+    );
+
+    // **ADL**: a class-typed argument may bring the callee in from its own namespace.
+    let adl = "\
+struct Widget { int size; };
+void f(Widget w) {
+    swap(w, w);
+}
+";
+    assert_eq!(codes_of(adl), [], "`swap` may be found by ADL");
+    // A macro is expanded before the checks see it, so the callee under judgement is the *body*'s. Declared, and
+    // the rule is silent — which is also the evidence that the macro's own name is never judged as a callee.
+    let macro_call = "\
+#define LOG(x) report(x)
+void report(int value);
+void f() {
+    LOG(1);
+}
+";
+    assert_eq!(codes_of(macro_call), []);
+
+    // A callee the header declares.
+    let from_a_header = "\
+void log_name(const char *name, int count);
+";
+    let caller = "\
+#include \"b.h\"
+void f() {
+    log_name(\"x\", 1);
+}
+";
+    assert_eq!(
+        codes_of_a_two_file_fixture(caller, from_a_header),
+        [],
+        "`log_name` is declared in the header"
+    );
+}

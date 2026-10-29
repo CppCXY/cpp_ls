@@ -47,7 +47,7 @@
 //!   and a declaration in *this* file is already the scope tree's business, so it is not counted twice (the two
 //!   coordinate systems, the rendering's and the file's, are not comparable offset by offset).
 
-use cpp_parser::{CppSyntaxKind, CppTokenKind};
+use cpp_parser::{CppAstNode, CppSyntaxKind, CppTokenKind};
 
 use super::{Check, CheckContext, DiagnosticCode};
 
@@ -99,7 +99,94 @@ impl Check for UndefinedName {
                 t!("`%{name}` is not declared: nothing this file can see names it", name = name),
             );
         }
+
+        // **A call's callee**, which is the other half of "a name is read here": `printh("…", 12)` on line 74 of the
+        // sample file, with `void printh(…)` defined on line 83, is the same error as an undeclared receiver and the
+        // same silence.
+        //
+        // The extra guard a receiver does not need is **ADL**: an unqualified call may be found through the
+        // namespaces of its arguments' types, so nothing may be said unless every argument's type is one the
+        // language knows (a builtin has no associated namespace). An argument whose type this layer cannot work out
+        // is "may be a class", and that is silence.
+        for call in context.own::<cpp_parser::CppCallExpr>().collect::<Vec<_>>() {
+            let call_node = call.syntax().clone();
+            let Some(callee) = call_node.children().next() else {
+                continue;
+            };
+            // A **bare** callee only: `a.f(…)` is the receiver's question above, and `Namespace::f(…)` and
+            // `(*p)(…)` are not this question at all.
+            let Some(token) = a_bare_name(&callee) else {
+                continue;
+            };
+            if super::member_access_above(&callee).is_some() {
+                continue;
+            }
+            let name = token.text().to_string();
+            let at = usize::from(token.text_range().start());
+            if in_a_template(&call_node) || in_a_lambda(context, at) {
+                continue;
+            }
+            if context
+                .summary
+                .macros
+                .iter()
+                .any(|macro_fact| macro_fact.name == name)
+            {
+                continue;
+            }
+            if context.model.names_a_template_parameter(&name, at) {
+                continue;
+            }
+            if a_declaration_is_visible(context, &name, at) {
+                continue;
+            }
+            if an_argument_may_take_part_in_adl(context, &call_node) {
+                continue;
+            }
+
+            context.add(
+                DiagnosticCode::UndefinedName,
+                cpp_parser::source_range(token.text_range()),
+                name.clone(),
+                t!("`%{name}` is not declared: nothing this file can see names it", name = name),
+            );
+        }
     }
+}
+
+/// **Could argument-dependent lookup find this call's callee?**
+///
+/// ADL considers the namespaces of the **class and enum types among the arguments**, so a call whose every argument
+/// is a builtin cannot be found that way — and only then may a missing declaration be called missing. An argument
+/// whose type this layer cannot work out might be anything, which is the same as "yes".
+fn an_argument_may_take_part_in_adl(
+    context: &CheckContext<'_>,
+    call: &cpp_parser::CppSyntaxNode,
+) -> bool {
+    let Some(call_expression) = cpp_parser::CppCallExpr::cast(call.clone()) else {
+        return true;
+    };
+    call_expression.get_args().iter().any(|argument| {
+        !matches!(
+            context.type_of(argument.syntax()),
+            crate::Known::Yes((type_of, _)) if is_a_builtin_spelling(&type_of.to_string())
+        )
+    })
+}
+
+/// **A type spelling the language already knows** — the ones with no associated namespace.
+fn is_a_builtin_spelling(written: &str) -> bool {
+    const BUILTIN: &[&str] = &[
+        "void", "bool", "char", "char8_t", "char16_t", "char32_t", "wchar_t", "short", "int", "long",
+        "float", "double", "signed", "unsigned",
+    ];
+    written
+        .split(|character: char| !character.is_alphanumeric() && character != '_')
+        .filter(|word| !word.is_empty())
+        .all(|word| {
+            BUILTIN.contains(&word)
+                || matches!(word, "const" | "volatile" | "constexpr")
+        })
 }
 
 /// **The single identifier an expression is written as**, or `None` — see the call site.
