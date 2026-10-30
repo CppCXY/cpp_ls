@@ -351,9 +351,17 @@ impl Feature {
             // `AttributesC`, `Nullptr` and `Constexpr` are **not** here: they have a second route (C++11) and are matched
             // by the arm above. A duplicate in this list silently won, because a `match` takes the last arm that names a
             // variant — which is what made `nullptr` C23-only for an afternoon.
-            BitInt | AutoC | EnumeratorsWithAFixedType | EmptyInitializer | Elifdef => {
-                S(Standard::C23)
-            }
+            AutoC | EnumeratorsWithAFixedType | EmptyInitializer | Elifdef => S(Standard::C23),
+            // **`_BitInt` is C23's, and every C compiler accepts it in every C mode.** Measured with gcc 15:
+            // `struct bits { unsigned _BitInt(3) three : 3; _BitInt(13) signed_wide : 13; _BitInt(5) plain; };`
+            // compiles with `-std=c99`, `-std=c11`, `-std=c17` and even `-std=gnu89` (exit 0, no diagnostic), and
+            // clang 18 accepts it in `-std=c++23`. Gating the grammar on C23 alone therefore misreads a declaration a
+            // compiler accepts whenever the standard is **not detected** — no compile database, a header opened on its
+            // own — as a call: the struct's four members came out as none, and the reader saw a type nobody declares.
+            // The bit is the only use of the answer — "is `_BitInt(` a type here" — and the detector around it already
+            // requires a parenthesised width followed by an identifier, so an ordinary variable named `_BitInt` is
+            // untouched.
+            BitInt => AnyOf(&[S(Standard::C89), S(Standard::Cpp11)]),
 
             // Vendors.
             StatementExpression | ElvisOperator | AsmBlock | NestedFunction | LabelsAsValues => {

@@ -31,6 +31,14 @@ C23 bits.
 
 **Not supported**: C23's `#embed`. Every other C23 construct is in the table.
 
+**One row is read in every standard**, because the compilers do: `_BitInt(N)` is C23's, and gcc 15 accepts
+`struct bits { unsigned _BitInt(3) three : 3; _BitInt(13) signed_wide : 13; _BitInt(5) plain; };` with `-std=c99`,
+`-std=c11`, `-std=c17` **and** `-std=gnu89` (exit 0, no diagnostic), while clang 18 accepts it in `-std=c++23`. A reader
+that gated it on C23 misread a legal declaration as a call whenever the standard was not detected — no compile database,
+a header opened on its own — and the struct came out with no members at all. The gate is open in every standard the
+server knows; the detector around it still requires a parenthesised width followed by an identifier, so a variable named
+`_BitInt` is untouched.
+
 ## 3. Preprocessing
 
 | Ability | What it does |

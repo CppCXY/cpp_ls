@@ -151,44 +151,71 @@ fn a_typeof_specifier_takes_a_type() {
     );
 }
 
-/// **`_BitInt` as a declaration's own type, and as a cast inside its initialiser** — C23.
+/// **`_BitInt` is read in every C mode, and in C++ too.**
 ///
 /// ```c
-/// _BitInt(37) wide = (_BitInt(37))1 << 30;
-/// unsigned _BitInt(7) small = 100;
+/// struct bits {
+///     unsigned _BitInt(3) three : 3;
+///     _BitInt(13) signed_wide : 13;
+///     _BitInt(5) plain;
+///     unsigned _BitInt(4) other : 2;
+/// };
 /// ```
 ///
-/// The first spelling had no declaration anchor at all: `_BitInt` is a contextual keyword (an identifier followed by a
-/// `(`), so the statement was read as an expression. Adding the anchor made this line fail — the initialiser's cast
-/// `(_BitInt(37))` needs the same rule in `is_a_type_in_parentheses` — which is why both halves are pinned here together.
-/// Measured on a nine-file C corpus: `struct bits` answered one of its two members.
+/// The grammar gated `_BitInt` on C23 alone, and no compiler does: measured with gcc 15, every one of these members
+/// compiles with `-std=c99`, `-std=c11`, `-std=c17` and `-std=gnu89` (exit 0, no diagnostic), and clang 18 accepts the
+/// same struct in `-std=c++23`. A project whose standard was **not detected** — no compile database, a header opened on
+/// its own — was therefore read as a call: `_BitInt(3) three : 3` became an initialiser and a macro call, and the struct
+/// had no members at all. Asked by a reader of such a project, and reproduced here under the default configuration and
+/// under `-std=c17`.
+///
+/// The comment this replaces called the default reading "supposed to fail"; that was true of the gate and wrong about
+/// the language.
 #[test]
-fn a_bitint_type_in_a_declaration_and_in_a_cast_parses() {
-    // **C23's language, because `_BitInt` is C23's.** `assert_all_parse` parses with `ParserConfig::default()`, which is
-    // C++17 — and in C++17 `_BitInt` is an ordinary identifier, so every one of these shapes is *supposed* to fail there.
-    // The first version of this test asked the default and reported a failure that was the harness's, not the grammar's.
+fn a_bitint_type_is_read_as_a_type_in_every_standard() {
     use cpp_parser::features::LanguageConfig;
-    let language = LanguageConfig::from_flag("-std=c23").expect("a flag");
-    let mut failed = Vec::new();
-    for (name, source) in [
-        (
-            "a declaration and a cast",
-            "void f(void) { _BitInt(37) wide = (_BitInt(37))1 << 30; (void)wide; }",
-        ),
-        (
-            "with an unsigned specifier in front",
-            "void f(void) { unsigned _BitInt(7) small = 100; (void)small; }",
-        ),
-        (
-            "a bit-field in a struct",
-            "struct bits { unsigned _BitInt(3) three : 3; _BitInt(13) signed_wide : 13; };",
-        ),
-    ] {
-        let config = cpp_parser::ParserConfig::default().with_language(language);
-        let tree = cpp_parser::CppParser::parse(source, config);
-        if !tree.get_errors().is_empty() {
-            failed.push(format!("{name}: {:?}", tree.get_errors()));
-        }
+    use cpp_parser::{CppAstNode, CppTranslationUnit};
+
+    const BITS: &str = "\
+struct bits {
+    unsigned _BitInt(3) three : 3;
+    _BitInt(13) signed_wide : 13;
+    _BitInt(5) plain;
+    unsigned _BitInt(4) other : 2;
+};
+";
+    let mut languages: Vec<(&str, Option<LanguageConfig>)> = vec![("the default", None)];
+    for standard in ["c99", "c11", "c17", "c23", "c++17", "gnu2x"] {
+        languages.push((
+            standard,
+            LanguageConfig::from_flag(&format!("-std={standard}")),
+        ));
     }
-    assert!(failed.is_empty(), "C23 _BitInt: {failed:#?}");
+
+    for (name, language) in languages {
+        let mut config = cpp_parser::ParserConfig::default();
+        if let Some(language) = language {
+            config = config.with_language(language);
+        }
+        let tree = cpp_parser::CppParser::parse(BITS, config);
+        assert!(
+            tree.get_errors().is_empty(),
+            "{name}: the struct did not parse: {:?}",
+            tree.get_errors()
+        );
+        let root = CppTranslationUnit::cast(tree.get_red_root()).expect("a translation unit");
+        let declaration = root.get_declarations().next().expect("the struct");
+        let class = declaration.get_class_def().expect("a struct definition");
+        let members: Vec<String> = class
+            .get_body()
+            .expect("a body")
+            .get_members()
+            .filter_map(|member| member.get_name_text())
+            .collect();
+        assert_eq!(
+            members,
+            vec!["three", "signed_wide", "plain", "other"],
+            "{name}: the bit-fields are members"
+        );
+    }
 }
