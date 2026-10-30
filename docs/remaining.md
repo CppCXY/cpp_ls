@@ -343,8 +343,17 @@ findings 4 条 undefined-field（signed_wide/plain）
 修后                 0           0           5/5       1/3
 ```
 
-**剩下的唯一一项**：`operation`/`compare_function` 的类型答 `binary_op`（typedef 的名字），而两文件 fixture
-（`a_function_pointer_typedef_from_a_header`）答展开后的 `int (*)(int, int)`。同一个引擎、同一个形状，差别在
-会话来源：fixture 是 in-memory + 默认语言（C++17），语料是真实工程 + `compile_commands.json`（C23）。下一轮第一步：
-在 `type_at` → `declared_type` → `NamedDeclaration::type_of` 上打印，比较两条调用路径各走到哪个分支；
-最可疑的是**语言**（C23 与 C++17 的别名展开可能不是同一个门控）。
+**那一项不是引擎的缺陷，是测量问错了 token。** 语料原来的两条 type 行把光标放在**声明符名字** `operation` 里，
+期望的却是**别名展开**后的 `int (*)(int, int)`；而两文件 fixture（`a_function_pointer_typedef_from_a_header`）
+把光标放在**类型名** `binary_op` 里 —— 那是两个不同的问题：
+
+```text
+光标在 operation 里   → operation : binary_op                 文件写的就是这个类型，hover 该显示它
+光标在 binary_op 里   → binary_op : int (*)(int, int)         别名指代什么，fixture 问的是这个
+```
+
+把两条行改成期望 `binary_op`，并新增一条光标在 `binary_op` 上、期望展开的行之后：**4/4 type 行全部通过**，
+语料全绿（5/5 members、4/4 types、0 findings、0 parse errors）。记在这里是因为这一类错误会重演：`TypeRow` 的
+`name` 决定光标落在哪个 token 上，"这个声明有没有类型"和"这个别名指代什么"必须写成两行。
+
+C 支持的未修清单到这一轮为止是**空的**；语料留在 `C:\Users\zc\Desktop\c-project`，以后任何 C 回归都可以直接跑它。

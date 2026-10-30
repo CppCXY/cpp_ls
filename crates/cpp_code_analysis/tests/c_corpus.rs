@@ -103,7 +103,15 @@ const MEMBERS: &[MemberRow] = &[
     },
 ];
 
-/// The type questions: the struct variable, and the two locals whose type is a function-pointer typedef from a header.
+/// The type questions: the struct variable, the two locals whose type is a function-pointer typedef from a header,
+/// and the alias spelling itself.
+///
+/// **The two are different questions, and measuring one as the other is a mistake this file made once.** A cursor
+/// inside the *declarator's name* (`operation`) asks what the file said the variable is — `binary_op`, the alias's
+/// name, which is the spelling a hover shows. A cursor inside the *type's name* (`binary_op`) asks what the alias
+/// denotes — `int (*)(int, int)` — and that is what the two-file fixture in `tests/types.rs` asserts. Both answers are
+/// right; the old rows here asked the first question and expected the second answer, so they reported a defect that
+/// did not exist.
 const TYPES: &[TypeRow] = &[
     TypeRow {
         file: "src/bits.c",
@@ -115,14 +123,20 @@ const TYPES: &[TypeRow] = &[
         file: "src/functions.c",
         needle: "binary_op operation",
         name: "operation",
-        // The engine expands a function-pointer typedef in a fixture; the corpus answered `<no type>`. What the type
-        // must name is the signature, not the typedef's spelling.
-        expected: "(int, int)",
+        // The variable's type is what the file wrote: the alias's name.
+        expected: "binary_op",
     },
     TypeRow {
         file: "src/functions.c",
         needle: "binary_op compare_function",
         name: "compare_function",
+        expected: "binary_op",
+    },
+    TypeRow {
+        file: "src/functions.c",
+        needle: "binary_op operation",
+        name: "binary_op",
+        // The alias itself denotes the signature, and the engine expands it — the question the two-file fixture asks.
         expected: "(int, int)",
     },
 ];

@@ -258,8 +258,12 @@ $env:CPPLS_C_NAMES = "div"  # 打印索引里这个名字的事实
                    findings   parse errors   members   types
 第九轮（旧语料）       0           0           49/50     32/34
 第十轮（冷缓存，修前）   4           0           3/5        1/3
-第十轮（修后）          0           0           5/5        1/3
+第十轮（修后）          0           0           5/5        4/4
 ```
+
+最后那 3 条 type 里，`operation`/`compare_function` 的两条原来是**问错了 token**：光标在声明符名字里，
+期望的却是别名展开 —— 与两文件 fixture（光标在类型名 `binary_op` 里）不是一个问题。改正期望、并补一条问
+`binary_op` 本身的行之后 4/4。详见 `docs/remaining.md` §N17 的结尾。
 
 修的是 `docs/remaining.md` §N16/§N17 的那一条：`_BitInt(13) signed_wide : 13;` 被 specifier 循环的两条
 "宏形状"分支读成 `MacroCall(_BitInt(13)) + NamedType(signed_wide)`，声明没有 declarator，成员消失。锚点
@@ -270,4 +274,4 @@ $env:CPPLS_C_NAMES = "div"  # 打印索引里这个名字的事实
 `FORMAT_VERSION` 3 → 4：摘要是缓存里的东西，而 `READING_FINGERPRINT` 现在只跟版本走 —— 修完第一次跑仍然是
 3/5，删掉语料的 `.cppls` 才是 5/5。这条差别值得记住：**改了摘要的内容，就要推 `FORMAT_VERSION`**。
 
-剩下的类型项（`binary_op` 没有展开成 `int (*)(int, int)`）写在 `docs/remaining.md` §N17 的最后。
+剩下的"类型项"最后查明是测量问题，不是引擎缺陷：语料现在 5/5 members、4/4 types、0 findings、0 parse errors。
