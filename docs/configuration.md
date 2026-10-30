@@ -223,6 +223,6 @@ contradicts — a C-style cast is the only cast C has, and an `int` in a conditi
 mistake. Measured before the gate existed: a C corpus configured with `-std=c17` answered **14 `c-style-cast` findings**
 telling the program to write `static_cast`.
 
-The other eighteen rules are about both languages. The gate is **not** a configuration key: a file compiled as C is read
+The other nineteen rules are about both languages. The gate is **not** a configuration key: a file compiled as C is read
 as C, and the eight rules are not opinions about it. `[diagnostics].disable` turns any rule off; nothing turns a
 C++-only rule on for C.

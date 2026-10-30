@@ -90,7 +90,7 @@ This is the "understands C++" layer, and the base every completion, hover and ch
 
 ## 6. Diagnostics
 
-Twenty-six rules, each with a fixed severity; `[diagnostics].disable` turns one off by name.
+Twenty-seven rules, each with a fixed severity; `[diagnostics].disable` turns one off by name.
 
 | Code | Severity | Meaning |
 | --- | --- | --- |
@@ -102,6 +102,7 @@ Twenty-six rules, each with a fixed severity; `[diagnostics].disable` turns one 
 | `redefinition` | Error | the same entity is defined twice in one scope |
 | `argument-count` | Error | the call passes the wrong number of arguments |
 | `return-type-mismatch` | Error | a `return` does not fit the declared type |
+| `dangling-return` | Error | a reference, pointer or view of something that dies when the function returns — a local, a temporary, or a pointer a local handed out |
 | `include-not-found` | Error | the `#include` was not found |
 | `access-invisible` | Error | a member reached from somewhere that may not reach it |
 | `missing-return` | Error | a function that promises a value can reach its end |

@@ -103,6 +103,9 @@ pub enum DiagnosticCode {
     MacroParentheses,
     /// A non-boolean value used as a condition — see [`super::implicit_bool_conversion`].
     ImplicitBoolConversion,
+    /// A reference, pointer or view of something that dies when the function returns — see
+    /// [`super::dangling_return`].
+    DanglingReturn,
 }
 
 impl DiagnosticCode {
@@ -112,7 +115,7 @@ impl DiagnosticCode {
     /// what it says about types, then what it says about a whole body, then the two that are about the reading
     /// rather than the program. A consumer that shows a settings screen, or a test that asserts every rule has a
     /// name and a module, iterates this.
-    pub const ALL: [DiagnosticCode; 26] = [
+    pub const ALL: [DiagnosticCode; 27] = [
         DiagnosticCode::SyntaxError,
         DiagnosticCode::ParamTypeCheck,
         DiagnosticCode::AssignTypeCheck,
@@ -139,6 +142,7 @@ impl DiagnosticCode {
         DiagnosticCode::MacroParentheses,
         DiagnosticCode::ImplicitBoolConversion,
         DiagnosticCode::ConceptNotSatisfied,
+        DiagnosticCode::DanglingReturn,
     ];
 
     /// **The code a client is shown**, and the spelling a config file uses: kebab case, and the module's file name
@@ -173,6 +177,7 @@ impl DiagnosticCode {
             DiagnosticCode::UseAuto => "use-auto",
             DiagnosticCode::MacroParentheses => "macro-parentheses",
             DiagnosticCode::ImplicitBoolConversion => "implicit-bool-conversion",
+            DiagnosticCode::DanglingReturn => "dangling-return",
             DiagnosticCode::ConceptNotSatisfied => "concept-not-satisfied",
         }
     }
@@ -237,6 +242,9 @@ impl DiagnosticCode {
             // A macro body without its own parentheses is a bug in the *caller's* expression order, not a style question.
             DiagnosticCode::MacroParentheses => RuleSeverity::Warning,
             DiagnosticCode::ImplicitBoolConversion => RuleSeverity::Hint,
+            // A dangling reference is undefined behaviour rather than a style question: the program reads an object
+            // whose lifetime ended, which is the one class of defect a compiler must not be quiet about.
+            DiagnosticCode::DanglingReturn => RuleSeverity::Error,
         }
     }
 

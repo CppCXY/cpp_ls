@@ -83,7 +83,7 @@ C23 bits.
 
 ## 6. Diagnostics
 
-Twenty-six rules, each with a fixed severity; `[diagnostics].disable` turns one off by name. The rows marked **C++**
+Twenty-seven rules, each with a fixed severity; `[diagnostics].disable` turns one off by name. The rows marked **C++**
 never fire in a file compiled as C — see [`configuration.md`](configuration.md) §5.
 
 | Code | Severity | Meaning |
@@ -96,6 +96,7 @@ never fire in a file compiled as C — see [`configuration.md`](configuration.md
 | `redefinition` | Error | the same entity is defined twice in one scope |
 | `argument-count` | Error | the call passes the wrong number of arguments |
 | `return-type-mismatch` | Error | a `return` does not fit the declared type |
+| `dangling-return` | Error | the address of a local returned as a pointer, or a pointer into a local |
 | `include-not-found` | Error | the `#include` was not found |
 | `access-invisible` | Error | a member reached from somewhere that may not reach it — **C++** |
 | `missing-return` | Error | a function that promises a value can reach its end |

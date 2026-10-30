@@ -110,6 +110,7 @@ pub mod diagnostic_code;
 mod braces_around_statements;
 pub mod concept_not_satisfied;
 mod cstyle_cast;
+mod dangling_return;
 mod else_after_return;
 mod implicit_bool_conversion;
 pub mod include_not_found;
@@ -1509,6 +1510,9 @@ pub fn run(context: CheckContext<'_>) -> Vec<Finding> {
     run_check::<param_type_check::ParamTypeCheck>(&mut context);
     run_check::<assign_type_check::AssignTypeCheck>(&mut context);
     run_check::<return_type_mismatch::ReturnTypeMismatch>(&mut context);
+    // The rule that needs an expression origin: `return s;` is a defect or not depending on whether `s` is a local, a
+    // parameter or a static - a question about the scope tree rather than about the spelling.
+    run_check::<dangling_return::DanglingReturn>(&mut context);
 
     if crate::probes::timing() {
         let (ran, nanos) = context.model.inference_cost();
