@@ -29,6 +29,8 @@ Widht = "Widht"
 exlude = "exlude"
 standrad = "standrad"
 Fo = "Fo"
+ue = "ue"
+UE = "UE"
 [files]
 extend-exclude = [
   "CHANGELOG.md",
