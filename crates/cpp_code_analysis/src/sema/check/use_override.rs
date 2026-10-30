@@ -41,7 +41,13 @@ impl Check for UseOverride {
             std::collections::BTreeMap::new();
 
         for (class, bases) in declarations {
-            let members: Vec<(String, String, usize)> = context
+            // **The declaration's text in the file, not in the rendering.** `fact.range` is a range in the file the
+            // reader wrote, which is [`CheckContext::written`]; `context.source` is the *rendering*, and slicing it
+            // with these offsets read the wrong declaration — `written.contains("override")` then answered about
+            // somebody else's text, and the members that did say `override` were reported as if they had not. Measured
+            // on `classes.cpp` of the C++ corpus: four findings naming `describe`, `clone`, `value` and `sum`, none of
+            // which was the member the range pointed at.
+            let members: Vec<(String, String, cpp_parser::SourceRange)> = context
                 .summary
                 .declarations
                 .iter()
@@ -51,14 +57,14 @@ impl Check for UseOverride {
                 })
                 .filter_map(|fact| {
                     let written = context
-                        .source
+                        .written
                         .get(fact.range.start_offset..fact.range.end_offset())?
                         .to_string();
-                    Some((fact.name.clone(), written, fact.name_range.start_offset))
+                    Some((fact.name.clone(), written, fact.name_range))
                 })
                 .collect();
 
-            for (name, written, offset) in members {
+            for (name, written, name_range) in members {
                 // **The member does not have to write `virtual`** — an override need not repeat it, and requiring it was
                 // the first version's bug. What matters is that it says neither `override` nor `final`.
                 if written.contains("override") || written.contains("final") {
@@ -90,11 +96,12 @@ impl Check for UseOverride {
                 if !overrides {
                     continue;
                 }
-                let range = cpp_parser::SourceRange::new(offset, name.len());
-                let _ = range;
-                context.add(
+                // **A range in the file's coordinates, published as one**: `add_in_the_file` is the crossing for a
+                // range that came from the summary, and asking `add` to cross it again put the finding at an offset
+                // that was the rendering's idea of the file's number.
+                context.add_in_the_file(
                     DiagnosticCode::UseOverride,
-                    cpp_parser::SourceRange::new(offset, name.len()),
+                    name_range,
                     name.clone(),
                     t!(
                         "`%{name}` overrides a base's virtual and does not say so — write `override`, which turns a silent non-override into a compile error",

@@ -117,6 +117,18 @@ impl Check for ArgumentCount {
             // The arguments as the typed layer counts them — for `scale(1, 2, 3)`, three.
             let passed = call.get_args().len();
 
+            // **A call that expands a pack passes an arity nothing here can count.** `sum_head(rest...)` is one
+            // argument to `get_args` — sometimes none, because the expansion is not an expression — and the count is
+            // whatever the pack holds at instantiation. The `...` is the evidence, and it is read from the call's own
+            // text because the expansion is not a node this check can ask about.
+            let written = context
+                .source
+                .get(usize::from(call.get_range().start())..usize::from(call.get_range().end()))
+                .unwrap_or_default();
+            if written.contains("...") {
+                continue;
+            }
+
             // **Which declaration this call means, if one of them is the language's answer.** `One` is a candidate
             // that fits, so the arity below cannot fire against it. `None` is the only arity report that is a fact
             // about the program — nothing in view takes this shape — and it is reported against the **nearest**

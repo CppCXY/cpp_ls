@@ -106,6 +106,44 @@ impl Check for UndefinedField {
                 object.class_name().unwrap_or_default().to_string()
             };
 
+            // **A class template's member list is a pattern, and the specialization's members are not all in it.**
+            // `Task<T>`'s members are those the template writes, and a member whose declaration depends on `T` — or one
+            // the pattern's own parse could not place — is missing from the list without being absent from the class.
+            // Measured: `other.handle_` inside `Task`'s move constructor, twice on `coroutines.cpp` of the C++ corpus.
+            // The fact's `parameters` are the template's own, so a class fact that has them is a template —
+            // `pattern` is about `auto` and is empty here.
+            let is_a_template = context.summary.declarations.iter().any(|fact| {
+                fact.kind == crate::DeclKind::Type
+                    && fact.name == class
+                    && !fact.parameters.is_empty()
+            });
+            if is_a_template {
+                continue;
+            }
+
+            // **Only a class this file declares is judged.** A member list built from another file's summary is the
+            // one thing this check cannot verify: the summary may have been cooked under a different macro environment
+            // — a standard header's `#if __cplusplus` branches are exactly that — and "the name is not in the list" is
+            // then a claim about *our reading* rather than about the program, which is the failure mode the module
+            // documentation says this check must never have.
+            //
+            // Measured on the C++ corpus: `future.get`, `promise.get`, `packaged_task.get` and
+            // `string_view::starts_with`/`ends_with` were five findings of exactly that kind, while the header's own
+            // summary answered 79 members for `std::string_view` in a session that read the same files in a different
+            // order. The scope tree holds precisely the classes whose declaration this file wrote, and those are the
+            // ones whose evidence is complete.
+            let declared_here = context
+                .model
+                .scopes()
+                .scope_with_qualified_name(&class)
+                .and_then(|scope| context.model.scopes().scope(scope))
+                .is_some_and(|scope| {
+                    matches!(scope.kind, crate::ScopeKind::Class | crate::ScopeKind::Enum)
+                });
+            if !declared_here {
+                continue;
+            }
+
             let crate::Known::Yes(members) = context.model.members_of(&class) else {
                 // Not known to be a class, or known and never read — see the module documentation.
                 continue;

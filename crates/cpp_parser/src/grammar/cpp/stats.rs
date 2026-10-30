@@ -443,6 +443,30 @@ pub fn parse_stat(p: &mut CppParser) -> ParseResult {
         _ if types::at_an_attribute(p) => {
             if let Err(err) = types::parse_attribute_specifiers(p) {
                 Err(err)
+            } else if matches!(
+                p.current_token(),
+                CppTokenKind::CaseKeyword | CppTokenKind::DefaultKeyword
+            ) {
+                // **An attribute may be the first token of a labelled statement**: the standard's
+                // `labeled-statement` begins with an attribute-specifier-seq, and `[[likely]] case 1:` is how a
+                // reader marks the branch that is expected to win:
+                //
+                // ```cpp
+                // switch (choice) {
+                //     [[likely]] case 2:
+                //         …
+                // }
+                // ```
+                //
+                // The statement rule cannot read a `case` on its own — a label is the switch body's, not a
+                // statement's — so before this the `case` was taken for an expression statement and reported
+                // `expected primary expression`. Read here, the attribute is the label's and the statement it
+                // labels follows as it always does.
+                if let Err(err) = read_switch_labels(p, base) {
+                    Err(err)
+                } else {
+                    parse_stat(p)
+                }
             } else {
                 parse_stat(p)
             }

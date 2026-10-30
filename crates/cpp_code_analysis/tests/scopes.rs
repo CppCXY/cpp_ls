@@ -2579,3 +2579,47 @@ fn a_call_to_a_qualified_name_in_a_body_binds_nothing() {
         "the call is not a declaration of anything: {shape}"
     );
 }
+
+/// **A `friend` function defined inside a class binds its own parameters and body.**
+///
+/// The `friend` keyword wraps the declaration it qualifies — `FriendDecl { Declaration { InitDeclarator … } }` — and
+/// that shape used to be skipped whole: no function scope, no parameter bindings, and `left`/`right` in an inline
+/// `operator==` read as undeclared (four findings on `classes.cpp` of the C++ corpus). The friend's *name* still
+/// declares nothing in the class — that is what `is_friend` keeps out — but its parameters are its own.
+#[test]
+fn a_friend_definition_binds_its_parameters() {
+    let source = "\
+struct S {
+    int x;
+    friend bool operator==(S const& left, S const& right) { return left.x == right.x; }
+};
+";
+    let table = scopes(source);
+    let shape = shape(&table);
+    println!("{shape}");
+    assert!(
+        shape.contains("left,right"),
+        "the friend function's parameters are bound in a scope of its own: {shape}"
+    );
+    assert!(
+        shape.contains("Class{x}"),
+        "the class's own member list is unchanged: {shape}"
+    );
+}
+
+/// **A `catch` handler's variable is a declaration**, visible in the handler and not outside it.
+#[test]
+fn a_catch_handlers_variable_is_bound() {
+    let source = "\
+void f() {
+    try { } catch (int const& again) { (void)again; }
+}
+";
+    let table = scopes(source);
+    let shape = shape(&table);
+    println!("{shape}");
+    assert!(
+        shape.contains("again"),
+        "the handler's variable is bound: {shape}"
+    );
+}

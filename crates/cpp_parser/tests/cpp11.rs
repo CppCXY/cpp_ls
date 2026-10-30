@@ -45,6 +45,16 @@ const CONSTRUCTS: &[(&str, &str)] = &[
     ("= delete", "struct S { S(const S&) = delete; };"),
     ("a raw string", "const char* s = R\"(a \" b)\";"),
     ("[[noreturn]]", "[[noreturn]] void f();"),
+    // **`typeid` carries a postfix chain**: `typeid(*p).name()` asks the type for a property, and the `.` belongs to
+    // the typeid-expression. Without the suffixes the node was complete at its `)` and the member access had no rule.
+    (
+        "typeid with a postfix member access",
+        "void f() { auto p = g(); std::cout << typeid(*p).name(); }",
+    ),
+    (
+        "typeid of a type with a postfix member access",
+        "void f() { std::cout << typeid(int).name(); }",
+    ),
 ];
 
 #[test]

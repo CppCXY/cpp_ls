@@ -61,6 +61,13 @@ impl Check for CStyleCast {
             if written.is_empty() {
                 continue;
             }
+            // **A cast to `void` is not a conversion**, and the message would name a spelling that does not exist:
+            // `(void)expression` is how C++ says "evaluate this and discard the result", and there is no
+            // `static_cast<void>(…)` in the language this rule was borrowed from. Every C++ codebase writes it,
+            // including the macro that made this finding on `preprocessor.cpp` of the C++ corpus.
+            if written == "void" {
+                continue;
+            }
             context.add(
                 DiagnosticCode::CStyleCast,
                 cpp_parser::source_range(node.text_range()),

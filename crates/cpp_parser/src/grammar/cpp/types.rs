@@ -1863,13 +1863,14 @@ fn parse_one_decl_specifier_inner(
             // while no *name* has joined it yet and the specifier before it is not already a
             // complete type; the `::` of a qualified name is walked by this loop one segment at a
             // time, so each later segment is still the same name.
-            if !name_joins_the_type(
+            let joins = name_joins_the_type(
                 p,
                 *has_type_specifier,
                 *name_allowed,
                 names_may_join,
                 a_class_definition_was_written,
-            ) {
+            );
+            if !joins {
                 return Err(CppParseError::syntax_error_from(
                     &t!("expected a declarator name"),
                     p.current_token_range(),
@@ -2034,6 +2035,15 @@ fn continues_a_qualified_name(p: &CppParser) -> bool {
             // whole scan to stop here — the argument list inside the bound is reached only through the `[`.
             CppTokenKind::Comma
             | CppTokenKind::Semicolon
+            // **A single `:` ends the name.** A qualified name is written with `::` and never with `:`, and the
+            // colon here is the one a **range-for header** (or a bit-field) puts between the declarator and what
+            // follows it: `for (int value : std::views::iota(1, 6))`. Stepping over it found the `::` of the *range
+            // expression*, answered "this name continues as a qualified name", and `value` joined the type — leaving
+            // the declaration with no declarator, so the header fell back to the C-style reading and reported
+            // `expected primary expression` against `int`. Measured on the C++ corpus: four range-for headers, all of
+            // them spelled with a `views::` name after the colon.
+            | CppTokenKind::Colon
+            | CppTokenKind::Question
             | CppTokenKind::LeftBrace
             | CppTokenKind::RightBrace
             | CppTokenKind::LeftParen

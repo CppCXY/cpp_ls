@@ -268,16 +268,30 @@ pub(crate) fn declared_type_of_with(
 
     let specifiers = specifiers?;
 
-    // **The declared name is handed over, because an out-of-line definition writes it in the
-    // specifier sequence** — see [`crate::sema::types::type_of_declaration_named`]. **Except for a
-    // `typedef`**, whose specifier sequence is its *type* and nothing else: `typedef typename
-    // _Base::reference reference;` writes the name twice, once inside the type and once as the
-    // declared one, and the out-of-line rule (a qualified spelling that ends in the declared name
-    // is the declarator's own name, not a type) then threw the **type** away and left nothing —
-    // which reads as `void`. An alias is exactly the case where the two spellings must not be
-    // reconciled.
+    // The declared name is handed over, because an out-of-line definition writes it in the specifier sequence — see
+    // [`crate::sema::types::type_of_declaration_named`]. **Except for a `typedef`**, whose specifier sequence is its
+    // *type* and nothing else: `typedef typename _Base::reference reference;` writes the name twice, once inside the
+    // type and once as the declared one, and the out-of-line rule (a qualified spelling that ends in the declared
+    // name is the declarator's own name, not a type) then threw the **type** away and left nothing — which reads as
+    // `void`. An alias is exactly the case where the two spellings must not be reconciled.
+    //
+    // **And except when the declarator itself holds the name.** That is what separates the two shapes the rule sees:
+    //
+    // ```text
+    //   std::any any = 1;                        specifier `std::any`, declarator `any`      -> the name is the declarator's
+    //   std::map<…> LuaLexer::LuaReserved = {…}; specifier `…::LuaReserved`, declarator `= {…}` -> the name is the specifier's
+    // ```
+    //
+    // Both write a qualified spelling that ends with the declared name, and only the second is a definition of that
+    // name. Asked without the distinction, `std::any any` recorded `type_of: Some("void")` — measured on
+    // `containers.cpp` of the C++ corpus, where `assign-type-check` then reported the initialisation of an `std::any`
+    // from `int` as a conversion "from `int` to `void`". The same shape is `Widget Widget;` or `S S;` in any file.
+    let the_declarator_holds_the_name = declarator
+        .as_ref()
+        .is_some_and(|node| reaches_the_name(node, binding.name_range));
     let spelled = match binding.kind {
         BindingKind::Typedef => None,
+        _ if the_declarator_holds_the_name => None,
         _ => Some(binding.name.text()),
     };
     let found = crate::sema::types::type_of_declaration_named(

@@ -1056,6 +1056,47 @@ impl ScopeTree {
         chain
     }
 
+    /// The scopes whose declarations are visible from `scope`, innermost first.
+    ///
+    /// The scope chain, and beside every **unnamed namespace** in it, the scope that namespace holds.
+    /// [namespace.def] says an unnamed namespace is equivalent to `namespace unique { … } using namespace unique;`
+    /// — its members are visible in the enclosing scope for the rest of the file, and only in this file. A plain
+    /// [`ScopeTree::scope_chain`] walk therefore misses the shape every C++ file with internal linkage uses:
+    ///
+    /// ```cpp
+    /// namespace { int helper(int); }     // internal linkage by construction
+    /// int use(int n) { return helper(n); }
+    /// ```
+    ///
+    /// `helper` is declared in the unnamed namespace's scope, which is a *child* of the file scope rather than an
+    /// ancestor of the use, so a chain walk never reaches it and the name reads as undeclared.
+    ///
+    /// The returned list is not ordered by the language's lookup rules beyond "innermost first" of the chain;
+    /// a consumer that must respect a declaration's position (a name is visible from its declaration onward) still
+    /// has to compare offsets itself.
+    pub fn scopes_visible_from(&self, from: ScopeId) -> Vec<ScopeId> {
+        let mut visible = self.scope_chain(from);
+        // The list grows while it is walked, which is what takes the descendants of an unnamed namespace too:
+        // `namespace { namespace { int x; } }` is two levels of the same rule.
+        let mut index = 0;
+        while index < visible.len() {
+            let id = visible[index];
+            index += 1;
+            let Some(scope) = self.scopes.get(id.index()) else {
+                continue;
+            };
+            for child in &scope.children {
+                let Some(child_scope) = self.scopes.get(child.index()) else {
+                    continue;
+                };
+                if child_scope.kind == ScopeKind::Namespace && child_scope.name.is_none() {
+                    visible.push(*child);
+                }
+            }
+        }
+        visible
+    }
+
     /// The scope a `::`-qualified spelling names: `ns::C` for the body of `namespace ns { struct C { … }; }`.
     ///
     /// The counterpart of [`ScopeTree::qualified_name_of`], and the reason a *qualified* name can be resolved at

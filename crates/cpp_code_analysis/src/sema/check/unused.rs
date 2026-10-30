@@ -56,6 +56,42 @@ fn is_deliberately_unused(name: &str) -> bool {
     name.starts_with('_')
 }
 
+/// **Does the declaration whose name is at `at` carry a `[[maybe_unused]]`?**
+///
+/// The attribute is written **before** the name — `[[maybe_unused]] int local = 3;` — and it is found by scanning the
+/// declaration's own prefix, which is the text between the previous statement boundary and the name. The fact's range
+/// starts at the name rather than at the declaration's first token, so the window is not "what precedes `at`": the type
+/// sits between the attribute and the name.
+///
+/// The boundary set is what keeps a *previous* declaration's attribute out of the answer: `[[maybe_unused]] int a = 1;`
+/// followed by `int b = 2;` must not excuse `b`, and the `;` between them is what stops it. `,` and `(` are boundaries
+/// too, because a declaration can follow both (`int a = 1, b;`, `for (int i = 0; …`).
+///
+/// `[[maybe_unused, other]]` and `[[other]] [[maybe_unused]]` are both written, and both contain the word, so the test is
+/// a search rather than a parse.
+fn is_marked_maybe_unused(source: &str, at: usize) -> bool {
+    let before = source.get(..at.min(source.len())).unwrap_or_default();
+    let from = before
+        .rfind([';', '{', '}', '(', ','])
+        .map_or(0, |boundary| boundary + 1);
+    before[from..].contains("maybe_unused")
+}
+
+/// **Does the declared type say, by itself, that the variable cannot be a side effect?**
+///
+/// A local whose type has a destructor is not "unused": `Guard guard(counter);` exists for its constructor and its
+/// destructor, and `std::shared_lock reader(mutex);` for its unlock. This layer cannot ask whether a type has a
+/// destructor — the answer is in the index, and a check may not ask — so it asks the narrower question its own evidence
+/// answers: **is the type one the language itself says has no destructor**? Only a builtin is. `int local = 3;` with
+/// nothing read is a fact about the code; `Guard guard(counter);` with nothing read is the code doing its job.
+///
+/// The declared type is the evidence and the only evidence: `auto` says nothing about a destructor either, so a local
+/// whose type the fact did not record is left alone.
+fn its_type_cannot_have_a_destructor(fact: &crate::DeclFact) -> bool {
+    fact.type_of
+        .as_deref()
+        .is_some_and(super::undefined_name::is_a_builtin_spelling)
+}
 /// A name that is not worth asking about: a keyword-shaped spelling, or nothing at all.
 fn is_a_candidate(name: &str) -> bool {
     !name.is_empty()
@@ -147,6 +183,22 @@ impl Check for Unused {
             }
 
             if is_deliberately_unused(&fact.name) || !is_a_candidate(&fact.name) {
+                continue;
+            }
+
+            // **`[[maybe_unused]]` is the reader saying "I know"**, and it is honoured here for the same reason a
+            // leading `_` is: a rule that reports a variable the reader has already marked is a rule that teaches them
+            // to delete the mark. Measured on `attributes.cpp` of the C++ corpus, whose only `unused` finding was a
+            // variable written `[[maybe_unused]]` three lines above it.
+            if is_marked_maybe_unused(context.source, at.get()) {
+                continue;
+            }
+
+            // **A type that can have a destructor is not this rule's business** — see
+            // [`its_type_cannot_have_a_destructor`]. `Guard guard(counter);` and `std::shared_lock reader(mutex);`
+            // were the two findings on `exceptions.cpp` and `concurrency.cpp` of the C++ corpus, and both are objects
+            // whose whole use is the side effect of their lifetime.
+            if !its_type_cannot_have_a_destructor(fact) {
                 continue;
             }
 

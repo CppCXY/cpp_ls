@@ -315,6 +315,41 @@ fn a_variadic_macro_with_no_extra_arguments_substitutes_nothing() {
     assert_eq!(joined(&expansion), "\"x\"( )");
 }
 
+/// **`__VA_OPT__` is its content when the variadic argument has a token, and nothing when it does not** — the C++20
+/// spelling of the comma that may not be written and the sum that is `0` when there is nothing to add.
+///
+/// It used to be left in the expansion as the name `__VA_OPT__`, which the parser then read as a call with an
+/// identifier in it: `preprocessor.cpp:96` of the C++ corpus reported `expected ), but get identifier`.
+#[test]
+fn va_opt_is_its_content_when_there_is_an_argument() {
+    let expansion = expand_use(
+        "#define LOG(f, ...) f(__VA_OPT__(,) __VA_ARGS__)\n",
+        "LOG(\"x\", 1)",
+    );
+    assert_eq!(text(&expansion), vec!["\"x\"", "(", ",", "1", ")"]);
+
+    let expansion = expand_use(
+        "#define SUM(...) (0 __VA_OPT__(+ __VA_ARGS__))\n",
+        "SUM(1, 2)",
+    );
+    assert_eq!(text(&expansion), vec!["(", "0", "+", "1", ",", "2", ")"]);
+}
+
+#[test]
+fn va_opt_is_nothing_when_the_argument_is_empty() {
+    let expansion = expand_use(
+        "#define LOG(f, ...) f(__VA_OPT__(,) __VA_ARGS__)\n",
+        "LOG(\"x\")",
+    );
+    assert_eq!(text(&expansion), vec!["\"x\"", "(", ")"]);
+
+    let expansion = expand_use("#define SUM(...) (0 __VA_OPT__(+ __VA_ARGS__))\n", "SUM()");
+    assert_eq!(text(&expansion), vec!["(", "0", ")"]);
+
+    // Whitespace is not an argument, so `SUM( )` is the empty case too.
+    let expansion = expand_use("#define SUM(...) (0 __VA_OPT__(+ __VA_ARGS__))\n", "SUM( )");
+    assert_eq!(text(&expansion), vec!["(", "0", ")"]);
+}
 // ============================================================================
 // Stringize and paste
 // ============================================================================

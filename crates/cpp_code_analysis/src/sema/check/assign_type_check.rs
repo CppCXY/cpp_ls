@@ -137,6 +137,18 @@ impl Check for AssignTypeCheck {
             else {
                 continue;
             };
+            // **A structured binding is not one variable.** `auto [key, value] = pair;` declares two names, and the
+            // expression on the right is the *source*, not a value being converted to either of them — reading the
+            // declarator's last identifier found `pair`, the variable on the right, and compared its type against
+            // itself. Measured on `containers.cpp` of the C++ corpus, once the declarations' own types were recorded
+            // correctly: `std::pair pair{4, 5};` and `std::array array{6, 7, 8};` each produced one finding about their
+            // own initialisation.
+            if declarator
+                .descendants()
+                .any(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::StructuredBinding)
+            {
+                continue;
+            }
             let Some(name) = super::spelling_of(&declarator) else {
                 continue;
             };

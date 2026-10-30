@@ -42,6 +42,27 @@ impl Check for ElseAfterReturn {
             {
                 continue;
             }
+
+            // **A compile-time `if` keeps its `else`.** `if constexpr (…) A else B` and `if consteval A else B` are one
+            // construct with two branches chosen by the compiler, and the chain form is how they are read: the
+            // `else if constexpr` ladder of a type-dispatch function is a table, not nesting to be flattened, and
+            // `if consteval { … } else { … }` is the shape the language gave that question. Dropping the `else` would
+            // still compile and would read worse — which is the whole test this hint has to pass. Measured: five
+            // findings on `constexpr.cpp`, `containers.cpp` and `templates.cpp` of the C++ corpus, none of them
+            // something to act on.
+            let opening: String = context
+                .source
+                .chars()
+                .skip(usize::from(statement.syntax().text_range().start()))
+                .take(32)
+                .collect();
+            let compile_time = opening
+                .split_whitespace()
+                .take(2)
+                .any(|word| word == "constexpr" || word == "consteval");
+            if compile_time {
+                continue;
+            }
             context.add(
                 DiagnosticCode::ElseAfterReturn,
                 cpp_parser::source_range(else_branch.syntax().text_range()),

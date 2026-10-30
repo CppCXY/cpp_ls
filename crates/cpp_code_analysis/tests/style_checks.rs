@@ -82,6 +82,51 @@ fn an_override_without_the_keyword_is_reported() {
     );
 }
 
+/// **The finding names the member it is about, and lands on it** — the coordinate bug that made this rule name one
+/// member and underline another.
+///
+/// A comment in the file shifts every *rendering* offset away from the file's, so a check that slices the rendering with
+/// a fact's file offsets reads somebody else's declaration: the members that do say `override` came out as if they did
+/// not, and the range pointed at a line the message was not about. `classes.cpp` of the C++ corpus produced four of
+/// them, naming `describe`, `clone`, `value` and `sum` while underlining `left + right`, `virtual`, `VirtualBase {` and
+/// `static_assert`.
+#[test]
+fn an_override_is_named_and_located_in_a_file_with_a_comment() {
+    let source = "\
+// the cook drops this comment, so the file's offsets and the rendering's differ
+struct Base {
+    virtual void really_overrides();
+    virtual void renamed_out();
+};
+struct Derived : Base {
+    void really_overrides() override;
+    void renamed_out();
+};
+";
+    let findings = findings_of(source);
+    let override_findings: Vec<&cpp_code_analysis::Finding> = findings
+        .iter()
+        .filter(|finding| finding.code == DiagnosticCode::UseOverride)
+        .collect();
+    assert_eq!(
+        override_findings.len(),
+        1,
+        "one member forgot the keyword: {findings:?}"
+    );
+    let finding = override_findings[0];
+    assert!(
+        finding.message.contains("renamed_out"),
+        "the message names the member: {}",
+        finding.message
+    );
+    let at = finding.range.start_offset;
+    assert!(
+        source[at..].starts_with("renamed_out"),
+        "the range is on the name the message is about, not at {at}: {:?}",
+        &source[at.saturating_sub(20)..(at + 20).min(source.len())]
+    );
+}
+
 /// `readability-simplify-boolean-expr`: `x == true` is `x`.
 #[test]
 fn a_comparison_against_true_is_reported() {
@@ -149,6 +194,27 @@ fn codes_of(source: &str) -> Vec<DiagnosticCode> {
         .unwrap_or_default()
 }
 
+/// Run the checks over one file and keep the findings themselves, for a test that asserts on a message or a range.
+fn findings_of(source: &str) -> Vec<cpp_code_analysis::Finding> {
+    use cpp_code_analysis::{
+        CompilerConfig, MemoryFiles, OpenDocuments, Session, SessionFiles, WatchFilter,
+    };
+    let files = MemoryFiles::new().with_file("/p/a.cpp", source);
+    let providers = SessionFiles::new(OpenDocuments::new(), files);
+    let mut session = Session::with_config(
+        "/p",
+        providers,
+        WatchFilter::new("/p"),
+        CompilerConfig::default(),
+    );
+    session.add_project_files([std::path::PathBuf::from("/p/a.cpp")]);
+    session.want_cooked_reading(std::path::Path::new("/p/a.cpp"));
+    session.index_everything();
+    session
+        .diagnostics(std::path::Path::new("/p/a.cpp"))
+        .map(|found| found.checks.clone())
+        .unwrap_or_default()
+}
 /// `modernize-use-auto`, narrowed to the case that is never wrong: an iterator declared by its full spelling.
 #[test]
 fn a_full_iterator_spelling_is_reported() {

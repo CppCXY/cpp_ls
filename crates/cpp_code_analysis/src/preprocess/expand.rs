@@ -1066,6 +1066,63 @@ fn substitute(
     while index < body_tokens.len() {
         let token = &body_tokens[index];
 
+        // **`__VA_OPT__(…)`** (C++20): the content is in the expansion when the variadic argument has a token, and
+        // is not there when it does not. It is the two spellings every variadic macro in real code is written with:
+        //
+        // ```cpp
+        // #define LOG(fmt, ...) printf(fmt __VA_OPT__(, ) __VA_ARGS__)    // the comma that may not be written
+        // #define SUM(...) (0 __VA_OPT__(+ __VA_ARGS__))                  // the sum that is `0` when it is empty
+        // ```
+        //
+        // Before this it was left in the cooked text as the name `__VA_OPT__`, so the parser read
+        // `(0 __VA_OPT__(+ 1 ,2 ,3))` — a call with an identifier in it — and the file reported
+        // `expected ), but get identifier`. Measured on `preprocessor.cpp:96` of the C++ corpus, whose only use of
+        // the construct is the `SUM` above.
+        //
+        // The content is substituted by **this same rule**, on a synthetic definition whose body is the group: `#`
+        // and `##` mean inside it what they mean anywhere else, and the parameters are the same parameters. A
+        // `__VA_OPT__` in a macro that is not variadic, or one not followed by `(`, is not this construct and falls
+        // through to the ordinary name handling below.
+        if token.kind == CppTokenKind::Identifier
+            && token.text() == "__VA_OPT__"
+            && body_tokens
+                .get(index + 1)
+                .is_some_and(|next| next.kind == CppTokenKind::LeftParen)
+        {
+            let open = index + 1;
+            let Some(close) = matching_close(&body_tokens, open) else {
+                // A group still being typed: keep what is there rather than dropping it.
+                out.extend(
+                    body_tokens[index..]
+                        .iter()
+                        .cloned()
+                        .map(Marked::from_a_body),
+                );
+                return out;
+            };
+            if variadic_argument_is_empty(params, arguments, tokens) {
+                index = close + 1;
+                continue;
+            }
+
+            let inside = |positions: &[usize]| -> Vec<usize> {
+                positions
+                    .iter()
+                    .filter(|at| **at > open && **at < close)
+                    .map(|at| at - (open + 1))
+                    .collect()
+            };
+            let mut group = definition.clone();
+            group.body = crate::macros::MacroBody {
+                tokens: body_tokens[open + 1..close].to_vec(),
+                stringize: inside(&stringize_at),
+                paste: inside(&paste_at),
+            };
+            out.extend(substitute(&group, arguments, tokens, invocation, expanded));
+            index = close + 1;
+            continue;
+        }
+
         // `#` before a parameter: the argument's *spelling*, as a string literal.
         if stringize_at.contains(&index)
             && token.kind == CppTokenKind::Hash
@@ -1161,6 +1218,40 @@ fn substitute(
     out
 }
 
+/// The index of the `)` that closes the `(` at `open`, counting nesting.
+///
+/// `None` when the list is not closed, which is a call being typed rather than an error: the caller keeps the
+/// tokens it has instead of dropping the rest of the body.
+fn matching_close(tokens: &[Token], open: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    for (index, token) in tokens.iter().enumerate().skip(open) {
+        match token.kind {
+            CppTokenKind::LeftParen => depth += 1,
+            CppTokenKind::RightParen => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Is the variadic argument's token run empty, for `__VA_OPT__`?
+///
+/// The question is asked about `__VA_ARGS__` because that is the name the variadic parameter carries, and the
+/// answer is what the standard's rule says: `__VA_OPT__` is substituted with its content when the argument has a
+/// token, and with nothing when the argument is absent or empty. Layout is trimmed first, so `F( )` counts as
+/// empty exactly like `F()`.
+fn variadic_argument_is_empty(
+    params: &[crate::macros::Parameter],
+    arguments: &[std::ops::Range<usize>],
+    tokens: &[Token],
+) -> bool {
+    argument_for(params, arguments, tokens, "__VA_ARGS__").is_empty()
+}
 /// Translate positions in the full body into positions in its layout-free form.
 ///
 /// The parser records where the `#` and `##` operators are by index into the body *as written*, and

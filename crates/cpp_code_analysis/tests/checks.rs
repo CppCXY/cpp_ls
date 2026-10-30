@@ -3326,3 +3326,88 @@ static int restrict_sum(int *restrict left, int *restrict right) {
         "two `restrict` parameters are two qualifiers: {codes:?}"
     );
 }
+
+/// **A name defined in an unnamed namespace is visible later in the same file.**
+///
+/// `namespace { int helper(); }` is how a C++ file gives a function internal linkage, and [namespace.def] makes its
+/// members visible in the enclosing scope — a `using namespace` the compiler writes for you. A plain scope-chain walk
+/// never reaches the child scope, so every call to a file-local helper read as undeclared (22 findings across the C++
+/// corpus, one per helper).
+#[test]
+fn an_unnamed_namespaces_member_is_visible_later_in_the_file() {
+    let codes = codes_of(
+        "\
+namespace {
+int helper(int value) { return value + 1; }
+int counter = 0;
+}
+
+int use_helper(int value) { return helper(value) + counter; }
+",
+    );
+    assert!(
+        !codes.contains(&DiagnosticCode::UndefinedName),
+        "an unnamed namespace's members are visible here: {codes:?}"
+    );
+}
+
+/// **`[[maybe_unused]]` is the reader answering this rule's question**, and a local with a type that can have a
+/// destructor is not "unused" at all: `Guard guard(counter);` exists for the side effect of its lifetime.
+#[test]
+fn a_marked_or_lifetime_object_is_not_reported_unused() {
+    let marked = codes_of(
+        "\
+void f() {
+    [[maybe_unused]] int local = 3;
+}
+",
+    );
+    assert!(
+        !marked.contains(&DiagnosticCode::Unused),
+        "the attribute is the answer: {marked:?}"
+    );
+
+    let lifetime = codes_of(
+        "\
+struct Guard { explicit Guard(int& counter) : counter_(counter) { ++counter_; } ~Guard() { --counter_; } int& counter_; };
+void f() {
+    int counter = 0;
+    Guard guard(counter);
+}
+",
+    );
+    assert!(
+        !lifetime.contains(&DiagnosticCode::Unused),
+        "an object whose use is its lifetime is not unused: {lifetime:?}"
+    );
+
+    let plain = codes_of(
+        "\
+void f() {
+    int local = 3;
+}
+",
+    );
+    assert!(
+        plain.contains(&DiagnosticCode::Unused),
+        "an unmarked builtin is still reported: {plain:?}"
+    );
+}
+
+/// **`std::any any = 1;` has type `std::any`**, not `void` — the declared name must not be read as the *declarator* of
+/// an out-of-line definition just because the type's last segment spells the same word.
+#[test]
+fn a_variable_named_like_its_type_keeps_that_type() {
+    let codes = codes_of(
+        "\
+void f() {
+    std::any any = 1;
+    any = std::string{\"anything\"};
+}
+",
+    );
+    assert!(
+        !codes.contains(&DiagnosticCode::AssignTypeCheck),
+        "`std::any any` is an `std::any`, and both assignments convert: {codes:?}"
+    );
+}

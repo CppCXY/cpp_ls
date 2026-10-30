@@ -66,12 +66,24 @@ types    PASS derived → Derived   PASS slot → Box<int>
 两条失败指向同一类问题：`std::unique_ptr<Resource>` 的成员查询，以及**协程函数的返回类型**（`Task<int> doubled()`）
 没有进入 `auto` 的推导。
 
-## 3. 下一轮的顺序
+## 3. 第一轮的下一轮顺序（已全部处理，留作记录）
 
-1. **range-for 的 range 表达式**（4 条错误，一行代码）——`for (x : expr)` 里 `expr` 以 `views::` 名称/管道/带花括号的
-   临时量开头时 `:` 右侧读不出来，是语法层的一个入口判断。
-2. **匿名 namespace 的可见性**（22 条 finding，影响最大）——同一文件、同一作用域的调用被判"未声明"，
-   查法是 `CPPLS_C_NAMES=<name>` 看索引里的事实，再看名字查询的可见性判断是否把匿名 namespace 的作用域排除了。
-3. `[[likely]] case`、`typeid(expr)`、包捕获、`##` 粘接（各一条，语法层各自独立）。
-4. `if constexpr` / `if consteval` 的 `else-after-return`、RAII 的 `unused`、依赖类型的成员访问、`std::any` 的类型。
-5. `auto` 对协程/模板函数返回类型的推导，以及 `unique_ptr` 的成员查询。
+1. **range-for 的 range 表达式**（4 条错误）——`for (x : expr)` 里 `expr` 以 `views::` 名称/管道/带花括号的临时量开头
+   时 `:` 右侧读不出来，是语法层的一个入口判断。**已修**：`continues_a_qualified_name` 不该越过 `:`。
+2. **匿名 namespace 的可见性**（22 条 finding）——同一文件、同一作用域的调用被判"未声明"。**已修**：
+   `ScopeTree::scopes_visible_from`，链上每个 scope 的无名 namespace 子节点也算可见。
+3. `[[likely]] case`、`typeid(expr)`、包捕获、`##`/`__VA_OPT__` 粘接。**已修**（各自有 parser/expand 测试）。
+4. `if constexpr` / `if consteval` 的 `else-after-return`、RAII 的 `unused`、依赖类型成员、`std::any` 的类型。**已修**。
+5. `auto` 对协程/模板函数返回类型的推导、`unique_ptr` 的成员查询。**未修**，见 §4。
+
+## 4. 仍然已知的两条，和一条测量环境的坑
+
+1. **`std::unique_ptr<Resource>` 的成员查询**：`unique->identifier()` 得到 0 个候选。`undefined-field` 用的
+   `the_class_after_an_arrow` 已经能回答，完成路径没有。
+2. **协程函数的返回类型**：`auto task = doubled();` 推不出 `Task<int>`，于是 `task.run()` 的成员和 `type_at` 都是
+   unknown。函数自身的返回类型 `Task<int>` 是写着的，缺的是 `auto` 从**函数调用**取类型这一条。
+3. **系统头文件的 summary 会随会话顺序给出不同答案**：同一个 `std::string_view`，单独打开 `strings.cpp` 的会话给出
+   79 个成员（含 `starts_with`/`ends_with`），而先索引整个工程、逐文件 cook + diagnostics 的会话给出 73 个（缺 C++20
+   的成员，于是 `undefined-field` 误报）。summary 的 key 有 `content_hash`/`context_hash`/fingerprint，但成员列表的
+   缓存（`index.remember_member_list`）只按"哪些文件贡献了它"失效——一个在头文件索引完成之前算出的列表可以活下来。
+   现在 `undefined-field` 只判定**本文件声明**的类，误报消失；根因是把宏环境纳入 summary / member-list 的 key。

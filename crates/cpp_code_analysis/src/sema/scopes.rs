@@ -501,6 +501,12 @@ impl ScopeWalker<'_> {
             // signature of a template — is saying the right thing about it. A new kind would have to be taught to all
             // of them to say the same.
             CppSyntaxKind::ConceptDecl => self.concept_decl(node, scope),
+            // **A `friend` declaration wraps a declaration of its own** — `friend bool operator==(…) { … }` is
+            // `FriendDecl { Declaration { … } }` — and nothing walked into it, so an inline friend's parameters and
+            // body were bound nowhere: every use of `left`/`right` in the fixture above read as undeclared. The
+            // wrapped declaration is an ordinary one; `declaration` knows it is a friend because its parent is this
+            // node, and that is what keeps the friend's *name* out of the class's members.
+            CppSyntaxKind::FriendDecl => self.items(node, scope),
             // **A lambda declares a scope of its own**, and nothing created one: `ScopeKind::Lambda` existed
             // with no constructor. Reported from an editor — `if (const auto result = safe_divide(a, b))` inside
             // `auto show_division = [](double a, double b) { … };` had no hover, no completion and no deduced
@@ -520,6 +526,11 @@ impl ScopeWalker<'_> {
             | CppSyntaxKind::SwitchStat
             | CppSyntaxKind::TryStat
             | CppSyntaxKind::IfStat => self.statement_scope(node, scope),
+            // **A handler binds its exception variable**, and nothing bound it: `catch (std::exception const&
+            // again) { … again.what() … }` had no declaration for `again` anywhere in the tree, so every use of it
+            // read as undeclared (one finding on `exceptions.cpp` of the C++ corpus). The handler is a scope like a
+            // function's: the variable is visible in the body and nowhere else.
+            CppSyntaxKind::CatchStat => self.catch_handler(node, scope),
             _ => self.descend(node, scope, Body::OpensAScope),
         }
     }
@@ -545,6 +556,33 @@ impl ScopeWalker<'_> {
         self.items(node, scope);
     }
 
+    /// `catch (Type const& name) { … }` — the handler's own scope, holding the exception variable.
+    ///
+    /// The declaration is a `Parameter` inside the handler's `ParameterList`, and the body is its `CompoundStat`
+    /// child. The parameter list is read by [`ScopeWalker::parameters`] — the same reader a function's list uses — and
+    /// then the body is walked as a block of its own.
+    fn catch_handler(&mut self, node: &CppSyntaxNode, parent: ScopeId) {
+        let handler = self.table.create_scope(
+            ScopeKind::Block,
+            Some(parent),
+            Some(cpp_parser::source_range(node.text_range())),
+        );
+
+        for list in node
+            .children()
+            .filter(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::ParameterList)
+        {
+            self.parameters(&list, handler);
+        }
+
+        for body in node
+            .children()
+            .filter(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::CompoundStat)
+        {
+            let block = self.block(&body, handler, Body::OpensAScope);
+            self.items(&body, block);
+        }
+    }
     /// A block statement, opening a scope for the statements it holds.
     fn block(&mut self, node: &CppSyntaxNode, parent: ScopeId, body: Body) -> ScopeId {
         match body {
@@ -1302,6 +1340,26 @@ impl ScopeWalker<'_> {
             return;
         }
 
+        // `friend` declarations declare nothing in this scope: `friend class X;` says X's members may reach
+        // into this class, and X itself is declared elsewhere. Binding it here would make a friend class look
+        // like a member.
+        //
+        // **Direct children, and the parent.** The `friend` keyword's node wraps the declaration it qualifies —
+        // `FriendDecl { Declaration { InitDeclarator … } }` — so the declaration that *is* the friend sees the
+        // node as its **parent**, while the declaration that merely contains one (`struct S { friend … };`) sees
+        // it as a child. Asked with `descendants()`, the enclosing class definition answered yes and was skipped
+        // altogether: the class's name was not bound and its body was never walked.
+        //
+        // Read before the unnamed check below, which is where a friend *definition* used to be dropped: `operator==`
+        // is a name `declared_name` cannot read from its declarator, so the declaration counted as unnamed and the
+        // parameters and body of a perfectly ordinary function were never walked.
+        let is_friend = node
+            .children()
+            .any(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::FriendDecl)
+            || node.parent().is_some_and(|parent| {
+                CppSyntaxKind::from(parent.kind()) == CppSyntaxKind::FriendDecl
+            });
+
         if declaration_is_qualified(node)
             || (specifier_is_qualified && is_unnamed_declaration(node))
         {
@@ -1335,17 +1393,19 @@ impl ScopeWalker<'_> {
             // nothing and still returns.
             if declares_a_body(node) {
                 self.specifiers(node, outer, inner, false);
+                return;
             }
-            return;
+            // **A `friend` definition whose name the declarator does not yield falls through.** The name is the
+            // class's business and `is_friend` keeps it out below, but the parameters and the body belong to the
+            // function and the declarator loop is what reads them.
+            if !is_friend {
+                return;
+            }
         }
 
         // `friend` declarations declare nothing in this scope: `friend class X;` says X's members may reach
         // into this class, and X itself is declared elsewhere. Binding it here would make a friend class look
         // like a member.
-        let is_friend = node
-            .children()
-            .any(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::FriendDecl);
-
         // A structured binding declares several names through one `StructuredBinding` node. It appears
         // wherever the pattern was written — as an init-declarator (`auto [a, b] = pair;`) or as a bare
         // declarator — so it is searched for under this declaration's declarators.
@@ -1507,6 +1567,18 @@ impl ScopeWalker<'_> {
                     if declarators(node).is_empty() {
                         return SpecifierName::Bound;
                     }
+                }
+                // **A `friend` declaration wraps a declaration of its own** — `friend bool operator==(…) { … }` is
+                // `FriendDecl { Declaration { InitDeclarator … CompoundStat } }` — and the specifier walk is where
+                // it is reached: the `friend` is a child of the *specifier sequence*, not of the declaration that
+                // holds the class body. Walking the wrapper is what reads the friend function's parameters and its
+                // body; the friend's own *name* is kept out of the class's members by `is_friend` in `declaration`.
+                //
+                // Measured: without this, an inline friend's declarator was never reached (the outer declaration
+                // answers zero declarators), so its parameters were bound nowhere and every use of `left`/`right`
+                // in `classes.cpp` read as undeclared.
+                CppSyntaxKind::FriendDecl => {
+                    self.items(&child, outer);
                 }
                 CppSyntaxKind::EnumDef | CppSyntaxKind::EnumClassDef => {
                     if !is_friend {
@@ -1724,10 +1796,6 @@ impl ScopeWalker<'_> {
         as_kind: Option<BindingKind>,
         body: Option<&CppSyntaxNode>,
     ) -> Option<ScopeId> {
-        if is_friend {
-            return None;
-        }
-
         // **`void Widget::grow() { … }` is a member of `Widget`**, and this is where that is decided — for
         // everything written in the declaration and, through the scope the body is walked into, for everything
         // written in the body.
@@ -1769,17 +1837,36 @@ impl ScopeWalker<'_> {
             // The name it introduces is the **last** segment — `grow`, not `Widget::grow` — so a qualified
             // spelling is read above rather than by `declared_name`, which refuses one precisely because the
             // unqualified lookup it exists for cannot find it.
-            None => {
-                let (name, name_range) = declared_name(declarator)?;
-                (outer, name, name_range)
-            }
+            None => match declared_name(declarator) {
+                Some((name, name_range)) => (outer, name, name_range),
+                // **A friend definition whose name `declared_name` cannot read.** `friend bool
+                // operator==(Base const& left, Base const& right) { … }` declares no member — a hidden friend is
+                // found by ADL — so returning here was right about the *name* and wrong about everything else: the
+                // body was walked into the class scope with no function scope at all, its parameters were bound
+                // nowhere, and every use of `left` and `right` read as undeclared. Four findings on
+                // `classes.cpp` of the C++ corpus.
+                //
+                // The name is not needed to read the inside: the scope hangs off `outer`, the parameters go in it,
+                // and the body is walked into it by the caller. Nothing is bound here.
+                None => {
+                    let function = self.table.create_scope(
+                        ScopeKind::Function,
+                        Some(outer),
+                        Some(cpp_parser::source_range(declarator.text_range())),
+                    );
+                    for parameter_list in parameter_lists(declarator) {
+                        self.parameters(&parameter_list, function);
+                    }
+                    return Some(function);
+                }
+            },
         };
 
         let is_function = declarator
             .descendants()
             .any(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::ParameterList);
 
-        // A class-like keyword in the specifiers settles the question: whatever the declarator looks like, the
+        // **A class-like keyword in the specifiers settles the question**: whatever the declarator looks like, the
         // identifier is the class or the enum, and `class Widget w;` cannot happen — a second declarator would
         // be a second variable of that type.
         if let Some(kind) = as_kind {
@@ -1803,7 +1890,11 @@ impl ScopeWalker<'_> {
         }
 
         let kind = function_binding_kind(&name);
-        self.bind(enclosing, name, kind, declarator, name_range);
+        // **A friend declaration declares no member** — see the note on the `declared_name` fallback above; the
+        // scope below is still opened, because a friend *definition* owns its parameters and its body.
+        if !is_friend {
+            self.bind(enclosing, name, kind, declarator, name_range);
+        }
 
         // A declaration with nothing to put in a scope opens none. `int size() const;` is a member function
         // declaration: its parameters are a *type*, not names, and it has no body — so a scope for it would be
@@ -2483,9 +2574,23 @@ fn class_like_binding_of(specifier: &CppSyntaxNode) -> Option<BindingKind> {
 /// constructors**: a declaration whose declarators live in a nested declaration is exactly what wrapping produces, and
 /// the search stops at the first level, so it cannot wander into a body.
 fn declarators(node: &CppSyntaxNode) -> Vec<CppSyntaxNode> {
+    // **A zero-width declarator names nothing.** The grammar synthesises one after a specifier sequence that
+    // consumed the whole declaration, and a `friend` definition is the shape that produces it: the inner
+    // declaration's declarator belongs to the friend (`FriendDecl { Declaration { InitDeclarator … } }`), and the
+    // outer declaration is left with an empty `InitDeclarator` at the end of the file. Kept, `declarator_as` opened
+    // a function scope over no tokens at all — measured on `classes.cpp`, where the friend `operator==`'s real
+    // declarator was never reached and its body was walked into nothing.
+    let a_declarator = |child: &CppSyntaxNode| {
+        matches!(
+            CppSyntaxKind::from(child.kind()),
+            CppSyntaxKind::InitDeclarator | CppSyntaxKind::Declarator
+        ) && !child.text_range().is_empty()
+    };
+
     let init: Vec<CppSyntaxNode> = node
         .children()
         .filter(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::InitDeclarator)
+        .filter(a_declarator)
         .collect();
 
     if !init.is_empty() {
@@ -2495,6 +2600,7 @@ fn declarators(node: &CppSyntaxNode) -> Vec<CppSyntaxNode> {
     let direct: Vec<CppSyntaxNode> = node
         .children()
         .filter(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::Declarator)
+        .filter(a_declarator)
         .collect();
 
     if !direct.is_empty() {

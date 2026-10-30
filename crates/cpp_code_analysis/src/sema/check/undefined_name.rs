@@ -71,6 +71,13 @@ impl Check for UndefinedName {
                 continue;
             }
 
+            // **A literal with a user-defined suffix is not a name.** `"numbers"sv.size()` is
+            // `operator""sv("numbers").size()`, and the token the tree hands over is the literal's own spelling — not an
+            // identifier, and nothing a declaration could be. Measured on `strings.cpp` of the C++ corpus.
+            if CppTokenKind::from(token.kind()) != CppTokenKind::Identifier {
+                continue;
+            }
+
             if in_a_template(&node) || in_a_lambda(context, at) {
                 continue;
             }
@@ -119,6 +126,12 @@ impl Check for UndefinedName {
                 continue;
             };
             if super::member_access_above(&callee).is_some() {
+                continue;
+            }
+            // **A literal with a user-defined suffix is not a name.** `"numbers"sv` is the call
+            // `operator""sv("numbers")`, and the token the tree hands over is the literal's own spelling — not an
+            // identifier, and nothing a declaration could be. Measured on `strings.cpp` of the C++ corpus.
+            if CppTokenKind::from(token.kind()) != CppTokenKind::Identifier {
                 continue;
             }
             let name = token.text().to_string();
@@ -216,6 +229,12 @@ fn is_a_keyword_construct(name: &str) -> bool {
             | "decltype"
             | "sizeof"
             | "offsetof"
+            // **The preprocessor's own operators, which are written like calls.** `_Pragma("…")` is a unary operator
+            // the standard defines ([cpp.pragma]); `__pragma(…)` is MSVC's spelling of the same. Neither is a name
+            // anything declares, and the preprocessor that expands them is *this* code's own — measured on
+            // `preprocessor.cpp` of the C++ corpus, whose `_Pragma` in a macro body was reported undeclared.
+            | "_Pragma"
+            | "__pragma"
     )
 }
 
@@ -232,7 +251,7 @@ fn is_the_implementations_builtin(name: &str) -> bool {
         || name.starts_with("_Interlocked")
         || name.starts_with("_mm")
 }
-fn is_a_builtin_spelling(written: &str) -> bool {
+pub(super) fn is_a_builtin_spelling(written: &str) -> bool {
     const BUILTIN: &[&str] = &[
         "void", "bool", "char", "char8_t", "char16_t", "char32_t", "wchar_t", "short", "int",
         "long", "float", "double", "signed", "unsigned",
@@ -314,7 +333,10 @@ fn in_a_lambda(context: &CheckContext<'_>, at: usize) -> bool {
 fn a_declaration_is_visible(context: &CheckContext<'_>, name: &str, at: usize) -> bool {
     let scopes = context.model.scopes();
     if let Some(scope) = scopes.scope_at(at) {
-        for id in scopes.scope_chain(scope) {
+        // **An unnamed namespace's members are visible here too** — see [`ScopeTree::scopes_visible_from`], which
+        // is the chain plus every unnamed namespace hanging off it. Without it every call to a file-local helper read
+        // as "not declared" (22 findings on the C++ corpus, one per helper).
+        for id in scopes.scopes_visible_from(scope) {
             let Some(data) = scopes.scope(id) else {
                 continue;
             };

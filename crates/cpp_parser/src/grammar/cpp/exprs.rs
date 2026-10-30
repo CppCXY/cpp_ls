@@ -899,7 +899,13 @@ fn parse_unary_expr(p: &mut CppParser, fold_operand: bool) -> ParseResult {
             expect_token(p, CppTokenKind::LeftParen)?;
             parse_type_id_or_expression(p)?;
             expect_token(p, CppTokenKind::RightParen)?;
-            Ok(m.complete(p))
+            // **The suffixes after a `typeid` are the expression's**, and `typeid(x).name()` is the spelling every
+            // reader of `typeid` writes: it asks the *type* for a property. Read as a plain unary expression, the
+            // `typeid` node was complete at its `)`, so the `.name()` had no rule left and the statement was
+            // reported `expected ; after expression` — measured on `classes.cpp:162` in the C++ corpus, the one
+            // place the corpus uses it.
+            let completed = m.complete(p);
+            parse_postfix_suffixes(p, completed)
         }
         // A C-style cast **is not read here**. The same arm exists one rule down
         // ([`parse_primary_expr`]'s `LeftParen if is_a_type_in_parentheses`), because a `(` that is not a cast is
@@ -3502,6 +3508,15 @@ fn parse_capture(p: &mut CppParser) -> ParseResult {
         p.current_token(),
         CppTokenKind::Ampersand | CppTokenKind::Star
     ) {
+        p.bump();
+    }
+
+    // **A pack capture puts the `...` first** (C++20): `[... copies = values]` — `std::apply`'s forwarding lambda is
+    // written exactly that way. The other spelling, `[args...]`, is read by the trailing `...` below; both capture a
+    // pack, and the standard's `init-capture` is the leading one. Read without it, the capture list ended at
+    // `copies`, the `]` was never reached, and the whole lambda came back as `expected primary expression` at its
+    // `[` — measured on `lambdas.cpp:46` of the C++ corpus.
+    if p.current_token() == CppTokenKind::Ellipsis {
         p.bump();
     }
 

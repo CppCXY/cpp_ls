@@ -94,7 +94,15 @@ use std::path::{Path, PathBuf};
 /// and `Point>` where the new one answers `size_type` and `std::vector<Point>`. The bytes are the same shape, so an
 /// old entry still decodes — which is exactly why this number has to move rather than the codec's: an entry that
 /// decodes but says something this build would not write is the case this constant exists for.
-pub const FORMAT_VERSION: u32 = 4;
+///
+/// # Why this moved to 5
+///
+/// **A declaration whose name spells its type's last segment recorded `void`.** `std::any any = 1;` — and `Widget
+/// Widget;` or `S S;` in any file — was read as an *out-of-line definition* of `any`, because the specifier `std::any`
+/// ends with `::` and the declared name. The type was thrown away, the fact said `void`, and `assign-type-check` then
+/// reported the initialisation as a conversion "from `int` to `void`". The bytes are unchanged, so an old entry decodes
+/// happily and keeps the wrong type — the case this constant is for.
+pub const FORMAT_VERSION: u32 = 5;
 
 /// **The fingerprint of the readers a summary was built by**, in the key.
 ///

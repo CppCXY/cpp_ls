@@ -377,6 +377,29 @@ fn the_cpp_corpus_parses_and_its_members_resolve() {
         );
     }
 
+    if std::env::var_os("CPPLS_C_MEMBERS").is_some()
+        && let Some(view) = session.view(root.join("src/strings.cpp"))
+    {
+        println!(
+            "\n[members] config standard: {:?}",
+            session.config().standard
+        );
+        for spelling in ["std::string_view", "std::string", "std::future"] {
+            match session.members_of(&view, spelling) {
+                Known::Yes(list) => println!(
+                    "\n[members] {spelling}: {} member(s), unlisted={}, has starts_with={}",
+                    list.members.len(),
+                    list.unlisted.len(),
+                    list.members
+                        .iter()
+                        .any(|member| member.fact.name == "starts_with")
+                ),
+                Known::Unknown(reason) => println!("\n[members] {spelling}: unknown ({reason:?})"),
+                Known::No => println!("\n[members] {spelling}: no"),
+            }
+        }
+    }
+
     println!(
         "\n=== summary: {} file(s) ({} with errors), {}/{} members, {}/{} types",
         files.len(),
