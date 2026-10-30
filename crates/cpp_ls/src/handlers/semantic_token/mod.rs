@@ -82,10 +82,6 @@ fn type_of_a_name_kind(kind: NameKind) -> Option<TypeKind> {
         NameKind::TypeParameter => TypeKind::TypeParameter,
         NameKind::EnumMember => TypeKind::EnumMember,
         NameKind::Function => TypeKind::Function,
-        // **A custom type, with `function` as its fallback** — see [`TypeKind::FunctionPointer`]. Sent as its own name
-        // so that a theme can draw a callable variable apart from a function; a client that cannot draw it is
-        // answered with `function` by [`push_names`].
-        NameKind::FunctionPointer => TypeKind::FunctionPointer,
         NameKind::Method => TypeKind::Method,
         NameKind::Variable => TypeKind::Variable,
         // **A custom type**, and the one place this server sends one — see [`TypeKind::VariableTemplate`]. A client
@@ -132,25 +128,16 @@ fn push_names(builder: &mut Builder<'_>, names: &[Name]) {
         );
 
         // **A custom type the client cannot draw falls back to the standard one it can.** The legend this server
-        // advertises is its own, so a client only draws the names it lists in `tokenTypes` — and neither
-        // `variableTemplate` nor `functionPointer` is part of the protocol's standard set. A client that does not know
-        // one would otherwise get *no* token for the declaration, which is worse than the colour it had before: it
-        // would lose the grammar's own.
-        if !pushed {
-            let fallback = match kind {
-                TypeKind::VariableTemplate => Some(TypeKind::Variable),
-                // A callable variable, drawn as the callable it is — which is the reading every use of it gets.
-                TypeKind::FunctionPointer => Some(TypeKind::Function),
-                _ => None,
-            };
-            if let Some(fallback) = fallback {
-                builder.push_range(
-                    name.range.start_offset,
-                    name.range.end_offset(),
-                    fallback,
-                    modifiers_of(name),
-                );
-            }
+        // advertises is its own, so a client only draws the names it lists in `tokenTypes` — and `variableTemplate`
+        // is not part of the protocol's standard set. A client that does not know it would otherwise get *no* token
+        // for the declaration, which is worse than the colour it had before: it would lose the grammar's own.
+        if !pushed && kind == TypeKind::VariableTemplate {
+            builder.push_range(
+                name.range.start_offset,
+                name.range.end_offset(),
+                TypeKind::Variable,
+                modifiers_of(name),
+            );
         }
     }
 }
@@ -567,10 +554,8 @@ fn drawable_types(supported: Option<Vec<SemanticTokenType>>) -> Option<Vec<Seman
 /// [`Builder::push_range`] refused them for want of a name in this list, and `draw.rs`'s fallback then painted
 /// `regexp`.
 ///
-/// Only the four format types and `functionPointer` are added. `variableTemplate` is deliberately **not**: its
-/// fallback is `variable`, which every theme colours, while a client that has no mapping for it would draw nothing at
-/// all. `functionPointer` is here for the same reason as the format types — a client whose manifest declares it draws
-/// it, and one that does not falls back to `function`.
+/// Only the four format types are added. `variableTemplate` is deliberately **not**: its fallback is `variable`,
+/// which every theme colours, while a client that has no mapping for it would draw nothing at all.
 fn extended_with_the_custom_types(
     drawable: Option<Vec<SemanticTokenType>>,
     client: crate::context::ClientId,
@@ -585,7 +570,6 @@ fn extended_with_the_custom_types(
         TypeKind::FormatArgument,
         TypeKind::FormatConversion,
         TypeKind::FormatEscape,
-        TypeKind::FunctionPointer,
     ] {
         let name = kind.to_semantic_token_type();
         if !drawable.contains(&name) {
@@ -1266,7 +1250,6 @@ constexpr bool is_assignable_v = __is_assignable(To, From);
             NameKind::TypeParameter,
             NameKind::EnumMember,
             NameKind::Function,
-            NameKind::FunctionPointer,
             NameKind::Method,
             NameKind::Variable,
             NameKind::Parameter,
@@ -2037,41 +2020,6 @@ void f(int width, double d) {
             at_type.get(&(literal + 1)),
             None,
             "no token inside the literal: {at_type:?}"
-        );
-    }
-
-    /// **A function pointer is its own type when the client can draw it, and `function` when it cannot.**
-    ///
-    /// The server half of the rule — the analysis half is `a_function_pointer_variable_has_its_own_kind`. The custom
-    /// name is what the legend advertises; `push_names` is what keeps a client that never heard of it from losing the
-    /// colour entirely, because it gets `function`, which is how every use of such a name reads.
-    #[test]
-    fn a_function_pointer_is_its_own_type_or_a_function() {
-        let text = "int f(void) { binary_op operation = add; return operation(1, 2); }\n";
-        let (session, path) = a_held_file(text);
-        let view = session.view_of_the_file(&path).expect("a view");
-        let file = session.files().held(&path).expect("the file is held");
-        let at = text.find("operation").expect("the fixture writes it");
-        let names = vec![name(at, "operation".len(), NameKind::FunctionPointer, true)];
-
-        // **A client that said nothing** — the custom name is in the legend, so it is sent.
-        let all = encode(file, Some(&view), &names, &None, false, &[]);
-        assert_eq!(
-            by_offset(text, &all).get(&at),
-            Some(&index_of(TypeKind::FunctionPointer)),
-            "a drawable custom type is sent as itself"
-        );
-
-        // **A client that declared only the standard types** — the fallback keeps the colour.
-        let standard = Some(vec![
-            lsp_types::SemanticTokenType::FUNCTION,
-            lsp_types::SemanticTokenType::VARIABLE,
-        ]);
-        let limited = encode(file, Some(&view), &names, &standard, false, &[]);
-        assert_eq!(
-            by_offset(text, &limited).get(&at),
-            Some(&index_of(TypeKind::Function)),
-            "a client that cannot draw `functionPointer` is sent `function`"
         );
     }
 }

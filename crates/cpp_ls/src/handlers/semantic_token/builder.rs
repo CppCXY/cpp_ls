@@ -107,14 +107,6 @@ pub enum TypeKind {
     /// language it is, and a format specifier *is* one. It is in the legend so that [`Builder::push_range`] can send
     /// it, which is the one thing this server needs from it.
     Regexp,
-    /// **A variable whose type is a function pointer** — `binary_op operation = add;`.
-    ///
-    /// Custom for the same reason as [`TypeKind::VariableTemplate`]: the protocol has no name for it, and both of the
-    /// things it is between are true — the name **is** a variable (the fact says so, and hover says so), and it is
-    /// **called** like a function (`operation(1, 2)`). A theme that wants to draw the callable ones apart from real
-    /// functions needs a name to hang the rule on. A client that cannot draw it is sent `function`, which is the
-    /// reading of every use of one.
-    FunctionPointer,
 }
 
 impl TypeKind {
@@ -143,9 +135,6 @@ impl TypeKind {
             TypeKind::FormatConversion => 19,
             TypeKind::FormatEscape => 20,
             TypeKind::Regexp => 21,
-            // **The newest number is the newest type**, and `ALL` is in this order — the legend test checks the two
-            // agree, which is the only thing keeping the encoding readable.
-            TypeKind::FunctionPointer => 22,
         }
     }
 
@@ -182,9 +171,6 @@ impl TypeKind {
             TypeKind::FormatConversion => SemanticTokenType::new("formatConversion"),
             TypeKind::FormatEscape => SemanticTokenType::new("formatEscape"),
             TypeKind::Regexp => SemanticTokenType::REGEXP,
-            // **The second custom type this server sends** — see [`TypeKind::FunctionPointer`]. A client that cannot
-            // draw the name is sent `function` by `push_names`, because every client can draw that one.
-            TypeKind::FunctionPointer => SemanticTokenType::new("functionPointer"),
         }
     }
 
@@ -212,7 +198,6 @@ impl TypeKind {
         TypeKind::FormatConversion,
         TypeKind::FormatEscape,
         TypeKind::Regexp,
-        TypeKind::FunctionPointer,
     ];
 }
 
