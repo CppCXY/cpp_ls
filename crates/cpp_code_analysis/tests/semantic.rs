@@ -2001,18 +2001,19 @@ fn a_return_type_a_directive_splits_is_the_branch_this_compilation_takes() {
     );
 }
 
-/// **A function pointer is drawn as a function.**
+/// **A function pointer has a kind of its own.**
 ///
 /// `binary_op operation = add;` declares a *variable* — the fact says so, and hover says "a variable" — but the type
 /// is `int (*)(int, int)`, so a reader scanning `operation(1, 2)` reads a call, and a theme that colours functions is
 /// where that call belongs. The type decides, so the rule is narrow:
 ///
-/// * a variable whose type is a function pointer, directly or through a typedef, is `function`;
+/// * a variable whose type is a function pointer, directly or through a typedef, is its own kind — `FunctionPointer`,
+///   which the server draws as the custom `functionPointer` token and other clients as `function`;
 /// * an ordinary variable stays `variable`;
 /// * a **parameter** keeps its own kind — `int g(binary_op callback)` says what the name is, and that is more than
 ///   the type can.
 #[test]
-fn a_function_pointer_variable_is_drawn_as_a_function() {
+fn a_function_pointer_variable_has_its_own_kind() {
     let names = classified(
         "\
 typedef int (*binary_op)(int, int);
@@ -2028,8 +2029,11 @@ int f(void) { binary_op operation = add; int value = 1; return operation(value, 
         .map(|(_, kind, declaration)| (*kind, *declaration))
         .collect();
     assert!(
-        !kinds.is_empty() && kinds.iter().all(|(kind, _)| *kind == NameKind::Function),
-        "a function pointer is drawn as a function, declared and used: {kinds:?}"
+        !kinds.is_empty()
+            && kinds
+                .iter()
+                .all(|(kind, _)| *kind == NameKind::FunctionPointer),
+        "a function pointer is its own kind, declared and used: {kinds:?}"
     );
 
     let callback: Vec<NameKind> = names

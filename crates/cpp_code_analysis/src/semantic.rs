@@ -113,6 +113,13 @@ pub enum NameKind {
     EnumMember,
     /// A free function, or a function this layer cannot see the owner of.
     Function,
+    /// **A variable whose type is a function pointer** — `binary_op operation = add;`.
+    ///
+    /// A kind of its own rather than `Function`, and the difference is what a theme wants: the name *is* a variable
+    /// (`int (*)(int, int)` is the type, not the declaration), and it is *called* like a function — so a client can
+    /// draw it either way, and this is the only place that says which two things it is between. A client that cannot
+    /// draw the custom name is sent `Function`, which is the reading of every use of it.
+    FunctionPointer,
     /// A function declared in a class — a member function, a constructor, a destructor, an operator.
     Method,
     Variable,
@@ -508,7 +515,11 @@ fn modifiers_of(
     // a wrong one is not to make it where it cannot be true.
     if !matches!(
         kind,
-        NameKind::Variable | NameKind::Parameter | NameKind::Method | NameKind::Function
+        NameKind::Variable
+            | NameKind::FunctionPointer
+            | NameKind::Parameter
+            | NameKind::Method
+            | NameKind::Function
     ) {
         return Vec::new();
     }
@@ -867,7 +878,7 @@ fn kind_of_binding(
                 // the fact says so and hover says so — but a reader scanning `operation(1, 2)` reads a call, and a
                 // theme that colours functions is where that call belongs. The type is what decides, so an ordinary
                 // variable keeps `variable` and only a callable one moves.
-                NameKind::Function
+                NameKind::FunctionPointer
             } else {
                 NameKind::Variable
             }
