@@ -954,6 +954,44 @@ fn declares_a_shape(kind: CppSyntaxKind) -> bool {
     )
 }
 
+/// **The namespace a namespace alias names** — `namespace views = ranges::views;` records `ranges::views`.
+///
+/// A namespace alias declares no members of its own, so a query that asks "what is written in `std::views`" finds
+/// nothing while every name a reader wants is in the target. Measured on the corpus's `ranges.cpp`, which includes
+/// `<ranges>`: completion after `std::views::` answered **0** names, while `filter`, `transform`, `reverse`, `drop`
+/// and `take` are all declared in `std::ranges::views`.
+///
+/// The **target is recorded as written**, not resolved: which scope it names depends on the scope the alias sits in
+/// (`ranges::views` inside `std` is `std::ranges::views`), and the query that reads this has the alias's own scope in
+/// the same fact — see `names_in_a_scope` in the index.
+fn declared_namespace_alias_target_with(root: &CppSyntaxNode, binding: &Binding) -> Option<String> {
+    if binding.kind != BindingKind::Namespace {
+        return None;
+    }
+    let name_start = binding.name_range.start_offset;
+    // **The innermost `namespace` declaration that contains the name.** The outermost one is the enclosing namespace
+    // — `namespace std { … }` contains every alias written inside it — and asking it first answered None for every
+    // alias in a real header.
+    let node = root
+        .descendants()
+        .filter(|node| {
+            CppSyntaxKind::from(node.kind()) == CppSyntaxKind::NamespaceDecl
+                && usize::from(node.text_range().start()) <= name_start
+                && name_start < usize::from(node.text_range().end())
+        })
+        .max_by_key(|node| usize::from(node.text_range().start()))?;
+    // A declaration with a body is an ordinary namespace; the alias is the one that writes `= target` and no braces.
+    if node
+        .children()
+        .any(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::CompoundStat)
+    {
+        return None;
+    }
+    node.children()
+        .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::NameExpr)
+        .map(|child| child.text().to_string())
+}
+
 /// The type a **`typedef` or `using` alias** names, as the file spells it.
 ///
 /// The third of the family [`declared_type_of`], [`declared_returns_of`], [`declared_bases_of`] — and the one
@@ -2581,6 +2619,7 @@ fn fact_for(
     } else {
         declared_type_of_with(shapes, binding)
             .or_else(|| declared_alias_target_with(shapes, binding))
+            .or_else(|| declared_namespace_alias_target_with(root, binding))
     };
     let returns = {
         // **The written return type, and the deduced one when there is none to write.** `declared_returns_of_with`

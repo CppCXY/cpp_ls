@@ -2527,6 +2527,21 @@ fn names_in_a_scope(
     scope: &str,
     written: &str,
 ) -> Known<Vec<OfferedName>> {
+    names_in_a_scope_at(index, scopes, root, path, scope, written, 0)
+}
+
+/// The same query, with how many aliases have been followed — the guard is what makes a cycle in
+/// `namespace a = b; namespace b = a;` terminate rather than recurse for ever.
+#[allow(clippy::too_many_arguments)]
+fn names_in_a_scope_at(
+    index: &ProjectIndex,
+    scopes: &crate::ScopeTree,
+    root: &cpp_parser::CppSyntaxNode,
+    path: &Path,
+    scope: &str,
+    written: &str,
+    depth: usize,
+) -> Known<Vec<OfferedName>> {
     // The global name space has no spelling of its own: `::` is what the file writes, and `None` is what a
     // declaration at file scope records.
     if scope == "::" {
@@ -2567,6 +2582,32 @@ fn names_in_a_scope(
                 ));
             }
             names.extend(offered(declarations_in(spelling, index, path, written), 0));
+
+            // **A namespace alias is a scope with no members of its own**, and its target is where the names are.
+            // `namespace views = ranges::views;` gives `std::views` an empty namespace scope — the walker needs one
+            // for the name to resolve — and every adapter a reader types after `std::views::` is declared in
+            // `std::ranges::views`. Measured on the corpus's `ranges.cpp`: completion after `std::views::` answered
+            // **0** names, while `filter`, `transform`, `reverse`, `drop` and `take` are all there.
+            //
+            // Only on the empty answer, so an ordinary `std::` never pays for the tree walk this needs.
+            if names.is_empty()
+                && depth < 4
+                && let Some(id) = in_the_tree
+                && let Some(target) = the_target_of_a_namespace_alias(root, scopes, id)
+            {
+                let target = the_target_in_its_own_scope(scopes, spelling, &target);
+                if target != spelling {
+                    return names_in_a_scope_at(
+                        index,
+                        scopes,
+                        root,
+                        path,
+                        &target,
+                        written,
+                        depth + 1,
+                    );
+                }
+            }
         }
         // Not in the buffer at all: the project's answer, or nothing.
         None => {
@@ -2709,6 +2750,40 @@ fn names_in_a_scope(
             } else {
                 let found = declarations_in(spelling, index, path, written);
                 if found.is_empty() {
+                    // **A namespace alias, declared in a header the buffer does not hold.** The scope tree is the
+                    // buffer's own, so `std::views` — `namespace views = ranges::views;` in `<ranges>` — is not a
+                    // scope it can name, and the index records the target on the alias's own fact. Measured on the
+                    // corpus's `ranges.cpp`: completion after `std::views::` answered **0** names, while every
+                    // adapter is declared in `std::ranges::views`.
+                    //
+                    // The target is looked up where the alias sits (`std::ranges::views` for `ranges::views` in
+                    // `std`) and then as written, because which of the two is right depends on the alias's scope.
+                    if depth < 4
+                        && let Known::Yes(alias) = index.definition(spelling, path)
+                        && alias.fact.kind == crate::DeclKind::Namespace
+                        && let Some(target) = alias.fact.type_of.as_deref()
+                    {
+                        let mut candidates: Vec<String> = Vec::new();
+                        if let Some(scope) = alias.fact.scope.as_deref() {
+                            candidates.push(format!("{scope}::{target}"));
+                        }
+                        candidates.push(target.trim_start_matches("::").to_string());
+                        for candidate in candidates {
+                            if candidate != spelling
+                                && !declarations_in(&candidate, index, path, written).is_empty()
+                            {
+                                return names_in_a_scope_at(
+                                    index,
+                                    scopes,
+                                    root,
+                                    path,
+                                    &candidate,
+                                    written,
+                                    depth + 1,
+                                );
+                            }
+                        }
+                    }
                     // Empty is either "declared and empty" or "no such scope", and the difference is the *name* —
                     // the same distinction `direct_members` makes, for the same reason.
                     return match index.definition(spelling, path) {
@@ -2726,6 +2801,56 @@ fn names_in_a_scope(
 
     sort_and_hide(&mut names);
     Known::Yes(names)
+}
+
+/// **What a namespace alias names**, or `None` when this scope is a namespace with a body of its own.
+///
+/// `namespace views = ranges::views;` parses as a `NamespaceDecl` with **no compound statement** and a `NameExpr`
+/// after the `=`; the scope walker creates a scope for it so that the name resolves, and that scope is empty by
+/// construction. The tree is asked rather than the text because the two are already in hand and the shape says it
+/// without spelling rules: a namespace declaration with a body is an ordinary one, with a target and no body is an
+/// alias.
+fn the_target_of_a_namespace_alias(
+    root: &cpp_parser::CppSyntaxNode,
+    scopes: &crate::ScopeTree,
+    id: crate::sema::symbol::ScopeId,
+) -> Option<String> {
+    let scope = scopes.scope(id)?;
+    if scope.kind != crate::ScopeKind::Namespace {
+        return None;
+    }
+    let range = scope.range?;
+    let node = root.descendants().find(|node| {
+        cpp_parser::CppSyntaxKind::from(node.kind()) == cpp_parser::CppSyntaxKind::NamespaceDecl
+            && cpp_parser::source_range(node.text_range()) == range
+    })?;
+    if node.children().any(|child| {
+        cpp_parser::CppSyntaxKind::from(child.kind()) == cpp_parser::CppSyntaxKind::CompoundStat
+    }) {
+        return None;
+    }
+    node.children()
+        .find(|child| {
+            cpp_parser::CppSyntaxKind::from(child.kind()) == cpp_parser::CppSyntaxKind::NameExpr
+        })
+        .map(|child| child.text().to_string())
+}
+
+/// **Where an alias's target is looked up from.** The language looks a target up in the scope the alias is declared
+/// in, so `namespace views = ranges::views;` inside `std` names `std::ranges::views`; a target that already resolves
+/// on its own — `namespace fs = std::filesystem;` at file scope — is used as written.
+fn the_target_in_its_own_scope(scopes: &crate::ScopeTree, alias: &str, target: &str) -> String {
+    let target = target.trim().trim_start_matches("::");
+    if let Some(at) = alias.rfind("::") {
+        let nearby = format!("{}::{target}", &alias[..at]);
+        if scopes.scope_with_qualified_name(&nearby).is_some() {
+            return nearby;
+        }
+    }
+    if scopes.scope_with_qualified_name(target).is_some() {
+        return target.to_string();
+    }
+    target.to_string()
 }
 
 /// **Is this declaration above the cursor**, so that the language has reached it?

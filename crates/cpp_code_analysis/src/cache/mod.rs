@@ -95,6 +95,14 @@ use std::path::{Path, PathBuf};
 /// old entry still decodes — which is exactly why this number has to move rather than the codec's: an entry that
 /// decodes but says something this build would not write is the case this constant exists for.
 ///
+/// # Why this moved to 7
+///
+/// **A namespace alias records the namespace it names.** `namespace views = ranges::views;` gave the fact an empty
+/// `type_of`, so a query for the names written in `std::views` answered nothing — while every adapter a reader types
+/// there (`filter`, `transform`, `reverse`, `drop`, `take`) is declared in `std::ranges::views`. The summary's *layout*
+/// is unchanged (the target is the existing `type_of` field), so an old entry decodes happily and keeps the empty
+/// answer — which is exactly the case this constant exists for.
+///
 /// # Why this moved to 5
 ///
 /// **A declaration whose name spells its type's last segment recorded `void`.** `std::any any = 1;` — and `Widget
@@ -102,7 +110,7 @@ use std::path::{Path, PathBuf};
 /// ends with `::` and the declared name. The type was thrown away, the fact said `void`, and `assign-type-check` then
 /// reported the initialisation as a conversion "from `int` to `void`". The bytes are unchanged, so an old entry decodes
 /// happily and keeps the wrong type — the case this constant is for.
-pub const FORMAT_VERSION: u32 = 6;
+pub const FORMAT_VERSION: u32 = 7;
 
 /// **The fingerprint of the readers a summary was built by**, in the key.
 ///

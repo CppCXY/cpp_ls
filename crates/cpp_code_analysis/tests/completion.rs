@@ -2957,6 +2957,91 @@ void f() { enable_if_t<true, payload> p{}; p. }
     );
 }
 
+/// **A namespace alias names a scope whose members are declared elsewhere.**
+///
+/// `namespace views = ranges::views;` is how `<ranges>` spells `std::views`, and the alias declares no names of its
+/// own: completion after `std::views::` answered **0** items while `filter`, `transform`, `reverse`, `drop` and `take`
+/// are all declared in `std::ranges::views`. Measured on the corpus's `ranges.cpp` before this was fixed.
+///
+/// The second half is the one that needs the index: an alias from a **header** is not a scope in the buffer's own
+/// scope tree, so the target has to be recorded on the alias's fact — see `declared_namespace_alias_target_with`.
+#[test]
+fn a_namespace_alias_offers_the_names_of_its_target() {
+    // Declared in the file itself: both namespaces are scopes of this buffer.
+    let source = "\
+namespace ranges { namespace views { int filter; int transform; } }
+namespace std { namespace views = ranges::views; }
+void f() { std::views:: }
+";
+    let mut memory = MemoryFiles::new().with_file("/p/a.cpp", source);
+    let _ = &mut memory;
+    let providers = SessionFiles::new(OpenDocuments::new(), memory);
+    let mut session = Session::with_config(
+        "/p",
+        providers,
+        WatchFilter::new("/p"),
+        CompilerConfig::default(),
+    );
+    session.add_project_files([std::path::PathBuf::from("/p/a.cpp")]);
+    let view = cooked_view(&mut session, "/p/a.cpp");
+    let at = source.find("std::views::").expect("the fixture writes it") + "std::views::".len();
+    let labels: Vec<String> = session
+        .completions(
+            &view,
+            cpp_code_analysis::file::coordinates::FileOffset::new(at),
+        )
+        .items
+        .into_iter()
+        .map(|item| item.label)
+        .collect();
+    assert!(
+        labels.iter().any(|label| label == "filter"),
+        "a `views` adapter is written in the alias target: {labels:?}"
+    );
+}
+
+/// The same question when the alias lives in a **header** the buffer includes.
+#[test]
+fn a_namespace_alias_from_a_header_offers_the_names_of_its_target() {
+    let header = "\
+namespace ranges { namespace views { int filter; int transform; } }
+namespace std { namespace views = ranges::views; }
+";
+    let source = "\
+#include \"views_like.h\"
+void f() { std::views:: }
+";
+    let memory = MemoryFiles::new()
+        .with_file("/p/a.cpp", source)
+        .with_file("/p/views_like.h", header);
+    let providers = SessionFiles::new(OpenDocuments::new(), memory);
+    let mut session = Session::with_config(
+        "/p",
+        providers,
+        WatchFilter::new("/p"),
+        CompilerConfig::default(),
+    );
+    session.add_project_files([
+        std::path::PathBuf::from("/p/a.cpp"),
+        std::path::PathBuf::from("/p/views_like.h"),
+    ]);
+    let view = cooked_view(&mut session, "/p/a.cpp");
+    let at = source.find("std::views::").expect("the fixture writes it") + "std::views::".len();
+    let labels: Vec<String> = session
+        .completions(
+            &view,
+            cpp_code_analysis::file::coordinates::FileOffset::new(at),
+        )
+        .items
+        .into_iter()
+        .map(|item| item.label)
+        .collect();
+    assert!(
+        labels.iter().any(|label| label == "filter"),
+        "the alias's target is in the header, not in this buffer: {labels:?}"
+    );
+}
+
 /// The member labels offered after `needle` in a one-file fixture, sorted.
 fn member_labels_at(source: &'static str, needle: &str) -> Vec<String> {
     let (session, view) = a_pointer_fixture(source);

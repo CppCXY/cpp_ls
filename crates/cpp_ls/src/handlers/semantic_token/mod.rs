@@ -803,6 +803,42 @@ constexpr bool is_assignable_v = __is_assignable(To, From);
         );
     }
 
+    /// **Both `template`s of a template template parameter are keywords**, and the first version sent neither.
+    ///
+    /// Reported from an editor with the hover on the second one: *"template has no semantic token"*, and VS Code showed
+    /// the TextMate scope instead of a token type. The keyword pass asks `is_keyword`, which does hold
+    /// `TemplateKeyword`; the token that arrives from the **parser** is what the test pins, because a `template` the
+    /// grammar consumed as part of a template parameter list is still a keyword to a reader.
+    #[test]
+    fn the_template_keyword_is_a_keyword_in_both_positions() {
+        let text = "\
+template <template <typename, typename> class Container, typename T>
+using ContainerOf = Container<int, int>;
+";
+        let (session, path) = a_held_file(text);
+        let view = session.view_of_the_file(&path).expect("a view");
+        let file = session.files().held(&path).expect("the file is held");
+        let names = session.classified_names(&view);
+        let tokens = by_offset(text, &encode(file, Some(&view), &names, &None, false, &[]));
+
+        let outer = text.find("template").expect("the fixture writes it");
+        assert_eq!(
+            tokens.get(&outer),
+            Some(&index_of(TypeKind::Keyword)),
+            "the declaration's own `template`"
+        );
+
+        let inner = text[outer + 1..]
+            .find("template")
+            .map(|at| at + outer + 1)
+            .expect("the fixture writes a template template parameter");
+        assert_eq!(
+            tokens.get(&inner),
+            Some(&index_of(TypeKind::Keyword)),
+            "the template template parameter's `template`"
+        );
+    }
+
     fn a_held_file(text: &str) -> (Session<MemoryFiles>, std::path::PathBuf) {
         let files = MemoryFiles::new().with_file("/p/a.cpp", text);
         let providers = SessionFiles::new(OpenDocuments::new(), files);

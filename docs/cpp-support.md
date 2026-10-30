@@ -50,7 +50,7 @@ This is the "understands C++" layer, and the base every completion, hover and ch
 
 | Ability | What it answers |
 | --- | --- |
-| Scopes | translation unit, namespaces (anonymous and inline), classes/structs/unions/enums (with anonymous-member promotion), functions, blocks, lambdas, `try`/`catch`, `for` init-statements, structured bindings |
+| Scopes | translation unit, namespaces (anonymous, inline, and **aliases** — `namespace views = ranges::views;` resolves to the scope it names), classes/structs/unions/enums (with anonymous-member promotion), functions, blocks, lambdas, `try`/`catch`, `for` init-statements, structured bindings |
 | Types | built-in types, pointers/references (lvalue and rvalue)/arrays/function pointers, `const`/`volatile`, `typedef`/alias templates, class template specialisations, `decltype`, `auto`, `char8_t` |
 | Template deduction | function template argument deduction (`T`, `const T&`, `T*`, `T[]`, a one-level template-id), explicit template arguments, parameter packs, partial ordering (the more specialised wins), substitution into a class template's members |
 | Overload resolution | viable candidates, then a per-argument rank (Exact / Promotion / Conversion / Unranked); the template-versus-ordinary tie-break; a `= delete`d candidate is never selected; several declarations of one name are chosen between by the arguments |
@@ -66,7 +66,7 @@ This is the "understands C++" layer, and the base every completion, hover and ch
 
 | Feature | What it gives |
 | --- | --- |
-| `textDocument/completion` | names in scope (locals → class members → namespaces → included headers), the right of `.`/`->`/`::` by type, macros, keywords, `#include` file names; with the range to replace, a `sortText` that is the analysis's own order (a local before a keyword before a name from a header), snippets when the client supports them, and `completionItem/resolve` for the one item being looked at |
+| `textDocument/completion` | names in scope (locals → class members → namespaces → included headers), the right of `.`/`->`/`::` by type (a **namespace alias** offers the names of its target, whether the alias is written here or in a header), macros, keywords, `#include` file names; with the range to replace, a `sortText` that is the analysis's own order (a local before a keyword before a name from a header), snippets when the client supports them, and `completionItem/resolve` for the one item being looked at |
 | `textDocument/hover` | macros first, then the declaration (signature/type/scope), then the type of the expression; the comment next to the declaration comes with it |
 | `textDocument/signatureHelp` | the list of overloads with `activeParameter` — the position of the argument being typed |
 | `textDocument/definition` | the declaration of a macro, type, function, variable, member or enumerator, across files through the index |
