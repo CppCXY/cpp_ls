@@ -63,6 +63,11 @@ const CONSTRUCTS: &[(&str, &str)] = &[
     ),
     // **A pack capture puts the `...` before the name** — the `init-capture` form, which is what a forwarding
     // lambda over `std::apply`'s arguments is written with.
+    // **`operator co_await`** — a keyword as an operator's name, which is how a type says it is awaitable.
+    (
+        "an awaitable's own operator co_await",
+        "struct Awaiter { class Handle {}; Handle handle; Awaiter operator co_await() { return *this; } };",
+    ),
     (
         "a pack capture",
         "template <typename... Ts> void f(Ts... xs) { auto g = [... copies = xs] { return 0; }; }",

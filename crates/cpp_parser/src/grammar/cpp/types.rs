@@ -4008,6 +4008,13 @@ fn is_overloadable_operator(kind: CppTokenKind) -> bool {
             | CppTokenKind::Arrow
             | CppTokenKind::ArrowStar
             | CppTokenKind::DotStar
+            // **`operator co_await`** — C++20's spelling for "this type is awaitable". It is a **keyword**, not a
+            // punctuator, so the table did not hold it and the operator name was refused: measured on
+            // `coroutines.cpp` of the C++ corpus, `awaiter operator co_await()` produced `ErrorNode`s, the class's
+            // own node then reached past its closing brace, and its scope swallowed the three free coroutine
+            // functions written after it — so `answer`/`doubled`/`custom` were filed as *members* of `Task`, carrying
+            // its template parameter, and `auto task = doubled();` had no type at all.
+            | CppTokenKind::CoAwaitKeyword
     )
 }
 

@@ -95,13 +95,23 @@ types    PASS derived → Derived   PASS slot → Box<int>
 4. `if constexpr` / `if consteval` 的 `else-after-return`、RAII 的 `unused`、依赖类型成员、`std::any` 的类型。**已修**。
 5. `auto` 对协程/模板函数返回类型的推导、`unique_ptr` 的成员查询。**未修**，见 §4。
 
-## 4. 仍然已知的两条，和一条测量环境的坑
+## 3.5 第三轮：协程返回类型那条的根因
 
-1. **`std::unique_ptr<Resource>` 的成员查询**：`unique->identifier()` 得到 0 个候选。`undefined-field` 用的
-   `the_class_after_an_arrow` 已经能回答，完成路径没有。
-2. **协程函数的返回类型**：`auto task = doubled();` 推不出 `Task<int>`，于是 `task.run()` 的成员和 `type_at` 都是
-   unknown。函数自身的返回类型 `Task<int>` 是写着的，缺的是 `auto` 从**函数调用**取类型这一条。
-3. **系统头文件的 summary 会随会话顺序给出不同答案**：同一个 `std::string_view`，单独打开 `strings.cpp` 的会话给出
+`auto task = doubled();` 推不出 `Task<int>` 并不是 `auto`/调用推导的问题——`answer`、`doubled`、`custom` 三个 fact
+的 `scope` 是 `Some("Task")`、`parameters` 是 `["T"]`，它们被当成了 `Task` 的**成员**。根因在解析器：
+`awaiter operator co_await()` 里的 `co_await` 是一个**关键字**，`parse_operator_name` 的可重载运算符表里没有它，
+于是 `ErrorNode` 落在 `Task` 的类体里，类的定义节点因此越过自己的 `}`，作用域延伸到后面三个自由协程函数上。
+把 `CoAwaitKeyword` 加进那张表即可：语料随之为 **7/8 members、4/4 types**（`task` → `Task<int>`、`task.run()` 7 个候选）。
+解析器测试见 `tests/cpp20.rs` 的 "an awaitable's own operator co_await"。
+
+## 4. 仍然已知的两条
+
+1. **`std::unique_ptr<Resource>` 的成员查询**（唯一一条 FAIL）：`unique->identifier()` 得到 0 个候选，根因不在
+   `->` 的处理——`type_at` 直接给出 `Unknown(Ambiguous("std::make_unique<Resource>"))`。libstdc++ 的 `make_unique` 有
+   三个可见重载（`_Args&&...`、`size_t`、以及一个 `= delete` 的数组拒绝版），排序时 `_Args` 没有从实参推导，三个都
+   平手，于是"歧义"。修法是**从实参推导参数包**（`_Args = [int]` → 参数 `int&&`，Exact 胜过 `size_t` 的 Conversion），
+   属于重载解析缺的能力。第一轮兜底的"所有候选返回类型一致就用它"在这里不成立：三个候选返回三种不同的别名拼写。
+2. **系统头文件的 summary 会随会话顺序给出不同答案**：同一个 `std::string_view`，单独打开 `strings.cpp` 的会话给出
    79 个成员（含 `starts_with`/`ends_with`），而先索引整个工程、逐文件 cook + diagnostics 的会话给出 73 个（缺 C++20
    的成员，于是 `undefined-field` 误报）。summary 的 key 有 `content_hash`/`context_hash`/fingerprint，但成员列表的
    缓存（`index.remember_member_list`）只按"哪些文件贡献了它"失效——一个在头文件索引完成之前算出的列表可以活下来。
