@@ -1,6 +1,6 @@
 [package]
 name = "cpp_code_analysis"
-version = "0.1.1"
+version = "0.1.3"
 edition = "2024"
 description = "The analysis layer of cpp_ls: the preprocessor, symbol scopes, type inference and the semantic checks."
 license = "MIT"

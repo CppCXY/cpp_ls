@@ -11,9 +11,9 @@ members = [
 # has to check rather than trust.
 [workspace.dependencies]
 # local
-cpp_parser = { path = "crates/cpp_parser", version = "0.1.1" }
-cpp_formatter = { path = "crates/cpp_formatter", version = "0.1.1" }
-cpp_code_analysis = { path = "crates/cpp_code_analysis", version = "0.1.1" }
+cpp_parser = { path = "crates/cpp_parser", version = "0.1.3" }
+cpp_formatter = { path = "crates/cpp_formatter", version = "0.1.3" }
+cpp_code_analysis = { path = "crates/cpp_code_analysis", version = "0.1.3" }
 
 # external
 lsp-server = "0.10.0"

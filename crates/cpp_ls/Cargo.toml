@@ -1,6 +1,6 @@
 [package]
 name = "cpp_ls"
-version = "0.1.1"
+version = "0.1.3"
 edition = "2024"
 description = "A C, C++ and CUDA language server."
 license = "MIT"
