@@ -107,9 +107,11 @@ pub mod diagnostic_code;
 // Checks/Finding { check: … } shape, so they are declared again the moment their bodies are rewritten. Kept in
 // the tree rather than deleted, because their reasoning (and the measured 119-findings defect they record) is what
 // the ported versions have to preserve.
+mod borrowed;
 mod braces_around_statements;
 pub mod concept_not_satisfied;
 mod cstyle_cast;
+mod dangling_field;
 mod dangling_return;
 mod else_after_return;
 mod implicit_bool_conversion;
@@ -1513,6 +1515,9 @@ pub fn run(context: CheckContext<'_>) -> Vec<Finding> {
     // The rule that needs an expression origin: `return s;` is a defect or not depending on whether `s` is a local, a
     // parameter or a static - a question about the scope tree rather than about the spelling.
     run_check::<dangling_return::DanglingReturn>(&mut context);
+    // The same origin analysis, asked about a member instead of a `return`: a view of a by-value parameter, or of a
+    // temporary, outlives what it refers to.
+    run_check::<dangling_field::DanglingField>(&mut context);
 
     if crate::probes::timing() {
         let (ran, nanos) = context.model.inference_cost();

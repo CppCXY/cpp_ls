@@ -2850,6 +2850,7 @@ fn the_cpp_only_rules_are_known_by_name() {
             DiagnosticCode::UseAuto,
             DiagnosticCode::ImplicitBoolConversion,
             DiagnosticCode::ConceptNotSatisfied,
+            DiagnosticCode::DanglingField,
         ]
     );
 }

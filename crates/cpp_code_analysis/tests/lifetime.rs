@@ -103,6 +103,85 @@ fn a_moved_local_is_still_the_functions_own() {
     );
 }
 
+/// Only the `dangling-field` messages.
+fn dangling_fields(source: &str) -> Vec<String> {
+    findings_of(source)
+        .into_iter()
+        .filter(|finding| finding.code == DiagnosticCode::DanglingField)
+        .map(|finding| finding.message)
+        .collect()
+}
+
+/// **A view member of a by-value parameter**, which the constructor destroys before the object exists.
+#[test]
+fn a_view_member_of_a_by_value_parameter_is_reported() {
+    let messages = dangling_fields("struct S { std::string_view v; S(std::string s) : v(s) {} };");
+    assert_eq!(messages.len(), 1, "{messages:?}");
+    assert!(messages[0].contains("parameter"), "{}", messages[0]);
+}
+
+/// **A view member of a temporary**, which dies at the end of the statement that built the object.
+#[test]
+fn a_view_member_of_a_temporary_is_reported() {
+    let messages = dangling_fields("struct S { std::string_view v = std::string(\"x\"); };");
+    assert_eq!(messages.len(), 1, "{messages:?}");
+    assert!(messages[0].contains("temporary"), "{}", messages[0]);
+}
+
+/// A reference member is the same defect as a view member.
+#[test]
+fn a_reference_member_of_a_temporary_is_reported() {
+    let messages =
+        dangling_fields("struct S { const std::string& v; S() : v(std::string(\"x\")) {} };");
+    assert_eq!(messages.len(), 1, "{messages:?}");
+    assert!(messages[0].contains("reference"), "{}", messages[0]);
+}
+
+/// A pointer member from `s.c_str()`: the pointer refers to storage the parameter owns.
+#[test]
+fn a_pointer_member_of_a_parameters_buffer_is_reported() {
+    let messages =
+        dangling_fields("struct S { const char* p; S(std::string s) : p(s.c_str()) {} };");
+    assert_eq!(messages.len(), 1, "{messages:?}");
+}
+
+/// A `span` member of a by-value vector is a view of a copy that dies with the constructor.
+#[test]
+fn a_span_member_of_a_by_value_vector_is_reported() {
+    let messages =
+        dangling_fields("struct S { std::span<int> v; S(std::vector<int> vec) : v(vec) {} };");
+    assert_eq!(messages.len(), 1, "{messages:?}");
+}
+
+/// **The classes that are written correctly, and must stay quiet.** Each one is a shape a careless rule would report:
+/// an owning member, a reference parameter (whose caller owns the lifetime), a member of `*this`, a literal, a
+/// pointer whose target is unknown.
+#[test]
+fn the_safe_field_shapes_are_silent() {
+    let safe = [
+        // The member owns its storage: there is nothing to dangle.
+        "struct S { std::string v; S(std::string s) : v(s) {} };",
+        // A reference parameter lives as long as its argument — the caller's obligation, written down as
+        // `[[clang::lifetimebound]]`.
+        "struct S { std::string_view v; S(const std::string& s) : v(s) {} };",
+        "struct S { std::string_view v; S(std::string&& s) : v(s) {} };",
+        // A member of the object outlives the constructor, and a static outlives everything.
+        "struct S { std::string s; std::string_view v; S() : v(s) {} };",
+        "struct S { static const std::string name; std::string_view v; S() : v(name) {} };",
+        // A string literal has static storage duration.
+        "struct S { std::string_view v; S() : v(\"literal\") {} };",
+        "struct S { std::string_view v = \"literal\"; };",
+        // A pointer whose target is not known.
+        "struct S { int* p; S(int* q) : p(q) {} };",
+        // A member with no initialiser borrows nothing.
+        "struct S { std::string_view v; S() {} };",
+    ];
+    for source in safe {
+        let messages = dangling_fields(source);
+        assert!(messages.is_empty(), "`{source}` reported {messages:?}");
+    }
+}
+
 /// **The declarations that are written correctly, and must stay quiet.** Each one is a shape a careless rule would
 /// report: a value return, a parameter (whose caller owns the lifetime), a static, a literal, a member.
 #[test]
