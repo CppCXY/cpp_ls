@@ -41,13 +41,13 @@ impl Check for UseOverride {
             std::collections::BTreeMap::new();
 
         for (class, bases) in declarations {
-            // **The declaration's text in the file, not in the rendering.** `fact.range` is a range in the file the
-            // reader wrote, which is [`CheckContext::written`]; `context.source` is the *rendering*, and slicing it
-            // with these offsets read the wrong declaration — `written.contains("override")` then answered about
-            // somebody else's text, and the members that did say `override` were reported as if they had not. Measured
-            // on `classes.cpp` of the C++ corpus: four findings naming `describe`, `clone`, `value` and `sum`, none of
-            // which was the member the range pointed at.
-            let members: Vec<(String, String, cpp_parser::SourceRange)> = context
+            // **What the declaration writes, read from the fact.** `override` and `final` are contextual identifiers, so
+            // the answer used to come from slicing the declaration's text and searching it — first from the
+            // *rendering* with the fact's file offsets, which read the wrong declaration and produced findings that
+            // named one member and underlined another (four on `classes.cpp` of the C++ corpus), and then from the
+            // file's text, which was right but did the same work at every check. The bits are recorded once, by the
+            // summary, from the tokens — see [`crate::DeclModifiers`].
+            let members: Vec<(String, crate::DeclModifiers, cpp_parser::SourceRange)> = context
                 .summary
                 .declarations
                 .iter()
@@ -55,19 +55,17 @@ impl Check for UseOverride {
                     fact.kind == crate::DeclKind::Function
                         && fact.scope.as_deref() == Some(class.as_str())
                 })
-                .filter_map(|fact| {
-                    let written = context
-                        .written
-                        .get(fact.range.start_offset..fact.range.end_offset())?
-                        .to_string();
-                    Some((fact.name.clone(), written, fact.name_range))
-                })
+                .map(|fact| (fact.name.clone(), fact.modifiers, fact.name_range))
                 .collect();
 
-            for (name, written, name_range) in members {
+            for (name, modifiers, name_range) in members {
                 // **The member does not have to write `virtual`** — an override need not repeat it, and requiring it was
-                // the first version's bug. What matters is that it says neither `override` nor `final`.
-                if written.contains("override") || written.contains("final") {
+                // the first version's bug. What matters is that it says neither `override` nor `final`: `contains`
+                // asks for **every** bit it is given, so the two are asked separately —
+                // `contains(OVERRIDE | FINAL)` would mean "says both".
+                if modifiers.contains(crate::DeclModifiers::OVERRIDE)
+                    || modifiers.contains(crate::DeclModifiers::FINAL)
+                {
                     continue;
                 }
                 // **Does a base actually declare it?** Only then is this an override that forgot to say so. Answered from the

@@ -131,9 +131,9 @@ pub use memory::MemoryReport;
 pub use summary::ConditionalBody;
 pub use summary::{
     ClosureEvidence, ConditionAt, ConditionalRegion, CookedDiagnostic, DeclFact, DeclKind,
-    FactGuard, FileSummary, GuardBranch, IncludeFact, IndexedRendering, IndexedUnit, MacroAt,
-    MacroDefinitions, MacroFact, MacroKind, MacroView, MapReport, OutlineSymbol, RenderedUnit,
-    SummaryGuards, TranslationUnit, UnitDefinitions, UnitReading, UnitSpan,
+    DeclModifiers, FactGuard, FileSummary, GuardBranch, IncludeFact, IndexedRendering, IndexedUnit,
+    MacroAt, MacroDefinitions, MacroFact, MacroKind, MacroView, MapReport, OutlineSymbol,
+    RenderedUnit, SummaryGuards, TranslationUnit, UnitDefinitions, UnitReading, UnitSpan,
     macros_from_direct_includes, macros_from_direct_includes_with_bodies,
     macros_from_the_closure_with_bodies, macros_in_force_before_the_include, outline_of,
 };

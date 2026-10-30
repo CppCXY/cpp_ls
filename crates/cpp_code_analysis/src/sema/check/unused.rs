@@ -56,27 +56,6 @@ fn is_deliberately_unused(name: &str) -> bool {
     name.starts_with('_')
 }
 
-/// **Does the declaration whose name is at `at` carry a `[[maybe_unused]]`?**
-///
-/// The attribute is written **before** the name — `[[maybe_unused]] int local = 3;` — and it is found by scanning the
-/// declaration's own prefix, which is the text between the previous statement boundary and the name. The fact's range
-/// starts at the name rather than at the declaration's first token, so the window is not "what precedes `at`": the type
-/// sits between the attribute and the name.
-///
-/// The boundary set is what keeps a *previous* declaration's attribute out of the answer: `[[maybe_unused]] int a = 1;`
-/// followed by `int b = 2;` must not excuse `b`, and the `;` between them is what stops it. `,` and `(` are boundaries
-/// too, because a declaration can follow both (`int a = 1, b;`, `for (int i = 0; …`).
-///
-/// `[[maybe_unused, other]]` and `[[other]] [[maybe_unused]]` are both written, and both contain the word, so the test is
-/// a search rather than a parse.
-fn is_marked_maybe_unused(source: &str, at: usize) -> bool {
-    let before = source.get(..at.min(source.len())).unwrap_or_default();
-    let from = before
-        .rfind([';', '{', '}', '(', ','])
-        .map_or(0, |boundary| boundary + 1);
-    before[from..].contains("maybe_unused")
-}
-
 /// **Does the declared type say, by itself, that the variable cannot be a side effect?**
 ///
 /// A local whose type has a destructor is not "unused": `Guard guard(counter);` exists for its constructor and its
@@ -188,9 +167,11 @@ impl Check for Unused {
 
             // **`[[maybe_unused]]` is the reader saying "I know"**, and it is honoured here for the same reason a
             // leading `_` is: a rule that reports a variable the reader has already marked is a rule that teaches them
-            // to delete the mark. Measured on `attributes.cpp` of the C++ corpus, whose only `unused` finding was a
-            // variable written `[[maybe_unused]]` three lines above it.
-            if is_marked_maybe_unused(context.source, at.get()) {
+            // to delete the mark. The bit is recorded by the summary — the attribute is an identifier inside an
+            // attribute node, so reading it here would be a second reading of the same spelling. Measured on
+            // `attributes.cpp` of the C++ corpus, whose only `unused` finding was a variable written
+            // `[[maybe_unused]]` three lines above it.
+            if fact.modifiers.contains(crate::DeclModifiers::MAYBE_UNUSED) {
                 continue;
             }
 

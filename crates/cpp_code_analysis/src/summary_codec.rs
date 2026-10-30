@@ -224,7 +224,7 @@ const MAGIC: &[u8; 8] = b"CPPLSSUM";
 /// reader is standing. Measured on `auto lineStartOffset = _lineOffsetVec[line]`: the alias chain followed every hop
 /// correctly and stopped at `_Alloc::value_type&`; with the default it reaches `std::size_t&`. See
 /// [`crate::DeclFact::parameter_defaults`] and [`crate::substituted_spelling_with_defaults`].
-pub const CODEC_VERSION: u32 = 31;
+pub const CODEC_VERSION: u32 = 32;
 
 /// Write a summary as bytes.
 ///
@@ -277,6 +277,9 @@ pub fn encode(summary: &FileSummary) -> Vec<u8> {
         put_u32(&mut out, guard_code(fact.guard));
         put_u8(&mut out, access_code(fact.access));
         put_u8(&mut out, u8::from(fact.exported));
+        // **The modifiers**, at the end of the fact so the bytes of an older entry stay readable up to here — the
+        // version is what makes the whole entry unreachable, but appending keeps the diff honest.
+        put_u32(&mut out, fact.modifiers.bits());
     }
 
     put_u32(&mut out, summary.macros.len() as u32);
@@ -690,6 +693,7 @@ pub fn decode(bytes: &[u8]) -> Result<FileSummary, DecodeError> {
             guard: guard_from(reader.u32()?)?,
             access: access_from(reader.u8()?),
             exported: reader.u8()? != 0,
+            modifiers: crate::DeclModifiers::from_bits(reader.u32()?),
         });
     }
 
@@ -1252,6 +1256,7 @@ mod tests {
                     name: "Widget".to_string(),
                     scope: None,
                     kind: DeclKind::Type,
+                    modifiers: crate::DeclModifiers::default(),
                     // A class declares no type in `type_of`'s sense, so the `None` branch is covered here.
                     type_of: None,
                     // A class returns nothing either, so `None` — and the second fact below covers the other value.
@@ -1290,6 +1295,7 @@ mod tests {
                     name: "make".to_string(),
                     scope: Some("ns::Widget".to_string()),
                     kind: DeclKind::Function,
+                    modifiers: crate::DeclModifiers::default(),
                     // A function declares no `type_of` — the name has no type — and its `returns` is what a *call*
                     // has. Both halves of that distinction are in this fixture on purpose.
                     type_of: None,
@@ -1318,6 +1324,7 @@ mod tests {
                     name: String::new(),
                     scope: None,
                     kind: DeclKind::Other,
+                    modifiers: crate::DeclModifiers::default(),
                     type_of: None,
                     returns: None,
                     bases: Vec::new(),

@@ -102,7 +102,7 @@ use std::path::{Path, PathBuf};
 /// ends with `::` and the declared name. The type was thrown away, the fact said `void`, and `assign-type-check` then
 /// reported the initialisation as a conversion "from `int` to `void`". The bytes are unchanged, so an old entry decodes
 /// happily and keeps the wrong type — the case this constant is for.
-pub const FORMAT_VERSION: u32 = 5;
+pub const FORMAT_VERSION: u32 = 6;
 
 /// **The fingerprint of the readers a summary was built by**, in the key.
 ///

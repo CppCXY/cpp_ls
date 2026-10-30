@@ -119,13 +119,9 @@ impl Check for ArgumentCount {
 
             // **A call that expands a pack passes an arity nothing here can count.** `sum_head(rest...)` is one
             // argument to `get_args` — sometimes none, because the expansion is not an expression — and the count is
-            // whatever the pack holds at instantiation. The `...` is the evidence, and it is read from the call's own
-            // text because the expansion is not a node this check can ask about.
-            let written = context
-                .source
-                .get(usize::from(call.get_range().start())..usize::from(call.get_range().end()))
-                .unwrap_or_default();
-            if written.contains("...") {
+            // whatever the pack holds at instantiation. The evidence is the parser's `PackExpansionExpr`, so a literal
+            // `...` in a string is not this.
+            if call.has_a_pack_expansion() {
                 continue;
             }
 

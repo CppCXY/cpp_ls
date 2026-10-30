@@ -50,17 +50,10 @@ impl Check for ElseAfterReturn {
             // still compile and would read worse — which is the whole test this hint has to pass. Measured: five
             // findings on `constexpr.cpp`, `containers.cpp` and `templates.cpp` of the C++ corpus, none of them
             // something to act on.
-            let opening: String = context
-                .source
-                .chars()
-                .skip(usize::from(statement.syntax().text_range().start()))
-                .take(32)
-                .collect();
-            let compile_time = opening
-                .split_whitespace()
-                .take(2)
-                .any(|word| word == "constexpr" || word == "consteval");
-            if compile_time {
+            //
+            // The question is the parser's, not this rule's: `is_constexpr`/`is_consteval` read the statement's own
+            // leading tokens, so a comment that mentions the word is not this and there is no text to slice here.
+            if statement.is_constexpr() || statement.is_consteval() {
                 continue;
             }
             context.add(

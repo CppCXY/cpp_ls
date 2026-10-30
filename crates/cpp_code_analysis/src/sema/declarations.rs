@@ -305,6 +305,139 @@ pub(crate) fn declared_type_of_with(
     (!written.is_empty()).then_some(written)
 }
 
+/// **The modifiers a declaration is written with**, from the tokens the shape table already holds.
+///
+/// `override` and `final` are contextual identifiers, `[[maybe_unused]]` is an attribute and `virtual`/`constexpr` are
+/// keywords inside the specifier sequence — so answering "does this declaration say `override`" used to mean slicing
+/// the declaration's text at a check site and searching it. The bits are computed here, once, from the same shape
+/// table the type and return-type questions use, and stored on the fact.
+pub(crate) fn declared_modifiers_with(
+    shapes: &DeclarationShapes,
+    binding: &Binding,
+    rendered: Option<&str>,
+) -> crate::DeclModifiers {
+    // The declaration's own specifiers and declarator, selected exactly as [`declared_type_of_with`] selects them: the
+    // innermost specifier sequence, and the first declarator that reaches the name (the inner one, for a parameter).
+    let mut specifiers = None;
+    let mut declarator: Option<CppSyntaxNode> = None;
+    let name_is_a_parameter = shapes.names_a_parameter(the_offset_to_descend_by(binding));
+    shapes.on_the_path(the_offset_to_descend_by(binding), |shape| {
+        if let Some(node) = &shape.specifiers {
+            specifiers = Some(node.clone());
+        }
+        if declarator.is_none()
+            && let Some(node) = &shape.declarator
+            && reaches_the_name(node, binding.name_range)
+            && !(name_is_a_parameter
+                && node
+                    .children()
+                    .any(|inner| CppSyntaxKind::from(inner.kind()) == CppSyntaxKind::ParameterList))
+        {
+            declarator = Some(node.clone());
+        }
+    });
+
+    let mut found = crate::DeclModifiers::default();
+    for node in [specifiers.as_ref(), declarator.as_ref()]
+        .into_iter()
+        .flatten()
+    {
+        found = found.union(modifiers_in(node));
+    }
+
+    // **An attribute written before the declaration is a *sibling* of it**, not a child — the parser gives
+    // `[[maybe_unused]]` its own node and then reads the declaration — so it is found by looking at the text in front of
+    // the declaration, at index time, and recorded as a bit. This is the one part that cannot be a token walk from the
+    // declaration's own nodes, and it is still one read per declaration, done once, rather than a text search at every
+    // check that asks.
+    if let (Some(rendered), Some(start)) = (
+        rendered,
+        specifiers
+            .as_ref()
+            .or(declarator.as_ref())
+            .map(|node| usize::from(node.text_range().start())),
+    ) && is_marked_maybe_unused(rendered, start)
+    {
+        found = found.union(crate::DeclModifiers::MAYBE_UNUSED);
+    }
+
+    found
+}
+
+/// **Does the declaration whose first token is at `at` carry a `[[maybe_unused]]`?**
+///
+/// The attribute is written before the name — `[[maybe_unused]] int local = 3;` — and it is found by scanning the
+/// declaration's own prefix, which is the text between the previous statement boundary and the declaration. The
+/// boundary set is what keeps a *previous* declaration's attribute out of the answer: `[[maybe_unused]] int a = 1;`
+/// followed by `int b = 2;` must not excuse `b`, and the `;` between them is what stops it. `,` and `(` are boundaries
+/// too, because a declaration can follow both (`int a = 1, b;`, `for (int i = 0; …`).
+fn is_marked_maybe_unused(source: &str, at: usize) -> bool {
+    let before = source.get(..at.min(source.len())).unwrap_or_default();
+    let from = before
+        .rfind([';', '{', '}', '(', ','])
+        .map_or(0, |boundary| boundary + 1);
+    before[from..].contains("maybe_unused")
+}
+
+/// The bits one node's tokens state — the specifier sequence, or the declarator.
+///
+/// Tokens rather than a text search: `override` and `final` arrive as identifiers, `delete`/`default` as their
+/// keywords, `...` as an ellipsis, and an attribute carries its word as an identifier too. The comparison is against a
+/// token's own text, which is the spelling the lexer produced, not a slice of the file that could match a comment.
+fn modifiers_in(node: &CppSyntaxNode) -> crate::DeclModifiers {
+    let mut found = crate::DeclModifiers::default();
+    // **Bodies are not the declaration's own words.** A class's specifier sequence *contains its body*, so a
+    // descendant scan answered "this class is `virtual`" because a member function was — measured by
+    // `the_virt_specifiers_are_bits`. The walk stops at a `ClassBody` or a `CompoundStat` and keeps everything else:
+    // specifier nodes, the declarator's suffix (`override`, `final`), a parameter list, an attribute.
+    let mut stack: Vec<(CppSyntaxNode, bool)> = vec![(node.clone(), false)];
+    while let Some((current, in_a_parameter_list)) = stack.pop() {
+        for element in current.children_with_tokens() {
+            if let Some(token) = element.as_token().cloned() {
+                let word = token.text();
+                let bit = match word {
+                    "virtual" => Some(crate::DeclModifiers::VIRTUAL),
+                    "override" => Some(crate::DeclModifiers::OVERRIDE),
+                    "final" => Some(crate::DeclModifiers::FINAL),
+                    "constexpr" => Some(crate::DeclModifiers::CONSTEXPR),
+                    "consteval" => Some(crate::DeclModifiers::CONSTEVAL),
+                    "constinit" => Some(crate::DeclModifiers::CONSTINIT),
+                    "static" => Some(crate::DeclModifiers::STATIC),
+                    "inline" => Some(crate::DeclModifiers::INLINE),
+                    "explicit" => Some(crate::DeclModifiers::EXPLICIT),
+                    "maybe_unused" => Some(crate::DeclModifiers::MAYBE_UNUSED),
+                    "nodiscard" => Some(crate::DeclModifiers::NODISCARD),
+                    "delete" => Some(crate::DeclModifiers::DELETED),
+                    "default" => Some(crate::DeclModifiers::DEFAULTED),
+                    _ => None,
+                };
+                if let Some(bit) = bit {
+                    found = found.union(bit);
+                }
+                // **A variadic parameter list**, which is the `...` of a function rather than of a pack expansion
+                // inside an expression: only a `...` inside a parameter list counts.
+                if in_a_parameter_list
+                    && cpp_parser::CppTokenKind::from(token.kind())
+                        == cpp_parser::CppTokenKind::Ellipsis
+                {
+                    found = found.union(crate::DeclModifiers::VARIADIC);
+                }
+                continue;
+            }
+            let Some(child) = element.as_node().cloned() else {
+                continue;
+            };
+            let kind = CppSyntaxKind::from(child.kind());
+            if matches!(kind, CppSyntaxKind::ClassBody | CppSyntaxKind::CompoundStat) {
+                continue;
+            }
+            let child_is_a_parameter_list = kind == CppSyntaxKind::ParameterList;
+            stack.push((child, in_a_parameter_list || child_is_a_parameter_list));
+        }
+    }
+
+    found
+}
 /// Which offset the walks in this module descend by: the **name**, not the binding's range.
 ///
 /// A `Binding`'s range is "the declarator" for a variable declared in a statement, and that is what the walks
@@ -2385,6 +2518,10 @@ fn fact_for(
     // scope in the file per declaration.
     in_namespace: Option<String>,
     declarations: &Declarations<'_>,
+    // **The file's rendering**, for the one modifier that is not a token of the declaration: an attribute is a
+    // *sibling* of the declaration, so `[[maybe_unused]]` is found in the text in front of it. Passed in because it is
+    // a copy of the whole file and the walk would otherwise make one per declaration.
+    rendered: &str,
     // than the macro table, because the answer is the same for every declaration in the file and asking per
 ) -> Option<DeclFact> {
     // A binding whose name has no identifier is a destructor, an operator, or a conversion function. Its
@@ -2515,6 +2652,9 @@ fn fact_for(
 
     Some(DeclFact {
         kind: DeclKind::from_binding_kind(binding.kind),
+        // **What the declaration writes** — read from the same shape table as everything above, and stored so that a
+        // check asking "does this say `override`" does not search the text for it. See [`crate::DeclModifiers`].
+        modifiers: declared_modifiers_with(shapes, binding, Some(rendered)),
         name,
         scope,
         // Asked of the scope the binding was made in rather than of the declaration's shape: `bool` is the one
@@ -3097,6 +3237,11 @@ impl<'a> DeclarationFacts<'a> {
 
         // per declaration copies the whole file each time.
 
+        // **The rendered file, once.** `root` is the tree of the *rendering* — macros expanded, directives resolved —
+        // and the only modifier that needs text rather than tokens is an attribute written before a declaration, which
+        // the parser keeps as a sibling. One copy per file, not one per declaration.
+        let rendered = root.text().to_string();
+
         for (index, scope) in scopes.scopes().iter().enumerate() {
             let id = ScopeId(index);
             // **A template parameter list files no declarations, and filing them was expensive in a way that had
@@ -3146,6 +3291,7 @@ impl<'a> DeclarationFacts<'a> {
                     local,
                     in_namespace.clone(),
                     &declarations,
+                    &rendered,
                 ) {
                     facts.push(fact);
                 }
@@ -3194,6 +3340,7 @@ impl<'a> DeclarationFacts<'a> {
                 false,
                 None,
                 &declarations,
+                &rendered,
             ) {
                 // **The walker answered `None` for a definition's list**, because the shape it reads the declarator
                 // from has no name (a qualified definition's name is in the specifier sequence). The pass read the

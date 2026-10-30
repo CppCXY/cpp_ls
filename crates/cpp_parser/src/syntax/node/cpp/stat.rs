@@ -83,6 +83,33 @@ impl CppIfStat {
     pub fn get_else_branch(&self) -> Option<CppElseStat> {
         self.child()
     }
+
+    /// **Is this a compile-time `if`?** — `if constexpr (…)`.
+    ///
+    /// The word is a keyword of the statement, not its text: asked of *this node's leading tokens*, so a comment or a
+    /// nested statement that mentions `constexpr` is not this. See [`CppIfStat::is_consteval`] for the other spelling.
+    pub fn is_constexpr(&self) -> bool {
+        self.leading_word(1).as_deref() == Some("constexpr")
+    }
+
+    /// **Is this `if consteval`, or `if !consteval`?** — the two spellings of `[stmt.if]`'s compile-time branch.
+    pub fn is_consteval(&self) -> bool {
+        match self.leading_word(1).as_deref() {
+            Some("consteval") => true,
+            Some("!") => self.leading_word(2).as_deref() == Some("consteval"),
+            _ => false,
+        }
+    }
+
+    /// The text of the `n`-th significant token of this statement, counting from the `if`.
+    fn leading_word(&self, n: usize) -> Option<String> {
+        self.syntax
+            .descendants_with_tokens()
+            .filter_map(|element| element.into_token())
+            .map(|token| token.text().to_string())
+            .filter(|text| !text.trim().is_empty())
+            .nth(n)
+    }
 }
 
 /// An `else` clause.

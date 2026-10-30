@@ -563,6 +563,23 @@ impl CppCallExpr {
 
         self.children::<CppExpr>().skip(1).collect()
     }
+
+    /// **Does this call expand a pack?** — `sum_head(rest...)`.
+    ///
+    /// A call whose argument is a pack expression passes however many arguments the pattern says, which is not a fact
+    /// about the text and not a number a checker can compare against a declaration's parameter count. The evidence is
+    /// the parser's own `PackExpansionExpr`.
+    ///
+    /// **The call's own subtree, not `get_args`**: `sum_head(rest...)` names the expansion as a direct child of the
+    /// call, and it is not one of the expression kinds `get_args` accepts — measured, the arguments came back empty and
+    /// the arity check reported "passes fewer" for a call that passes a whole pack. A nested lambda's expansion inside
+    /// an argument would count too, which is the silence direction: no arity is claimed about a call whose count is not
+    /// a fact about the text.
+    pub fn has_a_pack_expansion(&self) -> bool {
+        self.syntax()
+            .descendants()
+            .any(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::PackExpansionExpr)
+    }
 }
 
 /// An argument list: `(a, b, c)`.

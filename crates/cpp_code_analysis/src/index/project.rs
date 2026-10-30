@@ -8851,6 +8851,10 @@ fn fact_from_binding_with(
         // was made with the scopes in hand. See [`DeclFact::in_namespace`].
         in_namespace: None,
         kind: crate::DeclKind::from_binding_kind(binding.kind),
+        // The same bits the index fills — a fact must say the same thing whichever path produced it.
+        // **No rendering here**: this path is handed a node and no file text, and the attribute is a sibling of the
+        // declaration — a member query never asks for `[[maybe_unused]]`, so the bit is left unset rather than guessed.
+        modifiers: crate::sema::declarations::declared_modifiers_with(shapes, binding, None),
         type_of: crate::sema::declarations::declared_type_of_with(shapes, binding),
         // Answered here as well, because **members** are exactly where a call happens: `fac.build().size` needs the
         // return type of a member function that the file being edited declares. See [`DeclFact::returns`].
@@ -13129,6 +13133,8 @@ impl ProjectDefinition {
         ProjectDefinition {
             file: path.to_path_buf(),
             fact: DeclFact {
+                // The same bits the index fills — see `DeclModifiers`.
+                modifiers: crate::DeclModifiers::default(),
                 name: binding
                     .name
                     .identifier_text()

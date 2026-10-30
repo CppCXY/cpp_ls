@@ -41,6 +41,55 @@ fn frame_key(path: &std::path::Path) -> String {
     crate::paths::normalize_path(path, cfg!(windows))
 }
 
+/// **What a declaration is written with** — the modifiers every reader used to find by searching its text.
+///
+/// `override` and `final` are contextual identifiers, `[[maybe_unused]]` is an attribute, and `virtual`/`constexpr` are
+/// keywords inside the specifier sequence — so a consumer answering "does this declaration say `override`" had to
+/// slice the declaration's text and search it (`written.contains("override")`). The bits below are that question
+/// answered **once**, when the summary is built, from the tokens the walk already had in hand: every consumer of the
+/// summary reads a bit instead of re-reading text, and the answer cannot drift from the file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
+pub struct DeclModifiers(u32);
+
+impl DeclModifiers {
+    pub const VIRTUAL: Self = Self(1 << 0);
+    pub const OVERRIDE: Self = Self(1 << 1);
+    pub const FINAL: Self = Self(1 << 2);
+    pub const CONSTEXPR: Self = Self(1 << 3);
+    pub const CONSTEVAL: Self = Self(1 << 4);
+    pub const CONSTINIT: Self = Self(1 << 5);
+    pub const STATIC: Self = Self(1 << 6);
+    pub const INLINE: Self = Self(1 << 7);
+    pub const EXPLICIT: Self = Self(1 << 8);
+    /// `[[maybe_unused]]`, and the reader's answer that this declaration is not dead code.
+    pub const MAYBE_UNUSED: Self = Self(1 << 9);
+    /// `[[nodiscard]]`.
+    pub const NODISCARD: Self = Self(1 << 10);
+    /// A function with a variadic parameter list — `void log(const char*, ...)` or a parameter pack.
+    pub const VARIADIC: Self = Self(1 << 11);
+    pub const DELETED: Self = Self(1 << 12);
+    pub const DEFAULTED: Self = Self(1 << 13);
+
+    pub const fn bits(self) -> u32 {
+        self.0
+    }
+
+    pub const fn from_bits(bits: u32) -> Self {
+        Self(bits)
+    }
+
+    pub const fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+
+    pub const fn contains(self, other: Self) -> bool {
+        self.0 & other.0 == other.0
+    }
+
+    pub const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+}
 /// A declaration the file writes: enough to find it, name it, and say what kind of thing it is.
 ///
 /// Deliberately not a syntax tree and not a type: the fields are the ones a *query* needs — where to jump, what to
@@ -106,6 +155,9 @@ pub struct DeclFact {
     /// scope tree, which is built with no macro evidence and cannot answer this: see [`crate::FileView::parse`].
     pub in_namespace: Option<String>,
     pub kind: DeclKind,
+    /// **The modifiers the declaration writes** — see [`DeclModifiers`]. Answered once, at index time, from the
+    /// tokens; the consumers that used to search the declaration's text (`use-override`, `unused`) read a bit now.
+    pub modifiers: DeclModifiers,
     /// The type a variable-like declaration was written with, as the file spells it.
     ///
     /// The first field in a fact that is not simply "what the file says about this name" but "what the file says

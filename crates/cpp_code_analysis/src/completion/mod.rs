@@ -1634,6 +1634,7 @@ mod tests {
             local: false,
             in_namespace: None,
             kind: DeclKind::Function,
+            modifiers: crate::DeclModifiers::VIRTUAL,
             type_of: None,
             returns: returns.map(str::to_string),
             bases: Vec::new(),

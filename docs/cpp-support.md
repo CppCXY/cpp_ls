@@ -22,6 +22,25 @@ types    4 条手工清单：声明名上的 `type_at` 是否给出期望的类�
 
 文件与覆盖范围的表在语料自己的 `README.md`。
 
+## 1.5 判定放在索引阶段，而不是字符串搜索
+
+第一轮修缺陷时，有几处判定是"在检查层把声明的文本切一刀再搜索"——`written.contains("override")`、
+`text.contains("maybe_unused")`、`text.contains("...")`、`if constexpr` 的前缀扫描。这些都是**索引阶段就能回答**的
+问题，而每次诊断都重新读一遍文本既慢又容易拿错坐标系（`use-override` 的第一个 bug 就是拿文件偏移去切渲染文本）。
+现在：
+
+* **`DeclFact.modifiers: DeclModifiers`**（u32 位集）在 summary 构建时算一次，随 summary 落盘，检查只读位：
+  `VIRTUAL`、`OVERRIDE`、`FINAL`、`CONSTEXPR`、`CONSTEVAL`、`CONSTINIT`、`STATIC`、`INLINE`、`EXPLICIT`、
+  `MAYBE_UNUSED`、`NODISCARD`、`VARIADIC`、`DELETED`、`DEFAULTED`。`override`/`final` 是上下文标识符、`[[maybe_unused]]`
+  是声明**前面**的兄弟节点，所以位是**从 token** 读的，属性那一条读声明前缀（每文件一次渲染文本，不是每声明一次）。
+  `use-override` 与 `unused` 已改读位；`FORMAT_VERSION` 6、`CODEC_VERSION` 32。
+* **`if constexpr` / `if consteval`** 由 parser 回答：`CppIfStat::is_constexpr()` / `is_consteval()`（读语句自己的
+  前导 token），`else-after-return` 不再扫文本。
+* **包展开的实参个数**由 parser 回答：`CppCallExpr::has_a_pack_expansion()`（`PackExpansionExpr` 节点），
+  `argument-count` 不再在调用文本里找 `...`。
+
+回归测试：`tests/modifiers.rs` 逐条钉住上述位；`style_checks.rs` 的坐标测试（注释让 file/rendering 偏移不同）继续
+覆盖 `use-override`；`c_corpus`/`cpp_corpus` 仍为 0 finding。
 ## 2. 第一次测量（2026-10-30，冷缓存）
 
 ```text
