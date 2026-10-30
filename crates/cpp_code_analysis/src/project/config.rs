@@ -128,12 +128,37 @@ pub struct ProjectConfig {
     pub diagnostics: DiagnosticsSection,
     pub hover: HoverSection,
     pub format: FormatSection,
+    /// **`[unreal]`** — Unreal Engine's conventions, switched on by the project rather than guessed.
+    ///
+    /// UE code is C++ that is not readable as ordinary C++: `UCLASS()`, `GENERATED_BODY()` and `UPROPERTY(…)` come
+    /// from its headers, and its naming rules — a `UCLASS` starts with `U`, a `USTRUCT` with `F`, a `boolean` member
+    /// with `b` — are conventions no ordinary C++ project follows. Turning this on is what makes the two rules that
+    /// know them run, and nothing else changes: the macros are the project's headers, not this configuration.
+    pub unreal: Option<UnrealSection>,
     /// **The language this project's messages are written in** — `locale = "zh-CN"`.
     ///
     /// The one key that stands alone rather than in a section, because it is a preference about the *editor*: what
     /// the diagnostics, the parse errors and the hover popups say. Read by the server at start-up and whenever the
     /// file changes; a project that names it wins over the locale the client sent at `initialize`.
     pub locale: Option<String>,
+}
+
+/// **`[unreal]`** — whether this project is Unreal Engine code.
+///
+/// ```toml
+/// [unreal]
+/// enable = true
+/// ```
+///
+/// The one key, and it is deliberately a project's decision rather than a detection: a file that writes `UCLASS()`
+/// outside UE is a file with an unknown macro, not a game, and running Epic's naming rules on an engine-agnostic
+/// project would report every `class Widget` as a missing `A`/`U`/`F`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UnrealSection {
+    /// Run the Unreal conventions — see `ue-naming` and `ue-generate-body`.
+    #[serde(default)]
+    pub enable: bool,
 }
 
 /// `[workspace]` — what the project is made of.
@@ -925,6 +950,12 @@ pub fn parse_config(text: &str, path: &Path) -> ConfigReport {
             },
             "format" => match decode::<FormatSection>(section, name) {
                 Ok(decoded) => report.config.format = decoded,
+                Err(problem) => report.problems.push(problem),
+            },
+            // **[unreal]** — the engine's conventions, which a project switches on rather than a file's spelling
+            // implying. See [`UnrealSection`].
+            "unreal" => match decode::<UnrealSection>(section, name) {
+                Ok(decoded) => report.config.unreal = Some(decoded),
                 Err(problem) => report.problems.push(problem),
             },
             // **[locale]** — the language this project's messages are written in.

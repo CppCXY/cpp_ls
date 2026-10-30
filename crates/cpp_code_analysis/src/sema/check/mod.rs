@@ -124,9 +124,12 @@ pub mod redefinition;
 pub mod return_type_mismatch;
 mod simplify_boolean_expr;
 pub mod syntax_error;
+mod ue_generate_body;
+mod ue_naming;
 pub mod undefined_field;
 pub mod undefined_name;
 pub mod unnecessary_branch;
+mod unreal;
 pub mod unused;
 mod use_after_free;
 mod use_auto;
@@ -174,6 +177,11 @@ pub fn run_check<T: Check>(context: &mut CheckContext<'_>) {
     // every code is C++-only is not a question about this file at all, so it is skipped before it walks the tree. A
     // check that reports both kinds still runs, and the per-finding filter drops the half that does not apply.
     if context.is_c() && T::CODES.iter().all(|code| code.is_cpp_only()) {
+        return;
+    }
+    // **An Unreal rule costs nothing outside Unreal.** The project says whether it is engine code — see
+    // `[unreal] enable` — and a rule that does not know is skipped before it walks anything.
+    if !context.unreal && T::CODES.iter().all(|code| code.is_unreal_only()) {
         return;
     }
     if T::CODES.iter().any(|code| context.config.is_enabled(*code)) {
@@ -259,6 +267,9 @@ pub struct CheckContext<'a> {
     /// there is and [the rule that flags one](super::cstyle_cast) must not fire. `family()` answers `None` when the
     /// configuration enables both families, which is the honest answer for a parse nobody configured.
     pub language: cpp_parser::features::LanguageConfig,
+    /// **Is this project Unreal Engine code?** — the switch that makes the two engine rules run, and the reason they
+    /// are not on for an ordinary C++ project: `class Widget` would be reported as a missing `A`/`U`/`F` prefix.
+    pub unreal: bool,
     findings: Vec<Finding>,
 }
 
@@ -274,6 +285,7 @@ impl<'a> CheckContext<'a> {
         view: &'a FileView,
         config: CheckConfig,
         language: cpp_parser::features::LanguageConfig,
+        unreal: bool,
     ) -> Self {
         CheckContext {
             path,
@@ -285,6 +297,7 @@ impl<'a> CheckContext<'a> {
             config,
             view,
             language,
+            unreal,
             findings: Vec::new(),
         }
     }
@@ -1522,6 +1535,9 @@ pub fn run(context: CheckContext<'_>) -> Vec<Finding> {
     // The third rule of the lifetime family: a pointer read after its memory was freed, including a free written in
     // another function and recorded on that function fact.
     run_check::<use_after_free::UseAfterFree>(&mut context);
+    // **The Unreal Engine conventions**, which only a project that says it is engine code runs — see `[unreal]`.
+    run_check::<ue_naming::UeNaming>(&mut context);
+    run_check::<ue_generate_body::UeGenerateBody>(&mut context);
 
     if crate::probes::timing() {
         let (ran, nanos) = context.model.inference_cost();

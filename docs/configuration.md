@@ -195,6 +195,31 @@ Unknown keys fail their **whole section**, with a message, and the section keeps
 A rule name in `[diagnostics]` that this build does not have is logged the same way. Silently ignoring an unknown name is
 the failure mode the analysis is written against — a rule the user believes is on, that never runs.
 
+### `[unreal]` — Unreal Engine conventions
+
+```toml
+[unreal]
+enable = true
+```
+
+A UE project writes C++ that is not readable as ordinary C++: `UCLASS()`, `GENERATED_BODY()` and `UPROPERTY(…)` come
+from the engine's headers and expand to nothing, and the engine's naming rules are conventions no ordinary C++ project
+follows. `enable = true` is what makes the two rules that know them run:
+
+```text
+ue-naming          a UCLASS/USTRUCT/UENUM name without its engine prefix, a boolean member without `b`
+ue-generate-body   a UCLASS/USTRUCT whose body writes no GENERATED_BODY()
+```
+
+Both judge **style and engine semantics** rather than the language, which is why they are in the list of C++-only rules
+and why they are off for a project that does not say it is Unreal: `class Widget` would otherwise be reported as a
+missing `A`/`U`/`F`.
+
+The macros themselves are the project's headers, not this file. A checkout without the engine needs a simulated
+`CoreMinimal.h` — `UCLASS(...)` and the rest defined as empty, `int32`/`TArray`/`FString` spelled the way a module uses
+them — and `[compile] args` pointing at it. `C:\Users\zc\Desktop\UE-like` is such a project: a clean module, and the
+same code with one violation of each rule.
+
 ## 4. What is not supported
 
 | Not supported | Why |
@@ -215,9 +240,9 @@ The language of a file is decided by its `-std=` first (`-std=c17` → C, `-std=
 `.h` belongs to whichever language includes it, and C++ is the wider list. A project that states no language is read
 as "not told", which is not the same as C.
 
-**Nine rules are C++ only, and are switched off for a file compiled as C** — `use-nullptr`, `use-auto`,
-`use-override`, `c-style-cast`, `access-invisible`, `concept-not-satisfied`, `module-note`, `implicit-bool-conversion`
-and `dangling-field`. Six of them name grammar C does not have (`use-override`, `access-invisible`,
+**Eleven rules are C++ only, and are switched off for a file compiled as C** — `use-nullptr`, `use-auto`,
+`use-override`, `c-style-cast`, `access-invisible`, `concept-not-satisfied`, `module-note`, `implicit-bool-conversion`,
+`dangling-field`, and the two Unreal rules `ue-naming` and `ue-generate-body`. Six of them name grammar C does not have (`use-override`, `access-invisible`,
 `concept-not-satisfied`, `module-note`, `use-auto`, `use-nullptr`); the other two name C++ style that C's own idiom
 contradicts — a C-style cast is the only cast C has, and an `int` in a condition is the language's idiom rather than a
 mistake. Measured before the gate existed: a C corpus configured with `-std=c17` answered **14 `c-style-cast` findings**

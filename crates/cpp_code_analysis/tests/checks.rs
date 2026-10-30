@@ -2830,7 +2830,7 @@ int f(void) {
     );
 }
 
-/// **The eight C++-only rules are the eight the documentation lists.** The list is a claim about the language, and a
+/// **The eleven C++-only rules are the eleven the documentation lists.** The list is a claim about the language, and a
 /// rule added to it (or dropped from it) without the documentation moving is the kind of drift this test exists for.
 #[test]
 fn the_cpp_only_rules_are_known_by_name() {
@@ -2851,6 +2851,8 @@ fn the_cpp_only_rules_are_known_by_name() {
             DiagnosticCode::ImplicitBoolConversion,
             DiagnosticCode::ConceptNotSatisfied,
             DiagnosticCode::DanglingField,
+            DiagnosticCode::UeNaming,
+            DiagnosticCode::UeGenerateBody,
         ]
     );
 }

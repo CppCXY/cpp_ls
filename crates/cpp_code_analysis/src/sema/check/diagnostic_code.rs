@@ -111,6 +111,11 @@ pub enum DiagnosticCode {
     DanglingField,
     /// A pointer read after the memory it refers to was freed — see [`super::use_after_free`].
     UseAfterFree,
+    /// A type declared with Unreal Engine's `UCLASS`/`USTRUCT`/`UENUM` and a name missing the prefix the engine
+    /// requires — see [`super::ue_naming`].
+    UeNaming,
+    /// A `UCLASS`/`USTRUCT` whose body writes no `GENERATED_BODY()` — see [`super::ue_generate_body`].
+    UeGenerateBody,
 }
 
 impl DiagnosticCode {
@@ -120,7 +125,7 @@ impl DiagnosticCode {
     /// what it says about types, then what it says about a whole body, then the two that are about the reading
     /// rather than the program. A consumer that shows a settings screen, or a test that asserts every rule has a
     /// name and a module, iterates this.
-    pub const ALL: [DiagnosticCode; 29] = [
+    pub const ALL: [DiagnosticCode; 31] = [
         DiagnosticCode::SyntaxError,
         DiagnosticCode::ParamTypeCheck,
         DiagnosticCode::AssignTypeCheck,
@@ -150,6 +155,8 @@ impl DiagnosticCode {
         DiagnosticCode::DanglingReturn,
         DiagnosticCode::DanglingField,
         DiagnosticCode::UseAfterFree,
+        DiagnosticCode::UeNaming,
+        DiagnosticCode::UeGenerateBody,
     ];
 
     /// **The code a client is shown**, and the spelling a config file uses: kebab case, and the module's file name
@@ -187,6 +194,8 @@ impl DiagnosticCode {
             DiagnosticCode::DanglingReturn => "dangling-return",
             DiagnosticCode::DanglingField => "dangling-field",
             DiagnosticCode::UseAfterFree => "use-after-free",
+            DiagnosticCode::UeNaming => "ue-naming",
+            DiagnosticCode::UeGenerateBody => "ue-generate-body",
             DiagnosticCode::ConceptNotSatisfied => "concept-not-satisfied",
         }
     }
@@ -256,6 +265,11 @@ impl DiagnosticCode {
             DiagnosticCode::DanglingReturn => RuleSeverity::Error,
             DiagnosticCode::DanglingField => RuleSeverity::Error,
             DiagnosticCode::UseAfterFree => RuleSeverity::Error,
+            // A name is a convention rather than a broken program.
+            DiagnosticCode::UeNaming => RuleSeverity::Hint,
+            // **A `UCLASS` without `GENERATED_BODY()` does not compile in Unreal** — the macro declares the reflection
+            // data and the generated constructor the engine links against.
+            DiagnosticCode::UeGenerateBody => RuleSeverity::Error,
         }
     }
 
@@ -309,6 +323,20 @@ impl DiagnosticCode {
                 | DiagnosticCode::DanglingField
                 | DiagnosticCode::ModuleNote
                 | DiagnosticCode::ImplicitBoolConversion
+                | DiagnosticCode::UeNaming
+                | DiagnosticCode::UeGenerateBody
+        )
+    }
+
+    /// **Does this rule only make sense in Unreal Engine code?** — the switch `[unreal] enable` turns.
+    ///
+    /// The two answers are one kind: `ue-naming` and `ue-generate-body` name conventions and macros of that engine, and
+    /// a project that never writes `UCLASS()` has nothing for them to say. Like [`DiagnosticCode::is_cpp_only`], "not
+    /// told" is not the answer either way — a project that does not say it is Unreal is not treated as one.
+    pub fn is_unreal_only(self) -> bool {
+        matches!(
+            self,
+            DiagnosticCode::UeNaming | DiagnosticCode::UeGenerateBody
         )
     }
 }

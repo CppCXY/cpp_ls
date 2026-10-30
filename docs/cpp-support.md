@@ -90,7 +90,7 @@ This is the "understands C++" layer, and the base every completion, hover and ch
 
 ## 6. Diagnostics
 
-Twenty-nine rules, each with a fixed severity; `[diagnostics].disable` turns one off by name.
+Thirty-one rules, each with a fixed severity; `[diagnostics].disable` turns one off by name.
 
 | Code | Severity | Meaning |
 | --- | --- | --- |
@@ -105,6 +105,8 @@ Twenty-nine rules, each with a fixed severity; `[diagnostics].disable` turns one
 | `dangling-return` | Error | a reference, pointer or view of something that dies when the function returns — a local, a temporary, or a pointer a local handed out |
 | `dangling-field` | Error | a view, reference or pointer member initialised from a by-value parameter or a temporary, which do not outlive the object |
 | `use-after-free` | Error | a pointer read after the memory it refers to was released — by `delete`/`free`/`destroy_at`/`reset()`, or by a call to a function whose fact says it frees that argument |
+| `ue-naming` | Hint | Unreal Engine's prefix conventions — `UCLASS` → `U`/`A`, `USTRUCT` → `F`, `UENUM` → `E`, a boolean member → `b…` — **UE** (`[unreal] enable`) |
+| `ue-generate-body` | Error | a `UCLASS`/`USTRUCT` whose body writes no `GENERATED_BODY()` — **UE** (`[unreal] enable`) |
 | `include-not-found` | Error | the `#include` was not found |
 | `access-invisible` | Error | a member reached from somewhere that may not reach it |
 | `missing-return` | Error | a function that promises a value can reach its end |
