@@ -345,6 +345,20 @@ pub(crate) fn declared_modifiers_with(
         found = found.union(modifiers_in(node));
     }
 
+    // **`= delete` and `= default` are written after the declarator**, in the init-declarator that holds it — neither in
+    // the declarator itself nor in the specifiers. `modifiers_in` stops at bodies, so a lambda in an initialiser
+    // (`auto f = [](int* p) { delete p; };`) is not this.
+    //
+    // Measured on libstdc++'s `make_unique`: its third overload is `= delete`d so that arrays are rejected, and without
+    // the bit it tied with the real overload on every argument — `auto unique = std::make_unique<Resource>(1);` was
+    // `Ambiguous` and the variable had no type.
+    if let Some(init) = declarator
+        .as_ref()
+        .and_then(|declarator| declarator.parent())
+    {
+        found = found.union(modifiers_in(&init));
+    }
+
     // **An attribute written before the declaration is a *sibling* of it**, not a child — the parser gives
     // `[[maybe_unused]]` its own node and then reads the declaration — so it is found by looking at the text in front of
     // the declaration, at index time, and recorded as a bit. This is the one part that cannot be a token walk from the

@@ -485,7 +485,24 @@ pub(crate) fn the_class_after_the_operator(
     let mut followed_a_pointer = false;
     let mut current = written.clone();
     for _ in 0..4 {
-        if let Some(class) = current.class_name().map(str::to_string) {
+        if let Some(bare) = current.class_name().map(str::to_string) {
+            // **The spelling the use wrote is not always the one the index keys the class on.** `auto unique =
+            // std::make_unique<Resource>(1);` makes `unique`'s type `unique_ptr<Resource>`, whose class is declared as
+            // `std::unique_ptr` — a member list asked for the bare `unique_ptr` answers nothing (measured: 0 members
+            // against 52), and the arrow then resolved to the *pointer's own* (empty) members. The qualification is
+            // the index's own answer (`css::Widget` for a `Widget` declared there), and it is a `None` when the name is
+            // already qualified or nothing declares it, in which case the spelling stands.
+            // **Only a bare spelling is qualified.** `class_name()` answers the spelling the type was written with — for
+            // `std::unique_ptr<Base>` that already carries its namespace — and prepending the index's scope to it
+            // produced `std::std::unique_ptr` (measured on `classes.cpp`'s `clone->describe()`, which then resolved to
+            // the pointer's own typedef `pointer` and offered nothing).
+            let class = if bare.contains("::") {
+                bare.clone()
+            } else {
+                crate::index::project::qualified_from_the_index(index, path, &bare)
+                    .unwrap_or_else(|| bare.clone())
+            };
+
             // **1. A pointer-like class says what its arrow reaches, in `element_type`** — the standard's own
             // protocol, which `std::pointer_traits` is written in terms of and which `unique_ptr`, `shared_ptr` and
             // `weak_ptr` all take part in. It is asked **first**, because on those classes the arrow's declared
@@ -541,10 +558,15 @@ pub(crate) fn the_class_after_the_operator(
             current = (*pointee).clone();
         }
     }
-    current
-        .class_name()
-        .map(str::to_string)
-        .map(|class| (class, followed_a_pointer))
+    current.class_name().map(str::to_string).map(|bare| {
+        let class = if bare.contains("::") {
+            bare.clone()
+        } else {
+            crate::index::project::qualified_from_the_index(index, path, &bare)
+                .unwrap_or_else(|| bare.clone())
+        };
+        (class, followed_a_pointer)
+    })
 }
 
 /// **What a pointer-like class's arrow reaches**, asked of the index's own walk — see

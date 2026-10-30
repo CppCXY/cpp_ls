@@ -6614,7 +6614,17 @@ fn written_template_arguments(callee: &cpp_parser::CppSyntaxNode) -> Vec<Type> {
 ///
 /// `None` when nothing declares the name, or when the only declaration has no scope (a class at file scope is
 /// already spelled correctly, and qualifying it would look for `::Widget`).
-fn qualified_from_the_index(index: &ProjectIndex, from: &Path, class: &str) -> Option<String> {
+pub(crate) fn qualified_from_the_index(
+    index: &ProjectIndex,
+    from: &Path,
+    class: &str,
+) -> Option<String> {
+    // **A spelling that already writes its namespace is the index's own.** Qualifying it again produced
+    // `std::std::unique_ptr` — measured on `classes.cpp`'s `clone->describe()`, whose receiver is already
+    // `std::unique_ptr<Base>` — and every member query after it was about a class nothing declares.
+    if class.contains("::") {
+        return None;
+    }
     let declared = index.files_declaring(class, from);
     let found = declared.into_iter().next()?;
     let scope = found.fact.scope.as_deref()?;
@@ -6710,7 +6720,15 @@ fn declaration_of_a_callee(
             .iter()
             .map(|binding| (fact_from_binding(root, "", binding), path.to_path_buf()))
             .collect();
-        if let Some(chosen) = the_one_the_arguments_select(&types, &candidates)
+        let explicit_arguments: Vec<String> = call
+            .children()
+            .next()
+            .map(|callee| written_template_arguments(&callee))
+            .unwrap_or_default()
+            .iter()
+            .map(Type::to_string)
+            .collect();
+        if let Some(chosen) = the_one_the_arguments_select(&types, &candidates, &explicit_arguments)
             && let Some(binding) = bindings.get(chosen)
         {
             return Known::Yes(NamedDeclaration::Here(binding.clone()));
@@ -6899,6 +6917,10 @@ fn the_declaration_the_arguments_pick(
     call: &cpp_parser::CppSyntaxNode,
     name: &str,
 ) -> Option<(DeclFact, PathBuf)> {
+    // **The spelling a call writes is not the spelling the index stores.** `std::make_unique<Resource>(1)` carries its
+    // template arguments in the name the ambiguity reports, and `definitions("std::make_unique<Resource>")` finds
+    // nothing — measured — so the selection never ran at all. The arguments are the call's, not the declaration's name.
+    let name = the_name_without_its_arguments(name);
     let Known::Yes(definitions) = index.definitions(name, path) else {
         return None;
     };
@@ -6911,10 +6933,48 @@ fn the_declaration_the_arguments_pick(
         .map(|definition| (definition.fact.clone(), definition.file.clone()))
         .collect();
     let types = the_types_of_the_arguments(memo, index, declaring, scopes, root, path, call)?;
-    let chosen = the_one_the_arguments_select(&types, &candidates)?;
+    let explicit_arguments: Vec<String> = call
+        .children()
+        .next()
+        .map(|callee| written_template_arguments(&callee))
+        .unwrap_or_default()
+        .iter()
+        .map(Type::to_string)
+        .collect();
+    let chosen = the_one_the_arguments_select(&types, &candidates, &explicit_arguments)?;
     candidates.get(chosen).cloned()
 }
 
+/// **A call's callee without the template arguments the call wrote** — the spelling the index keys a name on.
+///
+/// `std::make_unique<Resource>` → `std::make_unique`, and `A<B<C>>::f` stays whole: the arguments are stripped only
+/// when the first `<`'s matching `>` is the **last** character, which is exactly the shape a call's argument list
+/// leaves. Anything else is part of the name (`A<B<C>>::f` has a `::` after its arguments), and cutting there would
+/// name a different entity.
+fn the_name_without_its_arguments(written: &str) -> &str {
+    let Some(open) = written.find('<') else {
+        return written;
+    };
+    let mut depth = 0i32;
+    for (at, character) in written[open..].char_indices() {
+        match character {
+            '<' => depth += 1,
+            '>' => {
+                depth -= 1;
+                if depth == 0 {
+                    let close = open + at;
+                    return if close + character.len_utf8() == written.len() {
+                        &written[..open]
+                    } else {
+                        written
+                    };
+                }
+            }
+            _ => {}
+        }
+    }
+    written
+}
 /// **The types of a call's arguments**, as spellings — `Unknown` for an argument whose type the engine cannot read.
 fn the_types_of_the_arguments(
     memo: &TypeMemo,
@@ -6957,11 +7017,30 @@ fn the_types_of_the_arguments(
 fn the_one_the_arguments_select(
     types: &[Known<String>],
     candidates: &[(DeclFact, PathBuf)],
+    explicit_arguments: &[String],
 ) -> Option<usize> {
-    let built: Vec<crate::sema::overload::Candidate> = candidates
+    // **A deleted declaration cannot be the meaning of a call this layer reports.** `std::make_unique` has a third
+    // overload `= delete`d so that arrays are rejected ([memory.syn]); it ties with the real one on every argument, and
+    // keeping it in the running is what made `auto unique = std::make_unique<Resource>(1);` ambiguous and left the
+    // variable with no type. `usable` holds the original indices, in the order the ranking sees them.
+    let usable: Vec<usize> = (0..candidates.len())
+        .filter(|at| {
+            !candidates[*at]
+                .0
+                .modifiers
+                .contains(crate::DeclModifiers::DELETED)
+        })
+        .collect();
+    if usable.is_empty() {
+        // Every candidate is deleted: the call is ill-formed whichever one it means, and "no answer" is the honest
+        // report of that.
+        return None;
+    }
+    let built: Vec<crate::sema::overload::Candidate> = usable
         .iter()
         .enumerate()
-        .map(|(at, (fact, _))| {
+        .map(|(at, &index)| {
+            let (fact, _) = &candidates[index];
             let (declared, variadic) = fact
                 .parameter_list
                 .as_deref()
@@ -6969,7 +7048,14 @@ fn the_one_the_arguments_select(
                 .unwrap_or_default();
             let names = fact.parameters.clone();
             let declared_for_ordering = declared.clone();
-            let substituted = match crate::sema::deduction::deduce(&names, &declared, types) {
+            // **The deduction starts from what the call wrote.** `std::make_unique<Resource>(1)` states `_Tp` as
+            // `Resource`; without that seed the candidate's every parameter stayed unbound and it ranked `Unranked`.
+            let substituted = match crate::sema::deduction::deduce_with_written(
+                &names,
+                &declared,
+                types,
+                explicit_arguments,
+            ) {
                 Some(deduced) => (
                     declared
                         .iter()
@@ -6996,9 +7082,18 @@ fn the_one_the_arguments_select(
 
     if crate::probes::inference() {
         eprintln!(
-            "[inference] pick among {} candidates, argument types {types:?}",
-            candidates.len()
+            "[inference] pick among {} candidates ({} usable), argument types {types:?} written {explicit_arguments:?}",
+            candidates.len(),
+            usable.len()
         );
+        for (at, (fact, _)) in candidates.iter().enumerate() {
+            eprintln!(
+                "[inference]   candidate {at}: bits={} deleted={} params={:?}",
+                fact.modifiers.bits(),
+                fact.modifiers.contains(crate::DeclModifiers::DELETED),
+                fact.parameter_list
+            );
+        }
         for (at, (fact, _)) in candidates.iter().enumerate() {
             eprintln!(
                 "[inference]   candidate {at}: scope {:?} returns {:?} params {:?}",
@@ -7011,16 +7106,17 @@ fn the_one_the_arguments_select(
         eprintln!("[inference]   choice: {choice:?}");
     }
     match choice {
-        crate::sema::overload::Choice::One(at) => Some(at),
+        // The rank is a position in `built`, which is `usable`'s order — the original index is what the caller wants.
+        crate::sema::overload::Choice::One(at) => usable.get(at).copied(),
         crate::sema::overload::Choice::Ambiguous => {
             let written = types.iter().find_map(|argument| match argument {
                 Known::Yes(spelling) => the_character_width(spelling),
                 _ => None,
             })?;
-            let definite: Vec<usize> = candidates
+            let definite: Vec<usize> = usable
                 .iter()
-                .enumerate()
-                .filter(|(_, (fact, _))| {
+                .filter(|at| {
+                    let (fact, _) = &candidates[**at];
                     fact.parameter_list
                         .as_deref()
                         .and_then(|list| {
@@ -7032,7 +7128,7 @@ fn the_one_the_arguments_select(
                         .and_then(|first| the_character_width(&first))
                         == Some(written)
                 })
-                .map(|(at, _)| at)
+                .copied()
                 .collect();
             match definite[..] {
                 [only] => Some(only),

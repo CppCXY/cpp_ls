@@ -104,15 +104,31 @@ types    PASS derived → Derived   PASS slot → Box<int>
 把 `CoAwaitKeyword` 加进那张表即可：语料随之为 **7/8 members、4/4 types**（`task` → `Task<int>`、`task.run()` 7 个候选）。
 解析器测试见 `tests/cpp20.rs` 的 "an awaitable's own operator co_await"。
 
-## 4. 仍然已知的两条
+## 3.6 第四轮：`unique->` 那条的四步
 
-1. **`std::unique_ptr<Resource>` 的成员查询**（唯一一条 FAIL）：`unique->identifier()` 得到 0 个候选，根因不在
-   `->` 的处理——`type_at` 直接给出 `Unknown(Ambiguous("std::make_unique<Resource>"))`。libstdc++ 的 `make_unique` 有
-   三个可见重载（`_Args&&...`、`size_t`、以及一个 `= delete` 的数组拒绝版），排序时 `_Args` 没有从实参推导，三个都
-   平手，于是"歧义"。修法是**从实参推导参数包**（`_Args = [int]` → 参数 `int&&`，Exact 胜过 `size_t` 的 Conversion），
-   属于重载解析缺的能力。第一轮兜底的"所有候选返回类型一致就用它"在这里不成立：三个候选返回三种不同的别名拼写。
-2. **系统头文件的 summary 会随会话顺序给出不同答案**：同一个 `std::string_view`，单独打开 `strings.cpp` 的会话给出
-   79 个成员（含 `starts_with`/`ends_with`），而先索引整个工程、逐文件 cook + diagnostics 的会话给出 73 个（缺 C++20
-   的成员，于是 `undefined-field` 误报）。summary 的 key 有 `content_hash`/`context_hash`/fingerprint，但成员列表的
-   缓存（`index.remember_member_list`）只按"哪些文件贡献了它"失效——一个在头文件索引完成之前算出的列表可以活下来。
-   现在 `undefined-field` 只判定**本文件声明**的类，误报消失；根因是把宏环境纳入 summary / member-list 的 key。
+`std::make_unique<Resource>(1)` 的 `auto` 推导一路有四个缺口，缺一个都走不通：
+
+1. **重载选择的入口拿的是带模板实参的拼写**：`Ambiguous("std::make_unique<Resource>")` 里的名字带 `<Resource>`，而
+   `definitions("std::make_unique<Resource>")` 什么也找不到——选择根本没开始。新增
+   `the_name_without_its_arguments`（只去掉"匹配的 `>` 正好在末尾"的那一组）。
+2. **显式模板实参没有参与推导**：`deduce` 只看调用实参，`_Tp` 无从绑定。新增 `deduction::deduce_with_written`：
+   调用写的 `<…>` 先绑好，并且**写死的名字不再参与推导**（`f<long>(1)` 里 `int` 转成 `long`，不是"不一致"）。
+3. **参数包没有元素类型**：`parameters_in` 把 `_Args&&... __args` 整个丢掉，于是这个候选和 `size_t` 那个都是
+   "无参数 + variadic"，永远平手。现在包保留元素拼写 `_Args&&`（C 风格无类型 `...` 仍然只置 variadic）。
+4. **`= delete` 的重载没有被排除**：`= delete` 写在 declarator **之后**的 init-declarator 里，早先的修饰符扫描看不到它，
+   于是它和真正的重载并列第一。现在 `modifiers_in` 也走 init-declarator（仍跳过 body），`DeclModifiers::DELETED`
+   生效，选择时剔除。
+
+外加完成路径的一处：`the_class_after_the_operator` 拿到的类名可能是**裸拼写**（`unique_ptr`），而索引里的是
+`std::unique_ptr`——成员列表问裸名得到 0 个，`->` 就退化到指针自己的（空）成员。现在裸名先经
+`qualified_from_the_index` 补全；已经带 `::` 的拼写不再补（否则会出现 `std::std::unique_ptr`，这是第一版就踩到的坑）。
+
+语料因此到 **8/8 members、4/4 types**。
+
+## 4. 仍然已知的一条：测量环境的坑
+
+**系统头文件的 summary 会随会话顺序给出不同答案**：同一个 `std::string_view`，单独打开 `strings.cpp` 的会话给出
+79 个成员（含 `starts_with`/`ends_with`），而先索引整个工程、逐文件 cook + diagnostics 的会话给出 73 个（缺 C++20
+的成员，于是 `undefined-field` 误报）。summary 的 key 有 `content_hash`/`context_hash`/fingerprint，但成员列表的
+缓存（`index.remember_member_list`）只按"哪些文件贡献了它"失效——一个在头文件索引完成之前算出的列表可以活下来。
+现在 `undefined-field` 只判定**本文件声明**的类，误报消失；根因是把宏环境纳入 summary / member-list 的 key。

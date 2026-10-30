@@ -544,6 +544,17 @@ pub fn parameters_in(parameter_list: &str) -> (Vec<String>, bool) {
         };
         if outside_the_arguments.contains("...") {
             *variadic = true;
+            // **A pack is ranked by its element type.** `_Args&&... _Args` faces as many arguments as the call writes,
+            // and every one of them is `_Args&&` — so the spelling without the `...` and without the parameter's own
+            // name is what the ranking compares an argument against. Dropped whole (as it was), the candidate had no
+            // parameters at all: measured on libstdc++'s `make_unique`, whose `_Args&&...` overload ranked `Unranked`
+            // against a plain `size_t` one, so the call was ambiguous and `auto unique = std::make_unique<Resource>(1);`
+            // had no type. A C-style `...` writes no type, and its element is empty — it still ends the list and adds no
+            // parameter.
+            let element = a_type_without_its_name(&outside_the_arguments.replace("...", ""));
+            if !element.trim().is_empty() {
+                parameters.push(element);
+            }
             return;
         }
         parameters.push(a_type_without_its_name(parameter));
@@ -604,9 +615,18 @@ fn a_template_argument_pack_inside_a_parameter_is_not_the_parameter_pack() {
     // `std::format`'s own spelling, and the bug the reader had: **any** `...` dropped the parameter, so both of its
     // overloads came back with an empty list and the ranking had nothing to compare. Measured before the fix:
     // `(const format_string<_Types...> _Fmt, _Types&&... _Args)` → `([], true)`.
+    //
+    // The trailing pack now contributes its **element** (`_Types&&`) rather than nothing — see `parameters_in`'s note on
+    // `make_unique` — while the pack *inside* `format_string<_Types...>` is still part of that parameter's own spelling.
     assert_eq!(
         parameters_in("(const format_string<_Types...> _Fmt, _Types&&... _Args)"),
-        (vec!["const format_string<_Types...>".to_string()], true)
+        (
+            vec![
+                "const format_string<_Types...>".to_string(),
+                "_Types&&".to_string()
+            ],
+            true
+        )
     );
     assert_eq!(
         parameters_in(
@@ -615,7 +635,8 @@ fn a_template_argument_pack_inside_a_parameter_is_not_the_parameter_pack() {
         (
             vec![
                 "const locale&".to_string(),
-                "const wformat_string<_Types...>".to_string()
+                "const wformat_string<_Types...>".to_string(),
+                "_Types&&".to_string()
             ],
             true
         )
@@ -633,9 +654,11 @@ fn a_template_argument_pack_inside_a_parameter_is_not_the_parameter_pack() {
         "a C-style variadic still ends the list: {:?}",
         parameters_in("(const char *format, ...)")
     );
+    // **A pack keeps its element type.** The test used to assert an empty list here, which is what made every pack
+    // candidate compare equal to every other one — see `parameters_in`'s note on `make_unique`.
     assert_eq!(
         parameters_in("(Args &&... args)"),
-        (Vec::<String>::new(), true)
+        (vec!["Args &&".to_string()], true)
     );
 }
 

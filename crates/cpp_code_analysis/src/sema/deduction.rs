@@ -44,11 +44,51 @@ pub(crate) fn deduce(
     parameters: &[String],
     arguments: &[Known<String>],
 ) -> Option<Vec<String>> {
+    deduce_seeded(names, parameters, arguments, &[], HashMap::new())
+}
+
+/// **The template arguments a call fixes, given what the call wrote** — [`deduce`] with the explicit `<…>` list already
+/// bound.
+///
+/// The explicit list is the half a call states outright: in `std::make_unique<Resource>(1)` the `_Tp` in
+/// `__unique_ptr_t<_Tp>` is `Resource` before any argument is looked at, and what is left to deduce is the pack. Read
+/// as an argument-only question, every parameter of that candidate stayed unbound — `_Tp` because nothing wrote it,
+/// `_Args` because the pack's element is not a parameter the old loop could split — the substitution was refused, and
+/// the candidate ranked `Unranked`. That is what made `make_unique` ambiguous between its three visible overloads and
+/// left `auto unique = std::make_unique<Resource>(1);` with no type.
+///
+/// A name the call wrote but the declaration does not have is ignored: the two are paired by position, and a longer
+/// written list is a call this module cannot read rather than a deduction to guess at.
+pub(crate) fn deduce_with_written(
+    names: &[String],
+    parameters: &[String],
+    arguments: &[Known<String>],
+    written: &[String],
+) -> Option<Vec<String>> {
+    let mut bound: HashMap<String, String> = HashMap::new();
+    let mut fixed: Vec<String> = Vec::new();
+    for (name, value) in names.iter().zip(written) {
+        bound.insert(name.clone(), value.clone());
+        fixed.push(name.clone());
+    }
+    deduce_seeded(names, parameters, arguments, &fixed, bound)
+}
+
+/// The deduction itself, with a set of names already fixed.
+fn deduce_seeded(
+    names: &[String],
+    parameters: &[String],
+    arguments: &[Known<String>],
+    // **The names the call wrote**, which are fixed rather than deduced: `f<long>(1)` states `T`, and the argument's
+    // `int` converts to it instead of disagreeing with it. They are a list of their own rather than "whatever is already
+    // bound", because a name bound by an *earlier argument* must still agree with the next one.
+    fixed: &[String],
+    mut bound: HashMap<String, String>,
+) -> Option<Vec<String>> {
+    let is_fixed = |name: &str| fixed.iter().any(|written| written == name);
     if names.is_empty() {
         return None;
     }
-
-    let mut bound: HashMap<String, String> = HashMap::new();
 
     for (parameter, argument) in parameters.iter().zip(arguments) {
         let Known::Yes(argument) = argument else {
@@ -61,7 +101,14 @@ pub(crate) fn deduce(
         let argument = the_shape_of(argument);
 
         // **The parameter is exactly a template parameter.** The whole of the commonest case.
+        //
+        // **A written template argument is not deduced.** `f<long>(1)` fixes `T = long`, and the argument's `int` does
+        // not disagree with it — it converts to it. Deducting anyway made a written argument and an argument type that
+        // are not identical a refusal, which is the opposite of what the call means.
         if names.iter().any(|name| name == &parameter) {
+            if is_fixed(&parameter) {
+                continue;
+            }
             if !bind(&mut bound, &parameter, &argument) {
                 return None;
             }
@@ -71,6 +118,10 @@ pub(crate) fn deduce(
         // **The parameter names a template parameter inside a shape**: `T*`, `T&`, `T[]`. The argument has to have the
         // same shape before and after the name, and the part where the name was is its argument.
         if let Some((before, name, after)) = around_a_name(&parameter, names) {
+            // A name the call already wrote is fixed — see the note above.
+            if is_fixed(&name) {
+                continue;
+            }
             let Some(rest) = argument.strip_prefix(&before) else {
                 continue;
             };
@@ -334,6 +385,35 @@ mod tests {
                 &[yes("std::vector<int>")]
             ),
             Some(names(&["int"]))
+        );
+    }
+
+    /// **The explicit `<…>` list is a deduction, not a decoration.** `std::make_unique<Resource>(1)` states `_Tp` and
+    /// leaves the pack; without the seed every name stayed unbound, the substitution was refused, and the candidate
+    /// ranked `Unranked` — which made the three visible `make_unique` overloads tie.
+    #[test]
+    fn a_written_template_argument_is_bound_before_the_arguments_are_read() {
+        assert_eq!(
+            deduce_with_written(
+                &names(&["_Tp", "_Args"]),
+                &parameters(&["_Args&&"]),
+                &[yes("int")],
+                &names(&["Resource"]),
+            ),
+            Some(names(&["Resource", "int"])),
+            "`_Tp` comes from the call's own `<Resource>`; `_Args` from the argument"
+        );
+
+        // A written name the declaration does not have is ignored rather than guessed at.
+        assert_eq!(
+            deduce_with_written(
+                &names(&["T"]),
+                &parameters(&["T"]),
+                &[yes("int")],
+                &names(&["long", "extra"]),
+            ),
+            Some(names(&["long"])),
+            "the first written argument is the first template parameter's"
         );
     }
 

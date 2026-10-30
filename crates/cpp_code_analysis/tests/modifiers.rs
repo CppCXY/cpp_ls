@@ -85,6 +85,33 @@ void log(const char* format, ...);
     );
 }
 
+/// **`= delete` is a modifier of the declaration, and it is written after the declarator.**
+///
+/// The init-declarator that holds the declarator is where `= delete` lives — a scan of the specifiers and the declarator
+/// alone never saw it, and a candidate that cannot be called then took part in the ranking as an equal: measured on
+/// libstdc++'s `make_unique`, whose `= delete`d overload tied with the real one, so `auto unique =
+/// std::make_unique<Resource>(1);` was ambiguous and had no type.
+#[test]
+fn a_deleted_declaration_is_marked() {
+    let source = "\
+void keeps(int);
+void dropped(int) = delete;
+struct Built { Built() = default; };
+";
+    assert!(
+        modifiers_of(source, "dropped", None).contains(DeclModifiers::DELETED),
+        "the init-declarator's `= delete` is part of the declaration"
+    );
+    assert!(
+        !modifiers_of(source, "keeps", None).contains(DeclModifiers::DELETED),
+        "and a declaration without one is not marked"
+    );
+    assert!(
+        modifiers_of(source, "Built", Some("Built")).contains(DeclModifiers::DEFAULTED),
+        "`= default` is the other half, and a constructor's name is its class's"
+    );
+}
+
 #[test]
 fn an_attribute_is_found_before_the_declaration() {
     let source = "\
