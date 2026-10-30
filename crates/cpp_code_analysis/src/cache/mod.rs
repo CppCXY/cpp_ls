@@ -95,6 +95,14 @@ use std::path::{Path, PathBuf};
 /// old entry still decodes — which is exactly why this number has to move rather than the codec's: an entry that
 /// decodes but says something this build would not write is the case this constant exists for.
 ///
+/// # Why this moved to 8
+///
+/// **A function's facts record which parameters it frees.** `void release(T* p) { delete p; }` now carries a bit for
+/// parameter 0, which is what lets `use-after-free` report `release(p); p->x;` when `release` is declared in a header.
+/// The field is new, so the *layout* moved too — but the reason this number moves as well is the one that always
+/// applies: an entry written before this describes a function without saying what it does to its arguments, and that
+/// is a wrong answer rather than an old one.
+///
 /// # Why this moved to 7
 ///
 /// **A namespace alias records the namespace it names.** `namespace views = ranges::views;` gave the fact an empty
@@ -110,7 +118,7 @@ use std::path::{Path, PathBuf};
 /// ends with `::` and the declared name. The type was thrown away, the fact said `void`, and `assign-type-check` then
 /// reported the initialisation as a conversion "from `int` to `void`". The bytes are unchanged, so an old entry decodes
 /// happily and keeps the wrong type — the case this constant is for.
-pub const FORMAT_VERSION: u32 = 7;
+pub const FORMAT_VERSION: u32 = 8;
 
 /// **The fingerprint of the readers a summary was built by**, in the key.
 ///

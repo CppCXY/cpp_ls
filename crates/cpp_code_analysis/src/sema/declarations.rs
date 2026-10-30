@@ -1454,6 +1454,258 @@ fn strip_reference_and_const(written: &str) -> String {
     words.join(" ")
 }
 
+/// **The parameters this function frees**, as a bit per parameter index — see [`crate::DeclFact::frees`].
+///
+/// Only an **unconditional** free is recorded: a `delete` at the top level of the body, or inside a plain block (which
+/// is the same statement sequence), frees its parameter on every path that reaches the end of the function. A `delete`
+/// inside an `if`, a loop, a `switch` or a `try` is not recorded, because a caller that uses the pointer afterwards is
+/// only *sometimes* wrong — and the rule that reads this reports only what is certain.
+///
+/// ```text
+///   void release(T* p) { delete p; }                 recorded: bit 0
+///   void maybe(T* p)   { if (c) delete p; }          not recorded: the free may not run
+///   void drop(T* p)    { free(p); }                  recorded: bit 0
+///   void end(T* p)     { std::destroy_at(p); }       recorded: bit 0
+/// ```
+///
+/// # Why one level
+///
+/// A function that frees through another call (`void release(T* p) { hand_off(p); }`) is not recorded, because this
+/// answer is written **while the project is being read** and the callee's fact may not exist yet. The one-level rule
+/// covers the shape that matters — the helper whose whole job is to free — and a second pass over the index could
+/// close the chain later.
+pub(crate) fn freed_parameters_of(root: &CppSyntaxNode, binding: &Binding) -> u64 {
+    // **Only a function can free one of its arguments**, and the guard is what keeps this from walking the tree for
+    // every variable of a file: the caller that needs it is a member query, one call at a time.
+    if !matches!(
+        binding.kind,
+        BindingKind::Function | BindingKind::Constructor
+    ) {
+        return 0;
+    }
+    // The innermost declaration that reaches the name and has a body: a free is written in a body or nowhere.
+    let name_start = binding.name_range.start_offset;
+    let declaration = root
+        .descendants()
+        .filter(|node| {
+            CppSyntaxKind::from(node.kind()) == CppSyntaxKind::Declaration
+                && usize::from(node.text_range().start()) <= name_start
+                && name_start < usize::from(node.text_range().end())
+                && node
+                    .children()
+                    .any(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::CompoundStat)
+        })
+        .max_by_key(|node| usize::from(node.text_range().start()));
+    let Some(declaration) = declaration else {
+        return 0;
+    };
+    let Some(body) = declaration
+        .children()
+        .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::CompoundStat)
+    else {
+        return 0;
+    };
+    let parameters = the_parameter_names(&declaration);
+    if parameters.is_empty() {
+        return 0;
+    }
+
+    let mut mask = 0u64;
+    scan_unconditional_statements(&body, &parameters, &mut mask);
+    mask
+}
+
+/// **Fill [`DeclFact::frees`](crate::DeclFact::frees) for every function of one file**, in a single walk.
+///
+/// The map is built once — every declaration that has a body, keyed by the offset its name starts at — and then each
+/// fact is answered from it. The alternative, asked per fact, is a walk of the whole rendering per declaration, which
+/// on a file that includes two standard headers is minutes rather than milliseconds.
+fn fill_the_frees(root: &CppSyntaxNode, facts: &mut [crate::DeclFact]) {
+    if facts.is_empty() {
+        return;
+    }
+    let mut bodies: std::collections::HashMap<usize, (CppSyntaxNode, Vec<String>)> =
+        std::collections::HashMap::new();
+    for node in root.descendants() {
+        if CppSyntaxKind::from(node.kind()) != CppSyntaxKind::Declaration {
+            continue;
+        }
+        let Some(body) = node
+            .children()
+            .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::CompoundStat)
+        else {
+            continue;
+        };
+        let Some(name) = node
+            .children()
+            .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::InitDeclarator)
+            .and_then(|init| {
+                init.children()
+                    .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::Declarator)
+            })
+            .and_then(|declarator| {
+                declarator
+                    .children()
+                    .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::NameExpr)
+            })
+            // A constructor writes its declarator directly, and it can free a parameter too.
+            .or_else(|| {
+                node.children()
+                    .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::Declarator)
+                    .and_then(|declarator| {
+                        declarator.children().find(|child| {
+                            CppSyntaxKind::from(child.kind()) == CppSyntaxKind::NameExpr
+                        })
+                    })
+            })
+        else {
+            continue;
+        };
+        let name_start = usize::from(name.text_range().start());
+        let parameters = the_parameter_names(&node);
+        bodies.insert(name_start, (body, parameters));
+    }
+
+    for fact in facts {
+        if fact.kind != crate::DeclKind::Function {
+            continue;
+        }
+        let Some((body, parameters)) = bodies.get(&fact.name_range.start_offset) else {
+            continue;
+        };
+        if parameters.is_empty() {
+            continue;
+        }
+        let mut mask = 0u64;
+        scan_unconditional_statements(body, parameters, &mut mask);
+        fact.frees = mask;
+    }
+}
+
+/// The parameter names of a function declaration, in the order they are written.
+fn the_parameter_names(declaration: &CppSyntaxNode) -> Vec<String> {
+    let declarator = declaration
+        .children()
+        .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::InitDeclarator)
+        .and_then(|init| {
+            init.children()
+                .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::Declarator)
+        })
+        // A constructor writes its declarator directly: `S(std::string s) : …`.
+        .or_else(|| {
+            declaration
+                .children()
+                .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::Declarator)
+        });
+    let Some(list) = declarator.and_then(|declarator| {
+        declarator
+            .children()
+            .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::ParameterList)
+    }) else {
+        return Vec::new();
+    };
+    list.children()
+        .filter(|parameter| CppSyntaxKind::from(parameter.kind()) == CppSyntaxKind::Parameter)
+        .map(|parameter| {
+            parameter
+                .children()
+                .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::Declarator)
+                .and_then(|declarator| {
+                    declarator
+                        .children()
+                        .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::NameExpr)
+                })
+                .map(|name| name.text().to_string())
+                .unwrap_or_default()
+        })
+        .collect()
+}
+
+/// Walk the statements that **always run**, and record the frees among them.
+fn scan_unconditional_statements(node: &CppSyntaxNode, parameters: &[String], mask: &mut u64) {
+    for child in node.children() {
+        match CppSyntaxKind::from(child.kind()) {
+            // A plain block is the same statement sequence, so it is still unconditional.
+            CppSyntaxKind::CompoundStat => scan_unconditional_statements(&child, parameters, mask),
+            // A statement whose expression may free a parameter.
+            CppSyntaxKind::ExpressionStat | CppSyntaxKind::ReturnStat => {
+                scan_for_a_free(&child, parameters, mask)
+            }
+            // Everything that may not run — and a lambda, whose body is another function.
+            _ => {}
+        }
+    }
+}
+
+/// Record the frees written in one statement's expressions, without descending into a lambda's body.
+fn scan_for_a_free(node: &CppSyntaxNode, parameters: &[String], mask: &mut u64) {
+    match CppSyntaxKind::from(node.kind()) {
+        CppSyntaxKind::LambdaExpr => return,
+        CppSyntaxKind::UnaryExpr => {
+            // `delete p;` is a unary expression whose first token is `delete` — `delete[] p` the same with brackets.
+            let is_delete = node
+                .children_with_tokens()
+                .filter_map(|element| element.into_token())
+                .next()
+                .map(|token| cpp_parser::CppTokenKind::from(token.kind()))
+                == Some(cpp_parser::CppTokenKind::DeleteKeyword);
+            if is_delete
+                && let Some(operand) = node.children().next()
+                && let Some(name) = a_bare_name(&operand)
+                && let Some(index) = parameters.iter().position(|parameter| parameter == &name)
+                && index < 64
+            {
+                *mask |= 1 << index;
+            }
+        }
+        CppSyntaxKind::CallExpr => {
+            let callee = node.children().next();
+            let name = callee.as_ref().and_then(the_last_identifier_of);
+            let frees_its_first_argument = match name.as_deref() {
+                Some("free") => true,
+                // `std::destroy_at(p)` ends the object's lifetime, which a later use reads.
+                Some("destroy_at") => true,
+                _ => false,
+            };
+            if frees_its_first_argument
+                && let Some(argument) = node.children().nth(1)
+                && let Some(name) = a_bare_name(&argument)
+                && let Some(index) = parameters.iter().position(|parameter| parameter == &name)
+                && index < 64
+            {
+                *mask |= 1 << index;
+            }
+        }
+        _ => {}
+    }
+    for child in node.children() {
+        scan_for_a_free(&child, parameters, mask);
+    }
+}
+
+/// The name a frees-its-argument expression names: `p` for `p` and for `&p`.
+fn a_bare_name(expression: &CppSyntaxNode) -> Option<String> {
+    match CppSyntaxKind::from(expression.kind()) {
+        CppSyntaxKind::IdentifierExpr | CppSyntaxKind::NameExpr => {
+            the_last_identifier_of(expression)
+        }
+        CppSyntaxKind::UnaryExpr => a_bare_name(&expression.children().next()?),
+        _ => None,
+    }
+}
+
+/// The last identifier in an expression, as a spelling.
+fn the_last_identifier_of(expression: &CppSyntaxNode) -> Option<String> {
+    expression
+        .descendants_with_tokens()
+        .filter_map(|element| element.into_token())
+        .filter(|token| {
+            cpp_parser::CppTokenKind::from(token.kind()) == cpp_parser::CppTokenKind::Identifier
+        })
+        .last()
+        .map(|token| token.text().to_string())
+}
+
 fn deduced_returns_of(root: &CppSyntaxNode, binding: &Binding) -> Option<String> {
     if binding.kind != BindingKind::Function {
         return None;
@@ -2708,6 +2960,9 @@ fn fact_for(
         // **What the declaration writes** — read from the same shape table as everything above, and stored so that a
         // check asking "does this say `override`" does not search the text for it. See [`crate::DeclModifiers`].
         modifiers: declared_modifiers_with(shapes, binding, Some(rendered)),
+        // **What the function frees** is filled by the pass after the facts are built — see
+        // [`fill_the_frees`], which needs the whole file to do it in one walk.
+        frees: 0,
         name,
         scope,
         // Asked of the scope the binding was made in rather than of the declaration's shape: `bool` is the one
@@ -3410,6 +3665,12 @@ impl<'a> DeclarationFacts<'a> {
         // are walked before the next top-level declaration.
 
         facts.sort_by_key(|fact| fact.range.start_offset);
+
+        // **The effects, in one pass over the file.** Asking each fact about its own body would walk the tree once per
+        // declaration — measured on a folding fixture that includes `<string>` and `<vector>`: the server took longer
+        // than a request's thirty-second budget to answer, because every inline function of those headers paid a walk
+        // of the whole rendering.
+        fill_the_frees(root, &mut facts);
 
         let mut targets: Vec<(&mut FactGuard, usize)> = facts
             .iter_mut()

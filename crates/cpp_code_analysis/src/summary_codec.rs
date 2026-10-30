@@ -224,7 +224,7 @@ const MAGIC: &[u8; 8] = b"CPPLSSUM";
 /// reader is standing. Measured on `auto lineStartOffset = _lineOffsetVec[line]`: the alias chain followed every hop
 /// correctly and stopped at `_Alloc::value_type&`; with the default it reaches `std::size_t&`. See
 /// [`crate::DeclFact::parameter_defaults`] and [`crate::substituted_spelling_with_defaults`].
-pub const CODEC_VERSION: u32 = 32;
+pub const CODEC_VERSION: u32 = 33;
 
 /// Write a summary as bytes.
 ///
@@ -280,6 +280,8 @@ pub fn encode(summary: &FileSummary) -> Vec<u8> {
         // **The modifiers**, at the end of the fact so the bytes of an older entry stay readable up to here — the
         // version is what makes the whole entry unreachable, but appending keeps the diff honest.
         put_u32(&mut out, fact.modifiers.bits());
+        // And the effects, which are the same kind of answer: what this declaration does, decided once at index time.
+        put_u64(&mut out, fact.frees);
     }
 
     put_u32(&mut out, summary.macros.len() as u32);
@@ -694,6 +696,7 @@ pub fn decode(bytes: &[u8]) -> Result<FileSummary, DecodeError> {
             access: access_from(reader.u8()?),
             exported: reader.u8()? != 0,
             modifiers: crate::DeclModifiers::from_bits(reader.u32()?),
+            frees: reader.u64()?,
         });
     }
 
@@ -1253,6 +1256,7 @@ mod tests {
             use_filter: vec![0x00, 0xff, 0x55, 0xaa, 0x01, 0x80],
             declarations: vec![
                 DeclFact {
+                    frees: 0,
                     name: "Widget".to_string(),
                     scope: None,
                     kind: DeclKind::Type,
@@ -1292,6 +1296,7 @@ mod tests {
                     guard: FactGuard::Unconditional,
                 },
                 DeclFact {
+                    frees: 0,
                     name: "make".to_string(),
                     scope: Some("ns::Widget".to_string()),
                     kind: DeclKind::Function,
@@ -1321,6 +1326,7 @@ mod tests {
                     guard: FactGuard::Region(3),
                 },
                 DeclFact {
+                    frees: 0,
                     name: String::new(),
                     scope: None,
                     kind: DeclKind::Other,

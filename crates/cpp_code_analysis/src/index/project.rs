@@ -9076,6 +9076,10 @@ fn fact_from_binding_with(
         // **No rendering here**: this path is handed a node and no file text, and the attribute is a sibling of the
         // declaration — a member query never asks for `[[maybe_unused]]`, so the bit is left unset rather than guessed.
         modifiers: crate::sema::declarations::declared_modifiers_with(shapes, binding, None),
+        // **The other answer the index writes**, and for the same reason: a member function's body is where a
+        // `delete` lives, so a call site that asks "does this free my argument" must not depend on which path built
+        // the fact.
+        frees: crate::sema::declarations::freed_parameters_of(root, binding),
         type_of: crate::sema::declarations::declared_type_of_with(shapes, binding),
         // Answered here as well, because **members** are exactly where a call happens: `fac.build().size` needs the
         // return type of a member function that the file being edited declares. See [`DeclFact::returns`].
@@ -13356,6 +13360,9 @@ impl ProjectDefinition {
             fact: DeclFact {
                 // The same bits the index fills — see `DeclModifiers`.
                 modifiers: crate::DeclModifiers::default(),
+                // The effects belong to the summary the index writes, and this answer is a *place to jump to*: a
+                // caller that wants `frees` asks the fact, which is the same rule `in_namespace` below follows.
+                frees: 0,
                 name: binding
                     .name
                     .identifier_text()

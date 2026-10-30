@@ -103,6 +103,136 @@ fn a_moved_local_is_still_the_functions_own() {
     );
 }
 
+/// Only the `use-after-free` messages.
+fn use_after_free(source: &str) -> Vec<String> {
+    findings_of(source)
+        .into_iter()
+        .filter(|finding| finding.code == DiagnosticCode::UseAfterFree)
+        .map(|finding| finding.message)
+        .collect()
+}
+
+/// **The plain shape**: `delete` and then a read through the pointer.
+#[test]
+fn a_pointer_read_after_delete_is_reported() {
+    let messages =
+        use_after_free("struct T { int x; }; void f() { T* p = new T(); delete p; p->x; }");
+    assert_eq!(messages.len(), 1, "{messages:?}");
+    assert!(messages[0].contains("p"), "{}", messages[0]);
+}
+
+/// **The answer to the question this rule was written for**: the free is written in *another function*, and the
+/// caller's use is reported from the callee's own fact.
+#[test]
+fn a_pointer_read_after_a_helper_frees_it_is_reported() {
+    let messages = use_after_free(
+        "struct T { int x; }; void release(T* p) { delete p; } void f() { T* p = new T(); release(p); p->x; }",
+    );
+    assert_eq!(messages.len(), 1, "{messages:?}");
+}
+
+/// The same, with the helper declared in a **header** — the case a call site cannot answer from its own text.
+///
+/// Written to disk rather than into `MemoryFiles`: a header's text reaches the caller through the cook, and a cooked
+/// include of a memory file is not produced by this harness (measured: the rendering of `a.cpp` was its own text with
+/// the `#include` line dropped, so the helper was not declared at all). A real directory makes the same cook a real
+/// one, which is the point of the test.
+#[test]
+fn a_pointer_read_after_a_headers_helper_frees_it_is_reported() {
+    let root = std::env::temp_dir().join(format!("cppls_use_after_free_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("a directory to write the fixture into");
+    std::fs::write(
+        root.join("release.h"),
+        "struct T { int x; };\nvoid release(T* p) { delete p; }\n",
+    )
+    .expect("the header");
+    let source = "#include \"release.h\"\nvoid f() { T* p = new T(); release(p); p->x; }\n";
+    std::fs::write(root.join("a.cpp"), source).expect("the source");
+
+    let mut session = cpp_code_analysis::Session::open(
+        root.clone(),
+        SessionFiles::new(OpenDocuments::new(), cpp_code_analysis::DiskFiles),
+        WatchFilter::new(&root),
+    );
+    session.add_project_files([root.join("a.cpp"), root.join("release.h")]);
+    session.index_everything();
+    // **The work loop has to drain.** A cook of the caller needs the header cooked first, and that is queued work:
+    // `index_everything` starts it and `advance` is what finishes it. Measured without this loop: the rendering of
+    // `a.cpp` was its own text with the `#include` line dropped, and the helper was not declared at all.
+    for _ in 0..2 {
+        let mut steps = 0;
+        while session.pending_work() > 0 && steps < 20_000 {
+            session.advance(64);
+            steps += 1;
+        }
+        session.cook(root.join("a.cpp").as_path());
+    }
+    let findings = session
+        .diagnostics(root.join("a.cpp").as_path())
+        .map(|found| found.checks)
+        .unwrap_or_default();
+    let messages: Vec<String> = findings
+        .into_iter()
+        .filter(|finding| finding.code == DiagnosticCode::UseAfterFree)
+        .map(|finding| finding.message)
+        .collect();
+    assert_eq!(messages.len(), 1, "{messages:?}");
+}
+
+#[test]
+fn a_pointer_read_after_free_is_reported() {
+    let messages = use_after_free("void f() { int* p = (int*)malloc(4); free(p); *p; }");
+    assert_eq!(messages.len(), 1, "{messages:?}");
+}
+
+#[test]
+fn a_smart_pointers_pointee_read_after_reset_is_reported() {
+    let messages =
+        use_after_free("void f() { std::unique_ptr<int> u(new int(1)); u.reset(); *u; }");
+    assert_eq!(messages.len(), 1, "{messages:?}");
+}
+
+#[test]
+fn a_parameter_read_after_delete_is_reported() {
+    let messages = use_after_free("struct T { int x; }; void g(T* p) { delete p; p->x; }");
+    assert_eq!(messages.len(), 1, "{messages:?}");
+}
+
+#[test]
+fn an_array_read_after_delete_is_reported() {
+    let messages = use_after_free("void f() { int* a = new int[4]; delete[] a; a[0]; }");
+    assert_eq!(messages.len(), 1, "{messages:?}");
+}
+
+/// **The shapes that are not certainly wrong, and must stay quiet.** Each is a case a careless analysis would report:
+/// a free that may not run, a pointer given a fresh value, a callee whose free is conditional, a different variable.
+#[test]
+fn the_safe_free_shapes_are_silent() {
+    let safe = [
+        // A read before the free.
+        "struct T { int x; }; void f() { T* p = new T(); p->x; delete p; }",
+        // The free may not run, so the later read is only sometimes wrong.
+        "struct T { int x; }; void f(int c) { T* p = new T(); if (c) delete p; p->x; }",
+        // The pointer was given a fresh value.
+        "struct T { int x; }; void f() { T* p = new T(); delete p; p = new T(); p->x; }",
+        // The callee frees only conditionally, so its fact does not say it frees.
+        "struct T { int x; }; void maybe(T* p, bool c) { if (c) delete p; } void f() { T* p = new T(); maybe(p, true); p->x; }",
+        // The callee does not free at all.
+        "struct T { int x; }; void touch(T* p) { } void f() { T* p = new T(); touch(p); p->x; }",
+        // Another variable is read.
+        "struct T { int x; }; void f() { T* p = new T(); T* q = new T(); delete p; q->x; }",
+        // Nothing reads through the freed pointer.
+        "struct T { int x; }; void f() { T* p = new T(); delete p; }",
+        // A smart pointer after `reset` is null, and `u` itself is not dangling.
+        "void f() { std::unique_ptr<int> u(new int(1)); u.reset(); u = nullptr; }",
+    ];
+    for source in safe {
+        let messages = use_after_free(source);
+        assert!(messages.is_empty(), "`{source}` reported {messages:?}");
+    }
+}
+
 /// Only the `dangling-field` messages.
 fn dangling_fields(source: &str) -> Vec<String> {
     findings_of(source)

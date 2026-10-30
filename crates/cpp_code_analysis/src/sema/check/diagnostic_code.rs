@@ -109,6 +109,8 @@ pub enum DiagnosticCode {
     /// A view, reference or pointer member that borrows something which does not outlive the object — see
     /// [`super::dangling_field`].
     DanglingField,
+    /// A pointer read after the memory it refers to was freed — see [`super::use_after_free`].
+    UseAfterFree,
 }
 
 impl DiagnosticCode {
@@ -118,7 +120,7 @@ impl DiagnosticCode {
     /// what it says about types, then what it says about a whole body, then the two that are about the reading
     /// rather than the program. A consumer that shows a settings screen, or a test that asserts every rule has a
     /// name and a module, iterates this.
-    pub const ALL: [DiagnosticCode; 28] = [
+    pub const ALL: [DiagnosticCode; 29] = [
         DiagnosticCode::SyntaxError,
         DiagnosticCode::ParamTypeCheck,
         DiagnosticCode::AssignTypeCheck,
@@ -147,6 +149,7 @@ impl DiagnosticCode {
         DiagnosticCode::ConceptNotSatisfied,
         DiagnosticCode::DanglingReturn,
         DiagnosticCode::DanglingField,
+        DiagnosticCode::UseAfterFree,
     ];
 
     /// **The code a client is shown**, and the spelling a config file uses: kebab case, and the module's file name
@@ -183,6 +186,7 @@ impl DiagnosticCode {
             DiagnosticCode::ImplicitBoolConversion => "implicit-bool-conversion",
             DiagnosticCode::DanglingReturn => "dangling-return",
             DiagnosticCode::DanglingField => "dangling-field",
+            DiagnosticCode::UseAfterFree => "use-after-free",
             DiagnosticCode::ConceptNotSatisfied => "concept-not-satisfied",
         }
     }
@@ -251,6 +255,7 @@ impl DiagnosticCode {
             // whose lifetime ended, which is the one class of defect a compiler must not be quiet about.
             DiagnosticCode::DanglingReturn => RuleSeverity::Error,
             DiagnosticCode::DanglingField => RuleSeverity::Error,
+            DiagnosticCode::UseAfterFree => RuleSeverity::Error,
         }
     }
 

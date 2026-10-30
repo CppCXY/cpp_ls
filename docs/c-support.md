@@ -83,7 +83,7 @@ C23 bits.
 
 ## 6. Diagnostics
 
-Twenty-eight rules, each with a fixed severity; `[diagnostics].disable` turns one off by name. The rows marked **C++**
+Twenty-nine rules, each with a fixed severity; `[diagnostics].disable` turns one off by name. The rows marked **C++**
 never fire in a file compiled as C — see [`configuration.md`](configuration.md) §5.
 
 | Code | Severity | Meaning |
@@ -98,6 +98,7 @@ never fire in a file compiled as C — see [`configuration.md`](configuration.md
 | `return-type-mismatch` | Error | a `return` does not fit the declared type |
 | `dangling-return` | Error | the address of a local returned as a pointer, or a pointer into a local |
 | `dangling-field` | Error | a pointer member initialised from a by-value parameter or a temporary — **C++** (C has no constructors) |
+| `use-after-free` | Error | a pointer read after `free`/`delete` released it, including a free written in another function |
 | `include-not-found` | Error | the `#include` was not found |
 | `access-invisible` | Error | a member reached from somewhere that may not reach it — **C++** |
 | `missing-return` | Error | a function that promises a value can reach its end |

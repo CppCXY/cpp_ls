@@ -128,6 +128,7 @@ pub mod undefined_field;
 pub mod undefined_name;
 pub mod unnecessary_branch;
 pub mod unused;
+mod use_after_free;
 mod use_auto;
 mod use_nullptr;
 mod use_override;
@@ -1518,6 +1519,9 @@ pub fn run(context: CheckContext<'_>) -> Vec<Finding> {
     // The same origin analysis, asked about a member instead of a `return`: a view of a by-value parameter, or of a
     // temporary, outlives what it refers to.
     run_check::<dangling_field::DanglingField>(&mut context);
+    // The third rule of the lifetime family: a pointer read after its memory was freed, including a free written in
+    // another function and recorded on that function fact.
+    run_check::<use_after_free::UseAfterFree>(&mut context);
 
     if crate::probes::timing() {
         let (ran, nanos) = context.model.inference_cost();

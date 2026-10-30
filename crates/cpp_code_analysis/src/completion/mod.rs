@@ -1651,6 +1651,7 @@ mod tests {
     #[test]
     fn a_functions_detail_line_is_what_it_takes() {
         let fact = |returns: Option<&str>, parameter_list: Option<&str>| DeclFact {
+            frees: 0,
             name: "format".to_string(),
             scope: Some("std".to_string()),
             local: false,

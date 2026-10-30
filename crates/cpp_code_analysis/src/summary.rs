@@ -158,6 +158,30 @@ pub struct DeclFact {
     /// **The modifiers the declaration writes** — see [`DeclModifiers`]. Answered once, at index time, from the
     /// tokens; the consumers that used to search the declaration's text (`use-override`, `unused`) read a bit now.
     pub modifiers: DeclModifiers,
+    /// **The parameters this function frees**, as a bit per parameter index.
+    ///
+    /// A bit is set when the body **certainly** frees that parameter: an unconditional `delete p;`, `free(p)`,
+    /// `std::destroy_at(p)`, or a call to a function whose own fact says it frees that argument. "Unconditional" is
+    /// the whole discipline — a `delete` inside an `if` is not recorded, because a caller that uses the pointer
+    /// afterwards is only *sometimes* wrong, and this analysis reports only what is certain.
+    ///
+    /// It exists for the question a call site cannot answer from its own file: `release(p); p->x;` where `release` is
+    /// declared in a header. The check that reads it is `use-after-free`, and the alternative — following the callee's
+    /// body at check time — is the one thing this layer must not do (a check that could parse would pay a parse per
+    /// call site).
+    ///
+    /// Three limits, all deliberate:
+    ///
+    /// ```text
+    ///   one level      the frees written in this body, not the ones behind another call
+    ///   parameters     `delete this;` and a freed *global* are not recorded
+    ///   certainty      a conditional free is not recorded, so a call site cannot report from it
+    /// ```
+    ///
+    /// The first is a limit of *when* the summary is built: a file's fact is written while the project is being read,
+    /// so the fact of a callee in another file may not exist yet. A second pass could close it, and until then this
+    /// answers the case that matters — the helper whose whole job is to free.
+    pub frees: u64,
     /// The type a variable-like declaration was written with, as the file spells it.
     ///
     /// The first field in a fact that is not simply "what the file says about this name" but "what the file says
