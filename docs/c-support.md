@@ -6,6 +6,9 @@
 
 ## 1. 语料
 
+> **2026-10-30：这份语料已经删除。** 现在测量的是 `C:\Users\zc\Desktop\c-project`（只保留未修的两个问题），
+> 见 §11。下面 §1–§10 的数字是历史记录，`tests/c_corpus.rs` 也已按新语料重写。
+
 位置：`C:\Users\zc\Desktop\cpp`（`CPPLS_C_CORPUS` 可覆盖），由 `CMakeLists.txt` 用 **MinGW Makefiles** 构建：
 
 ```powershell
@@ -244,3 +247,27 @@ $env:CPPLS_C_NAMES = "div"  # 打印索引里这个名字的事实
 
 成员/类型仍是 49/50、32/34:剩下的 `struct bits` 第二个位域与 `functions.c` 的函数指针 typedef 各有一个确切的
 下一步(见 §N15)。
+
+## 11. 第十轮：精简语料，`_BitInt` 成员与一个死锚点
+
+旧语料已删除，这一轮以后只在 **`C:\Users\zc\Desktop\c-project`** 上测量：3 个文件、gcc 15、C23
+（`-std=gnu2x`），只保留两个未修的问题 —— `_BitInt(` 起头的类体成员，以及来自头文件的函数指针 typedef。
+探针 `crates/cpp_code_analysis/tests/c_corpus.rs` 跟着重写（默认路径就是新语料，`CPPLS_C_CORPUS` 可覆盖）。
+
+```text
+                   findings   parse errors   members   types
+第九轮（旧语料）       0           0           49/50     32/34
+第十轮（冷缓存，修前）   4           0           3/5        1/3
+第十轮（修后）          0           0           5/5        1/3
+```
+
+修的是 `docs/remaining.md` §N16/§N17 的那一条：`_BitInt(13) signed_wide : 13;` 被 specifier 循环的两条
+"宏形状"分支读成 `MacroCall(_BitInt(13)) + NamedType(signed_wide)`，声明没有 declarator，成员消失。锚点
+`a_bitint_declaration_starts_here` 上一轮就写好了，但**没有任何调用者**（死代码，编译器的 `never used` 警告就是
+它）——这是"锚点进来了却没有效果"的真正原因。接上两处调用之后成员回来了，摘要里
+`["bits", "three", "signed_wide", "plain", "other"]` 齐全。
+
+`FORMAT_VERSION` 3 → 4：摘要是缓存里的东西，而 `READING_FINGERPRINT` 现在只跟版本走 —— 修完第一次跑仍然是
+3/5，删掉语料的 `.cppls` 才是 5/5。这条差别值得记住：**改了摘要的内容，就要推 `FORMAT_VERSION`**。
+
+剩下的类型项（`binary_op` 没有展开成 `int (*)(int, int)`）写在 `docs/remaining.md` §N17 的最后。

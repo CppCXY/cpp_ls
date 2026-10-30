@@ -296,3 +296,55 @@ struct bits {
 在 `parse_decl_specifier_seq_with` 里看清楚：specifier 循环在调用 [`parse_a_specifier`] 之前，是否先用
 "这个 token 能不能开始一个 specifier" 的判断把 `_BitInt`（一个 Identifier）拒掉了。语法规则本身已经有了
 （`a_bitint_declaration_starts_here` + specifier 里的 `_BitInt` 分支），所以差的是**类体成员那条路径上的同一个判断**。
+
+---
+
+### N17. 第十轮：精简语料工程，`_BitInt` 成员回来了（2026-10-30）
+
+旧语料 `C:\Users\zc\Desktop\cpp` 已经不存在了。这一轮把测量换成**只针对未修问题**的精简工程：
+
+```text
+C:\Users\zc\Desktop\c-project        3 个文件，gcc 15 + CMake，C23（-std=gnu2x）
+  include/corpus.h                   struct bits（四个成员，两种 specifier 开头）+ 函数指针 typedef
+  src/bits.c                         value.three / value.signed_wide / value.plain / value.other、pointer->three
+  src/functions.c                    binary_op operation / compare_function（typedef 来自头文件）
+  src/main.c                         调用者：工程必须能编译
+```
+
+`crates/cpp_code_analysis/tests/c_corpus.rs` 重写成这个工程的探针（同一个会话、三张表、`CPPLS_C_*` 诊断开关
+保留），**默认语料路径就是 `c-project`**，`CPPLS_C_CORPUS` 仍可覆盖。旧语料的 50/33 条清单随语料一起退休。
+
+第一次测量（冷缓存，修前）：
+
+```text
+parse    0 error，3 个文件，23 条声明
+members  value.three ✓  value.other ✓  pointer->three ✓
+         value.signed_wide ✗  value.plain ✗            （2 offered 里只有 other/three）
+types    value ✓（bits）  operation ✗  compare_function ✗（都答 binary_op）
+findings 4 条 undefined-field（signed_wide/plain）
+```
+
+**修**：`_BitInt(13) signed_wide : 13;` 被读成
+`DeclSpecifierSeq { MacroCall(_BitInt(13)), NamedType(signed_wide) }` —— specifier 循环里那两条
+"宏形状"分支（`MACRO(args) type …`）先认领了它，声明于是没有 declarator，成员自然消失。
+上一轮说"锚点进来了"没有生效的真正原因是：`a_bitint_declaration_starts_here` **定义了但没有调用者**（死代码，
+编译时的那条 `never used` 警告就是它）。这一轮把它接到那两条分支上（`types.rs` 两处
+`&& !super::decls::a_bitint_declaration_starts_here(p)`），`both_bitfields_of_a_bitint_struct_are_recorded`
+去掉 `#[ignore]`，现在是回归测试。
+
+**缓存**：修完第一次跑探针仍然是旧结果 —— `READING_FINGERPRINT` 现在只跟版本走，`.cppls` 里的旧 summary 被当成
+当前答案（删掉语料的 `.cppls` 后 5/5）。所以 `FORMAT_VERSION` 3 → 4，这正是它在文档里说的用法。
+
+修后的数字：
+
+```text
+                  findings   parse errors   members   types
+修前                 4           0           3/5       1/3
+修后                 0           0           5/5       1/3
+```
+
+**剩下的唯一一项**：`operation`/`compare_function` 的类型答 `binary_op`（typedef 的名字），而两文件 fixture
+（`a_function_pointer_typedef_from_a_header`）答展开后的 `int (*)(int, int)`。同一个引擎、同一个形状，差别在
+会话来源：fixture 是 in-memory + 默认语言（C++17），语料是真实工程 + `compile_commands.json`（C23）。下一轮第一步：
+在 `type_at` → `declared_type` → `NamedDeclaration::type_of` 上打印，比较两条调用路径各走到哪个分支；
+最可疑的是**语言**（C23 与 C++17 的别名展开可能不是同一个门控）。

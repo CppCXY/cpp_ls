@@ -184,7 +184,7 @@ fn a_bitint_type_in_a_declaration_and_in_a_cast_parses() {
             "struct bits { unsigned _BitInt(3) three : 3; _BitInt(13) signed_wide : 13; };",
         ),
     ] {
-        let config = cpp_parser::ParserConfig::default().with_language(language.clone());
+        let config = cpp_parser::ParserConfig::default().with_language(language);
         let tree = cpp_parser::CppParser::parse(source, config);
         if !tree.get_errors().is_empty() {
             failed.push(format!("{name}: {:?}", tree.get_errors()));

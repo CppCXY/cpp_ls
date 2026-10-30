@@ -1047,11 +1047,17 @@ fn parse_decl_specifier_seq_with(
         // grammar no longer has an environment to ask. What it bought — `_NODISCARD` not being read as the type it
         // looks like — belongs to the cooked stream now: by the time this rule runs the macro is replaced by what
         // it expands to.
+        // **`_BitInt(width)` is a name with a group that is not a macro**, and it has a specifier after the group
+        // whenever the member is written `_BitInt(13) signed_wide : 13;` — the `signed_wide` the shape looks for. Read
+        // as a macro specifier, it left the declaration with `signed_wide` as its *type* and no declarator, which is
+        // the one class of member the summary dropped (measured: `struct bits` recorded `three` and `other` and lost
+        // `signed_wide` and `plain`). See [`super::decls::a_bitint_declaration_starts_here`].
         if !has_type_specifier
             && allow_second_name
             && p.current_token() == CppTokenKind::Identifier
             && p.peek_next_token() == CppTokenKind::LeftParen
             && !at_an_attribute(p)
+            && !super::decls::a_bitint_declaration_starts_here(p)
             && a_specifier_follows_the_group(p)
         {
             let checkpoint = p.checkpoint();
@@ -1189,7 +1195,18 @@ fn parse_decl_specifier_seq_with(
         // after the group is the shapes that already own them (a macro standing for a whole declaration, a macro
         // definition), and evidence keeps its precedence: a name this file `#define`s is read by the rule that knows
         // what a macro is.
-        if allow_second_name && specifiers == 0 && a_macro_call_begins_the_declaration(p) {
+        //
+        // **`_BitInt(width)` is the one name with a group that is not a macro.** C23 makes it a type whose width is a
+        // constant expression, so `_BitInt(13) signed_wide : 13;` has exactly this shape — a name, a balanced group,
+        // an identifier — and taking it for a macro call is what made the declaration's specifier `MacroCall` plus the
+        // *type* `signed_wide`, leaving the bit-field with no declarator: no fact, no member. The anchor is asked here
+        // and not in [`super::decls::starts_declaration`], where a `_BitInt` that begins a *statement* is already read
+        // correctly, and where adding it made `_BitInt(37) wide = (_BitInt(37))1 << 30;` fail instead.
+        if allow_second_name
+            && specifiers == 0
+            && !super::decls::a_bitint_declaration_starts_here(p)
+            && a_macro_call_begins_the_declaration(p)
+        {
             if let Err(err) = super::stats::parse_a_macro_that_stands_for_a_declaration(p) {
                 p.close_marks_above(base);
                 return Err(err);

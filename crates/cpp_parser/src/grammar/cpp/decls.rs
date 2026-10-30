@@ -4844,15 +4844,23 @@ pub(super) fn can_begin_a_declaration(kind: CppTokenKind) -> bool {
 
 /// Does a **`_BitInt(width) declarator`** shape start at the cursor — C23's integer type in a declaration?
 ///
-/// `	ext
+/// ```text
 /// _BitInt(37) wide = …;      a declaration: an identifier follows the )
 /// f(x);                      a call: a ; or an operator follows it
-/// `
+/// ```
 ///
 /// The width is a constant expression, so the parentheses are balanced and the token after the matching `)` is what
 /// separates the two readings. The feature gate is the language's: `_BitInt` is C23's, and a C11 file has an ordinary
 /// identifier there.
-fn a_bitint_declaration_starts_here(p: &CppParser) -> bool {
+///
+/// **Asked by the specifier loop, not by [`starts_declaration`].** A `_BitInt` that begins a *statement* is already
+/// read as a declaration; what was lost was a **class-body member**, because the loop's two macro-shaped arms
+/// (`MACRO(args) type …`) claimed the shape first: `_BitInt(13) signed_wide : 13;` is a name, a balanced group and an
+/// identifier, which is exactly what they look for. Excluding it there is what records the member. Anchoring it in
+/// [`starts_declaration`] instead is the attempt that failed — `_BitInt(37) wide = (_BitInt(37))1 << 30;` stopped
+/// parsing at its initializer, because the anchor turned a declaration the statement path already read correctly into
+/// a different one.
+pub(super) fn a_bitint_declaration_starts_here(p: &CppParser) -> bool {
     if p.current_token_text() != "_BitInt"
         || p.peek_next_token() != CppTokenKind::LeftParen
         || !p.language().support(crate::features::Feature::BitInt)

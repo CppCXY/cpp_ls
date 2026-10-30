@@ -5417,8 +5417,8 @@ fn declared_type(
     // the type of that expression, and only the semantic layer can answer it: the reader of the *syntax* hands back
     // the spelling, `typeof(value)`, which no scope and no member list has heard of. The fact builder has the same
     // gap, so a summary records the spelling too; see `docs/remaining.md` §N13.
-    if let Some(payload) = a_typeof_payload(root, named) {
-        if let Known::Yes((type_of, _)) = type_of_expression(
+    if let Some(payload) = a_typeof_payload(root, named)
+        && let Known::Yes((type_of, _)) = type_of_expression(
             index,
             &mut |_: &Path| None,
             scopes,
@@ -5426,9 +5426,9 @@ fn declared_type(
             path,
             &payload,
             depth + 1,
-        ) {
-            return Known::Yes(type_of);
-        }
+        )
+    {
+        return Known::Yes(type_of);
     }
     if !writes_auto(&placeholder) {
         return Known::Yes(declaration);
@@ -5659,10 +5659,10 @@ fn initializer_type(
 /// and put back together the way the file would have spelled the type it let `auto` stand for.
 ///
 /// The declarator's operators are its text with the name taken out: `& r ` is `&`, `* p ` is `*`, `p ` is nothing.
-/// The **expression a 	ypeof/__typeof__ specifier names**, when that is what its payload is.
+/// The **expression a `typeof`/`__typeof__` specifier names**, when that is what its payload is.
 ///
 /// `None` for the type-id form (`typeof(struct point)`), which the syntax reader already resolves, and for every
-/// declaration that has no 	ypeof at all.
+/// declaration that has no `typeof` at all.
 fn a_typeof_payload(
     root: &cpp_parser::CppSyntaxNode,
     named: &NamedDeclaration,

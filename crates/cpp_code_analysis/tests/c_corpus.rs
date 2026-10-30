@@ -1,13 +1,23 @@
 //! **A measurement of the C corpus** — one line per file, one line per member question, one line per type question.
 //!
 //! ```text
-//! $env:CPPLS_C_CORPUS = "C:\Users\zc\Desktop\cpp"     # the default when it exists
 //! cargo test --release -p cpp_code_analysis --test c_corpus -- --ignored --nocapture
+//! $env:CPPLS_C_CORPUS = "C:\Users\zc\Desktop\c-project"   # the default
 //! ```
 //!
-//! The corpus is a real project: `CMakeLists.txt` builds it with MinGW's gcc, `build/compile_commands.json` carries the
-//! flags, and every construct in it is one the compiler accepted. That is what makes the numbers here mean something —
-//! a file that compiles and that this analysis reports an error in is a defect of the analysis, not of the file.
+//! The corpus is a real project: `CMakeLists.txt` builds it with MinGW's gcc 15 in C23 mode,
+//! `build/compile_commands.json` carries `-std=gnu2x`, and every construct in it is one the compiler accepted. That is
+//! what makes the numbers here mean something — a file that compiles and that this analysis reports an error in is a
+//! defect of the analysis, not of the file.
+//!
+//! # What the corpus is for
+//!
+//! Two defects, and only those two (see the corpus's own `README.md`):
+//!
+//! * **a class-body member whose specifier starts with `_BitInt(`** is dropped from the summary — `three` and `other`
+//!   are recorded (their specifier starts with `unsigned`), `signed_wide` and `plain` are not;
+//! * **a function-pointer typedef declared in a header**, used for a local variable, answers `<no type>`, while the same
+//!   shape in a two-file fixture answers `int (*)(int, int)`.
 //!
 //! # The three questions
 //!
@@ -34,7 +44,7 @@ use cpp_code_analysis::{DiskFiles, Known, OpenDocuments, Session, SessionFiles, 
 fn corpus_root() -> Option<PathBuf> {
     let named = std::env::var_os("CPPLS_C_CORPUS")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(r"C:\Users\zc\Desktop\cpp"));
+        .unwrap_or_else(|| PathBuf::from(r"C:\Users\zc\Desktop\c-project"));
     named
         .join("include")
         .join("corpus.h")
@@ -61,497 +71,62 @@ struct TypeRow {
     expected: &'static str,
 }
 
-/// The member questions. Grouped by the C feature that makes each one interesting, which is why the list is
-/// hand-written rather than harvested: every row is a construct this corpus exists to measure.
+/// The member questions — four members of one struct, and one through a pointer.
+///
+/// `three` and `other` are the control: their specifier starts with `unsigned`, and they are recorded today.
+/// `signed_wide` and `plain` start with `_BitInt(`, and are the defect.
 const MEMBERS: &[MemberRow] = &[
-    // The standard library's own structs — `struct tm`, `div_t`, `struct lconv` — whose definitions live in the
-    // toolchain's include directory rather than in the project.
     MemberRow {
-        file: "src/library.c",
-        needle: "local.tm_year",
-        expected: "tm_year",
-    },
-    MemberRow {
-        file: "src/library.c",
-        needle: "local.tm_wday",
-        expected: "tm_wday",
-    },
-    MemberRow {
-        file: "src/library.c",
-        needle: "local.tm_yday",
-        expected: "tm_yday",
-    },
-    MemberRow {
-        file: "src/library.c",
-        needle: "local.tm_isdst",
-        expected: "tm_isdst",
-    },
-    MemberRow {
-        file: "src/library.c",
-        needle: "pointer->tm_year",
-        expected: "tm_year",
-    },
-    MemberRow {
-        file: "src/library.c",
-        needle: "from_library->tm_mday",
-        expected: "tm_mday",
-    },
-    MemberRow {
-        file: "src/library.c",
-        needle: "divided.quot",
-        expected: "quot",
-    },
-    MemberRow {
-        file: "src/library.c",
-        needle: "divided.rem",
-        expected: "rem",
-    },
-    MemberRow {
-        file: "src/library.c",
-        needle: "long_divided.quot",
-        expected: "quot",
-    },
-    MemberRow {
-        file: "src/library.c",
-        needle: "wide_divided.rem",
-        expected: "rem",
-    },
-    MemberRow {
-        file: "src/library.c",
-        needle: "locale->decimal_point",
-        expected: "decimal_point",
-    },
-    MemberRow {
-        file: "src/library.c",
-        needle: "locale->int_frac_digits",
-        expected: "int_frac_digits",
-    },
-    MemberRow {
-        file: "src/library.c",
-        needle: "locale->p_cs_precedes",
-        expected: "p_cs_precedes",
-    },
-    MemberRow {
-        file: "src/library.c",
-        needle: "locale->negative_sign",
-        expected: "negative_sign",
-    },
-    // Our own aggregates: a struct through a pointer, a nested struct, an anonymous union, a bitfield.
-    MemberRow {
-        file: "src/aggregates.c",
-        needle: "pointer->x",
-        expected: "x",
-    },
-    MemberRow {
-        file: "src/aggregates.c",
-        needle: "sum.x",
-        expected: "x",
-    },
-    MemberRow {
-        file: "src/aggregates.c",
-        needle: "buffer->length",
-        expected: "length",
-    },
-    MemberRow {
-        file: "src/aggregates.c",
-        needle: "buffer->data",
-        expected: "data",
-    },
-    MemberRow {
-        file: "src/aggregates.c",
-        needle: "head->next",
-        expected: "next",
-    },
-    MemberRow {
-        file: "src/aggregates.c",
-        needle: "cursor->name",
-        expected: "name",
-    },
-    MemberRow {
-        file: "src/aggregates.c",
-        needle: "A_LINE.integer",
-        expected: "integer",
-    },
-    MemberRow {
-        file: "src/aggregates.c",
-        needle: "A_LINE.colour",
-        expected: "colour",
-    },
-    MemberRow {
-        file: "src/aggregates.c",
-        needle: "A_LINE.corners",
-        expected: "corners",
-    },
-    MemberRow {
-        file: "src/aggregates.c",
-        needle: "pointer->from",
-        expected: "from",
-    },
-    MemberRow {
-        file: "src/aggregates.c",
-        needle: "line.colour",
-        expected: "colour",
-    },
-    MemberRow {
-        file: "src/aggregates.c",
-        needle: "a_value.as",
-        expected: "as",
-    },
-    // types.c: a union inside a struct, an anonymous union, every bitfield base type.
-    MemberRow {
-        file: "src/types.c",
-        needle: "value.as",
-        expected: "as",
-    },
-    MemberRow {
-        file: "src/types.c",
-        needle: "line.integer",
-        expected: "integer",
-    },
-    MemberRow {
-        file: "src/types.c",
-        needle: "line.colour",
-        expected: "colour",
-    },
-    MemberRow {
-        file: "src/types.c",
-        needle: "fields.single_bit",
-        expected: "single_bit",
-    },
-    MemberRow {
-        file: "src/types.c",
-        needle: "fields.signed_field",
-        expected: "signed_field",
-    },
-    MemberRow {
-        file: "src/types.c",
-        needle: "fields.wide",
-        expected: "wide",
-    },
-    MemberRow {
-        file: "src/types.c",
-        needle: "fields.permissions",
-        expected: "permissions",
-    },
-    MemberRow {
-        file: "src/types.c",
-        needle: "flags.generation",
-        expected: "generation",
-    },
-    MemberRow {
-        file: "src/types.c",
-        needle: "flags.ready",
-        expected: "ready",
-    },
-    MemberRow {
-        file: "src/types.c",
-        needle: "anonymous_union.integer",
-        expected: "integer",
-    },
-    // control.c and preprocessor.c: a member behind a macro-expanded name, and one on the right of `&&`.
-    MemberRow {
-        file: "src/control.c",
-        needle: "flags.ready",
-        expected: "ready",
-    },
-    MemberRow {
-        file: "src/control.c",
-        needle: "flags.generation",
-        expected: "generation",
-    },
-    MemberRow {
-        file: "src/control.c",
-        needle: "origin.x",
-        expected: "x",
-    },
-    MemberRow {
-        file: "src/preprocessor.c",
-        needle: "pointer->x",
-        expected: "x",
-    },
-    MemberRow {
-        file: "src/preprocessor.c",
-        needle: "origin.x",
-        expected: "x",
-    },
-    // gnu.c: a member of a `packed` struct reached through a cast, and one through `typeof`.
-    MemberRow {
-        file: "src/gnu.c",
-        needle: "other_pointer->x",
-        expected: "x",
-    },
-    MemberRow {
-        file: "src/gnu.c",
-        needle: "gnu_aligned_buffer)->value",
-        expected: "value",
-    },
-    // c23.c: a `constexpr` aggregate, a `_BitInt` bitfield, an `auto`-deduced struct.
-    MemberRow {
-        file: "src/c23.c",
-        needle: "C23_ORIGIN.x",
-        expected: "x",
-    },
-    MemberRow {
-        file: "src/c23.c",
-        needle: "bits.three",
+        file: "src/bits.c",
+        needle: "value.three",
         expected: "three",
     },
     MemberRow {
-        file: "src/c23.c",
-        needle: "bits.signed_wide",
+        file: "src/bits.c",
+        needle: "value.signed_wide",
         expected: "signed_wide",
     },
     MemberRow {
-        file: "src/c23.c",
-        needle: "point_copy.x",
-        expected: "x",
+        file: "src/bits.c",
+        needle: "value.plain",
+        expected: "plain",
     },
     MemberRow {
-        file: "src/c23.c",
-        needle: "other->x",
-        expected: "x",
+        file: "src/bits.c",
+        needle: "value.other",
+        expected: "other",
     },
     MemberRow {
-        file: "src/c23.c",
-        needle: "origin.x",
-        expected: "x",
-    },
-    // The header's own `static inline` functions: a member access whose declaration is in a *header*, asked from a
-    // file that only includes it.
-    MemberRow {
-        file: "include/corpus.h",
-        needle: "a->x",
-        expected: "x",
-    },
-    MemberRow {
-        file: "include/corpus.h",
-        needle: "flags->ready",
-        expected: "ready",
-    },
-    MemberRow {
-        file: "include/corpus.h",
-        needle: "line->integer",
-        expected: "integer",
+        file: "src/bits.c",
+        needle: "pointer->three",
+        expected: "three",
     },
 ];
 
-/// The type questions: the declared name, and what the file says its type is.
+/// The type questions: the struct variable, and the two locals whose type is a function-pointer typedef from a header.
 const TYPES: &[TypeRow] = &[
-    // **A variable whose type is an unnamed struct declared inline** — the type's key is the variable's own name, so
-    // `bits.three` can be answered. See `an_unnamed_struct_type_is_keyed_by_the_variable_it_declares`.
     TypeRow {
-        file: "src/c23.c",
-        needle: "} bits = {5, -3};",
-        name: "bits",
+        file: "src/bits.c",
+        needle: "struct bits value",
+        name: "value",
         expected: "bits",
     },
-    // types.c — every arithmetic type, in a member and in a local.
-    TypeRow {
-        file: "src/types.c",
-        needle: "struct arithmetic values",
-        name: "values",
-        expected: "arithmetic",
-    },
-    TypeRow {
-        file: "src/types.c",
-        needle: "int promoted",
-        name: "promoted",
-        expected: "int",
-    },
-    TypeRow {
-        file: "src/types.c",
-        needle: "unsigned int converted",
-        name: "converted",
-        expected: "unsigned int",
-    },
-    TypeRow {
-        file: "src/types.c",
-        needle: "long widened",
-        name: "widened",
-        expected: "long",
-    },
-    TypeRow {
-        file: "src/types.c",
-        needle: "double mixed",
-        name: "mixed",
-        expected: "double",
-    },
-    TypeRow {
-        file: "src/types.c",
-        needle: "const int *pointer_to_const =",
-        name: "pointer_to_const",
-        expected: "int",
-    },
-    TypeRow {
-        file: "src/types.c",
-        needle: "enum constants constant_value",
-        name: "constant_value",
-        expected: "constants",
-    },
-    // aggregates.c — a struct, a pointer to one, a flexible array member's owner, an array, a VLA.
-    TypeRow {
-        file: "src/aggregates.c",
-        needle: "point sum =",
-        name: "sum",
-        expected: "point",
-    },
-    TypeRow {
-        file: "src/aggregates.c",
-        needle: "point *pointer = &sum;",
-        name: "pointer",
-        expected: "point",
-    },
-    TypeRow {
-        file: "src/aggregates.c",
-        needle: "struct buffer *buffer",
-        name: "buffer",
-        expected: "buffer",
-    },
-    TypeRow {
-        file: "src/aggregates.c",
-        needle: "char text[]",
-        name: "text",
-        expected: "char",
-    },
-    TypeRow {
-        file: "src/aggregates.c",
-        needle: "int vla[count]",
-        name: "vla",
-        expected: "int",
-    },
-    TypeRow {
-        file: "src/aggregates.c",
-        needle: "node second =",
-        name: "second",
-        expected: "node",
-    },
-    // functions.c — a function pointer, and a variadic function's parameter.
     TypeRow {
         file: "src/functions.c",
-        needle: "binary_op operation = add",
+        needle: "binary_op operation",
         name: "operation",
-        expected: "binary_op",
+        // The engine expands a function-pointer typedef in a fixture; the corpus answered `<no type>`. What the type
+        // must name is the signature, not the typedef's spelling.
+        expected: "(int, int)",
     },
     TypeRow {
         file: "src/functions.c",
-        needle: "comparer *compare",
-        name: "compare",
-        expected: "comparer",
-    },
-    TypeRow {
-        file: "src/functions.c",
-        needle: "node *head = malloc",
-        name: "head",
-        expected: "node",
-    },
-    // library.c — the library's own types.
-    TypeRow {
-        file: "src/library.c",
-        needle: "struct tm local;",
-        name: "local",
-        expected: "tm",
-    },
-    TypeRow {
-        file: "src/library.c",
-        needle: "struct tm *pointer = &local;",
-        name: "pointer",
-        expected: "tm",
-    },
-    TypeRow {
-        file: "src/library.c",
-        needle: "div_t divided",
-        name: "divided",
-        expected: "div_t",
-    },
-    TypeRow {
-        file: "src/library.c",
-        needle: "lldiv_t wide_divided",
-        name: "wide_divided",
-        expected: "lldiv_t",
-    },
-    TypeRow {
-        file: "src/library.c",
-        needle: "FILE *file =",
-        name: "file",
-        expected: "FILE",
-    },
-    TypeRow {
-        file: "src/library.c",
-        needle: "struct lconv *locale",
-        name: "locale",
-        expected: "lconv",
-    },
-    TypeRow {
-        file: "src/library.c",
-        needle: "jmp_buf environment",
-        name: "environment",
-        expected: "jmp_buf",
-    },
-    TypeRow {
-        file: "src/library.c",
-        needle: "time_t now =",
-        name: "now",
-        expected: "time_t",
-    },
-    TypeRow {
-        file: "src/library.c",
-        needle: "size_t length = strlen",
-        name: "length",
-        expected: "size_t",
-    },
-    // gnu.c — the extension types.
-    TypeRow {
-        file: "src/gnu.c",
-        needle: "__int128 wide =",
-        name: "wide",
-        expected: "__int128",
-    },
-    TypeRow {
-        file: "src/gnu.c",
-        needle: "__auto_type value = 7;",
-        name: "value",
-        expected: "int",
-    },
-    TypeRow {
-        file: "src/gnu.c",
-        needle: "__auto_type pointer = &point_copy;",
-        name: "pointer",
-        expected: "point",
-    },
-    TypeRow {
-        file: "src/gnu.c",
-        needle: "struct gnu_packed *)",
-        name: "gnu_packed",
-        expected: "gnu_packed",
-    },
-    // c23.c — `auto`, `constexpr`, `typeof`.
-    TypeRow {
-        file: "src/c23.c",
-        needle: "auto count = 3;",
-        name: "count",
-        expected: "int",
-    },
-    TypeRow {
-        file: "src/c23.c",
-        needle: "auto scale = 2.5;",
-        name: "scale",
-        expected: "double",
-    },
-    TypeRow {
-        file: "src/c23.c",
-        needle: "auto pointer = &point_copy;",
-        name: "pointer",
-        expected: "point",
-    },
-    TypeRow {
-        file: "src/c23.c",
-        needle: "typeof(value) copy",
-        name: "copy",
-        expected: "int",
+        needle: "binary_op compare_function",
+        name: "compare_function",
+        expected: "(int, int)",
     },
 ];
 
-/// The corpus's own files, sorted, without the build directory.
 fn corpus_files(root: &Path) -> Vec<PathBuf> {
     let opened = Session::open(
         root.to_path_buf(),
@@ -657,26 +232,16 @@ fn the_c_corpus_parses_and_its_members_resolve() {
             if cooked { "" } else { "  NOT COOKED" }
         );
         if let Some(found) = &found {
-            // **The rendering, because that is the text a finding's offset is into.** A file whose rendering inlines its
-            // include closure has the whole C library before its own first line, so a finding's *file* line cannot be
-            // computed from its offset — but the rendering line and the text at the offset say whether the finding is
-            // about this file's code or about a header's.
-            let rendering = session
-                .view(path)
-                .map(|view| view.source.to_string())
-                .unwrap_or_default();
-            // **A window around the offset in the file**, because every range the diagnostics channel reports has been
-            // mapped into the file — `add_in_the_file` for a rule that reads the summary, `map_into_the_file` for one
-            // that reads the rendering — so the file is the text an offset is into, and the rendering is only there to
-            // say what the cook made of the file.
+            // **A window around the offset in the file.** Every range the diagnostics channel reports has been mapped
+            // into the file — `add_in_the_file` for a rule that reads the summary, `map_into_the_file` for one that
+            // reads the rendering — so the file is the text an offset is into.
             let where_at = |offset: usize| -> String {
                 let text = &text;
                 let from = offset.saturating_sub(64).min(text.len());
                 let to = (offset + 64).min(text.len());
                 let before = text[..from]
                     .char_indices()
-                    .rev()
-                    .next()
+                    .next_back()
                     .map_or(from, |(at, _)| at);
                 let after = text[to..]
                     .char_indices()
@@ -691,13 +256,14 @@ fn the_c_corpus_parses_and_its_members_resolve() {
             };
             for error in found.errors.iter().take(6) {
                 println!(
-                    "      {}  ← {}",
+                    "      line {}: {}  ← {}",
+                    line_of(&text, error.start),
                     where_at(error.start),
                     error.message.chars().take(90).collect::<String>()
                 );
             }
-            // **Every finding, grouped by code** — the list is the work list, and three samples per file is how the
-            // first version of this probe hid that one code accounted for all of them. `CPPLS_C_ALL` lifts the cap.
+            // **Every finding, grouped by code** — three samples per file is how the first version of this probe hid
+            // that one code accounted for all of them. `CPPLS_C_ALL` lifts the cap.
             let mut by_code: BTreeMap<&str, Vec<&cpp_code_analysis::Finding>> = BTreeMap::new();
             for check in &found.checks {
                 by_code.entry(check.code.name()).or_default().push(check);
@@ -713,7 +279,8 @@ fn the_c_corpus_parses_and_its_members_resolve() {
                 };
                 for check in entries.iter().take(shown) {
                     println!(
-                        "        {}  ← {}",
+                        "        line {}: {}  ← {}",
+                        line_of(&text, check.range.start_offset),
                         where_at(check.range.start_offset),
                         check.message.chars().take(80).collect::<String>()
                     );
@@ -731,12 +298,10 @@ fn the_c_corpus_parses_and_its_members_resolve() {
 
     dump_names(&session, &root);
 
-    // **Re-cook the files whose rendering the cache has dropped**, and the reason is a measurement rather than a
-    // convenience: the rendering cache is bounded by weight, so a file cooked early is evicted by the ones after it, and
-    // `Session::view` then answers `None` for it — which the member and type rows below read as "the engine offered
-    // nothing". Measured: `aggregates.c` and `gnu.c` answered `0 offered` for **every** row while `types.c`, cooked
-    // last, answered all of them; `CPPLS_TRACE_VIEW` showed `summary true, held true` and no rendering. A cook is
-    // idempotent, so asking again costs the cook it never had.
+    // **Re-cook the files whose rendering the cache has dropped.** The rendering cache is bounded by weight, so a file
+    // cooked early is evicted by the ones after it, and `Session::view` then answers `None` — which the rows below
+    // read as "the engine offered nothing". Measured on the previous corpus: two files answered `0 offered` for every
+    // row while the last one answered all of them. A cook is idempotent.
     for path in &files {
         if session.view(path).is_none() && session.cook(path).is_none() {
             println!("  WARN  {} has no reading to ask about", path.display());
@@ -778,17 +343,6 @@ fn the_c_corpus_parses_and_its_members_resolve() {
             session.cook(&path);
         }
         let labels = member_labels(&session, &path, cursor);
-        if labels.is_empty() && std::env::var_os("CPPLS_TRACE_MEMBERS").is_some() {
-            match session.view(&path) {
-                Some(view) => println!(
-                    "  trace: {} rendering {} chars, reading offset {:?}",
-                    row.file,
-                    view.source.len(),
-                    view.reading_offset_of(FileOffset::new(cursor))
-                ),
-                None => println!("  trace: {} no view", row.file),
-            }
-        }
         if labels.is_empty() && std::env::var_os("CPPLS_TRACE_MEMBERS").is_some() {
             match session.view(&path) {
                 Some(view) => println!(
@@ -908,14 +462,15 @@ fn drain(session: &mut Session<DiskFiles>) -> usize {
     }
     steps
 }
+
 /// **What the index actually holds for a name** — the question every `undefined-name` finding turns into.
 ///
-/// `CPPLS_C_NAMES="functions_selector,functions_aborts,div,ldiv"` prints every fact filed under each name, with the
-/// file it came from, its kind, its type and its parameter list. A name with no fact at all is a declaration the
-/// summary did not record; a fact with an empty type is a declaration it recorded but could not read.
+/// `CPPLS_C_NAMES="bits,signed_wide"` prints every fact filed under each name, with the file it came from, its kind,
+/// its type and its parameter list. A name with no fact at all is a declaration the summary did not record; a fact
+/// with an empty type is a declaration it recorded but could not read.
 ///
-/// `CPPLS_C_FACTS="src/c23.c"` prints **every** fact of one file, which is the question a name cannot answer: whether a
-/// declaration was recorded at all, and what type the summary gave it.
+/// `CPPLS_C_FACTS="src/bits.c"` prints **every** fact of one file, which is the question a name cannot answer: whether
+/// a declaration was recorded at all, and what type the summary gave it.
 fn dump_names(session: &Session<DiskFiles>, root: &Path) {
     if let Ok(file) = std::env::var("CPPLS_C_FACTS") {
         let path = root.join(&file);
@@ -939,24 +494,6 @@ fn dump_names(session: &Session<DiskFiles>, root: &Path) {
         return;
     };
     println!("\n--- declarations: what the index holds under each name");
-    // **Where the toolchain said the headers are**: for a C project they must be the C ones (cstdlib is C++'s, and
-    // a <stdlib.h> that resolves to it leaves div undeclared — measured).
-    println!(
-        "  named compilers: {:?}",
-        session.discovery().named_compilers()
-    );
-    if let Some(toolchain) = session.toolchain() {
-        println!(
-            "  toolchain compiler: {:?}  version: {:?}",
-            toolchain.compiler, toolchain.version
-        );
-        let paths: Vec<String> = toolchain
-            .include_paths()
-            .iter()
-            .map(|path| format!("{:?}", path))
-            .collect();
-        println!("  toolchain include paths: {paths:?}");
-    }
     let probe = std::env::var_os("CPPLS_C_PROBE_FILE")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| root.join("src").join("main.c"));
@@ -1019,6 +556,7 @@ fn dump_names(session: &Session<DiskFiles>, root: &Path) {
         );
     }
 }
+
 fn name_of(path: &Path) -> String {
     path.strip_prefix(path.ancestors().nth(2).unwrap_or(path))
         .unwrap_or(path)

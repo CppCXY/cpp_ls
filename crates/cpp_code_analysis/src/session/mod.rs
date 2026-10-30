@@ -3703,7 +3703,11 @@ impl<F: FileProvider + Clone> Session<F> {
         }
         let file = self.vfs.held(&key)?;
         if std::env::var_os("CPPLS_TRACE_VIEW").is_some() {
-            eprintln!("view: file.path {:?} hash {:?}", file.path, crate::cache::content_hash(&file.text));
+            eprintln!(
+                "view: file.path {:?} hash {:?}",
+                file.path,
+                crate::cache::content_hash(&file.text)
+            );
         }
 
         // **The rendering, or a request for it — never the file's own tokens.**

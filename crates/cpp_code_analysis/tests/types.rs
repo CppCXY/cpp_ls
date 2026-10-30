@@ -1775,7 +1775,6 @@ int f(void) { binary_op operation = add; comparer *compare = 0; return operation
 /// `struct bits { unsigned _BitInt(3) three : 3; _BitInt(13) signed_wide : 13; };` — the corpus's own shape, and the
 /// measurement is the *summary*, because the facts are what a member list is built from.
 #[test]
-#[ignore = "a member whose specifier begins `_BitInt(N)` is dropped, while `unsigned _BitInt(N)` is kept — docs/remaining.md §N16"]
 fn both_bitfields_of_a_bitint_struct_are_recorded() {
     let source = "\
 struct bits {

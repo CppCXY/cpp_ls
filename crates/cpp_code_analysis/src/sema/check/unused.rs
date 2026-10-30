@@ -41,8 +41,6 @@ fn is_a_header(path: &std::path::Path) -> bool {
     )
 }
 
-/// `_name` is a name the writer chose not to use — see the module documentation.
-
 /// Is the declaration at t (a **rendering** offset) a **member of a type** rather than a local variable?
 ///
 /// The innermost scope decides, and only a class scope counts — see the call site for why the chain below the

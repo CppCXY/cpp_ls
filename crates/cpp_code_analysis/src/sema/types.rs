@@ -1504,7 +1504,7 @@ fn declared_name_range(declarator: &CppSyntaxNode) -> Option<cpp_parser::SourceR
 /// The qualifiers are dropped rather than modelled, and the reason is the same one [`Type`] gives for keeping
 /// spellings: this layer does not resolve aliases, so `const Int` and `Int` are already two names for one type, and
 /// a `const` on the base would be a third axis no query here asks about.
-/// Is this builtin specifier's text a **	ypeof/decltype spelling** — C23's, GNU's, or C++'s own?
+/// Is this builtin specifier's text a **`typeof`/`decltype` spelling** — C23's, GNU's, or C++'s own?
 fn is_a_typeof_spelling(word: &str) -> bool {
     let name = word.split('(').next().unwrap_or(word).trim();
     matches!(
@@ -1513,9 +1513,9 @@ fn is_a_typeof_spelling(word: &str) -> bool {
     )
 }
 
-/// The type a 	ypeof(…)/decltype(…) specifier denotes, when its payload is a **type-id**.
+/// The type a `typeof(…)`/`decltype(…)` specifier denotes, when its payload is a **type-id**.
 ///
-/// `None` when the payload is an expression — 	ypeof(value) — because that answer needs the semantic model and this
+/// `None` when the payload is an expression — `typeof(value)` — because that answer needs the semantic model and this
 /// reader is given a tree and nothing else.
 fn the_type_a_typeof_names(node: &CppSyntaxNode) -> Option<Type> {
     // The payload is the node inside the parentheses; a type-id is written as a TypeId holding a

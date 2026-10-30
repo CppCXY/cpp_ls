@@ -80,6 +80,13 @@ use std::path::{Path, PathBuf};
 /// *this* crate''s own readings leaves no such trace, so it is this number that is bumped — the same lever a
 /// dependency bump uses. The number is still the blunt instrument: every entry becomes unreachable.
 ///
+/// # Why this moved to 4
+///
+/// **A `_BitInt(`-first class-body member was lost from the summary.** `struct bits { _BitInt(13) signed_wide : 13; }`
+/// produced no declaration at all: the specifier loop read `_BitInt(13)` as an unexpanded macro and `signed_wide` as
+/// its *type*, so the member had no declarator. Every cache written before that fix holds a summary missing those
+/// members, and the member list is built from the summary — the stale answer is visibly wrong, not merely old.
+///
 /// # Why this moved for version 14 of the codec
 ///
 /// A fact's `type_of` is read from the syntax now rather than assembled out of a declaration's text, and the two
@@ -87,7 +94,7 @@ use std::path::{Path, PathBuf};
 /// and `Point>` where the new one answers `size_type` and `std::vector<Point>`. The bytes are the same shape, so an
 /// old entry still decodes — which is exactly why this number has to move rather than the codec's: an entry that
 /// decodes but says something this build would not write is the case this constant exists for.
-pub const FORMAT_VERSION: u32 = 3;
+pub const FORMAT_VERSION: u32 = 4;
 
 /// **The fingerprint of the readers a summary was built by**, in the key.
 ///
