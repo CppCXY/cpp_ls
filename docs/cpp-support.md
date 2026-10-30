@@ -1,134 +1,122 @@
-# C++ 支持性测量：`test_cpp`
+# C++ support
 
-> 目的：把"这个服务器读 C++ 代码读得怎么样"变成可重复的数字。语料是 `C:\Users\zc\Desktop\test_cpp`：16 个翻译
-> 单元，每个覆盖一块语言特性，用 **MinGW g++ 15 + CMake 以 C++23 构建**（0 error），所以"分析报错"是分析的缺陷，
-> 不是文件的问题。C 的同类测量在 [`c-support.md`](c-support.md)，语料在 `Desktop\c-project`。
+What this server understands about C++: how a file is identified as C++, which language features it reads, what the
+semantic layer can answer, what each LSP feature gives, and which diagnostics exist. Configuration and the limits are in
+[`configuration.md`](configuration.md); the same reference for C is [`c-support.md`](c-support.md).
 
-## 1. 语料与探针
+## 1. Language identification
 
-```powershell
-cmake -S . -B build -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
-cmake --build build                       # 0 error
-cargo test --release -p cpp_code_analysis --test cpp_corpus -- --ignored --nocapture
-```
+| Item | Rule |
+| --- | --- |
+| Extension | `cpp`, `cc`, `cxx`, `c++`, `cppm`, `ixx` are sources; `h`, `hh`, `hpp`, `hxx`, `h++`, `ipp`, `inl`, `tpp`, `tcc` are headers |
+| `.h` | belongs to whichever language **includes** it; read on its own it is C++, because that search list is the wider one |
+| `-std=` | wins over the extension: `c++11`…`c++23` and `gnu++…` are C++; `c…` is C |
+| Range of standards | **C++11 and later** (there is no separate C++98/03 mode; older code is read as C++11 and usually still parses) |
+| Indexed extensions | `c cc cpp cxx c++ h hh hpp hxx h++ ipp inl tpp tcc cppm ixx`, plus anything in `[workspace].source_extensions` (`cuh`, `cppm`) |
+| Where files come from | `compile_commands.json` → `.cppls.toml` → the project scan; an `#include` no search path can place falls back to matching the tail of its path against the tree |
+| CUDA | `.cu`/`.cuh` files and an `nvcc` build are read as CUDA; `[compile.cuda]` turns that on without a database |
 
-`crates/cpp_code_analysis/tests/cpp_corpus.rs` 打开这个工程、索引一次、逐个文件 cook，然后三张表：
+## 2. Standards and language features
 
-```text
-parse    每个文件的语法错误数、finding 数、声明数
-members  8 条手工清单：`x.member` / `x->member` 的补全列表里有没有期望的成员
-types    4 条手工清单：声明名上的 `type_at` 是否给出期望的类型
-```
+Each construct is a **feature bit** opened by `-std=` or `[compile].standard`.
 
-文件与覆盖范围的表在语料自己的 `README.md`。
+| Standard | Constructs accepted |
+| --- | --- |
+| C++11 | raw strings `R"(…)"`, `auto`, lambdas, rvalue references `&&`, variadic templates, alias templates `using`, `[[attribute]]`, `static_assert`, `alignas`/`alignof`, `thread_local`, `nullptr`, `enum class`, range `for` |
+| C++14 | generic lambdas (`auto` parameters), variable templates, binary literals, digit separators `'`, return type deduction |
+| C++17 | structured bindings, `if constexpr`, fold expressions, `inline` variables, class template argument deduction (CTAD), nested namespaces `a::b::c`, `[[maybe_unused]]`/`[[nodiscard]]`/`[[fallthrough]]` |
+| C++20 | concepts and `requires`, modules (`module`/`import`/`export`), coroutines (`co_await`/`co_yield`/`co_return`, `operator co_await`), designated initialisers, the three-way comparison `<=>`, `using enum`, `char8_t`, `consteval`, `constinit` |
+| C++23 | deducing `this` (explicit object parameters), `if consteval`, multidimensional subscript `a[i, j]`, static `operator()`/`operator[]`, `#elifdef`/`#elifndef` |
+| GNU extensions | statement expressions, `__typeof__`, `__attribute__`, `__builtin_*`, `asm`, `__restrict__` |
+| MSVC extensions | `__declspec(...)`, `__int64`, `__try`/`__except`/`__finally`, `__cdecl`/`__stdcall`, macro prefixes such as `_STD_BEGIN`/`_STD_END` |
+| CUDA | `__global__`/`__device__`/`__host__`, the `<<<…>>>` launch syntax, built-in vector types such as `float4` and `dim3` |
 
-## 1.5 判定放在索引阶段，而不是字符串搜索
+**Not supported**: C++26 (contracts, reflection, `#embed`) has no feature bits yet; that syntax is read as C++23.
 
-第一轮修缺陷时，有几处判定是"在检查层把声明的文本切一刀再搜索"——`written.contains("override")`、
-`text.contains("maybe_unused")`、`text.contains("...")`、`if constexpr` 的前缀扫描。这些都是**索引阶段就能回答**的
-问题，而每次诊断都重新读一遍文本既慢又容易拿错坐标系（`use-override` 的第一个 bug 就是拿文件偏移去切渲染文本）。
-现在：
+## 3. Preprocessing
 
-* **`DeclFact.modifiers: DeclModifiers`**（u32 位集）在 summary 构建时算一次，随 summary 落盘，检查只读位：
-  `VIRTUAL`、`OVERRIDE`、`FINAL`、`CONSTEXPR`、`CONSTEVAL`、`CONSTINIT`、`STATIC`、`INLINE`、`EXPLICIT`、
-  `MAYBE_UNUSED`、`NODISCARD`、`VARIADIC`、`DELETED`、`DEFAULTED`。`override`/`final` 是上下文标识符、`[[maybe_unused]]`
-  是声明**前面**的兄弟节点，所以位是**从 token** 读的，属性那一条读声明前缀（每文件一次渲染文本，不是每声明一次）。
-  `use-override` 与 `unused` 已改读位；`FORMAT_VERSION` 6、`CODEC_VERSION` 32。
-* **`if constexpr` / `if consteval`** 由 parser 回答：`CppIfStat::is_constexpr()` / `is_consteval()`（读语句自己的
-  前导 token），`else-after-return` 不再扫文本。
-* **包展开的实参个数**由 parser 回答：`CppCallExpr::has_a_pack_expansion()`（`PackExpansionExpr` 节点），
-  `argument-count` 不再在调用文本里找 `...`。
+| Ability | What it does |
+| --- | --- |
+| `#include` | angle and quote forms; search paths from the database, the configuration or the toolchain; a header is resolved against the C++ list, with tail matching as the fallback |
+| `#define` / `#undef` | object-like and function-like, variadic, `#`, `##`, `__VA_OPT__`; `#undef` is part of the history |
+| Conditionals | `#if`/`#elif`/`#else`/`#endif`, `#ifdef`/`#ifndef`, C++23's `#elifdef`/`#elifndef`; expressions are evaluated as integer constants |
+| Modules | `module`, `import`, `export` and `export module` are parsed and indexed as declarations |
+| Predefined macros | `__cplusplus` follows the selected standard; the toolchain's markers (`_MSC_VER`, `_WIN32`, `__GNUC__`, `__clang__`) follow the compiler |
+| Macro environment | the set of macros visible at each position is recorded, and hover, completion, references and rename ask it rather than searching the text |
 
-回归测试：`tests/modifiers.rs` 逐条钉住上述位；`style_checks.rs` 的坐标测试（注释让 file/rendering 偏移不同）继续
-覆盖 `use-override`；`c_corpus`/`cpp_corpus` 仍为 0 finding。
-## 2. 第一次测量（2026-10-30，冷缓存）
+## 4. Semantic analysis
 
-```text
-16 file(s), 640 declarations, 6 with a syntax error, 10 errors
-members  6/8
-types    3/4
-```
+This is the "understands C++" layer, and the base every completion, hover and check stands on.
 
-### 2.1 语法错误（10 条，5 组）
+| Ability | What it answers |
+| --- | --- |
+| Scopes | translation unit, namespaces (anonymous and inline), classes/structs/unions/enums (with anonymous-member promotion), functions, blocks, lambdas, `try`/`catch`, `for` init-statements, structured bindings |
+| Types | built-in types, pointers/references (lvalue and rvalue)/arrays/function pointers, `const`/`volatile`, `typedef`/alias templates, class template specialisations, `decltype`, `auto`, `char8_t` |
+| Template deduction | function template argument deduction (`T`, `const T&`, `T*`, `T[]`, a one-level template-id), explicit template arguments, parameter packs, partial ordering (the more specialised wins), substitution into a class template's members |
+| Overload resolution | viable candidates, then a per-argument rank (Exact / Promotion / Conversion / Unranked); the template-versus-ordinary tie-break; a `= delete`d candidate is never selected; several declarations of one name are chosen between by the arguments |
+| Type inference | `auto` (including `auto&&`/`auto*`), `decltype`, function return types, the return type of factories such as `std::make_unique` |
+| Members | class member lists (inherited, access-controlled, `static`, `using` declarations); a class template's members substituted with the arguments; the `->` of `unique_ptr`/`shared_ptr` and kin follows `element_type` |
+| Calls | argument count and types, variadic functions, default arguments as viable (a parameter list may be longer than the argument list), return type, the object type of a member call, `operator()` |
+| Concepts | `requires` expressions, `concept` definitions and constraint checking (`concept-not-satisfied`) |
+| Coroutines | `co_await`/`co_yield`/`co_return`, `promise_type`, `operator co_await`, and a coroutine's return type entering `auto` deduction |
+| Constants | `#if`, array extents, enumerator values, `constexpr` conditions (which branch of `if constexpr` is taken) |
+| The index | the cross-file declaration table, the `#include` graph, member-list caches, the summary cache (`.cppls`); modifiers (`virtual`, `override`, `final`, `constexpr`, `static`, `maybe_unused`, `= delete`, …) become **bits on the fact at index time** |
 
-| 位置 | 构造 | 现象 |
-|---|---|---|
-| `classes.cpp:64` | `[[likely]] case 2:` | `expected primary expression`。C++ 的 `labeled-statement` 允许属性在 `case` 前（`[stmt.label]`），g++ 接受，解析器不接受；第 67 行 `default:` 是连带错误 |
-| `classes.cpp:162` | `typeid(*polymorphic).name()` | `expected ';' after expression`。`typeid` 带解引用表达式作载荷时读错 |
-| `lambdas.cpp:46` | `[... copies = values]` 包捕获（C++20） | `expected primary expression`。lambda 的捕获列表不接受包展开 |
-| `preprocessor.cpp:96` | `TEST_CPP_MAKE_NAME(test)`，宏体是 `TEST_CPP_CAT(prefix, _value)`，再展开成 `a##b` | `expected ), but get identifier`。`##` 的粘接仍坏（与 C 语料 §N9 同源） |
-| `ranges.cpp:39,51,59` / `strings.cpp:87` | `for (int value : std::views::iota(1, 6))`、`for (… : map \| std::views::values)`、`for (… : rows \| std::views::join)`、`for (… : std::string_view{text} \| std::views::split(','))` | `expected primary expression`。range-for 的 range 表达式以 `views::` 的调用/管道开头时读不出 `:` 右侧 |
+## 5. LSP features
 
-### 2.2 误报（findings，按根因分组）
+| Feature | What it gives |
+| --- | --- |
+| `textDocument/completion` | names in scope (locals → class members → namespaces → included headers), the right of `.`/`->`/`::` by type, macros, keywords, `#include` file names; with the range to replace, a `sortText` that is the analysis's own order (a local before a keyword before a name from a header), snippets when the client supports them, and `completionItem/resolve` for the one item being looked at |
+| `textDocument/hover` | macros first, then the declaration (signature/type/scope), then the type of the expression; the comment next to the declaration comes with it |
+| `textDocument/signatureHelp` | the list of overloads with `activeParameter` — the position of the argument being typed |
+| `textDocument/definition` | the declaration of a macro, type, function, variable, member or enumerator, across files through the index |
+| `textDocument/implementation` | a virtual function's declaration → its overriders; a function declaration → its definition |
+| `textDocument/typeDefinition` | a variable or `auto` name → the definition of its type (classes, alias templates) |
+| `textDocument/references` | **exact references for macros**, including the ones reached under a conditional `#include` or `#if` (marked as uncertain); an ordinary name is not answered |
+| `textDocument/rename` + `prepareRename` | **macros only**; an ordinary name is refused, because editing half of a name's uses is a broken build written into the user's files |
+| `textDocument/documentHighlight` | occurrences of the same name in the current file |
+| `textDocument/documentSymbol` | the file's own declaration tree (including what `#if 0` removes), namespaces and classes nested; a range for the declaration and one for the name |
+| `workspace/symbol` | the declarations the project index holds, by name |
+| `callHierarchy` | incoming and outgoing calls of a function (member functions by the object's type) |
+| `textDocument/selectionRange` | the chain of syntax nodes around the cursor |
+| `textDocument/foldingRange` | brace blocks, comments, `#region`, runs of `#include` |
+| `textDocument/documentLink` | the path of an `#include`, as a link to the file |
+| `textDocument/inlayHint` | parameter names at call sites |
+| `textDocument/codeAction` | `source.include`: an unresolved name → an edit adding the header that declares it, chosen by the include-visibility rule |
+| `textDocument/semanticTokens` | the standard types plus `decorator` (Doxygen commands) and the custom `variableTemplate`; inside string literals, `std::format`/`fmt`'s `{}` fields and the `printf` family (`formatSpecifier`, `formatArgument`, `formatConversion`, `formatEscape`) |
+| `textDocument/diagnostic` | **pull mode**: syntax errors plus the rules in §6 |
+| `textDocument/formatting`, `rangeFormatting`, `willSaveWaitUntil` | whole-file and range formatting, reading the common subset of `.clang-format` (indent, column limit, brace style, short blocks on one line, …) |
+| `workspace/didChangeConfiguration` | `.cppls.toml` and editor settings — see [`configuration.md`](configuration.md) |
 
-| 规则 | 数量 | 例子 | 根因 |
-|---|---|---|---|
-| `undefined-name` | 22 | `factorial`、`sequences`、`exceptions`、`pointers`（都在**匿名 namespace** 里定义，在同一个文件的后面调用） | 匿名 namespace 的成员对索引里的名字查询不可见——同一文件里的调用被判"没有声明" |
-| `else-after-return` | 5 | `if constexpr (…) { return …; } else { … }`、`if consteval { … } else { … }` | 编译期分支的 `else` 不是"嵌套了不必要的 else"；规则应当跳过 `if constexpr`/`if consteval` |
-| `undefined-field` | 3 | 类模板 `Task` 的移动构造里 `std::exchange(other.handle_, …)` | 依赖类型的成员访问（`other` 的类型依赖 `T`）解析不出成员 |
-| `assign-type-check` | 2 | `std::any any = 1;` | 声明类型被读成 `void`，于是"1 不能转换成 void" |
-| `argument-count` | 1 | `sum_head(rest...)` | 包展开被当成"实参太少" |
-| `use-override` | 1 | `ThreeD::sum`（**写了** `override`） | 误报，且 range 落在 `static_assert` 上——检查层报告的 range 与文件坐标不一致（§N7 记过同类问题） |
-| `unused` | 2 | `Guard guard(counter);`、`std::shared_lock<std::shared_mutex> reader(...)` | RAII 对象本来就"不用"；`unused` 应豁免有非平凡析构的类型 |
+## 6. Diagnostics
 
-### 2.3 成员 / 类型
+Twenty-six rules, each with a fixed severity; `[diagnostics].disable` turns one off by name.
 
-```text
-members  PASS derived.name()      PASS clone->describe()   FAIL unique->identifier()（0 offered）
-         PASS vector.push_back    PASS deque.push_front     PASS accumulator.add(3)
-         FAIL task.run()（0 offered）  PASS slot.get()
-types    PASS derived → Derived   PASS slot → Box<int>
-         FAIL task → unknown（`auto task = doubled();` 的类型推不出 `Task<int>`）
-         PASS accumulator → Accumulator<int>
-```
-
-两条失败指向同一类问题：`std::unique_ptr<Resource>` 的成员查询，以及**协程函数的返回类型**（`Task<int> doubled()`）
-没有进入 `auto` 的推导。
-
-## 3. 第一轮的下一轮顺序（已全部处理，留作记录）
-
-1. **range-for 的 range 表达式**（4 条错误）——`for (x : expr)` 里 `expr` 以 `views::` 名称/管道/带花括号的临时量开头
-   时 `:` 右侧读不出来，是语法层的一个入口判断。**已修**：`continues_a_qualified_name` 不该越过 `:`。
-2. **匿名 namespace 的可见性**（22 条 finding）——同一文件、同一作用域的调用被判"未声明"。**已修**：
-   `ScopeTree::scopes_visible_from`，链上每个 scope 的无名 namespace 子节点也算可见。
-3. `[[likely]] case`、`typeid(expr)`、包捕获、`##`/`__VA_OPT__` 粘接。**已修**（各自有 parser/expand 测试）。
-4. `if constexpr` / `if consteval` 的 `else-after-return`、RAII 的 `unused`、依赖类型成员、`std::any` 的类型。**已修**。
-5. `auto` 对协程/模板函数返回类型的推导、`unique_ptr` 的成员查询。**未修**，见 §4。
-
-## 3.5 第三轮：协程返回类型那条的根因
-
-`auto task = doubled();` 推不出 `Task<int>` 并不是 `auto`/调用推导的问题——`answer`、`doubled`、`custom` 三个 fact
-的 `scope` 是 `Some("Task")`、`parameters` 是 `["T"]`，它们被当成了 `Task` 的**成员**。根因在解析器：
-`awaiter operator co_await()` 里的 `co_await` 是一个**关键字**，`parse_operator_name` 的可重载运算符表里没有它，
-于是 `ErrorNode` 落在 `Task` 的类体里，类的定义节点因此越过自己的 `}`，作用域延伸到后面三个自由协程函数上。
-把 `CoAwaitKeyword` 加进那张表即可：语料随之为 **7/8 members、4/4 types**（`task` → `Task<int>`、`task.run()` 7 个候选）。
-解析器测试见 `tests/cpp20.rs` 的 "an awaitable's own operator co_await"。
-
-## 3.6 第四轮：`unique->` 那条的四步
-
-`std::make_unique<Resource>(1)` 的 `auto` 推导一路有四个缺口，缺一个都走不通：
-
-1. **重载选择的入口拿的是带模板实参的拼写**：`Ambiguous("std::make_unique<Resource>")` 里的名字带 `<Resource>`，而
-   `definitions("std::make_unique<Resource>")` 什么也找不到——选择根本没开始。新增
-   `the_name_without_its_arguments`（只去掉"匹配的 `>` 正好在末尾"的那一组）。
-2. **显式模板实参没有参与推导**：`deduce` 只看调用实参，`_Tp` 无从绑定。新增 `deduction::deduce_with_written`：
-   调用写的 `<…>` 先绑好，并且**写死的名字不再参与推导**（`f<long>(1)` 里 `int` 转成 `long`，不是"不一致"）。
-3. **参数包没有元素类型**：`parameters_in` 把 `_Args&&... __args` 整个丢掉，于是这个候选和 `size_t` 那个都是
-   "无参数 + variadic"，永远平手。现在包保留元素拼写 `_Args&&`（C 风格无类型 `...` 仍然只置 variadic）。
-4. **`= delete` 的重载没有被排除**：`= delete` 写在 declarator **之后**的 init-declarator 里，早先的修饰符扫描看不到它，
-   于是它和真正的重载并列第一。现在 `modifiers_in` 也走 init-declarator（仍跳过 body），`DeclModifiers::DELETED`
-   生效，选择时剔除。
-
-外加完成路径的一处：`the_class_after_the_operator` 拿到的类名可能是**裸拼写**（`unique_ptr`），而索引里的是
-`std::unique_ptr`——成员列表问裸名得到 0 个，`->` 就退化到指针自己的（空）成员。现在裸名先经
-`qualified_from_the_index` 补全；已经带 `::` 的拼写不再补（否则会出现 `std::std::unique_ptr`，这是第一版就踩到的坑）。
-
-语料因此到 **8/8 members、4/4 types**。
-
-## 4. 仍然已知的一条：测量环境的坑
-
-**系统头文件的 summary 会随会话顺序给出不同答案**：同一个 `std::string_view`，单独打开 `strings.cpp` 的会话给出
-79 个成员（含 `starts_with`/`ends_with`），而先索引整个工程、逐文件 cook + diagnostics 的会话给出 73 个（缺 C++20
-的成员，于是 `undefined-field` 误报）。summary 的 key 有 `content_hash`/`context_hash`/fingerprint，但成员列表的
-缓存（`index.remember_member_list`）只按"哪些文件贡献了它"失效——一个在头文件索引完成之前算出的列表可以活下来。
-现在 `undefined-field` 只判定**本文件声明**的类，误报消失；根因是把宏环境纳入 summary / member-list 的 key。
+| Code | Severity | Meaning |
+| --- | --- | --- |
+| `syntax-error` | Error | the text does not parse |
+| `param-type-check` | Error | an argument's type cannot go to the parameter |
+| `assign-type-check` | Error | an assignment or initialisation does not fit the type |
+| `undefined-field` | Error | the member is not in the type (a class template's member list is a pattern and is skipped) |
+| `undefined-name` | Error | the name is not declared |
+| `redefinition` | Error | the same entity is defined twice in one scope |
+| `argument-count` | Error | the call passes the wrong number of arguments |
+| `return-type-mismatch` | Error | a `return` does not fit the declared type |
+| `include-not-found` | Error | the `#include` was not found |
+| `access-invisible` | Error | a member reached from somewhere that may not reach it |
+| `missing-return` | Error | a function that promises a value can reach its end |
+| `concept-not-satisfied` | Error | a constraint is not met |
+| `macro-redefined` | Warning | the same macro is redefined with a different body |
+| `unnecessary-branch` | Warning | a branch that cannot run (`if constexpr`/`if consteval` are not reported) |
+| `assignment-in-condition` | Warning | an assignment inside a condition |
+| `c-style-cast` | Warning | a C-style cast (a `(void)` cast is not reported) |
+| `macro-parentheses` | Warning | a macro body without parentheses of its own |
+| `unused` | Hint | a name nothing reads (tag: Unnecessary; `[[maybe_unused]]` and RAII guards are not reported) |
+| `braces-around-statements` | Hint | a single-statement branch without braces |
+| `use-nullptr` | Hint | `0`/`NULL` used as a null pointer |
+| `use-override` | Hint | an overriding function without `override`/`final` |
+| `simplify-boolean-expr` | Hint | a boolean expression that can be simplified |
+| `else-after-return` | Hint | an `else` after a `return` (`if constexpr`/`if consteval` are not reported) |
+| `use-auto` | Hint | a declaration that could be written `auto` |
+| `implicit-bool-conversion` | Hint | an arithmetic value converted to `bool` |
+| `module-note` | Information | a note about a module's position (not a complaint, no squiggle) |

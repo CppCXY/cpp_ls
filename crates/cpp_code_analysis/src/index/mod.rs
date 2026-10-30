@@ -1334,8 +1334,8 @@ fn deguard_the_files_own_guard(facts: &mut [&mut FactGuard], region: usize) {
 ///
 /// **The start is not narrowed the same way, and that is deliberate.** `body_text` is sliced from this range and the
 /// expander hands *its* token slice to the paste operator, whose positions were recorded against the body as written —
-/// so changing the start would move every `##` in the project by one token. See `docs/remaining.md` §N8, where the
-/// X-macro paste this interacts with is measured.
+/// so changing the start would move every `##` in the project by one token, which is the X-macro paste this interacts
+/// with.
 fn body_range_of(
     definition: &crate::preprocess::macros::MacroDef,
 ) -> Option<cpp_parser::SourceRange> {

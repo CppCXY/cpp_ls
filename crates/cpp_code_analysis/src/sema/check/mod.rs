@@ -166,6 +166,12 @@ pub trait Check {
 /// The skip is here rather than inside each check because the expensive part of a check is the walk over the tree,
 /// not the sentence it produces: a rule the user turned off should cost nothing at all.
 pub fn run_check<T: Check>(context: &mut CheckContext<'_>) {
+    // **A C++-only rule costs nothing in a C file.** The filter below is the same answer one level up: a check whose
+    // every code is C++-only is not a question about this file at all, so it is skipped before it walks the tree. A
+    // check that reports both kinds still runs, and the per-finding filter drops the half that does not apply.
+    if context.is_c() && T::CODES.iter().all(|code| code.is_cpp_only()) {
+        return;
+    }
     if T::CODES.iter().any(|code| context.config.is_enabled(*code)) {
         // **Per-rule timing, while a pathological file is being found.** `CPPLS_TIME_CHECKS=1` prints one line per rule per
         // file; summed over a run it names the rule that takes the forty-five seconds. Temporary — a probe is a tool, not a
@@ -418,6 +424,12 @@ impl<'a> CheckContext<'a> {
         message: impl Into<String>,
     ) {
         if !self.config.is_enabled(code) {
+            return;
+        }
+
+        // **A C++-only rule says nothing about a C file** — see [`DiagnosticCode::is_cpp_only`]. The skip in
+        // [`run_check`] covers a check that is entirely C++, and this covers the codes of a check that reports both.
+        if self.is_c() && code.is_cpp_only() {
             return;
         }
 

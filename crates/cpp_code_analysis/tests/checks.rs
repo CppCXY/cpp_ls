@@ -2830,6 +2830,73 @@ int f(void) {
     );
 }
 
+/// **The eight C++-only rules are the eight the documentation lists.** The list is a claim about the language, and a
+/// rule added to it (or dropped from it) without the documentation moving is the kind of drift this test exists for.
+#[test]
+fn the_cpp_only_rules_are_known_by_name() {
+    let marked: Vec<DiagnosticCode> = DiagnosticCode::ALL
+        .iter()
+        .copied()
+        .filter(|code| code.is_cpp_only())
+        .collect();
+    assert_eq!(
+        marked,
+        vec![
+            DiagnosticCode::AccessInvisible,
+            DiagnosticCode::ModuleNote,
+            DiagnosticCode::UseNullptr,
+            DiagnosticCode::UseOverride,
+            DiagnosticCode::CStyleCast,
+            DiagnosticCode::UseAuto,
+            DiagnosticCode::ImplicitBoolConversion,
+            DiagnosticCode::ConceptNotSatisfied,
+        ]
+    );
+}
+
+/// **A C project is not told to write C++.** These three rules name C++ style — `static_cast`, `nullptr`, an explicit
+/// comparison — and in C each of the three is the language's own spelling. The language comes from the project's own
+/// `-std=`, which is the defect `Config::language_for` records: a project that said `-std=c17` in `.cppls.toml` was
+/// read as "not told", and `cstyle-cast` alone produced **14 findings** telling a C program to write `static_cast`.
+///
+/// The C++ half of the test is not decoration: a gate that silently turned the rules off everywhere would pass the
+/// first half alone, and the rules are the reason the server has an opinion about C++ style at all.
+#[test]
+fn c_files_are_not_told_to_write_cpp_style() {
+    // **`NULL` is left undeclared on purpose.** A `#define NULL 0` would be expanded by the cook, and every rule here
+    // reads the tree: the expression would be `0` and `use-nullptr` could not see the spelling it is about. The
+    // `undefined-name` that comes with it is a different rule and is not what this test asserts.
+    let source = "\
+int *p = NULL;
+void f(int n) {
+    if (n) {
+        p = (int *)p;
+    }
+}
+";
+    let cpp_only = [
+        DiagnosticCode::UseNullptr,
+        DiagnosticCode::ImplicitBoolConversion,
+        DiagnosticCode::CStyleCast,
+    ];
+
+    let in_c = codes_of_with(source, "/p/style.c", Some("c17"));
+    for code in cpp_only {
+        assert!(
+            !in_c.contains(&code),
+            "{code:?} is C++ only, and this file is compiled as C: {in_c:?}"
+        );
+    }
+
+    let in_cpp = codes_of_with(source, "/p/style.cpp", Some("c++20"));
+    for code in cpp_only {
+        assert!(
+            in_cpp.contains(&code),
+            "{code:?} should fire in C++: {in_cpp:?}"
+        );
+    }
+}
+
 /// **What a C compiler provides is not an undeclared name, and what C made a keyword is not a call.**
 ///
 /// Both halves were measured on the C corpus as `undefined-name`, and neither can be fixed by a reader who declares

@@ -24,12 +24,9 @@ impl Check for CStyleCast {
     const CODES: &'static [DiagnosticCode] = &[DiagnosticCode::CStyleCast];
 
     fn check(context: &mut CheckContext<'_>) {
-        // **Not a rule in C.** C has no `static_cast`, no `const_cast` and no `reinterpret_cast` — `(Widget*)p` is how a C
-        // program writes that conversion, and a rule that called it a mistake there would be wrong about the language.
-        if context.is_c() {
-            return;
-        }
-
+        // **Not a rule in C**, and the answer lives with the code rather than here: `DiagnosticCode::is_cpp_only` marks
+        // this one, `run_check` skips it before it walks anything, and `CheckContext::push` would drop it anyway. A
+        // second early return here would be a second place to forget when the next C++-only rule is added.
         let Some(root) = context.root() else {
             return;
         };

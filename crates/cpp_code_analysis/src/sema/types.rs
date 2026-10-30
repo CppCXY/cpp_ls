@@ -1593,8 +1593,7 @@ pub(crate) fn read_specifiers_named(
                     // nothing, and `copy` recorded `typeof(value)` as its own type.
                     //
                     // An **expression** payload (`typeof(value)`) still needs the semantic model, which the fact builder
-                    // does not have — it keeps its spelling here and the query path resolves it. See
-                    // `docs/remaining.md` §N11.
+                    // does not have — it keeps its spelling here and the query path resolves it.
                     match the_type_a_typeof_names(&node) {
                         Some(denoted) => named = Some(denoted),
                         None => builtin.push(word),

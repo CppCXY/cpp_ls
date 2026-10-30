@@ -263,6 +263,34 @@ impl DiagnosticCode {
     pub fn is_a_complaint(self) -> bool {
         !matches!(self, DiagnosticCode::ModuleNote)
     }
+
+    /// **Is this rule about C++ only?** — the question a C project's diagnostics turn on.
+    ///
+    /// Two kinds of code answer yes, and they are one answer for the same reason: a rule that names C++ grammar cannot
+    /// fire in a C file, and a rule that names C++ *style* must not. `cstyle-cast` is the second kind — in C, a C-style
+    /// cast is the only cast there is, so telling a C program to write `static_cast` is telling it to write C++.
+    /// `use-nullptr` is the same: `NULL` is what C has, and C23's `nullptr` is a different question from the modernise
+    /// one. `implicit-bool-conversion` belongs here too, because an `int` in a condition is the language's own idiom in
+    /// C, and a reader who turns this server on for a C project asked for C to be read rather than rewritten.
+    ///
+    /// Measured before this existed: a C corpus configured with `-std=c17` answered **14 `cstyle-cast` findings**
+    /// telling the program to write `static_cast`, and the same shape of noise was available to every rule below.
+    ///
+    /// A project that states no language gets **all** of them: "not told" is not "C", and a feature disappearing
+    /// without a word is worse than a finding a project can switch off.
+    pub fn is_cpp_only(self) -> bool {
+        matches!(
+            self,
+            DiagnosticCode::UseNullptr
+                | DiagnosticCode::UseAuto
+                | DiagnosticCode::UseOverride
+                | DiagnosticCode::CStyleCast
+                | DiagnosticCode::AccessInvisible
+                | DiagnosticCode::ConceptNotSatisfied
+                | DiagnosticCode::ModuleNote
+                | DiagnosticCode::ImplicitBoolConversion
+        )
+    }
 }
 
 /// **What a client may grey out** — the protocol calls these tags, and this is the crate's own vocabulary for them.

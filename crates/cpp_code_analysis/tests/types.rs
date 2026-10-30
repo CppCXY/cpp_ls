@@ -1667,7 +1667,7 @@ fn an_unnamed_struct_type_is_keyed_by_the_variable_it_declares() {
     // **The *query* is what this test asserts, and the fact deliberately stays empty.** A file-scope
     // `static const struct { … } priority[]` is hovered as the declaration's own text, and naming that type made the
     // hover read `priority[] priority;` — so the key exists where a member question needs it (the query path, for a
-    // local) and nowhere a reader reads a type. See `docs/remaining.md` §N13.
+    // local) and nowhere a reader reads a type.
     assert_eq!(
         type_of_use(source, "bits").as_deref(),
         Some("bits"),
@@ -1756,8 +1756,8 @@ int f(void) { binary_op operation = add; comparer *compare = 0; return operation
     };
 
     // **The engine expands the alias**, and that is the better answer — `int (*)(int, int)` is the type, while
-    // `binary_op` is its name. This fixture therefore pins the *expansion*; what the corpus answers (nothing at all for
-    // the same shape) is still open, and `docs/remaining.md` §N14 records it.
+    // `binary_op` is its name. This fixture therefore pins the *expansion*; what the corpus answers for the same shape
+    // (nothing at all) is still open.
     let operation = type_at("binary_op operation").expect("the variable has a type");
     assert!(
         operation.contains("int") && operation.contains("(int, int)"),

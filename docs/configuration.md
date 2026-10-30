@@ -1,53 +1,38 @@
-# Configuring the analysis
+# Configuration and limits
 
-There are **two** ways to tell this server how a project is built, and deliberately no third:
+This is the reference for **how the server is configured** and **what it deliberately does not do**. The language
+features themselves are in [`c-support.md`](c-support.md) and [`cpp-support.md`](cpp-support.md).
+
+## 1. Two inputs, and no third
 
 ```text
 compile_commands.json     the build, as it ran                    — every build system can export it
 .cppls.toml               what a person knows and a build cannot  — this file
 ```
 
-A server that also read *this* build system's cache and *that* one's project file would have to be taught every
-build system in turn, and would still be wrong about the one nobody wrote an adapter for. The database is what they
-all agree on; `.cppls.toml` is where a project says what no database can. **There is no CMake support, on purpose** —
-CMake's job is to produce a compilation database, and
-`-DCMAKE_EXPORT_COMPILE_COMMANDS=ON` (or `set(CMAKE_EXPORT_COMPILE_COMMANDS ON)`) is how you ask it to.
+A server that also read *this* build system's cache and *that* one's project file would have to be taught every build
+system in turn, and would still be wrong about the one nobody wrote an adapter for. The database is what they all agree
+on; `.cppls.toml` is where a project says what no database can. **There is no CMake support, on purpose** — CMake's job
+is to produce a compilation database, and `-DCMAKE_EXPORT_COMPILE_COMMANDS=ON` (or
+`set(CMAKE_EXPORT_COMPILE_COMMANDS ON)`) is how you ask it to.
 
----
-
-## What happens when there is no database
-
-Three fallbacks, applied in this order, each weaker than the last:
+When there is no database, three fallbacks apply in this order, each weaker than the last:
 
 ```text
-1. .cppls.toml says                     a person wrote the compilation down — it wins outright
-2. compile_commands.json says           found beside the root, or up to three directories down (`build/`, `out/build/linux/`)
-3. fuzzy include matching               an `#include` whose directory no search path could place, matched by the tail
-                                        of its path against the files that are actually in the tree
+1. .cppls.toml says                a person wrote the compilation down — it wins outright
+2. compile_commands.json says      found beside the root, or up to three directories down (build/, out/build/linux/)
+3. fuzzy include matching          an #include whose directory no search path could place, matched by the tail
+                                   of its path against the files that are actually in the tree
 ```
 
-`3` is what makes a **Visual Studio solution** work, and an **unconfigured checkout**. CMake cannot export a
-compilation database for an MSVC solution generator, so those projects have no database and never will — without the
-fallback, `#include "Session/StandardIOSession.h"` is searched for beside the including file and in MSVC's own
-directories, and the file at `CodeFormatServer/include/Session/StandardIOSession.h` is never found. Measured on a real
-project: a closure of **14 files instead of the whole program**.
+Fallback 3 is **on exactly when there is no database** (the key below overrides it either way). It runs only after every
+exact candidate has failed, refuses a target with no directory in it (`#include <vector>` is spelled that way because the
+search path is supposed to find it), and matches the tail of the path component by component, backwards.
 
-It is **on by default exactly when there is no database**, and off when there is one (the key below overrides that
-either way). It is safe by construction:
-
-* it runs **only after every exact candidate has failed**, so it can never shadow a directory the project named;
-* it refuses a target with **no directory in it** — `#include <vector>` is spelled that way because the search path
-  is supposed to find it, and matching it against whatever `vector` is in the tree is the confident wrong answer;
-* it matches the **tail of the path, component by component, backwards**, so it cannot be wrong about the file's
-  name — only about which directory it is in, and the resolution records which one it chose.
-
----
-
-## `.cppls.toml`
+## 2. `.cppls.toml`
 
 Read from the workspace root (or the file named by `--config`). Every key is optional; a section that is absent is a
-section at its defaults. **A key that is not understood fails its whole section** — see
-[When a key is wrong](#when-a-key-is-wrong).
+section at its defaults.
 
 ### `[workspace]` — what to read at all
 
@@ -57,11 +42,12 @@ exclude = ["**/build/**", "third_party/**"]   # globs the analysis must not read
 source_extensions = ["cuh", "cppm"]           # extensions *added* to the engine's own list
 ```
 
-`exclude` is the same list an editor uses to hide files. A project that keeps sources under `build/` is unusual, not
-wrong, and a server that guessed the wrong way would silently analyse nothing.
+`exclude` is the same list an editor uses to hide files. `source_extensions` is **additive**: the engine's own list is
+what a C/C++ project is made of, and writing this says "and also these" — a CUDA `.cuh`, a module `.cppm`. To read fewer
+files, use `exclude`.
 
-`source_extensions` is **additive**: the engine's own list is what a C++ project is made of, and writing this says
-"and also these" — a CUDA `.cuh`, a module `.cppm`. To read fewer files, use `exclude`.
+The engine's own list: `c cc cpp cxx c++ h hh hpp hxx h++ ipp inl tpp tcc cppm ixx`, plus `def mpp cuh` for headers
+reached through an `#include`.
 
 ### `[compile]` — how the project is built
 
@@ -82,6 +68,7 @@ fuzzy_includes = true                      # force the tail-matching fallback on
 * **`remove_args` is applied before `extra_args`**, which is what makes "drop the database's `-std=c++17`, add
   `-std=c++20`" work.
 * **`compiler`** decides whose headers are read. `"auto"` and absence are the same thing.
+* **`standard`** is also what decides whether the file is C or C++ — see §5.
 
 #### `[compile.include]` — extra include directories for a subtree
 
@@ -91,18 +78,15 @@ fuzzy_includes = true                      # force the tail-matching fallback on
 "*" = ["include"]
 ```
 
-The older, smaller spelling of the idea that `[[compile.target]]` generalises: a directory and the include paths it
-needs. **Longest matching prefix wins, and `"*"` applies everywhere** — both can be true at once, and the nearer rule's
-directories are added first, because the resolver searches include paths in order. The names may be relative to the
-workspace root, and absolute paths are [reported as a problem](#when-a-key-is-wrong).
+A directory and the include paths it needs. **Longest matching prefix wins, and `"*"` applies everywhere** — both can be
+true at once, and the nearer rule's directories are added first, because the resolver searches include paths in order.
+The names may be relative to the workspace root, and absolute paths are reported as a problem.
 
 #### `[[compile.target]]` — one compilation, when the project is several
 
-**This is the key that makes a real C++ project work.** A real project is not one compilation: it is several, each
-with its own include directories and its own defines, and a single `args` list cannot describe them. Writing every
-target's `-I` into one list is not a simplification but a **wrong answer** — a header reachable only from another
-target's directory then resolves, and `#include "Config.h"` takes whichever `Config.h` the search order happens to
-reach first.
+A real project is not one compilation: it is several, each with its own include directories and its own defines, and a
+single `args` list cannot describe them. Writing every target's `-I` into one list is not a simplification but a **wrong
+answer**.
 
 ```toml
 [[compile.target]]
@@ -119,8 +103,6 @@ includes = ["LuaParser/include", "LuaParser/src"]
 defines  = ["LUA_COMPAT_5_3"]
 ```
 
-The vocabulary is CMake's, reduced to the three ideas that matter, so there is nothing new to learn:
-
 | `.cppls.toml` | CMake | meaning |
 |---|---|---|
 | `name` | the target's name | what to call it in a message |
@@ -130,10 +112,8 @@ The vocabulary is CMake's, reduced to the three ideas that matter, so there is n
 | `standard` | `CXX_STANDARD` | its standard; the project's `[compile].standard` is used when absent |
 | `args`, `extra_args`, `remove_args` | — | the same three keys as `[compile]`, for these files |
 
-**It is not a build system.** There are no dependencies, no sources to compile, no commands to run, and nothing here
-can make anything happen. It describes compilations — which is all an analysis needs and all a person should have to
-write down. Anything that must be *generated* belongs in a compilation database, and that is what `[compile].database`
-is for.
+It is **not a build system**: there are no dependencies, no sources to compile, no commands to run. It describes
+compilations, which is all an analysis needs.
 
 **Patterns.** Matched against the file's path relative to the workspace root, component by component:
 
@@ -143,18 +123,30 @@ is for.
 "Util/*.cpp"              direct children only
 ```
 
-`**` stands for any number of components (including none), `*` for any run of characters **within** one component,
-and everything else is literal. A pattern must consume the whole path unless its last component is `**`. Matching is
-case-insensitive, because a path that differs only in case is the same file on the platforms this runs on.
+`**` stands for any number of components (including none), `*` for any run of characters **within** one component, and
+everything else is literal. A pattern must consume the whole path unless its last component is `**`. Matching is
+case-insensitive.
 
-**Which target describes a file.** The **most specific** match wins — the one fixing the most literal components —
-and ties go to the one written first. So `Util/src/legacy/**` (two literal components) beats `**` (none), whichever
-order the tables are in. **Every** target that describes the file contributes, nearest first, because that is what
-`[compile.include]` has always documented and the two are one mechanism; patterns usually exclude each other, and
-where they do not, the nearer one's directories are simply searched first.
+**Which target describes a file.** The **most specific** match wins — the one fixing the most literal components — and
+ties go to the one written first. **Every** target that describes the file contributes, nearest first. A file **no**
+target describes is compiled exactly as `[compile]` says. A target with no `sources` describes nothing.
 
-A file **no** target describes is compiled exactly as `[compile]` says. A target with no `sources` describes nothing —
-it is not a target for every file.
+#### `[compile.cuda]` — a CUDA project
+
+```toml
+[compile.cuda]
+enable = true                                   # read it as CUDA even without an `nvcc` in the database
+toolkit = "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.4"
+host_compiler = "cl"                            # the host dialect: cl (MSVC) or g++/clang++ (GNU)
+include = ["third_party/cutlass/include"]       # extra include directories for CUDA units
+args = ["-arch=sm_80"]                          # extra flags, appended to whatever won
+```
+
+The analysis reads a project as CUDA when its toolchain is `nvcc` (`__CUDACC__` in the macro table, or the compiler's
+name); `enable` is the escape hatch for a project that has `.cu` files but no compile database. `toolkit` is what makes
+`#include <cuda_runtime.h>` resolve — the toolkit installs its headers under `<toolkit>/include` (and, from CUDA 12.8, a
+CCCL include beside it), and nothing on the system path knows that. `host_compiler` decides the **dialect**, which is a
+different question from the CUDA flag: on Windows `nvcc` drives `cl.exe`, on Linux `g++`.
 
 ### `[index]` — what is read and remembered
 
@@ -169,129 +161,68 @@ max_files = 20000        # how many files the project scan may list
 ```toml
 [diagnostics]
 on_change_ms = 300       # how long a file's diagnostics wait for typing to stop
+enable = []              # start from this list only (an empty list means "everything")
+disable = []             # never report these — wins over `enable`, and over the defaults
 
 [hover]
 enable = true            # whether hover answers at all
 
-[format]
+[format]                 # where this project's format strings are
 enable = true            # the colouring, the popup and the completion — `false` is all three at once
-std = true               # `{…}` — std::format / std::print / fmt::format, fmt::print …
-printf = true            # `%…` — printf, fprintf, snprintf, fmt::printf, fmt::sprintf …
-scanf = true             # `%…` with scansets — scanf, sscanf …
+std = true               # `{…}` — std::format / std::print / fmt::format, fmt::print
+printf = true            # `%…` — printf, fprintf, snprintf, fmt::printf, fmt::sprintf
+scanf = true             # `%…` with scansets — scanf, sscanf
 
-[format.functions]       # our own, keyed by the name the analysis RESOLVES them to
+[format.functions]       # your own, keyed by the name the analysis RESOLVES them to
 "mylib::logf" = "printf"                                 # printf's syntax, format string first
 "mylib::log" = "std"
 "mylib::trace" = { syntax = "printf", argument = 1 }     # `trace(level, fmt, …)`
 ```
 
-**One section for one feature**, and the default is on for every grammar: whether a string is a format string is
-something the analysis can prove about the text, so it does not wait for a project to opt in — and a grammar set to
-`false` costs nothing at all, because the pass answers before it looks at a token. `enable = false` turns the colour,
-the popup and the completion off together; they are three faces of one question and a project that turned it off gets
-none of them.
+A wrapper has a *position*: `mylib::trace(level, fmt, …)` puts the format string second, which
+`{ syntax = "printf", argument = 1 }` says and a list of names cannot. A bare string means the common case — that syntax,
+the first argument. Either form is matched against the **resolved** qualified name, so `using mylib::logf;` works and a
+local `logf` that is something else is not read as the wrapper.
 
-**The project's own functions are a table keyed by name** rather than a list, for one reason: a wrapper has a
-*position*. `mylib::trace(level, fmt, …)` puts the format string second, which `{ syntax = "printf", argument = 1 }`
-says and a list of names cannot. A bare string means the common case — that syntax, the first argument. Either form is
-matched against the **resolved** qualified name, so `using mylib::logf;` works and a local `logf` that is something
-else is not read as the wrapper.
+## 3. When a key is wrong
 
-The colouring sends four custom token types plus three standard fallbacks; the same rule decides what the popup
-says, and what the completion offers.
-
----
-
-## When a key is wrong
-
-Two kinds of problem, and they behave differently:
+Unknown keys fail their **whole section**, with a message, and the section keeps its defaults:
 
 ```text
 [compile] could not be read, so that section keeps its defaults: unknown field `standrad`
-compile.include names the absolute path "C:/build/inc"; absolute paths in a committed file do not travel
-
-the first is an **error**   — what that section said is not in effect
-the second is a **warning** — the rest of the configuration is in effect
 ```
 
-**An unknown key fails its whole section**, not just the key. That is deliberate — a section read halfway would be a
-configuration nobody wrote — but it has a sharp edge worth knowing: a single typo leaves `[compile]` at its defaults,
-and the *symptom* is a project analysed with the wrong include paths rather than a message about the typo. The message
-**is** reported (the server shows configuration errors to the client), so the first thing to do when the analysis looks
-wrong is to read the report.
+A rule name in `[diagnostics]` that this build does not have is logged the same way. Silently ignoring an unknown name is
+the failure mode the analysis is written against — a rule the user believes is on, that never runs.
 
-The most common instance, measured: writing `[[compile.target]]` while the table was still called something else — the
-section decoded with no problem reported and no target in effect, because the *tests'* fixture had the typo too. A
-fixture that does not decode measures nothing, which is why `tests/targets.rs` now asserts that its own configuration
-was understood before it asserts anything about the result.
+## 4. What is not supported
 
----
+| Not supported | Why |
+|---|---|
+| Build-system integration (CMake, Meson, …) | the database is the interface; `compile_commands.json` is what they export |
+| `textDocument/onTypeFormatting` | the trigger is unreliable in practice; formatting on save and on demand covers it |
+| clang-format itself | `cpp_formatter` is this project's own formatter; it reads a common subset of `.clang-format` |
+| C++26 (contracts, reflection, `#embed`) | no feature bits yet; the syntax is read as C++23 |
+| C23 `#embed` | not implemented |
+| `references` / `rename` of ordinary names | answering them means parsing every candidate file; the server refuses rather than editing half a name's uses (macros are answered exactly) |
+| Module linking | modules are parsed, indexed and resolved by name; nothing is linked or built |
+| Dataflow analysis | the checks are local to the file's facts plus the index |
+| Macro-expanded source mapping | hover and completion are answered from the macro environment, not from expanded text |
 
-## A worked example
+## 5. C and C++ in one project
 
-A six-target CMake project, `E:\EmmyLuaCodeStyle`, whose MSVC solution CMake cannot export a database for:
+The language of a file is decided by its `-std=` first (`-std=c17` → C, `-std=c++20` → C++), then by its extension;
+`.h` belongs to whichever language includes it, and C++ is the wider list. A project that states no language is read
+as "not told", which is not the same as C.
 
-```toml
-# No `database` key: there is none to point at. The include matching below is what makes the
-# project readable, and it is on by default because no database was found.
-[workspace]
-exclude = ["**/build*/**", "3rd/googletest-1.13.0/**"]
+**Eight rules are C++ only, and are switched off for a file compiled as C** — `use-nullptr`, `use-auto`,
+`use-override`, `c-style-cast`, `access-invisible`, `concept-not-satisfied`, `module-note` and
+`implicit-bool-conversion`. Six of them name grammar C does not have (`use-override`, `access-invisible`,
+`concept-not-satisfied`, `module-note`, `use-auto`, `use-nullptr`); the other two name C++ style that C's own idiom
+contradicts — a C-style cast is the only cast C has, and an `int` in a condition is the language's idiom rather than a
+mistake. Measured before the gate existed: a C corpus configured with `-std=c17` answered **14 `c-style-cast` findings**
+telling the program to write `static_cast`.
 
-[compile]
-standard = "c++20"
-fuzzy_includes = true          # stated rather than implied, for a reader
-
-[[compile.target]]
-name     = "CodeFormatCore"
-sources  = ["CodeFormatCore/**"]
-includes = ["CodeFormatCore/include", "CodeFormatCore/src", "Util/include", "LuaParser/include"]
-defines  = ["WIN32_LEAN_AND_MEAN"]
-
-[[compile.target]]
-name     = "CodeFormatCLib"
-sources  = ["CodeFormatCLib/**"]
-includes = ["CodeFormatCLib/include", "CodeFormatCore/include", "Util/include"]
-
-[[compile.target]]
-name     = "CodeFormatServer"
-sources  = ["CodeFormatServer/**"]
-includes = ["CodeFormatServer/include", "CodeFormatServer/src", "CodeFormatCore/include", "Util/include"]
-defines  = ["URI_STATIC_BUILD"]
-
-[[compile.target]]
-name     = "LuaParser"
-sources  = ["LuaParser/**"]
-includes = ["LuaParser/include", "LuaParser/src", "3rd/lua-5.4.3/src"]
-
-[[compile.target]]
-name     = "Util"
-sources  = ["Util/**"]
-includes = ["Util/include"]
-
-[[compile.target]]
-name     = "Tests"
-sources  = ["Test/**", "Test2/**"]
-includes = ["CodeFormatCore/include", "Util/include", "3rd/googletest-1.13.0/googletest/include"]
-defines  = ["UNIT_TEST"]
-```
-
-Third-party trees do not need targets of their own: a file no target describes falls back to `[compile]`, and the
-fuzzy fallback places `#include "asio/detail/…"` from the tail of the path.
-
----
-
-## Checking a configuration
-
-The server logs what it worked out at open: the toolchain it chose, where each include path came from, whether a
-database was found, and how many entries it held. On the command line, two probes answer the same questions:
-
-```bash
-# what the analysis thinks the project is, and what it can and cannot resolve
-cargo run --release -p cpp_code_analysis --example workspace_probe -- <root> <file.cpp>
-
-# how a project was discovered: its file, its database, its problems, and the flags in force
-cargo run --release -p cpp_code_analysis --example discover -- <project root>
-```
-
-`discover` is the one to reach for when a configuration key seems to have no effect: it prints the discovery report,
-including every problem the file's sections produced.
+The other eighteen rules are about both languages. The gate is **not** a configuration key: a file compiled as C is read
+as C, and the eight rules are not opinions about it. `[diagnostics].disable` turns any rule off; nothing turns a
+C++-only rule on for C.

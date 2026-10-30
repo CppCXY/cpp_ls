@@ -5416,7 +5416,7 @@ fn declared_type(
     // **A `typeof`/`__typeof__` specifier whose payload is an *expression*** — `typeof(value) copy = value;` — is
     // the type of that expression, and only the semantic layer can answer it: the reader of the *syntax* hands back
     // the spelling, `typeof(value)`, which no scope and no member list has heard of. The fact builder has the same
-    // gap, so a summary records the spelling too; see `docs/remaining.md` §N13.
+    // gap, so a summary records the spelling too.
     if let Some(payload) = a_typeof_payload(root, named)
         && let Known::Yes((type_of, _)) = type_of_expression(
             index,

@@ -1,277 +1,116 @@
-# C 支持性测量：一个纯 C 工程
-
-> 目的：把"这个服务器读 C 代码读得怎么样"变成**可重复的数字**——每个文件解析是否成功、每个成员访问能不能感知、
-> 每个声明的类型对不对。语料是一份**能编译的** C 工程（MinGW gcc 15 + CMake），所以"分析说错了"是分析的缺陷，
-> 不是文件的问题。
-
-## 1. 语料
-
-> **2026-10-30：这份语料已经删除。** 现在测量的是 `C:\Users\zc\Desktop\c-project`（只保留未修的两个问题），
-> 见 §11。下面 §1–§10 的数字是历史记录，`tests/c_corpus.rs` 也已按新语料重写。
-
-位置：`C:\Users\zc\Desktop\cpp`（`CPPLS_C_CORPUS` 可覆盖），由 `CMakeLists.txt` 用 **MinGW Makefiles** 构建：
-
-```powershell
-cmake -S . -B build -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
-cmake --build build        # 0 error；只剩一条故意的 -Wdeprecated-declarations（[[deprecated]] 用例）
-build\corpus.exe           # 1.4 total=16994915 names=corpus-1.4-enabled
-```
-
-| 文件 | 覆盖的语法 | 标准 |
-|---|---|---|
-| `include/corpus.h` | 共享声明：`struct`/`union`/`enum`、位域、柔性数组、不透明句柄、函数指针 typedef、`static inline`、X-macro | c17 |
-| `src/types.c` | 全部算术类型、`_Bool`、`_Complex`、限定符（`const`/`volatile`/`restrict`）、存储类、位域全基类型、匿名 union、枚举（掩码/负值/字符）、`_Atomic`、`limits.h`/`float.h` | c17 |
-| `src/aggregates.c` | 指定初始化、复合字面量、多维数组、VLA、柔性数组、嵌套/匿名聚合、自引用 struct、链表、`malloc` 后 `->` | c17 |
-| `src/functions.c` | 原型/无原型、K&R 定义、可变参数（`va_list`/`vsnprintf`）、函数指针（含返回函数指针）、`static`/`inline`、递归、`qsort` 回调 | c17 |
-| `src/control.c` | if/else-if/悬垂 else、`switch`（穿透/多标签/块/default 居中）、五种循环、`continue`/`break` 嵌套、`goto` 前向/后向、逗号表达式、短路 | c17 |
-| `src/preprocessor.c` | 对象/函数/可变参数宏、`#`/`##`、`__VA_OPT__`、X-macro 双向展开、`_Generic`、`_Static_assert`（文件作用域 + 块作用域）、条件编译、预定义宏 | gnu17 |
-| `src/gnu.c` | `__attribute__`（声明/参数/成员）、`__typeof__`/`typeof`、语句表达式 `({…})`、case range、`__builtin_*`、`__int128`、`__auto_type`、`__thread`、计算 goto | gnu17 |
-| `src/c23.c` | `nullptr`、`constexpr`、`auto` 类型推导、`typeof`/`typeof_unqual`、`[[nodiscard]]`/`[[deprecated]]`/`[[fallthrough]]`、二进制字面量、数字分隔符、`_BitInt(N)`、`enum : unsigned char`、`#embed` | c23 |
-| `src/library.c` | 标准库自己的类型：`struct tm`、`div_t`/`ldiv_t`/`lldiv_t`、`FILE*`、`struct lconv`、`jmp_buf`、`signal`、`<math.h>`、`<string.h>` | c17 |
-| `src/main.c` | 全部模块的调用者（没有死代码） | c17 |
-
-`build/compile_commands.json` 一并生成，因为这是服务器拿到 `-std=` 和 `-I` 的**最强来源**
-（`docs/configuration.md` 的 discovery 顺序：`.cppls.toml` → `compile_commands.json` → `CMakeCache.txt` → 工具链）。
-
-## 2. 测量工具
-
-`crates/cpp_code_analysis/tests/c_corpus.rs`——**一个会话**（索引一次），然后三张表：
-
-```powershell
-$env:CPPLS_C_CORPUS = "C:\Users\zc\Desktop\cpp"     # 默认就是它
-$env:CPPLS_C_NAMES  = "div,ldiv"                     # 可选：打印索引里这些名字的事实
-cargo test --release -p cpp_code_analysis --test c_corpus -- --ignored --nocapture
-```
-
-```text
-parse    ``session.cook`` 每个文件，``session.diagnostics`` 给出 syntax error 数与声明数（外加每个 code 的前几条 finding）
-members  50 条手工清单：``x.member`` / ``x->member`` 的**补全列表**（光标在运算符后面），检查期望的成员在不在
-types    33 条手工清单：光标放在声明名内部，``Session::type_at`` 的类型是否包含期望拼写
-```
-
-三个设计决定，都是为了**快**和**诚实**：
-
-* **一个会话**。第一版每个文件开一个会话并 `want_cooked_reading` + `advance` 循环——`advance` 走的是**索引队列**
-  而不是 cook 队列，于是它空转 20 分钟什么也没答；`diagnostics_rate` 那种"每文件一个会话"的形状在这里要 9 倍索引。
-  现在一次 `index_everything`（≈5 s，150 个 MinGW 头）+ 每个文件一次 `Session::cook`（13–36 ms），总计 ≈7 s。
-* **成员问补全，类型问 hover**。这是编辑器真实发出的两个请求，所以答对就是用户看到对了。
-* **清单而不是比率**。50 条成员 + 33 条类型，每一条都是一个具体构造（`tm_year`、匿名 union 的 `integer`、
-  `_BitInt` 位域、`jmp_buf`…），失败时能直接读出"哪种 C 语法没读对"。
-
-## 3. 第一次测量（2026-10-30，本轮开始时）
-
-```text
-indexed in 5.66 s
-src/aggregates.c   1 error  20 finding  73 decl  26 ms cook  214 line(s)
-src/c23.c          4 error   1 finding  15 decl  22 ms        182
-src/control.c      0 error   1 finding  41 decl  14 ms        217
-src/functions.c    0 error   4 finding  76 decl  18 ms        195
-src/gnu.c          4 error  27 finding  21 decl  16 ms        181
-src/library.c      0 error   5 finding  55 decl  35 ms        212
-src/main.c         0 error   0 finding   7 decl   8 ms         91
-src/preprocessor.c 0 error  20 finding  21 decl  14 ms        179
-src/types.c        0 error  11 finding 107 decl  36 ms        277
-totals: 9 files, 3 with a syntax error, 9 errors, 416 declarations
-members: 26/50 answered
-types:   25/33 correct
-```
-
-### 3.1 已修（本轮）
-
-| 缺陷 | 症状（实测） | 修法 | 测试 |
-|---|---|---|---|
-| 花括号初始化被判成"不转换" | `struct point origin = {0, 0};` → `assign-type-check`，文件里 13 条 | `InitListExpr` 不是值：初始化列表按元素逐项判断，没有可比的类型 | `checks::a_braced_initialiser_and_a_const_copy_are_not_failed_conversions` |
-| `(void)` 被当成一个参数 | `int f(void);` + `f()` → `argument-count` + `undefined-name` 两条 | 两个数参数的地方都加一条：只有一个无名 `void` = 零个参数 | `checks::the_c_spellings_void_restrict_and_static_assert_produce_no_finding` |
-| `restrict` 被当成声明名 | `int *restrict left` → `\`restrict\` is already declared` | `*` 后面的限定符位置接受 `restrict`（按 `Feature::Restrict`，C++ 里它仍是普通名字） | 同上 |
-
-### 3.2 未修，已定位到行（下一轮的工作清单）
-
-```text
-① C 工程的头文件搜索用的是 C++ 工具链的 include 路径
-   toolchain include paths: […/include/c++ , …/include/c++/x86_64-w64-mingw32 , …/include/c++/backward , …]
-   → <stdlib.h> 解析到 C++ 的 wrapper（cstdlib），于是 div/ldiv/lldiv 只剩 (long,long) 重载，
-     `div(7, 2)` 报 "is not declared"；<complex.h> 的 creal 同理。
-   影响 4 条 finding，并且让 library.c 的成员测量失去意义（库类型根本没读到）。
-
-② 文件作用域的 _Static_assert 被读成调用
-   preprocessor.c:78-80 三条 `_Static_assert(…);` → "`_Static_assert` is not declared"。
-   块作用域的那条（line 85）在 c17 夹具里是对的——所以这是**文件作用域**的那条路径。
-
-③ 名字查询与索引不一致（"两个读者"）
-   functions_selector / functions_aborts 都在索引里（corpus.h，Function，(void)/(int code)），
-   但 undefined-name 仍然报"not declared"。§15.11 记录过同类形状。
-
-④ 解析错误 9 条，集中在三个文件：
-   aggregates.c:90   expected primary expression          （复合字面量/数组字面量附近）
-   c23.c:32/34/85    constexpr 聚合、auto、enum : 基类型
-   gnu.c:36/130/136  __typeof__(struct point) origin = {1,2};、语句表达式、计算 goto
-
-⑤ 成员 24 条 / 类型 8 条缺失，按形状分组：
-   div_t（typedef 的匿名 struct）4 条、匿名 union 成员 1 条、corpus.h 的 static inline 里的成员访问 3 条、
-   c23.c 的 _BitInt 位域 2 条、gnu.c 的 __typeof__ 变量 1 条，其余是上面 ①④ 的连带。
-```
-
-## 4. 第二次测量：findings 65 → 18
-
-又修了三条，每条都先看着它失败：
-
-| 缺陷 | 症状（实测） | 修法 |
-|---|---|---|
-| **解析失败的文件仍然产出语义诊断** | `__typeof__(struct point) origin = {1,2};` 一条读不懂，同一文件里**每个调用、每个成员**都报 "not declared"（gnu.c 20 条） | `check::run` 先跑读**文本**的规则（include 找不到、宏重定义、宏括号），文件有语法错误就到此为止：解析错误由它自己的通道发，派生出来的断言都是猜的 |
-| `_Static_assert(…)` / `_Generic(…)` 被当成调用 | 11 条 `undefined-name`，全部来自**被内联进来的头文件**（那里解析时没有 C11 特性） | `undefined_name` 的调用侧：C 的关键字构造和 `__builtin_*` 永远不是"未声明的名字" |
-| `macro_parentheses` 注册了两次 | preprocessor.c 的 5 条变成 10 条 | 它读宏事实而不是树，移到读文本的那一组，只跑一次 |
-
-```text
-                 findings   parse errors   members   types
-第一次              89          9            26/50     25/33
-修 braced-init      65          9            26/50     25/33
-修 (void)/restrict  65          9            26/50     25/33
-第二轮              18          9            26/50     25/33
-```
-
-探针现在打印**命中点前后 48 字节的渲染文本**（cook 把渲染压成一行，行号没有意义），所以剩下 18 条逐条定位得到：
-
-```text
-library.c       5  div/ldiv/lldiv/labs/llabs    ← ①：<stdlib.h> 解析到 C++ 的 cstdlib
-types.c         2  creal/cimag                  ← ①：<complex.h> 同理
-aggregates.c    1  parse error: NULL → __null   ← ①：libstdc++ 的 NULL 拼写
-functions.c     3  functions_selector/functions_aborts（索引里其实有）+ sum 的 assign-type-check
-preprocessor.c  6  5 条 macro-parentheses 误报 + 1 条语句表达式里同名局部变量的 redefinition
-types.c         2  匿名 union 成员 line.integer / static 函数参数上的 restrict
-```
-
-也就是说：**18 条里有 8 条只有 ① 一个根因**（C 工程用了 C++ 的头文件搜索路径），而那一条同时是
-`aggregates.c` 那条解析错误的根因。
-
-## 5. 怎么再跑一次
-
-```powershell
-Remove-Item -Recurse -Force C:\Users\zc\Desktop\cpp\.cppls   # 冷缓存
-cargo test --release -p cpp_code_analysis --test c_corpus -- --ignored --nocapture
-$env:CPPLS_C_ALL = "1"      # 不截断 finding 列表
-$env:CPPLS_C_NAMES = "div"  # 打印索引里这个名字的事实
-```
-
-改了语料之后先 `cmake --build build`——语料编译不过的时候，"分析报错"就不再是缺陷，而是预期。
-
-## 6. 第三轮之后：findings 清零
-
-```text
-                 findings   parse errors   members   types
-第二轮              18          9            30/50     25/33
-第三轮               0          6            31/50     25/33
-```
-
-九条 finding 全部修掉，每条都有先看着它失败的测试：
-
-| 缺陷 | 症状 | 修法 |
-|---|---|---|
-| `_Generic` 不是 `CppExpr` | `strlen(TYPE_NAME(x))` 的实参计数是 **0**，报"参数太少" | 加 `CppSyntaxKind::GenericSelectionExpr` 和它的 AST 类型，`CppCallExpr::get_args` 才看得见它 |
-| `T * T;` 被当成声明 | `({ int s = (v); s * s; })` 用一次就报"`s` 重复声明" | `redefinition` 读声明符（`*s`）和它前面的名字，同一个拼写就是乘法 |
-| C99 的 `restrict` 没有语法规则 | `int *restrict left` 里 `restrict` 变成参数名，两个参数撞车 | `eat_cv_qualifiers` 加一条 `Feature::Restrict` 的分支，产出 `RestrictQual` |
-| 匿名 union 的成员无处可去 | `struct line` 只有 4 个成员而不是 6 个 | 没有名字、没有声明符、又在另一个类体里的类体，其成员绑到外层类的作用域 |
-| 宏的替换表范围越界 | `macro-parentheses` 拿格式字符串里的 `%` 报错 | `body_range_of` 取最后一个*显著* token；没有替换表的宏（`#define GUARDED_H`）保持旧答案，因为宏表和 include 环境必须一致 |
-| `&&label` / `goto *` | gnu.c 4 条解析错误里的 2 条 | 新的 `Feature::LabelsAsValues`，主表达式一条 `&&` + 名字的分支，`goto` 一条 `*` 表达式的分支 |
-| 数组类型的复合字面量 | `(const char[]){"compound"}` 报 `expected primary expression` | `an_operand_follows_the_parentheses` 认 `{`；**不能**放进 `starts_an_operand`（那会让 `Vec<int[4]>{}` 的 `<` 变成比较） |
-| `sizeof(union { int i; double d; })` | 类型里的成员被判"声明了没用过" | `unused` 看最内层作用域：类作用域里的声明是成员，不是局部变量 |
-
-剩下的 6 条解析错误：`c23.c` 4 条（`_BitInt(37)`、`typeof(struct point)`、`[[fallthrough]]` 的位置、`constexpr`），
-`gnu.c` 2 条（`__typeof__(struct point)`、case range 剩下的形状）。见 `docs/remaining.md` §N10。
-
-**下一轮第一件事**：`aggregates.c` 的 11 行成员检查现在全是 `0 offered` —— 这个文件刚刚才解析成功，这是第一次真正看它；
-先确认探针的 needle→offset 映射，再看 `completions` 对一个"头文件里的结构体"的局部变量回答什么。
-
-## 7. 第四轮：解析错误清零
-
-```text
-                 findings   parse errors   members   types
-第三轮               0           6           45/50     29/33
-第四轮               0           0           45/50     29/33
-```
-
-九条解析错误全部消失，语料 **508 条声明、9 个文件、零语法错误**：`typeof(type-id)`（C23 + GNU 两条路线）、
-`typeof_unqual`、`_BitInt(37)`、`&&label`、`goto *expr`、数组类型的复合字面量。
-
-**必须记下来的一件事：成员/类型的旧数字是探针自己在测缓存。** `renderings` 缓存按权重有界，先 cook 的文件被后面的
-挤掉，`Session::view` 于是答 `None`，探针把它读成"引擎什么都没提供"——`aggregates.c` 和 `gnu.c` 的每一行都是
-`0 offered`，而最后 cook 的 `types.c` 全过。每问一行之前重新 cook 一次，真实数字是 **45/50 和 29/33**（旧数字
-31/50、25/33）。这条写在这里是因为它会重演：任何"先批量准备、再批量提问"的探针都会踩到同一个坑。
-
-剩下的 9 个失败全是**类型推断**：`typeof(expr)`、`typeof(type)`、`__auto_type`、无名 union 类型的局部变量、
-函数指针局部变量。见 `docs/remaining.md` §N11。
-
-## 8. 第五轮：`typeof` 与匿名类型的键
-
-```text
-                 findings   parse errors   members   types
-第四轮               0           0           45/50     29/33
-第五轮               0           0           46/50     30/34
-```
-
-* **`typeof(struct point) origin`** 的事实类型现在是 `point`（`origin.x` 由 FAIL 变 PASS）。原来是整个拼写
-  `typeof(struct point)`，没有任何作用域或成员表认识它。
-* **`struct { … } bits = {5};` 的键是变量名 `bits`**：作用域树把匿名类作用域命名为声明符，`sema::types` 把变量的类型
-  也命名为同一个拼写——**两层必须一致**，否则成员永远找不到。摘要里现在是 `type bits`、`three` 的 `scope Some("bits")`。
-
-**还差一半**：`type_at(bits)` 仍答空类型——查询路径重新推导声明类型时没带声明符名字，走了 `an_unnamed_body` 的空拼写
-分支。事实对、成员归位，但补全还是空。`docs/remaining.md` §N12 写明了下一步该看哪个调用方。
-
-探针新增 `CPPLS_C_FACTS=<文件>`：打印一个文件的**每一条**事实（名字、kind、type、local、scope）。"这个声明到底有没有
-被记录、给了什么类型"是名字查不出来的问题，也正是靠它看出"事实对、查询错"。
-
-## 9. 第六轮：类型推断的查询路径
-
-```text
-                 findings   parse errors   members   types
-第五轮               0           0           46/50     30/34
-第六轮               0           0           49/50     32/34
-```
-
-四条都在**查询路径**上，解析和事实层早已正确：
-
-* `type_of_declaration_named` 的查询调用方少传了声明名（事实传了）→ `bits.three`、`anonymous_union.integer` 转绿。
-* `__auto_type` 是 GNU 的 `auto`，两处只认 `auto` 的门控都补上 → `value : int`。
-* `typeof(表达式)` 的载荷交给 `type_of_expression` → `copy : int`、`other_pointer->x` 转绿。
-* `typeof(nullptr)` 是表达式不是 type-id（新规则引入的唯一一条错误，当场修掉）。
-
-**取舍**：无名类型的键只加在局部变量的查询上。放进事实层会让 `priority[]` 的 hover 变成 `priority[] priority;`，
-一条 handshake 测试立刻变红——"读者看到的类型"和"成员查询要的键"不是同一个问题。
-
-## 10. 第八轮：`_BitInt` 的声明锚点
-
-`_BitInt(width) declarator` 现在被当作声明（前瞻跨过宽度的括号，要求 `)` 之后是 identifier，这样 `f(x);` 仍然是调用）。
-三种拼写由一条**显式用 C23 语言**跑的测试钉住:声明、`(_BitInt(37))` cast、位域。
-
-第一版测试用 `ParserConfig::default()`（C++17）跑,报的失败是测试自己的——C++17 里 `_BitInt` 就是普通标识符。
-**测一个 C23 构造必须显式给 C23 配置**,这条记在 §N15。
-
-成员/类型仍是 49/50、32/34:剩下的 `struct bits` 第二个位域与 `functions.c` 的函数指针 typedef 各有一个确切的
-下一步(见 §N15)。
-
-## 11. 第十轮：精简语料，`_BitInt` 成员与一个死锚点
-
-旧语料已删除，这一轮以后只在 **`C:\Users\zc\Desktop\c-project`** 上测量：3 个文件、gcc 15、C23
-（`-std=gnu2x`），只保留两个未修的问题 —— `_BitInt(` 起头的类体成员，以及来自头文件的函数指针 typedef。
-探针 `crates/cpp_code_analysis/tests/c_corpus.rs` 跟着重写（默认路径就是新语料，`CPPLS_C_CORPUS` 可覆盖）。
-
-```text
-                   findings   parse errors   members   types
-第九轮（旧语料）       0           0           49/50     32/34
-第十轮（冷缓存，修前）   4           0           3/5        1/3
-第十轮（修后）          0           0           5/5        4/4
-```
-
-最后那 3 条 type 里，`operation`/`compare_function` 的两条原来是**问错了 token**：光标在声明符名字里，
-期望的却是别名展开 —— 与两文件 fixture（光标在类型名 `binary_op` 里）不是一个问题。改正期望、并补一条问
-`binary_op` 本身的行之后 4/4。详见 `docs/remaining.md` §N17 的结尾。
-
-修的是 `docs/remaining.md` §N16/§N17 的那一条：`_BitInt(13) signed_wide : 13;` 被 specifier 循环的两条
-"宏形状"分支读成 `MacroCall(_BitInt(13)) + NamedType(signed_wide)`，声明没有 declarator，成员消失。锚点
-`a_bitint_declaration_starts_here` 上一轮就写好了，但**没有任何调用者**（死代码，编译器的 `never used` 警告就是
-它）——这是"锚点进来了却没有效果"的真正原因。接上两处调用之后成员回来了，摘要里
-`["bits", "three", "signed_wide", "plain", "other"]` 齐全。
-
-`FORMAT_VERSION` 3 → 4：摘要是缓存里的东西，而 `READING_FINGERPRINT` 现在只跟版本走 —— 修完第一次跑仍然是
-3/5，删掉语料的 `.cppls` 才是 5/5。这条差别值得记住：**改了摘要的内容，就要推 `FORMAT_VERSION`**。
-
-剩下的"类型项"最后查明是测量问题，不是引擎缺陷：语料现在 5/5 members、4/4 types、0 findings、0 parse errors。
+# C support
+
+What this server understands about C: how a file is identified as C, which language features it reads, what the
+semantic layer can answer, what each LSP feature gives, and which diagnostics exist. Configuration and the limits are in
+[`configuration.md`](configuration.md); the same reference for C++ is [`cpp-support.md`](cpp-support.md).
+
+## 1. Language identification
+
+| Item | Rule |
+| --- | --- |
+| Extension | `.c` is a C source; `.h` belongs to whichever language **includes** it (the C++ search list is the wider one, so a header read on its own is read as C++) |
+| `-std=` | Wins over the extension: `c89`/`c99`/`c11`/`c17`/`c23`/`gnu17` and so on are C; `c++…` is C++ |
+| Indexed extensions | `c cc cpp cxx c++ h hh hpp hxx h++ ipp inl tpp tcc cppm ixx`, plus anything in `[workspace].source_extensions` (for example `cuh`) |
+| Header extensions | the header family above, plus `def mpp cuh` |
+| Where files come from | `compile_commands.json` → `.cppls.toml` → the project scan; an `#include` no search path can place falls back to matching the tail of its path against the tree |
+
+## 2. Standards and language features
+
+Each construct is a **feature bit** opened by `-std=` or `[compile].standard`; a standard such as `c17` does not open the
+C23 bits.
+
+| Standard | Constructs accepted |
+| --- | --- |
+| C89 | the baseline: declarations before statements; no `//` comments, no `long long` |
+| C99 | `//` comments, `long long`, `restrict`, `inline`, `_Bool`, variable-length arrays, flexible array members, compound literals, variadic macros, designated initialisers |
+| C11 | `_Generic`, `_Atomic`, `_Static_assert`, `_Alignas`/`_Alignof`, `_Noreturn`, anonymous `struct`/`union`, `_Thread_local` |
+| C17 | no syntax of its own (C11 plus the defect reports); the feature bits exist so the standard can be asked |
+| C23 | `[[attribute]]`, `nullptr`, `constexpr`, `_BitInt(N)`, `auto` type inference, enumerations with a fixed underlying type, the empty initialiser `{}`, `#elifdef`/`#elifndef`, `typeof`/`typeof_unqual` |
+| GNU extensions | statement expressions `({ … })`, label addresses `&&label`, `?:` with the middle operand omitted, `asm` blocks, nested functions, `__typeof__`/`__typeof`, `__attribute__`, `__builtin_*` calls |
+| MSVC extensions | `__try`/`__except`/`__finally`, `__int8`…`__int64`, calling conventions such as `__cdecl`/`__stdcall` |
+
+**Not supported**: C23's `#embed`. Every other C23 construct is in the table.
+
+## 3. Preprocessing
+
+| Ability | What it does |
+| --- | --- |
+| `#include` | angle and quote forms; search paths from the database, the configuration or the toolchain; a path nothing places falls back to tail matching; each directive records its resolution |
+| `#define` | object-like and function-like, variadic (`...` and `__VA_ARGS__`), `#` stringification, `##` pasting, `__VA_OPT__` |
+| `#undef` | recorded, so the macro environment is tracked point by point |
+| Conditionals | `#if`/`#elif`/`#else`/`#endif`, `#ifdef`/`#ifndef`, C23's `#elifdef`/`#elifndef`; expressions are evaluated as integer constants |
+| `#pragma`, `_Pragma` | recorded and ignored as the standard says |
+| Predefined macros | `__STDC__` and `__STDC_VERSION__` follow the selected standard; the toolchain's own markers (`_MSC_VER`, `_WIN32`, `__GNUC__`, `__clang__`) follow the compiler |
+| Macro environment | **the set of macros visible at each position** is recorded, and hover, completion, references and rename ask it rather than searching the text |
+
+## 4. Semantic analysis
+
+| Ability | What it answers |
+| --- | --- |
+| Scopes | blocks, function parameters and bodies, `struct`/`union`/`enum` (including C23 fixed underlying types), `typedef` names, `goto` labels, file scope; an anonymous `struct`/`union` member is promoted to the enclosing type |
+| Types | built-in types, pointers, arrays, function pointers, bit-fields, `typedef` chains, qualifiers, compound literals, variable-length arrays |
+| Names | visibility along the scope chain, `extern`/`static` redeclarations, `__typeof__`, names that a macro produced |
+| Members | `struct`/`union` member lists (anonymous members, bit-fields, flexible array members); the right of `.`/`->` is answered from the object's type |
+| Calls | argument count, argument types, variadic functions, return type; a call through a function pointer is answered from the pointer's type |
+| Constants | `#if` expressions, array extents, enumerator values |
+| The index | the cross-file declaration table, the `#include` graph, member-list caches, and the summary cache (`.cppls`) |
+
+## 5. LSP features
+
+| Feature | What it gives for C |
+| --- | --- |
+| `textDocument/completion` | names in scope (locals → the file → included headers), `.`/`->` members, macros, keywords, `#include` file names; with the range to replace, a `sortText` that is the analysis's own order, snippets when the client supports them, and `completionItem/resolve` for documentation |
+| `textDocument/hover` | macros first (a `#define` **is** its value), then the declaration (signature/type), then the type of the expression; the comment next to the declaration comes with it |
+| `textDocument/signatureHelp` | the list of overloads with `activeParameter` — the position of the argument being typed |
+| `textDocument/definition` | the declaration of a macro, type, function or variable, across files through the index |
+| `textDocument/implementation` | a function declaration → its definition, across files |
+| `textDocument/typeDefinition` | a `typedef`/`struct` name → the definition of its type |
+| `textDocument/references` | **exact references for macros**, including the ones reached under a conditional `#include` or `#if` (marked as uncertain); an ordinary name is not answered |
+| `textDocument/rename` + `prepareRename` | **macros only**; an ordinary name is refused with the protocol's `null`, because editing half of a name's uses is a broken build written into the user's files |
+| `textDocument/documentHighlight` | occurrences of the same name in the current file |
+| `textDocument/documentSymbol` | the file's own declaration tree, **including what `#if 0` removes** (the reader is editing it), with a range for the whole declaration and one for the name |
+| `workspace/symbol` | the declarations the project index holds, by name |
+| `callHierarchy` | incoming and outgoing calls of a function |
+| `textDocument/selectionRange` | the chain of syntax nodes around the cursor |
+| `textDocument/foldingRange` | brace blocks, comments, `#region`, runs of `#include` |
+| `textDocument/documentLink` | the path of an `#include`, as a link to the file |
+| `textDocument/inlayHint` | parameter names at call sites |
+| `textDocument/codeAction` | `source.include`: an unresolved name → an edit adding the header that declares it |
+| `textDocument/semanticTokens` | the standard types (namespace, type, class, enum, typeParameter, parameter, variable, property, enumMember, function, method, macro, keyword, modifier, operator, decorator) and, inside string literals, `printf`/`scanf` format fields (`formatSpecifier`, `formatArgument`, `formatConversion`, `formatEscape`) |
+| `textDocument/diagnostic` | **pull mode**: syntax errors plus the rules in §6 |
+| `textDocument/formatting`, `rangeFormatting`, `willSaveWaitUntil` | whole-file and range formatting, reading the common subset of `.clang-format` |
+| `workspace/didChangeConfiguration` | `.cppls.toml` and editor settings — see [`configuration.md`](configuration.md) |
+
+## 6. Diagnostics
+
+Twenty-six rules, each with a fixed severity; `[diagnostics].disable` turns one off by name. The rows marked **C++**
+never fire in a file compiled as C — see [`configuration.md`](configuration.md) §5.
+
+| Code | Severity | Meaning |
+| --- | --- | --- |
+| `syntax-error` | Error | the text does not parse |
+| `param-type-check` | Error | an argument's type cannot go to the parameter |
+| `assign-type-check` | Error | an assignment or initialisation does not fit the type |
+| `undefined-field` | Error | the member is not in the type |
+| `undefined-name` | Error | the name is not declared |
+| `redefinition` | Error | the same entity is defined twice in one scope |
+| `argument-count` | Error | the call passes the wrong number of arguments |
+| `return-type-mismatch` | Error | a `return` does not fit the declared type |
+| `include-not-found` | Error | the `#include` was not found |
+| `access-invisible` | Error | a member reached from somewhere that may not reach it — **C++** |
+| `missing-return` | Error | a function that promises a value can reach its end |
+| `concept-not-satisfied` | Error | a constraint is not met — **C++** |
+| `macro-redefined` | Warning | the same macro is redefined with a different body |
+| `unnecessary-branch` | Warning | a branch that cannot run |
+| `assignment-in-condition` | Warning | an assignment inside a condition |
+| `c-style-cast` | Warning | a C-style cast — **C++** |
+| `macro-parentheses` | Warning | a macro body without parentheses of its own |
+| `unused` | Hint | a name nothing reads (tag: Unnecessary) |
+| `braces-around-statements` | Hint | a single-statement branch without braces |
+| `use-nullptr` | Hint | `0`/`NULL` used as a null pointer — **C++** |
+| `use-override` | Hint | an overriding function without `override` — **C++** |
+| `simplify-boolean-expr` | Hint | a boolean expression that can be simplified |
+| `else-after-return` | Hint | an `else` after a `return` |
+| `use-auto` | Hint | a declaration that could be written `auto` — **C++** |
+| `implicit-bool-conversion` | Hint | an arithmetic value converted to `bool` — **C++** |
+| `module-note` | Information | a note about a module's position — **C++**, not a complaint (no squiggle) |

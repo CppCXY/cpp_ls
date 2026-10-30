@@ -80,8 +80,8 @@ pointed at the binary directly.
 
 ## Configuring a project
 
-A `.cppls.toml` in the workspace root, or a `compile_commands.json` for the exact compiler flags — both are described
-in [`docs/configuration.md`](docs/configuration.md). No configuration is needed for a project of plain sources.
+A `.cppls.toml` in the workspace root, or a `compile_commands.json` for the exact compiler flags — both are described in
+[`docs/configuration.md`](docs/configuration.md). No configuration is needed for a project of plain sources.
 
 ## Working on it
 
