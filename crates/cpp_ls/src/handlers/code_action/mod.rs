@@ -37,7 +37,7 @@ pub async fn on_code_action(
     let uri = params.text_document.uri;
     let position = params.range.start;
     // **Where the milliseconds go**, when asked.
-    let trace = std::env::var_os("CPPLS_TRACE_CODE_ACTION").is_some();
+    let trace = cpp_code_analysis::probes::code_action();
     let started = std::time::Instant::now();
 
     if let Some(path) = uri_to_file_path(&uri) {

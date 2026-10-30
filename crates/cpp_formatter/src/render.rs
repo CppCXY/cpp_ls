@@ -527,14 +527,6 @@ fn planned_indent(
     enum_column: Option<usize>,
 ) -> Option<(usize, bool)> {
     let first = stream.tokens[index].kind;
-    if std::env::var_os("CPPFMT_DEBUG").is_some() {
-        eprintln!(
-            "planned: index={index} token={:?} in_ctor_init={in_ctor_init} ctor_column={ctor_column:?} block={:?} stack={}",
-            stream.tokens[index].text,
-            blocks[index],
-            stack.len()
-        );
-    }
     // **A preprocessor directive starts at column 0** (`IndentPPDirectives: None`, which is clang-format`s
     // default): `#if` inside a function body belongs against the margin, and the source`s own column is not kept.
     if first == cpp_parser::CppTokenKind::Hash {

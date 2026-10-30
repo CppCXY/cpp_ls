@@ -37,10 +37,10 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
-/// Is the census on? Read **once** — a probe that reads its environment per entry measures itself.
+/// Is the census on? **The read lives in [`crate::probes`]**, where every other switch's does: a probe that read the
+/// environment per entry would be measuring itself, which is the mistake that module exists to remove.
 fn enabled() -> bool {
-    static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("CPPLS_WALK_CENSUS").is_some())
+    crate::probes::walk_census()
 }
 
 static ENTRIES: AtomicU64 = AtomicU64::new(0);

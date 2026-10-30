@@ -65,7 +65,7 @@ pub async fn on_inlay_hint(
         // nothing at all when there is not. Handlers that reach the index through a name — `hover`, `definition`,
         // `signature_help` — get it from `read_the_modules`; the ones that ask about a *position* say it here.
         context.analysis().catch_up(&path).await;
-        if std::env::var_os("CPPLS_TRACE_INLAY").is_some() {
+        if cpp_code_analysis::probes::inlay() {
             eprintln!("[inlay] prepared and caught up in {:?}", started.elapsed());
         }
     }
@@ -111,7 +111,7 @@ pub async fn on_inlay_hint(
         // — which is what the report said, in those words. What makes the incomplete answer repairable is the
         // refresh the pump sends when the queue drains, not a refusal here.
         let hints = session.inlay_hints(&view, visible_range(&view, requested)?);
-        if std::env::var_os("CPPLS_TRACE_INLAY").is_some() {
+        if cpp_code_analysis::probes::inlay() {
             eprintln!(
                 "[inlay] view {parsed:?}, hints {:?}, {} hint(s)",
                 started.elapsed() - parsed,

@@ -3692,7 +3692,7 @@ impl<F: FileProvider + Clone> Session<F> {
             .unwrap_or_else(|| requested.to_path_buf());
         // **A miss is otherwise indistinguishable from "never cooked"**, which is what made a file that *had* been
         // cooked answer `None` for every query about it. See `CPPLS_TRACE_VIEW`.
-        if std::env::var_os("CPPLS_TRACE_VIEW").is_some() {
+        if crate::probes::view() {
             eprintln!(
                 "view: asked {:?} key {:?} summary {} held {}",
                 requested,
@@ -3702,7 +3702,7 @@ impl<F: FileProvider + Clone> Session<F> {
             );
         }
         let file = self.vfs.held(&key)?;
-        if std::env::var_os("CPPLS_TRACE_VIEW").is_some() {
+        if crate::probes::view() {
             eprintln!(
                 "view: file.path {:?} hash {:?}",
                 file.path,
@@ -4640,7 +4640,7 @@ impl<F: FileProvider + Clone> Session<F> {
                             // the same day and the same entry file can be measured with and without it. Comparing
                             // against a wall clock from an older build is how a 103 s figure got quoted for a code
                             // base it no longer described.
-                            !provisional && std::env::var_os("CPPLS_NO_SHARE").is_none(),
+                            !provisional && !crate::probes::no_share(),
                             self.store.contributions(),
                         )
                     });
@@ -6093,7 +6093,7 @@ impl<F: FileProvider + Clone> Session<F> {
         // than by a second read of the file, so the entry cannot describe one text under another's key.
         if let Ok(mut known) = self.renderings.lock() {
             let key = (path.clone(), text_hash);
-            if std::env::var_os("CPPLS_TRACE_VIEW").is_some() {
+            if crate::probes::view() {
                 eprintln!("commit: path {:?} hash {:?}", path, text_hash);
             }
             let before = known.len();

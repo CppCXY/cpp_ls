@@ -103,7 +103,7 @@ where
 
         // **Where a hint's milliseconds go**, when asked. One line per call separates them, and a
         // repeated callee spelling is visible in it.
-        let trace = std::env::var_os("CPPLS_TRACE_INLAY").is_some();
+        let trace = crate::probes::inlay();
         let started = std::time::Instant::now();
         let Known::Yes(callee) = callee_of_a_call(
             index,

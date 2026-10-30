@@ -73,6 +73,16 @@ switch! {
 
     inference => "CPPLS_TRACE_INFERENCE", "What a member answer was substituted with, and the type it became — the switch two editor reports needed.";
     answers => "CPPLS_TRACE_ANSWERS", "What one name query found: how many declarations, of which kinds, in which files — the question a hover on a template parameter turned on (2288 `_Tp` answers, none of them a class).";
+
+    view => "CPPLS_TRACE_VIEW", "Which rendering a query was answered from, and whether the cache had one: the question that separated `not cooked` from `cooked and dropped`.";
+    types => "CPPLS_TRACE_TYPES", "One line per type question, at its depth — the only instrument that showed a recursion no depth limit bounded.";
+    visibility => "CPPLS_TRACE_VISIBILITY", "How many files a visibility question kept, after the ordering step.";
+    splice => "CPPLS_SPLICE_TRACE", "Every file the session entered and spliced, with what it contributed — the trace a missing standard-library fact needed.";
+    inlay => "CPPLS_TRACE_INLAY", "Where an inlay-hint request's milliseconds went, one line per call.";
+    time_checks => "CPPLS_TIME_CHECKS", "One line per rule per file — names the check that takes the forty-five seconds.";
+    walk_census => "CPPLS_WALK_CENSUS", "Every file the walk entered, spliced or fresh, and the conditions it mentions.";
+    code_action => "CPPLS_TRACE_CODE_ACTION", "Where a code-action request's milliseconds went.";
+    no_share => "CPPLS_NO_SHARE", "Turn summary sharing off, so one machine can be measured with and without it — an A/B switch, not a setting.";
 }
 
 /// **Do not filter a candidate whose declaration is written in a `#if` region.**

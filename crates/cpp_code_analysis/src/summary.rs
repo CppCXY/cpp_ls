@@ -3556,14 +3556,14 @@ fn walk_one_file<'a>(
     // nesting depth** — a cycle of unguarded headers is the one shape the file's own rule cannot end. GCC's
     // `#include` nesting limit is 200, and this is that number.
     if walked.spliced.contains(path) {
-        if std::env::var_os("CPPLS_SPLICE_TRACE").is_some() {
+        if crate::probes::splice() {
             eprintln!("leave early (already spliced): {}", path.display());
         }
         return None;
     }
 
     let already_read = !seen.insert(path);
-    if std::env::var_os("CPPLS_SPLICE_TRACE").is_some() {
+    if crate::probes::splice() {
         eprintln!(
             "enter: {} | already seen {}, depth {depth}, spliced {}, timeline {}",
             path.display(),
@@ -4193,7 +4193,7 @@ fn splice_a_contribution<'a>(
     if let Some(timeline) = walked.timeline.as_mut() {
         timeline.leave(frame);
     }
-    if std::env::var_os("CPPLS_SPLICE_TRACE").is_some() {
+    if crate::probes::splice() {
         eprintln!(
             "splice: {} | {} changes, {} edges, {} events",
             file.display(),

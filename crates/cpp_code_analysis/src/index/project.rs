@@ -3334,7 +3334,7 @@ pub(crate) fn type_of_expression_memoed(
     // bounded by anything. Measured on a real C++23 project: `module_graph.cpp` overflowed the stack with 32 MB on
     // `text_of(site.file).content.substr(…).starts_with(name)`, and no log said which questions repeated. One line per
     // question answers that, and it is the only instrument that can.
-    if std::env::var_os("CPPLS_TRACE_TYPES").is_some() {
+    if crate::probes::types() {
         eprintln!(
             "[type_of] depth {depth:>2}  {:?}",
             expression
@@ -10448,7 +10448,7 @@ impl ProjectIndex {
         let nanos_before = CONDITION_NANOS.load(std::sync::atomic::Ordering::Relaxed);
         let (visible_files, through_an_import) = self.visible_files_with_modules(visible_from);
         let files = self.visible_in_order_of(visible_files);
-        if std::env::var_os("CPPLS_TRACE_VISIBILITY").is_some() {
+        if crate::probes::visibility() {
             eprintln!(
                 "[visibility] {} file(s) after the order step, from {}",
                 files.len(),

@@ -170,7 +170,7 @@ pub fn run_check<T: Check>(context: &mut CheckContext<'_>) {
         // **Per-rule timing, while a pathological file is being found.** `CPPLS_TIME_CHECKS=1` prints one line per rule per
         // file; summed over a run it names the rule that takes the forty-five seconds. Temporary — a probe is a tool, not a
         // feature, and this one comes out when the quadratic is fixed.
-        if std::env::var_os("CPPLS_TIME_CHECKS").is_some() {
+        if crate::probes::time_checks() {
             let at = std::time::Instant::now();
             T::check(context);
             let took = at.elapsed();
