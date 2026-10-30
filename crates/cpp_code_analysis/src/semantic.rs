@@ -272,6 +272,7 @@ pub fn classified_names(index: &ProjectIndex, view: &FileView) -> Vec<Name> {
         // 1. The declaration's own name. One hash lookup, and it is asked of every identifier in the file.
         if let Some(binding) = declared.get(&at)
             && let Some(kind) = kind_of_binding(
+                index,
                 binding,
                 view,
                 parameters.contains(&binding.name_range.start_offset),
@@ -325,6 +326,7 @@ pub fn classified_names(index: &ProjectIndex, view: &FileView) -> Vec<Name> {
         if declared_here {
             let resolved = *held.entry(text).or_insert_with(|| match held_at(view, at) {
                 Held::InThisFile(binding) => kind_of_binding(
+                    index,
                     &binding,
                     view,
                     parameters.contains(&binding.name_range.start_offset),
@@ -772,8 +774,48 @@ fn spell(global: bool, written: &str) -> String {
     }
 }
 
+/// **Does this spelling name a function pointer — directly, or through one typedef?**
+///
+/// `int (*)(int, int)` is one, and so is `binary_op` while the file writes
+/// `typedef int (*binary_op)(int, int);`. The second spelling is the one a reader sees in
+/// `binary_op operation = add;`, and a declaration's recorded type is the alias's name rather than the signature, so
+/// the alias is followed in the index.
+///
+/// The chain is bounded because a typedef of a typedef is legal and a cycle is not: four steps is past any spelling a
+/// project writes, and a spelling that returns to itself is refused rather than followed again.
+fn denotes_a_function_pointer(index: &ProjectIndex, declaring: &Path, written: &str) -> bool {
+    let mut spelling = written.trim().to_string();
+    for _ in 0..4 {
+        // **The signature is the answer.** `int (*)(int, int)` and `void (*)(void)` both carry `(*`, and no other
+        // type spelling does — a pointer to a function is written exactly that way.
+        if spelling.contains("(*") {
+            return true;
+        }
+        let Known::Yes(found) = index.definition(&spelling, declaring) else {
+            return false;
+        };
+        if found.fact.kind != DeclKind::Type {
+            return false;
+        }
+        let Some(target) = found.fact.type_of.as_deref() else {
+            return false;
+        };
+        let target = target.to_string();
+        if target == spelling {
+            return false;
+        }
+        spelling = target;
+    }
+    false
+}
+
 /// What a binding is, or `None` for a name a highlighter should not claim anything about.
-fn kind_of_binding(binding: &Binding, view: &FileView, is_a_parameter: bool) -> Option<NameKind> {
+fn kind_of_binding(
+    index: &ProjectIndex,
+    binding: &Binding,
+    view: &FileView,
+    is_a_parameter: bool,
+) -> Option<NameKind> {
     Some(match binding.kind {
         BindingKind::Namespace => NameKind::Namespace,
         BindingKind::Class | BindingKind::Enum | BindingKind::Alias | BindingKind::Typedef => {
@@ -818,6 +860,14 @@ fn kind_of_binding(binding: &Binding, view: &FileView, is_a_parameter: bool) -> 
                 // while the scope model records a variable because that is all a binding can say. The template head
                 // is in the tree, and this is what asks it.
                 NameKind::VariableTemplate
+            } else if crate::sema::declarations::declared_type_of(&view.root, binding)
+                .is_some_and(|written| denotes_a_function_pointer(index, &view.path, &written))
+            {
+                // **A function pointer is drawn as a function.** `binary_op operation = add;` declares a *variable* —
+                // the fact says so and hover says so — but a reader scanning `operation(1, 2)` reads a call, and a
+                // theme that colours functions is where that call belongs. The type is what decides, so an ordinary
+                // variable keeps `variable` and only a callable one moves.
+                NameKind::Function
             } else {
                 NameKind::Variable
             }

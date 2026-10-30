@@ -2000,3 +2000,65 @@ fn a_return_type_a_directive_splits_is_the_branch_this_compilation_takes() {
         "and an unsplit one keeps its type: {found:?}"
     );
 }
+
+/// **A function pointer is drawn as a function.**
+///
+/// `binary_op operation = add;` declares a *variable* — the fact says so, and hover says "a variable" — but the type
+/// is `int (*)(int, int)`, so a reader scanning `operation(1, 2)` reads a call, and a theme that colours functions is
+/// where that call belongs. The type decides, so the rule is narrow:
+///
+/// * a variable whose type is a function pointer, directly or through a typedef, is `function`;
+/// * an ordinary variable stays `variable`;
+/// * a **parameter** keeps its own kind — `int g(binary_op callback)` says what the name is, and that is more than
+///   the type can.
+#[test]
+fn a_function_pointer_variable_is_drawn_as_a_function() {
+    let names = classified(
+        "\
+typedef int (*binary_op)(int, int);
+static int add(int a, int b) { return a + b; }
+int g(binary_op callback) { return callback(1, 2); }
+int f(void) { binary_op operation = add; int value = 1; return operation(value, 2); }
+",
+    );
+
+    let kinds: Vec<(NameKind, bool)> = names
+        .iter()
+        .filter(|(text, _, _)| text == "operation")
+        .map(|(_, kind, declaration)| (*kind, *declaration))
+        .collect();
+    assert!(
+        !kinds.is_empty() && kinds.iter().all(|(kind, _)| *kind == NameKind::Function),
+        "a function pointer is drawn as a function, declared and used: {kinds:?}"
+    );
+
+    let callback: Vec<NameKind> = names
+        .iter()
+        .filter(|(text, _, _)| text == "callback")
+        .map(|(_, kind, _)| *kind)
+        .collect();
+    assert!(
+        !callback.is_empty() && callback.iter().all(|kind| *kind == NameKind::Parameter),
+        "a parameter stays a parameter: {callback:?}"
+    );
+
+    let value: Vec<NameKind> = names
+        .iter()
+        .filter(|(text, _, _)| text == "value")
+        .map(|(_, kind, _)| *kind)
+        .collect();
+    assert!(
+        !value.is_empty() && value.iter().all(|kind| *kind == NameKind::Variable),
+        "an ordinary variable stays a variable: {value:?}"
+    );
+
+    let alias: Vec<NameKind> = names
+        .iter()
+        .filter(|(text, _, _)| text == "binary_op")
+        .map(|(_, kind, _)| *kind)
+        .collect();
+    assert!(
+        !alias.is_empty() && alias.iter().all(|kind| *kind == NameKind::Type),
+        "and the typedef itself is still a type: {alias:?}"
+    );
+}
