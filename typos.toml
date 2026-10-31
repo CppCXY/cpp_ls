@@ -31,6 +31,7 @@ standrad = "standrad"
 Fo = "Fo"
 ue = "ue"
 UE = "UE"
+fpr = "fpr"
 [files]
 extend-exclude = [
   "CHANGELOG.md",
