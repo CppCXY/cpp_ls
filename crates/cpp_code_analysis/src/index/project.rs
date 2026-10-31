@@ -503,16 +503,30 @@ fn the_overload_a_call_names(
         // **The whole declaration, not the declarator.** A binding ranges over the declarator — `describe(T value)` —
         // and the `enable_if` is in the *return type*, which is a specifier of the enclosing declaration. Measured: the
         // binding's text was `describe(T value)` for both overloads, so the condition was never found and nothing narrowed.
-        let declaration = the_candidate
+        let declaration_node = the_candidate
             .ancestors()
             .find(|node| {
                 cpp_parser::CppSyntaxKind::from(node.kind())
                     == cpp_parser::CppSyntaxKind::Declaration
             })
-            .unwrap_or_else(|| the_candidate.clone())
-            .text()
-            .to_string();
-        let Some(condition) = crate::sema::constraint::the_condition_of(&declaration) else {
+            .unwrap_or_else(|| the_candidate.clone());
+        let declaration = declaration_node.text().to_string();
+        // **A `requires` clause is read from its own node**, because the clause and the declaration that follows it are
+        // separated by nothing but a newline: a text scan cannot tell `requires is_integral_v<T>` from
+        // `requires is_integral_v<T> std::string describe(T)`. `enable_if` is a name inside the type, so it is found in
+        // the text and needs no node.
+        let requires_clause = declaration_node
+            .descendants()
+            .find(|node| {
+                cpp_parser::CppSyntaxKind::from(node.kind())
+                    == cpp_parser::CppSyntaxKind::RequiresClause
+            })
+            .map(|node| node.text().to_string())
+            .and_then(|text| crate::sema::constraint::a_requires_clause(&text).map(str::to_string));
+        let condition_owned = requires_clause.as_deref().map(str::to_string).or_else(|| {
+            crate::sema::constraint::the_condition_of(&declaration).map(str::to_string)
+        });
+        let Some(condition) = condition_owned.as_deref() else {
             // An ordinary function, or a template enabled unconditionally.
             survivors.push(candidate.clone());
             continue;

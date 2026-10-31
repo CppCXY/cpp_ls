@@ -172,16 +172,24 @@ pub fn satisfies(condition: &str, bindings: &[(String, String)]) -> Option<bool>
     Trait::named(&trait_call.name)?.of(&argument)
 }
 
-/// **A condition spliced out of a declaration** — the text between `enable_if<` and its closing `>`.
+/// **A condition spliced out of a declaration** — the text between `enable_if<` and its closing `>`, or the expression a
+/// `requires` clause states.
 ///
 /// ```cpp
-/// typename std::enable_if<std::is_integral<T>::value, std::string>::type
-///                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/// typename std::enable_if<std::is_integral<T>::value, std::string>::type describe(T);   // the C++11 spelling
+/// template <typename T> requires std::is_integral_v<T> std::string describe(T);          // C++20's own
+///                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 /// ```
 ///
-/// `None` when the declaration has no `enable_if` at all, which is the ordinary function and every declaration that is
-/// not conditionally enabled.
+/// `None` when the declaration has no condition at all, which is the ordinary function. A **requires-expression**
+/// (`requires { value.size(); }`) is also `None`: it is a block of statements asking whether each one is well formed, not a
+/// constant expression this layer can decide, and answering it as if it were would drop the wrong candidate.
 pub fn the_condition_of(declaration: &str) -> Option<&str> {
+    the_enable_if_argument(declaration)
+}
+
+/// The first argument of the first `enable_if<…>` — the condition, in both `enable_if` and `enable_if_t`.
+fn the_enable_if_argument(declaration: &str) -> Option<&str> {
     let at = declaration.find("enable_if")?;
     let after = &declaration[at + "enable_if".len()..];
     let open = after.find('<')?;
@@ -202,6 +210,28 @@ pub fn the_condition_of(declaration: &str) -> Option<&str> {
         }
     }
     None
+}
+
+/// **The constraint a `RequiresClause` node states** — the node's own text without its keyword.
+///
+/// ```cpp
+/// template <typename T> requires std::is_integral_v<T>
+///                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/// ```
+///
+/// Read from the **node**, not from the declaration's text: the clause and the declaration that follows it are separated
+/// by nothing but a newline, so a text scan cannot tell `requires is_integral_v<T>` from `requires is_integral_v<T>
+/// std::string describe(T)`. The grammar knows, and this is that knowledge.
+///
+/// `None` when the node is a **requires-expression** (`requires { … }`), which asks whether statements compile rather than
+/// stating a condition this layer could decide.
+pub fn a_requires_clause(clause: &str) -> Option<&str> {
+    let text = clause.trim_start();
+    let rest = text.strip_prefix("requires")?.trim_start();
+    if rest.starts_with('{') {
+        return None;
+    }
+    (!rest.is_empty()).then_some(rest)
 }
 
 /// The argument list of `[std::]`name`<…>`, when the condition *is* that trait.

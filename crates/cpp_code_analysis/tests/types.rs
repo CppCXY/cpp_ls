@@ -2282,3 +2282,133 @@ fn dump_the_call_shape() {
         );
     }
 }
+
+/// **`enable_if` in a *template parameter*** — the other spelling of the same idiom.
+///
+/// ```cpp
+/// template <typename T, typename = std::enable_if_t<std::is_integral<T>::value>>
+/// void describe(T value);
+/// ```
+///
+/// Measured: the same call-site question as the return-type form, and the same answer for either call, because the
+/// condition is found but the parameter that carries it (`typename = …`) declares no name — so the bindings shifted and
+/// `T` was bound to nothing.
+#[test]
+fn an_enable_if_in_a_template_parameter_is_read() {
+    let source = "\
+#include <type_traits>
+#include <string>
+
+template <typename T, typename = std::enable_if_t<std::is_integral<T>::value>>
+std::string describe(T value) {
+    return \"integral\";
+}
+
+template <typename T, typename = std::enable_if_t<std::is_floating_point<T>::value>>
+std::string describe(T value) {
+    return \"floating\";
+}
+
+std::string f() {
+    describe(41);
+    return describe(1.5);
+}
+";
+    let session = session_with(&[("/p/a.cpp", source)]);
+    let view = session.view("/p/a.cpp").expect("the file is held");
+    let rendering = view.root.text().to_string();
+    let declaration_at = |which: usize| -> usize {
+        rendering
+            .match_indices("describe(T value)")
+            .nth(which)
+            .map(|(at, _)| at)
+            .expect("both declarations are in the rendering")
+    };
+    let floating_call = rendering
+        .find("describe(1.5)")
+        .expect("the call is written");
+    let one = match session.definition(
+        &view,
+        cpp_code_analysis::file::coordinates::ReadingOffset::new(floating_call + 3),
+    ) {
+        cpp_code_analysis::Known::Yes(found) => found,
+        other => panic!("`describe(1.5)` resolves: {other:?}"),
+    };
+    assert_eq!(
+        one.fact.name_range.start_offset,
+        declaration_at(1),
+        "the template parameter's condition picks the floating-point overload"
+    );
+}
+/// **A `requires` clause** — C++20's own spelling of the same condition.
+///
+/// ```cpp
+/// template <typename T> requires std::is_integral_v<T>
+/// std::string describe(T value);
+/// ```
+///
+/// `enable_if` is found by name; a `requires` clause is a different keyword and was not read at all, so both overloads
+/// stayed candidates and the call answered the first one written.
+#[test]
+fn a_requires_clause_is_read() {
+    let source = "\
+#include <type_traits>
+#include <string>
+
+template <typename T> requires std::is_integral_v<T>
+std::string describe(T value) {
+    return \"integral\";
+}
+
+template <typename T> requires std::is_floating_point_v<T>
+std::string describe(T value) {
+    return \"floating\";
+}
+
+std::string f() {
+    describe(41);
+    return describe(1.5);
+}
+";
+    let session = session_with(&[("/p/a.cpp", source)]);
+    let view = session.view("/p/a.cpp").expect("the file is held");
+    let rendering = view.root.text().to_string();
+    let declaration_at = |which: usize| -> usize {
+        rendering
+            .match_indices("describe(T value)")
+            .nth(which)
+            .map(|(at, _)| at)
+            .expect("both declarations are in the rendering")
+    };
+    let floating_call = rendering
+        .find("describe(1.5)")
+        .expect("the call is written");
+    let one = match session.definition(
+        &view,
+        cpp_code_analysis::file::coordinates::ReadingOffset::new(floating_call + 3),
+    ) {
+        cpp_code_analysis::Known::Yes(found) => found,
+        other => panic!("`describe(1.5)` resolves: {other:?}"),
+    };
+    assert_eq!(
+        one.fact.name_range.start_offset,
+        declaration_at(1),
+        "the `requires` clause picks the floating-point overload"
+    );
+
+    // **And the other direction**, as in the `enable_if` test: an answer that always took the last candidate would pass
+    // the assertion above.
+    let integral_call = rendering.find("describe(41)").expect("the call is written");
+    let integral = match session.definition(
+        &view,
+        cpp_code_analysis::file::coordinates::ReadingOffset::new(integral_call + 3),
+    ) {
+        cpp_code_analysis::Known::Yes(found) => found,
+        other => panic!("`describe(41)` resolves: {other:?}"),
+    };
+    assert_eq!(
+        integral.fact.name_range.start_offset,
+        declaration_at(0),
+        "and the integral overload for an int"
+    );
+}
