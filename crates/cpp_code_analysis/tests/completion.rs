@@ -2333,15 +2333,28 @@ void f() {
         "the pointee's member is offered after a `.` on a pointer: {labels:?}"
     );
 }
-/// **A `.` on a class with `operator->` is the same mistake as a `.` on a pointer** — the list is the pointee's and the
-/// operator is replaced.
+/// **A `.` on a class with `operator->` lists *that class's* members** — the pointee is reached with `->`, which is what the
+/// language says and what the arrow path already does.
 ///
-/// Reported with a screenshot: `config.Editorconfig.` where `Editorconfig` is a `std::shared_ptr<LuaEditorConfig>`
-/// offered `operator=`, `element_type` and `weak_type` — the members of `shared_ptr` itself, which the reader is not
-/// writing and which the `.` cannot use. A smart pointer reaches its pointee only through `operator->`, so the answer
-/// has to follow it: the same chain the `->` path already walks, entered one operator earlier.
+/// This test used to assert the opposite. The rule was: a `.` on a class that declares `operator->` is the same mistake as
+/// a `.` on a pointer, so the list is the pointee's and the operator is replaced. The first half of that is true of a smart
+/// pointer and **false of `std::optional`**, which declares `operator->` *and* `value_type`:
+///
+/// ```cpp
+/// std::optional<std::string> maybe;
+/// maybe.has_value();     // offered `append`, `c_str`, `capacity` — the string's sixty-eight
+/// maybe->size();         // right, through `operator->`
+/// ```
+///
+/// Measured on a C++ project: the dot answered the *contained* type's members for `optional<string>`, and **nothing** for
+/// `optional<int>` (following `value_type` to `int`, which has no members). The two classes are indistinguishable by shape,
+/// so the rule cannot be "follow the operator" — it is now **`element_type`**, the standard's own pointer protocol, which
+/// `unique_ptr`/`shared_ptr`/`weak_ptr` declare and `optional` does not.
+///
+/// The fixture below declares `operator->` and no `element_type`, so it is a class whose dot is its own list — the rule this
+/// test now pins, with the same shape the old one was written for.
 #[test]
-fn a_dot_on_a_class_with_operator_arrow_lists_the_pointee() {
+fn a_dot_on_a_class_with_operator_arrow_lists_that_class() {
     let source = "\
 namespace std {
 template <class T>
@@ -2377,14 +2390,14 @@ void f(Config config) {
     let at =
         source.find("config.Editorconfig.").expect("the fixture") + "config.Editorconfig.".len();
     let labels = labels_at(&mut session, "/p/a.cpp", at);
-    println!("dot on a smart pointer at {at}: {labels:?}");
+    println!("dot on a class with operator-> at {at}: {labels:?}");
     assert!(
-        labels.iter().any(|label| label == "code_style_check"),
-        "the pointee's member is offered: {labels:?}"
+        labels.iter().any(|label| label == "use_count"),
+        "the object's own member is offered: {labels:?}"
     );
     assert!(
-        !labels.iter().any(|label| label == "use_count"),
-        "and the smart pointer's own members are not: {labels:?}"
+        !labels.iter().any(|label| label == "code_style_check"),
+        "and the pointee's is not — that is what `->` is for: {labels:?}"
     );
 }
 

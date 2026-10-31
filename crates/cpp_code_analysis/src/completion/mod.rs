@@ -541,8 +541,28 @@ pub(crate) fn the_class_after_the_operator(
             // is what keeps an ordinary pointer from being stolen: `std::string* p; p->` must reach `std::string`,
             // whose member list has no `operator->`, so the pointer is stripped by the arm below instead of `p->`
             // becoming `basic_string::value_type`'s members (`char`'s, of which there are none).
-            if let Some(pointee) =
-                the_element_type_pointed_at(index, scopes, root, path, &class, &current)
+            // **Steps 1 and 2 are for an arrow, or for a class that declares `element_type`.** A reader who typed `.` is
+            // asking what the object in front of them has, and following a pointer-like class through `element_type` or
+            // `value_type` answered the *contained* type's members instead: measured on a C++ project,
+            // `std::optional<std::string> maybe; maybe.has_value()` offered `append`, `c_str`, `capacity` — the string's
+            // sixty-eight — while `maybe->size()` (an arrow, through `operator->`) was right. `std::optional<int>`
+            // answered **nothing** for the same reason: the step followed `value_type` to `int`, which has no members.
+            //
+            // The line is **`element_type`**, which is the standard's own pointer protocol and what `unique_ptr`,
+            // `shared_ptr` and `weak_ptr` declare — the dot-on-a-smart-pointer rewrite this loop also serves goes through
+            // it. `value_type` is every container's and every wrapper's (`optional`, `vector`, `string`), so a dot that
+            // followed *it* would list the elements' members for any of them.
+            let pointer_like = arrow
+                || crate::index::project::members_of(index, scopes, root, path, &class)
+                    .value()
+                    .is_some_and(|list| {
+                        list.members
+                            .iter()
+                            .any(|member| member.fact.name == "element_type")
+                    });
+            if pointer_like
+                && let Some(pointee) =
+                    the_element_type_pointed_at(index, scopes, root, path, &class, &current)
             {
                 current = crate::sema::types::parse_type_spelling(&pointee);
                 followed_a_pointer = true;
@@ -551,15 +571,20 @@ pub(crate) fn the_class_after_the_operator(
             // **2. A class's own `operator->`, when its declared return type can be read.** For an `arrow` this is
             // the chain continuing; for a `.` it is a reader who typed the wrong operator, which is reported by
             // `followed_a_pointer` so that the completion can rewrite the `.` as `->`.
-            let returns = crate::index::project::operator_returns_of(
-                index,
-                &mut |_: &Path| None,
-                scopes,
-                root,
-                path,
-                &current,
-                "operator->",
-            );
+            let returns = if arrow {
+                crate::index::project::operator_returns_of(
+                    index,
+                    &mut |_: &Path| None,
+                    scopes,
+                    root,
+                    path,
+                    &current,
+                    "operator->",
+                )
+            } else {
+                // **A dot does not follow a class's `operator->`** — see the note on step 1 above.
+                None
+            };
             let Some(returns) = returns else {
                 // **3. Where the arrow stops.** A plain `struct` on the left of `->` is ill-formed, and its members
                 // are the honest answer for a reader who typed one by mistake.

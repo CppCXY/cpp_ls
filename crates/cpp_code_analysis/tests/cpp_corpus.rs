@@ -123,6 +123,25 @@ const TYPES: &[TypeRow] = &[
         name: "widget",
         expected: "Widget",
     },
+    // The two `std::optional` declarations: what the *name* is typed as, before any member question.
+    TypeRow {
+        file: "src/techniques.cpp",
+        needle: "std::optional<std::string> maybe",
+        name: "maybe",
+        expected: "optional",
+    },
+    TypeRow {
+        file: "src/techniques.cpp",
+        needle: "std::optional<int> number",
+        name: "number",
+        expected: "optional",
+    },
+    TypeRow {
+        file: "src/techniques.cpp",
+        needle: "std::function<int(int, int)> operation",
+        name: "operation",
+        expected: "function",
+    },
 ];
 
 fn corpus_files(root: &Path) -> Vec<PathBuf> {
