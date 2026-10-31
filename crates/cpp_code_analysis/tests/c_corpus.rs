@@ -445,10 +445,17 @@ fn the_c_corpus_parses_and_its_members_resolve() {
             let started = std::time::Instant::now();
             let found = session.completions(&view, FileOffset::new(cursor));
             let spent = started.elapsed().as_millis();
+            let prefix = found.prefix.clone();
+            let first: Vec<String> = found
+                .items
+                .iter()
+                .take(4)
+                .map(|item| item.label.clone())
+                .collect();
             let labels: Vec<String> = found.items.iter().map(|item| item.label.clone()).collect();
             let has = labels.iter().any(|label| label == wanted);
             println!(
-                "  {:<18} {:?} → {} item(s), {wanted} {}, {spent} ms",
+                "  {:<18} {:?} → {} item(s), prefix {prefix:?}, {wanted} {}, {spent} ms, first {first:?}",
                 file,
                 needle,
                 labels.len(),

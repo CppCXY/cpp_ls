@@ -248,7 +248,6 @@ pub struct CompletionSet {
     pub prefix: String,
     /// The range a client **replaces** with the chosen item.
     pub replace: SourceRange,
-    /// Was the list cut short by a budget, so that items which would have been offered are missing?
     ///
     /// Distinct from the analysis being incomplete, and the distinction is the protocol's `isIncomplete`: a client
     /// told "incomplete" asks again as the user types, which is exactly right while a background index is still
@@ -264,6 +263,26 @@ pub struct CompletionSet {
     /// `<xstring>` had at file scope) and **58** once the file was cooked. A list that looks final and holds a
     /// quarter of the truth is worse than an empty one, because the reader believes it.
     pub incomplete: bool,
+}
+
+impl CompletionSet {
+    /// **Did the answer hold nothing that could be what the reader is typing?**
+    ///
+    /// A client filters the list by the typed prefix and, on an empty result, shows *"no suggestions"* — and some
+    /// clients cache that for the prefix, so only the next keystroke re-opens the question. An answer holding nothing
+    /// that matches is therefore **not final**, whatever the reason: the file's closure was still being read, its
+    /// summary had just been dropped by an edit, or the gathering layer stopped short.
+    ///
+    /// The test is the engine's own matcher rather than a prefix comparison, because `gp` legitimately matches
+    /// `getPid` without being a prefix of it — a list that answered `getPid` *did* answer what was typed.
+    pub fn nothing_matched(&self) -> bool {
+        !self.prefix.is_empty()
+            && !self.items.iter().any(|item| {
+                let compared = item.filter.as_deref().unwrap_or(&item.label);
+                crate::completion::matching::quality(compared, &self.prefix)
+                    != crate::completion::matching::NONE
+            })
+    }
 }
 
 impl Default for CompletionSet {
@@ -1468,13 +1487,16 @@ const ITEM_BUDGET: usize = 1000;
 /// contributes a share, and a header with a thousand names cannot starve one with ten.
 fn ordered(mut scored: Vec<Scored>) -> (Vec<CompletionItem>, bool) {
     let by_rank = |one: &Scored, other: &Scored| {
-        one.score
-            .keys()
-            .cmp(&other.score.keys())
-            // **How well it answers what was typed**, before the alphabetical tiebreak. `str` puts `string` above
-            // `to_string` even when both are in the same header, because one begins the name and the other begins a
-            // later word — and that is the ordering a reader expects from having typed something.
-            .then_with(|| other.matched.cmp(&one.matched))
+        // **How well it answers what was typed, before where the declaration is.** `str` must put `string` above
+        // `to_string` — the module's own rule — and the tier alone does not express that: measured with `fpr` in a
+        // C file, the list began `functions_pointers` (a *local*, matched as a word-start) above `fprintf` (an
+        // exact prefix match from `<stdio.h>`). A reader who typed three characters of a name means that name, and
+        // "nearer" is a tiebreak between the candidates that answer equally well — not a veto over them.
+        other
+            .matched
+            .cmp(&one.matched)
+            .then_with(|| one.score.keys().cmp(&other.score.keys()))
+            // **Then the alphabetical tiebreak**, which keeps a list stable between keystrokes.
             .then_with(|| one.item.label.cmp(&other.item.label))
     };
     scored.sort_by(by_rank);

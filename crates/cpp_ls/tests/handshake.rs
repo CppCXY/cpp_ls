@@ -5814,3 +5814,84 @@ int main(void) {
     return LOCAL_MACRO(value);
 }
 ";
+
+/// **The first completion after a file is opened**, asked the way an editor asks it: one shot, no retry, at the
+/// keystroke that follows `didOpen`.
+///
+/// Reported: *"我输入 f 还是没有补全,但是输入到 fp 的时候就有补全了"* — typing `f` shows nothing and typing `fp` works.
+/// The two requests differ only in the prefix, so the difference has to be either the answer for `f` or the state the
+/// server was in when it arrived; a test that retried either would hide both. So this asks **once** per prefix, in the
+/// order a reader types them, and requires the same name from both.
+#[test]
+fn the_first_completion_after_an_open_answers_the_same_as_the_second() {
+    let project = Project::new("c-first-completion");
+    project.write("main.c", C_COMPLETION_C);
+
+    let mut server = Server::start(project.root());
+    let uri = uri_of(&project.root().join("main.c"));
+    server.request(
+        1,
+        "initialize",
+        json!({
+            "processId": std::process::id(),
+            "rootUri": uri_of(project.root()),
+            "capabilities": {
+                "workspace": { "configuration": true, "didChangeWatchedFiles": { "dynamicRegistration": true } },
+                "window": { "workDoneProgress": true },
+            },
+        }),
+    );
+    server.notify("initialized", json!({}));
+    server.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": { "uri": uri, "languageId": "c", "version": 1, "text": C_COMPLETION_C }
+        }),
+    );
+
+    // **`f`, then `fp`** — the two prefixes in the report, one shot each, at the same line.
+    let line = line_of(C_COMPLETION_C, "fprintf(stdout");
+    let labels_at = |server: &mut Server, id: i64, width: u32| -> Vec<String> {
+        let character = C_COMPLETION_C
+            .lines()
+            .nth(line as usize)
+            .and_then(|text| text.find("fprintf"))
+            .expect("the fixture writes it") as u32
+            + width;
+        let answer = server.request(
+            id,
+            "textDocument/completion",
+            json!({
+                "textDocument": { "uri": uri },
+                "position": { "line": line, "character": character },
+            }),
+        );
+        let items = if let Some(items) = answer["result"]["items"].as_array() {
+            items.clone()
+        } else {
+            answer["result"].as_array().cloned().unwrap_or_default()
+        };
+        items
+            .iter()
+            .filter_map(|item| item["label"].as_str().map(str::to_string))
+            .collect()
+    };
+
+    let one = labels_at(&mut server, 100, 1);
+    let two = labels_at(&mut server, 200, 2);
+
+    assert!(
+        one.iter().any(|label| label == "fprintf"),
+        "the answer to `f` holds `fprintf` — {} item(s), first {:?}",
+        one.len(),
+        one.iter().take(8).collect::<Vec<_>>()
+    );
+    assert!(
+        two.iter().any(|label| label == "fprintf"),
+        "and so does the answer to `fp` — {} item(s)",
+        two.len()
+    );
+
+    server.request(999, "shutdown", Value::Null);
+    server.notify("exit", Value::Null);
+}

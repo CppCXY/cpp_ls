@@ -224,7 +224,12 @@ pub async fn on_completion(
                 // keystroke (`operator basic_string_view`, the only member the raw reading of `<xstring>` had at file
                 // scope) and **58** once that header was cooked. That is the same "ask again later" an empty list
                 // gets — and without it a partial list looks final, which is the defect this arm was added for.
-                || found.incomplete,
+                || found.incomplete
+                // **…and when the list holds nothing that could be what was typed.** A client filters by the prefix
+                // and caches an empty result, so an answer that answers nothing is not final whatever the reason:
+                // measured by a reader, typing `f` showed nothing and typing `fp` worked — the same file, seconds
+                // apart.
+                || found.nothing_matched(),
             items: found
                 .items
                 .iter()
