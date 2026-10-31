@@ -2040,3 +2040,117 @@ int f() {
     };
     assert!(found.contains("Wrap<int>"), "the guide deduces it: {found}");
 }
+
+/// **Which overload `describe(41)` calls**, asked the way go-to-definition asks it.
+///
+/// Two declarations differ only in their `enable_if` condition, so the *only* thing that picks between them is whether
+/// `std::is_integral<int>::value` is true. Printed first, asserted once the answer is known to be reachable.
+#[test]
+fn an_enable_if_overload_is_chosen_by_its_condition() {
+    let source = "\
+#include <type_traits>
+#include <string>
+
+template <typename T>
+typename std::enable_if<std::is_integral<T>::value, std::string>::type describe(T value) {
+    return \"integral\";
+}
+
+template <typename T>
+typename std::enable_if<std::is_floating_point<T>::value, std::string>::type describe(T value) {
+    return \"floating\";
+}
+
+std::string f() {
+    describe(41);
+    return describe(1.5);
+}
+";
+    let session = session_with(&[("/p/a.cpp", source)]);
+    let view = session.view("/p/a.cpp").expect("the file is held");
+    // The **second** call — `describe(1.5)` — which the floating-point overload must win.
+    let call = source.find("describe(1.5)").expect("the call is written");
+    let offset = call + 3;
+    let reading = as_reading(&view, offset);
+    let definitions = session.definitions(&view, reading);
+    eprintln!("[definitions] {definitions:?}");
+    let one = session.definition(&view, reading);
+    eprintln!("[definition] {one:?}");
+}
+/// **The condition evaluator**, decision by decision — the module the `enable_if` overloads rest on.
+#[test]
+fn the_constraint_evaluator_decides_the_fundamental_traits() {
+    use cpp_code_analysis::sema::constraint::{satisfies, the_condition_of};
+
+    let bind = |spelling: &str| vec![("T".to_string(), spelling.to_string())];
+
+    // The two declarations of `describe`, verbatim.
+    let integral = the_condition_of(
+        "typename std::enable_if<std::is_integral<T>::value, std::string>::type describe(T value)",
+    )
+    .expect("the declaration carries a condition");
+    assert_eq!(integral, "std::is_integral<T>::value");
+    assert_eq!(satisfies(integral, &bind("int")), Some(true));
+    assert_eq!(satisfies(integral, &bind("double")), Some(false));
+    assert_eq!(
+        satisfies(integral, &bind("std::string")),
+        Some(false),
+        "a class is not integral"
+    );
+
+    let floating = the_condition_of(
+        "typename std::enable_if<std::is_floating_point<T>::value, int>::type describe(T value)",
+    )
+    .expect("the declaration carries a condition");
+    assert_eq!(satisfies(floating, &bind("double")), Some(true));
+    assert_eq!(satisfies(floating, &bind("int")), Some(false));
+
+    // The three spellings of one answer.
+    for spelling in [
+        "std::is_integral<T>::value",
+        "std::is_integral<T>{}",
+        "std::is_integral_v<T>",
+        "std::is_integral<T>()",
+    ] {
+        assert_eq!(
+            satisfies(spelling, &bind("long")),
+            Some(true),
+            "{spelling} says a `long` is integral"
+        );
+    }
+
+    // The operators, and a trait this layer does not know.
+    assert_eq!(
+        satisfies("!std::is_integral<T>::value", &bind("double")),
+        Some(true)
+    );
+    assert_eq!(
+        satisfies(
+            "std::is_integral<T>::value && !std::is_same<T, char>::value",
+            &bind("int")
+        ),
+        Some(true)
+    );
+    assert_eq!(
+        satisfies(
+            "std::is_integral<T>::value || std::is_floating_point<T>::value",
+            &bind("float")
+        ),
+        Some(true)
+    );
+    assert_eq!(
+        satisfies("std::is_user_defined<T>::value", &bind("int")),
+        None,
+        "a trait this layer does not know is *cannot tell*, never `false`"
+    );
+    assert_eq!(
+        satisfies("std::is_integral<U>::value", &bind("int")),
+        None,
+        "an unbound parameter is cannot-tell as well"
+    );
+    assert_eq!(
+        the_condition_of("void plain(int value)"),
+        None,
+        "an ordinary function carries no condition"
+    );
+}

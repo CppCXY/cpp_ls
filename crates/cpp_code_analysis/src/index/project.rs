@@ -406,8 +406,28 @@ pub fn definitions_across_files(
     Known::Unknown(UnknownReason::UnparsableName)
 }
 
-/// **Is the cursor inside a definition written `void C::g() { … }`?** — the one place a bare name in a `.cpp` may
-/// denote a member that file does not declare.
+/// ```cpp
+/// template <typename T>
+/// typename std::enable_if<std::is_integral<T>::value, std::string>::type describe(T);
+/// template <typename T>
+/// typename std::enable_if<std::is_floating_point<T>::value, std::string>::type describe(T);
+///
+/// describe(1.5);      // the second, and only the condition says so
+/// ```
+///
+/// Two declarations of one name in one scope are an overload set, and the scope walk answers with the **first** of them
+/// for either call — measured: `describe(1.5)` jumped to the integral declaration. This narrows the set the way the
+/// language does for the shape it can read:
+///
+/// * a candidate whose `enable_if` condition is **false** for the call's argument types is dropped;
+/// * a candidate with no condition, or with one this layer cannot decide, is **kept** — deleting on "cannot tell" is how
+///   a reader loses the overload their program chose;
+/// * the answer is used only when exactly one candidate survives.
+///
+/// The argument types are bound to the declaration's own template parameters **in order** (`describe(T)` with
+/// `describe(1.5)` binds `T = double`), which is the one deduction this needs and the one it can do exactly.
+
+/// The names a declaration's `template <…>` introduces, in order — `template <typename T, class U>` answers `["T", "U"]`.
 ///
 /// A member function defined out of class has its class **in another file**, while the scope tree is built from the
 /// text of *this* one: `void C::g() { n = 1; }` opens a function scope whose qualifier names no scope here, so `n` is
@@ -8497,7 +8517,7 @@ fn deduced_class_template_arguments(
 /// index's facts for the header that declares it.
 fn the_constructor_takes(
     root: &cpp_parser::CppSyntaxNode,
-    class: &str,
+    _class: &str,
     simple: &str,
     only: &str,
 ) -> bool {

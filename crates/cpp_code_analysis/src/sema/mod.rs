@@ -14,6 +14,7 @@ pub mod overload;
 pub mod builtins;
 pub mod check;
 pub mod constant;
+pub mod constraint;
 pub mod convert;
 pub mod declarations;
 pub mod deduce;
