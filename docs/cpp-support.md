@@ -386,3 +386,22 @@ part in the protocol, and shapes that merely look similar stop borrowing another
 
 `cpp_project` now reads **9/9 members, 7/7 types**; the C corpus is unchanged (2/2, 3/3, no findings). The one finding left
 in the C++ project is the `param-type-check` on `value_or(0)`, with its three measurements recorded.
+
+## The false `param-type-check` on `value_or(0)`: a template parameter is not a class to ask about
+
+The trace named the step:
+
+```text
+[param-candidate] name="value_or" parameter="_Ty2&&" relation=Unknown(…) conversion=Refused
+```
+
+The relation answered `Unknown` — right — and then `sema::convert::conversion` asked the **class question** about `_Ty2`, a
+name nothing declares, and got `Some(false)` ("no constructor could take this"), which turned *cannot tell* into a
+**refusal**. Two candidates, both refused, `every_candidate_disagrees` stayed true, and a valid call was reported.
+
+The fix is the convention `sema::constraint` already uses: **a parameter written as a template parameter is not a class** —
+one capital letter (`T`, `U`, `V`), or the standard libraries' underscore-prefixed spelling (`_Ty2`, `_Up`, `_Elem`), which a
+project's own classes do not use. `conversion` answers `Unknown` for those before asking anything.
+
+Measured after: `cpp_project/src/techniques.cpp` — **0 findings**. The project's own baseline is now
+**0 parse errors, 0 findings, 9/9 members, 7/7 types**; the C corpus is unchanged (2/2, 3/3, 0 findings).
