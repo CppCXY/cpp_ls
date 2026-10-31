@@ -320,3 +320,27 @@ concept may name itself). Two facts the tree decided, both measured:
 describe(1.5)   integral<double> && is_signed<double>  = false && false → the floating overload
 describe(-3)    …                                      = true  && true  → the signed overload
 ```
+
+## Five more traits, and which type the qualifier is about
+
+```text
+is_reference   int&   int&&      a trailing `&`, one or two
+is_const       const int         the qualifier on the *topmost* type
+is_volatile    volatile int      the same
+is_array       int[4]  int[]     a `[` in the spelling
+is_function    int(int)          a `(` in the spelling, which no object type has
+```
+
+The first version of `is_const` read the leading `const` of `const int*` as the pointer being const — it is not: that
+`const` belongs to the pointee. The rule, stated once and read before the decorators are peeled:
+
+```text
+const int        const                     → true
+const int*       pointer to const int      → false
+const int&       reference to const int    → false
+int* const       const pointer             → true
+```
+
+**Still refused:** `is_class` and `is_enum` need a symbol table (a name is a class, an enum or a typedef), and
+`is_base_of`/`is_convertible`/`is_trivially_copyable` are relations between two types. They answer `None`, and a test pins
+that `is_class_v<T>` stays unanswerable rather than quietly becoming `false`.
