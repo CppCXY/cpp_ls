@@ -8460,6 +8460,12 @@ fn deduced_class_template_arguments(
     };
     let simple = class.rsplit("::").next().unwrap_or(class);
 
+    // **A hand-written deduction guide** — the language's own spelling of the rule, and the only source for a class
+    // whose constructor does not take the parameter: `template <typename T> Wrap(T) -> Wrap<T>;`. Asked first, because
+    // a guide that exists *is* the rule the language applies.
+    if let Some(deduced) = the_deduction_guide_deduces(root, class, simple, only, initializer) {
+        return Some(deduced);
+    }
     if the_constructor_takes(root, class, simple, only) {
         return Some(format!("{class}<{initializer}>"));
     }
@@ -8473,6 +8479,11 @@ fn deduced_class_template_arguments(
         let Some(view) = declaring(&declared.file) else {
             continue;
         };
+        if let Some(deduced) =
+            the_deduction_guide_deduces(&view.root, class, simple, only, initializer)
+        {
+            return Some(deduced);
+        }
         if the_constructor_takes(&view.root, class, simple, only) {
             return Some(format!("{class}<{initializer}>"));
         }
@@ -8537,6 +8548,58 @@ fn the_constructor_takes(
         return false;
     }
     false
+}
+
+/// **What a hand-written deduction guide says**, for the identity form: `Name(T) -> Name<T>`.
+///
+/// ```cpp
+/// template <typename T>
+/// Wrap(T) -> Wrap<T>;      //  Wrap wrapped(7);   is a Wrap<int>
+/// ```
+///
+/// The guide is a declaration whose text holds `->`: the head is `[template <…>] Name(params)` and the tail is the type
+/// it deduces to. Only the identity form is read — the return type is exactly `Name<T>` for the class's single template
+/// parameter — because anything else (`Name<T*>`, two parameters, a pack) is a pattern match this layer does not do, and a
+/// wrong argument would print an instantiation nobody asked for.
+fn the_deduction_guide_deduces(
+    root: &cpp_parser::CppSyntaxNode,
+    class: &str,
+    simple: &str,
+    only: &str,
+    initializer: &crate::sema::types::Type,
+) -> Option<String> {
+    let deduces_to = format!("{simple}<{only}>");
+    for declaration in root.descendants() {
+        if cpp_parser::CppSyntaxKind::from(declaration.kind())
+            != cpp_parser::CppSyntaxKind::Declaration
+        {
+            continue;
+        }
+        let text = declaration.text().to_string();
+        let Some((head, tail)) = text.split_once("->") else {
+            continue;
+        };
+        let returns = tail.trim().trim_end_matches(';').trim();
+        if returns != deduces_to {
+            continue;
+        }
+        let head = head.trim();
+        let Some(open) = head.rfind('(') else {
+            continue;
+        };
+        // **The guide's name**, which is the last token before its parameter list: `template <typename T>` then `Wrap`.
+        let name = head[..open]
+            .rsplit(|character: char| character.is_whitespace() || character == '>')
+            .find(|word| !word.is_empty())
+            .unwrap_or_default();
+        if name != simple {
+            continue;
+        }
+        if the_first_parameter_is(&head[open..], only) {
+            return Some(format!("{class}<{initializer}>"));
+        }
+    }
+    None
 }
 
 /// Is the first parameter of `list` — `(T value)`, `(const T& value)` — spelled with the template parameter?

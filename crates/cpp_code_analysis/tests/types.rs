@@ -2000,3 +2000,43 @@ int f() {
         "the argument is deduced: {found}"
     );
 }
+
+/// **A hand-written deduction guide**, which is the language's own spelling of the rule — and the only way to deduce a
+/// class whose constructor does not take the template parameter.
+///
+/// ```cpp
+/// template <typename T> struct Wrap { Wrap(std::string); };
+/// template <typename T> Wrap(T) -> Wrap<T>;
+/// Wrap w(7);        // Wrap<int>, and nothing about Wrap's constructor says so
+/// ```
+///
+/// Measured: the guide is read by the grammar (the file parses) and was not read by the deduction, so `w` answered the
+/// bare template name.
+#[test]
+fn a_hand_written_deduction_guide_is_read() {
+    let source = "\
+#include <string>
+
+template <typename T>
+struct Wrap {
+    Wrap(std::string);
+    T get() const;
+};
+
+template <typename T>
+Wrap(T) -> Wrap<T>;
+
+int f() {
+    Wrap wrapped(7);
+    return wrapped.get();
+}
+";
+    let session = session_with(&[("/p/a.cpp", source)]);
+    let view = session.view("/p/a.cpp").expect("the file is held");
+    let offset = last_word(source, "wrapped") + 2;
+    let found = match session.type_at(&view, as_reading(&view, offset)) {
+        cpp_code_analysis::Known::Yes(found) => found.type_of,
+        other => panic!("`w` has a type: {other:?}"),
+    };
+    assert!(found.contains("Wrap<int>"), "the guide deduces it: {found}");
+}
