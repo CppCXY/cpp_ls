@@ -73,9 +73,38 @@ pub fn conversion(
     let Some(class) = bare.class_name().filter(|class| !class.is_empty()) else {
         return Conversion::Unknown;
     };
+    // **A parameter written as a *template parameter* is not a class to ask about.** `template <typename _Ty2> T
+    // value_or(_Ty2&&)` — the standard library's own spelling — names a type that the *call* decides, so there is nothing
+    // to check an argument against. Measured on a C++ project: `number.value_or(0)` reported *"this passes `0` where
+    // `_Ty2&&` is declared for `value_or`"*, and the class question below answered `Some(false)` for `_Ty2` — a name no
+    // file declares — which turned "cannot tell" into a refusal.
+    //
+    // The convention is what makes this readable without a symbol table: one capital letter (`T`, `U`, `V`), or the
+    // library's underscore-prefixed form (`_Ty2`, `_Up`, `_Elem`). A program's own class is spelled otherwise, and answering
+    // `Unknown` for one of these costs a diagnostic rather than producing a false one.
+    if names_a_template_parameter(class) {
+        return Conversion::Unknown;
+    }
     match answer_the_class_question(class) {
         Some(true) => Conversion::NeedsABuild,
         Some(false) => Conversion::Refused,
         None => Conversion::Unknown,
     }
+}
+
+/// Is this spelling the convention for a template parameter — `T`, `Ts`, `_Ty2`, `_Up`?
+fn names_a_template_parameter(class: &str) -> bool {
+    let mut characters = class.chars();
+    let Some(first) = characters.next() else {
+        return false;
+    };
+    if class.len() == 1 {
+        return first.is_ascii_uppercase();
+    }
+    // `_Ty2`, `_Up`, `_Elem`: an underscore, a capital, and a name. The standard libraries spell their parameters this
+    // way and a project's classes do not.
+    first == '_'
+        && characters
+            .next()
+            .is_some_and(|second| second.is_ascii_uppercase())
 }

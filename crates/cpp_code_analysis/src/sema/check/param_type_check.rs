@@ -217,7 +217,6 @@ fn check_the_arguments(
                 }
             }
         }
-
         let Some(parameter) = disagreed_with else {
             continue;
         };
