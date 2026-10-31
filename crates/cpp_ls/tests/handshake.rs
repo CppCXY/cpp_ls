@@ -5629,3 +5629,160 @@ int use(void) {
     return n + total;
 }
 ";
+
+/// **The three things a C reader asks of a line they are writing** — completion of a name the file itself defines,
+/// completion inside a macro call, and the signature of a standard-library function.
+///
+/// ```c
+/// #include <stdio.h>
+/// #define LOCAL_MACRO(n) ((n) + 1)
+/// static int local_helper(int n) { return n; }
+/// int main(void) {
+///     int value = local_helper(1);
+///     fprintf(stdout, "%d\n", value);      signature help at the `(`
+///     return LOCAL_MACRO(value);           completion after `LOCAL_`
+/// }
+/// ```
+///
+/// Reported together: *"当前文件定义的内容几乎都无法补全, 但是 hover 和跳转都照得到"* and *"fprintf 没有
+/// signatureHelper"*. Hover and go-to-definition working while completion answers nothing is a **handler** question
+/// rather than an analysis one — the three queries share the file's view and the offset — so both are asked here, over
+/// stdio, at the positions the report names.
+#[test]
+fn a_c_reader_gets_completion_and_signature_help_for_what_the_file_defines() {
+    let project = Project::new("c-completion");
+    project.write("main.c", C_COMPLETION_C);
+
+    let mut server = Server::start(project.root());
+    let uri = uri_of(&project.root().join("main.c"));
+    server.request(
+        1,
+        "initialize",
+        json!({
+            "processId": std::process::id(),
+            "rootUri": uri_of(project.root()),
+            "capabilities": {
+                "workspace": { "configuration": true, "didChangeWatchedFiles": { "dynamicRegistration": true } },
+                "window": { "workDoneProgress": true },
+            },
+        }),
+    );
+    server.notify("initialized", json!({}));
+    server.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": { "uri": uri, "languageId": "c", "version": 1, "text": C_COMPLETION_C }
+        }),
+    );
+
+    let at = |needle: &str, after: usize| -> (u64, u64) {
+        let line = line_of(C_COMPLETION_C, needle);
+        let character = C_COMPLETION_C
+            .lines()
+            .nth(line as usize)
+            .and_then(|text| text.find(needle))
+            .expect("the fixture writes it")
+            + after;
+        (line, character as u64)
+    };
+
+    // **A name this file defines**, typed as far as `local_he`.
+    let (line, character) = at("local_helper(1)", 7);
+    let asked = server.ask_until(100, |id| {
+        json!({
+            "id": id,
+            "method": "textDocument/completion",
+            "params": {
+                "textDocument": { "uri": uri },
+                "position": { "line": line, "character": character },
+            },
+        })
+    });
+    let items = completion_items(&asked);
+    let labels: Vec<&str> = items
+        .iter()
+        .filter_map(|item| item["label"].as_str())
+        .collect();
+    assert!(
+        labels.iter().any(|label| *label == "local_helper"),
+        "a function the file defines completes: {} item(s), first {:?}",
+        labels.len(),
+        labels.iter().take(10).collect::<Vec<_>>()
+    );
+
+    // **The same, for a macro** — the row the report names as missing.
+    let (line, character) = at("LOCAL_MACRO(value)", 6);
+    let asked = server.ask_until(200, |id| {
+        json!({
+            "id": id,
+            "method": "textDocument/completion",
+            "params": {
+                "textDocument": { "uri": uri },
+                "position": { "line": line, "character": character },
+            },
+        })
+    });
+    let items = completion_items(&asked);
+    let labels: Vec<&str> = items
+        .iter()
+        .filter_map(|item| item["label"].as_str())
+        .collect();
+    assert!(
+        labels.iter().any(|label| *label == "LOCAL_MACRO"),
+        "a macro the file defines completes: {} item(s), first {:?}",
+        labels.len(),
+        labels.iter().take(10).collect::<Vec<_>>()
+    );
+
+    // **`fprintf(`'s signature**, which comes from a header the file includes rather than from the file.
+    let (line, character) = at("fprintf(stdout", 8);
+    let asked = server.ask_until(300, |id| {
+        json!({
+            "id": id,
+            "method": "textDocument/signatureHelp",
+            "params": {
+                "textDocument": { "uri": uri },
+                "position": { "line": line, "character": character },
+            },
+        })
+    });
+    let signatures = asked["result"]["signatures"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        !signatures.is_empty(),
+        "`fprintf` has a signature to show: {asked}"
+    );
+    let label = signatures[0]["label"].as_str().unwrap_or_default();
+    assert!(
+        label.contains("fprintf") && label.contains("format"),
+        "and it is `fprintf`'s own: {label}"
+    );
+
+    server.request(999, "shutdown", Value::Null);
+    server.notify("exit", Value::Null);
+}
+
+/// A completion answer, whether the server sent a list or a bare array.
+fn completion_items(answer: &Value) -> Vec<Value> {
+    if let Some(items) = answer["result"]["items"].as_array() {
+        return items.clone();
+    }
+    answer["result"].as_array().cloned().unwrap_or_default()
+}
+
+/// The fixture: a header the file includes, a macro, a static function, and a call of each.
+const C_COMPLETION_C: &str = "\
+#include <stdio.h>
+
+#define LOCAL_MACRO(n) ((n) + 1)
+
+static int local_helper(int n) { return n; }
+
+int main(void) {
+    int value = local_helper(1);
+    fprintf(stdout, \"%d\\n\", value);
+    return LOCAL_MACRO(value);
+}
+";

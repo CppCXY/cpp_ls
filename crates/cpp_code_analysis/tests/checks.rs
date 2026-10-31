@@ -3512,3 +3512,32 @@ int f(void) {
         "a variadic macro takes any number of arguments: {codes:?}"
     );
 }
+/// **The corpus's own `__VA_OPT__` shape** — the one that still reports an argument count through the real server.
+///
+/// ```c
+/// #define C23_SUM(count, ...) (c23_sum_impl)(count __VA_OPT__(, ) __VA_ARGS__)
+/// static int c23_sum_impl(int count, ...) { return count; }
+/// int c23_va_opt(int count, ...) { return C23_SUM(count, 1, 2, 3) + count; }
+/// ```
+///
+/// The fixture above (`a_variadic_macro_call_is_not_an_argument_count_finding`) declares the callee as a **prototype**
+/// and passes; this one *defines* it, which is the corpus's shape and the one an editor reported: "`c23_sum_impl` takes
+/// 1 argument(s) and this call passes more". The difference between the two fixtures is the whole reason this test
+/// exists — a prototype's parameter list reaches the rule as the declaration's **text**, while a definition's is read
+/// from the tree.
+#[test]
+fn a_variadic_macro_whose_callee_is_a_definition_is_not_an_argument_count_finding() {
+    let codes = codes_of_with(
+        "\
+#define C23_SUM(count, ...) (c23_sum_impl)(count __VA_OPT__(, ) __VA_ARGS__)
+static int c23_sum_impl(int count, ...) { return count; }
+int c23_va_opt(int count, ...) { return C23_SUM(count, 1, 2, 3) + count; }
+",
+        "/p/vaopt.c",
+        Some("c23"),
+    );
+    assert!(
+        !codes.contains(&DiagnosticCode::ArgumentCount),
+        "a variadic callee takes any number of arguments: {codes:?}"
+    );
+}

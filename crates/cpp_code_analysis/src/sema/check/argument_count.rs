@@ -245,6 +245,21 @@ fn callees_in_this_file(
             spellings.push(crate::sema::overload::a_type_without_its_name(&written_as));
         }
 
+        // **A `...` is a token of the list, not a parameter *node*.** `int count, ...` has one child (`int count`) and
+        // the ellipsis beside it, so a loop over the children never set `variadic` — and a variadic callee *defined in
+        // this file* was judged as taking exactly its named parameters. Measured: the corpus's `__VA_OPT__` macro
+        // expands to `(c23_sum_impl)(count, 1, 2, 3)`, and the rule said "`c23_sum_impl` takes 1 argument(s) and this
+        // call passes more" about `static int c23_sum_impl(int count, ...)`. The prototype path never showed it,
+        // because a prototype's list reaches this rule as the declaration's *text*.
+        let variadic = variadic
+            || parameters
+                .descendants_with_tokens()
+                .filter_map(|element| element.into_token())
+                .any(|token| {
+                    cpp_parser::CppTokenKind::from(token.kind())
+                        == cpp_parser::CppTokenKind::Ellipsis
+                });
+
         // **`(void)` is C's spelling of *no parameters*, and it is not one parameter of type `void`.** Counting it as
         // one made every `int f(void);` in a C project a function that needs an argument: measured on a nine-file C
         // corpus, `f(void)` called as `f()` produced **two** findings on one line — *"takes 1 argument(s) and this

@@ -406,6 +406,47 @@ fn the_c_corpus_parses_and_its_members_resolve() {
     }
 
     // ---------------------------------------------------------------------------------------------------------
+    // completions: what a cursor inside this file's own code is offered
+    // ---------------------------------------------------------------------------------------------------------
+    println!("\n--- completions: does the file's own content come back?");
+    {
+        for (file, needle, wanted) in [
+            // Inside the function that uses the macro, at the start of a statement.
+            ("src/c23.c", "return C23_SUM(", "C23_SUM"),
+            ("src/c23.c", "return C23_SUM(", "c23_sum_impl"),
+            // At a blank position inside a function body — the ordinary "what is in scope here".
+            ("src/c23.c", "int c23_va_opt(", "c23_sum_impl"),
+            ("src/functions.c", "int total = operation", "operation"),
+            ("src/types.c", "int main", "CORPUS_"),
+        ] {
+            let path = root.join(file);
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let Some(found_at) = text.find(needle) else {
+                println!("  SKIP  {file} {needle} (not written)");
+                continue;
+            };
+            // The cursor goes **after** the needle: inside the call's arguments, or just after the `(`.
+            let cursor = found_at + needle.len();
+            let Some(view) = session.view(&path) else {
+                println!("  SKIP  {file} (no reading)");
+                continue;
+            };
+            let found = session.completions(&view, FileOffset::new(cursor));
+            let labels: Vec<String> = found.items.iter().map(|item| item.label.clone()).collect();
+            let has = labels.iter().any(|label| label == wanted);
+            println!(
+                "  {:<18} {:?} → {} item(s), {wanted} {}",
+                file,
+                needle,
+                labels.len(),
+                if has { "✓" } else { "✗" }
+            );
+        }
+    }
+
+    // ---------------------------------------------------------------------------------------------------------
     // members
     // ---------------------------------------------------------------------------------------------------------
     println!("\n--- members: the completion at the position right after `.` / `->`");
