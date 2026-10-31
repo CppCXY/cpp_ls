@@ -171,3 +171,35 @@ first.self()  (CRTP)    `self` missing            5 offered
 
 **Left: CTAD.** `Box box(7)` types as `techniques::Box` — the template's name without the deduced argument — while
 `Box<int> box(7)` is right. The deduction guide parses; it is not applied.
+## Update: CTAD — `Box box(7)` is `Box<int>`, including through a header
+
+Three defects, each narrowed by a failing test before it was fixed:
+
+1. **The initializer was looked for one level too high.** A binding ranges over the `InitDeclarator` that wraps the
+   declarator — `Box box(7);` is `InitDeclarator > Declarator > [NameExpr, Initializer]` — so the walk answered "this
+   declaration has no initializer". It descends one level, and unwraps a paren initializer (`ArgumentList`, not an
+   expression).
+2. **The constructor was looked for in the class's scope**, where a constructor is not a binding (a scope is keyed by
+   name; `Box::Box` is not a name anything looks up). It is read from the class's own body by matching `[explicit] Name (`
+   — and *not* from the specifier sequence, which holds `explicit` alone when the constructor has a member-initializer
+   list.
+3. **The class's body is not in the file that uses it.** A `.cpp` that includes the header gets the header's facts inlined
+   and not its body, and the index keeps no fact for a constructor. The declaring file is parsed through the request
+   layer's file provider and the same scan runs over its tree.
+
+```text
+                before                 after
+box.get()       —                      2 offered            ✓
+first.self()    `self` missing         5 offered            ✓  (CRTP base)
+Box box(7)      techniques::Box        techniques::Box<int> ✓
+```
+
+`cpp_project`: **0 parse errors, 0 findings, 5/5 members, 4/4 types**. Reading without a diagnostic, in the same three
+files: `enable_if` on the return type, the `void_t` detection idiom, a `decltype` trailing return, a fold expression, a
+partial specialisation, a template template parameter, a C++20 concept with `requires`, CRTP, an alias template, and a
+deduction guide.
+
+**Not done, and the honest next step:** the deduction covers *one* template parameter whose constructor takes exactly that
+parameter. Two parameters, a constructor taking `Container<T>`, or a hand-written guide (parsed, not read) all answer the
+name as written — and `enable_if`'s condition is read as a type rather than **evaluated**, so `describe(41)` resolves but
+nothing decides which overload the condition selects.
