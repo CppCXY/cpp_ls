@@ -75,6 +75,27 @@ const MEMBERS: &[MemberRow] = &[
         needle: "numbers.front()",
         expected: "front",
     },
+    // **The shapes a reader meets next** — `std::optional`'s own members, and a `std::function` called.
+    MemberRow {
+        file: "src/techniques.cpp",
+        needle: "maybe.has_value()",
+        expected: "has_value",
+    },
+    MemberRow {
+        file: "src/techniques.cpp",
+        needle: "maybe->size()",
+        expected: "size",
+    },
+    MemberRow {
+        file: "src/techniques.cpp",
+        needle: "number.value_or(0)",
+        expected: "value_or",
+    },
+    MemberRow {
+        file: "src/techniques.cpp",
+        needle: "maybe.value()",
+        expected: "value",
+    },
 ];
 
 const TYPES: &[TypeRow] = &[

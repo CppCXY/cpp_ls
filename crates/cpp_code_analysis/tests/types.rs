@@ -2587,3 +2587,33 @@ std::string f() {
         "and true for a signed int"
     );
 }
+
+/// **A `No` from the type relation is not always a refusal** — `value_or(0)` against `_Ty2&&`.
+///
+/// The relation answers `No` for `int` → `_Ty2&&` because `_Ty2` is not `int`, and `_Ty2` is a *template parameter*. Only a
+/// class the index can find decides those; one it cannot see makes the answer `Unknown`, and `Unknown` reports nothing.
+#[test]
+fn a_template_parameter_target_is_not_a_refusal() {
+    use cpp_code_analysis::sema::convert::{Conversion, conversion};
+    use cpp_code_analysis::sema::types::{Type, parse_type_spelling};
+
+    let an_int = Type::builtin("int");
+    assert_eq!(
+        conversion(&an_int, "_Ty2&&", |_| None),
+        Conversion::Unknown,
+        "an unread template parameter is cannot-tell, not a refusal"
+    );
+    assert_eq!(
+        conversion(&an_int, "T", |_| None),
+        Conversion::Unknown,
+        "and so is a bare `T`"
+    );
+    // **A class the index knows still refuses**: `int` cannot be built into a `Widget` that has no such constructor.
+    assert_eq!(
+        conversion(&an_int, "const Widget&", |_| Some(false)),
+        Conversion::Refused,
+    );
+    // **And an unread class on the *source* side is cannot-tell too**, not a refusal.
+    let a_string = parse_type_spelling("std::string");
+    assert_eq!(conversion(&a_string, "int", |_| None), Conversion::Unknown);
+}

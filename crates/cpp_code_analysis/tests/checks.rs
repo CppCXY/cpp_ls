@@ -3593,3 +3593,59 @@ fn the_include_directory_beside_src_resolves_a_quoted_include() {
     );
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// **A parameter whose type is the callee's own template parameter takes anything** — `value_or(0)`.
+///
+/// ```cpp
+/// template <typename U> int value_or(U&& other) const;
+/// Opt o; o.value_or(0);          // `U` is deduced from the argument; nothing can be checked against it
+/// ```
+///
+/// Measured on a C++ project: `number.value_or(0)` produced *"this passes `0` where `_Ty2&&` is declared for `value_or`"*,
+/// which is the standard library's own `std::optional<T>::value_or` and is perfectly valid.
+#[test]
+fn a_parameter_that_is_the_callees_template_parameter_takes_anything() {
+    let codes = codes_of_with(
+        "\
+struct Opt {
+    template <typename U>
+    int value_or(U&& other) const;
+};
+
+int f() {
+    Opt o;
+    return o.value_or(0);
+}
+",
+        "/p/a.cpp",
+        Some("c++20"),
+    );
+    assert!(
+        !codes.contains(&DiagnosticCode::ParamTypeCheck),
+        "`U` is deduced from the argument: {codes:?}"
+    );
+}
+/// The same call against **two** members of one name — `value_or` has a `const&` and an `&&` overload in the standard
+/// library, both written `(_Ty2&&)`.
+#[test]
+fn a_template_parameter_member_overload_set_is_silent() {
+    let codes = codes_of_with(
+        "\
+struct Opt {
+    template <typename U> int value_or(U&& other) const &;
+    template <typename U> int value_or(U&& other) &&;
+};
+
+int f() {
+    Opt o;
+    return o.value_or(0);
+}
+",
+        "/p/a.cpp",
+        Some("c++20"),
+    );
+    assert!(
+        !codes.contains(&DiagnosticCode::ParamTypeCheck),
+        "neither overload has a type to check `0` against: {codes:?}"
+    );
+}
