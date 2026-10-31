@@ -364,3 +364,25 @@ PASS  maybe->size()         68 offered   `size` is in the list
 * the false finding's path could not be traced: `convertible_to(int, _Ty2&&)` is `Unknown`, the `Unknown` arm is written as
   silence, and `a_class_can_be_built_from` is never asked about `_Ty2`. Recorded with those three measurements rather than
   a guess.
+
+## A `.` on a class that declares `operator->` lists that class's own members
+
+Four member rows were red and all four came from one step: `the_class_after_the_operator` followed a "pointer-like" class
+through `element_type`/`value_type`, so a `.` typed where `->` was meant still offered the pointee's members. Right for
+`shared_ptr`; **wrong for `std::optional`**, which declares both `operator->` and `value_type`:
+
+```text
+before                                        after
+maybe.has_value()   68 offered (the string's)  15 offered (optional's own)
+maybe.value()       68 offered (the string's)  15 offered
+number.value_or(0)   0 offered                 15 offered
+maybe->size()       68 offered                 68 offered  (an arrow, unchanged)
+```
+
+The rule is now **`element_type`** — the standard's own pointer protocol, what `unique_ptr`/`shared_ptr`/`weak_ptr` declare
+— and not `value_type`, which every container and wrapper declares. The fixture that pinned the old rule was rewritten to
+pin the new one, with the trade stated in its doc comment: the smart-pointer convenience is kept for the classes that take
+part in the protocol, and shapes that merely look similar stop borrowing another type's members.
+
+`cpp_project` now reads **9/9 members, 7/7 types**; the C corpus is unchanged (2/2, 3/3, no findings). The one finding left
+in the C++ project is the `param-type-check` on `value_or(0)`, with its three measurements recorded.
