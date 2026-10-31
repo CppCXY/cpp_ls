@@ -418,6 +418,15 @@ fn the_c_corpus_parses_and_its_members_resolve() {
             ("src/c23.c", "int c23_va_opt(", "c23_sum_impl"),
             ("src/functions.c", "int total = operation", "operation"),
             ("src/types.c", "int main", "CORPUS_"),
+            // The last function of `functions.c`, where a reader reported that `fprintf` never completes.
+            ("src/functions.c", "fprintf(", "fprintf"),
+            // **Simulating what a reader types**: the cursor *inside* the word, so the prefix is non-empty — which is
+            // the case the report is about. A completion at `(` answers "everything visible", not "what I typed".
+            ("src/functions.c", "fpr", "fprintf"),
+            ("src/functions.c", "fprint", "fprintf"),
+            ("src/functions.c", "fp", "fprintf"),
+            ("src/functions.c", "fprintf(stderr", "fprintf"),
+            ("src/functions.c", "\"aborting with %d\\\\n\"", "fprintf"),
         ] {
             let path = root.join(file);
             let Ok(text) = std::fs::read_to_string(&path) else {

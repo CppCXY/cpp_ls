@@ -533,6 +533,62 @@ fn a_classic_c_file_answers_what_it_holds() {
         });
     }
 
+    // **A completion at a position named from outside** — the row that says whether a *reported* position answers at
+    // all, and if it does, whether the name the reader was typing is in the list.
+    //
+    // ```text
+    // $env:CPPLS_C_COMPLETE = "192:12"      zero-based line : character
+    // $env:CPPLS_C_WANT     = "fprintf"
+    // ```
+    //
+    // The two questions a report of "no completion here" can mean are *an empty answer* and *an answer that does not
+    // hold the name*, and a table row that says only `no` cannot tell them apart: the first is the analysis refusing,
+    // the second is the budget cutting the list before the client filters it — which looks identical in an editor.
+    if let Some(place) = std::env::var("CPPLS_C_COMPLETE").ok().and_then(|spec| {
+        let (line, character) = spec.split_once(':')?;
+        Some(Place {
+            line: line.parse().ok()?,
+            character: character.parse().ok()?,
+        })
+    }) {
+        let wanted = std::env::var("CPPLS_C_WANT").unwrap_or_default();
+        let started = Instant::now();
+        let result = server.request(
+            next(),
+            "textDocument/completion",
+            position(&source_uri, place),
+        );
+        let items = result
+            .get("items")
+            .and_then(Value::as_array)
+            .cloned()
+            .or_else(|| result.as_array().cloned())
+            .unwrap_or_default();
+        let has = items.iter().any(|item| {
+            item.get("label")
+                .and_then(Value::as_str)
+                .is_some_and(|label| label == wanted)
+        });
+        let incomplete = result
+            .get("isIncomplete")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        rows.push(Row {
+            feature: "completion (reported)",
+            answered: has,
+            count: items.len(),
+            ms: started.elapsed().as_millis(),
+            note: format!(
+                "{wanted}: {has}, isIncomplete {incomplete}, first: {:?}",
+                items
+                    .iter()
+                    .take(3)
+                    .filter_map(|item| item.get("label").and_then(Value::as_str))
+                    .collect::<Vec<_>>()
+            ),
+        });
+    }
+
     // **The symbols of the file**, which is the outline.
     {
         let started = Instant::now();

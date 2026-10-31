@@ -1448,8 +1448,18 @@ const ITEM_BUDGET: usize = 200;
 /// The sort is **stable**, which is what makes it a refinement rather than a re-decision: two items the gathering
 /// layer produced in one order and the score cannot separate keep that order, so the query's own ordering (C++'s,
 /// by how far the lookup walked) survives wherever the score has nothing to say.
+///
+/// # The budget is spent **fairly**, not first-come
+///
+/// Sorting is not enough on its own, because the deepest tier is the widest: every name of every included header has
+/// the same score, so the alphabetical tiebreak decides which 200 survive — and an alphabetical cut of thousands of
+/// names reaches only the first header's `a`–`b`. Measured through the real server at `fprintf(` in a 200-line C file
+/// that includes `<stdio.h>`: 200 items, `first: ["code", "add", "average"]`, and **`fprintf` absent** — the reader
+/// then types `fpr`, the client filters those 200 and the popup is empty, which is reported as "completion never works
+/// here" when the analysis answered perfectly well. So the cut is made **round-robin per declaring file**: each file
+/// contributes a share, and a header with a thousand names cannot starve one with ten.
 fn ordered(mut scored: Vec<Scored>) -> (Vec<CompletionItem>, bool) {
-    scored.sort_by(|one, other| {
+    let by_rank = |one: &Scored, other: &Scored| {
         one.score
             .keys()
             .cmp(&other.score.keys())
@@ -1458,15 +1468,49 @@ fn ordered(mut scored: Vec<Scored>) -> (Vec<CompletionItem>, bool) {
             // later word — and that is the ordering a reader expects from having typed something.
             .then_with(|| other.matched.cmp(&one.matched))
             .then_with(|| one.item.label.cmp(&other.item.label))
-    });
+    };
+    scored.sort_by(by_rank);
 
-    let truncated = scored.len() > ITEM_BUDGET;
-    scored.truncate(ITEM_BUDGET);
+    if scored.len() <= ITEM_BUDGET {
+        return (
+            scored.into_iter().map(|scored| scored.item).collect(),
+            false,
+        );
+    }
 
-    (
-        scored.into_iter().map(|scored| scored.item).collect(),
-        truncated,
-    )
+    // One bucket per declaring file, first seen in rank order — so the *nearest* file's names still lead, and an item
+    // with no identity (a snippet, a keyword, a member) is a bucket of its own.
+    let mut buckets: Vec<Vec<Scored>> = Vec::new();
+    let mut which: std::collections::HashMap<Option<std::path::PathBuf>, usize> =
+        std::collections::HashMap::new();
+    for one in scored {
+        let key = one.item.identity.as_ref().map(|(file, _)| file.clone());
+        let index = *which.entry(key).or_insert_with(|| {
+            buckets.push(Vec::new());
+            buckets.len() - 1
+        });
+        buckets[index].push(one);
+    }
+
+    // Draw one item per bucket per round until the budget is full. The chosen items are then **re-sorted by the same
+    // order**, because a fair draw is a choice of *which* items survive, not a new ranking: a reader must never see
+    // `abort` above the local variable in front of them because a bucket happened to be drawn first.
+    let widest = buckets.iter().map(Vec::len).max().unwrap_or(0);
+    let mut taken: Vec<Scored> = Vec::with_capacity(ITEM_BUDGET);
+    'fill: for round in 0..widest {
+        for bucket in &buckets {
+            let Some(one) = bucket.get(round) else {
+                continue;
+            };
+            taken.push(one.clone());
+            if taken.len() == ITEM_BUDGET {
+                break 'fill;
+            }
+        }
+    }
+    taken.sort_by(by_rank);
+
+    (taken.into_iter().map(|scored| scored.item).collect(), true)
 }
 
 /// **How near a declaration is to the cursor**, which is the whole of the ranking.

@@ -5734,6 +5734,30 @@ fn a_c_reader_gets_completion_and_signature_help_for_what_the_file_defines() {
         labels.iter().take(10).collect::<Vec<_>>()
     );
 
+    // **The empty-prefix list must still reach the names of a header that is not the first one.** Five standard
+    // headers declare far more than the 200-item budget, so a first-come cut keeps only `<stdio.h>`'s `a`-`b` names and
+    // `fprintf` is absent — which is what a reader sees as "completion does not work in this function". Measured through
+    // the real server on the corpus: `fprintf: false` with 200 items before the budget was spent fairly.
+    let (line, character) = at("fprintf(stdout", 8);
+    let asked = server.ask_until(250, |id| {
+        json!({
+            "id": id,
+            "method": "textDocument/completion",
+            "params": {
+                "textDocument": { "uri": uri },
+                "position": { "line": line, "character": character },
+            },
+        })
+    });
+    let items = completion_items(&asked);
+    assert!(
+        items
+            .iter()
+            .any(|item| item["label"].as_str() == Some("fprintf")),
+        "with nothing typed, the budget still reaches `fprintf`: {} item(s)",
+        items.len()
+    );
+
     // **`fprintf(`'s signature**, which comes from a header the file includes rather than from the file.
     let (line, character) = at("fprintf(stdout", 8);
     let asked = server.ask_until(300, |id| {
@@ -5775,6 +5799,10 @@ fn completion_items(answer: &Value) -> Vec<Value> {
 /// The fixture: a header the file includes, a macro, a static function, and a call of each.
 const C_COMPLETION_C: &str = "\
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <math.h>
+#include <time.h>
 
 #define LOCAL_MACRO(n) ((n) + 1)
 
