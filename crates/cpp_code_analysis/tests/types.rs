@@ -2197,6 +2197,41 @@ fn the_constraint_evaluator_decides_the_fundamental_traits() {
         None,
         "an unbound parameter is cannot-tell as well"
     );
+    // **The decorators**, which answer from the spelling alone — and for *any* type, so `std::string&` is a reference
+    // whichever class `string` is.
+    for (condition, spelling, expected) in [
+        ("std::is_reference_v<T>", "int&", true),
+        ("std::is_reference_v<T>", "int&&", true),
+        ("std::is_reference_v<T>", "int", false),
+        ("std::is_reference_v<T>", "std::string&", true),
+        ("std::is_const_v<T>", "const int", true),
+        ("std::is_const_v<T>", "int", false),
+        ("std::is_const_v<T>", "const int*", false),
+        ("std::is_volatile_v<T>", "volatile int", true),
+        ("std::is_volatile_v<T>", "int", false),
+        ("std::is_array_v<T>", "int[4]", true),
+        ("std::is_array_v<T>", "int[]", true),
+        ("std::is_array_v<T>", "int", false),
+        ("std::is_function_v<T>", "int(int)", true),
+        ("std::is_function_v<T>", "int", false),
+        ("std::is_pointer_v<T>", "int*", true),
+        ("std::is_pointer_v<T>", "int", false),
+    ] {
+        assert_eq!(
+            satisfies(condition, &bind(spelling)),
+            Some(expected),
+            "{condition} of {spelling}"
+        );
+    }
+    // **A class name is not a scalar this layer can place**, so a scalar trait of one is *cannot tell* — and an unbound
+    // parameter stays unanswerable for the decorators too.
+    assert_eq!(
+        satisfies("std::is_integral_v<T>", &bind("std::string")),
+        Some(false)
+    );
+    assert_eq!(satisfies("std::is_const_v<T>", &bind("U")), None);
+    assert_eq!(satisfies("std::is_class_v<T>", &bind("std::string")), None);
+
     assert_eq!(
         the_condition_of("void plain(int value)"),
         None,

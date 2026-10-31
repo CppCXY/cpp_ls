@@ -30,6 +30,11 @@ enum Trait {
     IsVoid,
     IsSigned,
     IsUnsigned,
+    IsReference,
+    IsConst,
+    IsVolatile,
+    IsArray,
+    IsFunction,
 }
 
 impl Trait {
@@ -42,20 +47,70 @@ impl Trait {
             "is_void" => Trait::IsVoid,
             "is_signed" => Trait::IsSigned,
             "is_unsigned" => Trait::IsUnsigned,
+            "is_reference" => Trait::IsReference,
+            "is_const" => Trait::IsConst,
+            "is_volatile" => Trait::IsVolatile,
+            "is_array" => Trait::IsArray,
+            "is_function" => Trait::IsFunction,
             _ => return None,
         })
     }
 
-    /// `None` when the spelling is not a type this layer knows — an unbound template parameter, a class, a `decltype` —
-    /// because a trait of an unknown type is *cannot tell*, and answering `false` would delete a candidate.
+    /// `None` when the spelling is not a type this layer knows — an unbound template parameter, a `decltype` — because a
+    /// trait of an unknown type is *cannot tell*, and answering `false` would delete a candidate.
+    ///
+    /// # What the spelling alone can answer
+    ///
+    /// ```text
+    /// the scalar          int, double, void …        is_integral, is_floating_point, is_arithmetic, is_void
+    /// the sign            unsigned int, int          is_signed, is_unsigned
+    /// the decorators      int*   int&   const int    is_pointer, is_reference, is_const, is_volatile
+    ///                     int[4] int(int)             is_array, is_function
+    /// ```
+    ///
+    /// The decorators are read off the same pieces the scalar is read from, so `const int*` is a pointer that is **not**
+    /// const and `const int&` is a reference that **is** — in that order, which is what the language means by each.
+    ///
+    /// **`is_class` and `is_enum` are not here**, and the refusal is the honest answer rather than an omission: a name is a
+    /// class, an enum or a typedef, and only a symbol table says which. `is_class<std::string>` answered `false` would delete
+    /// the overload the program chose; answered `true` it would delete the other. So would `is_base_of` and
+    /// `is_convertible`, which are relations between two types rather than a property of one spelling.
     fn of(self, spelling: &str) -> Option<bool> {
         let spelling = spelling.trim();
-        let bare = spelling
-            .strip_prefix("const ")
-            .map(str::trim)
-            .unwrap_or(spelling);
+        // **A reference is a trailing `&`**, one or two, and the rest of the spelling is what it refers to.
+        let reference = spelling.ends_with('&');
+        let without_reference = spelling.trim_end_matches('&').trim();
+        // **`const` and `volatile` on the *topmost* type** — not on what it points at or refers to. `const int` is const;
+        // `const int*` is a pointer to a const int and is **not** const itself, and `const int&` is a reference to one.
+        // The outermost qualifier is either at the front with nothing wrapping it after it, or written after the `*`
+        // (`int* const`). Read from the spelling as it was given, before the decorators are peeled.
+        let topmost = without_reference;
+        let qualified_const = (topmost.starts_with("const ") && !topmost.contains('*'))
+            || topmost.ends_with(" const");
+        let qualified_volatile = (topmost.starts_with("volatile ") && !topmost.contains('*'))
+            || topmost.ends_with(" volatile");
+        // **The qualifiers are then peeled** so the scalar underneath can be read: `const volatile int` is an `int`.
+        let mut bare = without_reference;
+        loop {
+            if let Some(rest) = bare.strip_prefix("const ") {
+                bare = rest.trim();
+                continue;
+            }
+            if let Some(rest) = bare.strip_prefix("volatile ") {
+                bare = rest.trim();
+                continue;
+            }
+            break;
+        }
+        let mut pointers_start = bare;
+        while let Some(rest) = pointers_start.strip_suffix('*') {
+            pointers_start = rest.trim();
+        }
         let pointers = bare.ends_with('*');
-        let scalars = bare.trim_end_matches('*').trim();
+        let scalars = pointers_start.trim();
+        // **A declaration's own shape**: an array writes `[`, a function type writes `(` and no object type does.
+        let array = scalars.contains('[');
+        let function = !array && scalars.contains('(');
         let integral = matches!(
             scalars,
             "char"
@@ -81,26 +136,68 @@ impl Trait {
         );
         let floating = matches!(scalars, "float" | "double" | "long double");
         let signed =
-            !bare.starts_with("unsigned") && !matches!(scalars, "bool" | "unsigned") && integral;
-        // **A name this layer cannot classify is not evidence of a class.** The convention that names a template
-        // parameter is one capital letter (T, U, V) is what separates "a type nobody bound" from "a type the
-        // program named" — the first is *cannot tell*, the second is a class, because every builtin is in the list
-        // above. decltype(...) and uto are not types until something decides them, so they are cannot-tell too.
+            !scalars.starts_with("unsigned") && !matches!(scalars, "bool" | "unsigned") && integral;
+        // **A name this layer cannot classify is not evidence of anything.** The convention that names a template
+        // parameter is one capital letter (T, U, V) is what separates "a type nobody bound" from "a type the program
+        // named" — the first is *cannot tell*. `decltype(…)` and `auto` are not types until something decides them, and
+        // a name whose own spelling this cannot place is left to the traits that need no scalar at all (a name with `&`
+        // *is* a reference whatever it names).
         let a_parameter_by_convention = scalars.len() == 1
             && scalars
                 .chars()
                 .all(|character| character.is_ascii_uppercase());
-        if a_parameter_by_convention || scalars.starts_with("decltype") || scalars == "auto" {
+        let unknown =
+            a_parameter_by_convention || scalars.starts_with("decltype") || scalars == "auto";
+
+        // The decorators answer for **any** type, known or not: `std::string&` is a reference whichever class `string` is.
+        match self {
+            Trait::IsReference => return Some(reference),
+            Trait::IsConst => {
+                if unknown {
+                    return None;
+                }
+                return Some(qualified_const);
+            }
+            Trait::IsVolatile => {
+                if unknown {
+                    return None;
+                }
+                return Some(qualified_volatile);
+            }
+            Trait::IsArray => {
+                if unknown {
+                    return None;
+                }
+                return Some(array);
+            }
+            Trait::IsFunction => {
+                if unknown {
+                    return None;
+                }
+                return Some(function);
+            }
+            _ => {}
+        }
+
+        if unknown {
             return None;
         }
         Some(match self {
-            Trait::IsIntegral => integral && !pointers,
-            Trait::IsFloatingPoint => floating && !pointers,
-            Trait::IsArithmetic => (integral || floating) && !pointers,
-            Trait::IsPointer => pointers,
-            Trait::IsVoid => scalars == "void" && !pointers,
+            Trait::IsIntegral => integral && !pointers && !reference,
+            Trait::IsFloatingPoint => floating && !pointers && !reference,
+            Trait::IsArithmetic => (integral || floating) && !pointers && !reference,
+            Trait::IsPointer => pointers && !reference,
+            Trait::IsVoid => scalars == "void" && !pointers && !reference,
             Trait::IsSigned => signed,
             Trait::IsUnsigned => integral && !signed,
+            // Answered above, before the scalar was needed.
+            Trait::IsReference
+            | Trait::IsConst
+            | Trait::IsVolatile
+            | Trait::IsArray
+            | Trait::IsFunction => {
+                unreachable!("answered before the scalar")
+            }
         })
     }
 }
