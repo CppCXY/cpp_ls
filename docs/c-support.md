@@ -183,3 +183,30 @@ A handshake test asks, over stdio, for a function the file defines, a macro the 
 The corpus probe grew a **completions** section for this reason: the member/type checklists answer *"what does the
 engine know"*, and a reader's complaint is about *"what am I offered"* — two different questions that read the same
 until one of them is measured separately.
+
+## 13. The completion budget is spent fairly, not first-come
+
+Reported at a specific position — `fprintf(` inside the last function of `functions.c`. Measured **through the real
+server** at that exact line and column:
+
+```text
+completion (reported)   no   200 items, 10 ms   fprintf: false, isIncomplete true, first: ["code", "add", "average"]
+```
+
+Two hundred items, ten milliseconds, the analysis healthy — and the name the reader was typing absent. Every name of
+every included header has the same score, so the alphabetical tiebreak decided which 200 of thousands survived
+`ITEM_BUDGET`, and an alphabetical cut of five standard headers reaches only `<stdio.h>`'s `a`–`b`. The reader types
+`fpr`, the **client** filters the 200 it already has, and the popup is empty — "completion never works here" was a
+truncated answer, and a count does not show truncation.
+
+`ordered` now draws **round-robin per declaring file** and re-sorts the chosen items by the same rank: the fair draw
+decides *which* items survive, never their order. The same position now answers `fprintf: true`, and the probe's rows at
+`fprintf(`, `fp`, `fpr`, `fprint` and `fprintf(stderr` all hold it.
+
+The handshake test for a C reader's three questions includes the **empty-prefix** row with five standard headers in the
+fixture, so the fixture overflows the budget by itself: a first-come cut fails it.
+
+**On "sometimes slow":** the same probe prints `the project is quiet after 33.8 s` — the *initial* index of this corpus
+(nine files plus the MinGW headers each inclusion pulls in). While it fills, an answer is a subset with
+`isIncomplete: true`, which an editor shows as a list that grows and a popup that re-opens. The query itself is 10 ms at
+this position.
