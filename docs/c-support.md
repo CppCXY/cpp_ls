@@ -210,3 +210,21 @@ fixture, so the fixture overflows the budget by itself: a first-come cut fails i
 (nine files plus the MinGW headers each inclusion pulls in). While it fills, an answer is a subset with
 `isIncomplete: true`, which an editor shows as a list that grows and a popup that re-opens. The query itself is 10 ms at
 this position.
+
+## 14. The completion budget, in three parts
+
+```text
+the typed prefix   dropped when nothing matched it, BEFORE the budget — with a prefix the answer is exact and never
+                   truncated: `fpr` answers 3 items, `fp` 10, `fprint` 2
+the budget         1000 items (clangd's own default), so an unfiltered list of a real C file fits whole
+the fair draw      only when 1000 is still not enough: round-robin per declaring file
+```
+
+Measured on the corpus: the **complete** visible set at `fprintf(` is 411 names and at `C23_SUM(` 481 — so the earlier
+200-item budget was cutting a list that fits, and the cut was what made `fprintf` invisible. Both are answered in full in
+**11 ms**, the same figure the truncated list took.
+
+A limit is still needed *in principle*: a C++ file that includes the standard library sees **14 351** names, which was
+4.5 MB of JSON per keystroke when the budget was added. The prefix filter is the part that was missing and matters most —
+non-matching names were *ranked last* rather than dropped, so they spent the budget and a typed prefix could not rescue
+the list it was typed into.
