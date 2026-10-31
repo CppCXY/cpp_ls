@@ -1820,3 +1820,52 @@ fn the_standards_own_macros_answer_from_the_language() {
         "a compiler's own macro is not the standard's, and no compiler was asked here"
     );
 }
+
+/// **A class template's members, through an instantiation** — `Box<int> box; box.get()`.
+///
+/// The template's body is ordinary C++: `get` and `set` are members of `Box`, and an instantiation has them. Measured on
+/// a C++20 project: `techniques::Box<int> box(7); box.` answered **0 items** — not a wrong list, an empty one — which is
+/// what a reader sees as "completion does not work on my template class".
+#[test]
+fn a_class_templates_members_answer_through_its_instantiation() {
+    let source = "\
+template <typename T>
+class Box {
+public:
+    explicit Box(T value) : value_(value) {}
+
+    T get() const { return value_; }
+    void set(T value) { value_ = value; }
+
+private:
+    T value_;
+};
+
+int f() {
+    Box<int> box(7);
+    return box.get();
+}
+";
+    let session = session_with(&[("/p/a.cpp", source)]);
+    let view = session.view("/p/a.cpp").expect("the file is held");
+
+    let names = |class: &str| match session.members_of(&view, class) {
+        cpp_code_analysis::Known::Yes(list) => list
+            .members
+            .iter()
+            .map(|member| member.fact.name.clone())
+            .collect::<Vec<_>>(),
+        other => panic!("`{class}` has a member list: {other:?}"),
+    };
+
+    assert!(
+        names("Box<int>").contains(&"get".to_string()),
+        "the instantiation has the template's members: {:?}",
+        names("Box<int>")
+    );
+    assert!(
+        names("Box").contains(&"get".to_string()),
+        "and so does the template's own name: {:?}",
+        names("Box")
+    );
+}

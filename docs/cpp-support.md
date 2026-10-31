@@ -125,3 +125,28 @@ Thirty-one rules, each with a fixed severity; `[diagnostics].disable` turns one 
 | `use-auto` | Hint | a declaration that could be written `auto` |
 | `implicit-bool-conversion` | Hint | an arithmetic value converted to `bool` |
 | `module-note` | Information | a note about a module's position (not a complaint, no squiggle) |
+
+## Where C++ templates stand, measured
+
+A `techniques.h` + `techniques.cpp` pair in `C:\Users\zc\Desktop\cpp_project` covers the classic shapes: `enable_if` on
+the return type, the `void_t` detection idiom, a `decltype` trailing return, a variadic template with a fold expression, a
+partial specialisation, a template template parameter, a C++20 concept with `requires`, CRTP, an alias template, and a
+class template with a deduction guide.
+
+**All of it parses**: three files, 0 parse errors, 68 declarations, indexed in 2.7 s.
+
+```text
+  FAIL  src/techniques.cpp  box.get()     0 offered   `get` is not reachable
+  FAIL  src/techniques.cpp  box.set(9)    0 offered   `set` is not reachable
+  FAIL  src/techniques.cpp  first.self()  2 offered   `self` missing from ["identifier", "size"]
+  FAIL  src/techniques.cpp  box           → techniques::Box      (a deducing `Box box(7)`: no `<int>`)
+```
+
+* the first two are **`include-not-found`**, not templates: `#include "techniques.h"` from `src/techniques.cpp` did not
+  resolve, so the header was never read and `Box`'s body is unknown. The same class template in one file answers `get`
+  correctly, which is what makes this a resolution question. `include_roots_above` starts at the *including file* and
+  joins `include` onto it, so its first candidates are `src/techniques.cpp/include` and `src/include` — where to look next.
+* the third is a real template gap: `Widget : techniques::counted<Widget>` needs the **CRTP base's** members, and only
+  `Widget`'s own two are offered.
+* the fourth is CTAD: `Box box(7);` types as `techniques::Box` (no argument) while `Box<int> box(7)` is right. The
+  deduction guide parses; it is not applied.

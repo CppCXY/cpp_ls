@@ -2,7 +2,7 @@
 //!
 //! ```text
 //! cargo test --release -p cpp_code_analysis --test cpp_corpus -- --ignored --nocapture
-//! $env:CPPLS_CPP_CORPUS = "C:\Users\zc\Desktop\test_cpp"   # the default
+//! $env:CPPLS_CPP_CORPUS = "C:\Users\zc\Desktop\cpp_project"   # the default
 //! ```
 //!
 //! The corpus is a real project: `CMakeLists.txt` builds it with MinGW's g++ 15 in C++23 mode, and
@@ -26,8 +26,8 @@ use cpp_code_analysis::{DiskFiles, Known, OpenDocuments, Session, SessionFiles, 
 fn corpus_root() -> Option<PathBuf> {
     let named = std::env::var_os("CPPLS_CPP_CORPUS")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(r"C:\Users\zc\Desktop\test_cpp"));
-    named.join("CMakeLists.txt").is_file().then_some(named)
+        .unwrap_or_else(|| PathBuf::from(r"C:\Users\zc\Desktop\cpp_project"));
+    named.join("main.cpp").is_file().then_some(named)
 }
 
 /// **One member question**: the file, the expression whose operator the cursor goes after, and the member expected.
@@ -47,75 +47,60 @@ struct TypeRow {
 }
 
 const MEMBERS: &[MemberRow] = &[
-    // A class hierarchy's own members, through an object and through a pointer.
+    // **SFINAE and the detection idiom**: the class template`'s own members, and a partially specialised one.
     MemberRow {
-        file: "src/classes.cpp",
-        needle: "derived.name()",
-        expected: "name",
-    },
-    MemberRow {
-        file: "src/classes.cpp",
-        needle: "clone->describe()",
-        expected: "describe",
-    },
-    MemberRow {
-        file: "src/smart_pointers.cpp",
-        needle: "unique->identifier()",
-        expected: "identifier",
-    },
-    // A standard container, a container adaptor's members, and a concept-constrained class.
-    MemberRow {
-        file: "src/containers.cpp",
-        needle: "vector.push_back(4)",
-        expected: "push_back",
-    },
-    MemberRow {
-        file: "src/containers.cpp",
-        needle: "deque.push_front(0)",
-        expected: "push_front",
-    },
-    MemberRow {
-        file: "src/concepts.cpp",
-        needle: "accumulator.add(3)",
-        expected: "add",
-    },
-    // A coroutine handle's own member, and a template instantiation's member.
-    MemberRow {
-        file: "src/coroutines.cpp",
-        needle: "task.run()",
-        expected: "run",
-    },
-    MemberRow {
-        file: "src/templates.cpp",
-        needle: "slot.get()",
+        file: "src/techniques.cpp",
+        needle: "box.get()",
         expected: "get",
+    },
+    MemberRow {
+        file: "src/techniques.cpp",
+        needle: "box.set(9)",
+        expected: "set",
+    },
+    MemberRow {
+        file: "src/techniques.cpp",
+        needle: "first.self()",
+        expected: "self",
+    },
+    // The deduced `Box box(7)`: the deduction guide is what gives it a type at all.
+    MemberRow {
+        file: "src/techniques.cpp",
+        needle: "box.get()",
+        expected: "get",
+    },
+    // A standard container, through the template function that deduced it.
+    MemberRow {
+        file: "src/techniques.cpp",
+        needle: "numbers.front()",
+        expected: "front",
     },
 ];
 
 const TYPES: &[TypeRow] = &[
     TypeRow {
-        file: "src/classes.cpp",
-        needle: "Derived derived(5",
-        name: "derived",
-        expected: "Derived",
-    },
-    TypeRow {
-        file: "src/templates.cpp",
-        needle: "Box<int> slot",
-        name: "slot",
+        file: "src/techniques.cpp",
+        needle: "techniques::Box<int> box",
+        name: "box",
         expected: "Box<int>",
     },
     TypeRow {
-        file: "src/coroutines.cpp",
-        needle: "auto task = doubled()",
-        name: "task",
-        expected: "Task<int>",
+        file: "src/techniques.cpp",
+        needle: "const std::vector<int> numbers",
+        name: "numbers",
+        expected: "vector<int>",
     },
     TypeRow {
-        file: "src/concepts.cpp",
-        needle: "Accumulator<int> accumulator",
-        name: "accumulator",
-        expected: "Accumulator<int>",
+        file: "src/techniques.cpp",
+        needle: "techniques::Box box(7)",
+        name: "box",
+        expected: "Box<int>",
+    },
+    TypeRow {
+        file: "src/techniques.cpp",
+        needle: "Widget widget;",
+        name: "widget",
+        expected: "Widget",
     },
 ];
 
@@ -175,7 +160,7 @@ fn declared_type(session: &Session<DiskFiles>, path: &Path, cursor: usize) -> Op
 #[ignore = "opens a real project; run with --ignored"]
 fn the_cpp_corpus_parses_and_its_members_resolve() {
     let Some(root) = corpus_root() else {
-        eprintln!("skipped: no corpus (set CPPLS_CPP_CORPUS to the test_cpp project)");
+        eprintln!("skipped: no corpus (set CPPLS_CPP_CORPUS to the cpp_project project)");
         return;
     };
     let files = corpus_files(&root);
