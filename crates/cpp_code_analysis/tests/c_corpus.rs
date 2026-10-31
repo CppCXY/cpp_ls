@@ -442,11 +442,13 @@ fn the_c_corpus_parses_and_its_members_resolve() {
                 println!("  SKIP  {file} (no reading)");
                 continue;
             };
+            let started = std::time::Instant::now();
             let found = session.completions(&view, FileOffset::new(cursor));
+            let spent = started.elapsed().as_millis();
             let labels: Vec<String> = found.items.iter().map(|item| item.label.clone()).collect();
             let has = labels.iter().any(|label| label == wanted);
             println!(
-                "  {:<18} {:?} → {} item(s), {wanted} {}",
+                "  {:<18} {:?} → {} item(s), {wanted} {}, {spent} ms",
                 file,
                 needle,
                 labels.len(),

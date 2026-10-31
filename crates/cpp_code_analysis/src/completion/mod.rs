@@ -1074,6 +1074,14 @@ fn names(
         }
     }
 
+    // **Nothing that matched nothing survives a typed prefix.** The client filters the list by what was typed and
+    // drops those rows anyway — keeping them only made the *budget* shorter for the names that can be what the
+    // reader is writing. Measured with a prefix: the corpus answers 3 items at `fpr` and would answer 1000+ if the
+    // non-matching names were carried along; the CUDA arm above has filtered this way from the start.
+    if !listed_prefix.is_empty() {
+        scored.retain(|one| one.matched != matching::NONE);
+    }
+
     let (items, cut) = ordered(scored);
     truncated |= cut;
 
@@ -1441,7 +1449,7 @@ const HEADER_BUDGET: usize = 200;
 /// A **payload** bound rather than a UI one: a client renders ten rows and still receives all of them, and 14 351
 /// items was 4.5 MB of JSON for one keystroke. Two hundred is more than any list a reader scrolls and small enough
 /// that the request stays a few kilobytes.
-const ITEM_BUDGET: usize = 200;
+const ITEM_BUDGET: usize = 1000;
 
 /// Put the items in order, apply the budget, and say whether anything was cut.
 ///
