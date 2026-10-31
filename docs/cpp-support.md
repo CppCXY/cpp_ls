@@ -241,3 +241,31 @@ A file with the two `describe` overloads binds a single `describe`, so `definiti
 and `go-to-definition` on `describe(1.5)` answers the *integral* declaration because it is first. Narrowing needs a set,
 and there is no set to narrow — the next step is structural: an **overload set per name** in the scope tree, after which the
 narrowing is a dozen lines against `definitions_at`.
+
+## `enable_if` overloads: chosen by their condition
+
+The scope tree was never the blocker. Measured: the translation unit holds `describe` **twice** — offsets 85 and 208, both
+`Function` — so an overload set is represented, and `definitions_at` (the plural query written *for* calls) returns both.
+What answered was the **singular** query, which takes the first binding of the name and stops.
+
+Three things then had to be right, each found by a trace rather than guessed:
+
+1. **the arguments are the call's children after the callee**, not always wrapped in an `ArgumentList`:
+   `describe(1.5)` is `CallExpr > [IdentifierExpr, LiteralExpr]`;
+2. **the declaration, not the declarator**: a binding's range is `describe(T value)`, and the `enable_if` is a specifier
+   of the enclosing `Declaration`;
+3. **the condition evaluator** (`sema::constraint`) binds `T` to the argument types in order and answers
+   `Some(true)`/`Some(false)`/`None` — `None` keeps the candidate, because deleting on "cannot tell" loses the overload the
+   program chose.
+
+```text
+describe(1.5)  → std::is_floating_point<T>   (T = double)
+describe(41)   → std::is_integral<T>         (T = int)
+```
+
+Both directions are asserted (`an_enable_if_overload_is_chosen_by_its_condition`): a narrowing that answered the *last*
+candidate for every call would pass the first assertion and be just as wrong.
+
+**Still not done:** `enable_if` in a *template parameter* (`template <typename T, typename = enable_if_t<…>>`), a
+hand-written `requires` clause, and any trait outside `is_integral`/`is_floating_point`/`is_arithmetic`/`is_pointer`/
+`is_void`/`is_signed`/`is_unsigned`/`is_same` — each answers `None`, which keeps both candidates rather than guessing.
