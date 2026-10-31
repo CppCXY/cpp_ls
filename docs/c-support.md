@@ -228,3 +228,25 @@ A limit is still needed *in principle*: a C++ file that includes the standard li
 4.5 MB of JSON per keystroke when the budget was added. The prefix filter is the part that was missing and matters most —
 non-matching names were *ranked last* rather than dropped, so they spent the budget and a typed prefix could not rescue
 the list it was typed into.
+
+## 15. Two things a reader notices at one character
+
+**The order changed.** With `fp` typed in `functions.c`:
+
+```text
+before   functions_plain, functions_pointers, fprintf, fputc
+after    fprintf, fputc, fputchar, fputs
+```
+
+The tier (where the declaration is) was compared *before* how well the name answered what was typed, so a local that
+matched `f`…`p` as word starts outranked the name whose first two letters those are. The match quality now leads and the
+tier is the tiebreak — which is what `completion::matching` documented all along and what the ranking note contradicted.
+
+**An answer that answers nothing is never final.** A client filters by the prefix and caches an empty result, so only
+the next keystroke re-opens the question — the shape of *"输入 f 没有补全, 输入 fp 就有了"*. `CompletionSet::nothing_matched()`
+asks the engine's own matcher whether any item could be what was typed, and the handler marks such an answer
+`isIncomplete: true`, so the client re-asks instead of caching "nothing here".
+
+Measured one-shot through the real server at the reported position: `427 items, 15 ms, fprintf: true`. The handshake
+suite gained two rows — the first completion after `didOpen` must hold the same name as the second (one shot each, no
+retry, because a retry hides the race), and `fp` must lead with `fprintf`.
