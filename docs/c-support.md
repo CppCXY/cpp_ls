@@ -154,3 +154,32 @@ never fire in a file compiled as C — see [`configuration.md`](configuration.md
 | `use-auto` | Hint | a declaration that could be written `auto` — **C++** |
 | `implicit-bool-conversion` | Hint | an arithmetic value converted to `bool` — **C++** |
 | `module-note` | Information | a note about a module's position — **C++**, not a complaint (no squiggle) |
+
+## 11. `...` is a token of the list, not a parameter node
+
+```c
+#define C23_SUM(count, ...) (c23_sum_impl)(count __VA_OPT__(, ) __VA_ARGS__)
+static int c23_sum_impl(int count, ...) { return count; }     /* a definition */
+int c23_va_opt(int count, ...) { return C23_SUM(count, 1, 2, 3) + count; }
+```
+
+`argument-count` said *"`c23_sum_impl` takes 1 argument(s) and this call passes more"* — the expansion passes four. A
+**definition's** parameter list is read from the tree, and a `...` is a *token of the list*, not a parameter node:
+`int count, ...` has one child (`int count`) and the ellipsis beside it, so a loop over the children never saw it. A
+**prototype's** list reaches the same rule as the declaration's *text*, so the defect only appeared for functions
+*defined* in the file being checked — which is why the first regression test (a prototype) passed while the corpus
+failed.
+
+Both shapes are pinned now: `a_variadic_macro_call_is_not_an_argument_count_finding` (prototype) and
+`a_variadic_macro_whose_callee_is_a_definition_is_not_an_argument_count_finding` (definition, the corpus verbatim).
+
+## 12. Completion and signature help, measured rather than changed
+
+A handshake test asks, over stdio, for a function the file defines, a macro the file defines, and the signature of
+`fprintf(` from `<stdio.h>`: all three answer. The corpus probe agrees (200 items at `C23_SUM(`, with `C23_SUM` and
+`c23_sum_impl` among them), and `tests/c_project.rs` against the corpus reports `documentSymbol 30`,
+`semanticTokens 339`, `inlayHint 2`, `diagnostic 0`.
+
+The corpus probe grew a **completions** section for this reason: the member/type checklists answer *"what does the
+engine know"*, and a reader's complaint is about *"what am I offered"* — two different questions that read the same
+until one of them is measured separately.
