@@ -728,7 +728,7 @@ pub struct ModuleImport {
 /// **The macros the C and C++ *standards* define** — every compiler defines these, whatever the project's build system
 /// says, and their values follow from the language the file is read as.
 ///
-/// `	ext
+/// `ext
 /// __STDC__            1                     both families
 /// __STDC_HOSTED__     1                     both families (a freestanding implementation says 0 and this cannot know)
 /// __STDC_VERSION__    201710L / 202311L     C99 and later, by the file's standard
