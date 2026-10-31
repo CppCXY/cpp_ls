@@ -269,3 +269,31 @@ candidate for every call would pass the first assertion and be just as wrong.
 **Still not done:** `enable_if` in a *template parameter* (`template <typename T, typename = enable_if_t<…>>`), a
 hand-written `requires` clause, and any trait outside `is_integral`/`is_floating_point`/`is_arithmetic`/`is_pointer`/
 `is_void`/`is_signed`/`is_unsigned`/`is_same` — each answers `None`, which keeps both candidates rather than guessing.
+
+## A named concept decides the overload too
+
+```cpp
+template <typename T> concept integral = std::is_integral_v<T>;
+template <integral T> std::string describe(T value);
+```
+
+The third spelling, and the one with no expression in the declaration at all: `enable_if` is not in the text and there is no
+`requires` clause, so both overloads stayed candidates and the call answered the first (measured: `describe(1.5)` resolved to
+the integral declaration, offset 168 rather than 243).
+
+`a_concept_name` reads the name from the two places it can stand — `template <integral T>` (a parameter whose first word is
+a name and whose second is the parameter it constrains, which excludes `typename T`, `class U` and `auto`) and
+`requires integral<T>` — and `the_concept_definition` finds the concept's right-hand side in the tree, evaluated with the
+same bindings the other forms use.
+
+**Only the definition is expanded.** `concept signed_integral = integral<T> && is_signed_v<T>` names another concept that
+this layer cannot expand, so the verdict is `None` and both candidates stay — the safe half of "cannot tell".
+
+All four spellings now resolve both directions:
+
+```text
+an_enable_if_overload_is_chosen_by_its_condition   the return type
+an_enable_if_in_a_template_parameter_is_read      the template parameter
+a_requires_clause_is_read                         C++20's own clause
+a_named_concept_decides_the_overload              a concept the file defines
+```
