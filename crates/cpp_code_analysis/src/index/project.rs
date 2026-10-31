@@ -455,6 +455,37 @@ pub fn definitions_across_files(
 ///
 /// The argument types are bound to the declaration's template parameters **in order** (`describe(T)` with
 /// `describe(1.5)` binds `T = double`), which is the one deduction this needs and the one it can do exactly.
+/// **A concept's right-hand side**, found by name: `template <typename T> concept integral = std::is_integral_v<T>;`
+/// answers `std::is_integral_v<T>`.
+///
+/// Searched in the tree the caller holds — the file being edited and, when a `.cpp` is asking, the header its class is
+/// declared in, which is the same walk the condition itself takes. Only the *definition* is read: a concept that composes
+/// other concepts (`concept signed_integral = integral<T> && is_signed_v<T>`) answers a name this layer cannot expand, so
+/// the verdict is `None` and the candidate stays.
+fn the_concept_definition(root: &cpp_parser::CppSyntaxNode, name: &str) -> Option<String> {
+    for declaration in root.descendants() {
+        if cpp_parser::CppSyntaxKind::from(declaration.kind())
+            != cpp_parser::CppSyntaxKind::ConceptDecl
+        {
+            continue;
+        }
+        let text = declaration.text().to_string();
+        let Some(at) = text.find('=') else {
+            continue;
+        };
+        // `concept integral = …` — the name is the word before the `=`.
+        let declared = text[..at].split_whitespace().last().unwrap_or_default();
+        if declared != name {
+            continue;
+        }
+        let body = text[at + 1..].trim().trim_end_matches(';').trim();
+        if !body.is_empty() {
+            return Some(body.to_string());
+        }
+    }
+    None
+}
+
 fn the_overload_a_call_names(
     index: &ProjectIndex,
     declaring: &mut dyn FnMut(&Path) -> Option<crate::FileView>,
@@ -525,6 +556,13 @@ fn the_overload_a_call_names(
             .and_then(|text| crate::sema::constraint::a_requires_clause(&text).map(str::to_string));
         let condition_owned = requires_clause.as_deref().map(str::to_string).or_else(|| {
             crate::sema::constraint::the_condition_of(&declaration).map(str::to_string)
+        });
+        // **A constraint written as a *concept*'s name** — `template <integral T>` — holds no expression to evaluate, so
+        // the concept's own definition is found and its right-hand side evaluated with the same bindings. Measured: a
+        // pair of overloads gated by `integral`/`floating` stayed an unresolved set and the call answered the first.
+        let condition_owned = condition_owned.or_else(|| {
+            let name = crate::sema::constraint::a_concept_name(&declaration)?;
+            the_concept_definition(root, &name)
         });
         let Some(condition) = condition_owned.as_deref() else {
             // An ordinary function, or a template enabled unconditionally.

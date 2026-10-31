@@ -2412,3 +2412,67 @@ std::string f() {
         "and the integral overload for an int"
     );
 }
+
+/// **A named concept** — `template <integral T>` where `integral` is a concept the file defines.
+///
+/// ```cpp
+/// template <typename T> concept integral = std::is_integral_v<T>;
+/// template <integral T> std::string describe(T value);
+/// ```
+///
+/// The constraint is a *name*, so there is no expression in the declaration to evaluate: it has to be found, and its own
+/// right-hand side evaluated with the same bindings. Measured: both overloads stayed candidates and the call answered the
+/// first.
+#[test]
+fn a_named_concept_decides_the_overload() {
+    let source = "\
+#include <type_traits>
+#include <string>
+
+template <typename T>
+concept integral = std::is_integral_v<T>;
+
+template <typename T>
+concept floating = std::is_floating_point_v<T>;
+
+template <integral T>
+std::string describe(T value) {
+    return \"integral\";
+}
+
+template <floating T>
+std::string describe(T value) {
+    return \"floating\";
+}
+
+std::string f() {
+    describe(41);
+    return describe(1.5);
+}
+";
+    let session = session_with(&[("/p/a.cpp", source)]);
+    let view = session.view("/p/a.cpp").expect("the file is held");
+    let rendering = view.root.text().to_string();
+    let declaration_at = |which: usize| -> usize {
+        rendering
+            .match_indices("describe(T value)")
+            .nth(which)
+            .map(|(at, _)| at)
+            .expect("both declarations are in the rendering")
+    };
+    let floating_call = rendering
+        .find("describe(1.5)")
+        .expect("the call is written");
+    let one = match session.definition(
+        &view,
+        cpp_code_analysis::file::coordinates::ReadingOffset::new(floating_call + 3),
+    ) {
+        cpp_code_analysis::Known::Yes(found) => found,
+        other => panic!("`describe(1.5)` resolves: {other:?}"),
+    };
+    assert_eq!(
+        one.fact.name_range.start_offset,
+        declaration_at(1),
+        "the concept picks the floating-point overload"
+    );
+}
