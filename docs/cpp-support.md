@@ -203,3 +203,20 @@ deduction guide.
 parameter. Two parameters, a constructor taking `Container<T>`, or a hand-written guide (parsed, not read) all answer the
 name as written — and `enable_if`'s condition is read as a type rather than **evaluated**, so `describe(41)` resolves but
 nothing decides which overload the condition selects.
+
+## Update: a hand-written deduction guide is read, not just parsed
+
+```cpp
+template <typename T> struct Wrap { Wrap(std::string); T get() const; };
+template <typename T> Wrap(T) -> Wrap<T>;
+
+Wrap wrapped(7);      // Wrap<int> — and nothing about Wrap's constructor says so
+```
+
+The guide was grammar the reader accepted and nothing consulted, so `Wrap wrapped(7)` answered the bare `Wrap`. It is
+read now: the declaration whose text holds `->`, whose head is `[template <…>] Name(params)` with the class's own name,
+and whose tail is exactly `Name<T>` for the class's single template parameter — asked **before** the constructor
+heuristic, because when a guide exists it *is* the rule the language applies.
+
+Only the identity form (`Name<T>`). `Name<T*>`, two parameters and a pack are pattern matches this layer does not do, and
+a wrong argument prints an instantiation nobody asked for.
