@@ -220,3 +220,24 @@ heuristic, because when a guide exists it *is* the rule the language applies.
 
 Only the identity form (`Name<T>`). `Name<T*>`, two parameters and a pack are pattern matches this layer does not do, and
 a wrong argument prints an instantiation nobody asked for.
+
+## `enable_if`: the evaluator is written, the overload set is not
+
+The condition of an `enable_if` overload is now decidable (`sema::constraint`, pinned by
+`the_constraint_evaluator_decides_the_fundamental_traits`):
+
+```text
+is_integral<int>            Some(true)     is_integral<std::string>   Some(false)
+is_integral<U>              None           is_user_defined<int>       None
+!is_integral<double>        Some(true)     is_integral<T> && !is_same<T, char>
+```
+
+It reads `::value`, `{}`, `_v` and `()` spellings, composes `!`/`&&`/`||` at the top level, and knows `is_same`. `None` —
+*cannot tell* — is answered for an unbound parameter and for a trait it does not know, because deleting a candidate on
+"cannot tell" is how a reader loses the overload their program chose.
+
+**What blocks the consumer, measured:** two declarations of one name in one scope produce **one** binding in the scope tree.
+A file with the two `describe` overloads binds a single `describe`, so `definitions_at`'s plural form can only return one,
+and `go-to-definition` on `describe(1.5)` answers the *integral* declaration because it is first. Narrowing needs a set,
+and there is no set to narrow — the next step is structural: an **overload set per name** in the scope tree, after which the
+narrowing is a dozen lines against `definitions_at`.
