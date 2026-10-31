@@ -405,3 +405,32 @@ project's own classes do not use. `conversion` answers `Unknown` for those befor
 
 Measured after: `cpp_project/src/techniques.cpp` — **0 findings**. The project's own baseline is now
 **0 parse errors, 0 findings, 9/9 members, 7/7 types**; the C corpus is unchanged (2/2, 3/3, 0 findings).
+
+## Deduced return types: same file works, through a header it is reached and cannot complete
+
+```cpp
+class Box {
+    T value_;
+    auto copy_of() const { return value_; }   // `auto`, decided by the body
+};
+Box<int> box(7);
+auto copied = box.copy_of();
+```
+
+```text
+PASS  same file                                          → `int`
+PASS  same file, with a constructor and public:/private: → `int`
+FAIL  member declared in the header                      → unknown
+```
+
+`type_a_return_states_with` could only type a **parameter** named by a `return`; a data member (`return value_;`) was
+unanswerable until a reader for the field's declared type was added. The caller's substitutions then turn `T` into `int`.
+
+The header path is **not** fixed, and the trace localises it: the fact is found (`copy_of`, offset 4855), `declaring` hands
+back the header, `definition_at` finds a binding there — and `deduced_returns_of_substituted` answers `None`. The deduction
+is reached and cannot finish, in a tree whose offsets come from a *rendering* while the fact's come from the *written* file.
+
+The hook was written, measured and reverted: it did not fix the cross-file case, and its scan sits on the hot path that types
+every deduced return. `the_reported_file_is_answered`'s budget is 30 s and it runs 20–35 s on a loaded machine — the failures
+seen today were load (the suite passes with the hook stashed and with it in place), so the two probe rows stay red as a
+**measurement**, not a regression.
