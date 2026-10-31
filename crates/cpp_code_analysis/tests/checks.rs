@@ -3541,3 +3541,49 @@ int c23_va_opt(int count, ...) { return C23_SUM(count, 1, 2, 3) + count; }
         "a variadic callee takes any number of arguments: {codes:?}"
     );
 }
+
+/// **The `include/` beside `src/` layout resolves without a compilation database** — CMake's own convention.
+///
+/// ```text
+/// <root>/include/techniques.h
+/// <root>/src/techniques.cpp      #include "techniques.h"
+/// ```
+///
+/// A quoted include is searched beside the including file, then in the `include` directories above it — which is what
+/// `include_roots_above` exists for. Measured on a real C++ project laid out exactly this way: the include was reported
+/// `include-not-found`, the header was never read, and every member question about a type the header declares answered
+/// nothing at all.
+#[test]
+fn the_include_directory_beside_src_resolves_a_quoted_include() {
+    let root = std::env::temp_dir().join("cppls-include-layout");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("include")).expect("the layout is created");
+    std::fs::create_dir_all(root.join("src")).expect("the layout is created");
+    std::fs::write(root.join("include/techniques.h"), "struct Widget { int size() const; };\n")
+        .expect("the header is written");
+    let source = "#include \"techniques.h\"\n\nint use() { Widget widget; return widget.size(); }\n";
+    std::fs::write(root.join("src/techniques.cpp"), source).expect("the source is written");
+
+    let mut session = cpp_code_analysis::Session::open(
+        root.clone(),
+        cpp_code_analysis::SessionFiles::new(cpp_code_analysis::OpenDocuments::new(), cpp_code_analysis::DiskFiles),
+        cpp_code_analysis::WatchFilter::new(&root),
+    );
+    session.add_project_files([root.join("src/techniques.cpp"), root.join("include/techniques.h")]);
+    session.index_everything();
+    session.cook(&root.join("src/techniques.cpp"));
+
+    let found = session
+        .diagnostics(&root.join("src/techniques.cpp"))
+        .expect("the file is analysed");
+    let codes: Vec<&str> = found
+        .checks
+        .iter()
+        .map(|check| check.code.name())
+        .collect();
+    assert!(
+        !codes.contains(&"include-not-found"),
+        "`include/` beside `src/` is on the search path: {codes:?}"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}

@@ -99,7 +99,12 @@ impl Resolution {
 ///
 /// The **provider** is asked, not `std::fs`, so that a session over a virtual filesystem — `MemoryFiles` in every
 /// test — behaves the same way, and so that a provider that caches its answers caches these too.
-fn include_roots_above<F: FileProvider>(directory: &Path, files: &F) -> Vec<PathBuf> {
+fn include_roots_above<F: FileProvider>(
+    directory: &Path,
+    name: &Path,
+    case_insensitive: bool,
+    files: &F,
+) -> Vec<PathBuf> {
     /// How far up to look. Six covers `repo/<target>/src/<module>/<sub>`, which is as deep as this layout goes in
     /// practice, and it is small enough that a checkout at the root of a drive cannot collect unrelated trees.
     const LEVELS: usize = 6;
@@ -109,7 +114,12 @@ fn include_roots_above<F: FileProvider>(directory: &Path, files: &F) -> Vec<Path
     for _ in 0..LEVELS {
         let Some(current) = at else { break };
         let candidate = current.join("include");
-        if files.exists(&candidate) {
+        // **Ask about the *file*, not the directory.** `exists` is a question about the provider's files, and a
+        // directory is not one of them: measured on a project laid out `include/` + `src/`, the climb found
+        // `<root>/include` and answered "no such file", because what it asked about was the directory itself. The
+        // question that matters is whether the include would be *found* there, so that is the one asked.
+        let probe = join_normalized(&candidate, name, case_insensitive);
+        if files.exists(&probe) {
             roots.push(candidate);
         }
         at = current.parent();
@@ -220,7 +230,7 @@ impl<'a, F: FileProvider> IncludeResolver<'a, F> {
         // A search that finds something is a file that exists at the spelling asked for, and the summary records
         // which path won, so a wrong hit is a wrong file rather than a wrong answer about a right one — the same
         // standing every `-I` has.
-        for root in include_roots_above(including, self.files) {
+        for root in include_roots_above(including, name, self.case_insensitive(), self.files) {
             candidates.push((
                 join_normalized(&root, name, self.case_insensitive()),
                 FoundIn::LocalDirectory,

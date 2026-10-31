@@ -150,3 +150,24 @@ class template with a deduction guide.
   `Widget`'s own two are offered.
 * the fourth is CTAD: `Box box(7);` types as `techniques::Box` (no argument) while `Box<int> box(7)` is right. The
   deduction guide parses; it is not applied.
+
+## Update: `include/` beside `src/`, and what that fixed
+
+`include_roots_above` tested `files.exists(<dir>/include)` — a question about a **directory**, which a file provider
+answers "no" to, so the climb found `<root>/include` and threw it away. A quoted include from a project laid out
+`include/` + `src/` (CMake's own convention, with no compilation database) then reported `include-not-found`, the header
+was never read, and every member question about a type it declares answered nothing. It now asks whether the include would
+be *found* there: `files.exists(<dir>/include/<name>)`.
+
+Measured on `cpp_project` with the techniques pair added:
+
+```text
+                        before                    after
+include-not-found       1 finding                 0 findings
+members                 1/5                       5/5
+box.get() / box.set()   0 offered                 2 offered
+first.self()  (CRTP)    `self` missing            5 offered
+```
+
+**Left: CTAD.** `Box box(7)` types as `techniques::Box` — the template's name without the deduced argument — while
+`Box<int> box(7)` is right. The deduction guide parses; it is not applied.
