@@ -354,8 +354,36 @@ pub fn definitions_across_files(
         }
     }
 
-    match crate::sema::resolve::definition_at(scopes, root, offset) {
-        Known::Yes(binding) => {
+    match crate::sema::resolve::definitions_at(scopes, root, offset) {
+        // **An overload set, which the condition in a signature can narrow.** The scope tree keeps both declarations —
+        // measured: the translation unit holds `describe` twice — while the *singular* query takes the first and stops,
+        // so `describe(1.5)` answered the `enable_if<is_integral<T>>` overload because it is written first. See
+        // [`the_overload_a_call_names`].
+        Known::Yes(candidates) if candidates.len() > 1 => {
+            let chosen = the_overload_a_call_names(
+                index,
+                declaring,
+                scopes,
+                root,
+                path,
+                offset,
+                &candidates,
+            )
+            .unwrap_or_else(|| candidates[0].clone());
+            let scope =
+                crate::sema::resolve::qualified_name_at(root, offset).and_then(|(written, _)| {
+                    written
+                        .rsplit_once("::")
+                        .map(|(scope, _)| scope.trim_start_matches("::").to_string())
+                        .filter(|scope| !scope.is_empty())
+                });
+            let local = scopes.declares_a_local(chosen.scope);
+            return Known::Yes(ProjectDefinitions::one(ProjectDefinition::from_binding(
+                path, chosen, scope, local,
+            )));
+        }
+        Known::Yes(mut candidates) => {
+            let binding = candidates.remove(0);
             // The scope the answer was reached *through*, when the cursor wrote one: `ns` for `ns::Widget`. A bare
             // name has none, and a leading `::` means the global name space, which is no scope at all.
             let scope =
@@ -404,6 +432,145 @@ pub fn definitions_across_files(
     // `No` from the single-file layer means the offset is not in a name the scopes could place at all — on
     // punctuation, or past the end — so there is nothing to look up anywhere.
     Known::Unknown(UnknownReason::UnparsableName)
+}
+/// **The overload a call actually names**, when the condition in its signature can decide it.
+///
+/// ```cpp
+/// template <typename T>
+/// typename std::enable_if<std::is_integral<T>::value, std::string>::type describe(T);
+/// template <typename T>
+/// typename std::enable_if<std::is_floating_point<T>::value, std::string>::type describe(T);
+///
+/// describe(1.5);      // the second, and only the condition says so
+/// ```
+///
+/// The scope tree keeps **both** declarations — measured, the translation unit holds `describe` twice — and until this
+/// function existed the answer was the first of them for either call, because the singular query takes the first binding
+/// of the name and stops. What separates the two is the `enable_if` in the *return type*, so the narrowing is:
+///
+/// * a candidate whose condition is **false** for the call's argument types is dropped;
+/// * a candidate with no condition, or with one this layer cannot decide, is **kept** — deleting on "cannot tell" is how
+///   a reader loses the overload their program chose;
+/// * the answer is used only when exactly one candidate survives.
+///
+/// The argument types are bound to the declaration's template parameters **in order** (`describe(T)` with
+/// `describe(1.5)` binds `T = double`), which is the one deduction this needs and the one it can do exactly.
+fn the_overload_a_call_names(
+    index: &ProjectIndex,
+    declaring: &mut dyn FnMut(&Path) -> Option<crate::FileView>,
+    scopes: &crate::ScopeTree,
+    root: &cpp_parser::CppSyntaxNode,
+    path: &Path,
+    offset: usize,
+    candidates: &[crate::Binding],
+) -> Option<crate::Binding> {
+    // **The call the cursor's name is the callee of.** A name that is not called has no arguments, so there is nothing to
+    // decide a condition against and the set stands as it is.
+    let name = crate::sema::resolve::expression_at(root, offset)?;
+    let call = name.ancestors().find(|node| {
+        cpp_parser::CppSyntaxKind::from(node.kind()) == cpp_parser::CppSyntaxKind::CallExpr
+    })?;
+    // **The arguments are the call's children after the callee**, and not always wrapped in an `ArgumentList`: measured,
+    // `describe(1.5)` is `CallExpr > [IdentifierExpr, LiteralExpr]`. Asking only for the wrapper found none and answered
+    // "this name is not called", which is why the narrowing never ran.
+    let arguments: Vec<cpp_parser::CppSyntaxNode> = match call.children().find(|node| {
+        cpp_parser::CppSyntaxKind::from(node.kind()) == cpp_parser::CppSyntaxKind::ArgumentList
+    }) {
+        Some(list) => list.children().collect(),
+        None => call.children().skip(1).collect(),
+    };
+    let argument_types: Vec<Option<String>> = arguments
+        .iter()
+        .map(|argument| {
+            match type_of_expression(index, declaring, scopes, root, path, argument, 0) {
+                Known::Yes((found, _)) => Some(found.to_string()),
+                _ => None,
+            }
+        })
+        .collect();
+    if argument_types.is_empty() {
+        return None;
+    }
+
+    let mut survivors = Vec::new();
+    for candidate in candidates {
+        let Some(the_candidate) =
+            node_covering(root, candidate.name_range.start_offset, candidate.range)
+        else {
+            survivors.push(candidate.clone());
+            continue;
+        };
+        // **The whole declaration, not the declarator.** A binding ranges over the declarator — `describe(T value)` —
+        // and the `enable_if` is in the *return type*, which is a specifier of the enclosing declaration. Measured: the
+        // binding's text was `describe(T value)` for both overloads, so the condition was never found and nothing narrowed.
+        let declaration = the_candidate
+            .ancestors()
+            .find(|node| {
+                cpp_parser::CppSyntaxKind::from(node.kind())
+                    == cpp_parser::CppSyntaxKind::Declaration
+            })
+            .unwrap_or_else(|| the_candidate.clone())
+            .text()
+            .to_string();
+        let Some(condition) = crate::sema::constraint::the_condition_of(&declaration) else {
+            // An ordinary function, or a template enabled unconditionally.
+            survivors.push(candidate.clone());
+            continue;
+        };
+        let parameters = template_parameters_in(&declaration);
+        let bound: Vec<(String, String)> = parameters
+            .into_iter()
+            .zip(argument_types.iter())
+            .filter_map(|(parameter, found)| Some((parameter, found.clone()?)))
+            .collect();
+        let verdict = crate::sema::constraint::satisfies(condition, &bound);
+        match verdict {
+            Some(false) => {}
+            _ => survivors.push(candidate.clone()),
+        }
+    }
+
+    (survivors.len() == 1).then(|| survivors.remove(0))
+}
+
+/// The names a declaration's `template <…>` introduces, in order — `template <typename T, class U>` answers `["T", "U"]`.
+fn template_parameters_in(declaration: &str) -> Vec<String> {
+    let Some(at) = declaration.find("template") else {
+        return Vec::new();
+    };
+    let after = &declaration[at + "template".len()..];
+    let Some(open) = after.find('<') else {
+        return Vec::new();
+    };
+    let mut depth = 0isize;
+    let mut close = None;
+    for (index, character) in after[open..].char_indices() {
+        match character {
+            '<' => depth += 1,
+            '>' => {
+                depth -= 1;
+                if depth == 0 {
+                    close = Some(open + index);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let Some(close) = close else {
+        return Vec::new();
+    };
+    after[open + 1..close]
+        .split(',')
+        .filter_map(|parameter| {
+            // `typename T`, `class U`, `typename... Args` — the name is the last word, and a pack keeps its `...`.
+            parameter
+                .split_whitespace()
+                .last()
+                .map(|word| word.trim_end_matches("...").trim().to_string())
+                .filter(|word| !word.is_empty())
+        })
+        .collect()
 }
 
 /// ```cpp

@@ -2059,7 +2059,7 @@ int f() {
 /// Ignored rather than deleted: the assertion is the goal, and the day an overload set exists this is the test that says
 /// so.
 #[test]
-#[ignore = "needs an overload set per name in ScopeTree — see docs/cpp-support.md"]
+#[test]
 fn an_enable_if_overload_is_chosen_by_its_condition() {
     let source = "\
 #include <type_traits>
@@ -2076,23 +2076,56 @@ typename std::enable_if<std::is_floating_point<T>::value, std::string>::type des
 }
 
 std::string f() {
+    describe(41);
     return describe(1.5);
 }
 ";
     let session = session_with(&[("/p/a.cpp", source)]);
     let view = session.view("/p/a.cpp").expect("the file is held");
-    let call = source.find("describe(1.5)").expect("the call is written");
-    let reading = as_reading(&view, call + 3);
-    let one = match session.definition(&view, reading) {
+    // **The rendering's text**, because a fact's range is a range there — the include closure is inlined into it.
+    let rendering = view.root.text().to_string();
+    let declaration_at = |which: usize| -> usize {
+        rendering
+            .match_indices("describe(T value)")
+            .nth(which)
+            .map(|(at, _)| at)
+            .expect("both declarations are in the rendering")
+    };
+
+    // **`describe(1.5)` picks the floating-point overload**: its condition is `is_floating_point<T>` with `T = double`.
+    let floating_call = rendering
+        .find("describe(1.5)")
+        .expect("the call is written");
+    let one = match session.definition(
+        &view,
+        cpp_code_analysis::file::coordinates::ReadingOffset::new(floating_call + 3),
+    ) {
         cpp_code_analysis::Known::Yes(found) => found,
         other => panic!("`describe(1.5)` resolves: {other:?}"),
     };
-    let declaration = &source[one.fact.range.start_offset..one.fact.range.end_offset()];
-    assert!(
-        declaration.contains("is_floating_point"),
-        "the condition picks the floating-point overload: {declaration}"
+    assert_eq!(
+        one.fact.name_range.start_offset,
+        declaration_at(1),
+        "the condition picks the floating-point overload"
+    );
+
+    // **And the other direction**, because a narrowing that answered the last candidate for every call would pass the
+    // assertion above and be just as wrong.
+    let integral_call = rendering.find("describe(41)").expect("the call is written");
+    let integral = match session.definition(
+        &view,
+        cpp_code_analysis::file::coordinates::ReadingOffset::new(integral_call + 3),
+    ) {
+        cpp_code_analysis::Known::Yes(found) => found,
+        other => panic!("`describe(41)` resolves: {other:?}"),
+    };
+    assert_eq!(
+        integral.fact.name_range.start_offset,
+        declaration_at(0),
+        "the condition picks the integral overload"
     );
 }
+
 /// **The condition evaluator**, decision by decision — the module the `enable_if` overloads rest on.
 #[test]
 fn the_constraint_evaluator_decides_the_fundamental_traits() {
@@ -2169,4 +2202,83 @@ fn the_constraint_evaluator_decides_the_fundamental_traits() {
         None,
         "an ordinary function carries no condition"
     );
+}
+
+/// Doctors: how many `describe` bindings the scope tree keeps, looked up from inside the function body.
+#[test]
+fn dump_the_overload_bindings() {
+    let source = "\
+#include <type_traits>
+
+template <typename T>
+typename std::enable_if<std::is_integral<T>::value, int>::type describe(T value) { return 1; }
+
+template <typename T>
+typename std::enable_if<std::is_floating_point<T>::value, int>::type describe(T value) { return 2; }
+
+int f() { return describe(1.5); }
+";
+    let session = session_with(&[("/p/a.cpp", source)]);
+    let view = session.view("/p/a.cpp").expect("the file is held");
+    let inside = source.find("return describe").expect("the call");
+    let reading = as_reading(&view, inside);
+    let scope = view.scopes.scope_at(reading.get()).expect("a scope");
+    let mut at = Some(scope);
+    while let Some(current) = at {
+        let data = view.scopes.scope(current).expect("the scope");
+        let named: Vec<_> = data
+            .bindings
+            .iter()
+            .filter(|binding| binding.name.identifier_text() == Some("describe"))
+            .map(|binding| (binding.kind, binding.name_range.start_offset))
+            .collect();
+        eprintln!(
+            "[bindings] scope {:?} kind {:?}: {} describe {named:?}",
+            current,
+            data.kind,
+            named.len()
+        );
+        at = data.parent;
+    }
+    let all: Vec<_> = view
+        .scopes
+        .scope(scope)
+        .expect("the scope")
+        .bindings
+        .iter()
+        .map(|binding| (binding.kind, binding.name.identifier_text()))
+        .collect();
+    eprintln!("[all] {all:?}");
+}
+/// Doctors: the tree above a call's callee.
+#[test]
+fn dump_the_call_shape() {
+    let source = "int describe(double v) { return 1; }\nint f() { return describe(1.5); }\n";
+    let session = session_with(&[("/p/a.cpp", source)]);
+    let view = session.view("/p/a.cpp").expect("the file is held");
+    let at = source.find("describe(1.5)").expect("the call") + 3;
+    let reading = as_reading(&view, at);
+    let node = cpp_code_analysis::sema::resolve::expression_at(&view.root, reading.get());
+    eprintln!("[call] expression={:?}", node.as_ref().map(|n| n.kind()));
+    let mut chain = Vec::new();
+    if let Some(node) = node {
+        for ancestor in node.ancestors() {
+            chain.push(format!("{:?}", ancestor.kind()));
+        }
+    }
+    eprintln!("[call] ancestors={chain:?}");
+    let call = cpp_code_analysis::sema::resolve::expression_at(&view.root, reading.get()).and_then(
+        |node| {
+            node.ancestors()
+                .find(|n| format!("{:?}", n.kind()).contains("Call"))
+        },
+    );
+    if let Some(call) = call {
+        eprintln!(
+            "[call] children={:?}",
+            call.children()
+                .map(|c| format!("{:?}", c.kind()))
+                .collect::<Vec<_>>()
+        );
+    }
 }
