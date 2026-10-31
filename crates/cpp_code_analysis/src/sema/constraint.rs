@@ -262,30 +262,42 @@ fn a_trait_call(condition: &str) -> Option<TraitCall<'_>> {
     })
 }
 
-/// Replace a bound template parameter with its type, as a word.
+/// Replace a bound template parameter with its type, as a **word** — `std::is_integral_v<T>` with `T = double` answers
+/// `std::is_integral_v<double>`.
+///
+/// The word boundary is the whole of it: the first version split the spelling into words, joined them with a separator,
+/// replaced, and joined them again **without restoring the punctuation** — so `std::is_integral_v<T>` became
+/// `stdis_integral_vdouble`, and a condition that named a concept answered "cannot tell" for a reason that had nothing to do
+/// with concepts.
 fn substitute(spelling: &str, bindings: &[(String, String)]) -> String {
-    let mut out = spelling.to_string();
-    for (parameter, concrete) in bindings {
-        out = out
-            .split(|character: char| !character.is_alphanumeric() && character != '_')
-            .collect::<Vec<_>>()
-            .join("\0");
-        let replaced = out
-            .split('\0')
-            .map(|word| {
-                if word == parameter {
-                    concrete.as_str()
-                } else {
-                    word
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("");
-        out = replaced;
+    let mut out = String::with_capacity(spelling.len());
+    let mut at = 0usize;
+    let characters: Vec<(usize, char)> = spelling.char_indices().collect();
+    while at < characters.len() {
+        let (start, character) = characters[at];
+        if !character.is_alphanumeric() && character != '_' {
+            out.push(character);
+            at += 1;
+            continue;
+        }
+        let mut end = at;
+        while end < characters.len()
+            && (characters[end].1.is_alphanumeric() || characters[end].1 == '_')
+        {
+            end += 1;
+        }
+        let word = &spelling[start
+            ..characters
+                .get(end)
+                .map_or(spelling.len(), |(offset, _)| *offset)];
+        match bindings.iter().find(|(parameter, _)| parameter == word) {
+            Some((_, concrete)) => out.push_str(concrete),
+            None => out.push_str(word),
+        }
+        at = end;
     }
     out
 }
-
 /// Split at `operator` outside any angle brackets or parentheses.
 fn top_level_split(text: &str, operator: &str) -> Vec<String> {
     let mut parts = Vec::new();
@@ -380,4 +392,95 @@ fn is_a_name(word: &str) -> bool {
         && word
             .chars()
             .all(|character| character.is_alphanumeric() || character == '_')
+}
+
+/// **Decide a condition, expanding the concepts it names** — [`satisfies`] with a way to look a concept up.
+///
+/// `expand` answers `(parameter, body)` for a concept name: `signed_integral` → `("T", "integral<T> && is_signed_v<T>")`.
+/// The body is then evaluated with the parameter bound to the argument the concept was applied to, and a body that names
+/// another concept recurses the same way. The depth is bounded because a concept may name itself (`concept X = X<T>`), and
+/// a walk that trusted the text would never end.
+pub fn satisfies_with(
+    condition: &str,
+    bindings: &[(String, String)],
+    expand: &mut dyn FnMut(&str) -> Option<(String, String)>,
+) -> Option<bool> {
+    satisfies_inside(condition, bindings, expand, 0)
+}
+
+/// How many concepts deep one condition is expanded. A concept that composes three others is the deepest shape in the
+/// standard library's own headers, and the bound exists for the self-referential spelling rather than for a real one.
+const MAX_CONCEPT_DEPTH: usize = 8;
+
+fn satisfies_inside(
+    condition: &str,
+    bindings: &[(String, String)],
+    expand: &mut dyn FnMut(&str) -> Option<(String, String)>,
+    depth: usize,
+) -> Option<bool> {
+    let condition = condition.trim();
+    if condition.is_empty() {
+        return None;
+    }
+
+    // The operators, from weakest to strongest, split at the *top level* so a nested `is_same<a, b>` is not cut in two.
+    for operator in ["||", "&&"] {
+        let parts = top_level_split(condition, operator);
+        if parts.len() > 1 {
+            let mut decided = Vec::with_capacity(parts.len());
+            for part in parts {
+                let verdict = satisfies_inside(&part, bindings, expand, depth);
+                decided.push(verdict?);
+            }
+            return Some(if operator == "||" {
+                decided.iter().any(|one| *one)
+            } else {
+                decided.iter().all(|one| *one)
+            });
+        }
+    }
+    if let Some(rest) = condition.strip_prefix('!') {
+        return Some(!satisfies_inside(rest, bindings, expand, depth)?);
+    }
+    if condition == "true" {
+        return Some(true);
+    }
+    if condition == "false" {
+        return Some(false);
+    }
+
+    // **`std::is_same<A, B>`** — the one trait with two arguments, and the one every `!is_same<T, char>` needs.
+    if let Some(arguments) = a_trait_call_with_name(condition, "is_same") {
+        let mut parts = top_level_split(arguments, ",").into_iter();
+        let left = substitute(&parts.next()?, bindings);
+        let right = substitute(&parts.next()?, bindings);
+        if left.contains('<') || right.contains('<') {
+            return None;
+        }
+        return Some(left.trim() == right.trim());
+    }
+
+    // **`std::is_integral<T>::value`**, `{}`, `_v`, `()` — one trait, four spellings.
+    let trait_call = a_trait_call(condition)?;
+    let argument = substitute(&trait_call.argument, bindings);
+    if argument.contains('<') || argument.is_empty() {
+        return None;
+    }
+    if let Some(trait_) = Trait::named(&trait_call.name) {
+        return trait_.of(&argument);
+    }
+
+    // **A concept the caller knows** — `integral<T>` inside another concept's body. Expanded with its own parameter bound
+    // to this argument, then decided.
+    if depth >= MAX_CONCEPT_DEPTH {
+        return None;
+    }
+    let (parameter, body) = match expand(&trait_call.name) {
+        Some(found) => found,
+        None => {
+            return None;
+        }
+    };
+    let substituted = substitute(&body, &[(parameter, argument)]);
+    satisfies_inside(&substituted, bindings, expand, depth + 1)
 }

@@ -462,6 +462,39 @@ pub fn definitions_across_files(
 /// declared in, which is the same walk the condition itself takes. Only the *definition* is read: a concept that composes
 /// other concepts (`concept signed_integral = integral<T> && is_signed_v<T>`) answers a name this layer cannot expand, so
 /// the verdict is `None` and the candidate stays.
+/// **The name a concept's own template parameter has** — the `T` of `template <typename T> concept integral = …`.
+///
+/// A concept's body is written in terms of its parameter, so expanding `integral<double>` means substituting `double` for
+/// that name. Read from the concept's own declaration rather than guessed from the use site.
+fn the_concept_parameters(root: &cpp_parser::CppSyntaxNode, name: &str) -> Option<String> {
+    for declaration in root.descendants() {
+        if cpp_parser::CppSyntaxKind::from(declaration.kind())
+            != cpp_parser::CppSyntaxKind::ConceptDecl
+        {
+            continue;
+        }
+        let text = declaration.text().to_string();
+        let Some(at) = text.find('=') else {
+            continue;
+        };
+        let declared = text[..at].split_whitespace().last().unwrap_or_default();
+        if declared != name {
+            continue;
+        }
+        // **The `template <…>` is a *sibling* of the `ConceptDecl`**, not part of it: measured, the tree is
+        // `Declaration > [TemplateDecl, ConceptDecl]` and the concept node's own text is `concept integral = …`. So the
+        // parameter list is read from the enclosing declaration.
+        let with_the_parameters = declaration
+            .parent()
+            .map(|parent| parent.text().to_string())
+            .unwrap_or(text);
+        return template_parameters_in(&with_the_parameters)
+            .into_iter()
+            .next();
+    }
+    None
+}
+
 fn the_concept_definition(root: &cpp_parser::CppSyntaxNode, name: &str) -> Option<String> {
     for declaration in root.descendants() {
         if cpp_parser::CppSyntaxKind::from(declaration.kind())
@@ -575,7 +608,14 @@ fn the_overload_a_call_names(
             .zip(argument_types.iter())
             .filter_map(|(parameter, found)| Some((parameter, found.clone()?)))
             .collect();
-        let verdict = crate::sema::constraint::satisfies(condition, &bound);
+        // **A concept the condition names is expanded and decided**, recursively: `signed_integral<T>` is
+        // `integral<T> && is_signed_v<T>`, and `integral<T>` is another concept. Without this, a composed concept answered
+        // "cannot tell" and both candidates stayed — measured, `describe(1.5)` resolved to the `signed_integral` overload.
+        let verdict = crate::sema::constraint::satisfies_with(condition, &bound, &mut |name| {
+            the_concept_definition(root, name).and_then(|body| {
+                the_concept_parameters(root, name).map(|parameter| (parameter, body))
+            })
+        });
         match verdict {
             Some(false) => {}
             _ => survivors.push(candidate.clone()),
