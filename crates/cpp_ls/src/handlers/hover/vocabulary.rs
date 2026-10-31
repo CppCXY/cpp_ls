@@ -28,6 +28,18 @@ pub fn keyword_hover(token: &cpp_parser::CppSyntaxToken) -> Option<String> {
 /// The name is without its introducer, which is how the doc grammar stores it (`@param` is a command node whose
 /// name token is `param`). A command the table does not describe answers `None` rather than a sentence about it
 /// being a command: the vocabulary is long, and a generic sentence would be noise on the eighty that are rare.
+/// **What a C keyword *construct* means** — `_Static_assert`, `_Generic`, `typeof` — keyed by its spelling.
+///
+/// These are not keywords to the lexer: `_Static_assert` is an identifier (a contextual spelling, so a program may
+/// have a variable called that in C89), and `typeof`/`typeof_unqual` are keywords only where the language allows
+/// them. So the kind-based table above cannot answer for them, and a reader hovering `_Static_assert(...)` was told
+/// nothing at all — the one place in C where the *construct* is the thing being read.
+pub fn construct_hover(token: &cpp_parser::CppSyntaxToken) -> Option<String> {
+    let word = token.text().to_ascii_lowercase();
+    // An exact spelling, not a prefix: `typeof_unqual` is its own key, and a name that merely starts with
+    // `_Static` is somebody's identifier.
+    known(&format!("keyword.{word}"))
+}
 pub fn command_hover(name: &str) -> Option<String> {
     known(&format!("command.{}", name.to_ascii_lowercase()))
 }

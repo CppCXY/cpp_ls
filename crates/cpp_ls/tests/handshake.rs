@@ -5479,3 +5479,153 @@ void f(double d, int n) {
     server.request(999, "shutdown", Value::Null);
     server.notify("exit", Value::Null);
 }
+
+/// **A C project's macro questions, asked the way the editor asks them** — the four a reader reported.
+///
+/// ```c
+/// #ifdef __STDC_VERSION__                          hover: nothing at all
+/// #define CORPUS_STANDARD __STDC_VERSION__         hover on the name: nothing at all
+/// #endif
+/// #define SUM(count, ...) (impl)(count __VA_OPT__(, ) __VA_ARGS__)
+/// int use(void) { return SUM(total, 1, 2, 3); }    go to definition: nothing at all
+/// _Static_assert(sizeof(int) >= 2, "…");           hover: nothing at all
+/// ```
+///
+/// Each row is a question the *editor* asked and got nothing for. The analysis behind them is not missing — a macro's
+/// `#define` is in the summary, and `_Static_assert` is a spelling the vocabulary can describe — so every failure here
+/// is a handler that did not ask, and that is what this test measures. It runs against a real server over stdio because
+/// the reported symptom is "no hover in the editor", and a session-level test cannot see a handler that never runs.
+#[test]
+fn the_c_macro_questions_the_editor_asks_are_answered() {
+    let project = Project::new("macro-questions");
+    project.write("macros.c", MACROS_C);
+
+    let mut server = Server::start(project.root());
+    let uri = uri_of(&project.root().join("macros.c"));
+    server.request(
+        1,
+        "initialize",
+        json!({
+            "processId": std::process::id(),
+            "rootUri": uri_of(project.root()),
+            "capabilities": {
+                "workspace": { "configuration": true, "didChangeWatchedFiles": { "dynamicRegistration": true } },
+                "window": { "workDoneProgress": true },
+            },
+        }),
+    );
+    server.notify("initialized", json!({}));
+    server.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": { "uri": uri, "languageId": "c", "version": 1, "text": MACROS_C }
+        }),
+    );
+
+    // **One shot per row**: the file is read by `prepare`, and a macro question is answered from that file's own
+    // summary — a retry loop here would spin for the whole timeout on a row that is broken, and the first row's
+    // failure is what this test exists to name.
+    let hover_at = |server: &mut Server, id: i64, needle: &str| -> Value {
+        let line = line_of(MACROS_C, needle);
+        let character = MACROS_C
+            .lines()
+            .nth(line as usize)
+            .and_then(|text| text.find(needle))
+            .expect("the fixture writes it");
+        server.request(
+            id,
+            "textDocument/hover",
+            json!({
+                "textDocument": { "uri": uri },
+                "position": { "line": line, "character": character },
+            }),
+        )
+    };
+
+    // **A macro the compiler predefines**, in a directive's condition.
+    let predefined = hover_at(&mut server, 100, "__STDC_VERSION__");
+    let text = predefined["result"]["contents"]["value"]
+        .as_str()
+        .unwrap_or_else(|| panic!("`__STDC_VERSION__` has a hover: {predefined}"));
+    assert!(
+        text.contains("predefined") && text.contains("__STDC_VERSION__"),
+        "the compiler defines it, and the card says so: {text}"
+    );
+
+    // **A macro at its own definition.**
+    let definition = hover_at(&mut server, 200, "CORPUS_STANDARD");
+    let text = definition["result"]["contents"]["value"]
+        .as_str()
+        .unwrap_or_else(|| panic!("`CORPUS_STANDARD` has a hover at its definition: {definition}"));
+    assert!(
+        text.contains("CORPUS_STANDARD"),
+        "the card names the macro: {text}"
+    );
+
+    // **`_Static_assert`,** which is a contextual spelling rather than a keyword.
+    let assertion = hover_at(&mut server, 300, "_Static_assert");
+    let text = assertion["result"]["contents"]["value"]
+        .as_str()
+        .unwrap_or_else(|| panic!("`_Static_assert` has a hover: {assertion}"));
+    assert!(
+        text.contains("_Static_assert") && text.contains("compile time"),
+        "the card explains the construct: {text}"
+    );
+
+    // **Go to definition on a macro use**, which is a *translation order* question rather than a name lookup.
+    let line = line_of(MACROS_C, "SUM(selected, 1, 2, 3)");
+    let character = MACROS_C
+        .lines()
+        .nth(line as usize)
+        .and_then(|text| text.find("SUM"))
+        .expect("the fixture writes the call");
+    let jumped = server.ask_until(400, |id| {
+        json!({
+            "id": id,
+            "method": "textDocument/definition",
+            "params": {
+                "textDocument": { "uri": uri },
+                "position": { "line": line, "character": character },
+            },
+        })
+    });
+    let location = if jumped["result"].is_array() {
+        jumped["result"][0].clone()
+    } else {
+        jumped["result"].clone()
+    };
+    assert_eq!(
+        location["uri"].as_str().map(|found| found == uri),
+        Some(true),
+        "a macro's definition is the `#define` in this file: {jumped}"
+    );
+    assert_eq!(
+        location["range"]["start"]["line"].as_u64(),
+        Some(line_of(MACROS_C, "#define SUM(")),
+        "and the line it names is the directive's: {jumped}"
+    );
+
+    server.request(999, "shutdown", Value::Null);
+    server.notify("exit", Value::Null);
+}
+
+/// The fixture: a predefined macro in a directive, a macro defined and used, and a C11 keyword construct.
+const MACROS_C: &str = "\
+#ifdef __STDC_VERSION__
+#define CORPUS_STANDARD __STDC_VERSION__
+#else
+#define CORPUS_STANDARD 0L
+#endif
+
+#define SUM(count, ...) (impl)(count __VA_OPT__(, ) __VA_ARGS__)
+
+int impl(int count, ...);
+
+int use(void) {
+    int total = 0;
+    int selected = 2;
+    int n = SUM(selected, 1, 2, 3);
+    _Static_assert(sizeof(int) >= 2, \"an int is at least two bytes\");
+    return n + total;
+}
+";

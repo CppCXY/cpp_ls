@@ -125,6 +125,21 @@ pub async fn on_goto_definition_handler(
             return location_of_a_file(session, &header).map(GotoDefinitionResponse::Scalar);
         }
 
+        // **A macro use**, which no declaration query can answer: the cook expanded it, so the rendering holds no
+        // `C23_SUM` and `definitions` is a query about *declarations* — a macro has none. Measured on a C corpus:
+        // `C23_SUM(count, 1, 2, 3)` answered nothing at all, while the *hover* on the same name worked, because hover
+        // asks this question and this handler did not. The `#define` is found from the **file's** text — the coordinates
+        // `header_at` above uses — and the range is the macro's **name**, which is what a reader clicks.
+        if let Known::Yes(found) = session.macro_at_a_file_offset(&view, in_the_file) {
+            let uri = path_to_uri(&found.file)?;
+            let declaring = session.files().held(&found.file)?;
+            let range = Range::new(
+                position_in_file(declaring, found.fact.range.start_offset)?,
+                position_in_file(declaring, found.fact.range.end_offset())?,
+            );
+            return Some(GotoDefinitionResponse::Scalar(Location { uri, range }));
+        }
+
         let Known::Yes(found) = session.definitions(&view, offset) else {
             return None;
         };

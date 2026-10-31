@@ -3481,3 +3481,34 @@ void f() {
         "`std::any any` is an `std::any`, and both assignments convert: {codes:?}"
     );
 }
+
+/// **A variadic macro's call has no arity to check** — and the count it does have is the macro's, not a function's.
+///
+/// ```c
+/// #define SUM(count, ...) (sum_impl)(count __VA_OPT__(, ) __VA_ARGS__)
+/// int n = SUM(total, 1, 2, 3);      // one fixed parameter, then the pack
+/// ```
+///
+/// `argument-count` reported this call: the macro's replacement list expands to a call of `sum_impl` with `count`
+/// and `__VA_ARGS__`, and the check was counting the *expansion's* arguments against `sum_impl`'s declaration — while
+/// the reader wrote one argument list, the macro's. Measured on a C corpus: one false finding, on the call the user
+/// pointed at.
+#[test]
+fn a_variadic_macro_call_is_not_an_argument_count_finding() {
+    let codes = codes_of_with(
+        "\
+#define SUM(count, ...) (sum_impl)(count __VA_OPT__(, ) __VA_ARGS__)
+int sum_impl(int count, ...);
+int f(void) {
+    int total = 0;
+    return SUM(total, 1, 2, 3);
+}
+",
+        "/p/variadic.c",
+        Some("gnu17"),
+    );
+    assert!(
+        !codes.contains(&DiagnosticCode::ArgumentCount),
+        "a variadic macro takes any number of arguments: {codes:?}"
+    );
+}

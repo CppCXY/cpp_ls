@@ -3,6 +3,16 @@
 #
 # 体例：一条讲"是什么"，必要的话再补一句"要知道的事"。弹窗是一眼扫过就关掉的东西，第二句留给正在核对规则的人。
 keyword:
+  _static_assert: "**`_Static_assert`** —— 在编译期检查一个条件；C11 的 `static_assert`（C11 里它是 `<assert.h>` 的宏，C23 起是关键字）。\n\n```c\n_Static_assert(sizeof(int) >= 2, \"an int is at least two bytes\");\n_Static_assert(sizeof(struct point) == 2 * sizeof(int));\n```\n\n条件必须是常量表达式，消息（C23 起可省略）是构建失败时打印的那句话。这是 C 说「这个假设成立」的方式，运行时零开销。"
+  _generic: "**`_Generic`** —— 按另一个表达式的类型在编译期挑一个表达式；C11。\n\n```c\n#define type_name(x) _Generic((x), int: \"int\", double: \"double\", default: \"other\")\n```\n\n每个关联是 `类型: 表达式`，控制表达式的类型（经过通常算术转换、去掉 `const`/`volatile` 之后）恰好选中一个。这是 C 表达「重载」的惯用法，而且它是**选择**而不是调用：没被选中的关联不会被求值。"
+  _alignas: "**`_Alignas`** —— 指定对象或类型的对齐；C11。\n\n```c\n_Alignas(16) char buffer[64];\n```\n\n只能加强不能减弱：比类型自身对齐更弱的 `_Alignas` 是约束违规。`_Alignof` 是问，`_Alignas` 是要求。"
+  _alignof: "**`_Alignof`** —— 它的参数类型要求的对齐；C11（C23 的 `alignof` 就是去掉下划线的同一个词）。\n\n它是常量表达式，而且和 `sizeof` 不同：`struct { char c; int i; }` 可能大小是 8、对齐是 4。"
+  _atomic: "**`_Atomic`** —— 读写不可分割的类型；C11。\n\n```c\n_Atomic int counter;\natomic_fetch_add(&counter, 1);\n```\n\n写在类型前面时是**类型限定符**（`_Atomic int`），单独出现时是**说明符**（`_Atomic(int)`）。操作请用 `<stdatomic.h>`：`++` 不是原子操作，除非用的是原子操作。"
+  _noreturn: "**`_Noreturn`** —— 这个函数不返回；C11（C23 起是 `[[noreturn]]`）。\n\n```c\n_Noreturn void fatal(const char *message);\n```\n\n它告诉编译器调用之后的代码不可达，这才让 `fatal(...)` 能用在需要值的位置。它是承诺不是检查：真返回了就是未定义行为。"
+  _thread_local: "**`_Thread_local`** —— 每个线程一份对象；C11（C23 起是 `thread_local`）。\n\n```c\n_Thread_local int depth;\n```\n\n可以写在文件作用域或块里，但不能写在参数表里。C 没有静态构造：第一个到达它的线程拿到零初始化的值，之后每个线程各自一份。"
+  typeof: "**`typeof`** —— 一个表达式的类型，或直接写的类型；C23 和 GNU 各模式。\n\n```c\ntypeof(value) copy = value;           /* 表达式的类型 */\ntypeof(struct point) origin = {3, 4}; /* 类型本身 */\n```\n\n`typeof` 保留操作数的限定符，`typeof_unqual` 去掉它们（`const int value` → `int`）。GNU 的拼写是 `__typeof__`，宏要声明「参数同类型的临时变量」时就是靠它。"
+  typeof_unqual: "**`typeof_unqual`** —— 表达式的类型，去掉顶层 `const`/`volatile`/`_Atomic`；C23。\n\n```c\nconst int value = 5;\ntypeof_unqual(value) mutable = value;   /* int */\n```\n\n和 `typeof` 的差别在宏需要给临时变量**赋值**时：`const int` 的 `typeof` 是 `const int`，赋值编译不过。"
+  _bitint: "**`_BitInt(N)`** —— 宽度由你指定的整数；C23。\n\n```c\n_BitInt(37) wide = 0;\nunsigned _BitInt(7) small = 100;\nstruct { _BitInt(13) signed_wide : 13; } bits;\n```\n\n宽度是常量表达式，范围 `2` 到 `BITINT_MAXWIDTH`（至少 64）。位域的声明类型用标准类型太宽时用它，`struct` 布局必须精确时也用它。"
   auto: "**`auto`** —— 由初始化器推导这个声明本身的类型。\n\n推导结果是初始化器的类型去掉顶层 `const` 和引用：`const int& r = x; auto v = r;` 得到的是 `int`。要保留它们就写 `auto&` 或 `const auto&`。"
   bool: "**`bool`** —— `true` 或 `false`。\n\n它可以和 `int` 互相转换（`false` 是 0，`true` 是 1），但那个转换不是这个类型的意思：`bool` 参数说的是「是或否」，`int` 参数说的不是。"
   break: "**`break`** —— 离开最近的 `for`、`while`、`do` 或 `switch`。\n\n是整个循环结束，不是当前这一轮结束 —— 后者是 `continue`。"

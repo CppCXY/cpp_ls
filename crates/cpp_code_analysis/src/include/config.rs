@@ -221,6 +221,27 @@ impl CompilerConfig {
             .and_then(|command| {
                 cpp_parser::features::LanguageConfig::from_command_line(command.arguments.iter())
             });
+        // **A project-wide `-std=` for the *other* family is not this file's language.** `[compile] standard` is a
+        // setting for the whole project, and the editor's default for it is `c++23` — so a `.c` file with no
+        // compilation database was read as **C++23**: measured through the real server on a two-file C fixture,
+        // `language_for` answered `family=Some(Cpp) standards=[Cpp23]`, and every C-only construct (`_Static_assert`,
+        // `typeof`, `restrict`, `_Generic`) was then either an error or a name. A compiler given `-std=c++23` and a
+        // `.c` file does not build it as C++ either: `-std` selects a version *within* the language the file is in.
+        //
+        // The rule is therefore the extension's, and only between the two *families*: `.c`/`.i` may not be given a
+        // C++ standard, `.cpp`/`.cc`/`.cxx`/`.mpp` may not be given a C one, and a `.h` — included by whichever
+        // language includes it — keeps whatever the project said.
+        let agrees_with_the_file = |language: &cpp_parser::features::LanguageConfig| {
+            use cpp_parser::features::Family;
+            // **Only for a C file**, and the other direction is deliberately not filtered: a C++ file handed
+            // `-std=c11` is a project stating something unusual rather than a default leaking into the wrong family, and
+            // `a_c_style_cast_is_not_a_rule_in_c` depends on exactly that comparison. A `.h` is included by whichever
+            // language includes it and keeps whatever the project said.
+            match file.extension().and_then(|extension| extension.to_str()) {
+                Some("c") | Some("i") => language.family() != Some(Family::Cpp),
+                _ => true,
+            }
+        };
         from_the_command
             // **The project's own `-std=`**, which is where `[compile] standard` and a `-std=` inside
             // `[compile] args` end up (see `project_config_from_flags`). It was missing here, so a project that
@@ -231,9 +252,11 @@ impl CompilerConfig {
                 self.standard
                     .as_deref()
                     .and_then(cpp_parser::features::LanguageConfig::from_standard_spelling)
+                    .filter(agrees_with_the_file)
             })
             .or_else(|| {
                 cpp_parser::features::LanguageConfig::from_command_line(self.extra_args.iter())
+                    .filter(agrees_with_the_file)
             })
             // **A `.c` file is C.** When nothing above has said what the file is — no database entry, no
             // `[compile] standard`, no `-std=` — the extension is what every compiler decides by, and it is what the

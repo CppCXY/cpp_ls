@@ -71,35 +71,20 @@ struct TypeRow {
     expected: &'static str,
 }
 
-/// The member questions — four members of one struct, and one through a pointer.
-///
-/// `three` and `other` are the control: their specifier starts with `unsigned`, and they are recorded today.
-/// `signed_wide` and `plain` start with `_BitInt(`, and are the defect.
+/// **The corpus was consolidated** — `src/bits.c` was merged into `src/c23.c`, so these rows name the shape where
+/// it now lives. `bits.three` and `bits.signed_wide` ask the two bit-fields of one anonymous struct: the first is
+/// written `unsigned _BitInt(3)`, the second `_BitInt(13)`, and the difference between them is the defect `§N16`
+/// describes — a member whose specifier *begins* with `_BitInt(` is dropped.
 const MEMBERS: &[MemberRow] = &[
     MemberRow {
-        file: "src/bits.c",
-        needle: "value.three",
+        file: "src/c23.c",
+        needle: "bits.three",
         expected: "three",
     },
     MemberRow {
-        file: "src/bits.c",
-        needle: "value.signed_wide",
+        file: "src/c23.c",
+        needle: "bits.signed_wide",
         expected: "signed_wide",
-    },
-    MemberRow {
-        file: "src/bits.c",
-        needle: "value.plain",
-        expected: "plain",
-    },
-    MemberRow {
-        file: "src/bits.c",
-        needle: "value.other",
-        expected: "other",
-    },
-    MemberRow {
-        file: "src/bits.c",
-        needle: "pointer->three",
-        expected: "three",
     },
 ];
 
@@ -114,12 +99,6 @@ const MEMBERS: &[MemberRow] = &[
 /// did not exist.
 const TYPES: &[TypeRow] = &[
     TypeRow {
-        file: "src/bits.c",
-        needle: "struct bits value",
-        name: "value",
-        expected: "bits",
-    },
-    TypeRow {
         file: "src/functions.c",
         needle: "binary_op operation",
         name: "operation",
@@ -128,9 +107,10 @@ const TYPES: &[TypeRow] = &[
     },
     TypeRow {
         file: "src/functions.c",
-        needle: "binary_op compare_function",
-        name: "compare_function",
-        expected: "binary_op",
+        needle: "comparer *compare",
+        name: "compare",
+        // A function-type alias: the variable is a pointer to the function, and the file wrote the alias.
+        expected: "comparer",
     },
     TypeRow {
         file: "src/functions.c",
@@ -319,6 +299,109 @@ fn the_c_corpus_parses_and_its_members_resolve() {
     for path in &files {
         if session.view(path).is_none() && session.cook(path).is_none() {
             println!("  WARN  {} has no reading to ask about", path.display());
+        }
+    }
+
+    // ---------------------------------------------------------------------------------------------------------
+    // macros: the answers an editor asks for at the four places a reader points at
+    // ---------------------------------------------------------------------------------------------------------
+    println!("\n--- macros: what the three queries answer at each place a reader points at");
+    {
+        // The offsets are the **file's**, which is the coordinate a client sends.
+        // **(file, the line to find, the word on it the cursor is on)** — the word matters: a directive's first word
+        // is `ifdef` or `define`, and a row that pointed there measured the keyword rather than the macro.
+        for (file, needle, word) in [
+            // A predefined macro in a directive's condition.
+            (
+                "src/preprocessor.c",
+                "#ifdef __STDC_VERSION__",
+                "__STDC_VERSION__",
+            ),
+            // A macro at its own definition.
+            (
+                "src/preprocessor.c",
+                "#define CORPUS_STANDARD __STDC_VERSION__",
+                "CORPUS_STANDARD",
+            ),
+            // …and the body of that same definition.
+            (
+                "src/preprocessor.c",
+                "#define CORPUS_STANDARD __STDC_VERSION__",
+                "__STDC_VERSION__",
+            ),
+            // A macro use inside an enum list — the X-macro a reader points at.
+            (
+                "src/preprocessor.c",
+                "CORPUS_COLOURS(CORPUS_ENUM_ENTRY)",
+                "CORPUS_COLOURS",
+            ),
+            // …and the inner name of that X-macro's row.
+            (
+                "src/preprocessor.c",
+                "CORPUS_COLOURS(CORPUS_ENUM_ENTRY)",
+                "CORPUS_ENUM_ENTRY",
+            ),
+            // A C11 keyword construct.
+            (
+                "src/preprocessor.c",
+                "_Static_assert(sizeof(point)",
+                "_Static_assert",
+            ),
+            // A variadic macro's use.
+            ("src/c23.c", "C23_SUM(count, 1, 2, 3)", "C23_SUM"),
+        ] {
+            let path = root.join(file);
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let Some(found_at) = text.find(needle) else {
+                println!("  SKIP  {file} {needle} (not written)");
+                continue;
+            };
+            let word_at = found_at + needle.find(word).expect("the word is on the line");
+            let Some(view) = session.view(&path) else {
+                println!("  SKIP  {file} (no reading)");
+                continue;
+            };
+            let file_offset = FileOffset::new(word_at);
+            let by_file = session
+                .macro_at_a_file_offset(&view, file_offset)
+                .value()
+                .map(|found| {
+                    format!(
+                        "{}:{}",
+                        found.file.file_name().unwrap_or_default().to_string_lossy(),
+                        found.fact.range.start_offset
+                    )
+                });
+            let by_rendering = view.reading_offset_of(file_offset).and_then(|offset| {
+                session
+                    .macro_definition(&view, offset)
+                    .value()
+                    .map(|found| found.fact.name.clone())
+            });
+            let goto = view
+                .reading_offset_of(file_offset)
+                .and_then(|offset| {
+                    session
+                        .definition(&view, offset)
+                        .value()
+                        .map(|found| found.file.clone())
+                })
+                .map(|file| {
+                    file.file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string()
+                });
+            println!(
+                "  {:<18} {:<40} hover/name {:?}  rendering {:?}  goto {:?}",
+                file,
+                needle.chars().take(38).collect::<String>(),
+                by_file,
+                by_rendering,
+                goto
+            );
         }
     }
 

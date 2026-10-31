@@ -89,6 +89,33 @@ server knows; the detector around it still requires a parenthesised width follow
 | `textDocument/formatting`, `rangeFormatting`, `willSaveWaitUntil` | whole-file and range formatting, reading the common subset of `.clang-format` |
 | `workspace/didChangeConfiguration` | `.cppls.toml` and editor settings — see [`configuration.md`](configuration.md) |
 
+## 5a. Macros, as the editor asks about them
+
+A C program's most-read text is its macros, and the four questions a reader asks of one are answered as follows.
+
+| Question | Where it is answered | What it does *not* need |
+| --- | --- | --- |
+| hover on a macro **use** | the #define's text, found from the file's own bytes | the rendering — the cook expanded the use away |
+| hover on a macro's **own #define** | the directive's own line, read from the file's text | the index: a file opened a moment ago has a view and no summary yet |
+| hover on a **predefined** macro (__STDC_VERSION__) | the standard's own table, then the toolchain's -dM output | a compiler: __STDC__, __STDC_HOSTED__, __STDC_VERSION__ and __cplusplus are the *standard's*, and their values follow from the language the file is read as |
+| hover on a **keyword construct** (_Static_assert, _Generic, 	ypeof, _BitInt, _Alignas, _Atomic, _Noreturn, _Thread_local) | the vocabulary, keyed by spelling | a keyword token: these are contextual spellings the lexer calls identifiers |
+| **go to definition** on a macro | the same file-offset query the hover uses | a declaration: a macro has no name fact, which is why the jump answered nothing at all |
+
+**Two defects behind those rows, both measured through the real server:**
+
+* the go-to-definition handler asked only the *declaration* query, so SUM(total, 1, 2, 3) answered 
+ull while the
+  hover on the same name worked — the two handlers asked different questions of the same name;
+* the hover handler holds the file's **plain** view (the cheap one, so that hovering does not evict the rendering cache),
+  and every macro query read written_text(), which is None for a plain view — so *every* macro question in the
+  editor answered "no written text". FileView::the_written_text now returns the file's text from whichever kind of view
+  it is handed.
+
+**And one that is not about macros at all, found while measuring them:** a .c file with no compilation database was
+read as **C++23**, because the editor's default [compile] standard is c++23 and it outranked the file's extension.
+Measured: language_for answered amily=Some(Cpp) standards=[Cpp23] on a .c fixture, so every C-only construct was
+either an error or a name. The extension now vetoes a standard of the *other* family for .c/.i files; a C++ file
+handed -std=c11 is left alone, because that is a project saying something unusual rather than a default leaking.
 ## 6. Diagnostics
 
 Thirty-one rules, each with a fixed severity; `[diagnostics].disable` turns one off by name. The rows marked **C++**

@@ -1799,3 +1799,24 @@ struct bits {
         "both bit-fields and the plain member are members: {names:?}"
     );
 }
+
+/// **`__STDC_VERSION__` is a macro every C compiler defines**, and its value follows from the standard the file is read
+/// as — not from a toolchain that may not exist.
+#[test]
+fn the_standards_own_macros_answer_from_the_language() {
+    let session = session_with(&[("/p/a.c", "int f(void) { return 0; }\n")]);
+    assert_eq!(
+        session.predefined_macro("__STDC_VERSION__", std::path::Path::new("/p/a.c")),
+        Some("202311L".to_string()),
+        "a permissive C reading takes the latest standard"
+    );
+    assert_eq!(
+        session.predefined_macro("__STDC__", std::path::Path::new("/p/a.c")),
+        Some("1".to_string()),
+    );
+    assert_eq!(
+        session.predefined_macro("__GNUC__", std::path::Path::new("/p/a.c")),
+        None,
+        "a compiler's own macro is not the standard's, and no compiler was asked here"
+    );
+}

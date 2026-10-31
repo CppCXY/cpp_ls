@@ -424,6 +424,17 @@ impl FileView {
     /// `None` for a view of the file's own tokens, where [`FileView::source`] is already that text. A consumer needs
     /// it for the one thing the rendering cannot answer: showing the reader the lines **they wrote**, with the macro
     /// still in them, rather than the expansion the compiler read.
+    /// **The file's own text, whichever kind of view this is.** A *plain* view's root **is** the file's text; a
+    /// *rendering's* is not, which is why the written text is kept beside it — and why the two are not interchangeable.
+    ///
+    /// This exists because a handler was given the plain view (the cheap one) and asked a macro question of it: every
+    /// macro query reads `written_text()`, so all of them answered "no written text" and a reader hovering a macro's
+    /// own `#define` was told nothing at all. Measured on a two-file C fixture through the real server.
+    pub fn the_written_text(&self) -> Option<String> {
+        self.written_text()
+            .map(str::to_string)
+            .or_else(|| Some(self.root.text().to_string()))
+    }
     pub fn written_text(&self) -> Option<&str> {
         self.written.as_deref()
     }

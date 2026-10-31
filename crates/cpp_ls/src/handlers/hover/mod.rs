@@ -204,6 +204,32 @@ fn doc_command_at(text: &str, offset: usize) -> Option<String> {
 ///
 /// `None` is the answer for punctuation, for whitespace, and for a name the analysis cannot place: a client shows
 /// nothing, and "there is nothing to say here" is true, where an empty popup would not be.
+/// The **identifier the cursor is on**, read from the file's own text — the word a macro question is about.
+///
+/// The same walk `Session::macro_at_a_file_offset` makes; it is repeated here because the answer is needed *before*
+/// that query, to ask the toolchain about a name that no file defines.
+fn word_in_the_file(
+    view: &cpp_code_analysis::FileView,
+    offset: cpp_code_analysis::file::coordinates::FileOffset,
+) -> String {
+    // **The file's own text, from whichever view this is** — see `FileView::the_written_text`: the handler holds the
+    // plain view, whose root is the file's own text, and `written_text()` alone is `None` for it.
+    let Some(written) = view.the_written_text() else {
+        return String::new();
+    };
+    let bytes = written.as_bytes();
+    let is_a_word = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'_';
+    let at = offset.get().min(bytes.len());
+    let mut start = at;
+    while start > 0 && is_a_word(bytes[start - 1]) {
+        start -= 1;
+    }
+    let mut end = at;
+    while end < bytes.len() && is_a_word(bytes[end]) {
+        end += 1;
+    }
+    written.get(start..end).unwrap_or_default().to_string()
+}
 pub fn hover(
     session: &Session<DiskFiles>,
     view: &FileView,
@@ -246,6 +272,14 @@ pub fn hover(
         };
 
         if covers_the_cursor && let Some(text) = vocabulary::keyword_hover(&token) {
+            return Some(markdown(text));
+        }
+
+        // **A C keyword *construct* — `_Static_assert`, `_Generic`, `typeof` — which the lexer does not call a
+        // keyword.** Each is a contextual spelling (`_Static_assert` is an identifier, `typeof` is only a keyword where
+        // the language allows it), so the table above cannot answer, and a reader hovering `_Static_assert(...)` got a
+        // popup about a *function call* or nothing at all. The vocabulary is keyed by the spelling.
+        if covers_the_cursor && let Some(text) = vocabulary::construct_hover(&token) {
             return Some(markdown(text));
         }
 
@@ -348,6 +382,31 @@ fn hover_of_the_program(
             }
         }
         Known::Unknown(_) | Known::No => {}
+    }
+    // **A macro the compiler itself defines** — `__STDC_VERSION__`, `__GNUC__`, `_WIN32`. It is in no file, so every
+    // query above answers nothing for it, and a reader hovering `#ifdef __STDC_VERSION__` was told nothing at all —
+    // which reads as "this name is unknown" for the one kind of name a compiler defines by itself. The value is the
+    // standard's own where the standard defines one, and the toolchain's `-dM` table otherwise.
+    let word = word_in_the_file(view, in_the_file);
+
+    // **A directive this very file writes**, read from its text. The index's summaries are pushed by the work loop, so
+    // a file opened a moment ago has a view and no summary — and a hover on its own `#define MAX(a, b)` answered nothing
+    // at all. The card is the directive itself, which is what a reader pointing at a definition wants to see.
+    if !word.is_empty()
+        && let Some(directive) = session.macro_definition_text(&view.path, in_the_file.get(), &word)
+    {
+        return Some(markdown(format!("```c\n{directive}\n```")));
+    }
+    if !word.is_empty()
+        && let Some(predefined) = session.predefined_macro(&word, &view.path)
+    {
+        return Some(markdown(if predefined.is_empty() {
+            format!("`{word}` — predefined by the compiler this project builds with.")
+        } else {
+            format!(
+                "`{word}` — predefined by the compiler this project builds with, as `{predefined}`."
+            )
+        }));
     }
 
     // **The spelling the cursor sits on**, when it is a template-id use. Read once here rather than inside the card:

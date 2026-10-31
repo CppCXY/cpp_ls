@@ -725,6 +725,113 @@ pub struct ModuleImport {
     pub resolved: Option<PathBuf>,
 }
 
+/// **The macros the C and C++ *standards* define** — every compiler defines these, whatever the project's build system
+/// says, and their values follow from the language the file is read as.
+///
+/// `	ext
+/// __STDC__            1                     both families
+/// __STDC_HOSTED__     1                     both families (a freestanding implementation says 0 and this cannot know)
+/// __STDC_VERSION__    201710L / 202311L     C99 and later, by the file's standard
+/// __cplusplus          201703L / 202302L    every C++ standard
+/// `
+///
+/// `None` for a name that is not one of them, and for `__STDC_VERSION__` in C89 — where it is deliberately undefined,
+/// which is exactly the question `#ifdef __STDC_VERSION__` asks.
+/// The **last directive that settles `name`** at or before `offset`, as its own text.
+///
+/// ```text
+/// #define MAX(a, b) ((a) > (b) ? (a) : (b))      → the whole line, `\`-continuations joined
+/// #define COUNT  10                            → `#define COUNT  10`
+/// #undef  COUNT                               → `#undef COUNT` (the name is settled, and by an un-definition)
+/// ```
+///
+/// A text scan rather than a parse: it is asked about the file the reader is in, at the moment they hover, and a
+/// directive is the one construct whose meaning is entirely in its first line. `None` when no directive mentions the
+/// name, or the last one *after* `offset` — a `#define` written below the point asked about does not apply there.
+fn the_directive_defining(name: &str, text: &str, offset: usize) -> Option<String> {
+    let mut settled: Option<String> = None;
+    let mut at = 0usize;
+    for line in text.split_inclusive('\n') {
+        let start = at;
+        at += line.len();
+        if start > offset {
+            break;
+        }
+        let trimmed = line.trim_start();
+        let rest = if let Some(rest) = trimmed.strip_prefix("#define") {
+            rest.trim_start()
+        } else if let Some(rest) = trimmed.strip_prefix("#undef") {
+            rest.trim_start()
+        } else {
+            continue;
+        };
+        // The name is the first identifier of what follows, and the directive is `#define NAME` or `#define NAME(…)`.
+        let end = rest
+            .find(|character: char| !(character.is_alphanumeric() || character == '_'))
+            .unwrap_or(rest.len());
+        if &rest[..end] != name {
+            continue;
+        }
+        // A definition only counts if it is written *before* the point asked about — or is the one the cursor is on.
+        if start > offset {
+            continue;
+        }
+        let mut directive = trimmed.trim_end().to_string();
+        // `\`-continuations: a body written on the next line is part of the same directive.
+        while directive.ends_with('\\') {
+            let next_start = at;
+            let Some(next) = text[next_start..].split_inclusive('\n').next() else {
+                break;
+            };
+            at += next.len();
+            directive.pop();
+            directive.push_str(next.trim_end());
+            if next.trim_end().ends_with('\\') {
+                continue;
+            }
+            break;
+        }
+        settled = Some(directive.trim_end().to_string());
+    }
+    settled
+}
+fn the_standards_own_macro(
+    name: &str,
+    language: &cpp_parser::features::LanguageConfig,
+) -> Option<String> {
+    use cpp_parser::features::{Family, Standard};
+    let family = language.family();
+    let c_standard = language
+        .standards()
+        .filter(|standard| standard.family() == Family::C)
+        .max();
+    let cpp_standard = language
+        .standards()
+        .filter(|standard| standard.family() == Family::Cpp)
+        .max();
+    match name {
+        "__STDC__" if family != Some(Family::Cpp) => Some("1".to_string()),
+        "__STDC_HOSTED__" if family != Some(Family::Cpp) => Some("1".to_string()),
+        "__STDC_VERSION__" if family != Some(Family::Cpp) => match c_standard? {
+            Standard::C89 => None,
+            Standard::C99 => Some("199901L".to_string()),
+            Standard::C11 => Some("201112L".to_string()),
+            Standard::C17 => Some("201710L".to_string()),
+            Standard::C23 => Some("202311L".to_string()),
+            // A C++ standard in the C slot cannot happen (max per family), and answering nothing is right.
+            _ => None,
+        },
+        "__cplusplus" if family != Some(Family::C) => match cpp_standard? {
+            Standard::Cpp11 => Some("201103L".to_string()),
+            Standard::Cpp14 => Some("201402L".to_string()),
+            Standard::Cpp17 => Some("201703L".to_string()),
+            Standard::Cpp20 => Some("202002L".to_string()),
+            Standard::Cpp23 => Some("202302L".to_string()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
 impl Session<DiskFiles> {
     /// Open a project the way a language server does: ask the machine what it compiles with.
     ///
@@ -6585,7 +6692,10 @@ impl<F: FileProvider + Clone> Session<F> {
         view: &FileView,
         offset: crate::file::coordinates::FileOffset,
     ) -> Known<ProjectMacro> {
-        let Some(written) = view.written_text() else {
+        // **The file's own text, from whichever view this is** — a handler may hold the *plain* view, whose root is the
+        // file's own text, and asking only for `written_text()` made every macro question in the editor answer "no
+        // written text". See `FileView::the_written_text`.
+        let Some(written) = view.the_written_text() else {
             return Known::Unknown(UnknownReason::NotDeclaredHere(Box::from("no written text")));
         };
         let at = offset.get();
@@ -6605,6 +6715,22 @@ impl<F: FileProvider + Clone> Session<F> {
             return Known::Unknown(UnknownReason::UnparsableName);
         }
         self.store.index().macro_definition(name, &view.path, at)
+    }
+
+    /// **A `#define`/`#undef` this file writes itself**, read from its text — the answer to a macro question about a
+    /// file the index has not caught up with yet.
+    ///
+    /// [`Session::macro_at_a_file_offset`] asks the **index**, whose summaries are pushed by the work loop: a file that
+    /// was opened a moment ago has a view and no summary, so a hover on that file's own `#define MAX(a, b)` answered
+    /// nothing at all. Measured through the real server on a two-file C fixture: `CORPUS_STANDARD` at its definition
+    /// answered `Unknown(NotDeclaredHere)` while the text plainly writes it.
+    ///
+    /// Returns the **directive's text** — `#define CORPUS_STANDARD __STDC_VERSION__`, continuation lines joined — which
+    /// is what a reader hovering a definition wants to see, and `None` when the name is not defined (or undefined) in
+    /// this file before `offset`.
+    pub fn macro_definition_text(&self, path: &Path, offset: usize, name: &str) -> Option<String> {
+        let text = self.text(path)?;
+        the_directive_defining(name, &text, offset)
     }
 
     /// **Every module this project can name**, for a completion after `import`.
@@ -6742,6 +6868,43 @@ impl<F: FileProvider + Clone> Session<F> {
 
     pub fn macro_definition(&self, view: &FileView, offset: ReadingOffset) -> Known<ProjectMacro> {
         macro_across_files(self.store.index(), &view.root, &view.path, offset.get())
+    }
+
+    /// **A macro the *compiler* predefines** — `__STDC_VERSION__`, `__GNUC__`, `_WIN32` — with its value.
+    ///
+    /// These are not in any file, so no summary holds them and [`Session::macro_at_a_file_offset`] answers nothing for
+    /// one; a reader hovering `#ifdef __STDC_VERSION__` was told nothing at all, which reads as "this name is unknown"
+    /// for the one kind of name a compiler defines by itself.
+    ///
+    /// # Where the answer comes from, in order
+    ///
+    /// ```text
+    /// 1. the standard's own macros             `__STDC__`, `__STDC_VERSION__`, `__STDC_HOSTED__`, `__cplusplus`
+    /// 2. the toolchain's `-dM` table           `__GNUC__`, `_WIN32`, `__linux__`
+    /// ```
+    ///
+    /// **The standard's first, and that is not an optimisation.** A test project with no `compile_commands.json` and no
+    /// compiler on `PATH` has no toolchain at all, and `__STDC_VERSION__` is defined by *every* C compiler — the *value*
+    /// is what a compiler decides, and the file's language already says which standard it is reading. Measured: a
+    /// handshake test on a two-file C project answered no hover for `__STDC_VERSION__`, because the toolchain was the
+    /// only source and it was absent.
+    ///
+    /// `path` is the file the question is about, because the standard is per file.
+    pub fn predefined_macro(&self, name: &str, path: &std::path::Path) -> Option<String> {
+        let language = self.config_for(path).language_for(path);
+        if let Some(value) = crate::session::the_standards_own_macro(name, &language) {
+            return Some(value);
+        }
+
+        let toolchain = self.toolchain.as_ref()?;
+        if toolchain.builtin_macros.is_empty() {
+            return None;
+        }
+        toolchain
+            .macros()
+            .into_iter()
+            .find(|(defined, _)| *defined == name)
+            .map(|(_, value)| value.unwrap_or_default().to_string())
     }
 
     /// **Every `import m;` this file writes, with the file each one reaches** — the module's answer to what
