@@ -297,3 +297,26 @@ an_enable_if_in_a_template_parameter_is_read      the template parameter
 a_requires_clause_is_read                         C++20's own clause
 a_named_concept_decides_the_overload              a concept the file defines
 ```
+
+## A composed concept decides the overload — and the substitution bug behind it
+
+`concept signed_integral = integral<T> && is_signed_v<T>` was the shape answered "cannot tell" on purpose last round. It
+decides now, and the reason it could not before was **not** the concepts:
+
+**`substitute` destroyed the punctuation.** It split a condition into words, joined them with a `\0` separator, replaced the
+parameter and joined them again *without restoring the separators* — so `std::is_integral_v<T>` became
+`stdis_integral_vdouble`. Every condition naming a qualified trait was unreadable after substitution; the earlier tests
+passed only because their arguments were bare (`T → double`).
+
+`satisfies_with` now decides a condition and, when a trait name is one it does not know, asks the caller for that
+**concept's** definition and recurses with the concept's parameter bound to the argument. Depth is bounded at eight (a
+concept may name itself). Two facts the tree decided, both measured:
+
+* a concept's `template <…>` is a **sibling** of its `ConceptDecl` (`Declaration > [TemplateDecl, ConceptDecl]`), so the
+  parameter list comes from the enclosing declaration;
+* a body naming another concept (`integral<T>`) is the case needing recursion — and the case `substitute` was breaking.
+
+```text
+describe(1.5)   integral<double> && is_signed<double>  = false && false → the floating overload
+describe(-3)    …                                      = true  && true  → the signed overload
+```
