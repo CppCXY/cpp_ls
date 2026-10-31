@@ -12111,6 +12111,11 @@ impl ProjectIndex {
             && left.fact.name == right.fact.name
             && left.fact.scope == right.fact.scope
             && left.fact.parameter_list == right.fact.parameter_list
+            // **Only across files.** The rule this serves is "a header declares, the `.cpp` defines" — and inside one file
+            // two declarations with the same parameter list can be two *overloads*: the two `describe`s differ only in
+            // their `enable_if` condition, which is in the return type and therefore in no field this compares.
+            // Measured: `describe(1.5)` answered the first declaration, because the second had been folded into it.
+            && left.file != right.file
     }
 
     fn certain_declarations(

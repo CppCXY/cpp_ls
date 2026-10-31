@@ -2040,12 +2040,26 @@ int f() {
     };
     assert!(found.contains("Wrap<int>"), "the guide deduces it: {found}");
 }
-
-/// **Which overload `describe(41)` calls**, asked the way go-to-definition asks it.
+/// **Which overload `describe(1.5)` calls**, asked the way go-to-definition asks it.
 ///
 /// Two declarations differ only in their `enable_if` condition, so the *only* thing that picks between them is whether
-/// `std::is_integral<int>::value` is true. Printed first, asserted once the answer is known to be reachable.
+/// `std::is_floating_point<double>::value` is true — and `sema::constraint` decides exactly that
+/// (`the_constraint_evaluator_decides_the_fundamental_traits`). What is missing is the **set** to decide it on.
+///
+/// Measured: the answer is the first declaration (the `is_integral` one) for either call, because two declarations of one
+/// name in one scope reach the answer as **one** candidate. The chain is:
+///
+/// ```text
+/// the scope tree     binds template functions … one binding for both
+/// definitions_at     "every declaration in the scope that answered" — a set of one
+/// the index          holds both facts, and folds them into one (`one_entity_declared_twice`, which is about a header's
+///                    declaration and the `.cpp`'s definition, not about two same-file overloads)
+/// ```
+///
+/// Ignored rather than deleted: the assertion is the goal, and the day an overload set exists this is the test that says
+/// so.
 #[test]
+#[ignore = "needs an overload set per name in ScopeTree — see docs/cpp-support.md"]
 fn an_enable_if_overload_is_chosen_by_its_condition() {
     let source = "\
 #include <type_traits>
@@ -2062,20 +2076,22 @@ typename std::enable_if<std::is_floating_point<T>::value, std::string>::type des
 }
 
 std::string f() {
-    describe(41);
     return describe(1.5);
 }
 ";
     let session = session_with(&[("/p/a.cpp", source)]);
     let view = session.view("/p/a.cpp").expect("the file is held");
-    // The **second** call — `describe(1.5)` — which the floating-point overload must win.
     let call = source.find("describe(1.5)").expect("the call is written");
-    let offset = call + 3;
-    let reading = as_reading(&view, offset);
-    let definitions = session.definitions(&view, reading);
-    eprintln!("[definitions] {definitions:?}");
-    let one = session.definition(&view, reading);
-    eprintln!("[definition] {one:?}");
+    let reading = as_reading(&view, call + 3);
+    let one = match session.definition(&view, reading) {
+        cpp_code_analysis::Known::Yes(found) => found,
+        other => panic!("`describe(1.5)` resolves: {other:?}"),
+    };
+    let declaration = &source[one.fact.range.start_offset..one.fact.range.end_offset()];
+    assert!(
+        declaration.contains("is_floating_point"),
+        "the condition picks the floating-point overload: {declaration}"
+    );
 }
 /// **The condition evaluator**, decision by decision — the module the `enable_if` overloads rest on.
 #[test]
