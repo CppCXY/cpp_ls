@@ -6341,6 +6341,13 @@ fn what_a_call_has_in(fact: &DeclFact) -> Option<Type> {
         // `Widget()` is a temporary of `Widget`, so a call of a class has the class. `DeclKind::Type` is exactly
         // "this declaration declares a class-like type", which is the case a call whose callee is a *type* lands in.
         crate::DeclKind::Type => Some(Type::named(fact.qualified_name())),
+        // **`auto` is read as the spelling it is**, and the deduction that would replace it is not attempted here.
+        //
+        // Filtering the placeholder so the caller's deduce-from-the-body pass could run looked like the fix for
+        // `auto copied = box.copy_of()` — and it is what the *same-file* path already does, through its own arm. Through a
+        // header's fact it costs a whole extra pass per call (`declaring`, `definition_at`, the body re-typed), and the
+        // standard library returns `auto` everywhere: measured, the reported-file handshake missed its thirty-second
+        // budget. The member's deduced return stays unknown through a header until that pass is made cheap.
         _ => fact.returns.as_deref().map(parse_type_spelling),
     }
 }

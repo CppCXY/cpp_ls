@@ -142,6 +142,18 @@ const TYPES: &[TypeRow] = &[
         name: "operation",
         expected: "function",
     },
+    TypeRow {
+        file: "src/techniques.cpp",
+        needle: "auto copied = box.copy_of()",
+        name: "copied",
+        expected: "int",
+    },
+    TypeRow {
+        file: "src/techniques.cpp",
+        needle: "auto doubled = box.doubled()",
+        name: "doubled",
+        expected: "int",
+    },
 ];
 
 fn corpus_files(root: &Path) -> Vec<PathBuf> {
