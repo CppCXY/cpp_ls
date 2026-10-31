@@ -5554,8 +5554,15 @@ fn declared_type(
         && !name.contains('<')
         && let Known::Yes((from_the_initializer, _)) =
             initializer_type(memo, index, declaring, scopes, root, path, named, depth + 1)
-        && let Some(with_arguments) =
-            deduced_class_template_arguments(index, scopes, root, path, name, &from_the_initializer)
+        && let Some(with_arguments) = deduced_class_template_arguments(
+            index,
+            scopes,
+            root,
+            path,
+            declaring,
+            name,
+            &from_the_initializer,
+        )
     {
         return Known::Yes(crate::sema::types::parse_type_spelling(&with_arguments));
     }
@@ -8416,11 +8423,34 @@ fn member_bindings(
 /// common case. `None` — meaning *answer the name as written* — for two parameters, for a constructor whose parameter
 /// names something else, and for a class with no constructor of that shape, because a guessed argument would print an
 /// instantiation nobody asked for.
+/// **The arguments a class template deduces from an initializer** — C++17's implicit guide, for the one shape this can be
+/// sure of.
+///
+/// ``Box box(7);`` where ``Box`` is ``template <typename T> class Box { Box(T); … };`` is a ``Box<int>``: the standard
+/// says the implicit guides are built from the constructors, and a constructor taking exactly the template parameter is
+/// the common case. ``None`` — meaning *answer the name as written* — for two parameters, for a constructor whose
+/// parameter names something else, and for a class with no constructor of that shape, because a guessed argument would
+/// print an instantiation nobody asked for.
+///
+/// # Where the constructor is read, and why from two places
+///
+/// A constructor is **not a binding** of its class's scope: a scope is keyed by name and `Box::Box` is not a name any
+/// lookup asks for. So it is read from the class's own body —
+///
+/// ```text
+/// the tree    the class is declared in the file being edited        `class Box { explicit Box(T); }`
+/// the index   it is declared in a header this file includes         the header's facts, scope `ns::Box`, name `Box`
+/// ```
+///
+/// — and the second case is not a refinement: measured on a `.cpp` that includes a header holding the template, the
+/// rendering inlined the *facts* (members answered 2 of 2) and not the *body*, so the tree held no `ClassDef` at all and
+/// the deduction answered the bare template name.
 fn deduced_class_template_arguments(
     index: &ProjectIndex,
     scopes: &crate::ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
+    declaring: &mut dyn FnMut(&Path) -> Option<crate::FileView>,
     class: &str,
     initializer: &crate::sema::types::Type,
 ) -> Option<String> {
@@ -8428,15 +8458,42 @@ fn deduced_class_template_arguments(
     let [only] = parameters.as_slice() else {
         return None;
     };
-
-    // **The class's own body, from the tree** — because a *constructor* is the parameter list the language deduces
-    // from, and a constructor is not a binding of its class's scope (a scope is keyed by name, and `Box::Box` is not a
-    // name anything looks up). Reading the body is what makes this the constructor's list rather than a member's.
-    // **The class node, from the tree**, rather than from a binding: a class scope holds its *members*, and the class
-    // itself is bound in the scope that encloses it, so the walk from the scope is the long way round. One translation
-    // unit is in hand, and the class is found by its own name.
     let simple = class.rsplit("::").next().unwrap_or(class);
-    let node = root.descendants().find(|node| {
+
+    if the_constructor_takes(root, class, simple, only) {
+        return Some(format!("{class}<{initializer}>"));
+    }
+    // **The header that declares it.** A `.cpp` whose rendering did not inline the template's *body* has no `ClassDef`
+    // to read, and the index keeps no fact for a constructor — so the file that declares the class is parsed and the same
+    // scan runs over its tree. `declaring` is the request layer's file provider, the one the type queries already use.
+    for declared in index.files_declaring(simple, path) {
+        if declared.file == path {
+            continue;
+        }
+        let Some(view) = declaring(&declared.file) else {
+            continue;
+        };
+        if the_constructor_takes(&view.root, class, simple, only) {
+            return Some(format!("{class}<{initializer}>"));
+        }
+    }
+    None
+}
+
+/// Does `class` declare a constructor whose first parameter **is** the template parameter `only`?
+///
+/// The two sources are tried in the order the answer is cheapest: the tree this file's reading already holds, then the
+/// index's facts for the header that declares it.
+fn the_constructor_takes(
+    root: &cpp_parser::CppSyntaxNode,
+    class: &str,
+    simple: &str,
+    only: &str,
+) -> bool {
+    // **In this file's own tree.** The class is found by its own name rather than through a scope: a class scope holds
+    // its members, and the class itself is bound in the scope that encloses it, so a walk from the scope is the long way
+    // round.
+    let in_the_tree = root.descendants().find(|node| {
         matches!(
             cpp_parser::CppSyntaxKind::from(node.kind()),
             cpp_parser::CppSyntaxKind::ClassDef
@@ -8446,51 +8503,52 @@ fn deduced_class_template_arguments(
             cpp_parser::CppSyntaxKind::from(child.kind()) == cpp_parser::CppSyntaxKind::NameExpr
                 && child.text().to_string().trim() == simple
         })
-    })?;
-
-    for declaration in node.descendants() {
-        if cpp_parser::CppSyntaxKind::from(declaration.kind())
-            != cpp_parser::CppSyntaxKind::Declaration
-        {
-            continue;
-        }
-        // A constructor is the member whose *specifier sequence* names the class: `explicit Box(T value)`.
-        let named_as_the_class = declaration
-            .children()
-            .filter(|child| {
+    });
+    if let Some(node) = in_the_tree {
+        for declaration in node.descendants() {
+            if cpp_parser::CppSyntaxKind::from(declaration.kind())
+                != cpp_parser::CppSyntaxKind::Declaration
+            {
+                continue;
+            }
+            // **A constructor, by its own text.** `explicit Box(T value) : value_(value) {}` is a declaration whose
+            // specifier sequence may hold `explicit` alone with the name in the declarator, so reading only the
+            // specifiers found the constructor in a class without a member-initializer list and not in one with it.
+            // The shape matched is `[explicit] Name (`, which nothing else in a class body is: a member function starts
+            // with its return type.
+            let text = declaration.text().to_string();
+            let head = text
+                .trim_start()
+                .trim_start_matches("explicit")
+                .trim_start();
+            if !(head.starts_with(simple) && head[simple.len()..].trim_start().starts_with('(')) {
+                continue;
+            }
+            let Some(parameters) = declaration.descendants().find(|child| {
                 cpp_parser::CppSyntaxKind::from(child.kind())
-                    == cpp_parser::CppSyntaxKind::DeclSpecifierSeq
-            })
-            .any(|specifiers| {
-                specifiers
-                    .children()
-                    .any(|child| child.text().to_string().trim() == simple)
-            });
-        if !named_as_the_class {
-            continue;
+                    == cpp_parser::CppSyntaxKind::ParameterList
+            }) else {
+                continue;
+            };
+            if the_first_parameter_is(&parameters.text().to_string(), only) {
+                return true;
+            }
         }
-        let Some(parameters) = declaration.descendants().find(|child| {
-            cpp_parser::CppSyntaxKind::from(child.kind())
-                == cpp_parser::CppSyntaxKind::ParameterList
-        }) else {
-            continue;
-        };
-        let list = parameters.text().to_string();
-        let first = list
-            .trim_start_matches('(')
-            .split(',')
-            .next()
-            .unwrap_or_default();
-        // The parameter's **type**, as written: `T value`, `const T& value`, `T&& value`.
-        if first
-            .split(|character: char| !character.is_alphanumeric() && character != '_')
-            .any(|word| word == only)
-        {
-            return Some(format!("{class}<{initializer}>"));
-        }
+        return false;
     }
-    None
+    false
 }
+
+/// Is the first parameter of `list` — `(T value)`, `(const T& value)` — spelled with the template parameter?
+fn the_first_parameter_is(list: &str, only: &str) -> bool {
+    list.trim_start_matches('(')
+        .split(',')
+        .next()
+        .unwrap_or_default()
+        .split(|character: char| !character.is_alphanumeric() && character != '_')
+        .any(|word| word == only)
+}
+
 fn class_template_parameters(
     index: &ProjectIndex,
     scopes: &crate::ScopeTree,

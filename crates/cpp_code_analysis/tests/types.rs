@@ -1954,3 +1954,49 @@ int f() {
         "the argument is deduced: {found}"
     );
 }
+
+/// The same deduction when the class is in a **header** — the shape the project actually has, and the one that still
+/// answers the bare template name there.
+#[test]
+fn a_class_template_argument_is_deduced_across_a_header() {
+    let header = "\
+#pragma once
+namespace techniques {
+template <typename T>
+class Box {
+public:
+    explicit Box(T value) : value_(value) {}
+    T get() const { return value_; }
+private:
+    T value_;
+};
+}  // namespace techniques
+";
+    let source = "\
+#include \"techniques.h\"
+
+int f() {
+    techniques::Box box(7);
+    return box.get();
+}
+";
+    let session = session_with(&[("/p/techniques.h", header), ("/p/a.cpp", source)]);
+    if let Some(summary) = session.parsed_summary(std::path::Path::new("/p/techniques.h")) {
+        for fact in &summary.declarations {
+            eprintln!(
+                "[fact] name={:?} scope={:?} kind={:?} params={:?}",
+                fact.name, fact.scope, fact.kind, fact.parameter_list
+            );
+        }
+    }
+    let view = session.view("/p/a.cpp").expect("the file is held");
+    let offset = last_word(source, "box") + 2;
+    let found = match session.type_at(&view, as_reading(&view, offset)) {
+        cpp_code_analysis::Known::Yes(found) => found.type_of,
+        other => panic!("`box` has a type: {other:?}"),
+    };
+    assert!(
+        found.contains("Box<int>"),
+        "the argument is deduced: {found}"
+    );
+}
