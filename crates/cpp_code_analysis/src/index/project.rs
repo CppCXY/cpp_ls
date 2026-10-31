@@ -5538,6 +5538,28 @@ fn declared_type(
     // the step that is right here — an alias *declared in this file* has a target this can read directly — and the
     // note on [`the_alias_behind`] for where the other step belongs.
     let placeholder = declaration.to_string();
+    // **C++17's *implicit* deduction guide** — `Box box(7);` where `Box` is a class template.
+    //
+    // The syntax reader answers the template's **name**, which is a type with an argument missing: `Box` is not
+    // `Box<int>`, and a member query on it finds nothing because no declaration is called that. The language's rule for
+    // this shape is the constructor's parameter list, and only that shape is deduced here — one template parameter, and
+    // a constructor whose first parameter *is* that parameter. Anything else answers the name it wrote, because a
+    // guessed argument would print an instantiation the reader never asked for.
+    //
+    // Measured on a C++20 project (`techniques.h` + `techniques.cpp`): `techniques::Box box(7)` typed as
+    // `techniques::Box` while `techniques::Box<int> box(7)` typed correctly, so what was missing was the deduction
+    // rather than the template.
+    if let crate::sema::types::Type::Named { name, arguments } = &declaration
+        && arguments.is_empty()
+        && !name.contains('<')
+        && let Known::Yes((from_the_initializer, _)) =
+            initializer_type(memo, index, declaring, scopes, root, path, named, depth + 1)
+        && let Some(with_arguments) =
+            deduced_class_template_arguments(index, scopes, root, path, name, &from_the_initializer)
+    {
+        return Known::Yes(crate::sema::types::parse_type_spelling(&with_arguments));
+    }
+
     // **A `typeof`/`__typeof__` specifier whose payload is an *expression*** — `typeof(value) copy = value;` — is
     // the type of that expression, and only the semantic layer can answer it: the reader of the *syntax* hands back
     // the spelling, `typeof(value)`, which no scope and no member list has heard of. The fact builder has the same
@@ -5853,10 +5875,36 @@ fn deduction_inputs(
     };
 
     let declarator = node_covering(root, binding.name_range.start_offset, binding.range)?;
-    let initializer = declarator.children().find(|child| {
-        cpp_parser::CppSyntaxKind::from(child.kind()) == cpp_parser::CppSyntaxKind::Initializer
-    })?;
-    let expression = initializer.children().next()?;
+    // **The initializer is the *declarator*'s child, and a binding may range over the `InitDeclarator` that wraps it.**
+    // `Box box(7);` is `InitDeclarator > Declarator > [NameExpr, Initializer]`, so a walk that looked for the initializer
+    // among the outermost node's children found none and answered "this declaration has no initializer" — which is what
+    // made class template argument deduction unreachable. Measured: `techniques::Box box(7)` typed as
+    // `techniques::Box`.
+    let is_an_initializer = |node: &cpp_parser::CppSyntaxNode| {
+        cpp_parser::CppSyntaxKind::from(node.kind()) == cpp_parser::CppSyntaxKind::Initializer
+    };
+    let declarator = if declarator.children().any(|child| is_an_initializer(&child)) {
+        declarator
+    } else {
+        declarator.children().find(|child| {
+            cpp_parser::CppSyntaxKind::from(child.kind()) == cpp_parser::CppSyntaxKind::Declarator
+        })?
+    };
+    let initializer = declarator
+        .children()
+        .find(|child| is_an_initializer(child))?;
+    let first = initializer.children().next()?;
+    // **A paren initialiser holds an *argument list*, not an expression.** `Box box(7);` is
+    // `Initializer > ArgumentList > LiteralExpr`, and handing the list itself to the expression walk answers nothing —
+    // the `auto` path never noticed because `auto n(7)` is unusual while `Box box(7)` is the shape C++17's class
+    // template argument deduction is written for. Measured: `techniques::Box box(7)` typed as `techniques::Box`.
+    let expression = if cpp_parser::CppSyntaxKind::from(first.kind())
+        == cpp_parser::CppSyntaxKind::ArgumentList
+    {
+        first.children().next()?
+    } else {
+        first
+    };
 
     // The specifiers are a sibling of the declarator's parent — `Declaration > [DeclSpecifierSeq, InitDeclarator]`
     // — and they are where the `auto` and its qualifiers are written.
@@ -8360,6 +8408,89 @@ fn member_bindings(
     crate::sema::types::TypeBindings::new(names, arguments.to_vec())
 }
 
+/// **The arguments a class template deduces from an initializer** — C++17's implicit guide, for the one shape this can be
+/// sure of.
+///
+/// `Box box(7);` where `Box` is `template <typename T> class Box { Box(T); … };` is a `Box<int>`: the standard says
+/// the implicit guides are built from the constructors, and a constructor taking exactly the template parameter is the
+/// common case. `None` — meaning *answer the name as written* — for two parameters, for a constructor whose parameter
+/// names something else, and for a class with no constructor of that shape, because a guessed argument would print an
+/// instantiation nobody asked for.
+fn deduced_class_template_arguments(
+    index: &ProjectIndex,
+    scopes: &crate::ScopeTree,
+    root: &cpp_parser::CppSyntaxNode,
+    path: &Path,
+    class: &str,
+    initializer: &crate::sema::types::Type,
+) -> Option<String> {
+    let parameters = class_template_parameters(index, scopes, root, path, class);
+    let [only] = parameters.as_slice() else {
+        return None;
+    };
+
+    // **The class's own body, from the tree** — because a *constructor* is the parameter list the language deduces
+    // from, and a constructor is not a binding of its class's scope (a scope is keyed by name, and `Box::Box` is not a
+    // name anything looks up). Reading the body is what makes this the constructor's list rather than a member's.
+    // **The class node, from the tree**, rather than from a binding: a class scope holds its *members*, and the class
+    // itself is bound in the scope that encloses it, so the walk from the scope is the long way round. One translation
+    // unit is in hand, and the class is found by its own name.
+    let simple = class.rsplit("::").next().unwrap_or(class);
+    let node = root.descendants().find(|node| {
+        matches!(
+            cpp_parser::CppSyntaxKind::from(node.kind()),
+            cpp_parser::CppSyntaxKind::ClassDef
+                | cpp_parser::CppSyntaxKind::StructDef
+                | cpp_parser::CppSyntaxKind::UnionDef
+        ) && node.children().any(|child| {
+            cpp_parser::CppSyntaxKind::from(child.kind()) == cpp_parser::CppSyntaxKind::NameExpr
+                && child.text().to_string().trim() == simple
+        })
+    })?;
+
+    for declaration in node.descendants() {
+        if cpp_parser::CppSyntaxKind::from(declaration.kind())
+            != cpp_parser::CppSyntaxKind::Declaration
+        {
+            continue;
+        }
+        // A constructor is the member whose *specifier sequence* names the class: `explicit Box(T value)`.
+        let named_as_the_class = declaration
+            .children()
+            .filter(|child| {
+                cpp_parser::CppSyntaxKind::from(child.kind())
+                    == cpp_parser::CppSyntaxKind::DeclSpecifierSeq
+            })
+            .any(|specifiers| {
+                specifiers
+                    .children()
+                    .any(|child| child.text().to_string().trim() == simple)
+            });
+        if !named_as_the_class {
+            continue;
+        }
+        let Some(parameters) = declaration.descendants().find(|child| {
+            cpp_parser::CppSyntaxKind::from(child.kind())
+                == cpp_parser::CppSyntaxKind::ParameterList
+        }) else {
+            continue;
+        };
+        let list = parameters.text().to_string();
+        let first = list
+            .trim_start_matches('(')
+            .split(',')
+            .next()
+            .unwrap_or_default();
+        // The parameter's **type**, as written: `T value`, `const T& value`, `T&& value`.
+        if first
+            .split(|character: char| !character.is_alphanumeric() && character != '_')
+            .any(|word| word == only)
+        {
+            return Some(format!("{class}<{initializer}>"));
+        }
+    }
+    None
+}
 fn class_template_parameters(
     index: &ProjectIndex,
     scopes: &crate::ScopeTree,

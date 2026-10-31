@@ -3559,28 +3559,34 @@ fn the_include_directory_beside_src_resolves_a_quoted_include() {
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(root.join("include")).expect("the layout is created");
     std::fs::create_dir_all(root.join("src")).expect("the layout is created");
-    std::fs::write(root.join("include/techniques.h"), "struct Widget { int size() const; };\n")
-        .expect("the header is written");
-    let source = "#include \"techniques.h\"\n\nint use() { Widget widget; return widget.size(); }\n";
+    std::fs::write(
+        root.join("include/techniques.h"),
+        "struct Widget { int size() const; };\n",
+    )
+    .expect("the header is written");
+    let source =
+        "#include \"techniques.h\"\n\nint use() { Widget widget; return widget.size(); }\n";
     std::fs::write(root.join("src/techniques.cpp"), source).expect("the source is written");
 
     let mut session = cpp_code_analysis::Session::open(
         root.clone(),
-        cpp_code_analysis::SessionFiles::new(cpp_code_analysis::OpenDocuments::new(), cpp_code_analysis::DiskFiles),
+        cpp_code_analysis::SessionFiles::new(
+            cpp_code_analysis::OpenDocuments::new(),
+            cpp_code_analysis::DiskFiles,
+        ),
         cpp_code_analysis::WatchFilter::new(&root),
     );
-    session.add_project_files([root.join("src/techniques.cpp"), root.join("include/techniques.h")]);
+    session.add_project_files([
+        root.join("src/techniques.cpp"),
+        root.join("include/techniques.h"),
+    ]);
     session.index_everything();
     session.cook(&root.join("src/techniques.cpp"));
 
     let found = session
         .diagnostics(&root.join("src/techniques.cpp"))
         .expect("the file is analysed");
-    let codes: Vec<&str> = found
-        .checks
-        .iter()
-        .map(|check| check.code.name())
-        .collect();
+    let codes: Vec<&str> = found.checks.iter().map(|check| check.code.name()).collect();
     assert!(
         !codes.contains(&"include-not-found"),
         "`include/` beside `src/` is on the search path: {codes:?}"

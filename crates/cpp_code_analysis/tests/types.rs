@@ -1869,3 +1869,88 @@ int f() {
         names("Box")
     );
 }
+
+/// **Class template argument deduction** — `Box box(7);` where `Box` is a class template.
+///
+/// The implicit guide is the constructor's parameter list: `Box(T value)` makes `Box box(7)` a `Box<int>`, and that is
+/// ordinary C++17. Measured on a real C++ project (`techniques.h` + `techniques.cpp`): the declaration's type came back
+/// as the **template's name without its argument** — `techniques::Box` — while `Box<int> box(7)` was right, so the
+/// deduction is what is missing rather than the template.
+#[test]
+fn a_class_template_argument_is_deduced_from_the_initializer() {
+    let source = "\
+template <typename T>
+class Box {
+public:
+    explicit Box(T value) : value_(value) {}
+
+    T get() const { return value_; }
+
+private:
+    T value_;
+};
+
+int f() {
+    Box box(7);
+    return box.get();
+}
+";
+    let session = session_with(&[("/p/a.cpp", source)]);
+    let view = session.view("/p/a.cpp").expect("the file is held");
+    let offset = last_word(source, "box") + 2;
+    let found = match session.type_at(&view, as_reading(&view, offset)) {
+        cpp_code_analysis::Known::Yes(found) => found.type_of,
+        other => panic!("`box` has a type: {other:?}"),
+    };
+    assert!(
+        found.contains("Box<int>"),
+        "the argument is deduced from the initializer: {found}"
+    );
+
+    // **And the members follow the deduced type**, which is the question a reader actually asks of the name.
+    let names = match session.members_of(&view, "Box<int>") {
+        cpp_code_analysis::Known::Yes(list) => list
+            .members
+            .iter()
+            .map(|member| member.fact.name.clone())
+            .collect::<Vec<_>>(),
+        other => panic!("`Box<int>` has a member list: {other:?}"),
+    };
+    assert!(
+        names.contains(&"get".to_string()),
+        "the deduced instantiation has the template's members: {names:?}"
+    );
+}
+
+/// The same deduction through a **namespace**, which is how a header's template is reached: `techniques::Box box(7)`.
+#[test]
+fn a_class_template_argument_is_deduced_through_a_namespace() {
+    let source = "\
+namespace techniques {
+template <typename T>
+class Box {
+public:
+    explicit Box(T value) : value_(value) {}
+    T get() const { return value_; }
+private:
+    T value_;
+};
+}  // namespace techniques
+
+int f() {
+    techniques::Box box(7);
+    return box.get();
+}
+";
+    let session = session_with(&[("/p/a.cpp", source)]);
+    let view = session.view("/p/a.cpp").expect("the file is held");
+    let offset = last_word(source, "box") + 2;
+    let found = match session.type_at(&view, as_reading(&view, offset)) {
+        cpp_code_analysis::Known::Yes(found) => found.type_of,
+        other => panic!("`box` has a type: {other:?}"),
+    };
+    assert!(
+        found.contains("Box<int>"),
+        "the argument is deduced: {found}"
+    );
+}
