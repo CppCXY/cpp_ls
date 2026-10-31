@@ -5704,7 +5704,7 @@ fn a_c_reader_gets_completion_and_signature_help_for_what_the_file_defines() {
         .filter_map(|item| item["label"].as_str())
         .collect();
     assert!(
-        labels.iter().any(|label| *label == "local_helper"),
+        labels.contains(&"local_helper"),
         "a function the file defines completes: {} item(s), first {:?}",
         labels.len(),
         labels.iter().take(10).collect::<Vec<_>>()
@@ -5728,7 +5728,7 @@ fn a_c_reader_gets_completion_and_signature_help_for_what_the_file_defines() {
         .filter_map(|item| item["label"].as_str())
         .collect();
     assert!(
-        labels.iter().any(|label| *label == "LOCAL_MACRO"),
+        labels.contains(&"LOCAL_MACRO"),
         "a macro the file defines completes: {} item(s), first {:?}",
         labels.len(),
         labels.iter().take(10).collect::<Vec<_>>()
