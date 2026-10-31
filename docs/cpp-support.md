@@ -344,3 +344,23 @@ int* const       const pointer             → true
 **Still refused:** `is_class` and `is_enum` need a symbol table (a name is a class, an enum or a typedef), and
 `is_base_of`/`is_convertible`/`is_trivially_copyable` are relations between two types. They answer `None`, and a test pins
 that `is_class_v<T>` stays unanswerable rather than quietly becoming `false`.
+
+## The next shapes: `std::optional`'s members are wrong in two different ways
+
+The techniques fixture grew a fold, a capturing lambda, a generic lambda, `std::function`, `std::optional` and
+`std::variant`, and the probe asks about them:
+
+```text
+FAIL  maybe.has_value()     68 offered   `has_value` missing from ["append", "assign", "at", "c_str", …]
+FAIL  maybe.value()         68 offered   the same string list
+FAIL  number.value_or(0)     0 offered   `value_or` is not reachable
+PASS  maybe->size()         68 offered   `size` is in the list
+```
+
+* **`std::optional<std::string>` answers `std::string`'s members for `.`** — while `->` correctly goes through
+  `operator->`. Two reads of one object disagree, and the `.` one is wrong.
+* **`std::optional<int>` answers nothing** — the same class, a different argument. That emptiness is also where the false
+  `param-type-check` comes from (*"this passes `0` where `_Ty2&&` is declared for `value_or`"*).
+* the false finding's path could not be traced: `convertible_to(int, _Ty2&&)` is `Unknown`, the `Unknown` arm is written as
+  silence, and `a_class_can_be_built_from` is never asked about `_Ty2`. Recorded with those three measurements rather than
+  a guess.
