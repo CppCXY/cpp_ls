@@ -167,6 +167,24 @@ const TYPES: &[TypeRow] = &[
         name: "mixed",
         expected: "double",
     },
+    TypeRow {
+        file: "src/techniques.cpp",
+        needle: "auto [number, fraction] = pair",
+        name: "number",
+        expected: "int",
+    },
+    TypeRow {
+        file: "src/techniques.cpp",
+        needle: "auto result = doubler(3)",
+        name: "result",
+        expected: "int",
+    },
+    TypeRow {
+        file: "src/techniques.cpp",
+        needle: "auto found = counts[\"a\"]",
+        name: "found",
+        expected: "int",
+    },
 ];
 
 fn corpus_files(root: &Path) -> Vec<PathBuf> {
@@ -346,6 +364,7 @@ fn the_cpp_corpus_parses_and_its_members_resolve() {
         };
         let Some(found_at) = text.find(row.needle) else {
             println!("  SKIP  {:<24} {} (not written)", row.file, row.needle);
+            member_failures += 1;
             continue;
         };
         let operator_at = row
@@ -398,6 +417,7 @@ fn the_cpp_corpus_parses_and_its_members_resolve() {
         };
         let Some(found_at) = text.find(row.needle) else {
             println!("  SKIP  {:<24} {} (not written)", row.file, row.needle);
+            type_failures += 1;
             continue;
         };
         let Some(name_at) = row.needle.find(row.name) else {

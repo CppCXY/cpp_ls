@@ -2697,3 +2697,29 @@ int f() {
         }
     }
 }
+
+/// **A lambda called through its own `operator()`** — `auto doubler = [](int v) { return v * 2; }; doubler(3)`.
+#[test]
+fn a_lambda_call_has_the_type_its_body_returns() {
+    let source = "\
+int f() {
+    auto doubler = [](int value) { return value * 2; };
+    auto result = doubler(3);
+    return result;
+}
+";
+    let session = session_with(&[("/p/a.cpp", source)]);
+    let view = session.view("/p/a.cpp").expect("the file is held");
+    for (name, _) in [("doubler", "closure"), ("result", "int")] {
+        let offset = last_word(source, name);
+        match session.type_at(&view, as_reading(&view, offset)) {
+            cpp_code_analysis::Known::Yes(found) => println!("{name} → {}", found.type_of),
+            other => println!("{name} → {other:?}"),
+        }
+    }
+    let offset = last_word(source, "result");
+    match session.type_at(&view, as_reading(&view, offset)) {
+        cpp_code_analysis::Known::Yes(found) => assert_eq!(found.type_of, "int"),
+        other => panic!("`result` is typed: {other:?}"),
+    }
+}

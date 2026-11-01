@@ -6959,6 +6959,46 @@ fn declaration_of_expression(
 /// Everything else stays [`UnknownReason::UnknownType`]: a call of a function pointer, of a lambda, of a template
 /// parameter whose type is not known here. Each of those needs a type *computed* rather than read off a
 /// declaration, which is the same boundary the rest of this function has.
+/// **What the lambda the callee names returns**, when the callee is a name initialised with one.
+///
+/// ```cpp
+/// auto doubler = [](int value) { return value * 2; };
+/// auto result = doubler(3);      // what `result` is
+/// ```
+///
+/// A lambda's type is unnamed, so `type_of` on the name answers nothing and the call has no return type to read. The syntax
+/// does hold the answer: the declarator that carries the name also carries the lambda.
+///
+/// **Any binding kind is accepted**, because a name whose value can be called is recorded as a `Function` in this scope tree —
+/// measured, `auto doubler = […];` gives `kind=Function` with the variable's own name range — and the question here is not what
+/// kind it is, but whether a lambda is what it was initialised with.
+fn a_lambdas_body_the_callee_names(
+    root: &cpp_parser::CppSyntaxNode,
+    scopes: &crate::ScopeTree,
+    callee: &cpp_parser::CppSyntaxNode,
+    argument_types: &[Type],
+) -> Option<String> {
+    let inside = callee.text_range();
+    let Known::Yes(binding) =
+        crate::sema::resolve::definition_at(scopes, root, inside.start().into())
+    else {
+        return None;
+    };
+    // **The declarator that holds the name**, found by the range the binding already carries — no name comparison, which
+    // would confuse two names of the same spelling in sibling scopes.
+    let name = binding.name_range;
+    let declarator = root.descendants().find(|node| {
+        let range = node.text_range();
+        CppSyntaxKind::from(node.kind()) == CppSyntaxKind::InitDeclarator
+            && usize::from(range.start()) <= name.start_offset
+            && name.end_offset() <= usize::from(range.end())
+    })?;
+    let lambda = declarator
+        .descendants()
+        .find(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::LambdaExpr)?;
+    crate::sema::declarations::a_lambdas_return_type(&lambda, argument_types)
+}
+
 fn type_of_a_call(
     memo: &TypeMemo,
     index: &ProjectIndex,
@@ -7014,6 +7054,17 @@ fn type_of_a_call(
     } else {
         Vec::new()
     };
+
+    // **A call of a lambda** — `auto f = [](int v) { return v * 2; }; f(3)`. The name has no type that says anything (a
+    // lambda's type is unnamed), so the answer comes from the body of the lambda it was initialised with — the same deduction
+    // an `auto`-returning function goes through. Measured: `auto result = doubler(3)` answered *"the type of `doubler(3)` is
+    // not known here"* while the body plainly returns an `int`.
+    if let Some(returns) = a_lambdas_body_the_callee_names(root, scopes, &callee, &argument_types) {
+        return Known::Yes((
+            crate::sema::types::parse_type_spelling(&returns),
+            path.to_path_buf(),
+        ));
+    }
 
     // **A call of an object** — `f(1)` where `f`'s type declares `operator()`. The callee is not a function
     // declaration at all, so the lookup below would answer `No`; what the call has is what the operator returns.

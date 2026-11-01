@@ -1785,6 +1785,60 @@ fn declaration_of(root: &CppSyntaxNode, binding: &Binding) -> Option<CppSyntaxNo
 ///
 /// Nested functions and lambdas are **skipped**: their `return`s belong to them, and counting one here would make a
 /// function's type depend on a body it does not own. `return;` contributes nothing rather than an empty expression.
+/// **What a lambda returns**, deduced from its own body — `auto f = [](int v) { return v * 2; }; f(3)`.
+///
+/// A lambda has no name, so the type of the *variable* it is stored in is the only way to reach the body; the caller
+/// resolves that variable and hands the lambda expression here. The parameters are the lambda's own, and there are no
+/// template parameters to substitute — a **generic** lambda (`[](auto v)`) answers `None`, because `auto` there is a template
+/// parameter written with another word and nothing in the call says what it stands for.
+pub fn a_lambdas_return_type(
+    lambda: &CppSyntaxNode,
+    argument_types: &[crate::sema::types::Type],
+) -> Option<String> {
+    let body = body_of(lambda)?;
+    let receives_a_placeholder = lambda
+        .descendants()
+        .filter(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::Parameter)
+        .any(|parameter| {
+            parameter
+                .text()
+                .to_string()
+                .split_whitespace()
+                .any(|word| word == "auto")
+        });
+    if receives_a_placeholder {
+        return None;
+    }
+    let substitutions = crate::sema::types::TypeSubstitutions::new(&[], argument_types);
+    let mut agreed: Option<String> = None;
+    // **The lambda's own returns**, which `returned_expressions_in` deliberately skips: that function answers for the
+    // *enclosing* function, and a lambda inside it belongs to the lambda. Here the lambda is the function, so the walk is the
+    // same one without that filter — and it still stops at a **nested** lambda, whose returns belong to it.
+    for statement in body.descendants() {
+        if CppSyntaxKind::from(statement.kind()) != CppSyntaxKind::ReturnStat {
+            continue;
+        }
+        let belongs_to_a_nested_lambda = statement
+            .ancestors()
+            .take_while(|node| node != lambda)
+            .any(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::LambdaExpr);
+        if belongs_to_a_nested_lambda {
+            continue;
+        }
+        let Some(expression) = statement.children().last() else {
+            continue;
+        };
+        let written =
+            type_a_return_states_with(&expression, lambda, &substitutions, argument_types)?;
+        match &agreed {
+            None => agreed = Some(written),
+            Some(previous) if *previous == written => {}
+            Some(_) => return None,
+        }
+    }
+    agreed
+}
+
 fn returned_expressions_in(body: &CppSyntaxNode) -> Vec<CppSyntaxNode> {
     let mut found = Vec::new();
 
