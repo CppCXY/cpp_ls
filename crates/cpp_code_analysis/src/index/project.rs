@@ -7224,7 +7224,7 @@ fn type_of_a_call(
 
     let resolved =
         declaration_of_a_callee(memo, index, declaring, scopes, root, path, &callee, written);
-    match resolved {
+    let known_so_far = match resolved {
         Known::Yes(named) => match named.what_a_call_has(
             index,
             declaring,
@@ -7234,12 +7234,207 @@ fn type_of_a_call(
             &written_arguments,
             &argument_types,
         ) {
-            Some(type_of) => Known::Yes((type_of, named.file(path))),
+            Some(type_of) => return Known::Yes((type_of, named.file(path))),
             None => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
         },
         Known::Unknown(reason) => Known::Unknown(reason),
         Known::No => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
+    };
+
+    // **A call of an overload set, where the call's own arguments choose.** `std::to_string(count)` has five declarations
+    // visible and one takes an `int`; `std::get<int>(either)` has three the `variant` can reach, and the survivors spell the
+    // written `int`. The name query answers `Ambiguous` — right for "where is this declared", wrong for "what does this call
+    // return", and the argument types are exactly the thing that decides. See
+    // [`the_return_the_overloads_agree_on`] for the two questions it asks and what it refuses.
+    if let Some(returns) = the_return_the_overloads_agree_on(
+        index,
+        path,
+        &the_names_the_call_may_use(&callee),
+        &written_arguments,
+        &argument_types,
+        crate::inlay::arguments_of(call)
+            .map(|arguments| arguments.len())
+            .unwrap_or_default(),
+    ) {
+        return Known::Yes((
+            crate::sema::types::parse_type_spelling(&returns),
+            path.to_path_buf(),
+        ));
     }
+
+    known_so_far
+}
+
+/// **The spellings a call's callee may be declared under** — its own text without the template arguments, and its last
+/// `::` segment. `std::to_string(count)`'s callee is `std::to_string` and `to_string`, two names the index may hold.
+fn the_names_the_call_may_use(callee: &cpp_parser::CppSyntaxNode) -> Vec<String> {
+    let spelled = callee.text().to_string();
+    let spelled = spelled.trim();
+    // **The template arguments are not part of the name**: `get<int>` is `get`, and `<int>` is what the call *wrote*.
+    let bare = match spelled.find('<') {
+        Some(at) => spelled[..at].trim(),
+        None => spelled,
+    };
+    let last = bare.rsplit("::").next().unwrap_or(bare);
+    let mut names = vec![bare.to_string()];
+    if last != bare {
+        names.push(last.to_string());
+    }
+    names
+}
+
+/// **What an overload set returns, when every candidate the call could reach agrees.**
+///
+/// A name declared more than once answers `Ambiguous` to the name query — right for "where is this declared" and wrong for
+/// "what does this call return", because the call's own arguments choose. Two questions narrow the set, and neither is a
+/// guess:
+///
+/// * **can this candidate be called this way** — the arity fits and every parameter takes the argument in its position. Only
+///   a *definite* refusal drops a candidate (`sema::convert::conversion`'s `Refused`); one this layer cannot compare keeps
+///   its place, because dropping it would be the same guess in the other direction;
+/// * **do the survivors say the same type** — their return spellings, with the call's **written** template arguments
+///   substituted in, read as `auto` would read them (no top-level reference, no `const`).
+///
+/// `std::to_string(count)` has five overloads and the one taking an `int` answers `std::string`; `std::get<int>(either)` has
+/// two left once the unexpanded spelling is dropped, and both say `int` — with and without a reference, which `auto` then
+/// removes. A spelling that still holds a template-id after substitution (`variant_alternative_t<int, …>`) names a trait this
+/// cannot evaluate, so it is **dropped** rather than compared: it would disagree with every concrete answer for a reason that
+/// is not about the type. A set that still disagrees answers `None` — choosing between them is overload *ranking*, which this
+/// layer does not do.
+fn the_return_the_overloads_agree_on(
+    index: &ProjectIndex,
+    path: &Path,
+    names: &[String],
+    written_arguments: &[Type],
+    argument_types: &[Type],
+    how_many_arguments: usize,
+) -> Option<String> {
+    for name in names {
+        let Known::Yes(found) = index.definitions(name, path) else {
+            continue;
+        };
+        let mut agreed: Option<String> = None;
+        let mut any = false;
+        for candidate in found
+            .found
+            .iter()
+            .filter(|declaration| declaration.fact.kind == crate::DeclKind::Function)
+        {
+            // **A deleted function is not a candidate** — [dcl.fct.def.delete]: it participates in overload resolution
+            // only to make the call ill-formed. `std::make_unique` declares
+            // `template <class T, class... Args> void make_unique(Args&&...) = delete;` to stop `make_unique<T[]>(…)`,
+            // and keeping it made the set disagree with the two real overloads around it.
+            if candidate
+                .fact
+                .modifiers
+                .contains(crate::summary::DeclModifiers::DELETED)
+            {
+                continue;
+            }
+            let Some(written) = candidate.fact.returns.as_deref() else {
+                continue;
+            };
+            if !a_candidate_that_can_be_called_this_way(
+                candidate.fact.parameter_list.as_deref(),
+                argument_types,
+                how_many_arguments,
+            ) {
+                continue;
+            }
+            let substituted =
+                if written_arguments.is_empty() || candidate.fact.parameters.is_empty() {
+                    written.to_string()
+                } else {
+                    let arguments: Vec<String> = written_arguments
+                        .iter()
+                        .map(|one| one.to_string())
+                        .collect();
+                    crate::sema::types::substituted_spelling(
+                        written,
+                        &candidate.fact.parameters,
+                        &arguments,
+                    )
+                };
+            // **A spelling that still names one of the candidate's own parameters could not be substituted** —
+            // `variant_alternative_t<int, variant<_Types...>>` keeps `_Types` — and comparing it with a concrete
+            // answer would make every set holding such an overload disagree for a reason that is not about the type.
+            let still_unsubstituted =
+                candidate.fact.parameters.iter().any(|parameter| {
+                    !parameter.is_empty() && substituted.contains(parameter.as_str())
+                });
+            if still_unsubstituted {
+                continue;
+            }
+            let read_as_auto_reads_it = read_the_way_auto_does(&substituted);
+            if read_as_auto_reads_it.is_empty() {
+                continue;
+            }
+            any = true;
+            match &agreed {
+                None => agreed = Some(read_as_auto_reads_it),
+                Some(previous) if *previous == read_as_auto_reads_it => {}
+                Some(_) => return None,
+            }
+        }
+        if any && agreed.is_some() {
+            return agreed;
+        }
+    }
+    None
+}
+
+/// **Can a call with this many arguments, of these types, reach this parameter list?**
+///
+/// Arity first — a **parameter pack** accepts any count from its position on — and then each parameter in turn, when the
+/// arguments could be typed at all. A call that wrote its template arguments (`std::get<int>(either)`) has no
+/// `argument_types` to compare, and its arity is still known: the counts are checked, the conversions are not.
+fn a_candidate_that_can_be_called_this_way(
+    parameter_list: Option<&str>,
+    argument_types: &[Type],
+    how_many_arguments: usize,
+) -> bool {
+    let Some(parameter_list) = parameter_list else {
+        // **A declaration with no recorded list has no vote.** It cannot be refused either, so it is skipped rather
+        // than kept: `std::make_unique` has a `void`-returning declaration with no parameter list recorded, and keeping
+        // it made every set holding such a declaration disagree with the concrete answers around it.
+        return false;
+    };
+    let parameters = crate::sema::overload::parameters_in(parameter_list).0;
+    // **A pack is recognised from the written list**, because `parameters_in` strips the `...`: `(_Types&&... _Args)`
+    // comes back as one parameter, `_Types&&`, and reading that as an exact arity dropped every variadic candidate
+    // — measured, `std::make_unique<Closing>()` answered nothing while two of its three overloads agree on the type.
+    let a_pack = parameter_list.contains("...");
+    if a_pack {
+        let fixed = parameters.len().saturating_sub(1);
+        if how_many_arguments < fixed {
+            return false;
+        }
+    } else if parameters.len() != how_many_arguments {
+        return false;
+    }
+    if argument_types.len() != how_many_arguments {
+        // The arguments could not be typed (the call wrote its template arguments instead), and the counts are all there
+        // is to check.
+        return true;
+    }
+    parameters
+        .iter()
+        .zip(argument_types)
+        .all(|(parameter, argument)| {
+            !crate::sema::convert::conversion(argument, parameter, |_| None).is_refused()
+        })
+}
+
+/// **The type `auto` would give this spelling** — no top-level reference and no `const`, which is what `auto x = f();` keeps.
+fn read_the_way_auto_does(written: &str) -> String {
+    let mut spelling = written.trim();
+    while let Some(rest) = spelling.strip_prefix("const ") {
+        spelling = rest.trim();
+    }
+    while let Some(rest) = spelling.strip_suffix('&') {
+        spelling = rest.trim();
+    }
+    spelling.to_string()
 }
 
 /// The types a callee's own `<…>` names, when it wrote one.
