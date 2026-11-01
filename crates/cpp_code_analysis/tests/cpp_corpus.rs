@@ -381,6 +381,36 @@ const TYPES: &[TypeRow] = &[
         name: "squared",
         expected: "int",
     },
+    TypeRow {
+        file: "src/techniques.cpp",
+        needle: "auto from_the_macro = techniques_macros::doubled(21)",
+        name: "from_the_macro",
+        expected: "int",
+    },
+    TypeRow {
+        file: "src/techniques.cpp",
+        needle: "auto owned_size = owned->reason.size()",
+        name: "owned_size",
+        expected: "size_t",
+    },
+    TypeRow {
+        file: "src/techniques.cpp",
+        needle: "auto called = doubler(5)",
+        name: "called",
+        expected: "int",
+    },
+    TypeRow {
+        file: "src/techniques.cpp",
+        needle: "auto found = counts.at(\"x\")",
+        name: "found",
+        expected: "int",
+    },
+    TypeRow {
+        file: "src/techniques.cpp",
+        needle: "auto taken = maybe.value_or(7)",
+        name: "taken",
+        expected: "int",
+    },
 ];
 
 fn corpus_files(root: &Path) -> Vec<PathBuf> {
