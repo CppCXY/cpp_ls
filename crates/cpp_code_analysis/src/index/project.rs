@@ -7027,7 +7027,23 @@ fn declaration_of_expression(
 /// ```cpp
 /// auto doubler = [](int value) { return value * 2; };
 /// auto result = doubler(3);      // what `result` is
-/// ```
+/// **What a call through a function pointer has** — the return type of the function it points at.
+///
+/// `int (*fp)(int)` is a `Pointer` to a `Function`, and calling `fp(3)` has what that function returns. `None` for every other
+/// type, which is the ordinary case: a name whose type is not a function pointer is not called through one.
+fn a_function_pointer_returns(a_type: &Type) -> Option<Type> {
+    let Type::Pointer { to } = a_type else {
+        return None;
+    };
+    match to.as_ref() {
+        Type::Function { returns, .. } => Some(returns.as_ref().clone()),
+        // A pointer to a *pointer* to a function is not this: C++ would need the intermediate dereference, and answering
+        // the deep return type would make `(**fpp)(1)` and `fpp(1)` the same call.
+        _ => None,
+    }
+}
+
+/// ```text
 ///
 /// A lambda's type is unnamed, so `type_of` on the name answers nothing and the call has no return type to read. The syntax
 /// does hold the answer: the declarator that carries the name also carries the lambda.
@@ -7117,6 +7133,16 @@ fn type_of_a_call(
     } else {
         Vec::new()
     };
+
+    // **A call through a function pointer** — `int (*fp)(int) = negate; fp(3)`. The callee is a variable whose type is a
+    // *pointer to a function*, so what the call has is that function's return type. Measured: `auto through_pointer = fp(3)`
+    // answered *"the type of `fp(3)` is not known here"*.
+    if let Known::Yes((callee_type, file)) =
+        type_of_expression_memoed(memo, index, declaring, scopes, root, path, &callee, 0)
+        && let Some(returns) = a_function_pointer_returns(&callee_type)
+    {
+        return Known::Yes((returns, file));
+    }
 
     // **A call of a lambda** — `auto f = [](int v) { return v * 2; }; f(3)`. The name has no type that says anything (a
     // lambda's type is unnamed), so the answer comes from the body of the lambda it was initialised with — the same deduction

@@ -219,3 +219,15 @@ struct bits {
         );
     }
 }
+
+/// Doctor: a function-pointer declarator's tree.
+#[test]
+fn dump_a_function_pointer_declaration() {
+    let source = "void f() {\n    int (*fp)(int) = negate;\n}\n";
+    let tree = cpp_parser::CppParser::parse(source, cpp_parser::ParserConfig::default());
+    fn walk(node: &cpp_parser::CppSyntaxNode, depth: usize) {
+        eprintln!("{}{:?} {:?}", "  ".repeat(depth), node.kind(), node.text().to_string().chars().take(28).collect::<String>());
+        for child in node.children() { walk(&child, depth + 1); }
+    }
+    walk(&tree.get_red_root(), 0);
+}

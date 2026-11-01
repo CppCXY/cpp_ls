@@ -203,6 +203,30 @@ const TYPES: &[TypeRow] = &[
         name: "value",
         expected: "int",
     },
+    TypeRow {
+        file: "src/techniques.cpp",
+        needle: "decltype(auto) same = widen_gently(1)",
+        name: "same",
+        expected: "int",
+    },
+    TypeRow {
+        file: "src/techniques.cpp",
+        needle: "auto through_pointer = fp(3)",
+        name: "through_pointer",
+        expected: "int",
+    },
+    TypeRow {
+        file: "src/techniques.cpp",
+        needle: "auto cut = text.substr(1, 2)",
+        name: "cut",
+        expected: "std::string",
+    },
+    TypeRow {
+        file: "src/techniques.cpp",
+        needle: "auto shared = Holder::instances",
+        name: "shared",
+        expected: "int",
+    }
 ];
 
 fn corpus_files(root: &Path) -> Vec<PathBuf> {

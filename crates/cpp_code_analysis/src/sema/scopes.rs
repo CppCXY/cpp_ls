@@ -1862,9 +1862,21 @@ impl ScopeWalker<'_> {
             },
         };
 
-        let is_function = declarator
-            .descendants()
-            .any(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::ParameterList);
+        // **A parenthesised declarator does not name a function.** `int (*fp)(int) = negate;` holds a `ParameterList`
+        // because it is a pointer *to* a function, and its name sits inside `(*fp)` — reading that as a function bound
+        // `fp` as one, and the declaration's own variable was then not declared at all from the reader's side: measured,
+        // `definitions("fp")` answered `NotDeclaredHere` and the undeclared-identifier check reported the file's own
+        // variable.
+        // **A pointer-to-function declarator starts with `(*` or `(&`** — and only that. A qualified definition writes its
+        // declarator as a bare parameter list (`void Widget::grow(Widget& other)` is `InitDeclarator "(Widget& other)"`), which
+        // also starts with `(` and must keep being read as a function.
+        let spelled = declarator.text().to_string();
+        let trimmed = spelled.trim_start();
+        let parenthesised_a_pointer = trimmed.starts_with("(*") || trimmed.starts_with("(&");
+        let is_function = !parenthesised_a_pointer
+            && declarator
+                .descendants()
+                .any(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::ParameterList);
 
         // **A class-like keyword in the specifiers settles the question**: whatever the declarator looks like, the
         // identifier is the class or the enum, and `class Widget w;` cannot happen — a second declarator would
@@ -2357,6 +2369,18 @@ fn is_unnamed_declaration(node: &CppSyntaxNode) -> bool {
         .filter_map(|element| element.into_token())
         .any(|token| CppTokenKind::from(token.kind()) == CppTokenKind::OperatorKeyword);
     if declares_an_operator {
+        return false;
+    }
+
+    // **A declarator that names something settles it too.** `int (*fp)(int) = negate;` has no name in the specifier, and the
+    // AST's own name reader answers `None` for a parenthesised declarator — so this called the declaration "unnamed", the
+    // walker stopped before reading the declarator, and the variable was never declared: measured, `definitions("fp")`
+    // answered `NotDeclaredHere` inside the function that declares it, and the undeclared-identifier check reported the
+    // file's own variable.
+    if declarators(node)
+        .iter()
+        .any(|declarator| declared_name(declarator).is_some())
+    {
         return false;
     }
 
@@ -2924,6 +2948,12 @@ fn name_node_along_declarator(node: &CppSyntaxNode) -> Option<CppSyntaxNode> {
         CppSyntaxKind::Declarator => {
             // A nested declarator is the derived-type part — `int *p` has the star in an outer declarator — so
             // the search continues through it rather than stopping at the first one.
+            //
+            // **A nested declarator that names nothing does not end the search.** `int (*fp)(int)` is
+            // `Declarator (*fp) > Declarator *fp > [Declarator *, NameExpr fp]`, and the star declarator holds no name —
+            // returning its `None` stopped the walk two levels above the `NameExpr`, so a local function pointer declared
+            // **nothing**: `definitions("fp")` answered `NotDeclaredHere` in the function that declares it, and the
+            // undeclared-identifier check reported the file's own variable.
             for child in node.children() {
                 if CppSyntaxKind::from(child.kind()) == CppSyntaxKind::Declarator
                     && let Some(found) = name_node_along_declarator(&child)

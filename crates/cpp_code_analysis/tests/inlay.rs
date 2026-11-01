@@ -347,7 +347,15 @@ struct S {
 /// interesting part: the day the binding exists, the reading already takes the declarator the name is a name of —
 /// the one whose list says `a`, not the list of the function it returns.
 #[test]
-fn a_declaration_the_scope_model_does_not_bind_is_not_hinted() {
+/// **A function that returns a pointer to a function is bound, and its own parameters are the ones read.**
+///
+/// `void (*f(int a))(int b);` declares `f` — a function of `a` returning a pointer to a function of `b` — and the walk that
+/// finds a name used to stop at the parenthesised declarator, so `f` was not bound at all and `f(1)` resolved to nothing. That
+/// boundary is gone: the declarator walk continues past a nested declarator that names nothing (measured tree:
+/// `InitDeclarator "(*f(int a))(int b)" > Declarator "(*f(int a))" > Declarator "*f(int a)" > …`), and the **name's own**
+/// parameter list is the one the hint reads — `a`, not the `b` of the function it returns.
+#[test]
+fn a_function_returning_a_function_pointer_is_bound() {
     let source = "void (*f(int a))(int b);\nvoid g() { f(1); }\n";
     let session = session_with(&[("/p/a.cpp", source)]);
     let view = session.view("/p/a.cpp").expect("the file is held");
@@ -360,11 +368,16 @@ fn a_declaration_the_scope_model_does_not_bind_is_not_hinted() {
                     source.rfind("f(1)").expect("the call")
                 )
             ),
-            cpp_code_analysis::Known::Unknown(_)
+            cpp_code_analysis::Known::Yes(_)
         ),
-        "this declaration shape is not bound, so nothing resolves the call"
+        "the declaration is bound, so the call resolves"
     );
-    assert!(hints_of(source).is_empty());
+    let argument = source.rfind("f(1)").expect("the call") + "f(".len();
+    assert_eq!(
+        hints_of(source),
+        vec![(argument, "a".to_string())],
+        "the name's own parameter, not the returned function's"
+    );
 }
 
 /// **A call through a function pointer is not hinted, and the parameters of its type are not read.**

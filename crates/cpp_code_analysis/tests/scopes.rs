@@ -2623,3 +2623,17 @@ void f() {
         "the handler's variable is bound: {shape}"
     );
 }
+
+/// **A function pointer declares a variable**, not a function and not nothing.
+///
+/// `int (*fp)(int) = negate;` is `InitDeclarator "( *fp )(int) = negate" > Declarator "(*fp)" > Declarator "*fp"`, and the
+/// declaration's specifiers hold no name — so the AST's own name reader answers `None` (`is_unnamed_declaration`), the walker
+/// stopped before the declarator, and `fp` was not declared at all: `definitions("fp")` answered `NotDeclaredHere` inside the
+/// function that declares it, and the undeclared-identifier check reported the file's own variable.
+#[test]
+fn a_function_pointer_declares_a_variable() {
+    let table = scopes("void use() {\n    int (*fp)(int) = 0;\n    (void)fp;\n}\n");
+    let rendered = shape(&table);
+    println!("{rendered}");
+    assert!(rendered.contains("fp"), "`fp` is a binding: {rendered}");
+}
