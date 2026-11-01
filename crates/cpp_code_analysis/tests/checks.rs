@@ -3708,3 +3708,32 @@ int Holder::peek() const { return secret; }\
         "the definition is the class's own code: {codes:?}"
     );
 }
+
+/// **A template parameter cannot be judged against a concept** — it is whatever the caller instantiates.
+///
+/// `template <class _Tp> void f(_Tp&& value) { g(std::forward<_Tp>(value)); }` is the shape every generic library is
+/// written in, and `_Tp&&` was reported as not satisfying `std::floating_point`. Measured on libstdc++'s `<compare>`.
+#[test]
+fn a_template_parameter_is_not_judged_against_a_concept() {
+    let codes = codes_of_with(
+        "\
+template <class _Tp>
+concept floating = __is_floating_point(_Tp);
+
+void takes_a_float(floating auto value) { (void)value; }
+void takes_an_int(int value) { (void)value; }
+
+template <class _Tp>
+void forward_it(_Tp&& value) {
+    takes_an_int(1);
+    (void)value;
+}
+",
+        "/p/a.cpp",
+        Some("c++20"),
+    );
+    assert!(
+        !codes.contains(&DiagnosticCode::ConceptNotSatisfied),
+        "a parameter is not a type: {codes:?}"
+    );
+}

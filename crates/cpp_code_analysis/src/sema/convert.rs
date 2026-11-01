@@ -93,6 +93,19 @@ pub fn conversion(
 }
 
 /// Is this spelling the convention for a template parameter — `T`, `Ts`, `_Ty2`, `_Up`?
+/// **Is this spelling a template parameter, as a check sees one?** — the class rule applied to a whole type.
+///
+/// `_Tp&&` and `const _U&` are the same question as `_Tp`, and a check that asks it of a *type* rather than of a
+/// class has to strip the operators first: a parameter is never a reference or a pointer, and the spelling around it
+/// is what the drop is.
+pub(crate) fn names_a_template_parameter_for_a_check(spelled: &str) -> bool {
+    let bare = spelled
+        .trim()
+        .trim_start_matches("const ")
+        .trim_end_matches(|character: char| matches!(character, '&' | '*' | ' '));
+    names_a_template_parameter(bare)
+}
+
 fn names_a_template_parameter(class: &str) -> bool {
     let mut characters = class.chars();
     let Some(first) = characters.next() else {

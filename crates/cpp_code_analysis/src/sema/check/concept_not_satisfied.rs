@@ -82,6 +82,13 @@ impl Check for ConceptNotSatisfied {
                 let crate::Known::Yes((passed, _)) = context.type_of(argument.syntax()) else {
                     continue;
                 };
+                // **A template parameter is not a type this can judge.** `_Tp&&` is whatever the caller instantiates,
+                // so every concept answers "not known" rather than "not satisfied": measured on libstdc++'s
+                // `<compare>`, `_Tp&&` was reported as not satisfying `std::floating_point`.
+                if crate::sema::convert::names_a_template_parameter_for_a_check(&passed.to_string())
+                {
+                    continue;
+                }
                 if concept.is_satisfied_by(&passed, context) != Some(false) {
                     continue;
                 }
