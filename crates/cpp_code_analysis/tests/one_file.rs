@@ -35,9 +35,10 @@ fn one_file_reports_its_findings_with_context() {
     for finding in &answer.checks {
         let at = view.file_offset_of(ReadingOffset::new(finding.range.start_offset));
         let line = at.map(|at| text[..at.get().min(text.len())].matches('\n').count());
-        // **The scope chain at the finding** — which class the reader is inside, as the tree sees it.
+        // **The scope chain at the finding** — which class the reader is inside, as the tree sees it. The scopes are
+        // keyed by *rendering* offsets, so the finding's own range is what is asked about.
         if let Some(at) = at
-            && let Some(scope) = view.scopes.scope_at(at.get())
+            && let Some(scope) = view.scopes.scope_at(finding.range.start_offset)
         {
             let chain: Vec<String> = view
                 .scopes
@@ -62,7 +63,12 @@ fn one_file_reports_its_findings_with_context() {
                     at..(at + (finding.range.end_offset() - finding.range.start_offset))
                         .min(text.len()),
                 );
-                println!("     name={:?} spelled={spelled:?}", finding.name);
+                println!(
+                    "     name={:?} spelled={spelled:?} reading={} written_here={}",
+                    finding.name,
+                    finding.range.start_offset,
+                    view.was_written_here(finding.range)
+                );
             }
         }
         if let Some(line) = line {
