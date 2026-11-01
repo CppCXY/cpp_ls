@@ -144,6 +144,17 @@ impl Check for AccessInvisible {
                 continue;
             }
 
+            // **And a `friend` may touch what is private.** `_bstr_t` declares `friend class _variant_t;`, whose members
+            // then read `_bstr_t`'s privates — the shape the standard's own operators and every `_com_ptr_t`-style wrapper
+            // is built from. The rule is written in the declaring class's own body, which is in this file (the member's
+            // declaration was found here), so the friend declarations are read from the tree rather than from a fact.
+            // Measured on MSVC's `comutil.h`: seven `AccessInvisible` findings, every one of them a friend's own code.
+            if enclosing_definition(&node)
+                .is_some_and(|accessing| declares_the_friend(&class, &accessing))
+            {
+                continue;
+            }
+
             context.add(
                 DiagnosticCode::AccessInvisible,
                 access.member_range,
@@ -164,6 +175,41 @@ impl Check for AccessInvisible {
 /// or `StructKeyword` token inside. This was a text test — *does the text start with `class ` and hold a `{`* — and
 /// that is a decision made by reading punctuation, which is how the check layer produced its one false positive so
 /// far (see `assignment_in_condition`).
+/// **Does `declaring` name `accessing` as a friend?** — `friend class X;`, `friend struct X;`, `friend X;`.
+///
+/// The names are compared by **spelling**, taken from the friend declaration's own text and from the accessing
+/// class's own keyword line. `friend class _variant_t;` inside `_bstr_t` then permits `_variant_t`'s members to
+/// read `_bstr_t`'s privates, which is what the standard library's own wrappers are written to do.
+fn declares_the_friend(declaring: &CppSyntaxNode, accessing: &CppSyntaxNode) -> bool {
+    let Some(name) = cpp_parser::CppSyntaxKind::from(accessing.kind())
+        .eq(&cpp_parser::CppSyntaxKind::ClassDef)
+        .then(|| first_word_after_the_keyword(accessing))
+        .flatten()
+    else {
+        return false;
+    };
+    declaring.descendants().any(|node| {
+        cpp_parser::CppSyntaxKind::from(node.kind()) == cpp_parser::CppSyntaxKind::FriendDecl
+            && node.text().to_string().contains(name.as_str())
+    })
+}
+
+/// The class's own name — the identifier after `class`/`struct`/`union` in its definition.
+fn first_word_after_the_keyword(definition: &CppSyntaxNode) -> Option<String> {
+    let spelled = definition.text().to_string();
+    let after = spelled
+        .trim_start()
+        .strip_prefix("class")
+        .or_else(|| spelled.trim_start().strip_prefix("struct"))
+        .or_else(|| spelled.trim_start().strip_prefix("union"))?;
+    let name: String = after
+        .trim_start()
+        .chars()
+        .take_while(|character| character.is_alphanumeric() || *character == '_')
+        .collect();
+    (!name.is_empty()).then_some(name)
+}
+
 fn enclosing_definition(node: &CppSyntaxNode) -> Option<CppSyntaxNode> {
     let mut current = node.parent();
     while let Some(ancestor) = current {

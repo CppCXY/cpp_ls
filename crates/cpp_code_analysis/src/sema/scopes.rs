@@ -1837,15 +1837,23 @@ impl ScopeWalker<'_> {
         // When it names no scope this file has built — a class from a header, a spelling this file only declares —
         // the answer is the scope the declaration was written in, which is where a declaration that qualifies
         // nothing belongs: the honest fallback rather than a failure.
+        // The spelling the function scope below carries: a qualified definition writes its name in the specifier, and
+        // that is the only place the class it belongs to is written.
+        let mut qualified_spelling = None;
         let qualified =
             qualified_declarator_name(declarator).or_else(|| qualified_specifier_name(declarator));
-
         let (enclosing, name, name_range) = match qualified {
-            Some((qualifier, name)) => (
-                self.scope_of_a_qualifier(&qualifier).unwrap_or(outer),
-                name.0,
-                name.1,
-            ),
+            Some((qualifier, name)) => {
+                qualified_spelling = name
+                    .0
+                    .identifier_text()
+                    .map(|name| format!("{qualifier}::{name}"));
+                (
+                    self.scope_of_a_qualifier(&qualifier).unwrap_or(outer),
+                    name.0,
+                    name.1,
+                )
+            }
             // The name it introduces is the **last** segment — `grow`, not `Widget::grow` — so a qualified
             // spelling is read above rather than by `declared_name`, which refuses one precisely because the
             // unqualified lookup it exists for cannot find it.
@@ -1955,9 +1963,24 @@ impl ScopeWalker<'_> {
         // it to be *in* `Widget` — which is what makes a `private` member nameable there. Measured with `inner`:
         // the cursor's class list was empty and a completion after `other.` offered four public members where
         // five were nameable.
-        let function = self
-            .table
-            .create_scope(ScopeKind::Function, Some(parent), Some(range));
+        // **And the scope carries the definition's qualified spelling.** A qualified definition writes its name in the
+        // *specifier* (`inline void Widget::grow(…)`), so `declared_name` reads none from the declarator and the scope was
+        // left unnamed. That name is what `class_of_the_enclosing_definition` reads to answer `this`, and what a reader sees
+        // as the function's own name. Measured on MSVC's `comutil.h`: `inline _bstr_t::_bstr_t() …` produced an unnamed
+        // function scope, so the member-access check could not tell it was inside `_bstr_t` and reported
+        // "`m_Data` is private in the class that declares it, and this is not that class's own code" — inside that class's
+        // own constructor.
+        let function = match qualified_spelling {
+            Some(spelling) => self.table.create_named_scope(
+                ScopeKind::Function,
+                Some(parent),
+                Some(range),
+                Some(&spelling),
+            ),
+            None => self
+                .table
+                .create_scope(ScopeKind::Function, Some(parent), Some(range)),
+        };
 
         for parameter_list in parameter_lists(declarator) {
             self.parameters(&parameter_list, function);

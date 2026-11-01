@@ -3649,3 +3649,30 @@ int f() {
         "neither overload has a type to check `0` against: {codes:?}"
     );
 }
+/// **A `friend` may read what is private**, which is what every wrapper class and every `operator<<` is built on.
+///
+/// `Borrower` is named in `Holder`'s own declaration, so its member may read `Holder::secret` — and the access check
+/// reported it until the friend declarations of the declaring class were read: measured on MSVC's `comutil.h`, seven
+/// findings of exactly this family.
+#[test]
+fn a_friends_code_may_read_what_is_private() {
+    let codes = codes_of_with(
+        "\
+class Holder {\
+    friend class Borrower;\
+    int secret = 1;\
+};\
+
+class Borrower {\
+public:\
+    int peek(Holder& holder) { return holder.secret; }\
+};\
+",
+        "/p/a.cpp",
+        Some("c++20"),
+    );
+    assert!(
+        !codes.contains(&DiagnosticCode::AccessInvisible),
+        "the friend declaration permits it: {codes:?}"
+    );
+}
