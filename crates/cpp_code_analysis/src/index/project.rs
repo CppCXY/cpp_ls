@@ -6541,25 +6541,45 @@ fn range_expression_of_the_pattern(
 }
 
 /// The initializer of `auto [a, b] = pair;` — the expression after the `=`.
+///
+/// **The `=` is inside the `InitDeclarator`**, not a child of the `Declaration`: measured, the tree is
+/// `Declaration > InitDeclarator "[number, fraction] = pair" > [StructuredBinding, =, NameExpr]`. The first version scanned
+/// the declaration and found no `=` there, so every structured binding over a `pair` answered nothing and the name rule below
+/// then made up a spelling (`int()` for both names). The declarator is asked first and the declaration is the fallback for a
+/// tree that writes the initializer one level up.
 fn initializer_of_the_pattern(
     pattern: &cpp_parser::CppSyntaxNode,
 ) -> Option<cpp_parser::CppSyntaxNode> {
     use cpp_parser::CppTokenKind;
 
-    let declaration = pattern.ancestors().find(|node| {
-        cpp_parser::CppSyntaxKind::from(node.kind()) == cpp_parser::CppSyntaxKind::Declaration
-    })?;
+    let holders: Vec<cpp_parser::CppSyntaxNode> = pattern
+        .ancestors()
+        .take_while(|node| {
+            !matches!(
+                cpp_parser::CppSyntaxKind::from(node.kind()),
+                cpp_parser::CppSyntaxKind::FunctionDef | cpp_parser::CppSyntaxKind::TranslationUnit
+            )
+        })
+        .filter(|node| {
+            matches!(
+                cpp_parser::CppSyntaxKind::from(node.kind()),
+                cpp_parser::CppSyntaxKind::InitDeclarator | cpp_parser::CppSyntaxKind::Declaration
+            )
+        })
+        .collect();
 
-    let mut after_the_equals = false;
-    for child in declaration.children_with_tokens() {
-        match child {
-            cpp_parser::CppSyntaxElement::Token(token) => {
-                if CppTokenKind::from(token.kind()) == CppTokenKind::Assign {
-                    after_the_equals = true;
+    for holder in holders {
+        let mut after_the_equals = false;
+        for child in holder.children_with_tokens() {
+            match child {
+                cpp_parser::CppSyntaxElement::Token(token) => {
+                    if CppTokenKind::from(token.kind()) == CppTokenKind::Assign {
+                        after_the_equals = true;
+                    }
                 }
+                cpp_parser::CppSyntaxElement::Node(node) if after_the_equals => return Some(node),
+                cpp_parser::CppSyntaxElement::Node(_) => {}
             }
-            cpp_parser::CppSyntaxElement::Node(node) if after_the_equals => return Some(node),
-            cpp_parser::CppSyntaxElement::Node(_) => {}
         }
     }
     None

@@ -2723,3 +2723,32 @@ int f() {
         other => panic!("`result` is typed: {other:?}"),
     }
 }
+
+/// **A structured binding over a `pair`** — `auto [number, fraction] = pair;` gives the components, in order.
+///
+/// Measured before this: **both** names answered `int()` — a spelling invented by the `auto` path after the pattern's
+/// initializer was never found, because the `=` of `auto [a, b] = pair;` is inside the `InitDeclarator` and the lookup only
+/// scanned the `Declaration` above it.
+#[test]
+fn a_structured_binding_over_a_pair_has_the_components_types() {
+    let source = "\
+#include <utility>
+
+int f() {
+    std::pair<int, double> pair{1, 2.5};
+    auto [number, fraction] = pair;
+    return number + static_cast<int>(fraction);
+}
+";
+    let session = session_with(&[("/p/a.cpp", source)]);
+    let view = session.view("/p/a.cpp").expect("the file is held");
+    for (name, expected) in [("number", "int"), ("fraction", "double")] {
+        let offset = last_word(source, name);
+        match session.type_at(&view, as_reading(&view, offset)) {
+            cpp_code_analysis::Known::Yes(found) => {
+                assert_eq!(found.type_of, expected, "{name}");
+            }
+            other => panic!("`{name}` is typed: {other:?}"),
+        }
+    }
+}
