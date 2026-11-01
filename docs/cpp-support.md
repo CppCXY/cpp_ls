@@ -434,3 +434,31 @@ The hook was written, measured and reverted: it did not fix the cross-file case,
 every deduced return. `the_reported_file_is_answered`'s budget is 30 s and it runs 20–35 s on a loaded machine — the failures
 seen today were load (the suite passes with the hook stashed and with it in place), so the two probe rows stay red as a
 **measurement**, not a regression.
+
+## A member's deduced return type, through a header
+
+```cpp
+// a.h
+class Box { T value_; auto copy_of() const { return value_; } auto doubled() const { return value_ + value_; } };
+// a.cpp
+Box<int> box(7);
+auto copied = box.copy_of();     // `int` now
+auto doubled = box.doubled();    // and the arithmetic one
+```
+
+Three things had to be true:
+
+1. **`auto` is not a return type.** The index records `auto`, and `what_a_call_has_in` parsed it into a *type called `auto`* —
+   an answer that reads like one. A placeholder answers `None` now, which is what lets the caller deduce from the body.
+2. **A `return` can name a data member.** `type_a_return_states_with` typed parameters only, so `return value_;` was
+   unanswerable; `a_data_member_type` reads the field's type from the class body, with a one-level walk, no allocation until a
+   name matches, and a 64-member bound — this runs for every deduced return whose name is not a parameter, and an unbounded
+   scan there is 8 s versus 35 s on the handshake suite.
+3. **The fact's offset is a file offset; the tree speaks the reading.** The fallback that reads a body from the *declaring*
+   file looked the offset up directly — right only when the two coincide. It translates with `reading_offset_of`, tries the raw
+   offset second (a `#if` branch nobody takes), and accepts a binding only if it carries the fact's name.
+
+```text
+a_members_deduced_return_type_is_read_through_a_header   red before, green after
+cpp_project: 0 errors, 0 findings, 9/9 members, 9/9 types  (was 7/9)
+```
