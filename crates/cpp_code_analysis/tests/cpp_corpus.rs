@@ -356,7 +356,31 @@ const TYPES: &[TypeRow] = &[
         needle: "auto second = pair.second",
         name: "second",
         expected: "double",
-    }
+    },
+    TypeRow {
+        file: "src/techniques.cpp",
+        needle: "auto first_fixed = fixed.front()",
+        name: "first_fixed",
+        expected: "int",
+    },
+    TypeRow {
+        file: "src/techniques.cpp",
+        needle: "auto view_size = view.size()",
+        name: "view_size",
+        expected: "size_t",
+    },
+    TypeRow {
+        file: "src/techniques.cpp",
+        needle: "auto inside = maybe.has_value()",
+        name: "inside",
+        expected: "bool",
+    },
+    TypeRow {
+        file: "src/techniques.cpp",
+        needle: "auto squared = square_of(3)",
+        name: "squared",
+        expected: "int",
+    },
 ];
 
 fn corpus_files(root: &Path) -> Vec<PathBuf> {

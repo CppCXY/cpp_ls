@@ -492,3 +492,51 @@ bare parameter list and must stay a function.
 An existing inlay test had **pinned the old boundary** (`void (*f(int a))(int b);` "is not bound, so nothing resolves the
 call"). It is now green in the opposite direction: `f` resolves, and the hint reads `f`'s own parameter `a`, not the `b` of the
 function it returns — exactly what its own comment predicted would work the day the binding existed.
+
+## Overload resolution by the call's own arguments, and the report card it produced
+
+The probe now asks **45 type questions and 10 member questions** of a real C++ project and its answer is 44/45 and 10/10, with
+**0 findings** and **0 parse errors**. What closed the last big gap:
+
+```cpp
+std::to_string(count)        → `string`
+std::get<int>(either)        → `int`
+std::make_unique<Closing>()  → `unique_ptr<Closing>`
+```
+
+All three were `Ambiguous`: a name declared more than once answers the *name* query, which is right for "where is this
+declared" and wrong for "what does this call return". `the_return_the_overloads_agree_on` asks each candidate two questions —
+can it be called this way, and does it spell the same type once the written template arguments are substituted — and answers
+only when every survivor agrees. Four rules make those questions answerable, and each came from a measurement:
+
+* a **deleted** function is not a candidate (`DELETED` is already a fact bit; `std::make_unique`'s deleted overload was making
+  the set disagree);
+* a **pack** is recognised from the written list, because `parameters_in` strips the `...` (`(_Types&&... _Args)` comes back as
+  one parameter);
+* a return spelling that **still names one of the candidate's own parameters** could not be substituted and is dropped rather
+  than compared;
+* a declaration with **no recorded parameter list** has no vote.
+
+## Two false findings removed from the member check
+
+```text
+concept sized = requires(T value) { value.size(); };   ← "`value` has no member `size`"
+widget.raw()                                           ← "`widget` has no member `raw`"   (CRTP base)
+the_widget().stored                                    ← "`the_widget()` has no member `stored`"
+```
+
+**A requires-expression asks whether the member is there** — a member missing from the hypothetical `T` is exactly what the
+concept tests for, so nothing inside a `RequiresExpr` is reported. **A class name two files declare is not evidence**: the
+project has two `Widget`s and the query answered with whichever the index filed first, so the check now asks how many visible
+declarations of the name there are and judges none of them when it is more than one. Both rules only ever remove a finding.
+
+## Known gaps, as measurements rather than as prose
+
+```text
+FAIL  auto raw = widget.raw();   CRTP: `raw` is `Counted<Widget>`'s member. The member *list* finds it (10/10 rows
+                                 include it), but the single-member query answers NotDeclaredHere when two classes share
+                                 the name — the same two-`Widget` collision, one layer below where it was fixed.
+```
+
+An **overload set that disagrees after narrowing** answers nothing on purpose: choosing between those candidates is overload
+*ranking* (conversions, template partial ordering), which this layer does not do.
