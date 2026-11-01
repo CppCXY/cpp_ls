@@ -259,6 +259,50 @@ const TYPES: &[TypeRow] = &[
         name: "counter",
         expected: "int",
     },
+    TypeRow {
+        file: "src/techniques.cpp",
+        needle: "Count count = 3",
+        name: "count",
+        // **The alias name is the answer**: a C++ toolchain shows `Count` here, because that is the spelling the
+        // declaration used and the name the reader wrote.
+        expected: "Count",
+    },
+    TypeRow {
+        file: "src/techniques.cpp",
+        needle: "Fraction fraction = 0.5",
+        name: "fraction",
+        expected: "Fraction",
+    },
+    TypeRow {
+        file: "src/techniques.cpp",
+        needle: "auto colour = Colour::Red",
+        name: "colour",
+        expected: "Colour",
+    },
+    TypeRow {
+        file: "src/techniques.cpp",
+        needle: "auto bytes = sizeof(int)",
+        name: "bytes",
+        expected: "size_t",
+    },
+    TypeRow {
+        file: "src/techniques.cpp",
+        needle: "auto printed = std::to_string(count)",
+        name: "printed",
+        expected: "string",
+    },
+    TypeRow {
+        file: "src/techniques.cpp",
+        needle: "Outer::Inner nested",
+        name: "nested",
+        expected: "Inner",
+    },
+    TypeRow {
+        file: "src/techniques.cpp",
+        needle: "auto owned = std::make_unique<Closing>()",
+        name: "owned",
+        expected: "unique_ptr",
+    },
 ];
 
 fn corpus_files(root: &Path) -> Vec<PathBuf> {

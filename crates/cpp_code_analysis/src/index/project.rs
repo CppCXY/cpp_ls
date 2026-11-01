@@ -4163,6 +4163,21 @@ fn type_of_expression_inner(
         }
     }
 
+    // **`sizeof` and `alignof` are a `size_t`**, whatever they are applied to — an expression or a type, complete or not.
+    // Measured: `auto bytes = sizeof(int);` answered nothing at all, and the initialiser's tree is
+    // `Initializer > UnaryExpr "sizeof(int)"`, so the arm is on the *shape* rather than on a kind this grammar does not
+    // produce for it.
+    {
+        let spelled = expression.text().to_string();
+        let spelled = spelled.trim_start();
+        if spelled.starts_with("sizeof") || spelled.starts_with("alignof") {
+            return Known::Yes((
+                crate::sema::types::parse_type_spelling("size_t"),
+                path.to_path_buf(),
+            ));
+        }
+    }
+
     // A **parenthesised** expression has the type of what it wraps, and the parentheses are a node of their own:
     // `(*p).size` makes the object of the `.` a `ParenExpr`, so a recursion that did not step through it would
     // stop one level above the answer — which is exactly where it used to stop.
@@ -5920,6 +5935,7 @@ fn declared_type(
     // `_Elem&`, because the substitution had already consumed the name the lookup needed. See [`alias_target`] for
     // the step that is right here — an alias *declared in this file* has a target this can read directly — and the
     // note on [`the_alias_behind`] for where the other step belongs.
+
     let placeholder = declaration.to_string();
     // **C++17's *implicit* deduction guide** — `Box box(7);` where `Box` is a class template.
     //
