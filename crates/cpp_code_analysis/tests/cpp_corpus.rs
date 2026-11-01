@@ -229,6 +229,36 @@ const TYPES: &[TypeRow] = &[
         name: "shared",
         expected: "int",
     },
+    TypeRow {
+        file: "src/techniques.cpp",
+        needle: "auto nine = operation(3, 6)",
+        name: "nine",
+        expected: "int",
+    },
+    TypeRow {
+        file: "src/techniques.cpp",
+        needle: "auto held = std::get<int>(either)",
+        name: "held",
+        expected: "int",
+    },
+    TypeRow {
+        file: "src/techniques.cpp",
+        needle: "constexpr int kMax = 10",
+        name: "kMax",
+        expected: "int",
+    },
+    TypeRow {
+        file: "src/techniques.cpp",
+        needle: "auto from_constant = doubled_constant(kMax)",
+        name: "from_constant",
+        expected: "int",
+    },
+    TypeRow {
+        file: "src/techniques.cpp",
+        needle: "constinit static int counter = 0",
+        name: "counter",
+        expected: "int",
+    },
 ];
 
 fn corpus_files(root: &Path) -> Vec<PathBuf> {
@@ -278,7 +308,10 @@ fn declared_type(session: &Session<DiskFiles>, path: &Path, cursor: usize) -> Op
     let reading = view.reading_offset_of(FileOffset::new(cursor))?;
     match session.type_at(&view, reading) {
         Known::Yes(found) => Some(found.type_of.to_string()),
-        Known::Unknown(reason) => Some(format!("<unknown: {}>", reason.describe())),
+        // **An unknown is not a type**: the probe's pass rule is "the answer contains the expected spelling", and
+        // `<unknown: `std::get<int>` is declared more than once…>` contains `int` — so an unknown answer passed a row that
+        // asked for `int`. Measured: it did exactly that.
+        Known::Unknown(_) => None,
         Known::No => None,
     }
 }

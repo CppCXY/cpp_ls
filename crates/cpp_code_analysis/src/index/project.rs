@@ -6386,6 +6386,12 @@ fn node_covering(
 /// [`declared_type`] — and each `*` has to match a pointer in the deduced type, because a `*` that does not is a
 /// declaration that does not compile rather than a type to report.
 fn auto_substituted(written: &str, deduced: &Type) -> Option<String> {
+    // **`decltype(auto)` means "the type this expression has"** — so the deduced type *is* the answer, not a
+    // `decltype(…)` written around it. Measured: `decltype(auto) same = widen_gently(1);` answered `decltype(int)`, which
+    // is a type no reader writes and no declaration contains.
+    if written.trim() == "decltype(auto)" {
+        return Some(deduced.to_string().trim().to_string());
+    }
     let deduced = deduced.to_string();
     let deduced = deduced.as_str();
     // The `auto` **word**, by position: a spelling can hold those four letters inside a longer name
