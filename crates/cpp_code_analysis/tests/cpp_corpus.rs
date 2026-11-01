@@ -327,6 +327,36 @@ const TYPES: &[TypeRow] = &[
         name: "same",
         expected: "bool",
     },
+    TypeRow {
+        file: "src/techniques.cpp",
+        needle: "auto one_pair = pairs.front()",
+        name: "one_pair",
+        expected: "pair<int, double>",
+    },
+    TypeRow {
+        file: "src/techniques.cpp",
+        needle: "auto raw = widget.raw()",
+        name: "raw",
+        expected: "int",
+    },
+    TypeRow {
+        file: "src/techniques.cpp",
+        needle: "auto stored = the_widget().stored",
+        name: "stored",
+        expected: "int",
+    },
+    TypeRow {
+        file: "src/techniques.cpp",
+        needle: "auto first = pair.first",
+        name: "first",
+        expected: "int",
+    },
+    TypeRow {
+        file: "src/techniques.cpp",
+        needle: "auto second = pair.second",
+        name: "second",
+        expected: "double",
+    }
 ];
 
 fn corpus_files(root: &Path) -> Vec<PathBuf> {

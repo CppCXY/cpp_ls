@@ -54,6 +54,17 @@ impl Check for UndefinedField {
         let collected = started.map(|started| started.elapsed());
         let mut judged = 0usize;
         for (_node, access) in accesses {
+            // **A requires-expression asks whether the member is there.** `concept sized = requires(T value) {
+            // value.size(); };` states a *question* about `T`, and a member missing from the hypothetical `T` is exactly
+            // what the concept is testing for — reporting it is always wrong, and it was: measured, the project's own
+            // `sized` concept produced "`value` has no member `size`". The existing dependent-type guard did not catch it
+            // because a requires-expression's parameter is not bound as a template parameter at that offset.
+            if _node.ancestors().any(|node| {
+                cpp_parser::CppSyntaxKind::from(node.kind())
+                    == cpp_parser::CppSyntaxKind::RequiresExpr
+            }) {
+                continue;
+            }
             // **Nothing after the operator** is a file being typed at — the completion path's business, not this
             // layer's: there is no name to have an opinion about yet.
             if access.member.is_empty() {
@@ -144,7 +155,40 @@ impl Check for UndefinedField {
                 continue;
             }
 
-            let crate::Known::Yes(members) = context.model.members_of(&class) else {
+            // **The bare spelling may name more than one class.** `Widget` written in a file that also declares
+            // `techniques::Widget` resolves to the *first* of them, and a member list from the wrong one reports the
+            // reader's own member as missing — measured: `widget.raw()` and `the_widget().stored` were both reported as
+            // "`Widget` has no member", while the class's own facts had five members from another `Widget` entirely.
+            // The index's qualified spelling is the one the facts are filed under, and it is what the completion path
+            // already asks for.
+            let resolved = crate::index::project::qualified_from_the_index(
+                context.model.index(),
+                context.model.path(),
+                &class,
+            )
+            .unwrap_or_else(|| class.clone());
+
+            // **A class name two files both declare is not evidence either.** Two `Widget`s — one in a header, one in
+            // a test file — resolve to whichever the index files first, and a member list from that one reports the
+            // other's members as missing: measured, `widget.raw()` and `the_widget().stored` were both reported as
+            // "`Widget` has no member", with five members from the wrong `Widget` in hand.
+            // **A class name two files both declare is not evidence.** Two `Widget`s — one in a header, one in a test
+            // file — resolve to whichever the index files first, and a member list from that one reports the other's
+            // members as missing: measured, `widget.raw()` and `the_widget().stored` were both reported as "`Widget` has
+            // no member", with five members from the wrong `Widget` in hand. The qualified spelling does not help when
+            // both are at file scope, so the count is what speaks: more than one declaration of the name, and this check
+            // has nothing to judge.
+            if context
+                .model
+                .index()
+                .files_declaring(&resolved, context.model.path())
+                .len()
+                > 1
+            {
+                continue;
+            }
+
+            let crate::Known::Yes(members) = context.model.members_of(&resolved) else {
                 // Not known to be a class, or known and never read — see the module documentation.
                 continue;
             };
