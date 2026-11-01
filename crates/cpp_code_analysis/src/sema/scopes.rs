@@ -1769,12 +1769,24 @@ impl ScopeWalker<'_> {
             .map(|name| name.text().to_string())
             .filter(|name| name.contains("::"));
         let function = match &spelled {
-            Some(spelled) => self.table.create_named_scope(
-                ScopeKind::Function,
-                Some(outer),
-                Some(range),
-                Some(spelled),
-            ),
+            Some(spelled) => {
+                // **The class this file *does* have, when the qualifier names one.** The path here is for a definition
+                // whose class comes from another file, but the same shape is written for a class declared three lines up:
+                // `struct W { void f(); }; void W::f() { a = 1; }`. Hanging the function scope off the file scope left
+                // the body unable to see the class's members — measured, every out-of-class definition in a file produced
+                // *"`a` is not declared"* while `W` was declared above it. The qualifier is what decides, and when it names
+                // a scope this file built, that scope is the parent.
+                let qualifier = spelled.rsplit_once("::").map(|(qualifier, _)| qualifier);
+                let parent = qualifier
+                    .and_then(|qualifier| self.scope_of_a_qualifier(qualifier))
+                    .unwrap_or(outer);
+                self.table.create_named_scope(
+                    ScopeKind::Function,
+                    Some(parent),
+                    Some(range),
+                    Some(spelled),
+                )
+            }
             None => self
                 .table
                 .create_scope(ScopeKind::Function, Some(outer), Some(range)),

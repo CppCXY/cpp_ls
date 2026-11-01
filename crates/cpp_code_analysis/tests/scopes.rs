@@ -2637,3 +2637,23 @@ fn a_function_pointer_declares_a_variable() {
     println!("{rendered}");
     assert!(rendered.contains("fp"), "`fp` is a binding: {rendered}");
 }
+
+/// **An out-of-class definition's body sees its class's members.**
+///
+/// `struct W { int a; void f(); }; void W::f() { a = 1; }` is the ordinary layout of every C++ project, and the function
+/// scope used to hang off the **file** scope: measured, the tree was `File{W}(Class{a,f} Fn)` and every member named in the
+/// body was reported as undeclared, on a class declared three lines above it.
+#[test]
+fn an_out_of_class_definition_is_nested_in_its_class() {
+    let table = scopes("struct W { int a; void f(); };\n\nvoid W::f() { a = 1; }\n");
+    let rendered = shape(&table);
+    println!("{rendered}");
+    assert!(
+        rendered.contains("Class{"),
+        "the class scope is built: {rendered}"
+    );
+    assert!(
+        rendered.contains("}(Fn)"),
+        "and the definition's function scope is a child of it: {rendered}"
+    );
+}
