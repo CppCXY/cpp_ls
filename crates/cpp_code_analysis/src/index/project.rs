@@ -5372,6 +5372,16 @@ impl NamedDeclaration {
             // file that is the better source by a wide margin — `const Widget* const p` is a shape with two
             // qualifier positions, and no parser of the *spelling* can put them back where the file had them.
             NamedDeclaration::Here(binding) => {
+                // **An enumerator's type is its enumeration.** `enum class Colour { Red };` writes no type beside `Red`,
+                // so the reader below works from the *enum's* specifier sequence and cannot answer the enumerator — and
+                // `auto colour = Colour::Red;` had no type at all. The enumeration is the scope the enumerator was bound
+                // in, which is what its own declaration opened.
+                if binding.kind == crate::BindingKind::Enumerator {
+                    return scopes
+                        .scope(binding.scope)
+                        .and_then(|scope| scope.name.clone())
+                        .map(Type::named);
+                }
                 let declarator =
                     crate::sema::types::declarator_declaring(root, binding.name_range)?;
                 let specifiers = declarator.ancestors().find_map(|node| {
@@ -5919,6 +5929,19 @@ fn declared_type(
     named: &NamedDeclaration,
     depth: usize,
 ) -> Known<Type> {
+    // **An enumerator's type is its enumeration** — the *indexed* half of the rule `NamedDeclaration::type_of` carries for
+    // a declaration in this file. `enum class Colour { Red };` writes no type beside `Red`, so the fact records
+    // `type_of: None` and this answered nothing: measured, `auto colour = Colour::Red;` in a `.cpp` whose enum is in the
+    // header had no type at all, while the same declaration in one file worked.
+    if let NamedDeclaration::Indexed(fact, _, _) = named
+        && fact.type_of.is_none()
+        && let Some(scope) = fact.scope.as_deref()
+        && let Known::Yes(enclosing) = index.definition(scope, path)
+        && enclosing.fact.kind == crate::DeclKind::Type
+    {
+        return Known::Yes(Type::named(scope));
+    }
+
     let declaration = named.type_of(root, scopes);
     let Some(declaration) = declaration else {
         return Known::No;

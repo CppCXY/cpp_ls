@@ -96,6 +96,12 @@ const MEMBERS: &[MemberRow] = &[
         needle: "maybe.value()",
         expected: "value",
     },
+    // **An inherited member**, reached through the instance of the derived class.
+    MemberRow {
+        file: "src/techniques.cpp",
+        needle: "derived.base_value",
+        expected: "base_value",
+    },
 ];
 
 const TYPES: &[TypeRow] = &[
@@ -302,6 +308,24 @@ const TYPES: &[TypeRow] = &[
         needle: "auto owned = std::make_unique<Closing>()",
         name: "owned",
         expected: "unique_ptr",
+    },
+    TypeRow {
+        file: "src/techniques.cpp",
+        needle: "auto described = derived.describe()",
+        name: "described",
+        expected: "int",
+    },
+    TypeRow {
+        file: "src/techniques.cpp",
+        needle: "auto sum = a + b",
+        name: "sum",
+        expected: "Money",
+    },
+    TypeRow {
+        file: "src/techniques.cpp",
+        needle: "auto same = (a == b)",
+        name: "same",
+        expected: "bool",
     },
 ];
 
