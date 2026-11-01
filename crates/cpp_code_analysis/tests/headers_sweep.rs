@@ -44,6 +44,9 @@ fn the_headers_of_a_standard_library_produce_no_findings() {
     let diagnostics = std::time::Instant::now();
     for path in &files {
         session.cook(path);
+        let Some(view) = session.view(path) else {
+            continue;
+        };
         let Some(answer) = session.diagnostics(path) else {
             continue;
         };
@@ -64,7 +67,24 @@ fn the_headers_of_a_standard_library_produce_no_findings() {
                         | cpp_code_analysis::sema::check::DiagnosticCode::MacroParentheses
                 )
             {
-                println!("  {name}: {:?}  {}", finding.code, finding.message);
+                // **The range is in the *rendering***, which has no comments and no line breaks of its own — so the file
+                // offset is asked for, through the view, and the line counted there.
+                let at =
+                    view.file_offset_of(cpp_code_analysis::file::coordinates::ReadingOffset::new(
+                        finding.range.start_offset,
+                    ));
+                let line = at.and_then(|at| {
+                    std::fs::read_to_string(path)
+                        .ok()
+                        .map(|text| text[..at.get().min(text.len())].matches('\n').count() + 1)
+                });
+                println!(
+                    "  {name}:{}  {:?}  {}",
+                    line.map(|line| line.to_string())
+                        .unwrap_or_else(|| "?".to_string()),
+                    finding.code,
+                    finding.message
+                );
             }
             shown += 1;
         }

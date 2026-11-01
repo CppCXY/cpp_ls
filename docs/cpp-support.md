@@ -598,3 +598,16 @@ before and after (`File{W}(Class{a,f} Fn)` → `File{W}(Class{a,f}(Fn))`).
   and lambda scopes, and the shapes were not reproducible from a fixture (`two_functions_that_both_name_one_variable` passes),
   so the next step is a trace on the header itself rather than another guess.
 * `UndefinedName` 2 — the two that remain in `comutil.h`.
+
+### The sweep's own coordinate bug, fixed
+
+The first version printed offsets as if they were **file** positions, and a finding's range is in the **rendering** — no
+comments, no line breaks of its own. The line numbers it printed pointed at comments and forward declarations, which is how
+the bug was noticed: `comutil.h:79` is a comment. The sweep asks `view.file_offset_of` now, and the same findings land on
+`comutil.h:765` (`_bstr_t::Data_t::AddRef`), `comutil.h:1204` (`_variant_t::_variant_t`), `concrt.h:1278`.
+
+**That changes what the remaining seven `AccessInvisible` findings are.** They sit in `_bstr_t`'s and `_variant_t`'s own
+member definitions — genuine "the class's own code" — reached through a **two-segment qualifier**
+(`inline unsigned long _bstr_t::Data_t::AddRef() throw()`). The out-of-class fix walks the qualifier segment by segment, so
+this shape should be next on the list; the sweep now names the line, which is what makes it a one-line investigation instead
+of a guess.
