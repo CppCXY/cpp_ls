@@ -2617,3 +2617,50 @@ fn a_template_parameter_target_is_not_a_refusal() {
     let a_string = parse_type_spelling("std::string");
     assert_eq!(conversion(&a_string, "int", |_| None), Conversion::Unknown);
 }
+
+/// **A member's deduced return type, through the header that declares it** — `auto copy_of() const { return value_; }`.
+///
+/// The class is written in a header and the call is in the `.cpp`, which is the shape a project actually has. The declared
+/// type is `auto`, so the *body* is what says `int` once the class's `T` is substituted, and the body is reachable because
+/// the header is part of the same translation unit.
+#[test]
+fn a_members_deduced_return_type_is_read_through_a_header() {
+    let header = "\
+template <typename T>
+class Box {
+public:
+    explicit Box(T value) : value_(value) {}
+    auto copy_of() const { return value_; }
+    auto doubled() const { return value_ + value_; }
+
+private:
+    T value_;
+};
+";
+    let source = "\
+#include \"a.h\"
+
+int f() {
+    Box<int> box(7);
+    auto copied = box.copy_of();
+    auto doubled = box.doubled();
+    return copied + doubled;
+}
+";
+    let session = session_with(&[("/p/a.cpp", source), ("/p/a.h", header)]);
+    let view = session.view("/p/a.cpp").expect("the file is held");
+    let offset = last_word(source, "copied");
+    match session.type_at(&view, as_reading(&view, offset)) {
+        cpp_code_analysis::Known::Yes(found) => {
+            assert_eq!(found.type_of, "int", "`copy_of` returns the field's type");
+        }
+        other => panic!("`copied` is typed: {other:?}"),
+    }
+    let offset = last_word(source, "doubled");
+    match session.type_at(&view, as_reading(&view, offset)) {
+        cpp_code_analysis::Known::Yes(found) => {
+            assert_eq!(found.type_of, "int", "`value_ + value_` is an `int`");
+        }
+        other => panic!("`doubled` is typed: {other:?}"),
+    }
+}

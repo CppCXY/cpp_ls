@@ -1824,6 +1824,71 @@ fn returned_expressions_in(body: &CppSyntaxNode) -> Vec<CppSyntaxNode> {
 /// The substitution is applied to **the type of a parameter**, which is where a template parameter can appear in a
 /// return statement: `return p;` gives `_Iter&&`, and at a call site with `_Iter = int*` that is `int*&&` — the answer
 /// the `auto` variable's declaration is asking for. Everything else in this walk is about the expression's shape and
+/// **A data member's declared type**, read from the class body the function is written in.
+///
+/// ```cpp
+/// class Box {
+///     T value_;                                  // ← `T` for the name `value_`
+/// public:
+///     auto copy_of() const { return value_; }    // the return expression names it
+/// };
+/// ```
+///
+/// `None` for a name that is not a field of that class — a parameter (handled before this), a global, a member function
+/// (a function has a parameter list, and its *type* is not what an accessor returns).
+///
+/// # Why the walk is shallow and the text is read last
+///
+/// This runs for **every** deduced return whose name is not a parameter, and a class of three hundred members would make the
+/// walk over its own children the whole cost. So the declarator is taken as the member's *own child* rather than through
+/// `descendants()`, nothing is allocated until a name has matched, and a class body larger than
+/// [`MOST_MEMBERS_AN_ACCESSOR_CLASS_HAS`] is not searched at all — the accessors this exists for are in small classes, and a
+/// larger one keeps the unknown return it had before this reader existed.
+fn a_data_member_type(expression: &CppSyntaxNode, declaration: &CppSyntaxNode) -> Option<String> {
+    /// A cost bound, not a language rule — see the note above.
+    const MOST_MEMBERS_AN_ACCESSOR_CLASS_HAS: usize = 64;
+
+    let name = expression.text().to_string();
+    let name = name.trim();
+    if name.is_empty() {
+        return None;
+    }
+    let body = declaration
+        .ancestors()
+        .find(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::ClassBody)?;
+    let mut members = body
+        .children()
+        .filter(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::Declaration);
+    let mut seen = 0usize;
+    for member in members.by_ref() {
+        seen += 1;
+        if seen > MOST_MEMBERS_AN_ACCESSOR_CLASS_HAS {
+            return None;
+        }
+        // **The member's own declarator**, one level down: `Declaration > InitDeclarator > Declarator`.
+        let Some(declarator) = member
+            .children()
+            .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::InitDeclarator)
+        else {
+            continue;
+        };
+        let written = declarator.text().to_string();
+        let written = written.trim();
+        // A function has a parameter list and a field does not — and this is a question about a field.
+        if written.contains('(') || written != name {
+            continue;
+        }
+        let text = member.text().to_string();
+        let at = text.find(name)?;
+        let the_type = text[..at].trim();
+        if the_type.is_empty() {
+            return None;
+        }
+        return Some(the_type.to_string());
+    }
+    None
+}
+
 /// does not depend on what a name stands for.
 fn type_a_return_states_with(
     expression: &CppSyntaxNode,
@@ -1832,7 +1897,12 @@ fn type_a_return_states_with(
 ) -> Option<String> {
     match CppSyntaxKind::from(expression.kind()) {
         CppSyntaxKind::NameExpr | CppSyntaxKind::IdentifierExpr => {
-            let written = parameter_type(expression, declaration)?;
+            // **A parameter, or a data member of the class the function is declared in.** The second is the shape every
+            // accessor has — `auto copy_of() const { return value_; }` — and without it a member's deduced return was
+            // unknown: measured on a C++ project, `auto copied = box.copy_of()` answered "the type is not known here",
+            // while the same body in a free function deduced fine (a free function's `return` can only name a parameter).
+            let written = parameter_type(expression, declaration)
+                .or_else(|| a_data_member_type(expression, declaration))?;
             Some(substituted_spelling(&written, substitutions))
         }
         // **A member access on a cast**, which is the shape `_Get_unwrapped`'s middle branch has:

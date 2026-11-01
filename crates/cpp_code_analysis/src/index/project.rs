@@ -5484,11 +5484,41 @@ impl NamedDeclaration {
                             written_arguments,
                         );
                         let declared_in = declaring(file.as_path())?;
-                        let Known::Yes(binding) = crate::sema::resolve::definition_at(
-                            &declared_in.scopes,
-                            &declared_in.root,
-                            offset,
-                        ) else {
+                        // **The fact's offset is a *file* offset; the tree speaks the *reading*.**
+                        //
+                        // `name_range` comes from the index, which records where a token sits in the file it was
+                        // written in. `definition_at` walks `declared_in.root`, whose offsets are the *rendering*'s —
+                        // the file with its `#include`s expanded. For a file with no macro and no include the two are
+                        // the same number, which is why this looked right; through a header that includes anything they
+                        // are not, and the binding found at the raw offset is a different declaration. The translation
+                        // is `reading_offset_of`, and the raw offset is tried after it because a region the rendering
+                        // does not contain (`#if` branch nobody takes) still has to be looked at the way it was.
+                        let found = [
+                            declared_in.reading_offset_of(
+                                crate::file::coordinates::FileOffset::new(offset),
+                            ),
+                            Some(crate::file::coordinates::ReadingOffset::new(offset)),
+                        ]
+                        .into_iter()
+                        .flatten()
+                        .find_map(|in_the_reading| {
+                            match crate::sema::resolve::definition_at(
+                                &declared_in.scopes,
+                                &declared_in.root,
+                                in_the_reading.get(),
+                            ) {
+                                // **The name has to be the one the fact named.** A matched offset in the wrong
+                                // coordinates lands on a neighbouring declaration, and deducing *its* body would be a
+                                // wrong answer that reads like a right one.
+                                Known::Yes(found)
+                                    if found.name.identifier_text() == Some(name.as_str()) =>
+                                {
+                                    Some(found)
+                                }
+                                _ => None,
+                            }
+                        });
+                        let Some(binding) = found else {
                             return None;
                         };
                         let written = crate::sema::declarations::deduced_returns_of_substituted(
@@ -6336,19 +6366,29 @@ fn auto_substituted(written: &str, deduced: &Type) -> Option<String> {
     Some(type_of)
 }
 
+/// Is this a return spelling the *body* decides — `auto`, `auto&`, `decltype(auto)`?
+fn is_a_placeholder(written: &str) -> bool {
+    matches!(
+        written.trim(),
+        "auto" | "auto&" | "auto&&" | "const auto" | "const auto&" | "decltype(auto)"
+    )
+}
+
 fn what_a_call_has_in(fact: &DeclFact) -> Option<Type> {
     match fact.kind {
         // `Widget()` is a temporary of `Widget`, so a call of a class has the class. `DeclKind::Type` is exactly
         // "this declaration declares a class-like type", which is the case a call whose callee is a *type* lands in.
         crate::DeclKind::Type => Some(Type::named(fact.qualified_name())),
-        // **`auto` is read as the spelling it is**, and the deduction that would replace it is not attempted here.
-        //
-        // Filtering the placeholder so the caller's deduce-from-the-body pass could run looked like the fix for
-        // `auto copied = box.copy_of()` — and it is what the *same-file* path already does, through its own arm. Through a
-        // header's fact it costs a whole extra pass per call (`declaring`, `definition_at`, the body re-typed), and the
-        // standard library returns `auto` everywhere: measured, the reported-file handshake missed its thirty-second
-        // budget. The member's deduced return stays unknown through a header until that pass is made cheap.
-        _ => fact.returns.as_deref().map(parse_type_spelling),
+        // **A placeholder is not a return type.** `auto copy_of() const { return value_; }` records `auto` as the spelling
+        // the file wrote, and parsing it answers a type *called* `auto` — which reads like an answer and is not one. `None`
+        // here is what lets the caller deduce from the body, which is the same thing the same-file arm already does; the
+        // body is read from the declaring file at the fact's offset **translated into that file's rendering**, which is
+        // where this path used to land on a neighbouring declaration instead.
+        _ => fact
+            .returns
+            .as_deref()
+            .filter(|written| !is_a_placeholder(written))
+            .map(parse_type_spelling),
     }
 }
 
