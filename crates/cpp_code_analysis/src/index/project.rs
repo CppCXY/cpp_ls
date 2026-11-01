@@ -5598,6 +5598,33 @@ impl NamedDeclaration {
                     started.substituted(&substitutions)
                 };
 
+                // **An injected-class-name stands for the class with its own arguments.** `std::string::substr` returns
+                // `basic_string` — the name a class uses for *itself* inside its own body — and a reader needs the
+                // instantiation, not the bare name: measured, `auto cut = text.substr(1, 2);` answered `basic_string`
+                // where `std::string` is the type. The arguments are the ones the receiver was used with, which is what
+                // `bindings` holds.
+                let started = match started.class_name() {
+                    Some(name)
+                        if started.arguments().is_empty()
+                            && !bindings.arguments().is_empty()
+                            && fact
+                                .scope
+                                .as_deref()
+                                .is_some_and(|scope| scope.rsplit("::").next() == Some(name)) =>
+                    {
+                        let arguments: Vec<String> = bindings
+                            .arguments()
+                            .iter()
+                            .map(|argument| argument.to_string())
+                            .collect();
+                        crate::sema::types::parse_type_spelling(&format!(
+                            "{name}<{}>",
+                            arguments.join(", ")
+                        ))
+                    }
+                    _ => started,
+                };
+
                 let Some(class) = fact.scope.as_deref() else {
                     // A free function: there is no class whose members could name its return type. An alias at
                     // file scope (`using size_type = size_t;` and a function returning `size_type`) is resolved by

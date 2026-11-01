@@ -1479,7 +1479,40 @@ pub fn type_of_declaration_named(
     // written *around* the name and is therefore part of the type — see [`wrap`].
     let inner = declarator_holding_the_name(declarator, name);
 
-    wrap(base, declarator, &inner, name)
+    // **A pointer-to-function declarator keeps its parameter list one level up.** `int (*fp)(int)` is
+    // `InitDeclarator > [Declarator "(*fp)", ParameterList "(int)"]` — the list belongs to the *pointer*, and the
+    // walk above is handed the declarator alone, so the type came back as `int*` and a call through `fp` had no
+    // return type to read. Measured: `auto through_pointer = fp(3);` answered unknown while the declaration is
+    // plainly a function pointer.
+    let the_base = base.clone();
+    let wrapped = wrap(base, declarator, &inner, name);
+    let pointer_to_function = declarator.text().to_string().trim_start().starts_with("(*")
+        || declarator.text().to_string().trim_start().starts_with("(&");
+    if pointer_to_function
+        && let Some(parent) = declarator.parent()
+        && let Some(list) = parent
+            .children()
+            .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::ParameterList)
+    {
+        // **The pointer is to the function, not the function of the pointer**: `int (*fp)(int)` is
+        // `Pointer { to: Function { returns: int } }`, and wrapping the pointer itself made it a function *returning*
+        // `int*` — which is a different type and a different call.
+        let function = Type::Function {
+            returns: Arc::new(the_base),
+            parameters: read_parameters(&list),
+        };
+        return if declarator.text().to_string().trim_start().starts_with("(&") {
+            Type::Reference {
+                to: Arc::new(function),
+                rvalue: false,
+            }
+        } else {
+            Type::Pointer {
+                to: Arc::new(function),
+            }
+        };
+    }
+    wrapped
 }
 
 /// **The range of the identifier a declarator declares** — its first `NameExpr`, which is the name.

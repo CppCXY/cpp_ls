@@ -219,14 +219,16 @@ const TYPES: &[TypeRow] = &[
         file: "src/techniques.cpp",
         needle: "auto cut = text.substr(1, 2)",
         name: "cut",
-        expected: "std::string",
+        // **The instantiation, not the alias**: `substr` is declared to return `basic_string`, the injected-class-name,
+        // so the answer is the class with the receiver's own arguments.
+        expected: "basic_string<char",
     },
     TypeRow {
         file: "src/techniques.cpp",
         needle: "auto shared = Holder::instances",
         name: "shared",
         expected: "int",
-    }
+    },
 ];
 
 fn corpus_files(root: &Path) -> Vec<PathBuf> {
