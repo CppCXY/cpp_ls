@@ -3676,3 +3676,35 @@ public:\
         "the friend declaration permits it: {codes:?}"
     );
 }
+
+/// **A private member read inside its class's own out-of-class definition** is that class's own code.
+///
+/// `int Holder::peek() { return secret; }` has no `ClassDef` above it in the tree — the class is written in the
+/// specifier — so the access check could not see that the reader *is* `Holder`, and reported it. Measured on
+/// MSVC's `comutil.h`: seven `AccessInvisible` findings, six of them defined out of class.
+#[test]
+fn an_out_of_class_definition_may_read_its_own_private_member() {
+    let codes = codes_of_with(
+        "\
+struct Outer {
+    struct Inner {
+        int peek() const;
+    private:
+        int secret = 1;
+    };
+};
+    int peek() const;\
+private:\
+    int secret = 1;\
+};\
+
+int Holder::peek() const { return secret; }\
+",
+        "/p/a.cpp",
+        Some("c++20"),
+    );
+    assert!(
+        !codes.contains(&DiagnosticCode::AccessInvisible),
+        "the definition is the class's own code: {codes:?}"
+    );
+}

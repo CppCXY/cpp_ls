@@ -144,6 +144,20 @@ impl Check for AccessInvisible {
                 continue;
             }
 
+            // **…and an out-of-class definition has no `ClassDef` above it in the tree at all.** `inline _bstr_t&
+            // _bstr_t::operator=(const _bstr_t& s) { m_Data = s.m_Data; }` is `_bstr_t`'s own code, but the class is written
+            // in the *specifier*, so `enclosing_definition` reads `None` and this rule could not fire. The scope tree has
+            // the answer — the definition opens a function scope named for its class, and the walk up from the access reaches
+            // a Class scope whose qualified name is the class. Measured on MSVC's `comutil.h`: seven findings, every one of
+            // them the declaring class's own member function, six of them defined out of class.
+            if let (Some(inside), Some(declared)) = (
+                the_class_the_reader_is_in(context, &node),
+                first_word_after_the_keyword(&class),
+            ) && (inside == declared || inside.ends_with(&format!("::{declared}")))
+            {
+                continue;
+            }
+
             // **And a `friend` may touch what is private.** `_bstr_t` declares `friend class _variant_t;`, whose members
             // then read `_bstr_t`'s privates — the shape the standard's own operators and every `_com_ptr_t`-style wrapper
             // is built from. The rule is written in the declaring class's own body, which is in this file (the member's
@@ -155,6 +169,23 @@ impl Check for AccessInvisible {
                 continue;
             }
 
+            if std::env::var_os("CPPLS_TRACE_ACCESS").is_some() {
+                let spelled = context
+                    .source
+                    .get(access.member_range.start_offset..access.member_range.end_offset())
+                    .unwrap_or("<out of range>");
+                let object = context
+                    .source
+                    .get(
+                        cpp_parser::source_range(access.object.text_range()).start_offset
+                            ..cpp_parser::source_range(access.object.text_range()).end_offset(),
+                    )
+                    .unwrap_or("<out of range>");
+                eprintln!(
+                    "[access] member={:?} spelled={spelled:?} object={object:?} range={:?}",
+                    access.member, access.member_range
+                );
+            }
             context.add(
                 DiagnosticCode::AccessInvisible,
                 access.member_range,
@@ -175,6 +206,27 @@ impl Check for AccessInvisible {
 /// or `StructKeyword` token inside. This was a text test — *does the text start with `class ` and hold a `{`* — and
 /// that is a decision made by reading punctuation, which is how the check layer produced its one false positive so
 /// far (see `assignment_in_condition`).
+/// **Does `declaring` name `accessing` as a friend?** — `friend class X;`, `friend struct X;`, `friend X;`.
+///
+/// The names are compared by **spelling**, taken from the friend declaration's own text and from the accessing
+/// **The qualified name of the class the reader is inside at `node`**, from the scope tree.
+///
+/// The tree cannot answer it for an out-of-class definition — the class is written in the specifier and there is no
+/// `ClassDef` ancestor — while the scope tree can: the definition opens a function scope named `_bstr_t::operator=`,
+/// whose parent is the class scope. `None` when the node is in no class at all, which is the ordinary free function.
+fn the_class_the_reader_is_in(context: &CheckContext<'_>, node: &CppSyntaxNode) -> Option<String> {
+    let at = cpp_parser::source_range(node.text_range()).start_offset;
+    let mut scope = context.view.scopes.scope_at(at);
+    while let Some(id) = scope {
+        let data = context.view.scopes.scope(id)?;
+        if matches!(data.kind, crate::ScopeKind::Class) {
+            return data.name.as_deref().map(str::to_string);
+        }
+        scope = data.parent;
+    }
+    None
+}
+
 /// **Does `declaring` name `accessing` as a friend?** — `friend class X;`, `friend struct X;`, `friend X;`.
 ///
 /// The names are compared by **spelling**, taken from the friend declaration's own text and from the accessing

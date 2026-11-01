@@ -54,6 +54,16 @@ fn one_file_reports_its_findings_with_context() {
                 finding.code,
                 line.map(|line| line + 1)
             );
+            // **What the file actually spells at the reported span** — which tells a wrong *range* from a wrong
+            // *translation*: when this differs from `finding.name`, the range is the problem.
+            {
+                let at = at.get();
+                let spelled = text.get(
+                    at..(at + (finding.range.end_offset() - finding.range.start_offset))
+                        .min(text.len()),
+                );
+                println!("     name={:?} spelled={spelled:?}", finding.name);
+            }
         }
         if let Some(line) = line {
             for around in line.saturating_sub(2)..=(line + 2).min(lines.len().saturating_sub(1)) {
