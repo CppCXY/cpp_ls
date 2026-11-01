@@ -540,3 +540,27 @@ FAIL  auto raw = widget.raw();   CRTP: `raw` is `Counted<Widget>`'s member. The 
 
 An **overload set that disagrees after narrowing** answers nothing on purpose: choosing between those candidates is overload
 *ranking* (conversions, template partial ordering), which this layer does not do.
+
+## Why the CRTP row cannot be fixed where it looks fixable — a measured constraint
+
+```cpp
+template <typename Derived> struct Counted { int raw() const { … } };
+struct Widget : Counted<Widget> { int stored; };
+Widget widget;  auto raw = widget.raw();      // no type
+```
+
+The member *list* finds `raw` (depth 1, from `Counted`), so `members_of("Widget")` is right and the completion offers it. The
+single-member query, `member_fact("Widget", "raw")`, answers `NotDeclaredHere`, and the reason is not the base walk:
+
+* the project has **two** `Widget` classes — one in `techniques.h`, one in `main.cpp` — and a bare spelling resolves to
+  whichever the index filed first;
+* the natural disambiguator is the file the **object's type was declared in**, and that is what this pipeline cannot give: the
+  declaration's file, as `type_of` reports it, is the file the *expression* was read in — because a `.cpp`'s rendering has its
+  headers' text **inlined**, so the header's identity is already gone by the time the type is answered. Measured with the
+  candidate fix in place: `member_fact("Widget", "raw")` arrived with `from = techniques.cpp`, and that file's members for
+  `Widget` were `["identifier", "size"]` — the *other* class's, read out of the same rendering.
+
+That was tried, measured and reverted rather than shipped: threading the type's file into the member query changed no answer
+and added a parameter to eight call sites. The fix this needs is one layer down — the type has to carry the file its
+declaration was *written* in, which means the rendering has to keep the span table's file boundaries by the time a type is
+built. That is a real piece of work and it belongs to its own change, not to a member query.
