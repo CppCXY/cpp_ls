@@ -48,7 +48,11 @@ impl Check for ParamTypeCheck {
         // overload set, and an overload set is not this check's question — see the module documentation. The
         // `Option` is the whole of that rule: `None` means "more than one declaration", and the call loop below
         // skips those names without asking anything else.
-        let mut by_name: std::collections::HashMap<String, Option<Vec<String>>> =
+        // **The name a definition answers to is the name the *call* must write**, and a definition inside a namespace
+        // needs its namespace: `techniques::describe(41)` and `techniques_app::describe(const Shape&)` are two different
+        // functions, and a table keyed by the bare name compared the first against the second's parameter. Measured on the
+        // project this layer is measured on: two findings, both against a definition the call does not name.
+        let mut by_name: std::collections::HashMap<String, Option<(Vec<String>, Vec<String>)>> =
             std::collections::HashMap::new();
         // **This file's own functions** - see CheckContext::own_syntax_nodes.
         for function in context
@@ -68,6 +72,7 @@ impl Check for ParamTypeCheck {
                 .iter()
                 .map(|spelling| crate::sema::overload::a_type_without_its_name(spelling))
                 .collect();
+            let namespaces = enclosing_namespaces(&function);
             match by_name.entry(name) {
                 std::collections::hash_map::Entry::Occupied(mut e) => {
                     // **A second declaration of one name is an overload set** — see the module documentation. `None`
@@ -75,7 +80,7 @@ impl Check for ParamTypeCheck {
                     e.insert(None);
                 }
                 std::collections::hash_map::Entry::Vacant(e) => {
-                    e.insert(Some(parameters));
+                    e.insert(Some((namespaces, parameters)));
                 }
             }
         }
@@ -108,8 +113,21 @@ impl Check for ParamTypeCheck {
             // rule that keeps an overload set out of a comparison about one parameter list. But a function declared once in a
             // header and called here has exactly one parameter list too, and that is the most common shape in a project, so a
             // name the table does not hold is asked of the index before this check gives up.
+            // **A qualified call names a function in that scope, and nowhere else.** `techniques::describe(41)` must not
+            // be compared against `techniques_app::describe(const Shape&)`, which is what a table keyed by the bare name
+            // did — measured on the project this layer is measured on, two findings against a definition the call does not
+            // name.
+            let written_callee = callee.text().to_string();
+            let qualifier = written_callee
+                .rfind("::")
+                .map(|at| written_callee[..at].trim().to_string());
             let parameters: Vec<String> = match by_name.get(name.as_str()) {
-                Some(Some(parameters)) => parameters.clone(),
+                Some(Some((namespaces, parameters))) => {
+                    if !a_qualifier_names_the_namespaces(qualifier.as_deref(), namespaces) {
+                        continue;
+                    }
+                    parameters.clone()
+                }
                 // A name declared twice in this file is an overload set: not this check's question.
                 Some(None) => continue,
                 None => match the_index_declares_one(context, name.as_str()) {
@@ -243,7 +261,39 @@ fn check_the_arguments(
     }
 }
 
-/// **The one parameter list the index has for a name**, with its parameter names stripped — the fallback for a function
+/// **The namespaces a declaration is written inside**, outermost first.
+fn enclosing_namespaces(node: &cpp_parser::CppSyntaxNode) -> Vec<String> {
+    let mut namespaces: Vec<String> = node
+        .ancestors()
+        .filter(|ancestor| {
+            matches!(
+                cpp_parser::CppSyntaxKind::from(ancestor.kind()),
+                cpp_parser::CppSyntaxKind::NamespaceDecl
+            )
+        })
+        .filter_map(|namespace| super::spelling_of(&namespace))
+        .collect();
+    namespaces.reverse();
+    namespaces
+}
+
+/// **Does the qualifier a call wrote name these namespaces?**
+///
+/// `None` for an unqualified call, which may name any of them. A qualified one names a scope, and the declaration is
+/// that function only when the chain it is written in is the chain the call ends with: `techniques::describe` does not
+/// name `techniques_app::describe`.
+fn a_qualifier_names_the_namespaces(qualifier: Option<&str>, namespaces: &[String]) -> bool {
+    let Some(qualifier) = qualifier else {
+        return true;
+    };
+    if namespaces.is_empty() {
+        return false;
+    }
+    qualifier == namespaces.join("::")
+        || qualifier.ends_with(&format!("::{}", namespaces.join("::")))
+}
+
+/// **The one parameter list the index has for a name**
 /// declared in a header and called here.
 ///
 /// `None` when the index knows no such function, knows several (an overload set, which this check declines), or when the

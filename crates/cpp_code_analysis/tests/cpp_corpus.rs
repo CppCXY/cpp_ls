@@ -411,6 +411,18 @@ const TYPES: &[TypeRow] = &[
         name: "taken",
         expected: "int",
     },
+    TypeRow {
+        file: "src/techniques.cpp",
+        needle: "auto total = techniques_app::total_area(shapes)",
+        name: "total",
+        expected: "double",
+    },
+    TypeRow {
+        file: "src/techniques.cpp",
+        needle: "auto described = techniques_app::describe(*shapes.front())",
+        name: "described",
+        expected: "int",
+    },
 ];
 
 fn corpus_files(root: &Path) -> Vec<PathBuf> {
