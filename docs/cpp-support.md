@@ -642,3 +642,34 @@ AccessInvisible at Some(694) in scopes: ["Block", "Block", "Block", "Function_va
 `_bstr_t`. Two different objects in one answer means the *pair* (name, range) is not the pair the access had: `comutil.h` is
 macro-heavy, and a finding inside a macro expansion reports the call site while its written span is elsewhere. That is the next
 measurement, and it is why the seven remain red instead of being silenced.
+
+## A second header corpus: libstdc++
+
+The sweep takes any include directory, and GCC's headers are written differently enough to find a different family:
+
+```text
+CPPLS_HEADERS="…\mingw64\lib\gcc\x86_64-w64-mingw32\15.1.0\include\c++" \
+  cargo test -p cpp_code_analysis --test headers_sweep -- --ignored --nocapture
+```
+
+```text
+before   {AccessInvisible: 1, ArgumentCount: 3, BracesAroundStatements: 95, CStyleCast: 44, ConceptNotSatisfied: 2,
+          DanglingReturn: 1, ElseAfterReturn: 13, MacroParentheses: 4, ParamTypeCheck: 6, UndefinedName: 12}
+after    {…, ConceptNotSatisfied: 0, …}
+```
+
+**A template parameter is not a type**, so no concept can refuse it: `_Tp&&` was reported as not satisfying
+`std::floating_point`, because a spelling comparison answered "not floating point" for a name that is whatever the caller
+instantiates. The check now answers "cannot tell" for a type whose bare spelling is a parameter — the same naming convention
+`sema::convert` already uses — and "cannot tell" is never a finding.
+
+**What this corpus found and this round did not fix**, each with the measurement that names it:
+
+* `UndefinedName` 12 + `AccessInvisible` 1, all in `<chrono>`, all **macro-expanded** uses where the reported span and the
+  reported name come from different places (`__dp`, `_M_y`). The range a macro-written binding gets is the open question.
+* `ParamTypeCheck` 6, all `strong_ordering(x)` where `x` is a `strong_ordering`: the copy constructor is implicit and this
+  layer sees only the `_Ord` one. Two candidate rules were measured and neither moved the number.
+* `ArgumentCount` 3 — `hours(__h)` resolved to `<chrono>`'s **member function** `hours()` rather than to the type's
+  constructor, and the guard against that (`names_a_type`) consults the facts, where the `using hours = duration<…>` alias is
+  not among the visible declarations of the name.
+* `DanglingReturn` 1 in `<any>`.
