@@ -154,6 +154,19 @@ const TYPES: &[TypeRow] = &[
         name: "doubled",
         expected: "int",
     },
+    // **A fold expression over a pack**: `(values + ...)` of four `int`s is an `int`, and of `int + double` a `double`.
+    TypeRow {
+        file: "src/techniques.cpp",
+        needle: "auto total = techniques::sum_of(1, 2, 3, 4)",
+        name: "total",
+        expected: "int",
+    },
+    TypeRow {
+        file: "src/techniques.cpp",
+        needle: "auto mixed = techniques::sum_of(1, 2.5)",
+        name: "mixed",
+        expected: "double",
+    },
 ];
 
 fn corpus_files(root: &Path) -> Vec<PathBuf> {

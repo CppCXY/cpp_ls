@@ -713,6 +713,15 @@ impl<'a> TypeSubstitutions<'a> {
             .is_some_and(|class| class == name && default.arguments().is_empty());
         (!stands_for_itself).then_some(default)
     }
+
+    /// **The arguments the call passed, in the order they were written.**
+    ///
+    /// A *pack* has no single substitution — `template <typename... Values>` with `sum_of(1, 2.5)` pairs `Values` with the
+    /// first argument — so a reader that needs the whole list (the type of a fold expression, which is what `+` widens all
+    /// of them to) asks for it here rather than going through [`TypeSubstitutions::get`].
+    pub fn arguments(&self) -> &'a [Type] {
+        self.arguments
+    }
 }
 
 /// **A substitution the caller owns** — the same pairing as [`TypeSubstitutions`], with the lists held rather than

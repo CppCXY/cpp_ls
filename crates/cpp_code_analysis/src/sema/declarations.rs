@@ -1215,6 +1215,9 @@ pub fn deduced_returns_of_substituted(
     root: &CppSyntaxNode,
     binding: Binding,
     substitutions: &crate::sema::types::TypeSubstitutions<'_>,
+    // **The types the call passed**, in order — what a *pack* stands for. A fold expression widens all of them
+    // (`sum_of(1, 2.5)` is a `double`), and a pack has no single substitution to read that from.
+    argument_types: &[crate::sema::types::Type],
 ) -> Option<String> {
     if binding.kind != BindingKind::Function {
         return None;
@@ -1232,7 +1235,8 @@ pub fn deduced_returns_of_substituted(
 
     let mut agreed: Option<String> = None;
     for expression in &returns {
-        let written = type_a_return_states_with(expression, &declaration, substitutions)?;
+        let written =
+            type_a_return_states_with(expression, &declaration, substitutions, argument_types)?;
         match &agreed {
             None => agreed = Some(written),
             Some(previous) if *previous == written => {}
@@ -1824,6 +1828,41 @@ fn returned_expressions_in(body: &CppSyntaxNode) -> Vec<CppSyntaxNode> {
 /// The substitution is applied to **the type of a parameter**, which is where a template parameter can appear in a
 /// return statement: `return p;` gives `_Iter&&`, and at a call site with `_Iter = int*` that is `int*&&` — the answer
 /// the `auto` variable's declaration is asking for. Everything else in this walk is about the expression's shape and
+/// **The usual arithmetic conversions**, for the one question a fold expression asks: what `(a + b + c)` is.
+///
+/// Only the widening half is modelled — `int` with `double` is a `double`, `float` with `long double` a `long double` —
+/// because that is what decides the type of a sum. A non-arithmetic operand answers `None`: `Widget + Widget` is an
+/// `operator+` this layer would have to find, and answering `Widget` for a user-defined sum is the kind of confidence that
+/// produces wrong types.
+fn the_widest_of(types: &[crate::sema::types::Type]) -> Option<String> {
+    let mut widest: Option<(u8, String)> = None;
+    for a_type in types {
+        let spelling = a_type.to_string();
+        let rank = match spelling.trim() {
+            "long double" => 6,
+            "double" => 5,
+            "float" => 4,
+            "unsigned long long" | "long long" | "long long int" | "unsigned long long int" => 3,
+            "unsigned long" | "long" | "long int" | "unsigned long int" | "signed long" => 2,
+            "bool" | "char" | "signed char" | "unsigned char" | "short" | "unsigned short"
+            | "int" | "unsigned" | "unsigned int" | "signed int" | "short int"
+            | "unsigned short int" | "signed short" | "signed short int" | "size_t"
+            | "std::size_t" | "ptrdiff_t" | "wchar_t" | "char8_t" | "char16_t" | "char32_t" => 1,
+            _ => return None,
+        };
+        match &widest {
+            Some((widest_rank, _)) if *widest_rank >= rank => {}
+            _ => widest = Some((rank, spelling.trim().to_string())),
+        }
+    }
+    // **Integral promotion**: a `char` or a `bool` summed is an `int`, and a list of them is not a `char`.
+    let (rank, spelling) = widest?;
+    if rank == 1 && spelling != "size_t" && spelling != "std::size_t" && spelling != "ptrdiff_t" {
+        return Some("int".to_string());
+    }
+    Some(spelling)
+}
+
 /// **A data member's declared type**, read from the class body the function is written in.
 ///
 /// ```cpp
@@ -1894,8 +1933,16 @@ fn type_a_return_states_with(
     expression: &CppSyntaxNode,
     declaration: &CppSyntaxNode,
     substitutions: &crate::sema::types::TypeSubstitutions<'_>,
+    argument_types: &[crate::sema::types::Type],
 ) -> Option<String> {
     match CppSyntaxKind::from(expression.kind()) {
+        // **A parenthesised expression is what it wraps.** A fold has to be written in parentheses — `(values + ...)` —
+        // so the node a `return` hands here is the `ParenExpr`, and without this arm the fold inside it was never looked
+        // at: measured, `auto total = sum_of(1, 2, 3, 4)` answered unknown with the fold arm below already written.
+        CppSyntaxKind::ParenExpr => {
+            let inner = expression.children().next()?;
+            type_a_return_states_with(&inner, declaration, substitutions, argument_types)
+        }
         CppSyntaxKind::NameExpr | CppSyntaxKind::IdentifierExpr => {
             // **A parameter, or a data member of the class the function is declared in.** The second is the shape every
             // accessor has — `auto copy_of() const { return value_; }` — and without it a member's deduced return was
@@ -1911,6 +1958,16 @@ fn type_a_return_states_with(
         // skipped rather than guessed.
         CppSyntaxKind::BinaryExpr => {
             let operands: Vec<CppSyntaxNode> = expression.children().collect();
+            // **A fold expression** — `(values + ...)`. Measured tree: `ParenExpr > BinaryExpr > [NameExpr, FoldExpr]`, so
+            // the fold is the *second operand* and the first is the pack it folds over. Its type is every argument the
+            // call passed, widened by `+`: four `int`s are an `int`, and `1` with `2.5` is a `double`. Before this the arm
+            // answered `None` for want of a right-hand type, and `auto total = sum_of(1, 2, 3, 4)` stayed unknown.
+            if operands.len() == 2
+                && CppSyntaxKind::from(operands[1].kind()) == CppSyntaxKind::FoldExpr
+                && let Some(widest) = the_widest_of(argument_types)
+            {
+                return Some(widest);
+            }
             let comparison = expression
                 .children_with_tokens()
                 .filter_map(|element| element.into_token())
@@ -1925,8 +1982,10 @@ fn type_a_return_states_with(
             }
 
             let (left, right) = (operands.first()?, operands.last()?);
-            let left_type = type_a_return_states_with(left, declaration, substitutions)?;
-            let right_type = type_a_return_states_with(right, declaration, substitutions)?;
+            let left_type =
+                type_a_return_states_with(left, declaration, substitutions, argument_types)?;
+            let right_type =
+                type_a_return_states_with(right, declaration, substitutions, argument_types)?;
             if left_type == right_type {
                 return Some(left_type);
             }

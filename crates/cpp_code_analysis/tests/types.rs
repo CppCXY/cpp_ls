@@ -2664,3 +2664,36 @@ int f() {
         other => panic!("`doubled` is typed: {other:?}"),
     }
 }
+
+/// **A fold expression's type** — `template <typename... Vs> auto sum_of(Vs... values) { return (values + ...); }`.
+///
+/// The return type is `auto`, so the body decides, and the body is a fold: the type is every argument the call passed,
+/// widened by `+` — four `int`s are an `int`, and `1` with `2.5` is a `double`.
+#[test]
+fn a_fold_expressions_type_is_the_widest_argument() {
+    let source = "\
+namespace t {
+template <typename... Values>
+auto sum_of(Values... values) {
+    return (values + ...);
+}
+}
+
+int f() {
+    auto total = t::sum_of(1, 2, 3, 4);
+    auto mixed = t::sum_of(1, 2.5);
+    return total + static_cast<int>(mixed);
+}
+";
+    let session = session_with(&[("/p/a.cpp", source)]);
+    let view = session.view("/p/a.cpp").expect("the file is held");
+    for (name, expected) in [("total", "int"), ("mixed", "double")] {
+        let offset = last_word(source, name);
+        match session.type_at(&view, as_reading(&view, offset)) {
+            cpp_code_analysis::Known::Yes(found) => {
+                assert_eq!(found.type_of, expected, "{name}");
+            }
+            other => panic!("`{name}` is typed: {other:?}"),
+        }
+    }
+}

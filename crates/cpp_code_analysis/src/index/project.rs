@@ -5428,7 +5428,9 @@ impl NamedDeclaration {
                 // the substitutions is the only one instantiated, and `_It + 0` becomes `int* + 0`.
                 let names_for_the_call =
                     crate::sema::declarations::declared_template_parameters_of(root, binding);
-                let returns = match crate::sema::declarations::declared_returns_of(root, binding) {
+                let returns = match crate::sema::declarations::declared_returns_of(root, binding)
+                    .filter(|returns| !is_a_placeholder(returns))
+                {
                     Some(returns) => parse_type_spelling(&returns),
                     None => {
                         let substitutions = crate::sema::types::TypeSubstitutions::new(
@@ -5439,6 +5441,7 @@ impl NamedDeclaration {
                             root,
                             binding.clone(),
                             &substitutions,
+                            argument_types,
                         )?;
                         parse_type_spelling(&written)
                     }
@@ -5525,6 +5528,7 @@ impl NamedDeclaration {
                             &declared_in.root,
                             binding,
                             &substitutions,
+                            argument_types,
                         )?;
                         parse_type_spelling(&written)
                     }
@@ -7029,7 +7033,9 @@ fn type_of_a_call(
         return Known::Yes((crate::sema::types::parse_type_spelling(&returns), file));
     }
 
-    match declaration_of_a_callee(memo, index, declaring, scopes, root, path, &callee, written) {
+    let resolved =
+        declaration_of_a_callee(memo, index, declaring, scopes, root, path, &callee, written);
+    match resolved {
         Known::Yes(named) => match named.what_a_call_has(
             index,
             declaring,
