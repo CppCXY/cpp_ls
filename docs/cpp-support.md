@@ -611,3 +611,34 @@ member definitions — genuine "the class's own code" — reached through a **tw
 (`inline unsigned long _bstr_t::Data_t::AddRef() throw()`). The out-of-class fix walks the qualifier segment by segment, so
 this shape should be next on the list; the sweep now names the line, which is what makes it a one-line investigation instead
 of a guess.
+
+## Named function scopes, `friend` access, and a probe that shows where a finding sits
+
+Three more from the header sweep, each with a test whose red was reproduced:
+
+**An out-of-class definition's function scope carried no name.** `inline void Widget::grow(…)` writes its name in the
+*specifier*, so `declared_name` read none from the declarator and the scope came out unnamed — and that name is what
+`class_of_the_enclosing_definition` reads to answer `this`:
+
+```text
+before   Function                          (inside Class _bstr_t)
+after    Function_bstr_t::GetAddress       (inside Class _bstr_t)
+```
+
+**A friend may read what is private.** `class Holder { friend class Borrower; int secret; };` — the access check reported
+`Borrower`'s read of `secret` until it looked at the declaring class's own `FriendDecl` nodes.
+`a_friends_code_may_read_what_is_private` fails without the rule and passes with it; a `friend` operator written in a class body
+is the same rule and the reason every `operator<<` works.
+
+**`tests/one_file.rs`** prints every finding in one file with the source **and the scope chain at the finding** — which is
+what turned "seven findings in a COM header" into specific lines. Its first version looked the scopes up by *file* offset while
+the tree is keyed by *rendering* offset, and therefore answered `TranslationUnit` for everything; the fixed tool prints
+
+```text
+AccessInvisible at Some(694) in scopes: ["Block", "Block", "Block", "Function_variant_t::_variant_t", "Class_variant_t"]
+```
+
+— which says the finding's node is inside `_variant_t`'s own constructor while the message names `m_Data`, a private member of
+`_bstr_t`. Two different objects in one answer means the *pair* (name, range) is not the pair the access had: `comutil.h` is
+macro-heavy, and a finding inside a macro expansion reports the call site while its written span is elsewhere. That is the next
+measurement, and it is why the seven remain red instead of being silenced.
