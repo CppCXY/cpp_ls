@@ -1888,7 +1888,7 @@ fn returned_expressions_in(body: &CppSyntaxNode) -> Vec<CppSyntaxNode> {
 /// because that is what decides the type of a sum. A non-arithmetic operand answers `None`: `Widget + Widget` is an
 /// `operator+` this layer would have to find, and answering `Widget` for a user-defined sum is the kind of confidence that
 /// produces wrong types.
-fn the_widest_of(types: &[crate::sema::types::Type]) -> Option<String> {
+pub(crate) fn the_widest_of(types: &[crate::sema::types::Type]) -> Option<String> {
     let mut widest: Option<(u8, String)> = None;
     for a_type in types {
         let spelling = a_type.to_string();

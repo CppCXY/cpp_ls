@@ -4120,6 +4120,49 @@ fn type_of_expression_inner(
         };
     }
 
+    // **A conditional expression** has the type the two branches agree on: `cond ? 1 : 2.0` is a `double` — [expr.cond]
+    // usual arithmetic conversions, the same rule a fold uses. Measured: `auto widened = true ? 1 : 2.0;` answered
+    // *"the type of `true ? 1 : 2.0` is not known here"*.
+    if cpp_parser::CppSyntaxKind::from(expression.kind()) == cpp_parser::CppSyntaxKind::TernaryExpr
+    {
+        let branches: Vec<cpp_parser::CppSyntaxNode> = expression.children().collect();
+        if let (Some(one), Some(other)) = (branches.get(1), branches.get(2)) {
+            let one_type = type_of_expression_memoed(
+                memo,
+                index,
+                declaring,
+                scopes,
+                root,
+                path,
+                one,
+                depth + 1,
+            );
+            let other_type = type_of_expression_memoed(
+                memo,
+                index,
+                declaring,
+                scopes,
+                root,
+                path,
+                other,
+                depth + 1,
+            );
+            if let (Known::Yes((one_type, file)), Known::Yes((other_type, _))) =
+                (one_type, other_type)
+            {
+                let agreed = if one_type == other_type {
+                    Some(one_type.clone())
+                } else {
+                    crate::sema::declarations::the_widest_of(&[one_type, other_type])
+                        .map(|widest| crate::sema::types::parse_type_spelling(&widest))
+                };
+                if let Some(agreed) = agreed {
+                    return Known::Yes((agreed, file));
+                }
+            }
+        }
+    }
+
     // A **parenthesised** expression has the type of what it wraps, and the parentheses are a node of their own:
     // `(*p).size` makes the object of the `.` a `ParenExpr`, so a recursion that did not step through it would
     // stop one level above the answer — which is exactly where it used to stop.

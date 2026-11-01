@@ -185,6 +185,24 @@ const TYPES: &[TypeRow] = &[
         name: "found",
         expected: "int",
     },
+    TypeRow {
+        file: "src/techniques.cpp",
+        needle: "auto widened = true ? 1 : 2.0",
+        name: "widened",
+        expected: "double",
+    },
+    TypeRow {
+        file: "src/techniques.cpp",
+        needle: "auto allocated = new Closing{}",
+        name: "allocated",
+        expected: "Closing*",
+    },
+    TypeRow {
+        file: "src/techniques.cpp",
+        needle: "for (const auto& [key, value] : table)",
+        name: "value",
+        expected: "int",
+    },
 ];
 
 fn corpus_files(root: &Path) -> Vec<PathBuf> {
