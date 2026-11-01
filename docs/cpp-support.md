@@ -564,3 +564,37 @@ That was tried, measured and reverted rather than shipped: threading the type's 
 and added a parameter to eight call sites. The fix this needs is one layer down — the type has to carry the file its
 declaration was *written* in, which means the rendering has to keep the span table's file boundaries by the time a type is
 built. That is a real piece of work and it belongs to its own change, not to a member query.
+
+## A header sweep: the false findings it found, and what is still there
+
+A new ignored test (`tests/headers_sweep.rs`) indexes sixty of MSVC's headers and runs **every check** over them. Valid code,
+so every finding is a defect of this layer's — and it is the only way to find defects that a three-file project cannot show:
+
+```text
+CPPLS_HEADERS="…\VC\Tools\MSVC\14.35.32215\include" \
+  cargo test -p cpp_code_analysis --test headers_sweep -- --ignored --nocapture
+```
+
+```text
+before   {AccessInvisible: 7, AssignTypeCheck: 1, CStyleCast: 138, ElseAfterReturn: 2, MacroParentheses: 8,
+          Redefinition: 5, UndefinedName: 11, UseNullptr: 26}
+after    {AccessInvisible: 7, AssignTypeCheck: 1, CStyleCast: 138, ElseAfterReturn: 2, MacroParentheses: 8,
+          Redefinition: 5, UndefinedName: 2, UseNullptr: 26}
+```
+
+**`UndefinedName` fell from 11 to 2**, all nine from one COM header, and the cause was worth more than the nine: an
+**out-of-class definition's function scope was parented to the file**, so `void W::f() { a = 1; }` could not see `a` even
+when `W` was declared three lines above. That is the shape every C++ project is written in. See the commit for the tree
+before and after (`File{W}(Class{a,f} Fn)` → `File{W}(Class{a,f}(Fn))`).
+
+**What is still there**, with what it would take:
+
+* `CStyleCast` 138, `UseNullptr` 26, `MacroParentheses` 8, `ElseAfterReturn` 2 — **style** rules. A vendor's headers are not
+  written to a project's style, and an editor offering these on `<vector>` is noise. A real project turns them off for
+  system headers; whether this layer should decide that for the user is a product question, not a defect.
+* `AccessInvisible` 7 — all in `comutil.h`, all about `m_Data`/`m_wstr` in `_bstr_t`'s own member definitions. Its members are
+  **private**, so this is the same family as the last point: the code *is* the class's own.
+* `Redefinition` 5 — `_Ptr`, `_Src`, `_Destination_tuple` in three `#if`-heavy headers. The check only judges function, block
+  and lambda scopes, and the shapes were not reproducible from a fixture (`two_functions_that_both_name_one_variable` passes),
+  so the next step is a trace on the header itself rather than another guess.
+* `UndefinedName` 2 — the two that remain in `comutil.h`.
