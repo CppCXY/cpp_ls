@@ -462,3 +462,33 @@ Three things had to be true:
 a_members_deduced_return_type_is_read_through_a_header   red before, green after
 cpp_project: 0 errors, 0 findings, 9/9 members, 9/9 types  (was 7/9)
 ```
+
+## The shapes around the edges: lambdas, structured bindings, `?:`, function pointers
+
+Every one of these was **measured red first**, in the probe's own file layout, and each turned out to be a different layer:
+
+| shape | before | after | what was wrong |
+| --- | --- | --- | --- |
+| `auto copied = box.copy_of()` | unknown | `int` | `auto` was parsed as a type *called* `auto`, and a `return` naming a data member was unreadable |
+| `auto total = sum_of(1, 2, 3, 4)` | unknown | `int` | a fold is `ParenExpr > BinaryExpr > [pack, FoldExpr]`, and a *pack* is no single substitution |
+| `auto result = doubler(3)` | unknown | `int` | a lambda's type is unnamed; the body is reachable through the variable it was stored in |
+| `auto [n, f] = pair` | `int()` for both | `int`, `double` | the `=` of a structured binding is inside the `InitDeclarator`, which the pattern reader did not look in |
+| `auto widened = c ? 1 : 2.0` | unknown | `double` | no `TernaryExpr` arm; the widening table from the fold is shared |
+| `int (*fp)(int) = negate; fp(3)` | *"`fp` is not declared"* | `int` | a parenthesised declarator was called unnamed, then read as a function, and its type lost the parameter list |
+| `auto cut = text.substr(1, 2)` | `basic_string` | `basic_string<char, …>` | an injected-class-name stands for the class *with its arguments* |
+
+Two of those were **wrong answers rather than missing ones**, which is the worse failure: `int()` is a type-shaped lie, and
+`basic_string` with no arguments is a different type from the one the declaration means. The rule applied throughout: an
+answer this layer cannot build is `None`, and a spelling it *can* build is built completely or not at all.
+
+The function-pointer case is worth its own line, because the false diagnostic was the visible half: `int (*fp)(int) = negate;`
+made `fp` **undeclared in the function that declares it** — the AST's name reader answers `None` for a parenthesised
+declarator, so the walker decided the declaration was unnamed and never read the declarator at all. The scope tree had no `fp`,
+and the undeclared-identifier check reported the file's own variable. Three separate fixes, each verified by a trace:
+`is_unnamed_declaration` consults the declarators, a nested declarator that names nothing no longer ends the walk, and a
+declarator is read as a function only when it is **not** `(*`/`(&`-parenthesised — a qualified definition's declarator is a
+bare parameter list and must stay a function.
+
+An existing inlay test had **pinned the old boundary** (`void (*f(int a))(int b);` "is not bound, so nothing resolves the
+call"). It is now green in the opposite direction: `f` resolves, and the hint reads `f`'s own parameter `a`, not the `b` of the
+function it returns — exactly what its own comment predicted would work the day the binding existed.
