@@ -49,14 +49,12 @@ fn one_file_reports_its_findings_with_context() {
                     })
                 })
                 .collect();
-            println!("  in scopes: {chain:?}");
+            println!(
+                "  {:?} at {:?} in scopes: {chain:?}",
+                finding.code,
+                line.map(|line| line + 1)
+            );
         }
-        println!(
-            "\n{:?} at {:?}: {}",
-            finding.code,
-            line.map(|line| line + 1),
-            finding.message
-        );
         if let Some(line) = line {
             for around in line.saturating_sub(2)..=(line + 2).min(lines.len().saturating_sub(1)) {
                 println!("  {}: {}", around + 1, lines[around]);
