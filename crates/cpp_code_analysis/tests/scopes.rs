@@ -2658,3 +2658,4 @@ fn an_out_of_class_definition_is_nested_in_its_class() {
     );
 }
 
+
