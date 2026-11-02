@@ -139,9 +139,13 @@ pub(crate) fn the_annotation_before(written: &str, at: usize) -> Option<String> 
         return None;
     }
     let head = trimmed[..index].trim_end();
+    // **A char offset, and a char's own width** — the same rule as `sema::declarations::the_annotation_before`, where
+    // `offset + 1` panicked on a multi-byte character in the indexing thread.
     let start = head
-        .rfind(|ch: char| !(ch.is_alphanumeric() || ch == '_'))
-        .map(|offset| offset + 1)
+        .char_indices()
+        .rev()
+        .find(|(_, ch)| !(ch.is_alphanumeric() || *ch == '_'))
+        .map(|(offset, ch)| offset + ch.len_utf8())
         .unwrap_or(0);
     let identifier = &head[start..];
     if identifier.is_empty()

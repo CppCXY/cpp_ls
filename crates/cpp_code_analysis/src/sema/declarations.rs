@@ -1700,9 +1700,16 @@ fn the_annotation_before(written: &str, at: usize) -> Option<(String, Vec<String
         return None;
     }
     let head = before[..index].trim_end();
+    // **A char offset, and a char's own width.** `rfind` answers the *byte* offset of a character, so `offset + 1` is
+    // that character's successor only when it is one byte wide: `×` (U+00D7) is two, and `&head[start..]` panicked with
+    // "start byte index 37747 is not a char boundary; it is inside '×'" on a real project — inside the **indexing**
+    // thread, which is a crash rather than a wrong answer. `len_utf8` is the offset of the next character, which is
+    // what this wants, and it is the same expression for every width.
     let start = head
-        .rfind(|ch: char| !(ch.is_alphanumeric() || ch == '_'))
-        .map(|offset| offset + 1)
+        .char_indices()
+        .rev()
+        .find(|(_, ch)| !(ch.is_alphanumeric() || *ch == '_'))
+        .map(|(offset, ch)| offset + ch.len_utf8())
         .unwrap_or(0);
     let macro_name = &head[start..];
     if !matches!(
@@ -4949,7 +4956,7 @@ pub fn split_by_a_directive_with(shapes: &DeclarationShapes, binding: &Binding) 
 
 #[cfg(test)]
 mod tests {
-    use super::{build_facts, by_name, template_parameters_for};
+    use super::{build_facts, by_name, template_parameters_for, the_annotation_before};
     use crate::preprocess::preprocess;
     use crate::sema::scopes::build_scopes;
     use crate::summary::DeclFact;
@@ -5889,4 +5896,24 @@ public:
         );
         assert_eq!(of("plain").returns.as_deref(), Some("void"));
     }
+}
+
+/// **A multi-byte character before an annotation does not panic.**
+///
+/// `the_annotation_before` finds the identifier by searching *backwards* for the first character that is not part
+/// of it — and `rfind` answers a **byte** offset, so `offset + 1` lands inside the character when that character is
+/// wider than one byte. Measured on a real project: *"start byte index 37747 is not a char boundary; it is inside
+/// '×' (bytes 37746..37748)"*, raised inside the **indexing** thread while a summary was being built.
+#[test]
+fn an_annotation_after_a_multi_byte_character_is_read() {
+    let written = "// 3×UCLASS()\nclass Foo {};";
+    let at = written
+        .find("class Foo")
+        .expect("the declaration is written");
+    let found = the_annotation_before(written, at);
+    assert_eq!(
+        found.map(|(name, _)| name),
+        Some("UCLASS".to_string()),
+        "the annotation is found past a two-byte character"
+    );
 }
