@@ -1656,23 +1656,27 @@ impl<F: FileProvider> SummaryStore<F> {
                     continue;
                 };
 
-                // The plain shape first — it is free (9.7 ms for every body in the project) and it settles most
-                // bodies; an environment is only asked for the ones it cannot read.
-                let plain = { cpp_parser::shape_of_a_body(body).a_reading_uses_this() };
-                let used = if plain {
-                    true
-                } else {
-                    match &bodies {
+                // **The plain shape first, and the three answers it can give.** `Used` is the free yes
+                // (`namespace std {`, `}`, `try {`, `::std::`). `Settled` is a body no environment can turn into
+                // one of those: `((a) > (b) ? (a) : (b))` is not a namespace whatever `a` expands to, and asking
+                // a timeline about it is the waste this arm removes — measured on `EmmyLuaCodeStyle`, where the
+                // pass built thirteen whole-closure timelines per drain to answer such questions with `no`.
+                // `Unplaceable` is the one real question: a body that begins with a **name**, whose expansion is
+                // what decides whether it opens a scope.
+                let used = match the_plain_shape(body) {
+                    APlainShape::Used => true,
+                    APlainShape::Settled => false,
+                    APlainShape::Unplaceable => match &bodies {
                         // **The unit's own timeline**: the body is read in the environment of the file that
                         // defines it, which is a position in the walk — no closure walked here at all.
                         Some(bodies) => {
                             cpp_parser::shape_of_a_body_at(body, bodies, range.start_offset)
                                 .a_reading_uses_this()
                         }
-                        // A caller with **no timeline at all** — a probe indexing a closure from an entry point, a
-                        // test — keeps the reading this pass has always had: the defining file's own closure,
-                        // walked once per file that needs it. Slower, and the same answer for a file that *is* its
-                        // own unit root; the session passes units and never comes here.
+                        // A caller with **no timeline at all** — a probe indexing a closure from an entry point,
+                        // a test — keeps the reading this pass has always had: the defining file's own closure,
+                        // walked once per file that needs it. Slower, and the same answer for a file that *is*
+                        // its own unit root; the session passes units and never comes here.
                         None => {
                             let environment = environment.get_or_insert_with(|| {
                                 let evidence = crate::summary::macros_from_the_closure_with_bodies(
@@ -1695,7 +1699,7 @@ impl<F: FileProvider> SummaryStore<F> {
                             cpp_parser::shape_of_a_body_at(body, environment, range.start_offset)
                                 .a_reading_uses_this()
                         }
-                    }
+                    },
                 };
 
                 if used {
@@ -2464,6 +2468,66 @@ fn words_of(text: &str) -> impl Iterator<Item = &str> {
 
 /// Every whole word the files in `files` mention, as a set — the narrowing [`SummaryStore::re_read_what_a_body_changes`]
 /// applies, and a **superset** of the names `mentions_one_of` could match in any of them.
+#[cfg(test)]
+mod the_plain_shape_tests {
+    use super::{APlainShape, the_plain_shape};
+
+    /// **The three answers, with the shapes that make the pass pay for a timeline or not.**
+    ///
+    /// The one that matters is the middle: `((a) > (b) ? (a) : (b))` is not a namespace whatever `a` expands to, so the
+    /// environment cannot change it and the pass used to ask anyway — measured on `EmmyLuaCodeStyle`, where thirteen
+    /// whole-closure timelines were built per drain to answer such questions with `no`.
+    #[test]
+    fn a_body_is_settled_without_an_environment_unless_it_begins_with_a_name() {
+        for (body, expected) in [
+            ("namespace std {", APlainShape::Used),
+            ("}", APlainShape::Used),
+            ("::std::", APlainShape::Used),
+            ("try {", APlainShape::Used),
+            ("((a) > (b) ? (a) : (b))", APlainShape::Settled),
+            ("42", APlainShape::Settled),
+            ("\"text\"", APlainShape::Settled),
+            ("", APlainShape::Settled),
+            (
+                "_EXTERN_CXX_WORKAROUND namespace std {",
+                APlainShape::Unplaceable,
+            ),
+            ("_STD_BEGIN", APlainShape::Unplaceable),
+        ] {
+            assert_eq!(the_plain_shape(body), expected, "{body:?}");
+        }
+    }
+}
+
+/// **What the plain reader can say about a macro body without its environment.**
+///
+/// The three answers are the whole point of the pre-flight below: two of them need no timeline.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum APlainShape {
+    /// `namespace std {`, `}`, `try {`, `::std::` — a reading uses the body, and the plain reader already said so.
+    Used,
+    /// `Other`, and no environment can change that: the body does not begin with a **name**. `((a) > (b) ? (a) : (b))`
+    /// is not a namespace whatever `a` expands to, and neither is a literal or an operator.
+    Settled,
+    /// `Other`, and the body begins with a name — what that name expands to is what decides the shape, so this is the
+    /// only case that needs an environment.
+    Unplaceable,
+}
+
+fn the_plain_shape(body: &str) -> APlainShape {
+    if cpp_parser::shape_of_a_body(body).a_reading_uses_this() {
+        return APlainShape::Used;
+    }
+    // The first significant character, after the line splices and whitespace a replacement list may begin with.
+    let mut characters = body
+        .trim_start_matches(['\\', ' ', '\t', '\n', '\r'])
+        .chars();
+    match characters.next() {
+        Some(first) if first.is_alphabetic() || first == '_' => APlainShape::Unplaceable,
+        _ => APlainShape::Settled,
+    }
+}
+
 fn words_mentioned_by(
     sources: &std::collections::HashMap<String, String>,
     files: &[PathBuf],
