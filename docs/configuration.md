@@ -200,11 +200,26 @@ the failure mode the analysis is written against — a rule the user believes is
 ```toml
 [unreal]
 enable = true
+engine = "C:/Program Files/Epic Games/UE_5.4"   # optional: the installation, or its Engine directory
 ```
 
 A UE project writes C++ that is not readable as ordinary C++: `UCLASS()`, `GENERATED_BODY()` and `UPROPERTY(…)` come
 from the engine's headers and expand to nothing, and the engine's naming rules are conventions no ordinary C++ project
-follows. `enable = true` is what makes the two rules that know them run:
+follows. Either key turns the engine reading on; `engine` also makes the engine's headers resolve:
+
+```text
+engine    every `Engine/Source/Runtime/<Module>/{Public,Classes}` becomes an include directory, so
+          `#include "CoreMinimal.h"` and `#include "GameFramework/Actor.h"` resolve as in a build. A path that is not
+          an installation is used as a plain include root, which is what a header-only simulation needs.
+          Without the key, an `Engine/Source/Runtime` beside (or one level above) the workspace is used when it exists.
+macros    WITH_EDITOR, WITH_EDITORONLY_DATA, WITH_ENGINE, UE_BUILD_DEVELOPMENT, UE_SERVER, IS_PROGRAM and the host's
+          PLATFORM_* — the engine's build configuration. A define the project states itself (compile database,
+          `[compile] args`, `[compile] extra_args`) wins: a guess must not override a build that exists.
+API       one `<MODULE>_API` per module the project's `*.uproject` names, defined as nothing. `MyGame` gives
+          `MYGAME_API`: the build tool turns it into a visibility attribute, and to a reader it is empty.
+```
+
+The two rules that judge the conventions:
 
 ```text
 ue-naming          a UCLASS/USTRUCT/UENUM name without its engine prefix, a boolean member without `b`
@@ -215,10 +230,10 @@ Both judge **style and engine semantics** rather than the language, which is why
 and why they are off for a project that does not say it is Unreal: `class Widget` would otherwise be reported as a
 missing `A`/`U`/`F`.
 
-The macros themselves are the project's headers, not this file. A checkout without the engine needs a simulated
-`CoreMinimal.h` — `UCLASS(...)` and the rest defined as empty, `int32`/`TArray`/`FString` spelled the way a module uses
-them — and `[compile] args` pointing at it. `C:\Users\zc\Desktop\UE-like` is such a project: a clean module, and the
-same code with one violation of each rule.
+Without an engine installed, a simulated tree of the same shape is enough — `CoreMinimal.h` with the reflection macros
+expanded to nothing and `int32`/`TArray`/`FString` spelled the way a module uses them, plus a `*.uproject` naming the
+module. `C:\Users\zc\Desktop\UE_SOURCE` is such a tree and `C:\Users\zc\Desktop\UE-like` a project over it: a clean
+module, and the same code with one violation of each rule.
 
 ## 4. What is not supported
 

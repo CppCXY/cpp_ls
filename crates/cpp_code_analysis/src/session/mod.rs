@@ -989,9 +989,19 @@ impl Session<DiskFiles> {
 
         // **And what the project says about CUDA**, which is the one layer discovery cannot work out on a machine
         // where `nvcc` is not installed: the toolkit's location, the host compiler's name, extra includes. Applied
-        // after the toolchain so that `enable` can override a discovery that found no `nvcc` — see\n        // `crate::project::cuda::CudaSection`.
+        // after the toolchain so that `enable` can override a discovery that found no `nvcc` — see
+        // `crate::project::cuda::CudaSection`.
         let config = match &project_config.config.compile.cuda {
             Some(cuda) => cuda.applied_to(config, &root),
+            None => config,
+        };
+
+        // **And what it says about Unreal Engine** — where the engine is installed, so that `#include "CoreMinimal.h"`
+        // and `#include "GameFramework/Actor.h"` resolve the way a build resolves them, plus the macros an engine build
+        // defines and one `<MODULE>_API` per module the project's `*.uproject` names. Applied after the toolchain and
+        // the database, so that a define the build itself stated wins. See `crate::project::ue::UnrealSection`.
+        let config = match &project_config.config.unreal {
+            Some(unreal) => unreal.applied_to(config, &root),
             None => config,
         };
 
@@ -4465,7 +4475,7 @@ impl<F: FileProvider + Clone> Session<F> {
                 .config
                 .unreal
                 .as_ref()
-                .is_some_and(|unreal| unreal.enable),
+                .is_some_and(|unreal| unreal.is_on()),
         ))
     }
 
