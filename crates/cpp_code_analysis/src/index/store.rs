@@ -1733,7 +1733,19 @@ impl<F: FileProvider> SummaryStore<F> {
             // The candidates come from the *whole index* (`files_defining_any_macro`), which is why an ordinary
             // project has them: `EmmyLuaCodeStyle` mentions `MAX` and `MIN`, which a dozen unrelated headers define.
             // Measured there: five to forty-one candidates per drain, of which **none** was in the closure.
-            candidates.retain(|summary| bodies_of(&environments, &seed, &summary.path).is_some());
+            //
+            // **Only when there are timelines to retain against.** This line is about the *units* — "a name whose only
+            // definers are outside them cannot be about the reading being repaired" — and a caller with no units has
+            // nothing to compare with, so it used to drop **every** candidate: `bodies_of` answers `Some` only for a
+            // path a unit covers, and after phase 2 stopped building units the answer was `None` for all of them.
+            // Measured on the C++ corpus and on `a_class_scoped_by_another_files_macro_body…`: `bodied` came out
+            // empty, `re-read: … 0 candidate file(s) … nothing bodied`, and no summary was ever refined (§3.1 of
+            // `docs/indexing-review.md`). With no units the per-candidate arm below builds the defining file's own
+            // composed environment instead, which is the reading phase 2 introduced.
+            if !environments.is_empty() {
+                candidates
+                    .retain(|summary| bodies_of(&environments, &seed, &summary.path).is_some());
+            }
 
             // Then their text, which is what the scan slices bodies out of — and, for a file being re-read that no
             // timeline covers, its own closure's text (the re-read falls back to walking it). This used to read
@@ -2263,7 +2275,10 @@ impl<F: FileProvider> SummaryStore<F> {
     ///
     /// What it costs: a breadth-first walk over summaries, one file read per defining file, and a slice per body. No
     /// preprocess, no render, no parse of anything but the file being refined.
-    fn the_indexed_environment(&self, path: &Path) -> Option<cpp_parser::MacroEnvironment> {
+    pub(crate) fn the_indexed_environment(
+        &self,
+        path: &Path,
+    ) -> Option<cpp_parser::MacroEnvironment> {
         let mut order: Vec<PathBuf> = Vec::new();
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut pending: std::collections::VecDeque<PathBuf> = std::collections::VecDeque::new();

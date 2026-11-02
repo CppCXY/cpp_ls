@@ -670,6 +670,10 @@ pub struct Session<F: FileProvider = DiskFiles> {
     /// [`Session::want_cooked_reading`] and `Cooking` have, for the same reason. Behind a lock because the asking
     /// happens in a query (`&self`) and the building happens in the loop (`&mut self`).
     macro_work: std::sync::Mutex<Cooking>,
+    /// **The run's parsed macro definitions** — see `ParsedDefinitions`: a body parses once per run, not once per
+    /// file that sees it. Keyed by the definition's own text, so it needs no invalidation: the same text is the same
+    /// definition, and a file that changed contributes a different one.
+    parsed_definitions: std::sync::Mutex<crate::ParsedDefinitions>,
     /// **The renderings built for `view`**, remembered against the content they were read from.
     ///
     /// The same arrangement as [`Session::macro_environments`] and for the same reason: a rendering is a unit walk
@@ -1074,8 +1078,12 @@ pub struct CookingMaterials {
     pub path: PathBuf,
     /// The summary key the rendered reading is filed under.
     pub key: SummaryKey,
-    /// The translation unit whose environment this file's macros come from.
-    pub unit: std::sync::Arc<crate::TranslationUnit>,
+    /// **What the file's closure defines**, as the renderer's starting state.
+    ///
+    /// Composed from the index (`configuration_from_environment_and`) rather than taken from a translation unit, so a
+    /// file no timeline holds — a header, which is most of them — can still be cooked. It used to be an
+    /// `Arc<TranslationUnit>` and this field is why the change was worth making: see [`Session::render_a_cooked`].
+    pub configuration: crate::preprocess::cooked::Configuration,
     /// The file's own text.
     pub text: String,
     /// **The hash of that text**, which is what the commit compares the file's text against — see
@@ -1447,6 +1455,7 @@ impl<F: FileProvider + Clone> Session<F> {
             prefetched: HashMap::new(),
             headers,
             macro_work: std::sync::Mutex::new(Cooking::default()),
+            parsed_definitions: std::sync::Mutex::new(crate::ParsedDefinitions::new()),
             macro_environments: std::sync::Mutex::new(cache::cache_lru::Cache::macro_environments()),
             surfaces: std::sync::Mutex::new(crate::effect::Surfaces::new()),
             effects: std::sync::Mutex::new(HashMap::new()),
@@ -3562,6 +3571,18 @@ impl<F: FileProvider + Clone> Session<F> {
 
         loop {
             let read = self.advance(64).len();
+            // **"Everything" includes refining everything, and this is where a caller says so.** The lazy contract is
+            // that a *start* refines nothing and a *request* refines what it names; a caller that asks for the whole
+            // project — a test, a probe, a batch consumer — is naming every file it has read. Without this the second
+            // pass runs on an empty ask list (`take_the_files_wanted_for_refinement`), no summary ever gets its
+            // closure's macro environment, and the capability the pass exists for is silently absent: measured, the C++
+            // corpus reads **41/52** type answers instead of 51/52, and
+            // `a_class_scoped_by_another_files_macro_body_is_scoped_through_the_session` fails with
+            // `Widget → NotDeclaredHere("std::Widget")`.
+            let read_so_far: Vec<std::path::PathBuf> = self.parsed_since_the_last_pass.clone();
+            for path in &read_so_far {
+                self.want_refinement(path);
+            }
             total += read;
 
             // **Every stage of the cook is counted, because a file can be claimed and then lost.**
@@ -3722,35 +3743,48 @@ impl<F: FileProvider + Clone> Session<F> {
 
     /// **Ask for a file's reading to be refined** — what an open or a request does.
     ///
-    /// Only a file that is in the backlog can be refined: one that is not has either been refined already or never read,
-    /// and the question "is this in the backlog" is a hash of the list the second pass uses, so a stale ask cannot keep
-    /// the pump alive.
+    /// It used to answer only for a file still in `parsed_since_the_last_pass`, on the argument that a file outside it
+    /// "has either been refined already or never read". **Both halves of that were wrong**, and the cost was the whole
+    /// capability: the pump drains that backlog before a request ever arrives, so every ask was refused, `advance`'s pass
+    /// ran on an empty list, and no summary was ever refined. Measured on the C++ corpus: **51/52 type answers before
+    /// phase 0, 41/52 after**, with the failing test naming the mechanism
+    /// (`a_class_scoped_by_another_files_macro_body_is_scoped_through_the_session`, `Widget` → `NotDeclaredHere`).
+    ///
+    /// A file that `is_refined` is the one real no-op: asking again would re-read a summary that already has its
+    /// environment. Everything else is recorded, and the pump refines it once — `take_the_files_wanted_for_refinement`
+    /// removes the ask, so an ask is served once.
     pub fn want_refinement(&self, path: &Path) {
-        if self
-            .parsed_since_the_last_pass
-            .iter()
-            .any(|queued| queued == path)
-            && let Ok(mut wanted) = self.refined_on_request.lock()
-        {
+        if self.is_refined(path) {
+            return;
+        }
+        if let Ok(mut wanted) = self.refined_on_request.lock() {
             wanted.insert(path.to_path_buf());
         }
     }
 
     /// **Take the files that were asked for**, at most `at_most`, and drop them from the backlog.
+    ///
+    /// The asks are the queue, not the backlog: a file a request named is refined wherever it is, which is what makes
+    /// "answer from L1, ask for L2" reachable after a start has drained. A file that is *also* still in
+    /// `parsed_since_the_last_pass` is taken out of it, so one file is re-read once.
     fn take_the_files_wanted_for_refinement(&mut self, at_most: usize) -> Vec<PathBuf> {
         let mut taken = Vec::new();
         let Ok(mut wanted) = self.refined_on_request.lock() else {
             return taken;
         };
-        let mut index = 0;
-        while index < self.parsed_since_the_last_pass.len() && taken.len() < at_most {
-            let path = self.parsed_since_the_last_pass[index].clone();
-            if wanted.remove(&path) {
-                self.parsed_since_the_last_pass.swap_remove(index);
-                taken.push(path);
-            } else {
-                index += 1;
+        while taken.len() < at_most {
+            let Some(path) = wanted.iter().next().cloned() else {
+                break;
+            };
+            wanted.remove(&path);
+            if let Some(at) = self
+                .parsed_since_the_last_pass
+                .iter()
+                .position(|queued| queued == &path)
+            {
+                self.parsed_since_the_last_pass.swap_remove(at);
             }
+            taken.push(path);
         }
         taken
     }
@@ -6193,38 +6227,83 @@ impl<F: FileProvider + Clone> Session<F> {
         // 1. **A unit that already contains the file is the environment to use.** The project's translation unit is
         //    normally held (it was walked when its file was read), and its timeline is exactly the state at the
         //    header's inclusion — no walk, no guess.
-        // 2. **Otherwise a file that some indexed file includes is not cooked on its own at all.** Its summary is
-        //    already a reading of its text; a second one made from an empty environment is worse than no answer, and
-        //    the risk of it winning is what this branch removes.
-        let mut unit = None;
-        {
+        // 2. **Otherwise a file that can be the root of its own program is walked as one** — a `.cpp` with a compile
+        //    command, a file nothing includes, a buffer the reader has open. Its timeline is the whole closure.
+        // 3. **Otherwise the environment is composed from the index** — `the_indexed_environment`, the same reading the
+        //    second pass makes and the same one the *summary* of this file is rebuilt from. This arm is new, and it is
+        //    what a header gets: it used to `return None`, because the alternative was an **empty** environment and a
+        //    rendering made from one is a wrong answer. A composed environment is not empty, so the reason that rule
+        //    existed is gone and the rule with it.
+        //
+        // **The measurement that made rule 3 exist.** After phase 2 stopped building units for the pass, rule 2 was
+        // reached for every header, rule 3 was `return None`, and `render_a_cooked`'s `unit.environment_of(path)?`
+        // answered `None`: `include/techniques.h` came out `NOT COOKED` and the C++ corpus went **51/52 → 41/52** type
+        // answers, 10/10 → 9/10 member answers. A capability that depends on a *cache* holding some other file's
+        // timeline is not a capability; the environment has to be a function of the index.
+        //
+        // **Rules 1 and 2 come first, and that is measured too.** Composing *everything* was tried first and left the
+        // corpus at 41/52: a timeline sees the guarded `#define`s a closure's facts do not (`FactGuard::Special`), so a
+        // composed environment is weaker exactly where a standard library puts its specifiers. Composition is the
+        // fallback that makes a header cookable at all, not a replacement for the walk.
+        let held = {
             let held_units = self.held_units();
-            for held in held_units.values() {
-                if held.provisional {
-                    continue;
-                }
-                if held.unit.environment_of(&path).is_some() {
-                    unit = Some(std::sync::Arc::clone(&held.unit));
-                    break;
-                }
-            }
-        }
-        let unit = match unit {
-            Some(unit) => unit,
-            None => {
-                let included = !self.store.index().includers_of(&path).is_empty();
-                let has_a_command = self
-                    .config
-                    .database
-                    .as_ref()
-                    .is_some_and(|database| database.command_for(&path).is_some());
-                if included && !has_a_command && !self.documents.is_open(&path) {
-                    return None;
-                }
-                self.unit_and_state_of(&path)?.0
-            }
+            held_units
+                .values()
+                .find(|held| !held.provisional && held.unit.environment_of(&path).is_some())
+                .map(|held| std::sync::Arc::clone(&held.unit))
         };
-        unit.environment_of(&path)?;
+        let can_be_a_root = {
+            let included = !self.store.index().includers_of(&path).is_empty();
+            let has_a_command = self
+                .config
+                .database
+                .as_ref()
+                .is_some_and(|database| database.command_for(&path).is_some());
+            !included || has_a_command || self.documents.is_open(&path)
+        };
+        // The definition cache is the run's, not this file's: a definition's text does not depend on which file asked
+        // for it, and without it every cook re-lexes and re-parses the whole closure's bodies (`configuration_from_
+        // environment_and`'s own note measures 12.2 s of a 40 s census on exactly that).
+        let mut parsed = self
+            .parsed_definitions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut composed = || {
+            self.store
+                .the_indexed_environment(&path)
+                .map(|environment| {
+                    crate::preprocess::cooked::configuration_from_environment_and(
+                        &environment,
+                        true,
+                        &mut parsed,
+                    )
+                })
+        };
+        let walked = if held.is_none() && can_be_a_root {
+            self.unit_and_state_of(&path).map(|(unit, _)| unit)
+        } else {
+            None
+        };
+        let configuration = match (&held, &walked) {
+            (Some(unit), _) => {
+                let view = unit.environment_of(&path)?;
+                crate::preprocess::cooked::configuration_from_environment_and(
+                    &view,
+                    true,
+                    &mut parsed,
+                )
+            }
+            (None, Some(unit)) => {
+                let view = unit.environment_of(&path)?;
+                crate::preprocess::cooked::configuration_from_environment_and(
+                    &view,
+                    true,
+                    &mut parsed,
+                )
+            }
+            (None, None) => composed()?,
+        };
+        drop(parsed);
 
         let text = self.files.read(&path)?;
         let text_hash = crate::cache::content_hash(&text);
@@ -6233,7 +6312,7 @@ impl<F: FileProvider + Clone> Session<F> {
         Some(CookingMaterials {
             path,
             key,
-            unit,
+            configuration,
             text,
             text_hash,
             seed,
@@ -6246,13 +6325,13 @@ impl<F: FileProvider + Clone> Session<F> {
     /// Everything it reads is owned by its argument, so a caller may hold it under a **read** lock while a query runs
     /// beside it. [`Session::commit_a_cooked`] is the other half: one insert, `&mut self`.
     ///
-    /// The unit and the seed are moved in rather than borrowed because the caller has to let go of the session
-    /// between the two halves — that is the whole point of the split — and a borrow of `&self` cannot survive it.
+    /// The starting macro state and the seed are moved in rather than borrowed because the caller has to let go of the
+    /// session between the two halves — that is the whole point of the split — and a borrow of `&self` cannot survive it.
     pub fn render_a_cooked(&self, materials: &CookingMaterials) -> Option<RenderedCook> {
         let CookingMaterials {
             path,
             key,
-            unit,
+            configuration,
             text,
             text_hash,
             seed,
@@ -6260,16 +6339,17 @@ impl<F: FileProvider + Clone> Session<F> {
         } = materials;
 
         let (tokens, _) = { cpp_parser::lex(text, &cpp_parser::LexerConfig::default()) };
-        let unit_definitions = unit.definitions();
-        let macros = {
-            crate::preprocess::cooked::FileMacros::new(
-                unit.environment_of(path)?,
-                &unit_definitions,
-                Some(seed),
-                true,
-            )
-        };
-        let rendered = { crate::preprocess::cooked::cook_with(text, &tokens, &macros).render() };
+        // **Two layers: what the file's closure defines, over what the compilation predefines.** `Over` is the
+        // closure path's own answer to that question — see its note — and it is what makes a cook possible for a file
+        // **no timeline holds**: the configuration is composed from the index (`configuration_from_environment_and`),
+        // so a header is rendered in its includers' environment rather than not at all.
+        //
+        // It used to be `FileMacros::new(unit.environment_of(path)?, …)`, which required a **held translation unit** —
+        // and after phase 2 stopped building units for the pass, cooking a header depended on some *other* file's
+        // timeline happening to sit in the cache. Measured on the C++ corpus: the header came out `NOT COOKED`, and the
+        // corpus went 51/52 → 41/52 type answers. Correctness must not depend on cache residency.
+        let start = crate::preprocess::cooked::Over::new(&configuration.table, seed);
+        let rendered = { crate::preprocess::cooked::cook_with(text, &tokens, &start).render() };
         let indexer = FileIndexer::new(&self.files, &self.config);
         let indexed = indexer.index_rendering(path, &rendered, *key);
         let reading = CookedReading {

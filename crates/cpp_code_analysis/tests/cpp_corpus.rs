@@ -520,6 +520,20 @@ fn the_cpp_corpus_parses_and_its_members_resolve() {
         };
         let started = std::time::Instant::now();
         let cooked = session.cook(path).is_some();
+        // **The pump, between the cook and the questions.** The design note's contract is "answer from L1, ask for L2":
+        // a reading that is still shape-only becomes exact once the pump has run. `CPPLS_CORPUS_PUMP=1` asks the
+        // questions after it, which is the difference between "this session cannot refine" and "it has not yet".
+        if std::env::var_os("CPPLS_CORPUS_PUMP").is_some() {
+            session.catch_up(path);
+            let mut slices = 0usize;
+            while session.pending_work() > 0 && slices < 400 {
+                if session.advance(64).is_empty() {
+                    break;
+                }
+                slices += 1;
+            }
+            let _ = session.cook(path);
+        }
         let cooking = started.elapsed();
         let found = session.diagnostics(path);
         let errors = found.as_ref().map(|found| found.errors.len()).unwrap_or(0);
