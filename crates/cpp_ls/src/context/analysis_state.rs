@@ -409,12 +409,9 @@ impl AnalysisState {
     /// async server must not do with a lock it does not own. `blocking` is `block_in_place` on the multi-threaded
     /// runtime (the server's, see `cpp_ls.rs`) and a plain call in a test's current-thread one.
     pub fn with_snapshot<T>(&self, f: impl FnOnce(&Session<DiskFiles>) -> T) -> Option<T> {
-        let session = blocking(|| {
+        let session = blocking(move || {
             let session = self.read();
-            match session.as_ref() {
-                Some(session) => Some(f(session)),
-                None => None,
-            }
+            session.as_ref().map(f)
         })?;
         Some(session)
     }
