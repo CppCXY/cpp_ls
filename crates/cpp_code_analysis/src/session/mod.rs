@@ -1076,6 +1076,12 @@ pub struct PreparedWave {
     pub prepared: Vec<(PathBuf, crate::index::store::Prepared)>,
     /// The timelines the second pass reads its environments out of, for the files this wave will parse.
     pub units: Vec<std::sync::Arc<crate::TranslationUnit>>,
+    /// **Refined readings the cache already holds for the slice this wave will drain.**
+    ///
+    /// The second pass refines a file against its own closure, and its answer is a function of that closure — so a
+    /// stored one is served instead of being rebuilt, and the files it covers need no timeline at all. This is what
+    /// makes a second start cheap: the pass costs a lookup rather than a parse per file.
+    pub refinements: Vec<crate::FileSummary>,
 }
 
 /// **What a drained slice still has to do, decided but not paid for.**
@@ -2619,18 +2625,33 @@ impl<F: FileProvider + Clone> Session<F> {
         // warm start was **66 s**, of which 60 s was twelve such calls — 5 s each for four files — while the index
         // itself took 4 s. One unit per drained slice is what the pass was designed around, and the early return was
         // silently withholding it.
-        let slice: Vec<PathBuf> = self
+        let mut slice: Vec<PathBuf> = self
             .parsed_since_the_last_pass
             .iter()
             .take(RE_READ_SLICE)
             .cloned()
             .collect();
+        // **What the cache already refined, before any timeline is built.** A file whose reading was refined under
+        // its own closure needs no unit, no render and no parse: the summary goes into the index at commit time. What
+        // is left is the honest work, and the timelines are built for that and nothing else.
+        let mut refinements: Vec<crate::FileSummary> = Vec::new();
+        if !slice.is_empty() {
+            let mut still_to_read = Vec::with_capacity(slice.len());
+            for path in std::mem::take(&mut slice) {
+                match self.store.the_stored_refinement(&path) {
+                    Some(summary) => refinements.push(summary),
+                    None => still_to_read.push(path),
+                }
+            }
+            slice = still_to_read;
+        }
         let units = self.units_for_the_pass(&slice);
 
         if wave.is_empty() {
             return PreparedWave {
                 prepared: Vec::new(),
                 units,
+                refinements,
             };
         }
 
@@ -2646,6 +2667,7 @@ impl<F: FileProvider + Clone> Session<F> {
                 room,
             ),
             units,
+            refinements,
         }
     }
 
@@ -2665,9 +2687,20 @@ impl<F: FileProvider + Clone> Session<F> {
     /// caller takes the drain to [`Session::prepare_the_drain`] under a read lock and brings it back to
     /// [`Session::commit_the_drain`] — so the write lock is held for the inserts and for nothing else.
     pub fn commit_a_wave(&mut self, wave: PreparedWave, steps: usize) -> (Vec<Step>, Drain) {
-        let PreparedWave { prepared, units } = wave;
+        let PreparedWave {
+            prepared,
+            units,
+            refinements,
+        } = wave;
         for (path, made) in prepared {
             self.prefetched.insert(queue_key(&path), made);
+        }
+        // **The readings that came from the cache are applied here**, and their files leave the second pass's backlog:
+        // there is nothing left to refine in them.
+        for summary in refinements {
+            self.parsed_since_the_last_pass
+                .retain(|queued| queued != &summary.path);
+            self.store.apply_a_stored_refinement(summary);
         }
 
         let mut done = Vec::new();
@@ -2767,6 +2800,11 @@ impl<F: FileProvider + Clone> Session<F> {
         } else {
             Vec::new()
         };
+
+        // **What the cache already refined, before any timeline is built.** The second pass's answer is a function of
+        // the file's own closure, so a stored one is served and its file needs no unit at all — the difference between
+        // a second start that re-reads the project and one that reads a handful of files.
+        let files = self.store.take_the_stored_refinements(files);
 
         // **A caller that passed no timelines for a slice it is about to drain.** `advance` roots its units at the
         // files it just read, which is not the slice this pass takes — so on the drain phase (nothing left to read,

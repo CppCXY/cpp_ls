@@ -95,6 +95,17 @@ use std::path::{Path, PathBuf};
 /// old entry still decodes — which is exactly why this number has to move rather than the codec's: an entry that
 /// decodes but says something this build would not write is the case this constant exists for.
 ///
+/// # Why this moved to 11
+///
+/// **A refined reading is stored now, under the closure it was read in.** The second pass used to throw its answer away
+/// at the end of every run because the key could not name the environment, and that is why *every* start re-read the
+/// whole project (~120 s on `EmmyLuaCodeStyle`). `SummaryKey::env_hash` is that environment now — the closure
+/// fingerprint — and the database honours it instead of hardcoding `env: 0`.
+///
+/// The count of readings per file changed with it: one file now has the unrefined reading (`env: 0`) and the refined
+/// ones, so collection had to stop keeping a single environment per file. That is a change of what an entry means, which
+/// is what this constant invalidates.
+///
 /// # Why this moved to 10
 ///
 /// **A declaration records the reflection annotation it was written under.** `UCLASS(Blueprintable)` and
@@ -135,7 +146,7 @@ use std::path::{Path, PathBuf};
 /// ends with `::` and the declared name. The type was thrown away, the fact said `void`, and `assign-type-check` then
 /// reported the initialisation as a conversion "from `int` to `void`". The bytes are unchanged, so an old entry decodes
 /// happily and keeps the wrong type — the case this constant is for.
-pub const FORMAT_VERSION: u32 = 10;
+pub const FORMAT_VERSION: u32 = 11;
 
 /// **The fingerprint of the readers a summary was built by**, in the key.
 ///

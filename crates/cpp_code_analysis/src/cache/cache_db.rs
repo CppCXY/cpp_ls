@@ -602,22 +602,25 @@ impl CacheDb {
     /// iterated — and because a delete set built from a consistent snapshot is the only one whose counts a test can
     /// assert on.
     pub fn collect(&self) -> Result<Collected> {
-        let (live_summaries, live_renderings, live_contents) = {
+        let (live_summaries, live_contents) = {
             let read = self.database.begin_read()?;
             let files = read.open_table(FILES)?;
-            let mut summaries: HashSet<(u64, u64, u64)> = HashSet::new();
-            let mut renderings: HashSet<(u64, u64)> = HashSet::new();
+            // **Live by (content, config), not by the environment.** A file has more than one reading now — the
+            // unrefined one from indexing and the refined one the second pass stored — and both are readings of the
+            // same `(content, config)`. The exact-triple set deleted whichever of the two the file row did not name:
+            // measured as the two ways the refinement cache failed, `not stored` when the row kept `env: 0` and `Built`
+            // when it kept the fingerprint.
+            let mut summaries: HashSet<(u64, u64)> = HashSet::new();
             let mut contents: HashSet<u64> = HashSet::new();
             for entry in files.iter()? {
                 let (_, value) = entry?;
                 let Some(row) = FileRow::decode(value.value()) else {
                     continue;
                 };
-                summaries.insert((row.content, row.config, row.env));
-                renderings.insert((row.content, row.env));
+                summaries.insert((row.content, row.config));
                 contents.insert(row.content);
             }
-            (summaries, renderings, contents)
+            (summaries, contents)
         };
 
         // **Nothing referenced means nothing to collect.** The first run has no `files` rows yet — the store
@@ -625,7 +628,7 @@ impl CacheDb {
         // summary is garbage" would empty a database that had just been filled. A collection is only meaningful
         // once some file says what it is, and this is the guard that makes the difference a rule rather than an
         // accident of ordering.
-        if live_summaries.is_empty() && live_renderings.is_empty() {
+        if live_summaries.is_empty() && live_contents.is_empty() {
             return Ok(Collected::default());
         }
 
@@ -636,7 +639,7 @@ impl CacheDb {
             let dead: Vec<(u64, u64, u64)> = summaries
                 .iter()?
                 .filter_map(|entry| entry.ok().map(|(key, _)| key.value()))
-                .filter(|key| !live_summaries.contains(key))
+                .filter(|key| !live_summaries.contains(&(key.0, key.1)))
                 .collect();
             for key in dead {
                 summaries.remove(key)?;
@@ -648,7 +651,7 @@ impl CacheDb {
             let dead: Vec<(u64, u64)> = renderings
                 .iter()?
                 .filter_map(|entry| entry.ok().map(|(key, _)| key.value()))
-                .filter(|key| !live_renderings.contains(key))
+                .filter(|key| !live_contents.contains(&key.0))
                 .collect();
             for key in dead {
                 renderings.remove(key)?;
@@ -773,10 +776,14 @@ impl SummaryCache {
     /// re-parse it — and the store's own tests are exactly that question asked with two stores, where the answer was
     /// twenty failures until the buffer became readable.
     pub fn summary(&self, key: crate::cache::SummaryKey) -> Option<crate::FileSummary> {
+        // **The environment is part of the key, and it was not.** A reading refined under one environment and one
+        // taken from the file's own text are two different answers (`_STD` is `::std::` under one and a plain name
+        // under the other); with `env: 0` the second overwrote the first, which is why the second pass could not store
+        // what it built. `SummaryKey::env_hash` is 0 exactly when a reading claims no environment.
         let cache_key = CacheKey {
             content: key.content_hash,
             config: key.context_hash,
-            env: 0,
+            env: key.env_hash,
         };
         let buffered = self.pending.lock().ok().and_then(|pending| {
             pending
@@ -805,7 +812,7 @@ impl SummaryCache {
         let cache_key = CacheKey {
             content: key.content_hash,
             config: key.context_hash,
-            env: 0,
+            env: key.env_hash,
         };
         let Ok(mut pending) = self.pending.lock() else {
             return;

@@ -142,6 +142,52 @@ fn a_rendering_is_not_left_in_the_cache_for_the_next_session() {
         "and it is the branch that file has when nothing defines `FROM_THE_SOURCE`"
     );
 }
+/// **A reading the second pass found nothing to repair in is written down, and served to the next session.**
+///
+/// The pass refines a file against its closure, and for the large majority of a real project the answer is "nothing to
+/// repair" — no macro body the file's text mentions, no declaration a conditional splits. That answer is worth keeping:
+/// without it every start re-examines every file and, worse, builds the **whole-closure timelines** the drain needs to
+/// do the examining. Measured on `EmmyLuaCodeStyle`: 1745 files re-read on every start (~120 s), of which the ones with
+/// something to decide are a small minority.
+///
+/// The entry names the file's **own** closure (`the_closure_fingerprint`), so only a reading of that closure is served;
+/// the direction that must never happen — a reading taken inside *another* file's program — is pinned by
+/// `a_rendering_is_not_left_in_the_cache_for_the_next_session`.
+#[test]
+fn a_refinement_is_served_to_the_next_session() {
+    // Nothing here needs repairing: one declaration, no macro, no conditional. The pass marks the reading and the next
+    // session should answer from that mark, without a timeline.
+    let api = "struct Live { int a; };\n";
+    let main = "#include \"api.h\"\nLive live;\n";
+    let files = MemoryFiles::new()
+        .with_file("/p/api.h", api)
+        .with_file("/p/main.cpp", main);
+    let fixture = Memory::new("a-refinement-is-served", &files);
+    let roots = [PathBuf::from("/p/main.cpp")];
+
+    {
+        let mut first = fixture.session();
+        first.add_project_files(roots.iter().cloned());
+        first.index_everything();
+        assert!(first.is_indexed("/p/api.h"), "the closure was followed");
+    }
+
+    let mut second = fixture.session();
+    second.add_project_files(roots.iter().cloned());
+    second.index_everything();
+    assert_eq!(
+        second.unit_stats().walked,
+        0,
+        "a reading nothing had to repair needs no timeline on the next start: {:?}",
+        second.unit_stats()
+    );
+    assert_eq!(
+        second.re_read_backlog(),
+        0,
+        "and nothing is left for the second pass"
+    );
+}
+
 /// **A declaration only a macro makes becomes one this session answers for**, once its queue drains.
 ///
 /// `DECLARE_HANDLE(HWND)` declares `HWND__` and `HWND` to a compiler and *nothing* to a reader of the file's own

@@ -1424,6 +1424,156 @@ impl<F: FileProvider> SummaryStore<F> {
         re_read
     }
 
+    /// **The closure a file is read in, as one number** — the key that makes a refined reading storable.
+    ///
+    /// A summary refined under its closure's macro bodies is a function of the file's text **and of every file the
+    /// closure reaches**, and the reading used to be thrown away at the end of every run for exactly that reason: the
+    /// cache key named the text and the configuration, and a later run could not say which environment the reading was
+    /// taken under. This is that missing part — hash `(path, content_hash)` for every file in the closure, breadth-first
+    /// from the file.
+    ///
+    /// **The root is the file itself, and it is load-bearing.** `api.h` read inside `main.cpp`'s program is a different
+    /// reading from `api.h` read alone, and the closure of `api.h` is the same number in both — so a refinement is only
+    /// stored when the environment it was read in is this file's own closure, and never from a unit another file roots.
+    ///
+    /// **A closure the index does not fully hold is still an identity.** An unresolved include, or a file the index does
+    /// not have, is hashed as that state rather than refusing the whole key: measured on `EmmyLuaCodeStyle`, refusing
+    /// cost **1445 of 1745** files. The state is stable, so it is the honest answer.
+    pub fn the_closure_fingerprint(&self, path: &Path) -> Option<u64> {
+        const THE_WIDEST_CLOSURE: usize = 8192;
+        /// A domain separator, so that "unresolved `x.h`" cannot collide with a path that happens to hash the same.
+        const UNRESOLVED_INCLUDE: u64 = 0x8f3a_2c11_5e6b_9d07;
+        /// The same, for a file inside the closure that the index does not hold.
+        const NOT_IN_THE_INDEX: u64 = 0x1d57_9b40_c3e8_2a6f;
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut pending: std::collections::VecDeque<PathBuf> = std::collections::VecDeque::new();
+        let mut parts: Vec<u64> = Vec::new();
+        pending.push_back(path.to_path_buf());
+        while let Some(next) = pending.pop_front() {
+            let key = normalize_path(&next, cfg!(windows));
+            if !seen.insert(key.clone()) {
+                continue;
+            }
+            if seen.len() > THE_WIDEST_CLOSURE {
+                return None;
+            }
+            // **The index's own spelling**, which is the normalized one — the index stores `c:/…` and a session hands
+            // `C:\…`. Looked up raw, every closure past the first file was "not indexed" and every fingerprint came
+            // back empty.
+            let Some(summary) = self.index.summary(std::path::Path::new(&key)) else {
+                parts.push(fnv1a64(key.as_bytes()) ^ NOT_IN_THE_INDEX);
+                continue;
+            };
+            let mut bytes = Vec::with_capacity(16 + key.len());
+            bytes.extend_from_slice(key.as_bytes());
+            bytes.extend_from_slice(&summary.key.content_hash.to_le_bytes());
+            parts.push(fnv1a64(&bytes));
+            for include in &summary.includes {
+                match include.resolved.as_ref() {
+                    Some(resolved) => pending.push_back(resolved.clone()),
+                    None => parts.push(fnv1a64(include.spelling.as_bytes()) ^ UNRESOLVED_INCLUDE),
+                }
+            }
+        }
+        parts.sort_unstable();
+        let mut bytes = Vec::with_capacity(parts.len() * 8);
+        for part in parts {
+            bytes.extend_from_slice(&part.to_le_bytes());
+        }
+        Some(fnv1a64(&bytes))
+    }
+
+    /// **Record that the second pass found nothing to repair in a file** — the half of the cache a rebuilt summary
+    /// cannot express, and the one that keeps the timelines unbuilt on a restart.
+    ///
+    /// A file the pass skipped is a file whose reading is already the one the program implies, so the reading can be
+    /// served next time like any refinement — under its own closure key. Without this, a skipped file is re-examined on
+    /// every start, and the timelines its slice needs are built every time for the few files that *do* need one.
+    fn mark_the_reading_as_refined(&self, path: &Path) {
+        let Some(summary) = self.index.summary(path) else {
+            return;
+        };
+        let Some(fingerprint) = self.the_closure_fingerprint(path) else {
+            return;
+        };
+        let mut marked = summary.clone();
+        marked.key = SummaryKey::new(marked.key.content_hash, marked.key.context_hash)
+            .with_environment(fingerprint);
+        store_it(&self.summary_database(), path, &marked, self.generation);
+    }
+
+    /// **The refined reading of a file, when the cache already holds it for this file's own closure** — the fast path
+    /// that makes a second start skip the second pass instead of redoing it.
+    ///
+    /// `None` means "not stored for the program as it is now", and the caller pays for the pass as before. A hit is
+    /// verified the same way a normal cache hit is ([`SummaryStore::resolution_still_holds`]), because a header that
+    /// moved changes the program without changing any text the key names.
+    pub fn the_stored_refinement(&self, path: &Path) -> Option<crate::FileSummary> {
+        match self.the_stored_refinement_reason(path) {
+            Ok(summary) => Some(summary),
+            Err(reason) => {
+                if crate::probes::cooking() {
+                    eprintln!("refinement: {} skipped: {reason}", path.display());
+                }
+                None
+            }
+        }
+    }
+
+    /// Why a stored refinement is not usable, named — the instrument the hit-rate measurements needed.
+    fn the_stored_refinement_reason(
+        &self,
+        path: &Path,
+    ) -> Result<crate::FileSummary, &'static str> {
+        let Some(source) = self.files.read(path) else {
+            return Err("no text");
+        };
+        let Some(fingerprint) = self.the_closure_fingerprint(path) else {
+            return Err("no fingerprint");
+        };
+        let key = SummaryKey::new(content_hash(&source), self.context_hash(path))
+            .with_environment(fingerprint);
+        let Some(database) = self.summary_database() else {
+            return Err("no database");
+        };
+        let Some(stored) = database.summary(key) else {
+            return Err("not stored");
+        };
+        if stored.key != key {
+            return Err("key moved");
+        }
+        if !self.resolution_still_holds(path, &stored) {
+            return Err("resolution moved");
+        }
+        Ok(stored)
+    }
+
+    /// **Put a refined reading the cache held into the index** — the commit half of
+    /// [`SummaryStore::take_the_stored_refinements`].
+    pub fn apply_a_stored_refinement(&mut self, summary: crate::FileSummary) {
+        self.commit_reread(summary, true);
+    }
+
+    /// **Take every refined reading the cache holds for these files**, and answer with the ones it does not.
+    ///
+    /// This is what keeps the timelines unbuilt on a warm start: a file whose refinement is already on disk needs no
+    /// unit, no render and no parse — the summary goes into the index and the pass never sees it.
+    pub fn take_the_stored_refinements(&mut self, files: Vec<PathBuf>) -> Vec<PathBuf> {
+        let mut missing = Vec::new();
+        for path in files {
+            match self.the_stored_refinement(&path) {
+                Some(summary) => {
+                    self.commit_reread(summary, true);
+                    if crate::probes::cooking() {
+                        eprintln!("re-read: {} came from the cache", path.display());
+                    }
+                }
+                None => missing.push(path),
+            }
+        }
+        missing
+    }
+
     /// **The second pass, planned but not applied** — everything that does not change the store.
     ///
     /// This is [`SummaryStore::re_read_what_a_body_changes`] with the two writes taken out of it: the `#define`
@@ -1752,6 +1902,11 @@ impl<F: FileProvider> SummaryStore<F> {
                     started.elapsed().as_millis()
                 );
             }
+            // **The decision is written down**, so the next start serves it instead of rebuilding the timelines that led
+            // to it. See `mark_the_reading_as_refined`.
+            for path in indexed {
+                self.mark_the_reading_as_refined(path);
+            }
             return ReRead {
                 rebuilt: Vec::new(),
                 not_yet: Vec::new(),
@@ -1800,6 +1955,7 @@ impl<F: FileProvider> SummaryStore<F> {
             // **And a file whose own declarations a conditional splits** — see `guarded` above. This is the case
             // `mentions_one_of` cannot see: no body is involved, and the file is the only evidence of the question.
             if !mentioned && !decided_about && !guarded.contains(path.as_path()) {
+                self.mark_the_reading_as_refined(path);
                 continue;
             }
 
@@ -1807,6 +1963,13 @@ impl<F: FileProvider> SummaryStore<F> {
                 eprintln!("re-read candidate: {}", path.display());
             }
 
+            // **A file a slice unit covers is rendered through it**, which is the whole reason the units exist — walking
+            // every file's own closure instead was measured as *minutes* on a real project, because a header two levels
+            // down includes everything above it and the walk is not shared. The cost of that choice is that this
+            // reading's environment is the unit root's, not this file's, so it is **not** stored under the file's own
+            // closure; a refinement is only cacheable when the environment is the file's own (see
+            // `the_closure_fingerprint`), and that leaves the own-closure arm and the "nothing to repair" marks as the
+            // entries a later start serves.
             if units.iter().any(|unit| unit.environment_of(path).is_some()) {
                 through_a_timeline.push((path, source));
                 continue;
@@ -1820,7 +1983,11 @@ impl<F: FileProvider> SummaryStore<F> {
             // (`Summary::macro_readings`), which a rendering does not have because it has expanded
             // them away. See `tests/scopes.rs`.
             if !walk_its_own {
-                let key = SummaryKey::new(content_hash(source), self.context_hash(path));
+                let Some(fingerprint) = self.the_closure_fingerprint(path) else {
+                    continue;
+                };
+                let key = SummaryKey::new(content_hash(source), self.context_hash(path))
+                    .with_environment(fingerprint);
                 let indexer =
                     FileIndexer::new(&self.files, &self.config).with_seed(self.index.macros());
                 let Some(environment) = self.closure_environment(path, &sources) else {
@@ -1829,13 +1996,17 @@ impl<F: FileProvider> SummaryStore<F> {
                 let made = indexer
                     .with_macro_bodies(&environment)
                     .index(path, source, key);
-                // **Not stored**: the summary is the file read with its closure's macro bodies in force, while the
-                // key names only the text and the configuration. See the note at the other arm.
-                rebuilt.push((made, false));
+                // **Stored, now that the key names the file's own closure** — see `the_closure_fingerprint`.
+                store_it(&self.summary_database(), path, &made, self.generation);
+                rebuilt.push((made, true));
                 continue;
             }
 
-            let key = SummaryKey::new(content_hash(source), self.context_hash(path));
+            let Some(fingerprint) = self.the_closure_fingerprint(path) else {
+                continue;
+            };
+            let key = SummaryKey::new(content_hash(source), self.context_hash(path))
+                .with_environment(fingerprint);
             let indexer =
                 FileIndexer::new(&self.files, &self.config).with_seed(self.index.macros());
             // **A file no slice unit covers is read through its own timeline**, walked here rather than skipped.
@@ -1872,16 +2043,10 @@ impl<F: FileProvider> SummaryStore<F> {
                 .index_the_readings(path, source, &rendered, key)
                 .summary;
 
-            // **Not stored, for the reason the timeline branch gives below.** `made` is the file read with its own
-            // closure's macro bodies in force — the environment every file it includes had at that point — while the
-            // key names only the text and the configuration. So the entry the *first pass* wrote stays (a reading of
-            // the text claiming no environment), and this refinement lives in the index for this run.
-            //
-            // Measured, and it is why this line changed: the same project indexed twice answered **43 483** and
-            // **43 363** declarations in one closure (`tests/unit_read_probe.rs`), cold run against warm, because the
-            // warm run's cache held summaries this branch had written. The refinement is redone every run either way,
-            // so refusing to store it costs nothing.
-            let stored = false;
+            // **Stored**: this arm reads the file in its **own** closure (`a_timeline_of_its_own`), which is exactly the
+            // environment `the_closure_fingerprint` names.
+            store_it(&self.summary_database(), path, &made, self.generation);
+            let stored = true;
             rebuilt.push((made, stored));
         }
 
@@ -1950,6 +2115,16 @@ impl<F: FileProvider> SummaryStore<F> {
                 bodied.len(),
                 started.elapsed().as_millis()
             );
+        }
+
+        // **The refined readings reach the disk now, not eventually.** `SummaryCache::put` appends to a batch that is
+        // flushed when it fills or when the cache is dropped — and the cache is an `Arc` in a process-wide table, so a
+        // session that ends does not drop it. Measured as the defect this line fixes: the second session found nothing,
+        // because two entries never filled a batch of 32.
+        if rebuilt.iter().any(|(_, stored)| *stored)
+            && let Some(database) = self.summary_database()
+        {
+            database.flush();
         }
 
         ReRead { rebuilt, not_yet }
@@ -2512,6 +2687,30 @@ enum APlainShape {
     /// `Other`, and the body begins with a name — what that name expands to is what decides the shape, so this is the
     /// only case that needs an environment.
     Unplaceable,
+}
+
+/// **Write a refined summary under the key that names the closure it was read in** — the half of the second pass that
+/// used to be thrown away, and the reason a second start can skip the pass instead of redoing it.
+fn store_it(
+    database: &Option<std::sync::Arc<crate::cache::cache_db::SummaryCache>>,
+    path: &Path,
+    summary: &crate::FileSummary,
+    generation: u64,
+) {
+    let Some(database) = database else {
+        return;
+    };
+    database.put(summary.key, summary);
+    // **The file's row stays the unrefined one** (`env: 0`): it describes the file, not a reading of it, and a
+    // `(path, env)` row would have to know which environments will be wanted. `collect` keeps every reading whose
+    // `(content, config)` is live, which is what lets the refined entry and the unrefined one coexist.
+    database.note_file(
+        path,
+        summary.key.content_hash,
+        summary.key.context_hash,
+        0,
+        generation,
+    );
 }
 
 fn the_plain_shape(body: &str) -> APlainShape {
