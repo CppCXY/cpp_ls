@@ -1014,6 +1014,59 @@ pub fn definition_at(scopes: &ScopeTree, root: &CppSyntaxNode, offset: usize) ->
     }
 }
 
+/// **The name a generated member stands for**, when the class it is written in has generated code.
+///
+/// `Super` is `typedef <Base> Super;` and `ThisClass` is `typedef <TheClass> ThisClass;` — both written by Unreal's
+/// build tool. The signal that the generated code is here is `StaticClass`: only that code (or a simulation of it)
+/// declares it, so an ordinary C++ class with a `StaticClass` member is the only case this could misread, and it needs
+/// a `Super`/`ThisClass` its author never wrote to do it.
+///
+/// `None` for every other name, and for `Super`/`ThisClass` in a class without the generated code — the ordinary walk
+/// must answer those, and it does: they are unknown names.
+fn the_generated_member_spelling(
+    root: &CppSyntaxNode,
+    offset: usize,
+    written: &str,
+) -> Option<String> {
+    let (generated, rest) = written
+        .strip_prefix("Super")
+        .map(|rest| ("Super", rest))
+        .or_else(|| {
+            written
+                .strip_prefix("ThisClass")
+                .map(|rest| ("ThisClass", rest))
+        })?;
+    // The name is only the segment's own spelling: `Super` or `Super::`.
+    if !(rest.is_empty() || rest.starts_with("::")) {
+        return None;
+    }
+    let name = name_node_around(root, offset)?;
+    let class = name.ancestors().find(|node| {
+        matches!(
+            CppSyntaxKind::from(node.kind()),
+            CppSyntaxKind::ClassDef | CppSyntaxKind::StructDef
+        )
+    })?;
+    let has_generated_code = class.descendants().any(|node| {
+        CppSyntaxKind::from(node.kind()) == CppSyntaxKind::NameExpr && node.text() == "StaticClass"
+    });
+    if !has_generated_code {
+        return None;
+    }
+    if generated == "ThisClass" {
+        let own = class
+            .descendants()
+            .find(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::NameExpr)?;
+        return Some(format!("{}{rest}", own.text()));
+    }
+    let base = class
+        .descendants()
+        .find(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::BaseSpecifier)?;
+    let base_name = base
+        .descendants()
+        .find(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::NameExpr)?;
+    Some(format!("{}{rest}", base_name.text()))
+}
 /// **Every declaration the name at `offset` has** — [`definition_at`]'s plural, and the query a call needs.
 ///
 /// An overload set is one name with several declarations **in one scope**, and C++ ordinary lookup stops at the
@@ -1046,8 +1099,29 @@ pub fn definitions_at(
         return Known::No;
     };
 
+    // **`Super` and `ThisClass` stand for a name the generated code declares.** Unreal's build tool writes
+    // `typedef <Base> Super;` and `typedef <TheClass> ThisClass;` into the generated header, so a project whose
+    // generated code is present resolves them as ordinary members. A project read from a **simulation** — the macro
+    // expanded to the name-independent half — has neither, and every `Super::BeginPlay()` in it was an unknown name.
+    // Rewriting the spelling is the whole rule: `Super::BeginPlay` becomes `<Base>::BeginPlay`, and the ordinary
+    // resolution below finds the base's member where it always would.
+    let rewritten = the_generated_member_spelling(root, offset, &written);
+    let written = match &rewritten {
+        Some(spelling) => spelling.clone(),
+        None => written,
+    };
+
     if written.contains("::") {
-        return qualified_definitions_at(scopes, innermost, &written);
+        let qualified = qualified_definitions_at(scopes, innermost, &written);
+        // **A rewritten name is declared in another file**, and the anchors above are this file's scope chain: the
+        // global spelling is the one that reaches a class the engine's header declares.
+        if rewritten.is_some() && !matches!(qualified, Known::Yes(_)) {
+            let global = qualified_definitions_at(scopes, innermost, &format!("::{written}"));
+            if matches!(global, Known::Yes(_)) {
+                return global;
+            }
+        }
+        return qualified;
     }
 
     let name = Name::identifier(written.clone());

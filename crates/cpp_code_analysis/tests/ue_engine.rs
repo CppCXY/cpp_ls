@@ -220,6 +220,13 @@ public:
     TObjectPtr<UObject> Target;
 
     TArray<FString> Names;
+
+    void BeginPlay() override
+    {
+        Super::BeginPlay();
+        ThisClass* Self = this;
+        (void)Self;
+    }
 };
 "#,
     );
@@ -265,6 +272,46 @@ public:
         .find(|member| member.fact.name == "ThisClass")
         .expect("the generated `ThisClass`");
     assert_eq!(this_class.fact.type_of.as_deref(), Some("AMyActor"));
+
+    // **And they resolve inside a body**, which is the half the generated code does for a compiler: `Super::BeginPlay()`
+    // reaches the engine's `AActor::BeginPlay`, and `ThisClass` is the class the body is written in.
+    let source = view.source.to_string();
+    // **The cursor goes on the member**, not the qualifier: on `Super` the answer is the base class itself, which is the
+    // right answer to a different question.
+    let super_at = source.find("Super::BeginPlay").expect("the base call") + "Super::".len();
+    let Known::Yes(base) = session.definition(
+        &view,
+        cpp_code_analysis::file::coordinates::ReadingOffset::new(super_at),
+    ) else {
+        panic!("`Super::BeginPlay` resolves");
+    };
+    assert_eq!(base.fact.name, "BeginPlay", "{:?}", base.fact);
+    // The index spells a path in its own (lowercased) form on Windows.
+    assert!(
+        base.file
+            .to_string_lossy()
+            .to_ascii_lowercase()
+            .ends_with("gameframework/actor.h"),
+        "the base's own declaration: {:?}",
+        base.file
+    );
+
+    let this_at = source.find("ThisClass* Self").expect("the class itself");
+    let Known::Yes(own) = session.definition(
+        &view,
+        cpp_code_analysis::file::coordinates::ReadingOffset::new(this_at),
+    ) else {
+        panic!("`ThisClass` resolves");
+    };
+    assert_eq!(own.fact.name, "AMyActor", "{:?}", own.fact);
+    assert!(
+        own.file
+            .to_string_lossy()
+            .to_ascii_lowercase()
+            .ends_with("myactor.h"),
+        "{:?}",
+        own.file
+    );
 }
 
 /// **A class with no base gets no `Super`**, and a project that is not engine code gets neither: the synthesis follows
