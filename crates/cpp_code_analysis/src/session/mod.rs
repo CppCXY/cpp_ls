@@ -6616,14 +6616,51 @@ impl<F: FileProvider + Clone> Session<F> {
     /// consumer that can show only one location gets nothing rather than an arbitrary one. A client that can show a
     /// list — `textDocument/definition` — should ask that instead.
     pub fn definition(&self, view: &FileView, offset: ReadingOffset) -> Known<ProjectDefinition> {
-        definition_across_files(
+        let found = definition_across_files(
             self.store.index(),
             &mut |path| self.view(path),
             &view.scopes,
             &view.root,
             &view.path,
             offset.get(),
-        )
+        );
+        self.with_the_reflection(view, found)
+    }
+
+    /// **The reflection annotation the summary recorded**, when a same-file answer came from the binding instead.
+    ///
+    /// A definition inside the file being read is built from the scope tree, which holds the declaration's shape and no
+    /// annotation: `UPROPERTY(EditAnywhere)` is an empty macro and was expanded away before the tree existed. The
+    /// **summary** of the same file recorded it from the text, so the two answers are merged here rather than duplicating
+    /// the text walk in the binding path. A member declared in *another* file already carries it — that fact came from
+    /// the index.
+    fn with_the_reflection(
+        &self,
+        view: &FileView,
+        found: Known<ProjectDefinition>,
+    ) -> Known<ProjectDefinition> {
+        let Known::Yes(mut definition) = found else {
+            return found;
+        };
+        if definition.fact.reflection.is_some() {
+            return Known::Yes(definition);
+        }
+        let Some(in_the_file) =
+            view.file_offset_of(ReadingOffset::new(definition.fact.name_range.start_offset))
+        else {
+            return Known::Yes(definition);
+        };
+        let Some(summary) = self.parsed_summary(&view.path) else {
+            return Known::Yes(definition);
+        };
+        // **The name and its offset**, because an overload set shares the first and not the second.
+        let recorded = summary.declarations.iter().find(|fact| {
+            fact.name == definition.fact.name && fact.name_range.start_offset == in_the_file.get()
+        });
+        if let Some(recorded) = recorded {
+            definition.fact.reflection = recorded.reflection.clone();
+        }
+        Known::Yes(definition)
     }
 
     /// **Every declaration the name at `offset` refers to** — an overload set, a redeclaration, or one entity.

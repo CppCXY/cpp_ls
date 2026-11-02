@@ -3642,6 +3642,70 @@ void f() {
     server.notify("exit", Value::Null);
 }
 
+/// **Hover on a UE member shows the reflection annotation it was written under.**
+///
+/// `UPROPERTY(EditAnywhere, Category = "Game")` is an empty macro: the tree has nothing of it, and the card a reader got
+/// for a reflected member said only `bool bIsReady` — while the annotation is the whole reason the engine's build tool
+/// does anything with the declaration. The fact carries it (read from the file's text), and the card shows it as the file
+/// wrote it.
+#[test]
+fn hover_shows_the_unreal_reflection_annotation() {
+    let project = Project::new("unreal-hover");
+    project.write(".cppls.toml", "[unreal]\nenable = true\n");
+    // **The macros come from a header, the way an engine's do** — the same shape the simulated engine has, and the one
+    // this feature was measured on: the annotation is left standing in the file's own text, which is what the summary
+    // reads, while the reading a compiler parses has it expanded away.
+    project.write(
+        "engine.h",
+        "#pragma once\n\n#define UCLASS(...)\n#define UPROPERTY(...)\n#define GENERATED_BODY()\n",
+    );
+    const ACTOR_H: &str = "\
+#include \"engine.h\"
+
+UCLASS(Blueprintable)
+class AMyActor
+{
+    GENERATED_BODY()
+
+    UPROPERTY(EditAnywhere, Category = \"Game\")
+    bool bIsReady = false;
+};
+";
+    project.write("actor.h", ACTOR_H);
+
+    let mut server = Server::start(project.root());
+    let uri = uri_of(&project.root().join("actor.h"));
+    server.request(
+        1,
+        "initialize",
+        json!({
+            "processId": std::process::id(),
+            "rootUri": uri_of(project.root()),
+            "capabilities": {},
+        }),
+    );
+    server.notify("initialized", json!({}));
+    server.notify(
+        "textDocument/didOpen",
+        json!({ "textDocument": { "uri": uri, "languageId": "cpp", "version": 1, "text": ACTOR_H } }),
+    );
+
+    let hover = hover_at(&mut server, 100, &uri, ACTOR_H, "AMyActor", 1);
+    let text = hover["result"]["contents"]["value"]
+        .as_str()
+        .unwrap_or_else(|| panic!("a markdown answer was expected, got {hover}"));
+    assert!(
+        text.contains("UCLASS(Blueprintable)"),
+        "the annotation, as the file wrote it: {text}"
+    );
+    assert!(
+        text.contains("AMyActor"),
+        "and the declaration is still what the card is about: {text}"
+    );
+
+    server.request(200, "shutdown", Value::Null);
+    server.notify("exit", Value::Null);
+}
 /// A hover whose position is the first byte of `needle` in the fixture — for a member name, which
 /// [`hover_over`] cannot address (it hovers at the start of the line).
 /// A hover whose position is `into` bytes into the **last** occurrence of `needle` — for a member name, which

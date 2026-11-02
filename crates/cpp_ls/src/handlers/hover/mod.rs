@@ -1104,6 +1104,22 @@ fn declaration_markdown(
         )
     ));
 
+    // **The reflection annotation the declaration was written under.** `UCLASS(Blueprintable)` and
+    // `UPROPERTY(EditAnywhere, Category="Game")` are empty macros: the tree has nothing of them, and the card a reader
+    // gets for a member said only its type. The specifiers are what the engine's build tool acts on — the reason the
+    // declaration is what it is to the editor — so the card shows them exactly as the file wrote them.
+    if let Some(reflection) = &fact.reflection {
+        out.push_str(&format!(
+            "\n\n`{}({})`",
+            reflection.macro_name,
+            reflection.specifiers.join(", ")
+        ));
+        out.push_str(match reflection.specifiers.len() {
+            0 => "\n\nThe declaration is annotated for Unreal's reflection system, with no specifiers.",
+            _ => "\n\nThe specifiers Unreal's reflection system acts on, as the declaration wrote them.",
+        });
+    }
+
     if let FactGuard::Region(_) = fact.guard {
         out.push_str(
             "\n\nThis declaration is inside a conditional block, so whether it exists depends on the compilation \
