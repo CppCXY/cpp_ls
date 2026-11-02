@@ -231,6 +231,50 @@ fn a_generated_header_is_required_and_last() {
         "{findings:?}"
     );
 }
+/// **A reflection annotation on something the build tool does not reflect.**
+///
+/// `UPROPERTY` on a member is the annotation working; on a local or a file-scope declaration it is never read, and
+/// nothing in the build says so. The finding is a **warning** — the program compiles, and what is wrong is the
+/// expectation the annotation sets.
+#[test]
+fn a_reflection_annotation_outside_a_class_is_reported() {
+    let project = Project::new(
+        "macro_scope",
+        ENABLED,
+        &format!(
+            "{ENGINE}{GENERATED}
+UPROPERTY()
+int32 Global = 0;
+
+UCLASS()
+class AMyActor
+{{
+    GENERATED_BODY()
+
+public:
+    UPROPERTY(EditAnywhere)
+    bool bIsReady = false;
+
+    void Tick(float DeltaSeconds)
+    {{
+        UPROPERTY(EditAnywhere)
+        int32 Scratch = 0;
+    }}
+}};
+"
+        ),
+    );
+    let session = project.session();
+    let findings = engine_findings(&session, &project.root.join("game.h"));
+    assert_eq!(
+        findings,
+        vec![
+            (DiagnosticCode::UeMacroScope, "Global".to_string()),
+            (DiagnosticCode::UeMacroScope, "Scratch".to_string()),
+        ],
+        "{findings:?}"
+    );
+}
 /// **The names the rules answer to**, because a project switches them off by name in `[diagnostics] disable`.
 #[test]
 fn the_engine_rules_are_named() {

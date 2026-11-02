@@ -119,6 +119,8 @@ pub enum DiagnosticCode {
     /// A file with reflection annotations and no `*.generated.h` include, or one that is not the last include — see
     /// [`super::ue_generated_header`].
     UeGeneratedHeader,
+    /// A `UPROPERTY`/`UFUNCTION` on something the build tool does not reflect — see [`super::ue_macro_scope`].
+    UeMacroScope,
 }
 
 impl DiagnosticCode {
@@ -128,7 +130,7 @@ impl DiagnosticCode {
     /// what it says about types, then what it says about a whole body, then the two that are about the reading
     /// rather than the program. A consumer that shows a settings screen, or a test that asserts every rule has a
     /// name and a module, iterates this.
-    pub const ALL: [DiagnosticCode; 32] = [
+    pub const ALL: [DiagnosticCode; 33] = [
         DiagnosticCode::SyntaxError,
         DiagnosticCode::ParamTypeCheck,
         DiagnosticCode::AssignTypeCheck,
@@ -161,6 +163,7 @@ impl DiagnosticCode {
         DiagnosticCode::UeNaming,
         DiagnosticCode::UeGenerateBody,
         DiagnosticCode::UeGeneratedHeader,
+        DiagnosticCode::UeMacroScope,
     ];
 
     /// **The code a client is shown**, and the spelling a config file uses: kebab case, and the module's file name
@@ -201,6 +204,7 @@ impl DiagnosticCode {
             DiagnosticCode::UeNaming => "ue-naming",
             DiagnosticCode::UeGenerateBody => "ue-generate-body",
             DiagnosticCode::UeGeneratedHeader => "ue-generated-header",
+            DiagnosticCode::UeMacroScope => "ue-macro-scope",
             DiagnosticCode::ConceptNotSatisfied => "concept-not-satisfied",
         }
     }
@@ -278,6 +282,8 @@ impl DiagnosticCode {
             // **The build fails without the generated header**, the same shape as the missing body macro: the
             // declaration is fine, and the engine build tool is what rejects it.
             DiagnosticCode::UeGeneratedHeader => RuleSeverity::Error,
+            // **The program compiles**; what is wrong is the expectation the annotation sets, which is a warning.
+            DiagnosticCode::UeMacroScope => RuleSeverity::Warning,
         }
     }
 
@@ -334,6 +340,7 @@ impl DiagnosticCode {
                 | DiagnosticCode::UeNaming
                 | DiagnosticCode::UeGenerateBody
                 | DiagnosticCode::UeGeneratedHeader
+                | DiagnosticCode::UeMacroScope
         )
     }
 
@@ -348,6 +355,7 @@ impl DiagnosticCode {
             DiagnosticCode::UeNaming
                 | DiagnosticCode::UeGenerateBody
                 | DiagnosticCode::UeGeneratedHeader
+                | DiagnosticCode::UeMacroScope
         )
     }
 }

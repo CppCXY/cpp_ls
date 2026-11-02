@@ -112,7 +112,7 @@ pub(crate) fn annotated_declarations(
 
 /// **The identifier of the macro call that ends immediately before `at`** — `UCLASS` of `UCLASS(...)`, when the call is
 /// the last thing written before the declaration.
-fn the_annotation_before(written: &str, at: usize) -> Option<String> {
+pub(crate) fn the_annotation_before(written: &str, at: usize) -> Option<String> {
     let before = written.get(..at)?;
     let trimmed = before.trim_end();
     if !trimmed.ends_with(')') {
@@ -162,6 +162,28 @@ pub(crate) fn declared_name(
     declaration
         .descendants()
         .find(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::NameExpr)
+}
+
+/// **The name a declaration declares**, not the first name in its type: `int32 Global = 0;` declares `Global`, and the
+/// first `NameExpr` in the declaration is `int32` — a named type is a name too.
+pub(crate) fn the_declared_name(
+    declaration: &cpp_parser::CppSyntaxNode,
+) -> Option<cpp_parser::CppSyntaxNode> {
+    let declarator = declaration
+        .children()
+        .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::InitDeclarator)
+        .and_then(|init| {
+            init.children()
+                .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::Declarator)
+        })
+        .or_else(|| {
+            declaration
+                .children()
+                .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::Declarator)
+        })?;
+    declarator
+        .children()
+        .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::NameExpr)
 }
 
 /// **The type a member is written with**, from the file's own text: from the declaration's start to the name's, with

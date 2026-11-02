@@ -126,6 +126,7 @@ mod simplify_boolean_expr;
 pub mod syntax_error;
 mod ue_generate_body;
 mod ue_generated_header;
+mod ue_macro_scope;
 mod ue_naming;
 pub mod undefined_field;
 pub mod undefined_name;
@@ -1540,6 +1541,7 @@ pub fn run(context: CheckContext<'_>) -> Vec<Finding> {
     run_check::<ue_naming::UeNaming>(&mut context);
     run_check::<ue_generate_body::UeGenerateBody>(&mut context);
     run_check::<ue_generated_header::UeGeneratedHeader>(&mut context);
+    run_check::<ue_macro_scope::UeMacroScope>(&mut context);
 
     if crate::probes::timing() {
         let (ran, nanos) = context.model.inference_cost();

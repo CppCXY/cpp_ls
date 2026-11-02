@@ -2854,6 +2854,7 @@ fn the_cpp_only_rules_are_known_by_name() {
             DiagnosticCode::UeNaming,
             DiagnosticCode::UeGenerateBody,
             DiagnosticCode::UeGeneratedHeader,
+            DiagnosticCode::UeMacroScope,
         ]
     );
 }

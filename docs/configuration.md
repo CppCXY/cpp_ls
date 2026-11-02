@@ -224,6 +224,8 @@ The two rules that judge the conventions:
 ```text
 ue-naming          a UCLASS/USTRUCT/UENUM name without its engine prefix, a boolean member without `b`
 ue-generate-body   a UCLASS/USTRUCT whose body writes no GENERATED_BODY()
+ue-generated-header  a file with annotations and no `*.generated.h`, or one that is not the last include
+ue-macro-scope     a UPROPERTY/UFUNCTION on a local or a file-scope declaration, which the build tool never reads
 ```
 
 Both judge **style and engine semantics** rather than the language, which is why they are in the list of C++-only rules
@@ -255,9 +257,9 @@ The language of a file is decided by its `-std=` first (`-std=c17` → C, `-std=
 `.h` belongs to whichever language includes it, and C++ is the wider list. A project that states no language is read
 as "not told", which is not the same as C.
 
-**Twelve rules are C++ only, and are switched off for a file compiled as C** — `use-nullptr`, `use-auto`,
+**Thirteen rules are C++ only, and are switched off for a file compiled as C** — `use-nullptr`, `use-auto`,
 `use-override`, `c-style-cast`, `access-invisible`, `concept-not-satisfied`, `module-note`, `implicit-bool-conversion`,
-`dangling-field`, and the three Unreal rules `ue-naming`, `ue-generate-body` and `ue-generated-header`. Six of them name grammar C does not have (`use-override`, `access-invisible`,
+`dangling-field`, and the four Unreal rules `ue-naming`, `ue-generate-body`, `ue-generated-header` and `ue-macro-scope`. Six of them name grammar C does not have (`use-override`, `access-invisible`,
 `concept-not-satisfied`, `module-note`, `use-auto`, `use-nullptr`); the other two name C++ style that C's own idiom
 contradicts — a C-style cast is the only cast C has, and an `int` in a condition is the language's idiom rather than a
 mistake. Measured before the gate existed: a C corpus configured with `-std=c17` answered **14 `c-style-cast` findings**
