@@ -8748,6 +8748,32 @@ fn apply_project_config(filter: WatchFilter, report: &ConfigReport) -> WatchFilt
         filter = filter.with_cache_directory(cache_dir);
     }
 
+    // **A UE project's build trees are not source.** `Intermediate` holds the generated headers — which the analysis
+    // must still *read* when a source includes one, and must never analyse as a translation unit — and `Binaries`,
+    // `Saved` and `DerivedDataCache` hold outputs. Measured on a real UE checkout: `Intermediate/Build` is most of the
+    // file count under the project, and indexing it produces findings about generated code nobody edits.
+    //
+    // Excluded by **pattern** rather than by a special case in the walk, because that is what this filter is for and
+    // because a project that keeps its generated code somewhere else can say so with `[workspace] exclude`.
+    if report
+        .config
+        .unreal
+        .as_ref()
+        .is_some_and(|unreal| unreal.is_on())
+    {
+        for pattern in [
+            "Intermediate/**",
+            "**/Intermediate/**",
+            "Binaries/**",
+            "Saved/**",
+            "DerivedDataCache/**",
+        ] {
+            if let Ok(pattern) = crate::PathPattern::new(pattern) {
+                filter = filter.ignore_pattern(pattern);
+            }
+        }
+    }
+
     filter
 }
 

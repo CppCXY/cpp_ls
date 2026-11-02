@@ -133,9 +133,14 @@ impl World {
             "{\n  \"FileVersion\": 3,\n  \"Modules\": [ { \"Name\": \"Game\", \"Type\": \"Runtime\" } ]\n}\n",
         )
         .expect("the uproject");
+        // **The generated header where UHT writes it** — `Intermediate/Build/<Platform>/<Config>/Inc/<Module>/UHT` — so
+        // that `#include "Game.generated.h"` resolves through the generated include directory and not beside the source.
+        let generated =
+            project.join("Intermediate/Build/Win64/UnrealEditor/Inc/Game/UHT/Game.generated.h");
+        std::fs::create_dir_all(generated.parent().expect("a parent")).expect("the UHT directory");
         std::fs::write(
-            project.join("Source/Game/Game.generated.h"),
-            "#pragma once\n",
+            &generated,
+            "#pragma once\n\nstruct FFromGenerated\n{\n    int32 Value = 0;\n};\n",
         )
         .expect("the generated header");
         World { root: project }
@@ -221,6 +226,10 @@ public:
 
     TArray<FString> Names;
 
+    // A type the generated header declares: it exists only under `Intermediate/…/UHT`, which is the include directory
+    // the section adds.
+    FFromGenerated Generated;
+
     void BeginPlay() override
     {
         Super::BeginPlay();
@@ -232,6 +241,31 @@ public:
     );
     let mut session = world.session();
     session.cook(&header);
+
+    // **The generated tree is not analysed as source**, though its headers resolve: `Intermediate` is UHT's output.
+    assert!(
+        session.project_files().iter().all(|path| !path
+            .to_string_lossy()
+            .to_ascii_lowercase()
+            .contains("intermediate")),
+        "the generated tree is excluded from the analysis: {:?}",
+        session.project_files()
+    );
+
+    // **The generated include directory is part of the file's configuration.**
+    let config = session.config_for(&header);
+    assert!(
+        config
+            .include_paths
+            .iter()
+            .any(|path| path.directory.ends_with("UHT")),
+        "{:?}",
+        config
+            .include_paths
+            .iter()
+            .map(|path| &path.directory)
+            .collect::<Vec<_>>()
+    );
 
     let errors = session
         .diagnostics(&header)
@@ -254,9 +288,19 @@ public:
         .iter()
         .map(|member| member.fact.name.as_str())
         .collect();
-    for expected in ["bIsReady", "Target", "Names", "StaticClass"] {
+    for expected in ["bIsReady", "Target", "Names", "StaticClass", "Generated"] {
         assert!(names.contains(&expected), "{expected} of {names:?}");
     }
+    // The type came from the generated header, so its own member resolves too.
+    let Known::Yes(generated) = session.members_of(&view, "FFromGenerated") else {
+        panic!("the generated header's type is indexed");
+    };
+    let generated_names: Vec<&str> = generated
+        .members
+        .iter()
+        .map(|member| member.fact.name.as_str())
+        .collect();
+    assert!(generated_names.contains(&"Value"), "{generated_names:?}");
 
     // **The two members the generated code writes that a macro cannot.** `Super` is the class's first base as its
     // declaration spelled it, `ThisClass` is the class itself — derived from the declaration, not invented.

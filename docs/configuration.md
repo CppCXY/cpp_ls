@@ -212,6 +212,10 @@ engine    every `Engine/Source/Runtime/<Module>/{Public,Classes}` becomes an inc
           `#include "CoreMinimal.h"` and `#include "GameFramework/Actor.h"` resolve as in a build. A path that is not
           an installation is used as a plain include root, which is what a header-only simulation needs.
           Without the key, an `Engine/Source/Runtime` beside (or one level above) the workspace is used when it exists.
+generated the project's own generated headers are found either way: every
+          `Intermediate/Build/<Platform>/<Config>/Inc/<Module>/UHT` directory is on the include path, which is where
+          UHT writes `*.generated.h` and where a built project takes `Super`, `ThisClass` and `StaticClass()` from.
+          A project that has never been built has none of these, and the analysis falls back to the macro's own half.
 macros    WITH_EDITOR, WITH_EDITORONLY_DATA, WITH_ENGINE, UE_BUILD_DEVELOPMENT, UE_SERVER, IS_PROGRAM and the host's
           PLATFORM_* — the engine's build configuration. A define the project states itself (compile database,
           `[compile] args`, `[compile] extra_args`) wins: a guess must not override a build that exists.

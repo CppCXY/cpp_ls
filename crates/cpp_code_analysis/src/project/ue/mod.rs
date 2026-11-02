@@ -132,6 +132,16 @@ impl UnrealSection {
         if !self.is_on() {
             return config;
         }
+        // **The project's own generated code first.** UHT writes each module's generated headers into
+        // `Intermediate/Build/<Platform>/<Config>/Inc/<Module>/UHT`, and that directory is what makes
+        // `#include "MyActor.generated.h"` resolve — the header a UE source file includes, and the one that declares
+        // `Super`, `ThisClass` and `StaticClass()` for the compiler. A project that has been built has them as **real
+        // symbols**; one that has not keeps the fallback [`crate::sema::resolve`] documents.
+        for include in generated_include_directories(root) {
+            config
+                .include_paths
+                .push(crate::include::config::IncludePath::system(include));
+        }
         if let Some(engine) = self.engine_root(root) {
             for include in engine_include_directories(&engine) {
                 config
@@ -171,6 +181,60 @@ pub fn generated_members(class_name: &str, bases: &[String]) -> Vec<(&'static st
     members
 }
 
+/// **The directories UHT wrote this project's generated headers into.**
+///
+/// ```text
+/// Intermediate/Build/<Platform>/<Config>/Inc/<Module>/UHT/MyActor.generated.h
+/// ```
+///
+/// Both `<Module>/UHT` and `<Module>` are offered, because a module's generated code is reachable under either in a real
+/// tree and a duplicate search path costs nothing. Every platform and configuration found is included: a language
+/// server analyses a checkout rather than a build, and a file compiled for `Win64/Development` may be read while the
+/// editor's `Win64/UnrealEditorDevelopment` directory is the only one regenerated.
+///
+/// A project that has never been built has no such directory, and the answer is empty — that is the honest state, not a
+/// failure: [`crate::sema::resolve`]'s generated-member fallback exists for exactly that case.
+fn generated_include_directories(root: &Path) -> Vec<PathBuf> {
+    let build = root.join("Intermediate/Build");
+    let Ok(platforms) = std::fs::read_dir(&build) else {
+        return Vec::new();
+    };
+    let mut platforms: Vec<PathBuf> = platforms
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| path.is_dir())
+        .collect();
+    platforms.sort();
+    let mut directories = Vec::new();
+    for platform in platforms {
+        let Ok(configurations) = std::fs::read_dir(&platform) else {
+            continue;
+        };
+        let mut configurations: Vec<PathBuf> = configurations
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|path| path.is_dir())
+            .collect();
+        configurations.sort();
+        for configuration in configurations {
+            let inc = configuration.join("Inc");
+            let Ok(modules) = std::fs::read_dir(&inc) else {
+                continue;
+            };
+            let mut modules: Vec<PathBuf> = modules
+                .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+                .filter(|path| path.is_dir())
+                .collect();
+            modules.sort();
+            for module in modules {
+                let uht = module.join("UHT");
+                if uht.is_dir() {
+                    directories.push(uht);
+                }
+                directories.push(module);
+            }
+        }
+    }
+    directories
+}
 /// **The include directories an engine root offers**, in the order a build would read them.
 ///
 /// The real layout is `Engine/Source/Runtime/<Module>/Public` (the module's headers) and, for some modules,
@@ -372,6 +436,29 @@ mod tests {
             ]
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_built_projects_generated_directories_are_found() {
+        let root = std::env::temp_dir().join(format!("cppls_ue_uht_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let editor = root.join("Intermediate/Build/Win64/UnrealEditor/Inc/Game/UHT");
+        let development = root.join("Intermediate/Build/Win64/Development/Inc/Other");
+        std::fs::create_dir_all(&editor).expect("the UHT directory");
+        std::fs::create_dir_all(&development).expect("a second configuration");
+        let directories = generated_include_directories(&root);
+        assert!(directories.contains(&editor), "{directories:?}");
+        assert!(
+            directories.contains(&root.join("Intermediate/Build/Win64/Development/Inc/Other")),
+            "a module's own directory is offered too: {directories:?}"
+        );
+        // **A project that was never built has none**, and that is an answer rather than a failure.
+        let empty = std::env::temp_dir().join(format!("cppls_ue_unbuilt_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&empty);
+        std::fs::create_dir_all(&empty).expect("an empty project");
+        assert!(generated_include_directories(&empty).is_empty());
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&empty);
     }
 
     #[test]
