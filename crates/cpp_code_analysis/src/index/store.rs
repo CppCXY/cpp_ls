@@ -112,6 +112,11 @@ pub struct SummaryStore<F: FileProvider = DiskFiles> {
     /// every summary built after it — [`SummaryStore::prepare_telling`] consults this map — so the record is made
     /// where it was always made, at the start of the pass, and the lock is what makes that legal from `&self`.
     dead_macros: std::sync::Mutex<std::collections::HashMap<PathBuf, Vec<usize>>>,
+    /// **The files whose reading this store has decided needs no repair** — see
+    /// [`SummaryStore::mark_the_reading_as_refined`]. A mark says the first pass's reading *is* the program's reading,
+    /// which is what [`Session::is_refined`] has to report for the majority of a project, where the second pass decides
+    /// nothing and rebuilds nothing.
+    refined_marks: std::sync::Mutex<std::collections::HashSet<PathBuf>>,
     ///
     /// Opened on first use rather than in `with_provider`, because the cache directory is only final after
     /// `with_cache_directory` and a store that opened the wrong directory would be a store with two caches.
@@ -162,7 +167,7 @@ const MAX_INCLUDE_SEARCHES: usize = 8192;
 /// lock a request waits for. What is left for [`SummaryStore::commit_the_re_read`] is an index insert per file.
 pub struct ReRead {
     /// The files whose reading changed, and whether each may be written down.
-    rebuilt: Vec<(FileSummary, bool)>,
+    pub rebuilt: Vec<(FileSummary, bool)>,
     /// **Files this pass could not read yet**, because the closure they need is not in the index
     /// yet — see [`SummaryStore::a_timeline_of_its_own`].
     not_yet: Vec<PathBuf>,
@@ -476,6 +481,7 @@ impl<F: FileProvider> SummaryStore<F> {
             stats: StoreStats::default(),
             revision: std::sync::atomic::AtomicU64::new(0),
             dead_macros: std::sync::Mutex::new(std::collections::HashMap::new()),
+            refined_marks: std::sync::Mutex::new(std::collections::HashSet::new()),
             summary_database: std::sync::OnceLock::new(),
             generation: 0,
             include_searches: std::sync::Mutex::new(std::collections::HashMap::new()),
@@ -1500,6 +1506,17 @@ impl<F: FileProvider> SummaryStore<F> {
         marked.key = SummaryKey::new(marked.key.content_hash, marked.key.context_hash)
             .with_environment(fingerprint);
         store_it(&self.summary_database(), path, &marked, self.generation);
+        if let Ok(mut marks) = self.refined_marks.lock() {
+            marks.insert(path.to_path_buf());
+        }
+    }
+
+    /// **Has this store decided that a file's reading needs no repair?** — the answer the session's `is_refined` needs
+    /// for a file the second pass marked rather than rebuilt, which is the ordinary case.
+    pub fn is_marked_refined(&self, path: &Path) -> bool {
+        self.refined_marks
+            .lock()
+            .is_ok_and(|marks| marks.contains(path))
     }
 
     /// **The refined reading of a file, when the cache already holds it for this file's own closure** — the fast path

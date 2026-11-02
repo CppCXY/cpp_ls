@@ -473,6 +473,9 @@ pub struct Session<F: FileProvider = DiskFiles> {
     /// **Behind a lock of its own**, because the thing that asks is a *request*: it holds the session for reading, and
     /// taking the write lock to record a `HashSet` insert is the wait this whole phase exists to remove.
     refined_on_request: std::sync::Mutex<std::collections::HashSet<PathBuf>>,
+    /// **The files whose reading in the index is a refined one** — what [`Session::is_refined`] answers, and what
+    /// phase 1 needs to know when an answer is still the shape-only reading.
+    refined_readings: std::sync::Mutex<std::collections::HashSet<PathBuf>>,
     /// **The open files whose cooked reading is missing or stale** — what [`Session::cook`] is called for when the
     /// queue drains.
     ///
@@ -1414,6 +1417,7 @@ impl<F: FileProvider + Clone> Session<F> {
             queue: Work::default(),
             parsed_since_the_last_pass: Vec::new(),
             refined_on_request: std::sync::Mutex::new(std::collections::HashSet::new()),
+            refined_readings: std::sync::Mutex::new(std::collections::HashSet::new()),
             cooking: Cooking::default(),
             definitions: std::sync::Mutex::new(crate::MacroDefinitions::default()),
             units: std::sync::Mutex::new(UnitTable::default()),
@@ -3097,7 +3101,18 @@ impl<F: FileProvider + Clone> Session<F> {
         // alone: a dependency nothing will ever index is a fact about the project, not about
         // timing, and the file keeps the reading the first pass gave it.
         let waiting: Vec<PathBuf> = plan.waiting_for_the_index().to_vec();
+        // **Every rebuilt reading, not only the storable ones.** What this set says is "the index holds the refined
+        // reading of this file now", and a reading rebuilt through a sibling file's timeline is exactly as refined for
+        // this session — that it cannot be written down is the cache's question, not this one.
+        let refined: Vec<PathBuf> = plan
+            .rebuilt
+            .iter()
+            .map(|(summary, _)| summary.path.clone())
+            .collect();
         let re_read = self.store.commit_the_re_read(plan);
+        if let Ok(mut known) = self.refined_readings.lock() {
+            known.extend(refined);
+        }
         if !waiting.is_empty() && self.pending_work() > 0 {
             if crate::probes::cooking() {
                 eprintln!(
@@ -6717,7 +6732,36 @@ impl<F: FileProvider + Clone> Session<F> {
             &view.path,
             offset.get(),
         );
-        self.with_the_reflection(view, found)
+        let found = self.with_the_reflection(view, found);
+        // **The answer came from L1, so ask for L2** — phase 1 of `docs/indexing-design.md`. A declaration the reader
+        // jumped into is a file they are now looking at, and its refined reading is what its own members, types and
+        // macro-shaped declarations are answered from. Asking here costs a `HashSet` insert under its own lock; the pump
+        // then refines that one file (measured: **93.6 ms**, one timeline) while this answer is already on screen.
+        if let Known::Yes(found) = &found {
+            self.want_refinement(&found.file);
+        }
+        found
+    }
+
+    /// **Is this file's reading the refined one?** — `false` for a summary that is still the shape-only reading of the
+    /// file's own text, which is what a start leaves behind (see `want_refinement`).
+    pub fn is_refined(&self, path: &Path) -> bool {
+        // Two ways to be refined, and both are real: a reading served from the refinement cache keeps its environment
+        // key, while one the pass built in this run is inserted under the file's own key (the store resets it, so that
+        // the entry the first pass wrote stays addressable). The set is what makes the second kind visible.
+        if self
+            .refined_readings
+            .lock()
+            .is_ok_and(|refined| refined.contains(path))
+        {
+            return true;
+        }
+        self.store.is_marked_refined(path)
+            || self
+                .store
+                .index()
+                .summary(path)
+                .is_some_and(|summary| summary.key.env_hash != 0)
     }
 
     /// **The reflection annotation the summary recorded**, when a same-file answer came from the binding instead.
