@@ -123,6 +123,163 @@ pub trait CommandRunner {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct DiskCommands;
 
+/// **A compiler's answers, remembered on disk** — the cache that makes a warm open stop running one.
+///
+/// `Session::open` measured **141 ms** on `EmmyLuaCodeStyle`, and it is `toolchain::discover_with` — three or four
+/// compiler invocations (`-E -v` for the search list, `-dM` for the predefined macros, `--version` for the version
+/// line). The answer is a function of the compiler's **bytes**, the arguments, the environment the caller passes and
+/// the variables the compiler reads; this key names all of them, so a cached answer is an answer about the same
+/// compiler in the same situation. The parsers still run — they are microseconds — only the process is not started.
+///
+/// It sits at the [`CommandRunner`] boundary rather than around [`Toolchain`] on purpose: the runner is the whole
+/// interface the discovery has to the outside world, so caching here cannot miss a call, and a new question added to
+/// the discovery is cached the day it is written.
+pub struct CachedCommands {
+    directory: std::path::PathBuf,
+    inner: DiskCommands,
+}
+
+impl CachedCommands {
+    /// The cache lives under the project's own cache directory, beside the summaries it is the environment of.
+    pub fn new(directory: impl Into<std::path::PathBuf>) -> Self {
+        let directory = directory.into();
+        let _ = std::fs::create_dir_all(&directory);
+        Self {
+            directory,
+            inner: DiskCommands,
+        }
+    }
+
+    /// **Everything the answer can depend on**, as one number.
+    fn the_key(
+        program: &Path,
+        arguments: &[&str],
+        environment: &[(std::ffi::OsString, std::ffi::OsString)],
+    ) -> u64 {
+        let mut bytes: Vec<u8> = Vec::new();
+        bytes.extend_from_slice(program.to_string_lossy().as_bytes());
+        for argument in arguments {
+            bytes.push(0x1f);
+            bytes.extend_from_slice(argument.as_bytes());
+        }
+        for (name, value) in environment {
+            bytes.push(0x1f);
+            bytes.extend_from_slice(name.to_string_lossy().as_bytes());
+            bytes.push(0x1d);
+            bytes.extend_from_slice(value.to_string_lossy().as_bytes());
+        }
+        // **The compiler's own bytes**: an upgrade changes this, and a cache that ignored it would answer about the
+        // compiler that used to be installed.
+        if let Ok(metadata) = std::fs::metadata(program) {
+            bytes.extend_from_slice(&metadata.len().to_le_bytes());
+            if let Ok(modified) = metadata.modified()
+                && let Ok(since) = modified.duration_since(std::time::UNIX_EPOCH)
+            {
+                bytes.extend_from_slice(&since.as_secs().to_le_bytes());
+            }
+        }
+        // **The variables the compiler reads itself** — `-iwithprefix` directories come from the environment, and
+        // `cl` finds its headers through `INCLUDE`. They are not in the caller's `environment` list, so they are
+        // named here; anything that changes the search list changes the key.
+        for name in [
+            "PATH",
+            "CPATH",
+            "CPLUS_INCLUDE_PATH",
+            "C_INCLUDE_PATH",
+            "INCLUDE",
+            "LIB",
+            "LIBRARY_PATH",
+            "SDKROOT",
+            "VCINSTALLDIR",
+            "WindowsSdkDir",
+            "VCToolsInstallDir",
+        ] {
+            bytes.push(0x1f);
+            bytes.extend_from_slice(name.as_bytes());
+            if let Some(value) = std::env::var_os(name) {
+                bytes.push(0x1d);
+                bytes.extend_from_slice(value.to_string_lossy().as_bytes());
+            }
+        }
+        crate::cache::fnv1a64(&bytes)
+    }
+
+    fn the_file(&self, key: u64) -> std::path::PathBuf {
+        self.directory.join(format!("{key:016x}.cache"))
+    }
+
+    fn remembered(&self, key: u64) -> Option<Output> {
+        let bytes = std::fs::read(self.the_file(key)).ok()?;
+        decode(&bytes)
+    }
+
+    fn remember(&self, key: u64, output: &Output) {
+        if let Some(bytes) = encode(output) {
+            let path = self.the_file(key);
+            let temporary = path.with_extension("tmp");
+            if std::fs::write(&temporary, &bytes).is_ok() {
+                let _ = std::fs::rename(&temporary, &path);
+            }
+        }
+    }
+}
+
+impl CommandRunner for CachedCommands {
+    fn run(
+        &self,
+        program: &Path,
+        arguments: &[&str],
+        environment: &[(std::ffi::OsString, std::ffi::OsString)],
+    ) -> Option<Output> {
+        let key = Self::the_key(program, arguments, environment);
+        if let Some(remembered) = self.remembered(key) {
+            return Some(remembered);
+        }
+        let made = self.inner.run(program, arguments, environment);
+        if let Some(output) = &made {
+            self.remember(key, output);
+        }
+        made
+    }
+}
+
+/// The wire form: `succeeded`, the status, then two length-prefixed byte strings. Hand-written rather than `serde`
+/// because it is four fields and a cache format that must not change when a struct somewhere else does.
+fn encode(output: &Output) -> Option<Vec<u8>> {
+    let mut bytes = Vec::with_capacity(output.stdout.len() + output.stderr.len() + 21);
+    bytes.push(u8::from(output.succeeded));
+    bytes.extend_from_slice(&i64::from(output.status.unwrap_or(-1)).to_le_bytes());
+    for text in [&output.stdout, &output.stderr] {
+        let length = u32::try_from(text.len()).ok()?;
+        bytes.extend_from_slice(&length.to_le_bytes());
+        bytes.extend_from_slice(text.as_bytes());
+    }
+    Some(bytes)
+}
+
+fn decode(bytes: &[u8]) -> Option<Output> {
+    let mut at = 0usize;
+    let succeeded = *bytes.get(at)? != 0;
+    at += 1;
+    let status = i64::from_le_bytes(bytes.get(at..at + 8)?.try_into().ok()?);
+    at += 8;
+    let read_one = |at: &mut usize| -> Option<String> {
+        let length = u32::from_le_bytes(bytes.get(*at..*at + 4)?.try_into().ok()?) as usize;
+        *at += 4;
+        let text = String::from_utf8(bytes.get(*at..*at + length)?.to_vec()).ok()?;
+        *at += length;
+        Some(text)
+    };
+    let stdout = read_one(&mut at)?;
+    let stderr = read_one(&mut at)?;
+    Some(Output {
+        stdout,
+        stderr,
+        status: (status >= 0).then_some(status as i32),
+        succeeded,
+    })
+}
+
 impl CommandRunner for DiskCommands {
     fn run(
         &self,

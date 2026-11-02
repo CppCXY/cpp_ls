@@ -79,7 +79,7 @@ use crate::file::paths::{DiskFiles, FileProvider, OverlayFiles, normalize_path};
 use crate::file::vfs::Vfs;
 use crate::file::view::{FileView, TokensOf};
 use crate::include::config::{CompileCommands, CompilerConfig, project_config_from_flags};
-use crate::include::toolchain::{self, DiskCommands, Environment, Toolchain};
+use crate::include::toolchain::{self, Environment, Toolchain};
 use crate::index::project::{
     MemberCompletions, MemberList, NameCompletions, ProjectDefinition, ProjectDefinitions,
     ProjectIndex, ProjectMacro, substituted_members,
@@ -974,9 +974,21 @@ impl Session<DiskFiles> {
         let layout = crate::include::msvc::WindowsLayout::current();
         let named = discovery.named_compilers();
 
+        // **The compiler's answers are cached under the project's own cache**, beside the summaries they are the
+        // environment of: a warm open replays them instead of running a compiler (`Session::open` measured 141 ms,
+        // almost all of it the invocations). See [`toolchain::CachedCommands`].
+        let toolchain_cache = project_config
+            .config
+            .index
+            .cache_dir
+            .clone()
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| root.join(".cppls"))
+            .join("toolchain");
+        let commands = toolchain::CachedCommands::new(toolchain_cache);
         let toolchain = toolchain::discover_with(
             &files,
-            &DiskCommands,
+            &commands,
             &named,
             // **What the project says this file is built as**: the database's entry for it, or — when the database
             // states nothing — the standard the configuration already resolved (`[compile] args = ["-std=c++17"]`,

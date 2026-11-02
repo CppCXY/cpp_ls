@@ -1,6 +1,6 @@
 use super::{
-    Dialect, Environment, Output, a_cuda_toolchain, parse_search_list, parse_version,
-    search_list_flags,
+    CachedCommands, Dialect, Environment, Output, a_cuda_toolchain, decode, encode,
+    parse_search_list, parse_version, search_list_flags,
 };
 
 /// **A CUDA toolchain is recognised from its macros or its name, and that reaches the parser's switch.**
@@ -1269,5 +1269,44 @@ End of search list.
         found.system_include_paths.len() == 3,
         "the fixture's three C directories: {:?}",
         found.system_include_paths
+    );
+}
+
+/// **The cache round-trips, and its key changes when an answer could.**
+///
+/// The wire form is hand-written (four fields), so a silent mismatch between writer and reader would serve an empty
+/// answer instead of a compiler's; and the key is the whole correctness argument for the cache, so the two things that
+/// must change it — the arguments and the environment — are asked about directly.
+#[test]
+fn a_cached_answer_reads_back_and_its_key_notices_a_difference() {
+    let output = Output {
+        stdout: "gcc version 15.1.0\n".to_string(),
+        stderr: "COLLECT_GCC=g++\r\n".to_string(),
+        status: Some(0),
+        succeeded: true,
+    };
+    let bytes = encode(&output).expect("it encodes");
+    assert_eq!(decode(&bytes), Some(output));
+
+    let program = std::path::Path::new("/usr/bin/g++");
+    let empty: Vec<(std::ffi::OsString, std::ffi::OsString)> = Vec::new();
+    let one = CachedCommands::the_key(program, &["-E", "-v"], &empty);
+    let same = CachedCommands::the_key(program, &["-E", "-v"], &empty);
+    assert_eq!(one, same, "the same question is the same key");
+
+    let other_arguments = CachedCommands::the_key(program, &["-dM"], &empty);
+    assert_ne!(
+        one, other_arguments,
+        "a different question is a different key"
+    );
+
+    let environment = vec![(
+        std::ffi::OsString::from("INCLUDE"),
+        std::ffi::OsString::from("C:/sdk/include"),
+    )];
+    let other_environment = CachedCommands::the_key(program, &["-E", "-v"], &environment);
+    assert_ne!(
+        one, other_environment,
+        "an environment the compiler was given is part of the key"
     );
 }
