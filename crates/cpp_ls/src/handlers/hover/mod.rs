@@ -70,11 +70,12 @@ pub async fn on_hover(
     let uri = params.text_document_position_params.text_document.uri;
     let position = params.text_document_position_params.position;
 
-    // **Reading the file in, without waiting for the index.** Both calls are bounded: a hover is answered from the file's
-    // own text, and waiting for the pump's write lock — measured at 43 s on a cold project — buys nothing a keystroke can
-    // use. See [`crate::handlers::read_the_file_the_request_is_about`], which owns the measurement and the fallback.
+    // **The read-only form of the step below**: hover is answered from the file's own text, so a wait for the write
+    // lock — which during an index is the pump's — buys nothing. `AnalysisState::prepare_for_a_read` carries the
+    // measurement: the first hover of an open file went from 1 103 ms to 12–34 ms.
     if let Some(path) = uri_to_file_path(&uri) {
-        crate::handlers::read_the_file_the_request_is_about(&context, &path).await;
+        context.analysis().prepare_for_a_read(&path).await;
+        crate::handlers::read_the_modules(&context, &path, false).await;
 
         // **And then the query, which no longer waits for the project's index to drain.**
         //
