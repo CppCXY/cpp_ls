@@ -989,7 +989,7 @@ impl Session<DiskFiles> {
 
         // **And what the project says about CUDA**, which is the one layer discovery cannot work out on a machine
         // where `nvcc` is not installed: the toolkit's location, the host compiler's name, extra includes. Applied
-        // after the toolchain so that `enable` can override a discovery that found no `nvcc` — see `CudaSection`.
+        // after the toolchain so that `enable` can override a discovery that found no `nvcc` — see\n        // `crate::project::cuda::CudaSection`.
         let config = match &project_config.config.compile.cuda {
             Some(cuda) => cuda.applied_to(config, &root),
             None => config,

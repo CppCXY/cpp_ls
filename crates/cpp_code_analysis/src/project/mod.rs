@@ -35,7 +35,9 @@
 
 pub mod build;
 pub mod config;
+pub mod cuda;
 pub mod discovery;
+pub mod ue;
 
 pub use build::{COMPILE_DATABASE_FILE, Database, DatabaseOrigin, find_database};
 pub use config::{
