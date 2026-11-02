@@ -233,7 +233,14 @@ const MAGIC: &[u8; 8] = b"CPPLSSUM";
 /// CORPUS_H` carried 355 bytes of "body" and `macro-parentheses` read the comment's `:` as an operator and told the reader
 /// to write `#define CORPUS_H(…) (…)`. The number moves because a cached entry holds the old range, and the reader cannot
 /// tell an old 355 from a new one.
-pub const CODEC_VERSION: u32 = 34;
+///
+/// # Version 35
+///
+/// A declaration fact gained `reflection` — the annotation it was written under and its specifiers, read from the file's
+/// text because the macros expand to nothing. A hover on a `UPROPERTY` member and the `ue-specifier` rule both need it,
+/// and neither can recover it from the tree. An entry written before this describes every declaration as unannotated,
+/// which is a wrong answer rather than an old one — the case this number exists for.
+pub const CODEC_VERSION: u32 = 35;
 
 /// Write a summary as bytes.
 ///
@@ -291,6 +298,19 @@ pub fn encode(summary: &FileSummary) -> Vec<u8> {
         put_u32(&mut out, fact.modifiers.bits());
         // And the effects, which are the same kind of answer: what this declaration does, decided once at index time.
         put_u64(&mut out, fact.frees);
+        // **The reflection annotation**, when there is one: its macro and its specifiers, as the file wrote them. A
+        // presence byte first, so the common unannotated declaration costs one byte.
+        match &fact.reflection {
+            Some(reflection) => {
+                put_u8(&mut out, 1);
+                put_str(&mut out, &reflection.macro_name);
+                put_u32(&mut out, reflection.specifiers.len() as u32);
+                for specifier in &reflection.specifiers {
+                    put_str(&mut out, specifier);
+                }
+            }
+            None => put_u8(&mut out, 0),
+        }
     }
 
     put_u32(&mut out, summary.macros.len() as u32);
@@ -706,6 +726,21 @@ pub fn decode(bytes: &[u8]) -> Result<FileSummary, DecodeError> {
             exported: reader.u8()? != 0,
             modifiers: crate::DeclModifiers::from_bits(reader.u32()?),
             frees: reader.u64()?,
+            reflection: match reader.u8()? {
+                0 => None,
+                _ => {
+                    let macro_name = reader.string()?;
+                    let count = reader.count()?;
+                    let mut specifiers = Vec::with_capacity(count);
+                    for _ in 0..count {
+                        specifiers.push(reader.string()?);
+                    }
+                    Some(crate::summary::ReflectionFact {
+                        macro_name,
+                        specifiers,
+                    })
+                }
+            },
         });
     }
 
@@ -1266,6 +1301,16 @@ mod tests {
             declarations: vec![
                 DeclFact {
                     frees: 0,
+                    // **Both ends of the field**, like the rest of this fixture: this declaration has an annotation and
+                    // the two after it have none, which is what the presence byte distinguishes.
+                    reflection: Some(crate::summary::ReflectionFact {
+                        macro_name: "UCLASS".to_string(),
+                        specifiers: vec![
+                            "Blueprintable".to_string(),
+                            "Category = \"UI\"".to_string(),
+                            "meta=(DisplayName=\"W\", ToolTip=\"a, b\")".to_string(),
+                        ],
+                    }),
                     name: "Widget".to_string(),
                     scope: None,
                     kind: DeclKind::Type,
@@ -1306,6 +1351,7 @@ mod tests {
                 },
                 DeclFact {
                     frees: 0,
+                    reflection: None,
                     name: "make".to_string(),
                     scope: Some("ns::Widget".to_string()),
                     kind: DeclKind::Function,
@@ -1336,6 +1382,7 @@ mod tests {
                 },
                 DeclFact {
                     frees: 0,
+                    reflection: None,
                     name: String::new(),
                     scope: None,
                     kind: DeclKind::Other,

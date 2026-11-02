@@ -10047,6 +10047,9 @@ fn fact_from_binding_with(
         // `delete` lives, so a call site that asks "does this free my argument" must not depend on which path built
         // the fact.
         frees: crate::sema::declarations::freed_parameters_of(root, binding),
+        // **Read by the index path too**, when a member query leaves the file: the annotation is a fact like any other,
+        // and a hover on a `UPROPERTY` member should find its specifiers wherever the member is declared.
+        reflection: None,
         type_of: crate::sema::declarations::declared_type_of_with(shapes, binding),
         // Answered here as well, because **members** are exactly where a call happens: `fac.build().size` needs the
         // return type of a member function that the file being edited declares. See [`DeclFact::returns`].
@@ -14335,6 +14338,7 @@ impl ProjectDefinition {
                 // The effects belong to the summary the index writes, and this answer is a *place to jump to*: a
                 // caller that wants `frees` asks the fact, which is the same rule `in_namespace` below follows.
                 frees: 0,
+                reflection: None,
                 name: binding
                     .name
                     .identifier_text()

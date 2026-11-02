@@ -1586,6 +1586,201 @@ fn fill_the_frees(root: &CppSyntaxNode, facts: &mut [crate::DeclFact]) {
     }
 }
 
+/// **The reflection annotation each fact was written under**, read from the file's text.
+///
+/// Unreal's reflection macros expand to nothing, so the tree a fact is built from holds no `UCLASS` and no specifier —
+/// the text is the only place they still exist:
+///
+/// ```text
+/// UPROPERTY(EditAnywhere, Category = "Game")
+/// bool bIsReady = false;                     <- the declaration starts at `bool`
+/// ```
+///
+/// **The declaration's start, not the fact's**: a variable's fact begins at its *declarator* (`bIsReady`), and the text
+/// before that is `bool ` rather than the annotation — measured, and the first version of this pass matched nothing on
+/// members because of it. So the tree is walked once, the annotation is read before each declaration's own start, and
+/// the result is filed under the **declared name's** offset, which is what a fact carries in `name_range`.
+fn fill_the_reflection(
+    root: &cpp_parser::CppSyntaxNode,
+    written: &str,
+    facts: &mut [crate::DeclFact],
+) {
+    let mut annotations: std::collections::HashMap<usize, crate::summary::ReflectionFact> =
+        std::collections::HashMap::new();
+    for node in root.descendants() {
+        if cpp_parser::CppSyntaxKind::from(node.kind()) != cpp_parser::CppSyntaxKind::Declaration {
+            continue;
+        }
+        let Some(name) = the_declaration_name(&node) else {
+            continue;
+        };
+        // **Two shapes, because the parser reads them differently.** A class's `UCLASS(...)` is a sibling *before* the
+        // declaration; a member function's `UFUNCTION(...)` was measured to be **part of** the declaration — the parser's
+        // recovery keeps the macro call and the signature together — so the annotation starts at the declaration itself.
+        let start = usize::from(node.text_range().start());
+        let Some((macro_name, specifiers)) =
+            the_annotation_before(written, start).or_else(|| the_annotation_at(written, start))
+        else {
+            continue;
+        };
+        annotations.insert(
+            usize::from(name.text_range().start()),
+            crate::summary::ReflectionFact {
+                macro_name,
+                specifiers,
+            },
+        );
+    }
+    for fact in facts {
+        if fact.reflection.is_some() {
+            continue;
+        }
+        if let Some(reflection) = annotations.get(&fact.name_range.start_offset) {
+            fact.reflection = Some(reflection.clone());
+        }
+    }
+}
+
+/// **The name a declaration declares** — the class's own name, or the declarator's, never the first name in its type.
+fn the_declaration_name(
+    declaration: &cpp_parser::CppSyntaxNode,
+) -> Option<cpp_parser::CppSyntaxNode> {
+    let kind = |node: &cpp_parser::CppSyntaxNode| cpp_parser::CppSyntaxKind::from(node.kind());
+    if let Some(definition) = declaration.descendants().find(|node| {
+        matches!(
+            kind(node),
+            cpp_parser::CppSyntaxKind::ClassDef | cpp_parser::CppSyntaxKind::StructDef
+        )
+    }) {
+        return definition
+            .descendants()
+            .find(|node| kind(node) == cpp_parser::CppSyntaxKind::NameExpr);
+    }
+    // A variable keeps its declarator under an `InitDeclarator`; a function's is a child of the declaration itself.
+    let declarator = declaration
+        .descendants()
+        .find(|node| kind(node) == cpp_parser::CppSyntaxKind::InitDeclarator)
+        .and_then(|init| {
+            init.children()
+                .find(|node| kind(node) == cpp_parser::CppSyntaxKind::Declarator)
+        })
+        .or_else(|| {
+            declaration
+                .children()
+                .find(|node| kind(node) == cpp_parser::CppSyntaxKind::Declarator)
+        })?;
+    declarator
+        .descendants()
+        .find(|node| kind(node) == cpp_parser::CppSyntaxKind::NameExpr)
+}
+
+/// The macro call that ends immediately before `at`, with its arguments split into specifiers.
+fn the_annotation_before(written: &str, at: usize) -> Option<(String, Vec<String>)> {
+    let before = written.get(..at)?.trim_end();
+    if !before.ends_with(')') {
+        return None;
+    }
+    let bytes = before.as_bytes();
+    let mut depth = 0usize;
+    let mut index = bytes.len();
+    while index > 0 {
+        index -= 1;
+        match bytes[index] {
+            b')' => depth += 1,
+            b'(' => {
+                depth -= 1;
+                if depth == 0 {
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    if depth != 0 {
+        return None;
+    }
+    let head = before[..index].trim_end();
+    let start = head
+        .rfind(|ch: char| !(ch.is_alphanumeric() || ch == '_'))
+        .map(|offset| offset + 1)
+        .unwrap_or(0);
+    let macro_name = &head[start..];
+    if !matches!(
+        macro_name,
+        "UCLASS" | "USTRUCT" | "UENUM" | "UINTERFACE" | "UPROPERTY" | "UFUNCTION"
+    ) {
+        return None;
+    }
+    Some((
+        macro_name.to_string(),
+        the_specifiers(&before[index + 1..before.len() - 1]),
+    ))
+}
+
+/// The macro call that **starts** at `at`, with its arguments split into specifiers — the shape the parser leaves for a
+/// member function, where the annotation and the signature are one declaration.
+fn the_annotation_at(written: &str, at: usize) -> Option<(String, Vec<String>)> {
+    let rest = written.get(at..)?;
+    let open = rest.find('(')?;
+    let macro_name = rest[..open].trim_end();
+    if !matches!(
+        macro_name,
+        "UCLASS" | "USTRUCT" | "UENUM" | "UINTERFACE" | "UPROPERTY" | "UFUNCTION"
+    ) {
+        return None;
+    }
+    let mut depth = 0usize;
+    let mut close = None;
+    for (index, character) in rest[open..].char_indices() {
+        match character {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    close = Some(open + index);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let close = close?;
+    Some((
+        macro_name.to_string(),
+        the_specifiers(&rest[open + 1..close]),
+    ))
+}
+/// **The specifiers of one annotation**, split at the top-level commas.
+///
+/// A value may carry its own parentheses and commas — `meta=(DisplayName="Ready", ToolTip="…")`, `Category="A, B"` — so
+/// the split follows the nesting and the string literals rather than the text's commas.
+fn the_specifiers(arguments: &str) -> Vec<String> {
+    let mut specifiers = Vec::new();
+    let mut depth = 0usize;
+    let mut in_a_string = false;
+    let mut start = 0usize;
+    for (index, character) in arguments.char_indices() {
+        match character {
+            '"' => in_a_string = !in_a_string,
+            '(' | '[' | '{' if !in_a_string => depth += 1,
+            ')' | ']' | '}' if !in_a_string => depth = depth.saturating_sub(1),
+            ',' if depth == 0 && !in_a_string => {
+                let specifier = arguments[start..index].trim();
+                if !specifier.is_empty() {
+                    specifiers.push(specifier.to_string());
+                }
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    let specifier = arguments[start..].trim();
+    if !specifier.is_empty() {
+        specifiers.push(specifier.to_string());
+    }
+    specifiers
+}
+
 /// The parameter names of a function declaration, in the order they are written.
 fn the_parameter_names(declaration: &CppSyntaxNode) -> Vec<String> {
     let declarator = declaration
@@ -3146,6 +3341,9 @@ fn fact_for(
         // **What the function frees** is filled by the pass after the facts are built — see
         // [`fill_the_frees`], which needs the whole file to do it in one walk.
         frees: 0,
+        // **The annotation is filled after the facts exist** — see `fill_the_reflection`, which reads the file text once
+        // for the whole file rather than once per declaration.
+        reflection: None,
         name,
         scope,
         // Asked of the scope the binding was made in rather than of the declaration's shape: `bool` is the one
@@ -3854,6 +4052,10 @@ impl<'a> DeclarationFacts<'a> {
         // than a request's thirty-second budget to answer, because every inline function of those headers paid a walk
         // of the whole rendering.
         fill_the_frees(root, &mut facts);
+        // **The reflection annotations, from the file text once per file** — `UCLASS(Blueprintable)` and
+        // `UPROPERTY(EditAnywhere)` are empty macros, so nothing of them survives into the tree; the specifiers exist
+        // only in the text, and a per-declaration read of it would copy the file once per fact.
+        fill_the_reflection(root, &rendered, &mut facts);
 
         let mut targets: Vec<(&mut FactGuard, usize)> = facts
             .iter_mut()
@@ -5234,6 +5436,74 @@ int Box<int>::Inner::deep = 0;
         )
     }
 
+    /// **The reflection annotation a declaration was written under**, with its specifiers as the file spelled them.
+    ///
+    /// `UCLASS` and `UPROPERTY` expand to nothing, so the tree a fact is built from holds neither: the specifiers survive
+    /// only in the text, and `fill_the_reflection` reads them back from the declaration's own offset. This pins the
+    /// shapes a rule and a hover both need — a macro with bare specifiers, one with a value, and one whose value has
+    /// commas inside it (`meta=(…)`), which must stay **one** specifier.
+    #[test]
+    fn a_reflection_annotation_is_recorded_with_its_specifiers() {
+        let source = "\
+UCLASS(Blueprintable, BlueprintType)
+class MYGAME_API AMyActor
+{
+public:
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = \"Game\")
+    bool bIsReady = false;
+
+    UFUNCTION(BlueprintCallable, meta=(DisplayName=\"Do It\", ToolTip=\"a, b\"))
+    void DoThing();
+
+    int32 NotAnnotated = 0;
+};
+";
+        let (facts, _) = facts(source);
+
+        let class = facts
+            .iter()
+            .find(|fact| fact.name == "AMyActor")
+            .expect("the class");
+        let reflection = class.reflection.clone().expect("UCLASS");
+        assert_eq!(reflection.macro_name, "UCLASS");
+        assert_eq!(
+            reflection.names().collect::<Vec<_>>(),
+            vec!["Blueprintable", "BlueprintType"]
+        );
+
+        let member = facts
+            .iter()
+            .find(|fact| fact.name == "bIsReady")
+            .expect("the member");
+        let reflection = member.reflection.clone().expect("UPROPERTY");
+        assert_eq!(reflection.macro_name, "UPROPERTY");
+        assert_eq!(
+            reflection.specifiers,
+            vec!["EditAnywhere", "BlueprintReadWrite", "Category = \"Game\"",]
+        );
+        assert_eq!(reflection.value_of("Category"), Some("\"Game\""));
+
+        let function = facts
+            .iter()
+            .find(|fact| fact.name == "DoThing")
+            .expect("the function");
+        let reflection = function.reflection.clone().expect("UFUNCTION");
+        assert_eq!(reflection.macro_name, "UFUNCTION");
+        assert_eq!(
+            reflection.specifiers,
+            vec![
+                "BlueprintCallable",
+                "meta=(DisplayName=\"Do It\", ToolTip=\"a, b\")",
+            ],
+            "a value with commas in it is one specifier"
+        );
+
+        let plain = facts
+            .iter()
+            .find(|fact| fact.name == "NotAnnotated")
+            .expect("the plain member");
+        assert!(plain.reflection.is_none());
+    }
     /// The facts of a file that **does not** parse cleanly, with the diagnostics that say so.
     fn facts_of_a_broken_file(
         source: &str,

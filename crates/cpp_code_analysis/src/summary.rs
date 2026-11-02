@@ -253,6 +253,13 @@ pub struct DeclFact {
     /// on macros and includes `D` never mentions. A stored copy would therefore go stale while `D`'s own text and
     /// key stayed identical, so nothing would invalidate it. `bases` is a spelling; the chain is a query.
     pub bases: Vec<String>,
+    /// **What a reflection annotation said** — `UCLASS(Blueprintable)`, `UPROPERTY(EditAnywhere, Category="Game")` — as
+    /// the file wrote it, or `None` for a declaration nothing annotates.
+    ///
+    /// Read from the file's own text, because the annotation is an **empty macro**: after preprocessing there is no
+    /// `UCLASS` left anywhere in the tree, so the rest of the analysis — a hover, a rule — could not see the specifiers
+    /// even though they are the whole meaning of the declaration to the engine's build tool.
+    pub reflection: Option<ReflectionFact>,
     /// **The names a class template declares its parameters with** — `["_Ty", "_Alloc"]` for `std::vector`, empty
     /// for anything that is not a class template.
     ///
@@ -707,6 +714,50 @@ pub enum DeclKind {
     Namespace,
     MacroLike,
     Other,
+}
+
+/// **One reflection annotation**, as the file wrote it.
+///
+/// ```cpp
+/// UCLASS(Blueprintable, BlueprintType)
+/// class MYGAME_API AMyActor : public AActor { … };
+///
+/// UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Game")
+/// bool bIsReady = false;
+/// ```
+///
+/// The macro's name and its specifiers, **in the order written and with the spelling the file used** (`Category =
+/// "Game"` keeps its spaces and quotes). What a specifier *means* is the rule layer's question: `ue-specifier` checks the
+/// name against the engine's vocabulary, and a hover shows the list. Storing the meaning here would freeze one engine
+/// version's semantics into a summary that outlives it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReflectionFact {
+    /// `UCLASS`, `USTRUCT`, `UENUM`, `UINTERFACE`, `UPROPERTY`, `UFUNCTION` — the macro as written.
+    pub macro_name: String,
+    /// The arguments between the parentheses, split at the top-level commas and trimmed: `["EditAnywhere", "Category =
+    /// \"Game\""]`. An empty list is the ordinary `UPROPERTY()`.
+    pub specifiers: Vec<String>,
+}
+
+impl ReflectionFact {
+    /// **The value a specifier was given**, when it has one: `Category = "Game"` answers `Some("\"Game\"")` for
+    /// `"Category"`. The comparison ignores whitespace around the `=`, which the file may write either way.
+    pub fn value_of(&self, name: &str) -> Option<&str> {
+        self.specifiers.iter().find_map(|specifier| {
+            let (key, value) = specifier.split_once('=')?;
+            (key.trim() == name).then(|| value.trim())
+        })
+    }
+
+    /// **The specifier names**, without their values: `["EditAnywhere", "Category"]`.
+    pub fn names(&self) -> impl Iterator<Item = &str> {
+        self.specifiers.iter().map(|specifier| {
+            specifier
+                .split_once('=')
+                .map(|(key, _)| key.trim())
+                .unwrap_or(specifier.as_str())
+        })
+    }
 }
 
 /// The **parameter list** of a `#define`, read back from the file it was written in.

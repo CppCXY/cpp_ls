@@ -95,6 +95,14 @@ use std::path::{Path, PathBuf};
 /// old entry still decodes — which is exactly why this number has to move rather than the codec's: an entry that
 /// decodes but says something this build would not write is the case this constant exists for.
 ///
+/// # Why this moved to 10
+///
+/// **A declaration records the reflection annotation it was written under.** `UCLASS(Blueprintable)` and
+/// `UPROPERTY(EditAnywhere, Category="Game")` are empty macros, so a summary that does not record them describes a
+/// declaration whose meaning to Unreal's build tool is lost — and the specifiers are what `ue-specifier` and a hover
+/// read. The layout moved with the field, but the reason this number moves too is the usual one: an old entry decodes
+/// and answers "unannotated" for declarations that are annotated.
+///
 /// # Why this moved to 9
 ///
 /// **An include guard's body is empty, and a cached entry has to say so.** `#define CORPUS_H` used to record the trivia
@@ -127,7 +135,7 @@ use std::path::{Path, PathBuf};
 /// ends with `::` and the declared name. The type was thrown away, the fact said `void`, and `assign-type-check` then
 /// reported the initialisation as a conversion "from `int` to `void`". The bytes are unchanged, so an old entry decodes
 /// happily and keeps the wrong type — the case this constant is for.
-pub const FORMAT_VERSION: u32 = 9;
+pub const FORMAT_VERSION: u32 = 10;
 
 /// **The fingerprint of the readers a summary was built by**, in the key.
 ///
