@@ -250,6 +250,58 @@ public:
     for expected in ["bIsReady", "Target", "Names", "StaticClass"] {
         assert!(names.contains(&expected), "{expected} of {names:?}");
     }
+
+    // **The two members the generated code writes that a macro cannot.** `Super` is the class's first base as its
+    // declaration spelled it, `ThisClass` is the class itself — derived from the declaration, not invented.
+    let super_member = list
+        .members
+        .iter()
+        .find(|member| member.fact.name == "Super")
+        .expect("the generated `Super`");
+    assert_eq!(super_member.fact.type_of.as_deref(), Some("AActor"));
+    let this_class = list
+        .members
+        .iter()
+        .find(|member| member.fact.name == "ThisClass")
+        .expect("the generated `ThisClass`");
+    assert_eq!(this_class.fact.type_of.as_deref(), Some("AMyActor"));
+}
+
+/// **A class with no base gets no `Super`**, and a project that is not engine code gets neither: the synthesis follows
+/// the generated code's own rule (`Super` names a base), not the presence of the macro alone.
+#[test]
+fn a_class_without_a_base_has_no_super() {
+    let world = World::new("no_base");
+    let header = world.write(
+        "Source/Game/MyData.h",
+        r#"
+#pragma once
+
+#include "CoreMinimal.h"
+#include "Game.generated.h"
+
+USTRUCT()
+struct FMyData
+{
+    GENERATED_BODY()
+
+    int32 Value = 0;
+};
+"#,
+    );
+    let mut session = world.session();
+    session.cook(&header);
+    let view = session.view(&header).expect("the header is held");
+    let Known::Yes(list) = session.members_of(&view, "FMyData") else {
+        panic!("`FMyData` has members");
+    };
+    let names: Vec<&str> = list
+        .members
+        .iter()
+        .map(|member| member.fact.name.as_str())
+        .collect();
+    assert!(names.contains(&"ThisClass"), "{names:?}");
+    assert!(!names.contains(&"Super"), "a struct has no base: {names:?}");
 }
 
 /// **The two engine rules run on a project that names an engine**, and the engine's own headers are quiet: the

@@ -154,6 +154,23 @@ impl UnrealSection {
     }
 }
 
+/// **What `GENERATED_BODY()` writes into a class that a macro cannot** — the two names that need the class and its base.
+///
+/// The engine's build tool writes `typedef <Base> Super;` and `typedef <ThisClass> ThisClass;` into the generated code,
+/// which is why a macro in the engine's own header can declare `StaticClass()` (no name needed) and not these two. A
+/// language server that only reads the macro therefore answers `Super` and `ThisClass` as unknown names — measured on
+/// `UE-like`, where `Super::BeginPlay()` resolved to nothing.
+///
+/// The answer is derived, not invented: `Super` **is** the class's first base as its declaration wrote it, and
+/// `ThisClass` **is** the class. Returned as `(name, type)` in the order the generated code writes them.
+pub fn generated_members(class_name: &str, bases: &[String]) -> Vec<(&'static str, String)> {
+    let mut members = vec![("ThisClass", class_name.to_string())];
+    if let Some(base) = bases.first() {
+        members.push(("Super", base.clone()));
+    }
+    members
+}
+
 /// **The include directories an engine root offers**, in the order a build would read them.
 ///
 /// The real layout is `Engine/Source/Runtime/<Module>/Public` (the module's headers) and, for some modules,

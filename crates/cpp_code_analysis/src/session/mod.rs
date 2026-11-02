@@ -7853,7 +7853,74 @@ impl<F: FileProvider + Clone> Session<F> {
             written_type,
         );
         // **The class's arguments, written through its members** — see [`substituted_members`].
-        substituted_members(self.store.index(), &view.path, written_type, listed)
+        let listed = substituted_members(self.store.index(), &view.path, written_type, listed);
+        self.the_generated_members(written_type, &view.path, listed)
+    }
+
+    /// **The members `GENERATED_BODY()` writes that a macro cannot** — `Super` and `ThisClass`.
+    ///
+    /// Unreal's build tool writes `typedef <Base> Super;` and `typedef <TheClass> ThisClass;` into the generated code,
+    /// so a project whose generated headers are present has them as ordinary members and this adds nothing. A project
+    /// that is read from a **simulation** — the macro expanded to the name-independent half, `StaticClass()` and
+    /// `GetPrivateStaticClass()` — has the annotation and not these, which is the case this exists for: measured on
+    /// `UE-like`, `Super::BeginPlay()` and `ThisClass` were names nothing declared.
+    ///
+    /// The signal is `StaticClass`, which only the generated code (or a simulation of it) declares, and the absence of
+    /// `ThisClass`, which says the generated code is not here. Outside `[unreal]` nothing is added: an ordinary C++
+    /// class with a `StaticClass` member must not grow a `Super` it never declared.
+    fn the_generated_members(
+        &self,
+        written_type: &str,
+        path: &std::path::Path,
+        listed: Known<crate::index::MemberList>,
+    ) -> Known<crate::index::MemberList> {
+        let unreal = self
+            .project_config()
+            .config
+            .unreal
+            .as_ref()
+            .is_some_and(|unreal| unreal.is_on());
+        if !unreal {
+            return listed;
+        }
+        let Known::Yes(mut list) = listed else {
+            return listed;
+        };
+        let declares_static_class = list
+            .members
+            .iter()
+            .any(|member| member.fact.name == "StaticClass");
+        let already_generated = list
+            .members
+            .iter()
+            .any(|member| member.fact.name == "ThisClass");
+        if !declares_static_class || already_generated {
+            return Known::Yes(list);
+        }
+        let Known::Yes(declared) = self.store.index().definition(written_type, path) else {
+            return Known::Yes(list);
+        };
+        // The synthetic members point at the class's own declaration: that is where the macro that generates them is
+        // written, and it is the honest place for a hover to open.
+        let class_fact = declared.fact.clone();
+        let class_name = class_fact.name.clone();
+        for (name, type_of) in crate::project::ue::generated_members(&class_name, &class_fact.bases)
+        {
+            let mut fact = class_fact.clone();
+            fact.name = name.to_string();
+            fact.kind = crate::DeclKind::Type;
+            fact.type_of = Some(type_of);
+            // A generated member is not a member of a **namespace**: it belongs to the class it was generated for.
+            fact.scope = Some(class_name.clone());
+            list.members.push(crate::index::ProjectMember {
+                file: declared.file.clone(),
+                fact,
+                declared_in: class_name.clone(),
+                depth: 0,
+                ambiguous: false,
+            });
+        }
+        Known::Yes(list)
     }
 
     /// **A type name as a declaration wrote it, resolved where it was written — through a base if it has to.**
