@@ -60,6 +60,52 @@ pub use text_document::{
     process_did_open_text_document, process_did_save_text_document,
 };
 
+/// **How long a request may wait for the index before it answers with what it has.**
+///
+/// The editor must never wait for the pump. Measured over the wire on `EmmyLuaCodeStyle` (1243 files): the first hover
+/// about a file answered in **43 s** while the project was being indexed, and the hover's own analysis answered in
+/// **2–33 ms** once the file was in hand. Every one of those seconds was the write lock the pump holds while it reads a
+/// closure — so the fix is not a faster query, it is to stop the query waiting.
+///
+/// The budget is what a keystroke may pay, not what the work costs. A miss answers from what is in memory (a client
+/// shows nothing, which is the state it already handles while an index runs) and starts the same work where nobody is
+/// waiting, so the next request takes the fast path. That is IntelliJ's *dumb mode* applied to one handler instead of
+/// the whole server.
+const THE_INDEX_MAY_TAKE: std::time::Duration = std::time::Duration::from_millis(25);
+
+/// **Read the file a request is about, without making the request wait for the project's index.**
+///
+/// [`AnalysisState::prepare_for_a_read`] is a read when the file is in hand and a **write** when it is not — and the
+/// write waits for whatever section of the index is in flight. The same is true of
+/// [`read_the_modules`]. This bounds both, and pays a miss forward to a background task.
+///
+/// [`AnalysisState::prepare_for_a_read`]: crate::context::AnalysisState::prepare_for_a_read
+pub async fn read_the_file_the_request_is_about(
+    context: &ServerContextSnapshot,
+    path: &std::path::Path,
+) {
+    let analysis = context.analysis();
+    match tokio::time::timeout(THE_INDEX_MAY_TAKE, analysis.prepare_for_a_read(path)).await {
+        // The file is in hand: the modules are the cheap half of the same question.
+        Ok(true) => {
+            let _ =
+                tokio::time::timeout(THE_INDEX_MAY_TAKE, read_the_modules(context, path, false))
+                    .await;
+        }
+        // No workspace open: there is nothing to read, and nothing to queue either.
+        Ok(false) => {}
+        // **The index is busy.** Answer now, and read the file where nobody is waiting.
+        Err(_) => {
+            let context = context.clone();
+            let path = path.to_path_buf();
+            tokio::spawn(async move {
+                context.analysis().prepare_for_a_read(&path).await;
+                read_the_modules(&context, &path, false).await;
+            });
+        }
+    }
+}
+
 /// **The module interface units this file imports, read in** — the half of "read the file in first" that a project
 /// scan cannot do.
 ///

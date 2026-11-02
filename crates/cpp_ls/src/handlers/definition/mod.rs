@@ -64,16 +64,14 @@ pub async fn on_goto_definition_handler(
     let uri = params.text_document_position_params.text_document.uri;
     let position = params.text_document_position_params.position;
 
-    // The file is read in first, under the write lock, so that the query below can be a read: a file the client has
-    // open is already held by `didOpen`, and this covers the request that arrives about one that is not.
+    // The file is read in first, **bounded**, so that the query below can be a read and never waits for the index: a file
+    // the client has open is already held by `didOpen`, and this covers the request that arrives about one that is not.
+    // See [`crate::handlers::read_the_file_the_request_is_about`] for the measurement.
     if let Some(path) = uri_to_file_path(&uri) {
-        context.analysis().prepare(&path).await;
-
-        // **The module interface units this file imports.** A name that arrives through `import std;` is declared in
-        // a file the project never scanned — `<VC>/Tools/MSVC/<version>/modules/std.ixx` is outside it — so a
-        // go-to-definition on `std::string` in a file that says `import std;` has nothing to point at until that file
-        // is read. `false`: this handler has no edit to catch up on, so the read does it itself.
-        crate::handlers::read_the_modules(&context, &path, false).await;
+        // **The file and the module units it imports**, both bounded — a name that arrives through `import std;` is
+        // declared in a file the project never scanned (`<VC>/Tools/MSVC/<version>/modules/std.ixx`), and reading it is
+        // part of what `read_the_file_the_request_is_about` does for the request that asks.
+        crate::handlers::read_the_file_the_request_is_about(&context, &path).await;
         // **And then the query, which no longer waits for the project's index to drain.**
         //
         // The defect is real and worth keeping on the record: `prepare` reads *this* file, while the declaration
