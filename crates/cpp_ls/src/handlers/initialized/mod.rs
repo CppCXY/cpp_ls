@@ -393,6 +393,16 @@ async fn index_in_background(context: ServerContextSnapshot) {
                     // person is typing ([`Session::materials_for`], [`Session::render_them`]).
                     let claimed = session.claim_cooking(COOK_A_SLICE);
 
+                    // **The module units a request queued**, read here rather than inside the request: a module unit is
+                    // read as a program (a whole closure rendered), so a hover that did it was indexing under the write
+                    // lock — measured, 1 468 ms of a 1 862 ms first hover. Four per slice is enough to keep the queue
+                    // moving without holding this write lock for a rendering.
+                    for _ in 0..4 {
+                        if !session.read_a_module_unit() {
+                            break;
+                        }
+                    }
+
                     let pending_now = session.pending_work();
                     // **Where the memory is, at the one moment somebody looks**: when the queue drains, the
                     // session reports what it is holding. These numbers were already collectable — `Session::cache_sizes`

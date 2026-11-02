@@ -113,46 +113,29 @@ pub async fn read_the_modules(
 
     let read = path.to_path_buf();
 
+    // **A request queues the module work; it does not drain the index for it.**
+    //
+    // This closure used to do three things: catch the file up (a parse, milliseconds), queue the interface unit the
+    // file imports, and then **drain the whole index queue** — `while session.pending() > 0 { session.advance(256) }`,
+    // up to four hundred rounds, then up to sixteen module units, three times over. Measured on the first hover of a
+    // session: **1 468 ms** of a 1 862 ms request, spent indexing the project under the write lock, for a `.cpp` that
+    // imports no module at all.
+    //
+    // What a request owes the answer is the part that makes the *reading* current — `catch_up` — and the queueing.
+    // The draining is the pump's (`handlers::initialized`'s slice reads the module units the queue names), which is
+    // the same split as the second pass: requests ask, the background pays.
     context
         .analysis()
-        .update_session("a request caught the index up", move |session| {
+        .update_session("a request queued the modules", move |session| {
             if !caught_up {
-                // The caller's summary may still be an edit behind — `catch_up` is what makes the *reading* current,
-                // and an import that is not in the reading cannot be read in. One parse of one file, and nothing at
-                // all when there is no edit waiting.
                 session.catch_up(&read);
             }
-
-            // **Queued, then read as a program — the compiler's two steps.** Queueing is instant and puts the
-            // interface unit in the project; reading it as a **translation unit** is what makes the names *right*,
-            // because it renders every header in the closure inside this unit's environment (`#if` decided once)
-            // instead of leaving them with raw summaries, where `shared_ptr_base.h` writes a class head three times
-            // under `#if`/`#else` and its scopes mis-pair — measured, a completion after `ptr->` offered the
-            // `shared_ptr`'s own four members instead of `std::string`'s sixty-eight.
-            //
-            // **Paid here, once per session, because the answer is wrong without it** — and a client that cancels is
-            // retried on the next keystroke, which finds the reading already made (**2.4 ms** measured against
-            // **484 ms** for the cold program read). The drain is what gives the walk a summary to start from and a
-            // closure that has stopped filling; three rounds is the same bound `commit_a_program` uses.
-            let queued = session.queue_the_modules_a_file_imports(&read);
-            for _ in 0..3 {
-                let mut rounds = 0;
-                while session.pending() > 0 && rounds < 400 {
-                    session.advance(256);
-                    rounds += 1;
-                }
-                for _ in 0..16 {
-                    if !session.read_a_module_unit() {
-                        break;
-                    }
-                }
-                if !session.a_module_unit_is_waiting_for_its_program() {
-                    break;
-                }
-            }
-            queued
+            session.queue_the_modules_a_file_imports(&read)
         })
         .await;
+
+    // The pump is what reads them; it is told there is work.
+    context.analysis().wake();
 }
 
 /// What a module has to answer to be advertised in `initialize`.
