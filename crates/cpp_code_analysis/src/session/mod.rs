@@ -463,6 +463,16 @@ pub struct Session<F: FileProvider = DiskFiles> {
     /// only the chunk that happened to drain the queue is what left MSVC's `<xstring>` and `<vector>` — both read in
     /// the first chunk, both scoped by a macro body defined in a later one — reading at file scope for ever.
     parsed_since_the_last_pass: Vec<PathBuf>,
+    /// **The files somebody has asked to have refined** — phase 0 of `docs/indexing-design.md`.
+    ///
+    /// The second pass used to drain the whole backlog at startup: on `EmmyLuaCodeStyle` that was 1745 files and
+    /// **59–120 s**, for answers about files the reader had not opened. A start now refines nothing; `catch_up` marks
+    /// the file a request or an open is about, and the pump refines only what it finds here. The backlog stays for the
+    /// files nobody asked about — they are refined the first time somebody does.
+    ///
+    /// **Behind a lock of its own**, because the thing that asks is a *request*: it holds the session for reading, and
+    /// taking the write lock to record a `HashSet` insert is the wait this whole phase exists to remove.
+    refined_on_request: std::sync::Mutex<std::collections::HashSet<PathBuf>>,
     /// **The open files whose cooked reading is missing or stale** — what [`Session::cook`] is called for when the
     /// queue drains.
     ///
@@ -1403,6 +1413,7 @@ impl<F: FileProvider + Clone> Session<F> {
             project: project.clone(),
             queue: Work::default(),
             parsed_since_the_last_pass: Vec::new(),
+            refined_on_request: std::sync::Mutex::new(std::collections::HashSet::new()),
             cooking: Cooking::default(),
             definitions: std::sync::Mutex::new(crate::MacroDefinitions::default()),
             units: std::sync::Mutex::new(UnitTable::default()),
@@ -2562,7 +2573,7 @@ impl<F: FileProvider + Clone> Session<F> {
         // **And a whole program if one is owed**, in the same three phases the pump takes apart — this path has no
         // lock to keep free, so it takes them in a row. The clock and the budget are inside
         // [`Session::read_a_program_now`] (`the_program_to_read`), so a caller that has just edited reads nothing.
-        if self.is_idle() && self.pending_cooking() == 0 && self.re_read_backlog() == 0 {
+        if self.is_idle() && self.pending_cooking() == 0 && self.refinements_wanted() == 0 {
             self.read_a_program_now();
         }
 
@@ -2795,8 +2806,7 @@ impl<F: FileProvider + Clone> Session<F> {
         // closure, so a bigger root set is a bigger timeline and the pass is proportional to it. Rooted here, the
         // walk happens once, at the size it is used at, and under the read lock.
         let files = if self.is_idle() {
-            let take = self.parsed_since_the_last_pass.len().min(RE_READ_SLICE);
-            self.parsed_since_the_last_pass.drain(..take).collect()
+            self.take_the_files_wanted_for_refinement(RE_READ_SLICE)
         } else {
             Vec::new()
         };
@@ -3385,6 +3395,8 @@ impl<F: FileProvider + Clone> Session<F> {
     /// That second half is the case a user hit: `full2.` on a fresh session answered **four items** — the names in
     /// scope — because `std::string` was not in the index yet and nothing had read the headers that declare it.
     pub fn catch_up(&mut self, path: &Path) {
+        // **The file a request is about is one the second pass may refine** — see `want_refinement`.
+        self.want_refinement(path);
         if self.queue.forget(path) {
             self.index_one(path.to_path_buf(), Priority::Open, 0, None);
         }
@@ -3637,7 +3649,7 @@ impl<F: FileProvider + Clone> Session<F> {
     /// argument that put the cooking backlog here: a summary the pass is about to revise is not a summary a check may
     /// call a fact.
     pub fn pending_work(&self) -> usize {
-        self.queue.pending() + self.cooking.len() + self.parsed_since_the_last_pass.len()
+        self.queue.pending() + self.cooking.len() + self.refinements_wanted()
     }
 
     /// Is everything the session knows about already **read**?
@@ -3672,6 +3684,49 @@ impl<F: FileProvider + Clone> Session<F> {
     /// hundred keystrokes.
     pub fn re_read_backlog(&self) -> usize {
         self.parsed_since_the_last_pass.len()
+    }
+
+    /// **How many files are waiting because somebody asked for them** — the only re-reads a start does not defer.
+    pub fn refinements_wanted(&self) -> usize {
+        self.refined_on_request
+            .lock()
+            .map(|wanted| wanted.len())
+            .unwrap_or(0)
+    }
+
+    /// **Ask for a file's reading to be refined** — what an open or a request does.
+    ///
+    /// Only a file that is in the backlog can be refined: one that is not has either been refined already or never read,
+    /// and the question "is this in the backlog" is a hash of the list the second pass uses, so a stale ask cannot keep
+    /// the pump alive.
+    pub fn want_refinement(&self, path: &Path) {
+        if self
+            .parsed_since_the_last_pass
+            .iter()
+            .any(|queued| queued == path)
+            && let Ok(mut wanted) = self.refined_on_request.lock()
+        {
+            wanted.insert(path.to_path_buf());
+        }
+    }
+
+    /// **Take the files that were asked for**, at most `at_most`, and drop them from the backlog.
+    fn take_the_files_wanted_for_refinement(&mut self, at_most: usize) -> Vec<PathBuf> {
+        let mut taken = Vec::new();
+        let Ok(mut wanted) = self.refined_on_request.lock() else {
+            return taken;
+        };
+        let mut index = 0;
+        while index < self.parsed_since_the_last_pass.len() && taken.len() < at_most {
+            let path = self.parsed_since_the_last_pass[index].clone();
+            if wanted.remove(&path) {
+                self.parsed_since_the_last_pass.swap_remove(index);
+                taken.push(path);
+            } else {
+                index += 1;
+            }
+        }
+        taken
     }
 
     // **Drop everything the cook queue is waiting for, and say how much it was.**

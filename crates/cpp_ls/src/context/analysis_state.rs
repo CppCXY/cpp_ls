@@ -272,6 +272,12 @@ impl AnalysisState {
             && let Some(session) = session.as_ref()
             && session.index().summary(path).is_some()
         {
+            // **The file this request is about is one the second pass may refine** — a start no longer refines the
+            // project (`docs/indexing-design.md`, phase 0), so asking must happen here, under the read lock, and the
+            // recording is behind its own lock for exactly that reason. `wake` is what tells the pump there is work:
+            // without it the ask sits in the set until somebody types.
+            session.want_refinement(path);
+            self.wake();
             return true;
         }
 
