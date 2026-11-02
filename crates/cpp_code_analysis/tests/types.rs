@@ -2059,7 +2059,6 @@ int f() {
 /// Ignored rather than deleted: the assertion is the goal, and the day an overload set exists this is the test that says
 /// so.
 #[test]
-#[test]
 fn an_enable_if_overload_is_chosen_by_its_condition() {
     let source = "\
 #include <type_traits>

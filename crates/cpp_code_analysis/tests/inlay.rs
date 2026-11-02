@@ -346,7 +346,6 @@ struct S {
 /// Pinned as a claim about the **resolution** rather than as "no hint", because which layer refuses is the
 /// interesting part: the day the binding exists, the reading already takes the declarator the name is a name of —
 /// the one whose list says `a`, not the list of the function it returns.
-#[test]
 /// **A function that returns a pointer to a function is bound, and its own parameters are the ones read.**
 ///
 /// `void (*f(int a))(int b);` declares `f` — a function of `a` returning a pointer to a function of `b` — and the walk that

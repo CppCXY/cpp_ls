@@ -102,7 +102,7 @@ pub(crate) fn names_a_template_parameter_for_a_check(spelled: &str) -> bool {
     let bare = spelled
         .trim()
         .trim_start_matches("const ")
-        .trim_end_matches(|character: char| matches!(character, '&' | '*' | ' '));
+        .trim_end_matches(['&', '*', ' ']);
     names_a_template_parameter(bare)
 }
 

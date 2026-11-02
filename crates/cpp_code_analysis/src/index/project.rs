@@ -433,36 +433,6 @@ pub fn definitions_across_files(
     // punctuation, or past the end — so there is nothing to look up anywhere.
     Known::Unknown(UnknownReason::UnparsableName)
 }
-/// **The overload a call actually names**, when the condition in its signature can decide it.
-///
-/// ```cpp
-/// template <typename T>
-/// typename std::enable_if<std::is_integral<T>::value, std::string>::type describe(T);
-/// template <typename T>
-/// typename std::enable_if<std::is_floating_point<T>::value, std::string>::type describe(T);
-///
-/// describe(1.5);      // the second, and only the condition says so
-/// ```
-///
-/// The scope tree keeps **both** declarations — measured, the translation unit holds `describe` twice — and until this
-/// function existed the answer was the first of them for either call, because the singular query takes the first binding
-/// of the name and stops. What separates the two is the `enable_if` in the *return type*, so the narrowing is:
-///
-/// * a candidate whose condition is **false** for the call's argument types is dropped;
-/// * a candidate with no condition, or with one this layer cannot decide, is **kept** — deleting on "cannot tell" is how
-///   a reader loses the overload their program chose;
-/// * the answer is used only when exactly one candidate survives.
-///
-/// The argument types are bound to the declaration's template parameters **in order** (`describe(T)` with
-/// `describe(1.5)` binds `T = double`), which is the one deduction this needs and the one it can do exactly.
-/// **A concept's right-hand side**, found by name: `template <typename T> concept integral = std::is_integral_v<T>;`
-/// answers `std::is_integral_v<T>`.
-///
-/// Searched in the tree the caller holds — the file being edited and, when a `.cpp` is asking, the header its class is
-/// declared in, which is the same walk the condition itself takes. Only the *definition* is read: a concept that composes
-/// other concepts (`concept signed_integral = integral<T> && is_signed_v<T>`) answers a name this layer cannot expand, so
-/// the verdict is `None` and the candidate stays.
-/// **The name a concept's own template parameter has** — the `T` of `template <typename T> concept integral = …`.
 ///
 /// A concept's body is written in terms of its parameter, so expanding `integral<double>` means substituting `double` for
 /// that name. Read from the concept's own declaration rather than guessed from the use site.
@@ -495,6 +465,13 @@ fn the_concept_parameters(root: &cpp_parser::CppSyntaxNode, name: &str) -> Optio
     None
 }
 
+/// **A concept's right-hand side**, found by name: `template <typename T> concept integral = std::is_integral_v<T>;`
+/// answers `std::is_integral_v<T>`.
+///
+/// Searched in the tree the caller holds — the file being edited and, when a `.cpp` is asking, the header its class is
+/// declared in, which is the same walk the condition itself takes. Only the *definition* is read: a concept that composes
+/// other concepts (`concept signed_integral = integral<T> && is_signed_v<T>`) answers a name this layer cannot expand, so
+/// the verdict is `None` and the candidate stays.
 fn the_concept_definition(root: &cpp_parser::CppSyntaxNode, name: &str) -> Option<String> {
     for declaration in root.descendants() {
         if cpp_parser::CppSyntaxKind::from(declaration.kind())
@@ -519,6 +496,28 @@ fn the_concept_definition(root: &cpp_parser::CppSyntaxNode, name: &str) -> Optio
     None
 }
 
+/// **The overload a call actually names**, when the condition in its signature can decide it.
+///
+/// ```cpp
+/// template <typename T>
+/// typename std::enable_if<std::is_integral<T>::value, std::string>::type describe(T);
+/// template <typename T>
+/// typename std::enable_if<std::is_floating_point<T>::value, std::string>::type describe(T);
+///
+/// describe(1.5);      // the second, and only the condition says so
+/// ```
+///
+/// The scope tree keeps **both** declarations — measured, the translation unit holds `describe` twice — and until this
+/// function existed the answer was the first of them for either call, because the singular query takes the first binding
+/// of the name and stops. What separates the two is the `enable_if` in the *return type*, so the narrowing is:
+///
+/// * a candidate whose condition is **false** for the call's argument types is dropped;
+/// * a candidate with no condition, or with one this layer cannot decide, is **kept** — deleting on "cannot tell" is how
+///   a reader loses the overload their program chose;
+/// * the answer is used only when exactly one candidate survives.
+///
+/// The argument types are bound to the declaration's template parameters **in order** (`describe(T)` with
+/// `describe(1.5)` binds `T = double`), which is the one deduction this needs and the one it can do exactly.
 fn the_overload_a_call_names(
     index: &ProjectIndex,
     declaring: &mut dyn FnMut(&Path) -> Option<crate::FileView>,
@@ -664,27 +663,6 @@ fn template_parameters_in(declaration: &str) -> Vec<String> {
         })
         .collect()
 }
-
-/// ```cpp
-/// template <typename T>
-/// typename std::enable_if<std::is_integral<T>::value, std::string>::type describe(T);
-/// template <typename T>
-/// typename std::enable_if<std::is_floating_point<T>::value, std::string>::type describe(T);
-///
-/// describe(1.5);      // the second, and only the condition says so
-/// ```
-///
-/// Two declarations of one name in one scope are an overload set, and the scope walk answers with the **first** of them
-/// for either call — measured: `describe(1.5)` jumped to the integral declaration. This narrows the set the way the
-/// language does for the shape it can read:
-///
-/// * a candidate whose `enable_if` condition is **false** for the call's argument types is dropped;
-/// * a candidate with no condition, or with one this layer cannot decide, is **kept** — deleting on "cannot tell" is how
-///   a reader loses the overload their program chose;
-/// * the answer is used only when exactly one candidate survives.
-///
-/// The argument types are bound to the declaration's own template parameters **in order** (`describe(T)` with
-/// `describe(1.5)` binds `T = double`), which is the one deduction this needs and the one it can do exactly.
 
 /// The names a declaration's `template <…>` introduces, in order — `template <typename T, class U>` answers `["T", "U"]`.
 ///
@@ -5589,9 +5567,7 @@ impl NamedDeclaration {
                                 _ => None,
                             }
                         });
-                        let Some(binding) = found else {
-                            return None;
-                        };
+                        let binding = found?;
                         let written = crate::sema::declarations::deduced_returns_of_substituted(
                             &declared_in.root,
                             binding,

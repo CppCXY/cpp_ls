@@ -72,8 +72,13 @@ fn one_file_reports_its_findings_with_context() {
             }
         }
         if let Some(line) = line {
-            for around in line.saturating_sub(2)..=(line + 2).min(lines.len().saturating_sub(1)) {
-                println!("  {}: {}", around + 1, lines[around]);
+            for (index, text) in lines
+                .iter()
+                .enumerate()
+                .skip(line.saturating_sub(2))
+                .take(5)
+            {
+                println!("  {}: {}", index + 1, text);
             }
         }
     }

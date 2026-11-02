@@ -23,35 +23,35 @@
 /// is claiming to know what the standard library's own definition says.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Trait {
-    IsIntegral,
-    IsFloatingPoint,
-    IsArithmetic,
-    IsPointer,
-    IsVoid,
-    IsSigned,
-    IsUnsigned,
-    IsReference,
-    IsConst,
-    IsVolatile,
-    IsArray,
-    IsFunction,
+    Integral,
+    FloatingPoint,
+    Arithmetic,
+    Pointer,
+    Void,
+    Signed,
+    Unsigned,
+    Reference,
+    Const,
+    Volatile,
+    Array,
+    Function,
 }
 
 impl Trait {
     fn named(name: &str) -> Option<Trait> {
         Some(match name {
-            "is_integral" => Trait::IsIntegral,
-            "is_floating_point" => Trait::IsFloatingPoint,
-            "is_arithmetic" => Trait::IsArithmetic,
-            "is_pointer" => Trait::IsPointer,
-            "is_void" => Trait::IsVoid,
-            "is_signed" => Trait::IsSigned,
-            "is_unsigned" => Trait::IsUnsigned,
-            "is_reference" => Trait::IsReference,
-            "is_const" => Trait::IsConst,
-            "is_volatile" => Trait::IsVolatile,
-            "is_array" => Trait::IsArray,
-            "is_function" => Trait::IsFunction,
+            "is_integral" => Trait::Integral,
+            "is_floating_point" => Trait::FloatingPoint,
+            "is_arithmetic" => Trait::Arithmetic,
+            "is_pointer" => Trait::Pointer,
+            "is_void" => Trait::Void,
+            "is_signed" => Trait::Signed,
+            "is_unsigned" => Trait::Unsigned,
+            "is_reference" => Trait::Reference,
+            "is_const" => Trait::Const,
+            "is_volatile" => Trait::Volatile,
+            "is_array" => Trait::Array,
+            "is_function" => Trait::Function,
             _ => return None,
         })
     }
@@ -151,26 +151,26 @@ impl Trait {
 
         // The decorators answer for **any** type, known or not: `std::string&` is a reference whichever class `string` is.
         match self {
-            Trait::IsReference => return Some(reference),
-            Trait::IsConst => {
+            Trait::Reference => return Some(reference),
+            Trait::Const => {
                 if unknown {
                     return None;
                 }
                 return Some(qualified_const);
             }
-            Trait::IsVolatile => {
+            Trait::Volatile => {
                 if unknown {
                     return None;
                 }
                 return Some(qualified_volatile);
             }
-            Trait::IsArray => {
+            Trait::Array => {
                 if unknown {
                     return None;
                 }
                 return Some(array);
             }
-            Trait::IsFunction => {
+            Trait::Function => {
                 if unknown {
                     return None;
                 }
@@ -183,19 +183,15 @@ impl Trait {
             return None;
         }
         Some(match self {
-            Trait::IsIntegral => integral && !pointers && !reference,
-            Trait::IsFloatingPoint => floating && !pointers && !reference,
-            Trait::IsArithmetic => (integral || floating) && !pointers && !reference,
-            Trait::IsPointer => pointers && !reference,
-            Trait::IsVoid => scalars == "void" && !pointers && !reference,
-            Trait::IsSigned => signed,
-            Trait::IsUnsigned => integral && !signed,
+            Trait::Integral => integral && !pointers && !reference,
+            Trait::FloatingPoint => floating && !pointers && !reference,
+            Trait::Arithmetic => (integral || floating) && !pointers && !reference,
+            Trait::Pointer => pointers && !reference,
+            Trait::Void => scalars == "void" && !pointers && !reference,
+            Trait::Signed => signed,
+            Trait::Unsigned => integral && !signed,
             // Answered above, before the scalar was needed.
-            Trait::IsReference
-            | Trait::IsConst
-            | Trait::IsVolatile
-            | Trait::IsArray
-            | Trait::IsFunction => {
+            Trait::Reference | Trait::Const | Trait::Volatile | Trait::Array | Trait::Function => {
                 unreachable!("answered before the scalar")
             }
         })
@@ -262,7 +258,7 @@ pub fn satisfies(condition: &str, bindings: &[(String, String)]) -> Option<bool>
 
     // **`std::is_integral<T>::value`**, `std::is_integral<T>{}`, `std::is_integral_v<T>` — one trait, three spellings.
     let trait_call = a_trait_call(condition)?;
-    let argument = substitute(&trait_call.argument, bindings);
+    let argument = substitute(trait_call.argument, bindings);
     if argument.contains('<') || argument.is_empty() {
         return None;
     }
@@ -559,7 +555,7 @@ fn satisfies_inside(
 
     // **`std::is_integral<T>::value`**, `{}`, `_v`, `()` — one trait, four spellings.
     let trait_call = a_trait_call(condition)?;
-    let argument = substitute(&trait_call.argument, bindings);
+    let argument = substitute(trait_call.argument, bindings);
     if argument.contains('<') || argument.is_empty() {
         return None;
     }

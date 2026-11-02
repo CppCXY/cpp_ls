@@ -3581,10 +3581,10 @@ fn the_include_directory_beside_src_resolves_a_quoted_include() {
         root.join("include/techniques.h"),
     ]);
     session.index_everything();
-    session.cook(&root.join("src/techniques.cpp"));
+    session.cook(root.join("src/techniques.cpp"));
 
     let found = session
-        .diagnostics(&root.join("src/techniques.cpp"))
+        .diagnostics(root.join("src/techniques.cpp"))
         .expect("the file is analysed");
     let codes: Vec<&str> = found.checks.iter().map(|check| check.code.name()).collect();
     assert!(
