@@ -95,6 +95,15 @@ use std::path::{Path, PathBuf};
 /// old entry still decodes — which is exactly why this number has to move rather than the codec's: an entry that
 /// decodes but says something this build would not write is the case this constant exists for.
 ///
+/// # Why this moved to 9
+///
+/// **An include guard's body is empty, and a cached entry has to say so.** `#define CORPUS_H` used to record the trivia
+/// after the name as its body — for a guard followed by a comment block, the comment itself (355 bytes in
+/// `c-project/include/corpus.h`), so `macro-parentheses` read a `:` out of prose and told the reader to write
+/// `#define CORPUS_H(…) (…)`. The bytes are unchanged (`body_range`, a new answer), so an old entry decodes happily and
+/// keeps the false warning — the case this constant exists for. [`crate::cache::FORMAT_VERSION`] moves with
+/// `CODEC_VERSION` because a summary and its codec cannot disagree about what a range means.
+///
 /// # Why this moved to 8
 ///
 /// **A function's facts record which parameters it frees.** `void release(T* p) { delete p; }` now carries a bit for
@@ -118,7 +127,7 @@ use std::path::{Path, PathBuf};
 /// ends with `::` and the declared name. The type was thrown away, the fact said `void`, and `assign-type-check` then
 /// reported the initialisation as a conversion "from `int` to `void`". The bytes are unchanged, so an old entry decodes
 /// happily and keeps the wrong type — the case this constant is for.
-pub const FORMAT_VERSION: u32 = 8;
+pub const FORMAT_VERSION: u32 = 9;
 
 /// **The fingerprint of the readers a summary was built by**, in the key.
 ///

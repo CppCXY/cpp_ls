@@ -224,7 +224,16 @@ const MAGIC: &[u8; 8] = b"CPPLSSUM";
 /// reader is standing. Measured on `auto lineStartOffset = _lineOffsetVec[line]`: the alias chain followed every hop
 /// correctly and stopped at `_Alloc::value_type&`; with the default it reaches `std::size_t&`. See
 /// [`crate::DeclFact::parameter_defaults`] and [`crate::substituted_spelling_with_defaults`].
-pub const CODEC_VERSION: u32 = 33;
+///
+/// # Version 34
+///
+/// A macro fact's `body_range` for a definition with **no replacement list** became a **zero-length** range at the end of
+/// the name, where it used to be the trivia after the name. The old value was not an empty body: for an include guard
+/// followed by a comment block it was the whole comment — measured on `c-project/include/corpus.h`, where `#define
+/// CORPUS_H` carried 355 bytes of "body" and `macro-parentheses` read the comment's `:` as an operator and told the reader
+/// to write `#define CORPUS_H(…) (…)`. The number moves because a cached entry holds the old range, and the reader cannot
+/// tell an old 355 from a new one.
+pub const CODEC_VERSION: u32 = 34;
 
 /// Write a summary as bytes.
 ///

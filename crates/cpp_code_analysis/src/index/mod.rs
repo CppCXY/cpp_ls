@@ -1332,6 +1332,15 @@ fn deguard_the_files_own_guard(facts: &mut [&mut FactGuard], region: usize) {
 /// `"corpus"\n\n/* A function-like macro … */\n`, and one `redefinition` for a macro compared against text that was not
 /// its body.
 ///
+/// **An empty replacement list is empty, and says so with a zero length.** `#define CORPUS_H` has no body, and the
+/// fallback here used to take the trivia after the name — for an include guard followed by a comment, that is the
+/// comment block itself. `macro-parentheses` then read the comment as the replacement list, found a `:` in it and
+/// reported `CORPUS_H`'s "replacement list" as unparenthesised: a warning a reader gets the first time the header is
+/// opened, on the one line of an include guard that could not possibly be wrong. Measured on
+/// `C:\Users\zc\Desktop\c-project\include\corpus.h`: the body was 355 bytes, the comment under the guard. A zero-length
+/// range keeps `Some`, so the environment and the macro table still agree that the fact has a body, and it slices to
+/// `""` — which every body judge already reads as "no replacement list".
+///
 /// **The start is not narrowed the same way, and that is deliberate.** `body_text` is sliced from this range and the
 /// expander hands *its* token slice to the paste operator, whose positions were recorded against the body as written —
 /// so changing the start would move every `##` in the project by one token, which is the X-macro paste this interacts
@@ -1340,17 +1349,11 @@ fn body_range_of(
     definition: &crate::preprocess::macros::MacroDef,
 ) -> Option<cpp_parser::SourceRange> {
     let first = definition.body.tokens.first()?;
-    let last = definition
-        .body
-        .significant()
-        .last()
-        // **A body with no significant token keeps the old answer**, which is the trivia after the name — #define
-        // GUARDED_H has no replacement list, and the environment built from these facts and the macro table built
-        // from the same text must agree about that: ffect::tests::the_chain_agrees_with_the_walk_on_every_file`r
-        // compares them name by name, and answering None here made the two disagree about every include guard.
-        .or_else(|| definition.body.tokens.last())?;
     let start = first.range.start_offset;
-    let end = last.range.start_offset + last.range.length;
+    let end = match definition.body.significant().last() {
+        Some(last) => last.range.start_offset + last.range.length,
+        None => start,
+    };
     Some(cpp_parser::SourceRange::new(
         start,
         end.saturating_sub(start),

@@ -260,6 +260,37 @@ fn an_unparenthesised_macro_is_reported() {
     }
 }
 
+/// **An include guard has no replacement list, and the text after it is not one.**
+///
+/// Measured on `c-project/include/corpus.h`: `#define CORPUS_H` followed by a comment block recorded the comment as the
+/// macro's body — 355 bytes of it — and `macro-parentheses` found the comment's `:` and told the reader to write
+/// `#define CORPUS_H(…) (…)`. The warning appeared the first time the header was opened, on the one line of a guard
+/// that cannot be wrong.
+#[test]
+fn an_include_guard_is_not_a_macro_with_a_body() {
+    let guarded = codes_of(
+        "#ifndef CORPUS_H\n\
+         #define CORPUS_H\n\
+         \n\
+         /*\n\
+          * A comment with operators in it: `three` and `other`, `a : b`, `x = 1`.\n\
+          */\n\
+         struct bits { int three; };\n\
+         #endif\n",
+    );
+    assert!(
+        !guarded.contains(&DiagnosticCode::MacroParentheses),
+        "an empty replacement list has nothing to parenthesise: {guarded:?}"
+    );
+
+    // The rule still fires on a definition that *has* an unparenthesised body.
+    let loose = codes_of("#define TWICE(x) x * 2\nint f(int n) { return TWICE(n + 1); }\n");
+    assert!(
+        loose.contains(&DiagnosticCode::MacroParentheses),
+        "the rule itself is not weakened: {loose:?}"
+    );
+}
+
 /// **The cost of reading text instead of the tree**: a comment and a string literal are not code.
 ///
 /// Every text-based rule has this hole, and it is the same hole in each: the spelling is in the file, and the file also
