@@ -164,6 +164,151 @@ impl UnrealSection {
     }
 }
 
+/// **The specifiers each reflection macro accepts**, as the engine documents them.
+///
+/// A mistyped specifier is **silently ignored** by the build tool: `UPROPERTY(BlueprintReadWrit)` compiles, and the
+/// property is not readable from Blueprint. That silence is what `ue-specifier` reports, and this table is the answer it
+/// compares against.
+///
+/// # Why a table, and why it is allowed to be incomplete
+///
+/// Rider runs the real UnrealHeaderTool in the background and shows its diagnostics; this analysis has no engine to run,
+/// so the vocabulary has to be written down. It is the **common** set, and the rule is a warning rather than an error for
+/// exactly that reason: a specifier this table does not know may be one a newer engine added, and a project that hits a
+/// false positive silences the rule by name (`[diagnostics] disable = ["ue-specifier"]`) — the escape hatch every rule in
+/// this server has.
+///
+/// `meta` is in every list because it is accepted everywhere, and its inside is free-form: `meta=(DisplayName="…")` is
+/// **one** specifier whose parentheses hold whatever the engine's documentation says.
+pub fn known_specifiers(macro_name: &str) -> Option<&'static [&'static str]> {
+    const UCLASS: &[&str] = &[
+        "Abstract",
+        "AdvancedClassDisplay",
+        "AutoCollapseCategories",
+        "AutoExpandCategories",
+        "Blueprintable",
+        "BlueprintType",
+        "ClassGroup",
+        "CollapseCategories",
+        "Config",
+        "Const",
+        "CustomConstructor",
+        "DefaultConfig",
+        "DefaultToInstanced",
+        "Deprecated",
+        "DontAutoCollapseCategories",
+        "DontCollapseCategories",
+        "EarlyAccessPreview",
+        "Experimental",
+        "HideCategories",
+        "Interface",
+        "MinimalAPI",
+        "NoExport",
+        "NonTransient",
+        "NotBlueprintable",
+        "NotPlaceable",
+        "PerObjectConfig",
+        "Placeable",
+        "ShowCategories",
+        "SparseClassDataType",
+        "Transient",
+        "Within",
+        "meta",
+    ];
+    const USTRUCT: &[&str] = &[
+        "Atomic",
+        "BlueprintType",
+        "Immutable",
+        "NoExport",
+        "SparseClassDataType",
+        "meta",
+    ];
+    const UENUM: &[&str] = &["BlueprintType", "Experimental", "meta"];
+    const UINTERFACE: &[&str] = &[
+        "Blueprintable",
+        "Experimental",
+        "MinimalAPI",
+        "NotBlueprintable",
+        "meta",
+    ];
+    const UPROPERTY: &[&str] = &[
+        "AdvancedDisplay",
+        "AssetRegistrySearchable",
+        "BlueprintAssignable",
+        "BlueprintCallable",
+        "BlueprintGetter",
+        "BlueprintHidden",
+        "BlueprintReadOnly",
+        "BlueprintReadWrite",
+        "BlueprintSetter",
+        "Category",
+        "Config",
+        "DuplicateTransient",
+        "EditAnywhere",
+        "EditDefaultsOnly",
+        "EditFixedSize",
+        "EditInline",
+        "EditInstanceOnly",
+        "Export",
+        "GlobalConfig",
+        "HideAlphaChannel",
+        "HidePin",
+        "Instanced",
+        "Interp",
+        "Localized",
+        "NoClear",
+        "NoExport",
+        "NonPIEDuplicateTransient",
+        "NonTransactional",
+        "PersistentInstance",
+        "RepNotify",
+        "Replicated",
+        "ReplicatedUsing",
+        "SaveGame",
+        "SerializeText",
+        "SimpleDisplay",
+        "SkipSerialization",
+        "TextExportTransient",
+        "Transient",
+        "VisibleAnywhere",
+        "VisibleDefaultsOnly",
+        "VisibleInstanceOnly",
+        "ZeroConstructor",
+        "meta",
+    ];
+    const UFUNCTION: &[&str] = &[
+        "BlueprintAuthorityOnly",
+        "BlueprintCallable",
+        "BlueprintCosmetic",
+        "BlueprintImplementableEvent",
+        "BlueprintNativeEvent",
+        "BlueprintPure",
+        "CallInEditor",
+        "Category",
+        "Client",
+        "CustomThunk",
+        "Exec",
+        "NetMulticast",
+        "Reliable",
+        "SealedEvent",
+        "Server",
+        "ServiceRequest",
+        "ServiceResponse",
+        "Unreliable",
+        "WithValidation",
+        "meta",
+    ];
+    match macro_name {
+        "UCLASS" => Some(UCLASS),
+        "USTRUCT" => Some(USTRUCT),
+        "UENUM" => Some(UENUM),
+        "UINTERFACE" => Some(UINTERFACE),
+        "UPROPERTY" => Some(UPROPERTY),
+        "UFUNCTION" => Some(UFUNCTION),
+        _ => None,
+    }
+}
+
 /// **What `GENERATED_BODY()` writes into a class that a macro cannot** — the two names that need the class and its base.
 ///
 /// The engine's build tool writes `typedef <Base> Super;` and `typedef <ThisClass> ThisClass;` into the generated code,

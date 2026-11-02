@@ -275,6 +275,38 @@ public:
         "{findings:?}"
     );
 }
+/// **A specifier the engine does not know is silently ignored**, which is what makes it worth reporting: the program
+/// builds and the property quietly is not what the annotation says.
+#[test]
+fn an_unknown_specifier_is_reported() {
+    let project = Project::new(
+        "specifier",
+        ENABLED,
+        &format!(
+            "{ENGINE}{GENERATED}
+UCLASS(Blueprintable)
+class AMyActor
+{{
+    GENERATED_BODY()
+
+public:
+    UPROPERTY(EditAnywhere, BlueprintReadWrit, Category = \"Game\")
+    bool bIsReady = false;
+
+    UPROPERTY(VisibleAnywhere, meta = (DisplayName = \"Count\"))
+    int32 Count = 0;
+}};
+"
+        ),
+    );
+    let session = project.session();
+    let findings = engine_findings(&session, &project.root.join("game.h"));
+    assert_eq!(
+        findings,
+        vec![(DiagnosticCode::UeSpecifier, "BlueprintReadWrit".to_string())],
+        "{findings:?}"
+    );
+}
 /// **The names the rules answer to**, because a project switches them off by name in `[diagnostics] disable`.
 #[test]
 fn the_engine_rules_are_named() {

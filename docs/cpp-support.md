@@ -90,7 +90,7 @@ This is the "understands C++" layer, and the base every completion, hover and ch
 
 ## 6. Diagnostics
 
-Thirty-three rules, each with a fixed severity; `[diagnostics].disable` turns one off by name.
+Thirty-four rules, each with a fixed severity; `[diagnostics].disable` turns one off by name.
 
 | Code | Severity | Meaning |
 | --- | --- | --- |
@@ -109,6 +109,7 @@ Thirty-three rules, each with a fixed severity; `[diagnostics].disable` turns on
 | `ue-generate-body` | Error | a `UCLASS`/`USTRUCT` whose body writes no `GENERATED_BODY()` — **UE** (`[unreal] enable`) |
 | `ue-generated-header` | Error | a file with reflection annotations and no `*.generated.h` include, or one that is not the last include — **UE** (`[unreal] enable`) |
 | `ue-macro-scope` | Warning | a `UPROPERTY`/`UFUNCTION` on a local, a parameter or a file-scope declaration — the build tool reflects class members only — **UE** (`[unreal] enable`) |
+| `ue-specifier` | Warning | a specifier the engine does not know, which the build tool silently ignores — **UE** (`[unreal] enable`) |
 | `include-not-found` | Error | the `#include` was not found |
 | `access-invisible` | Error | a member reached from somewhere that may not reach it |
 | `missing-return` | Error | a function that promises a value can reach its end |
