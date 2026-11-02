@@ -90,7 +90,7 @@ This is the "understands C++" layer, and the base every completion, hover and ch
 
 ## 6. Diagnostics
 
-Thirty-one rules, each with a fixed severity; `[diagnostics].disable` turns one off by name.
+Thirty-two rules, each with a fixed severity; `[diagnostics].disable` turns one off by name.
 
 | Code | Severity | Meaning |
 | --- | --- | --- |
@@ -107,6 +107,7 @@ Thirty-one rules, each with a fixed severity; `[diagnostics].disable` turns one 
 | `use-after-free` | Error | a pointer read after the memory it refers to was released — by `delete`/`free`/`destroy_at`/`reset()`, or by a call to a function whose fact says it frees that argument |
 | `ue-naming` | Hint | Unreal Engine's prefix conventions — `UCLASS` → `U`/`A`, `USTRUCT` → `F`, `UENUM` → `E`, a boolean member → `b…` — **UE** (`[unreal] enable`) |
 | `ue-generate-body` | Error | a `UCLASS`/`USTRUCT` whose body writes no `GENERATED_BODY()` — **UE** (`[unreal] enable`) |
+| `ue-generated-header` | Error | a file with reflection annotations and no `*.generated.h` include, or one that is not the last include — **UE** (`[unreal] enable`) |
 | `include-not-found` | Error | the `#include` was not found |
 | `access-invisible` | Error | a member reached from somewhere that may not reach it |
 | `missing-return` | Error | a function that promises a value can reach its end |

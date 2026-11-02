@@ -116,6 +116,9 @@ pub enum DiagnosticCode {
     UeNaming,
     /// A `UCLASS`/`USTRUCT` whose body writes no `GENERATED_BODY()` — see [`super::ue_generate_body`].
     UeGenerateBody,
+    /// A file with reflection annotations and no `*.generated.h` include, or one that is not the last include — see
+    /// [`super::ue_generated_header`].
+    UeGeneratedHeader,
 }
 
 impl DiagnosticCode {
@@ -125,7 +128,7 @@ impl DiagnosticCode {
     /// what it says about types, then what it says about a whole body, then the two that are about the reading
     /// rather than the program. A consumer that shows a settings screen, or a test that asserts every rule has a
     /// name and a module, iterates this.
-    pub const ALL: [DiagnosticCode; 31] = [
+    pub const ALL: [DiagnosticCode; 32] = [
         DiagnosticCode::SyntaxError,
         DiagnosticCode::ParamTypeCheck,
         DiagnosticCode::AssignTypeCheck,
@@ -157,6 +160,7 @@ impl DiagnosticCode {
         DiagnosticCode::UseAfterFree,
         DiagnosticCode::UeNaming,
         DiagnosticCode::UeGenerateBody,
+        DiagnosticCode::UeGeneratedHeader,
     ];
 
     /// **The code a client is shown**, and the spelling a config file uses: kebab case, and the module's file name
@@ -196,6 +200,7 @@ impl DiagnosticCode {
             DiagnosticCode::UseAfterFree => "use-after-free",
             DiagnosticCode::UeNaming => "ue-naming",
             DiagnosticCode::UeGenerateBody => "ue-generate-body",
+            DiagnosticCode::UeGeneratedHeader => "ue-generated-header",
             DiagnosticCode::ConceptNotSatisfied => "concept-not-satisfied",
         }
     }
@@ -270,6 +275,9 @@ impl DiagnosticCode {
             // **A `UCLASS` without `GENERATED_BODY()` does not compile in Unreal** — the macro declares the reflection
             // data and the generated constructor the engine links against.
             DiagnosticCode::UeGenerateBody => RuleSeverity::Error,
+            // **The build fails without the generated header**, the same shape as the missing body macro: the
+            // declaration is fine, and the engine build tool is what rejects it.
+            DiagnosticCode::UeGeneratedHeader => RuleSeverity::Error,
         }
     }
 
@@ -325,6 +333,7 @@ impl DiagnosticCode {
                 | DiagnosticCode::ImplicitBoolConversion
                 | DiagnosticCode::UeNaming
                 | DiagnosticCode::UeGenerateBody
+                | DiagnosticCode::UeGeneratedHeader
         )
     }
 
@@ -336,7 +345,9 @@ impl DiagnosticCode {
     pub fn is_unreal_only(self) -> bool {
         matches!(
             self,
-            DiagnosticCode::UeNaming | DiagnosticCode::UeGenerateBody
+            DiagnosticCode::UeNaming
+                | DiagnosticCode::UeGenerateBody
+                | DiagnosticCode::UeGeneratedHeader
         )
     }
 }

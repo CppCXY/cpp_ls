@@ -81,6 +81,10 @@ const ENGINE: &str = "\
 
 const ENABLED: &str = "[unreal]\nenable = true\n";
 
+/// **The generated header, last** — a file that annotates anything must include it, and a fixture that does not would be
+/// reported by `ue-generated-header` in every other test.
+const GENERATED: &str = "#include \"game.generated.h\"\n";
+
 /// **A `UCLASS` whose name has no engine prefix and whose body has no `GENERATED_BODY()`** — both rules report, at the
 /// positions the file has them.
 #[test]
@@ -89,7 +93,7 @@ fn a_ue_class_is_told_about_its_prefix_and_its_missing_body() {
         "bad",
         ENABLED,
         &format!(
-            "{ENGINE}
+            "{ENGINE}{GENERATED}
 UCLASS()
 class MyActor
 {{
@@ -121,7 +125,7 @@ fn a_ue_class_that_follows_the_conventions_is_silent() {
         "clean",
         ENABLED,
         &format!(
-            "{ENGINE}
+            "{ENGINE}{GENERATED}
 UCLASS()
 class AMyActor
 {{
@@ -179,6 +183,54 @@ public:
     }
 }
 
+/// **A file that annotates anything must include the generated header, and last.**
+///
+/// UHT writes the reflection code into `<File>.generated.h`; a header without it has nothing for `GENERATED_BODY()` to
+/// expand to, and one that puts the generated header before another has it after declarations that need its macros. Both
+/// are the engine build tool's rules rather than the language's, which is why the rule is here and only in UE mode.
+#[test]
+fn a_generated_header_is_required_and_last() {
+    let without = Project::new(
+        "no_generated",
+        ENABLED,
+        &format!("{ENGINE}UCLASS()\nclass AMyActor\n{{\n    GENERATED_BODY()\n}};\n"),
+    );
+    let session = without.session();
+    let findings = engine_findings(&session, &without.root.join("game.h"));
+    assert_eq!(
+        findings,
+        vec![(DiagnosticCode::UeGeneratedHeader, "AMyActor".to_string())],
+        "{findings:?}"
+    );
+
+    let last = Project::new(
+        "generated_last",
+        ENABLED,
+        &format!("{ENGINE}{GENERATED}\nUCLASS()\nclass AMyActor\n{{\n    GENERATED_BODY()\n}};\n"),
+    );
+    let session = last.session();
+    let findings = engine_findings(&session, &last.root.join("game.h"));
+    assert!(findings.is_empty(), "{findings:?}");
+
+    // Another include after the generated one: the finding is at that include, which is the line to move.
+    let not_last = Project::new(
+        "generated_first",
+        ENABLED,
+        &format!(
+            "{ENGINE}{GENERATED}#include \"CoreMinimal.h\"\n\nUCLASS()\nclass AMyActor\n{{\n    GENERATED_BODY()\n}};\n"
+        ),
+    );
+    let session = not_last.session();
+    let findings = engine_findings(&session, &not_last.root.join("game.h"));
+    assert_eq!(
+        findings,
+        vec![(
+            DiagnosticCode::UeGeneratedHeader,
+            "CoreMinimal.h".to_string()
+        )],
+        "{findings:?}"
+    );
+}
 /// **The names the rules answer to**, because a project switches them off by name in `[diagnostics] disable`.
 #[test]
 fn the_engine_rules_are_named() {

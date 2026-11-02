@@ -30,7 +30,10 @@ const CORE_MINIMAL: &str = r#"
 #define UINTERFACE(...)
 #define UPROPERTY(...)
 #define UFUNCTION(...)
-#define GENERATED_BODY()
+#define GENERATED_BODY() \
+public: \
+    static UClass* StaticClass(); \
+    static UClass* GetPrivateStaticClass();
 #define GENERATED_UCLASS_BODY()
 #define GENERATED_USTRUCT_BODY()
 #define UE_LOG(CategoryName, Verbosity, Format, ...)
@@ -62,6 +65,8 @@ const OBJECT: &str = r#"
 #pragma once
 
 #include "CoreMinimal.h"
+
+class UClass;
 
 class UObject
 {
@@ -128,6 +133,11 @@ impl World {
             "{\n  \"FileVersion\": 3,\n  \"Modules\": [ { \"Name\": \"Game\", \"Type\": \"Runtime\" } ]\n}\n",
         )
         .expect("the uproject");
+        std::fs::write(
+            project.join("Source/Game/Game.generated.h"),
+            "#pragma once\n",
+        )
+        .expect("the generated header");
         World { root: project }
     }
 
@@ -195,6 +205,7 @@ fn a_game_module_over_a_simulated_engine_reads_and_lints() {
 
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
+#include "Game.generated.h"
 
 UCLASS()
 class GAME_API AMyActor : public AActor
@@ -236,7 +247,7 @@ public:
         .iter()
         .map(|member| member.fact.name.as_str())
         .collect();
-    for expected in ["bIsReady", "Target", "Names"] {
+    for expected in ["bIsReady", "Target", "Names", "StaticClass"] {
         assert!(names.contains(&expected), "{expected} of {names:?}");
     }
 }
@@ -253,6 +264,7 @@ fn the_engine_rules_run_and_the_engine_itself_is_not_judged() {
 
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
+#include "Game.generated.h"
 
 UCLASS()
 class MyActor : public AActor
@@ -286,6 +298,7 @@ fn naming_the_engine_turns_the_conventions_on() {
         "Source/Game/MyActor.h",
         r#"
 #include "CoreMinimal.h"
+#include "Game.generated.h"
 
 UCLASS()
 class MyActor

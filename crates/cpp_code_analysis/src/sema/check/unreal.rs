@@ -40,8 +40,27 @@ pub(crate) fn annotated_declarations(
     macros: &[&str],
 ) -> Vec<Annotated> {
     let mut found = Vec::new();
-    for node in context.own_syntax_nodes() {
+    // **Every top-level declaration of the rendering, not `own_syntax_nodes`.**
+    //
+    // `own_top_level_nodes` keeps a child only when its **whole** range was written in this file, and a class that uses
+    // an engine macro is not: `GENERATED_BODY()` expands to declarations that come from the engine's header, so the
+    // class's range holds tokens written elsewhere and the class is pruned — measured on the UE-like project, where
+    // `struct MyData { GENERATED_BODY() … }` disappeared from the check's view while its fact was still in the summary.
+    // That is the right rule for a check that reports on a header's code, and the wrong one here: the **annotation** is
+    // what says this file owns the declaration, and it is read from this file's own text below.
+    for node in context.tree().children() {
         if CppSyntaxKind::from(node.kind()) != CppSyntaxKind::Declaration {
+            continue;
+        }
+        // **The first token decides ownership**: a declaration whose opening keyword is not this file's belongs to an
+        // included header, whatever its annotation says.
+        let Some(first) = node.first_token() else {
+            continue;
+        };
+        if !context
+            .view
+            .was_written_here(cpp_parser::source_range(first.text_range()))
+        {
             continue;
         }
         // **A class body or an enumeration body** — the two annotations that name a type. An enumeration parses its

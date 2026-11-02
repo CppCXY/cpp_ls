@@ -118,7 +118,7 @@ either an error or a name. The extension now vetoes a standard of the *other* fa
 handed -std=c11 is left alone, because that is a project saying something unusual rather than a default leaking.
 ## 6. Diagnostics
 
-Thirty-one rules, each with a fixed severity; `[diagnostics].disable` turns one off by name. The rows marked **C++**
+Thirty-two rules, each with a fixed severity; `[diagnostics].disable` turns one off by name. The rows marked **C++**
 never fire in a file compiled as C — see [`configuration.md`](configuration.md) §5.
 
 | Code | Severity | Meaning |
@@ -136,6 +136,7 @@ never fire in a file compiled as C — see [`configuration.md`](configuration.md
 | `use-after-free` | Error | a pointer read after `free`/`delete` released it, including a free written in another function |
 | `ue-naming` | Hint | Unreal Engine's prefixes — **C++**, and only with `[unreal] enable` |
 | `ue-generate-body` | Error | a `UCLASS`/`USTRUCT` without `GENERATED_BODY()` — **C++**, and only with `[unreal] enable` |
+| `ue-generated-header` | Error | a file with reflection annotations and no `*.generated.h` include, or one that is not last — **C++**, and only with `[unreal] enable` |
 | `include-not-found` | Error | the `#include` was not found |
 | `access-invisible` | Error | a member reached from somewhere that may not reach it — **C++** |
 | `missing-return` | Error | a function that promises a value can reach its end |

@@ -255,9 +255,9 @@ The language of a file is decided by its `-std=` first (`-std=c17` → C, `-std=
 `.h` belongs to whichever language includes it, and C++ is the wider list. A project that states no language is read
 as "not told", which is not the same as C.
 
-**Eleven rules are C++ only, and are switched off for a file compiled as C** — `use-nullptr`, `use-auto`,
+**Twelve rules are C++ only, and are switched off for a file compiled as C** — `use-nullptr`, `use-auto`,
 `use-override`, `c-style-cast`, `access-invisible`, `concept-not-satisfied`, `module-note`, `implicit-bool-conversion`,
-`dangling-field`, and the two Unreal rules `ue-naming` and `ue-generate-body`. Six of them name grammar C does not have (`use-override`, `access-invisible`,
+`dangling-field`, and the three Unreal rules `ue-naming`, `ue-generate-body` and `ue-generated-header`. Six of them name grammar C does not have (`use-override`, `access-invisible`,
 `concept-not-satisfied`, `module-note`, `use-auto`, `use-nullptr`); the other two name C++ style that C's own idiom
 contradicts — a C-style cast is the only cast C has, and an `int` in a condition is the language's idiom rather than a
 mistake. Measured before the gate existed: a C corpus configured with `-std=c17` answered **14 `c-style-cast` findings**
