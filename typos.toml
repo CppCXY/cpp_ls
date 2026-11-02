@@ -34,7 +34,7 @@ UE = "UE"
 fpr = "fpr"
 [files]
 extend-exclude = [
-  "*.md",
+  "CHANGELOG.md",
   "*.flake",
   "*.yaml",
   "test.rs",
