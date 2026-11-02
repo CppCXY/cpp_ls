@@ -2640,7 +2640,7 @@ impl<F: FileProvider + Clone> Session<F> {
         // warm start was **66 s**, of which 60 s was twelve such calls — 5 s each for four files — while the index
         // itself took 4 s. One unit per drained slice is what the pass was designed around, and the early return was
         // silently withholding it.
-        let mut slice: Vec<PathBuf> = self
+        let slice: Vec<PathBuf> = self
             .parsed_since_the_last_pass
             .iter()
             .take(RE_READ_SLICE)
@@ -2650,17 +2650,15 @@ impl<F: FileProvider + Clone> Session<F> {
         // its own closure needs no unit, no render and no parse: the summary goes into the index at commit time. What
         // is left is the honest work, and the timelines are built for that and nothing else.
         let mut refinements: Vec<crate::FileSummary> = Vec::new();
-        if !slice.is_empty() {
-            let mut still_to_read = Vec::with_capacity(slice.len());
-            for path in std::mem::take(&mut slice) {
-                match self.store.the_stored_refinement(&path) {
-                    Some(summary) => refinements.push(summary),
-                    None => still_to_read.push(path),
-                }
+        for path in &slice {
+            if let Some(summary) = self.store.the_stored_refinement(path) {
+                refinements.push(summary);
             }
-            slice = still_to_read;
         }
-        let units = self.units_for_the_pass(&slice);
+        // **No timelines are built for the pass any more** (phase 2): the reading is composed from the index's macro
+        // facts, so the whole-closure walk was the cost of a question it no longer answers. `units` stays in the plan so
+        // the callers that still expect one see an empty list rather than a different shape.
+        let units = Vec::new();
 
         if wave.is_empty() {
             return PreparedWave {
@@ -2746,7 +2744,7 @@ impl<F: FileProvider + Clone> Session<F> {
     fn finish_a_slice(
         &mut self,
         done: &[Step],
-        mut units: Vec<std::sync::Arc<crate::TranslationUnit>>,
+        units: Vec<std::sync::Arc<crate::TranslationUnit>>,
     ) -> Drain {
         // **The second pass, at the moment the closure is in hand**. `SummaryStore::get` reads one file with
         // the evidence the index has at that moment, and for MSVC's STL that is no evidence at all: `<vector>`'s
@@ -2828,9 +2826,8 @@ impl<F: FileProvider + Clone> Session<F> {
         //
         // Building them here is inside the writer on the pump's path and free of it on `advance`'s — and the pump
         // never reaches this line, because `prepare_a_wave` now always hands it the slice's timelines.
-        if units.is_empty() && !files.is_empty() {
-            units = self.units_for_the_pass(&files);
-        }
+        // **No timelines for the pass** — see `prepare_a_wave`. The composition in `prepare_the_re_read` needs none.
+        let _ = &units;
 
         // **And the files whose cooked reading is out of date**, now that their environments are complete: a file's
         // macros are the ones its includes brought in, and the index queue emptying is the first moment that is
@@ -3135,6 +3132,7 @@ impl<F: FileProvider + Clone> Session<F> {
     /// A candidate that a unit already built reads is skipped — the question is "which timeline holds this file's
     /// environment", and the first unit that answers `environment_of` is that timeline. On the 138-file project
     /// this returns **one** unit, where the second pass used to walk a closure per file.
+    #[allow(dead_code)]
     fn units_for_the_pass(&self, files: &[PathBuf]) -> Vec<std::sync::Arc<crate::TranslationUnit>> {
         // **The slice, and not the project.** This used to chain `self.project` in front of `files`, on the argument
         // that a project file is a root whose closure is the whole program and therefore covers the most — and the
@@ -3255,6 +3253,7 @@ impl<F: FileProvider + Clone> Session<F> {
     /// Kept as a named function rather than folded into the caller because that is where the parallel version lived
     /// and where the next attempt will go. **Do not parallelise it again without measuring the thing it is for**:
     /// see the comment at the call site for what the last attempt cost and why its shape regressed.
+    #[allow(dead_code)]
     fn walk_the_timelines(
         &self,
         roots: Vec<PathBuf>,

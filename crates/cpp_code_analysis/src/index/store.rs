@@ -1655,7 +1655,9 @@ impl<F: FileProvider> SummaryStore<F> {
         // and copy all of them, on every drain.
         let mut sources: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
-        let eager = units.is_empty();
+        // **Eager is the timeline-less caller's shape** — the one that has no walker and no summaries to walk.
+        // A session that stops passing units does it to get the index environment below, not to copy every text.
+        let eager = units.is_empty() && !walk_its_own;
         {
             if eager {
                 for summary in self.index.summaries() {
@@ -1943,7 +1945,7 @@ impl<F: FileProvider> SummaryStore<F> {
         let mut rebuilt: Vec<(FileSummary, bool)> = Vec::new();
         // **And the candidates that cannot be read yet** — a closure the index does not describe completely. The
         // caller queues them again; see [`ReRead::waiting_for_the_index`].
-        let mut not_yet: Vec<PathBuf> = Vec::new();
+        let not_yet: Vec<PathBuf> = Vec::new();
 
         // **Two kinds of re-read, and only one of them waits for the other.** A file a unit's timeline covers is
         // re-read through that timeline — a pure function of the file, the configuration and the walk the pass
@@ -2026,45 +2028,18 @@ impl<F: FileProvider> SummaryStore<F> {
                 .with_environment(fingerprint);
             let indexer =
                 FileIndexer::new(&self.files, &self.config).with_seed(self.index.macros());
-            // **A file no slice unit covers is read through its own timeline**, walked here rather than skipped.
-            //
-            // This arm used to fix the scopes macros open and leave every `#if` branch standing,
-            // while the timeline arm above *rendered* — so the same file was two different readings
-            // depending on whether a unit covering it happened to be in hand.
-            //
-            // Walking the file's own closure costs ~38 ms and is cached by content (`walked_by_content`), and it is
-            // what the other arm is: a rendering of the file in the environment its own reading was built with.
-            let Some(unit) = self.a_timeline_of_its_own(path, &sources) else {
-                // **Not "nothing to say" — "not yet".** The file's closure is not in the index, so a rendering of it
-                // today is a rendering of part of a program. The caller retries this file once the index has it, which
-                // is what makes "was this file refined" independent of when the pass happened to reach it.
-                if tracing {
-                    eprintln!(
-                        "re-read: {} waits for its closure to be indexed",
-                        path.display()
-                    );
-                }
-                not_yet.push(path.clone());
+            // **The reading is composed, not walked.** The bodies in force come from the index's own macro facts — see
+            // `the_indexed_environment` — so this is one parse of one file instead of a whole-program walk.
+            let Some(environment) = self.the_indexed_environment(path) else {
                 continue;
             };
-            let Some(view) = unit.environment_of(path) else {
-                continue;
-            };
-            let definitions = unit.definitions();
-            let (tokens, _) = cpp_parser::lex(source, &cpp_parser::LexerConfig::default());
-            let macros =
-                crate::preprocess::cooked::FileMacros::new(view, &definitions, Some(&seed), true);
-            let rendered =
-                { crate::preprocess::cooked::cook_with(source, &tokens, &macros).render() };
             let made = indexer
-                .index_the_readings(path, source, &rendered, key)
-                .summary;
-
-            // **Stored**: this arm reads the file in its **own** closure (`a_timeline_of_its_own`), which is exactly the
-            // environment `the_closure_fingerprint` names.
+                .with_macro_bodies(&environment)
+                .index(path, source, key);
+            // **Stored**: the environment is a function of this file's own closure, which is the number the key names.
             store_it(&self.summary_database(), path, &made, self.generation);
-            let stored = true;
-            rebuilt.push((made, stored));
+            rebuilt.push((made, true));
+            continue;
         }
 
         // **The unit's timeline again, and this is the half that used to walk a closure per file** (3 363 ms,
@@ -2278,6 +2253,91 @@ impl<F: FileProvider> SummaryStore<F> {
         )
     }
 
+    /// **The macro bodies in force in a file, from the index alone** — phase 2 of `docs/indexing-design.md`.
+    ///
+    /// [`SummaryStore::closure_environment`] answers the same question by walking the closure with the preprocessor's
+    /// conditionals evaluated, which is a whole-program parse. This takes every **unconditional** `#define` the index
+    /// recorded in the closure, in include order (later files and later directives win), and reads the replacement lists
+    /// out of the defining files. A name whose definitions are all conditional is left out — unknown rather than
+    /// guessed, which is exactly the answer the shape-only reading gives for it, so this never claims more than it knows.
+    ///
+    /// What it costs: a breadth-first walk over summaries, one file read per defining file, and a slice per body. No
+    /// preprocess, no render, no parse of anything but the file being refined.
+    fn the_indexed_environment(&self, path: &Path) -> Option<cpp_parser::MacroEnvironment> {
+        let mut order: Vec<PathBuf> = Vec::new();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut pending: std::collections::VecDeque<PathBuf> = std::collections::VecDeque::new();
+        pending.push_back(path.to_path_buf());
+        while let Some(next) = pending.pop_front() {
+            let key = normalize_path(&next, cfg!(windows));
+            if !seen.insert(key.clone()) {
+                continue;
+            }
+            let Some(summary) = self.index.summary(std::path::Path::new(&key)) else {
+                continue;
+            };
+            order.push(next.clone());
+            for include in &summary.includes {
+                if let Some(resolved) = &include.resolved {
+                    pending.push_back(resolved.clone());
+                }
+            }
+        }
+
+        // **The last definition wins**, so the closure is walked backwards and the first entry seen for a name is kept.
+        let mut entries: Vec<cpp_parser::IncludedMacro> = Vec::new();
+        let mut chosen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut texts: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        for file in order.iter().rev() {
+            let key = normalize_path(file, cfg!(windows));
+            let Some(summary) = self.index.summary(std::path::Path::new(&key)) else {
+                continue;
+            };
+            for fact in summary.macros.iter().rev() {
+                if !fact.kind.is_definition()
+                    || !matches!(fact.guard, crate::summary::FactGuard::Unconditional)
+                {
+                    continue;
+                }
+                if !chosen.insert(fact.name.clone()) {
+                    continue;
+                }
+                let Some(range) = fact.body_range else {
+                    continue;
+                };
+                if !texts.contains_key(&key) {
+                    let Some(text) = self.files.read(file) else {
+                        continue;
+                    };
+                    texts.insert(key.clone(), text);
+                }
+                let Some(text) = texts.get(&key) else {
+                    continue;
+                };
+                let Some(body) = text.get(range.start_offset..range.start_offset + range.length)
+                else {
+                    continue;
+                };
+                // A function-like macro is substituted by parameter, and the list is the text between the name and the
+                // replacement list — the one piece a fact does not carry and the source does.
+                let parameters = fact.function_like.then(|| {
+                    text.get(fact.range.start_offset + fact.range.length..range.start_offset)
+                        .map(str::trim)
+                        .unwrap_or("()")
+                });
+                entries.push(cpp_parser::IncludedMacro::defined_with_body_and_parameters(
+                    0,
+                    &fact.name,
+                    fact.function_like,
+                    fact.body,
+                    Some(body),
+                    parameters,
+                ));
+            }
+        }
+        Some(cpp_parser::MacroEnvironment::from_included_macros(entries))
+    }
+
     /// **The file's own timeline, walked from what this store holds** — the second pass's fallback arm needs one.
     ///
     /// A `TranslationUnit` is the walk of a closure; the session keeps them in a table and hands them out, and the
@@ -2286,6 +2346,7 @@ impl<F: FileProvider> SummaryStore<F> {
     /// its own reading was built with — the answer the `through_a_timeline` arm gets from a unit it was handed.
     ///
     /// `None` when the file has no summary, which is a file the pass has nothing to say about.
+    #[allow(dead_code)]
     fn a_timeline_of_its_own(
         &self,
         path: &Path,
