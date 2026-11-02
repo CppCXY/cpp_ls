@@ -3571,18 +3571,14 @@ impl<F: FileProvider + Clone> Session<F> {
 
         loop {
             let read = self.advance(64).len();
-            // **"Everything" includes refining everything, and this is where a caller says so.** The lazy contract is
-            // that a *start* refines nothing and a *request* refines what it names; a caller that asks for the whole
-            // project — a test, a probe, a batch consumer — is naming every file it has read. Without this the second
-            // pass runs on an empty ask list (`take_the_files_wanted_for_refinement`), no summary ever gets its
-            // closure's macro environment, and the capability the pass exists for is silently absent: measured, the C++
-            // corpus reads **41/52** type answers instead of 51/52, and
-            // `a_class_scoped_by_another_files_macro_body_is_scoped_through_the_session` fails with
-            // `Widget → NotDeclaredHere("std::Widget")`.
-            let read_so_far: Vec<std::path::PathBuf> = self.parsed_since_the_last_pass.clone();
-            for path in &read_so_far {
-                self.want_refinement(path);
-            }
+            // **Not asked for here, and the reason is the next defect rather than this call.** Every file this pass
+            // reads would be a file to refine, which is what "index everything" sounds like it means — and it makes four
+            // session tests pass. It also makes the pass **refine a fixture's own file**, and three `checks` tests then
+            // see a different reading of it (`c_files_are_not_told_to_write_cpp_style`: `UseNullptr` stops firing, because
+            // the re-read of a one-file fixture produces a reading the checks decline). That is a defect in the
+            // **refined reading** — the same family as the C++ corpus at 41/52 — so the ask waits for it. A *request*
+            // still asks (`catch_up`), which is the contract; a batch "index everything" does not, and the tests that
+            // need it are listed in `docs/indexing-review.md` §4.
             total += read;
 
             // **Every stage of the cook is counted, because a file can be claimed and then lost.**

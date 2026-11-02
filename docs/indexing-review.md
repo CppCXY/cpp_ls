@@ -177,3 +177,40 @@ $env:CPPLS_NO_INFERENCE = "1"         # the same pull with the engine answering 
 ```
 
 Every claim in §3 has a command above it in §1, and every item in §4 has a number it is accepted by.
+
+## 6. What has been fixed since this review was written, and what is now coupled
+
+Landed in `c7aac67` plus this round's work:
+
+* **`want_refinement` refused every ask that mattered** (§3.2's first half). It recorded a file only while the file was
+  still in `parsed_since_the_last_pass`, and the pump drains that before a request arrives — so in a running server **no
+  summary was ever refined**. Any file is now recorded; `is_refined` is the one no-op.
+* **The candidate filter dropped every candidate when there were no timelines.** `candidates.retain(… bodies_of(…)…)` is
+  about the *units*; with phase 2 building none, `bodies_of` answered `None` for every file, `bodied` came out empty and the
+  pass reported `0 candidate file(s) … nothing bodied` — a no-op that looked like a decision. Measured: after this line was
+  guarded on `!environments.is_empty()`, `a_class_scoped_by_another_files_macro_body_is_scoped_through_the_session` **passes**.
+* **`cook` required a held translation unit** (§3.1). The starting macro state is now `Over(configuration, seed)`, with the
+  configuration composed from the index when no unit covers the file, so `include/techniques.h` is cooked rather than
+  `NOT COOKED`. The walk is still preferred where one exists.
+
+```text
+cargo test -p cpp_code_analysis --lib    728 passed / 10 failed  →  734 passed / 4 failed / 2 ignored
+```
+
+**The four that remain are one coupled defect, and it is now reproducible in a tiny fixture:**
+
+```text
+the pass refines a fixture's own file
+  c_files_are_not_told_to_write_cpp_style   `UseNullptr` stops firing — the refined reading of the file
+                                            makes every check decline
+  a_class_scoped_by_another_files_macro_body_is_scoped_through_the_session
+  a_file_read_back_through_its_own_unit_is_not_read_again_by_the_second_pass
+  a_keystroke_in_a_body_reads_the_file_through_its_timeline
+  a_refinement_is_served_to_the_next_session
+```
+
+Refining is what makes those four pass (`index_everything` has to ask — a batch caller is naming every file), and refining
+is what makes the three `checks` fixtures fail. So the next measurement is **what the refined reading of a single file looks
+like next to the raw one**, in that fixture — the same question the C++ corpus asks at 41/52, and the same one the design's §2.1
+answers with "L1 is environment-free; L2 is per (file, environment)": the refined summary is being used as if it were the
+environment-free one.

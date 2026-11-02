@@ -88,8 +88,13 @@ fn what_one_class_answers_for_its_members() {
             println!("members_of: {} member(s)", list.members.len());
             for member in list.members.iter().take(30) {
                 println!(
-                    "  {:?} {:?} scope {:?} type {:?}",
-                    member.fact.kind, member.fact.name, member.fact.scope, member.fact.type_of
+                    "  {:?} {:?} scope {:?} type {:?} returns {:?} parameters {:?}",
+                    member.fact.kind,
+                    member.fact.name,
+                    member.fact.scope,
+                    member.fact.type_of,
+                    member.fact.returns,
+                    member.fact.parameters
                 );
             }
         }
