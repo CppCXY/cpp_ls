@@ -214,3 +214,29 @@ is what makes the three `checks` fixtures fail. So the next measurement is **wha
 like next to the raw one**, in that fixture — the same question the C++ corpus asks at 41/52, and the same one the design's §2.1
 answers with "L1 is environment-free; L2 is per (file, environment)": the refined summary is being used as if it were the
 environment-free one.
+
+### The lever, named
+
+Everything above is one lever: **`index_everything` does not ask for refinements**, and `catch_up` only asks for the file a
+request names. Turning the ask on makes these pass:
+
+```text
+a_class_scoped_by_another_files_macro_body_is_scoped_through_the_session
+a_file_read_back_through_its_own_unit_is_not_read_again_by_the_second_pass
+a_keystroke_in_a_body_reads_the_file_through_its_timeline
+a_refinement_is_served_to_the_next_session
+tests/semantic.rs: a_local_fact_carries_a_namespace_the_file_only_opens_with_a_macro
+tests/semantic.rs: a_return_type_a_directive_splits_is_the_branch_this_compilation_takes
+```
+
+and turning it on makes these fail, in the same run:
+
+```text
+tests/checks.rs: c_files_are_not_told_to_write_cpp_style           (every code disappears for a C++ fixture)
+tests/checks.rs: only_an_unparenthesised_expression_body_is_a_macro_parentheses_finding
+tests/checks.rs: a_member_parameter_written_with_the_class_alias_is_checked
+```
+
+So the next measurement is not "does the pass run" — it does — but **what the refined reading of a one-file fixture contains
+that makes every check decline**. That is the same question the C++ corpus asks (41/52), and the fixture that reproduces it
+is fifty lines long, in `tests/checks.rs`.

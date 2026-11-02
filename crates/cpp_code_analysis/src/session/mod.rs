@@ -1078,12 +1078,15 @@ pub struct CookingMaterials {
     pub path: PathBuf,
     /// The summary key the rendered reading is filed under.
     pub key: SummaryKey,
-    /// **What the file's closure defines**, as the renderer's starting state.
+    /// **The timeline whose view answers positionally**, when one covers the file — `FileMacros` over its
+    /// definitions, which is what the reading has always used where a unit exists.
+    pub unit: Option<std::sync::Arc<crate::TranslationUnit>>,
+    /// **The composed starting state**, for a file no timeline covers: `Over(configuration, seed)`.
     ///
-    /// Composed from the index (`configuration_from_environment_and`) rather than taken from a translation unit, so a
-    /// file no timeline holds — a header, which is most of them — can still be cooked. It used to be an
-    /// `Arc<TranslationUnit>` and this field is why the change was worth making: see [`Session::render_a_cooked`].
-    pub configuration: crate::preprocess::cooked::Configuration,
+    /// Two fields rather than one because they are not equivalent: a `MacroView` is a **position** in a walk,
+    /// so it answers `#define`s that arrive mid-file and directives that split a declaration; a materialised
+    /// `Configuration` is the state a file *starts* with. The walk stays preferred wherever it exists.
+    pub configuration: Option<crate::preprocess::cooked::Configuration>,
     /// The file's own text.
     pub text: String,
     /// **The hash of that text**, which is what the commit compares the file's text against — see
@@ -6280,24 +6283,13 @@ impl<F: FileProvider + Clone> Session<F> {
         } else {
             None
         };
-        let configuration = match (&held, &walked) {
-            (Some(unit), _) => {
-                let view = unit.environment_of(&path)?;
-                crate::preprocess::cooked::configuration_from_environment_and(
-                    &view,
-                    true,
-                    &mut parsed,
-                )
-            }
-            (None, Some(unit)) => {
-                let view = unit.environment_of(&path)?;
-                crate::preprocess::cooked::configuration_from_environment_and(
-                    &view,
-                    true,
-                    &mut parsed,
-                )
-            }
-            (None, None) => composed()?,
+        // **A timeline answers positionally and stays preferred**; the composed configuration is the fallback for a
+        // file no walk covers. Converting both to a `Configuration` was tried and is *not* equivalent: the two
+        // `semantic.rs` tests about a directive-split return type failed with it, because a materialised table is the
+        // state a file starts with rather than the state at each line.
+        let (unit, configuration) = match held.or(walked) {
+            Some(unit) => (Some(unit), None),
+            None => (None, Some(composed()?)),
         };
         drop(parsed);
 
@@ -6308,6 +6300,7 @@ impl<F: FileProvider + Clone> Session<F> {
         Some(CookingMaterials {
             path,
             key,
+            unit,
             configuration,
             text,
             text_hash,
@@ -6327,6 +6320,7 @@ impl<F: FileProvider + Clone> Session<F> {
         let CookingMaterials {
             path,
             key,
+            unit,
             configuration,
             text,
             text_hash,
@@ -6335,17 +6329,37 @@ impl<F: FileProvider + Clone> Session<F> {
         } = materials;
 
         let (tokens, _) = { cpp_parser::lex(text, &cpp_parser::LexerConfig::default()) };
-        // **Two layers: what the file's closure defines, over what the compilation predefines.** `Over` is the
-        // closure path's own answer to that question — see its note — and it is what makes a cook possible for a file
-        // **no timeline holds**: the configuration is composed from the index (`configuration_from_environment_and`),
-        // so a header is rendered in its includers' environment rather than not at all.
+        // **Two ways to start a rendering, and the walk's is the accurate one.**
         //
-        // It used to be `FileMacros::new(unit.environment_of(path)?, …)`, which required a **held translation unit** —
-        // and after phase 2 stopped building units for the pass, cooking a header depended on some *other* file's
-        // timeline happening to sit in the cache. Measured on the C++ corpus: the header came out `NOT COOKED`, and the
-        // corpus went 51/52 → 41/52 type answers. Correctness must not depend on cache residency.
-        let start = crate::preprocess::cooked::Over::new(&configuration.table, seed);
-        let rendered = { crate::preprocess::cooked::cook_with(text, &tokens, &start).render() };
+        // A `MacroView` is a *position* in a walk, so it answers a `#define` that arrives mid-file and a directive that
+        // splits a declaration — which is what a compiler sees, and what every reading this session built before this
+        // change used. It requires a **held translation unit**, and after phase 2 stopped building units for the pass no
+        // header had one: `include/techniques.h` came out `NOT COOKED` and the C++ corpus went 51/52 → 41/52 type
+        // answers. A capability that depends on a *cache* holding another file's timeline is not a capability, so when
+        // no walk covers the file its environment is **composed from the index**
+        // (`configuration_from_environment_and`, over the run's shared `ParsedDefinitions`) and rendered as
+        // `Over(configuration, seed)`.
+        //
+        // **The fallback is not a substitute**, and the difference is measured: converting *both* to a `Configuration`
+        // failed the two `tests/semantic.rs` tests about a directive-split return type, because a materialised table is
+        // the state a file *starts* with rather than the state at each line.
+        let rendered = match (unit, configuration) {
+            (Some(unit), _) => {
+                let definitions = unit.definitions();
+                let macros = crate::preprocess::cooked::FileMacros::new(
+                    unit.environment_of(path)?,
+                    &definitions,
+                    Some(seed),
+                    true,
+                );
+                crate::preprocess::cooked::cook_with(text, &tokens, &macros).render()
+            }
+            (None, Some(configuration)) => {
+                let start = crate::preprocess::cooked::Over::new(&configuration.table, seed);
+                crate::preprocess::cooked::cook_with(text, &tokens, &start).render()
+            }
+            (None, None) => return None,
+        };
         let indexer = FileIndexer::new(&self.files, &self.config);
         let indexed = indexer.index_rendering(path, &rendered, *key);
         let reading = CookedReading {
