@@ -2,7 +2,6 @@ mod analysis_state;
 mod client;
 mod client_id;
 mod lsp_features;
-mod pull_cache;
 mod query_runner;
 mod snapshot;
 mod status_bar;
@@ -15,8 +14,7 @@ pub use client_id::{ClientId, get_client_id};
 pub use lsp_features::LspFeatures;
 use lsp_server::{Connection, ErrorCode, RequestId, Response};
 use lsp_types::ClientCapabilities;
-pub use pull_cache::RequestManager;
-pub use query_runner::{RequestOutcome, analysis_query, snapshot_query};
+pub use query_runner::{RequestOutcome, snapshot_query};
 pub use snapshot::ServerContextSnapshot;
 pub use status_bar::ProgressTask;
 pub use status_bar::StatusBar;
@@ -56,7 +54,6 @@ impl ServerContext {
             workspace_manager,
             status_bar,
             lsp_features,
-            request_manager: Arc::new(RequestManager::new()),
             inbox: UpdateInbox::new(),
         });
         spawn_update_queue(inner.clone());

@@ -1,18 +1,18 @@
 //! # Unified analysis query runner
 //!
-//! All pull requests go through here:
+//! Every request goes through here:
 //! - completed normally → `Ready`
 //! - genuinely no data → `Missing`
-//! - external cancellation / replaced by latest-wins → `Cancelled(Client)`
+//! - `$/cancelRequest` → `Cancelled(Client)`
 
-use super::{AnalysisState, RequestManager};
+use super::AnalysisState;
 use cpp_code_analysis::{DiskFiles, Session};
 use tokio_util::sync::CancellationToken;
 
 /// Cancellation source.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CancelSource {
-    /// Client `$/cancelRequest`, or a newer same-key request replacing the old one.
+    /// `$/cancelRequest`.
     Client,
 }
 
@@ -34,54 +34,8 @@ impl<T> RequestOutcome<T> {
     }
 }
 
-/// Unified executor for pull requests with PullCache.
-pub async fn analysis_query<T, F>(
-    analysis: &AnalysisState,
-    request_manager: &RequestManager,
-    key: &str,
-    cancel_token: Option<CancellationToken>,
-    compute: F,
-) -> RequestOutcome<T>
-where
-    T: Send + Sync + 'static,
-    F: FnOnce(&Session<DiskFiles>) -> Option<T> + Send + 'static,
-{
-    if let Some(token) = &cancel_token {
-        request_manager.begin(key, token.clone()).await;
-    }
-    let key_owner = request_manager.lock_for(key).await;
-    let _guard = key_owner.lock().await;
-
-    if let Some(token) = &cancel_token
-        && token.is_cancelled()
-    {
-        return RequestOutcome::Cancelled(CancelSource::Client);
-    }
-
-    let started = std::time::Instant::now();
-    let outcome = analysis.query_blocking(compute).await;
-    let took = started.elapsed().as_millis();
-    if took > 100 {
-        log::debug!("a query waited {took} ms for the analysis");
-    }
-    match outcome {
-        RequestOutcome::Ready(value) => RequestOutcome::Ready(value),
-        RequestOutcome::Missing => {
-            if let Some(token) = &cancel_token
-                && token.is_cancelled()
-            {
-                RequestOutcome::Cancelled(CancelSource::Client)
-            } else {
-                RequestOutcome::Missing
-            }
-        }
-        RequestOutcome::Cancelled(CancelSource::Client) => {
-            RequestOutcome::Cancelled(CancelSource::Client)
-        }
-    }
-}
-
-/// Unified executor for plain snapshot queries without PullCache.
+/// **The one executor every request uses**: a read-only query against the analysis, answerable only once there is a
+/// reading.
 pub async fn snapshot_query<T, F>(
     analysis: &AnalysisState,
     cancel_token: CancellationToken,

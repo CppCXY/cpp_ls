@@ -30,7 +30,7 @@
 //! that "not ready yet" cannot become "nothing to say": [`AnalysisState::prepare_for_a_diagnostic`] reads, indexes and
 //! cooks the file under the write lock, which is what makes the answer about the text the client just sent.
 //!
-//! The work still goes through [`analysis_query`], which is what that mechanism is for: a client re-requests the
+//! The work goes through [`snapshot_query`], the runner every other request uses: a client re-requests the
 //! same file as the user keeps typing, and an answer already being computed for the same key is **replaced** rather
 //! than duplicated (the older task is cancelled and the newer one's answer is the only one sent).
 
@@ -40,7 +40,7 @@ use lsp_types::{
 };
 use tokio_util::sync::CancellationToken;
 
-use crate::context::{RequestOutcome, ServerContextSnapshot, analysis_query};
+use crate::context::{RequestOutcome, ServerContextSnapshot, snapshot_query};
 use crate::util::uri_to_file_path;
 
 pub async fn on_pull_document_diagnostic(
@@ -49,7 +49,6 @@ pub async fn on_pull_document_diagnostic(
     cancel_token: CancellationToken,
 ) -> RequestOutcome<DocumentDiagnosticReportResult> {
     let uri = params.text_document.uri;
-    let cache_key = format!("diagnostic:{}", uri.as_str());
 
     // **Read and cook it first**, under the write lock, so the query below has a reading to answer from. Without
     // this the query answers `Missing`, and `Missing` reaches the client as `null`.
@@ -59,13 +58,11 @@ pub async fn on_pull_document_diagnostic(
     context.analysis().prepare_for_a_diagnostic(&path).await;
 
     let for_the_query = path.clone();
-    let outcome = analysis_query(
-        context.analysis(),
-        context.request_manager(),
-        &cache_key,
-        Some(cancel_token),
-        move |session| Some(super::diagnose_file(session, &for_the_query)),
-    )
+    // **The same runner as every other request** — see `context::query_runner`. A pull has nothing to coalesce: the
+    // client decides when to ask, and `$/cancelRequest` is the one cancellation the protocol has.
+    let outcome = snapshot_query(context.analysis(), cancel_token, move |session| {
+        Some(super::diagnose_file(session, &for_the_query))
+    })
     .await;
 
     outcome.map(|found| {

@@ -64,7 +64,7 @@ const MAIN_CPP: &str = "#include \"widget.h\"\n\nvoid f() {\n    Widget w;\n    
 ///
 /// The reported symptom was that diagnostics did not change while typing, and this is the layer it was in. A client
 /// that advertises `textDocument.diagnostic` is answered by `textDocument/diagnostic`, and that handler went through
-/// `analysis_query` → `query_blocking` → `RequestOutcome::Missing`, which `ServerContext::task` turns into
+/// `snapshot_query` → `query_blocking` → `RequestOutcome::Missing`, which `ServerContext::task` turns into
 /// **`Response::new_ok(id, Value::Null)`**.
 ///
 /// `null` is not a `DocumentDiagnosticReport`. A client that asked for one and got `null` cannot tell it from a
