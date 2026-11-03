@@ -1245,6 +1245,62 @@ pub fn member_across_files(
 /// The class is returned **owned** rather than borrowed, because the class of a pointee belongs to a type that
 /// is itself a shared handle — and a borrow of it would have to outlive a local, which is the shape that ends
 /// in unsafe lifetime extension. One `String` per member query is the price of not doing that.
+/// **What a pointer-like class's arrow reaches** — its `element_type`, with the class's parameters substituted.
+///
+/// The standard's protocol (`std::pointer_traits` is written in terms of it, and `unique_ptr`, `shared_ptr` and `weak_ptr`
+/// all take part): `using element_type = _Tp;`. Pairing `_Tp` with the object type's argument is the step that turns
+/// `shared_ptr<Node>` into `Node` — without it the member is `_Tp`, which is not a class, and the lookup answered
+/// `Unknown` in the handle (`auto twin = node->twin();`).
+///
+/// `None` for a class that declares no `element_type` (an ordinary pointer, whose pointee the plain reader already
+/// strips) and for a substitution that does not land on a class.
+pub(crate) fn the_pointee_of_a_handle(
+    index: &ProjectIndex,
+    scopes: &crate::ScopeTree,
+    root: &cpp_parser::CppSyntaxNode,
+    path: &Path,
+    class: &str,
+    arguments: &[crate::sema::types::Type],
+) -> Option<(String, Vec<crate::sema::types::Type>)> {
+    let written: Vec<String> = arguments
+        .iter()
+        .map(|argument| argument.to_string())
+        .collect();
+    let Known::Yes((fact, file)) = member_fact(
+        index,
+        scopes,
+        root,
+        path,
+        class,
+        "element_type",
+        Some(&written),
+    ) else {
+        return None;
+    };
+    let written_type = fact.type_of.as_deref()?;
+    let bindings = member_bindings(index, scopes, root, path, class, arguments);
+    let finished = bindings.applied_to(&parse_type_spelling(written_type));
+    // **A nested spelling is followed**, which is the ordinary shape in the standard library: `shared_ptr` inherits
+    // `__shared_ptr<_Tp>` and `element_type` is written there as `_Tp`, so the fact found through the base walk says
+    // `__shared_ptr<_Tp>::element_type`. Substituted, that is `__shared_ptr<Node>::element_type` — a member of the class
+    // `__shared_ptr<Node>`, and following it is what answers `Node`.
+    let finished = finish_a_nested_name(
+        index,
+        scopes,
+        root,
+        path,
+        class,
+        &bindings,
+        finished,
+        file,
+        vec![fact.name.clone()],
+    );
+    match finished.0 {
+        Type::Named { name, arguments } => Some((name, arguments)),
+        _ => None,
+    }
+}
+
 fn member_access_class(written: &Type) -> Option<String> {
     if let Some(class) = written.class_name() {
         return Some(class.to_string());
@@ -4652,12 +4708,22 @@ fn type_of_expression_inner(
         // `basic_string<char, char_traits<char>, allocator<char>>`. Without them the pairing is empty, `_Elem` has
         // nothing to be replaced by, and `x.back()` on a `std::string` answers `_Elem&`: measured, and it is the
         // last step between that and `char&`. See [`member_access_class_and_arguments`].
-        let (class, arguments) = match reached_by_an_arrow {
-            // The arrow already said which class, and the arguments of the handle are not the pointee's.
-            Some((reached, _)) => (reached, Vec::new()),
-            None => {
-                member_access_class_and_arguments(index, scopes, root, path, &class, &inner_type)
-            }
+        let (class, arguments) =
+            member_access_class_and_arguments(index, scopes, root, path, &class, &inner_type);
+        // **The pointee, by the handle's own `element_type` — substituted.** `std::shared_ptr` declares
+        // `using element_type = _Tp;`, so the member is `_Tp` until the object type's argument is paired with it
+        // (`shared_ptr<Node>` → `Node`). Asked first, because it is the protocol and it knows the arguments; the
+        // completion's resolver is the fallback for the shapes it covers (`p->` on a real pointer, an `operator->`
+        // whose return type is a class).
+        let (class, arguments) = match inner.arrow {
+            true => the_pointee_of_a_handle(index, scopes, root, path, &class, &arguments)
+                .or_else(|| {
+                    reached_by_an_arrow
+                        .clone()
+                        .map(|(reached, _)| (reached, Vec::new()))
+                })
+                .unwrap_or((class, arguments)),
+            false => (class, arguments),
         };
         // The arguments as **spellings**, which is what a pattern comparison is: a pattern is what the other
         // declaration wrote, and two spellings of one type would not compare equal. The direction this rule fails in
@@ -7300,6 +7366,21 @@ fn type_of_a_call(
         return Known::Yes((crate::sema::types::parse_type_spelling(&returns), file));
     }
 
+    // **The standard library's factories, whose return type the standard fixes.** `make_shared<T>(args…)` is a
+    // `shared_ptr<T>` and `make_unique<T>(args…)` a `unique_ptr<T>` — but the implementation is free to return a wrapper:
+    // libstdc++ writes `shared_ptr<_NonArray<_Tp>>`, and substitution produced `shared_ptr<_NonArray<Node>>`, whose
+    // `element_type` is the wrapper. A member reached through the arrow then looked in `std::shared_ptr` and answered
+    // `Unknown`, measured on `auto twin = node->twin();`. The table is two families and says only what [util.smartptr]
+    // says, so it holds for any library.
+    if let Some(pointer) = the_factory_the_call_names(&callee)
+        && let Some(argument) = written_arguments.first()
+    {
+        return Known::Yes((
+            crate::sema::types::parse_type_spelling(&format!("{pointer}<{argument}>")),
+            path.to_path_buf(),
+        ));
+    }
+
     // **A call whose callee names a class is a temporary of that class** — `std::shared_ptr<int>(p, deleter)`,
     // `Widget(1)`. The constructor is not a function the spelling names, so every arm above answers nothing, and the
     // class (with its written template arguments, which `parse_type_spelling` reads) was in the spelling all along.
@@ -7353,6 +7434,27 @@ fn type_of_a_call(
     }
 
     known_so_far
+}
+
+/// **The smart pointer a factory function returns** — `make_shared` → `shared_ptr`, `make_unique` → `unique_ptr`.
+///
+/// Asked of the **last** segment of the callee`s spelling, because the standard library's are written `std::make_shared`
+/// and a project may write `using std::make_shared;` and then call it bare. A name that is only *similar* is not in the
+/// table, and the ordinary arms answer for it.
+fn the_factory_the_call_names(callee: &cpp_parser::CppSyntaxNode) -> Option<&'static str> {
+    let spelled = callee.text().to_string();
+    let spelled = spelled.trim();
+    // The template arguments are the type the factory makes, not part of its name.
+    let bare = match spelled.find('<') {
+        Some(at) => spelled[..at].trim(),
+        None => spelled,
+    };
+    let last = bare.rsplit("::").next().unwrap_or(bare);
+    match last {
+        "make_shared" => Some("shared_ptr"),
+        "make_unique" | "make_unique_for_overwrite" => Some("unique_ptr"),
+        _ => None,
+    }
 }
 
 /// **The callee's spelling when it names a class** — the temporary a call of a type constructs.

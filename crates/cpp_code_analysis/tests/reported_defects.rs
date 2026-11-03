@@ -402,15 +402,16 @@ fn a_call_of_a_type_and_an_arrow_through_a_handle() {
          struct Node {\n\
              int value() const { return 2; }\n\
          };\n\
+         template <typename T>\n\
          struct Handle {\n\
-             using element_type = Node;\n\
-             Node* operator->() const;\n\
+             using element_type = T;\n\
+             T* operator->() const;\n\
          };\n\
          void f() {\n\
              int a = Widget(1).size();\n\
              int b = Widget().size();\n\
          }\n\
-         void g(Handle handle, Node* pointer) {\n\
+         void g(Handle<Node> handle, Node* pointer) {\n\
              int c = handle->value();\n\
              int d = pointer->value();\n\
          }\n",

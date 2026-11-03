@@ -5841,6 +5841,34 @@ impl<F: FileProvider + Clone> Session<F> {
         arrow: bool,
     ) -> Option<String> {
         let written = crate::sema::types::parse_type_spelling(written);
+        // **The pointee, by `element_type` with the type's own arguments substituted** — `shared_ptr<Node>` reaches
+        // `Node`, where the completion's resolver answered `std::shared_ptr` because `element_type` is written `_Tp`. See
+        // [`crate::index::project::the_pointee_of_a_handle`]; the resolver below stays for a raw pointer and for an
+        // `operator->` whose return type is a class.
+        if arrow && let crate::sema::types::Type::Named { name, arguments } = &written {
+            // **The class as the index files it.** A member is recorded under the class's qualified name, and a type
+            // deduced from a `std::` function is spelled without the namespace: `make_shared` answers
+            // `shared_ptr<Node>` while the class is `std::shared_ptr`, whose `element_type` is the member being read.
+            let class = match name.contains("::") {
+                true => name.clone(),
+                false => crate::index::project::qualified_from_the_index(
+                    self.store.index(),
+                    &view.path,
+                    name,
+                )
+                .unwrap_or_else(|| name.clone()),
+            };
+            if let Some((pointee, _)) = crate::index::project::the_pointee_of_a_handle(
+                self.store.index(),
+                &view.scopes,
+                &view.root,
+                &view.path,
+                &class,
+                arguments,
+            ) {
+                return Some(pointee);
+            }
+        }
         crate::completion::the_class_after_the_operator(
             self.store.index(),
             &view.scopes,
