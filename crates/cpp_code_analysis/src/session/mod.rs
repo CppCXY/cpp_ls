@@ -4697,6 +4697,26 @@ impl<F: FileProvider + Clone> Session<F> {
         crate::cache::fnv1a64(&bytes)
     }
 
+    /// **Answer the pull for the files a reader has open, before it is asked for.**
+    ///
+    /// A pull's first answer for a new reading is the expensive one — measured on `CodeFormat.cpp`, **36.6 ms** (18.1 ms of
+    /// inference) for the pull after an edit and **109 ms** for the first pull of a session, against **2.2 ms** for a
+    /// repeat. Those numbers are the first answer for a state, and the pump is the only party that knows when a state
+    /// exists and nobody is waiting for its answer: it has just committed the reading. So it asks the same question the
+    /// client will ask, and the `checks_memo` it fills is what the client's pull finds.
+    ///
+    /// **At most two files** — a reader has one open file and the header beside it — and only what `diagnostics` can
+    /// answer at all: an uncooked reading is a `None` here and a `None` there, so the warm costs a lookup.
+    pub fn warm_the_pulls(&self) -> usize {
+        let mut warmed = 0;
+        for path in self.documents.paths().into_iter().take(2) {
+            if self.diagnostics(&path).is_some() {
+                warmed += 1;
+            }
+        }
+        warmed
+    }
+
     /// **The query entry point for one file** — a [`crate::sema::model::SemanticModel`] over `view`, with the
     /// session as its resolver.
     ///

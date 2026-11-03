@@ -563,6 +563,21 @@ async fn index_in_background(context: ServerContextSnapshot) {
                 .await
                 .unwrap_or((0, 0));
 
+            // **The pull's answer, computed while nobody is waiting.** A first pull for a new reading is the expensive
+            // one (36.6 ms on `CodeFormat.cpp`, 109 ms on a cold session, against 2.2 ms for a repeat), and the pump is
+            // the one party that knows when a new reading exists — it just committed one. `pending == 0` keeps it out of
+            // a typing burst: the queue is empty, so no request is waiting on a parse this slice owes it.
+            if (re_read > 0 || cooked > 0) && pending == 0 {
+                let warmed = context
+                    .analysis()
+                    .run_blocking(|session| Some(session.warm_the_pulls()))
+                    .await
+                    .unwrap_or(0);
+                if warmed > 0 {
+                    log::trace!("pump: {warmed} pull answer(s) warmed");
+                }
+            }
+
             // **A slice that changed nothing must not be repeated for ever.** A file the cook claims and cannot build
             // — no summary, no unit, a rendering that declines — leaves `pending` where it was, and a pump that keeps
             // taking it never goes idle. Measured once on a real project: `index slice: … 2 to cook, 0 left` once a
