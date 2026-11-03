@@ -89,22 +89,25 @@ files have stub records. Refinement runs afterwards, in order: the open files, t
 `start_shape`, `C:\Users\zc\Desktop\github\EmmyLuaCodeStyle` (1 243 project files scanned), release:
 
 ```text
-Session::open                    276 ms cold, 300 ms warm
-whole pass (cold)              7 092 ms, 58 slices
-  prepare (read lock)          2 468 ms
-  commit (write lock)          1 006 ms
-  drain + cooking (read lock)  3 617 ms
-  worst single commit            252 ms      ← the write budget is 50 ms
-whole pass (warm)              5 350 ms, 30 slices
+Session::open                    140 ms cold, 94 ms warm (the toolchain answer is cached)
+whole pass (cold, in process)  36 300 ms, 109 slices      (the server, no cache: 96 s, 445 slices)
+  prepare (read lock)          32 332 ms
+  commit (write lock)             661 ms total
+  drain + cooking (read lock)   3 306 ms
+  worst single commit              27 ms      ← the write budget is 50 ms, and the server's cold start
+                                                 measured 25 ms worst / 0.8 ms mean
+whole pass (warm)              3 852 ms, 41 slices
 did_open                          0.3 ms
-catch_up                        580 ms       ← the first request's cost, before any query
-cook                             14.6 ms
-view                              3.87 ms
-diagnostics (every check)       200.4 ms     23 finding(s)
+catch_up                        123 ms       ← the first request's cost, before any query
+cook                             11.5 ms
+view                              2.92 ms
+diagnostics (every check)       153.3 ms     23 finding(s) — 2 ms on the repeat
 steady view                       0.01 ms
 ```
 
-`hover2.mjs` over the wire: first hover **333 ms**, steady **2 ms**. Before this work: first hover 1 850 ms.
+`hover2.mjs` over the wire: first hover **206–208 ms** immediately after `didOpen`, **3 ms** once the pump has run. Before
+this work: 1 850 ms. The server's cold index of 1 695 files (no `.cppls`) took **96 s** in 445 slices — the throughput item
+of §4.6.
 
 | phase | state | measured |
 | --- | --- | --- |
