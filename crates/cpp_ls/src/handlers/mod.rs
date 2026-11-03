@@ -32,7 +32,7 @@ mod document_symbol;
 mod folding_range;
 mod format;
 mod formatting;
-mod hover;
+pub mod hover;
 pub mod implementation;
 mod initialized;
 mod inlay_hint;

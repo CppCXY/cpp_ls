@@ -4018,9 +4018,10 @@ fn type_of_expression_inner(
     // answer into an uncertain one.
     if cpp_parser::CppSyntaxKind::from(expression.kind()) == cpp_parser::CppSyntaxKind::NewExpr {
         return match new_expression_allocates(expression) {
-            Some(allocated) => {
-                Known::Yes((Type::named(format!("{allocated}*")), path.to_path_buf()))
-            }
+            Some(allocated) => Known::Yes((
+                crate::sema::types::parse_type_spelling(&format!("{allocated}*")),
+                path.to_path_buf(),
+            )),
             None => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
         };
     }
@@ -4098,12 +4099,19 @@ fn type_of_expression_inner(
             &first,
             depth + 1,
         ) {
-            // The named type is a class, and a class has no `type_of` of its own — so the *spelling* is the answer,
-            // which is what the initializer wrote.
-            Known::Yes((type_of, file)) => Known::Yes((type_of, file)),
+            // **Not the first element's type.** `{1, 2}` is a braced list of values and C++ makes it a
+            // `std::initializer_list<int>` — a library type, which this layer deliberately does not invent. Answering
+            // `int` here claimed that the list *is* an `int`, and the hover that read the type at the object's last byte
+            // then looked for members of `int` on a `Pair<int, int>`.
+            Known::Yes(_) => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
             _ => match declaration_of_expression(index, scopes, root, path, &first) {
+                // **The spelling is read, not named.** `Type::named("Pair<int, int>")` is a class whose *name* is
+                // `Pair<int, int>` and whose argument list is empty — so nothing downstream substitutes: the member
+                // lookup is handed that spelling, `TypeBindings` gets no arguments, and `sum`'s written `T` comes back as
+                // `T`. `parse_type_spelling` is the crate's reader for a written type and answers
+                // `Named { name: "Pair", arguments: [int, int] }` for the same text.
                 Known::Yes(named) if named.type_of(root, scopes).is_none() => Known::Yes((
-                    Type::named(first.text().to_string().trim()),
+                    crate::sema::types::parse_type_spelling(first.text().to_string().trim()),
                     named.file(path),
                 )),
                 _ => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),

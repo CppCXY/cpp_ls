@@ -487,22 +487,17 @@ fn member_markdown(
 ) -> String {
     let object = access.object.text().to_string();
     let object = object.trim();
-    // **The type is read at the object's *last* byte, not its first.**
+    // **The object's own node, not the byte at its end.**
     //
-    // `type_at` answers for the innermost node the offset sits in, and the first byte of `win->w_buffer` is the `w`
-    // of `win` — a node of type `win_T*`. Asking there for `win->w_buffer->b_fnum` looked `b_fnum` up in `win_T`,
-    // which has no such member, and the popup said so: `` `win_T*` has no member `b_fnum` `` — measured on neovim's
-    // `arglist.c`, where the honest answer is the buffer's member (the header spells it `handle`, and the file
-    // reaches it through `#define b_fnum handle`).
-    //
-    // The last byte is inside the object expression and past the base name, so the node it sits in *is* the chain:
-    // `win->w_buffer` reads as `buf_T*`. A one-token object (`eap`) is unaffected — every byte of it is the same
-    // name — and an object that ends in `)` (`f()->x`) lands on the call, which is what it should be.
-    let at = cpp_code_analysis::file::coordinates::ReadingOffset::new(
-        usize::from(access.object.text_range().end()).saturating_sub(1),
-    );
-
-    let cpp_code_analysis::Known::Yes(found) = session.type_at(view, at) else {
+    // This used to read the type at the object's *last* byte, for a real reason: the first byte of `win->w_buffer` is
+    // the `w` of `win`, and asking there answered `win_T*` for a `buf_T*` chain (measured on neovim's `arglist.c`,
+    // where the popup said `` `win_T*` has no member `b_fnum` ``). That reason is a property of *offsets*, and the
+    // caller here has the **node**: `access.object` is the whole chain. Reading it directly is the same answer for
+    // `win->w_buffer` and the right one for objects that end in a delimiter — `Pair<int, int>{1, 2}`'s last byte is
+    // inside the braced list, and the offset question answered `int` for it, which is the "`int` has no member `sum`"
+    // in the report.
+    let cpp_code_analysis::Known::Yes(found) = session.type_of_the_expression(view, &access.object)
+    else {
         // **Saying "I do not know" is the answer.** A reader who sees this knows the popup is about a type the analysis
         // could not read, and the next thing to do — annotate the declaration, or read the header it comes from — is
         // theirs. Nine unrelated declarations would tell them the same thing at four times the size, and worse.
@@ -1783,21 +1778,24 @@ fn where_clause(
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| file.display().to_string());
 
-    // **The view's ruler only for the view's own file.** A declaration in a header carries that header's offsets, and
-    // translating those through *this* file's rendering would move them somewhere they never were. For the file being
-    // viewed the offsets are the rendering's, so asking the file's line index answers with a line number from a
-    // different document: measured, a class on line 6 of a file with five `#include`s above it was announced as
-    // `main.cpp:1:7` — the column right and the line five short.
-    let asked = match view {
-        Some(view) if is_the_viewed_file(view, file) => crate::util::position_at_offset(
-            view,
-            cpp_code_analysis::file::coordinates::ReadingOffset::new(offset),
-        ),
-        _ => session
-            .files()
-            .held(file)
-            .and_then(|declaring| crate::util::position_in_file(declaring, offset)),
-    };
+    // **The file's ruler, after the view's mapping.** A declaration's offsets are the **file's** — the summary is
+    // mapped into the file, and a probe on `test_cpp/src/templates.cpp` shows `name_range` slicing the file's own text.
+    // What a view can add is a *mapping*: a rendering's offsets are not the file's, so they go through
+    // `file_offset_of` first (the identity for a view of the written text). The line index must then be the **declaring
+    // file's**: a plain view of the written text carries `written_text()` of `None` and no line index of its own, and
+    // measuring a file offset against that answered `templates.cpp:6:12` for `Pair::sum`, which is written on line 18.
+    let in_the_file = view
+        .and_then(|view| {
+            view.file_offset_of(cpp_code_analysis::file::coordinates::ReadingOffset::new(
+                offset,
+            ))
+        })
+        .map(|at| at.get())
+        .unwrap_or(offset);
+    let asked = session
+        .files()
+        .held(file)
+        .and_then(|declaring| crate::util::position_in_file(declaring, in_the_file));
 
     match asked {
         Some(position) => format!("`{name}:{}:{}`", position.line + 1, position.character + 1),

@@ -7749,6 +7749,37 @@ impl<F: FileProvider + Clone> Session<F> {
     /// The **innermost** one containing the offset ([`crate::sema::resolve::expression_at`]), so a cursor on
     /// `this` in `this->size` asks about `this`. A cursor in whitespace inside a statement is in no expression, and
     /// that is also the honest answer.
+    /// **The type of this expression** — [`Session::type_at`] for a node the caller already holds.
+    ///
+    /// The offset form asks about the **innermost** expression containing a byte, which is the right question for a
+    /// cursor and the wrong one for a caller that already has the expression: `Pair<int, int>{1, 2}`'s last byte is
+    /// inside the braced list, so the offset question answered the *list*'s type for the object whose members were
+    /// being asked about — and a hover said "`int` has no member `sum`" for a `Pair<int, int>`.
+    pub fn type_of_the_expression(
+        &self,
+        view: &FileView,
+        expression: &cpp_parser::CppSyntaxNode,
+    ) -> Known<ExpressionType> {
+        let written = expression.text().to_string().trim().to_string();
+        match crate::index::project::type_of_expression(
+            self.store.index(),
+            &mut |path| self.view(path),
+            &view.scopes,
+            &view.root,
+            &view.path,
+            expression,
+            0,
+        ) {
+            Known::Yes((type_of, file)) => Known::Yes(ExpressionType {
+                expression: written,
+                type_of: type_of.to_string(),
+                file,
+            }),
+            Known::Unknown(reason) => Known::Unknown(reason),
+            Known::No => Known::No,
+        }
+    }
+
     pub fn type_at(&self, view: &FileView, offset: ReadingOffset) -> Known<ExpressionType> {
         let Some(expression) = crate::sema::resolve::expression_at(&view.root, offset.get()) else {
             return Known::No;

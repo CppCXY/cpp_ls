@@ -197,3 +197,86 @@ fn an_alias_of_a_qualified_type_is_not_a_void() {
         alias.type_of
     );
 }
+
+/// **§C1 — a braced initialisation of a class template keeps its template arguments.**
+///
+/// Reported on `test_cpp/src/templates.cpp`:
+///
+/// ```cpp
+/// template <typename T, typename U = int> struct Pair { T first; U second; T sum() const { … } };
+/// template <typename T> struct Pair<T, T> { … };
+/// …
+/// Pair<int, int>{1, 2}.sum()      // hover: "`int` has no member `sum`"
+/// ```
+///
+/// The initialiser's first child is the *type name*, and the arm that answers a class with no `type_of` of its own named
+/// the **whole spelling**: `Type::named("Pair<int, int>")` is a class whose name is `Pair<int, int>` and whose argument
+/// list is empty — so no argument reached the substitution, and `sum`'s written `T` was answered as `T`. The member
+/// lookup was handed the same spelling, whose class is `int` to the hover.
+///
+/// The same change makes a **bare** braced list honest: `{1, 2}` was answered `int` (its first element), which claims the
+/// list *is* an `int`; C++ makes it a `std::initializer_list<int>`, a library type this layer does not invent, so the
+/// answer is that it has no type here.
+#[test]
+fn a_braced_initialisation_of_a_class_template_keeps_its_arguments() {
+    let session = session_with(&[(
+        "/p/a.cpp",
+        "template <typename T, typename U = int>\n\
+         struct Pair {\n\
+             T first;\n\
+             U second;\n\
+             T sum() const { return first + second; }\n\
+         };\n\
+         void f() {\n\
+             int a = Pair<int, int>{1, 2}.sum();\n\
+             int b = Pair<int, long>{1, 2}.sum();\n\
+         }\n",
+    )]);
+    let path = std::path::Path::new("/p/a.cpp");
+    let view = session.view_of_the_file(path).expect("the written text");
+    let source = view.source.clone();
+    let nodes: Vec<cpp_parser::CppSyntaxNode> = view.root.descendants().collect();
+
+    let node_at = |at: usize| -> cpp_parser::CppSyntaxNode {
+        let found = nodes
+            .iter()
+            .find(|node| usize::from(node.text_range().start()) == at)
+            .expect("a node starts here");
+        found.clone()
+    };
+
+    // The member of an instantiation is the substituted one: `T` for `Pair<int, int>` is `int`.
+    let used_at = source.find("Pair<int, int>{1, 2}.sum").expect("the use");
+    let member = used_at + "Pair<int, int>{1, 2}.".len();
+    let known = session.type_at(
+        &view,
+        cpp_code_analysis::file::coordinates::ReadingOffset::new(member),
+    );
+    assert_eq!(
+        known.map(|found| found.type_of.clone()),
+        cpp_code_analysis::Known::Yes("int".to_string()),
+        "the member of an instantiation is read with its arguments substituted"
+    );
+
+    // The initialisation is the instantiated class, not a name that happens to contain its arguments.
+    let object = nodes
+        .iter()
+        .find(|node| node.text() == "Pair<int, int>{1, 2}")
+        .expect("the object node")
+        .clone();
+    let object_type = session.type_of_the_expression(&view, &object);
+    assert_eq!(
+        object_type.map(|found| found.type_of.clone()),
+        cpp_code_analysis::Known::Yes("Pair<int, int>".to_string()),
+        "the object is the instantiation"
+    );
+
+    // A bare braced list is not its first element.
+    let list = source[used_at..].find('{').expect("the list") + used_at;
+    let bare = node_at(list);
+    let bare_known = session.type_of_the_expression(&view, &bare);
+    assert!(
+        matches!(bare_known, cpp_code_analysis::Known::Unknown(_)),
+        "a braced list of values has no type this layer can name: {bare_known:?}"
+    );
+}
