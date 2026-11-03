@@ -227,6 +227,12 @@ unchanged file re-derives every answer on every debounce, and the whole pull run
 * **Acceptance:** steady pull on `CodeFormat.cpp` ≤ 50 ms; two consecutive pulls of an unchanged file differ by < 20 %;
   the prepare and diagnostics phases of `start_shape` drop accordingly.
 
+**Measured baseline for this item** (`start_shape`, `EmmyLuaCodeStyle`, release, 2026-11-03): `diagnostics (every check)`
+**143.4 ms**, `view` 2.9 ms, `cook` 12.8 ms, `catch_up` 654 ms. The hot spot is `Session::checks_about`: it builds
+`self.semantic_model(view)` per pull, and the memo's lifetime is exactly that one call — the comment says so ("the lifetime
+that makes its memo need no invalidation rule"). The cache this item asks for is therefore a **session-owned model** keyed
+`(content_hash, context_hash, env_hash)`, handed to `checks_about` in place of a fresh one, so a debounce after no change
+reuses every answer.
 ### 4.3 A commit can hold the writer for 252 ms
 
 Today's `start_shape` reports `worst single commit 252 ms` against the 50 ms `WRITE_BUDGET`. The phases that can do it are
