@@ -3573,7 +3573,15 @@ impl<F: FileProvider + Clone> Session<F> {
         let tracing = crate::probes::cooking();
 
         loop {
-            let read = self.advance(64).len();
+            let steps = self.advance(64);
+            // **Every file a batch read names is a file to refine.** This is the review's lever: a request asks
+            // (`catch_up`), and a batch caller that just read the whole project asks for the whole project. It was held
+            // back while the refined reading was weaker than the raw one; the refinement now files its rendering as the
+            // file's **cooked** facts (L2) and leaves the summary alone (L1), which is what the design's §2.1 says.
+            for step in &steps {
+                self.want_refinement(&step.path);
+            }
+            let read = steps.len();
             // **Not asked for here, and the reason is the next defect rather than this call.** Every file this pass
             // reads would be a file to refine, which is what "index everything" sounds like it means — and it makes four
             // session tests pass. It also makes the pass **refine a fixture's own file**, and three `checks` tests then

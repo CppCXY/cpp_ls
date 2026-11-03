@@ -165,6 +165,7 @@ fn a_rendering_is_not_left_in_the_cache_for_the_next_session() {
         }
     }
 }
+#[test]
 /// **A reading the second pass found nothing to repair in is written down, and served to the next session.**
 ///
 /// The pass refines a file against its closure, and for the large majority of a real project the answer is "nothing to
@@ -176,12 +177,9 @@ fn a_rendering_is_not_left_in_the_cache_for_the_next_session() {
 /// The entry names the file's **own** closure (`the_closure_fingerprint`), so only a reading of that closure is served;
 /// the direction that must never happen — a reading taken inside *another* file's program — is pinned by
 /// `a_rendering_is_not_left_in_the_cache_for_the_next_session`.
-#[test]
 // **Ignored while the refined reading is being fixed** — the defect and its reproducer are in `docs/indexing-review.md`
 // §6: refining a file makes three `checks` fixtures see a reading their rules decline, so `index_everything` does not
 // ask for it yet, and this test needs the ask. The assertion is right; the behaviour is what is wrong.
-#[ignore = "a refined reading is weaker than the raw one — docs/indexing-review.md §6"]
-#[test]
 fn a_refinement_is_served_to_the_next_session() {
     // Nothing here needs repairing: one declaration, no macro, no conditional. The pass marks the reading and the next
     // session should answer from that mark, without a timeline.
@@ -1951,6 +1949,8 @@ fn a_body_edit_does_not_cost_the_program_again() {
     );
 }
 
+#[test]
+#[ignore = "a query still answers from the summary's conditional fact — the reading choice does not reach this question yet (design §4.1)"]
 /// **Once a file is read as a program, the lookup-time guard filter has nothing left to do** — patch number two's
 /// remaining work, measured.
 ///
@@ -1962,7 +1962,6 @@ fn a_body_edit_does_not_cost_the_program_again() {
 /// This test pins that on a fixture rather than on a project: the same questions are asked with the filter on and
 /// off (`probes::set_no_guard_filter`, which exists for this measurement), and the answers must be identical. If they
 /// ever differ, this file's reading is not the rendering and the patch has a user again.
-#[test]
 /// # Why this is ignored rather than fixed, and why it is not deleted
 ///
 /// It is **red**, and the way it fails is the signal: with the filter on, `Dead` — a class under `#if 0` — answers
@@ -1974,8 +1973,6 @@ fn a_body_edit_does_not_cost_the_program_again() {
 ///
 /// Ignored rather than rewritten: the assertion is right and the behaviour is wrong, and an assertion that accepted
 /// `unknown` here would be pinning a regression as the contract. Deleting it would remove the instrument.
-#[ignore = "a raw summary needs the guard filter again — the rendering-derived reading is gone (review §3.1)"]
-#[test]
 fn a_file_read_as_a_program_needs_no_guard_filter() {
     let cfg = "#define ON 1\n";
     let api = "#include \"cfg.h\"\n#if 0\nstruct Dead { int gone; };\n#endif\nstruct Live { int kept; };\n";
@@ -2546,6 +2543,7 @@ fn typing_in_a_body_does_not_cost_the_walk_a_translation_unit_is() {
     );
 }
 
+#[test]
 /// **A file this session already has a unit for is read *with* that unit's environment, and the second pass is
 /// not paid for it.**
 ///
@@ -2574,12 +2572,9 @@ fn typing_in_a_body_does_not_cost_the_walk_a_translation_unit_is() {
 /// is the note to tighten it into the scope assertion the moment that defect is fixed. A test that asserted the
 /// scope now would be red for a reason that has nothing to do with the flag, which is the shape of test
 /// `status.md` §6 warns about in its second rule.
-#[test]
 // **Ignored while the refined reading is being fixed** — the defect and its reproducer are in `docs/indexing-review.md`
 // §6: refining a file makes three `checks` fixtures see a reading their rules decline, so `index_everything` does not
 // ask for it yet, and this test needs the ask. The assertion is right; the behaviour is what is wrong.
-#[ignore = "a refined reading is weaker than the raw one — docs/indexing-review.md §6"]
-#[test]
 fn a_file_read_back_through_its_own_unit_is_not_read_again_by_the_second_pass() {
     let ns = "#define BEGIN_NS namespace one {\n#define END_NS }\n";
     let api = "#include \"ns.h\"\nBEGIN_NS struct Widget { int size; }; END_NS\n";
@@ -3671,8 +3666,6 @@ fn the_scan_finds_the_projects_sources_and_leaves_the_rest() {
 // **Ignored while the refined reading is being fixed** — the defect and its reproducer are in `docs/indexing-review.md`
 // §6: refining a file makes three `checks` fixtures see a reading their rules decline, so `index_everything` does not
 // ask for it yet, and this test needs the ask. The assertion is right; the behaviour is what is wrong.
-#[ignore = "a refined reading is weaker than the raw one — docs/indexing-review.md §6"]
-#[test]
 fn a_class_scoped_by_another_files_macro_body_is_scoped_through_the_session() {
     // The store's second pass, on the closure a **session** builds one file at a time. MSVC's STL is
     // written this way: `<vector>` opens `std` with `_STD_BEGIN`, whose replacement list is in `yvals_core.h`,
@@ -3748,6 +3741,8 @@ fn a_class_scoped_by_another_files_macro_body_is_scoped_through_the_session() {
     );
 }
 
+#[test]
+#[ignore = "the keystroke's reading is still the raw one — the reading choice of the next commit (design §4.1)"]
 /// **A keystroke in a body rebuilds the file's summary *through its timeline*, not from its bytes.**
 ///
 /// The window this closes is the one the four patch layers exist for. An edit drops the file's summary
@@ -3755,12 +3750,9 @@ fn a_class_scoped_by_another_files_macro_body_is_scoped_through_the_session() {
 /// every answer about the file was the *written* reading until the idle pass got to it — a scope opened by another
 /// file's macro was `None`, a return type split by `#if` was the wrong branch. A body edit moves no directive, so the
 /// timeline is still in force, and an index step that holds one now renders instead of parsing text.
-#[test]
 // **Ignored while the refined reading is being fixed** — the defect and its reproducer are in `docs/indexing-review.md`
 // §6: refining a file makes three `checks` fixtures see a reading their rules decline, so `index_everything` does not
 // ask for it yet, and this test needs the ask. The assertion is right; the behaviour is what is wrong.
-#[ignore = "a refined reading is weaker than the raw one — docs/indexing-review.md §6"]
-#[test]
 fn a_keystroke_in_a_body_reads_the_file_through_its_timeline() {
     let project = Project::new("keystroke-renders");
     project.write(

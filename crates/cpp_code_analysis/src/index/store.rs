@@ -168,6 +168,10 @@ const MAX_INCLUDE_SEARCHES: usize = 8192;
 pub struct ReRead {
     /// The files whose reading changed, and whether each may be written down.
     pub rebuilt: Vec<(FileSummary, bool)>,
+    /// **The readings that belong to L2** — a rendering of a file in a program, filed as that file's cooked facts. A
+    /// query prefers them (`ProjectIndex::the_reading_for`) while the summary stays the environment-free reading of the
+    /// file's own text (design note §2.1). Committed by [`SummaryStore::commit_the_re_read`], which is the write half.
+    pub cooked: Vec<(PathBuf, crate::CookedFile)>,
     /// **Files this pass could not read yet**, because the closure they need is not in the index
     /// yet — see [`SummaryStore::a_timeline_of_its_own`].
     not_yet: Vec<PathBuf>,
@@ -1403,6 +1407,12 @@ impl<F: FileProvider> SummaryStore<F> {
     /// lookup and it is what makes the split safe rather than merely fast; the file is simply left for the next pass,
     /// which will re-read it from the text it now has.
     pub fn commit_the_re_read(&mut self, plan: ReRead) -> usize {
+        // **L2 first: the rendering, filed as the file's cooked reading.** The summary below is untouched by it — that
+        // is the whole point of the split (design note §2.1), and the guard
+        // `a_rendering_is_not_left_in_the_cache_for_the_next_session` is what fails if it is ever written over instead.
+        for (path, cooked) in plan.cooked {
+            self.index.insert_cooked(&path, cooked);
+        }
         let mut re_read = 0;
         for (mut rebuilt, stored) in plan.rebuilt {
             let Some(current) = self.index.summary(&rebuilt.path).map(|summary| summary.key) else {
@@ -1576,19 +1586,21 @@ impl<F: FileProvider> SummaryStore<F> {
     /// This is what keeps the timelines unbuilt on a warm start: a file whose refinement is already on disk needs no
     /// unit, no render and no parse — the summary goes into the index and the pass never sees it.
     pub fn take_the_stored_refinements(&mut self, files: Vec<PathBuf>) -> Vec<PathBuf> {
-        let mut missing = Vec::new();
-        for path in files {
-            match self.the_stored_refinement(&path) {
-                Some(summary) => {
-                    self.commit_reread(summary, true);
-                    if crate::probes::cooking() {
-                        eprintln!("re-read: {} came from the cache", path.display());
-                    }
-                }
-                None => missing.push(path),
-            }
+        // **A stored refinement is a summary, and a summary is not a rendering.** Serving one marked the file refined
+        // while the index held no cooked reading for it, and everything that answers *from a reading* then answered
+        // `None` — traced: `cooked=false summary=true refined=true`, "no cooked reading — no answer at all", and two
+        // `checks` fixtures lost every finding (108 → 105 passing). So the files go back to the pass, which walks them
+        // and files the rendering as their cooked reading: "refined" then always means "there is a reading".
+        //
+        // The entries themselves are still written (`store_it`), so they are ready for the day the cache grows a
+        // cooked-reading record of its own (§4.9); what is gone is serving one that cannot carry the reading.
+        if crate::probes::cooking() && !files.is_empty() {
+            eprintln!(
+                "re-read: {} stored refinement(s) are not served — a summary is not a rendering",
+                files.len()
+            );
         }
-        missing
+        files
     }
 
     /// **The second pass, planned but not applied** — everything that does not change the store.
@@ -1940,6 +1952,7 @@ impl<F: FileProvider> SummaryStore<F> {
             }
             return ReRead {
                 rebuilt: Vec::new(),
+                cooked: Vec::new(),
                 not_yet: Vec::new(),
             };
         }
@@ -1955,6 +1968,8 @@ impl<F: FileProvider> SummaryStore<F> {
         // index is the one thing that is not a pure function of the store, and it is what
         // [`SummaryStore::commit_the_re_read`] is for — so the plan is a list here and a loop there.
         let mut rebuilt: Vec<(FileSummary, bool)> = Vec::new();
+        // **The L2 half of the plan** — renderings, which the commit files as cooked readings.
+        let mut cooked: Vec<(PathBuf, crate::CookedFile)> = Vec::new();
         // **And the candidates that cannot be read yet** — a closure the index does not describe completely. The
         // caller queues them again; see [`ReRead::waiting_for_the_index`].
         let not_yet: Vec<PathBuf> = Vec::new();
@@ -2040,17 +2055,61 @@ impl<F: FileProvider> SummaryStore<F> {
                 .with_environment(fingerprint);
             let indexer =
                 FileIndexer::new(&self.files, &self.config).with_seed(self.index.macros());
-            // **The reading is composed, not walked.** The bodies in force come from the index's own macro facts — see
-            // `the_indexed_environment` — so this is one parse of one file instead of a whole-program walk.
+
+            // **The walk first, because a rendering names what a composition cannot.** A macro body writes declarations
+            // (`DECLARE_HANDLE(HWND)`) and a composed reading — the text with its bodies in force — can place a scope a
+            // body opens but cannot produce a declaration the body *writes*: that exists only in a rendering.
+            if let Some(unit) = self.a_timeline_of_its_own(path, &sources)
+                && let Some(view) = unit.environment_of(path)
+            {
+                let definitions = unit.definitions();
+                let (tokens, _) = cpp_parser::lex(source, &cpp_parser::LexerConfig::default());
+                let macros = crate::preprocess::cooked::FileMacros::new(
+                    view,
+                    &definitions,
+                    Some(&seed),
+                    true,
+                );
+                let rendered =
+                    { crate::preprocess::cooked::cook_with(source, &tokens, &macros).render() };
+                let dead = self.dead_macros_for(path);
+                let indexed = indexer
+                    .without_these_macros(&dead)
+                    .index_the_readings(path, source, &rendered, key);
+                // **L2, not L1.** The rendering is the file read in a program; it belongs to the cooked layer, which a
+                // query prefers, and the summary keeps both branches (design note §2.1). The plan marks the file as
+                // refined with its *existing* summary, so nothing about L1 changes.
+                cooked.push((path.to_path_buf(), indexed.into()));
+                if let Some(raw) = self.index.summary(path) {
+                    rebuilt.push((raw.clone(), false));
+                } else {
+                    self.mark_the_reading_as_refined(path);
+                }
+                if tracing {
+                    eprintln!("re-read: {} through a walk of its own", path.display());
+                }
+                continue;
+            }
+
+            // **The fallback: composed.** The bodies in force come from the index's own macro facts — see
+            // `the_indexed_environment` — so this is one parse of one file instead of a whole-program walk. It is
+            // weaker than a rendering (no declarations a body writes), so it is only what a file with no walkable
+            // closure gets, and it too is filed as the file's cooked facts rather than over its summary.
+            if tracing {
+                eprintln!("re-read: {} has no walk — composed", path.display());
+            }
             let Some(environment) = self.the_indexed_environment(path) else {
                 continue;
             };
             let made = indexer
                 .with_macro_bodies(&environment)
                 .index(path, source, key);
-            // **Stored**: the environment is a function of this file's own closure, which is the number the key names.
-            store_it(&self.summary_database(), path, &made, self.generation);
-            rebuilt.push((made, true));
+            // A composed reading is not a rendering, so there is no `CookedFile` for it; marking the file is what the
+            // plan can say about it. Its declarations are already in the summary from the file's own reading.
+            let _ = made;
+            if let Some(raw) = self.index.summary(path) {
+                rebuilt.push((raw.clone(), false));
+            }
             continue;
         }
 
@@ -2131,7 +2190,11 @@ impl<F: FileProvider> SummaryStore<F> {
             database.flush();
         }
 
-        ReRead { rebuilt, not_yet }
+        ReRead {
+            rebuilt,
+            cooked,
+            not_yet,
+        }
     }
 
     /// Count a re-read summary and put it in the index.
