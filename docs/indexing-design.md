@@ -194,6 +194,22 @@ and the two `tests/semantic.rs` questions about a refined reading still fail —
 `only_an_unparenthesised_expression_body_is_a_macro_parentheses_finding`) **lose every finding**. A rule that renders a file
 only when it has includes changed neither set, which says the checks are not reading the reading the queries read: teach
 them the same choice, then the trade (three capabilities for two checks) can be settled.
+**Fourth measurement: the checks fail for one line of state, and it is `is_refined` without a reading.** Traced
+`Session::diagnostics` on the failing fixture with the L2 refinement on:
+
+```text
+diag: cooked=false summary=true refined=true
+diag: no cooked reading — no answer at all
+```
+
+`diagnostics` has **no arm** for "refined but not cooked": the file is marked refined (the plan pushed its summary), the
+cook is therefore never made, and the pull answers `None` — so every code disappears, which is exactly what the two
+`checks` fixtures assert against. The composed fallback claims a reading it did not make.
+
+The fix is to **produce the reading**, not to drop the claim: making a refinement always file something cookable (the walk
+already does; the fallback must render the file from its own directives and file that). Dropping the claim instead was
+measured too — it moved the failure to a third `checks` test, so the state "refined and cooked" is what the rest of the
+session assumes, and a refinement that leaves the file unrefined is a second inconsistency, not a fix.
 ### 4.2 The request path is the slow part now — *second*
 
 Steady `textDocument/diagnostic` is **389 ms median** (review) / **200 ms here**, of which **97 % is type inference**
