@@ -279,7 +279,6 @@ fn a_file_that_includes_a_standard_header_becomes_cacheable() {
 
 /// **A project with no build system of any kind is read with the environment the compiler gives it.**
 #[test]
-#[ignore = "the cooked reading does not place `Widget` in `std`: the compiler's built-ins are not reaching the refinement's walk — the next measurement"]
 fn a_project_with_no_build_system_is_read_with_the_compilers_environment() {
     // The shape MSVC's standard library is written in, in three files that need no compiler to *parse* and one to
     // *read*: `yvals_core.h` defines `_STL_COMPILER_PREPROCESSOR` under
@@ -346,11 +345,13 @@ fn a_project_with_no_build_system_is_read_with_the_compilers_environment() {
 
     session.index_everything();
 
+    // **The reading the program implies, which is the cooked one** (§2.1 of the design note): a summary is the file's
+    // environment-free reading, and whether `RC_INVOKED`/`Q_MOC_RUN` are defined is the compiler's answer.
     let scope = session
         .index()
-        .summary(&widget)
-        .and_then(|summary| {
-            summary
+        .cooked_reading(&widget)
+        .and_then(|cooked| {
+            cooked
                 .declarations
                 .iter()
                 .find(|fact| fact.name == "Widget")
