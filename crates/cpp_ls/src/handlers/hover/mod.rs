@@ -542,11 +542,38 @@ fn member_markdown(
             access.member
         );
     };
-    let Some(member) = list
+    // **Every declaration of the name, not the first.** A class that declares `void call(Fn &&fn)` and
+    // `void call(Fn &&fn) const` has two members, and which one is callable depends on the object's constness — which the
+    // type model does not carry yet (`type_of` is `Foo` for both `Foo foo;` and `const Foo cfoo;`). Listing them is the
+    // answer that is right about both, and the qualifiers the facts now record are what tells them apart.
+    let candidates: Vec<&cpp_code_analysis::ProjectMember> = list
         .members
         .iter()
-        .find(|member| member.fact.name == access.member)
-    else {
+        .filter(|member| member.fact.name == access.member)
+        .collect();
+    if candidates.len() > 1 {
+        let mut out = String::from("```cpp\n");
+        for candidate in &candidates {
+            out.push_str(&signature_line(&candidate.fact));
+            out.push('\n');
+        }
+        out.push_str("```\n\n");
+        let scope = candidates
+            .iter()
+            .find_map(|candidate| candidate.fact.scope.clone())
+            .unwrap_or_else(|| written.clone());
+        out.push_str(&format!(
+            "`{scope}::{}` — {} declarations, told apart by their qualifiers.\n\nWhich one a call means depends on `{object}`: a `const` object can only call the `const` one.",
+            access.member,
+            candidates.len()
+        ));
+        return out;
+    }
+    let Some(member) = candidates.first().copied().or_else(|| {
+        list.members
+            .iter()
+            .find(|member| member.fact.name == access.member)
+    }) else {
         // **A member written through a macro is not a missing member**, and this is C's ordinary way of renaming a
         // field: neovim writes `#define b_fnum handle` *inside* `struct file_buffer`, so `buf->b_fnum` is
         // `buf->handle` after the preprocessor while the file's own text has no member called `b_fnum` at all.
@@ -843,14 +870,46 @@ fn signature_line(fact: &DeclFact) -> String {
         && fact.parameter_list.is_none()
         && let Some(written) = &fact.type_of
     {
-        return format!("{written} {}", fact.name);
+        return format!("{written} {}{}", fact.name, the_trailing_clause(fact));
     }
     match (&fact.returns, &fact.parameter_list) {
-        (Some(returns), Some(parameters)) => format!("{returns} {}{parameters}", fact.name),
+        (Some(returns), Some(parameters)) => format!(
+            "{returns} {}{parameters}{}",
+            fact.name,
+            the_trailing_clause(fact)
+        ),
         (Some(returns), None) => format!("{returns} {}(…)", fact.name),
-        (None, Some(parameters)) => format!("{}{parameters}", fact.name),
+        (None, Some(parameters)) => {
+            format!("{}{parameters}{}", fact.name, the_trailing_clause(fact))
+        }
         (None, None) => format!("{} {}", kind_words(fact), fact.qualified_name()),
     }
+}
+
+/// **What a function's declaration writes after its parameter list** — `const`, `volatile`, `&&`, and the
+/// `requires`-clause.
+///
+/// The report was `void call(Fn &&fn) const requires requires { fn(*this); }` hovering as `call(Fn &&fn)`: the two halves a
+/// reader of a class with two `call`s needs to tell them apart were both missing, and one of them (`const`) was missing
+/// from the fact itself. See [`cpp_code_analysis::DeclModifiers::CONST`] and [`DeclFact::requires_clause`].
+fn the_trailing_clause(fact: &DeclFact) -> String {
+    let bits = fact.modifiers.bits();
+    let mut out = String::new();
+    for (bit, word) in [
+        (cpp_code_analysis::DeclModifiers::CONST, " const"),
+        (cpp_code_analysis::DeclModifiers::VOLATILE, " volatile"),
+        (cpp_code_analysis::DeclModifiers::RVALUE_REFERENCE, " &&"),
+        (cpp_code_analysis::DeclModifiers::LVALUE_REFERENCE, " &"),
+    ] {
+        if bits & bit.bits() != 0 {
+            out.push_str(word);
+        }
+    }
+    if let Some(clause) = &fact.requires_clause {
+        out.push(' ');
+        out.push_str(clause);
+    }
+    out
 }
 
 pub(crate) fn markdown(value: String) -> Hover {

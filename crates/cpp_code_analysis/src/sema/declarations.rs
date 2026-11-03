@@ -345,6 +345,13 @@ pub(crate) fn declared_modifiers_with(
         found = found.union(modifiers_in(node));
     }
 
+    // **The function's own qualifiers**, which are written *after* the parameter list: `void f() const &`,
+    // `void g(int) &&`. They are neither in the specifier sequence nor inside the declarator, so the token walk above
+    // cannot see them — it is given a node, and they are siblings that follow the declarator.
+    if let Some(declarator) = declarator.as_ref() {
+        found = found.union(function_suffix_in(declarator));
+    }
+
     // **`= delete` and `= default` are written after the declarator**, in the init-declarator that holds it — neither in
     // the declarator itself nor in the specifiers. `modifiers_in` stops at bodies, so a lambda in an initialiser
     // (`auto f = [](int* p) { delete p; };`) is not this.
@@ -376,6 +383,65 @@ pub(crate) fn declared_modifiers_with(
     }
 
     found
+}
+
+/// **The qualifiers written after a function's parameter list** — `const`, `volatile`, `&`, `&&`.
+///
+/// They are **the declarator's own trailing tokens**: the parser reads `void constant(int x) const {}` as an
+/// `InitDeclarator` whose `Declarator` node's text is `constant(int x) const`. The scan therefore starts after the
+/// declarator's `ParameterList` child, which is what keeps a `const` *inside* a parameter type (`void f(const int)`) and
+/// a `&` in a return type (`int& f()`) out of it.
+fn function_suffix_in(declarator: &CppSyntaxNode) -> crate::DeclModifiers {
+    let mut found = crate::DeclModifiers::default();
+    let mut after_the_parameters = false;
+    for element in declarator.children_with_tokens() {
+        if !after_the_parameters {
+            if element.as_node().is_some_and(|node| {
+                CppSyntaxKind::from(node.kind()) == CppSyntaxKind::ParameterList
+            }) {
+                after_the_parameters = true;
+            }
+            continue;
+        }
+        let Some(token) = element.as_token() else {
+            continue;
+        };
+        match token.text() {
+            "const" => found = found.union(crate::DeclModifiers::CONST),
+            "volatile" => found = found.union(crate::DeclModifiers::VOLATILE),
+            "&" => found = found.union(crate::DeclModifiers::LVALUE_REFERENCE),
+            "&&" => found = found.union(crate::DeclModifiers::RVALUE_REFERENCE),
+            _ => {}
+        }
+    }
+    found
+}
+
+/// **The `requires`-clause written after a function's parameter list**, as the declaration spells it.
+///
+/// The node is the declarator's **sibling**, not its child — `void constrained(int x) const requires (x > 0) {}` is an
+/// `InitDeclarator` holding the declarator (with its `const`) and a `RequiresClause` after it. What is returned is the
+/// clause's own text, keyword included (`requires (x > 0)`), because that is what the card prints after the signature;
+/// `None` when the declaration writes none.
+pub(crate) fn the_requires_clause_with(
+    shapes: &DeclarationShapes,
+    binding: &Binding,
+) -> Option<String> {
+    let mut declarator: Option<CppSyntaxNode> = None;
+    shapes.on_the_path(the_offset_to_descend_by(binding), |shape| {
+        if let Some(node) = &shape.declarator
+            && reaches_the_name(node, binding.name_range)
+        {
+            declarator = Some(node.clone());
+        }
+    });
+    let parent = declarator.as_ref()?.parent()?;
+    let clause = parent
+        .children()
+        .find(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::RequiresClause)?;
+    let text = clause.text().to_string();
+    let text = text.trim();
+    (!text.is_empty()).then(|| text.to_string())
 }
 
 /// **Does the declaration whose first token is at `at` carry a `[[maybe_unused]]`?**
@@ -968,28 +1034,29 @@ fn declared_namespace_alias_target_with(root: &CppSyntaxNode, binding: &Binding)
     if binding.kind != BindingKind::Namespace {
         return None;
     }
-    let name_start = binding.name_range.start_offset;
-    // **The innermost `namespace` declaration that contains the name.** The outermost one is the enclosing namespace
-    // — `namespace std { … }` contains every alias written inside it — and asking it first answered None for every
-    // alias in a real header.
-    let node = root
-        .descendants()
-        .filter(|node| {
-            CppSyntaxKind::from(node.kind()) == CppSyntaxKind::NamespaceDecl
-                && usize::from(node.text_range().start()) <= name_start
-                && name_start < usize::from(node.text_range().end())
-        })
-        .max_by_key(|node| usize::from(node.text_range().start()))?;
-    // A declaration with a body is an ordinary namespace; the alias is the one that writes `= target` and no braces.
-    if node
-        .children()
-        .any(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::CompoundStat)
-    {
-        return None;
+    // **The innermost `namespace` declaration the name is written in.** Found by walking the name **token**'s
+    // ancestors rather than by scanning the tree: the innermost enclosing declaration is at most a few parents up, and
+    // the scan this replaced was measured at **16.7 s of a 17 s summary** on a 1.5 MB header — which is why a guard on
+    // the text after the name existed, and the guard compared a rendering's bytes with a binding's range.
+    let mut node = cpp_parser::token_at(root, binding.name_range.start_offset)?.parent();
+    while let Some(current) = node {
+        if CppSyntaxKind::from(current.kind()) == CppSyntaxKind::NamespaceDecl {
+            // A declaration with a body is an ordinary namespace; an alias writes `= target` and no braces, and a
+            // forward declaration `namespace std;` has neither — so the target is what tells the two apart.
+            if current
+                .children()
+                .any(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::CompoundStat)
+            {
+                return None;
+            }
+            return current
+                .children()
+                .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::NameExpr)
+                .map(|child| child.text().to_string());
+        }
+        node = current.parent();
     }
-    node.children()
-        .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::NameExpr)
-        .map(|child| child.text().to_string())
+    None
 }
 
 /// The type a **`typedef` or `using` alias** names, as the file spells it.
@@ -3256,21 +3323,10 @@ fn fact_for(
     } else {
         declared_type_of_with(shapes, binding)
             .or_else(|| declared_alias_target_with(shapes, binding))
-            // **A namespace alias is the only `namespace` binding whose name is followed by `=`.** The target is found
-            // by scanning the whole tree for the innermost `namespace` declaration containing the name, so asking it of
-            // every namespace was O(file) per namespace: measured on a 1.5 MB WinRT header, **16.7 s of a 17 s
-            // summary** went to this chain while the walk's own inner calls were 5–10 ms. A definition is written
-            // `namespace X {` and an alias `namespace X = target;`, so one character decides it, and the scan is paid
-            // only by the alias that needs it.
-            .or_else(|| {
-                let after = rendered
-                    .get(binding.name_range.end_offset()..)?
-                    .trim_start();
-                if !after.starts_with('=') {
-                    return None;
-                }
-                declared_namespace_alias_target_with(root, binding)
-            })
+            // **A namespace alias, recognised by its shape.** See [`declared_namespace_alias_target_with`] for why the
+            // character after the name cannot answer: the binding's range and the text `fact_for` is handed are not
+            // always the same ruler, and a header's alias was filed with no target because of it.
+            .or_else(|| declared_namespace_alias_target_with(root, binding))
     };
     let returns = {
         // **The written return type, and the deduced one when there is none to write.** `declared_returns_of_with`
@@ -3359,6 +3415,10 @@ fn fact_for(
         // **What the declaration writes** — read from the same shape table as everything above, and stored so that a
         // check asking "does this say `override`" does not search the text for it. See [`crate::DeclModifiers`].
         modifiers: declared_modifiers_with(shapes, binding, Some(rendered)),
+        // **The `requires`-clause written after the parameter list**, which is a fact about the declaration and not a
+        // modifier: `void f(int) const requires (x > 0)`. The hover card showed neither it nor the `const` — reported
+        // from `strings.cpp` as "the card is missing what the declaration says".
+        requires_clause: the_requires_clause_with(shapes, binding),
         // **What the function frees** is filled by the pass after the facts are built — see
         // [`fill_the_frees`], which needs the whole file to do it in one walk.
         frees: 0,

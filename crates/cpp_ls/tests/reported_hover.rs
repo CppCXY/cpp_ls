@@ -64,3 +64,75 @@ fn a_member_of_a_class_template_instantiation_is_named() {
 
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// `cfoo.call(...)` on a `const Foo` showed the **non-const** `call`, and `Bar`'s `requires`-clause never appeared.
+///
+/// A class may declare a name twice and tell the two apart by `const` (and by a trailing `requires`). The object's
+/// constness is not in the type model yet — `type_of` is `Foo` for both `Foo foo;` and `const Foo cfoo;` — so the card
+/// lists **every** declaration of the name, with the qualifiers the facts now record; the reader's own line says which
+/// object they are calling it on.
+#[test]
+fn a_member_declared_twice_shows_both_declarations_and_their_clauses() {
+    let root: PathBuf = std::env::temp_dir().join("cppls-hover-qualifiers");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("a project directory");
+    let file = root.join("a.cpp");
+    let source = "struct Foo {\n\
+                  template <typename Fn> void call(Fn &&fn) {}\n\
+                  template <typename Fn> void call(Fn &&fn) const {}\n\
+                  };\n\
+                  struct Bar {\n\
+                  template <typename Fn> void call(Fn &&fn) requires requires { fn(*this); } {}\n\
+                  template <typename Fn> void call(Fn &&fn) const requires requires { fn(*this); } {}\n\
+                  };\n\
+                  void f() {\n\
+                  const Foo cfoo;\n\
+                  cfoo.call([](auto &&x) {});\n\
+                  const Bar cbar;\n\
+                  cbar.call([](auto &&x) {});\n\
+                  }\n";
+    std::fs::write(&file, source).expect("the fixture writes");
+
+    let mut session = Session::open(
+        &root,
+        SessionFiles::new(OpenDocuments::new(), DiskFiles),
+        WatchFilter::new(&root),
+    );
+    session.add_project_files([file.clone()]);
+    session.did_open(&file, source);
+    session.catch_up(&file);
+    let _ = session.cook(&file);
+    let _ = session.index_everything();
+    let view = session.view_of_the_file(&file).expect("the written text");
+
+    for (needle, must_say) in [
+        ("cfoo.call", "void call(Fn &&fn) const"),
+        ("cbar.call", "const requires requires"),
+    ] {
+        let line = source.find(needle).expect("the use");
+        let at = line + needle.find("call").expect("the member name");
+        let hover = cpp_ls::handlers::hover::hover(
+            &session,
+            &view,
+            ReadingOffset::new(at + 1),
+            FileOffset::new(at + 1),
+        )
+        .expect("a member has a card");
+        let text = match hover.contents {
+            lsp_types::HoverContents::Markup(markup) => markup.value,
+            other => format!("{other:?}"),
+        };
+        assert!(
+            text.contains(must_say),
+            "the card must say {must_say:?}: {text}"
+        );
+        assert!(
+            text.contains("const Foo")
+                || text.contains("const Bar")
+                || text.contains("`const` object"),
+            "and it must say which one a const object may call: {text}"
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&root);
+}

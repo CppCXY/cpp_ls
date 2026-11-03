@@ -280,3 +280,97 @@ fn a_braced_initialisation_of_a_class_template_keeps_its_arguments() {
         "a braced list of values has no type this layer can name: {bare_known:?}"
     );
 }
+
+/// **§C2 — a member function's `const`, `&`/`&&` and its `requires`-clause are facts.**
+///
+/// Reported from `strings.cpp`:
+///
+/// ```cpp
+/// struct Foo {
+///     template <typename Fn> void call(Fn &&fn) { … }
+///     template <typename Fn> void call(Fn &&fn) const { … }
+/// };
+/// struct Bar {
+///     template <typename Fn> void call(Fn &&fn) requires requires { fn(*this); } { … }
+///     template <typename Fn> void call(Fn &&fn) const requires requires { fn(*this); } { … }
+/// };
+/// ```
+///
+/// Hovering `cfoo.call` showed `call(Fn &&fn)` — the **non-const** declaration, which a `const Foo` cannot call — and
+/// nothing of `Bar`'s `requires`. Both were missing from the fact: `DeclModifiers` had a bit for `constexpr` (a
+/// specifier) and none for `const` (written after the parameter list), and the trailing clause had no field at all.
+///
+/// The bits and the clause must also agree **whichever path built the fact** — the summary and a member list asked from
+/// the file's own scopes do — which is why this test asks both.
+#[test]
+fn a_member_function_records_its_qualifiers_and_its_requires_clause() {
+    let session = session_with(&[(
+        "/p/a.cpp",
+        "struct Foo {\n\
+             template <typename Fn>\n\
+             void call(Fn &&fn) {}\n\
+             template <typename Fn>\n\
+             void call(Fn &&fn) const {}\n\
+         };\n\
+         struct Bar {\n\
+             template <typename Fn>\n\
+             void call(Fn &&fn) requires requires { fn(*this); } {}\n\
+             template <typename Fn>\n\
+             void call(Fn &&fn) const requires requires { fn(*this); } {}\n\
+         };\n",
+    )]);
+    let path = std::path::Path::new("/p/a.cpp");
+    let view = session.view_of_the_file(path).expect("the written text");
+
+    let is_const = |fact: &cpp_code_analysis::DeclFact| {
+        fact.modifiers.bits() & cpp_code_analysis::DeclModifiers::CONST.bits() != 0
+    };
+
+    // The summary: two `call`s per class, one of each constness.
+    let summary = session.index().summary(path).expect("a summary");
+    let calls: Vec<&cpp_code_analysis::DeclFact> = summary
+        .declarations
+        .iter()
+        .filter(|fact| fact.name == "call")
+        .collect();
+    assert_eq!(calls.len(), 4, "four declarations: {calls:?}");
+    assert_eq!(calls.iter().filter(|fact| is_const(fact)).count(), 2);
+    for fact in calls
+        .iter()
+        .filter(|fact| fact.scope.as_deref() == Some("Bar"))
+    {
+        assert_eq!(
+            fact.requires_clause.as_deref(),
+            Some("requires requires { fn(*this); }"),
+            "the clause as the declaration spells it"
+        );
+    }
+
+    // And the member list, which is a *different* builder: a member's card comes from here.
+    let cpp_code_analysis::Known::Yes(foo) = session.members_of(&view, "Foo") else {
+        panic!("members of Foo");
+    };
+    assert_eq!(
+        foo.members
+            .iter()
+            .filter(|member| member.fact.name == "call")
+            .filter(|member| is_const(&member.fact))
+            .count(),
+        1,
+        "one const `call` in Foo's member list"
+    );
+    let cpp_code_analysis::Known::Yes(bar) = session.members_of(&view, "Bar") else {
+        panic!("members of Bar");
+    };
+    for member in bar
+        .members
+        .iter()
+        .filter(|member| member.fact.name == "call")
+    {
+        assert_eq!(
+            member.fact.requires_clause.as_deref(),
+            Some("requires requires { fn(*this); }"),
+            "the member list's facts carry the clause too"
+        );
+    }
+}

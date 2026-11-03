@@ -278,6 +278,7 @@ pub fn encode(summary: &FileSummary) -> Vec<u8> {
         for constraint in &fact.constraints {
             put_str(&mut out, constraint);
         }
+        put_opt_str(&mut out, fact.requires_clause.as_deref());
         put_u32(&mut out, fact.parameter_defaults.len() as u32);
         for default in &fact.parameter_defaults {
             put_str(&mut out, default);
@@ -706,6 +707,7 @@ pub fn decode(bytes: &[u8]) -> Result<FileSummary, DecodeError> {
                 }
                 constraints
             },
+            requires_clause: reader.optional_string()?,
             parameter_defaults: {
                 let mut defaults = Vec::new();
                 for _ in 0..reader.count()? {
@@ -1326,6 +1328,8 @@ mod tests {
                     parameters: vec!["_Ty".to_string(), "_Alloc".to_string()],
                     // The constraint in front of each parameter — empty here, and carried by the round trip.
                     constraints: vec![String::new(), "Integral".to_string()],
+                    // A clause is the declaration's text, and this literal is a fixture with no text to read.
+                    requires_clause: None,
                     parameter_defaults: Vec::new(),
                     // **A pattern**, so the round trip carries one: the field a member lookup uses to tell a partial
                     // specialization from its primary template. The `None` branch is covered by the two facts below.
@@ -1363,6 +1367,8 @@ mod tests {
                     bases: Vec::new(),
                     parameters: Vec::new(),
                     constraints: Vec::new(),
+                    // A clause is the declaration's text, and this literal is a fixture with no text to read.
+                    requires_clause: None,
                     parameter_defaults: Vec::new(),
                     pattern: None,
                     // The one field a completion's detail line reads: a function with no parameters is written
@@ -1392,6 +1398,8 @@ mod tests {
                     bases: Vec::new(),
                     parameters: Vec::new(),
                     constraints: Vec::new(),
+                    // A clause is the declaration's text, and this literal is a fixture with no text to read.
+                    requires_clause: None,
                     parameter_defaults: Vec::new(),
                     pattern: None,
                     parameter_list: None,

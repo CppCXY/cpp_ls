@@ -1763,6 +1763,8 @@ mod tests {
             bases: Vec::new(),
             parameters: Vec::new(),
             constraints: Vec::new(),
+            // A clause is the declaration's text, and this literal is a fixture with no text to read.
+            requires_clause: None,
             parameter_defaults: Vec::new(),
             pattern: None,
             parameter_list: parameter_list.map(str::to_string),

@@ -69,6 +69,15 @@ impl DeclModifiers {
     pub const VARIADIC: Self = Self(1 << 11);
     pub const DELETED: Self = Self(1 << 12);
     pub const DEFAULTED: Self = Self(1 << 13);
+    /// **A member function declared `const`** — `T sum() const`. Written after the parameter list, which is why it was
+    /// missing while `constexpr` was not: the specifier sequence holds one and the declarator's suffix the other.
+    pub const CONST: Self = Self(1 << 14);
+    /// `volatile`, in the same position and for the same reason.
+    pub const VOLATILE: Self = Self(1 << 15);
+    /// A **ref-qualifier**: `void f() &` is callable only on an lvalue, `void g() &&` only on an rvalue. `noexcept` and
+    /// the `&`/`&&` of a *parameter type* are not this — see `function_suffix_in`.
+    pub const LVALUE_REFERENCE: Self = Self(1 << 16);
+    pub const RVALUE_REFERENCE: Self = Self(1 << 17);
 
     pub const fn bits(self) -> u32 {
         self.0
@@ -288,6 +297,14 @@ pub struct DeclFact {
     /// declared in a header is the ordinary shape, and a call site in another file can only ask the summary. The
     /// names alone cannot answer *is this argument's type constrained, and by what*.
     pub constraints: Vec<String>,
+    /// **The `requires`-clause written after the parameter list**, as the declaration spells it — `requires (x > 0)`,
+    /// `requires requires { fn(*this); }`.
+    ///
+    /// Separate from [`DeclFact::constraints`], which is the **per-template-parameter** constraint list and is read
+    /// positionally beside [`DeclFact::parameters`] by `sema::check::concept_not_satisfied`; appending a trailing clause
+    /// there would shift every pair. `None` for a declaration that writes none, and for everything that has no parameter
+    /// list to put one after.
+    pub requires_clause: Option<String>,
     /// **The default argument of each template parameter**, in the same order as [`DeclFact::parameters`], as the file
     /// wrote it — `["", "allocator<_Ty>"]` for `template <class _Ty, class _Alloc = allocator<_Ty>>`.
     ///

@@ -10117,6 +10117,10 @@ fn fact_from_binding_with(
         // without them.
         parameters: crate::sema::declarations::declared_template_parameters_with(shapes, binding),
         constraints: Vec::new(),
+        // **The clause the declaration writes**, from the same shape table the modifiers come from — the two paths that
+        // build a fact must say the same thing (a member queried from the file's own scopes went through this one, and
+        // its card showed the declaration without the `requires` the index had).
+        requires_clause: crate::sema::declarations::the_requires_clause_with(shapes, binding),
         parameter_defaults: crate::sema::declarations::declared_parameter_defaults_with(
             shapes, binding,
         ),
@@ -14486,6 +14490,8 @@ impl ProjectDefinition {
                 bases: Vec::new(),
                 parameters: Vec::new(),
                 constraints: Vec::new(),
+                // Same reason as `constraints` above: a clause is the declaration's text, and this is a place to jump to.
+                requires_clause: None,
                 parameter_defaults: Vec::new(),
                 // Nor a pattern: this fact is a place to jump to, and the class it names is already the one the
                 // caller asked about. See [`DeclFact::pattern`].
