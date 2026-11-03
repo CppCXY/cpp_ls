@@ -61,7 +61,7 @@ const IDLE_WAIT: std::time::Duration = std::time::Duration::from_millis(1000);
 /// fast because they had *nothing to say*. A slice that ends early drains the queue later, and a list with no
 /// summary behind it is not a fast answer but no answer. Throughput and latency pull against each other here, and
 /// this count already sat at a workable point between them.
-const INDEX_SLICE: usize = 4;
+const INDEX_SLICE: usize = 24;
 
 /// **How many files one slice cooks** — the same shape as [`INDEX_SLICE`], and the same reason.
 ///
@@ -81,8 +81,7 @@ const COOK_A_SLICE: usize = 4;
 /// back **empty for the first eight requests** instead of the first five. The two knobs trade a wait for an empty
 /// list, and no setting of either wins, because reading files and answering questions take the same write lock.
 /// The constant is kept as the record of what the wait actually is.
-#[allow(dead_code)]
-const INDEX_SLICE_MS: u64 = 40;
+const INDEX_SLICE_MS: u64 = 30;
 
 pub async fn initialized_handler(
     context: ServerContextSnapshot,
@@ -476,7 +475,9 @@ async fn index_in_background(context: ServerContextSnapshot) {
             // ms**. Under half the target grows by a file, so the search settles where the machine's files actually are.
             wave = match held {
                 over if over > u128::from(INDEX_SLICE_MS) => (wave / 2).max(1),
-                under if under < u128::from(INDEX_SLICE_MS) / 2 => (wave + 1).min(INDEX_SLICE),
+                // **Doubling, not one file at a time.** The commit spends a budget of its own since 4.3, so the wave no
+                // longer sets how long the writer is held — it sets how much is prepared (the read half) per slice.
+                under if under < u128::from(INDEX_SLICE_MS) => (wave * 2).min(INDEX_SLICE),
                 _ => wave,
             };
 

@@ -2748,8 +2748,21 @@ impl<F: FileProvider + Clone> Session<F> {
             self.store.apply_a_stored_refinement(summary);
         }
 
+        // **How long one commit may spend inserting** — the write hold this half controls.
+        //
+        // A count is a guess about a sum that varies with the files a wave happened to hold: measured on
+        // `EmmyLuaCodeStyle`, an ordinary header's insert is **1–8 ms** and the largest (`xlocale`,
+        // `windows.media.audio.h`) **13–27 ms**, so 24 files were 44.3 ms in one run and 78.4 ms in the next. Spending a
+        // budget instead bounds the hold by the work that determines it. The files not popped stay at the front of the
+        // queue, already prepared in `prefetched`, and the next slice commits them without parsing them again — so the
+        // wave stays large, and the wave is what sets throughput (one second pass per slice).
+        const COMMIT_MS: u128 = 20;
         let mut done = Vec::new();
+        let committing = std::time::Instant::now();
         for _ in 0..steps {
+            if !done.is_empty() && committing.elapsed().as_millis() >= COMMIT_MS {
+                break;
+            }
             let Some((path, priority, depth)) = self.queue.pop() else {
                 break;
             };

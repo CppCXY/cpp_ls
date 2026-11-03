@@ -113,6 +113,11 @@ fn where_a_start_spends_its_time() {
     let mut whole_commit = Duration::ZERO;
     let mut whole_drain = Duration::ZERO;
     let mut worst_commit = Duration::ZERO;
+    // **The server's own rule** — `INDEX_SLICE` is its cap and `INDEX_SLICE_MS` its target (`initialized/mod.rs`). The
+    // probe used to double the wave to 64, which is a shape the product never runs: the "worst single commit" it reported
+    // (152–252 ms) belonged to a wave four times the server's cap.
+    const INDEX_SLICE: usize = 24;
+    const INDEX_SLICE_MS: u128 = 30;
     let mut wave = 8usize;
     let mut stuck_at: Option<(usize, usize)> = None;
 
@@ -154,6 +159,12 @@ fn where_a_start_spends_its_time() {
         let _ = session.commit_them(rendered);
         whole_drain += draining.elapsed();
 
+        if ms(commit) > 50.0 {
+            println!(
+                "  slow commit at slice {slices}: prepared {prepared_count}, committed {committed}, wave {wave}, commit {:.1} ms",
+                ms(commit)
+            );
+        }
         if slices < 8 || slices.is_multiple_of(500) {
             println!(
                 "  slice {slices:>4}: prepared {prepared_count:>3}, committed {committed:>3}, asked {asked_count:>2}, built {built_count:>2}, queue {:>4}, cooking {:>3}, work {:>4}, gather {:>7.1} ms, commit {:>6.1} ms",
@@ -167,7 +178,13 @@ fn where_a_start_spends_its_time() {
             );
         }
         slices += 1;
-        wave = (wave * 2).min(64);
+        // The server's adaptation, verbatim: over the target halves, under half of it grows by one, in between it holds.
+        let held = commit.as_millis();
+        wave = match held {
+            over if over > INDEX_SLICE_MS => (wave / 2).max(1),
+            under if under < INDEX_SLICE_MS => (wave * 2).min(INDEX_SLICE),
+            _ => wave,
+        };
     }
     let pass = started.elapsed();
     println!("--- the pass");
