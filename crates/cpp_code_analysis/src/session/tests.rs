@@ -4791,3 +4791,46 @@ fn a_cook_of_text_that_has_since_changed_is_not_filed() {
         found.errors
     );
 }
+
+/// **A pull is remembered for the reading it was made from, and an edit is not what it holds.**
+///
+/// A pull builds a `SemanticModel` and runs every rule — measured **143.4 ms** on `EmmyLuaCodeStyle`, 97 % of it type
+/// inference — and the model cannot outlive the call (it borrows the tree and holds a non-`Send` cache of header views).
+/// The findings can: they are plain data and a function of everything the pull reads, so the state is keyed and the
+/// second pull of the same state is a lookup. What must never happen is the memo outliving an edit, which is what this
+/// test is about.
+#[test]
+fn a_pull_is_remembered_until_the_file_changes() {
+    let source = "int f() { int *p = 0; return 1; }\n";
+    let files = MemoryFiles::new().with_file("/p/a.cpp", source);
+    let fixture = Memory::new("pull-memo", &files);
+    let mut session = fixture.session();
+    session.did_open("/p/a.cpp", source);
+    session.index_everything();
+
+    let first = session
+        .diagnostics("/p/a.cpp")
+        .expect("the file reads")
+        .checks
+        .len();
+    let again = session
+        .diagnostics("/p/a.cpp")
+        .expect("the file reads")
+        .checks
+        .len();
+    assert_eq!(first, again, "the same reading answers the same");
+
+    let edited = "int f() { int *p = 0; return 1; }\nint g() { int *q = 0; return 2; }\n";
+    session.did_change("/p/a.cpp", edited);
+    session.advance(4);
+    let _ = session.cook("/p/a.cpp");
+    let after = session
+        .diagnostics("/p/a.cpp")
+        .expect("the edited file reads")
+        .checks
+        .len();
+    assert!(
+        after > first,
+        "an edit is seen, not the memory of it: {first} -> {after}"
+    );
+}

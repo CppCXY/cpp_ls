@@ -233,6 +233,23 @@ unchanged file re-derives every answer on every debounce, and the whole pull run
 that makes its memo need no invalidation rule"). The cache this item asks for is therefore a **session-owned model** keyed
 `(content_hash, context_hash, env_hash)`, handed to `checks_about` in place of a fresh one, so a debounce after no change
 reuses every answer.
+**First step landed: the findings are remembered, the model is not.** A pull builds a `SemanticModel` that cannot outlive
+the call (it borrows the tree and holds a non-`Send` cache of header views), but its **answers** are plain data. `Session`
+now remembers one file's findings under a key that names every input a finding depends on — the summary's key, the closure
+fingerprint, the store's revision, the diagnostics configuration, the language and the Unreal switch — and the second pull
+of the same state is a lookup. Measured with a bounded probe on `CodeFormat.cpp`:
+
+```text
+pull 0   35.9 ms   3 finding(s)
+pull 1    2.0 ms   3 finding(s)
+pull 2    1.9 ms   …
+pull 3    1.9 ms   …
+```
+
+`a_pull_is_remembered_until_the_file_changes` pins both halves: the same reading answers the same, and an edit is seen.
+`--lib` 738 / 0 / 2, `tests/checks.rs` 108, clippy green. **What this does not fix** is the first pull after an edit — the
+typing path — which still pays the inference; that is the next step, and it needs the answers reused **across** readings
+(a cache keyed by what a `type_of` question depends on), not a memo of a whole pull.
 ### 4.3 A commit can hold the writer for 252 ms
 
 Today's `start_shape` reports `worst single commit 252 ms` against the 50 ms `WRITE_BUDGET`. The phases that can do it are
