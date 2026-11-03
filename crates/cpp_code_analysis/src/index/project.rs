@@ -11787,11 +11787,23 @@ impl ProjectIndex {
             // reading of `print` with **no** `println` while the summary had all four — that reading shadowed the
             // summary for every query, which is what a hover on `std::println` answered `null` for. So the chosen
             // reading is used when it has something to say about this question, and the summary when it does not.
+            // **The asking program's own reading answers alone.** A name it does not hold is a name that program did
+            // not compile — `#if 0 struct Dead` is in the file's environment-free summary and in no rendering — so the
+            // summary may not speak for it. The fallback below stays for the other case, which is a real one: a cook
+            // that went wrong (a module's cook losing a feature-test macro) must not shadow a declaration the file does
+            // hold unconditionally elsewhere.
+            let the_askers_own = asking.is_some_and(|program| {
+                self.order
+                    .get(&file)
+                    .and_then(|key| self.cooked.get(key))
+                    .and_then(|readings| readings.id_for(program))
+                    .is_some()
+            });
             let (facts, reading): (&[DeclFact], u32) = match cooked {
                 Some(cooked) if cooked.declarations.iter().any(&accepts) => {
                     (cooked.declarations.as_slice(), reading)
                 }
-                Some(_) if summary.declarations.iter().any(&accepts) => {
+                Some(_) if !the_askers_own && summary.declarations.iter().any(&accepts) => {
                     (summary.declarations.as_slice(), 0)
                 }
                 Some(cooked) => (cooked.declarations.as_slice(), reading),

@@ -3741,8 +3741,6 @@ fn a_class_scoped_by_another_files_macro_body_is_scoped_through_the_session() {
     );
 }
 
-#[test]
-#[ignore = "the keystroke's reading is still the raw one — the reading choice of the next commit (design §4.1)"]
 /// **A keystroke in a body rebuilds the file's summary *through its timeline*, not from its bytes.**
 ///
 /// The window this closes is the one the four patch layers exist for. An edit drops the file's summary
@@ -3750,9 +3748,8 @@ fn a_class_scoped_by_another_files_macro_body_is_scoped_through_the_session() {
 /// every answer about the file was the *written* reading until the idle pass got to it — a scope opened by another
 /// file's macro was `None`, a return type split by `#if` was the wrong branch. A body edit moves no directive, so the
 /// timeline is still in force, and an index step that holds one now renders instead of parsing text.
-// **Ignored while the refined reading is being fixed** — the defect and its reproducer are in `docs/indexing-review.md`
-// §6: refining a file makes three `checks` fixtures see a reading their rules decline, so `index_everything` does not
-// ask for it yet, and this test needs the ask. The assertion is right; the behaviour is what is wrong.
+#[ignore = "the keystroke path files its rendering as the *summary* (`prepare_with_the_timeline`); the L1/L2 split of design §2.1 has not reached it, so no cooked reading exists after an edit"]
+#[test]
 fn a_keystroke_in_a_body_reads_the_file_through_its_timeline() {
     let project = Project::new("keystroke-renders");
     project.write(
@@ -3772,13 +3769,19 @@ fn a_keystroke_in_a_body_reads_the_file_through_its_timeline() {
     );
     session.add_project_files([widget.clone()]);
     session.index_everything();
+    // **The reading is the cooked one, not the summary.** A summary is the file's environment-free reading
+    // (`docs/indexing-design.md` §2.1), so `_STD_BEGIN` — a body from `open.h` — is not in it; the reading the program
+    // implies is the file's cooked reading, and that is where a macro-opened scope lives.
     assert!(
-        session.index().summary(&widget).is_some_and(|summary| {
-            summary
-                .declarations
-                .iter()
-                .any(|fact| fact.name == "Widget" && fact.scope.as_deref() == Some("std"))
-        }),
+        session
+            .index()
+            .cooked_reading(&widget)
+            .is_some_and(|cooked| {
+                cooked
+                    .declarations
+                    .iter()
+                    .any(|fact| fact.name == "Widget" && fact.scope.as_deref() == Some("std"))
+            }),
         "the first reading is the timeline's, from the second pass"
     );
 
@@ -3800,8 +3803,11 @@ fn a_keystroke_in_a_body_reads_the_file_through_its_timeline() {
 
     // And the facts say so: the scope of a declaration written inside a macro-opened namespace is `std` **now**,
     // before any idle pass could have re-read the file.
-    let summary = session.index().summary(&widget).expect("indexed again");
-    let widget_fact = summary
+    let cooked = session
+        .index()
+        .cooked_reading(&widget)
+        .expect("read again, in its program");
+    let widget_fact = cooked
         .declarations
         .iter()
         .find(|fact| fact.name == "Widget")
