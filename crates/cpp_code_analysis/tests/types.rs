@@ -292,12 +292,10 @@ int f() { auto&& bound = the_widget(); return bound.size; }
         type_of_use(from_a_reference, "bound").as_deref(),
         Some("Widget&")
     );
-    // **A plain name is not collapsed yet, and that is a gap rather than a rule.** `auto&& bound = base;` is `int&`
-    // in C++, and this answers `int&&`: the value category of a *name* is not read here, because what the deducer has
-    // in hand is the initializer's type, which is `int` for both `base` and `42`. Written down so the next reader does
-    // not mistake it for the language's answer.
+    // **A named initializer is an lvalue**, so `auto&&` on it is `int&` — the collapse C++ performs, decided from the
+    // initializer's *shape* (a name is an lvalue; a literal or a call is not) because its type is `int` for both.
     let from_a_name = "int f() { int base = 1; auto&& bound = base; return bound; }\n";
-    assert_eq!(type_of_use(from_a_name, "bound").as_deref(), Some("int&&"));
+    assert_eq!(type_of_use(from_a_name, "bound").as_deref(), Some("int&"));
 }
 
 /// **`auto&` on a reference-returning call is one reference, not two.**

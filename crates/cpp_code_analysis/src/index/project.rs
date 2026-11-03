@@ -6518,7 +6518,10 @@ fn auto_substituted(
             base.truncate(trimmed);
             base = base.trim_end().to_string();
         }
-        reference = match (suffix.contains("&&"), deduced_had_one) {
+        reference = match (
+            suffix.contains("&&"),
+            deduced_had_one || initializer_is_an_lvalue,
+        ) {
             (true, false) => "&&",
             _ => "&",
         };
@@ -7238,7 +7241,35 @@ fn type_of_a_call(
         return element;
     }
 
-    let written_arguments = written_template_arguments(&callee);
+    // **The template arguments the call wrote, from the *call* and not only from the callee.** A member call's `‹…›`
+    // may be a sibling of the member-access node rather than a descendant of it — measured on a real project:
+    // `_server->GetService<CommandService>()` found no written arguments, so the member's `returns` came back with
+    // its template parameter still standing (`Service *`) and nothing after the arrow could be typed. The arguments
+    // are searched for **before the argument list**, so that `f(g<int>(1))` cannot lend its inner `<int>` to `f`.
+    let written_arguments = {
+        let from_the_callee = written_template_arguments(&callee);
+        if from_the_callee.is_empty() {
+            call.children()
+                .take_while(|child| {
+                    CppSyntaxKind::from(child.kind()) != CppSyntaxKind::ArgumentList
+                })
+                .filter_map(|child| {
+                    // **The child may *be* the list** — `descendants()` does not include the node it is called on,
+                    // and a member call's template arguments sit beside the member access rather than inside it.
+                    if CppSyntaxKind::from(child.kind()) == CppSyntaxKind::TemplateArgumentList {
+                        return Some(child);
+                    }
+                    child.descendants().find(|node| {
+                        CppSyntaxKind::from(node.kind()) == CppSyntaxKind::TemplateArgumentList
+                    })
+                })
+                .next()
+                .map(|list| crate::sema::types::read_template_arguments(&list))
+                .unwrap_or_default()
+        } else {
+            from_the_callee
+        }
+    };
 
     // **The types of the arguments the call passed**, which is the other way a function template is told what its
     // parameters stand for — and the way the standard library uses almost everywhere: `_Get_unwrapped(_First)`
