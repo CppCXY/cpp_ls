@@ -1671,6 +1671,26 @@ impl<F: FileProvider + Clone> Session<F> {
             .lock()
             .map(|held| (held.len(), held.weight()))
             .unwrap_or((0, 0));
+        // **Which timelines are one allocation counted twice.** The unit table and the sharing cache hold the same
+        // `Arc` whenever a timeline was both held for a root and remembered for its content — the common case — so
+        // adding their byte counts would report the same megabytes twice. Measured rather than assumed: the pointers
+        // are compared, and the walk table's half of every overlap is what the totals subtract.
+        let shared_timeline_bytes = {
+            let mut seen: std::collections::HashSet<usize> = std::collections::HashSet::new();
+            for unit in self.held_units().timelines() {
+                seen.insert(std::sync::Arc::as_ptr(unit) as *const () as usize);
+            }
+            let mut shared = 0usize;
+            if let Ok(held) = self.walked_by_content.lock() {
+                for unit in held.values() {
+                    if !seen.insert(std::sync::Arc::as_ptr(unit) as *const () as usize) {
+                        shared += unit.heap_bytes();
+                    }
+                }
+            }
+            shared
+        };
+        let tables = self.store.index().table_accounting();
 
         crate::MemoryReport {
             vfs_files,
@@ -1695,6 +1715,20 @@ impl<F: FileProvider + Clone> Session<F> {
             walk_cache_bytes,
             walks_by_content_entries,
             walks_by_content_bytes,
+            shared_timeline_bytes,
+            index_names_bytes: tables.names.bytes,
+            index_names_entries: tables.names.name_entries,
+            index_scope_entries: tables.names.scope_entries,
+            index_name_postings: tables.names.name_postings,
+            index_scope_postings: tables.names.scope_postings,
+            index_edges: tables.edges,
+            index_edge_bytes: tables.edge_bytes,
+            index_member_lists: tables.member_list_entries,
+            index_member_list_bytes: tables.member_list_bytes,
+            index_memo_entries: tables.guard_entries
+                + tables.visibility_entries
+                + tables.condition_entries,
+            index_memo_bytes: tables.guard_bytes + tables.visibility_bytes + tables.condition_bytes,
         }
     }
     /// **What a name is at one position in one file** — see [`crate::MacroAt`] for why this exists and what the
@@ -8567,34 +8601,70 @@ pub struct CookedReading {
 /// How many translation units the session keeps in memory.
 ///
 /// A unit is a timeline over a whole include closure, so it is the session's largest single object; the disk cache
-/// holds the rest ([`crate::TranslationUnitCache`]) and a unit that falls out of here is one decode away. Sixteen is
-/// enough for the units a reader is working in (the open files' roots and the headers they name) and small enough
-/// that a project of a thousand sources does not hold a thousand timelines.
+/// holds the rest ([`crate::TranslationUnitCache`]) and a unit that falls out of here is one decode away. **Eight**
+/// is enough for the units a reader is working in — the open file it is looking at and the headers beside it — and
+/// small enough that a project of a thousand sources does not hold a thousand timelines.
+///
+/// It was sixteen, and the measurement that halved it is at [`MAX_UNIT_BYTES`]: a session that opened twenty files
+/// held sixteen timelines for 40.4 MB and re-asked for them **twice**.
 ///
 /// **A count is not a budget.** Measured on `EmmyLuaCodeStyle`, a unit is **6.2 MB** after the
-/// second pass — sixteen of them are 99 MB, and a header-heavier project would have sixteen units
+/// second pass — eight of them are 50 MB, and a header-heavier project would have eight units
 /// of 25 MB without this constant changing. So the table is bounded by **bytes** as well:
 /// [`MAX_UNIT_BYTES`].
-const MAX_UNITS: usize = 16;
+const MAX_UNITS: usize = 8;
 
 /// **How many bytes of translation units the session keeps** — the budget the count above cannot express.
 ///
-/// 128 MB is 16 typical units *and* room for a few heavy ones; an entry larger than the whole budget is still
-/// kept (the walk that just produced it is the one the caller is about to use), and the eviction order prefers the
-/// smallest closure first so the units that answer the most questions survive.
-const MAX_UNIT_BYTES: usize = 128 * 1024 * 1024;
+/// An entry larger than the whole budget is still kept (the walk that just produced it is the one the caller is
+/// about to use), and the eviction order prefers the smallest closure first so the units that answer the most
+/// questions survive.
+///
+/// # Why 128 MB became 64, measured
+///
+/// The table is the session's largest single object and it was sized when the **second pass** walked units for every
+/// file it re-read — a phase-2 change removed that caller, and what uses the table now is a reader cooking one file
+/// at a time. Measured with `tests/memory_probe.rs` on `EmmyLuaCodeStyle`, twenty files opened, cooked and cooked
+/// again:
+///
+/// ```text
+/// sixteen timelines held                 40.4 MB
+/// twenty files cooked a second time        2 hits, 23 walks   (the rendering cache answers the rest)
+/// ```
+///
+/// So the tail of sixteen is not earning 40 MB. Eight keeps the reader's working set — the file it is looking at and
+/// the headers beside it — and halves the bill; a timeline that falls out is a 38 ms walk, and the rendering cache
+/// in front of it is what a re-cook usually hits anyway.
+const MAX_UNIT_BYTES: usize = 64 * 1024 * 1024;
 
 /// **How many timelines the closure-dedup table keeps.** The byte budget is the real bound; this is the backstop
-/// against a project of thousands of tiny closures.
-const MAX_WALKS_BY_CONTENT_ENTRIES: usize = 512;
+/// against a project of thousands of tiny closures — where 512 entries are a budget of their own, on a project whose
+/// closures are a few kilobytes each. 32 is what a reader's recent history needs; the block below has the measurement
+/// that took both numbers down.
+const MAX_WALKS_BY_CONTENT_ENTRIES: usize = 32;
 
 /// **How many bytes of closure timelines the dedup table keeps** — see [`Session::walked_by_content`].
 ///
 /// Before this bound the table was a `HashMap` that never dropped anything: measured on a cold start it held
-/// **384 entries / 222 MB** after the second pass, and every edit of a root adds a new content identity. 64 MB is
-/// the same order as the units budget's working set and small enough that a project's whole history of closures
-/// cannot be what fills the resident set.
-const MAX_WALKS_BY_CONTENT_BYTES: usize = 64 * 1024 * 1024;
+/// **384 entries / 222 MB** after the second pass, and every edit of a root adds a new content identity.
+///
+/// # Why 64 MB became 16 MB, measured
+///
+/// The cache's justification was a mass indexer: "2110 roots, 786 distinct closures, **46 % of walks removable**".
+/// That caller no longer exists — phase 2 stopped building units for the second pass — and what remains is a reader
+/// cooking one file at a time, where a hit needs two roots whose *closure content* is identical. Measured with
+/// `tests/memory_probe.rs` on two real projects:
+///
+/// ```text
+/// EmmyLuaCodeStyle   20 files opened and cooked   20 walks, 0 from memory   46.6 MB held
+/// clice             20 files opened and cooked   20 walks, 0 from memory    0.6 MB held
+/// ```
+///
+/// So on both projects the table's hit rate is **zero** and its bill on the first is 46.6 MB, of which 40.4 MB is
+/// the same allocation the unit table also holds. A cap of 16 MB keeps what the cache is good at — the sibling roots
+/// that do share a closure — and bounds the waste at a quarter of what it was. The *useful* table here is the unit
+/// table, which holds a root's own timeline for its own cooks and pulls; this one is speculation.
+const MAX_WALKS_BY_CONTENT_BYTES: usize = 16 * 1024 * 1024;
 
 /// How many rounds [`Session::read_the_modules_a_file_imports`] may read module interface units in.
 ///
@@ -8701,6 +8771,16 @@ impl UnitTable {
     /// What the table holds: `(entries, bytes)`.
     fn accounting(&self) -> (usize, usize) {
         (self.held.len(), self.bytes)
+    }
+
+    /// **The timelines themselves, for the one caller that has to know which of them is shared.**
+    ///
+    /// [`UnitTable`] and `walked_by_content` hold the *same* `Arc<TranslationUnit>` whenever a timeline was both held
+    /// for a root and remembered for sharing, which is the common case — so a report that adds
+    /// `accounting().1` to the sharing cache's weight counts one allocation twice. This is how that is measured
+    /// instead of assumed: the caller compares pointers. See [`Session::memory_report`].
+    fn timelines(&self) -> impl Iterator<Item = &std::sync::Arc<crate::TranslationUnit>> {
+        self.held.values().map(|held| &held.unit)
     }
 }
 

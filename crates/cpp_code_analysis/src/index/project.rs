@@ -10955,6 +10955,156 @@ impl ProjectIndex {
         )
     }
 
+    /// **What the index's own tables cost**, which [`ProjectIndex::accounting`] does not answer.
+    ///
+    /// `accounting` counts the *facts* — the summaries and the cooked readings — and those are what the index is
+    /// *about*. This counts the structure built around them, and it is not small: the inverted index holds one
+    /// posting per declaration under two keys (its name and its scope), the include graph holds one set of includers
+    /// per file, and four memos hold answers that outlive the request that asked for them.
+    ///
+    /// The gap this closes was measurable and unexplained: on a 103-source project the session's own report said
+    /// **112.4 MB** while the process held **263 MB** after the index, and "the index's own tables are not in it" was
+    /// one of the three candidates the audit could not rule out. See [`crate::MemoryReport`].
+    ///
+    /// Every number here is an estimate with the same stated method as the rest of that report: the entries' keys,
+    /// the payloads they point at, and one container header each. Spare capacity and the maps' own tables are not
+    /// counted, so this is a lower bound.
+    pub fn table_accounting(&self) -> TableCost {
+        let names = self.names.accounting();
+        // **The include graph**: one set of includers per file, and the file names again as set members. A project's
+        // `included_by` is where "which files does this header affect" is answered, so it grows with the edges rather
+        // than with the files.
+        let mut edges = 0usize;
+        let mut edge_bytes = 0usize;
+        for (included, includers) in &self.included_by {
+            edges += includers.len();
+            edge_bytes += included.len() + std::mem::size_of::<BTreeSet<String>>();
+            edge_bytes += includers
+                .iter()
+                .map(|includer| includer.len() + std::mem::size_of::<String>())
+                .sum::<usize>();
+        }
+        edge_bytes += self
+            .included_by
+            .keys()
+            .map(|key| key.len() + std::mem::size_of::<String>())
+            .sum::<usize>();
+        let modules: usize = self
+            .module_interfaces
+            .iter()
+            .map(|(name, path)| name.len() + path.len() + 2 * std::mem::size_of::<String>())
+            .sum();
+        // **The three memos that outlive a request.** `member_lists` is the big one — a list is hundreds of
+        // `ProjectMember`s, each carrying a `DeclFact` — and it is bounded at `MAX_CACHED_MEMBER_LISTS`.
+        let (member_list_entries, member_lists, member_list_bytes) = self
+            .member_lists
+            .lock()
+            .map(|lists| {
+                let members: usize = lists.values().map(|held| held.list.members.len()).sum();
+                let bytes: usize = lists
+                    .values()
+                    .map(|held| {
+                        let members: usize = held
+                            .list
+                            .members
+                            .iter()
+                            .map(|member| {
+                                std::mem::size_of::<crate::ProjectMember>()
+                                    + DeclFact::heap_bytes(&member.fact)
+                            })
+                            .sum();
+                        let unlisted = held.list.unlisted.len()
+                            * std::mem::size_of::<crate::UnlistedBase>();
+                        members
+                            + unlisted
+                            + held.contributors.len() * std::mem::size_of::<PathBuf>()
+                            + held
+                                .contributors
+                                .iter()
+                                .map(|path| path.to_string_lossy().len())
+                                .sum::<usize>()
+                    })
+                    .sum();
+                (lists.len(), members, bytes)
+            })
+            .unwrap_or_default();
+        let (guard_entries, guard_bytes) = self
+            .guard_answers
+            .lock()
+            .map(|answers| {
+                (
+                    answers.len(),
+                    answers.len()
+                        * (std::mem::size_of::<(PathBuf, usize, u32)>()
+                            + std::mem::size_of::<crate::Visibility>()),
+                )
+            })
+            .unwrap_or_default();
+        let (visibility_entries, visibility_bytes) = self
+            .visibility
+            .lock()
+            .map(|walks| {
+                let bytes: usize = walks
+                    .values()
+                    .map(|walk| {
+                        // A walk's answer is one entry per file it reached, plus that file's name twice.
+                        let reached = walk.seen.visibility.len();
+                        let names: usize = walk
+                            .seen
+                            .visibility
+                            .keys()
+                            .map(|path| path.len() * 2 + 48)
+                            .sum();
+                        names
+                            + reached * std::mem::size_of::<IncludeVisibility>()
+                            + walk.contributors.len() * std::mem::size_of::<String>()
+                    })
+                    .sum();
+                (walks.len(), bytes)
+            })
+            .unwrap_or_default();
+        let (condition_entries, condition_bytes) = self
+            .visibility_answers
+            .lock()
+            .map(|answers| {
+                (
+                    answers.len(),
+                    answers.len()
+                        * (std::mem::size_of::<(String, u32)>()
+                            + std::mem::size_of::<crate::Visibility>()
+                            + 24),
+                )
+            })
+            .unwrap_or_default();
+        // **The paths, twice**: `order` for iteration, `sequence` for identity. Both hold the file's own spelling.
+        let path_bytes: usize = self
+            .order
+            .values()
+            .map(|path| path.len() + std::mem::size_of::<String>())
+            .sum::<usize>()
+            + self
+                .sequence
+                .keys()
+                .map(|path| path.len() + std::mem::size_of::<String>())
+                .sum::<usize>();
+
+        TableCost {
+            names,
+            edges,
+            edge_bytes: edge_bytes + modules,
+            member_list_entries,
+            member_lists,
+            member_list_bytes,
+            guard_entries,
+            guard_bytes,
+            visibility_entries,
+            visibility_bytes,
+            condition_entries,
+            condition_bytes,
+            path_bytes,
+        }
+    }
+
     pub fn cooked_declarations(&self, path: &Path) -> Option<&[DeclFact]> {
         Some(self.cooked_reading(path)?.declarations.as_slice())
     }
@@ -19306,4 +19456,53 @@ fn an_element_type_through_the_members(
     }
 
     None
+}
+
+/// **What the index's own tables cost** — the answer to [`ProjectIndex::table_accounting`].
+///
+/// The facts live in `summaries` and `cooked` and are counted by [`ProjectIndex::accounting`]; this is the structure
+/// around them: the inverted index, the include graph, and the four memos that outlive a request. Every number is an
+/// estimate with a stated method — keys, payloads, one container header each, no spare capacity — so the sum is a
+/// lower bound, which is the same convention [`crate::MemoryReport`] uses.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct TableCost {
+    /// The inverted index: two posting maps, the definers, and the sorted spellings.
+    pub names: crate::index::names::NameIndexCost,
+    /// Include edges across the project — the sum of every file's set of includers.
+    pub edges: usize,
+    /// The include graph and the module map, in bytes.
+    pub edge_bytes: usize,
+    /// Cached member lists ([`ProjectIndex::member_lists`]).
+    pub member_list_entries: usize,
+    /// Members across those lists.
+    pub member_lists: usize,
+    /// Their estimated bytes.
+    pub member_list_bytes: usize,
+    /// Guard verdicts remembered ([`ProjectIndex::guard_answers`]).
+    pub guard_entries: usize,
+    /// Their estimated bytes.
+    pub guard_bytes: usize,
+    /// Visibility walks remembered, one per root asked.
+    pub visibility_entries: usize,
+    /// Their estimated bytes.
+    pub visibility_bytes: usize,
+    /// Conditional-include answers remembered.
+    pub condition_entries: usize,
+    /// Their estimated bytes.
+    pub condition_bytes: usize,
+    /// The file paths held twice, by order and by identity.
+    pub path_bytes: usize,
+}
+
+impl TableCost {
+    /// The whole of it, in bytes.
+    pub fn total(&self) -> usize {
+        self.names.bytes
+            + self.edge_bytes
+            + self.member_list_bytes
+            + self.guard_bytes
+            + self.visibility_bytes
+            + self.condition_bytes
+            + self.path_bytes
+    }
 }

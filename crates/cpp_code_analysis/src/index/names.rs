@@ -222,6 +222,75 @@ impl NameIndex {
     pub fn distinct_names(&self) -> usize {
         self.by_name.len()
     }
+
+    /// **What the inverted index costs**, in the same units [`crate::MemoryReport`] uses.
+    ///
+    /// A posting is 12 bytes (`file`, `reading`, `slot`), a key is its own string plus the `Vec`'s three words, and
+    /// the estimate counts exactly those: `postings × size_of::<Posting>()`, the keys' bytes, one `Vec` header per
+    /// key. It does **not** count the `HashMap`'s own table (open addressing, ~1.14 × capacity × 24 bytes), which is
+    /// the slack `memory.rs`'s module note already declares is not accounted.
+    pub fn accounting(&self) -> NameIndexCost {
+        let postings = |map: &HashMap<Box<str>, Vec<Posting>>| {
+            let slots: usize = map.values().map(Vec::capacity).sum();
+            let keys: usize = map.keys().map(|key| key.len()).sum();
+            let entries = map.len();
+            // The payload, the keys, and one `Vec` header per key.
+            let bytes = slots * std::mem::size_of::<Posting>()
+                + keys
+                + entries * std::mem::size_of::<Vec<Posting>>();
+            (entries, slots, bytes)
+        };
+        let (name_entries, name_postings, name_bytes) = postings(&self.by_name);
+        let (scope_entries, scope_postings, scope_bytes) = postings(&self.by_scope);
+        let definers: usize = self.definers.values().map(Vec::capacity).sum();
+        let definer_keys: usize = self.definers.keys().map(|key| key.len()).sum();
+        let definer_bytes = definers * std::mem::size_of::<u32>()
+            + definer_keys
+            + self.definers.len() * std::mem::size_of::<Vec<u32>>();
+        let spellings: Vec<&Box<str>> = self.sorted.values().flatten().collect();
+        let sorted_bytes = self.sorted.keys().map(|key| key.len()).sum::<usize>()
+            + spellings
+                .iter()
+                .map(|spelling| spelling.len())
+                .sum::<usize>()
+            + self.sorted.len() * std::mem::size_of::<Vec<Box<str>>>()
+            + spellings.len() * std::mem::size_of::<Box<str>>();
+        NameIndexCost {
+            name_entries,
+            name_postings,
+            scope_entries,
+            scope_postings,
+            definer_entries: self.definers.len(),
+            definers,
+            spelling_entries: spellings.len(),
+            bytes: name_bytes + scope_bytes + definer_bytes + sorted_bytes,
+        }
+    }
+}
+
+/// **What [`NameIndex`] costs**, split so that a report can name the part that grew.
+///
+/// The two posting maps are the same order of magnitude and different questions — `by_name` is "who declares this
+/// name", `by_scope` is "what is declared in this scope" — so a project whose classes grow but whose name vocabulary
+/// does not shows up in one and not the other.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct NameIndexCost {
+    /// Distinct names in `by_name`.
+    pub name_entries: usize,
+    /// Postings across them — one per non-local declaration.
+    pub name_postings: usize,
+    /// Distinct scopes in `by_scope`.
+    pub scope_entries: usize,
+    /// Postings across those.
+    pub scope_postings: usize,
+    /// Distinct macro names in `definers`.
+    pub definer_entries: usize,
+    /// Files across those lists.
+    pub definers: usize,
+    /// Spellings in `sorted` — the case-insensitive search's own copy of every name.
+    pub spelling_entries: usize,
+    /// The estimated bytes of all four maps.
+    pub bytes: usize,
 }
 
 /// Insert keeping the list sorted. A file that is new has the largest sequence number, so the common case is a push.
