@@ -4833,3 +4833,42 @@ fn a_pull_is_remembered_until_the_file_changes() {
         "an edit is seen, not the memory of it: {first} -> {after}"
     );
 }
+
+/// **A second pull reuses the inference the first one computed**, and the memo is keyed on the reading it was made from.
+///
+/// `TypeMemo` lives for one request — by design, since its answers are positions in one tree — so every pull re-derived
+/// every type it asked about. The index keeps the answers across requests now (`ProjectIndex::type_answers`), and the
+/// lifetime rule is the one the other memos have: an insert or a forget clears it. This test proves the reuse by
+/// forgetting the **pull's own** memo between two pulls, so the second one really runs its checks again.
+#[test]
+fn a_second_pull_reuses_the_inference_of_the_first() {
+    let source = "void f() {\n    int count = \"three\";\n    (void)count;\n}\n";
+    let files = MemoryFiles::new().with_file("/p/a.cpp", source);
+    let fixture = Memory::new("type-memo-across-pulls", &files);
+    let mut session = fixture.session();
+    session.did_open("/p/a.cpp", source);
+    session.index_everything();
+
+    let first = session.diagnostics("/p/a.cpp").expect("the file reads");
+    assert!(!first.checks.is_empty(), "the fixture has a finding");
+    let (hits_before, misses_before) = session.index().type_cache_stats();
+
+    // The pull's own memo, gone: the next pull recomputes its checks and can only be fast through the type memo.
+    *session
+        .checks_memo
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    let second = session.diagnostics("/p/a.cpp").expect("the file reads");
+    let (hits_after, misses_after) = session.index().type_cache_stats();
+
+    assert_eq!(
+        first.checks.len(),
+        second.checks.len(),
+        "the same reading answers the same"
+    );
+    assert!(
+        hits_after > hits_before,
+        "the second pull answered type questions from the memo: {hits_before} -> {hits_after} hit(s), \
+         {misses_before} -> {misses_after} computed"
+    );
+}

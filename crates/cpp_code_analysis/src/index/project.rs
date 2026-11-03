@@ -1009,6 +1009,17 @@ pub struct ProjectIndex {
     /// `macros_at`/`macro_environment` state, one walk per file with conditions answered as they are reached,
     /// which removes the per-edge cost instead of the invalidation.
     visibility_answers: std::sync::Mutex<HashMap<(String, u32), crate::Visibility>>,
+    /// **The inference answers that outlive one request** — see [`ProjectIndex::a_remembered_type`].
+    ///
+    /// `TypeMemo` lives for one request, so a pull, a hover and the next pull ask the same questions of the same tree
+    /// again. The key is the file, the expression's range and text, and its kind; the lifetime rule is the one the memos
+    /// above have — **every insert and every forget clears it** — so a hit is always an answer about the index as it
+    /// stands. Bounded, and cleared when it reaches the bound: an answer is cheap to recompute and a map that grows with
+    /// a session is not.
+    type_answers: std::sync::Mutex<HashMap<u64, Known<(Type, PathBuf)>>>,
+    /// How many questions the memo answered and how many it had to compute — what says whether it is earning its map.
+    type_hits: std::sync::atomic::AtomicU64,
+    type_misses: std::sync::atomic::AtomicU64,
     /// **The member lists already built, by `(class, the file whose tree was used)`** — see
     /// [`ProjectIndex::cached_member_list`] for the measurement and for how an entry is invalidated.
     ///
@@ -3512,6 +3523,27 @@ fn sort_and_hide(names: &mut Vec<OfferedName>) {
 const MAX_NESTED_TYPE_DEPTH: usize = 8;
 
 const MAX_TYPE_DEPTH: usize = 8;
+
+/// **How many inference answers the index keeps** — see `ProjectIndex::type_answers`.
+const MAX_TYPE_ANSWERS: usize = 8192;
+
+/// **What an inference answer is a function of**, as one number: the file, the expression's range, its kind and its text.
+///
+/// The range is part of it on purpose: the same spelling at two places is two questions (`Widget` inside a class and
+/// outside one), and a `T` in a template is a parameter where a `T` at file scope is a class.
+fn the_type_key(path: &Path, expression: &cpp_parser::CppSyntaxNode) -> u64 {
+    let range = expression.text_range();
+    let mut bytes: Vec<u8> = Vec::with_capacity(96);
+    bytes.extend_from_slice(normalize_path(path, cfg!(windows)).as_bytes());
+    bytes.push(0x1f);
+    bytes.extend_from_slice(&u64::from(u32::from(range.start())).to_le_bytes());
+    bytes.extend_from_slice(&u64::from(u32::from(range.end())).to_le_bytes());
+    let kind = cpp_parser::CppSyntaxKind::from(expression.kind());
+    bytes.extend_from_slice(&u64::from(kind as u16).to_le_bytes());
+    bytes.push(0x1e);
+    bytes.extend_from_slice(expression.text().to_string().as_bytes());
+    crate::cache::fnv1a64(&bytes)
+}
 /// **What a `new` expression allocates** — the spelling of its type, which is the whole of the answer.
 ///
 /// The type is the `TypeId` child the grammar built: `new` is the one expression whose operand is a **type**, and
@@ -3697,6 +3729,16 @@ pub(crate) fn type_of_expression_memoed(
     if let Some(known) = memo.remembered_type(&key) {
         return known;
     }
+    // **An answer a previous request already computed**, for a *top-level* question: the answer is a function of this
+    // file's expression and of the index, and every insert or forget in the index clears the memo — so a hit cannot be
+    // about a world the index has left. A recursive question is a step toward an answer rather than one, and `depth`
+    // bounds what it was allowed to see, so nothing below the top is filed.
+    if depth == 0
+        && let Some(known) = index.a_remembered_type(path, expression)
+    {
+        memo.types.borrow_mut().insert(key, known.clone());
+        return known;
+    }
     // **A node already on the stack above this call is a cycle, and no amount of depth bounds it** — see
     // [`TypeMemo::enter`] for the chain that was measured. The answer names the spelling rather than inventing a type.
     if !memo.enter(key) {
@@ -3749,6 +3791,9 @@ pub(crate) fn type_of_expression_memoed(
     // **The claim is released before the answer is filed**, and both happen whatever the arm answered: a question
     // left in flight would make every later ask about the same node answer `Unknown`.
     memo.leave(&key);
+    if depth == 0 {
+        index.remember_a_type(path, expression, &answer);
+    }
     memo.types.borrow_mut().insert(key, answer.clone());
     memo.spent
         .set(memo.spent.get() + started.elapsed().as_nanos() as u64);
@@ -10447,6 +10492,9 @@ impl ProjectIndex {
             // claims nothing: `Marked::default()` on its own would decide every `#ifdef` in every file as false.
             macros: Marked::default().incomplete(),
             visibility_answers: std::sync::Mutex::new(HashMap::new()),
+            type_answers: std::sync::Mutex::new(HashMap::new()),
+            type_hits: std::sync::atomic::AtomicU64::new(0),
+            type_misses: std::sync::atomic::AtomicU64::new(0),
             visibility: std::sync::Mutex::new(HashMap::new()),
             ..ProjectIndex::default()
         }
@@ -10515,6 +10563,11 @@ impl ProjectIndex {
         // visibility can only change when what the index holds changes, and losing one costs a condition, not a
         // walk. See [`ProjectIndex::visibility_answers`].
         if let Ok(mut answers) = self.visibility_answers.lock() {
+            answers.clear();
+        }
+        // **And the inference answers, for the same reason.** A summary that arrives can turn a type's `Unknown` into a
+        // class, and nothing computed before it may answer after it.
+        if let Ok(mut answers) = self.type_answers.lock() {
             answers.clear();
         }
         if let Ok(mut declared) = self.definition_answers.lock() {
@@ -10674,6 +10727,11 @@ impl ProjectIndex {
         if let Ok(mut answers) = self.visibility_answers.lock() {
             answers.clear();
         }
+        // **And the inference answers, for the same reason.** A summary that arrives can turn a type's `Unknown` into a
+        // class, and nothing computed before it may answer after it.
+        if let Ok(mut answers) = self.type_answers.lock() {
+            answers.clear();
+        }
         if let Ok(mut walks) = self.visibility.lock() {
             walks.retain(|_, cached| {
                 cached
@@ -10716,6 +10774,53 @@ impl ProjectIndex {
         }
 
         true
+    }
+
+    /// **The type of an expression, as a previous request answered it** — see [`ProjectIndex::type_answers`].
+    pub(crate) fn a_remembered_type(
+        &self,
+        path: &Path,
+        expression: &cpp_parser::CppSyntaxNode,
+    ) -> Option<Known<(Type, PathBuf)>> {
+        let key = the_type_key(path, expression);
+        let remembered = self
+            .type_answers
+            .lock()
+            .ok()
+            .and_then(|answers| answers.get(&key).cloned());
+        if remembered.is_some() {
+            self.type_hits
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        } else {
+            self.type_misses
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        remembered
+    }
+
+    /// **How the inference memo has done**: `(answered from the memo, had to compute)`. The second number is what the
+    /// memo exists to make small, and the pair is what a test or a probe can assert on.
+    pub fn type_cache_stats(&self) -> (u64, u64) {
+        (
+            self.type_hits.load(std::sync::atomic::Ordering::Relaxed),
+            self.type_misses.load(std::sync::atomic::Ordering::Relaxed),
+        )
+    }
+
+    /// File one inference answer for the requests that follow.
+    pub(crate) fn remember_a_type(
+        &self,
+        path: &Path,
+        expression: &cpp_parser::CppSyntaxNode,
+        answer: &Known<(Type, PathBuf)>,
+    ) {
+        let key = the_type_key(path, expression);
+        if let Ok(mut answers) = self.type_answers.lock() {
+            if answers.len() >= MAX_TYPE_ANSWERS {
+                answers.clear();
+            }
+            answers.insert(key, answer.clone());
+        }
     }
 
     pub fn len(&self) -> usize {
