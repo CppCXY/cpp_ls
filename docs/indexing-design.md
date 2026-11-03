@@ -278,6 +278,14 @@ read with every lock dropped, commit under the writer).
 
 * **Acceptance:** worst single commit ≤ 50 ms over a whole pass, with modules queued.
 
+**Settled in `df5bd5f`.** The 252 ms was the probe's own shape: it doubled its wave to 64 while the server caps it
+(`INDEX_SLICE`), and the server's cold-start log showed holds of 1–18 ms. With the probe following the server's rule, the
+cap turned out to be the wrong instrument — an insert is 1–8 ms for an ordinary header and 13–27 ms for the largest, so 24
+files measured 44.3 ms once and 78.4 ms the next time. `commit_a_wave` now stops when it has spent **20 ms**, leaving the
+rest of the wave at the front of the queue, already prepared; the wave itself stays large (it sets throughput) and may
+double to its cap. Measured: probe worst commit **31 ms** (pass 44.9 s, against 35.0 s unbounded), server cold start
+**444 slices, worst hold 33 ms, mean 0.9 ms**. The price is throughput, and it is the next measurement: the cold start of
+1 695 files was still indexing after **82 s**.
 ### 4.4 Phase 4/5 — one cache and consulted-definition invalidation — *after 4.2*
 
 They are what makes 4.2's cache correct under edits (an edit invalidates exactly the readings that read the edited
