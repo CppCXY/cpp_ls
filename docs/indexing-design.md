@@ -250,6 +250,25 @@ pull 3    1.9 ms   …
 `--lib` 738 / 0 / 2, `tests/checks.rs` 108, clippy green. **What this does not fix** is the first pull after an edit — the
 typing path — which still pays the inference; that is the next step, and it needs the answers reused **across** readings
 (a cache keyed by what a `type_of` question depends on), not a memo of a whole pull.
+**Second step landed (`378f11f`): the pump answers the pull before the client asks.** The typing path's cost is the *first*
+pull of each new reading — measured on `CodeFormat.cpp`, 36.6 ms after an edit (18.1 ms inference), 109 ms for a session's
+first pull, against 2.2 ms for a repeat. The pump has just committed the reading those answers are made from, so
+`Session::warm_the_pulls` asks the same question the client will ask (the files a reader has open, at most two) and fills
+`checks_memo`; the request that follows is a lookup. Measured:
+
+```text
+pull before the edit            38.3 ms
+pull again, no change            2.3 ms
+(after the edit: warm_the_pulls → 1 answer)
+pull after the edit              2.0 ms      ← was 36.6 ms
+pull again                       1.9 ms
+```
+
+**What is still open in this item** is a *type-level* memo across readings: the 18.1 ms of inference after an edit is
+re-derived because `TypeMemo` lives for one request. A content hash cannot key it (an edit changes it), and a range cannot
+either (offsets move) — the sound key is the one §2.4 describes, the **definitions the answer actually consulted**, recorded
+when it is computed and compared on lookup. Until that exists, the honest statement is: the first answer for a new state
+costs what it costs, and this item moves it to the party that is not being waited for.
 ### 4.3 A commit can hold the writer for 252 ms
 
 Today's `start_shape` reports `worst single commit 252 ms` against the 50 ms `WRITE_BUDGET`. The phases that can do it are
