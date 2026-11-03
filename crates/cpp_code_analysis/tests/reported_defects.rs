@@ -374,3 +374,70 @@ fn a_member_function_records_its_qualifiers_and_its_requires_clause() {
         );
     }
 }
+
+/// **§C3 — a call of a type is a temporary of it, and `->` reaches through a handle.**
+///
+/// Reported from `smart_pointers.cpp`:
+///
+/// ```cpp
+/// std::shared_ptr<int> aliased(shared, nullptr);   // hover on `use_count`: the class is out of the index
+/// auto node = std::make_shared<Node>(3);
+/// auto twin = node->twin();                        // `NotDeclaredHere("shared_ptr::twin")`
+/// ```
+///
+/// Two rules were missing and both are the language's:
+///
+/// * **`T(args)` is a temporary of `T`.** The constructor is not a function the spelling names, so every function arm
+///   answered nothing — `Widget(1).size()` had no type at all, and the member question then had no class to ask.
+/// * **An arrow reaches what the completion already says it reaches.** `p->` on a `Widget*` reaches `Widget`; on a
+///   pointer-like class it reaches the class's `element_type`, which is the standard's own protocol and what
+///   `shared_ptr`/`unique_ptr` declare (`operator->`'s return type is a dependent `typename …::type`, unreadable here).
+#[test]
+fn a_call_of_a_type_and_an_arrow_through_a_handle() {
+    let session = session_with(&[(
+        "/p/a.cpp",
+        "struct Widget {\n\
+             int size() const { return 1; }\n\
+         };\n\
+         struct Node {\n\
+             int value() const { return 2; }\n\
+         };\n\
+         struct Handle {\n\
+             using element_type = Node;\n\
+             Node* operator->() const;\n\
+         };\n\
+         void f() {\n\
+             int a = Widget(1).size();\n\
+             int b = Widget().size();\n\
+         }\n\
+         void g(Handle handle, Node* pointer) {\n\
+             int c = handle->value();\n\
+             int d = pointer->value();\n\
+         }\n",
+    )]);
+    let path = std::path::Path::new("/p/a.cpp");
+    let view = session.view_of_the_file(path).expect("the written text");
+    let source = view.source.clone();
+
+    let type_of_member = |needle: &str| {
+        let at = source.find(needle).expect("the use") + needle.len() - 1;
+        session.type_at(
+            &view,
+            cpp_code_analysis::file::coordinates::ReadingOffset::new(at),
+        )
+    };
+
+    for needle in [
+        "Widget(1).size",
+        "Widget().size",
+        "handle->value",
+        "pointer->value",
+    ] {
+        let known = type_of_member(needle);
+        assert_eq!(
+            known.clone().map(|found| found.type_of.clone()),
+            cpp_code_analysis::Known::Yes("int".to_string()),
+            "{needle:?} must be an `int`: {known:?}"
+        );
+    }
+}

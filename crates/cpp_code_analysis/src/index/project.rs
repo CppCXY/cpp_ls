@@ -4608,7 +4608,28 @@ fn type_of_expression_inner(
             }
         };
 
-        let Some(class) = member_access_class(&inner_type) else {
+        // **An arrow is followed as far as the type answers.** `p->` on a `Widget*` reaches `Widget`, on a
+        // `std::shared_ptr<Node>` reaches `Node` — the pointer-like class says so with `element_type` (`operator->`'s
+        // declared return type is a dependent `typename …::type`, which is a trait this layer cannot read). The
+        // completion has resolved this for a while in [`crate::completion::the_class_after_the_operator`], including the
+        // bound on a proxy whose `operator->` returns itself; this arm used to look the member up in the **handle** and
+        // answered `Unknown(NotDeclaredHere("shared_ptr::twin"))` for `auto twin = node->twin();`.
+        let reached_by_an_arrow = inner.arrow.then(|| {
+            crate::completion::the_class_after_the_operator(
+                index,
+                scopes,
+                root,
+                path,
+                &inner_type,
+                true,
+            )
+        });
+        let reached_by_an_arrow = reached_by_an_arrow.flatten();
+        let Some(class) = reached_by_an_arrow
+            .clone()
+            .map(|(reached, _)| reached)
+            .or_else(|| member_access_class(&inner_type))
+        else {
             return Known::Unknown(UnknownReason::UnknownType(Box::from(
                 inner_type.to_string(),
             )));
@@ -4631,8 +4652,13 @@ fn type_of_expression_inner(
         // `basic_string<char, char_traits<char>, allocator<char>>`. Without them the pairing is empty, `_Elem` has
         // nothing to be replaced by, and `x.back()` on a `std::string` answers `_Elem&`: measured, and it is the
         // last step between that and `char&`. See [`member_access_class_and_arguments`].
-        let (class, arguments) =
-            member_access_class_and_arguments(index, scopes, root, path, &class, &inner_type);
+        let (class, arguments) = match reached_by_an_arrow {
+            // The arrow already said which class, and the arguments of the handle are not the pointee's.
+            Some((reached, _)) => (reached, Vec::new()),
+            None => {
+                member_access_class_and_arguments(index, scopes, root, path, &class, &inner_type)
+            }
+        };
         // The arguments as **spellings**, which is what a pattern comparison is: a pattern is what the other
         // declaration wrote, and two spellings of one type would not compare equal. The direction this rule fails in
         // is "no match", which keeps an answer rather than removing one.
@@ -7274,6 +7300,18 @@ fn type_of_a_call(
         return Known::Yes((crate::sema::types::parse_type_spelling(&returns), file));
     }
 
+    // **A call whose callee names a class is a temporary of that class** — `std::shared_ptr<int>(p, deleter)`,
+    // `Widget(1)`. The constructor is not a function the spelling names, so every arm above answers nothing, and the
+    // class (with its written template arguments, which `parse_type_spelling` reads) was in the spelling all along.
+    // Measured: `std::shared_ptr<int>(shared, nullptr).use_count()` answered *"the type of … is not known here"*, and the
+    // hover on the member then had no class to look it up in.
+    if let Some(spelling) = a_callee_that_names_a_type(index, path, &callee) {
+        return Known::Yes((
+            crate::sema::types::parse_type_spelling(&spelling),
+            path.to_path_buf(),
+        ));
+    }
+
     let resolved =
         declaration_of_a_callee(memo, index, declaring, scopes, root, path, &callee, written);
     let known_so_far = match resolved {
@@ -7315,6 +7353,42 @@ fn type_of_a_call(
     }
 
     known_so_far
+}
+
+/// **The callee's spelling when it names a class** — the temporary a call of a type constructs.
+///
+/// A template-id is kept as written, because its arguments are part of the type: `std::shared_ptr<int>`. The name is
+/// looked up without them (`std::shared_ptr`), and every declaration of it must be a type — the ordinary case for a class
+/// template, whose first declaration is a forward one, so the singular query answers `Ambiguous` and the plural one says
+/// whether they agree about being a class.
+fn a_callee_that_names_a_type(
+    index: &ProjectIndex,
+    path: &Path,
+    callee: &cpp_parser::CppSyntaxNode,
+) -> Option<String> {
+    let spelled = callee.text().to_string();
+    let spelled = spelled.trim();
+    if spelled.is_empty() || spelled.contains(' ') {
+        return None;
+    }
+    let bare = match spelled.find('<') {
+        Some(at) => spelled[..at].trim(),
+        None => spelled,
+    };
+    let names_a_type = match index.definition(bare, path) {
+        Known::Yes(found) => found.fact.kind == crate::DeclKind::Type,
+        Known::Unknown(UnknownReason::Ambiguous(_)) => {
+            index.definitions(bare, path).value().is_some_and(|found| {
+                !found.found.is_empty()
+                    && found
+                        .found
+                        .iter()
+                        .all(|declaration| declaration.fact.kind == crate::DeclKind::Type)
+            })
+        }
+        Known::Unknown(_) | Known::No => false,
+    };
+    names_a_type.then(|| spelled.to_string())
 }
 
 /// **The spellings a call's callee may be declared under** — its own text without the template arguments, and its last
