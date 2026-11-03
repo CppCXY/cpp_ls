@@ -3256,7 +3256,21 @@ fn fact_for(
     } else {
         declared_type_of_with(shapes, binding)
             .or_else(|| declared_alias_target_with(shapes, binding))
-            .or_else(|| declared_namespace_alias_target_with(root, binding))
+            // **A namespace alias is the only `namespace` binding whose name is followed by `=`.** The target is found
+            // by scanning the whole tree for the innermost `namespace` declaration containing the name, so asking it of
+            // every namespace was O(file) per namespace: measured on a 1.5 MB WinRT header, **16.7 s of a 17 s
+            // summary** went to this chain while the walk's own inner calls were 5–10 ms. A definition is written
+            // `namespace X {` and an alias `namespace X = target;`, so one character decides it, and the scan is paid
+            // only by the alias that needs it.
+            .or_else(|| {
+                let after = rendered
+                    .get(binding.name_range.end_offset()..)?
+                    .trim_start();
+                if !after.starts_with('=') {
+                    return None;
+                }
+                declared_namespace_alias_target_with(root, binding)
+            })
     };
     let returns = {
         // **The written return type, and the deduced one when there is none to write.** `declared_returns_of_with`
