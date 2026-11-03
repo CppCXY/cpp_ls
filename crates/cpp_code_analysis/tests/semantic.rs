@@ -529,10 +529,15 @@ fn a_local_fact_carries_a_namespace_the_file_only_opens_with_a_macro() {
     let view = session.view("/p/a.cpp").expect("the file is held");
 
     // The body's `Widget w;` — the local, and not the class of the same name above it.
-    let local = session
+    // **The reading the program implies, which is the cooked one** (`docs/indexing-design.md` §2.1): a summary is the
+    // file's environment-free reading, and `BEGIN_APP` — a body from `ns.h` — is not in it.
+    let cooked = session
         .index()
-        .summaries()
-        .flat_map(|summary| summary.declarations.iter())
+        .cooked_reading(std::path::Path::new("/p/a.cpp"))
+        .expect("the file was read in its program");
+    let local = cooked
+        .declarations
+        .iter()
         .find(|fact| fact.local && fact.name == "w")
         .expect("the local is declared");
 
@@ -1976,11 +1981,13 @@ fn a_return_type_a_directive_splits_is_the_branch_this_compilation_takes() {
          int plain(int a);\n\
          };\n",
     )]);
-    let summary = session
+    // The branch `__cplusplus` selects is the **cooked** reading's answer, not the summary's: the summary is
+    // environment-free and holds both branches.
+    let cooked = session
         .index()
-        .summary(std::path::Path::new("/p/a.cpp"))
-        .expect("indexed");
-    let found: Vec<(&str, Option<&str>)> = summary
+        .cooked_reading(std::path::Path::new("/p/a.cpp"))
+        .expect("the file was read in its program");
+    let found: Vec<(&str, Option<&str>)> = cooked
         .declarations
         .iter()
         .filter(|fact| matches!(fact.kind, cpp_code_analysis::DeclKind::Function))
