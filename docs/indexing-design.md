@@ -142,8 +142,29 @@ likely the guard filter and the macro-scoping pass are applied to one reading an
 
 * **Acceptance:** the five tests un-ignored and green; `--lib` **739/739 with no `#[ignore]` for these**; C++ corpus back
   to **51/52 and 10/10**.
-* **First measurement:** a 50-line fixture in `tests/checks.rs` (`c_files_are_not_told_to_write_cpp_style` is the one
-  that shows every check declining) — compare the raw summary and the refined summary of the same file, field by field.
+
+**The lever was measured, and it is confirmed — the *layer* is what is missing.** Running the experiment (a refinement
+that prefers `a_timeline_of_its_own` + a real render, and `index_everything` asking again) fixed **four of the five**
+ignored tests, including `a_file_read_as_a_program_needs_no_guard_filter`; the guard test then failed the other way:
+
+```text
+a_rendering_is_not_left_in_the_cache_for_the_next_session
+  a summary is the environment-free reading, so both branches are in it: 1 of 2
+```
+
+Because a refined reading was written **over the summary**. The contract the test states is the design's §2.1: **L1
+(the summary) stays environment-free, and the refined reading is L2** — a separate, per-(file, environment) layer that
+queries prefer when it exists. The tree has no L2 store yet; the closest thing is the index's **cooked facts**
+(`insert_cooked` / `cooked_declarations`, the layer a program read already fills).
+
+So the fix is precise, and it is not "choose a better arm":
+
+1. refinement renders the file (walk) and files the result as **cooked facts** for that file, never as its summary;
+2. `definitions`/`members` prefer cooked facts over the summary's when both exist (the test at `session/tests.rs:2033`
+   says exactly this: two declarations lists for one file are two translation units, and offering both answers for both);
+3. then the ask in `index_everything` stays on, the four capabilities pass, and the guard keeps its two-branch summary.
+
+That is one change of layer, not a rewrite; it is the next commit.
 
 ### 4.2 The request path is the slow part now — *second*
 
