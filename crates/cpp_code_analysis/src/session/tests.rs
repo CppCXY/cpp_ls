@@ -3748,7 +3748,6 @@ fn a_class_scoped_by_another_files_macro_body_is_scoped_through_the_session() {
 /// every answer about the file was the *written* reading until the idle pass got to it — a scope opened by another
 /// file's macro was `None`, a return type split by `#if` was the wrong branch. A body edit moves no directive, so the
 /// timeline is still in force, and an index step that holds one now renders instead of parsing text.
-#[ignore = "the keystroke path files its rendering as the *summary* (`prepare_with_the_timeline`); the L1/L2 split of design §2.1 has not reached it, so no cooked reading exists after an edit"]
 #[test]
 fn a_keystroke_in_a_body_reads_the_file_through_its_timeline() {
     let project = Project::new("keystroke-renders");

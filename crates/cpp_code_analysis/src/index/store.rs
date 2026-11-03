@@ -316,7 +316,13 @@ enum PreparedOutcome {
     /// The disk had the answer.
     Stored(FileSummary),
     /// The disk did not; this was parsed, and `stored` says whether it was written down.
-    Built { summary: FileSummary, stored: bool },
+    Built {
+        summary: FileSummary,
+        stored: bool,
+        /// **The rendering's own reading**, when the summary came from one — a file read through its timeline has both
+        /// layers, and the cooked one is what a query prefers (see `ProjectIndex::the_reading_for`).
+        cooked: Option<crate::CookedFile>,
+    },
 }
 
 /// What the store did, so that a caller can see the cache working.
@@ -944,7 +950,10 @@ impl<F: FileProvider> SummaryStore<F> {
         };
         // Whether the summary came from a rendering, decided before the value is moved out of the option.
         let from_a_rendering = rendered.is_some();
-        let summary = rendered.unwrap_or_else(|| indexer.index(path, &source, key));
+        let (summary, cooked) = match rendered {
+            Some((summary, cooked)) => (summary, Some(cooked)),
+            None => (indexer.index(path, &source, key), None),
+        };
 
         // The one rule about the filesystem: a summary that records a *failed* search must not be stored, because
         // nothing in the key would notice the header appearing. See the module documentation.
@@ -978,7 +987,11 @@ impl<F: FileProvider> SummaryStore<F> {
             );
         }
 
-        Prepared(PreparedOutcome::Built { summary, stored })
+        Prepared(PreparedOutcome::Built {
+            summary,
+            stored,
+            cooked,
+        })
     }
 
     /// **The summary of one file, read as the program reads it** — lex, render through `unit`, parse the rendering,
@@ -995,7 +1008,7 @@ impl<F: FileProvider> SummaryStore<F> {
         unit: &crate::TranslationUnit,
         view: crate::MacroView<'_>,
         key: SummaryKey,
-    ) -> crate::FileSummary {
+    ) -> (crate::FileSummary, crate::CookedFile) {
         let seed = crate::macros::MacroTable::from_marked(self.index.macros());
         let definitions = unit.definitions();
         let (tokens, _) = cpp_parser::lex(source, &cpp_parser::LexerConfig::default());
@@ -1009,12 +1022,20 @@ impl<F: FileProvider> SummaryStore<F> {
         // written. See [`crate::FileIndexer::with_directives`].
         let directives = self.directive_summary(path);
 
-        FileIndexer::new(&self.files, &self.config)
+        let indexed = FileIndexer::new(&self.files, &self.config)
             .with_seed(self.index.macros())
             .without_these_macros(&self.dead_macros_for(path))
             .with_directives(directives.as_deref())
-            .index_the_readings(path, source, &rendered, key)
-            .summary
+            .index_the_readings(path, source, &rendered, key);
+        // **Both layers from one parse**: the summary (declarations + directives, what `commit` files as L1) and the
+        // cooked reading (what a program saw, filed as L2). `CookedFile::from` says which four things those are.
+        let cooked = crate::CookedFile {
+            declarations: indexed.summary.declarations.clone(),
+            macros: indexed.summary.macros.clone(),
+            diagnostics: indexed.diagnostics,
+            unplaced: indexed.unplaced,
+        };
+        (indexed.summary, cooked)
     }
 
     /// Put what [`SummaryStore::prepare`] made into the index, and count it.
@@ -1031,13 +1052,24 @@ impl<F: FileProvider> SummaryStore<F> {
                 self.index.insert_at(path, stored);
                 self.index.summary(path)
             }
-            PreparedOutcome::Built { summary, stored } => {
+            PreparedOutcome::Built {
+                summary,
+                stored,
+                cooked,
+            } => {
                 self.stats.rebuilt += 1;
                 if !stored {
                     self.stats.unstored += 1;
                 }
 
                 self.index.insert(summary);
+                // **The rendering's reading, filed as the file's cooked one.** A file read through its timeline (an index
+                // step after an edit, a cook) has both layers; `diagnostics` answers from the cooked reading, and a query
+                // prefers it. Measured as the defect where a keystroke emptied a file's findings: the summary was written
+                // and the reading was not.
+                if let Some(cooked) = cooked {
+                    self.index.insert_cooked(path, cooked);
+                }
                 self.index.summary(path)
             }
         }
