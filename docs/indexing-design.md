@@ -187,6 +187,13 @@ refinement reverted, so they are a pre-existing red on `main`, not a casualty of
 was about `--lib` only. The workspace's real state is 2 red, and the doc's §5 rule — a green run with ignores is not green
 — applies to a red run too.
 
+**Third measurement: the layer is read, and the checks are what it costs.** With `ReRead.cooked` + `insert_cooked`, the ask
+back on and three tests un-ignored: `--lib` is **737 passed / 0 failed / 2 ignored** (was 734/0/10), the guard stays green,
+and the two `tests/semantic.rs` questions about a refined reading still fail — while two one-file `checks` fixtures
+(`c_files_are_not_told_to_write_cpp_style`,
+`only_an_unparenthesised_expression_body_is_a_macro_parentheses_finding`) **lose every finding**. A rule that renders a file
+only when it has includes changed neither set, which says the checks are not reading the reading the queries read: teach
+them the same choice, then the trade (three capabilities for two checks) can be settled.
 ### 4.2 The request path is the slow part now — *second*
 
 Steady `textDocument/diagnostic` is **389 ms median** (review) / **200 ms here**, of which **97 % is type inference**
