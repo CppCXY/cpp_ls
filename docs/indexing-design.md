@@ -108,6 +108,10 @@ steady view                       0.01 ms
 `hover2.mjs` over the wire: first hover **206–208 ms** immediately after `didOpen`, **3 ms** once the pump has run. Before
 this work: 1 850 ms. The server's cold index of 1 695 files (no `.cppls`) is **18 s in 97 slices** — 96 s before `6db805d`.
 
+The pull path also lost its **coalescer** (`c3b23f3`): `RequestManager` serialised same-key pulls and cancelled the older
+one, which is a push model's job — here the client decides when to ask, the answer is memoised on the reading, and
+`$/cancelRequest` is the one cancellation the protocol has.
+
 | phase | state | measured |
 | --- | --- | --- |
 | 0 — lazy refinement | **landed** `7bc4c60` | start = index only, **0** timelines; 26.3 s → 4.6 s (review's project), 7.1 s cold / 5.4 s warm here |
@@ -266,11 +270,29 @@ pull after the edit              2.0 ms      ← was 36.6 ms
 pull again                       1.9 ms
 ```
 
-**What is still open in this item** is a *type-level* memo across readings: the 18.1 ms of inference after an edit is
-re-derived because `TypeMemo` lives for one request. A content hash cannot key it (an edit changes it), and a range cannot
-either (offsets move) — the sound key is the one §2.4 describes, the **definitions the answer actually consulted**, recorded
-when it is computed and compared on lookup. Until that exists, the honest statement is: the first answer for a new state
-costs what it costs, and this item moves it to the party that is not being waited for.
+**The type-level memo landed in `4e02cee`.** `TypeMemo` lives for one request by design — its answers are ranges in one
+tree — so every request re-derived every type it asked about. The index keeps the answers across requests
+(`ProjectIndex::type_answers`), keyed by the file, the expression's range and text and its kind, with the lifetime rule
+every other memo in the index has: **`insert_at` and `forget` clear it**. Only top-level questions are filed, because a
+recursive answer is a step toward an answer and `depth` bounds what it was allowed to see.
+
+```text
+400 expression questions, three freshly built models over one reading (CodeFormat.cpp)
+round 0: 28.2 ms, 50 hit(s) / 476 computed
+round 1:  4.1 ms, 343 hit(s) / 483 computed     ← 7× cheaper, the same 58 answers
+round 2:  3.9 ms, 639 hit(s) / 488 computed
+```
+
+That is the shape it changes: hover, completion, inlay hints, semantic tokens and a repeated pull all build a fresh model
+over an unchanged reading. It does **not** make the first request after an edit cheaper — an edit drops the summary, which
+clears the memo, which is exactly right.
+
+**Stage 4/5 are not planned** (a decision, not a deferral). §2.4's consulted-definition invalidation and §2.5's one
+byte-bounded cache are the machinery a *salsa-like* engine needs: a fine-grained dependency graph that keeps a derivation
+valid across edits. This server is not that shape — a request answers from one reading, the index's memos are cleared by the
+two events that change it (`insert_at`, `forget`), and every remaining cost measured here has been a quadratic or a wait,
+not a missing derivation. Building the graph would add the largest source of subtle wrong answers in the design for a win
+the numbers no longer show.
 ### 4.3 A commit can hold the writer for 252 ms
 
 Today's `start_shape` reports `worst single commit 252 ms` against the 50 ms `WRITE_BUDGET`. The phases that can do it are
@@ -288,11 +310,11 @@ rest of the wave at the front of the queue, already prepared; the wave itself st
 double to its cap. Measured: probe worst commit **31 ms** (pass 44.9 s, against 35.0 s unbounded), server cold start
 **444 slices, worst hold 33 ms, mean 0.9 ms**. The price is throughput, and it is the next measurement: the cold start of
 1 695 files was still indexing after **82 s**.
-### 4.4 Phase 4/5 — one cache and consulted-definition invalidation — *after 4.2*
+### 4.4 Phase 4/5 — **dropped**
 
-They are what makes 4.2's cache correct under edits (an edit invalidates exactly the readings that read the edited
-bodies), so they are not optional, just later. Acceptance as in §2.5/§2.4: one rendering per (file, environment) per
-start; a one-line edit invalidates only the refinements that read its bodies.
+See the note at the end of §4.2: consulted-definition invalidation and a single byte-bounded cache are salsa-shaped, and
+this engine does not need a fine-grained derivation graph to answer a request from one reading. The measured costs left are
+throughput in the cold pass, not correctness of a derivation.
 
 ### 4.5 Phase 3 proper — snapshot publication — *last*
 
