@@ -164,7 +164,28 @@ So the fix is precise, and it is not "choose a better arm":
    says exactly this: two declarations lists for one file are two translation units, and offering both answers for both);
 3. then the ask in `index_everything` stays on, the four capabilities pass, and the guard keeps its two-branch summary.
 
-That is one change of layer, not a rewrite; it is the next commit.
+That is one change of layer, not a rewrite.
+
+**Second measurement: the layer was built, and the queries do not read it yet.** With the refinement filing its rendering as
+the file's cooked facts (`insert_cooked`, the plan carrying them through `ReRead.cooked` to the write half) and
+`index_everything` asking again: **three** of the five ignored capabilities pass
+(`a_class_scoped_by_another_files_macro_body_…`, `a_file_read_back_through_its_own_unit_…`,
+`a_refinement_is_served_to_the_next_session`), the guard stays green (its summary keeps both branches), and two
+**integration** tests say what is still missing:
+
+```text
+tests/semantic.rs: a_local_fact_carries_a_namespace_the_file_only_opens_with_a_macro
+tests/semantic.rs: a_return_type_a_directive_splits_is_the_branch_this_compilation_takes
+```
+
+Both are questions whose answer the refinement now puts in **L2 while the lookup still reads L1 only**
+(`files_declaring`/`certain_declarations`). So the order is forced: **teach the queries to prefer the cooked reading
+first**, then the ask and the un-ignoring — a layer nothing reads is a layer that changes no answer.
+
+**And the tree was not green before this work started.** Those same two `semantic.rs` tests fail at `ce2ec82` with the
+refinement reverted, so they are a pre-existing red on `main`, not a casualty of this round; the note's "734/0/10" claim
+was about `--lib` only. The workspace's real state is 2 red, and the doc's §5 rule — a green run with ignores is not green
+— applies to a red run too.
 
 ### 4.2 The request path is the slow part now — *second*
 

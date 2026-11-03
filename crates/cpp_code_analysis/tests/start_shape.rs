@@ -154,7 +154,7 @@ fn where_a_start_spends_its_time() {
         let _ = session.commit_them(rendered);
         whole_drain += draining.elapsed();
 
-        if slices < 8 || slices % 500 == 0 {
+        if slices < 8 || slices.is_multiple_of(500) {
             println!(
                 "  slice {slices:>4}: prepared {prepared_count:>3}, committed {committed:>3}, asked {asked_count:>2}, built {built_count:>2}, queue {:>4}, cooking {:>3}, work {:>4}, gather {:>7.1} ms, commit {:>6.1} ms",
                 session.pending(),

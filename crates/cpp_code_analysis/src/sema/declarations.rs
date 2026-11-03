@@ -4956,7 +4956,7 @@ pub fn split_by_a_directive_with(shapes: &DeclarationShapes, binding: &Binding) 
 
 #[cfg(test)]
 mod tests {
-    use super::{build_facts, by_name, template_parameters_for, the_annotation_before};
+    use super::{build_facts, by_name, template_parameters_for};
     use crate::preprocess::preprocess;
     use crate::sema::scopes::build_scopes;
     use crate::summary::DeclFact;
