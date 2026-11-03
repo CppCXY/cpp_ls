@@ -90,12 +90,12 @@ files have stub records. Refinement runs afterwards, in order: the open files, t
 
 ```text
 Session::open                    140 ms cold, 94 ms warm (the toolchain answer is cached)
-whole pass (cold, in process)  36 300 ms, 109 slices      (the server, no cache: 96 s, 445 slices)
-  prepare (read lock)          32 332 ms
-  commit (write lock)             661 ms total
-  drain + cooking (read lock)   3 306 ms
-  worst single commit              27 ms      ← the write budget is 50 ms, and the server's cold start
-                                                 measured 25 ms worst / 0.8 ms mean
+whole pass (cold, in process)   8 554 ms, 111 slices      (the server, no cache: 18 s, 97 slices)
+  prepare (read lock)           3 902 ms
+  commit (write lock)             747 ms total
+  drain + cooking (read lock)   3 905 ms
+  worst single commit            28 ms      ← the write budget is 50 ms, and the server's cold start
+                                               measured 24 ms worst / 5.9 ms mean
 whole pass (warm)              3 852 ms, 41 slices
 did_open                          0.3 ms
 catch_up                        123 ms       ← the first request's cost, before any query
@@ -106,8 +106,7 @@ steady view                       0.01 ms
 ```
 
 `hover2.mjs` over the wire: first hover **206–208 ms** immediately after `didOpen`, **3 ms** once the pump has run. Before
-this work: 1 850 ms. The server's cold index of 1 695 files (no `.cppls`) took **96 s** in 445 slices — the throughput item
-of §4.6.
+this work: 1 850 ms. The server's cold index of 1 695 files (no `.cppls`) is **18 s in 97 slices** — 96 s before `6db805d`.
 
 | phase | state | measured |
 | --- | --- | --- |
@@ -304,8 +303,11 @@ data; then it is a refactor rather than a speculation.
 
 ### 4.6 The other open items, in the review's order
 
-* **Parallel first pass** (cold 94–149 s → 7.1 s here): parsing is a pure function of `(text, config)`; only the inserts
-  must be serial. Acceptance: cold pass ≤ 3 s on this project, warm unchanged.
+* **Parallel first pass** — **largely done by accident**: the cold pass this note began with at 94–149 s is **18 s** for
+  1 695 files in the server now, and the parallelism it was going to add was already there (`parallel_map`, 6 workers). What
+  the number came from instead was a quadratic: a namespace-alias question scanned the whole tree per `namespace` binding,
+  which is **16.7 s of a 17 s summary** on a 1.5 MB WinRT header (`6db805d`). What is left of the item is the shape it was
+  really for — a pass that does not need the whole project at once — which §4.7's stubs already describe.
 * **Re-baseline every probe input:** a project with non-ASCII text (the panic in `3c2f784` came from one), one whose
   includes resolve, one with modules. Acceptance: five projects in every measurement, no panic.
 * **Format versions split by layer**, so a bump degrades a minute instead of an open.
