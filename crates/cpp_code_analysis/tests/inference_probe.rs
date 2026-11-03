@@ -40,10 +40,10 @@ fn what_is_answered_at_a_place() {
     // diagnostics without one is answered "nothing to say" rather than "nothing wrong".
     session.want_cooked_reading(&file);
     session.add_project_files([file.clone()]);
+    // **`index_everything` is the whole pump**, cooking included. A `while pending_work() { advance() }` loop *after*
+    // it livelocks: `advance` only **marks** files for cooking and `pending_work` counts them, so the condition never
+    // falls. Measured on a real project as a probe that ran for twenty minutes without printing its header line.
     session.index_everything();
-    while session.pending_work() > 0 {
-        session.advance(64);
-    }
     println!(
         "indexed {} file(s) in {:?}",
         session.cache_sizes().summaries,

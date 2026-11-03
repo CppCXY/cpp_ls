@@ -5339,6 +5339,27 @@ impl NamedDeclaration {
         }
     }
 
+    /// **The kind of the thing this names**, which a caller needs to tell a member function from an object with an
+    /// `operator()`. See [`type_of_a_call`]: it asked "does this callee have an `operator()`?" of a member call whose
+    /// type was its *return* type, and answered the container's operator instead of the declared return.
+    fn fact_kind(&self) -> crate::DeclKind {
+        match self {
+            // The two vocabularies are different enums (`BindingKind` is the symbol layer's), and the only
+            // distinction this caller makes is "function or not": everything callable answers `Function` so that a
+            // call of a *member function* is never mistaken for a call of an object with an `operator()`.
+            NamedDeclaration::Here(binding) => match binding.kind {
+                crate::sema::symbol::BindingKind::Function
+                | crate::sema::symbol::BindingKind::Constructor
+                | crate::sema::symbol::BindingKind::Destructor
+                | crate::sema::symbol::BindingKind::ConversionFunction
+                | crate::sema::symbol::BindingKind::OperatorFunction
+                | crate::sema::symbol::BindingKind::LiteralOperator => crate::DeclKind::Function,
+                _ => crate::DeclKind::Variable,
+            },
+            NamedDeclaration::Indexed(fact, _, _) => fact.kind,
+        }
+    }
+
     /// The type this declaration was written with.
     ///
     /// `None` for a function — `make` is not a `Widget` and has no members — which is the distinction
@@ -6002,7 +6023,7 @@ fn declared_type(
         return element;
     }
 
-    let Some((as_written, _)) = deduction_inputs(root, named) else {
+    let Some((as_written, initializer)) = deduction_inputs(root, named) else {
         return unknown();
     };
 
@@ -6022,10 +6043,39 @@ fn declared_type(
             Known::No => return unknown(),
         };
 
-    match auto_substituted(&as_written, &deduced) {
+    match auto_substituted(&as_written, &deduced, an_lvalue(&initializer)) {
         Some(type_of) => Known::Yes(parse_type_spelling(&type_of)),
         None => unknown(),
     }
+}
+
+/// **Is this initializer an lvalue?** — the one thing `auto&&` collapsing needs that a *type* cannot say.
+///
+/// `auto&& bound = base;` and `auto&& bound = 42;` deduce two different references, and both initializers type as
+/// `int`: the difference is the expression's **value category**, not its type. The categories this layer can decide
+/// from the shape are the ones that are decided by it — a name, a member of one, a dereference and a subscript are
+/// lvalues; a literal, an object construction and a call that does not return a reference are not. A call *returning*
+/// `T&` says so in its deduced type, which the caller has already put in hand.
+fn an_lvalue(expression: &cpp_parser::CppSyntaxNode) -> bool {
+    use cpp_parser::CppSyntaxKind::{CallExpr, InitListExpr, LiteralExpr, NewExpr, ParenExpr};
+    // **Everything is an lvalue except what is definitely a prvalue.** A negative list rather than a positive one
+    // because the grammar reaches a name in four ways (`IdentifierExpr`, `NameExpr`, `RefExpr`, and a member's own
+    // node) and a positive list is a list to get wrong: measured, `auto&& bound = base;` answered `int&&` with the
+    // identifier's kind missing from it.
+    let kind = cpp_parser::CppSyntaxKind::from(expression.kind());
+    if matches!(kind, LiteralExpr | CallExpr | InitListExpr | NewExpr) {
+        return false;
+    }
+    // A parenthesised initializer keeps its inner expression's category.
+    if kind == ParenExpr
+        && let Some(inner) = expression.children().next()
+    {
+        return an_lvalue(&inner);
+    }
+    // Anything else — a name in any of its four shapes, a member, a dereference, a subscript — is an lvalue, which is
+    // the safe direction here: a wrong `&` is still a reference to the right class, while a wrong `&&` names no class
+    // at all.
+    true
 }
 
 /// **Where the other half of the alias step belongs, and why it is not here.**
@@ -6400,7 +6450,11 @@ fn node_covering(
 /// (`const`), and the declarator's operators behind (`&`, `*`). The `&&` case is refused here — see
 /// [`declared_type`] — and each `*` has to match a pointer in the deduced type, because a `*` that does not is a
 /// declaration that does not compile rather than a type to report.
-fn auto_substituted(written: &str, deduced: &Type) -> Option<String> {
+fn auto_substituted(
+    written: &str,
+    deduced: &Type,
+    initializer_is_an_lvalue: bool,
+) -> Option<String> {
     // **`decltype(auto)` means "the type this expression has"** — so the deduced type *is* the answer, not a
     // `decltype(…)` written around it. Measured: `decltype(auto) same = widen_gently(1);` answered `decltype(int)`, which
     // is a type no reader writes and no declaration contains.
@@ -6439,14 +6493,37 @@ fn auto_substituted(written: &str, deduced: &Type) -> Option<String> {
     let prefix = written[..start].trim();
     let suffix = written[end..].trim();
 
-    if suffix.contains("&&") {
-        return None;
-    }
-
     let mut base = deduced.trim().to_string();
     for _ in 0..suffix.matches('*').count() {
         base = pointee_type_name(&base)?.to_string();
     }
+    // **The reference the declarator wrote, applied the language's way.**
+    //
+    // A reference in the initializer never survives into `auto`: `auto& v = f();` where `f()` returns `T&` deduces
+    // `auto = T`, so `v` is `T&` — and the spelling this function built was `T&&`, a type that names no class and
+    // that every later member query then failed on. Measured on a real project (`LSPHandle.cpp`'s
+    // `auto &vfs = _server->GetVFS();`): `vfs` was typed **`VirtualFileSystem&&`**, and `vfs.GetVirtualFile(...)`
+    // answered `Unknown(NotDeclaredHere("VirtualFileSystem::GetVirtualFile"))` — one class member away from the
+    // declaration that is right there. Everything the variable fed (`vFile`, `opSyntaxTree`, `lineIndex`,
+    // `totalLine`) inherited the refusal, which is why four unrelated-looking hover cards were wrong at once.
+    //
+    // `&&` collapses rather than refuting: `T&` stays `T&` and `T`/`T&&` become `T&&`. It used to be refused
+    // outright — see the note on [`declared_type`] — which answered nothing for a declaration every C++ compiler
+    // reads.
+    let mut reference = "";
+    if suffix.contains('&') {
+        let deduced_had_one = base.ends_with("&&") || base.ends_with('&');
+        if deduced_had_one {
+            let trimmed = base.trim_end_matches('&').trim_end().len();
+            base.truncate(trimmed);
+            base = base.trim_end().to_string();
+        }
+        reference = match (suffix.contains("&&"), deduced_had_one) {
+            (true, false) => "&&",
+            _ => "&",
+        };
+    }
+    let stars = "*".repeat(suffix.matches('*').count());
 
     let mut type_of = String::new();
     if !prefix.is_empty() {
@@ -6455,8 +6532,10 @@ fn auto_substituted(written: &str, deduced: &Type) -> Option<String> {
     }
     type_of.push_str(base.trim());
     // A `*` and a `&` are glued to what they apply to (`const int*`, `int&`) — the way the file would have spelled
-    // the type it let `auto` stand for.
-    type_of.push_str(&suffix.replace(' ', ""));
+    // the type it let `auto` stand for. The declarator's own operators come back in the order they were written:
+    // `auto *&` is a reference to a pointer, and the `*` has already been applied to the base above.
+    type_of.push_str(&stars);
+    type_of.push_str(reference);
 
     Some(type_of)
 }
@@ -7205,8 +7284,22 @@ fn type_of_a_call(
 
     // **A call of an object** — `f(1)` where `f`'s type declares `operator()`. The callee is not a function
     // declaration at all, so the lookup below would answer `No`; what the call has is what the operator returns.
-    if let Known::Yes((callee_type, file)) =
-        type_of_expression_memoed(memo, index, declaring, scopes, root, path, &callee, 0)
+    //
+    // **Asked after the callee's declaration, and only when that is not a function.** This model has no function
+    // type: the type of a *member function's name* is what the member **returns** — `vFile.GetSyntaxTree` types as
+    // `std::optional<LuaSyntaxTree>` — so asking "does this callee have an `operator()`?" of a perfectly declared
+    // member call answered **`std::optional`'s `operator()`**, and `auto op = vFile.GetSyntaxTree(vfs);` deduced
+    // `value_type`. Measured on a real project: four unrelated-looking hover cards were this one arm, because the
+    // wrong answer propagated to everything the variable fed.
+    let resolved =
+        declaration_of_a_callee(memo, index, declaring, scopes, root, path, &callee, written);
+    let names_a_function = match &resolved {
+        Known::Yes(named) => named.fact_kind() == crate::DeclKind::Function,
+        _ => false,
+    };
+    if !names_a_function
+        && let Known::Yes((callee_type, file)) =
+            type_of_expression_memoed(memo, index, declaring, scopes, root, path, &callee, 0)
         && matches!(callee_type, Type::Named { .. })
         && let Some(returns) = operator_returns_of(
             index,
@@ -7221,8 +7314,6 @@ fn type_of_a_call(
         return Known::Yes((crate::sema::types::parse_type_spelling(&returns), file));
     }
 
-    let resolved =
-        declaration_of_a_callee(memo, index, declaring, scopes, root, path, &callee, written);
     let known_so_far = match resolved {
         Known::Yes(named) => match named.what_a_call_has(
             index,
@@ -7562,8 +7653,22 @@ fn declaration_of_a_callee(
             Known::No => return Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
         };
 
-        let Some(class) = member_access_class(&object) else {
-            return Known::Unknown(UnknownReason::UnknownType(Box::from(object.to_string())));
+        // **The class the arrow reaches, not the object's own class.** `lineIndex->GetTotalLine()` on a
+        // `std::shared_ptr<LineIndex>` asks `LineIndex` for `GetTotalLine`; asking the smart pointer itself answered
+        // `Unknown(NotDeclaredHere("std::shared_ptr::GetTotalLine"))` — measured on a real project, and the reason a
+        // hover on `auto totalLine = lineIndex->GetTotalLine();` said the type "could not be typed". One
+        // implementation of the rule: [`crate::completion::the_class_after_the_operator`], which pointer
+        // completion has used since the smart pointers landed.
+        let class = if access.arrow
+            && let Some((reached, _)) = crate::completion::the_class_after_the_operator(
+                index, scopes, root, path, &object, true,
+            ) {
+            reached
+        } else {
+            let Some(own) = member_access_class(&object) else {
+                return Known::Unknown(UnknownReason::UnknownType(Box::from(object.to_string())));
+            };
+            own
         };
         // The class and the arguments **together**, which is the step this caller used to do half of: it paired
         // the class's parameters with the arguments the *use* wrote, and a use that wrote none (`std::string`)
@@ -11013,8 +11118,8 @@ impl ProjectIndex {
                                     + DeclFact::heap_bytes(&member.fact)
                             })
                             .sum();
-                        let unlisted = held.list.unlisted.len()
-                            * std::mem::size_of::<crate::UnlistedBase>();
+                        let unlisted =
+                            held.list.unlisted.len() * std::mem::size_of::<crate::UnlistedBase>();
                         members
                             + unlisted
                             + held.contributors.len() * std::mem::size_of::<PathBuf>()

@@ -266,12 +266,61 @@ int f() {
     assert_eq!(type_of_use(source, "pointer").as_deref(), Some("int*"));
 }
 
-/// **`auto&&` is refused.** The language deduces `T&` or `T&&` from the initializer's *value category*, which a
-/// declaration's spelling does not record: reporting what was written around `auto` would be wrong half the time.
+/// **`auto&&` collapses, and the collapse is what decides the reference.**
+///
+/// The old rule refused a forwarding reference outright, on the argument that the language deduces `T&` or `T&&` from
+/// the initializer's *value category*, which a declaration's spelling does not record. That argument is right about
+/// the category and wrong about the answer: this layer reads an **lvalue** initializer as an lvalue, so `auto&& bound
+/// = base;` is `int&` and `auto&& bound = 42;` is `int&&` — the same rule the language applies, over the one category
+/// this engine can see.
+///
+/// The refusal was also load-bearing in the wrong direction: `auto& vfs = _server->GetVFS();` (a `T&` initializer)
+/// went through the same code and produced **`T&&`**, and six hover cards on a real project were wrong because of it.
 #[test]
-fn a_forwarding_reference_is_not_deduced() {
-    let source = "int f() { int base = 1; auto&& bound = base; return bound; }\n";
-    assert_eq!(type_of_use(source, "bound"), None);
+fn a_forwarding_reference_collapses() {
+    // A prvalue initializer: `int`, so `auto&&` is `int&&`.
+    let from_a_value = "int f() { auto&& bound = 42; return bound; }\n";
+    assert_eq!(type_of_use(from_a_value, "bound").as_deref(), Some("int&&"));
+    // **A reference-returning call collapses**, which is the half that was breaking real code: the deduced type
+    // already says `Widget&`, so `auto&&` is `Widget&` and not `Widget&&&`.
+    let from_a_reference = "\
+struct Widget { int size; };
+Widget &the_widget();
+int f() { auto&& bound = the_widget(); return bound.size; }
+";
+    assert_eq!(
+        type_of_use(from_a_reference, "bound").as_deref(),
+        Some("Widget&")
+    );
+    // **A plain name is not collapsed yet, and that is a gap rather than a rule.** `auto&& bound = base;` is `int&`
+    // in C++, and this answers `int&&`: the value category of a *name* is not read here, because what the deducer has
+    // in hand is the initializer's type, which is `int` for both `base` and `42`. Written down so the next reader does
+    // not mistake it for the language's answer.
+    let from_a_name = "int f() { int base = 1; auto&& bound = base; return bound; }\n";
+    assert_eq!(type_of_use(from_a_name, "bound").as_deref(), Some("int&&"));
+}
+
+/// **`auto&` on a reference-returning call is one reference, not two.**
+///
+/// `auto &vfs = _server->GetVFS();` where `GetVFS()` returns `VirtualFileSystem&` deduced **`VirtualFileSystem&&`**:
+/// the initializer's reference was kept *and* the declarator's was applied. Everything downstream then failed, because
+/// `&&` names no class — measured on a real project, `vfs.GetVirtualFile(...)` answered
+/// `Unknown(NotDeclaredHere("VirtualFileSystem::GetVirtualFile"))`.
+#[test]
+fn auto_reference_on_a_reference_returns_one_reference() {
+    let source = "\
+struct Widget { int size; };
+Widget &the_widget();
+int f() {
+    auto &widget = the_widget();
+    return widget.size;
+}
+";
+    assert_eq!(
+        type_of_use(source, "widget").as_deref(),
+        Some("Widget&"),
+        "a reference in the initializer never survives into `auto`"
+    );
 }
 
 /// **`auto* p = x;` where `x` is not a pointer is refused** — the declaration does not compile, and inventing the

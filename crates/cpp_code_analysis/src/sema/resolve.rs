@@ -905,8 +905,16 @@ pub fn member_access_of(node: &CppSyntaxNode) -> Option<MemberAccess> {
         .iter()
         .find_map(|element| element.as_node().cloned())?;
 
-    // The member is the identifier **after** the operator — the last one in text order, because the object of a
-    // nested access is itself a member access and its identifiers come first.
+    // The member is the identifier **immediately after** the operator — the *first* one in text order, and the
+    // distinction is not cosmetic.
+    //
+    // It used to be the **last** identifier of the node, on the argument that "the object of a nested access is itself
+    // a member access and its identifiers come first". That argument holds for `a.b.c` (whose object is a *node*, so
+    // its identifiers are inside it) but not for the member's own **template arguments**, which are identifiers after
+    // the name and inside the same node: measured on a real project, `_server->GetService<CommandService>()` read the
+    // member as **`CommandService`** and looked it up as a member of `LanguageServer` — so every
+    // `GetService<T>()->…` in the file answered `Unknown(NotDeclaredHere("LanguageServer::T"))` and nothing after the
+    // arrow could be typed.
     let after_operator: Vec<cpp_parser::CppSyntaxToken> = node
         .descendants_with_tokens()
         .filter_map(|element| element.into_token())
@@ -919,7 +927,7 @@ pub fn member_access_of(node: &CppSyntaxNode) -> Option<MemberAccess> {
     // Nothing after the operator is a real state and not a failure: `w.` is a member access with the member still
     // to be written. The empty range sits at the operator's end, which is exactly where the name goes — so a
     // caller that inserts, replaces or drops text has one range to work with in both states.
-    let Some(member_token) = after_operator.into_iter().next_back() else {
+    let Some(member_token) = after_operator.into_iter().next() else {
         return Some(MemberAccess {
             object,
             member: String::new(),
