@@ -79,8 +79,10 @@ be complete — the same "raw readings of standard headers are incomplete" probl
 `shared_ptr` is never the open file.
 
 **`GetService<CommandService>()`** answers `Service*`: the fact is `returns "Service *"`, `parameters ["Service"]`, and
-the substitution in `what_a_call_has` is guarded on `written_arguments`, so `written_template_arguments(callee)` is
-returning nothing for a **member** call. That is where the next hour goes.
+the substitution in `what_a_call_has` is guarded on `written_arguments` — which is empty, even after the search was
+widened from the callee to the whole call. The reason is upstream of that: **the parser reads `GetService<CommandService>`
+as a comparison**, so there is no `TemplateArgumentList` in the tree to find. The next step is a parser-level one —
+re-reading `‹…›` after a member name in a call position — not another inference heuristic.
 
 **Hover feels slow** is not the question path: measured on this file, `Session::open` 40–150 ms, `catch_up` 70–660 ms,
 `cook` 7 ms, `view` 2 ms, and each hover question **0–3 ms**. What is slow is the pump beside it, and one number says
