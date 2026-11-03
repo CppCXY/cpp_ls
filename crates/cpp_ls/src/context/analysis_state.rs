@@ -628,6 +628,13 @@ impl AnalysisState {
             && let Some(session) = session.as_ref()
             && session.index().summary(&to_prepare).is_some()
             && session.index().cooked_declarations(&to_prepare).is_some()
+            // **And the view, which is what the checks read.** The edit drops the file's rendering before the analysis
+            // applies the edit, so for one pull the summary and the cooked reading are still the old ones and there is
+            // no view: `checks_about` then has no tree, every finding disappears, and the client is told the file became
+            // clean — the flash this function exists to prevent. Measured: `prepare fast path` followed by
+            // `view=false checks=0` on the pull right after `didChange`. `Session::view` is a lookup of the rendering
+            // (not a parse), so asking costs a hash read.
+            && session.view(&to_prepare).is_some()
         {
             return true;
         }
