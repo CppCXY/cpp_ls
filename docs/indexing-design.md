@@ -210,6 +210,12 @@ The fix is to **produce the reading**, not to drop the claim: making a refinemen
 already does; the fallback must render the file from its own directives and file that). Dropping the claim instead was
 measured too — it moved the failure to a third `checks` test, so the state "refined and cooked" is what the rest of the
 session assumes, and a refinement that leaves the file unrefined is a second inconsistency, not a fix.
+**Settled in `f0dea64`.** The layer landed: `ReRead.cooked` carries the walking arm, the write half files it with
+`insert_cooked`, the summary is never overwritten, and the refinement cache stops serving a summary — so "refined" now
+always means "there is a reading". Measured on that commit: `--lib` **737 / 0 / 2** (was 734 / 0 / 10), `tests/checks.rs`
+**108 passed** (the 105 regression is gone), `tests/semantic.rs` unchanged at 2 pre-existing failures, clippy green.
+Three of the five capabilities are back; the two still ignored are the guard filter on a program-read file and a keystroke
+through its timeline, and their reasons now name what is missing.
 ### 4.2 The request path is the slow part now — *second*
 
 Steady `textDocument/diagnostic` is **389 ms median** (review) / **200 ms here**, of which **97 % is type inference**
