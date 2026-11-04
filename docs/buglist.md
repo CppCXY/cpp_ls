@@ -267,3 +267,25 @@ The card in that screenshot is `increment` — a structured binding over `std::p
 types are **lambdas** and therefore unnamed. Its sentence ("the type is deduced from the initializer, and that could not be
 typed: …") is the analysis's honest refusal, and it is long enough that a narrow popup wraps it mid-clause; the wording is
 worth shortening, the answer is not wrong.
+
+---
+
+## 11. Inlay hints: what the types cover, and what is left
+
+**Done in `715da0a`.** `auto` variables, a range-for's `auto`, a structured binding's names, and the return type an
+`auto` function deduces — `inlay::type_hints`, asking the same reader the hover asks. Measured on `test_cpp` with
+`inspect inlay`: `basics.cpp` 9 hints, `smart_pointers.cpp` 8 (`unique_ptr<Resource>`, `shared_ptr<Node>`, …),
+`ranges.cpp` 1, `lambdas.cpp` 0.
+
+**Open, in the order they matter:**
+
+* **A lambda parameter's type** — `[](auto x)` is a template; the type exists only at a call site, and this layer holds one
+  file. The shape of the fix is clangd's: at the call, the argument's type is the parameter's.
+* **A lambda's deduced return** — its type is unnamed and `deduced_returns_of` starts from a *binding*, which a lambda does
+  not have.
+* **A braced initialisation in an expression** — `auto t = std::tuple{1, 2, 3}` answers `std::tuple`, without its
+  arguments: the class-expression path resolves a bare name (`Pair{…}`) but not a qualified one (`std::pair{…}`).
+  Measured with `inspect inlay --project … --file src/basics.cpp` (`107:15  : std::tuple`).
+* **A structured binding over a user class** — the elements are split for `pair`/`map` by name; a class with `first`/`second`
+  of its own answers the aggregate and stops, so `auto [a, b] = my_pair;` gets no hints. (The aggregate is known — CTAD
+  answers `Pair<int, double>` — so this is the split, not the deduction.)
