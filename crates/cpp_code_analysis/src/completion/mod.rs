@@ -978,6 +978,67 @@ struct MemberAnswer {
 ///
 /// `with_table` is whether the language's own vocabulary — keywords, snippets, built-in type names — belongs in
 /// this answer. It does in a **statement** and does not in a directive's argument.
+/// **The adaptors `std::views` declares, when the scope being completed is that namespace.**
+///
+/// `(name, does it take arguments, detail)`. The arity is a *hint for the item's kind* — a callable is drawn as a function
+/// and an object as a variable — and no argument list is inserted, because each adaptor's own overloads decide what a call
+/// means.
+fn the_views_adaptors_a_scope_names(
+    scope: &str,
+) -> Option<&'static [(&'static str, bool, &'static str)]> {
+    let is_the_views_namespace =
+        scope == "std::views" || scope == "ranges::views" || scope.ends_with("::views");
+    if !is_the_views_namespace {
+        return None;
+    }
+    Some(THE_VIEWS_ADAPTORS)
+}
+
+/// **The adaptors in `std::views`**, as the standard lists them — C++20's, plus the C++23 additions this server's language
+/// level already writes.
+const THE_VIEWS_ADAPTORS: &[(&str, bool, &str)] = &[
+    ("all", false, "a view of the whole range"),
+    ("as_const", false, "a view whose elements are const"),
+    (
+        "common",
+        false,
+        "a view with a common iterator and sentinel",
+    ),
+    ("counted", true, "a counted view over an iterator"),
+    ("drop", true, "skip the first n elements"),
+    ("drop_while", true, "skip while the predicate holds"),
+    ("elements", true, "a view over one member of each element"),
+    (
+        "filter",
+        true,
+        "a view of the elements the predicate accepts",
+    ),
+    ("join", false, "flatten a range of ranges"),
+    ("keys", false, "a view over the first member of each pair"),
+    (
+        "lazy_split",
+        true,
+        "a view of the subranges between separators",
+    ),
+    ("owning_view", true, "a view that owns its range"),
+    ("ref_view", true, "a view that refers to a range"),
+    ("reverse", false, "a view of the elements in reverse order"),
+    ("split", true, "a view of the subranges between separators"),
+    ("take", true, "the first n elements"),
+    ("take_while", true, "the elements while the predicate holds"),
+    (
+        "transform",
+        true,
+        "a view with the function applied to each element",
+    ),
+    (
+        "values",
+        false,
+        "a view over the second member of each pair",
+    ),
+    ("iota", true, "a sequence of increasing values"),
+];
+
 fn names(
     index: &ProjectIndex,
     scopes: &ScopeTree,
@@ -1043,6 +1104,36 @@ fn names(
         // cannot place. The list stays empty and the table still contributes, because `#define ret|` has a use for
         // `return` whether or not any name is visible.
         Known::Unknown(_) | Known::No => {}
+    }
+
+    // **`std::views`' adaptors are standard names, and the index may hold none of them.** Measured: `members_of("std::views")`
+    // answered **0** while `std::ranges` answered 125 — the `views` namespace is filled with `inline constexpr` adaptor
+    // objects that the summary does not reach — so `numbers | std::views::f` completed nothing at all, on the header whose
+    // whole purpose is those names. The set is closed and the names are the standard's, which is the argument
+    // `PREDEFINED_MACROS` makes for the compiler's own macros; a name the index also holds is merged by label below.
+    if let Some(adaptors) = the_views_adaptors_a_scope_names(&listed_scope) {
+        for (name, takes_arguments, detail) in adaptors {
+            let matched = matching::quality(name, &listed_prefix);
+            if matched == matching::NONE {
+                continue;
+            }
+            let mut item = CompletionItem::word(
+                name,
+                if *takes_arguments {
+                    ItemKind::Function
+                } else {
+                    ItemKind::Variable
+                },
+                detail,
+            );
+            item.replace = replace;
+            item.filter = Some(format!("{listed_scope}::{name}"));
+            scored.push(Scored {
+                score: Score::new(Score::DIRECT_INCLUDE, 0),
+                matched,
+                item,
+            });
+        }
     }
 
     if with_table {

@@ -3090,3 +3090,52 @@ fn member_labels_at(source: &'static str, needle: &str) -> Vec<String> {
     labels.sort_unstable();
     labels
 }
+
+/// **`std::views::` completes the adaptors**, even though the index holds none of them.
+///
+/// Measured: `members_of("std::views")` answers **0** while `std::ranges` answers 125 — libstdc++ fills the `views`
+/// namespace with `inline constexpr` adaptor objects the summary does not reach — so `numbers | std::views::f` completed
+/// nothing on the header whose whole purpose is those names. The set is closed and the names are the standard's, so they
+/// come from a table; a name the index also holds is merged by label.
+#[test]
+fn the_views_adaptors_complete_after_the_scope() {
+    let source = "#include <ranges>\n#include <vector>\n\
+                  int main() { std::vector<int> numbers; for (auto v : numbers | std::views::) { } }\n";
+    let files = MemoryFiles::new().with_file("/p/a.cpp", source);
+    let providers = SessionFiles::new(OpenDocuments::new(), files);
+    let mut session = Session::with_config(
+        "/p",
+        providers,
+        WatchFilter::new("/p"),
+        CompilerConfig::default(),
+    );
+    session.add_project_files([std::path::PathBuf::from("/p/a.cpp")]);
+    let view = cooked_view(&mut session, "/p/a.cpp");
+    let at = source.find("std::views::)").expect("the fixture") + "std::views::".len();
+    let offered = session.completions(
+        &view,
+        cpp_code_analysis::file::coordinates::FileOffset::new(at),
+    );
+    let labels: Vec<&str> = offered
+        .items
+        .iter()
+        .map(|item| item.label.as_str())
+        .collect();
+
+    for adaptor in [
+        "filter",
+        "transform",
+        "take",
+        "drop",
+        "reverse",
+        "keys",
+        "values",
+        "join",
+        "iota",
+    ] {
+        assert!(
+            labels.contains(&adaptor),
+            "`std::views::{adaptor}` is offered: {labels:?}"
+        );
+    }
+}
