@@ -46,9 +46,21 @@ body, a `using`, an operator's spelling).
 
 ---
 
-## 2. `shared_from_this()` inside a class that derives `enable_shared_from_this`
+## 2. `shared_from_this()` — the hover is fixed, the *type* is still open
 
-**Symptom (图 6).** The call has no hover at all; `type_at` answers `Unknown(Ambiguous("shared_from_this"))`.
+**Symptom (图 6, and again 2026-11-04).** The call had no hover at all; `type_at` answered
+`Unknown(Ambiguous("shared_from_this"))`.
+
+**Fixed in `6e6ed31`.** `a_member_of_the_enclosing_class` is C++'s second half of unqualified name lookup — a name inside
+a member function is also looked up in the class and its bases — and the hover builds its card from it. Measured:
+`shared_from_this()` hovers as `int shared_from_this()` — "`Base::shared_from_this` — a function returning `int`, in
+`Base`", declared where the header writes it.
+
+**What is still open: the call's *type*.** `members_of("Node")` carries the member with `returns: "_Tp"` — the **base's**
+parameter — and the pairing that would finish it (the base's arguments, `Node`) is not on the member list: `declared_in` is
+`std::enable_shared_from_this`, without `<Node>`. The type engine refuses an unfinished type rather than printing
+`_Tp (*)()`, so today the answer is `Unknown`. The fix is one field: the base walk knows the base's spelling and its
+arguments, and `ProjectMember` should carry them (or `declared_in` should be the instantiated spelling).
 
 **Measured.**
 
@@ -214,3 +226,44 @@ Planned, not built.
 | `const`/`&`/`&&` and the requires-clause missing from the card — and from the fact | `c08e213` |
 | `std::views::` answered 0 names after a header's alias stopped being in the buffer's tree | `c08e213` |
 | `T(args)` had no type; `->` through a smart pointer looked in the handle; `make_shared`'s wrapper type | `e47996d`, `5891719` |
+| `std::any any;` / `std::pair pair;` hovered as `void` (a type dropped as if it were the declarator) | `90f1726` |
+| `std::pair pair{1, 2}` kept its bare name — CTAD at a braced initialisation; a member of a class template was called a "variable template" | `6e6ed31` |
+| An unqualified name inside a member function was not looked up in the class (`shared_from_this()` had no hover) | `6e6ed31` |
+| A function's name answered its **class** as its type (`shared_from_this` in `Base` was a `Base`) | `6e6ed31` |
+| `members_of("shared_ptr<int>")` answered nothing while the completion at the same cursor offered `reset` | `6e6ed31` |
+
+---
+
+## 9. `typename` has no semantic token in a lambda's template parameter list
+
+**Symptom (图 3).** `[]<typename T>(T value)` — the inspector shows `<typename·T>` with **no** token for `typename`
+(standard token type `Other`), while `T` is a `typeParameter`.
+
+**Why it is there.** `semantic.rs` classifies **identifiers only** (`token.kind != CppTokenKind::Identifier { continue }`),
+and its module documentation says so on purpose: "**no** token for `int`, `return`, or a string literal: a client that
+already lexes C++ draws keywords itself."
+
+**Why it still matters.** A client's grammar does not always recognise `typename` in that position, and the one place it
+matters to this server is the *template parameter list* — where a reader needs to see that `T` is a parameter of a
+template. Two options, both defensible:
+
+* a narrow exception: `typename`/`class` **introducing a template parameter** get a `keyword` token (a new `NameKind`,
+  mapped in the legend), with the module's rule kept for every other keyword;
+* nothing, and the client's grammar is where the fix belongs.
+
+**Check.** `inspect tree` locates the token; the classification is `Session::classified_names`.
+
+## 10. Go to Definition on `make_incrementer` — *verified correct, not a bug*
+
+**Symptom (图 4).** "跳转到定义的位置完全是错的", with `lambdas.cpp:75:11` in the screenshot.
+
+**Measured.** `inspect define --project … --file src/lambdas.cpp --needle "instance.make_incrementer()" --shift 11`
+answers `lambdas.cpp:20:10   make_incrementer   function in Counter parameters ()` — the declaration, which is where the
+jump should go. `75:11` is the **card's** "Declared in" line for `increment`, the structured binding, which is correct for
+that name. Kept here so the next report of it starts from a measurement: if a client still jumps to 75:11 on
+`make_incrementer`, the question is which position it sent.
+
+The card in that screenshot is `increment` — a structured binding over `std::pair{by_reference, by_value}`, whose element
+types are **lambdas** and therefore unnamed. Its sentence ("the type is deduced from the initializer, and that could not be
+typed: …") is the analysis's honest refusal, and it is long enough that a narrow popup wraps it mid-clause; the wording is
+worth shortening, the answer is not wrong.
