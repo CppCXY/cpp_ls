@@ -3665,7 +3665,6 @@ class Holder {\
     friend class Borrower;\
     int secret = 1;\
 };\
-
 class Borrower {\
 public:\
     int peek(Holder& holder) { return holder.secret; }\
@@ -3700,7 +3699,6 @@ struct Outer {
 private:\
     int secret = 1;\
 };\
-
 int Holder::peek() const { return secret; }\
 ",
         "/p/a.cpp",
