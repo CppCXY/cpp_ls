@@ -2475,6 +2475,10 @@ fn direct_members(
     } else {
         resolve_aliases(index, scopes, root, path, class)
     };
+    // **A namespace alias in the spelling's prefix** — `std::views::_Filter` is `std::ranges::views::_Filter`. Type aliases
+    // are followed above; a namespace alias is not a type, so it needs this step, and it is *additive*: a spelling that
+    // already resolves is unchanged.
+    let class = through_a_namespace_alias(index, path, &class);
     let class = &class;
 
     if let Some(scope) = scopes.scope_with_qualified_name(class)
@@ -11154,6 +11158,59 @@ fn is_declared(
 /// The qualified name `<class>::<member>`, which is why nothing here needs to know what a class *is*: the file
 /// being edited is asked first through its scope tree, and the index second — the two-layer split
 /// [`definition_across_files`] makes, for the same reason.
+/// **A spelling with its namespace-alias prefixes followed** — `std::views::_Filter` → `std::ranges::views::_Filter`.
+///
+/// libstdc++ writes `namespace views = ranges::views;`, so every name inside it can be written through the alias.
+/// `members_of` was taught to follow the alias for the **namespace itself**; a type, a member or a base spelled one level
+/// deeper (`std::views::_Filter`, `std::views::filter`) needs the same substitution in its prefix.
+///
+/// Longest prefix first, so `a::b::c` asks about `a::b` before `a` — a namespace declared inside another one is the case
+/// that needs it. A spelling with no alias in it comes back unchanged, which is what keeps this additive.
+fn through_a_namespace_alias(index: &ProjectIndex, path: &Path, spelling: &str) -> String {
+    const DEPTH: usize = 4;
+    let mut rewritten = spelling.to_string();
+    for _ in 0..DEPTH {
+        let segments: Vec<&str> = rewritten.split("::").collect();
+        if segments.len() < 2 {
+            return rewritten;
+        }
+        let mut changed = false;
+        for take in (1..segments.len()).rev() {
+            let prefix = segments[..take].join("::");
+            let Some(found) = index.definition(&prefix, path).value() else {
+                continue;
+            };
+            if found.fact.kind != crate::DeclKind::Namespace {
+                continue;
+            }
+            let Some(target) = found.fact.type_of.as_deref() else {
+                continue;
+            };
+            if target == prefix {
+                continue;
+            }
+            let qualified = if target.contains("::") {
+                target.to_string()
+            } else {
+                match &found.fact.scope {
+                    Some(scope) => format!("{scope}::{target}"),
+                    None => target.to_string(),
+                }
+            };
+            if qualified == prefix {
+                continue;
+            }
+            rewritten = format!("{qualified}::{}", segments[take..].join("::"));
+            changed = true;
+            break;
+        }
+        if !changed {
+            return rewritten;
+        }
+    }
+    rewritten
+}
+
 fn direct_member(
     index: &ProjectIndex,
     scopes: &crate::ScopeTree,
@@ -14572,6 +14629,27 @@ impl ProjectIndex {
                 // under.
                 if let Some(qualified) = self.qualified_name_of_the_entity(alias.fact, &prefix) {
                     return Some(format!("{qualified}::{}", segments[take..].join("::")));
+                }
+
+                // **A namespace alias** — `namespace views = ranges::views;`, which is how libstdc++ spells
+                // `std::views`. Its fact is a `Namespace` whose `type_of` is the target, so it is neither a type alias
+                // (the case below) nor an entity with a qualified name of its own (the case above): the target is the
+                // rewrite. Measured: `std::views::filter` answered `NotDeclaredHere` while `std::ranges::views::filter`
+                // was declared in `<ranges>` all along.
+                if alias.fact.kind == DeclKind::Namespace
+                    && let Some(written_target) = alias.fact.type_of.as_deref()
+                {
+                    let qualified = if written_target.contains("::") {
+                        written_target.to_string()
+                    } else {
+                        match &alias.fact.scope {
+                            Some(scope) => format!("{scope}::{written_target}"),
+                            None => written_target.to_string(),
+                        }
+                    };
+                    if qualified != prefix {
+                        return Some(format!("{qualified}::{}", segments[take..].join("::")));
+                    }
                 }
 
                 if alias.fact.kind != DeclKind::Type {

@@ -807,3 +807,86 @@ fn a_returned_local_states_its_type() {
         "the local's declaration states the type the function returns"
     );
 }
+
+/// **§D3 — a qualified name is resolved through a namespace alias.**
+///
+/// Reported from `ranges.cpp`: `std::views::filter` answered `NotDeclaredHere("std::views::filter")` while
+/// `std::ranges::views::filter` was declared in `<ranges>` all along. libstdc++ writes `namespace views = ranges::views;`,
+/// and the name query's alias walk followed **type** aliases (`using string = basic_string<char>`) and `using`-declared
+/// types — a namespace alias's fact is a `Namespace` whose `type_of` is the target, which is neither.
+///
+/// The alias is written relative to its own scope here (`namespace views = ranges::views;` inside `std`), which is the real
+/// spelling: the rewrite has to qualify it with that scope, or the target names nothing.
+///
+/// **And the members of a type written through the alias** — `std::views::_Filter` — are the target's members: the same
+/// substitution has to happen in a spelling's **prefix**, not only when the whole spelling is the namespace.
+#[test]
+fn a_qualified_name_is_resolved_through_a_namespace_alias() {
+    let session = session_with(&[
+        (
+            "/p/views.h",
+            "namespace std {\n\
+             namespace ranges {\n\
+                 namespace views {\n\
+                     inline constexpr int filter = 1;\n\
+                 }\n\
+             }\n\
+             namespace views = ranges::views;\n\
+             }\n",
+        ),
+        (
+            "/p/a.cpp",
+            "#include \"views.h\"\nint main() { return std::views::filter; }\n",
+        ),
+    ]);
+    let path = std::path::Path::new("/p/a.cpp");
+    let view = session.view_of_the_file(path).expect("the written text");
+    let source = view.source.clone();
+    let at = source.find("std::views::filter").expect("the fixture") + "std::views::".len();
+
+    let known = session.definition(
+        &view,
+        cpp_code_analysis::file::coordinates::ReadingOffset::new(at),
+    );
+    let cpp_code_analysis::Known::Yes(found) = known else {
+        panic!("the alias names a declaration: {known:?}");
+    };
+    assert_eq!(
+        found.fact.qualified_name(),
+        "std::ranges::views::filter",
+        "the answer is the target's declaration, under the scope that actually declares it"
+    );
+
+    // The members of a type written through the alias are the target's.
+    let session = session_with(&[
+        (
+            "/p/views.h",
+            "namespace std {\n\
+             namespace ranges {\n\
+                 namespace views {\n\
+                     struct _Filter { int arity; };\n\
+                 }\n\
+             }\n\
+             namespace views = ranges::views;\n\
+             }\n",
+        ),
+        (
+            "/p/a.cpp",
+            "#include \"views.h\"\nint main() { std::views::_Filter value; return value.arity; }\n",
+        ),
+    ]);
+    let view = session.view_of_the_file(path).expect("the written text");
+    let known = session.members_of(&view, "std::views::_Filter");
+    let cpp_code_analysis::Known::Yes(listed) = known else {
+        panic!("the alias names the class `std::ranges::views::_Filter`: {known:?}");
+    };
+    assert_eq!(
+        listed
+            .members
+            .iter()
+            .map(|member| member.fact.name.as_str())
+            .collect::<Vec<_>>(),
+        ["arity"],
+        "the member is looked for in the scope that declares it"
+    );
+}

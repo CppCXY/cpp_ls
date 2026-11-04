@@ -1217,6 +1217,14 @@ fn names(
         scored.retain(|one| one.matched != matching::NONE);
     }
 
+    // **One row per label.** Two arms can offer one name — the index's adaptor and the `std::views` table's fallback for
+    // it, a keyword and the table's snippet — and a list with two identical rows is a choice to make by accident. The
+    // order is by score, so the first of a label is the better one; the rest are dropped.
+    {
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        scored.retain(|one| seen.insert(one.item.label.clone()));
+    }
+
     let (items, cut) = ordered(scored);
     truncated |= cut;
 
