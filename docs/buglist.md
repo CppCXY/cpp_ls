@@ -528,3 +528,46 @@ returns it still refuses — the type is the enclosing variable's, which needs a
 written down in that module: a zero-sized enum implementing `lsp_types::request::Request`, a handler returning
 `RequestOutcome`, and a row in `handlers/request_handler.rs` — plus, on the client side, a command and a keybinding in the
 extension. A capability row is deliberately empty: the method needs no advertisement, and an old client simply never sends it.
+
+---
+
+## 26. `sema` was re-searching text the parser had already structured — and that is the next body of work
+
+A review of the code this round added found two repeating mistakes in `crates/cpp_code_analysis/src/sema`:
+
+1. **A fact the tree states was recovered from the source text.** `parameter_type` cut a parameter's type out of its text with
+   `rfind(name)` — wrong for `int int_`, where the name occurs in the type as well. `a_local_variables_type` scanned every
+   declaration for the name as a whole word and then cut again. `a_captures_type` found an init-capture with
+   `split_once('=')`. Each of these had a typed answer already (or one line away).
+2. **Raw rowan traversal where a typed node exists.** `CppSyntaxKind::from(node.kind()) == …` followed by
+   `.children().find(…)` in place of `CppDeclaration::get_body()`, `CppLambdaExpr::get_captures()`, `CppReturnStat::get_expr()`.
+   `declarations.rs` alone had **85** raw-kind comparisons, `scopes.rs` **65**.
+
+**What changed first (this round):** the parser grew the accessors the questions needed —
+`CppLambdaCapture`/`CppLambdaCaptureList` and `CppLambdaExpr::get_captures`, `CppParam::get_name_text`/`get_type_text`,
+`CppDeclaration::get_type_text_of`, `CppDeclarator::get_type_suffix`, `CppPointerType::get_operator_text`,
+`CppArrayType::get_type_text` — plus **the typed bridge** `typed_descendants`/`typed_children`/`typed_ancestors`/
+`typed_ancestors_until`, which is what lets `sema` (which holds `&CppSyntaxNode`) use the typed walks at all. Five `sema`
+helpers were rewritten on them and lost every text search: `parameter_type`, `a_local_variables_type`, `a_captures_type`,
+`a_bare_name`, `the_last_identifier_of`, `the_parameter_names`.
+
+**Measured, and the measurement is why the cache version moved to 13:** the rewrite changed a reading — `int* q` used to
+deduce `int` — so the `/p` fixtures' shared cache at `C:\p\.cppls` served the old answer and
+`a_function_with_no_written_return_type_states_one_in_its_body` failed for a fix that was in the binary. A cold cache passed.
+`FORMAT_VERSION` is now 13 with that story in its doc.
+
+**The order the rest is fixed in**, by the count of raw usages (from a regex over the directory):
+
+| file | raw kind | text→String | `rfind` | `split_whitespace` |
+| --- | --- | --- | --- | --- |
+| `declarations.rs` | 85 | 49 | 3 | 6 |
+| `scopes.rs` | 65 | 15 | 1 | 0 |
+| `types.rs` | 27 | 18 | 1 | 2 |
+| `resolve.rs` | 12 | 6 | 1 | 0 |
+| `sema/mod.rs` | 4 | 6 | 1 | 1 |
+| `check/*` | 1–8 each | — | — | — |
+
+`declarations.rs`'s remaining hot spots are the return-type walkers (`body_of`, `returned_expressions_in`,
+`type_a_return_states`, `type_a_return_states_with`, `type_with_the_auto_parameters`) and the declaration geometry that
+predates them (`function_suffix_in`, `is_marked_maybe_unused`, which scans backwards through the text for `[[maybe_unused]]`
+when the attribute is a node). Those are the next batch, then `scopes.rs`.

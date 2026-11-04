@@ -37,18 +37,47 @@ use crate::util::{path_to_uri, uri_to_file_path};
 /// takes it like any other row. `Option<Url>` is what clangd answers — one URI, or `null` when there is no counterpart.
 pub enum SwitchSourceHeader {}
 
+/// **The params, in either shape a client sends.**
+///
+/// LSP's [`TextDocumentIdentifier`] is `{ "uri": … }`, and that is what clangd's own method takes. The VS Code client
+/// sends the LSP-shaped `{ "textDocument": { "uri": … } }` — the shape every other text-document request uses — and the first
+/// version of this handler answered `missing field 'uri'`, measured in the extension's log. A method that is an extension
+/// has no schema to appeal to, so both are accepted: the field name is not worth telling a client it is too old.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwitchSourceHeaderParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    text_document: Option<TextDocumentIdentifier>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    uri: Option<Uri>,
+}
+
+impl SwitchSourceHeaderParams {
+    /// The document the request names, whichever field carried it.
+    pub fn the_uri(&self) -> Option<&Uri> {
+        self.text_document
+            .as_ref()
+            .map(|document| &document.uri)
+            .or(self.uri.as_ref())
+    }
+}
+
 impl lsp_types::request::Request for SwitchSourceHeader {
-    type Params = TextDocumentIdentifier;
+    type Params = SwitchSourceHeaderParams;
     type Result = Option<Uri>;
     const METHOD: &'static str = "textDocument/switchSourceHeader";
 }
 
 pub async fn on_switch_source_header(
     context: ServerContextSnapshot,
-    params: TextDocumentIdentifier,
+    params: SwitchSourceHeaderParams,
     cancel_token: CancellationToken,
 ) -> RequestOutcome<Option<Uri>> {
-    let uri = params.uri;
+    let Some(uri) = params.the_uri().cloned() else {
+        // **A request that names no document** is answered `null` rather than an error: the client asked a question the
+        // server cannot answer, and a null says so without failing the session.
+        return RequestOutcome::Ready(None);
+    };
     if let Some(path) = uri_to_file_path(&uri) {
         // The file has to be read for its includes to be known; a header nothing has opened is exactly the case where the
         // answer comes from another file's `#include`.
@@ -262,5 +291,36 @@ mod tests {
             the_counterpart_of(&session, std::path::Path::new("/p/notes.txt")),
             None
         );
+    }
+}
+
+#[cfg(test)]
+mod params_tests {
+    use super::SwitchSourceHeaderParams;
+
+    /// **Both shapes on the wire**, because the extension sends the second and clangd's method documents the first.
+    #[test]
+    fn both_param_shapes_name_the_document() {
+        let bare: SwitchSourceHeaderParams = serde_json::from_str(
+            r#"{"uri":"file:///p/foo.cpp"}"#,
+        )
+        .expect("a bare `uri` is a `TextDocumentIdentifier`");
+        assert_eq!(
+            bare.the_uri().map(|uri| uri.as_str()),
+            Some("file:///p/foo.cpp")
+        );
+
+        let nested: SwitchSourceHeaderParams = serde_json::from_str(
+            r#"{"textDocument":{"uri":"file:///p/foo.h"}}"#,
+        )
+        .expect("the LSP-shaped `textDocument` is what a VS Code client sends");
+        assert_eq!(
+            nested.the_uri().map(|uri| uri.as_str()),
+            Some("file:///p/foo.h")
+        );
+
+        // And neither answers nothing rather than failing.
+        let empty: SwitchSourceHeaderParams = serde_json::from_str("{}").expect("an empty object");
+        assert_eq!(empty.the_uri(), None);
     }
 }

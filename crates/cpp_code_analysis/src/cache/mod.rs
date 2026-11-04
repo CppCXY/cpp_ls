@@ -146,7 +146,16 @@ use std::path::{Path, PathBuf};
 /// ends with `::` and the declared name. The type was thrown away, the fact said `void`, and `assign-type-check` then
 /// reported the initialisation as a conversion "from `int` to `void`". The bytes are unchanged, so an old entry decodes
 /// happily and keeps the wrong type — the case this constant is for.
-pub const FORMAT_VERSION: u32 = 12;
+///
+/// # Why this moved to 13
+///
+/// **The type a deduced `return` states is now composed from typed nodes rather than cut out of the declaration's text**,
+/// and the two disagree where the cut was wrong: `int* q` was `int` before the pointer moved into the spelling, so every
+/// `auto f(int* q) { return q; }` recorded a fact that offered `int`'s members instead of the pointee's. The key's parts are
+/// unchanged, so an entry from before this bump decodes happily and keeps the answer — measured: the stale `C:\p\.cppls`
+/// of the `/p` fixtures made `a_function_with_no_written_return_type_states_one_in_its_body` fail for a fix that was in the
+/// binary, and pass on a cold cache.
+pub const FORMAT_VERSION: u32 = 13;
 
 /// **The fingerprint of the readers a summary was built by**, in the key.
 ///

@@ -246,6 +246,44 @@ impl<N: CppAstToken> Iterator for CppAstTokenChildren<N> {
     }
 }
 
+/// **The typed descendants of a raw node**, in document order.
+///
+/// The bridge for a caller that holds a [`CppSyntaxNode`](crate::CppSyntaxNode) rather than a typed node — a scope tree over a
+/// file, say — and wants the typed layer's walk. `node.descendants()` is rowan's untyped walk; this one answers types.
+pub fn typed_descendants<N: CppAstNode + 'static>(
+    node: &CppSyntaxNode,
+) -> impl Iterator<Item = N> + '_ {
+    node.descendants().filter_map(N::cast)
+}
+
+/// **The typed children of a raw node.**
+pub fn typed_children<N: CppAstNode + 'static>(
+    node: &CppSyntaxNode,
+) -> impl Iterator<Item = N> + '_ {
+    node.children().filter_map(N::cast)
+}
+
+/// **The typed ancestors of a raw node**, innermost first.
+pub fn typed_ancestors<N: CppAstNode + 'static>(
+    node: &CppSyntaxNode,
+) -> impl Iterator<Item = N> + '_ {
+    node.ancestors().filter_map(N::cast)
+}
+
+/// **The typed ancestors of a raw node, stopping before `stop`.**
+///
+/// `stop` is exclusive: the walk answers the nodes strictly between `node` and `stop` in the tree. Its use is the question "is
+/// there a lambda between this return statement and the body that owns it" — a walk without the bound ascends into the
+/// enclosing function and can never answer no.
+pub fn typed_ancestors_until<'a, N: CppAstNode + 'static>(
+    node: &'a CppSyntaxNode,
+    stop: &'a CppSyntaxNode,
+) -> impl Iterator<Item = N> + 'a {
+    node.ancestors()
+        .take_while(move |ancestor| ancestor != stop)
+        .filter_map(N::cast)
+}
+
 /// Is this node covered by one of `kinds`?
 ///
 /// A helper for the `can_cast` bodies, which are otherwise the same match repeated for every type.
@@ -367,6 +405,9 @@ fn collect_subtree_text(node: &CppSyntaxNode, out: &mut String) {
 ///
 /// Like [`subtree_text`] but keeps one space between tokens, so `unsigned char` stays readable.
 pub fn subtree_text_spaced(node: &CppSyntaxNode) -> String {
+    // **The file's own spelling with runs of whitespace collapsed** — `std::vector<int>` stays one spelling and
+    // `unsigned char` keeps its single space. Presentation rather than structure: a caller that needs to know what the type
+    // *is* asks the typed accessors (`CppDeclSpecifierSeq::get_type_text`, `CppParam::get_type_text`), not this.
     let raw = node.text().to_string();
     raw.split_whitespace().collect::<Vec<_>>().join(" ")
 }

@@ -119,6 +119,36 @@ impl CppDeclaration {
         self.child()
     }
 
+    /// **The type this declaration writes for the declarator named `name`** — `int*` for the `a` of `int* a, b;`, and `int`
+    /// for its `b`.
+    ///
+    /// A declaration carries one specifier sequence and one or more declarators, and each declarator has its own pointer,
+    /// reference and array parts. Answering "what type does this declaration give this name" without slicing the
+    /// declaration's text is what this accessor exists for; it is the question a `return` of a local asks.
+    pub fn get_type_text_of(&self, name: &str) -> Option<String> {
+        let base = self
+            .get_decl_specifiers()
+            .map(|specifiers| specifiers.get_type_text())
+            .unwrap_or_default();
+        for declarator in self.get_init_declarators() {
+            let declares_it = declarator
+                .get_name()
+                .is_some_and(|written| written.get_name_text() == name);
+            if !declares_it {
+                continue;
+            }
+            let mut the_type = base.clone();
+            if let Some(declarator) = declarator.get_declarator() {
+                the_type.push_str(&declarator.get_type_suffix());
+            }
+            let the_type = the_type.trim().to_string();
+            if !the_type.is_empty() {
+                return Some(the_type);
+            }
+        }
+        None
+    }
+
     /// The name this declaration introduces, if it has one.
     ///
     /// Four places a name can live, and they are tried in order:
@@ -544,6 +574,50 @@ impl CppDeclarator {
         self.get_name().map(|it| it.get_name_text().to_string())
     }
 
+    /// **The declarator's type parts, without its name**: `*`, `&`, `&&`, `[3]`, in source order.
+    ///
+    /// What a type spelling needs from a declarator. The name is the declarator's own and not part of the type, and the
+    /// parameter list of a function declarator is a signature rather than a type.
+    pub fn get_type_suffix(&self) -> String {
+        let mut out = String::new();
+        for element in self.syntax().children_with_tokens() {
+            match element {
+                rowan::NodeOrToken::Node(child) => match CppSyntaxKind::from(child.kind()) {
+                    // `CppPointerType` covers all three of `*`, `&` and `&&`.
+                    CppSyntaxKind::PointerType
+                    | CppSyntaxKind::ReferenceType
+                    | CppSyntaxKind::RValueReferenceType => {
+                        if let Some(pointer) = CppPointerType::cast(child) {
+                            out.push_str(&pointer.get_operator_text());
+                        }
+                    }
+                    CppSyntaxKind::ArrayType => {
+                        if let Some(array) = CppArrayType::cast(child) {
+                            out.push_str(&array.get_type_text());
+                        }
+                    }
+                    // **A nested declarator is where a pointer lives**: `int* p` is `Declarator > Declarator > PointerType`,
+                    // measured, so the outer level has to hand the question down rather than answer nothing.
+                    CppSyntaxKind::Declarator => {
+                        if let Some(inner) = CppDeclarator::cast(child) {
+                            out.push_str(&inner.get_type_suffix());
+                        }
+                    }
+                    _ => {}
+                },
+                rowan::NodeOrToken::Token(token) => match token.kind() {
+                    CppKind::Token(CppTokenKind::Star)
+                    | CppKind::Token(CppTokenKind::Ampersand)
+                    | CppKind::Token(CppTokenKind::LogicalAnd) => {
+                        out.push_str(token.text());
+                    }
+                    _ => {}
+                },
+            }
+        }
+        out
+    }
+
     /// The full spelling of this declarator including the name, trivia removed.
     pub fn get_declarator_text(&self) -> String {
         self.syntax()
@@ -830,6 +904,23 @@ impl CppPointerType {
         )
     }
 
+    /// The `*`, `&` or `&&` this pointer type is written with.
+    ///
+    /// Asked by **token kind**, which is what the grammar guarantees: the token *class* is a lexer's classification, and a
+    /// `*` is an operator rather than punctuation — a `CppPunctuationToken` cast of it answers `None`.
+    pub fn get_operator_text(&self) -> String {
+        for kind in [
+            CppTokenKind::Star,
+            CppTokenKind::Ampersand,
+            CppTokenKind::LogicalAnd,
+        ] {
+            if let Some(token) = self.token_by_kind(kind) {
+                return token.get_text().to_string();
+            }
+        }
+        String::new()
+    }
+
     pub fn get_operator_token(&self) -> Option<CppPunctuationToken> {
         self.token()
     }
@@ -860,6 +951,25 @@ impl CppArrayType {
     pub fn get_size_expr(&self) -> Option<CppExpr> {
         self.child()
     }
+
+    /// The array part of a spelling — `[3]`, `[]`, `[N + 1]` — with trivia dropped, so a type reads `int[3]`.
+    pub fn get_type_text(&self) -> String {
+        crate::syntax::node::traits::subtree_text(self.syntax())
+    }
+}
+
+/// **Append a spelling to a type being composed**, with a space only where two word-like tokens would otherwise merge.
+///
+/// The one rule a token walk needs to produce `const std::string&` and `int*` from the same code: `unsigned` `char` keeps the
+/// space, `int` `*` does not, and `std` `::` does not either.
+fn push_a_spelling(out: &mut String, spelling: &str) {
+    let word_like = |character: char| character.is_alphanumeric() || character == '_';
+    if out.chars().next_back().is_some_and(word_like)
+        && spelling.chars().next().is_some_and(word_like)
+    {
+        out.push(' ');
+    }
+    out.push_str(spelling);
 }
 
 /// A function parameter list, including its parentheses.
@@ -928,6 +1038,42 @@ impl CppParam {
     /// The parameter name. Unnamed parameters (`void f(int)`) have none.
     pub fn get_name(&self) -> Option<CppNameToken> {
         self.get_declarator()?.get_name()
+    }
+
+    /// The parameter's name as text, for comparing one name against another.
+    pub fn get_name_text(&self) -> Option<String> {
+        self.get_name().map(|name| name.get_name_text().to_string())
+    }
+
+    /// **The type this parameter is written with**, as the file spells it: `const std::string&` for
+    /// `const std::string& name`, `int*` for `int* p`, `int` for `int`.
+    ///
+    /// Composed from the tree — the specifier sequence's own type text and the declarator's pointer, reference and array
+    /// parts — rather than by cutting the parameter's text at its name. The cut is wrong for a name that occurs in the type as
+    /// well (`int int_`), and it has to decide what to do with a default value and a pack expansion.
+    pub fn get_type_text(&self) -> String {
+        let mut the_type = String::new();
+        for element in self.syntax().children_with_tokens() {
+            match element {
+                rowan::NodeOrToken::Node(child) => {
+                    // **The declarator's type parts and then nothing**: what follows a declarator is a default value or a
+                    // trailing qualifier, neither of which is the type.
+                    if let Some(declarator) = CppDeclarator::cast(child.clone()) {
+                        the_type.push_str(&declarator.get_type_suffix());
+                        break;
+                    }
+                    if let Some(specifiers) = CppDeclSpecifierSeq::cast(child) {
+                        push_a_spelling(&mut the_type, &specifiers.get_type_text());
+                    }
+                }
+                rowan::NodeOrToken::Token(token) => {
+                    if !crate::syntax::node::traits::is_trivia(token.kind().into()) {
+                        push_a_spelling(&mut the_type, token.text());
+                    }
+                }
+            }
+        }
+        the_type.trim().to_string()
     }
 
     pub fn get_default_value(&self) -> Option<CppInitializer> {

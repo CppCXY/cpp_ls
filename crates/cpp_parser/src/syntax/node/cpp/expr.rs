@@ -792,6 +792,112 @@ impl CppLambdaExpr {
         )
         .and_then(CppTypeId::cast)
     }
+
+    /// **The capture list** — the `[` … `]` written before the parameter list.
+    ///
+    /// A lambda with no capture list (`[]() {}` writes an empty one) still has the node; `None` means the tree has no list at
+    /// all, which is a malformed lambda rather than an empty capture set.
+    pub fn get_captures(&self) -> Option<CppLambdaCaptureList> {
+        self.child()
+    }
+
+    /// The parameters, when the lambda writes a list. `[]`  has none: the list is optional in the grammar.
+    pub fn get_params(&self) -> Option<super::CppParamList> {
+        self.get_param_list()
+    }
+}
+
+/// A lambda's capture list: `[a, &b, value = counter + 10]`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CppLambdaCaptureList {
+    syntax: CppSyntaxNode,
+}
+
+impl CppAstNode for CppLambdaCaptureList {
+    fn syntax(&self) -> &CppSyntaxNode {
+        &self.syntax
+    }
+
+    fn can_cast(kind: CppSyntaxKind) -> bool {
+        kind == CppSyntaxKind::LambdaCaptureList
+    }
+
+    fn cast(syntax: CppSyntaxNode) -> Option<Self> {
+        Self::can_cast(syntax.kind().into()).then_some(Self { syntax })
+    }
+}
+
+impl CppLambdaCaptureList {
+    /// Every capture, in the order written.
+    pub fn get_captures(&self) -> CppAstChildren<CppLambdaCapture> {
+        self.children()
+    }
+
+    /// Captures nothing — `[]`.
+    pub fn is_empty(&self) -> bool {
+        self.get_captures().next().is_none()
+    }
+}
+
+/// One capture: `x`, `&x`, `this`, `*this`, `=`, `&`, `...args`, or `x = expr`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CppLambdaCapture {
+    syntax: CppSyntaxNode,
+}
+
+impl CppAstNode for CppLambdaCapture {
+    fn syntax(&self) -> &CppSyntaxNode {
+        &self.syntax
+    }
+
+    fn can_cast(kind: CppSyntaxKind) -> bool {
+        kind == CppSyntaxKind::LambdaCapture
+    }
+
+    fn cast(syntax: CppSyntaxNode) -> Option<Self> {
+        Self::can_cast(syntax.kind().into()).then_some(Self { syntax })
+    }
+}
+
+impl CppLambdaCapture {
+    /// **The captured name**, when the capture names one.
+    ///
+    /// `None` for the two default captures (`[=]`, `[&]`) and for `[this]`/`[*this]`, which capture the object rather than a
+    /// name — ask [`CppLambdaCapture::is_this`] for those.
+    pub fn get_name(&self) -> Option<CppNameToken> {
+        self.token()
+    }
+
+    pub fn get_name_text(&self) -> Option<String> {
+        self.get_name().map(|name| name.get_name_text().to_string())
+    }
+
+    /// **The initializer of an init-capture** — `counter + 10` for `[value = counter + 10]`.
+    ///
+    /// `None` for every other capture, whose value is the enclosing variable's.
+    pub fn get_initializer(&self) -> Option<CppExpr> {
+        self.child()
+    }
+
+    /// Captured by reference — `[&x]`, and the `[&]` default.
+    pub fn is_by_reference(&self) -> bool {
+        self.token_by_kind(CppTokenKind::Ampersand).is_some()
+    }
+
+    /// Captures the object — `[this]` or `[*this]`.
+    pub fn is_this(&self) -> bool {
+        self.token_by_kind(CppTokenKind::ThisKeyword).is_some()
+    }
+
+    /// **Captures everything** — `[=]` or `[&]` with no name after the sigil.
+    pub fn captures_everything(&self) -> bool {
+        self.get_name().is_none() && !self.is_this()
+    }
+
+    /// A pack capture — `[...args = values]` or `[args...]`.
+    pub fn is_pack_expansion(&self) -> bool {
+        self.token_by_kind(CppTokenKind::Ellipsis).is_some()
+    }
 }
 
 /// `this`.
