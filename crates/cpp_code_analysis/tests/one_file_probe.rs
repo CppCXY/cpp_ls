@@ -107,6 +107,18 @@ fn what_one_file_costs() {
             "nothing"
         }
     );
+    // **What that view was parsed from, and whether asking again parses it again.** A `view` is a `FileView`, whose
+    // tree is built from the *rendering* — the whole closure, preprocessed — and nothing caches the tree.
+    if let Some(rendered) = session.rendering_of(&file) {
+        println!(
+            "the rendering                {:>9.2} MB, {} token(s)",
+            rendered.text.len() as f64 / (1024.0 * 1024.0),
+            rendered.spans.len()
+        );
+    }
+    let again = Instant::now();
+    let _ = session.view(&file);
+    println!("view, asked again            {:>9.1} ms", ms(again.elapsed()));
 
     let Some(view) = view else {
         println!("no view, so no question can be asked");
