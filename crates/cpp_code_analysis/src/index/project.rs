@@ -3320,15 +3320,7 @@ fn names_in_a_scope_at(
             {
                 let target = the_target_in_its_own_scope(scopes, spelling, &target);
                 if target != spelling {
-                    return names_in_a_scope_at(
-                        index,
-                        scopes,
-                        root,
-                        path,
-                        &target,
-                        written,
-                        depth + 1,
-                    );
+                    return names_in_a_scope_at(index, scopes, root, path, &target, written, 0);
                 }
             }
         }
@@ -3496,13 +3488,7 @@ fn names_in_a_scope_at(
                                 && !declarations_in(&candidate, index, path, written).is_empty()
                             {
                                 return names_in_a_scope_at(
-                                    index,
-                                    scopes,
-                                    root,
-                                    path,
-                                    &candidate,
-                                    written,
-                                    depth + 1,
+                                    index, scopes, root, path, &candidate, written, 0,
                                 );
                             }
                         }
@@ -6758,6 +6744,23 @@ fn range_for_element_type(
         })?;
 
     let range = range_expression_of_the_pattern(&loop_node)?;
+
+    // **A range built out of adaptors has its element computed from the expression**, because the view it makes has no
+    // name this layer can spell: `numbers | std::views::filter(f) | std::views::take(2)` yields `int` even though no
+    // declaration says so. See [`element_of_a_range_expression`].
+    if let Some(element) = element_of_a_range_expression(
+        memo,
+        index,
+        declaring,
+        scopes,
+        root,
+        path,
+        &range,
+        depth + 1,
+    ) {
+        return Some(element.map(|(type_of, _)| type_of));
+    }
+
     let Known::Yes((container, _)) = type_of_expression_memoed(
         memo,
         index,
@@ -6777,6 +6780,284 @@ fn range_for_element_type(
         Some(element) => Known::Yes(crate::sema::types::parse_type_spelling(&element)),
         None => Known::Unknown(UnknownReason::UnknownType(Box::from(container.to_string()))),
     })
+}
+
+/// **The element a range expression yields, when the expression *builds* the range.**
+///
+/// The named-container case above is one half; this is the other, and it is what C++20 ranges are written with:
+///
+/// ```text
+/// numbers | std::views::filter(f) | std::views::take(2)   the element of `numbers`
+/// map | std::views::keys                                  the key of the map's pair
+/// map | std::views::values                                its value
+/// rows | std::views::join                                 the element of the inner range
+/// std::views::iota(1, 6)                                  the type of `1`
+/// std::ranges::subrange(begin, end)                       the element of the range `begin` came from
+/// ```
+///
+/// A view has no name this layer can spell — its type is a class template over a closure type — so the question is asked of
+/// the **expression** and never of a `Type`: the left operand says the element, and each adaptor is a function on it. An
+/// adaptor that changes the element through a body (`transform`'s lambda) is refused: reading a `return` there needs the
+/// same deduction a function body does, and a guess would offer the wrong members in the loop.
+///
+/// `None` when the expression is not one of these shapes — the caller falls back to typing it as a value.
+fn element_of_a_range_expression(
+    memo: &TypeMemo,
+    index: &ProjectIndex,
+    declaring: &mut dyn FnMut(&Path) -> Option<crate::FileView>,
+    scopes: &crate::ScopeTree,
+    root: &cpp_parser::CppSyntaxNode,
+    path: &Path,
+    expression: &cpp_parser::CppSyntaxNode,
+    depth: usize,
+) -> Option<Known<(Type, PathBuf)>> {
+    // **A pipe chain**: the element of the left, adapted by the right.
+    if let Some((left, right)) = the_two_operands_of_a_pipe(expression)
+        && let Some(left_element) = element_of_a_range_expression(
+            memo,
+            index,
+            declaring,
+            scopes,
+            root,
+            path,
+            &left,
+            depth + 1,
+        )
+    {
+        return Some(adapted_element(&left_element, &right, index, path));
+    }
+
+    // **The base case: a range expression that is a value.** `numbers`, `collection`, a function call returning a
+    // container — the element is the one its type yields, which is the path named containers already took. It has to be
+    // here and not only in the caller, because the pipe case recurses to a value.
+    if CppSyntaxKind::from(expression.kind()) != CppSyntaxKind::BinaryExpr
+        && a_call_to_a_function(expression).is_none()
+        && let Known::Yes((container, file)) = type_of_expression_memoed(
+            memo,
+            index,
+            declaring,
+            scopes,
+            root,
+            path,
+            expression,
+            depth + 1,
+        )
+        && let Some(element) = range_element_of(&container)
+    {
+        return Some(Known::Yes((
+            crate::sema::types::parse_type_spelling(&element),
+            file,
+        )));
+    }
+
+    // **`std::views::iota(1, 6)`** — a counted range of the first argument's type.
+    if let Some(callee) = a_call_to_a_function(expression) {
+        let written = callee.text().to_string();
+        let written = written.trim();
+        let name = written.rsplit("::").next().unwrap_or(written);
+        if name == "iota" {
+            let arguments = crate::inlay::arguments_of(expression).unwrap_or_default();
+            let first = arguments.first()?;
+            return Some(
+                match type_of_expression_memoed(
+                    memo,
+                    index,
+                    declaring,
+                    scopes,
+                    root,
+                    path,
+                    first,
+                    depth + 1,
+                ) {
+                    Known::Yes((type_of, file)) => Known::Yes((type_of, file)),
+                    _ => Known::Unknown(UnknownReason::UnknownType(Box::from("std::views::iota"))),
+                },
+            );
+        }
+        // **`std::ranges::subrange(begin, end)`** — the element of the range a `begin()` came from.
+        if name == "subrange" {
+            let arguments = crate::inlay::arguments_of(expression).unwrap_or_default();
+            let first = arguments.first()?;
+            if let Some(element) = element_of_an_iterator_expression(
+                memo,
+                index,
+                declaring,
+                scopes,
+                root,
+                path,
+                first,
+                depth + 1,
+            ) {
+                return Some(element);
+            }
+        }
+    }
+
+    None
+}
+
+/// **The two operands of `a | b`**, when the expression is one.
+///
+/// The operator is a **token** between two nodes, so the two children are the operands — the same shape every
+/// `BinaryExpr` has.
+fn the_two_operands_of_a_pipe(
+    expression: &cpp_parser::CppSyntaxNode,
+) -> Option<(cpp_parser::CppSyntaxNode, cpp_parser::CppSyntaxNode)> {
+    if CppSyntaxKind::from(expression.kind()) != CppSyntaxKind::BinaryExpr {
+        return None;
+    }
+    let is_a_pipe = expression
+        .children_with_tokens()
+        .filter_map(|element| element.into_token())
+        .any(|token| token.text() == "|");
+    if !is_a_pipe {
+        return None;
+    }
+    let mut operands = expression.children();
+    let left = operands.next()?;
+    let right = operands.next()?;
+    Some((left, right))
+}
+
+/// **The element a view adaptor yields from `element`** — the right-hand side of a pipe, applied.
+fn adapted_element(
+    element: &Known<(Type, PathBuf)>,
+    adaptor: &cpp_parser::CppSyntaxNode,
+    index: &ProjectIndex,
+    path: &Path,
+) -> Known<(Type, PathBuf)> {
+    let Known::Yes((element, file)) = element else {
+        return element.clone();
+    };
+    let written = adaptor.text().to_string();
+    let written = written.trim();
+    let _ = (index, path);
+
+    // **`transform` is refused**: its element comes from the lambda's body, and a guess would offer the wrong members.
+    if written.contains("views::transform") || written.contains("views::transform_view") {
+        return Known::Unknown(UnknownReason::UnknownType(Box::from(
+            "std::views::transform",
+        )));
+    }
+
+    // **`keys` / `values`** are the two halves of the left element's `pair` — `map | std::views::keys` yields `K`.
+    if written.contains("views::keys") {
+        return match pair_component(element, 0) {
+            Some(component) => Known::Yes((component, file.clone())),
+            None => Known::Unknown(UnknownReason::UnknownType(Box::from("std::views::keys"))),
+        };
+    }
+    if written.contains("views::values") {
+        return match pair_component(element, 1) {
+            Some(component) => Known::Yes((component, file.clone())),
+            None => Known::Unknown(UnknownReason::UnknownType(Box::from("std::views::values"))),
+        };
+    }
+
+    // **`join`** flattens a range of ranges: the element of the element.
+    if written.contains("views::join") {
+        return match element_of_the_element(element) {
+            Some(inner) => Known::Yes((inner, file.clone())),
+            None => Known::Unknown(UnknownReason::UnknownType(Box::from("std::views::join"))),
+        };
+    }
+
+    // **Every other adaptor passes the element through**: `filter`, `reverse`, `take`, `drop`, `take_while`,
+    // `drop_while`, `filter_view`, `reverse_view`, `take_view`, `drop_view`, `common`, `all`, `counted`, `elements`…
+    Known::Yes((element.clone(), file.clone()))
+}
+
+/// **One component of a `pair`-shaped type**, without the `const` a map's key carries.
+fn pair_component(element: &Type, position: usize) -> Option<Type> {
+    let Type::Named { name, arguments } = element else {
+        return None;
+    };
+    let plain = name.rsplit("::").next().unwrap_or(name);
+    if plain != "pair" && plain != "tuple" {
+        return None;
+    }
+    let component = arguments.get(position)?.clone();
+    Some(strip_a_leading_const(&component))
+}
+
+/// The same type without a leading `const` — `keys` yields the key, and the key of a `map` is `const K` **in the pair**,
+/// not in the view's element.
+fn strip_a_leading_const(type_of: &Type) -> Type {
+    let written = type_of.to_string();
+    match written.strip_prefix("const ") {
+        Some(rest) => crate::sema::types::parse_type_spelling(rest),
+        None => type_of.clone(),
+    }
+}
+
+/// **The element of the element** — `join`'s rule, for the shapes this layer can read.
+fn element_of_the_element(element: &Type) -> Option<Type> {
+    let written = element_of(element, 0)?;
+    Some(crate::sema::types::parse_type_spelling(&written))
+}
+
+/// **The element of the range an iterator expression came from** — `numbers.begin()`, `numbers.begin() + 3`.
+///
+/// The iterator's own type is a class template this layer cannot read; the range whose `begin()` produced it is written in
+/// the expression, and its element is the answer.
+fn element_of_an_iterator_expression(
+    memo: &TypeMemo,
+    index: &ProjectIndex,
+    declaring: &mut dyn FnMut(&Path) -> Option<crate::FileView>,
+    scopes: &crate::ScopeTree,
+    root: &cpp_parser::CppSyntaxNode,
+    path: &Path,
+    expression: &cpp_parser::CppSyntaxNode,
+    depth: usize,
+) -> Option<Known<(Type, PathBuf)>> {
+    // `v.begin()` / `v.end()` — a member call whose object is the range.
+    if let Some(access) = crate::sema::resolve::member_access_of(expression) {
+        let written = access.member.clone();
+        if written == "begin" || written.ends_with(".begin") {
+            let Known::Yes((container, file)) = type_of_expression_memoed(
+                memo,
+                index,
+                declaring,
+                scopes,
+                root,
+                path,
+                &access.object,
+                depth + 1,
+            ) else {
+                return None;
+            };
+            let element = range_element_of(&container)?;
+            return Some(Known::Yes((
+                crate::sema::types::parse_type_spelling(&element),
+                file,
+            )));
+        }
+    }
+    // `begin + 3` — the iterator is the left operand, and the question is the same.
+    if CppSyntaxKind::from(expression.kind()) == CppSyntaxKind::BinaryExpr {
+        let left = expression.children().next()?;
+        return element_of_an_iterator_expression(
+            memo,
+            index,
+            declaring,
+            scopes,
+            root,
+            path,
+            &left,
+            depth + 1,
+        );
+    }
+    None
+}
+
+/// **The callee of a call expression**, when the expression is one.
+fn a_call_to_a_function(
+    expression: &cpp_parser::CppSyntaxNode,
+) -> Option<cpp_parser::CppSyntaxNode> {
+    if CppSyntaxKind::from(expression.kind()) != CppSyntaxKind::CallExpr {
+        return None;
+    }
+    expression.children().next()
 }
 
 /// **The element a range yields** — the whole element, where [`element_of`] answers one *component* of it.
@@ -8026,6 +8307,47 @@ fn type_of_a_call(
         ));
     }
 
+    // **The ranges algorithms, whose return type the standard fixes.** The implementation's `iterator` is a class
+    // template over a closure type, so the index cannot spell it; what a reader does with the result is dereference it or
+    // count with it, and those are the two answers below. See [`a_ranges_algorithm_the_call_names`].
+    if let Some(algorithm) = a_ranges_algorithm_the_call_names(&callee) {
+        let arguments = crate::inlay::arguments_of(call).unwrap_or_default();
+        match algorithm.as_str() {
+            "find" | "find_if" | "find_if_not" | "max" | "min" | "max_element" | "min_element"
+            | "lower_bound" | "upper_bound" | "equal_range" | "search" => {
+                if let Some(element) = arguments.first().and_then(|first| {
+                    element_of_a_range_expression(
+                        memo, index, declaring, scopes, root, path, first, 0,
+                    )
+                }) {
+                    return element;
+                }
+            }
+            "count" | "count_if" | "distance" | "ssize" => {
+                return Known::Yes((
+                    crate::sema::types::parse_type_spelling("std::ptrdiff_t"),
+                    path.to_path_buf(),
+                ));
+            }
+            "size" => {
+                return Known::Yes((
+                    crate::sema::types::parse_type_spelling("std::size_t"),
+                    path.to_path_buf(),
+                ));
+            }
+            "subrange" => {
+                if let Some(first) = arguments.first()
+                    && let Some(element) = element_of_an_iterator_expression(
+                        memo, index, declaring, scopes, root, path, first, 0,
+                    )
+                {
+                    return element;
+                }
+            }
+            _ => {}
+        }
+    }
+
     // **A call whose callee names a class is a temporary of that class** — `std::shared_ptr<int>(p, deleter)`,
     // `Widget(1)`. The constructor is not a function the spelling names, so every arm above answers nothing, and the
     // class (with its written template arguments, which `parse_type_spelling` reads) was in the spelling all along.
@@ -8131,6 +8453,40 @@ fn the_name_before_its_template_arguments(callee: &cpp_parser::CppSyntaxNode) ->
         .chars()
         .all(|character| character.is_alphanumeric() || character == '_' || character == ':');
     names_something.then(|| name.to_string())
+}
+
+/// **The ranges algorithm a callee names** — `std::ranges::find`, `ranges::find`.
+///
+/// The name is read from the spelling the call wrote, and only the `std::ranges` family is recognised: a project's own
+/// `find` is a function whose declaration the ordinary path reads, and answering it from a table would be a guess.
+fn a_ranges_algorithm_the_call_names(callee: &cpp_parser::CppSyntaxNode) -> Option<String> {
+    let written = callee.text().to_string();
+    let written = written.trim();
+    let last = written.rsplit("::").next()?;
+    // **A call written in the ranges namespace's own spelling** — `std::ranges::find`, `ranges::find`. A bare `find`
+    // is left to the ordinary path: a project declares one as often as not, and the table would take it.
+    let in_the_ranges_namespace = written.contains("ranges::");
+    let is_an_algorithm = matches!(
+        last,
+        "find"
+            | "find_if"
+            | "find_if_not"
+            | "max"
+            | "min"
+            | "max_element"
+            | "min_element"
+            | "count"
+            | "count_if"
+            | "distance"
+            | "size"
+            | "ssize"
+            | "subrange"
+            | "lower_bound"
+            | "upper_bound"
+            | "equal_range"
+            | "search"
+    );
+    (in_the_ranges_namespace && is_an_algorithm).then(|| last.to_string())
 }
 
 fn a_callee_that_names_a_type(
