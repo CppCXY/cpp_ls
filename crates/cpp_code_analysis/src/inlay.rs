@@ -120,8 +120,11 @@ where
             // the declaration that holds the declarator, so the question "was this written `auto`" is asked of the
             // declaration rather than of the declarator.
             CppSyntaxKind::InitDeclarator => {
-                // A structured binding is its own shape below; the declarator here holds the names.
-                if node.children().any(|child| {
+                // A structured binding is its own shape below; the declarator here holds the names — **a level
+                // deeper than a child**, measured: `InitDeclarator > Declarator > StructuredBinding`. The children test
+                // never fired, so the range-for's `auto` drew the element type on top of the per-name hint and a reader
+                // saw `name: const std::string` twice.
+                if node.descendants().any(|child| {
                     CppSyntaxKind::from(child.kind()) == CppSyntaxKind::StructuredBinding
                 }) {
                     continue;
@@ -172,6 +175,43 @@ where
                             kind: TypeHintKind::StructuredBinding,
                         });
                     }
+                }
+            }
+            // **A lambda with no written return type** — `[](int v) { return v * 10; }` is an `int`, and the
+            // deduction for it already exists (`a_lambdas_return_type`, which a *call* of the lambda uses). The hint goes
+            // where the trailing `-> T` would be written: just before the body, after the specifiers.
+            CppSyntaxKind::LambdaExpr => {
+                if !contains(range, node.text_range().start().into()) {
+                    continue;
+                }
+                let Some(body) = node
+                    .children()
+                    .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::CompoundStat)
+                else {
+                    continue;
+                };
+                // **The file's own answer wins.** `[](int v) noexcept -> int { … }` states the type; a hint that repeated
+                // it would be noise, and one that disagreed with it would be a lie.
+                let written = node.text().to_string();
+                let before_the_body = written
+                    .find(&body.text().to_string())
+                    .map(|at| &written[..at])
+                    .unwrap_or("");
+                if before_the_body.contains("->") {
+                    continue;
+                }
+                let at = usize::from(body.text_range().start());
+                if !contains(range, at) {
+                    continue;
+                }
+                if let Some(label) = crate::sema::declarations::a_lambdas_return_type(&node, &[])
+                    && is_a_type_spelling(&label)
+                {
+                    hints.push(TypeHint {
+                        offset: at,
+                        label,
+                        kind: TypeHintKind::DeducedReturn,
+                    });
                 }
             }
             // **`auto f(…)`** — the return type the body deduces, drawn after the parameter list where a trailing

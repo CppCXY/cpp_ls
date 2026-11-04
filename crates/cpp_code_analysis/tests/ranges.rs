@@ -155,10 +155,10 @@ int main() {
     );
 }
 
-/// **`views::transform` is refused rather than guessed** — its element comes from the lambda's body, and a wrong member
-/// list is worse than none.
+/// **`views::transform`'s element is the lambda's return type** — the deduction `a_lambdas_return_type` already had, so
+/// this is one answer rather than a guess.
 #[test]
-fn a_transform_is_refused() {
+fn a_transform_answers_the_lambdas_return() {
     let source = "
 #include <ranges>
 #include <vector>
@@ -171,8 +171,27 @@ int main() {
 ";
     assert_eq!(
         type_after(source, "value :"),
-        None,
-        "`transform`'s element is the lambda body's return type, which this layer does not deduce: an answer here would \
-         be the loop offering the wrong members"
+        Some("int".to_string()),
+        "`v * 10` is an `int`, and that is what the transform yields"
     );
+}
+
+/// **And a body this layer cannot type is still refused** — a transform that answers a wrong element would offer the loop
+/// wrong members, which is the failure the refusal exists for.
+#[test]
+fn a_transform_of_an_unclearable_body_is_refused() {
+    let source = "
+#include <ranges>
+#include <vector>
+struct S { int field; };
+void f(S other) {
+    std::vector<int> numbers;
+    for (auto value : numbers | std::views::transform([&](int v) { return other; })) {
+        value = 0;
+    }
+}
+";
+    // The body returns a parameter of a **captured** object — a name this syntax walk cannot type — so the element is
+    // unknown rather than `S`.
+    assert_eq!(type_after(source, "value :"), None);
 }

@@ -1380,15 +1380,19 @@ fn a_type_the_expression_names(
     }
     let names_a_type = match index.definition(spelled, path) {
         Known::Yes(found) => found.fact.kind == crate::DeclKind::Type,
+        // **A name is a type when one of its declarations is one.** `std::string` is an alias (a `Type`) and also has a
+        // constructor named `string`, so the name query answers `Ambiguous`; requiring *every* candidate to be a type
+        // refused the head of `std::string{"three"}` and, with it, the whole `std::tuple{1, 2.5, std::string{"three"}}`
+        // (measured on `basics.cpp`: the tuple deduced to its bare name). A construction needs a class, and a name that
+        // any of whose declarations is a type can be one.
         Known::Unknown(UnknownReason::Ambiguous(_)) => index
             .definitions(spelled, path)
             .value()
             .is_some_and(|found| {
-                !found.found.is_empty()
-                    && found
-                        .found
-                        .iter()
-                        .all(|declaration| declaration.fact.kind == crate::DeclKind::Type)
+                found
+                    .found
+                    .iter()
+                    .any(|declaration| declaration.fact.kind == crate::DeclKind::Type)
             }),
         Known::Unknown(_) | Known::No => false,
     };
@@ -1414,6 +1418,67 @@ fn a_namespace_aliass_target(index: &ProjectIndex, path: &Path, class: &str) -> 
         Some(scope) => Some(format!("{scope}::{written}")),
         None => Some(written),
     }
+}
+
+/// **What a class-template use with no written arguments stands for, from the standard's own guides.**
+///
+/// `std::tuple{1, 2.5, s}` is `std::tuple<int, double, S>` and `std::pair pair{4, 5}` is `std::pair<int, int>` — the
+/// standard fixes both, and neither is readable from libstdc++'s constructors (a constrained variadic template for `tuple`,
+/// and a `pair` whose declaring class the walk does not reach). A table is the honest form for a closed set: the names are
+/// the standard's, and a class a project calls `pair` is not `std::pair` (the spelling must be `std`-qualified, or the fact
+/// must say its scope is `std`).
+///
+/// The number of elements has to line up with the rule, which is what keeps `std::pair one{1}` from answering a
+/// `pair<int>` the language would reject.
+fn the_deduction_the_standard_fixes(
+    name: &str,
+    class_as_written: &str,
+    element_types: &[crate::sema::types::Type],
+) -> Option<Vec<crate::sema::types::Type>> {
+    let plain = class_as_written
+        .rsplit("::")
+        .next()
+        .unwrap_or(class_as_written);
+    let in_the_library = class_as_written.contains("std::") || name.starts_with("std::");
+    if !in_the_library {
+        return None;
+    }
+
+    // **Every element, one per parameter** — `pair` takes exactly two, `tuple` as many as are written.
+    match plain {
+        "pair" if element_types.len() == 2 => {
+            return Some(element_types.to_vec());
+        }
+        "tuple" if !element_types.is_empty() => {
+            return Some(element_types.to_vec());
+        }
+        _ => {}
+    }
+
+    // **One argument, from the first element** — the containers whose braced form is
+    // `Container(std::initializer_list<T>)`.
+    let from_the_first = matches!(
+        plain,
+        "optional"
+            | "vector"
+            | "list"
+            | "deque"
+            | "set"
+            | "multiset"
+            | "unordered_set"
+            | "unordered_multiset"
+            | "basic_string"
+            | "valarray"
+            | "initializer_list"
+            | "stack"
+            | "queue"
+            | "priority_queue"
+            | "span"
+    );
+    if from_the_first && element_types.len() == 1 {
+        return Some(element_types.to_vec());
+    }
+    None
 }
 
 /// **The class arguments a braced initialisation deduces** — `std::pair pair{1, 2}` is a `pair<int, int>`.
@@ -1512,9 +1577,21 @@ fn the_arguments_a_braced_initialisation_deduces(
             .find(|member| !member.fact.parameters.is_empty())
             .map(|member| member.fact.parameters.clone())?,
     };
+    // **The standard's own guides, before the constructors are walked.** The library's constructors are constrained
+    // templates (`tuple(_UElements&&...) requires …`), which no pairing of the class's parameters can read; the guide is a
+    // fact about the standard rather than about the text. See [`the_deduction_the_standard_fixes`].
+    if let Some(deduced) = the_deduction_the_standard_fixes(name, &class_as_written, &element_types)
+    {
+        return Some(crate::sema::types::Type::Named {
+            name: class_as_written,
+            arguments: deduced,
+        });
+    }
+
     if parameters.is_empty() {
         return None;
     }
+
     let mut agreed: Option<Vec<crate::sema::types::Type>> = None;
     for constructor in listed
         .members
@@ -6978,11 +7055,25 @@ fn adapted_element(
     let written = written.trim();
     let _ = (index, path);
 
-    // **`transform` is refused**: its element comes from the lambda's body, and a guess would offer the wrong members.
+    // **`transform`'s element is the lambda's return type.** It used to be refused — the body is where the answer is, and
+    // a guess would offer the wrong members — but the deduction for a lambda's `return` exists
+    // (`a_lambdas_return_type`, which a call of the lambda uses), so this is the same answer rather than a guess. A body
+    // this layer cannot type (`return ++counter;`) still answers nothing.
     if written.contains("views::transform") || written.contains("views::transform_view") {
-        return Known::Unknown(UnknownReason::UnknownType(Box::from(
-            "std::views::transform",
-        )));
+        let lambda = adaptor
+            .descendants()
+            .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::LambdaExpr);
+        return match lambda
+            .and_then(|lambda| crate::sema::declarations::a_lambdas_return_type(&lambda, &[]))
+        {
+            Some(label) => Known::Yes((
+                crate::sema::types::parse_type_spelling(&label),
+                file.clone(),
+            )),
+            None => Known::Unknown(UnknownReason::UnknownType(Box::from(
+                "std::views::transform",
+            ))),
+        };
     }
 
     // **`keys` / `values`** are the two halves of the left element's `pair` — `map | std::views::keys` yields `K`.
