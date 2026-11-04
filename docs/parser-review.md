@@ -192,9 +192,29 @@ That is the worst class of bug for a lossless tree — silent and position-shift
 every C API header has one. The control test (`a_comment_between_two_declarations_survives`) passes for the same text
 without the linkage block, so the machinery for comments is fine; the container is what is wrong.
 
-Where to look: `parse_linkage_block` (`decls.rs`), the `parse_declaration(p).is_err()` branch, and whichever rule left
-the cursor on a trivia token — the invariant "the cursor is always on a significant token" is the one that is being
-violated, and it is worth asserting it (a `debug_assert` in `bump`) before fixing the container.
+Where to look, and how far the investigation got. The invariant being violated is "the cursor always stands on a token
+`bump` can emit", and it is now **asserted** in `CppParser::bump` — the whole parser suite (476 tests) still passes
+with the assert in place, so this shape is the only place it happens. With the assert in, the failing test names the
+exact step:
+
+```text
+the cursor is on LineComment at 23, which `bump` cannot emit — every later offset is shifted
+  at decls.rs:5786                       the linkage loop's "always advance" branch
+```
+
+and a trace of the loop says where the cursor came from:
+
+```text
+LINKAGE loop: cursor IntKeyword at 8   (before=8)     the first declaration parses
+LINKAGE loop: cursor LineComment at 23 (before=23)    the previous iteration left it there
+```
+
+So the defect is not in the linkage loop: **`parse_declaration` leaves the cursor on the trailing comment** of the
+declaration it just read, and the loop then finds a token `parse_declaration` refuses and cannot advance past.
+Only three things move the cursor (`bump` computes the next token through `skip_trivia`; `init` and `rollback` set it
+from a checkpoint), so the next step is to watch `token_index` across one declaration inside a linkage block and find
+the write that puts it on a comment — a `rollback` to a checkpoint taken there is the shape to check first. A patch in
+the loop would hide it; the fix belongs where the cursor is set.
 
 ## 5. Code quality
 

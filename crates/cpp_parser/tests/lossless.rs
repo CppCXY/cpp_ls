@@ -51,8 +51,16 @@ fn a_comment_between_two_declarations_survives() {
 ///
 /// `parse_linkage_block`'s recovery branch marks an `ErrorNode` and calls `bump`, and `bump` emits nothing when the
 /// token at the cursor is **trivia** — comments are trivia to `CppParser::skip_trivia`, which is what makes the node
-/// empty and the comment's text vanish. The cursor should never stand on trivia; something in the declaration path
-/// leaves it there in this container only, and that is what the fix has to find.
+/// empty and the comment's text vanish. `bump` now asserts that this cannot happen, and in a debug build this test
+/// fails on **that** assertion rather than on the round trip:
+///
+/// ```text
+/// the cursor is on LineComment at 23, …    at decls.rs:5786
+/// ```
+///
+/// A trace of the loop shows where it came from — `cursor IntKeyword at 8`, then `cursor LineComment at 23` on the
+/// next iteration — so `parse_declaration` leaves the cursor on the trailing comment it just passed, and the loop
+/// meets a token it cannot advance past. That is where the fix belongs, not in the loop.
 ///
 /// `extern "C"` is not an exotic shape: it is in every C API header, and `cxxabi.h` is where this was first measured
 /// (22 315 bytes in, 19 987 bytes out — 677 lines of 717).

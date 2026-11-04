@@ -5764,6 +5764,7 @@ pub fn parse_linkage_block(p: &mut CppParser) -> ParseResult {
 
         let member_base = p.open_marks();
         let before = p.current_token_index();
+        eprintln!("LINKAGE loop: cursor {:?} at {} (before={})", p.current_token(), p.current_token_index(), before);
         let before_events = p.current_event_count();
         if parse_declaration(p).is_err() {
             // **With their end events**, for the third time in this file's history (see `end_marks_to`): a

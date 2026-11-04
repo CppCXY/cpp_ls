@@ -1631,6 +1631,18 @@ impl<'a> CppParser<'a> {
     pub fn bump(&mut self) {
         let consumed_index = self.token_index;
 
+        // **The cursor must stand on a token that can be emitted.** It used to be possible for it to stand on
+        // *trivia*, and the shape of the damage is worth stating because nothing else catches it: `bump` emits
+        // nothing for a trivia kind (the round above emits those), so the token's bytes were consumed and emitted
+        // nowhere, and the tree silently stopped being lossless from that offset on. Measured on `cxxabi.h`: 22 315
+        // bytes in, 19 987 out, with the comment that was lost replaced by a zero-width `ErrorNode` and **zero**
+        // syntax errors reported — see `tests/lossless.rs`.
+        debug_assert!(
+            !is_trivia_kind(self.current_token),
+            "the cursor is on {:?} at {consumed_index}, which `bump` cannot emit — every later offset is shifted",
+            self.current_token
+        );
+
         // Trivia tokens are emitted by `parse_trivia_tokens`, which runs over the whole skipped
         // span; pushing them here as well would duplicate them in the tree.
         if consumed_index < self.tokens.len() && !is_trivia_kind(self.current_token) {
