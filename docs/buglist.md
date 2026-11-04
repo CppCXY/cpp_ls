@@ -499,3 +499,32 @@ template) gets no header, `consume(T&&)` and `Builder::with` do.
   argument types are passed today.
 * **A lambda parameter's type at a call site** (#11a) — unchanged: `auto f = [](auto v) { … }; f(3)` needs the call's
   argument types substituted into the generic lambda's parameter.
+
+---
+
+## 24. The two lambda shapes are closed (`25e592c`), and `switchSourceHeader` (`1db5b5f`)
+
+**#23's first item — a generic lambda's parameter.** `[](auto v) { return v; }` called as `f(3)` now returns an `int`: the
+parameters written `auto` are paired with the call's arguments **by position**, and the returns are typed over those names.
+`[](auto v) { return v * 2; }` called with `2.5` is a `double`. A call that wrote no arguments (the inlay asks about the lambda
+itself) still has nothing to pair and refuses.
+
+**#23's second item — an init-capture.** `[value = counter + 10] { return value; }` now deduces `int`: the capture's
+initializer is an expression the same walk types, with the **enclosing function's** declarations in hand — the nearest
+`Declaration` above the lambda is `auto initialised = …`, whose body does not hold `counter`, and the outermost one does. The
+inlay shows `-> int` for it, and for `[]() noexcept { return 1; }`; a body with no return gets nothing.
+
+**`textDocument/switchSourceHeader`.** clangd's extension method, declared as a request in `handlers/switch_source_header`
+(params `TextDocumentIdentifier`, result `Option<Uri>`), answered by the same order clangd uses: same directory and stem,
+then an `#include` in either direction, then anything the project lists by stem. The client is the VS Code extension's
+`cppls.switchheadersource` bound to `alt+o`.
+
+**What is left of the lambda work:** a capture that is **plain** (`[counter]`, `[&counter]`) has no initializer, so a body that
+returns it still refuses — the type is the enclosing variable's, which needs a name lookup from a capture node.
+
+## 25. The editor protocol this server now extends
+
+`textDocument/switchSourceHeader` is the first **non-standard** request in the dispatch table. The pattern for the next one is
+written down in that module: a zero-sized enum implementing `lsp_types::request::Request`, a handler returning
+`RequestOutcome`, and a row in `handlers/request_handler.rs` — plus, on the client side, a command and a keybinding in the
+extension. A capability row is deliberately empty: the method needs no advertisement, and an old client simply never sends it.
