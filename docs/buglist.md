@@ -375,3 +375,35 @@ name. Two things beside it are missing:
 * #14 — the **call's type on a braced construction** (`auto y = B<int>{}.with(2)` answers the initialiser's spelling while
   the hover on `.with` is right).
 * #12 — done in `19e32a0`.
+
+---
+
+## 18. The declaration vocabulary — `3fc280a`
+
+`typename` was the example, and the request was the whole family: `constexpr`, `auto`, `decltype`, `namespace`, `explicit`,
+`noexcept`, `const`, `static`, `class`, `struct`, `union`, `enum`, `template`, `typedef`, `using`, `alignas`, `alignof`,
+`consteval`, `constinit`, `volatile`, `mutable`, `extern`, `register`, `thread_local`, `inline`, `virtual`, `friend` — one
+colour; `return`, `if`, `while`, `for`, `switch`, `break`, `continue`, `goto`, `case`, `default`, `sizeof`, `new`, `delete`,
+`throw`, `try`, `catch`, `co_*` and the `_cast`s — the standard keyword colour. The custom type is `declarationKeyword`
+(it was `typename`), the extension maps it to `keyword.operator.cast`, and the fallbacks are `modifier` then `keyword`.
+
+## 19. Ranges — what `4c519d1` and `6d62857` answer, and what they do not
+
+**Answered** (measured, `tests/ranges.rs`): the element of a pipe chain (`numbers | views::filter(f) | views::take(2)` →
+`int`), of `views::iota`, of `views::keys`/`values`, of `views::join`; `std::ranges::find`/`max`/`min`/`*_element` → the
+element, `count_if`/`distance` → `std::ptrdiff_t`, `size` → `std::size_t`, `subrange` → the element of the range its
+iterator came from; `std::views::` completes its adaptors; a loop variable over a chain completes the element's members.
+
+**Not answered, in the order they matter:**
+
+* **`views::transform`'s element** — it is the lambda body's return type, and the deduction refuses rather than guesses.
+  The shape of the fix: type the lambda's `return` the way a function body's is typed (`type_a_return_states`), then
+  substitute the parameter from the range's element. `tests/ranges.rs` pins the refusal so the change is deliberate.
+* **`std::views`' members in the index** — `members_of("std::views")` answers 0 while `std::ranges` answers 125, so the
+  *hover* on `std::views::filter` has nothing to say even though completion now offers the name. That is the summary of
+  `<ranges>` (or of the `bits/ranges_*.h` that open the namespace) not recording `inline constexpr` adaptor objects —
+  worth a probe of one of those files' facts.
+* **`ranges.cpp`'s functions** — `pipeline()` and `counted_range()` return `auto` with no written return type, and their
+  `return result;` names a **local**, which the syntax deduction refuses (`a_data_member_type` covers members, not locals).
+  So `for (int value : pipeline())` has no element. The fix is the same one the deduced-return work opened: type a `return`
+  that names a local by the local's declared type.
