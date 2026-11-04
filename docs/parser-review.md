@@ -53,6 +53,35 @@ The important ratio is the last one: **template-dense code costs ~2.5× more per
 difference is entirely in the grammar — speculation, `TypeNames` lookups, the `<`-is-it-a-template question. The tree
 library's share is stable at 21–24 MB/s whatever the input.
 
+### Where the grammar's time goes
+
+`CPPLS_PARSER_STATS=1` prints a phase table (inclusive times, from `parser/phases.rs`) and a set of counts. On the
+3.98 MB standard-header unit — 972 104 tokens, 688 159 nodes, 2 467 911 events — the parse is **1.56 s** and it splits:
+
+```text
+declaration              769 ms   27 306 calls    28.2 µs each     48 % of the parse
+  specifiers             192 ms   64 052 calls    3.0 µs each     12 %   ← the largest single named item
+  declarator              82 ms   43 524 calls    1.9 µs each      5 %
+  expression              69 ms   49 399 calls    1.4 µs each      4 %
+  template-arguments      32 ms   19 114 calls    1.7 µs each      2 %
+  declarator-suffixes    0.1 ms      254 calls
+tree building            187 ms   688 159 nodes                  12 %
+lexing                    27 ms   978 289 tokens                  2 %
+doc layer               10.6 ms    8 887 comment groups         0.7 %   (1.2 µs each)
+statement              1901 ms   36 804 calls   — inflated: a file-scope declaration is parsed *through*
+                                                `parse_stat`, and nested statements count for each enclosing one
+```
+
+Counts, from the same switch: 115 086 checkpoints (0.12 per token), 15 665 rollbacks, 38 411 type-name questions, 2 751
+`>`-closing questions, and the doc layer at ~1 µs per comment group. **Per-file cost is flat** — the slowest ten files
+of the corpus are 113–128 µs/KB against an average of 110 — so there is no pathological construct anywhere in
+libstdc++, and the 2.5× over plain code is not one hot spot but the ordinary cost of the constructs std headers are
+made of.
+
+That last number is the important one for anyone hoping to "optimize the template path": **there is no single place to
+win 2×**. The grammar's cost is spread over declaration machinery and per-token work; the best single named target is
+`parse_decl_specifier_seq` at 12 % of the parse.
+
 A translation unit is not what a reader feels, either: the analysis parses a **rendering** (the file with its macros
 expanded, which for a header-heavy file is the whole closure). The parser's own dump tool records that case: *"on the
 3.3 MB cooked `<vector>` stream the parse is about 0.8 s"* — 4 MB/s on the worst realistic input, and close to the
@@ -266,9 +295,10 @@ Ranked by (measured win) ÷ (risk):
 
 1. ~~**Cache the `FileView` per (file, content hash, environment)**~~ — **done**, and the numbers are below. The
    analysis re-parsed a rendering on *every* `Session::view`, i.e. on every hover and every pull.
-2. **The grammar's template path** (88 % of the std-header parse, 2.5× plain code per byte): profile the speculation
-   sites (`checkpoint`/`rollback` per declaration) and `is_a_known_type_name` before changing anything — this is where
-   an afternoon of measurement pays, and it is the only place a 2× is available.
+2. ~~**The grammar's template path**~~ — **tried, and the hypothesis was wrong.** There is no template-path hot spot:
+   per-file cost is flat (§2), the phase table puts 50 % in `parse_declaration` and 12 % in its specifier sequence, and
+   the counts say speculation is 0.12 checkpoints per token. What was measured and changed is in §5.3; the honest
+   conclusion is that **a 2× needs several 10 % items**, starting with `parse_decl_specifier_seq` (12 %).
 3. **Fix the linkage-block losslessness bug** (§4) — small, and it is a correctness bug in a construct every C header
    uses.
 4. **`unsafe` removal** (§5.1) — zero risk to change, removes a UB hazard.
@@ -302,6 +332,37 @@ Two things had to change for a session to hold a tree at all:
   across the server's threads, so the cache holds a `ParsedView` — everything but the root — and
   `FileView::from_parsed` rebuilds it per hit, which is one allocation.
 
+### What item 2 became, measured
+
+Item 2 said the template path was where a 2× lived. **It is not**, and finding that out is the result.
+
+What was tried first was the marker bookkeeping, because `Marker::complete` asked a hash map three questions per node
+and `close_mark` scanned the open stack:
+
+```text
+closed_marks: HashMap<usize, bool>  →  Vec<u8> indexed by event position
+  close_mark      4 hash lookups + 2 linear scans per node → 3 loads, one byte each
+  rollback        remove a map entry per position closed since → truncate the table
+2.48 → 2.54–2.57 MB/s (3.98 MB of std headers, three runs after the change against a 2.48–2.52 baseline)
+```
+
+Real, reproducible, and **2.5 % — not 2×**. It is kept because it is strictly less work per node and makes a rollback a
+truncation, but it is not what the review predicted.
+
+Then the phase table (§2) answered where the time actually is, and the answer rules out the premise: **no hot spot**.
+The parse is 1.56 s for 3.98 MB, split `declaration 50 % (specifier sequence 12 %, declarator 5 %, expression 5 %,
+template arguments 2 %), tree 12 %, lexing 2 %`, and per-file cost is flat at 110 µs/KB with the slowest file at 128.
+A speculative parser that re-reads 12 % of its tokens would show up as a file- or construct-shaped spike; there is
+none.
+
+What is left behind for the next round:
+
+* `parser/phases.rs` — the phase timer, `CPPLS_PARSER_STATS=1`, free when off (one relaxed `OnceLock` load per
+  instrumented call) and inclusive by design, so a parent's number contains its children's.
+* `ParserCounts` — checkpoints, rollbacks, type questions, `>` questions, comment groups and their time.
+* The measurement that matters: **`parse_decl_specifier_seq` is 12 % of the parse at 3.1 µs a call**, and the
+  declaration machinery around it is another ~25 %. Those are where a 10 % win each is available; a 2× is not.
+
 ## 6. How to reproduce every number
 
 ```powershell
@@ -309,6 +370,14 @@ $env:CPPLS_PROJECT_ROOT = "E:\EmmyLuaCodeStyle"                                 
 cargo test --release -p cpp_parser --test parse_cost -- --ignored --nocapture     # throughput, weight, accuracy
 cargo test -p cpp_parser --test lossless                                          # the losslessness invariant
 cargo test -p cpp_parser --test lossless -- --ignored                             # the linkage-block reproducer, red
+```
+
+And the phase table behind §2:
+
+```powershell
+$env:CPPLS_PROJECT_ROOT = "C:\…\mingw64\lib\gcc\x86_64-w64-mingw32\15.1.0\include\c++"
+$env:CPPLS_PARSER_STATS = "1"
+cargo test --release -p cpp_parser --test parse_cost -- --ignored --nocapture 2>&1 | Select-String "parser"
 ```
 
 The std-header corpus used for the hard numbers:

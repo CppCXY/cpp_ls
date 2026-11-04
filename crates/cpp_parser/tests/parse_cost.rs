@@ -126,6 +126,20 @@ fn what_parsing_costs() {
         ));
     }
     worst.sort_by_key(|(micros, _, _)| std::cmp::Reverse(*micros));
+    // **The slowest per byte**, which is the table that names a construct: a file is slow because of what it
+    // contains, and the top of this list is where a grammar spends its time.
+    let mut dense: Vec<(u128, String)> = worst
+        .iter()
+        .map(|(micros, which, bytes)| {
+            let per_kb = *micros as f64 * 1024.0 / (*bytes as f64).max(1.0);
+            (per_kb as u128, which.clone())
+        })
+        .collect();
+    dense.sort_by_key(|(per_kb, _)| std::cmp::Reverse(*per_kb));
+    println!("  slowest per KB:");
+    for (per_kb, which) in dense.iter().take(10) {
+        println!("    {per_kb:>6} µs/KB  {which}");
+    }
     println!(
         "parsed {} file(s), {:.1} MB in {:?} — {:.2} MB/s",
         worst.len(),

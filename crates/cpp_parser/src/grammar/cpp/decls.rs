@@ -646,6 +646,7 @@ fn ends_a_template_parameter(p: &CppParser) -> bool {
 /// Returns `Err` without having consumed anything when the input does not look like a declaration,
 /// so the caller can fall back to parsing an expression statement.
 pub fn parse_declaration(p: &mut CppParser) -> ParseResult {
+    let _phase = crate::parser::phases::during("declaration");
     // A declaration is the one place a bare template-id may stand where a *name* belongs, and only when the
     // declaration is an **explicit instantiation**: `extern template void f<int>(int);` names the instantiation
     // it asks for, and that name is a template-id. Everywhere else `C<T> x;` gives the arguments to the type.

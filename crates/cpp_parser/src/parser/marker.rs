@@ -41,9 +41,18 @@ pub(crate) trait MarkerEventContainer {
 
     fn get_events(&mut self) -> &mut Vec<MarkEvent>;
 
+    /// **Append one event** — the one way an event enters the stream.
+    ///
+    /// A container keeps per-position bookkeeping beside the stream (`CppParser::closed_marks` is one byte per
+    /// event), so a push that bypasses this is a table that drifts one entry out of step with the events. The default
+    /// is the plain push, for a container with nothing to keep in step.
+    fn push_event(&mut self, event: MarkEvent) {
+        self.get_events().push(event);
+    }
+
     fn mark(&mut self, kind: CppSyntaxKind) -> Marker {
         let position = self.get_events().len();
-        self.get_events().push(MarkEvent::NodeStart {
+        self.push_event(MarkEvent::NodeStart {
             kind,
             parent: NO_FORWARD_PARENT,
         });
@@ -300,7 +309,7 @@ impl CompleteMarker {
             MarkEvent::NodeStart { parent, .. } => *parent = m.position,
             _ => unreachable!(),
         }
-        p.get_events().push(MarkEvent::Trivia);
+        p.push_event(MarkEvent::Trivia);
         m
     }
 
