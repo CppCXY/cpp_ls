@@ -404,3 +404,62 @@ void h(int (*cb)(int a)) {
 fn a_call_with_no_arguments_has_no_hints() {
     assert!(hints_of("int f();\nint g() { return f(); }\n").is_empty());
 }
+
+/// **The types the file does not write** — `auto`, a range-for's element, and a deduced return.
+///
+/// The module used to refuse these: "the analysis has no type system — nothing deduces `auto`". That stopped being true
+/// when `type_at` learned to deduce from the initializer, which is why the hints are asked of the same reader the hover
+/// asks. A hint that was *wrong* would be printed into the user's code, so the test asserts both what is hinted and that
+/// the unanswerable shapes stay silent.
+#[test]
+fn the_types_the_file_does_not_write() {
+    let source = "\
+struct Widget { int size; };
+void f() {
+    auto n = 1;
+    auto& r = n;
+    const auto c = 2.5;
+    int v[3] = {1, 2, 3};
+    for (auto item : v) { }
+    auto untyped = Widget{};
+}
+auto one() { return 1; }
+";
+    let session = session_with(&[("/p/a.cpp", source)]);
+    let view = session.view("/p/a.cpp").expect("the file is held");
+    let whole_file = cpp_parser::SourceRange::new(0, view.source.len());
+    let hints = session.type_hints(&view, whole_file);
+    let said: Vec<(String, cpp_code_analysis::TypeHintKind)> = hints
+        .iter()
+        .map(|hint| (hint.label.clone(), hint.kind))
+        .collect();
+
+    // **The whole list, in the order the walk finds the declarations.** A hint printed into the user's code is either
+    // right or a lie, so the expected answer is exact rather than "contains".
+    assert_eq!(
+        said,
+        vec![
+            ("int".to_string(), cpp_code_analysis::TypeHintKind::Auto),
+            ("int&".to_string(), cpp_code_analysis::TypeHintKind::Auto),
+            (
+                "const double".to_string(),
+                cpp_code_analysis::TypeHintKind::Auto
+            ),
+            ("int".to_string(), cpp_code_analysis::TypeHintKind::Auto),
+            ("Widget".to_string(), cpp_code_analysis::TypeHintKind::Auto),
+            (
+                "int".to_string(),
+                cpp_code_analysis::TypeHintKind::DeducedReturn
+            ),
+        ],
+        "`auto n`, `auto& r`, `const auto c`, the range-for's `auto item`, `auto untyped`, and `auto one()`"
+    );
+
+    // Every hint is drawn at the end of a name, so the text before it ends with one — and no hint repeats the
+    // placeholder the file already writes.
+    for hint in &hints {
+        assert!(hint.offset <= source.len(), "inside the file");
+        assert!(source.is_char_boundary(hint.offset), "a drawable position");
+        assert_ne!(hint.label, "auto");
+    }
+}

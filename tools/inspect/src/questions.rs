@@ -445,6 +445,49 @@ pub fn the_facts(opened: &Opened, filters: &FactFilters<'_>) -> Result<Answer, S
     Ok(Answer::new(text, value))
 }
 
+/// **The inlay hints the analysis asks an editor to draw** — parameter names and deduced types.
+pub fn the_inlay(opened: &Opened) -> Result<Answer, String> {
+    let whole = cpp_parser::SourceRange::new(0, opened.text.len());
+    let parameters = opened.session.inlay_hints(&opened.view, whole);
+    let types = opened.session.type_hints(&opened.view, whole);
+    let mut text = format!(
+        "inlay hints in {}: {} parameter(s), {} type(s)\n",
+        opened.file.display(),
+        parameters.len(),
+        types.len()
+    );
+    for hint in &parameters {
+        let (line, column) = line_col(&opened.text, hint.offset);
+        text.push_str(&format!("  {line}:{column}  parameter  `{}:`\n", hint.name));
+    }
+    for hint in &types {
+        let (line, column) = line_col(&opened.text, hint.offset);
+        let punctuation = match hint.kind {
+            cpp_code_analysis::TypeHintKind::DeducedReturn => "->",
+            _ => ":",
+        };
+        text.push_str(&format!(
+            "  {line}:{column}  type       {punctuation} `{}`  ({:?})\n",
+            hint.label, hint.kind
+        ));
+    }
+    let value = json!({
+        "file": opened.file.display().to_string(),
+        "parameters": parameters.iter().map(|hint| json!({
+            "line": line_col(&opened.text, hint.offset).0,
+            "column": line_col(&opened.text, hint.offset).1,
+            "name": hint.name,
+        })).collect::<Vec<_>>(),
+        "types": types.iter().map(|hint| json!({
+            "line": line_col(&opened.text, hint.offset).0,
+            "column": line_col(&opened.text, hint.offset).1,
+            "label": hint.label,
+            "kind": format!("{:?}", hint.kind),
+        })).collect::<Vec<_>>(),
+    });
+    Ok(Answer::new(text, value))
+}
+
 /// **The findings a diagnostics channel would report for the file.**
 pub fn the_diagnostics(opened: &Opened) -> Result<Answer, String> {
     let found = opened

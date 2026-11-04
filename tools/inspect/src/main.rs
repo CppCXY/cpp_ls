@@ -85,6 +85,8 @@ enum Command {
         #[arg(long, default_value_t = 40)]
         limit: usize,
     },
+    /// The inlay hints an editor would draw for the file: parameter names and deduced types.
+    Inlay,
     /// The findings a diagnostics channel would report for the file.
     Diagnostics,
     /// The summary's key, includes and counts.
@@ -173,6 +175,7 @@ fn run(cli: Cli) -> Result<(), String> {
                 limit: *limit,
             },
         )?,
+        Command::Inlay => questions::the_inlay(&opened)?,
         Command::Diagnostics => questions::the_diagnostics(&opened)?,
         Command::Summary => questions::the_summary(&opened)?,
         Command::Tree { limit } => questions::the_tree(&opened, &cli.place, *limit)?,

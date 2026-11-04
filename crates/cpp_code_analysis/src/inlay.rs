@@ -1,25 +1,34 @@
 //! Inlay hints: what the file does not write and a reader still needs.
 //!
-//! # What can be hinted, and what cannot
+//! # Two kinds of hint, and both are answerable
 //!
-//! An inlay hint is a piece of text the editor draws *in* the code — not part of the file, and not editable by
-//! accident — so the bar for one is higher than for a popup: it sits in the middle of the line the user is
-//! reading. Two hints are worth that, and only one of them is answerable here.
+//! An inlay hint is text the editor draws **in** the code — not part of the file, and not editable by accident — so the
+//! bar for one is higher than for a popup: it sits in the middle of the line the user is reading. Two are worth that.
 //!
 //! ```text
-//! a parameter's name    `scale(3, 0.5)`          →  `scale(count: 3, factor: 0.5)`     answerable: the
-//!                                                                                       callee's declaration
-//!                                                                                       writes the names
-//! a declaration's type  `auto n = count();`      →  `auto n: int = count();`           not answerable: the
-//!                       `for (auto& x : v)`       →  `for (auto& x : std::vector<..>)`  analysis has no type
-//!                                                                                       system — nothing
-//!                                                                                       deduces `auto`, and
-//!                                                                                       `vector<int>` is not
-//!                                                                                       an instantiated type
+//! a parameter's name    `scale(3, 0.5)`          →  `scale(count: 3, factor: 0.5)`   the callee's declaration
+//!                                                                                     writes the names
+//! a deduced type        `auto n = count();`      →  `auto n: int = count();`         the initializer's type
+//!                       `for (auto& x : v)`      →  `for (auto& x: std::string& : v)` the range's element
+//!                       `auto [a, b] = pair;`    →  `auto [a: int, b: double] = pair` each name's element
+//!                       `auto f() { return 1; }` →  `auto f() -> int { return 1; }`   the deduced return
 //! ```
 //!
-//! So this module produces parameter hints and nothing else, and the type column is not a gap to be filled in later
-//! by guessing: a type hint that was wrong would be a lie printed into the user's code.
+//! The first version of this module said the type column was *not* answerable — "the analysis has no type system, nothing
+//! deduces `auto`". It grew one (`type_at` deduces from the initializer, a range's element, a structured binding, and
+//! since the class-template deduction of `6e6ed31` a braced initialisation's arguments), so that paragraph became a gap
+//! instead of a boundary. [`type_hints`] is the second half, and it asks the **same** reader the hover asks: one
+//! implementation of "what type is this", because two would eventually disagree in front of a user.
+//!
+//! What is still not hinted, and why:
+//!
+//! * **a lambda parameter** — `[](auto x)` is a template, and the type exists only at a call site (this layer holds one
+//!   file and one tree);
+//! * **a lambda's deduced return** — its type is unnamed and `deduced_returns_of` starts from a binding a lambda does
+//!   not have;
+//! * **a type written already** — `int n = 1;` needs no `int:` in front of it, and the hint would be noise.
+//!
+//! See `docs/buglist.md` for the two that remain.
 //!
 //! # What makes a hint *useful* rather than noise
 //!
@@ -53,6 +62,216 @@ pub struct ParameterHint {
     pub offset: usize,
     /// The parameter's name, as the callee's declaration spells it.
     pub name: String,
+}
+
+/// **A type the file does not write**, at the place it would be written.
+///
+/// The label is the *caller's* business, like [`ParameterHint`]'s: this layer says which type and where it belongs, and
+/// the LSP layer decides that it is drawn after the name with a colon in front of it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypeHint {
+    /// Where the hint is drawn: the end of the name (or of `]` for a structured binding).
+    pub offset: usize,
+    /// The type, as the analysis spells it: `int`, `const int&`, `std::pair<int, double>`.
+    pub label: String,
+    /// Which of the three shapes asked for it — a consumer may draw them differently.
+    pub kind: TypeHintKind,
+}
+
+/// The shapes a [`TypeHint`] can be about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TypeHintKind {
+    /// `auto n = …` — the type the initializer gives it.
+    Auto,
+    /// `auto [a, b] = …` — the element each name binds.
+    StructuredBinding,
+    /// `auto f(…) { … }` — the return type the body deduces.
+    DeducedReturn,
+}
+
+/// **The types a file does not write, in `range`.**
+///
+/// `type_at` answers the type of the expression at a byte offset (the session's `type_at`, which is the one reader of
+/// that question), and `returns_at` answers the return type a declaration's fact records — a function's *written* `auto`
+/// is replaced by the deduced spelling there, which is why this does not need a second inference.
+///
+/// Three refusals, each the same shape as [`parameter_hints`]'s:
+///
+/// * **the answer is `auto` or empty** — the deduction declined, and printing `auto` where the file already says it is
+///   worse than nothing;
+/// * **the position is not in `range`** — a hint outside the viewport is work the client throws away;
+/// * **the declaration is not an `auto` one** — a written type is already on the line.
+pub fn type_hints<F, G>(
+    view: &FileView,
+    range: SourceRange,
+    mut type_at: F,
+    mut returns_at: G,
+) -> Vec<TypeHint>
+where
+    F: FnMut(usize) -> Option<String>,
+    G: FnMut(usize) -> Option<String>,
+{
+    let mut hints: Vec<TypeHint> = Vec::new();
+
+    for node in view.root.descendants() {
+        let kind = CppSyntaxKind::from(node.kind());
+        match kind {
+            // **`auto n = …` and a range-for's `auto`, which is the same node.** The specifier sequence is a sibling of
+            // the declaration that holds the declarator, so the question "was this written `auto`" is asked of the
+            // declaration rather than of the declarator.
+            CppSyntaxKind::InitDeclarator => {
+                // A structured binding is its own shape below; the declarator here holds the names.
+                if node.children().any(|child| {
+                    CppSyntaxKind::from(child.kind()) == CppSyntaxKind::StructuredBinding
+                }) {
+                    continue;
+                }
+                if !contains(range, node.text_range().start().into())
+                    || !writes_auto_in_the_declaration(&node)
+                {
+                    continue;
+                }
+                let Some(name) = the_name_of_a_declarator(&node) else {
+                    continue;
+                };
+                let at = usize::from(name.text_range().end());
+                if !contains(range, at) {
+                    continue;
+                }
+                if let Some(label) = type_at(usize::from(name.text_range().start()))
+                    && is_a_type_spelling(&label)
+                {
+                    hints.push(TypeHint {
+                        offset: at,
+                        label,
+                        kind: TypeHintKind::Auto,
+                    });
+                }
+            }
+            // **`auto [a, b] = …`** — each name binds one element, and each is asked separately: `a: int, b: double`
+            // is what a reader of the line needs, and one label for the whole list would have to invent a notation for
+            // "the pair's two halves".
+            CppSyntaxKind::StructuredBinding => {
+                if !contains(range, node.text_range().start().into()) {
+                    continue;
+                }
+                for name in node.children() {
+                    if CppSyntaxKind::from(name.kind()) != CppSyntaxKind::NameExpr {
+                        continue;
+                    }
+                    let at = usize::from(name.text_range().end());
+                    if !contains(range, at) {
+                        continue;
+                    }
+                    if let Some(label) = type_at(usize::from(name.text_range().start()))
+                        && is_a_type_spelling(&label)
+                    {
+                        hints.push(TypeHint {
+                            offset: at,
+                            label,
+                            kind: TypeHintKind::StructuredBinding,
+                        });
+                    }
+                }
+            }
+            // **`auto f(…)`** — the return type the body deduces, drawn after the parameter list where a trailing
+            // return type would be written.
+            CppSyntaxKind::Declaration | CppSyntaxKind::FunctionDef => {
+                if !contains(range, node.text_range().start().into()) {
+                    continue;
+                }
+                // **The declarator, however the declaration wraps it**: `auto one() { … }` is
+                // `Declaration > [DeclSpecifierSeq "auto", InitDeclarator > Declarator > [NameExpr, ParameterList]]`,
+                // and a direct-child search for `Declarator` found the `InitDeclarator` and stopped. Bounded to the
+                // declarator's subtree, a `ParameterList` is a *function* declarator's — an expression's argument list
+                // is an `ArgumentList`, a different kind.
+                let Some(declarator) = node.children().find(|child| {
+                    matches!(
+                        CppSyntaxKind::from(child.kind()),
+                        CppSyntaxKind::Declarator | CppSyntaxKind::InitDeclarator
+                    )
+                }) else {
+                    continue;
+                };
+                let Some(list) = declarator.descendants().find(|child| {
+                    CppSyntaxKind::from(child.kind()) == CppSyntaxKind::ParameterList
+                }) else {
+                    continue;
+                };
+                if !writes_auto_in_the_declaration(&node) {
+                    continue;
+                }
+                let at = usize::from(list.text_range().end());
+                if !contains(range, at) {
+                    continue;
+                }
+                let Some(name) = the_name_of_a_declarator(&node) else {
+                    continue;
+                };
+                if let Some(label) = returns_at(usize::from(name.text_range().start()))
+                    && is_a_type_spelling(&label)
+                {
+                    hints.push(TypeHint {
+                        offset: at,
+                        label,
+                        kind: TypeHintKind::DeducedReturn,
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+
+    hints
+}
+
+/// **Was this declaration written with `auto`** — in its specifier sequence, however it is nested?
+///
+/// The specifiers are a sibling of the declarator's parent (`Declaration > [DeclSpecifierSeq, InitDeclarator]`), and a
+/// range-for's are inside the for statement's own declaration; walking the ancestors of the node asked about is what makes
+/// both the same question.
+fn writes_auto_in_the_declaration(node: &CppSyntaxNode) -> bool {
+    // **The node's own specifiers first**: an `InitDeclarator`'s are its parent declaration's, while a `Declaration` or
+    // `FunctionDef` that is asked about *is* the declaration — the walk from `ancestors()` alone missed `auto one()`.
+    let own = node
+        .children()
+        .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::DeclSpecifierSeq);
+    let enclosing = node.ancestors().take(4).find_map(|ancestor| {
+        ancestor
+            .children()
+            .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::DeclSpecifierSeq)
+    });
+    own.or(enclosing).into_iter().any(|specifiers| {
+        specifiers.descendants().any(|child| {
+            let kind = CppSyntaxKind::from(child.kind());
+            // **`auto` arrives as a `BuiltinType`** whose token is `AutoKeyword` (the grammar's own table) — the
+            // `AutoType` kind exists for another shape. Both are the placeholder and both mean the same; asking only
+            // for `AutoType` matched nothing, and every `auto` in the file went unhinted.
+            kind == CppSyntaxKind::AutoType
+                || (kind == CppSyntaxKind::BuiltinType && child.text().to_string().trim() == "auto")
+        })
+    })
+}
+
+/// The name a declarator declares — its innermost `NameExpr`, which is the identifier a reader sees.
+fn the_name_of_a_declarator(node: &CppSyntaxNode) -> Option<CppSyntaxNode> {
+    let name = node
+        .descendants()
+        .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::NameExpr)?;
+    if name.text().to_string().trim().is_empty() {
+        return None;
+    }
+    Some(name)
+}
+
+/// **Is this spelling a type a reader can use** — not the placeholder, not empty?
+///
+/// `auto` is the word the file already wrote: printing it in a hint says the analysis declined while looking like an
+/// answer. `Type::to_string` of a deduced type never carries it, so this is a guard against a caller whose answer was the
+/// placeholder's spelling.
+fn is_a_type_spelling(label: &str) -> bool {
+    let label = label.trim();
+    !label.is_empty() && label != "auto" && !label.contains("auto")
 }
 
 /// **The parameter names for the calls in `range`** — what an editor draws as inlay hints.

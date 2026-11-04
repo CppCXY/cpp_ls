@@ -10,12 +10,20 @@
 //! So the analysis answers with names it read off the callee's own declaration ([`Session::inlay_hints`]), and this
 //! layer renders them — `count:` with a space after it — and refuses to invent anything the analysis did not say.
 //!
-//! # What is *not* hinted
+//! # Types too, since the analysis grew one
 //!
-//! Types. `auto n = count();` would read better as `auto n: int = …`, and this server cannot write that `int`: the
-//! analysis has no type system, nothing deduces `auto`, and a `std::vector<int>` is not an instantiated type here.
-//! A type hint that was wrong would be a lie printed into the user's code, which is worse than the hint being
-//! missing — see the `inlay` module for the two shapes that are answerable and the boundary between them.
+//! ```text
+//! auto n = count();        auto n: int = count();
+//! for (auto& item : v)      for (auto& item: std::string& : v)
+//! auto [a, b] = pair;       auto [a: int, b: double] = pair
+//! auto f() { return 1; }    auto f() -> int { return 1; }
+//! ```
+//!
+//! The first version of this handler refused them, and it was right to at the time: nothing deduced `auto`, and a
+//! `std::vector<int>` was not an instantiated type. Both are answered now (`Session::type_hints`, which asks the same
+//! reader the hover does), so the refusal became a gap. What is still refused is a **lambda parameter**'s type (needs the
+//! call sites) and a **lambda's deduced return** (its type is unnamed and the deduction starts from a binding) — see
+//! `docs/buglist.md`.
 //!
 //! # Offsets in, positions out
 //!
@@ -110,7 +118,12 @@ pub async fn on_inlay_hint(
         // typing is inside that window at every stroke. So the hints vanished exactly while they were being written
         // — which is what the report said, in those words. What makes the incomplete answer repairable is the
         // refresh the pump sends when the queue drains, not a refusal here.
-        let hints = session.inlay_hints(&view, visible_range(&view, requested)?);
+        let visible = visible_range(&view, requested)?;
+        let hints = session.inlay_hints(&view, visible);
+        let types = session.type_hints(&view, visible);
+        if cpp_code_analysis::probes::inlay() {
+            eprintln!("[inlay] {} type hint(s)", types.len());
+        }
         if cpp_code_analysis::probes::inlay() {
             eprintln!(
                 "[inlay] view {parsed:?}, hints {:?}, {} hint(s)",
@@ -123,6 +136,11 @@ pub async fn on_inlay_hint(
             hints
                 .into_iter()
                 .filter_map(|hint| inlay_hint_of(held, hint))
+                .chain(
+                    types
+                        .into_iter()
+                        .filter_map(|hint| type_hint_of(held, hint)),
+                )
                 .collect(),
         )
     })
@@ -171,6 +189,30 @@ pub fn inlay_hint_of(file: &VfsFile, hint: ParameterHint) -> Option<InlayHint> {
     })
 }
 
+/// **One type hint**, as the protocol's position and label.
+///
+/// The punctuation differs by shape and that is deliberate: a variable's type goes where a type would be written
+/// (`auto n: int`), while a deduced return goes where a trailing return type would (`auto f() -> int`). Both are drawn
+/// with no padding on the left — the label carries its own space — and the editor's font makes them look like the code.
+pub fn type_hint_of(file: &VfsFile, hint: cpp_code_analysis::TypeHint) -> Option<InlayHint> {
+    let position = position_in_file(file, hint.offset)?;
+    let label = match hint.kind {
+        cpp_code_analysis::TypeHintKind::Auto
+        | cpp_code_analysis::TypeHintKind::StructuredBinding => format!(": {}", hint.label),
+        cpp_code_analysis::TypeHintKind::DeducedReturn => format!(" -> {}", hint.label),
+    };
+    Some(InlayHint {
+        position,
+        label: InlayHintLabel::String(label),
+        kind: Some(InlayHintKind::TYPE),
+        text_edits: None,
+        tooltip: None,
+        padding_left: None,
+        padding_right: Some(true),
+        data: None,
+    })
+}
+
 /// Nothing is resolved lazily: every hint this server sends is complete, so the client is told there is no
 /// `inlayHint/resolve` to call.
 pub struct InlayHintCapabilities;
@@ -207,6 +249,60 @@ mod tests {
         );
         session.load("/p/a.cpp");
         (session, std::path::PathBuf::from("/p/a.cpp"))
+    }
+
+    /// **A type hint is drawn where a type would be written** — `: int` after a name, ` -> int` after a parameter
+    /// list — and a position the file cannot place produces nothing at all.
+    #[test]
+    fn a_type_hint_becomes_a_labelled_hint_where_a_type_would_be_written() {
+        use super::type_hint_of;
+        use cpp_code_analysis::{TypeHint, TypeHintKind};
+
+        let text = "auto n = 1;\nauto f() { return 1; }\n";
+        let (session, path) = a_held_file(text);
+        let file = session.files().held(&path).expect("the file is held");
+
+        let variable = type_hint_of(
+            file,
+            TypeHint {
+                offset: text.find('n').expect("the fixture") + 1,
+                label: "int".to_string(),
+                kind: TypeHintKind::Auto,
+            },
+        )
+        .expect("the offset is in the file");
+        match &variable.label {
+            lsp_types::InlayHintLabel::String(label) => assert_eq!(label, ": int"),
+            other => panic!("a plain label was expected, not label parts: {other:?}"),
+        }
+        assert_eq!(variable.kind, Some(lsp_types::InlayHintKind::TYPE));
+
+        let returned = type_hint_of(
+            file,
+            TypeHint {
+                offset: text.find("()").expect("the fixture") + 2,
+                label: "int".to_string(),
+                kind: TypeHintKind::DeducedReturn,
+            },
+        )
+        .expect("the offset is in the file");
+        match &returned.label {
+            lsp_types::InlayHintLabel::String(label) => assert_eq!(label, " -> int"),
+            other => panic!("a plain label was expected, not label parts: {other:?}"),
+        }
+
+        assert!(
+            type_hint_of(
+                file,
+                TypeHint {
+                    offset: text.len() + 5,
+                    label: "int".to_string(),
+                    kind: TypeHintKind::Auto,
+                },
+            )
+            .is_none(),
+            "a position past the end of the file produces no hint"
+        );
     }
 
     /// The label is the name and a colon, the kind is `Parameter`, and the padding is on the side the argument is

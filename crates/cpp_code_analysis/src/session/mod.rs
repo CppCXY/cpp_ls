@@ -7938,6 +7938,54 @@ impl<F: FileProvider + Clone> Session<F> {
         hints
     }
 
+    /// **The types the file does not write** — `auto`, a range-for's element, each name of a structured binding, and
+    /// the return type an `auto` function deduces. See [`crate::inlay::type_hints`] for the three shapes and the three
+    /// refusals.
+    ///
+    /// The type of an expression and the return type of a declaration are both **this** session's questions, which is why
+    /// the walk lives in `inlay` and the answers are handed to it: one reader of "what type is this", the same one the
+    /// hover uses.
+    ///
+    /// The offsets are moved back into the file's coordinates exactly as [`Session::inlay_hints`] does, and for the same
+    /// reason — a hint is drawn in the reader's own buffer.
+    pub fn type_hints(
+        &self,
+        view: &FileView,
+        range: cpp_parser::SourceRange,
+    ) -> Vec<crate::inlay::TypeHint> {
+        let mut hints = crate::inlay::type_hints(
+            view,
+            range,
+            |at| match self.type_at(view, ReadingOffset::new(at)) {
+                Known::Yes(found) => Some(found.type_of),
+                _ => None,
+            },
+            // **The index's fact, not the binding's.** A name in this file is answered from the *binding* builder, which
+            // records the return type the file wrote — and an `auto` return has none. The deduction
+            // (`deduced_returns_of`) runs in the index's builder, so the fact that says `int` for `auto one()` is the
+            // summary's; the local fact stays as the fallback for a file the index has not caught up with.
+            |at| {
+                let local = self.definition(view, ReadingOffset::new(at)).value();
+                let indexed = local.as_ref().and_then(|found| {
+                    self.store
+                        .index()
+                        .definition(&found.fact.qualified_name(), &view.path)
+                        .value()
+                });
+                indexed
+                    .and_then(|found| found.fact.returns)
+                    .or_else(|| local.and_then(|found| found.fact.returns))
+            },
+        );
+        for hint in &mut hints {
+            let Some(placed) = view.file_offset_of(ReadingOffset::new(hint.offset)) else {
+                continue;
+            };
+            hint.offset = placed.get();
+        }
+        hints
+    }
+
     /// **What each name in this file is** — the classification a semantic highlighter draws colours from.
     ///
     /// Read from the file's own bindings and macro directives, and from the index for a spelling the file does not
