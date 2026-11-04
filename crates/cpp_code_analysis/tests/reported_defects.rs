@@ -890,3 +890,41 @@ fn a_qualified_name_is_resolved_through_a_namespace_alias() {
         "the member is looked for in the scope that declares it"
     );
 }
+
+/// **§D4 — a type name written through an inline namespace still names the type.**
+///
+/// `std::string` is `using string = basic_string<char>;` inside `std::__cxx11`, so the index's qualified name is
+/// `std::__cxx11::string` and `definition("std::string")` answers `NotDeclaredHere`. Measured on `basics.cpp`:
+/// `std::string{"three"}`'s head had no type, so that element was unknown and the `std::tuple{1, 2.5,
+/// std::string{"three"}}` around it deduced to its bare name rather than to `std::tuple<int, double, std::string>`.
+///
+/// The retry is the one `members_of` already makes: the last segment, and any candidate that is a type.
+#[test]
+fn a_type_name_through_an_inline_namespace_names_the_type() {
+    let session = session_with(&[(
+        "/p/a.cpp",
+        "namespace std {\n\
+         template <class E> struct basic_string { };\n\
+         inline namespace __cxx11 { using string = basic_string<char>; }\n\
+         }\n\
+         void f() {\n\
+             auto tuple = std::tuple<int, std::string>{};\n\
+             std::string s2{\"three\"};\n\
+         }\n",
+    )]);
+    let path = std::path::Path::new("/p/a.cpp");
+    let view = session.view_of_the_file(path).expect("the written text");
+    let source = view.source.clone();
+    let at = source.find("s2{").expect("the fixture");
+
+    assert_eq!(
+        session
+            .type_at(
+                &view,
+                cpp_code_analysis::file::coordinates::ReadingOffset::new(at)
+            )
+            .map(|found| found.type_of.clone()),
+        cpp_code_analysis::Known::Yes("std::string".to_string()),
+        "the alias's name is what the file wrote, even though the index stores it under `__cxx11`"
+    );
+}

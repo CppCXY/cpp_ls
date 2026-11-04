@@ -1394,7 +1394,21 @@ fn a_type_the_expression_names(
                     .iter()
                     .any(|declaration| declaration.fact.kind == crate::DeclKind::Type)
             }),
-        Known::Unknown(_) | Known::No => false,
+        // **An inline namespace is not part of the name a reader writes.** `std::string` is
+        // `using string = basic_string<char>;` inside `std::__cxx11`, so its qualified name is `std::__cxx11::string` and
+        // the spelled lookup names nothing — measured on `basics.cpp`, where `std::string{"three"}` answered no type and
+        // the `std::tuple{1, 2.5, std::string{"three"}}` around it deduced to its bare name. The retry is the one
+        // `members_of` already makes: the last segment, and any candidate that is a type.
+        Known::Unknown(_) | Known::No => {
+            let bare = spelled.rsplit("::").next().unwrap_or(spelled);
+            bare != spelled
+                && index.definitions(bare, path).value().is_some_and(|found| {
+                    found
+                        .found
+                        .iter()
+                        .any(|declaration| declaration.fact.kind == crate::DeclKind::Type)
+                })
+        }
     };
     names_a_type.then(|| spelled.to_string())
 }
