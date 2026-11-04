@@ -455,3 +455,21 @@ in the name completion.
 followed by both loops (they iterate, and the name query's does so up to `ALIAS_DEPTH`), but an alias to a namespace
 **declared inline** (`inline namespace __cxx11`) is still the case the member walk reports as `unlisted` rather than
 following — see `#11`'s note about `std::string`. Nothing in this round changes that, and it is worth its own probe.
+
+---
+
+## 22. The four reports of this round — `062278b`
+
+| fig | what | how |
+| --- | --- | --- |
+| 1 | `for (auto const& [name, number] : map)` drew `name: …` twice | the declarator's skip tested its **children**; the binding is one level deeper (`InitDeclarator > Declarator > StructuredBinding`) |
+| 2 | `std::tuple{…}` / `std::pair pair{…}` deduced nothing | the standard's own guides from a table (`pair`, `tuple`, `optional` and the single-`initializer_list` containers); only a `std`-qualified spelling matches |
+| 3 | a lambda with no written return type showed none | the existing `a_lambdas_return_type` drawn as `-> T` before the body, after the specifiers; a written `-> T` and an unclearable body are refused |
+| 4 | a view's type could not be reasoned about past `filter` | `views::transform`'s element is the lambda's return, so every adaptor after it has an element to take |
+
+**And a name with several declarations is a type when one of them is** — `std::string{"three"}` was refused because the alias
+and its constructor make the name `Ambiguous`, and the check required *every* candidate to be a type.
+
+**Measured gap, not closed:** `std::tuple{1, 2.5, std::string{"three"}}` on `basics.cpp` still answers the bare `std::tuple`.
+The trace says the deduction sees **two** element types of three — `std::string{"three"}`'s own type is the missing one, and
+that is a construction of an **alias**; the next probe is that arm rather than the table, which is right when the elements are.
