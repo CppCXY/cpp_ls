@@ -188,12 +188,25 @@ fn push_keywords(builder: &mut Builder<'_>, view: Option<&FileView>) {
             _ => continue,
         };
 
-        builder.push_range(
+        let pushed = builder.push_range(
             token.range.start_offset,
             token.range.end_offset(),
             drawn,
             Modifier::none(),
         );
+        // **A kind the client cannot draw falls back to `keyword`.** `typename` is sent as a `modifier` (a qualifier is
+        // a property of the declaration), and a client whose advertised `tokenTypes` do not list `modifier` got **no
+        // token at all** — reported from an editor as "`typename` has no colour in `[]<typename T>`". `keyword` is in
+        // every legend, and the grammar's own colour is better than none: the same rule the `variableTemplate` fallback
+        // states for names.
+        if !pushed && drawn != TypeKind::Keyword {
+            builder.push_range(
+                token.range.start_offset,
+                token.range.end_offset(),
+                TypeKind::Keyword,
+                Modifier::none(),
+            );
+        }
     }
 }
 
@@ -2056,6 +2069,50 @@ void f(int width, double d) {
             at_type.get(&(literal + 1)),
             None,
             "no token inside the literal: {at_type:?}"
+        );
+    }
+
+    /// **`typename` in a lambda's template parameter list is drawn.**
+    ///
+    /// Reported from an editor: `[]<typename T>(T value)` showed `T` as a `typeParameter` and `typename` as **nothing**
+    /// (the inspector's "standard token type: Other"). The keyword pass draws every lexer keyword and `typename` is one,
+    /// so the question is which of the two is wrong — the pass or the report.
+    #[test]
+    fn typename_in_a_lambdas_template_parameter_list_is_drawn() {
+        // **The line from the report**, not a shortened one: `constexpr auto kTyped = []<typename T>(T value)` is
+        // where the inspector showed `typename` as nothing and `T` as a `typeParameter`.
+        let text = "constexpr auto kTyped = []<typename T>(T value) {\n    return value * 2;\n};\n";
+        let (session, path) = a_held_file(text);
+        let view = session.view_of_the_file(&path).expect("a view");
+        let file = session.files().held(&path).expect("the file is held");
+        let names = session.classified_names(&view);
+        let tokens = encode(file, Some(&view), &names, &None, false, &[]);
+        let drawn = by_offset(text, &tokens);
+
+        let at = text[..text.find("typename").expect("the fixture writes it")].len();
+        assert_eq!(
+            drawn.get(&at),
+            Some(&index_of(TypeKind::Modifier)),
+            "`typename` introduces a template parameter and is a modifier: {drawn:?}"
+        );
+
+        // **And a client that does not advertise `modifier` still gets a token** — `keyword`, which is in every legend.
+        // This is the shape of the report: the inspector said "standard token type: Other" for a word the pass had
+        // claimed as a kind the legend did not carry.
+        let without_modifier = Some(vec![
+            lsp_types::SemanticTokenType::KEYWORD,
+            lsp_types::SemanticTokenType::TYPE_PARAMETER,
+            lsp_types::SemanticTokenType::VARIABLE,
+            lsp_types::SemanticTokenType::TYPE,
+        ]);
+        let fallback = by_offset(
+            text,
+            &encode(file, Some(&view), &names, &without_modifier, false, &[]),
+        );
+        assert_eq!(
+            fallback.get(&at),
+            Some(&index_of(TypeKind::Keyword)),
+            "a keyword the client cannot draw as a modifier is drawn as a keyword: {fallback:?}"
         );
     }
 }
