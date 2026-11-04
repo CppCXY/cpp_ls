@@ -1109,6 +1109,60 @@ fn written_template_id(
 ///
 /// `written` is **the spelling the reader wrote at the cursor**, when the cursor is on a template-id use — see
 /// [`written_template_id`]. It is `None` for every other card, and the one card that uses it is a type template's.
+/// **The `template <…>` header written immediately before a declaration**, from the declaring file's own text.
+///
+/// `None` when there is none, or when something other than whitespace sits between the header's `>` and the declaration —
+/// which is what keeps a header that belongs to the *previous* declaration from being borrowed by this one.
+///
+/// The search goes backwards from the name for the last `template`, then checks that the text between the header's closing
+/// `>` and the name is only whitespace. A header that spans lines is found the same way, because the scan is over the text
+/// rather than over a line.
+fn the_template_head_before(
+    session: &Session<DiskFiles>,
+    file: &std::path::Path,
+    at: usize,
+) -> Option<String> {
+    let text = session.text(file)?;
+    let before = text.get(..at)?;
+    let start = before.rfind("template")?;
+    let header = &before[start..];
+    // The header ends at its balanced `>`; anything but whitespace between that and the name means the header belongs to
+    // another declaration.
+    let mut depth = 0i32;
+    let mut end = None;
+    for (offset, character) in header.char_indices() {
+        match character {
+            '<' => depth += 1,
+            '>' => {
+                depth -= 1;
+                if depth == 0 {
+                    end = Some(offset + 1);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let end = end?;
+    // **The header belongs to the declaration whose name follows it**, and what sits between them is the return type and
+    // the specifiers (	emplate <class T>\nT with(…)). What would prove it belongs to *another* declaration is a
+    // declaration ending in that span: a ;, a } or a {.
+    let between = &header[end..];
+    if between.contains(';') || between.contains('}') || between.contains('{') {
+        return None;
+    }
+    // A `template` that is the beginning of a *string* or a comment would be found by `rfind` as well; requiring the
+    // header to start at a word boundary is what keeps this to the keyword.
+    let starts_a_word = before[..start]
+        .chars()
+        .next_back()
+        .is_none_or(|character| !character.is_alphanumeric() && character != '_');
+    if !starts_a_word {
+        return None;
+    }
+    Some(header[..end].trim().to_string())
+}
+
 fn declaration_markdown(
     session: &Session<DiskFiles>,
     view: &FileView,
@@ -1201,6 +1255,13 @@ fn declaration_markdown(
     // declaration — drew the whole `enum { MyClass = 123, AnotherClass };` body above a card that already says what the
     // name is and what number it has (reported from an editor, with a screenshot of exactly that). The name is what the
     // reader asked about, and the value is the next line.
+    // **The `template <…>` header the declaration was written with.** `int with(U input)` does not say that `U` is a
+    // template parameter, and the fact holds only the names — so the header is read from the declaring file's text: the
+    // nearest `template <…>` that ends before the name with nothing but whitespace between them. The file's own answer,
+    // so `template <int N>` stays a non-type parameter.
+    let template_head =
+        the_template_head_before(session, &found.file, fact.name_range.start_offset);
+
     let declaration = if !subject.is_empty() {
         subject.to_string()
     } else if spells_a_signature(fact) {
@@ -1209,6 +1270,10 @@ fn declaration_markdown(
         fact.name.clone()
     } else {
         declaration_text(session, Some(view), &found.file, fact)
+    };
+    let declaration = match &template_head {
+        Some(head) => format!("{head}\n{declaration}"),
+        None => declaration,
     };
     out.push_str(&code_block(&declaration));
     let qualified = if subject.is_empty() {
