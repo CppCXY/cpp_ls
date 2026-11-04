@@ -2095,17 +2095,35 @@ impl ScopeWalker<'_> {
             Some(scope),
             Some(cpp_parser::source_range(node.text_range())),
         );
+        // **A lambda may write its own template parameter list** — `[]<typename T>(T value) { … }`, C++20's template
+        // lambda. Its parameters are bound in a scope of their own, exactly as a `template <…>` head's are, and the
+        // parameter list and the body are walked **inside** it so that `T` is visible where the lambda is written and
+        // not outside. Measured: `T` was the one token in `[]<typename T>` that the semantic pass had no declaration
+        // for, and a hover on it had nothing to say.
+        let mut inside = inner;
+        if let Some(list) = node
+            .children()
+            .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::TemplateParameterList)
+        {
+            let parameters = self.table.create_scope(
+                ScopeKind::TemplateParameters,
+                Some(inner),
+                Some(cpp_parser::source_range(list.text_range())),
+            );
+            self.template_parameters(&list, parameters);
+            inside = parameters;
+        }
         for list in node
             .children()
             .filter(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::ParameterList)
         {
-            self.parameters(&list, inner);
+            self.parameters(&list, inside);
         }
         for body in node
             .children()
             .filter(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::CompoundStat)
         {
-            self.items(&body, inner);
+            self.items(&body, inside);
         }
     }
 

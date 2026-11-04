@@ -2096,6 +2096,16 @@ void f(int width, double d) {
             "`typename` introduces a template parameter and is a modifier: {drawn:?}"
         );
 
+        // **The parameter itself is a `typeParameter`** — the other half of the report, and it needed the analysis to
+        // bind a lambda's explicit template parameter list: before that, `T` was the one token here with no declaration
+        // to classify.
+        let parameter = at + "typename ".len();
+        assert_eq!(
+            drawn.get(&parameter),
+            Some(&index_of(TypeKind::TypeParameter)),
+            "`T` in `[]<typename T>` is a template parameter: {drawn:?}"
+        );
+
         // **And a client that does not advertise `modifier` still gets a token** — `keyword`, which is in every legend.
         // This is the shape of the report: the inspector said "standard token type: Other" for a word the pass had
         // claimed as a kind the legend did not carry.

@@ -665,3 +665,43 @@ fn a_braced_construction_in_an_expression_deduces_its_arguments() {
         "the construction's arguments come from its elements"
     );
 }
+
+/// **§C8 — a structured binding over a class this project declares takes its members' types.**
+///
+/// `element_of` knows the standard library's shapes by name (`pair`, `map`, `tuple`, a sequence's argument) and answers
+/// nothing for a class a project declares itself — so `auto [a, b] = p;` over `Pair<int, double>` refused, and the inlay
+/// hint for it was missing. A pair-like type is a class with `first` and `second`, and `members_of` has their types with
+/// the container's arguments substituted; the order is asked by **name**, because the member list is sorted.
+#[test]
+fn a_structured_binding_over_a_project_class_takes_its_members_types() {
+    let session = session_with(&[(
+        "/p/a.cpp",
+        "template <typename A, typename B>\n\
+         struct Pair {\n\
+             A first;\n\
+             B second;\n\
+             Pair(A a, B b) : first(a), second(b) {}\n\
+         };\n\
+         void f() {\n\
+             Pair<int, double> p{1, 2.5};\n\
+             auto [a, b] = p;\n\
+         }\n",
+    )]);
+    let path = std::path::Path::new("/p/a.cpp");
+    let view = session.view_of_the_file(path).expect("the written text");
+    let source = view.source.clone();
+    let at = |needle: &str| source.find(needle).expect("the fixture");
+
+    for (needle, skip, expected) in [("[a", 1, "int"), ("b]", 0, "double")] {
+        assert_eq!(
+            session
+                .type_at(
+                    &view,
+                    cpp_code_analysis::file::coordinates::ReadingOffset::new(at(needle) + skip)
+                )
+                .map(|found| found.type_of.clone()),
+            cpp_code_analysis::Known::Yes(expected.to_string()),
+            "`{needle}` is the member's type with the container's arguments substituted"
+        );
+    }
+}

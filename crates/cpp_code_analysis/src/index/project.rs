@@ -7288,7 +7288,41 @@ fn structured_binding_type(
         return Some(container);
     };
 
-    Some(match element_of(&container, position) {
+    // **A class this project declares, whose members are `first` and `second`.** `element_of` is a table of the
+    // standard library's shapes and knows nothing about a class's members; a pair-like type is exactly a class with those
+    // two, and `members_of` has their types — substituted with the container's arguments, so `Pair<int, double>` binds
+    // `int` and `double` and not the parameters it was declared with. The order is asked by **name** rather than by
+    // position: the member list is sorted, so "the first data member" is not a question it can answer.
+    let element = element_of(&container, position).or_else(|| {
+        let Type::Named { name, .. } = &container else {
+            return None;
+        };
+        let wanted = match position {
+            0 => "first",
+            1 => "second",
+            _ => return None,
+        };
+        let Known::Yes(listed) = members_of(index, scopes, root, path, name) else {
+            return None;
+        };
+        // **And the container's arguments substituted through it.** The session's `members_of` does this for a caller that
+        // asked with a template-id (`Pair<int, double>`); a caller here holds the list *before* that step, so it runs it —
+        // the same function, so the two cannot disagree about what `first` is.
+        let Known::Yes(listed) =
+            substituted_members(index, path, &container.to_string(), Known::Yes(listed))
+        else {
+            return None;
+        };
+        listed
+            .members
+            .iter()
+            .find(|member| {
+                member.fact.name == wanted && member.fact.kind == crate::DeclKind::Variable
+            })
+            .and_then(|member| member.fact.type_of.clone())
+    });
+
+    Some(match element {
         Some(element) => Known::Yes((crate::sema::types::parse_type_spelling(&element), file)),
         None => Known::Unknown(UnknownReason::UnknownType(Box::from(container.to_string()))),
     })
