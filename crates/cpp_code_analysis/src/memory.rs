@@ -55,6 +55,13 @@ pub struct MemoryReport {
     /// The rendering cache: entry count and the bytes of rendered text.
     pub renderings: usize,
     pub rendering_bytes: usize,
+    /// **The parse trees kept for reuse**: how many views, and their estimated tree bytes.
+    ///
+    /// The newest table here and the largest per entry — a rowan tree is 8–24× the text it describes
+    /// (`docs/parser-review.md` §2) — bounded by [`crate::cache::cache_lru::VIEW_BYTES`] of *estimated tree*. It buys
+    /// a hundredfold on every request that asks a question about a position, which used to parse the rendering again.
+    pub views: usize,
+    pub view_bytes: usize,
 
     /// Dead-macro decisions, one vector of offsets per file.
     pub dead_macro_decisions: usize,
@@ -138,6 +145,7 @@ impl MemoryReport {
             + self.definition_bytes
             + self.unit_bytes
             + self.rendering_bytes
+            + self.view_bytes
             + self.dead_macro_bytes
             + self.index_table_bytes()
             + self.walks_by_content_bytes
@@ -163,7 +171,7 @@ impl std::fmt::Display for MemoryReport {
         write!(
             formatter,
             "vfs {} files {} ({}) | summaries {} ({}) | cooked {} ({}) | definitions {} ({}) | \
-             units {} ({}) | renderings {} ({}) | bookkeeping {} dead-macro offsets, {} signatures, \
+             units {} ({}) | renderings {} ({}) | views {} ({}) | bookkeeping {} dead-macro offsets, {} signatures, \
              {} searches, {} units-read | walk cache {} ({}) | walks by content {} ({}, {} shared with units)",
             self.vfs_files,
             mb(self.vfs_text_bytes),
@@ -178,6 +186,8 @@ impl std::fmt::Display for MemoryReport {
             mb(self.unit_bytes),
             self.renderings,
             mb(self.rendering_bytes),
+            self.views,
+            mb(self.view_bytes),
             thousands(self.dead_macro_decisions),
             self.directive_signatures,
             self.include_searches,

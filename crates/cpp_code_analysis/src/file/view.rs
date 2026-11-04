@@ -139,12 +139,22 @@ pub struct FileView {
     /// The line index **of [`FileView::source`]** — the same one the VFS built when it took this text in.
     pub line_index: Arc<LineIndex>,
     /// The parse of [`FileView::source`], kept because a caller may want the diagnostics or the token list.
-    pub tree: CppSyntaxTree,
+    /// The parse of `source`, kept because a caller may want the diagnostics or the token list.
+    ///
+    /// **Behind an `Arc`, because a view is cloned per request and a tree is the expensive half.** The token
+    /// vector alone is twelve bytes per token, so a clone of the tree is a copy of megabytes; behind an `Arc` a
+    /// clone of a view is a handful of reference-count bumps, which is what makes [`crate::Session::view`] able
+    /// to answer from a cache. Every use reads through the deref and needs no change.
+    pub tree: std::sync::Arc<CppSyntaxTree>,
     /// The tree's root. Exactly `tree.get_red_root()`, kept because every query wants it and re-deriving a red root
     /// per query would allocate one per query.
     pub root: CppSyntaxNode,
     /// The file's scopes, built from the same tree.
-    pub scopes: ScopeTree,
+    /// The file's scopes, built from the same tree.
+    ///
+    /// Behind an `Arc` for the same reason as [`FileView::tree`]: a `ScopeTree` is a `Vec<Scope>` plus maps and
+    /// cloning one is proportional to the file.
+    pub scopes: std::sync::Arc<ScopeTree>,
     /// Did the text come from an open buffer rather than from the file?
     pub open: bool,
     /// **The file's own text, when [`FileView::source`] is a rendering of it.**
@@ -164,6 +174,64 @@ pub struct FileView {
     /// Empty exactly when [`FileView::written`] is `None`. It is an `Arc<[_]>` rather than a `Vec` because a view is
     /// cloned per request — every handler takes one — and a header's rendering is hundreds of thousands of tokens.
     reading: Arc<[crate::preprocess::cooked::RenderedSpan]>,
+}
+
+/// **A parsed view without its red root** — what a session can cache, and why the split exists.
+///
+/// rowan's `SyntaxNode` is neither `Send` nor `Sync` (its own documentation says so, and it is why
+/// [`crate::CppSyntaxTree`] holds a `GreenNode`), while a session is shared across a language server's threads. So
+/// what a cache may hold is everything a view is made of **except** the red root: the green tree, the scopes, the two
+/// texts, their line indexes and the span mapping — all `Send + Sync`, and all of them `Arc`s after the first build.
+/// [`FileView::from_parsed`] puts a root back, which is one allocation against the parse it replaces.
+#[derive(Debug, Clone)]
+pub struct ParsedView {
+    pub file: FileId,
+    pub path: PathBuf,
+    pub source: Arc<str>,
+    pub line_index: Arc<LineIndex>,
+    pub tree: std::sync::Arc<CppSyntaxTree>,
+    pub scopes: std::sync::Arc<ScopeTree>,
+    pub open: bool,
+    pub written: Option<Arc<str>>,
+    pub written_lines: Option<Arc<LineIndex>>,
+    pub reading: Arc<[crate::preprocess::cooked::RenderedSpan]>,
+}
+
+impl FileView {
+    /// **The shareable half of a view** — everything but the red root, which is the one part that cannot cross
+    /// threads. See [`ParsedView`].
+    pub fn into_parsed(self) -> ParsedView {
+        ParsedView {
+            file: self.file,
+            path: self.path,
+            source: self.source,
+            line_index: self.line_index,
+            tree: self.tree,
+            scopes: self.scopes,
+            open: self.open,
+            written: self.written,
+            written_lines: self.written_lines,
+            reading: self.reading,
+        }
+    }
+
+    /// A view of an already-parsed one: the red root is rebuilt, and everything else is shared.
+    pub fn from_parsed(parsed: ParsedView) -> FileView {
+        let root = parsed.tree.get_red_root();
+        FileView {
+            file: parsed.file,
+            path: parsed.path,
+            source: parsed.source,
+            line_index: parsed.line_index,
+            tree: parsed.tree,
+            root,
+            scopes: parsed.scopes,
+            open: parsed.open,
+            written: parsed.written,
+            written_lines: parsed.written_lines,
+            reading: parsed.reading,
+        }
+    }
 }
 
 impl FileView {
@@ -730,9 +798,9 @@ impl FileView {
             path: file.path.clone(),
             source,
             line_index: file.line_index.clone(),
-            tree,
+            tree: std::sync::Arc::new(tree),
             root,
-            scopes,
+            scopes: std::sync::Arc::new(scopes),
             open: file.open,
             written: None,
             written_lines: None,
@@ -823,9 +891,9 @@ impl FileView {
             path: file.path.clone(),
             source,
             line_index,
-            tree,
+            tree: std::sync::Arc::new(tree),
             root,
-            scopes,
+            scopes: std::sync::Arc::new(scopes),
             open: file.open,
             written: Some(file.text.clone()),
             written_lines: Some(file.line_index.clone()),

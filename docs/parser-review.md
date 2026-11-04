@@ -264,10 +264,8 @@ the loop would hide it; the fix belongs where the cursor is set.
 
 Ranked by (measured win) ÷ (risk):
 
-1. **Cache the `FileView` per (file, content hash, environment)** — the analysis re-parses a rendering on *every*
-   `Session::view`, i.e. on every hover and every pull (`view` is `FileView::parse_rendering_in`, and nothing caches
-   the tree). A 1 MB file costs ~160 ms per request at 6 MB/s; an 11 KB file 1.1 ms. Measured: `view` 1.1 ms, then
-   `view, asked again` 1.2 ms — the second one re-parses.
+1. ~~**Cache the `FileView` per (file, content hash, environment)**~~ — **done**, and the numbers are below. The
+   analysis re-parsed a rendering on *every* `Session::view`, i.e. on every hover and every pull.
 2. **The grammar's template path** (88 % of the std-header parse, 2.5× plain code per byte): profile the speculation
    sites (`checkpoint`/`rollback` per declaration) and `is_a_known_type_name` before changing anything — this is where
    an afternoon of measurement pays, and it is the only place a 2× is available.
@@ -278,6 +276,31 @@ Ranked by (measured win) ÷ (risk):
 
 Not worth doing: replacing rowan (§3), `NodeCache` (§2, measured no gain), incremental reparse (a re-parse of a 200 KB
 file is 30 ms; the win is in caching whole views, not in splicing them).
+
+### What item 1 became, measured
+
+A `FileView` cache in the session, keyed by `(path, the rendering *by object*, the file's identity, the language,
+`cuda`, whether the buffer is open, the macro environment for a buffer view)` — see `Session::views` for why none of
+those can serve a stale parse. Two more numbers came out of doing it:
+
+```text
+                                               before        after
+11 KB file, a view                              1.5 ms       11 µs   (200 hits in 2.2 ms)
+0.08 MB rendering (a 213 KB header), a view    15.4 ms      185 µs   (200 hits in 37 ms)
+```
+
+The *first* attempt still cost 145 µs a hit, and the phase timers said where: `CompilerConfig::for_file` (132 µs) —
+it clones the configuration and looks the file up in the compile database, and it was being paid *after* the parse
+became free. `language_for` cost the same again by itself (it re-does the lookup and re-parses `-std=`), so both are
+now memoized per file, together, in `Session::config_for_file`.
+
+Two things had to change for a session to hold a tree at all:
+
+* **`FileView.tree` and `.scopes` are behind `Arc`s.** A view is cloned per request, and before this a clone copied
+  the token stream — twelve bytes per token, megabytes for the units this exists for.
+* **The cached half has no red root.** rowan's `SyntaxNode` is neither `Send` nor `Sync` and a session is shared
+  across the server's threads, so the cache holds a `ParsedView` — everything but the root — and
+  `FileView::from_parsed` rebuilds it per hit, which is one allocation.
 
 ## 6. How to reproduce every number
 
