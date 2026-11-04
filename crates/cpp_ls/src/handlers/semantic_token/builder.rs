@@ -101,13 +101,15 @@ pub enum TypeKind {
     /// Its fallback is *nothing*: the client's own string colour already draws it, and a `string` token would be the
     /// same colour at the price of one token.
     FormatEscape,
-    /// **`typename` where it introduces a template parameter** — `[]<typename T>`, `template <typename U>`.
+    /// **A keyword that declares or modifies a declaration** — `constexpr`, `auto`, `decltype`, `namespace`, `explicit`,
+    /// `noexcept`, `typename`, `const`, `static`, …
     ///
-    /// Its own name because a reader wants it drawn apart from `const`/`static`: it is the word that says the next name is
-    /// a **type**, and a theme puts it near `static_cast`'s `keyword.operator.cast` (the protocol has no such type, so a
-    /// client maps this name to a scope of its choosing — the VS Code extension does exactly that in its
-    /// `semanticTokenScopes`). The fallbacks are `modifier` and then `keyword`, both standard.
-    Typename,
+    /// Its own name because a reader wants the declaration vocabulary apart from the statement vocabulary: a theme puts
+    /// it near `static_cast`'s `keyword.operator.cast`, and leaving it to the grammar's one `keyword` colour is what the
+    /// report was about ("`typename` 希望颜色接近 `static_cast`"). The protocol has no such type, so a client maps this
+    /// name to a scope of its choosing — the VS Code extension does that in its `semanticTokenScopes`. The fallbacks are
+    /// `modifier` and then `keyword`, both standard.
+    DeclarationKeyword,
     /// **A regular expression** — not this server's own, and here only as the fallback for a format field.
     ///
     /// The protocol has had `regexp` since 3.16 and every client advertises it; a theme draws it as the pattern
@@ -142,7 +144,7 @@ impl TypeKind {
             TypeKind::FormatConversion => 19,
             TypeKind::FormatEscape => 20,
             TypeKind::Regexp => 21,
-            TypeKind::Typename => 22,
+            TypeKind::DeclarationKeyword => 22,
         }
     }
 
@@ -179,7 +181,7 @@ impl TypeKind {
             TypeKind::FormatConversion => SemanticTokenType::new("formatConversion"),
             TypeKind::FormatEscape => SemanticTokenType::new("formatEscape"),
             TypeKind::Regexp => SemanticTokenType::REGEXP,
-            TypeKind::Typename => SemanticTokenType::new("typename"),
+            TypeKind::DeclarationKeyword => SemanticTokenType::new("declarationKeyword"),
         }
     }
 
@@ -207,7 +209,7 @@ impl TypeKind {
         TypeKind::FormatConversion,
         TypeKind::FormatEscape,
         TypeKind::Regexp,
-        TypeKind::Typename,
+        TypeKind::DeclarationKeyword,
     ];
 }
 

@@ -182,27 +182,7 @@ fn push_keywords(builder: &mut Builder<'_>, view: Option<&FileView>) {
                 _ => TypeKind::Variable,
             },
             other if cpp_parser::is_keyword(other) => {
-                // **`typename` where it introduces a template parameter is drawn as its own type.** The table below
-                // answers `modifier` for every `typename`, which is right for `typename T::type` and not for the word
-                // that says the next name *is* a type. The tree is what tells them apart: the parameter list's own
-                // `TemplateParameter` is the parent. Reported from an editor, with the request that the colour be near
-                // `static_cast` — which a client does by mapping this name to `keyword.operator.cast`.
-                // The token stream has no parent, so the tree is asked for the node at the token's start — one
-                // lookup, only for the word this branch is about.
-                let introduces_a_parameter = other == cpp_parser::CppTokenKind::TypenameKeyword
-                    && cpp_parser::token_at(&view.root, token.range.start_offset).is_some_and(
-                        |found| {
-                            found.parent_ancestors().any(|parent| {
-                                cpp_parser::CppSyntaxKind::from(parent.kind())
-                                    == cpp_parser::CppSyntaxKind::TemplateParameter
-                            })
-                        },
-                    );
-                if introduces_a_parameter {
-                    TypeKind::Typename
-                } else {
-                    kind_of_keyword(other).unwrap_or(TypeKind::Keyword)
-                }
+                kind_of_keyword(other).unwrap_or(TypeKind::Keyword)
             }
             // Punctuation, literals, comments: not this pass's business.
             _ => continue,
@@ -222,7 +202,7 @@ fn push_keywords(builder: &mut Builder<'_>, view: Option<&FileView>) {
         // **`typename` has a second fallback**, because its own name is the least likely to be known: the custom type
         // first, then `modifier` (what every `typename` used to be), then the standard `keyword` every legend carries.
         let pushed = pushed
-            || (drawn == TypeKind::Typename
+            || (drawn == TypeKind::DeclarationKeyword
                 && builder.push_range(
                     token.range.start_offset,
                     token.range.end_offset(),
@@ -442,8 +422,11 @@ fn kind_of_keyword(kind: cpp_parser::CppTokenKind) -> Option<TypeKind> {
         // `true` and `false` are the same `BoolLiteral` kind the type shares, handled above.
         CppTokenKind::TrueKeyword | CppTokenKind::FalseKeyword => TypeKind::Variable,
 
-        // **A qualifier is not a statement keyword.** `constexpr` in particular is written constantly in modern
-        // C++ and reads as a *property of the declaration*, which is what a theme's `modifier` colour is for.
+        // **The declaration vocabulary, drawn as one colour.** The report asked for `constexpr`, `auto`, `decltype`,
+        // `namespace`, `explicit` and `noexcept` to read like `typename` — the words that say what a declaration *is* or
+        // how it may be used — and for `if`/`while`/`return` to stay ordinary keywords. The protocol has no type for this
+        // family, so it is the custom one; a client maps it (the VS Code extension maps it to `keyword.operator.cast`,
+        // the colour `static_cast` carries).
         CppTokenKind::ConstKeyword
         | CppTokenKind::ConstexprKeyword
         | CppTokenKind::ConstevalKeyword
@@ -461,10 +444,22 @@ fn kind_of_keyword(kind: cpp_parser::CppTokenKind) -> Option<TypeKind> {
         | CppTokenKind::TypenameKeyword
         | CppTokenKind::AutoKeyword
         | CppTokenKind::DecltypeKeyword
-        | CppTokenKind::NoexceptKeyword => TypeKind::Modifier,
+        | CppTokenKind::NoexceptKeyword
+        | CppTokenKind::NamespaceKeyword
+        | CppTokenKind::ClassKeyword
+        | CppTokenKind::StructKeyword
+        | CppTokenKind::UnionKeyword
+        | CppTokenKind::EnumKeyword
+        | CppTokenKind::TemplateKeyword
+        | CppTokenKind::TypedefKeyword
+        | CppTokenKind::UsingKeyword
+        | CppTokenKind::AlignasKeyword
+        | CppTokenKind::AlignofKeyword => TypeKind::DeclarationKeyword,
 
-        // Everything else: `return`, `if`, `for`, `class`, `sizeof`, `new`, `template` …  — the words that are
-        // about the syntax itself. `None` for a kind this list does not name, and the caller decides.
+        // **Control flow keeps the standard `keyword` colour** — `return`, `if`, `while`, `for`, `switch`, `break`,
+        // `continue`, `goto`, `case`, `default`, `sizeof`, `new`, `delete`, `throw`, `try`, `catch`, `co_*` and the
+        // `_cast`s: words about the statement being written, not about the declaration. `None` for a kind this list does
+        // not name, and the caller decides.
         _ => return None,
     })
 }
@@ -617,7 +612,7 @@ fn extended_with_the_custom_types(
         // scope for it (semanticTokenScopes), which is how the word gets the static_cast colour a reader asked for.
         // A client that does not know the name never sees it: Builder::push_range refuses a kind outside this list, and
         // the pass falls back to modifier, then keyword.
-        TypeKind::Typename,
+        TypeKind::DeclarationKeyword,
     ] {
         let name = kind.to_semantic_token_type();
         if !drawable.contains(&name) {
@@ -872,8 +867,8 @@ using ContainerOf = Container<int, int>;
         let outer = text.find("template").expect("the fixture writes it");
         assert_eq!(
             tokens.get(&outer),
-            Some(&index_of(TypeKind::Keyword)),
-            "the declaration's own `template`"
+            Some(&index_of(TypeKind::DeclarationKeyword)),
+            "the declaration's own `template` is a declaration keyword"
         );
 
         let inner = text[outer + 1..]
@@ -882,8 +877,8 @@ using ContainerOf = Container<int, int>;
             .expect("the fixture writes a template template parameter");
         assert_eq!(
             tokens.get(&inner),
-            Some(&index_of(TypeKind::Keyword)),
-            "the template template parameter's `template`"
+            Some(&index_of(TypeKind::DeclarationKeyword)),
+            "the template template parameter's `template` too"
         );
     }
 
@@ -1656,7 +1651,7 @@ int f(int value);
     /// colour a theme can recover — the client's own grammar draws it as plain text — so the list is tested rather
     /// than trusted.
     #[test]
-    fn a_declaration_specifier_is_drawn_as_a_modifier() {
+    fn a_declaration_specifier_is_drawn_as_a_declaration_keyword() {
         let text = "struct Marker {\n\
                     \x20   explicit Marker(int pos);\n\
                     \x20   virtual ~Marker();\n\
@@ -1669,15 +1664,85 @@ int f(int value);
         let tokens = encode(file, Some(&view), &names, &None, false, &[]);
         let at_type = by_offset(text, &tokens);
 
+        // **One colour for the declaration vocabulary**, which is the reported request: `typename` was the example,
+        // and the words a declaration is made of should read the same (`constexpr`, `explicit`, `noexcept`, …) while
+        // `if`/`while`/`return` keep the standard `keyword` colour.
         for word in ["explicit", "virtual", "constexpr", "const", "noexcept"] {
             let at = text[..text.find(word).expect("the fixture writes it")].len();
             assert_eq!(
                 at_type.get(&at),
-                Some(&index_of(TypeKind::Modifier)),
-                "`{word}` is a declaration specifier: {at_type:?}"
+                Some(&index_of(TypeKind::DeclarationKeyword)),
+                "`{word}` is a declaration keyword: {at_type:?}"
             );
         }
     }
+
+    /// **The declaration vocabulary is one colour; control flow is not.**
+    ///
+    /// Reported: "`typename` 只是例子 —— `constexpr`、`auto`、`decltype`、`namespace`、`explicit`、`noexcept` 这些用于声明或修饰的关键词
+    /// 全部采用这个颜色，而 `if`、`while`、`return` 这样的控制流关键词保持不变". The table in [`kind_of_keyword`] is the rule; this
+    /// is the rule stated as a test, over both sides of the line at once.
+    #[test]
+    fn the_declaration_vocabulary_is_one_colour_and_control_flow_is_not() {
+        let text = "namespace demo {\n\
+                    template <typename T>\n\
+                    class Thing {\n\
+                        explicit Thing(T value) noexcept;\n\
+                        constexpr auto size() const -> decltype(sizeof(T)) { return sizeof(T); }\n\
+                        static inline const int stride = 1;\n\
+                        enum class Kind { One, Two };\n\
+                    };\n\
+                    }\n\
+                    void walk() {\n\
+                        for (int i = 0; i < 3; ++i) {\n\
+                            if (i > 1) { while (false) break; return; }\n\
+                            switch (i) { case 0: new int(1); default: break; }\n\
+                        }\n\
+                    }\n";
+        let (session, path) = a_held_file(text);
+        let view = session.view_of_the_file(&path).expect("a view");
+        let file = session.files().held(&path).expect("the file is held");
+        let names = session.classified_names(&view);
+        let tokens = encode(file, Some(&view), &names, &None, false, &[]);
+        let at_type = by_offset(text, &tokens);
+
+        let declaration = index_of(TypeKind::DeclarationKeyword);
+        let keyword = index_of(TypeKind::Keyword);
+        for word in [
+            "namespace",
+            "template",
+            "typename",
+            "class",
+            "explicit",
+            "noexcept",
+            "constexpr",
+            "auto",
+            "decltype",
+            "static",
+            "inline",
+            "const",
+            "enum",
+        ] {
+            let at = text[..text.find(word).expect("the fixture writes it")].len();
+            assert_eq!(
+                at_type.get(&at),
+                Some(&declaration),
+                "`{word}` is part of a declaration: {at_type:?}"
+            );
+        }
+
+        for word in [
+            "for", "if", "while", "break", "return", "switch", "case", "new",
+        ] {
+            let at = text[..text.find(word).expect("the fixture writes it")].len();
+            assert_eq!(
+                at_type.get(&at),
+                Some(&keyword),
+                "`{word}` is a statement, not a declaration: {at_type:?}"
+            );
+        }
+    }
+
     /// **A keyword is drawn as what it is**, which is not one answer: a type, a qualifier, a value and a statement
     /// word are four things a reader scans for, and a theme colours them apart. See [`kind_of_keyword`].
     ///
@@ -1702,8 +1767,8 @@ int f(int value);
             ("bool", TypeKind::Type, "`bool` names a type"),
             (
                 "constexpr",
-                TypeKind::Modifier,
-                "a qualifier is a property of the declaration",
+                TypeKind::DeclarationKeyword,
+                "a declaration keyword, drawn with its family",
             ),
             (
                 "this",
@@ -1721,15 +1786,19 @@ int f(int value);
                 TypeKind::Keyword,
                 "`return` is about the syntax, which is what `keyword` means",
             ),
-            ("const", TypeKind::Modifier, "the trailing `const` too"),
+            (
+                "const",
+                TypeKind::DeclarationKeyword,
+                "the trailing `const` is a declaration keyword too",
+            ),
             (
                 "auto",
-                TypeKind::Modifier,
-                "a declaration's placeholder is a property of the declaration, not a statement keyword",
+                TypeKind::DeclarationKeyword,
+                "a declaration's placeholder, drawn with its family",
             ),
             (
                 "const int",
-                TypeKind::Modifier,
+                TypeKind::DeclarationKeyword,
                 "and the leading `const` of `const int z`",
             ),
         ] {
@@ -1790,7 +1859,7 @@ int f(int value);
             }
         }
 
-        let keyword = index_of(TypeKind::Keyword);
+        let keyword = index_of(TypeKind::DeclarationKeyword);
         let a_type = index_of(TypeKind::Type);
         assert_eq!(
             by_column.get(&at("struct")),
@@ -2127,7 +2196,7 @@ void f(int width, double d) {
         let at = text[..text.find("typename").expect("the fixture writes it")].len();
         assert_eq!(
             drawn.get(&at),
-            Some(&index_of(TypeKind::Typename)),
+            Some(&index_of(TypeKind::DeclarationKeyword)),
             "`typename` introducing a template parameter is drawn as its own type: {drawn:?}"
         );
 
