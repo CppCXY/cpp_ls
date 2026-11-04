@@ -928,3 +928,31 @@ fn a_type_name_through_an_inline_namespace_names_the_type() {
         "the alias's name is what the file wrote, even though the index stores it under `__cxx11`"
     );
 }
+
+/// **§D5 — a generic lambda called with an `int` returns an `int`.**
+///
+/// `auto f = [](auto v) { return v; }; f(3)` — the lambda's parameter is a template parameter written `auto`, and its body's
+/// return type was refused outright ("nothing says what `auto` stands for"). At a **call site** something does: the argument
+/// types, paired with the parameters by position.
+#[test]
+fn a_generic_lambda_called_with_an_int_returns_an_int() {
+    let session = session_with(&[(
+        "/p/a.cpp",
+        "int main() {\n    auto twice = [](auto v) { return v * 2; };\n    auto x = twice(2.5);\n}\n",
+    )]);
+    let path = std::path::Path::new("/p/a.cpp");
+    let view = session.view_of_the_file(path).expect("the written text");
+    let source = view.source.clone();
+    let at = source.find("auto x").expect("the fixture") + "auto x".len() - 1;
+
+    assert_eq!(
+        session
+            .type_at(
+                &view,
+                cpp_code_analysis::file::coordinates::ReadingOffset::new(at)
+            )
+            .map(|found| found.type_of.clone()),
+        cpp_code_analysis::Known::Yes("double".to_string()),
+        "`v * 2` with `v` a `double` is a `double`"
+    );
+}

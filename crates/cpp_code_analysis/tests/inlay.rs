@@ -463,3 +463,46 @@ auto one() { return 1; }
         assert_ne!(hint.label, "auto");
     }
 }
+
+/// **A lambda's deduced return is a hint**, and an init-capture's type comes from its initializer.
+///
+/// `[value = counter + 10] { return value; }` — the capture is neither a parameter nor a local, so the return walk refused
+/// it and the lambda had no `-> T` hint. The initializer is an expression the same walk types, with the **enclosing
+/// function's** declarations in hand (the capture is written in the function's scope, not in the variable's).
+#[test]
+fn a_lambdas_deduced_return_is_a_hint() {
+    let source = "\
+void f() {
+    int counter = 0;
+    auto initialised = [value = counter + 10] { return value; };
+    auto noexcept_lambda = []() noexcept { return 1; };
+    auto by_ref = [&counter] { ++counter; };
+}
+";
+    let session = session_with(&[("/p/a.cpp", source)]);
+    let view = session.view("/p/a.cpp").expect("the file is held");
+    let whole_file = cpp_parser::SourceRange::new(0, view.source.len());
+    let hints: Vec<(usize, String)> = session
+        .type_hints(&view, whole_file)
+        .into_iter()
+        .map(|hint| (hint.offset, hint.label))
+        .collect();
+
+    // The hint sits at the body's first byte, which is the `{` after the specifiers.
+    for needle in ["{ return value; }", "{ return 1; }"] {
+        let at = source.find(needle).expect("the fixture");
+        assert!(
+            hints
+                .iter()
+                .any(|(offset, label)| *offset == at && label == "int"),
+            "`-> int` before `{needle}`: {hints:?}"
+        );
+    }
+    // A body with no return has nothing to deduce.
+    assert!(
+        !hints
+            .iter()
+            .any(|(_, label)| label == "void" || label.is_empty()),
+        "no hint for `++counter`: {hints:?}"
+    );
+}

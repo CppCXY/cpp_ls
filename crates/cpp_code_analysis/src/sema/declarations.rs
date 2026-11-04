@@ -2075,7 +2075,11 @@ pub fn a_lambdas_return_type(
                 .split_whitespace()
                 .any(|word| word == "auto")
         });
-    if receives_a_placeholder {
+    // **A generic parameter takes the call's argument.** `[](auto v) { return v; }` called as `f(3)` returns an `int`, and
+    // the arguments are what say so — the parameters written `auto` are paired with them by position. When the call wrote no
+    // arguments (the inlay asks about the lambda itself), there is nothing to pair and the answer is refused.
+    let placeholder_types = the_auto_parameters_with_their_arguments(lambda, argument_types);
+    if receives_a_placeholder && placeholder_types.is_empty() {
         return None;
     }
     let substitutions = crate::sema::types::TypeSubstitutions::new(&[], argument_types);
@@ -2097,8 +2101,10 @@ pub fn a_lambdas_return_type(
         let Some(expression) = statement.children().last() else {
             continue;
         };
-        let written =
-            type_a_return_states_with(&expression, lambda, &substitutions, argument_types)?;
+        let written = match type_with_the_auto_parameters(&expression, &placeholder_types) {
+            Some(written) => written,
+            None => type_a_return_states_with(&expression, lambda, &substitutions, argument_types)?,
+        };
         match &agreed {
             None => agreed = Some(written),
             Some(previous) if *previous == written => {}
@@ -2106,6 +2112,110 @@ pub fn a_lambdas_return_type(
         }
     }
     agreed
+}
+
+/// **The `auto` parameters of a lambda, paired with the call's arguments** — `[](auto v) { … }` called `f(3)` gives `v → int`.
+///
+/// The pairing is positional, which is what the language does: the i-th parameter takes the i-th argument. A parameter
+/// written `auto const&`/`auto&&` still receives the argument's type here — the reference and the `const` are the parameter's
+/// shape, and what a `return` of the name then means is the value's type.
+fn the_auto_parameters_with_their_arguments(
+    lambda: &CppSyntaxNode,
+    argument_types: &[crate::sema::types::Type],
+) -> Vec<(String, crate::sema::types::Type)> {
+    let mut paired: Vec<(String, crate::sema::types::Type)> = Vec::new();
+    for (at, parameter) in lambda
+        .descendants()
+        .filter(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::Parameter)
+        .enumerate()
+    {
+        let text = parameter.text().to_string();
+        if !text.split_whitespace().any(|word| word == "auto") {
+            continue;
+        }
+        let Some(name) = parameter
+            .descendants()
+            .find(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::NameExpr)
+            .map(|node| node.text().to_string())
+            .map(|text| text.trim().to_string())
+        else {
+            continue;
+        };
+        if let Some(argument) = argument_types.get(at) {
+            paired.push((name, argument.clone()));
+        }
+    }
+    paired
+}
+
+/// **The type a return statement states, with the `auto` parameters standing for their arguments.**
+///
+/// The arms are the shapes a return is written with: a name (a paired parameter, or one the ordinary walk can type), a
+/// literal, an arithmetic pair, parentheses, and a construction. `None` when the shape is anything else, and the caller
+/// falls back to the ordinary walk — which is what a lambda with no `auto` parameters uses.
+fn type_with_the_auto_parameters(
+    expression: &CppSyntaxNode,
+    paired: &[(String, crate::sema::types::Type)],
+) -> Option<String> {
+    let kind = CppSyntaxKind::from(expression.kind());
+    match kind {
+        CppSyntaxKind::ParenExpr => {
+            let inner = expression.children().next()?;
+            type_with_the_auto_parameters(&inner, paired)
+        }
+        CppSyntaxKind::NameExpr | CppSyntaxKind::IdentifierExpr => {
+            let written = expression.text().to_string();
+            let written = written.trim();
+            paired
+                .iter()
+                .find(|(name, _)| name == written)
+                .map(|(_, type_of)| type_of.to_string())
+        }
+        CppSyntaxKind::LiteralExpr => {
+            Some(literal_type(&expression.text().to_string()).to_string())
+        }
+        CppSyntaxKind::InitListExpr => {
+            let head = expression.children().next()?;
+            let written = head.text().to_string();
+            let written = written.trim();
+            (!written.is_empty() && written != "{").then(|| written.to_string())
+        }
+        CppSyntaxKind::BinaryExpr => {
+            let operands: Vec<CppSyntaxNode> = expression.children().collect();
+            let comparison = expression
+                .children_with_tokens()
+                .filter_map(|element| element.into_token())
+                .any(|token| {
+                    matches!(
+                        token.text(),
+                        "==" | "!=" | "<" | ">" | "<=" | ">=" | "&&" | "||"
+                    )
+                });
+            if comparison {
+                return Some("bool".to_string());
+            }
+            let (left, right) = (operands.first()?, operands.last()?);
+            let left_type = type_with_the_auto_parameters(left, paired)?;
+            let right_type = type_with_the_auto_parameters(right, paired)?;
+            // **The usual arithmetic conversion, in the one case needing no table**: equal types are that type, and a
+            // floating type absorbs an integer. Anything else is the ranking this layer does not keep.
+            if left_type == right_type {
+                return Some(left_type);
+            }
+            let floating = |written: &str| written.contains("float") || written.contains("double");
+            match (floating(&left_type), floating(&right_type)) {
+                (true, true) => Some(if left_type.len() >= right_type.len() {
+                    left_type
+                } else {
+                    right_type
+                }),
+                (true, false) => Some(left_type),
+                (false, true) => Some(right_type),
+                (false, false) => None,
+            }
+        }
+        _ => None,
+    }
 }
 
 fn returned_expressions_in(body: &CppSyntaxNode) -> Vec<CppSyntaxNode> {
@@ -2273,7 +2383,9 @@ fn type_a_return_states_with(
             // while the same body in a free function deduced fine (a free function's `return` can only name a parameter).
             let written = parameter_type(expression, declaration)
                 .or_else(|| a_data_member_type(expression, declaration))
-                .or_else(|| a_local_variables_type(expression, declaration))?;
+                .or_else(|| a_local_variables_type(expression, declaration))
+                // **And an init-capture** — `[value = counter + 10] { return value; }`, whose type is its initializer's.
+                .or_else(|| a_captures_type(expression, declaration))?;
             Some(substituted_spelling(&written, substitutions))
         }
         // **A member access on a cast**, which is the shape `_Get_unwrapped`'s middle branch has:
@@ -2376,6 +2488,7 @@ fn type_a_return_states(expression: &CppSyntaxNode, declaration: &CppSyntaxNode)
                 // had no return type at all.
                 .or_else(|| a_data_member_type(expression, declaration))
                 .or_else(|| a_local_variables_type(expression, declaration))
+                .or_else(|| a_captures_type(expression, declaration))
         }
         CppSyntaxKind::BinaryExpr => {
             // Three children — left, operator, right — and the operator is a token rather than a node, so the two
@@ -2515,6 +2628,64 @@ fn parameter_type(name: &CppSyntaxNode, declaration: &CppSyntaxNode) -> Option<S
     let at = whole.rfind(written)?;
     let the_type = whole[..at].trim();
     (!the_type.is_empty()).then(|| the_type.to_string())
+}
+
+/// **The type an init-capture's name has** — `[value = counter + 10] { return value; }` is an `int`.
+///
+/// The capture is written in the lambda's own capture list (`LambdaCapture "value = counter + 10"`), and its initializer is
+/// an expression the same walk types — with the **enclosing** declaration's parameters in hand, because that is the scope the
+/// initializer is written in (`counter` is a parameter of the function containing the lambda).
+///
+/// A plain capture (`[counter]`, `[&counter]`) has no initializer and answers nothing here: its type is the enclosing
+/// variable's, which is a name lookup this layer does not make from a capture node.
+fn a_captures_type(expression: &CppSyntaxNode, declaration: &CppSyntaxNode) -> Option<String> {
+    let name = expression.text().to_string();
+    let name = name.trim();
+    if name.is_empty() {
+        return None;
+    }
+    for capture in declaration
+        .descendants()
+        .filter(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::LambdaCapture)
+    {
+        let text = capture.text().to_string();
+        let Some((left, _)) = text.split_once('=') else {
+            continue;
+        };
+        if left.trim() != name {
+            continue;
+        }
+        // **The initializer is the expression after the =.** It may be a child node or one level down (the capture
+        // node's own structure is the grammar's), so the first node that is not the captured name is the answer.
+        let initializer = capture
+            .children()
+            .find(|child| child.text().to_string().trim() != left.trim())
+            .or_else(|| {
+                capture
+                    .descendants()
+                    .find(|node| node.text().to_string().trim() != left.trim())
+            })?;
+        // **The enclosing *function*, not the variable the lambda is stored in.** The nearest Declaration ancestor is
+        // uto initialised = [value = …], whose body does not hold int counter = 0; — the initializer is written in the
+        // function's scope, so the walk needs the **outermost** declaration around the lambda.
+        let outer = declaration
+            .ancestors()
+            .filter(|node| {
+                matches!(
+                    CppSyntaxKind::from(node.kind()),
+                    CppSyntaxKind::Declaration | CppSyntaxKind::FunctionDef
+                )
+            })
+            .last()
+            .unwrap_or_else(|| declaration.clone());
+        return type_a_return_states_with(
+            &initializer,
+            &outer,
+            &crate::sema::types::TypeSubstitutions::new(&[], &[]),
+            &[],
+        );
+    }
+    None
 }
 
 /// **The type a local variable's own declaration writes** — `std::vector<int> result;` answers `std::vector<int>`.
