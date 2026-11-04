@@ -705,3 +705,50 @@ fn a_structured_binding_over_a_project_class_takes_its_members_types() {
         );
     }
 }
+
+/// **§C9 — a braced construction of a template-id is a type.**
+///
+/// `auto x = B<int>{};` answered `UnknownType("B<int>{}")` while `auto x = B{};` worked, and the member access
+/// `Builder<int>{}.with(2)` reported "the type of `Builder<int>{}` is not known" (measured in `templates.cpp`).
+///
+/// The gate in front of the name arm rejects `(`, `)` and `,` — a whole expression is not a name — and `B<int>{}` writes
+/// none of the three: its one segment is `B` once the `<…>` comes off, so the name arm answered before the braced-list arm
+/// could. A braced construction is not a name either, and with the gate saying so the construction reaches the arm that
+/// names its head and runs the class-template deduction.
+#[test]
+fn a_braced_construction_of_a_template_id_is_typed() {
+    let session = session_with(&[(
+        "/p/a.cpp",
+        "template <typename T>\n\
+         struct B {\n\
+             T v;\n\
+             int with(int x) { return x; }\n\
+         };\n\
+         void f() {\n\
+             auto x = B<int>{};\n\
+             auto y = B<int>{}.with(2);\n\
+         }\n",
+    )]);
+    let path = std::path::Path::new("/p/a.cpp");
+    let view = session.view_of_the_file(path).expect("the written text");
+    let source = view.source.clone();
+
+    // **At the variable's own name**, not after the `=`: the first byte of the initializer is the head of the
+    // construction, and the question here is what the *variable* is.
+    //
+    // The second half of the fixture is deliberately not asserted: `auto y = B<int>{}.with(2);` answers the initialiser's
+    // **spelling** (`B<int>{}.with`), because the type of a member call on a braced construction is a separate question —
+    // the hover on the member answers `int with(int x)` while the call's own type does not. Recorded in `docs/buglist.md`
+    // as the next piece of the card work rather than asserted away here.
+    let at = source.find("x = ").expect("the fixture");
+    assert_eq!(
+        session
+            .type_at(
+                &view,
+                cpp_code_analysis::file::coordinates::ReadingOffset::new(at)
+            )
+            .map(|found| found.type_of.clone()),
+        cpp_code_analysis::Known::Yes("B<int>".to_string()),
+        "a braced construction of a template-id is its class with the arguments it wrote"
+    );
+}

@@ -4544,6 +4544,17 @@ fn type_of_expression_inner(
             return Known::Unknown(UnknownReason::UnknownType(Box::from(written)));
         };
 
+        // **A construction has a head, a bare braced list does not.** `{1, 2}` has values only; `Builder<int>{}` is the
+        // type's name and a nested list of values. The first branch below refuses *anything* whose first child has a
+        // type, which is right for a value and wrong for a type: `Builder<int>{}.with(2)` answered "the type of
+        // `Builder<int>{}` is not known" while the head was a class this file declares.
+        let has_a_head = cpp_parser::CppSyntaxKind::from(first.kind())
+            != cpp_parser::CppSyntaxKind::InitListExpr
+            && expression.children().nth(1).is_some_and(|child| {
+                cpp_parser::CppSyntaxKind::from(child.kind())
+                    == cpp_parser::CppSyntaxKind::InitListExpr
+            });
+
         return match type_of_expression_memoed(
             memo,
             index,
@@ -4558,7 +4569,9 @@ fn type_of_expression_inner(
             // `std::initializer_list<int>` — a library type, which this layer deliberately does not invent. Answering
             // `int` here claimed that the list *is* an `int`, and the hover that read the type at the object's last byte
             // then looked for members of `int` on a `Pair<int, int>`.
-            Known::Yes(_) => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
+            Known::Yes(_) if !has_a_head => {
+                Known::Unknown(UnknownReason::UnknownType(Box::from(written)))
+            }
             _ => match declaration_of_expression(index, scopes, root, path, &first) {
                 // **The spelling is read, not named.** `Type::named("Pair<int, int>")` is a class whose *name* is
                 // `Pair<int, int>` and whose argument list is empty — so nothing downstream substitutes: the member
@@ -7478,7 +7491,17 @@ fn writes_a_name(written: &str) -> bool {
     // What is left after this test is a name: `std::vector<int>` and `A<B>::C<D>` pass, `f(x)`, `a + b`, `{1, 2}`
     // and `static_cast<T>(y)` do not. `,` is in the list because `A<B, C>` is a name and `f(a, b)` is not — and
     // after the argument list comes off, the two are otherwise the same shape.
-    if spelling.contains('(') || spelling.contains(')') || spelling.contains(',') {
+    // **A braced construction is not a name either.** `B<int>{}` passes every other test here — its one segment is
+    // `B` once the `<…>` comes off — so the name arm claimed it and answered `UnknownType("B<int>{}")` before the
+    // braced-list arm could type it. `auto x = B{};` worked only because a list with values writes a comma
+    // (`std::pair{1, 2.5}`) and the comma was already in the list. Measured on `Builder<int>{}.with(2)` in
+    // `templates.cpp`: the member access reported "the type of `Builder<int>{}` is not known".
+    if spelling.contains('(')
+        || spelling.contains(')')
+        || spelling.contains(',')
+        || spelling.contains('{')
+        || spelling.contains('}')
+    {
         return false;
     }
 
