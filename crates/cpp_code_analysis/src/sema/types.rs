@@ -1456,7 +1456,7 @@ pub fn type_of_declaration_named(
     name: cpp_parser::SourceRange,
     declared_name: Option<&str>,
 ) -> Type {
-    let base = read_specifiers_named(specifiers, declared_name);
+    let base = read_specifiers_named(specifiers, declared_name, name);
 
     // **A base with no spelling has nothing for a declarator to be applied to.** `priority[]` of the unnamed class
     // type above is not `[]`, it is an array of a type this layer cannot spell — so wrapping it in an `Array`
@@ -1575,20 +1575,31 @@ fn the_type_a_typeof_names(node: &CppSyntaxNode) -> Option<Type> {
             .children()
             .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::DeclSpecifierSeq)?
     };
-    let read = read_specifiers_named(&specifiers, None);
+    let read = read_specifiers_named(
+        &specifiers,
+        None,
+        cpp_parser::source_range(specifiers.text_range()),
+    );
     // An elaborated name is the type's *name* on its own: struct point reaches this reader as a specifier sequence
     // holding BuiltinType "struct" and NamedType "point", and the answer is point — which is what a member list is
     // keyed under. A payload that resolved to nothing is not an answer.
     (!read.to_string().trim().is_empty()).then_some(read)
 }
 pub(crate) fn read_specifiers(specifiers: &CppSyntaxNode) -> Type {
-    read_specifiers_named(specifiers, None)
+    read_specifiers_named(
+        specifiers,
+        None,
+        cpp_parser::source_range(specifiers.text_range()),
+    )
 }
 
 /// [`read_specifiers`], with the name the declaration declares — see [`type_of_declaration_named`].
 pub(crate) fn read_specifiers_named(
     specifiers: &CppSyntaxNode,
     declared_name: Option<&str>,
+    // Where the declared name is, so that a specifier which *is* that name (an out-of-line definition's
+    // `LuaLexer::LuaReserved`) is told apart from a type that merely ends the same way (`std::any any`).
+    declared_range: cpp_parser::SourceRange,
 ) -> Type {
     let mut builtin: Vec<String> = Vec::new();
     // The **last** name in the sequence, and the last unmodelled node — see the two notes below.
@@ -1656,10 +1667,17 @@ pub(crate) fn read_specifiers_named(
                 // spelling ends with `::` and the name being declared, and a *type* never does.
                 let written = node.text().to_string();
                 let written = written.trim();
+                // **A declarator's qualified name, not a type that happens to end the same way.** The range is what
+                // tells the two apart: `LuaLexer::LuaReserved` ends exactly where the declared name ends, while
+                // `std::any any` writes the type *before* the name, one space short. Without the range the guard also
+                // dropped `std::pair`, `std::string` … — every declaration whose type's last segment was its own name —
+                // and an empty specifier sequence answered `void`: measured, `std::any any = 1;` hovered as `void any;`
+                // and `type_at(any)` answered `void`.
                 let is_the_declared_name = declared_name.is_some_and(|name| {
-                    written
-                        .strip_suffix(name)
-                        .is_some_and(|prefix| prefix.ends_with("::"))
+                    usize::from(node.text_range().end()) == declared_range.end_offset()
+                        && written
+                            .strip_suffix(name)
+                            .is_some_and(|prefix| prefix.ends_with("::"))
                 });
                 if !is_the_declared_name && let Some(found) = read_named(&node) {
                     named = Some(found);

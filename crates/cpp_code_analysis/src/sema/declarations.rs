@@ -2741,7 +2741,12 @@ pub(crate) fn declared_returns_of_with(
     let spelling = if specifiers.text().to_string().trim().is_empty() {
         String::new()
     } else {
-        crate::sema::types::read_specifiers_named(&specifiers, Some(declared.as_str())).to_string()
+        crate::sema::types::read_specifiers_named(
+            &specifiers,
+            Some(declared.as_str()),
+            cpp_parser::source_range(specifiers.text_range()),
+        )
+        .to_string()
     };
 
     let spelling = format!("{spelling} {before_the_name}");

@@ -442,3 +442,49 @@ fn a_call_of_a_type_and_an_arrow_through_a_handle() {
         );
     }
 }
+
+/// **§C4 — a type whose last segment is the declared name is a type, not a declarator.**
+///
+/// Reported from the editor: `std::any any = 1;` hovered as `void any;`, and `std::pair pair{1, 2};` as `void pair;`.
+///
+/// The specifier reader drops a specifier that spells a **declarator's** qualified name — the guard exists for
+/// `std::map<std::string, LuaTokenKind> LuaLexer::LuaReserved = { … }`, where "the last name wins" would record
+/// `LuaLexer::LuaReserved` as the type. It recognised that shape by the text alone, and `std::any` ends in `::` + `any`
+/// exactly as `LuaLexer::LuaReserved` ends in `::` + `LuaReserved`. The type was dropped, the specifier sequence read as
+/// empty, and `parse_type_spelling("")` answered **`void`** — a wrong type, which is worse than no type.
+///
+/// The range tells the two apart: a declarator's qualified name ends where the declared name ends, and a type written
+/// before the name does not.
+#[test]
+fn a_type_whose_last_segment_is_the_declared_name_is_not_dropped() {
+    let session = session_with(&[(
+        "/p/a.cpp",
+        "void f() {\n\
+             std::any any = 1;\n\
+             std::pair pair{1, 2};\n\
+             std::string string = \"x\";\n\
+         }\n",
+    )]);
+    let path = std::path::Path::new("/p/a.cpp");
+    let view = session.view_of_the_file(path).expect("the written text");
+    let source = view.source.clone();
+
+    for (declaration, type_of) in [
+        ("std::any any", "std::any"),
+        ("std::pair pair", "std::pair"),
+        ("std::string string", "std::string"),
+    ] {
+        let at = source.find(declaration).expect("the declaration")
+            + declaration.rfind(' ').unwrap()
+            + 1;
+        let known = session.type_at(
+            &view,
+            cpp_code_analysis::file::coordinates::ReadingOffset::new(at),
+        );
+        assert_eq!(
+            known.map(|found| found.type_of.clone()),
+            cpp_code_analysis::Known::Yes(type_of.to_string()),
+            "`{declaration}` must be a `{type_of}`, not `void`"
+        );
+    }
+}
