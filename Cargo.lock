@@ -623,6 +623,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "inspect"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "cpp_code_analysis",
+ "cpp_ls",
+ "cpp_parser",
+ "serde_json",
+]
+
+[[package]]
 name = "is_terminal_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"

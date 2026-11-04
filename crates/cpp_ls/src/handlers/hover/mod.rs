@@ -37,8 +37,8 @@ use cpp_code_analysis::{
 };
 use cpp_parser::CppDocComment;
 use lsp_types::{
-    ClientCapabilities, Hover, HoverContents, HoverParams, HoverProviderCapability, MarkupContent,
-    MarkupKind, ServerCapabilities,
+    ClientCapabilities, Hover, HoverContents, HoverParams, HoverProviderCapability, MarkedString,
+    MarkupContent, MarkupKind, ServerCapabilities,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -230,6 +230,34 @@ fn word_in_the_file(
     }
     written.get(start..end).unwrap_or_default().to_string()
 }
+/// **The card's markdown**, for a caller that is not speaking the protocol — a tool, a test, a probe.
+///
+/// [`hover`] answers with `lsp_types::Hover`, which is the right type for the server and the wrong one for a caller that
+/// wants the text: it would have to depend on `lsp_types` to read one field. See `tools/inspect`.
+pub fn hover_text(
+    session: &Session<DiskFiles>,
+    view: &FileView,
+    offset: cpp_code_analysis::file::coordinates::ReadingOffset,
+    in_the_file: cpp_code_analysis::file::coordinates::FileOffset,
+) -> Option<String> {
+    let hover = hover(session, view, offset, in_the_file)?;
+    Some(match hover.contents {
+        HoverContents::Markup(markup) => markup.value,
+        HoverContents::Scalar(one) => match one {
+            MarkedString::String(text) => text,
+            MarkedString::LanguageString(string) => string.value,
+        },
+        HoverContents::Array(many) => many
+            .into_iter()
+            .map(|one| match one {
+                MarkedString::String(text) => text,
+                MarkedString::LanguageString(string) => string.value,
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+    })
+}
+
 pub fn hover(
     session: &Session<DiskFiles>,
     view: &FileView,

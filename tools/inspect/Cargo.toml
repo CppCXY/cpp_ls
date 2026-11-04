@@ -1,0 +1,25 @@
+[package]
+name = "inspect"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Ask the analysis one question about one project, from the command line."
+
+# **Why this crate exists.** Every question about the analysis used to be a new `tests/tmp_*.rs` probe: write it, run
+# `cargo test --test tmp_x`, read four lines of output, delete it. The compile is the cost and it is paid per file, and
+# the answers are the same twenty questions over and over — the type at an offset, a class's members, the fact behind a
+# name, the hover card. This is one binary that answers all of them from arguments, so a question costs a run and not a
+# build.
+#
+# It is a **tool**, not a shipped binary: nothing in `crates/` depends on it, and it links the same libraries the server
+# and the tests do (`cpp_ls` for the hover card, which is the one answer that lives in the server crate).
+
+[dependencies]
+cpp_parser.workspace = true
+cpp_code_analysis.workspace = true
+# The hover card is the server's own rendering, and a probe that asked the analysis instead would answer a different
+# question from the one an editor asks.
+cpp_ls.workspace = true
+
+clap.workspace = true
+serde_json.workspace = true
