@@ -307,3 +307,30 @@ list is not a `TemplateParameters` scope there (a `template <class T>` head is).
 
 **Check.** `inspect` has no semantic-token command yet; the test
 `typename_in_a_lambdas_template_parameter_list_is_drawn` holds the fixture and asserts the `typename` half.
+
+---
+
+## 13. `#12` and `#11(d)` — fixed in `19e32a0`
+
+* **A lambda's own `T`.** `[]<typename T>(T value)` bound nothing for `T`: the lambda's scope walker read the parameter
+  list and the body, and the explicit `TemplateParameterList` a C++20 lambda may write was never visited. It now opens a
+  `TemplateParameters` scope as a `template <…>` head does, and `T` is a `typeParameter`.
+* **A structured binding over a project class.** `element_of` is a table of the standard library's shapes; a class with
+  `first`/`second` is now asked through `members_of`, with the container's arguments substituted — `auto [a, b] = p;` over
+  `Pair<int, double>` binds `int`/`double`.
+
+## 14. The first checkpoint of the card work — and what it uncovered
+
+**Fixed in `13c665f`.** `B<int>{}` was not typed at all while `B{}` was: the name gate (`writes_a_name`) rejects `(`, `)`
+and `,` and not `{`/`}`, so a construction with a template-id head was claimed by the *name* arm. And a construction is now
+distinguished from a bare braced list by its second child. `Builder<int>{}.with(2)` hovers as `int with(U input)`.
+
+**Open, in the order they matter:**
+
+* **The call's type on a braced construction.** `auto y = B<int>{}.with(2);` answers the initialiser's spelling
+  (`B<int>{}.with`) while the hover on `.with` answers `int with(int x)`. The hover reads the member, the call's type does
+  not — the callee is an `IndexExpr`-shaped member call, which `declaration_of_a_callee` does not recognise.
+* **The template head in the card** (#1's checkpoint): `T with(U input)` still does not say `template <typename U>`. The
+  fact carries only the **names** (`["U"]`), not the written header, so composing `template <typename U>` would be a guess
+  for a non-type parameter (`template <int N>`). The fix is a fact field holding the written header at index time — the
+  same shape as `parameter_list`, which is already the written text.
