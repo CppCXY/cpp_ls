@@ -407,3 +407,30 @@ iterator came from; `std::views::` completes its adaptors; a loop variable over 
   `return result;` names a **local**, which the syntax deduction refuses (`a_data_member_type` covers members, not locals).
   So `for (int value : pipeline())` has no element. The fix is the same one the deduced-return work opened: type a `return`
   that names a local by the local's declared type.
+
+---
+
+## 20. The three reports of this round — `c354c60`
+
+| fig | what | how |
+| --- | --- | --- |
+| 1 | `int* a; a[0]` had no type | the subscript arm learned `Type::Pointer` — `p[i]` is `*(p + i)`, whose type is the pointee |
+| 2 | `nullptr` drawn as a variable | it is `declarationKeyword` now, the colour `const` has |
+| 3 | `std::is_same_v` hovered as two identical lines and "decided by the arguments" | one line per **distinct** signature, and a list with one shape says "a redeclaration, or the two branches of a conditional header" |
+
+And two items from #19:
+
+* **`return` a local** — `auto pipeline() { std::vector<int> result; … return result; }` now answers `std::vector<int>`. The
+  small walker (`deduced_returns_of`'s own) learned a member and a local; the local's type is the last declaration before the
+  return that declares the name.
+* **A namespace alias's members** — `members_of("std::views")` answered 0 and now answers 100: libstdc++ writes
+  `namespace views = ranges::views;`, and the member walk follows *type* aliases only, so an empty answer for a namespace
+  whose fact names a target is asked again of the target.
+
+**Still open from #19:**
+
+* **`std::views::filter` has no hover.** The name query (`definitions_in_scope`) resolves the scope `std::views` without
+  following the namespace alias, so `define`/`hover` say `NotDeclaredHere("std::views::filter")`. The member list follows the
+  alias, completion offers the name from its table; the fix is the same following in the **scope lookup of a qualified
+  name**.
+* **`views::transform`'s element** — the lambda body's return type is still refused.
