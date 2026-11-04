@@ -434,3 +434,24 @@ And two items from #19:
   alias, completion offers the name from its table; the fix is the same following in the **scope lookup of a qualified
   name**.
 * **`views::transform`'s element** — the lambda body's return type is still refused.
+
+---
+
+## 21. Namespace aliases — `5836603`, and what is left
+
+`namespace views = ranges::views;` is how libstdc++ spells `std::views`, and three lookups resolved the spelling literally:
+
+| lookup | before | after |
+| --- | --- | --- |
+| the name query (`through_an_alias`) | `std::views::filter` → `NotDeclaredHere` | `filter` in `std::ranges::views`, `ranges:1882:30` |
+| the member list | `members_of("std::views")` → 0 | 100; and `std::views::_Filter` has the target's 4 members |
+| the completion's scope | the index's adaptors were never reached | 39 rows, real types; the table is the fallback, no duplicates |
+
+The pieces: the alias rewrite in `through_an_alias` (the target, qualified by the alias's own scope), the same rewrite for a
+namespace's members in `members_of_inner`, `through_a_namespace_alias` for a **prefix** of a spelling, and a dedup by label
+in the name completion.
+
+**What is left, and why it is a different question:** an alias whose target is itself reached through *another* alias is
+followed by both loops (they iterate, and the name query's does so up to `ALIAS_DEPTH`), but an alias to a namespace
+**declared inline** (`inline namespace __cxx11`) is still the case the member walk reports as `unlisted` rather than
+following — see `#11`'s note about `std::string`. Nothing in this round changes that, and it is worth its own probe.
