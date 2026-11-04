@@ -499,11 +499,19 @@ fn hover_of_the_program(
             }
             _ => expression_markdown(session, view, offset).map(markdown),
         },
-        // `No` and `Unknown` both leave the name question unanswered: the first says the analysis looked and there
-        // is no such declaration, the second that it cannot say yet (the file's includes are still being read).
-        // Either way the cursor may still be *in* something the analysis can type — `this`, `*p`, `f(1)` — which is
-        // a different question about the same position, and the one a reader on a keyword is asking.
-        Known::No | Known::Unknown(_) => expression_markdown(session, view, offset).map(markdown),
+        // **A name inside a member function may be a member of the class** — C++ looks there before it gives up, and
+        // that is the one place a bare name can name a declaration no scope in this file writes:
+        // `shared_from_this()` in a class deriving `std::enable_shared_from_this<Node>`. The analysis answers with the
+        // member list, substituted; without this the hover had **no content at all** for the call (reported, with a
+        // screenshot of an empty popup).
+        Known::No | Known::Unknown(_) => {
+            match session.member_of_the_enclosing_class(view, offset) {
+                Some(found) => Some(markdown(declaration_markdown(session, view, &found, None))),
+                // The cursor may still be *in* something the analysis can type — `this`, `*p`, `f(1)` — which is a
+                // different question about the same position, and the one a reader on a keyword is asking.
+                None => expression_markdown(session, view, offset).map(markdown),
+            }
+        }
     }
 }
 
@@ -1588,7 +1596,12 @@ fn kind_words(fact: &DeclFact) -> String {
         .filter(|name| !name.is_empty())
         .map(String::as_str)
         .collect();
-    if !named.is_empty() {
+    // **Only when the declaration is the template.** A *member* of a class template carries the class's parameters in
+    // this field — the member-list builder fills them so a use's arguments can be paired — so printing them as the
+    // member's own said "`std::pair::second` — a variable template over `_T1`, `_T2`" (reported, with a screenshot): a
+    // member of a template is not a template, and the field cannot tell the two apart. A fact with a scope therefore
+    // stops claiming and lets the `in `` ` clause below say where it is.
+    if !named.is_empty() && fact.scope.is_none() {
         words.push_str(&format!(" template over `{}`", named.join("`, `")));
     }
 

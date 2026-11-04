@@ -488,3 +488,70 @@ fn a_type_whose_last_segment_is_the_declared_name_is_not_dropped() {
         );
     }
 }
+
+/// **§C5 — a braced initialisation of a class template deduces its arguments.**
+///
+/// Reported from `containers.cpp` (fig 5) and `lambdas.cpp` (fig 4):
+///
+/// ```cpp
+/// std::pair pair{1, 2};
+/// std::cout << pair.first << pair.second;          // `_T1` / `_T2`, unsubstituted
+/// auto [increment, copy] = instance.make_incrementer();   // and it returns `std::pair{…}`
+/// ```
+///
+/// C++17 deduces a class template's arguments from the constructor at a braced initialisation. The engine answered the
+/// class's **bare name** — a type with an argument missing — so nothing downstream substituted and every member stayed
+/// `_T1`/`_T2`.
+///
+/// The deduction walks the class's constructors and pairs their written parameters with the initialiser's element
+/// types (`deduce_the_parameters`, which already handles a parameter written as one template parameter with reference
+/// qualifiers). It answers only when **every** parameter is deduced and every candidate agrees.
+#[test]
+fn a_braced_initialisation_of_a_class_template_deduces_its_arguments() {
+    let session = session_with(&[(
+        "/p/a.cpp",
+        "template <typename A, typename B>\n\
+         struct Pair {\n\
+             A first;\n\
+             B second;\n\
+             Pair(A a, B b) : first(a), second(b) {}\n\
+         };\n\
+         void f() {\n\
+             Pair pair{1, 2.5};\n\
+             int one = pair.first;\n\
+             double other = pair.second;\n\
+         }\n",
+    )]);
+    let path = std::path::Path::new("/p/a.cpp");
+    let view = session.view_of_the_file(path).expect("the written text");
+    let source = view.source.clone();
+    let at_of = |needle: &str| {
+        let at = source.find(needle).expect("the use");
+        at + needle.len() - 1
+    };
+    let known_at = |needle: &str| {
+        session.type_at(
+            &view,
+            cpp_code_analysis::file::coordinates::ReadingOffset::new(at_of(needle)),
+        )
+    };
+
+    // The declaration itself: the arguments come from `{1, 2.5}`.
+    assert_eq!(
+        known_at("Pair pair").map(|found| found.type_of.clone()),
+        cpp_code_analysis::Known::Yes("Pair<int, double>".to_string()),
+        "the braced initialisation deduces `A = int, B = double`"
+    );
+
+    // And the members are substituted, which is the report's second half.
+    assert_eq!(
+        known_at("pair.first").map(|found| found.type_of.clone()),
+        cpp_code_analysis::Known::Yes("int".to_string()),
+        "`first` is `A`, and `A` is `int` here"
+    );
+    assert_eq!(
+        known_at("pair.second").map(|found| found.type_of.clone()),
+        cpp_code_analysis::Known::Yes("double".to_string()),
+        "`second` is `B`, and `B` is `double` here"
+    );
+}

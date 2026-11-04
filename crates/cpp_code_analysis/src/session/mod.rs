@@ -7868,6 +7868,28 @@ impl<F: FileProvider + Clone> Session<F> {
         }
     }
 
+    /// **The member of the class the cursor is inside that `name` names** — C++'s unqualified member lookup.
+    ///
+    /// The hover's question, for a name the scope tree and the index cannot place: `shared_from_this()` inside a class
+    /// deriving `std::enable_shared_from_this<Node>` is a member of the **base**, and no scope in the file declares it.
+    /// `members_of` answers it, substituted, and this is the one-reader wrapper the hover uses. `None` when the cursor is
+    /// not inside a class member, or the name is not a member of that class.
+    pub fn member_of_the_enclosing_class(
+        &self,
+        view: &FileView,
+        offset: ReadingOffset,
+    ) -> Option<ProjectDefinition> {
+        let callee = crate::sema::resolve::name_node_at(&view.root, offset.get())?;
+        crate::index::project::a_member_of_the_enclosing_class(
+            self.store.index(),
+            &view.scopes,
+            &view.root,
+            &view.path,
+            &callee,
+            false,
+        )
+    }
+
     /// **The parameter names to draw at the calls in `range`** — see [`crate::inlay`].
     ///
     /// `range` is the range the client asked about, in the file's own coordinates. Everything this needs beyond

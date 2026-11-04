@@ -1245,6 +1245,219 @@ pub fn member_across_files(
 /// The class is returned **owned** rather than borrowed, because the class of a pointee belongs to a type that
 /// is itself a shared handle — and a borrow of it would have to outlive a local, which is the shape that ends
 /// in unsafe lifetime extension. One `String` per member query is the price of not doing that.
+/// **The braced initialiser a declaration was written with** — `std::pair pair{1, 2}` → `{1, 2}`.
+///
+/// `deduction_inputs` looks for an `Initializer` node, which is the shape `= value` and `(args)` produce; a braced
+/// initialisation puts its list beside the declarator instead, so it needs its own reader. `None` for every declaration
+/// that is not initialised with braces, and for one in another file (this layer holds one tree).
+fn the_braced_initialiser_of(
+    root: &cpp_parser::CppSyntaxNode,
+    named: &NamedDeclaration,
+) -> Option<cpp_parser::CppSyntaxNode> {
+    let NamedDeclaration::Here(binding) = named else {
+        return None;
+    };
+    let declarator = crate::sema::types::declarator_declaring(root, binding.name_range)?;
+    let parent = declarator.parent()?;
+    // **The list is wrapped**: `Pair p{1, 2.5}` is `InitDeclarator > [Declarator "p", Initializer "{1, 2.5}"]`, and the
+    // `Initializer` holds the `InitListExpr`. One hop, not a search: a subtree search would also find a braced list in an
+    // argument (`Pair p(make(1))`'s nested calls), which is not this declaration's initialisation.
+    let initializer = parent.children().find(|node| {
+        cpp_parser::CppSyntaxKind::from(node.kind()) == cpp_parser::CppSyntaxKind::Initializer
+    })?;
+    initializer.children().find(|node| {
+        cpp_parser::CppSyntaxKind::from(node.kind()) == cpp_parser::CppSyntaxKind::InitListExpr
+    })
+}
+
+/// **A member of the class the cursor is inside** — the second half of C++'s unqualified name lookup.
+///
+/// Only a bare identifier is considered: `std::make` is qualified, and a qualified name is not looked up among a class's
+/// members. The member list is the query that answers (`members_of` walks the bases and substitutes the class's
+/// arguments), which is why a member inherited through a template base comes back with a finished type.
+pub(crate) fn a_member_of_the_enclosing_class(
+    index: &ProjectIndex,
+    scopes: &crate::ScopeTree,
+    root: &cpp_parser::CppSyntaxNode,
+    path: &Path,
+    callee: &cpp_parser::CppSyntaxNode,
+    // **What the caller does with it.** The card wants the declaration and can show a type the header wrote with the
+    // base's parameter in it; the type engine cannot use one, and a wrong type is worse than a refusal.
+    a_finished_type_only: bool,
+) -> Option<ProjectDefinition> {
+    let name = callee.text().to_string();
+    let name = name.trim();
+    let bare = !name.is_empty()
+        && name
+            .chars()
+            .all(|character| character.is_alphanumeric() || character == '_');
+    if !bare {
+        return None;
+    }
+    let class =
+        class_of_the_enclosing_definition(scopes, usize::from(callee.text_range().start()))?;
+    let Known::Yes(listed) = members_of(index, scopes, root, path, &class) else {
+        return None;
+    };
+    let member = listed
+        .members
+        .iter()
+        .find(|member| member.fact.name == name)?;
+    // **A member of a base that is itself a template is not finished here.** `enable_shared_from_this<Node>`'s
+    // `shared_from_this` is `_Tp`, and the member list does not carry the base's arguments — printing `_Tp (*)()` (which
+    // is what a call of it answered) is worse than saying the type is not known. The refusal is the same one every other
+    // unreadable spelling gets.
+    let names_a_parameter = |written: &str| {
+        written
+            .split(|character: char| !character.is_alphanumeric() && character != '_')
+            .any(|word| {
+                member
+                    .fact
+                    .parameters
+                    .iter()
+                    .any(|parameter| !parameter.is_empty() && parameter == word)
+            })
+    };
+    if a_finished_type_only
+        && (member
+            .fact
+            .returns
+            .as_deref()
+            .is_some_and(names_a_parameter)
+            || member
+                .fact
+                .type_of
+                .as_deref()
+                .is_some_and(names_a_parameter))
+    {
+        return None;
+    }
+    // **No class argument pairing here**: `members_of` has already substituted the class's arguments through its
+    // members, so the fact's types are the ones a reader of this class sees.
+    Some(ProjectDefinition {
+        file: member.file.clone(),
+        fact: member.fact.clone(),
+    })
+}
+
+/// **The class arguments a braced initialisation deduces** — `std::pair pair{1, 2}` is a `pair<int, int>`.
+///
+/// C++17's deduction for a class template with no written arguments: the initialiser's elements are the constructor's
+/// arguments, and the constructor's parameters say what each template parameter stands for. `deduce_the_parameters` is
+/// the pairing (a parameter written as one template parameter, reference qualifiers stripped); this walks the class's
+/// constructors, keeps the ones that deduce **every** parameter, and answers only when they agree — the same falsifiable
+/// rule the overload arm uses.
+///
+/// `None` when the spelling already names a type (`pair<int, int>`), when it is not a class template, when an element's
+/// type is unknown (a lambda's type is unnamed, and guessing one would print an instantiation nobody wrote), or when the
+/// candidates disagree.
+#[allow(clippy::too_many_arguments)]
+fn the_arguments_a_braced_initialisation_deduces(
+    memo: &TypeMemo,
+    index: &ProjectIndex,
+    declaring: &mut dyn FnMut(&Path) -> Option<crate::FileView>,
+    scopes: &crate::ScopeTree,
+    root: &cpp_parser::CppSyntaxNode,
+    path: &Path,
+    elements: &[cpp_parser::CppSyntaxNode],
+    spelled: &str,
+    depth: usize,
+) -> Option<Type> {
+    // The written spelling must be a bare class name: a template-id has its arguments already.
+    if spelled.contains('<') {
+        return None;
+    }
+    let class = crate::sema::types::parse_type_spelling(spelled);
+    let crate::sema::types::Type::Named { name, arguments } = &class else {
+        return None;
+    };
+    if !arguments.is_empty() {
+        return None;
+    }
+
+    let element_types: Vec<crate::sema::types::Type> = elements
+        .iter()
+        .filter_map(|element| {
+            match type_of_expression_memoed(
+                memo,
+                index,
+                declaring,
+                scopes,
+                root,
+                path,
+                element,
+                depth + 1,
+            ) {
+                Known::Yes((type_of, _)) => Some(type_of),
+                _ => None,
+            }
+        })
+        .collect();
+    // **Every element, or none.** A list with one unknown element cannot say what the class is, and a partial answer
+    // would print a `pair<int, _T2>` nobody wrote.
+    if element_types.is_empty() || element_types.len() != elements.len() {
+        return None;
+    }
+
+    // The class's template parameters, from the declaration the index holds.
+    // **An owned declaration**: `Known::value` clones, so a reference into it would die with the temporary. The class
+    // fact's `parameters` are what the deduction pairs, and its qualified name is the spelling a member list is keyed by.
+    let declared = index
+        .definitions(name, path)
+        .value()
+        .and_then(|found| {
+            found
+                .found
+                .into_iter()
+                .find(|declaration| !declaration.fact.parameters.is_empty())
+        })
+        .or_else(|| index.definition(name, path).value())?;
+    let parameters = declared.fact.parameters.clone();
+    if parameters.is_empty() {
+        return None;
+    }
+    let class_as_written = declared.fact.qualified_name();
+    let constructor_name = class_as_written
+        .rsplit("::")
+        .next()
+        .unwrap_or(&class_as_written);
+
+    let Known::Yes(listed) = members_of(index, scopes, root, path, &class_as_written) else {
+        return None;
+    };
+    let mut agreed: Option<Vec<crate::sema::types::Type>> = None;
+    for constructor in listed
+        .members
+        .iter()
+        .filter(|member| member.fact.kind == crate::DeclKind::Function)
+        .filter(|member| member.fact.name == constructor_name)
+    {
+        let deduced = deduce_the_parameters(
+            &parameters,
+            constructor.fact.parameter_list.as_deref(),
+            &element_types,
+        );
+        // Every parameter must have been replaced: one left standing is not a deduction.
+        let every = deduced.iter().all(|argument| {
+            !matches!(argument, crate::sema::types::Type::Named { name, .. }
+                if parameters.iter().any(|parameter| parameter == name))
+        });
+        if !every {
+            continue;
+        }
+        match &agreed {
+            Some(previous) if *previous != deduced => return None,
+            Some(_) => {}
+            None => agreed = Some(deduced),
+        }
+    }
+
+    agreed.map(|arguments| crate::sema::types::Type::Named {
+        name: name.clone(),
+        arguments,
+    })
+}
+
 /// **What a pointer-like class's arrow reaches** — its `element_type`, with the class's parameters substituted.
 ///
 /// The standard's protocol (`std::pointer_traits` is written in terms of it, and `unique_ptr`, `shared_ptr` and `weak_ptr`
@@ -1567,6 +1780,22 @@ pub fn members_of(
     }
 
     let listed = members_of_inner(index, scopes, root, path, class);
+    // **A bare spelling the index files qualified.** `shared_ptr<int>` is what a type deduced from a `std::` function is
+    // written as, and the class is `std::shared_ptr`; a member list asked for the bare name answered `NotDeclaredHere`
+    // while the completion at the same cursor offered the members (reported: "`shared_ptr<int>` has no member `reset`"
+    // with `reset` in the list next to it). Qualified once, only when the first answer held no class.
+    let listed = match &listed {
+        Known::No | Known::Unknown(_) => match class.contains("::") {
+            true => listed,
+            false => match qualified_from_the_index(index, path, class) {
+                Some(qualified) if qualified != class => {
+                    members_of_inner(index, scopes, root, path, &qualified)
+                }
+                _ => listed,
+            },
+        },
+        Known::Yes(_) => listed,
+    };
     if let Known::Yes(list) = &listed {
         index.remember_member_list(key, list);
     }
@@ -4166,10 +4395,20 @@ fn type_of_expression_inner(
                 // lookup is handed that spelling, `TypeBindings` gets no arguments, and `sum`'s written `T` comes back as
                 // `T`. `parse_type_spelling` is the crate's reader for a written type and answers
                 // `Named { name: "Pair", arguments: [int, int] }` for the same text.
-                Known::Yes(named) if named.type_of(root, scopes).is_none() => Known::Yes((
-                    crate::sema::types::parse_type_spelling(first.text().to_string().trim()),
-                    named.file(path),
-                )),
+                //
+                // **And a class template with no written arguments deduces them** — `std::pair pair{1, 2}` is a
+                // `pair<int, int>`; see [`the_arguments_a_braced_initialisation_deduces`].
+                Known::Yes(named) if named.type_of(root, scopes).is_none() => {
+                    let spelled = first.text().to_string();
+                    let spelled = spelled.trim();
+                    let elements: Vec<cpp_parser::CppSyntaxNode> =
+                        expression.children().skip(1).collect();
+                    let settled = the_arguments_a_braced_initialisation_deduces(
+                        memo, index, declaring, scopes, root, path, &elements, spelled, depth,
+                    )
+                    .unwrap_or_else(|| crate::sema::types::parse_type_spelling(spelled));
+                    Known::Yes((settled, named.file(path)))
+                }
                 _ => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
             },
         };
@@ -5516,6 +5755,21 @@ impl NamedDeclaration {
             // file that is the better source by a wide margin — `const Widget* const p` is a shape with two
             // qualifier positions, and no parser of the *spelling* can put them back where the file had them.
             NamedDeclaration::Here(binding) => {
+                // **A function's name has no type.** The declarator reader below assembles one from the declarator, and
+                // for `shared_from_this()` that is the function type `T (*)()` — while what a call of it has is
+                // [`DeclFact::returns`], which is the question a caller asks next. Measured: `auto p =
+                // shared_from_this();` answered `T (*)()` for a member function this file declares.
+                if matches!(
+                    binding.kind,
+                    crate::BindingKind::Function
+                        | crate::BindingKind::Constructor
+                        | crate::BindingKind::Destructor
+                        | crate::BindingKind::ConversionFunction
+                        | crate::BindingKind::OperatorFunction
+                        | crate::BindingKind::LiteralOperator
+                ) {
+                    return None;
+                }
                 // **An enumerator's type is its enumeration.** `enum class Colour { Red };` writes no type beside `Red`,
                 // so the reader below works from the *enum's* specifier sequence and cannot answer the enumerator — and
                 // `auto colour = Colour::Red;` had no type at all. The enumeration is the scope the enumerator was bound
@@ -6077,6 +6331,10 @@ fn declared_type(
     // header had no type at all, while the same declaration in one file worked.
     if let NamedDeclaration::Indexed(fact, _, _) = named
         && fact.type_of.is_none()
+        // **An enumerator only.** `DeclKind` has no enumerator — it is a `Variable` in the enum's scope — and a
+        // *function* has the same (`type_of: None`, scope = a class). Without this guard `shared_from_this` declared in
+        // `Base` answered the type `Base`, which is the class it is a member of, not what it is.
+        && fact.kind == crate::DeclKind::Variable
         && let Some(scope) = fact.scope.as_deref()
         && let Known::Yes(enclosing) = index.definition(scope, path)
         && enclosing.fact.kind == crate::DeclKind::Type
@@ -6116,19 +6374,41 @@ fn declared_type(
     if let crate::sema::types::Type::Named { name, arguments } = &declaration
         && arguments.is_empty()
         && !name.contains('<')
-        && let Known::Yes((from_the_initializer, _)) =
-            initializer_type(memo, index, declaring, scopes, root, path, named, depth + 1)
-        && let Some(with_arguments) = deduced_class_template_arguments(
-            index,
-            scopes,
-            root,
-            path,
-            declaring,
-            name,
-            &from_the_initializer,
-        )
     {
-        return Known::Yes(crate::sema::types::parse_type_spelling(&with_arguments));
+        // **The braced initialiser's elements are the constructor's arguments.** `std::pair pair{1, 2}` is a
+        // `pair<int, int>` by the same C++17 rule the next block applies to `Box box(7)`, and the elements are where the
+        // arguments are: the `initializer_type` below answers the *list's* type, which is a `std::initializer_list` this
+        // layer deliberately does not invent.
+        if let Some(initialisation) = the_braced_initialiser_of(root, named) {
+            let elements: Vec<cpp_parser::CppSyntaxNode> = initialisation.children().collect();
+            if let Some(with_arguments) = the_arguments_a_braced_initialisation_deduces(
+                memo,
+                index,
+                declaring,
+                scopes,
+                root,
+                path,
+                &elements,
+                name,
+                depth + 1,
+            ) {
+                return Known::Yes(with_arguments);
+            }
+        }
+        if let Known::Yes((from_the_initializer, _)) =
+            initializer_type(memo, index, declaring, scopes, root, path, named, depth + 1)
+            && let Some(with_arguments) = deduced_class_template_arguments(
+                index,
+                scopes,
+                root,
+                path,
+                declaring,
+                name,
+                &from_the_initializer,
+            )
+        {
+            return Known::Yes(crate::sema::types::parse_type_spelling(&with_arguments));
+        }
     }
 
     // **A `typeof`/`__typeof__` specifier whose payload is an *expression*** — `typeof(value) copy = value;` — is
@@ -7999,6 +8279,26 @@ fn declaration_of_a_callee(
 
     // question about a name goes through.
     let known = declaration_of_expression(index, scopes, root, path, callee);
+
+    // **C++'s unqualified member lookup, for a name the scopes cannot place.** Inside a member function, a name is also
+    // looked up in the class (and its bases) — `shared_from_this()` in a class deriving
+    // `std::enable_shared_from_this<Node>` is `std::enable_shared_from_this<Node>::shared_from_this`, which no scope in
+    // the file declares. Measured: the call answered `Unknown(Ambiguous("shared_from_this"))` while
+    // `members_of("Node")` listed the member, substituted, as `std::shared_ptr<Node> shared_from_this()`.
+    if matches!(
+        known,
+        Known::No
+            | Known::Unknown(UnknownReason::NotDeclaredHere(_))
+            | Known::Unknown(UnknownReason::Ambiguous(_))
+    ) && let Some(member) =
+        a_member_of_the_enclosing_class(index, scopes, root, path, callee, true)
+    {
+        return Known::Yes(NamedDeclaration::Indexed(
+            member.fact,
+            member.file,
+            crate::sema::types::TypeBindings::new(Vec::new(), Vec::new()),
+        ));
+    }
 
     // **A name with several declarations, and a call that selects one of them.** `std::format("…", value)` is four
     // overloads — narrow and wide, with and without a locale — and the name lookup is right to refuse to pick. What
@@ -10717,7 +11017,10 @@ fn enclosing_class(scopes: &crate::ScopeTree, offset: usize) -> Option<String> {
 ///
 /// A free function's qualified name has no `::` and so names no class, which is the right answer for `this` there —
 /// there is none.
-fn class_of_the_enclosing_definition(scopes: &crate::ScopeTree, offset: usize) -> Option<String> {
+pub(crate) fn class_of_the_enclosing_definition(
+    scopes: &crate::ScopeTree,
+    offset: usize,
+) -> Option<String> {
     if let Some(class) = enclosing_class(scopes, offset) {
         return Some(class);
     }
