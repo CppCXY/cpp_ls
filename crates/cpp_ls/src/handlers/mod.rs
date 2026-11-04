@@ -44,6 +44,7 @@ mod response_handler;
 mod selection_range;
 mod semantic_token;
 mod signature_help;
+mod switch_source_header;
 mod text_document;
 mod type_definition;
 mod workspace_symbol;
@@ -190,6 +191,7 @@ capabilities!(modules: {
     selection_range => SelectionRangeCapabilities,
 signature_help => SignatureHelpCapabilities,
 semantic_token => SemanticTokenCapabilities,
+    switch_source_header => SwitchSourceHeaderCapabilities,
     workspace_symbol => WorkspaceSymbolCapabilities,
     diagnostic => DiagnosticCapabilities,
     configuration => ConfigurationCapabilities,

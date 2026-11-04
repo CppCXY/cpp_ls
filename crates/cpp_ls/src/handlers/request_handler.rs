@@ -67,6 +67,7 @@ use super::{
     selection_range::on_selection_range,
     semantic_token::on_semantic_tokens,
     signature_help::on_signature_help,
+    switch_source_header::{SwitchSourceHeader, on_switch_source_header},
     type_definition::on_goto_type_definition,
     workspace_symbol::on_workspace_symbol,
 };
@@ -164,6 +165,7 @@ pub async fn on_request_handler(
     SelectionRangeRequest => on_selection_range,
     SemanticTokensFullRequest => on_semantic_tokens,
     SignatureHelpRequest => on_signature_help,
+    SwitchSourceHeader => on_switch_source_header,
     PrepareRenameRequest => on_prepare_rename,
     Rename => on_rename,
     WorkspaceSymbolRequest => on_workspace_symbol,
