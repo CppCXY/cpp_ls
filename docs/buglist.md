@@ -473,3 +473,29 @@ and its constructor make the name `Ambiguous`, and the check required *every* ca
 **Measured gap, not closed:** `std::tuple{1, 2.5, std::string{"three"}}` on `basics.cpp` still answers the bare `std::tuple`.
 The trace says the deduction sees **two** element types of three — `std::string{"three"}`'s own type is the missing one, and
 that is a construction of an **alias**; the next probe is that arm rather than the table, which is right when the elements are.
+
+---
+
+## 23. Two items closed after #22 — `3446547`, `93e4c8c`
+
+**The #22 gap is closed (`3446547`).** `std::tuple{1, 2.5, std::string{"three"}}` now deduces
+`std::tuple<int, double, std::string>` on the real file. The cause was not the guide table: `std::string` is
+`using string = basic_string<char>;` inside `std::__cxx11`, so the index stores the alias under `std::__cxx11::string` and
+`definition("std::string")` answers `NotDeclaredHere` — the third element had no type, and one unknown element refuses the
+whole deduction. `a_type_the_expression_names` now retries by the last segment (the retry `members_of` already makes) and
+accepts any candidate that is a type. `auto [a, b, c] = tuple` binds `int`, `double`, `std::string`.
+
+**The card shows the `template <…>` header (`93e4c8c`).** #1's first checkpoint: `int with(U input)` did not say that `U` is a
+template parameter. The fact holds only the names, and composing `template <typename U>` from them would be a guess for
+`template <int N>` — so the header is read from the **declaring file's text**: the nearest `template` before the name,
+balanced to its `>`, with no `;`/`}`/`{` in the span that would make it another declaration's. `run_templates()` (not a
+template) gets no header, `consume(T&&)` and `Builder::with` do.
+
+**Still open:**
+
+* **The lambda's init-capture** — `[value = counter + 10] { return value; }` has no inlay: typing `value` means typing the
+  capture's initializer, and `counter` is a parameter of the **enclosing** function, which the lambda's own deduction does not
+  reach. The shape of the fix: pass the enclosing function's parameter types into `a_lambdas_return_type`, the way a call's
+  argument types are passed today.
+* **A lambda parameter's type at a call site** (#11a) — unchanged: `auto f = [](auto v) { … }; f(3)` needs the call's
+  argument types substituted into the generic lambda's parameter.
