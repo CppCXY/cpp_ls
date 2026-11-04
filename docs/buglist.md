@@ -46,7 +46,7 @@ body, a `using`, an operator's spelling).
 
 ---
 
-## 2. `shared_from_this()` — the hover is fixed, the *type* is still open
+## 2. `shared_from_this()` — fixed in `fba6959`
 
 **Symptom (图 6, and again 2026-11-04).** The call had no hover at all; `type_at` answered
 `Unknown(Ambiguous("shared_from_this"))`.
@@ -56,11 +56,11 @@ a member function is also looked up in the class and its bases — and the hover
 `shared_from_this()` hovers as `int shared_from_this()` — "`Base::shared_from_this` — a function returning `int`, in
 `Base`", declared where the header writes it.
 
-**What is still open: the call's *type*.** `members_of("Node")` carries the member with `returns: "_Tp"` — the **base's**
-parameter — and the pairing that would finish it (the base's arguments, `Node`) is not on the member list: `declared_in` is
-`std::enable_shared_from_this`, without `<Node>`. The type engine refuses an unfinished type rather than printing
-`_Tp (*)()`, so today the answer is `Unknown`. The fix is one field: the base walk knows the base's spelling and its
-arguments, and `ProjectMember` should carry them (or `declared_in` should be the instantiated spelling).
+**And the type, in `fba6959`.** `bases_of` answers *names a class can be looked up by* and drops the arguments on
+purpose; the walk now carries the **written clause** and runs the base's members through `substituted_members`, so
+`Node`'s `shared_from_this` returns `Node *` (`std::shared_ptr<Node>` for the real library) and `declared_in` names the
+instantiation. The enclosing class is also asked **before** the index's flat name query — after the file's own scopes —
+which is where C++ puts that lookup.
 
 **Measured.**
 
@@ -231,10 +231,13 @@ Planned, not built.
 | An unqualified name inside a member function was not looked up in the class (`shared_from_this()` had no hover) | `6e6ed31` |
 | A function's name answered its **class** as its type (`shared_from_this` in `Base` was a `Base`) | `6e6ed31` |
 | `members_of("shared_ptr<int>")` answered nothing while the completion at the same cursor offered `reset` | `6e6ed31` |
+| A member inherited from a template base kept the base's parameter (`_Tp`/`T *`) — no `shared_from_this()` type | `fba6959` |
+| A braced **construction** in an expression (`auto t = std::tuple{1, 2, 3}`) kept its bare class name | `520cc5c` |
+| `typename` in a lambda's template parameter list drawn as nothing, for a client whose legend lacks `modifier` | `c0d932f` |
 
 ---
 
-## 9. `typename` has no semantic token in a lambda's template parameter list
+## 9. `typename` in a lambda's template parameter list — fixed in `c0d932f`; the parameter itself is open
 
 **Symptom (图 3).** `[]<typename T>(T value)` — the inspector shows `<typename·T>` with **no** token for `typename`
 (standard token type `Other`), while `T` is a `typeParameter`.
@@ -289,3 +292,18 @@ worth shortening, the answer is not wrong.
 * **A structured binding over a user class** — the elements are split for `pair`/`map` by name; a class with `first`/`second`
   of its own answers the aggregate and stops, so `auto [a, b] = my_pair;` gets no hints. (The aggregate is known — CTAD
   answers `Pair<int, double>` — so this is the split, not the deduction.)
+
+---
+
+## 12. A lambda's own template parameter is not classified
+
+Found while testing `c0d932f`: for `constexpr auto kTyped = []<typename T>(T value) { … }`, the encoded tokens carry
+`typename` (a `modifier`, or `keyword` when the legend cannot draw a modifier) and **nothing at all** for `T` — while the
+report's inspector showed `T` as a `typeParameter`.
+
+`classified_names` classifies a declaration's own name from the scope tree, and a lambda's explicit template parameter
+list is not a `TemplateParameters` scope there (a `template <class T>` head is). The fix is in the scope walker
+(`sema::scopes`): the list a lambda writes after `[]` opens the same kind of scope, with the same parameter bindings.
+
+**Check.** `inspect` has no semantic-token command yet; the test
+`typename_in_a_lambdas_template_parameter_list_is_drawn` holds the fixture and asserts the `typename` half.
