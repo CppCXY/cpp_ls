@@ -1350,10 +1350,27 @@ fn macro_names<'a>(index: &'a ProjectIndex, path: &Path) -> Vec<&'a str> {
         };
         macros.extend(included.macros.iter().map(|fact| fact.name.as_str()));
     }
+    // **The macros no file declares.** `__LINE__`, `__FILE__`, `__DATE__`, `__TIME__`, `__cplusplus` and the `__STDC_*`
+    // family are defined by the compiler for every translation unit, so an index query cannot find them — and a
+    // preprocessor condition is exactly where a reader writes them (`#if __cplusplus >= 202002L`). The compiler's own
+    // table (`_MSC_VER`, `__GNUC__`, …) is the toolchain's, which this layer does not hold; these are the standard's.
+    macros.extend(PREDEFINED_MACROS.iter().copied());
     macros.sort_unstable();
     macros.dedup();
     macros
 }
+
+/// **The macros every compiler defines**, which no declaration in any project does.
+const PREDEFINED_MACROS: &[&str] = &[
+    "__LINE__",
+    "__FILE__",
+    "__DATE__",
+    "__TIME__",
+    "__cplusplus",
+    "__STDC__",
+    "__STDC_HOSTED__",
+    "__STDC_VERSION__",
+];
 
 /// **`#if`, `#elif`, `#ifdef`, `#ifndef`, `#undef`** — the vocabulary is the macros, and the operator on them.
 ///

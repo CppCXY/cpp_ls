@@ -7353,6 +7353,164 @@ impl<F: FileProvider + Clone> Session<F> {
             .map(|(_, value)| value.unwrap_or_default().to_string())
     }
 
+    /// **What a macro invocation at `offset` expands to** — the replacement list with the invocation's arguments put in.
+    ///
+    /// `None` when the name is not a macro there, when it is a function-like macro **not followed by a call** (writing
+    /// its name alone does not expand it), or when the argument list cannot be read (an unbalanced `(` in the text).
+    ///
+    /// The substitution is textual, and deliberately: `#x` and `a ## b` are not applied, and the result's own macro names
+    /// are not expanded again. A consumer that shows this must say which rules it applied — see the `hover` card, which
+    /// does — because a reader comparing it with a compiler's answer would otherwise be looking at two different things.
+    pub fn the_expansion_of_a_macro(
+        &self,
+        view: &FileView,
+        offset: crate::file::coordinates::FileOffset,
+    ) -> Option<String> {
+        let Known::Yes(found) = self.macro_at_a_file_offset(view, offset) else {
+            return None;
+        };
+        let fact = &found.fact;
+        if fact.kind != crate::MacroKind::Definition {
+            return None;
+        }
+
+        // **The body's text, from the file that writes it.** A macro's fact has file offsets, so the text is the
+        // defining file's own — which is this one for a macro written here, and a header otherwise.
+        let body_range = fact.body_range?;
+        let defining =
+            if crate::file::paths::normalize_path(&found.file, self.files.is_case_insensitive())
+                == crate::file::paths::normalize_path(&view.path, self.files.is_case_insensitive())
+            {
+                view.the_written_text().map(|text| text.to_string())
+            } else {
+                self.view_of_the_file(&found.file)
+                    .map(|other| other.source.to_string())
+            }?;
+        let body = defining
+            .get(body_range.start_offset..body_range.end_offset())?
+            .trim();
+
+        // An **object-like** macro is its replacement list, whatever follows the name.
+        if !fact.function_like {
+            return Some(body.to_string());
+        }
+
+        // **The parameters, from the `#define` line.** The fact records `function_like` and the body's range, not the
+        // names: they are the text between the name and the body, and reading it is the same rule the parser applied.
+        let between = defining.get(fact.range.end_offset()..body_range.start_offset)?;
+        let open = between.find('(')?;
+        let close = between.rfind(')')?;
+        if close < open {
+            return None;
+        }
+        let parameters: Vec<&str> = between[open + 1..close]
+            .split(',')
+            .map(str::trim)
+            .filter(|parameter| !parameter.is_empty())
+            .collect();
+
+        // **The argument list, read from the text at its `(`** — `(2, 5) rest` → `["2", "5"]`. The nesting and the
+        // literals are tracked because both appear in real arguments: `f(g(1, 2), 3)` has two arguments and
+        // `f("a,b", c)` has two as well. A list with no closing paren is `None` — the file is being edited and the text
+        // is not a call yet.
+        fn the_arguments_of_a_call(text: &str) -> Option<Vec<String>> {
+            let bytes = text.as_bytes();
+            if bytes.first() != Some(&b'(') {
+                return None;
+            }
+            let mut depth = 0i32;
+            let mut quote: Option<u8> = None;
+            let mut arguments: Vec<String> = Vec::new();
+            let mut current_start = 1usize;
+            let mut at = 0usize;
+            while at < bytes.len() {
+                let byte = bytes[at];
+                match quote {
+                    Some(ending) => {
+                        if byte == b'\\' {
+                            at += 2;
+                            continue;
+                        }
+                        if byte == ending {
+                            quote = None;
+                        }
+                    }
+                    None => match byte {
+                        b'"' | b'\'' => quote = Some(byte),
+                        b'(' | b'[' | b'{' => depth += 1,
+                        b')' | b']' | b'}' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                let last = text[current_start..at].trim();
+                                if !last.is_empty() || !arguments.is_empty() {
+                                    arguments.push(last.to_string());
+                                }
+                                return Some(arguments);
+                            }
+                        }
+                        b',' if depth == 1 => {
+                            arguments.push(text[current_start..at].trim().to_string());
+                            current_start = at + 1;
+                        }
+                        _ => {}
+                    },
+                }
+                at += 1;
+            }
+            None
+        }
+
+        // **The invocation, from the file the cursor is in.** The name's own token is read from the bytes at `offset`,
+        // and the arguments are what follows the `(` that must come next for an expansion to happen at all.
+        let written = view.the_written_text()?;
+        let bytes = written.as_bytes();
+        let is_a_word = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'_';
+        let mut start = offset.get().min(bytes.len());
+        while start > 0 && is_a_word(bytes[start - 1]) {
+            start -= 1;
+        }
+        let mut end = offset.get().min(bytes.len());
+        while end < bytes.len() && is_a_word(bytes[end]) {
+            end += 1;
+        }
+        if written.get(start..end)? != fact.name {
+            return None;
+        }
+        let after = &written[end..];
+        let paren = after.find(|character: char| !character.is_whitespace())?;
+        if !after[paren..].starts_with('(') {
+            return None;
+        }
+
+        let arguments = the_arguments_of_a_call(&written[end + paren..])?;
+        if arguments.len() != parameters.len() && !(parameters.len() == 1 && parameters[0] == "...")
+        {
+            return None;
+        }
+
+        // **A textual substitution, on identifier boundaries.**
+        let mut expanded = String::with_capacity(body.len());
+        let body_bytes = body.as_bytes();
+        let mut at = 0usize;
+        while at < body_bytes.len() {
+            if !is_a_word(body_bytes[at]) || (at > 0 && is_a_word(body_bytes[at - 1])) {
+                expanded.push(body_bytes[at] as char);
+                at += 1;
+                continue;
+            }
+            let word_start = at;
+            while at < body_bytes.len() && is_a_word(body_bytes[at]) {
+                at += 1;
+            }
+            let word = &body[word_start..at];
+            match parameters.iter().position(|parameter| *parameter == word) {
+                Some(position) => expanded.push_str(arguments.get(position)?.trim()),
+                None => expanded.push_str(word),
+            }
+        }
+        Some(expanded)
+    }
+
     /// **Every `import m;` this file writes, with the file each one reaches** — the module's answer to what
     /// [`crate::IncludeFact`] is for `#include`.
     ///
@@ -7998,7 +8156,50 @@ impl<F: FileProvider + Clone> Session<F> {
     /// with different ones. A caller that publishes these should therefore publish them again once
     /// [`Session::pending`] reaches zero.
     pub fn classified_names(&self, view: &FileView) -> Vec<crate::semantic::Name> {
+        use cpp_parser::CppTokenKind;
         let mut names = crate::semantic::classified_names(self.store.index(), view);
+
+        // **The predefined macros, which no file declares.** `__LINE__`, `__FILE__`, `__DATE__`, `__TIME__`,
+        // `__cplusplus` and the compiler's own five hundred are defined by the *compiler*, so the walk above — which
+        // classifies a name by the declaration it resolves to — has nothing to say about them, and an editor drew
+        // `__LINE__` as "standard token type: Other" (reported, with the inspector's own reading). The two tables are
+        // this session's: the standard's own (a constant, per language) and the toolchain's `-dM` output.
+        //
+        // The tokens are the **rendering's**, like the walk's, and this runs before the placement loop for the same
+        // reason: a range still in rendering coordinates is what that loop translates.
+        let language = self.config_for(&view.path).language_for(&view.path);
+        let mut claimed: std::collections::HashSet<usize> =
+            names.iter().map(|name| name.range.start_offset).collect();
+        for token in view.tree.get_tokens() {
+            if token.kind != CppTokenKind::Identifier {
+                continue;
+            }
+            // A predefined macro is spelled with leading underscores on both sides; nothing else in the file needs the
+            // two table lookups below.
+            let Some(text) = view.get_token_text(token.range) else {
+                continue;
+            };
+            if !text.starts_with('_') {
+                continue;
+            }
+            let start = token.range.start_offset;
+            if claimed.contains(&start) {
+                continue;
+            }
+            let is_predefined = the_standards_own_macro(text, &language).is_some()
+                || self.predefined_macro(text, &view.path).is_some();
+            if !is_predefined {
+                continue;
+            }
+            claimed.insert(start);
+            names.push(crate::semantic::Name {
+                range: token.range,
+                kind: crate::semantic::NameKind::Macro,
+                declaration: false,
+                modifiers: Vec::new(),
+                provenance: crate::semantic::Provenance::Macro,
+            });
+        }
 
         // **The ranges are moved out of the rendering and into the file, because that is what both consumers read.**
         //

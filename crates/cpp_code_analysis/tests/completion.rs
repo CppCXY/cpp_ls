@@ -1993,7 +1993,30 @@ fn a_macro_body_offers_its_own_parameters() {
     println!("prefix {:?} → {labels:?}", offered.prefix);
     // **The macro's parameters first**, then the macros already defined — at the start of the replacement list,
     // which is where a reader begins to write one.
-    assert_eq!(labels, vec!["a", "b", "c", "MAX", "MAX3"], "{labels:?}");
+    //
+    // **And the predefined ones, which no file declares.** `__LINE__`, `__FILE__`, `__cplusplus` and the `__STDC_*`
+    // family are defined by the compiler, so neither this file nor its headers list them; a replacement list is one of
+    // the places they are written. Reported (fig 1): a completion in a preprocessor position knew only the project's
+    // own macros.
+    assert_eq!(
+        labels,
+        vec![
+            "a",
+            "b",
+            "c",
+            "MAX",
+            "MAX3",
+            "__DATE__",
+            "__FILE__",
+            "__LINE__",
+            "__STDC_HOSTED__",
+            "__STDC_VERSION__",
+            "__STDC__",
+            "__TIME__",
+            "__cplusplus",
+        ],
+        "{labels:?}"
+    );
     assert_eq!(
         offered.replace.length, 0,
         "nothing is typed yet, so the range is where the caret is"

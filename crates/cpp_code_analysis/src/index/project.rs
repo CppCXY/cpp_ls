@@ -8108,6 +8108,31 @@ fn the_factory_the_call_names(callee: &cpp_parser::CppSyntaxNode) -> Option<&'st
 /// looked up without them (`std::shared_ptr`), and every declaration of it must be a type — the ordinary case for a class
 /// template, whose first declaration is a forward one, so the singular query answers `Ambiguous` and the plural one says
 /// whether they agree about being a class.
+/// **The name before a template-id's arguments** — `make_sized<3>` → `make_sized`, and `None` for anything else.
+///
+/// The rule is C++'s own spelling and nothing more: a name-like prefix, a `<`, and a `>` that ends the text. A member
+/// access and an operator are not touched — the caller asks this only of a callee whose ordinary lookup answered nothing.
+fn the_name_before_its_template_arguments(callee: &cpp_parser::CppSyntaxNode) -> Option<String> {
+    let kind = CppSyntaxKind::from(callee.kind());
+    if !matches!(
+        kind,
+        CppSyntaxKind::NameExpr | CppSyntaxKind::IdentifierExpr
+    ) {
+        return None;
+    }
+    let text = callee.text().to_string();
+    let text = text.trim();
+    let open = text.find('<')?;
+    if open == 0 || !text.ends_with('>') {
+        return None;
+    }
+    let name = &text[..open];
+    let names_something = name
+        .chars()
+        .all(|character| character.is_alphanumeric() || character == '_' || character == ':');
+    names_something.then(|| name.to_string())
+}
+
 fn a_callee_that_names_a_type(
     index: &ProjectIndex,
     path: &Path,
@@ -8542,8 +8567,42 @@ fn declaration_of_a_callee(
         ));
     }
 
-    // question about a name goes through.
+    // **A callee written as a template-id names the function before its `<`.** `make_sized<3>()` is a call of
+    // `make_sized`, and the written arguments are read by `type_of_a_call`, which passes them to `what_a_call_has` for
+    // substitution — but the name query was asked about `make_sized<3>`, which is no declaration's name, so the call had
+    // no type at all (measured: `make_sized<3>().size()` reported the type as unknown while `std::array<int, 3>`'s members
+    // were listable). The retry is one index query, and only when the ordinary lookup found nothing.
     let known = declaration_of_expression(index, scopes, root, path, callee);
+    let known = match &known {
+        Known::No
+        | Known::Unknown(UnknownReason::NotDeclaredHere(_))
+        | Known::Unknown(UnknownReason::Ambiguous(_)) => {
+            match the_name_before_its_template_arguments(callee) {
+                // **The scope tree first, by offset.** It is the reader that resolves a namespaced name —
+                // `test_cpp::make_sized` is not reachable by `index.definition("make_sized")` — and it places the name
+                // whose template-id the file wrote.
+                Some(bare) => {
+                    let start = usize::from(callee.text_range().start());
+                    match crate::sema::resolve::definition_at(scopes, root, start + bare.len()) {
+                        Known::Yes(binding) => Known::Yes(NamedDeclaration::Here(binding)),
+                        _ => match index.definition(&bare, path) {
+                            Known::Yes(found) => Known::Yes(NamedDeclaration::Indexed(
+                                found.fact,
+                                found.file,
+                                crate::sema::types::TypeBindings::new(Vec::new(), Vec::new()),
+                            )),
+                            Known::Unknown(reason) => Known::Unknown(reason),
+                            Known::No => Known::No,
+                        },
+                    }
+                }
+                // **Nothing was retried, so nothing is replaced.** An `Ambiguous` name stays ambiguous: the call's own
+                // arguments are what picks one, and that question is asked below.
+                None => known,
+            }
+        }
+        _ => known,
+    };
 
     // **A name with several declarations, and a call that selects one of them.** `std::format("…", value)` is four
     // overloads — narrow and wide, with and without a locale — and the name lookup is right to refuse to pick. What
@@ -8560,7 +8619,14 @@ fn declaration_of_a_callee(
         return known;
     };
     match the_declaration_the_arguments_pick(
-        memo, index, declaring, scopes, root, path, &call, name,
+        memo,
+        index,
+        declaring,
+        scopes,
+        root,
+        path,
+        &call,
+        name.as_ref(),
     ) {
         Some((fact, file)) => Known::Yes(NamedDeclaration::Indexed(
             fact,
@@ -10965,7 +11031,12 @@ fn fact_from_binding_with(
         type_of: crate::sema::declarations::declared_type_of_with(shapes, binding),
         // Answered here as well, because **members** are exactly where a call happens: `fac.build().size` needs the
         // return type of a member function that the file being edited declares. See [`DeclFact::returns`].
-        returns: crate::sema::declarations::declared_returns_of_in(shapes, root, binding),
+        // **The deduction, when the file wrote no return type.** `declared_returns_of_in` answers only what is written, and
+        // `auto` is not — the index's fact deduces through `declared_returns_of`, so this one must too, or the same function
+        // has a return type in one answer and none in the other. Measured: `make_sized` printed `std::array<int, Size>` from
+        // `facts` and "a function" from the hover.
+        returns: crate::sema::declarations::declared_returns_of_in(shapes, root, binding)
+            .or_else(|| crate::sema::declarations::declared_returns_of(root, binding)),
         split_by_a_directive: crate::sema::declarations::split_by_a_directive_with(shapes, binding),
         bases: crate::sema::declarations::declared_bases_of_with(shapes, binding),
         // **The same three fields the index fills**, because a fact must say the same thing whichever path produced it.
@@ -17334,16 +17405,30 @@ mod tests {
 
     #[test]
     fn a_call_of_something_with_no_return_type_is_an_unknown_type() {
-        // The boundary inside the new capability, and it is the *honest* answer rather than a wrong guess: a
-        // deduced `auto` is not a class anything can be looked up in, so the file never says what this call has.
+        // **A deduced return the syntax can name is recorded.** `return Widget{}` is a prvalue of `Widget`, so
+        // `make().size` resolves — the boundary moved here when the construction arm was added (fig 5: the hover had no
+        // return type and the caller had nothing to substitute into).
         let source = "struct Widget {\n  int size;\n};\nauto make() { return Widget{}; }\n\
                       void f() {\n  make().size = 1;\n}\n";
         let found = member_of(&[], "/p/a.cpp", source, "size = 1;");
+        let Known::Yes(found) = found else {
+            panic!("`return Widget{{}}` states the type it returns: {found:?}");
+        };
+        assert_eq!(found.fact.name, "size");
 
-        assert!(
-            matches!(found, Known::Unknown(UnknownReason::UnknownType(_))),
-            "the return type is deduced, so the file does not state it: {found:?}"
-        );
+        // **And the refusals that remain are the honest ones**: a return that is a call (this layer has no callee
+        // declaration to read) and a declaration with no body at all.
+        for source in [
+            "struct Widget {\n  int size;\n};\nWidget source();\n\
+             auto make() { return source(); }\nvoid f() {\n  make().size = 1;\n}\n",
+            "struct Widget {\n  int size;\n};\nauto make();\nvoid f() {\n  make().size = 1;\n}\n",
+        ] {
+            let found = member_of(&[], "/p/a.cpp", source, "size = 1;");
+            assert!(
+                matches!(found, Known::Unknown(UnknownReason::UnknownType(_))),
+                "the file does not state what this call has: {found:?}"
+            );
+        }
     }
 
     #[test]

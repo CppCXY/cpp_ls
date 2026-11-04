@@ -382,7 +382,12 @@ fn hover_of_the_program(
     // expanded it — so the query takes the file offset the client gave us. Measured: a hover on a file's own
     // `#define MAX(a, b)` answered nothing, because the reading offset named a position the file does not have.
     if let Known::Yes(found) = session.macro_at_a_file_offset(view, in_the_file) {
-        return Some(markdown(macro_markdown(session, view, &found)));
+        return Some(markdown(macro_markdown(
+            session,
+            view,
+            &found,
+            Some(in_the_file),
+        )));
     }
     // …and the rendering's coordinates for a macro written where the cook kept it (a `#define`'s own body, a directive
     // argument), which is what the old path answered.
@@ -391,7 +396,14 @@ fn hover_of_the_program(
     // `TEST(Format, LocalStatement)` plainly has it. The popup says what the name is and that its existence depends on
     // the compilation, rather than saying nothing at all (which is what an editor reported: no hover on `TEST`).
     match session.macro_definition(view, offset) {
-        Known::Yes(found) => return Some(markdown(macro_markdown(session, view, &found))),
+        Known::Yes(found) => {
+            return Some(markdown(macro_markdown(
+                session,
+                view,
+                &found,
+                Some(in_the_file),
+            )));
+        }
         Known::Unknown(UnknownReason::ConditionalCompilation) => {
             let name = session
                 .definitions(view, offset)
@@ -980,7 +992,12 @@ fn header_markdown(header: &cpp_code_analysis::HeaderTarget) -> String {
 }
 
 /// A macro, as the definition writes it.
-fn macro_markdown(session: &Session<DiskFiles>, view: &FileView, found: &ProjectMacro) -> String {
+fn macro_markdown(
+    session: &Session<DiskFiles>,
+    view: &FileView,
+    found: &ProjectMacro,
+    at: Option<cpp_code_analysis::file::coordinates::FileOffset>,
+) -> String {
     let fact = &found.fact;
 
     if !fact.kind.is_definition() {
@@ -1016,6 +1033,23 @@ fn macro_markdown(session: &Session<DiskFiles>, view: &FileView, found: &Project
         },
         where_clause(session, Some(view), &found.file, fact.range.start_offset)
     ));
+
+    // **What the invocation expands to**, when the cursor is on one. A macro's card otherwise says what the `#define`
+    // wrote and leaves the substitution to the reader, which is the one thing a macro makes hard: `TEST_CPP_MAX(2, 5)`
+    // is `((2) > (5) ? (2) : (5))` only after the arguments go in. Reported from an editor, with a screenshot of exactly
+    // that card.
+    //
+    // The rules applied are textual and the sentence says which: `#x` and `a ## b` are not applied, and the result's own
+    // macro names are not expanded again. A reader comparing this with a compiler must know the difference.
+    if let Some(at) = at
+        && let Some(expanded) = session.the_expansion_of_a_macro(view, at)
+        && !expanded.trim().is_empty()
+    {
+        out.push_str(&format!(
+            "\nExpands to `{}`\n\n*A textual expansion: `#` and `##` are not applied, and the result is not expanded again.*\n",
+            expanded.trim()
+        ));
+    }
 
     if let Some(documentation) =
         documentation_of_a_fact(session, view, &found.file, fact.range.start_offset)
@@ -1072,6 +1106,31 @@ fn declaration_markdown(
     // `WINAPI`" — reported from an editor, with a screenshot. The index knows better: the name table says which
     // names are macros anywhere in the project (`files_defining_macro`), and the written specifier sequence minus
     // those names is the type the compiler would have seen. See `the_type_the_macros_leave`.
+    // **A binding is a place to jump to; the card wants the declaration's facts.** `ProjectDefinition::from_binding`
+    // records no type and no return type, deliberately — they are facts about the file's text, and a binding carries
+    // none of them. A hover on a function's own definition therefore printed `make_sized()` and "a function", while the
+    // index held `std::array<int, Size>` (reported, fig 5; `facts` and the card disagreed about the same declaration).
+    //
+    // The index is asked only when the binding's fact has **nothing to compose from** — no type, no return type, no
+    // parameter list — so a declaration the file spells keeps its own answer, and one the index does not hold falls back
+    // to the binding rather than to an empty card.
+    let indexed = if found.fact.kind == DeclKind::Function
+        && found.fact.type_of.is_none()
+        && found.fact.returns.is_none()
+        && found.fact.parameter_list.is_none()
+    {
+        session
+            .index()
+            .definition(&found.fact.qualified_name(), &found.file)
+            .value()
+    } else {
+        None
+    };
+    let found = match &indexed {
+        Some(indexed) => indexed,
+        None => found,
+    };
+
     let mut corrected = found.fact.clone();
     if let Some(returns) = corrected.returns.clone()
         && let Some(better) = the_type_the_macros_leave(session, &found.file, &corrected, &returns)

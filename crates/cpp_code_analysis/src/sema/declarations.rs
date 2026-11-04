@@ -2347,6 +2347,20 @@ fn type_a_return_states(expression: &CppSyntaxNode, declaration: &CppSyntaxNode)
             let written = target.text().to_string().trim().to_string();
             (!written.is_empty()).then_some(written)
         }
+        // **A construction states its type too** — `return std::array<int, Size>{};` is a prvalue of
+        // `std::array<int, Size>`. The head is the list's first child (`InitListExpr > [IdentifierExpr, InitListExpr]`),
+        // and the alternative is the callee of `T(…)`. Nothing about the elements is read: the answer is the type the
+        // file wrote, which is what a caller substitutes into when the function is a template.
+        CppSyntaxKind::InitListExpr => {
+            let head = expression.children().next()?;
+            let written = head.text().to_string();
+            let written = written.trim();
+            (!written.is_empty() && written != "{").then(|| written.to_string())
+        }
+        // **A parenthesised construction is deliberately not here.** The tree cannot tell a constructor from a function
+        // call — `Widget(1)` and `make()` are the same shape — and answering the callee's spelling for both read
+        // `return make();` as a `make`. A braced list has no such twin: `T{…}` is a construction, so it is the shape this
+        // layer can name.
         // **A literal's type is its own**, and the four C++ gives are `int`, `double`, `bool` and a pointer. Read
         // by the shape of the text rather than by a table: `1` and `1'000` and `0x10` are one type, and `1.5f` is
         // not `1.5`.
@@ -5935,7 +5949,8 @@ public:
              struct C { Widget member(); };\n\
              static inline Widget decorated();\n\
              auto trailing() -> Widget;\n\
-             auto deduced() { return Widget{}; }\n\
+             auto deduced() { return Widget{}; }
+        auto unclearable() { return make(); }\n\
              void plain();\n",
         );
 
@@ -5968,10 +5983,20 @@ public:
             Some("Widget"),
             "a trailing return type wins — it is the one the file stated, and the specifiers say `auto`"
         );
+        // **A deduced return the syntax can name is recorded.** `return Widget{…}` is a prvalue of `Widget`, and the
+        // rule this assertion was written for — "a deduced `auto` is not a class anything can be looked up in" — is
+        // true of a body whose returns this layer cannot type (`return f();`), not of one that names its type on the
+        // line. Refusing the second is what left the hover without a return type and a caller without an input to
+        // substitute into (reported, fig 5).
         assert_eq!(
-            of("deduced").returns,
+            of("deduced").returns.as_deref(),
+            Some("Widget"),
+            "a construction in a `return` states the type it returns"
+        );
+        assert_eq!(
+            of("unclearable").returns,
             None,
-            "a deduced `auto` is not a class anything can be looked up in"
+            "a return this layer cannot type is still refused rather than guessed"
         );
         assert_eq!(of("plain").returns.as_deref(), Some("void"));
     }

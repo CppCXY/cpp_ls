@@ -182,7 +182,27 @@ fn push_keywords(builder: &mut Builder<'_>, view: Option<&FileView>) {
                 _ => TypeKind::Variable,
             },
             other if cpp_parser::is_keyword(other) => {
-                kind_of_keyword(other).unwrap_or(TypeKind::Keyword)
+                // **`typename` where it introduces a template parameter is drawn as its own type.** The table below
+                // answers `modifier` for every `typename`, which is right for `typename T::type` and not for the word
+                // that says the next name *is* a type. The tree is what tells them apart: the parameter list's own
+                // `TemplateParameter` is the parent. Reported from an editor, with the request that the colour be near
+                // `static_cast` — which a client does by mapping this name to `keyword.operator.cast`.
+                // The token stream has no parent, so the tree is asked for the node at the token's start — one
+                // lookup, only for the word this branch is about.
+                let introduces_a_parameter = other == cpp_parser::CppTokenKind::TypenameKeyword
+                    && cpp_parser::token_at(&view.root, token.range.start_offset).is_some_and(
+                        |found| {
+                            found.parent_ancestors().any(|parent| {
+                                cpp_parser::CppSyntaxKind::from(parent.kind())
+                                    == cpp_parser::CppSyntaxKind::TemplateParameter
+                            })
+                        },
+                    );
+                if introduces_a_parameter {
+                    TypeKind::Typename
+                } else {
+                    kind_of_keyword(other).unwrap_or(TypeKind::Keyword)
+                }
             }
             // Punctuation, literals, comments: not this pass's business.
             _ => continue,
@@ -199,6 +219,16 @@ fn push_keywords(builder: &mut Builder<'_>, view: Option<&FileView>) {
         // token at all** — reported from an editor as "`typename` has no colour in `[]<typename T>`". `keyword` is in
         // every legend, and the grammar's own colour is better than none: the same rule the `variableTemplate` fallback
         // states for names.
+        // **`typename` has a second fallback**, because its own name is the least likely to be known: the custom type
+        // first, then `modifier` (what every `typename` used to be), then the standard `keyword` every legend carries.
+        let pushed = pushed
+            || (drawn == TypeKind::Typename
+                && builder.push_range(
+                    token.range.start_offset,
+                    token.range.end_offset(),
+                    TypeKind::Modifier,
+                    Modifier::none(),
+                ));
         if !pushed && drawn != TypeKind::Keyword {
             builder.push_range(
                 token.range.start_offset,
@@ -583,6 +613,11 @@ fn extended_with_the_custom_types(
         TypeKind::FormatArgument,
         TypeKind::FormatConversion,
         TypeKind::FormatEscape,
+        // **And 	ypename**, because the VS Code client is the one that maps it: its extension declares the type and a
+        // scope for it (semanticTokenScopes), which is how the word gets the static_cast colour a reader asked for.
+        // A client that does not know the name never sees it: Builder::push_range refuses a kind outside this list, and
+        // the pass falls back to modifier, then keyword.
+        TypeKind::Typename,
     ] {
         let name = kind.to_semantic_token_type();
         if !drawable.contains(&name) {
@@ -2092,8 +2127,8 @@ void f(int width, double d) {
         let at = text[..text.find("typename").expect("the fixture writes it")].len();
         assert_eq!(
             drawn.get(&at),
-            Some(&index_of(TypeKind::Modifier)),
-            "`typename` introduces a template parameter and is a modifier: {drawn:?}"
+            Some(&index_of(TypeKind::Typename)),
+            "`typename` introducing a template parameter is drawn as its own type: {drawn:?}"
         );
 
         // **The parameter itself is a `typeParameter`** — the other half of the report, and it needed the analysis to
