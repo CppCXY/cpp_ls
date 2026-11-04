@@ -555,3 +555,67 @@ fn a_braced_initialisation_of_a_class_template_deduces_its_arguments() {
         "`second` is `B`, and `B` is `double` here"
     );
 }
+
+/// **§C6 — a member inherited from a template base is written in that base's parameters.**
+///
+/// Reported as `shared_from_this()` having no hover and no type. The member list had it all along — through
+/// `enable_shared_from_this<Node>` — but the fact said `_Tp`/`T *` and `declared_in` named the base **without** its
+/// arguments, so nothing downstream could finish the type.
+///
+/// `bases_of` answers *names a class can be looked up by* and drops the arguments on purpose. The walk keeps the
+/// **written clause** alongside, resolves its head, and runs the base's members through `substituted_members` — so
+/// `Node`'s `shared_from_this` is a `Node *` and its tag names the instantiation it came from.
+#[test]
+fn a_member_of_a_template_base_is_substituted_with_the_base_arguments() {
+    let session = session_with(&[
+        (
+            "/p/base.h",
+            "namespace std {\n\
+             template <typename T>\n\
+             struct enable_shared_from_this {\n\
+                 T* shared_from_this() { return nullptr; }\n\
+             };\n\
+             }\n",
+        ),
+        (
+            "/p/a.cpp",
+            "#include \"base.h\"\n\
+             struct Node : public std::enable_shared_from_this<Node> {\n\
+                 void twin() { auto p = shared_from_this(); }\n\
+             };\n",
+        ),
+    ]);
+    let path = std::path::Path::new("/p/a.cpp");
+    let view = session.view_of_the_file(path).expect("the written text");
+
+    let cpp_code_analysis::Known::Yes(listed) = session.members_of(&view, "Node") else {
+        panic!("`Node` is declared in this file");
+    };
+    let member = listed
+        .members
+        .iter()
+        .find(|member| member.fact.name == "shared_from_this")
+        .expect("the member comes through the base walk");
+    assert_eq!(
+        member.fact.returns.as_deref(),
+        Some("Node *"),
+        "the base's `T` is the class it was instantiated with: {member:?}"
+    );
+    assert_eq!(
+        member.declared_in, "std::enable_shared_from_this<Node>",
+        "the tag names the instantiation, not just the base's name"
+    );
+
+    // And the deduction that needed it: `auto p = shared_from_this();` is a `Node *`, not `T *`.
+    let source = view.source.clone();
+    let at = source.find("auto p").expect("the fixture") + "auto p".len() - 1;
+    let known = session.type_at(
+        &view,
+        cpp_code_analysis::file::coordinates::ReadingOffset::new(at),
+    );
+    assert_eq!(
+        known.map(|found| found.type_of.clone()),
+        cpp_code_analysis::Known::Yes("Node*".to_string()),
+        "the call's type is the substituted return type"
+    );
+}

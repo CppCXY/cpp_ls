@@ -2137,21 +2137,27 @@ fn members_of_inner(
     // makes a template parameter shadow any name of its class, so a parameter of *this* class can never be its base.
     let parameters = class_template_parameters(index, scopes, root, path, &class);
 
-    let mut level: Vec<(String, String)> = match bases_of(index, scopes, root, path, &class) {
-        Known::Yes(bases) => bases
-            .into_iter()
-            .filter(|base| !names_a_template_parameter(base, &parameters))
-            .map(|base| (base, class.to_string()))
-            .collect(),
-        Known::Unknown(reason) => {
-            list.unlisted.push(UnlistedBase {
-                spelling: class.to_string(),
-                reason,
-            });
-            Vec::new()
-        }
-        Known::No => Vec::new(),
-    };
+    // **The base's written spelling, arguments and all.** `bases_of` answers *names a class can be looked up by* — the
+    // arguments are dropped there on purpose (they are not bases, and treating one as a base was measured at 251 ms on
+    // `std::vector`) — while a member inherited from a **template** base is written in the base's parameters:
+    // `enable_shared_from_this<Node>::shared_from_this` returns `_Tp`, and without the arguments nothing downstream can
+    // finish it. `raw_bases` reads the clause itself, and the level keeps the spelling.
+    let mut level: Vec<(String, String)> =
+        match the_base_clauses_of(index, scopes, root, path, &class) {
+            Known::Yes(bases) => bases
+                .into_iter()
+                .filter(|written| !names_a_template_parameter(base_type_name(written), &parameters))
+                .map(|written| (written, class.to_string()))
+                .collect(),
+            Known::Unknown(reason) => {
+                list.unlisted.push(UnlistedBase {
+                    spelling: class.to_string(),
+                    reason,
+                });
+                Vec::new()
+            }
+            Known::No => Vec::new(),
+        };
     let mut depth = 1;
 
     while !level.is_empty() {
@@ -2159,8 +2165,16 @@ fn members_of_inner(
         let mut next: Vec<(String, String)> = Vec::new();
 
         for (written, owner) in level {
-            let base = resolved_in_the_enclosing_scopes(index, scopes, path, &owner, &written);
-            if !visited.insert(base.clone()) {
+            // **The head is resolved where the base clause was written; the arguments are kept as written.**
+            let head = base_type_name(&written).to_string();
+            let base = resolved_in_the_enclosing_scopes(index, scopes, path, &owner, &head);
+            // The spelling a reader sees and the one the members are substituted by: the resolved head with the
+            // arguments the clause wrote.
+            let shown = match written.find('<') {
+                Some(at) => format!("{base}{}", &written[at..]),
+                None => base.clone(),
+            };
+            if !visited.insert(shown.clone()) {
                 continue;
             }
 
@@ -2171,31 +2185,48 @@ fn members_of_inner(
                 // path or a file that was never indexed, not a different query.
                 Known::Unknown(reason) => {
                     list.unlisted.push(UnlistedBase {
-                        spelling: base,
+                        spelling: shown,
                         reason,
                     });
                     continue;
                 }
                 Known::No => continue,
             };
-            let further = bases_of(index, scopes, root, path, &base);
 
-            found.extend(members.into_iter().map(|(file, fact)| ProjectMember {
-                file,
-                fact,
-                declared_in: base.clone(),
-                depth,
-                ambiguous: false,
-            }));
+            // **The base's arguments, applied to its members** — the same substitution the class's own members go
+            // through, aliases included. `shown` is a template-id exactly when the clause wrote arguments, and
+            // `substituted_members` does nothing for a plain class.
+            let listed = MemberList {
+                members: members
+                    .into_iter()
+                    .map(|(file, fact)| ProjectMember {
+                        file,
+                        fact,
+                        declared_in: shown.clone(),
+                        depth,
+                        ambiguous: false,
+                    })
+                    .collect(),
+                unlisted: Vec::new(),
+            };
+            let Known::Yes(listed) = substituted_members(index, path, &shown, Known::Yes(listed))
+            else {
+                continue;
+            };
+            found.extend(listed.members);
 
+            // **The next level is substituted too**: a base of a base is written in the base's parameters
+            // (`_Vector_base<_Tp, _Alloc>` inside `vector<_Tp>`), and those are this level's arguments.
+            let further = the_base_clauses_of(index, scopes, root, path, &base);
             match further {
-                Known::Yes(found) => next.extend(
-                    found
+                Known::Yes(clauses) => next.extend(
+                    clauses
                         .into_iter()
-                        .filter(|base_of_base| {
-                            !names_a_template_parameter(base_of_base, &parameters)
+                        .map(|clause| substitute_a_base_clause(index, path, &shown, &clause))
+                        .filter(|clause| {
+                            !names_a_template_parameter(base_type_name(clause), &parameters)
                         })
-                        .map(|base_of_base| (base_of_base, base.clone())),
+                        .map(|clause| (clause, base.clone())),
                 ),
                 Known::Unknown(reason) => list.unlisted.push(UnlistedBase {
                     spelling: base,
@@ -2231,6 +2262,76 @@ fn members_of_inner(
     }
 
     Known::Yes(list)
+}
+
+/// **The base clauses a class was written with** — `std::enable_shared_from_this<Node>`, arguments and all.
+///
+/// `bases_of` answers the *names* a class can be looked up by, which is the right answer for the walk's lookups and the
+/// wrong one for a member's type: a member inherited from a template base is written in that base's parameters, and a
+/// name without its arguments cannot say what they are. This reads the clause itself — from the file's own tree when the
+/// class is in it, and from the fact the index holds otherwise — and falls back to `bases_of` when neither answers, so the
+/// walk is never worse than it was.
+fn the_base_clauses_of(
+    index: &ProjectIndex,
+    scopes: &crate::ScopeTree,
+    root: &cpp_parser::CppSyntaxNode,
+    path: &Path,
+    class: &str,
+) -> Known<Vec<String>> {
+    if let Some(scope) = scopes.scope_with_qualified_name(class)
+        && let Some(data) = scopes.scope(scope)
+        && let Some(parent) = data.parent
+        && let Some(name) = class.rsplit("::").next()
+        && let Some(binding) = scopes.scope(parent).and_then(|scope| {
+            scope
+                .bindings
+                .iter()
+                .find(|binding| binding.name.identifier_text() == Some(name))
+        })
+    {
+        return Known::Yes(crate::sema::declarations::declared_bases_of(root, binding));
+    }
+    let base = base_type_name(class).to_string();
+    if let Some(declared) = index
+        .files_declaring(&base, path)
+        .into_iter()
+        .find(|declared| declared.fact.kind == crate::DeclKind::Type)
+    {
+        return Known::Yes(declared.fact.bases.clone());
+    }
+    bases_of(index, scopes, root, path, class)
+}
+
+/// **A base clause with the current level's arguments substituted into it** — `_Vector_base<_Tp, _Alloc>` asked of
+/// `vector<int>` is `_Vector_base<int, allocator<int>>`.
+///
+/// The parameters come from the declaration of the class the clause was written in, and the arguments from `shown`;
+/// when either is missing the clause is returned unchanged, which is the direction that keeps the walk going.
+fn substitute_a_base_clause(
+    index: &ProjectIndex,
+    path: &Path,
+    shown: &str,
+    clause: &str,
+) -> String {
+    let Some((head, mut arguments)) = split_template_arguments(shown) else {
+        return clause.to_string();
+    };
+    let Some(declared) = index
+        .files_declaring(&head, path)
+        .into_iter()
+        .find(|declared| declared.fact.kind == crate::DeclKind::Type)
+    else {
+        return clause.to_string();
+    };
+    // **The arguments written are the first parameters, in order** — the same positional rule
+    // `substituted_members` applies for a defaulted parameter list.
+    let mut names = declared.fact.parameters.clone();
+    names.truncate(arguments.len());
+    arguments.truncate(names.len());
+    if names.is_empty() {
+        return clause.to_string();
+    }
+    crate::sema::types::substituted_spelling(clause, &names, &arguments)
 }
 
 /// Every declaration written **directly in** the class or namespace `class` names.
@@ -8277,19 +8378,20 @@ fn declaration_of_a_callee(
         }
     }
 
-    // question about a name goes through.
-    let known = declaration_of_expression(index, scopes, root, path, callee);
-
-    // **C++'s unqualified member lookup, for a name the scopes cannot place.** Inside a member function, a name is also
-    // looked up in the class (and its bases) — `shared_from_this()` in a class deriving
-    // `std::enable_shared_from_this<Node>` is `std::enable_shared_from_this<Node>::shared_from_this`, which no scope in
-    // the file declares. Measured: the call answered `Unknown(Ambiguous("shared_from_this"))` while
-    // `members_of("Node")` listed the member, substituted, as `std::shared_ptr<Node> shared_from_this()`.
+    // **C++'s unqualified member lookup, asked where the language puts it.**
+    //
+    // Inside a member function a name is looked up in the class and its bases **before** the enclosing namespaces —
+    // `shared_from_this()` in a class deriving `std::enable_shared_from_this<Node>` is
+    // `std::enable_shared_from_this<Node>::shared_from_this`, which no scope in the file declares. It has to come before
+    // the index-wide name query, because that query resolves the base's declaration in its own header and answers the
+    // **written** fact (`T *`), while the member list substitutes the class's arguments through it (`Node *`).
+    //
+    // Two conditions keep this from taking an answer that was already better: the file's own scopes must answer
+    // **nothing** (a local variable, or a member declared here, keeps the scope tree's answer), and the class's member
+    // must be finished (a member of a template base whose arguments the member list could not read is refused).
     if matches!(
-        known,
-        Known::No
-            | Known::Unknown(UnknownReason::NotDeclaredHere(_))
-            | Known::Unknown(UnknownReason::Ambiguous(_))
+        crate::sema::resolve::definition_at(scopes, root, end_of_the_written_name(callee)),
+        Known::No | Known::Unknown(UnknownReason::NotDeclaredHere(_))
     ) && let Some(member) =
         a_member_of_the_enclosing_class(index, scopes, root, path, callee, true)
     {
@@ -8299,6 +8401,9 @@ fn declaration_of_a_callee(
             crate::sema::types::TypeBindings::new(Vec::new(), Vec::new()),
         ));
     }
+
+    // question about a name goes through.
+    let known = declaration_of_expression(index, scopes, root, path, callee);
 
     // **A name with several declarations, and a call that selects one of them.** `std::format("…", value)` is four
     // overloads — narrow and wide, with and without a locale — and the name lookup is right to refuse to pick. What
@@ -17826,7 +17931,11 @@ struct line {\n\
         // `public Base<int>` is the class `Base` for the purpose of finding members: the arguments say which type
         // is inherited, not which class declares what. Reading the spelling literally would look for a class named
         // `Base<int>`, which is a name no declaration has.
-        let source = "template <typename T>\nstruct Base {\n  int size;\n};\n\
+        //
+        // **What the arguments are kept for is the member, not the lookup.** A member inherited from a template base is
+        // written in that base's parameters (`T size;`), and substituting them is what makes its type the one a reader of
+        // `Derived` sees. The tag therefore names the instantiation: `Base<int>` is where the member came from.
+        let source = "template <typename T>\nstruct Base {\n  T size;\n};\n\
                       struct Derived : public Base<int> {\n  int d;\n};\n";
         let found = members_of_class(&[], "/p/a.cpp", source, "Derived");
 
@@ -17835,7 +17944,12 @@ struct line {\n\
         };
 
         assert_eq!(names(&list), ["d", "size"]);
-        assert_eq!(list.members[1].declared_in, "Base");
+        assert_eq!(
+            list.members[1].fact.type_of.as_deref(),
+            Some("int"),
+            "the base's parameter is substituted: {list:?}"
+        );
+        assert_eq!(list.members[1].declared_in, "Base<int>");
     }
 
     #[test]
