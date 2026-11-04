@@ -334,3 +334,44 @@ distinguished from a bare braced list by its second child. `Builder<int>{}.with(
   fact carries only the **names** (`["U"]`), not the written header, so composing `template <typename U>` would be a guess
   for a non-type parameter (`template <int N>`). The fix is a fact field holding the written header at index time — the
   same shape as `parameter_list`, which is already the written text.
+
+---
+
+## 15. The five reports of 2026-11-04, and where each one stands
+
+Fixed in `62f0d0c`:
+
+| fig | what | how |
+| --- | --- | --- |
+| 1 | `__LINE__`, `__FILE__`, `__DATE__`, `__TIME__`, `__cplusplus` drew as "Other" | classified as `macro` from the standard's table and the toolchain's; completed too |
+| 2 | the macro card showed the `#define` and left the expansion to the reader | `Expands to` — `Session::the_expansion_of_a_macro`, textual, and the card says which rules it applied |
+| 3 | `typename` had a `modifier` colour the client could not map near `static_cast` | the custom semantic type `typename` (fallbacks `modifier`, `keyword`); the VS Code extension maps it to `keyword.operator.cast` |
+| 5 | `constexpr auto make_sized()` hovered as "a function" with no return type | `return T{…}` states its type; the card asks the index for a **function**'s facts when the binding's are empty |
+| 6 | `make_sized<3>().size()` — "the type is not known here" | a template-id callee is resolved by the name before its `<`, through the scope tree first, so `Size → 3` reaches the return type |
+
+**The extension change is configuration only** (`semanticTokenTypes` + `semanticTokenScopes` in
+`C:\Users\zc\Desktop\github\VSCode-Cppls\package.json`); the extension is the reader's to build.
+
+## 16. Fig 7 — what is left of it
+
+Measured with `inspect`: `std::runtime_error` **resolves** — `hover` on the name answers ``class runtime_error : public
+exception``, "a type derived from `exception`, in `std`", declared in `stdexcept:221:9`. So the report is not about the class
+name. Two things beside it are missing:
+
+* **its base**: `members_of("std::runtime_error")` reports `unlisted base exception: NotDeclaredHere("exception")` — the base
+  clause's spelling is looked up as written, and `exception` is `std::exception`. The fix is the base walk's qualification:
+  a base found in the enclosing scopes the way a member is (`resolved_in_the_enclosing_scopes` already does this for a
+  *member*, and the base walk calls it — so the gap is that the base is written unqualified in `stdexcept` and the lookup
+  happens in the *derived* class's file).
+* **an inherited constructor**: `using std::runtime_error::runtime_error;` has no reader — the using-declaration binds a
+  name, and a constructor is not a name completion can offer on the class. The shape to handle is C++'s
+  `using Base::Base`, which makes each of the base's constructors a constructor of the derived class.
+
+## 17. Still open from the earlier rounds
+
+* #1 — the card's **template head**: `T with(U input)` does not say `template <typename U>`, and the fact holds only the
+  parameter **names**. The fix is a fact field for the written header, as `parameter_list` already is for the parameters.
+* #11(a),(b) — a lambda parameter's type at a call site, and a lambda's deduced return.
+* #14 — the **call's type on a braced construction** (`auto y = B<int>{}.with(2)` answers the initialiser's spelling while
+  the hover on `.with` is right).
+* #12 — done in `19e32a0`.
