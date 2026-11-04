@@ -1340,6 +1340,61 @@ pub(crate) fn a_member_of_the_enclosing_class(
     })
 }
 
+/// **The values of a braced list, flat** — `{1, 2.5}` and `std::pair{1, 2.5}` are the same values.
+///
+/// A **construction** writes the type's name as the list's first child and the values as *another* list:
+/// `InitListExpr > [IdentifierExpr "std::pair", InitListExpr "{1, 2.5}"]`. A declaration's initialiser is the flat list.
+/// The deduction wants the values, so the nested list is opened once.
+fn the_elements_of_a_braced_list(
+    expression: &cpp_parser::CppSyntaxNode,
+) -> Vec<cpp_parser::CppSyntaxNode> {
+    let mut elements: Vec<cpp_parser::CppSyntaxNode> = Vec::new();
+    for child in expression.children().skip(1) {
+        match cpp_parser::CppSyntaxKind::from(child.kind())
+            == cpp_parser::CppSyntaxKind::InitListExpr
+        {
+            true => elements.extend(child.children()),
+            false => elements.push(child),
+        }
+    }
+    elements
+}
+
+/// **A type a bare expression names** — `std::pair` in `std::pair{1, 2}`, or a written instantiation.
+///
+/// The question is asked when a braced initialisation's head is not a *name in a scope*: a qualified type written as an
+/// expression is an `IdentifierExpr`, which `declaration_of_expression` declines. The index answers whether the spelling
+/// is a class, and a spelling that already carries `<…>` is its own type — nothing to look up.
+fn a_type_the_expression_names(
+    index: &ProjectIndex,
+    path: &Path,
+    expression: &cpp_parser::CppSyntaxNode,
+) -> Option<String> {
+    let spelled = expression.text().to_string();
+    let spelled = spelled.trim();
+    if spelled.is_empty() || spelled.contains(' ') {
+        return None;
+    }
+    if spelled.contains('<') {
+        return Some(spelled.to_string());
+    }
+    let names_a_type = match index.definition(spelled, path) {
+        Known::Yes(found) => found.fact.kind == crate::DeclKind::Type,
+        Known::Unknown(UnknownReason::Ambiguous(_)) => index
+            .definitions(spelled, path)
+            .value()
+            .is_some_and(|found| {
+                !found.found.is_empty()
+                    && found
+                        .found
+                        .iter()
+                        .all(|declaration| declaration.fact.kind == crate::DeclKind::Type)
+            }),
+        Known::Unknown(_) | Known::No => false,
+    };
+    names_a_type.then(|| spelled.to_string())
+}
+
 /// **The class arguments a braced initialisation deduces** — `std::pair pair{1, 2}` is a `pair<int, int>`.
 ///
 /// C++17's deduction for a class template with no written arguments: the initialiser's elements are the constructor's
@@ -1399,9 +1454,13 @@ fn the_arguments_a_braced_initialisation_deduces(
         return None;
     }
 
-    // The class's template parameters, from the declaration the index holds.
-    // **An owned declaration**: `Known::value` clones, so a reference into it would die with the temporary. The class
-    // fact's `parameters` are what the deduction pairs, and its qualified name is the spelling a member list is keyed by.
+    // **The class's template parameters, from the declaration or from its own members.**
+    //
+    // The index's name query is the direct answer, and it declines a spelling written in an expression in a session that
+    // has not indexed the project (`std::pair{1, 2}` — the class is declared in the same file). The member list is the
+    // query the deduction walks anyway, and every member of a class template carries the class's parameters
+    // (`DeclFact::parameters` is what pairs them with a use's arguments), so the fallback is not a second guess: it is the
+    // same field, read from a fact that is in hand.
     let declared = index
         .definitions(name, path)
         .value()
@@ -1411,12 +1470,11 @@ fn the_arguments_a_braced_initialisation_deduces(
                 .into_iter()
                 .find(|declaration| !declaration.fact.parameters.is_empty())
         })
-        .or_else(|| index.definition(name, path).value())?;
-    let parameters = declared.fact.parameters.clone();
-    if parameters.is_empty() {
-        return None;
-    }
-    let class_as_written = declared.fact.qualified_name();
+        .or_else(|| index.definition(name, path).value());
+    let class_as_written = match &declared {
+        Some(declaration) => declaration.fact.qualified_name(),
+        None => name.clone(),
+    };
     let constructor_name = class_as_written
         .rsplit("::")
         .next()
@@ -1425,6 +1483,17 @@ fn the_arguments_a_braced_initialisation_deduces(
     let Known::Yes(listed) = members_of(index, scopes, root, path, &class_as_written) else {
         return None;
     };
+    let parameters = match declared {
+        Some(declaration) if !declaration.fact.parameters.is_empty() => declaration.fact.parameters,
+        _ => listed
+            .members
+            .iter()
+            .find(|member| !member.fact.parameters.is_empty())
+            .map(|member| member.fact.parameters.clone())?,
+    };
+    if parameters.is_empty() {
+        return None;
+    }
     let mut agreed: Option<Vec<crate::sema::types::Type>> = None;
     for constructor in listed
         .members
@@ -4502,15 +4571,29 @@ fn type_of_expression_inner(
                 Known::Yes(named) if named.type_of(root, scopes).is_none() => {
                     let spelled = first.text().to_string();
                     let spelled = spelled.trim();
-                    let elements: Vec<cpp_parser::CppSyntaxNode> =
-                        expression.children().skip(1).collect();
+                    let elements = the_elements_of_a_braced_list(expression);
                     let settled = the_arguments_a_braced_initialisation_deduces(
                         memo, index, declaring, scopes, root, path, &elements, spelled, depth,
                     )
                     .unwrap_or_else(|| crate::sema::types::parse_type_spelling(spelled));
                     Known::Yes((settled, named.file(path)))
                 }
-                _ => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
+                // **A qualified type name is a type even when the name query declines it.** `std::pair{1, 2}` is an
+                // `InitListExpr` whose first child is an `IdentifierExpr "std::pair"` — an expression node, not a name in
+                // a scope, so `declaration_of_expression` answers nothing and the list fell back to the bare spelling:
+                // `auto t = std::tuple{1, 2, 3}` was a `std::tuple` with no arguments (measured with `inspect inlay`).
+                // The spelling is asked of the index instead, and the deduction is the same one the arm above runs.
+                _ => match a_type_the_expression_names(index, path, &first) {
+                    Some(spelled) => {
+                        let elements = the_elements_of_a_braced_list(expression);
+                        let settled = the_arguments_a_braced_initialisation_deduces(
+                            memo, index, declaring, scopes, root, path, &elements, &spelled, depth,
+                        )
+                        .unwrap_or_else(|| crate::sema::types::parse_type_spelling(&spelled));
+                        Known::Yes((settled, path.to_path_buf()))
+                    }
+                    None => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
+                },
             },
         };
     }

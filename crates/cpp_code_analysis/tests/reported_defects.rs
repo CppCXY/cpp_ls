@@ -619,3 +619,49 @@ fn a_member_of_a_template_base_is_substituted_with_the_base_arguments() {
         "the call's type is the substituted return type"
     );
 }
+
+/// **§C7 — a braced *construction* in an expression deduces its arguments too.**
+///
+/// `auto t = std::tuple{1, 2, 3}` answered `std::tuple` — no arguments — while the same braced list written as a
+/// declaration's initialiser (`std::pair pair{1, 2}`) deduced. Two shapes were being read as one:
+///
+/// ```text
+/// declaration's initialiser    Initializer > InitListExpr > [1, 2.5]              flat
+/// construction expression      InitListExpr > [IdentifierExpr, InitListExpr]       the name, then a nested list
+/// ```
+///
+/// and the arm read the nested list as **one element** whose type is a bare braced list — `Unknown` — so it declined.
+/// `the_elements_of_a_braced_list` opens the nested list, and a **qualified** head (`std::pair`) is asked of the index
+/// when the name query declines an expression node.
+#[test]
+fn a_braced_construction_in_an_expression_deduces_its_arguments() {
+    let session = session_with(&[(
+        "/p/a.cpp",
+        "namespace std {\n\
+         template <typename A, typename B>\n\
+         struct pair {\n\
+             A first;\n\
+             B second;\n\
+             pair(A a, B b) : first(a), second(b) {}\n\
+         };\n\
+         }\n\
+         void f() {\n\
+             auto p = std::pair{1, 2.5};\n\
+         }\n",
+    )]);
+    let path = std::path::Path::new("/p/a.cpp");
+    let view = session.view_of_the_file(path).expect("the written text");
+    let source = view.source.clone();
+    let at = source.find("auto p").expect("the fixture") + "auto p".len() - 1;
+
+    assert_eq!(
+        session
+            .type_at(
+                &view,
+                cpp_code_analysis::file::coordinates::ReadingOffset::new(at)
+            )
+            .map(|found| found.type_of.clone()),
+        cpp_code_analysis::Known::Yes("std::pair<int, double>".to_string()),
+        "the construction's arguments come from its elements"
+    );
+}
