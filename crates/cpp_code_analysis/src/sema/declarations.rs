@@ -2272,7 +2272,8 @@ fn type_a_return_states_with(
             // unknown: measured on a C++ project, `auto copied = box.copy_of()` answered "the type is not known here",
             // while the same body in a free function deduced fine (a free function's `return` can only name a parameter).
             let written = parameter_type(expression, declaration)
-                .or_else(|| a_data_member_type(expression, declaration))?;
+                .or_else(|| a_data_member_type(expression, declaration))
+                .or_else(|| a_local_variables_type(expression, declaration))?;
             Some(substituted_spelling(&written, substitutions))
         }
         // **A member access on a cast**, which is the shape `_Get_unwrapped`'s middle branch has:
@@ -2369,6 +2370,12 @@ fn type_a_return_states(expression: &CppSyntaxNode, declaration: &CppSyntaxNode)
         }
         CppSyntaxKind::NameExpr | CppSyntaxKind::IdentifierExpr => {
             parameter_type(expression, declaration)
+                // **The two other names a `return` can write**: a member of the class the function is in, and a local of the
+                // same body. This walker is the one `deduced_returns_of` calls, so a case missing here is missing from every
+                // fact an `auto` function builds — measured: `auto pipeline() { std::vector<int> result; … return result; }`
+                // had no return type at all.
+                .or_else(|| a_data_member_type(expression, declaration))
+                .or_else(|| a_local_variables_type(expression, declaration))
         }
         CppSyntaxKind::BinaryExpr => {
             // Three children — left, operator, right — and the operator is a token rather than a node, so the two
@@ -2507,6 +2514,68 @@ fn parameter_type(name: &CppSyntaxNode, declaration: &CppSyntaxNode) -> Option<S
     let whole = whole.trim();
     let at = whole.rfind(written)?;
     let the_type = whole[..at].trim();
+    (!the_type.is_empty()).then(|| the_type.to_string())
+}
+
+/// **The type a local variable's own declaration writes** — `std::vector<int> result;` answers `std::vector<int>`.
+///
+/// The sibling of [`parameter_type`], and it exists for the same shape of hole: `auto pipeline() { std::vector<int>
+/// result; … return result; }` returns a **local**, and the deduction knew a parameter and a data member only — so
+/// `pipeline()` had no return type and a range-for over its result had no element (measured on `ranges.cpp`).
+///
+/// The declaration is the last one **before the return** that declares the name, which is the one C++ would read there: a
+/// nested block's shadow comes later in document order, and taking the last rather than the first is what makes that true.
+/// The type is the declaration's text with the name taken out, the same rule [`parameter_type`] uses — and `rfind`, because
+/// `int int_` has the name inside the type's spelling as well.
+fn a_local_variables_type(
+    expression: &CppSyntaxNode,
+    declaration: &CppSyntaxNode,
+) -> Option<String> {
+    let written = expression.text().to_string();
+    let written = written.trim();
+    if written.is_empty() {
+        return None;
+    }
+
+    // **The declarations before this point that declare this name.** A `Declaration` covers `int x = 1;` and
+    // `std::vector<int> v;`; its own text is what the reader sees.
+    let mut found: Option<CppSyntaxNode> = None;
+    for candidate in declaration.descendants() {
+        if CppSyntaxKind::from(candidate.kind()) != CppSyntaxKind::Declaration {
+            continue;
+        }
+        if candidate.text_range().end() > expression.text_range().start() {
+            continue;
+        }
+        // **A declarator's name is not always a NameExpr** — int result = 1; writes it as a token under the
+        // declarator — so the test is on the declaration's **text**, with the name as a whole word.
+        let text = candidate.text().to_string();
+        let declares_it = {
+            let mut rest = text.as_str();
+            let mut found_the_word = false;
+            while let Some(at) = rest.find(written) {
+                let before = rest[..at].chars().next_back();
+                let after = rest[at + written.len()..].chars().next();
+                let a_word = |character: Option<char>| {
+                    character.is_some_and(|c| c.is_alphanumeric() || c == '_')
+                };
+                if !a_word(before) && !a_word(after) {
+                    found_the_word = true;
+                    break;
+                }
+                rest = &rest[at + written.len()..];
+            }
+            found_the_word
+        };
+        if declares_it {
+            found = Some(candidate.clone());
+        }
+    }
+    let whole = found?.text().to_string();
+    let whole = whole.trim().trim_end_matches(';').trim_end();
+    let at = whole.rfind(written)?;
+    let the_type = whole[..at].trim();
+    // A declaration whose "type" would be empty (`x;`) is not a declaration with a type to read.
     (!the_type.is_empty()).then(|| the_type.to_string())
 }
 

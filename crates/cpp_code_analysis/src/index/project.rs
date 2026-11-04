@@ -1395,6 +1395,27 @@ fn a_type_the_expression_names(
     names_a_type.then(|| spelled.to_string())
 }
 
+/// **The namespace a namespace alias names** — `views` → `std::ranges::views`.
+///
+/// A namespace alias's fact is a `Namespace` whose `type_of` is the target's *written* spelling, which may be relative to
+/// the scope the alias was declared in (`namespace views = ranges::views;` inside `std`). It is qualified here with that
+/// scope when it is unqualified, and `None` is returned for everything that is not an alias — including a real namespace
+/// with no members, which is a different answer.
+fn a_namespace_aliass_target(index: &ProjectIndex, path: &Path, class: &str) -> Option<String> {
+    let found = index.definition(class, path).value()?;
+    if found.fact.kind != crate::DeclKind::Namespace {
+        return None;
+    }
+    let written = found.fact.type_of.clone()?;
+    if written.contains("::") || written.is_empty() {
+        return Some(written);
+    }
+    match &found.fact.scope {
+        Some(scope) => Some(format!("{scope}::{written}")),
+        None => Some(written),
+    }
+}
+
 /// **The class arguments a braced initialisation deduces** — `std::pair pair{1, 2}` is a `pair<int, int>`.
 ///
 /// C++17's deduction for a class template with no written arguments: the initialiser's elements are the constructor's
@@ -2159,6 +2180,20 @@ fn members_of_inner(
     };
     if crate::probes::members() && own.is_empty() {
         eprintln!("members_of_inner: {class} has no own members (after alias resolution)");
+    }
+
+    // **A namespace alias answers with its target's members.** `namespace views = ranges::views;` is how libstdc++ spells
+    // `std::views`, and the index records it as a `Namespace` whose `type_of` is the target — not as a type alias, so
+    // `resolve_aliases_or_unresolved` above steps over it. Measured: `std::ranges::views` answered **100** members and
+    // `std::views` answered **0**, with nothing in `unlisted` to say why.
+    let mut own = own;
+    if own.is_empty()
+        && let Some(target) = a_namespace_aliass_target(index, path, &class)
+        && let Known::Yes(found) = direct_members(index, scopes, root, path, &target)
+        && !found.is_empty()
+    {
+        own = found;
+        class = target;
     }
 
     let mut list = MemberList::default();
@@ -5018,6 +5053,12 @@ fn type_of_expression_inner(
             // needs the class looking up — taking the first template argument instead would be right for a
             // `vector` and wrong for a `map`, and nothing here can tell them apart.
             Known::Yes((type_of, file)) => match type_of.pointee() {
+                // **A pointer's subscript is the pointee.** `int* a; a[0]` is `*(a + 0)`, and C++ fixes its type as `int`
+                // — no class, no instance, nothing this layer cannot read. Reported: `auto x = a[0];` answered "the type
+                // of `a[0]` is not known here".
+                Some(element) if matches!(type_of, Type::Pointer { .. }) => {
+                    Known::Yes(((*element).clone(), file))
+                }
                 Some(element) if matches!(type_of, Type::Array { .. }) => {
                     Known::Yes(((*element).clone(), file))
                 }

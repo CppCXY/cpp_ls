@@ -732,6 +732,7 @@ fn overloads_markdown(
     shown.truncate(MAX_SHOWN);
 
     let mut lines = String::new();
+    let mut shown_lines: Vec<String> = Vec::new();
     for index in &shown {
         let declaration = &found.found[*index];
         let is_the_one = chosen_index == Some(*index);
@@ -777,13 +778,27 @@ fn overloads_markdown(
                     cpp_code_analysis::sema::types::substituted_spelling(&line, &names, &arguments);
             }
         }
-        lines.push_str(if is_the_one { "→ " } else { "  " });
-        lines.push_str(&line);
-        lines.push('\n');
+        // **One line per distinct signature.** A name declared twice with the same shape — `std::is_same_v` is
+        // libstdc++'s `#if __cplusplus > …` branch and its `#else` — printed the same sentence twice and read as an
+        // overload set with two identical members. The count of declarations is still said below; the block is what a
+        // reader compares, and two identical lines compare to nothing.
+        let marked = format!("{}{line}", if is_the_one { "→ " } else { "  " });
+        let duplicate = shown_lines
+            .iter()
+            .any(|existing| existing.trim_start_matches("→ ").trim_start_matches("  ") == line);
+        shown_lines.push(marked);
+        if !duplicate {
+            lines.push_str(&format!("{}{line}\n", if is_the_one { "→ " } else { "  " }));
+        }
     }
 
     let first = &found.found[0];
     let qualified = first.fact.qualified_name();
+    let distinct = shown_lines
+        .iter()
+        .map(|line| line.trim_start_matches("→ ").trim_start_matches("  "))
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
     let mut out = code_block(lines.trim_end());
 
     out.push_str(&format!(
@@ -795,6 +810,12 @@ fn overloads_markdown(
         } else if chosen.is_some() {
             "The `→` one is what a call here means: the arguments select it, and the others are what a different \
              argument list would reach."
+        } else if distinct == 1 {
+            // **One shape, several declarations.** A variable template written under `#if`/`#else`, a redeclaration in a
+            // header it includes, an `inline constexpr` defined twice — none of them is an overload set, and the arguments
+            // sentence is simply false about them.
+            "The declarations spell the **same signature** — a redeclaration, or the two branches of a conditional \
+             header — so which one is in effect depends on the compilation, not on a call."
         } else {
             "Which one a call means is decided by the arguments, so they are all here rather than one of them being \
              guessed at."

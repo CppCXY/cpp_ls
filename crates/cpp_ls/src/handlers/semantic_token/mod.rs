@@ -417,7 +417,11 @@ fn kind_of_keyword(kind: cpp_parser::CppTokenKind) -> Option<TypeKind> {
         | CppTokenKind::VoidKeyword => TypeKind::Type,
 
         // A value the expression names rather than a word about the syntax around it.
-        CppTokenKind::ThisKeyword | CppTokenKind::NullptrKeyword => TypeKind::Variable,
+        CppTokenKind::ThisKeyword => TypeKind::Variable,
+        // **`nullptr` reads as a declaration word, not as a value.** Reported: it was drawn as a variable, and a reader
+        // asked for the colour `const` has — it names a *type*'s null pointer constant (`std::nullptr_t`) rather than a
+        // stored value, which is what makes it look wrong beside the literals.
+        CppTokenKind::NullptrKeyword => TypeKind::DeclarationKeyword,
 
         // `true` and `false` are the same `BoolLiteral` kind the type shares, handled above.
         CppTokenKind::TrueKeyword | CppTokenKind::FalseKeyword => TypeKind::Variable,
@@ -1775,7 +1779,11 @@ int f(int value);
                 TypeKind::Variable,
                 "`this` is a value, and the report asks for it to match `bool`'s *kind* — a type it is not",
             ),
-            ("nullptr", TypeKind::Variable, "and so is `nullptr`"),
+            (
+                "nullptr",
+                TypeKind::DeclarationKeyword,
+                "`nullptr` reads as a declaration word — the colour `const` has",
+            ),
             (
                 "true",
                 TypeKind::Variable,

@@ -752,3 +752,58 @@ fn a_braced_construction_of_a_template_id_is_typed() {
         "a braced construction of a template-id is its class with the arguments it wrote"
     );
 }
+
+/// **§D1 — a pointer's subscript is its pointee.**
+///
+/// `int* a; …; auto x = a[0];` — reported: "the type of `a[0]` is not known here". The subscript arm handled a
+/// `Type::Array` and a class with `operator[]`; a pointer is neither, and `p[i]` is `*(p + i)`, whose type C++ fixes as
+/// the pointee.
+#[test]
+fn a_pointer_subscript_is_its_pointee() {
+    let session = session_with(&[(
+        "/p/a.cpp",
+        "int main() {\n    int* a;\n    a = new int(42);\n    auto x = a[0];\n    return 0;\n}\n",
+    )]);
+    let path = std::path::Path::new("/p/a.cpp");
+    let view = session.view_of_the_file(path).expect("the written text");
+    let source = view.source.clone();
+    let at = source.find("auto x").expect("the fixture") + "auto x".len() - 1;
+    assert_eq!(
+        session
+            .type_at(
+                &view,
+                cpp_code_analysis::file::coordinates::ReadingOffset::new(at)
+            )
+            .map(|found| found.type_of.clone()),
+        cpp_code_analysis::Known::Yes("int".to_string())
+    );
+}
+
+/// **§D2 — `return` a local names the local's declared type.**
+///
+/// `auto pipeline() { std::vector<int> result; … return result; }` had no return type: the deduction knew a parameter and a
+/// data member, and a local was refused — so a range-for over `pipeline()` had no element (measured on `ranges.cpp`). The
+/// declaration in front of the return states the type, which is the same reading a parameter gets.
+#[test]
+fn a_returned_local_states_its_type() {
+    let session = session_with(&[(
+        "/p/a.cpp",
+        "auto make() {\n    std::vector<int> result;\n    return result;\n}\n",
+    )]);
+    let path = std::path::Path::new("/p/a.cpp");
+    let view = session.view_of_the_file(path).expect("the written text");
+    let source = view.source.clone();
+    let _ = &source;
+    // **The index's fact, not the binding's.** `Session::definition` answers a *place to jump to* and records no return
+    // type (deliberately — see `ProjectDefinition::from_binding`); the summary is where the declaration's facts live.
+    let known = session
+        .index()
+        .definition("make", path)
+        .value()
+        .unwrap_or_else(|| panic!("`make` is in the index"));
+    assert_eq!(
+        known.fact.returns.as_deref(),
+        Some("std::vector<int>"),
+        "the local's declaration states the type the function returns"
+    );
+}
