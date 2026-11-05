@@ -840,6 +840,14 @@ impl CppInitDeclarator {
         self.get_declarator()?.get_name()
     }
 
+    /// **The `requires`-clause written after the declarator**, when the declaration has one.
+    ///
+    /// `void constrained(int x) const requires (x > 0) {}` is an `InitDeclarator` holding the declarator (with its
+    /// `const`) and a `RequiresClause` after it, so the clause is this node's sibling rather than part of the declarator.
+    pub fn get_requires_clause(&self) -> Option<CppRequiresClause> {
+        self.child()
+    }
+
     pub fn get_initializer(&self) -> Option<CppInitializer> {
         self.child()
     }
@@ -997,6 +1005,33 @@ fn push_a_spelling(out: &mut String, spelling: &str) {
         out.push(' ');
     }
     out.push_str(spelling);
+}
+
+/// A `requires`-clause: `requires (x > 0)`, `requires std::integral<T>`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CppRequiresClause {
+    syntax: CppSyntaxNode,
+}
+
+impl CppAstNode for CppRequiresClause {
+    fn syntax(&self) -> &CppSyntaxNode {
+        &self.syntax
+    }
+
+    fn can_cast(kind: CppSyntaxKind) -> bool {
+        kind == CppSyntaxKind::RequiresClause
+    }
+
+    fn cast(syntax: CppSyntaxNode) -> Option<Self> {
+        Self::can_cast(syntax.kind().into()).then_some(Self { syntax })
+    }
+}
+
+impl CppRequiresClause {
+    /// The clause **as the file spells it**, keyword included — what a card prints after a signature.
+    pub fn get_clause_text(&self) -> String {
+        crate::syntax::node::traits::subtree_text_spaced(self.syntax())
+    }
 }
 
 /// An attribute list: `[[maybe_unused]]`, `[[nodiscard("why")]]`, `[[gnu::always_inline]]`.

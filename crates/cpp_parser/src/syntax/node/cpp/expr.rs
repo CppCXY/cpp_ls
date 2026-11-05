@@ -426,6 +426,13 @@ impl CppUnaryExpr {
     }
 
     /// Is the operator written before its operand?
+    /// **Is this a `delete` expression** — `delete p;` or `delete[] p;`?
+    ///
+    /// The keyword is a token of the unary expression, so the question is a token kind rather than the first token's text.
+    pub fn is_delete(&self) -> bool {
+        self.token_by_kind(CppTokenKind::DeleteKeyword).is_some()
+    }
+
     pub fn is_prefix(&self) -> bool {
         let Some(operator) = self
             .syntax()

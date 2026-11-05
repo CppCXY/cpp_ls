@@ -247,10 +247,7 @@ pub(crate) fn declared_type_of_with(
             // subtree — for **every shape on the path**, and a function declarator is the biggest node on the path.
             // Measured on `arm_neon.h`: 6,703 bindings × 1.3 ms = **9.8 s of an 8.3 s summary build**, all of it here.
             // A parameter list is a *direct* child of the declarator that has one, which is the whole question.
-            && !(name_is_a_parameter
-                && node
-                    .children()
-                    .any(|inner| CppSyntaxKind::from(inner.kind()) == CppSyntaxKind::ParameterList))
+            && !(name_is_a_parameter && is_a_function_declarator(node))
         {
             declarator = Some(node.clone());
         }
@@ -330,10 +327,7 @@ pub(crate) fn declared_modifiers_with(
         if declarator.is_none()
             && let Some(node) = &shape.declarator
             && reaches_the_name(node, binding.name_range)
-            && !(name_is_a_parameter
-                && node
-                    .children()
-                    .any(|inner| CppSyntaxKind::from(inner.kind()) == CppSyntaxKind::ParameterList))
+            && !(name_is_a_parameter && is_a_function_declarator(node))
         {
             declarator = Some(node.clone());
         }
@@ -435,22 +429,15 @@ pub(crate) fn the_requires_clause_with(
             declarator = Some(node.clone());
         }
     });
+    use cpp_parser::{CppAstNode, CppInitDeclarator};
     let parent = declarator.as_ref()?.parent()?;
-    let clause = parent
-        .children()
-        .find(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::RequiresClause)?;
-    let text = clause.text().to_string();
-    let text = text.trim();
-    (!text.is_empty()).then(|| text.to_string())
+    // **The clause is a sibling of the declarator**, in the init-declarator that holds both: `void f() const requires (x) {}`.
+    let init = CppInitDeclarator::cast(parent)?;
+    let clause = init.get_requires_clause()?;
+    let text = clause.get_clause_text();
+    (!text.is_empty()).then_some(text)
 }
 
-/// **Does the declaration whose first token is at `at` carry a `[[maybe_unused]]`?**
-///
-/// The attribute is written before the name — `[[maybe_unused]] int local = 3;` — and it is found by scanning the
-/// declaration's own prefix, which is the text between the previous statement boundary and the declaration. The
-/// boundary set is what keeps a *previous* declaration's attribute out of the answer: `[[maybe_unused]] int a = 1;`
-/// followed by `int b = 2;` must not excuse `b`, and the `;` between them is what stops it. `,` and `(` are boundaries
-/// too, because a declaration can follow both (`int a = 1, b;`, `for (int i = 0; …`).
 /// **Does this declaration say `[[maybe_unused]]`?**
 ///
 /// The attribute is a node, in one of two places depending on where the declaration is written — a **child of the specifier
@@ -485,12 +472,23 @@ fn is_marked_maybe_unused(
     false
 }
 
+/// **Is this declarator a function's?** — the question that decides whether a name inside it is a parameter.
+///
+/// A parameter list is a **direct child** of the declarator that has one (measured; see the note at its use), so this is the
+/// typed accessor rather than a search of the declarator's subtree.
+fn is_a_function_declarator(declarator: &CppSyntaxNode) -> bool {
+    use cpp_parser::CppAstNode;
+    cpp_parser::CppDeclarator::cast(declarator.clone())
+        .is_some_and(|declarator| declarator.get_param_list().is_some())
+}
+
 /// The bits one node's tokens state — the specifier sequence, or the declarator.
 ///
 /// Tokens rather than a text search: `override` and `final` arrive as identifiers, `delete`/`default` as their
 /// keywords, `...` as an ellipsis, and an attribute carries its word as an identifier too. The comparison is against a
 /// token's own text, which is the spelling the lexer produced, not a slice of the file that could match a comment.
 fn modifiers_in(node: &CppSyntaxNode) -> crate::DeclModifiers {
+    use cpp_parser::CppAstNode;
     let mut found = crate::DeclModifiers::default();
     // **Bodies are not the declaration's own words.** A class's specifier sequence *contains its body*, so a
     // descendant scan answered "this class is `virtual`" because a member function was — measured by
@@ -533,11 +531,15 @@ fn modifiers_in(node: &CppSyntaxNode) -> crate::DeclModifiers {
             let Some(child) = element.as_node().cloned() else {
                 continue;
             };
-            let kind = CppSyntaxKind::from(child.kind());
-            if matches!(kind, CppSyntaxKind::ClassBody | CppSyntaxKind::CompoundStat) {
+            // **A body is not the declaration's own words**: a class's specifier sequence contains its body, so the walk stops
+            // at a `ClassBody` or a `CompoundStat`. The parameter-list flag is what separates a variadic function's `...` from a
+            // pack expansion in an expression.
+            if cpp_parser::CppClassBody::can_cast(child.kind().into())
+                || cpp_parser::CppCompoundStat::can_cast(child.kind().into())
+            {
                 continue;
             }
-            let child_is_a_parameter_list = kind == CppSyntaxKind::ParameterList;
+            let child_is_a_parameter_list = cpp_parser::CppParamList::can_cast(child.kind().into());
             stack.push((child, in_a_parameter_list || child_is_a_parameter_list));
         }
     }
@@ -991,6 +993,7 @@ impl ShapeChildren {
 }
 
 fn children_a_question_reads(node: &CppSyntaxNode) -> ShapeChildren {
+    use cpp_parser::CppAstNode;
     let mut read = ShapeChildren {
         specifiers: None,
         trailing: None,
@@ -1012,9 +1015,9 @@ fn children_a_question_reads(node: &CppSyntaxNode) -> ShapeChildren {
             // A base's *name*, not the whole specifier: taking the specifier's text would read the access keyword
             // as part of the name (`public B` is `B`).
             CppSyntaxKind::BaseSpecifier => read.bases.extend(
-                child
-                    .children()
-                    .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::NameExpr),
+                <cpp_parser::CppBaseSpecifier as cpp_parser::CppAstNode>::cast(child)
+                    .and_then(|base| base.get_name())
+                    .map(|name| name.syntax().clone()),
             ),
             _ => {}
         }
@@ -1064,25 +1067,15 @@ fn declared_namespace_alias_target_with(root: &CppSyntaxNode, binding: &Binding)
     // ancestors rather than by scanning the tree: the innermost enclosing declaration is at most a few parents up, and
     // the scan this replaced was measured at **16.7 s of a 17 s summary** on a 1.5 MB header — which is why a guard on
     // the text after the name existed, and the guard compared a rendering's bytes with a binding's range.
-    let mut node = cpp_parser::token_at(root, binding.name_range.start_offset)?.parent();
-    while let Some(current) = node {
-        if CppSyntaxKind::from(current.kind()) == CppSyntaxKind::NamespaceDecl {
-            // A declaration with a body is an ordinary namespace; an alias writes `= target` and no braces, and a
-            // forward declaration `namespace std;` has neither — so the target is what tells the two apart.
-            if current
-                .children()
-                .any(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::CompoundStat)
-            {
-                return None;
-            }
-            return current
-                .children()
-                .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::NameExpr)
-                .map(|child| child.text().to_string());
-        }
-        node = current.parent();
+    use cpp_parser::CppNamespaceDecl;
+    let token = cpp_parser::token_at(root, binding.name_range.start_offset)?;
+    let namespace = cpp_parser::typed_ancestors::<CppNamespaceDecl>(&token.parent()?).next()?;
+    // A declaration with a body is an ordinary namespace; an alias writes `= target` and no braces, and a forward
+    // declaration `namespace std;` has neither — so the absence of a body is what tells the two apart.
+    if namespace.get_body().is_some() {
+        return None;
     }
-    None
+    Some(namespace.get_name()?.get_qualified_name())
 }
 
 /// The type a **`typedef` or `using` alias** names, as the file spells it.
@@ -1200,22 +1193,20 @@ fn the_class_a_typedef_body_names(
     specifiers: &CppSyntaxNode,
     typedef_name: &str,
 ) -> Option<String> {
+    // **The class or enum this declaration defines**, by the kinds its typed node covers: `CppClassDef` is
+    // `class`/`struct`/`union`, and a scoped enum is `EnumClassDef` (which is why `CppEnumDef::can_cast` cannot be the test
+    // here — it also accepts a `BuiltinType`, and a specifier sequence has those for ordinary types).
+    use cpp_parser::CppAstNode;
     let body = specifiers.children().find(|child| {
-        matches!(
-            CppSyntaxKind::from(child.kind()),
-            CppSyntaxKind::ClassDef
-                | CppSyntaxKind::StructDef
-                | CppSyntaxKind::UnionDef
-                | CppSyntaxKind::EnumDef
-                | CppSyntaxKind::EnumClassDef
-        )
+        let kind = CppSyntaxKind::from(child.kind());
+        cpp_parser::CppClassDef::can_cast(kind)
+            || matches!(kind, CppSyntaxKind::EnumDef | CppSyntaxKind::EnumClassDef)
     })?;
 
-    let tag = body
-        .children()
-        .filter(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::NameExpr)
-        .map(|child| child.text().to_string().trim().to_string())
-        .find(|written| !written.is_empty());
+    let tag = cpp_parser::typed_children::<cpp_parser::CppNameExpr>(&body)
+        .next()
+        .map(|name| name.get_qualified_name())
+        .filter(|written| !written.is_empty());
 
     Some(tag.unwrap_or_else(|| typedef_name.trim().to_string()))
 }
@@ -1553,34 +1544,30 @@ pub(crate) fn freed_parameters_of(root: &CppSyntaxNode, binding: &Binding) -> u6
         return 0;
     }
     // The innermost declaration that reaches the name and has a body: a free is written in a body or nowhere.
+    use cpp_parser::CppAstNode;
     let name_start = binding.name_range.start_offset;
-    let declaration = root
-        .descendants()
-        .filter(|node| {
-            CppSyntaxKind::from(node.kind()) == CppSyntaxKind::Declaration
-                && usize::from(node.text_range().start()) <= name_start
-                && name_start < usize::from(node.text_range().end())
-                && node
-                    .children()
-                    .any(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::CompoundStat)
+    // **The innermost declaration that reaches the name and has a body**: a free is written in a body or nowhere.
+    let declaration = cpp_parser::typed_descendants::<cpp_parser::CppDeclaration>(root)
+        .filter(|declaration| {
+            let range = declaration.get_range();
+            usize::from(range.start()) <= name_start
+                && name_start < usize::from(range.end())
+                && declaration.get_body().is_some()
         })
-        .max_by_key(|node| usize::from(node.text_range().start()));
+        .max_by_key(|declaration| usize::from(declaration.get_range().start()));
     let Some(declaration) = declaration else {
         return 0;
     };
-    let Some(body) = declaration
-        .children()
-        .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::CompoundStat)
-    else {
+    let Some(body) = declaration.get_body() else {
         return 0;
     };
-    let parameters = the_parameter_names(&declaration);
+    let parameters = the_parameter_names(declaration.syntax());
     if parameters.is_empty() {
         return 0;
     }
 
     let mut mask = 0u64;
-    scan_unconditional_statements(&body, &parameters, &mut mask);
+    scan_unconditional_statements(body.syntax(), &parameters, &mut mask);
     mask
 }
 
@@ -1595,44 +1582,20 @@ fn fill_the_frees(root: &CppSyntaxNode, facts: &mut [crate::DeclFact]) {
     }
     let mut bodies: std::collections::HashMap<usize, (CppSyntaxNode, Vec<String>)> =
         std::collections::HashMap::new();
-    for node in root.descendants() {
-        if CppSyntaxKind::from(node.kind()) != CppSyntaxKind::Declaration {
-            continue;
-        }
-        let Some(body) = node
-            .children()
-            .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::CompoundStat)
-        else {
+    use cpp_parser::CppAstNode;
+    // **The name and the body of every declaration that has one**, asked of the typed node: `get_name` covers the class, the
+    // namespace, the declarator and the constructor's bare declarator, which is the chain four kind comparisons used to spell
+    // out.
+    for node in cpp_parser::typed_descendants::<cpp_parser::CppDeclaration>(root) {
+        let Some(body) = node.get_body() else {
             continue;
         };
-        let Some(name) = node
-            .children()
-            .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::InitDeclarator)
-            .and_then(|init| {
-                init.children()
-                    .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::Declarator)
-            })
-            .and_then(|declarator| {
-                declarator
-                    .children()
-                    .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::NameExpr)
-            })
-            // A constructor writes its declarator directly, and it can free a parameter too.
-            .or_else(|| {
-                node.children()
-                    .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::Declarator)
-                    .and_then(|declarator| {
-                        declarator.children().find(|child| {
-                            CppSyntaxKind::from(child.kind()) == CppSyntaxKind::NameExpr
-                        })
-                    })
-            })
-        else {
+        let Some(name) = node.get_name() else {
             continue;
         };
-        let name_start = usize::from(name.text_range().start());
-        let parameters = the_parameter_names(&node);
-        bodies.insert(name_start, (body, parameters));
+        let name_start = usize::from(cpp_parser::CppAstToken::get_range(&name).start());
+        let parameters = the_parameter_names(node.syntax());
+        bodies.insert(name_start, (body.syntax().clone(), parameters));
     }
 
     for fact in facts {
@@ -1927,50 +1890,48 @@ fn scan_unconditional_statements(node: &CppSyntaxNode, parameters: &[String], ma
 
 /// Record the frees written in one statement's expressions, without descending into a lambda's body.
 fn scan_for_a_free(node: &CppSyntaxNode, parameters: &[String], mask: &mut u64) {
-    match CppSyntaxKind::from(node.kind()) {
-        CppSyntaxKind::LambdaExpr => return,
-        CppSyntaxKind::UnaryExpr => {
-            // `delete p;` is a unary expression whose first token is `delete` — `delete[] p` the same with brackets.
-            let is_delete = node
-                .children_with_tokens()
-                .filter_map(|element| element.into_token())
-                .next()
-                .map(|token| cpp_parser::CppTokenKind::from(token.kind()))
-                == Some(cpp_parser::CppTokenKind::DeleteKeyword);
-            if is_delete
-                && let Some(operand) = node.children().next()
-                && let Some(name) = a_bare_name(&operand)
-                && let Some(index) = parameters.iter().position(|parameter| parameter == &name)
-                && index < 64
-            {
-                *mask |= 1 << index;
+    use cpp_parser::{CppAstNode, CppExpr};
+    if let Some(expression) = CppExpr::cast(node.clone()) {
+        match &expression {
+            // A lambda's body is another function: its frees are not this one's.
+            CppExpr::LambdaExpr(_) => return,
+            CppExpr::UnaryExpr(unary) => {
+                // `delete p;` is a unary expression whose operator is the `delete` keyword — `delete[] p` the same.
+                if unary.is_delete()
+                    && let Some(operand) = unary.get_operand()
+                    && let Some(name) = a_bare_name(operand.syntax())
+                    && let Some(index) = parameters.iter().position(|parameter| parameter == &name)
+                    && index < 64
+                {
+                    *mask |= 1 << index;
+                }
             }
-        }
-        CppSyntaxKind::CallExpr => {
-            let callee = node.children().next();
-            let name = callee.as_ref().and_then(the_last_identifier_of);
-            let frees_its_first_argument = match name.as_deref() {
-                Some("free") => true,
-                // `std::destroy_at(p)` ends the object's lifetime, which a later use reads.
-                Some("destroy_at") => true,
-                _ => false,
-            };
-            if frees_its_first_argument
-                && let Some(argument) = node.children().nth(1)
-                && let Some(name) = a_bare_name(&argument)
-                && let Some(index) = parameters.iter().position(|parameter| parameter == &name)
-                && index < 64
-            {
-                *mask |= 1 << index;
+            CppExpr::CallExpr(call) => {
+                let name = call
+                    .get_callee()
+                    .and_then(|callee| the_last_identifier_of(callee.syntax()));
+                let frees_its_first_argument = match name.as_deref() {
+                    Some("free") => true,
+                    // `std::destroy_at(p)` ends the object's lifetime, which a later use reads.
+                    Some("destroy_at") => true,
+                    _ => false,
+                };
+                if frees_its_first_argument
+                    && let Some(argument) = call.get_args().into_iter().next()
+                    && let Some(name) = a_bare_name(argument.syntax())
+                    && let Some(index) = parameters.iter().position(|parameter| parameter == &name)
+                    && index < 64
+                {
+                    *mask |= 1 << index;
+                }
             }
+            _ => {}
         }
-        _ => {}
     }
     for child in node.children() {
         scan_for_a_free(&child, parameters, mask);
     }
 }
-
 /// The name a frees-its-argument expression names: `p` for `p` and for `&p`.
 fn a_bare_name(expression: &CppSyntaxNode) -> Option<String> {
     use cpp_parser::{CppAstNode, CppNameExpr, CppUnaryExpr};
