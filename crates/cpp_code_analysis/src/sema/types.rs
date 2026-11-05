@@ -2048,43 +2048,52 @@ fn wrap(
     /// initializer, an attribute. The caller loops rather than matching, because a level can hold more than one
     /// operator (`int (*p)[4]`), and the order among them is the order they are written in.
     fn apply(wrapped: &Type, node: &CppSyntaxNode) -> Option<Type> {
-        Some(match CppSyntaxKind::from(node.kind()) {
-            CppSyntaxKind::PointerType => Type::Pointer {
-                to: Arc::new(wrapped.clone()),
-            },
-            CppSyntaxKind::ReferenceType | CppSyntaxKind::RValueReferenceType => Type::Reference {
-                to: Arc::new(wrapped.clone()),
-                rvalue: node.text().to_string().trim().starts_with("&&"),
-            },
-            CppSyntaxKind::ArrayType => Type::Array {
+        // **The three pointer kinds are one node type**: `*`, `&` and `&&` are a `CppPointerType`, and the reference questions are
+        // its own — the `&&` used to be read from the node's text.
+        if let Some(pointer) = cpp_parser::CppPointerType::cast(node.clone()) {
+            return Some(if pointer.is_reference() {
+                Type::Reference {
+                    to: Arc::new(wrapped.clone()),
+                    rvalue: pointer.is_rvalue_reference(),
+                }
+            } else {
+                Type::Pointer {
+                    to: Arc::new(wrapped.clone()),
+                }
+            });
+        }
+        if cpp_parser::CppArrayType::can_cast(node.kind().into()) {
+            return Some(Type::Array {
                 of: Arc::new(wrapped.clone()),
                 extent: array_extent(node),
-            },
-            CppSyntaxKind::ParameterList => Type::Function {
+            });
+        }
+        if cpp_parser::CppParamList::can_cast(node.kind().into()) {
+            return Some(Type::Function {
                 returns: Arc::new(wrapped.clone()),
                 parameters: read_parameters(node),
-            },
-            // **A nested declarator that is not the way down is an operator wrapper.**
-            //
-            // The tree keeps the derived-type part of a declaration in a declarator of its own: `Widget* w` has the
-            // star inside an inner `Declarator` holding a `PointerType`, while the **name** sits at the outer level.
-            // [`at_level`] walks only the declarators that *reach the name*, and it treats everything else as an
-            // ordinary child — which is right for a `NameExpr` and wrong for this, so the star was never applied and
-            // `Widget* w` read as `Widget`. Measured: four type tests and three semantic ones failed on it.
-            //
-            // Recursing here applies the wrapper's own operators, in the order they are written, to what has been
-            // read so far — which is what [`at_level`] would have done with them had they been written one level up.
-            CppSyntaxKind::Declarator => {
-                let mut wrapped = wrapped.clone();
-                for inner in node.children() {
-                    if let Some(next) = apply(&wrapped, &inner) {
-                        wrapped = next;
-                    }
-                }
-                wrapped
+            });
+        }
+        // **A nested declarator that is not the way down is an operator wrapper.**
+        //
+        // The tree keeps the derived-type part of a declaration in a declarator of its own: `Widget* w` has the star inside an
+        // inner `Declarator` holding a `PointerType`, while the **name** sits at the outer level. [`at_level`] walks only the
+        // declarators that *reach the name*, and it treats everything else as an ordinary child — which is right for a `NameExpr`
+        // and wrong for this, so the star was never applied and `Widget* w` read as `Widget`. Measured: four type tests and three
+        // semantic ones failed on it.
+        //
+        // Recursing here applies the wrapper's own operators, in the order they are written, to what has been read so far — which
+        // is what [`at_level`] would have done with them had they been written one level up.
+        if !cpp_parser::CppDeclarator::can_cast(node.kind().into()) {
+            return None;
+        }
+        let mut wrapped = wrapped.clone();
+        for inner in node.children() {
+            if let Some(next) = apply(&wrapped, &inner) {
+                wrapped = next;
             }
-            _ => return None,
-        })
+        }
+        Some(wrapped)
     }
 
     /// The type of one declarator level, given the type the level **inside** it produced.
@@ -2181,7 +2190,7 @@ fn read_parameters(list: &CppSyntaxNode) -> Vec<Type> {
     let mut parameters = Vec::new();
 
     for parameter in list.children() {
-        if CppSyntaxKind::from(parameter.kind()) != CppSyntaxKind::Parameter {
+        if !cpp_parser::CppParam::can_cast(parameter.kind().into()) {
             continue;
         }
 
@@ -2357,10 +2366,8 @@ mod tests {
             .descendants()
             .filter(|child| cpp_parser::CppDeclarator::can_cast(child.kind().into()))
             .filter(|child| {
-                child.descendants().any(|inner| {
-                    CppSyntaxKind::from(inner.kind()) == CppSyntaxKind::NameExpr
-                        && inner.text().to_string().trim() == name
-                })
+                cpp_parser::typed_descendants::<cpp_parser::CppNameExpr>(child)
+                    .any(|inner| inner.syntax().text().to_string().trim() == name)
             })
             .min_by_key(|child| {
                 usize::from(child.text_range().end()) - usize::from(child.text_range().start())
@@ -2370,9 +2377,8 @@ mod tests {
         let specifiers = declared
             .ancestors()
             .find_map(|node| {
-                node.children().find(|child| {
-                    CppSyntaxKind::from(child.kind()) == CppSyntaxKind::DeclSpecifierSeq
-                })
+                node.children()
+                    .find(|child| cpp_parser::CppDeclSpecifierSeq::can_cast(child.kind().into()))
             })
             .unwrap_or_else(|| panic!("{name} has a specifier sequence in {source:?}"));
 
