@@ -55,6 +55,20 @@ pub const MACRO_ENVIRONMENT_NAMES: usize = 64 * 1024;
 /// How many effects a session keeps — see [`Cache::effects`].
 pub const EFFECT_ENTRIES: usize = 4096;
 
+/// How many parsed views a session keeps — see [`Cache::views`].
+///
+/// A reader has one file open and looks at a handful of headers beside it; eight is "the file, its closure's
+/// headers, and room to switch back and forth". The count is the backstop: the byte budget is what actually decides.
+pub const VIEW_ENTRIES: usize = 8;
+
+/// **How many bytes of parse tree the view cache may hold** — see [`Cache::views`].
+///
+/// 64 MB of *estimated tree*, which is about 3–8 MB of rendering text. The number is chosen from what a view is worth:
+/// rebuilding one is a parse at the parser's 6 MB/s (120 ms for a 0.74 MB unit), so a miss on a file the reader is
+/// working in is a visible stall, while 64 MB is a fifth of what the index's tables hold on a mid-sized project
+/// (`docs/memory.md`).
+pub const VIEW_BYTES: usize = 64 * 1024 * 1024;
+
 /// A least-recently-used map with a weight budget.
 ///
 /// `K` is the cache key (a path and a content hash, or an effect's own hash), `V` the value. The weight is supplied by
@@ -82,6 +96,15 @@ impl<K: Hash + Eq + Clone, V> Cache<K, V> {
     /// The renderings a session remembers: a few of them, and at most [`RENDERING_BYTES`] of text.
     pub fn renderings() -> Self {
         Self::new(RENDERING_ENTRIES, RENDERING_BYTES)
+    }
+
+    /// **The views a session remembers** — [`VIEW_ENTRIES`] of them, and at most [`VIEW_BYTES`] of *estimated tree*.
+    ///
+    /// The weight is not the text a view was parsed from but what the view costs: a rowan tree is 8–24× its text
+    /// (`docs/parser-review.md`), so a budget stated in text bytes would understate the memory by an order of
+    /// magnitude. See [`crate::session::a_view_weighs`] for the estimate.
+    pub fn views() -> Self {
+        Self::new(VIEW_ENTRIES, VIEW_BYTES)
     }
 
     /// The macro environments a session remembers: [`MACRO_ENVIRONMENT_NAMES`] names across

@@ -83,6 +83,7 @@ vfs                  28.8 MB   23.6 MB of text + 5.2 MB of line indexes, for eve
 walks by content     15.0 MB   capped at 16 MB
 units                27.2 MB   capped at 8 entries / 64 MB
 cooked                0.4 MB   (7.4 MB on the running server, which cooked 163 files)
+views                 0.9 MB   0.08 MB of rendering, as a parse tree; capped at 8 entries / 64 MB of estimated tree
 index tables         15.0 MB
 definitions          10.3 MB   30k `#define` bodies, growing with the closures a session has read
 ```
@@ -97,3 +98,10 @@ The first two are the only ones worth a plan, and neither is a tuning constant:
   at the cost of a re-read.
 
 Neither is started. The numbers above are the baseline a plan for them would have to move.
+
+## The table that arrived after this was written
+
+`views` — the parse trees a session keeps for reuse (`docs/parser-review.md` §5.3). It is the only entry here that is a
+**tree** rather than facts or text, so its weight is estimated from the measured ratio: a rowan tree is 8–24× the text
+it describes, and the cache is bounded by 64 MB of that estimate rather than by text bytes. Measured on one standard
+header: a 0.08 MB rendering holds a 0.9 MB tree, and the cache turns a 15.4 ms request into 185 µs.

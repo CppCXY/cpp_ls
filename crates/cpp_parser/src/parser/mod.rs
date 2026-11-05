@@ -1,6 +1,7 @@
 mod cpp_parser;
 mod marker;
 mod parser_config;
+pub(crate) mod phases;
 mod type_names;
 
 pub use cpp_parser::{Checkpoint, CppParser, EventStreamAudit, ParseAnchor};

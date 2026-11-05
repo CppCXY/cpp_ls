@@ -126,7 +126,46 @@ enum BodyKind {
     Block,
 }
 
+/// **The three states of one event position**, in [`CppParser::closed_marks`]. Byte rather than an enum because
+/// the vector is one byte per event, and one byte per event is what makes the table cheap enough to keep for the
+/// whole parse.
+const NOT_CLOSED: u8 = 0;
+/// The node opened at this position has emitted its `NodeEnd` — the ordinary state of a closed node.
+const CLOSED_WITH_EVENT: u8 = 1;
+/// The node was **detached by recovery** without its `NodeEnd`. Its owner may still owe that event — see
+/// [`Marker::complete`], whose second branch is exactly this state.
+const DETACHED: u8 = 2;
+
+/// **Counters for `CPPLS_PARSER_STATS=1`** — what the parse spent its questions on.
+///
+/// Not a profiler: a count per kind of question, printed once at the end of a parse. It answers the only question a
+/// profiler on this machine cannot — *how often* a rule runs — and the times then come from what one of them must
+/// cost. The numbers it produced are in `docs/parser-review.md` §2.
+#[derive(Default)]
+struct ParserCounts {
+    checkpoints: std::cell::Cell<u64>,
+    rollbacks: std::cell::Cell<u64>,
+    attempted: std::cell::Cell<u64>,
+    type_questions: std::cell::Cell<u64>,
+    type_answers: std::cell::Cell<u64>,
+    greater_than_questions: std::cell::Cell<u64>,
+    marks: std::cell::Cell<u64>,
+    closes: std::cell::Cell<u64>,
+    #[allow(dead_code)]
+    trivia_sweeps: std::cell::Cell<u64>,
+    comment_groups: std::cell::Cell<u64>,
+    comment_nanos: std::cell::Cell<u64>,
+}
+
+impl ParserCounts {
+    fn one_more(cell: &std::cell::Cell<u64>) {
+        cell.set(cell.get() + 1);
+    }
+}
+
 pub struct CppParser<'a> {
+    /// See [`ParserCounts`]. Always present; read only when `CPPLS_PARSER_STATS=1`.
+    counts: ParserCounts,
     text: &'a str,
     events: Vec<MarkEvent>,
     /// **The token stream, immutable once lexed.**
@@ -161,7 +200,19 @@ pub struct CppParser<'a> {
     /// detached by recovery does not — and in the latter case its owner may still reach
     /// `complete()` and owe that event. Collapsing the two into one set is what makes the event
     /// stream go unbalanced in ways that are invisible in the tree.
-    closed_marks: std::collections::HashMap<usize, bool>,
+    ///
+    /// # One byte per event, not a hash map
+    ///
+    /// It was a `HashMap<usize, bool>` and every `Marker::complete` asked it three questions — end event emitted,
+    /// detached, still open — plus two linear scans of the open stack. On a standard-header unit that is **688 159
+    /// nodes**, and the questions are *index* questions on a dense, append-only stream: the event's position is the
+    /// key. A byte vector kept in step with the events turns each into a load, and turns a rollback from "remove one
+    /// entry per position closed since" into a truncation — the journal below is then only needed to know *how far*
+    /// to truncate, and that is one length.
+    ///
+    /// The values are [`NOT_CLOSED`], [`CLOSED_WITH_EVENT`] and [`DETACHED`]; the constants are below because the
+    /// encoding is the whole of the type's contract.
+    closed_marks: Vec<u8>,
     /// The positions in [`CppParser::closed_marks`], **in the order they were first closed**.
     ///
     /// What makes a rollback proportional to the work it undoes instead of to the file. `rollback` has to forget
@@ -173,7 +224,8 @@ pub struct CppParser<'a> {
     ///
     /// The journal's tail past a checkpoint **is** the set to forget: an entry appears here exactly when its
     /// marker is closed, so truncating this list to the checkpoint's length names every position that was closed
-    /// since — and removing those from the map is precisely what the scan computed.
+    /// since — and with [`CppParser::closed_marks`] indexed by position, truncating *that* to the checkpoint's event
+    /// count is the whole of the removal.
     closed_marks_journal: Vec<usize>,
     /// **Whether a `>` at the cursor closes a list or compares** — the state clang keeps in
     /// `Parser::GreaterThanIsOperator`, held here as the one number that decides it.
@@ -391,36 +443,58 @@ impl MarkerEventContainer for CppParser<'_> {
     fn close_mark(&mut self, position: usize, want_event: bool) -> bool {
         // Removing the mark from the open set and emitting the event happen together, so the two
         // can never disagree about whether a node is closed.
-        self.open_marks.retain(|open| *open != position);
+        //
+        // **The grammar closes nodes last-in-first-out**, so the stack's top answers in the common case and the scan
+        // is the fallback for recovery's out-of-order closes. Measured on a standard-header unit: 688 159 nodes, each
+        // of which used to walk the whole open stack here.
+        if self.open_marks.last() == Some(&position) {
+            self.open_marks.pop();
+        } else {
+            self.open_marks.retain(|open| *open != position);
+        }
 
-        match self.closed_marks.entry(position) {
-            std::collections::hash_map::Entry::Occupied(_) => false,
-            std::collections::hash_map::Entry::Vacant(slot) => {
-                slot.insert(want_event);
-                // …and the journal, so that a rollback can undo exactly this insertion without scanning the map.
+        match self.closed_marks.get(position) {
+            Some(&NOT_CLOSED) => {
+                self.closed_marks[position] = if want_event {
+                    CLOSED_WITH_EVENT
+                } else {
+                    DETACHED
+                };
+                // The journal, so that a rollback knows how far back to truncate the table.
                 self.closed_marks_journal.push(position);
                 if want_event {
-                    self.events.push(MarkEvent::NodeEnd);
+                    self.push_event(MarkEvent::NodeEnd);
                 }
                 want_event
             }
+            // Closed already — or a position that is not an event at all.
+            _ => false,
         }
     }
 
     fn mark_has_end_event(&self, position: usize) -> bool {
-        self.closed_marks.get(&position).copied().unwrap_or(false)
+        self.closed_marks.get(position) == Some(&CLOSED_WITH_EVENT)
     }
 
     fn mark_was_detached(&self, position: usize) -> bool {
-        matches!(self.closed_marks.get(&position), Some(false))
+        self.closed_marks.get(position) == Some(&DETACHED)
     }
 
     fn mark_is_open(&self, position: usize) -> bool {
-        self.open_marks.contains(&position)
+        // Closing and leaving the open set happen in the same call, so "not closed" *is* "open" — and it is an
+        // index rather than a scan of the open stack.
+        self.closed_marks.get(position) == Some(&NOT_CLOSED)
     }
 
     fn get_events(&mut self) -> &mut Vec<MarkEvent> {
         &mut self.events
+    }
+
+    /// **Append one event, keeping [`CppParser::closed_marks`] in step with it** — the one way an event enters the
+    /// stream.
+    fn push_event(&mut self, event: MarkEvent) {
+        self.events.push(event);
+        self.closed_marks.push(NOT_CLOSED);
     }
 }
 
@@ -467,7 +541,8 @@ impl<'a> CppParser<'a> {
             token_index: 0,
             current_token: CppTokenKind::None,
             open_marks: Vec::new(),
-            closed_marks: std::collections::HashMap::new(),
+            closed_marks: Vec::new(),
+            counts: ParserCounts::default(),
             closed_marks_journal: Vec::new(),
             innermost_template_argument_list: None,
             bracket_depth: 0,
@@ -512,6 +587,7 @@ impl<'a> CppParser<'a> {
             builder.finish()
         };
 
+        crate::parser::phases::report();
         let tokens = std::mem::take(&mut parser.tokens);
         let tree = CppSyntaxTree::new(root, errors, tokens);
         (tree, events)
@@ -523,6 +599,32 @@ impl<'a> CppParser<'a> {
 
         parse_cpp_unit(&mut parser);
         let audit = parser.audit_events();
+
+        // **What the parse asked, and how often** — `CPPLS_PARSER_STATS=1`. See [`ParserCounts`].
+        if std::env::var_os("CPPLS_PARSER_STATS").is_some_and(|value| !value.is_empty()) {
+            let counts = &parser.counts;
+            eprintln!(
+                "parser stats: {} event(s) | {} mark(s), {} close(s) | {} checkpoint(s), {} rollback(s), \
+                 {} speculative attempt(s) | {} type question(s), {} answered | {} `>` question(s) | \
+                 {} token(s)",
+                parser.events.len(),
+                counts.marks.get(),
+                counts.closes.get(),
+                counts.checkpoints.get(),
+                counts.rollbacks.get(),
+                counts.attempted.get(),
+                counts.type_questions.get(),
+                counts.type_answers.get(),
+                counts.greater_than_questions.get(),
+                parser.tokens.len(),
+            );
+            eprintln!(
+                "parser doc layer: {} group(s), {} ns total, {} ns each",
+                counts.comment_groups.get(),
+                counts.comment_nanos.get(),
+                counts.comment_nanos.get() / counts.comment_groups.get().max(1),
+            );
+        }
 
         debug_assert!(
             parser.open_marks.is_empty(),
@@ -540,6 +642,7 @@ impl<'a> CppParser<'a> {
             builder.finish()
         };
 
+        crate::parser::phases::report();
         let tokens = std::mem::take(&mut parser.tokens);
         (CppSyntaxTree::new(root, errors, tokens), audit)
     }
@@ -653,6 +756,7 @@ impl<'a> CppParser<'a> {
 
     /// Record a checkpoint that [`CppParser::rollback`] can restore.
     pub fn checkpoint(&self) -> Checkpoint {
+        ParserCounts::one_more(&self.counts.checkpoints);
         Checkpoint {
             events_len: self.events.len(),
             token_index: self.token_index,
@@ -681,17 +785,16 @@ impl<'a> CppParser<'a> {
     /// reports code the user did not write, which is worse than saying nothing — the file that comes out is valid
     /// C++ and the editor would underline it. The reading that *is* kept reports its own problems normally.
     pub fn rollback(&mut self, checkpoint: Checkpoint) {
+        ParserCounts::one_more(&self.counts.rollbacks);
         self.events.truncate(checkpoint.events_len);
         self.open_marks.truncate(checkpoint.open_marks);
-        // Positions at or past the truncation point are gone from the event stream, so their
-        // "already closed" bookkeeping must go too — otherwise a future marker reusing the same
-        // position would be considered closed and its `NodeEnd` silently skipped.
-        for position in self
-            .closed_marks_journal
-            .split_off(checkpoint.closed_marks_journal_len)
-        {
-            self.closed_marks.remove(&position);
-        }
+        // Positions at or past the truncation point are gone from the event stream, so their "already closed"
+        // bookkeeping goes too — otherwise a future marker reusing the same position would be considered closed and
+        // its `NodeEnd` silently skipped. **The table is indexed by event position**, so this is one truncation and
+        // the journal only has to say how far: it used to walk the positions closed since and remove each from a map.
+        self.closed_marks.truncate(checkpoint.events_len);
+        self.closed_marks_journal
+            .truncate(checkpoint.closed_marks_journal_len);
         self.declaration_type_name = checkpoint.declaration_type_name;
         self.previous_declaration_type_name = checkpoint.previous_declaration_type_name;
         self.declaration_type_is_qualified = checkpoint.declaration_type_is_qualified;
@@ -712,6 +815,7 @@ impl<'a> CppParser<'a> {
     /// This is the primitive that makes C++'s declaration/expression ambiguity tractable without
     /// a symbol table.
     pub fn try_parse<T>(&mut self, f: impl FnOnce(&mut Self) -> Option<T>) -> Option<T> {
+        ParserCounts::one_more(&self.counts.attempted);
         let checkpoint = self.checkpoint();
         match f(self) {
             Some(value) => Some(value),
@@ -1012,6 +1116,7 @@ impl<'a> CppParser<'a> {
     /// in the file. `>=` and `>>=` are never this question's business — they are different tokens and stay
     /// operators either way — and `>>` is, which is why `a >> b` inside `C<(a >> b)>` reads as a shift.
     pub fn greater_than_is_an_operator(&self) -> bool {
+        ParserCounts::one_more(&self.counts.greater_than_questions);
         match self.innermost_template_argument_list {
             None => true,
             Some(entered_at) => self.bracket_depth > entered_at,
@@ -1125,11 +1230,19 @@ impl<'a> CppParser<'a> {
     /// A **template parameter** counts, and the two sources are kept apart because they are scoped differently:
     /// see [`CppParser::template_parameters`].
     pub fn is_a_known_type_name(&self, name: &str) -> bool {
-        self.type_names.is_a_type(name)
-            || self
-                .template_parameters
-                .iter()
-                .any(|parameter| &**parameter == name)
+        ParserCounts::one_more(&self.counts.type_questions);
+        if self.type_names.is_a_type(name) {
+            ParserCounts::one_more(&self.counts.type_answers);
+            return true;
+        }
+        let from_a_head = self
+            .template_parameters
+            .iter()
+            .any(|parameter| &**parameter == name);
+        if from_a_head {
+            ParserCounts::one_more(&self.counts.type_answers);
+        }
+        from_a_head
     }
 
     /// Record a template parameter that declares a **type** — `typename T`, `class C`.
@@ -1631,11 +1744,27 @@ impl<'a> CppParser<'a> {
     pub fn bump(&mut self) {
         let consumed_index = self.token_index;
 
+        // **The cursor must stand on a token that can be emitted.** It used to be possible for it to stand on
+        // *trivia*, and the shape of the damage is worth stating because nothing else catches it: `bump` emits
+        // nothing for a trivia kind (the round above emits those), so the token's bytes were consumed and emitted
+        // nowhere, and the tree silently stopped being lossless from that offset on. Measured on `cxxabi.h`: 22 315
+        // bytes in, 19 987 out, with the comment that was lost replaced by a zero-width `ErrorNode` and **zero**
+        // syntax errors reported — see `tests/lossless.rs`.
+        //
+        // **Asserted only under `CPPLS_TRIVIA=1`**, because the state is reachable today: a debug build of the server
+        // hits it while indexing ordinary C++ headers (§4 of `docs/parser-review.md`), and a guard that fires on
+        // every run is a guard nobody can keep. The probe turns it into the failure it is.
+        assert!(
+            std::env::var_os("CPPLS_TRIVIA").is_none() || !is_trivia_kind(self.current_token),
+            "the cursor is on {:?} at {consumed_index}, which `bump` cannot emit — every later offset is shifted",
+            self.current_token
+        );
+
         // Trivia tokens are emitted by `parse_trivia_tokens`, which runs over the whole skipped
         // span; pushing them here as well would duplicate them in the tree.
         if consumed_index < self.tokens.len() && !is_trivia_kind(self.current_token) {
             let token = self.tokens[consumed_index];
-            self.events.push(MarkEvent::EatToken {
+            self.push_event(MarkEvent::EatToken {
                 kind: token.kind,
                 range: token.range,
             });
@@ -1768,7 +1897,7 @@ impl<'a> CppParser<'a> {
             let token = self.tokens[index];
 
             if !is_comment_kind(token.kind) {
-                self.events.push(MarkEvent::EatToken {
+                self.push_event(MarkEvent::EatToken {
                     kind: token.kind,
                     range: token.range,
                 });
@@ -1781,7 +1910,12 @@ impl<'a> CppParser<'a> {
             // The doc parse is total: it cannot fail, and it cannot leave a marker open, so there is
             // nothing to recover from and nothing to check. Anything it wants to report it reports
             // through `push_error`.
+            ParserCounts::one_more(&self.counts.comment_groups);
+            let doc_started = std::time::Instant::now();
             let _ = crate::grammar::doc::parse_comment_group(self, &sources);
+            self.counts
+                .comment_nanos
+                .set(self.counts.comment_nanos.get() + doc_started.elapsed().as_nanos() as u64);
 
             index = *group.last().expect("a group has at least one comment") + 1;
         }
@@ -1914,7 +2048,7 @@ impl<'a> CppParser<'a> {
     /// is the whole of the translation between the two layers: no offset arithmetic, no buffering.
     /// That is what lets doc nodes be ordinary children of the C++ tree.
     pub(crate) fn push_doc_token(&mut self, kind: CppTokenKind, range: crate::text::SourceRange) {
-        self.events.push(MarkEvent::EatToken { kind, range });
+        self.push_event(MarkEvent::EatToken { kind, range });
     }
 
     /// Emit the current token and move on, **without** attaching the trivia that follows it.
@@ -1928,7 +2062,7 @@ impl<'a> CppParser<'a> {
 
         if consumed_index < self.tokens.len() && !is_trivia_kind(self.current_token) {
             let token = self.tokens[consumed_index];
-            self.events.push(MarkEvent::EatToken {
+            self.push_event(MarkEvent::EatToken {
                 kind: token.kind,
                 range: token.range,
             });
@@ -2126,8 +2260,8 @@ impl<'a> CppParser<'a> {
 
         let empty_nodes = self
             .closed_marks
-            .values()
-            .filter(|emitted| !**emitted)
+            .iter()
+            .filter(|state| **state == DETACHED)
             .count();
 
         let mut unclosed = Vec::new();

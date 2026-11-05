@@ -450,6 +450,7 @@ enum Level {
 
 /// Read an expression down to `level`, optionally reading a trailing `...` as a pack expansion.
 fn parse_expr_up_to(p: &mut CppParser, level: Level, pack_expansion: bool) -> ParseResult {
+    let _phase = crate::parser::phases::during("expression");
     let mut expr = parse_ternary_expr(p)?;
 
     if level == Level::Full {

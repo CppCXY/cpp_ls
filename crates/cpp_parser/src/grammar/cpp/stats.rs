@@ -386,6 +386,7 @@ fn block_follow(p: &CppParser) -> bool {
 /// node the statement opened, so callers can recover by skipping tokens without having to know how
 /// deep the failed rule got.
 pub fn parse_stat(p: &mut CppParser) -> ParseResult {
+    let _phase = crate::parser::phases::during("statement");
     let base = p.open_marks();
 
     let result = match p.current_token() {

@@ -83,6 +83,7 @@ switch! {
     walk_census => "CPPLS_WALK_CENSUS", "Every file the walk entered, spliced or fresh, and the conditions it mentions.";
     code_action => "CPPLS_TRACE_CODE_ACTION", "Where a code-action request's milliseconds went.";
     no_share => "CPPLS_NO_SHARE", "Turn summary sharing off, so one machine can be measured with and without it — an A/B switch, not a setting.";
+    trivia => "CPPLS_TRIVIA", "Assert the cursor-is-on-trivia invariant: with this on, `bump` panics instead of silently dropping a token's bytes — the live defect of `docs/parser-review.md` §4.";
 }
 
 /// **Do not filter a candidate whose declaration is written in a `#if` region.**

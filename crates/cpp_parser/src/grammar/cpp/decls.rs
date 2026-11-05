@@ -646,6 +646,7 @@ fn ends_a_template_parameter(p: &CppParser) -> bool {
 /// Returns `Err` without having consumed anything when the input does not look like a declaration,
 /// so the caller can fall back to parsing an expression statement.
 pub fn parse_declaration(p: &mut CppParser) -> ParseResult {
+    let _phase = crate::parser::phases::during("declaration");
     // A declaration is the one place a bare template-id may stand where a *name* belongs, and only when the
     // declaration is an **explicit instantiation**: `extern template void f<int>(int);` names the instantiation
     // it asks for, and that name is a template-id. Everywhere else `C<T> x;` gives the arguments to the type.
@@ -5764,6 +5765,7 @@ pub fn parse_linkage_block(p: &mut CppParser) -> ParseResult {
 
         let member_base = p.open_marks();
         let before = p.current_token_index();
+        eprintln!("LINKAGE loop: cursor {:?} at {} (before={})", p.current_token(), p.current_token_index(), before);
         let before_events = p.current_event_count();
         if parse_declaration(p).is_err() {
             // **With their end events**, for the third time in this file's history (see `end_marks_to`): a

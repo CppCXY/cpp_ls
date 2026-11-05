@@ -404,6 +404,96 @@ enum Which {
 /// The provider chain is owned rather than borrowed, which is what lets a long-lived caller — a language server —
 /// hold a session in a field. See the module documentation: the caller keeps a handle to the same chain by cloning
 /// it before the session takes it, and a clone of a provider is a second handle on the same files.
+/// **A file's configuration and its language, worked out once** — the value [`Session::config_for_file`] memoizes.
+///
+/// The language is kept beside the configuration because deriving it is not free and it was being derived per query:
+/// [`CompilerConfig::language_for`] looks the file up in the compilation database *again* and re-parses `-std=` out of
+/// the command line, for an answer that cannot change while the session lives.
+#[derive(Debug)]
+struct PerFileConfig {
+    config: std::sync::Arc<CompilerConfig>,
+    language: cpp_parser::features::LanguageConfig,
+    cuda: bool,
+}
+
+/// **What a cached view was parsed from**, and the whole reason a stale one cannot be served.
+///
+/// A `FileView` is a function of exactly these seven things, and each of them moves for a reason:
+///
+/// ```text
+/// path       one view per file, whatever spelling the caller used
+/// text       the content hash of the text parsed — a rendering's, or the file's own for a buffer view
+/// spans      how many rendering spans went with it: part of the identity of the offset mapping
+/// id         the VFS's identity for the file, which a delete-and-recreate moves
+/// cuda       the parse's vendor switch
+/// language   the file's own language level (`-std=`), which changes what a name may mean
+/// open       whether the text is a buffer rather than the file on disk
+/// ```
+///
+/// The **text** is the load-bearing one, and it is why this needs no invalidation hooks: a rendering whose text
+/// changed for any reason — a header edited, a macro moved, the closure grown — is a different key rather than a
+/// stale hit. The rendering cache can rely on `retain(dependent)` for the same job because it is keyed by the
+/// *dependent's* text; this one is keyed by what was actually parsed, which is strictly narrower.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ViewKey {
+    path: PathBuf,
+    /// **Which rendering this is**, by object — see [`RenderingId`]. `None` for a buffer view, which has none.
+    ///
+    /// By object rather than by the hash of its text, and the difference is the cost of a hit on a large file: hashing
+    /// a 1 MB rendering is about a millisecond and would be paid on every hit, while comparing an `Arc` pointer is one
+    /// word.
+    rendering: Option<RenderingId>,
+    /// The file's own text, by hash — what a **buffer view** was parsed from.
+    text: u64,
+    id: crate::file::paths::FileId,
+    cuda: bool,
+    language: Option<cpp_parser::features::LanguageConfig>,
+    open: bool,
+    /// **The macro environment a buffer view was parsed with**, when there was one. `None` is the empty environment,
+    /// which is one value however often it is made.
+    ///
+    /// Held rather than identified by a raw address: an id that outlived its allocation could name a *different*
+    /// environment that happened to be allocated where the old one was. The environment is an `Arc`, so holding it is
+    /// one reference count — and the identity is `Arc::ptr_eq`, which is exactly "the same environment object".
+    environment: Option<EnvironmentId>,
+}
+
+/// The identity of a rendering — **by object, held**, see [`ViewKey::rendering`].
+#[derive(Debug, Clone)]
+struct RenderingId(std::sync::Arc<crate::preprocess::cooked::RenderedCooked>);
+
+impl PartialEq for RenderingId {
+    fn eq(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for RenderingId {}
+
+impl std::hash::Hash for RenderingId {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::sync::Arc::as_ptr(&self.0).hash(state);
+    }
+}
+
+/// The identity of a macro environment — **by object, held**, see [`ViewKey::environment`].
+#[derive(Debug, Clone)]
+struct EnvironmentId(std::sync::Arc<cpp_parser::MacroEnvironment>);
+
+impl PartialEq for EnvironmentId {
+    fn eq(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for EnvironmentId {}
+
+impl std::hash::Hash for EnvironmentId {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::sync::Arc::as_ptr(&self.0).hash(state);
+    }
+}
+
 /// What a session is holding — see [`Session::cache_sizes`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct CacheSizes {
@@ -422,6 +512,23 @@ pub struct CacheSizes {
     /// **Cooked readings held**: files, and the declarations in them.
     pub cooked_files: usize,
     pub cooked_declarations: usize,
+    /// **Parse trees held for reuse**: how many views, and their estimated tree bytes — see [`Session::view`].
+    pub views: usize,
+    pub view_bytes: usize,
+}
+
+/// **What one parsed view costs**, in the estimate the view cache's budget is stated in.
+///
+/// A rowan tree weighs 8–24× the text it describes, measured on two corpora (`docs/parser-review.md` §2): one
+/// allocation per token with the token's bytes copied into it, one per node with its children. 8 is the low end and a
+/// source file is the case that hits it, so `text × 8` plus a word per token is the estimate — deliberately an
+/// under-estimate, because over-stating it would evict views that are cheap to keep and the budget is what matters,
+/// not the last megabyte.
+///
+/// **Why not the rendering weight**: that is `text + spans × 16`, which is what the *rendering* cache is bounded by.
+/// The two caches hold different things and a view is the larger one.
+fn a_view_weighs(view: &FileView) -> usize {
+    view.source.len().saturating_mul(8) + view.tree.get_tokens().len().saturating_mul(16)
 }
 
 pub struct Session<F: FileProvider = DiskFiles> {
@@ -681,6 +788,17 @@ pub struct Session<F: FileProvider = DiskFiles> {
     /// file that sees it. Keyed by the definition's own text, so it needs no invalidation: the same text is the same
     /// definition, and a file that changed contributes a different one.
     parsed_definitions: std::sync::Mutex<crate::ParsedDefinitions>,
+    /// **A file's `CompilerConfig`, worked out once** — see [`Session::config_for_file`].
+    ///
+    /// [`CompilerConfig::for_file`] clones the whole configuration, applies the project's `remove_args`/`extra_args`
+    /// and looks the file up in the compilation database, and it was being called by every `view` — **after** the
+    /// parse became a cache hit, it was the whole cost of one (measured: 0.28 ms per hit on an 11 KB file, against
+    /// 0.3 ms for the parse it was hiding behind).
+    ///
+    /// **No invalidation, and the reason is structural**: a session's configuration is built once by `Session::open`
+    /// and nothing reassigns it. A configuration that changes is a *new session* (the server replaces the analysis
+    /// state), which is the same rule the rest of this type follows.
+    config_for_file: std::sync::Mutex<HashMap<PathBuf, std::sync::Arc<PerFileConfig>>>,
     /// **The renderings built for `view`**, remembered against the content they were read from.
     ///
     /// The same arrangement as [`Session::macro_environments`] and for the same reason: a rendering is a unit walk
@@ -696,6 +814,33 @@ pub struct Session<F: FileProvider = DiskFiles> {
             (PathBuf, u64),
             std::sync::Arc<crate::preprocess::cooked::RenderedCooked>,
         >,
+    >,
+    /// **Views already built**, by what they were parsed from — the answer to "a pull is a parse per request".
+    ///
+    /// [`Session::view`] parses a file's **rendering**, which for a header-heavy file is its whole closure; measured
+    /// on a 0.74 MB unit at the parser's 6 MB/s, that is **120 ms per call**, and a hover, a pull, an inlay hint and
+    /// a semantic-token request each call it. The tree is the expensive half and nothing was remembering it: the
+    /// rendering cache holds the rendered *text*, and the parse was made again every time.
+    ///
+    /// # Why this key cannot serve a stale view
+    ///
+    /// A view is a function of: the text parsed (the rendering's), the rendering's spans (the offsets between the
+    /// rendering and the file), the parse's own configuration (`cuda`, the language level), whether the buffer is
+    /// open, and the file's identity. All seven are in [`ViewKey`], and the text is keyed by its **content hash** —
+    /// the same rule the rendering cache uses, and stricter here, because a rendering whose text changed for any
+    /// reason (a header edited, a macro moved) is a different key rather than a stale hit. A config change moves the
+    /// language, an open/close moves `open`, a re-read of the file moves the text. Nothing else can change what a
+    /// parse of that input means.
+    ///
+    /// `FileView` is cheap to hand out because its tree and its scopes are behind `Arc`s: a hit is a handful of
+    /// reference-count bumps, which is what makes a cache worth having at all (a clone that copied the token stream
+    /// would cost twelve bytes per token — megabytes for the units this exists for).
+    ///
+    /// The value is a [`crate::file::view::ParsedView`] and not a [`FileView`]: a view holds rowan's red root, which is
+    /// neither `Send` nor `Sync`, and a session is shared across the server's threads. The root is one allocation,
+    /// made per hit — see `FileView::from_parsed`.
+    views: std::sync::Mutex<
+        cache::cache_lru::Cache<ViewKey, std::sync::Arc<crate::file::view::ParsedView>>,
     >,
     /// **The summary of a rendering**, by `(path, content hash of the rendered text)`.
     ///
@@ -1467,10 +1612,12 @@ impl<F: FileProvider + Clone> Session<F> {
             headers,
             macro_work: std::sync::Mutex::new(Cooking::default()),
             parsed_definitions: std::sync::Mutex::new(crate::ParsedDefinitions::new()),
+            config_for_file: std::sync::Mutex::new(HashMap::new()),
             macro_environments: std::sync::Mutex::new(cache::cache_lru::Cache::macro_environments()),
             surfaces: std::sync::Mutex::new(crate::effect::Surfaces::new()),
             effects: std::sync::Mutex::new(HashMap::new()),
             renderings: std::sync::Mutex::new(cache::cache_lru::Cache::renderings()),
+            views: std::sync::Mutex::new(cache::cache_lru::Cache::views()),
             rendering_summaries: std::sync::Mutex::new(cache::cache_lru::Cache::new(
                 RENDERING_SUMMARY_ENTRIES,
                 RENDERING_SUMMARY_BYTES,
@@ -1507,6 +1654,38 @@ impl<F: FileProvider + Clone> Session<F> {
     /// debugging "why did this file resolve that header" wants.
     pub fn config_for(&self, file: &std::path::Path) -> CompilerConfig {
         self.config().for_file(file)
+    }
+
+    /// **A file's configuration and its language, worked out once per session** — see [`Session::config_for_file`]
+    /// for the field and the measurement.
+    ///
+    /// The same answers [`Session::config_for`] and [`CompilerConfig::language_for`] give. Both are memoized together
+    /// because both were on the same path and each was the whole cost of a *cached* view: `for_file` clones the
+    /// configuration and looks the file up in the database, and `language_for` looks it up **again** and re-parses
+    /// `-std=` out of the command line — measured together at **132 µs per call**, which was 90 % of what a view-cache
+    /// hit cost until this existed.
+    ///
+    /// Bounded by count, and the bound clears the whole memo: a reader meets a few dozen files, and evicting one entry
+    /// at a time would buy nothing for the bookkeeping it costs.
+    fn config_for_file(&self, file: &std::path::Path) -> std::sync::Arc<PerFileConfig> {
+        if let Ok(known) = self.config_for_file.lock()
+            && let Some(held) = known.get(file)
+        {
+            return std::sync::Arc::clone(held);
+        }
+        let config = std::sync::Arc::new(self.config().for_file(file));
+        let worked_out = std::sync::Arc::new(PerFileConfig {
+            language: config.language_for(file),
+            cuda: config.cuda(),
+            config,
+        });
+        if let Ok(mut known) = self.config_for_file.lock() {
+            if known.len() >= CONFIG_FOR_FILE_ENTRIES {
+                known.clear();
+            }
+            known.insert(file.to_path_buf(), std::sync::Arc::clone(&worked_out));
+        }
+        worked_out
     }
 
     pub fn config(&self) -> &CompilerConfig {
@@ -1619,6 +1798,11 @@ impl<F: FileProvider + Clone> Session<F> {
             .sum();
 
         let (cooked_files, cooked_declarations) = self.store.index().cooked_size();
+        let (views, view_bytes) = self
+            .views
+            .lock()
+            .map(|known| (known.len(), known.weight()))
+            .unwrap_or((0, 0));
         CacheSizes {
             renderings,
             rendering_bytes,
@@ -1628,6 +1812,27 @@ impl<F: FileProvider + Clone> Session<F> {
             macros,
             cooked_files,
             cooked_declarations,
+            views,
+            view_bytes,
+        }
+    }
+
+    /// **A view already parsed from exactly this input**, or `None`.
+    ///
+    /// A hit is a handful of `Arc` bumps and one red root — see [`Session::view`] for what the key is made of and why
+    /// none of it can serve a stale parse, and [`crate::file::view::ParsedView`] for why the cached half has no root.
+    fn a_view_already_parsed(&self, key: &ViewKey) -> Option<FileView> {
+        let mut known = self.views.lock().ok()?;
+        let parsed = known.get(key)?;
+        Some(FileView::from_parsed((**parsed).clone()))
+    }
+
+    /// Remember `view` under `key`, weighed by what it actually costs — see [`a_view_weighs`].
+    fn remember_a_view(&self, key: ViewKey, view: &FileView) {
+        let weight = a_view_weighs(view);
+        if let Ok(mut known) = self.views.lock() {
+            let parsed = view.clone().into_parsed();
+            known.insert(key, std::sync::Arc::new(parsed), weight);
         }
     }
 
@@ -1665,6 +1870,11 @@ impl<F: FileProvider + Clone> Session<F> {
             })
             .unwrap_or((0, 0));
         let (dead_macro_files, dead_macro_offsets) = self.dead_macro_decisions();
+        let (views, view_bytes) = self
+            .views
+            .lock()
+            .map(|known| (known.len(), known.weight()))
+            .unwrap_or((0, 0));
         let (walk_cache_entries, walk_cache_bytes) = self.store.contributions().accounting();
         let (walks_by_content_entries, walks_by_content_bytes) = self
             .walked_by_content
@@ -1706,6 +1916,8 @@ impl<F: FileProvider + Clone> Session<F> {
             unit_bytes,
             renderings,
             rendering_bytes,
+            views,
+            view_bytes,
             dead_macro_decisions: dead_macro_files,
             dead_macro_bytes: dead_macro_offsets * std::mem::size_of::<usize>(),
             directive_signatures: self.directive_signatures.len(),
@@ -4056,11 +4268,37 @@ impl<F: FileProvider + Clone> Session<F> {
         match self.known_rendering_of(&file.path, &file.text) {
             // **Parsed as the language the file is**, not as the parser's default: see
             // [`FileView::parse_rendering_in`] — `restrict`, C23's literals and the GNU extensions all depend on it.
-            Some(rendered) => Some(FileView::parse_rendering_in(
-                file,
-                &rendered,
-                &self.config_for(&file.path),
-            )),
+            //
+            // **And only once per (rendering, configuration).** The parse is the expensive half of every request that
+            // asks a question about a position — measured at the parser's 6 MB/s, so 120 ms for a 0.74 MB unit — and
+            // it was being paid on every call. The key is [`ViewKey`]: the rendered text's hash, the span count, the
+            // file's identity, the language, `cuda` and whether the buffer is open. A miss parses; a hit is a few
+            // reference-count bumps.
+            Some(rendered) => {
+                let config = self.config_for_file(&file.path);
+                let key = ViewKey {
+                    path: file.path.clone(),
+                    rendering: Some(RenderingId(rendered.clone())),
+                    // The rendering is the text: no second hash of the same bytes, and no `spans` — an object's
+                    // identity covers both.
+                    text: 0,
+                    id: file.id,
+                    cuda: config.cuda,
+                    language: Some(config.language),
+                    open: file.open,
+                    // A rendering has no invocations left in it, so its parse takes no macro environment.
+                    environment: None,
+                };
+                if let Some(held) = self.a_view_already_parsed(&key) {
+                    if crate::probes::view() {
+                        eprintln!("view: {} came from the cache", file.path.display());
+                    }
+                    return Some(held);
+                }
+                let view = FileView::parse_rendering_in(file, &rendered, &config.config);
+                self.remember_a_view(key, &view);
+                Some(view)
+            }
             None => {
                 if crate::probes::cooking() {
                     // **The two halves of the lookup, printed.** The key is `(path, content_hash(text))`, and a
@@ -4142,14 +4380,31 @@ impl<F: FileProvider + Clone> Session<F> {
         //
         // The environment is the one **already read** for this content - `known_macros_of` is a hash and a lookup -
         // and an empty one otherwise, which is the honest answer for a file whose include closure has not been walked.
-        let macros = self
-            .known_macros_of(&file.path, &file.text)
-            .unwrap_or_default();
-        Some(FileView::parse_with_cuda(
-            file,
-            macros.as_ref(),
-            self.config.cuda(),
-        ))
+        let known = self.known_macros_of(&file.path, &file.text);
+        // **The same cache as `view`**, because the question is the same one and the cost is the same shape: a parse
+        // of this file's own text with an environment that has not moved. The identity is the environment *object* —
+        // held in the key, so its address cannot be reused under it — and `None` for the empty one, which is one value
+        // however often it is made.
+        let key = ViewKey {
+            path: file.path.clone(),
+            // A buffer view parses the file's own text, which has no rendering behind it.
+            rendering: None,
+            text: crate::cache::content_hash(&file.text),
+            id: file.id,
+            cuda: self.config.cuda(),
+            // A buffer view's parser is built from `ParserConfig::default()` and the environment alone — see
+            // `FileView::parse_with_cuda` — so there is no language level in its identity.
+            language: None,
+            open: file.open,
+            environment: known.clone().map(EnvironmentId),
+        };
+        if let Some(held) = self.a_view_already_parsed(&key) {
+            return Some(held);
+        }
+        let macros = known.unwrap_or_default();
+        let view = FileView::parse_with_cuda(file, macros.as_ref(), self.config.cuda());
+        self.remember_a_view(key, &view);
+        Some(view)
     }
 
     /// **The view of a file that a compiler's parser would see**, built if it has to be.
@@ -8995,6 +9250,12 @@ const MAX_WALKS_BY_CONTENT_ENTRIES: usize = 32;
 /// that do share a closure — and bounds the waste at a quarter of what it was. The *useful* table here is the unit
 /// table, which holds a root's own timeline for its own cooks and pulls; this one is speculation.
 const MAX_WALKS_BY_CONTENT_BYTES: usize = 16 * 1024 * 1024;
+
+/// **How many files' configurations a session memoizes** — see [`Session::config_for_file`].
+///
+/// A reader meets a few dozen files; 256 is far past that and small enough that the memo is a rounding error in the
+/// memory report. Reaching it clears the whole memo rather than evicting one entry.
+const CONFIG_FOR_FILE_ENTRIES: usize = 256;
 
 /// How many rounds [`Session::read_the_modules_a_file_imports`] may read module interface units in.
 ///

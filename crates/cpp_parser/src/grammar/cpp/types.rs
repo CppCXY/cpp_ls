@@ -788,6 +788,7 @@ fn a_parameter_list_follows_the_attributes(p: &CppParser) -> bool {
 }
 
 pub fn parse_decl_specifier_seq(p: &mut CppParser) -> ParseResult {
+    let _phase = crate::parser::phases::during("specifiers");
     parse_decl_specifier_seq_with(p, true, true)
 }
 
@@ -5012,6 +5013,7 @@ fn a_parenthesised_declarator_with_a_name_follows(p: &CppParser) -> bool {
 /// Exposed for the alias rule, which needs it for the same reason the type-id does: `using Arr = int[4];`
 /// writes a type whose array part has nothing enclosing it to attach to.
 pub fn parse_declarator_suffixes(p: &mut CppParser) -> ParseResult {
+    let _phase = crate::parser::phases::during("declarator-suffixes");
     loop {
         match p.current_token() {
             CppTokenKind::LeftParen => {
@@ -5056,6 +5058,7 @@ pub fn parse_declarator(p: &mut CppParser) -> ParseResult {
 /// outside a variable declaration's declarator a `[` here is an array bound or a lambda capture, and
 /// reading it as a binding pattern would take those away from the rules that own them.
 pub fn parse_declarator_with(p: &mut CppParser, allow_structured_binding: bool) -> ParseResult {
+    let _phase = crate::parser::phases::during("declarator");
     let base = p.open_marks();
     let m = p.mark(CppSyntaxKind::Declarator);
 
@@ -5504,6 +5507,7 @@ pub fn parse_template_argument_list(p: &mut CppParser) -> ParseResult {
 }
 
 fn parse_template_argument_list_inner(p: &mut CppParser) -> ParseResult {
+    let _phase = crate::parser::phases::during("template-arguments");
     let base = p.open_marks();
     let m = p.mark(CppSyntaxKind::TemplateArgumentList);
 

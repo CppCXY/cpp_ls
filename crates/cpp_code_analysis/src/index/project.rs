@@ -5704,7 +5704,7 @@ pub(crate) fn operator_returns_of(
 
     let class_view = class_file.as_deref().and_then(declaring);
     let (class_scopes, class_root, class_path) = match &class_view {
-        Some(view) => (&view.scopes, &view.root, view.path.as_path()),
+        Some(view) => (view.scopes.as_ref(), &view.root, view.path.as_path()),
         None => (scopes, root, path),
     };
 
