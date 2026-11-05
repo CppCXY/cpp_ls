@@ -43,7 +43,7 @@
 
 use std::collections::HashMap;
 
-use cpp_parser::{CppAstNode, CppSyntaxKind};
+use cpp_parser::CppAstNode;
 
 use super::{Check, CheckContext, DiagnosticCode};
 
@@ -129,9 +129,9 @@ impl Check for AssignTypeCheck {
             let Some(declarator) = initializer
                 .parent()
                 .and_then(|holder| {
-                    holder.children().find(|child| {
-                        CppSyntaxKind::from(child.kind()) == CppSyntaxKind::Declarator
-                    })
+                    holder
+                        .children()
+                        .find(|child| cpp_parser::CppDeclarator::can_cast(child.kind().into()))
                 })
                 .or_else(|| initializer.parent())
             else {
@@ -145,7 +145,7 @@ impl Check for AssignTypeCheck {
             // own initialisation.
             if declarator
                 .descendants()
-                .any(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::StructuredBinding)
+                .any(|node| cpp_parser::CppStructuredBinding::can_cast(node.kind().into()))
             {
                 continue;
             }

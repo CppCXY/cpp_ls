@@ -39,6 +39,7 @@ use cpp_parser::CppSyntaxKind;
 
 use super::unreal::{the_annotation_before, the_declared_name};
 use super::{Check, CheckContext, DiagnosticCode};
+use cpp_parser::CppAstNode;
 
 /// The annotations the build tool reflects — `UPROPERTY` and `UFUNCTION` are the two that name a declaration's role.
 const ANNOTATIONS: &[&str] = &["UPROPERTY", "UFUNCTION"];
@@ -53,7 +54,7 @@ impl Check for UeMacroScope {
         // tokens is not wholly written here, and the annotation is what proves ownership — the same rule
         // [`super::unreal`] documents.
         for node in context.tree().children() {
-            if CppSyntaxKind::from(node.kind()) != CppSyntaxKind::Declaration {
+            if !cpp_parser::CppDeclaration::can_cast(node.kind().into()) {
                 continue;
             }
             let Some(first) = node.first_token() else {
@@ -73,7 +74,7 @@ impl Check for UeMacroScope {
 /// One top-level declaration: its nested declarations, and whether each annotated one is a member.
 fn check_declaration(context: &mut CheckContext<'_>, declaration: &cpp_parser::CppSyntaxNode) {
     for node in declaration.descendants() {
-        if CppSyntaxKind::from(node.kind()) != CppSyntaxKind::Declaration {
+        if !cpp_parser::CppDeclaration::can_cast(node.kind().into()) {
             continue;
         }
         let Some(name) = the_declared_name(&node) else {

@@ -301,7 +301,7 @@ fn in_a_template(node: &cpp_parser::CppSyntaxNode) -> bool {
         let Some(parent) = ancestor.parent() else {
             continue;
         };
-        if CppSyntaxKind::from(parent.kind()) == CppSyntaxKind::Declaration
+        if cpp_parser::CppDeclaration::can_cast(parent.kind().into())
             && parent
                 .children()
                 .any(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::TemplateDecl)

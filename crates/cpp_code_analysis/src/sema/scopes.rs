@@ -471,9 +471,10 @@ impl ScopeWalker<'_> {
                     Some(scope),
                     Some(cpp_parser::source_range(node.text_range())),
                 );
-                for list in node.children().filter(|child| {
-                    CppSyntaxKind::from(child.kind()) == CppSyntaxKind::TemplateParameterList
-                }) {
+                for list in node
+                    .children()
+                    .filter(|child| cpp_parser::CppTemplateParamList::can_cast(child.kind().into()))
+                {
                     self.template_parameters(&list, parameters);
                 }
                 self.items(node, parameters);
@@ -547,7 +548,7 @@ impl ScopeWalker<'_> {
     /// reached the construct that owns it is not visible any more — which is exactly how this went wrong the
     /// first time.
     fn descend(&mut self, node: &CppSyntaxNode, scope: ScopeId, body: Body) {
-        if CppSyntaxKind::from(node.kind()) == CppSyntaxKind::CompoundStat {
+        if cpp_parser::CppCompoundStat::can_cast(node.kind().into()) {
             let inner = self.block(node, scope, body);
             self.items(node, inner);
             return;
@@ -570,14 +571,14 @@ impl ScopeWalker<'_> {
 
         for list in node
             .children()
-            .filter(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::ParameterList)
+            .filter(|child| cpp_parser::CppParamList::can_cast(child.kind().into()))
         {
             self.parameters(&list, handler);
         }
 
         for body in node
             .children()
-            .filter(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::CompoundStat)
+            .filter(|child| cpp_parser::CppCompoundStat::can_cast(child.kind().into()))
         {
             let block = self.block(&body, handler, Body::OpensAScope);
             self.items(&body, block);
@@ -899,7 +900,7 @@ impl ScopeWalker<'_> {
         // always a direct child, so it is searched for rather than assumed.
         for body in node
             .descendants()
-            .filter(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::CompoundStat)
+            .filter(|child| cpp_parser::CppCompoundStat::can_cast(child.kind().into()))
         {
             self.enumerators(&body, scope);
         }
@@ -983,7 +984,7 @@ impl ScopeWalker<'_> {
         // the other half of the same fact.
         for declarator in node
             .children()
-            .filter(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::Declarator)
+            .filter(|child| cpp_parser::CppDeclarator::can_cast(child.kind().into()))
         {
             if let Some((name, name_range)) = declared_name(&declarator) {
                 self.bind(scope, name, BindingKind::Typedef, node, name_range);
@@ -1153,9 +1154,10 @@ impl ScopeWalker<'_> {
             Some(cpp_parser::source_range(template.text_range())),
         );
 
-        for list in template.children().filter(|child| {
-            CppSyntaxKind::from(child.kind()) == CppSyntaxKind::TemplateParameterList
-        }) {
+        for list in template
+            .children()
+            .filter(|child| cpp_parser::CppTemplateParamList::can_cast(child.kind().into()))
+        {
             self.template_parameters(&list, parameters);
         }
 
@@ -1213,7 +1215,7 @@ impl ScopeWalker<'_> {
     /// invisible to `Next`.
     fn template_parameters(&mut self, list: &CppSyntaxNode, scope: ScopeId) {
         for parameter in list.children() {
-            if CppSyntaxKind::from(parameter.kind()) != CppSyntaxKind::TemplateParameter {
+            if !cpp_parser::CppTemplateParam::can_cast(parameter.kind().into()) {
                 continue;
             }
 
@@ -1253,7 +1255,7 @@ impl ScopeWalker<'_> {
         // itself when there is none.
         let declaration = node
             .ancestors()
-            .find(|ancestor| CppSyntaxKind::from(ancestor.kind()) == CppSyntaxKind::Declaration)
+            .find(|ancestor| cpp_parser::CppDeclaration::can_cast(ancestor.kind().into()))
             .unwrap_or_else(|| node.clone());
         let text = declaration.text().to_string();
         let body_text = body.text().to_string();
@@ -1271,7 +1273,7 @@ impl ScopeWalker<'_> {
     fn the_declarators_name_around(node: &CppSyntaxNode) -> Option<String> {
         let declaration = node
             .ancestors()
-            .find(|ancestor| CppSyntaxKind::from(ancestor.kind()) == CppSyntaxKind::Declaration)?;
+            .find(|ancestor| cpp_parser::CppDeclaration::can_cast(ancestor.kind().into()))?;
         let declaration = cpp_parser::CppDeclaration::cast(declaration)?;
         declaration.get_name_text()
     }
@@ -1330,12 +1332,9 @@ impl ScopeWalker<'_> {
         // is untouched.
         if (declaration_is_qualified(node)
             || (specifier_is_qualified && is_unnamed_declaration(node)))
-            && node.ancestors().any(|ancestor| {
-                matches!(
-                    CppSyntaxKind::from(ancestor.kind()),
-                    CppSyntaxKind::CompoundStat
-                )
-            })
+            && node
+                .ancestors()
+                .any(|ancestor| cpp_parser::CppCompoundStat::can_cast(ancestor.kind().into()))
         {
             return;
         }
@@ -1504,7 +1503,7 @@ impl ScopeWalker<'_> {
         for declarator in declarators(node) {
             if let Some(binding) = declarator
                 .descendants()
-                .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::StructuredBinding)
+                .find(|child| cpp_parser::CppStructuredBinding::can_cast(child.kind().into()))
             {
                 return Some(binding.children().collect());
             }
@@ -1896,7 +1895,7 @@ impl ScopeWalker<'_> {
         let is_function = !parenthesised_a_pointer
             && declarator
                 .descendants()
-                .any(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::ParameterList);
+                .any(|child| cpp_parser::CppParamList::can_cast(child.kind().into()));
 
         // **A class-like keyword in the specifiers settles the question**: whatever the declarator looks like, the
         // identifier is the class or the enum, and `class Widget w;` cannot happen — a second declarator would
@@ -2029,7 +2028,7 @@ impl ScopeWalker<'_> {
         // the declarator and there is nothing else here.
         let has_body = specifier
             .descendants()
-            .any(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::CompoundStat);
+            .any(|child| cpp_parser::CppCompoundStat::can_cast(child.kind().into()));
 
         if !has_body {
             return named_here;
@@ -2046,7 +2045,7 @@ impl ScopeWalker<'_> {
         // `Color` in its declarator instead, and the enumerators still belong to this scope.
         for body in specifier
             .descendants()
-            .filter(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::CompoundStat)
+            .filter(|child| cpp_parser::CppCompoundStat::can_cast(child.kind().into()))
         {
             self.enumerators(&body, scope);
         }
@@ -2103,7 +2102,7 @@ impl ScopeWalker<'_> {
         let mut inside = inner;
         if let Some(list) = node
             .children()
-            .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::TemplateParameterList)
+            .find(|child| cpp_parser::CppTemplateParamList::can_cast(child.kind().into()))
         {
             let parameters = self.table.create_scope(
                 ScopeKind::TemplateParameters,
@@ -2115,13 +2114,13 @@ impl ScopeWalker<'_> {
         }
         for list in node
             .children()
-            .filter(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::ParameterList)
+            .filter(|child| cpp_parser::CppParamList::can_cast(child.kind().into()))
         {
             self.parameters(&list, inside);
         }
         for body in node
             .children()
-            .filter(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::CompoundStat)
+            .filter(|child| cpp_parser::CppCompoundStat::can_cast(child.kind().into()))
         {
             self.items(&body, inside);
         }
@@ -2292,7 +2291,7 @@ fn function_body(node: &CppSyntaxNode) -> Option<CppSyntaxNode> {
 
     for declarator in declarators(node) {
         for child in declarator.children() {
-            if CppSyntaxKind::from(child.kind()) == CppSyntaxKind::CompoundStat {
+            if cpp_parser::CppCompoundStat::can_cast(child.kind().into()) {
                 return Some(child);
             }
         }
@@ -2301,7 +2300,7 @@ fn function_body(node: &CppSyntaxNode) -> Option<CppSyntaxNode> {
     // A member function's body is inside the class body, which is inside the specifier sequence.
     let specifiers = first_child(node, CppSyntaxKind::DeclSpecifierSeq)?;
     for child in specifiers.descendants() {
-        if CppSyntaxKind::from(child.kind()) != CppSyntaxKind::ClassBody {
+        if !cpp_parser::CppClassBody::can_cast(child.kind().into()) {
             continue;
         }
 
@@ -2404,7 +2403,7 @@ fn declares_a_body(node: &CppSyntaxNode) -> bool {
 /// `false` for every node that is not a `Declaration`, because the other declaration kinds state their name
 /// differently and already handle an absent one — an anonymous namespace, an unnamed `class {}`.
 fn is_unnamed_declaration(node: &CppSyntaxNode) -> bool {
-    if CppSyntaxKind::from(node.kind()) != CppSyntaxKind::Declaration {
+    if !cpp_parser::CppDeclaration::can_cast(node.kind().into()) {
         return false;
     }
 
@@ -2554,7 +2553,7 @@ fn named_in_a_declarator(declarator: &CppSyntaxNode) -> bool {
 
         if let Some(node) = child.into_node() {
             // A parameter list is a type, not this declarator's name, and so is everything below one.
-            if CppSyntaxKind::from(node.kind()) == CppSyntaxKind::ParameterList {
+            if cpp_parser::CppParamList::can_cast(node.kind().into()) {
                 continue;
             }
 
@@ -2666,7 +2665,7 @@ fn declarators(node: &CppSyntaxNode) -> Vec<CppSyntaxNode> {
 
     let init: Vec<CppSyntaxNode> = node
         .children()
-        .filter(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::InitDeclarator)
+        .filter(|child| cpp_parser::CppInitDeclarator::can_cast(child.kind().into()))
         .filter(a_declarator)
         .collect();
 
@@ -2676,7 +2675,7 @@ fn declarators(node: &CppSyntaxNode) -> Vec<CppSyntaxNode> {
 
     let direct: Vec<CppSyntaxNode> = node
         .children()
-        .filter(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::Declarator)
+        .filter(|child| cpp_parser::CppDeclarator::can_cast(child.kind().into()))
         .filter(a_declarator)
         .collect();
 
@@ -2685,7 +2684,7 @@ fn declarators(node: &CppSyntaxNode) -> Vec<CppSyntaxNode> {
     }
 
     node.children()
-        .filter(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::Declaration)
+        .filter(|child| cpp_parser::CppDeclaration::can_cast(child.kind().into()))
         .flat_map(|wrapped| declarators(&wrapped))
         .collect()
 }
@@ -2729,7 +2728,7 @@ fn specifier_name(specifier: &CppSyntaxNode) -> Option<(Name, cpp_parser::Source
             let name = name_from_text(text, specifier)?;
             return Some((name, cpp_parser::source_range(token.text_range())));
         };
-        if CppSyntaxKind::from(node.kind()) == CppSyntaxKind::CompoundStat {
+        if cpp_parser::CppCompoundStat::can_cast(node.kind().into()) {
             return None;
         }
     }
@@ -2906,7 +2905,7 @@ pub(crate) fn parameters_of(
         .map(|parameter| {
             let declared = parameter
                 .children()
-                .filter(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::Declarator)
+                .filter(|child| cpp_parser::CppDeclarator::can_cast(child.kind().into()))
                 .find_map(|declarator| declared_name(&declarator));
 
             (parameter, declared)
@@ -3008,7 +3007,7 @@ fn name_node_along_declarator(node: &CppSyntaxNode) -> Option<CppSyntaxNode> {
             // **nothing**: `definitions("fp")` answered `NotDeclaredHere` in the function that declares it, and the
             // undeclared-identifier check reported the file's own variable.
             for child in node.children() {
-                if CppSyntaxKind::from(child.kind()) == CppSyntaxKind::Declarator
+                if cpp_parser::CppDeclarator::can_cast(child.kind().into())
                     && let Some(found) = name_node_along_declarator(&child)
                 {
                     return Some(found);
@@ -3206,7 +3205,7 @@ fn qualified_specifier_name(
 ) -> Option<(String, (Name, cpp_parser::SourceRange))> {
     let declaration = declarator
         .ancestors()
-        .find(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::Declaration)?;
+        .find(|node| cpp_parser::CppDeclaration::can_cast(node.kind().into()))?;
 
     qualified_name(qualified_specifier_name_node(&declaration)?)
 }
@@ -3416,7 +3415,7 @@ fn name_from_text(text: &str, node: &CppSyntaxNode) -> Option<Name> {
     // which node the caller happened to pass.
     let declarator_text = node
         .parent()
-        .filter(|parent| CppSyntaxKind::from(parent.kind()) == CppSyntaxKind::Declarator)
+        .filter(|parent| cpp_parser::CppDeclarator::can_cast(parent.kind().into()))
         .map(|parent| parent.text().to_string())
         .unwrap_or_else(|| node.text().to_string());
     let has_tilde = declarator_text.trim_start().starts_with('~');

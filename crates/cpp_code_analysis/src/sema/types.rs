@@ -73,6 +73,7 @@
 use std::fmt;
 use std::sync::Arc;
 
+use cpp_parser::CppAstNode;
 use cpp_parser::{CppSyntaxKind, CppSyntaxNode};
 
 /// A type inside a type, **shared rather than owned**.
@@ -1207,7 +1208,7 @@ pub fn template_parameters_with_defaults(
     let mut found = Vec::new();
 
     for parameter in list.children() {
-        if CppSyntaxKind::from(parameter.kind()) != CppSyntaxKind::TemplateParameter {
+        if !cpp_parser::CppTemplateParam::can_cast(parameter.kind().into()) {
             continue;
         }
 
@@ -1378,16 +1379,16 @@ pub fn declarator_declaring(
 
         let init = node
             .children()
-            .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::InitDeclarator);
+            .find(|child| cpp_parser::CppInitDeclarator::can_cast(child.kind().into()));
         let declarator = init
             .as_ref()
             .and_then(|init| {
                 init.children()
-                    .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::Declarator)
+                    .find(|child| cpp_parser::CppDeclarator::can_cast(child.kind().into()))
             })
             .or_else(|| {
                 node.children()
-                    .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::Declarator)
+                    .find(|child| cpp_parser::CppDeclarator::can_cast(child.kind().into()))
             });
         if declarator.is_some() {
             return declarator;
@@ -1398,7 +1399,7 @@ pub fn declarator_declaring(
         // makes this rewrite equivalent; the scan is here only for that shape, so the common case never pays it.
         if node
             .descendants()
-            .any(|inner| CppSyntaxKind::from(inner.kind()) == CppSyntaxKind::Declarator)
+            .any(|inner| cpp_parser::CppDeclarator::can_cast(inner.kind().into()))
         {
             return None;
         }
@@ -1492,7 +1493,7 @@ pub fn type_of_declaration_named(
         && let Some(parent) = declarator.parent()
         && let Some(list) = parent
             .children()
-            .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::ParameterList)
+            .find(|child| cpp_parser::CppParamList::can_cast(child.kind().into()))
     {
         // **The pointer is to the function, not the function of the pointer**: `int (*fp)(int)` is
         // `Pointer { to: Function { returns: int } }`, and wrapping the pointer itself made it a function *returning*
@@ -1999,7 +2000,7 @@ fn declarator_holding_the_name(
     loop {
         let next = node
             .children()
-            .filter(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::Declarator)
+            .filter(|child| cpp_parser::CppDeclarator::can_cast(child.kind().into()))
             .find(|child| reaches(child, name));
 
         match next {
@@ -2107,9 +2108,7 @@ fn wrap(
             // name". The containment test is true of a `ParameterList` and an `ArrayType` as well — they are written
             // after the name and their spans reach past it — so using it skipped exactly the operators this function
             // exists to apply, which is how `void (*Callback)(int)` came back as `void*(int)`.
-            if CppSyntaxKind::from(child.kind()) == CppSyntaxKind::Declarator
-                && reaches(&child, name)
-            {
+            if cpp_parser::CppDeclarator::can_cast(child.kind().into()) && reaches(&child, name) {
                 continue;
             }
             if let Some(next) = apply(&wrapped, &child) {
@@ -2130,7 +2129,7 @@ fn wrap(
     while current.text_range() != innermost.text_range() {
         let Some(down) = current
             .children()
-            .filter(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::Declarator)
+            .filter(|child| cpp_parser::CppDeclarator::can_cast(child.kind().into()))
             .find(|child| reaches(child, name))
         else {
             break;
@@ -2191,7 +2190,7 @@ fn read_parameters(list: &CppSyntaxNode) -> Vec<Type> {
             .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::DeclSpecifierSeq);
         let declarator = parameter
             .children()
-            .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::Declarator);
+            .find(|child| cpp_parser::CppDeclarator::can_cast(child.kind().into()));
 
         let Some(specifiers) = specifiers else {
             continue;
@@ -2356,7 +2355,7 @@ mod tests {
 
         let declared = root
             .descendants()
-            .filter(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::Declarator)
+            .filter(|child| cpp_parser::CppDeclarator::can_cast(child.kind().into()))
             .filter(|child| {
                 child.descendants().any(|inner| {
                     CppSyntaxKind::from(inner.kind()) == CppSyntaxKind::NameExpr

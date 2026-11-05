@@ -30,9 +30,8 @@
 //!
 //! A function's body is in the file being checked, so this is a question about one file by construction.
 
-use cpp_parser::CppSyntaxKind;
-
 use super::{Check, CheckContext, DiagnosticCode};
+use cpp_parser::CppAstNode;
 
 /// **Does this definition declare the class it is written inside** — a constructor, or a destructor?
 ///
@@ -62,9 +61,7 @@ fn declares_the_enclosing_class(function: &cpp_parser::CppSyntaxNode) -> bool {
                 // [`super::spelling_of`] uses for a declarator.
                 let declared = ancestor
                     .children()
-                    .find(|child| {
-                        matches!(CppSyntaxKind::from(child.kind()), CppSyntaxKind::ClassBody)
-                    })
+                    .find(|child| cpp_parser::CppClassBody::can_cast(child.kind().into()))
                     .and_then(|body| {
                         ancestor
                             .descendants_with_tokens()
@@ -189,7 +186,7 @@ impl Check for MissingReturn {
             // control-flow question and this layer answers from a tree.
             let has_a_return = body
                 .descendants()
-                .any(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::ReturnStat);
+                .any(|node| cpp_parser::CppReturnStat::can_cast(node.kind().into()));
             if has_a_return {
                 continue;
             }

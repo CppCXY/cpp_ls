@@ -78,7 +78,7 @@ impl Check for UeNaming {
             .collect();
         for body in bodies {
             for declaration in body.children() {
-                if CppSyntaxKind::from(declaration.kind()) != CppSyntaxKind::Declaration {
+                if !cpp_parser::CppDeclaration::can_cast(declaration.kind().into()) {
                     continue;
                 }
                 let Some((name, spelled)) = bool_member(context, &declaration) else {
@@ -119,14 +119,14 @@ fn bool_member(
 ) -> Option<(cpp_parser::CppSyntaxNode, String)> {
     let declarator = declaration
         .children()
-        .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::InitDeclarator)
+        .find(|child| cpp_parser::CppInitDeclarator::can_cast(child.kind().into()))
         .and_then(|init| {
             init.children()
-                .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::Declarator)
+                .find(|child| cpp_parser::CppDeclarator::can_cast(child.kind().into()))
         })?;
     if declarator
         .children()
-        .any(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::ParameterList)
+        .any(|child| cpp_parser::CppParamList::can_cast(child.kind().into()))
     {
         return None;
     }

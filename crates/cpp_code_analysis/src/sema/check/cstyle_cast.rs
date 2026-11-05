@@ -49,7 +49,7 @@ impl Check for CStyleCast {
             }
             let Some(type_id) = node
                 .children()
-                .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::TypeId)
+                .find(|child| cpp_parser::CppTypeId::can_cast(child.kind().into()))
             else {
                 continue;
             };

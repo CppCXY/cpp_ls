@@ -19,6 +19,7 @@
 use cpp_parser::CppSyntaxKind;
 
 use super::CheckContext;
+use cpp_parser::CppAstNode;
 
 /// **One declaration an engine macro annotates**, in both coordinate systems.
 pub(crate) struct Annotated {
@@ -49,7 +50,7 @@ pub(crate) fn annotated_declarations(
     // That is the right rule for a check that reports on a header's code, and the wrong one here: the **annotation** is
     // what says this file owns the declaration, and it is read from this file's own text below.
     for node in context.tree().children() {
-        if CppSyntaxKind::from(node.kind()) != CppSyntaxKind::Declaration {
+        if !cpp_parser::CppDeclaration::can_cast(node.kind().into()) {
             continue;
         }
         // **The first token decides ownership**: a declaration whose opening keyword is not this file's belongs to an
@@ -104,7 +105,7 @@ pub(crate) fn annotated_declarations(
             name: name.clone(),
             name_in_the_file,
             body_in_the_file: Some((body_in_the_file.start_offset, body_in_the_file.end_offset())),
-            has_a_class_body: CppSyntaxKind::from(body.kind()) == CppSyntaxKind::ClassBody,
+            has_a_class_body: cpp_parser::CppClassBody::can_cast(body.kind().into()),
         });
     }
     found
@@ -175,15 +176,15 @@ pub(crate) fn the_declared_name(
 ) -> Option<cpp_parser::CppSyntaxNode> {
     let declarator = declaration
         .children()
-        .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::InitDeclarator)
+        .find(|child| cpp_parser::CppInitDeclarator::can_cast(child.kind().into()))
         .and_then(|init| {
             init.children()
-                .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::Declarator)
+                .find(|child| cpp_parser::CppDeclarator::can_cast(child.kind().into()))
         })
         .or_else(|| {
             declaration
                 .children()
-                .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::Declarator)
+                .find(|child| cpp_parser::CppDeclarator::can_cast(child.kind().into()))
         })?;
     declarator
         .children()

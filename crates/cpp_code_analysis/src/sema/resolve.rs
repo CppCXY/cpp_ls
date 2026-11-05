@@ -1069,7 +1069,7 @@ fn the_generated_member_spelling(
     }
     let base = class
         .descendants()
-        .find(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::BaseSpecifier)?;
+        .find(|node| cpp_parser::CppBaseSpecifier::can_cast(node.kind().into()))?;
     let base_name = base
         .descendants()
         .find(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::NameExpr)?;

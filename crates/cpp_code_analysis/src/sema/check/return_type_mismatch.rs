@@ -26,9 +26,10 @@
 //!
 //! The body being checked is in this file, and so is its return type. Nothing here looks at another file.
 
-use cpp_parser::{CppSyntaxKind, CppSyntaxNode};
+use cpp_parser::CppSyntaxNode;
 
 use super::{Check, CheckContext, DiagnosticCode};
+use cpp_parser::CppAstNode;
 
 /// **`return-type-mismatch`** — see the module documentation.
 pub struct ReturnTypeMismatch;
@@ -53,7 +54,7 @@ impl Check for ReturnTypeMismatch {
 
             for returned in function
                 .descendants()
-                .filter(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::ReturnStat)
+                .filter(|node| cpp_parser::CppReturnStat::can_cast(node.kind().into()))
             {
                 let returned_text = returned.text().to_string();
                 let returned_text = returned_text.trim();
@@ -127,7 +128,7 @@ impl Check for ReturnTypeMismatch {
 fn return_type_of(function: &CppSyntaxNode) -> Option<String> {
     let parameters = function
         .children()
-        .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::ParameterList)?;
+        .find(|child| cpp_parser::CppParamList::can_cast(child.kind().into()))?;
     let name = function
         .children()
         .take_while(|child| child != &parameters)

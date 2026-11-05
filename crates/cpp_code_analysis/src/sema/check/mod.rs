@@ -1077,31 +1077,18 @@ fn strip_trailing_scopes(head: &str) -> String {
 /// Here rather than in the caller because the head reader is what has the name and the node, and a second walk of
 /// the ancestors from outside would be a second answer to the same question.
 fn declares_the_enclosing_class_named(function: &cpp_parser::CppSyntaxNode, name: &str) -> bool {
-    use cpp_parser::CppSyntaxKind;
+    use cpp_parser::{CppAstNode, CppClassDef, CppCompoundStat};
 
+    // **The nearest class-like definition, by name**, and a body stops the walk: a class declared inside a function does not
+    // enclose it. The name is the definition's own (`get_name_text`), not the last identifier written before its body.
     for ancestor in function.ancestors().skip(1) {
-        match CppSyntaxKind::from(ancestor.kind()) {
-            CppSyntaxKind::StructDef | CppSyntaxKind::ClassDef | CppSyntaxKind::UnionDef => {
-                let declared = ancestor
-                    .children()
-                    .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::ClassBody)
-                    .and_then(|body| {
-                        ancestor
-                            .descendants_with_tokens()
-                            .filter_map(|element| element.into_token())
-                            .take_while(|token| {
-                                token.text_range().end() <= body.text_range().start()
-                            })
-                            .filter(|token| {
-                                token.kind() == cpp_parser::CppTokenKind::Identifier.into()
-                            })
-                            .last()
-                            .map(|token| token.text().to_string())
-                    });
-                return declared.as_deref() == Some(name.trim_start_matches('~'));
-            }
-            CppSyntaxKind::CompoundStat => return false,
-            _ => {}
+        if CppCompoundStat::can_cast(ancestor.kind().into()) {
+            return false;
+        }
+        if let Some(class) = CppClassDef::cast(ancestor.clone()) {
+            return class
+                .get_name_text()
+                .is_some_and(|declared| declared == name.trim_start_matches('~'));
         }
     }
     false
