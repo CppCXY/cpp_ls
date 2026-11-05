@@ -158,5 +158,24 @@ fn what_a_refinement_costs() {
         queued
     );
 
+    // **What the served files still owe**: a cooked record carries facts, not text, so the rendering is a cook
+    // slice — the half the record cannot answer. Measured separately so the two numbers cannot be confused.
+    // `index_everything` is the caller that cooks; `advance` alone never does (`finish_a_slice` plans a drain,
+    // `commit_a_wave`/`claim_cooking` take the cook queue).
+    let started = std::time::Instant::now();
+    let owed = session.pending_cooking();
+    session.index_everything();
+    println!(
+        "\n{cooked} rendering(s) the served files owed: {:?} — {:?} left",
+        started.elapsed(),
+        session.pending_cooking(),
+        cooked = owed
+    );
+
+    println!(
+        "\nstored refinement(s) served this run: {} | store {:?}",
+        session.stats().stored_refinements_served,
+        session.stats()
+    );
     println!("\nmemory: {}", session.memory_report());
 }

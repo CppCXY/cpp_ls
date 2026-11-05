@@ -154,6 +154,42 @@ five C files (1 590)        —                                    45.0 ms each,
 candidate that needs one, and the batch path (`index_everything`) still asks for a refinement of every file it read —
 about 70 s on this project, which no server path calls. Those are §6's items 4–7.
 
+### 3.2 What was changed next: the cache holds the cooked reading
+
+The second half of the cost was invisible on a *single* run: every session paid the refinement again, because the
+cache stored the refined **summary** and phase 2 stopped writing one (`unstored: 7` in a run's own stats) — a
+refinement's artifact is now the **rendering**, filed as the file's *cooked reading*. So the store gained a
+`cooked_readings` table keyed exactly like the summary (`content`, `config`, `closure fingerprint`), and:
+
+* **written** wherever a cooked reading is committed (`commit_the_re_read`, `commit_a_cooked` — the pass and the cook
+  path), with its own record format (`summary_codec::encode_the_cooked_reading`), shared field writers with the
+  summary codec so a new `DeclFact` field lands in one place;
+* **served** by `take_the_stored_refinements`: the facts go into the index, the path is marked refined, and the path
+  comes back to the caller — which is the session — because a cooked record carries **no rendering** and
+  `Session::view` parses one. The session queues the cook, so the ordinary slice builds the rendering and skips only
+  the composition the record answered. (Without that half, fourteen `completion` fixtures panicked with "asked to be
+  read and cooked, and the pump did both" — the facts were served and the tree was `None`.)
+
+**Measured on `EmmyLuaCodeStyle`, five C files of a 1 590-file index, two consecutive runs of
+`tests/refinement_probe`:**
+
+```text
+                        rebuilt (run 1)        served (run 2)
+facts                   48.0 ms each           0.6 ms each
+the rendering it owes    —                     12.2 ms each      (60.8 ms for five, one `index_everything`)
+total                   ~48 ms each            ~12.8 ms each     — 3.8×
+```
+
+The remaining 12 ms is render + parse, which no record of facts can answer; storing the rendering itself (text and
+spans) is what would take it to zero, and the spans carry an `Origin` the current codec does not encode.
+
+**Verified.** `tests/stored_refinement.rs`:
+`a_second_session_serves_the_stored_refinement` (a second session over the same cache serves, and the served reading
+is a reading — `std::Widget` is still found) and `a_changed_file_is_not_served_from_the_cache` (an edited file is
+rebuilt; the *unchanged* file beside it is served). The C++ corpus answers `10/10 members, 49/52 types` before and
+after, `cargo t --workspace` is 137 suites with 0 failures, and `diagnostics_stable` (the pull's inline refinement)
+still passes in 0.17 s.
+
 **The disk cache does not pay for this.** A stored refinement is a `FileSummary`; the reading the session now needs is
 a **rendering**, so the store's own fast path refuses every entry it has:
 
@@ -214,7 +250,7 @@ Ranked by expected win per unit of work, and each with the measurement that woul
 | # | idea | why it should win | what to measure |
 | --- | --- | --- | --- |
 | 1 | ~~**Make a refinement closure-local**~~ — **done (§3.1)**: candidates are restricted to the re-read files' include closures | removed the `O(index)` term: 65 ms for a header in a 1 590-file index, 45 ms for a C file, where the same asks took over a minute | measured above; the corpus probe is byte-identical |
-| 2 | **Serve the stored L2**: key the cache by `(content, closure fingerprint)` and store the **rendering** (L3 is exactly that) | a second start refines nothing | `re-read: … not served` count → 0; second-start refine time |
+| 2 | ~~**Serve the stored L2**~~ — **done (§3.2)**: the cooked reading is stored and served (48 → 12.8 ms a file) | the composition and the macro-body shaping are gone from a warm start | measured: `stored_refinements_served: 5`, 0.6 ms served + 12.2 ms of rendering |
 | 3 | **Never serve a refinement from a request**: drop `advance`'s tail from the pull path, let the pump do it | a slow refinement stops being a stalled server | `worst_write_hold` before/after |
 | 4 | **Refine the open files' closures eagerly, and nothing else** (the design's own order: open files, their closures, then the rest) | the first hover on an open file is the common case and would be L2 already | hover `wait gate`+`wait session` on a cold start |
 | 5 | **Retire `parsed_since_the_last_pass` as the ask-list**: it is 1 590 paths on a warm session and no longer means "work" | one less unbounded-looking number in every report, and `re_read_backlog` stops lying | `MemoryReport` after start |

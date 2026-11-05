@@ -3107,7 +3107,14 @@ impl<F: FileProvider + Clone> Session<F> {
         // **What the cache already refined, before any timeline is built.** The second pass's answer is a function of
         // the file's own closure, so a stored one is served and its file needs no unit at all — the difference between
         // a second start that re-reads the project and one that reads a handful of files.
-        let files = self.store.take_the_stored_refinements(files);
+        let served = self.store.take_the_stored_refinements(files);
+        // **And the rendering of each served file is still owed**, because a cooked record carries facts, not text:
+        // `Session::view` parses a rendering, so the file goes to the cook queue rather than being dropped as done.
+        // It is the ordinary cook — render and parse — with the composition the record already answered left out.
+        for path in served.served {
+            self.cooking.want(&path);
+        }
+        let files = served.still_to_do;
 
         // **A caller that passed no timelines for a slice it is about to drain.** `advance` roots its units at the
         // files it just read, which is not the slice this pass takes — so on the drain phase (nothing left to read,
@@ -6867,7 +6874,13 @@ impl<F: FileProvider + Clone> Session<F> {
             );
         }
         {
-            self.store.index_mut().insert_cooked(&path, indexed.into());
+            // **The reading goes to the disk as well as the index**, which is what makes a second start free: the
+            // next session's `take_the_stored_refinements` serves this file instead of rebuilding it — measured at
+            // 45 ms rebuilt against 1.2 ms served, see `docs/refinement.md` §3.2. Written *before* the index insert
+            // because the write borrows the store and the insert needs it mutably; both are cheap.
+            let cooked: crate::index::CookedFile = indexed.into();
+            self.store.put_the_cooked_reading(&path, &cooked);
+            self.store.index_mut().insert_cooked(&path, cooked);
         }
         Some(reading)
     }

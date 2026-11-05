@@ -28,7 +28,9 @@ use cpp_parser::SymbolKind;
 use cpp_parser::{MacroBody, SourceRange};
 
 use crate::cache::SummaryKey;
+use crate::index::CookedFile;
 use crate::preprocess::directive::IncludeForm;
+use crate::summary::CookedDiagnostic;
 use crate::summary::{
     Access, ConditionalRegion, DeclFact, DeclKind, FactGuard, FileSummary, GuardBranch,
     IncludeFact, MacroFact, MacroKind, MacroScopeReading, ModuleReading, SummaryGuards,
@@ -261,77 +263,12 @@ pub fn encode(summary: &FileSummary) -> Vec<u8> {
 
     put_u32(&mut out, summary.declarations.len() as u32);
     for fact in &summary.declarations {
-        put_str(&mut out, &fact.name);
-        put_opt_str(&mut out, fact.scope.as_deref());
-        put_u8(&mut out, decl_kind_code(fact.kind));
-        put_opt_str(&mut out, fact.type_of.as_deref());
-        put_opt_str(&mut out, fact.returns.as_deref());
-        put_u32(&mut out, fact.bases.len() as u32);
-        for base in &fact.bases {
-            put_str(&mut out, base);
-        }
-        put_u32(&mut out, fact.parameters.len() as u32);
-        for parameter in &fact.parameters {
-            put_str(&mut out, parameter);
-        }
-        put_u32(&mut out, fact.constraints.len() as u32);
-        for constraint in &fact.constraints {
-            put_str(&mut out, constraint);
-        }
-        put_opt_str(&mut out, fact.requires_clause.as_deref());
-        put_u32(&mut out, fact.parameter_defaults.len() as u32);
-        for default in &fact.parameter_defaults {
-            put_str(&mut out, default);
-        }
-        put_opt_str(&mut out, fact.parameter_list.as_deref());
-        put_opt_str(&mut out, fact.pattern.as_deref());
-        put_range(&mut out, fact.range);
-        put_range(&mut out, fact.name_range);
-        put_u8(&mut out, u8::from(fact.local));
-        put_opt_str(&mut out, fact.in_namespace.as_deref());
-        put_u8(&mut out, u8::from(fact.clean));
-        put_u8(&mut out, u8::from(fact.split_by_a_directive));
-        put_u32(&mut out, guard_code(fact.guard));
-        put_u8(&mut out, access_code(fact.access));
-        put_u8(&mut out, u8::from(fact.exported));
-        // **The modifiers**, at the end of the fact so the bytes of an older entry stay readable up to here — the
-        // version is what makes the whole entry unreachable, but appending keeps the diff honest.
-        put_u32(&mut out, fact.modifiers.bits());
-        // And the effects, which are the same kind of answer: what this declaration does, decided once at index time.
-        put_u64(&mut out, fact.frees);
-        // **The reflection annotation**, when there is one: its macro and its specifiers, as the file wrote them. A
-        // presence byte first, so the common unannotated declaration costs one byte.
-        match &fact.reflection {
-            Some(reflection) => {
-                put_u8(&mut out, 1);
-                put_str(&mut out, &reflection.macro_name);
-                put_u32(&mut out, reflection.specifiers.len() as u32);
-                for specifier in &reflection.specifiers {
-                    put_str(&mut out, specifier);
-                }
-            }
-            None => put_u8(&mut out, 0),
-        }
+        put_declaration(&mut out, fact);
     }
 
     put_u32(&mut out, summary.macros.len() as u32);
     for fact in &summary.macros {
-        put_str(&mut out, &fact.name);
-        put_u8(&mut out, macro_kind_code(fact.kind));
-        put_u8(&mut out, u8::from(fact.function_like));
-        put_u8(&mut out, macro_body_code(fact.body));
-        put_opt_str(&mut out, fact.value.as_deref());
-        put_opt_str(&mut out, fact.alias.as_deref());
-        put_range(&mut out, fact.range);
-        match fact.body_range {
-            Some(range) => {
-                put_u8(&mut out, 1);
-                put_range(&mut out, range);
-            }
-            None => put_u8(&mut out, 0),
-        }
-        put_u32(&mut out, guard_code(fact.guard));
-        put_u8(&mut out, u8::from(fact.settles_the_name));
+        put_macro(&mut out, fact);
     }
 
     put_u32(&mut out, summary.includes.len() as u32);
@@ -678,92 +615,14 @@ pub fn decode(bytes: &[u8]) -> Result<FileSummary, DecodeError> {
     };
     let path = reader.path()?;
 
-    let mut declarations = Vec::new();
+    let mut declarations: Vec<DeclFact> = Vec::new();
     for _ in 0..reader.count()? {
-        declarations.push(DeclFact {
-            name: reader.string()?,
-            scope: reader.optional_string()?,
-            kind: decl_kind_from(reader.u8()?)?,
-            type_of: reader.optional_string()?,
-            returns: reader.optional_string()?,
-            bases: {
-                let mut bases = Vec::new();
-                for _ in 0..reader.count()? {
-                    bases.push(reader.string()?);
-                }
-                bases
-            },
-            parameters: {
-                let mut parameters = Vec::new();
-                for _ in 0..reader.count()? {
-                    parameters.push(reader.string()?);
-                }
-                parameters
-            },
-            constraints: {
-                let mut constraints = Vec::new();
-                for _ in 0..reader.count()? {
-                    constraints.push(reader.string()?);
-                }
-                constraints
-            },
-            requires_clause: reader.optional_string()?,
-            parameter_defaults: {
-                let mut defaults = Vec::new();
-                for _ in 0..reader.count()? {
-                    defaults.push(reader.string()?);
-                }
-                defaults
-            },
-            parameter_list: reader.optional_string()?,
-            pattern: reader.optional_string()?,
-            range: reader.range()?,
-            name_range: reader.range()?,
-            local: reader.u8()? != 0,
-            in_namespace: reader.optional_string()?,
-            clean: reader.u8()? != 0,
-            split_by_a_directive: reader.u8()? != 0,
-            guard: guard_from(reader.u32()?)?,
-            access: access_from(reader.u8()?),
-            exported: reader.u8()? != 0,
-            modifiers: crate::DeclModifiers::from_bits(reader.u32()?),
-            frees: reader.u64()?,
-            reflection: match reader.u8()? {
-                0 => None,
-                _ => {
-                    let macro_name = reader.string()?;
-                    let count = reader.count()?;
-                    let mut specifiers = Vec::with_capacity(count);
-                    for _ in 0..count {
-                        specifiers.push(reader.string()?);
-                    }
-                    Some(crate::summary::ReflectionFact {
-                        macro_name,
-                        specifiers,
-                    })
-                }
-            },
-        });
+        declarations.push(get_declaration(&mut reader)?);
     }
 
-    let mut macros = Vec::new();
+    let mut macros: Vec<MacroFact> = Vec::new();
     for _ in 0..reader.count()? {
-        macros.push(MacroFact {
-            name: reader.string()?,
-            kind: macro_kind_from(reader.u8()?)?,
-            function_like: reader.u8()? != 0,
-            body: macro_body_from(reader.u8()?)?,
-            value: reader.optional_string()?.map(Box::from),
-            alias: reader.optional_string()?.map(Box::from),
-            range: reader.range()?,
-            body_range: match reader.u8()? {
-                0 => None,
-                1 => Some(reader.range()?),
-                _ => return Err(DecodeError::BadDiscriminant),
-            },
-            guard: guard_from(reader.u32()?)?,
-            settles_the_name: reader.u8()? != 0,
-        });
+        macros.push(get_macro(&mut reader)?);
     }
 
     let mut includes = Vec::new();
@@ -1279,7 +1138,9 @@ fn symbol_kind_code(kind: SymbolKind) -> u8 {
 mod tests {
     use super::{CODEC_VERSION, DecodeError, MAGIC, decl_kind_code, decode, encode};
     use crate::cache::SummaryKey;
+    use crate::index::CookedFile;
     use crate::preprocess::directive::IncludeForm;
+    use crate::summary::CookedDiagnostic;
     use crate::summary::MacroKind;
     use crate::summary::{
         ConditionalRegion, DeclFact, DeclKind, FactGuard, FileSummary, GuardBranch, IncludeFact,
@@ -1645,4 +1506,374 @@ mod tests {
 
         at
     }
+}
+/// Write one declaration fact — shared by the summary record and the cooked-reading record.
+///
+/// **One writer, two records, on purpose.** A cooked reading's declarations are the same `DeclFact`s a summary
+/// holds; a second copy of these eighty lines would be a second place to add the next field to, and the failure it
+/// would produce is silent — a field written by one record and not the other, decoding as whatever follows it.
+fn put_declaration(out: &mut Vec<u8>, fact: &DeclFact) {
+    put_str(out, &fact.name);
+    put_opt_str(out, fact.scope.as_deref());
+    put_u8(out, decl_kind_code(fact.kind));
+    put_opt_str(out, fact.type_of.as_deref());
+    put_opt_str(out, fact.returns.as_deref());
+    put_u32(out, fact.bases.len() as u32);
+    for base in &fact.bases {
+        put_str(out, base);
+    }
+    put_u32(out, fact.parameters.len() as u32);
+    for parameter in &fact.parameters {
+        put_str(out, parameter);
+    }
+    put_u32(out, fact.constraints.len() as u32);
+    for constraint in &fact.constraints {
+        put_str(out, constraint);
+    }
+    put_opt_str(out, fact.requires_clause.as_deref());
+    put_u32(out, fact.parameter_defaults.len() as u32);
+    for default in &fact.parameter_defaults {
+        put_str(out, default);
+    }
+    put_opt_str(out, fact.parameter_list.as_deref());
+    put_opt_str(out, fact.pattern.as_deref());
+    put_range(out, fact.range);
+    put_range(out, fact.name_range);
+    put_u8(out, u8::from(fact.local));
+    put_opt_str(out, fact.in_namespace.as_deref());
+    put_u8(out, u8::from(fact.clean));
+    put_u8(out, u8::from(fact.split_by_a_directive));
+    put_u32(out, guard_code(fact.guard));
+    put_u8(out, access_code(fact.access));
+    put_u8(out, u8::from(fact.exported));
+    // **The modifiers**, at the end of the fact so the bytes of an older entry stay readable up to here — the
+    // version is what makes the whole entry unreachable, but appending keeps the diff honest.
+    put_u32(out, fact.modifiers.bits());
+    // And the effects, which are the same kind of answer: what this declaration does, decided once at index time.
+    put_u64(out, fact.frees);
+    // **The reflection annotation**, when there is one: its macro and its specifiers, as the file wrote them. A
+    // presence byte first, so the common unannotated declaration costs one byte.
+    match &fact.reflection {
+        Some(reflection) => {
+            put_u8(out, 1);
+            put_str(out, &reflection.macro_name);
+            put_u32(out, reflection.specifiers.len() as u32);
+            for specifier in &reflection.specifiers {
+                put_str(out, specifier);
+            }
+        }
+        None => put_u8(out, 0),
+    }
+}
+
+/// Write one macro fact — see [`put_declaration`] for why this is shared.
+fn put_macro(out: &mut Vec<u8>, fact: &MacroFact) {
+    put_str(out, &fact.name);
+    put_u8(out, macro_kind_code(fact.kind));
+    put_u8(out, u8::from(fact.function_like));
+    put_u8(out, macro_body_code(fact.body));
+    put_opt_str(out, fact.value.as_deref());
+    put_opt_str(out, fact.alias.as_deref());
+    put_range(out, fact.range);
+    match fact.body_range {
+        Some(range) => {
+            put_u8(out, 1);
+            put_range(out, range);
+        }
+        None => put_u8(out, 0),
+    }
+    put_u32(out, guard_code(fact.guard));
+    put_u8(out, u8::from(fact.settles_the_name));
+}
+
+/// Read one declaration fact — the reader half of [`put_declaration`].
+fn get_declaration(reader: &mut Reader<'_>) -> Result<DeclFact, DecodeError> {
+    Ok(DeclFact {
+        name: reader.string()?,
+        scope: reader.optional_string()?,
+        kind: decl_kind_from(reader.u8()?)?,
+        type_of: reader.optional_string()?,
+        returns: reader.optional_string()?,
+        bases: {
+            let mut bases = Vec::new();
+            for _ in 0..reader.count()? {
+                bases.push(reader.string()?);
+            }
+            bases
+        },
+        parameters: {
+            let mut parameters = Vec::new();
+            for _ in 0..reader.count()? {
+                parameters.push(reader.string()?);
+            }
+            parameters
+        },
+        constraints: {
+            let mut constraints = Vec::new();
+            for _ in 0..reader.count()? {
+                constraints.push(reader.string()?);
+            }
+            constraints
+        },
+        requires_clause: reader.optional_string()?,
+        parameter_defaults: {
+            let mut defaults = Vec::new();
+            for _ in 0..reader.count()? {
+                defaults.push(reader.string()?);
+            }
+            defaults
+        },
+        parameter_list: reader.optional_string()?,
+        pattern: reader.optional_string()?,
+        range: reader.range()?,
+        name_range: reader.range()?,
+        local: reader.u8()? != 0,
+        in_namespace: reader.optional_string()?,
+        clean: reader.u8()? != 0,
+        split_by_a_directive: reader.u8()? != 0,
+        guard: guard_from(reader.u32()?)?,
+        access: access_from(reader.u8()?),
+        exported: reader.u8()? != 0,
+        modifiers: crate::DeclModifiers::from_bits(reader.u32()?),
+        frees: reader.u64()?,
+        reflection: match reader.u8()? {
+            0 => None,
+            _ => {
+                let macro_name = reader.string()?;
+                let count = reader.count()?;
+                let mut specifiers = Vec::with_capacity(count);
+                for _ in 0..count {
+                    specifiers.push(reader.string()?);
+                }
+                Some(crate::summary::ReflectionFact {
+                    macro_name,
+                    specifiers,
+                })
+            }
+        },
+    })
+}
+
+/// Read one macro fact — the reader half of [`put_macro`].
+fn get_macro(reader: &mut Reader<'_>) -> Result<MacroFact, DecodeError> {
+    Ok(MacroFact {
+        name: reader.string()?,
+        kind: macro_kind_from(reader.u8()?)?,
+        function_like: reader.u8()? != 0,
+        body: macro_body_from(reader.u8()?)?,
+        value: reader.optional_string()?.map(Box::from),
+        alias: reader.optional_string()?.map(Box::from),
+        range: reader.range()?,
+        body_range: match reader.u8()? {
+            0 => None,
+            1 => Some(reader.range()?),
+            _ => return Err(DecodeError::BadDiscriminant),
+        },
+        guard: guard_from(reader.u32()?)?,
+        settles_the_name: reader.u8()? != 0,
+    })
+}
+
+/// **Read and write a cooked reading** — the L2 record a warm start needs to serve without rebuilding.
+///
+/// The record is a [`CookedFile`]: the declarations the rendering read as (already mapped back into the file), the
+/// macros it was read with, its diagnostics, and how many it could not place. It is what `take_the_stored_refinements`
+/// refuses to invent today ("a summary is not a rendering"): a summary alone says what the *file* declares, while a
+/// cooked reading says what the *program* declares, and the two differ exactly where refinement matters.
+///
+/// Its own magic and its own version, because it is a different record from a summary: a decoder handed the wrong
+/// one must say so rather than read a declaration count out of a summary's include list. The declarations and macros
+/// use the same writers as a summary (§[`put_declaration`]), so a field added to either type is a change in one
+/// place — and a version check that rejects every older entry, which a cache is allowed to do.
+const COOKED_MAGIC: &[u8; 8] = b"CPPLSCKR";
+/// The version of the cooked-reading record. Bumped whenever the bytes of one change; see [`COOKED_MAGIC`].
+const COOKED_VERSION: u32 = 1;
+
+pub fn encode_the_cooked_reading(reading: &CookedFile) -> Vec<u8> {
+    let mut out = Vec::with_capacity(256 + reading.declarations.len() * 48);
+    out.extend_from_slice(COOKED_MAGIC);
+    put_u32(&mut out, COOKED_VERSION);
+    put_u32(&mut out, reading.declarations.len() as u32);
+    for fact in &reading.declarations {
+        put_declaration(&mut out, fact);
+    }
+    put_u32(&mut out, reading.macros.len() as u32);
+    for fact in &reading.macros {
+        put_macro(&mut out, fact);
+    }
+    put_u32(&mut out, reading.diagnostics.len() as u32);
+    for diagnostic in &reading.diagnostics {
+        put_range(&mut out, diagnostic.range);
+        put_str(&mut out, &diagnostic.message);
+    }
+    put_u32(&mut out, reading.unplaced as u32);
+    out
+}
+
+pub fn decode_the_cooked_reading(bytes: &[u8]) -> Result<CookedFile, DecodeError> {
+    let mut reader = Reader::new(bytes);
+    if reader.take(COOKED_MAGIC.len())? != COOKED_MAGIC {
+        return Err(DecodeError::NotASummary);
+    }
+    if reader.u32()? != COOKED_VERSION {
+        return Err(DecodeError::UnsupportedVersion);
+    }
+    let mut declarations = Vec::new();
+    for _ in 0..reader.count()? {
+        declarations.push(get_declaration(&mut reader)?);
+    }
+    let mut macros = Vec::new();
+    for _ in 0..reader.count()? {
+        macros.push(get_macro(&mut reader)?);
+    }
+    let mut diagnostics = Vec::new();
+    for _ in 0..reader.count()? {
+        diagnostics.push(CookedDiagnostic {
+            range: reader.range()?,
+            message: reader.string()?,
+        });
+    }
+    let unplaced = reader.u32()? as usize;
+    Ok(CookedFile {
+        declarations,
+        macros,
+        diagnostics,
+        unplaced,
+    })
+}
+
+/// **A cooked reading survives the round trip** — the record a warm start serves instead of rebuilding.
+///
+/// Every field of [`CookedFile`] is used at least once here: a fact with empty lists and one with each list filled,
+/// a macro with a body range and one without, a diagnostic, and the unplaced count. A codec is tested by
+/// round-tripping values rather than by pinning bytes — the bytes are an implementation detail, and what a caller
+/// needs to know is that the values come back.
+#[test]
+fn a_cooked_reading_round_trips() {
+    use crate::index::CookedFile;
+    use crate::summary::CookedDiagnostic;
+
+    let reading = CookedFile {
+        declarations: vec![
+            DeclFact {
+                name: "Widget".to_string(),
+                scope: Some("std".to_string()),
+                kind: DeclKind::Type,
+                type_of: None,
+                returns: None,
+                bases: vec!["Base".to_string()],
+                parameters: vec!["T".to_string()],
+                constraints: Vec::new(),
+                requires_clause: Some("sizeof(T) > 0".to_string()),
+                parameter_defaults: Vec::new(),
+                parameter_list: None,
+                pattern: Some("Widget<T>".to_string()),
+                range: SourceRange::new(10, 20),
+                name_range: SourceRange::new(16, 6),
+                local: false,
+                in_namespace: Some("std".to_string()),
+                clean: true,
+                split_by_a_directive: false,
+                guard: FactGuard::Unconditional,
+                access: Some(Access::Public),
+                exported: true,
+                modifiers: crate::DeclModifiers::default(),
+                frees: 0,
+                reflection: Some(crate::summary::ReflectionFact {
+                    macro_name: "UPROPERTY".to_string(),
+                    specifiers: vec!["EditAnywhere".to_string()],
+                }),
+            },
+            DeclFact {
+                name: "f".to_string(),
+                scope: None,
+                kind: DeclKind::Function,
+                type_of: Some("int".to_string()),
+                returns: Some("void".to_string()),
+                bases: Vec::new(),
+                parameters: Vec::new(),
+                constraints: vec!["Copyable<T>".to_string()],
+                requires_clause: None,
+                parameter_defaults: vec!["0".to_string()],
+                parameter_list: Some("(int a)".to_string()),
+                pattern: None,
+                range: SourceRange::new(40, 30),
+                name_range: SourceRange::new(44, 1),
+                local: true,
+                in_namespace: None,
+                clean: false,
+                split_by_a_directive: true,
+                guard: FactGuard::Unconditional,
+                access: None,
+                exported: false,
+                modifiers: crate::DeclModifiers::default(),
+                frees: 3,
+                reflection: None,
+            },
+        ],
+        macros: vec![crate::summary::MacroFact {
+            name: "_STD_BEGIN".to_string(),
+            kind: crate::summary::MacroKind::Definition,
+            function_like: false,
+            body: MacroBody::Expression,
+            value: Some(Box::from("namespace std {")),
+            alias: None,
+            range: SourceRange::new(1, 30),
+            body_range: Some(SourceRange::new(20, 14)),
+            guard: FactGuard::Unconditional,
+            settles_the_name: true,
+        }],
+        diagnostics: vec![CookedDiagnostic {
+            range: SourceRange::new(50, 3),
+            message: "expected `;`".to_string(),
+        }],
+        unplaced: 2,
+    };
+
+    let bytes = encode_the_cooked_reading(&reading);
+    let back = decode_the_cooked_reading(&bytes).expect("the bytes this encoder wrote decode");
+
+    assert_eq!(back.declarations.len(), 2);
+    assert_eq!(back.declarations[0].name, "Widget");
+    assert_eq!(back.declarations[0].scope.as_deref(), Some("std"));
+    assert_eq!(back.declarations[0].bases, ["Base"]);
+    assert_eq!(
+        back.declarations[0].requires_clause.as_deref(),
+        Some("sizeof(T) > 0")
+    );
+    assert_eq!(back.declarations[0].pattern.as_deref(), Some("Widget<T>"));
+    assert_eq!(back.declarations[0].range, SourceRange::new(10, 20));
+    assert_eq!(back.declarations[0].access, Some(Access::Public));
+    assert_eq!(
+        back.declarations[0]
+            .reflection
+            .as_ref()
+            .map(|r| r.macro_name.as_str()),
+        Some("UPROPERTY")
+    );
+    assert_eq!(back.declarations[1].frees, 3);
+    assert!(back.declarations[1].local);
+    assert!(back.declarations[1].split_by_a_directive);
+    assert_eq!(back.macros.len(), 1);
+    assert_eq!(back.macros[0].name, "_STD_BEGIN");
+    assert_eq!(back.macros[0].body_range, Some(SourceRange::new(20, 14)));
+    assert!(back.macros[0].settles_the_name);
+    assert_eq!(back.diagnostics.len(), 1);
+    assert_eq!(back.diagnostics[0].message, "expected `;`");
+    assert_eq!(back.unplaced, 2);
+
+    // **The format's own guards**, which is what the magic and the version are for: a record from another
+    // producer, or from a different layout, must be refused rather than decoded into facts nobody wrote.
+    let mut other_record = encode_the_cooked_reading(&reading);
+    other_record[0] = b'X';
+    assert!(
+        decode_the_cooked_reading(&other_record).is_err(),
+        "a record whose magic is not a cooked reading's is refused"
+    );
+    let mut next_layout = encode_the_cooked_reading(&reading);
+    next_layout[8..12].copy_from_slice(&0u32.to_le_bytes());
+    assert!(
+        decode_the_cooked_reading(&next_layout).is_err(),
+        "and one written by a different layout is refused on its version"
+    );
 }

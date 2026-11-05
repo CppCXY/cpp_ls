@@ -60,11 +60,12 @@ use std::path::{Path, PathBuf};
 
 use cpp_parser::Dialect;
 
+use crate::cache::cache_db::CacheKey;
 use crate::cache::{SummaryKey, content_hash, fnv1a64};
 use crate::file::paths::{DiskFiles, FileProvider, normalize_path};
 use crate::include::config::CompilerConfig;
-use crate::index::FileIndexer;
 use crate::index::project::ProjectIndex;
+use crate::index::{CookedFile, FileIndexer};
 use crate::summary::{FileSummary, IncludeFact};
 use crate::{IncludeForm, cache};
 
@@ -165,6 +166,17 @@ const MAX_INCLUDE_SEARCHES: usize = 8192;
 /// The split exists for the reason every other prepare/commit pair in this crate does: the pass re-parses files and
 /// walks their environments, which is 150 ms per file measured, and it used to do all of it while holding the write
 /// lock a request waits for. What is left for [`SummaryStore::commit_the_re_read`] is an index insert per file.
+/// **What [`SummaryStore::take_the_stored_refinements`] decided**: the files it served, and the ones still to build.
+///
+/// Two lists rather than one because the two have different owners: the still-to-do files go to the second pass, and
+/// the served ones go to the caller's **cook queue** — the facts are in the index, but a cooked record carries no
+/// rendering, and `Session::view` parses one.
+#[derive(Debug, Default)]
+pub struct ServedRefinements {
+    pub still_to_do: Vec<std::path::PathBuf>,
+    /// Served from the disk: their cooked facts are in the index and their rendering is owed.
+    pub served: Vec<std::path::PathBuf>,
+}
 pub struct ReRead {
     /// The files whose reading changed, and whether each may be written down.
     pub rebuilt: Vec<(FileSummary, bool)>,
@@ -344,6 +356,9 @@ pub struct StoreStats {
     /// Summaries built and deliberately **not** written, because they say something about the filesystem that a
     /// key computed from the text cannot check. See the module documentation.
     pub unstored: usize,
+    /// **Refined readings the disk served** — files whose refinement this session did not rebuild. The number a warm
+    /// start is judged by: see `docs/refinement.md` §3.2.
+    pub stored_refinements_served: usize,
 }
 
 impl StoreStats {
@@ -367,6 +382,9 @@ impl StoreStats {
             reused: self.reused.saturating_sub(earlier.reused),
             rebuilt: self.rebuilt.saturating_sub(earlier.rebuilt),
             unstored: self.unstored.saturating_sub(earlier.unstored),
+            stored_refinements_served: self
+                .stored_refinements_served
+                .saturating_sub(earlier.stored_refinements_served),
         }
     }
 }
@@ -1442,7 +1460,12 @@ impl<F: FileProvider> SummaryStore<F> {
         // **L2 first: the rendering, filed as the file's cooked reading.** The summary below is untouched by it — that
         // is the whole point of the split (design note §2.1), and the guard
         // `a_rendering_is_not_left_in_the_cache_for_the_next_session` is what fails if it is ever written over instead.
+        //
+        // **And written down**, because a refinement's artifact no longer has a stored summary to ride with: phase 2
+        // files the rendering as the cooked reading and leaves L1 alone, so this record is the only thing a warm start
+        // can serve. Measured: a served refinement is 1.2 ms against 45 ms rebuilt (`docs/refinement.md` §3.2).
         for (path, cooked) in plan.cooked {
+            self.put_the_cooked_reading(&path, &cooked);
             self.index.insert_cooked(&path, cooked);
         }
         let mut re_read = 0;
@@ -1613,26 +1636,99 @@ impl<F: FileProvider> SummaryStore<F> {
         self.commit_reread(summary, true);
     }
 
+    /// **Write one file's cooked reading down**, keyed exactly as its refinement is.
+    ///
+    /// The record is the L2 answer for the file — what the *program* declares of it — and it is what makes a stored
+    /// refinement servable. A summary alone cannot: it says what the file's own text declares, so serving one marked
+    /// the file refined while the index held no cooked reading, and everything that answers from a reading answered
+    /// `None` (traced: `cooked=false summary=true refined=true`, two `checks` fixtures lost every finding).
+    ///
+    /// The key is [`SummaryStore::the_closure_fingerprint`]'s: the file's content, the compilation context, and the
+    /// content of its whole closure. A rendering is a function of exactly those, which is why one key serves both.
+    pub fn put_the_cooked_reading(&self, path: &Path, reading: &CookedFile) {
+        let Some(source) = self.files.read(path) else {
+            return;
+        };
+        let Some(fingerprint) = self.the_closure_fingerprint(path) else {
+            return;
+        };
+        let key = CacheKey {
+            content: content_hash(&source),
+            config: self.context_hash(path),
+            env: fingerprint,
+        };
+        let Some(database) = self.summary_database() else {
+            return;
+        };
+        let bytes = crate::summary_codec::encode_the_cooked_reading(reading);
+        database.put_cooked_reading(key, &bytes);
+    }
+
+    /// **The cooked reading stored for `path`, when it is still the reading for this text and this closure.**
+    ///
+    /// The read half of [`SummaryStore::put_the_cooked_reading`], and the same validation as a summary's: the key is
+    /// recomputed and compared, so a record written for another text, another configuration or another closure is a
+    /// miss rather than a wrong answer. `resolution_still_holds` is asked as well, because a record's paths were
+    /// resolved against a filesystem that may have moved under it.
+    pub fn the_stored_cooked_reading(&self, path: &Path) -> Option<CookedFile> {
+        let source = self.files.read(path)?;
+        let fingerprint = self.the_closure_fingerprint(path)?;
+        let key = CacheKey {
+            content: content_hash(&source),
+            config: self.context_hash(path),
+            env: fingerprint,
+        };
+        let database = self.summary_database()?;
+        let bytes = database.cooked_reading(key)?;
+        crate::summary_codec::decode_the_cooked_reading(&bytes).ok()
+    }
+
     /// **Take every refined reading the cache holds for these files**, and answer with the ones it does not.
     ///
-    /// This is what keeps the timelines unbuilt on a warm start: a file whose refinement is already on disk needs no
-    /// unit, no render and no parse — the summary goes into the index and the pass never sees it.
-    pub fn take_the_stored_refinements(&mut self, files: Vec<PathBuf>) -> Vec<PathBuf> {
-        // **A stored refinement is a summary, and a summary is not a rendering.** Serving one marked the file refined
-        // while the index held no cooked reading for it, and everything that answers *from a reading* then answered
-        // `None` — traced: `cooked=false summary=true refined=true`, "no cooked reading — no answer at all", and two
-        // `checks` fixtures lost every finding (108 → 105 passing). So the files go back to the pass, which walks them
-        // and files the rendering as their cooked reading: "refined" then always means "there is a reading".
-        //
-        // The entries themselves are still written (`store_it`), so they are ready for the day the cache grows a
-        // cooked-reading record of its own (§4.9); what is gone is serving one that cannot carry the reading.
-        if crate::probes::cooking() && !files.is_empty() {
+    /// This is what keeps a timeline unbuilt on a warm start: a file whose refinement is already on disk needs no
+    /// unit, no render and no parse — the cooked reading goes into the index and the pass never sees it.
+    ///
+    /// # The cooked reading is the whole record
+    ///
+    /// A stored *summary* used to be served alone, and a refined summary is not a refined reading: `is_refined` then
+    /// meant "the facts are L2" while the index held no cooked reading, so every consumer that answers from a
+    /// reading answered `None` — traced as `cooked=false summary=true refined=true`, and two `checks` fixtures lost
+    /// every finding (108 → 105 passing). Phase 2 then removed the other half of that route: **a refinement writes no
+    /// summary at all** (its reading is the rendering, and L1 is left alone), so there is nothing else to ride with.
+    /// The record served here is the cooked reading, and `is_refined` is made true by marking the path — the same mark
+    /// the pass sets, without a summary that would say something the L1 entry does not.
+    pub fn take_the_stored_refinements(&mut self, files: Vec<PathBuf>) -> ServedRefinements {
+        let mut still_to_do = Vec::new();
+        let mut served_paths = Vec::new();
+        let mut served = 0usize;
+        for path in files {
+            let Some(cooked) = self.the_stored_cooked_reading(&path) else {
+                still_to_do.push(path);
+                continue;
+            };
+            self.index.insert_cooked(&path, cooked);
+            if let Ok(mut marks) = self.refined_marks.lock() {
+                marks.insert(path.clone());
+            }
+            // **The rendering is the caller's half.** The record carries facts, not text, and `Session::view` parses
+            // the *rendering* — a session that stopped here would answer every fact question from L2 and every tree
+            // question with `None` (measured as fourteen `completion` fixtures panicking with "asked to be read and
+            // cooked, and the pump did both"). So the served paths come back to the caller, which owns a cook queue:
+            // the pump slices the rendering as it always did, and skips only the composition this record answered.
+            served_paths.push(path);
+            served += 1;
+        }
+        self.stats.stored_refinements_served += served;
+        if crate::probes::cooking() && !still_to_do.is_empty() {
             eprintln!(
-                "re-read: {} stored refinement(s) are not served — a summary is not a rendering",
-                files.len()
+                "re-read: {served} stored refinement(s) served, {} rebuilt (nothing stored for them)",
+                still_to_do.len()
             );
         }
-        files
+        ServedRefinements {
+            still_to_do,
+            served: served_paths,
+        }
     }
 
     /// **The second pass, planned but not applied** — everything that does not change the store.

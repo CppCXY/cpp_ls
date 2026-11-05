@@ -1246,11 +1246,13 @@ fn a_delta_of_stats_saturates_rather_than_panicking() {
         reused: 1,
         rebuilt: 0,
         unstored: 0,
+        stored_refinements_served: 0,
     };
     let earlier = StoreStats {
         reused: 0,
         rebuilt: 5,
         unstored: 2,
+        stored_refinements_served: 0,
     };
 
     assert_eq!(
@@ -1259,6 +1261,7 @@ fn a_delta_of_stats_saturates_rather_than_panicking() {
             reused: 1,
             rebuilt: 0,
             unstored: 0,
+            stored_refinements_served: 0,
         },
         "a reading given out of order is a caller's mistake, and zero is a better failure than a panic"
     );

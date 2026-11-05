@@ -46,6 +46,11 @@ const META: TableDefinition<&str, &[u8]> = TableDefinition::new("meta");
 const FILES: TableDefinition<&str, &[u8]> = TableDefinition::new("files");
 const PROJECTIONS: TableDefinition<u64, &[u8]> = TableDefinition::new("projections");
 const SUMMARIES: TableDefinition<(u64, u64, u64), &[u8]> = TableDefinition::new("summaries");
+/// **The cooked reading of a file** — the L2 record a warm start serves instead of rebuilding. Keyed like a summary
+/// (`(content, config, env)`), because a cooked reading is a summary-shape answer: what the *program* declares of this
+/// file, under one compilation context and one macro environment. See `summary_codec::encode_the_cooked_reading`.
+const COOKED_READINGS: TableDefinition<(u64, u64, u64), &[u8]> =
+    TableDefinition::new("cooked_readings");
 const RENDERINGS: TableDefinition<(u64, u64), &[u8]> = TableDefinition::new("renderings");
 const ENVIRONMENTS: TableDefinition<u64, &[u8]> = TableDefinition::new("environments");
 const MACROS: TableDefinition<u64, &[u8]> = TableDefinition::new("macros");
@@ -467,6 +472,28 @@ impl CacheDb {
         ))
     }
 
+    /// The cooked reading stored for one key — see [`COOKED_READINGS`].
+    pub fn cooked_reading(&self, key: CacheKey) -> Result<Option<Vec<u8>>> {
+        let read = self.database.begin_read()?;
+        let cooked = read.open_table(COOKED_READINGS)?;
+        let Some(value) = cooked.get((key.content, key.config, key.env))? else {
+            return Ok(None);
+        };
+        Ok(Some(decompress(value.value())?))
+    }
+
+    /// Store a cooked reading. Compressed here, once, like a summary — the two are the same order of bytes.
+    pub fn put_cooked_reading(&self, key: CacheKey, bytes: &[u8]) -> Result<()> {
+        let packed = compress(bytes);
+        let write = self.database.begin_write()?;
+        {
+            let mut cooked = write.open_table(COOKED_READINGS)?;
+            cooked.insert((key.content, key.config, key.env), &packed[..])?;
+        }
+        write.commit()?;
+        Ok(())
+    }
+
     pub fn put_rendering(&self, content: u64, env: u64, text: &str) -> Result<()> {
         let packed = compress(text.as_bytes());
         let write = self.database.begin_write()?;
@@ -766,6 +793,22 @@ impl SummaryCache {
                 log::warn!("the summary database could not be opened: {error}");
                 None
             }
+        }
+    }
+
+    /// **The cooked reading for a key**, decoded — see `CacheDb::cooked_reading`.
+    ///
+    /// A miss is `None` and never an error: a parent that stored the refinement before this table existed has a
+    /// summary and no cooked reading, which is a file the pass rebuilds (`SummaryStore::take_the_stored_refinements`).
+    pub fn cooked_reading(&self, key: CacheKey) -> Option<Vec<u8>> {
+        self.database.cooked_reading(key).ok().flatten()
+    }
+
+    /// **Write a cooked reading.** Through the database directly, unlike summaries: a cooked reading is written once
+    /// per refinement and read by the *next* start, so the in-process buffer the summaries need has nothing to add.
+    pub fn put_cooked_reading(&self, key: CacheKey, bytes: &[u8]) {
+        if let Err(error) = self.database.put_cooked_reading(key, bytes) {
+            log::debug!("a cooked reading was not stored: {error}");
         }
     }
 
