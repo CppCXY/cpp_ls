@@ -79,7 +79,6 @@ switch! {
     visibility => "CPPLS_TRACE_VISIBILITY", "How many files a visibility question kept, after the ordering step.";
     splice => "CPPLS_SPLICE_TRACE", "Every file the session entered and spliced, with what it contributed — the trace a missing standard-library fact needed.";
     inlay => "CPPLS_TRACE_INLAY", "Where an inlay-hint request's milliseconds went, one line per call.";
-    time_checks => "CPPLS_TIME_CHECKS", "One line per rule per file — names the check that takes the forty-five seconds.";
     walk_census => "CPPLS_WALK_CENSUS", "Every file the walk entered, spliced or fresh, and the conditions it mentions.";
     code_action => "CPPLS_TRACE_CODE_ACTION", "Where a code-action request's milliseconds went.";
     no_share => "CPPLS_NO_SHARE", "Turn summary sharing off, so one machine can be measured with and without it — an A/B switch, not a setting.";

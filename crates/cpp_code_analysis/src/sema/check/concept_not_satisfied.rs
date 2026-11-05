@@ -173,12 +173,16 @@ enum Concept {
 
 impl Concept {
     /// **Which concept a constraint names**, from the head's own spelling — with or without `std::`.
+    ///
+    /// The split order matters and was wrong: taking the last `::` **before** cutting the template arguments finds the scope
+    /// *inside* them — `std::derived_from<std::vector<int>>` answered a concept called `vector<int>>` — so the arguments are
+    /// cut first, and the scope is then the head's own.
     fn from_constraint(constraint: &str) -> Option<Concept> {
-        let unqualified = constraint.rsplit("::").next().unwrap_or(constraint);
-        let (name, arguments) = match unqualified.split_once('<') {
-            Some((name, rest)) => (name.trim(), Some(rest.trim_end_matches('>'))),
-            None => (unqualified.trim(), None),
+        let (head, arguments) = match constraint.trim().split_once('<') {
+            Some((head, rest)) => (head.trim(), Some(rest.trim_end_matches('>'))),
+            None => (constraint.trim(), None),
         };
+        let name = head.rsplit("::").next().unwrap_or(head).trim();
 
         match name {
             "integral" | "signed_integral" | "unsigned_integral" => Some(Concept::Integral),
@@ -247,9 +251,18 @@ impl Concept {
             }
             Concept::DerivedFrom(base) => derives_from(context, passed, base),
             Concept::NeedsAnObjectType(_) => {
-                // **A reference satisfies none of them**, and that is the whole of what this answers: a value type
-                // needs its constructors, which this layer does not read.
-                Some(!passed.to_string().contains('&'))
+                // **A reference satisfies none of them**, and that is the whole of what this answers: a value type needs
+                // its constructors, which this layer does not read. Asked of the type's **variant** — a reference is
+                // `Type::Reference`, and `passed.to_string().contains('&')` was a second reader of that fact, one that
+                // answered "not an object" for any spelling that happened to carry an `&` (a `decltype(x) &`, a template
+                // argument named one) and "an object" for an array, which is not copyable either way.
+                match passed {
+                    crate::sema::types::Type::Reference { .. } => Some(false),
+                    // An array and a function are not object types either, and this layer cannot decide them: saying
+                    // nothing is the direction every arm here takes when it would be guessing.
+                    crate::sema::types::Type::Array { .. } => None,
+                    _ => Some(true),
+                }
             }
             Concept::ConvertibleTo(target) => {
                 let target = crate::sema::types::parse_type_spelling(target);
@@ -391,8 +404,7 @@ fn derives_from(
     }
 
     let index = context.model.index();
-    let base = base.trim();
-    let base = base.rsplit("::").next().unwrap_or(base);
+    let base = the_class_name(base);
 
     let mut waiting = vec![name.clone()];
     let mut seen = std::collections::HashSet::new();
@@ -402,7 +414,7 @@ fn derives_from(
         if !seen.insert(class.clone()) {
             continue;
         }
-        if class.rsplit("::").next().unwrap_or(&class) == base {
+        if the_class_name(&class) == base {
             return Some(true);
         }
 
@@ -426,13 +438,24 @@ fn derives_from(
         };
 
         for written in &fact.bases {
-            // `public: std::basic_ios` and `private Widget` are both written with an access keyword; none of it
-            // changes which class the name is.
-            let written = written.trim();
-            let name = written.split_whitespace().next_back().unwrap_or(written);
-            waiting.push(name.trim_end_matches('<').to_string());
+            // **A base clause is the base's *name***: the fact stores it as one (`shape.bases` is the `CppBaseSpecifier`'s
+            // name node, written as the reader spelled it), so there is no access keyword to strip. What it may carry is
+            // template arguments and a scope — `std::vector<int>` — and this question is about the class's own name, which
+            // is what [`the_class_name`] leaves. Splitting on whitespace, which this did, took `Base>` from
+            // `conditional_t<true, X, Base>` and then looked up a class with that name.
+            waiting.push(the_class_name(written).to_string());
         }
     }
 
     answered.then_some(false)
+}
+
+/// **A class's own name** — `ns::B<int>` → `B`.
+///
+/// The template arguments and the scope are not part of the identity this question asks about: a base clause writes
+/// `std::vector<int>` and the constraint writes `std::derived_from<vector<int>>`, and both name the class `vector`.
+fn the_class_name(written: &str) -> &str {
+    let name = written.trim();
+    let name = name.split('<').next().unwrap_or(name).trim();
+    name.rsplit("::").next().unwrap_or(name).trim()
 }

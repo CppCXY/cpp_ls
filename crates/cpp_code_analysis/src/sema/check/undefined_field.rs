@@ -49,18 +49,14 @@ impl Check for UndefinedField {
         // `LuaSyntaxTree.cpp`: collecting 74 accesses takes **262 µs** and the loop over them **98
         // ms** — so this check is not a tree walk that got slow, it is 74 type questions (`type_of`
         // per access, 6 inference questions each), and the work is in the engine.
-        let traced = crate::probes::timing();
-        let started = traced.then(std::time::Instant::now);
         let accesses = context.member_accesses();
-        let collected = started.map(|started| started.elapsed());
-        let mut judged = 0usize;
-        for (_node, access) in accesses {
+        for (node, access) in accesses {
             // **A requires-expression asks whether the member is there.** `concept sized = requires(T value) {
             // value.size(); };` states a *question* about `T`, and a member missing from the hypothetical `T` is exactly
             // what the concept is testing for — reporting it is always wrong, and it was: measured, the project's own
             // `sized` concept produced "`value` has no member `size`". The existing dependent-type guard did not catch it
             // because a requires-expression's parameter is not bound as a template parameter at that offset.
-            if _node
+            if node
                 .ancestors()
                 .any(|node| cpp_parser::CppRequiresExpr::can_cast(node.kind().into()))
             {
@@ -194,7 +190,6 @@ impl Check for UndefinedField {
                 continue;
             };
 
-            judged += 1;
             if members
                 .members
                 .iter()
@@ -215,24 +210,6 @@ impl Check for UndefinedField {
                 continue;
             }
 
-            // **What the list held, and what the index holds about the name** — the pair that separates "the class
-            // has no such member" from "the index never recorded it". The second number is what showed that
-            // `std::vector::erase` was missing from the *facts*, not from the check.
-            if crate::probes::members() {
-                let index = context.model.index();
-                eprintln!(
-                    "[undefined-field] `{}` -> `{}` ({} member(s), {} unlisted) — index: {} posting(s) of \
-                     `{}`, {} in scope `{}`",
-                    object.class_name().unwrap_or("?"),
-                    access.member,
-                    members.members.len(),
-                    members.unlisted.len(),
-                    index.name_postings(&access.member),
-                    access.member,
-                    index.scope_postings(object.class_name().unwrap_or("")),
-                    object.class_name().unwrap_or("?"),
-                );
-            }
             // The message names what the reader wrote rather than a rendering of the type: `w.weight` is what is on
             // their screen, and a type pretty-printed by this layer would be a second spelling to disagree with.
             context.add(
@@ -244,13 +221,6 @@ impl Check for UndefinedField {
                     object = access.object.text().to_string().trim(),
                     member = access.member
                 ),
-            );
-        }
-        if let (true, Some(started), Some(collected)) = (traced, started, collected) {
-            eprintln!(
-                "[undefined-field] collected {collected:?}, judged {judged} access(es) with a list, \
-                 loop took {:?}",
-                started.elapsed() - collected
             );
         }
     }

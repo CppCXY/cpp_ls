@@ -4206,24 +4206,9 @@ pub(crate) struct TypeMemo {
     in_flight: std::cell::RefCell<std::collections::HashSet<(u32, u32)>>,
     members:
         std::cell::RefCell<std::collections::HashMap<(String, String), Known<(DeclFact, PathBuf)>>>,
-    /// How long the engine has spent, in nanoseconds — the attribution these measurements need.
-    spent: std::cell::Cell<u64>,
-    /// How many inferences ran.
-    ran: std::cell::Cell<u64>,
 }
 
 impl TypeMemo {
-    /// **Has this node's type already been asked for?** — the model's own count of its hits, so that
-    /// [crate::sema::model::SemanticModel::inference_stats] keeps meaning what it says.
-    /// What the engine has cost so far: (inferences, nanoseconds) — see [TypeMemo].
-    pub(crate) fn spent(&self) -> (u64, u64) {
-        (self.ran.get(), self.spent.get())
-    }
-
-    pub(crate) fn remembers(&self, key: &(u32, u32)) -> bool {
-        self.types.borrow().contains_key(key)
-    }
-
     /// **The type of a node already asked about, if it was.**
     fn remembered_type(&self, key: &(u32, u32)) -> Option<Known<(Type, PathBuf)>> {
         self.types.borrow().get(key).cloned()
@@ -4366,9 +4351,6 @@ pub(crate) fn type_of_expression_memoed(
         index.remember_a_type(path, expression, &answer);
     }
     memo.types.borrow_mut().insert(key, answer.clone());
-    memo.spent
-        .set(memo.spent.get() + started.elapsed().as_nanos() as u64);
-    memo.ran.set(memo.ran.get() + 1);
     answer
 }
 

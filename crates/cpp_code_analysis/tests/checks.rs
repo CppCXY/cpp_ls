@@ -2089,6 +2089,58 @@ int f() {
     );
 }
 
+/// **A base clause is a spelling, and the class it names is `B`** — `std::derived_from<std::vector<int>>` asks about a
+/// type, `class D : public std::vector<int>` writes the base with its arguments, and the question is whether the class's own
+/// name is the one asked for.
+///
+/// The old reading took the last whitespace-separated word of the base's spelling — `Base>` from
+/// `conditional_t<true, X, Base>` — and then looked up a class with that name; a plain `std::vector<int>` base was compared
+/// whole against `vector` and never matched. Both directions are silence-or-report on a name, so the fixture below asks the
+/// two questions that separate them: a class that derives from the named template is **not** reported, and one that does not
+/// is.
+#[test]
+fn a_templated_base_is_compared_by_the_class_it_names() {
+    let derives = "\
+template <std::derived_from<std::vector<int>> T>
+void take(T value);
+
+struct Derived : public std::vector<int> {};
+
+int f() {
+    Derived d;
+    take(d);
+    return 0;
+}
+";
+    let messages = messages_of(derives);
+    assert!(
+        !messages
+            .iter()
+            .any(|(code, _)| *code == DiagnosticCode::ConceptNotSatisfied),
+        "`Derived` derives from `std::vector<int>`: {messages:?}"
+    );
+
+    let does_not = "\
+template <std::derived_from<std::vector<int>> T>
+void take(T value);
+
+struct Plain {};
+
+int f() {
+    Plain p;
+    take(p);
+    return 0;
+}
+";
+    let messages = messages_of(does_not);
+    assert!(
+        messages
+            .iter()
+            .any(|(code, _)| *code == DiagnosticCode::ConceptNotSatisfied),
+        "`Plain` derives from nothing: {messages:?}"
+    );
+}
+
 /// **A concept the analysis cannot decide is silence**, not a guess: `requires` clauses and user-written concepts
 /// are exactly the cases where a finding would be the check's opinion rather than the language's.
 #[test]

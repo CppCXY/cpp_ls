@@ -73,10 +73,6 @@ pub struct SemanticModel<'a> {
     /// **What `members_of` was asked, and what it answered** — a class's members do not change during one file's checks, and
     /// the same class is asked once per member access. See `members_of` for the measurement that made this necessary.
     members: RefCell<BTreeMap<String, Known<MemberList>>>,
-    /// How many times the inference engine actually ran — the number that says whether the memo is working.
-    inferred: std::cell::Cell<usize>,
-    /// How many times a cached answer was handed back.
-    reused: std::cell::Cell<usize>,
 }
 
 impl<'a> SemanticModel<'a> {
@@ -103,8 +99,6 @@ impl<'a> SemanticModel<'a> {
             resolver: RefCell::new(resolver),
             types: crate::index::project::TypeMemo::default(),
             members: RefCell::new(BTreeMap::new()),
-            inferred: std::cell::Cell::new(0),
-            reused: std::cell::Cell::new(0),
         }
     }
 
@@ -128,47 +122,21 @@ impl<'a> SemanticModel<'a> {
                 expression.text().to_string().trim(),
             )));
         }
-        let range = cpp_parser::source_range(expression.text_range());
-        let key = (range.start_offset as u32, range.end_offset() as u32);
-        let asked_before = self.types.remembers(&key);
-        if asked_before {
-            self.reused.set(self.reused.get() + 1);
-        } else {
-            self.inferred.set(self.inferred.get() + 1);
-        }
-
-        let started = std::time::Instant::now();
-        let answer = {
-            // One borrow of the resolver for the whole inference, so a question that reaches into another file —
-            // and the question *inside* that answer, recursively — all go through the same memo and the same
-            // resolver. The `RefCell` is borrowed as a *field*, not as `self`, which is what keeps a second query
-            // on this model possible while this one runs.
-            let mut resolver = self.resolver.borrow_mut();
-            project::type_of_expression_memoed(
-                &self.types,
-                self.index,
-                &mut **resolver,
-                self.scopes,
-                self.root,
-                self.path,
-                expression,
-                0,
-            )
-        };
-        // **The slow questions, by name.** A pull answers about 150 of them (measured: "153 question(s) in 169 ms"),
-        // and a total says nothing about which of them is worth the next hour — this does.
-        if crate::probes::timing() {
-            let took = started.elapsed();
-            if took.as_micros() >= 500 {
-                let text: String = expression.text().to_string().chars().take(70).collect();
-                eprintln!(
-                    "[question] {:>5.1} ms  {}",
-                    took.as_secs_f64() * 1000.0,
-                    text.split_whitespace().collect::<Vec<_>>().join(" ")
-                );
-            }
-        }
-        answer
+        // One borrow of the resolver for the whole inference, so a question that reaches into another file — and the
+        // question *inside* that answer, recursively — all go through the same memo and the same resolver. The `RefCell`
+        // is borrowed as a *field*, not as `self`, which is what keeps a second query on this model possible while this one
+        // runs.
+        let mut resolver = self.resolver.borrow_mut();
+        project::type_of_expression_memoed(
+            &self.types,
+            self.index,
+            &mut **resolver,
+            self.scopes,
+            self.root,
+            self.path,
+            expression,
+            0,
+        )
     }
 
     /// **The members of a class, inherited ones included** — see [`project::members_of`].
@@ -268,21 +236,6 @@ impl<'a> SemanticModel<'a> {
                         .any(|binding| binding.name.text() == name)
             })
         })
-    }
-
-    /// What [`SemanticModel::type_of`] has cost so far: `(inferences run, answers reused)`.
-    ///
-    pub fn inference_stats(&self) -> (usize, usize) {
-        (self.inferred.get(), self.reused.get())
-    }
-
-    /// **What the engine has cost this model so far**: `(questions answered, nanoseconds)`.
-    ///
-    /// The split a diagnostics pull needs — the rules' own walks against the inference they ask for. Measured on
-    /// `LuaSyntaxTree.cpp`: `CPPLS_NO_INFERENCE=1` (every answer `Unknown`) takes the whole check layer from
-    /// **695 ms to 25 ms**, so this is the number that says whether the next work is in the engine.
-    pub fn inference_cost(&self) -> (u64, u64) {
-        self.types.spent()
     }
 
     /// The file this model is about.
