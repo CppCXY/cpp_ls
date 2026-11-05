@@ -757,6 +757,15 @@ pub struct ReflectionFact {
 }
 
 impl ReflectionFact {
+    /// **The annotation as one line** — `UCLASS(Blueprintable)`, `UPROPERTY(EditAnywhere, Category = "Game")`.
+    ///
+    /// Generated from the recorded parts rather than cut out of the file: the macro and the arguments are what the
+    /// analysis read, and a rendering that puts them back together cannot disagree with what it decided the
+    /// declaration is annotated with.
+    pub fn said(&self) -> String {
+        format!("{}({})", self.macro_name, self.specifiers.join(", "))
+    }
+
     /// **The value a specifier was given**, when it has one: `Category = "Game"` answers `Some("\"Game\"")` for
     /// `"Category"`. The comparison ignores whitespace around the `=`, which the file may write either way.
     pub fn value_of(&self, name: &str) -> Option<&str> {

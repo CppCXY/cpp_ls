@@ -1819,8 +1819,23 @@ impl CppTemplateParam {
         self.child()
     }
 
+    /// The parameter's name — `T` in `typename T`, `N` in `int N`, `Args` in `class... Args`.
+    ///
+    /// **Two shapes, one question.** A non-type parameter is a declaration and names itself through its declarator
+    /// (`int N`); a type parameter has no declarator at all — `typename T` is a specifier holding `T` as a name — so the
+    /// declarator search answered `None` for every type parameter, and a hover rendered
+    /// `template <typename T, typename Alloc = int>` as `template <typename, typename = int>`. The fallback is the
+    /// **first** name in the subtree: the parameter's own name precedes its default's (`typename Alloc = std::allocator<T>`
+    /// names `Alloc` first), and `T` in that default is a different question.
     pub fn get_name(&self) -> Option<CppNameToken> {
-        self.get_declarator()?.get_name()
+        self.get_declarator()
+            .and_then(|declarator| declarator.get_name())
+            .or_else(|| {
+                self.syntax()
+                    .descendants()
+                    .find_map(CppNameExpr::cast)
+                    .and_then(|name| name.get_name_token())
+            })
     }
 
     pub fn get_declarator(&self) -> Option<CppDeclarator> {
@@ -1828,9 +1843,15 @@ impl CppTemplateParam {
     }
 
     /// Is this `typename T` / `class T`?
+    ///
+    /// **Searched as a subtree**: the keyword is inside the parameter's `DeclSpecifierSeq`
+    /// (`TemplateParameter > DeclSpecifierSeq > TypenameType > TypenameKeyword`), not a direct token of it — so the
+    /// child-token search answered `false` for every type parameter, and a hover that asked it rendered
+    /// `template <typename T, typename Alloc = int>` as `template <T, Alloc = int>`. Measured with `inspect hover`
+    /// on a fixture. `concept` is a type parameter's keyword too, in a constrained one.
     pub fn is_type_param(&self) -> bool {
         self.syntax()
-            .children_with_tokens()
+            .descendants_with_tokens()
             .filter_map(|it| it.into_token())
             .any(|token| {
                 matches!(

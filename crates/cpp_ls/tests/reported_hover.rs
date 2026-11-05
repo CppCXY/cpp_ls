@@ -106,7 +106,7 @@ fn a_member_declared_twice_shows_both_declarations_and_their_clauses() {
     let view = session.view_of_the_file(&file).expect("the written text");
 
     for (needle, must_say) in [
-        ("cfoo.call", "void call(Fn &&fn) const"),
+        ("cfoo.call", "void call(Fn&& fn) const"),
         ("cbar.call", "const requires requires"),
     ] {
         let line = source.find(needle).expect("the use");

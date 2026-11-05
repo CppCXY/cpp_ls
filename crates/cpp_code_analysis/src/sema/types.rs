@@ -845,6 +845,18 @@ pub fn parse_type_spelling(written: &str) -> Type {
         return Type::builtin("void");
     }
 
+    // **`typename` is a disambiguator, not part of a type.**
+    //
+    // `using element_type = typename __shared_ptr<_Tp>::element_type;` records exactly that spelling, and the word made
+    // the name a class called `typename __shared_ptr<_Tp>` — so the nested lookup that follows answered
+    // `NotDeclaredHere` and `std::shared_ptr<T>`'s `element_type` never resolved. Measured through `inspect members` on a
+    // fixture shaped like libstdc++: the arrow through a `shared_ptr` reached no pointee, and a hover on
+    // `p->identifier()` said "`shared_ptr<Resource>` has no member `identifier`".
+    let trimmed = trimmed
+        .strip_prefix("typename ")
+        .map(str::trim_start)
+        .unwrap_or(trimmed);
+
     // **The qualifiers written last come off first.** `Widget* const` is a pointer with a `const` *after* the
     // operator, so peeling the `*` before the `const` would look for one at a position where it is not — the
     // spelling would end in `const` and the operator would end up inside the name. A qualifier on either side of a

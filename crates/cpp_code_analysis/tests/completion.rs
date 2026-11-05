@@ -2679,6 +2679,67 @@ int f() {
     );
 }
 
+/// **A pointer-like class spelled without its namespace still reaches its pointee.**
+///
+/// The spelling of a deduced return type comes from the **declaration**, which libstdc++ writes inside `namespace
+/// std`: `make_shared<_Yp>` returns `shared_ptr<_Yp>`, so a hover on `make_shared<Resource>()->identifier()` holds
+/// `shared_ptr<Resource>` and has to find the class `std::shared_ptr`. Measured on `test_cpp`'s
+/// `smart_pointers.cpp`: `members_of("shared_ptr")` answered 0 members while `members_of("std::shared_ptr")`
+/// answered 39, and the hover said "`shared_ptr<Resource>` has no member `identifier`".
+#[test]
+fn a_bare_class_spelling_is_qualified_by_the_index() {
+    let header = "\
+namespace std {
+template <class T> struct __shared_ptr {
+    typedef T element_type;
+    element_type* operator->() const;
+};
+template <class T> struct shared_ptr : __shared_ptr<T> {
+    using element_type = typename __shared_ptr<T>::element_type;
+};
+}
+struct Resource { int identifier() const; };
+";
+    let source = "\
+#include \"smart.h\"
+int f() {
+    std::shared_ptr<Resource> p;
+    return p->identifier();
+}
+";
+    let files = MemoryFiles::new()
+        .with_file("/p/smart.h", header)
+        .with_file("/p/a.cpp", source);
+    let providers = SessionFiles::new(OpenDocuments::new(), files);
+    let mut session = Session::with_config(
+        "/p",
+        providers,
+        WatchFilter::new("/p"),
+        CompilerConfig::default(),
+    );
+    session.add_project_files([
+        std::path::PathBuf::from("/p/smart.h"),
+        std::path::PathBuf::from("/p/a.cpp"),
+    ]);
+    session.index_everything();
+    let view = cooked_view(&mut session, "/p/a.cpp");
+
+    // **The bare spelling**, which is what a deduced return type records.
+    let reached = session.the_class_after_the_operator(&view, "shared_ptr<Resource>", true);
+    assert_eq!(
+        reached.as_deref(),
+        Some("Resource"),
+        "the arrow reaches the pointee through element_type"
+    );
+
+    // And the member list of the bare spelling is the class's, not an empty one.
+    let listed = session.members_of(&view, "shared_ptr<Resource>");
+    assert!(
+        matches!(&listed, Known::Yes(list) if list.members.iter().any(|member| member.fact.name == "element_type")),
+        "the bare spelling names the class: {listed:?}"
+    );
+}
+
 /// One file in one project, cooked, with a view of it — the shape the two tests above share.
 fn one_file_session(source: &str) -> (Session<MemoryFiles>, cpp_code_analysis::FileView) {
     let files = MemoryFiles::new().with_file("/p/a.cpp", source);

@@ -85,6 +85,11 @@ fn what_it_says(fact: &DeclFact) -> String {
     if let Some(requires) = &fact.requires_clause {
         said.push_str(&format!(" requires `{requires}`"));
     }
+    // **The annotation the declaration was written under** — `UCLASS(Blueprintable)`. Reported here because the card is
+    // rendered from the fact, so a fact that lost it and a card that does not show it look the same from outside.
+    if let Some(reflection) = &fact.reflection {
+        said.push_str(&format!(" under `{}`", reflection.said()));
+    }
     if fact.modifiers.bits() != 0 {
         said.push_str(&format!(" modifiers {:#x}", fact.modifiers.bits()));
     }
@@ -103,6 +108,7 @@ fn declaration_value(session: &Session<DiskFiles>, definition: &ProjectDefinitio
         "parameter_list": definition.fact.parameter_list,
         "parameters": definition.fact.parameters,
         "requires_clause": definition.fact.requires_clause,
+        "reflection": definition.fact.reflection.as_ref().map(|reflection| reflection.said()),
         "modifiers": definition.fact.modifiers.bits(),
     })
 }

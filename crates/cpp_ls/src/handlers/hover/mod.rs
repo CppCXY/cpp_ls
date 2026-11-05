@@ -49,13 +49,6 @@ use crate::util::{file_offset_at_position, uri_to_file_path};
 /// The two vocabularies a popup has an answer for and the analysis does not: keywords, and Doxygen's commands.
 mod vocabulary;
 
-/// How much of a declaration's text is shown before it is elided.
-///
-/// A hover is a popup, and a declaration can be a whole class body or a 40-line function. The cut is at a line
-/// boundary so that what is shown is still code, and the count says how much was left out — an elision a reader
-/// can see, rather than a `…` that might be the file's own text.
-const MAX_HOVER_LINES: usize = 12;
-
 /// How long an expression quoted in a hover may be before it is cut.
 ///
 /// An expression is quoted *inside a line of markdown*, so it is collapsed to one line first; the cut is what
@@ -659,7 +652,7 @@ fn member_markdown(
     if shown.len() > 1 {
         let mut out = String::from("```cpp\n");
         for candidate in &shown {
-            out.push_str(&signature_line(&candidate.fact));
+            out.push_str(&a_line(&candidate.fact));
             out.push('\n');
         }
         out.push_str("```\n\n");
@@ -818,7 +811,7 @@ fn overloads_markdown(
             fact.returns = read.returns;
             fact.type_of = read.type_of;
         }
-        let mut line = signature_line(&fact);
+        let mut line = a_line(&fact);
         if is_the_one
             && let Some(view) = view
             && let Some(text) = session.text(&declaration.file)
@@ -1003,55 +996,12 @@ fn the_type_the_macros_leave<F: cpp_code_analysis::FileProvider + Clone>(
     let spelling = spelling.trim().to_string();
     (!spelling.is_empty() && spelling != returns).then_some(spelling)
 }
-fn spells_a_signature(fact: &DeclFact) -> bool {
-    fact.returns.is_some() || fact.parameter_list.is_some() || fact.type_of.is_some()
-}
-
-fn signature_line(fact: &DeclFact) -> String {
-    if fact.returns.is_none()
-        && fact.parameter_list.is_none()
-        && let Some(written) = &fact.type_of
-    {
-        return format!("{written} {}{}", fact.name, the_trailing_clause(fact));
-    }
-    match (&fact.returns, &fact.parameter_list) {
-        (Some(returns), Some(parameters)) => format!(
-            "{returns} {}{parameters}{}",
-            fact.name,
-            the_trailing_clause(fact)
-        ),
-        (Some(returns), None) => format!("{returns} {}(…)", fact.name),
-        (None, Some(parameters)) => {
-            format!("{}{parameters}{}", fact.name, the_trailing_clause(fact))
-        }
-        (None, None) => format!("{} {}", kind_words(fact), fact.qualified_name()),
-    }
-}
-
-/// **What a function's declaration writes after its parameter list** — `const`, `volatile`, `&&`, and the
-/// `requires`-clause.
+/// **The declaration's line, rebuilt** — the renderer's single-line form, for a card or an overload list.
 ///
-/// The report was `void call(Fn &&fn) const requires requires { fn(*this); }` hovering as `call(Fn &&fn)`: the two halves a
-/// reader of a class with two `call`s needs to tell them apart were both missing, and one of them (`const`) was missing
-/// from the fact itself. See [`cpp_code_analysis::DeclModifiers::CONST`] and [`DeclFact::requires_clause`].
-fn the_trailing_clause(fact: &DeclFact) -> String {
-    let bits = fact.modifiers.bits();
-    let mut out = String::new();
-    for (bit, word) in [
-        (cpp_code_analysis::DeclModifiers::CONST, " const"),
-        (cpp_code_analysis::DeclModifiers::VOLATILE, " volatile"),
-        (cpp_code_analysis::DeclModifiers::RVALUE_REFERENCE, " &&"),
-        (cpp_code_analysis::DeclModifiers::LVALUE_REFERENCE, " &"),
-    ] {
-        if bits & bit.bits() != 0 {
-            out.push_str(word);
-        }
-    }
-    if let Some(clause) = &fact.requires_clause {
-        out.push(' ');
-        out.push_str(clause);
-    }
-    out
+/// The type writer and the parameter parser live in [`cpp_code_analysis::sema::render`], so a line printed in a list and
+/// the same line printed above a card are the same line, generated the same way.
+fn a_line(fact: &DeclFact) -> String {
+    cpp_code_analysis::sema::render::a_line(fact, None, None)
 }
 
 pub(crate) fn markdown(value: String) -> Hover {
@@ -1178,64 +1128,6 @@ fn written_template_id(
     (written.contains('<') && !written.is_empty()).then(|| written.to_string())
 }
 
-/// A declaration, rendered from the fact the index holds.
-///
-/// `written` is **the spelling the reader wrote at the cursor**, when the cursor is on a template-id use — see
-/// [`written_template_id`]. It is `None` for every other card, and the one card that uses it is a type template's.
-/// **The `template <…>` header written immediately before a declaration**, from the declaring file's own text.
-///
-/// `None` when there is none, or when something other than whitespace sits between the header's `>` and the declaration —
-/// which is what keeps a header that belongs to the *previous* declaration from being borrowed by this one.
-///
-/// The search goes backwards from the name for the last `template`, then checks that the text between the header's closing
-/// `>` and the name is only whitespace. A header that spans lines is found the same way, because the scan is over the text
-/// rather than over a line.
-fn the_template_head_before(
-    session: &Session<DiskFiles>,
-    file: &std::path::Path,
-    at: usize,
-) -> Option<String> {
-    let text = session.text(file)?;
-    let before = text.get(..at)?;
-    let start = before.rfind("template")?;
-    let header = &before[start..];
-    // The header ends at its balanced `>`; anything but whitespace between that and the name means the header belongs to
-    // another declaration.
-    let mut depth = 0i32;
-    let mut end = None;
-    for (offset, character) in header.char_indices() {
-        match character {
-            '<' => depth += 1,
-            '>' => {
-                depth -= 1;
-                if depth == 0 {
-                    end = Some(offset + 1);
-                    break;
-                }
-            }
-            _ => {}
-        }
-    }
-    let end = end?;
-    // **The header belongs to the declaration whose name follows it**, and what sits between them is the return type and
-    // the specifiers (	emplate <class T>\nT with(…)). What would prove it belongs to *another* declaration is a
-    // declaration ending in that span: a ;, a } or a {.
-    let between = &header[end..];
-    if between.contains(';') || between.contains('}') || between.contains('{') {
-        return None;
-    }
-    // A `template` that is the beginning of a *string* or a comment would be found by `rfind` as well; requiring the
-    // header to start at a word boundary is what keeps this to the keyword.
-    let starts_a_word = before[..start]
-        .chars()
-        .next_back()
-        .is_none_or(|character| !character.is_alphanumeric() && character != '_');
-    if !starts_a_word {
-        return None;
-    }
-    Some(header[..end].trim().to_string())
-}
-
 fn declaration_markdown(
     session: &Session<DiskFiles>,
     view: &FileView,
@@ -1262,10 +1154,22 @@ fn declaration_markdown(
     // The index is asked only when the binding's fact has **nothing to compose from** — no type, no return type, no
     // parameter list — so a declaration the file spells keeps its own answer, and one the index does not hold falls back
     // to the binding rather than to an empty card.
-    let indexed = if found.fact.kind == DeclKind::Function
-        && found.fact.type_of.is_none()
+    // **A binding is a place to jump to; the card wants the declaration's facts.** `ProjectDefinition::from_binding`
+    // records no type and no return type, deliberately — they are facts about the file's text, and a binding carries
+    // none of them. A hover on a function's own definition therefore printed `make_sized()` and "a function", while the
+    // index held `std::array<int, Size>`; and a **member alias** hovered at its declaration printed the bare name
+    // (`value_type`) where the index holds `T` — measured with `inspect hover` on a class template.
+    //
+    // The index is asked only when the binding's fact has **nothing to render from** — no type, no return type, no
+    // parameter list — so a declaration the file spells keeps its own answer, and one the index does not hold falls back
+    // to the binding rather than to an empty card.
+    let indexed = if (found.fact.type_of.is_none()
         && found.fact.returns.is_none()
-        && found.fact.parameter_list.is_none()
+        && found.fact.parameter_list.is_none())
+        // **A binding carries no annotation either.** `UCLASS(Blueprintable)` is read into the fact from the file's text
+        // (`fill_the_reflection`), and a fact built from a *binding* — which is what a hover on the declaration's own name
+        // gets — has none of it. The index's fact is the one with it, so it is asked for whenever the field is missing.
+        || found.fact.reflection.is_none()
     {
         session
             .index()
@@ -1284,6 +1188,20 @@ fn declaration_markdown(
         && let Some(better) = the_type_the_macros_leave(session, &found.file, &corrected, &returns)
     {
         corrected.returns = Some(better);
+    }
+    // **The annotation the file writes, when the index has not recorded it yet.** `UCLASS(Blueprintable)` is read into
+    // the fact from the file's text, and the summary that holds it is built by the pump — a hover can arrive first.
+    // The declaring file's own view is right here (the node below is taken from it), and its facts are the same facts
+    // the summary would hold, so the card reads them rather than showing a class with no annotation.
+    if corrected.reflection.is_none()
+        && let Some(facts) = session
+            .view_of_the_file(&found.file)
+            .map(|view| session.facts_of_the_view(&view))
+        && let Some(the_files) = facts
+            .iter()
+            .find(|theirs| theirs.name_range.start_offset == corrected.name_range.start_offset)
+    {
+        corrected.reflection = the_files.reflection.clone();
     }
     let fact = &corrected;
     let mut out = String::new();
@@ -1323,32 +1241,23 @@ fn declaration_markdown(
         cpp_code_analysis::file::coordinates::ReadingOffset::new(fact.name_range.start_offset),
     );
 
-    // **The code block is the declaration's own line, and an enumerator's is its name.** [`spells_a_signature`] is
-    // false for an enumerator (no type, no parameter list, no return type), so the fallback — the raw text of the
-    // declaration — drew the whole `enum { MyClass = 123, AnotherClass };` body above a card that already says what the
-    // name is and what number it has (reported from an editor, with a screenshot of exactly that). The name is what the
-    // reader asked about, and the value is the next line.
-    // **The `template <…>` header the declaration was written with.** `int with(U input)` does not say that `U` is a
-    // template parameter, and the fact holds only the names — so the header is read from the declaring file's text: the
-    // nearest `template <…>` that ends before the name with nothing but whitespace between them. The file's own answer,
-    // so `template <int N>` stays a non-type parameter.
-    let template_head =
-        the_template_head_before(session, &found.file, fact.name_range.start_offset);
-
-    let declaration = if !subject.is_empty() {
-        subject.to_string()
-    } else if spells_a_signature(fact) {
-        signature_line(fact)
-    } else if enumerator.is_some() {
-        fact.name.clone()
-    } else {
-        declaration_text(session, Some(view), &found.file, fact)
-    };
-    let declaration = match &template_head {
-        Some(head) => format!("{head}\n{declaration}"),
-        None => declaration,
-    };
-    out.push_str(&code_block(&declaration));
+    // **The code block is generated from the model** — see [`cpp_code_analysis::sema::render`]. Not the declaration's
+    // text, not the fact's strings joined together, and no `template <…>` cut out of the file: a type is a `Type`
+    // printed by its own writer, a parameter list is parsed and rebuilt, and the head comes from the declaration's
+    // template parameters. The renderer is the one place that decides this, so the card, the overload list and the
+    // member list cannot disagree.
+    let node = session.the_declaration_node(&found.file, fact.range.start_offset);
+    let declaration = cpp_code_analysis::sema::render::an_item(fact, node.as_ref(), constant_value);
+    out.push_str(&code_block(&declaration.join("\n")));
+    // **The instantiation the reader wrote**, when it is not what the declaration says. A class template's fact
+    // describes the declaration; the cursor may be on `std::map<std::string, LuaTokenKind>` and the signature that
+    // matters is the class's. Parsed by the type writer like everything else.
+    if !subject.is_empty() {
+        out.push_str(&format!(
+            "\nAs written here: `{}`\n",
+            cpp_code_analysis::sema::render::a_type(subject)
+        ));
+    }
     let qualified = if subject.is_empty() {
         fact.qualified_name()
     } else {
@@ -1844,141 +1753,6 @@ fn kind_words(fact: &DeclFact) -> String {
     words
 }
 
-/// **The declaration's head**, as the file writes it — the signature, with any body left out.
-///
-/// This is the shape rust-analyzer's hover has, and the reason is not fashion: what a reader wants from a popup is
-/// the *interface* of the thing under the cursor. `class Sux { public: void print() { printf(…); } };` says nothing
-/// the head does not, and it pushes the documentation and the location off the screen.
-///
-/// # Why the head is taken from the source rather than composed from the fact
-///
-/// The fact carries the name, the kind, the return type, the parameter list, the template parameters and the bases —
-/// enough to *build* a signature, and that was the first thing tried. It does not carry the keyword: [`DeclKind`]
-/// says `Type`, and whether the file wrote `class`, `struct`, `union` or `enum class` is not in it. Composing would
-/// therefore mean printing `class` for a `struct`, which is a guess dressed as a fact — the kind of answer this
-/// codebase refuses everywhere else. So the spelling stays the file's and only the *extent* is decided here.
-///
-/// The head ends at the first `{`: a declaration's head cannot contain one (`= {}` as a default argument is the one
-/// case, and it is rare enough that cutting there beats a brace-matching scan that would have to know about strings,
-/// comments and character literals to be right). `class Sux {` becomes `class Sux`, `void print() {` becomes
-/// `void print()`, and a declaration with no body (`int x = 1;`) is unchanged. A head that was cut keeps the
-/// punctuation that says it is one — a definition's `)` reads as a call otherwise.
-fn declaration_text(
-    session: &Session<DiskFiles>,
-    view: Option<&FileView>,
-    file: &std::path::Path,
-    fact: &DeclFact,
-) -> String {
-    // **The text the fact's offsets are offsets into**, not simply the file's — see
-    // [`the_text_a_facts_offsets_are_in`]. Reading the file's bytes at a rendering's offsets is what put `tream>`,
-    // the tail of `#include <iostream>`, at the top of a popup about `main`.
-    let Some(text) = the_text_a_facts_offsets_are_in(session, view, file) else {
-        // The file cannot be read (deleted since it was indexed, or a buffer that was closed unsaved): the fact is
-        // still true, and what it says is shown without the text.
-        return format!("{} {}", kind_words(fact), fact.qualified_name());
-    };
-
-    // **A variable is shown by its type**, because the fact's `range` is the *declarator* — the name and its
-    // initializer — so `auto n = 1;` slices to `n = 1` and `Box<int> b;` to `b`, and neither is an interface.
-    //
-    // `auto` is not a type: it is the word the file used instead of one, so it is treated exactly like no type at
-    // all and the analysis is asked. That distinction was got wrong first time round — `auto n = 1;` keeps
-    // `Some("auto")`, the fallback was written for `None`, and the popup went on showing the initializer.
-    if matches!(fact.kind, DeclKind::Variable) {
-        // **A function type is never a variable's type**, and a structured binding is where the two got mixed up:
-        // `for (auto [key, value] : map)` records no written type for either name, `declared_type_of` answered the
-        // enclosing function's `int()`, and the popup showed `int() value;` for a `std::string`. `int()` cannot be a
-        // variable, so a spelling that ends in `)` is treated as no spelling at all and the analysis is asked — which
-        // is where the element type of a binding lives now.
-        let from_the_fact = fact
-            .type_of
-            .as_deref()
-            .filter(|type_of| *type_of != "auto" && !type_of.trim_end().ends_with(')'));
-        let written_type = match from_the_fact {
-            Some(type_of) => Some(type_of.to_string()),
-            // The file's own bindings carry no `type_of` at all, and the offset to ask at is the fact's own name —
-            // which is in this view's coordinates exactly when the fact is about this file.
-            None if view.is_some_and(|view| is_the_viewed_file(view, file)) => {
-                match session.type_at(
-                    view.expect("established above"),
-                    cpp_code_analysis::file::coordinates::ReadingOffset::new(
-                        fact.name_range.start_offset,
-                    ),
-                ) {
-                    Known::Yes(type_of) => Some(type_of.type_of.clone()),
-                    _ => None,
-                }
-            }
-            None => None,
-        };
-
-        if let Some(type_of) = written_type {
-            let type_of = type_of.trim();
-            if !type_of.is_empty() && type_of != "auto" {
-                return format!("{type_of} {};", fact.name);
-            }
-        }
-    }
-
-    // **A declaration whose type this layer cannot spell is shown as the file writes it**, from the *declaration's*
-    // own start rather than from the declarator's. `static const struct { unsigned char left; … } priority[]` is the
-    // case: the type is an unnamed class, so there is no spelling for a signature line, and the declarator alone is
-    // `priority[] = …` — while what the reader needs to see is the struct they wrote. The head rule below cuts at the
-    // first `{` because that is where a *body* starts; here the first `{` opens the type, so the cut is skipped.
-    if matches!(fact.kind, DeclKind::Variable)
-        && fact.type_of.is_none()
-        && let Some(start) = the_declarations_start(view, file, fact)
-    {
-        let written = slice_lines(text, start, fact.range.end_offset());
-        let written = written.trim();
-        if !written.is_empty() {
-            return if written.ends_with(';') || written.ends_with('…') {
-                written.to_string()
-            } else {
-                format!("{written};")
-            };
-        }
-    }
-
-    let written = slice_lines(text, fact.range.start_offset, fact.range.end_offset());
-    let head = match written.find('{') {
-        Some(at) => written[..at].trim_end(),
-        None => written.trim_end(),
-    };
-
-    match head.chars().last() {
-        Some(')') => format!("{head};"),
-        _ => head.to_string(),
-    }
-}
-
-/// **Where the declaration that names `fact` starts**, when the fact is about the file the view is of.
-///
-/// A fact's `range` is its **declarator** — `priority[] = { … }` — while the declaration it belongs to starts at its
-/// specifiers (`static const struct`). The tree answers this without a heuristic: the innermost `Declaration` node
-/// holding the fact's name is the declaration, and its start is where a reader would say the line begins.
-///
-/// `None` for a fact about another file (this view has no tree for it) and for a name the tree cannot place, which is
-/// the case the caller answers with the declarator's own text as it always did.
-fn the_declarations_start(
-    view: Option<&FileView>,
-    file: &std::path::Path,
-    fact: &DeclFact,
-) -> Option<usize> {
-    let view = view.filter(|view| is_the_viewed_file(view, file))?;
-    let mut node = cpp_parser::token_at(&view.root, fact.name_range.start_offset)?.parent();
-
-    while let Some(current) = node {
-        if cpp_parser::CppSyntaxKind::from(current.kind()) == cpp_parser::CppSyntaxKind::Declaration
-        {
-            return Some(cpp_parser::source_range(current.text_range()).start_offset);
-        }
-        node = current.parent();
-    }
-
-    None
-}
-
 /// **The text a fact's offsets are offsets into** — which is not always the file's own text.
 ///
 /// A fact about a declaration in **another file** carries that file's offsets: the index maps a cooked reading back
@@ -2061,27 +1835,6 @@ fn definition_line(
     RenderedText {
         text: text[line_start..end].trim_end().to_string(),
     }
-}
-
-/// A slice of a file, cut at a line boundary when it is long.
-fn slice_lines(text: &str, start: usize, end: usize) -> String {
-    if start >= text.len() {
-        return String::new();
-    }
-
-    let end = end.min(text.len()).max(start);
-    let slice = &text[start..end];
-
-    let lines: Vec<&str> = slice.lines().collect();
-    if lines.len() <= MAX_HOVER_LINES {
-        return slice.trim_end().to_string();
-    }
-
-    format!(
-        "{}\n// … {} more lines",
-        lines[..MAX_HOVER_LINES].join("\n"),
-        lines.len() - MAX_HOVER_LINES
-    )
 }
 
 /// `file.h:12` — where something is, as a client can follow.
@@ -2357,27 +2110,6 @@ mod tests {
             "a `//` comment is prose with an `@` in it"
         );
     }
-    #[test]
-    fn a_long_declaration_is_cut_at_a_line_and_says_how_much_is_missing() {
-        let text = (0..20)
-            .map(|line| format!("int field_{line};"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let shown = slice_lines(&text, 0, text.len());
-
-        assert_eq!(shown.lines().count(), MAX_HOVER_LINES + 1);
-        assert!(shown.ends_with("// … 8 more lines"), "{shown}");
-    }
-
-    #[test]
-    fn a_short_declaration_is_shown_whole() {
-        let text = "struct Widget { int size; };\nint other;";
-        assert_eq!(
-            slice_lines(text, 0, "struct Widget { int size; };".len()),
-            "struct Widget { int size; };"
-        );
-    }
-
     #[test]
     fn a_fence_cannot_be_closed_by_the_declaration_it_quotes() {
         // A declaration holding a raw string with three backticks in it: the block has to be fenced with more.

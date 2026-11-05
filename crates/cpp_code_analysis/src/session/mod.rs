@@ -8832,6 +8832,48 @@ impl<F: FileProvider + Clone> Session<F> {
         Some((types, candidates))
     }
 
+    /// **A file's facts, read from its own view** — the answer an index summary gives, without waiting for one.
+    ///
+    /// A request can beat the index: the file is open, its tree is parsed, and the summary that records a reflection
+    /// annotation (`UCLASS(Blueprintable)`) is built by the pump some time later. A card that needs one field the
+    /// binding does not carry cannot wait, so it asks the view — the same `build_facts` the summary is built from, over
+    /// the same tree, which is why the two cannot disagree about what the file says.
+    ///
+    /// One parse and one fact-building pass, the price [`Session::outline`] already pays per request.
+    pub fn facts_of_the_view(&self, view: &FileView) -> Vec<crate::DeclFact> {
+        let preprocessing = crate::preprocess(&view.source, view.tree.get_tokens());
+        let errors: Vec<cpp_parser::SourceRange> = view
+            .tree
+            .get_errors()
+            .iter()
+            .map(|error| cpp_parser::source_range(error.range))
+            .collect();
+        crate::build_facts(&view.scopes, &preprocessing, &view.root, &errors).0
+    }
+
+    /// **The declaration's own node**, for a fact that names one — the syntax a rendering needs.
+    ///
+    /// A [`DeclFact`] records the words of a declaration and not the structure of it: whether a class was written
+    /// `class`, `struct` or `union` is the node's kind, and a template head's parameters are the node's children. A
+    /// caller that has only the fact can render everything a fact carries and must guess the rest, so the card asks for
+    /// the node where the fact says the declaration is.
+    ///
+    /// `None` when the file cannot be read (a header the project never loaded), when the offset is not inside a
+    /// declaration, or when the declaration there is not the one asked about — all three are the caller's answer
+    /// "render from the fact alone", never an error.
+    pub fn the_declaration_node(
+        &self,
+        file: &Path,
+        offset: usize,
+    ) -> Option<cpp_parser::CppDeclaration> {
+        let view = self.view_of_the_file(file)?;
+        let token = cpp_parser::token_at(&view.root, offset)?;
+        use cpp_parser::CppAstNode as _;
+        token
+            .parent_ancestors()
+            .find_map(cpp_parser::CppDeclaration::cast)
+    }
+
     /// **The template arguments a call fixes**, for a declaration the caller already holds.
     ///
     /// Deduction needs the call's argument types, which is what a `SemanticModel` is for; the names come from the

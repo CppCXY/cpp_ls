@@ -3349,9 +3349,16 @@ fn a_hover_names_the_instantiation_and_never_invents_a_void() {
         !text.contains("void"),
         "an anonymous struct's variable is not `void`: {text}"
     );
+    // **The card is generated, not the declaration's text.** It used to be the file's own spelling of the anonymous
+    // struct — the only way to show `unsigned char` for a type with no name — and that is exactly the copy-paste the
+    // card must not do: the type has no name to spell, so the card shows the name and says nothing it did not read.
     assert!(
-        text.contains("unsigned char"),
-        "the declaration's own text is what the reader can see: {text}"
+        !text.contains("unsigned char"),
+        "the card does not echo the struct's body: {text}"
+    );
+    assert!(
+        text.contains("priority"),
+        "and it is still about the name the cursor is on: {text}"
     );
 
     server.request(999, "shutdown", Value::Null);

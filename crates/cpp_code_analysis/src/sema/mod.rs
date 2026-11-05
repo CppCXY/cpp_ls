@@ -22,6 +22,7 @@ pub mod model;
 pub mod module_info;
 pub mod modules;
 pub mod parser_symbols;
+pub mod render;
 pub mod resolve;
 pub mod scopes;
 pub mod symbol;

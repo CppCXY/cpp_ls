@@ -1689,8 +1689,20 @@ pub(crate) fn the_pointee_of_a_handle(
         file,
         vec![fact.name.clone()],
     );
+    // **A name that no class declares is not a pointee.** `std::shared_ptr`'s `element_type` is written
+    // `typename __shared_ptr<_Tp>::element_type`, and a walk that cannot finish it answers the spelling it started with —
+    // a class called `__shared_ptr<Resource>::element_type`, which nothing declares. Handing that back hides the caller's
+    // own fallback (following `operator->`'s declared return type), which is the step that does resolve it: measured on
+    // `test_cpp`'s `smart_pointers.cpp`, the hover asked for members of that invented name and said
+    // "`shared_ptr<Resource>` has no member `identifier`".
     match finished.0 {
-        Type::Named { name, arguments } => Some((name, arguments)),
+        Type::Named { name, arguments } => {
+            let declared = index.files_declaring(base_type_name(&name), path);
+            declared
+                .iter()
+                .any(|declaration| declaration.fact.kind == crate::DeclKind::Type)
+                .then_some((name, arguments))
+        }
         _ => None,
     }
 }
@@ -1965,6 +1977,10 @@ pub fn members_of(
     // written as, and the class is `std::shared_ptr`; a member list asked for the bare name answered `NotDeclaredHere`
     // while the completion at the same cursor offered the members (reported: "`shared_ptr<int>` has no member `reset`"
     // with `reset` in the list next to it). Qualified once, only when the first answer held no class.
+    // **An empty answer is also a reason to try the qualified spelling.** A bare class name that resolved to an
+    // *ambiguous* declaration answers `Known::Yes` with no members (`direct_members`' own rule for `Ambiguous`), so the
+    // retry below — which only ran when the first answer held no class at all — never happened: measured,
+    // `members_of("shared_ptr")` answered 0 members while `members_of("std::shared_ptr")` answered 39.
     let listed = match &listed {
         Known::No | Known::Unknown(_) => match class.contains("::") {
             true => listed,
@@ -1975,6 +1991,20 @@ pub fn members_of(
                 _ => listed,
             },
         },
+        Known::Yes(list) if list.members.is_empty() && !class.contains("::") => {
+            match qualified_from_the_index(index, path, base_type_name(class)) {
+                Some(qualified) if qualified != class => {
+                    // The arguments the caller wrote are kept: `shared_ptr<Resource>` qualifies to
+                    // `std::shared_ptr<Resource>`, which is the spelling the members are then substituted with.
+                    let qualified = match class.find('<') {
+                        Some(at) => format!("{qualified}{}", &class[at..]),
+                        None => qualified,
+                    };
+                    members_of_inner(index, scopes, root, path, &qualified)
+                }
+                _ => listed,
+            }
+        }
         Known::Yes(_) => listed,
     };
     if let Known::Yes(list) = &listed {
@@ -4435,7 +4465,7 @@ fn type_of_expression_inner(
     //
     // Read from the **token**, not the text: `1` and `1.0f` and `"abc"` differ by their kind, and a suffix
     // (`10u`, `1.0L`) is part of the literal rather than a separate thing to interpret. A user-defined literal
-    // (`10_km`) is deliberately **not** here: its type is whatever the literal operator returns, which is a lookup.
+    // (`10_km`) is a **lookup**: its type is the return type of `operator""_km`, and that is the arm below.
     if let Some((kind, written_as)) = expression
         .children_with_tokens()
         .filter_map(|element| element.into_token())
@@ -4468,8 +4498,36 @@ fn type_of_expression_inner(
             cpp_parser::CppTokenKind::NullptrLiteral | cpp_parser::CppTokenKind::NullptrKeyword => {
                 Some("nullptr_t")
             }
+            // **A user-defined literal's type is its operator's return type.** `"numbers"sv` is
+            // `operator""sv("numbers", 1)`, whose declaration is where the type is written — a lookup, and one the index
+            // answers by name. Measured on `test_cpp`'s `strings.cpp`: `"numbers"sv.size()` had no type at all, so the
+            // hover on `size` said the type of `"numbers"sv` was not known and go-to-definition reached nothing.
+            cpp_parser::CppTokenKind::UserDefinedLiteral => None,
             _ => None,
         };
+        // **The one literal kind whose spelling is not its type.** Handled before the arm above so that the
+        // `Some("int")`-style answers stay one match, and because this is the only case that needs the index.
+        if kind == cpp_parser::CppTokenKind::UserDefinedLiteral {
+            // **An unknown answer says what is unknown**: the literal, with its suffix, rather than the whole
+            // expression, because the suffix is the part that did not resolve.
+            let a_user_defined_literal_is = |returns: String| {
+                Known::Yes((
+                    crate::sema::types::parse_type_spelling(&returns),
+                    path.to_path_buf(),
+                ))
+            };
+            if let Some(suffix) = a_user_defined_literals_suffix(&written_as)
+                && let Some(declared) = index
+                    .files_declaring(&format!("operator\"\"{suffix}"), path)
+                    .into_iter()
+                    .find(|declared| declared.fact.kind == crate::DeclKind::Function)
+                && let Some(returns) = declared.fact.returns.as_deref()
+                && !returns.trim().is_empty()
+            {
+                return a_user_defined_literal_is(returns.to_string());
+            }
+            return Known::Unknown(UnknownReason::UnknownType(Box::from(written)));
+        }
         if let Some(spelled) = literal {
             // **Parsed, not named.** `Type::named("int")` is a type whose *name* is `int` — a class as far as every
             // later question is concerned — and the same for `const char*`. Measured: a string literal came back as
@@ -4484,6 +4542,30 @@ fn type_of_expression_inner(
                 path.to_path_buf(),
             ));
         }
+    }
+
+    /// **The suffix of a user-defined literal** — `_kb` for `4_kb`, `sv` for `"numbers"sv`, `_f` for `1.0e5_f`.
+    ///
+    /// The token is one piece of text, so the boundary has to be found in it. The **last** run of identifier characters
+    /// is the suffix's neighbourhood; inside it, a suffix begins at its last `_` (a numeric literal's suffix must start
+    /// there, and `0x1F_kb`'s `F` is a hexadecimal digit, not a letter of the suffix) and otherwise at its first letter
+    /// (`"x"sv`, `1.5s` — the reserved suffixes the standard library declares without an underscore).
+    fn a_user_defined_literals_suffix(written: &str) -> Option<&str> {
+        let written = written.trim_end();
+        let run_start = written
+            .rfind(|character: char| !(character.is_ascii_alphanumeric() || character == '_'))
+            .map(|boundary| boundary + 1)
+            .unwrap_or(0);
+        let run = &written[run_start..];
+        if run.is_empty() {
+            return None;
+        }
+        if let Some(underscore) = run.rfind('_') {
+            let suffix = &run[underscore..];
+            return (suffix.len() > 1).then_some(suffix);
+        }
+        run.find(|character: char| character.is_ascii_alphabetic())
+            .map(|at| &run[at..])
     }
 
     /// **The type of a string literal, from its encoding prefix** — see the literal arm of [`type_of_expression_inner`].
@@ -6527,9 +6609,42 @@ fn finish_a_nested_name(
         }
         asked.push(nested.clone());
 
-        let Known::Yes((inner, inner_file)) =
-            member_fact(index, scopes, root, path, class, &nested, None)
-        else {
+        // **A nested name whose head is another class.** `std::shared_ptr`'s `element_type` is
+        // `typename __shared_ptr<_Tp>::element_type`: the alias is the **base's**, and the head of the spelling names the
+        // base. Asking the outer class for a member spelled `__shared_ptr<Resource>::element_type` finds nothing, and the
+        // walk stopped right there — measured on `test_cpp`'s `smart_pointers.cpp`, where `locked->identifier()` answered
+        // "`shared_ptr<Resource>` has no member `identifier`" for a `shared_ptr<Resource>` that has one.
+        //
+        // The step is the same question [`the_pointee_of_a_handle`] asks, so it is the same `member_fact` call: the head
+        // resolved in the enclosing scopes (a base name is not a member, so `resolve_aliases` is the reader that knows how
+        // it is written) and the tail looked up in it, with the head's own arguments as the pairing.
+        let found = match member_fact(index, scopes, root, path, class, &nested, None) {
+            Known::Yes(found) => Known::Yes(found),
+            miss => match the_head_and_the_member_of(&nested) {
+                Some((head, tail)) => {
+                    let head = resolve_aliases(index, scopes, root, path, head).to_string();
+                    let arguments: Vec<String> = parse_type_spelling(&head)
+                        .arguments()
+                        .iter()
+                        .map(|argument| argument.to_string())
+                        .collect();
+                    match member_fact(
+                        index,
+                        scopes,
+                        root,
+                        path,
+                        &head,
+                        tail,
+                        (!arguments.is_empty()).then_some(&arguments),
+                    ) {
+                        Known::Yes(found) => Known::Yes(found),
+                        _ => miss,
+                    }
+                }
+                None => miss,
+            },
+        };
+        let Known::Yes((inner, inner_file)) = found else {
             break;
         };
         let Some(inner_type) = inner.type_of.as_deref() else {
@@ -6542,6 +6657,34 @@ fn finish_a_nested_name(
     }
 
     (current, current_file)
+}
+
+/// **Split `A<B>::C` into its head and its last member** — `("A<B>", "C")` — at the last `::` outside angle brackets.
+///
+/// `None` when there is no `::` to split at, or when either half would be empty. The head keeps its arguments: a base
+/// written `__shared_ptr<_Tp>` is looked up by the name `__shared_ptr` and substituted by `_Tp`'s argument, and the two
+/// halves are what the caller passes on.
+fn the_head_and_the_member_of(nested: &str) -> Option<(&str, &str)> {
+    let mut depth = 0usize;
+    let mut boundary = None;
+    let bytes = nested.as_bytes();
+    let mut at = 0usize;
+    while at + 1 < bytes.len() {
+        match bytes[at] {
+            b'<' => depth += 1,
+            b'>' => depth = depth.saturating_sub(1),
+            b':' if depth == 0 && bytes[at + 1] == b':' => {
+                boundary = Some(at);
+                at += 1;
+            }
+            _ => {}
+        }
+        at += 1;
+    }
+    let boundary = boundary?;
+    let head = nested[..boundary].trim();
+    let tail = nested[boundary + 2..].trim();
+    (!head.is_empty() && !tail.is_empty()).then_some((head, tail))
 }
 
 /// **A declaration's type finished when it is an alias template applied to arguments.**
@@ -8907,8 +9050,17 @@ pub(crate) fn qualified_from_the_index(
     if class.contains("::") {
         return None;
     }
+    // **A *type* called that, not the first thing called that.** `files_declaring` is a name lookup, and a class's
+    // name is also its constructors': `std::shared_ptr` has a dozen facts named `shared_ptr` whose scope is
+    // `std::shared_ptr` itself — qualifying from one of those gives `std::shared_ptr::shared_ptr`, a class nothing
+    // declares, and every member query after it answers nothing. Measured: this function is what turned
+    // `shared_ptr<Resource>` into a class with **0 members** while `std::shared_ptr<Resource>` answered **39**, and
+    // the hover on `locked->identifier()` said "has no member" because of it. The question here is a *class* spelling,
+    // so the declaration has to be the class.
     let declared = index.files_declaring(class, from);
-    let found = declared.into_iter().next()?;
+    let found = declared
+        .into_iter()
+        .find(|declared| declared.fact.kind == crate::DeclKind::Type)?;
     let scope = found.fact.scope.as_deref()?;
     (!scope.is_empty()).then(|| format!("{scope}::{class}"))
 }
@@ -20826,7 +20978,19 @@ pub fn substituted_members(
         alias_targets.push(target);
     }
 
-    for member in &mut list.members {
+    // **An alias's own target is not an alias to expand.** `std::shared_ptr`'s `element_type` is written
+    // `using element_type = typename __shared_ptr<_Tp>::element_type;`, so the target contains its own name and
+    // replacing that name with the target doubles the prefix —
+    // `typename __shared_ptr<Resource>::typename __shared_ptr<Resource>::element_type`, measured. The member's own
+    // `type_of` *is* the target, so the expansion is a step for the other members only.
+    let declares_an_alias = |member: &ProjectMember| {
+        member.fact.kind == crate::DeclKind::Type && alias_names.contains(&member.fact.name)
+    };
+    for member in list
+        .members
+        .iter_mut()
+        .filter(|member| !declares_an_alias(member))
+    {
         for spelling in [
             &mut member.fact.parameter_list,
             &mut member.fact.returns,
@@ -20842,6 +21006,17 @@ pub fn substituted_members(
                     &alias_targets,
                 );
             }
+        }
+    }
+    for member in &mut list.members {
+        for spelling in [
+            &mut member.fact.parameter_list,
+            &mut member.fact.returns,
+            &mut member.fact.type_of,
+        ]
+        .into_iter()
+        .flatten()
+        {
             *spelling = crate::sema::types::substituted_spelling(spelling, &names, &arguments);
         }
     }
