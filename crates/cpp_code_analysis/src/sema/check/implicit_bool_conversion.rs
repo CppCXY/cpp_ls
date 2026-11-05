@@ -110,7 +110,7 @@ impl Check for ImplicitBoolConversion {
 /// Parentheses are unwrapped because a reader writes `if ((a == b))` and the condition node is the same one.
 fn the_question_answers_itself(expression: &cpp_parser::CppSyntaxNode) -> bool {
     let mut node = expression.clone();
-    while cpp_parser::CppSyntaxKind::from(node.kind()) == cpp_parser::CppSyntaxKind::ParenExpr {
+    while cpp_parser::CppParenExpr::can_cast(node.kind().into()) {
         match node.children().next() {
             Some(inner) => node = inner,
             None => return false,
@@ -126,7 +126,7 @@ fn the_question_answers_itself(expression: &cpp_parser::CppSyntaxNode) -> bool {
 
     // A logical `!` has the same answer and no typed accessor, so the operator is read from the first token — the
     // same reading `assign_type_check`'s `unary_operand_with` makes, and for the same reason.
-    if cpp_parser::CppSyntaxKind::from(node.kind()) == cpp_parser::CppSyntaxKind::UnaryExpr {
+    if cpp_parser::CppUnaryExpr::can_cast(node.kind().into()) {
         return node
             .children_with_tokens()
             .filter_map(|element| element.into_token())

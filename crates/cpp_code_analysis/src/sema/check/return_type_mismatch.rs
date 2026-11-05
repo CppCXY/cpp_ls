@@ -26,8 +26,6 @@
 //!
 //! The body being checked is in this file, and so is its return type. Nothing here looks at another file.
 
-use cpp_parser::CppSyntaxNode;
-
 use super::{Check, CheckContext, DiagnosticCode};
 use cpp_parser::CppAstNode;
 
@@ -44,7 +42,7 @@ impl Check for ReturnTypeMismatch {
             .filter(super::is_a_function_definition)
             .collect::<Vec<_>>()
         {
-            let Some(declared) = return_type_of(&function) else {
+            let Some(declared) = super::return_type_written_by(&function) else {
                 continue;
             };
             // A placeholder is a deduction question, not a conversion one.
@@ -52,16 +50,12 @@ impl Check for ReturnTypeMismatch {
                 continue;
             }
 
-            for returned in function
-                .descendants()
-                .filter(|node| cpp_parser::CppReturnStat::can_cast(node.kind().into()))
-            {
-                let returned_text = returned.text().to_string();
-                let returned_text = returned_text.trim();
-                let expression = returned
-                    .children()
-                    .find(|child| child.text().to_string().trim() != "return")
-                    .filter(|child| child.text().to_string().trim() != ";");
+            for returned in super::the_returns_in(&function) {
+                let expression = returned.get_expr();
+                let returned_text = expression
+                    .as_ref()
+                    .map(|expression| cpp_parser::subtree_text_spaced(expression.syntax()))
+                    .unwrap_or_default();
 
                 match expression {
                     // `return;` — the statement is the keyword and the semicolon and nothing between them.
@@ -69,7 +63,7 @@ impl Check for ReturnTypeMismatch {
                         if declared != "void" {
                             context.add(
                                 DiagnosticCode::ReturnTypeMismatch,
-                                cpp_parser::source_range(returned.text_range()),
+                                cpp_parser::source_range(returned.get_range()),
                                 String::new(),
                                 t!(
                                     "`return;` in a function declared to return `%{declared}`",
@@ -78,13 +72,13 @@ impl Check for ReturnTypeMismatch {
                             );
                         }
                     }
-                    Some(expression) if declared == "void" => {
-                        let _ = expression;
+                    Some(_) if declared == "void" => {
                         // A value from a `void` function is legal when the expression is itself `void` — which is
                         // the common shape `return f();` — and this layer does not distinguish them.
                     }
                     Some(expression) => {
-                        let crate::Known::Yes((from, _)) = context.type_of(&expression) else {
+                        let crate::Known::Yes((from, _)) = context.type_of(expression.syntax())
+                        else {
                             // The model could not tell what the expression is: a name from a header nobody read, an
                             // overload set, a deduction. Asking a conversion question about an unknown type is how a
                             // check invents a problem.
@@ -104,7 +98,7 @@ impl Check for ReturnTypeMismatch {
                         }
                         context.add(
                             DiagnosticCode::ReturnTypeMismatch,
-                            cpp_parser::source_range(expression.text_range()),
+                            cpp_parser::source_range(expression.get_range()),
                             String::new(),
                             t!(
                                 "`%{returned_text}` returns a value that does not convert to `%{declared}`, the type this function is declared to return", returned_text = returned_text, declared = declared
@@ -115,34 +109,4 @@ impl Check for ReturnTypeMismatch {
             }
         }
     }
-}
-
-/// The return type a function definition writes, as the text before its name.
-///
-/// Read as **text** rather than as nodes, because the grammar's recovery around a declarator is exactly what makes
-/// a node-shaped answer unreliable here: `int* f()`, `const std::string& f()` and `auto f()` all have to come out
-/// as the spelling the reader wrote.
-///
-/// `None` for a definition with nothing before its name, which a constructor has — and a constructor has no
-/// `return` statements either, so nothing is lost.
-fn return_type_of(function: &CppSyntaxNode) -> Option<String> {
-    let parameters = function
-        .children()
-        .find(|child| cpp_parser::CppParamList::can_cast(child.kind().into()))?;
-    let name = function
-        .children()
-        .take_while(|child| child != &parameters)
-        .last()?;
-
-    let whole = function.text().to_string();
-    let start: usize = function.text_range().start().into();
-    let before_the_name: usize = name.text_range().start().into();
-    let head = whole.get(..before_the_name.checked_sub(start)?)?.trim();
-
-    // A pointer or reference written against the name — `int *f()` — belongs to the type.
-    let head = head.trim_end_matches(['*', '&']).trim_end();
-    if head.is_empty() {
-        return None;
-    }
-    Some(head.to_string())
 }

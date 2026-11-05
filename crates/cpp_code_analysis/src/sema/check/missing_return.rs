@@ -184,26 +184,17 @@ impl Check for MissingReturn {
 
             // **A `return` anywhere is enough.** See the module documentation: "not every path returns" is a
             // control-flow question and this layer answers from a tree.
-            let has_a_return = body
-                .descendants()
-                .any(|node| cpp_parser::CppReturnStat::can_cast(node.kind().into()));
-            if has_a_return {
+            if !super::the_returns_in(&function).is_empty() {
                 continue;
             }
 
-            // **A body whose last statement cannot fall through.** Read as text, because "does this end in a
-            // `throw` or in a loop that never ends" is a question about the last few tokens rather than about the
-            // shape of a tree, and because a wrong "it cannot fall through" here is a *missed* finding rather than
-            // an invented one.
-            let text = body.text().to_string();
-            let tail = text.trim_end_matches(['}', ' ', '\n', '\t', ';']);
-            let cannot_fall_through = tail.ends_with("throw")
-                || tail.contains("throw ")
-                || tail.ends_with("while (true)")
-                || tail.ends_with("while(true)")
-                || tail.ends_with("for (;;)")
-                || tail.ends_with("for(;;)");
-            if cannot_fall_through {
+            // **A body whose last statement cannot fall through.** The statement is the node, not a substring of the body:
+            // the text version asked whether `throw ` appeared **anywhere** (`int f() { if (x) throw y; }` was silent) and
+            // whether a nested `while (true)` ended the text. A wrong "cannot fall through" is a *missed* finding, which is
+            // the direction this rule accepts — a wrong "can" is an invented one, which it does not.
+            if cpp_parser::CppCompoundStat::cast(body.clone())
+                .is_some_and(|body| cannot_fall_through(&body))
+            {
                 continue;
             }
 
@@ -229,5 +220,47 @@ impl Check for MissingReturn {
                 ),
             );
         }
+    }
+}
+
+/// **Can the body's last statement not fall through?** — a `throw`, a `while (true)`, a `for (;;)`, or a braced block whose own
+/// last statement says so.
+///
+/// The loop spellings are read from the statement's own text because `CppForStat` does not expose its condition yet; a `break`
+/// inside the loop is not considered, which is the conservative direction (a missed finding, never an invented one).
+fn cannot_fall_through(body: &cpp_parser::CppCompoundStat) -> bool {
+    use cpp_parser::{CppAstNode, CppStat};
+
+    let Some(last) = body.get_stats().last() else {
+        return false;
+    };
+    match &last {
+        CppStat::ThrowStat(_) => return true,
+        CppStat::WhileStat(while_statement) => {
+            let condition = while_statement
+                .get_condition()
+                .map(|condition| condition.syntax().clone());
+            return is_the_literal_true(condition.as_ref());
+        }
+        CppStat::CompoundStat(block) => return cannot_fall_through(block),
+        _ => {}
+    }
+    let spelled = last.syntax().text().to_string();
+    let spelled = spelled.trim_start();
+    spelled.starts_with("for (;;)") || spelled.starts_with("for(;;)")
+}
+
+fn is_the_literal_true(condition: Option<&cpp_parser::CppSyntaxNode>) -> bool {
+    use cpp_parser::{CppAstNode, CppExpr};
+    let Some(condition) = condition else {
+        return false;
+    };
+    match CppExpr::cast(condition.clone()) {
+        Some(CppExpr::ParenExpr(paren)) => matches!(
+            paren.get_expr(),
+            Some(CppExpr::LiteralExpr(literal))
+                if literal.get_literal_text().is_some_and(|text| text.trim() == "true")
+        ),
+        _ => false,
     }
 }

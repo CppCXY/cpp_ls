@@ -735,7 +735,7 @@ pub fn is_a_class_definition(node: &cpp_parser::CppSyntaxNode) -> bool {
 
 /// **Is this node a function definition?** See [`function_definitions`] for why the question is about shape.
 pub fn is_a_function_definition(node: &cpp_parser::CppSyntaxNode) -> bool {
-    use cpp_parser::{CppAstNode, CppCompoundStat, CppDeclaration, CppParamList};
+    use cpp_parser::{CppAstNode, CppCompoundStat, CppDeclaration};
 
     // **The body is a direct child and the parameters are not**, which is the asymmetry that made this predicate
     // wrong the first time and silent for three checks: measured, `int count() { }` is a `Declaration` whose
@@ -761,16 +761,8 @@ pub fn is_a_function_definition(node: &cpp_parser::CppSyntaxNode) -> bool {
     //
     // Anchoring on the declaration's **own** `InitDeclarator` is what makes the parameters the ones the body belongs
     // to. A definition has exactly one: `int f() { }` and `S::S() { }` each put their `()` inside it.
-    let Some(parameters) = declaration
-        .get_init_declarator()
-        .and_then(|declarator| declarator.get_declarator())
-        .and_then(|declarator| {
-            declarator
-                .syntax()
-                .descendants()
-                .find_map(CppParamList::cast)
-        })
-        .map(|parameters| span_of(parameters.syntax()))
+    let Some(parameters) =
+        function_parameters(declaration.syntax()).map(|parameters| span_of(parameters.syntax()))
     else {
         return false;
     };
@@ -778,6 +770,53 @@ pub fn is_a_function_definition(node: &cpp_parser::CppSyntaxNode) -> bool {
     // The list is inside the head, so it starts before the body; and the body is not inside the list, which is what
     // `void f(int g(void))` would otherwise look like — a list inside a list.
     !contains(parameters, body) && parameters.0 < body.0
+}
+
+/// **The parameter list a function declaration writes**, without walking its body.
+///
+/// `CppDeclaration::get_param_list` is the declarator's own list — a function's body belongs to the declaration, so
+/// `descendants()` reached every lambda in it and answered *their* lists as well as this one's (measured: a function with a
+/// lambda answered two parameters). The walk of the whole body was also the cost: three checks ask this per function.
+///
+/// A node that is not a declaration keeps the typed descendant walk, which is what a caller handing in a lambda's body needs.
+fn function_parameters(function: &cpp_parser::CppSyntaxNode) -> Option<cpp_parser::CppParamList> {
+    use cpp_parser::{CppAstNode, CppDeclaration, CppLambdaExpr, CppParamList};
+    if let Some(declaration) = CppDeclaration::cast(function.clone()) {
+        return declaration.get_param_list();
+    }
+    if let Some(lambda) = CppLambdaExpr::cast(function.clone()) {
+        return lambda.get_params();
+    }
+    cpp_parser::typed_descendants::<CppParamList>(function).next()
+}
+
+/// **The `return`s a function's body holds**, without the ones a nested lambda owns.
+///
+/// A closure's result type is deduced from its own `return`s, so a rule judging *this* function's return type must not read them —
+/// and `descendants()` has no way to skip a subtree. The walk stops at a `CppLambdaExpr`.
+pub fn the_returns_in(function: &cpp_parser::CppSyntaxNode) -> Vec<cpp_parser::CppReturnStat> {
+    use cpp_parser::CppAstNode;
+    let mut found = Vec::new();
+    let body = cpp_parser::CppDeclaration::cast(function.clone())
+        .and_then(|declaration| declaration.get_body());
+    if let Some(body) = body {
+        collect_returns(body.syntax(), &mut found);
+    }
+    found
+}
+
+fn collect_returns(node: &cpp_parser::CppSyntaxNode, found: &mut Vec<cpp_parser::CppReturnStat>) {
+    use cpp_parser::CppAstNode;
+    if let Some(returned) = cpp_parser::CppReturnStat::cast(node.clone()) {
+        found.push(returned);
+        return;
+    }
+    for child in node.children() {
+        if cpp_parser::CppLambdaExpr::can_cast(child.kind().into()) {
+            continue;
+        }
+        collect_returns(&child, found);
+    }
 }
 
 /// A node's span as `(start, end)` offsets — what the rest of this layer compares, and cheap to pass around.
@@ -896,13 +935,23 @@ pub fn return_type_written_by(function: &cpp_parser::CppSyntaxNode) -> Option<St
 
 /// Read a function's head — see [`FunctionHead`].
 pub fn function_head(function: &cpp_parser::CppSyntaxNode) -> Option<FunctionHead> {
-    use cpp_parser::{CppAstNode, CppParamList};
+    use cpp_parser::CppAstNode;
 
     // **Anchored on the parameter list**, found through the typed AST: a function's name is written immediately
     // before its `(`, in every spelling. `CppParamList::cast` rather than a kind comparison, because the node is
     // `ParameterList` — a kind this grammar does not have under that name, so a kind comparison matched nothing.
-    let parameters = function.descendants().find_map(CppParamList::cast)?;
+    let parameters = function_parameters(function)?;
     let open = usize::from(parameters.syntax().text_range().start());
+
+    // **A member function template's head does not begin with its template parameters**, which are written before the return
+    // type: `template<class T> void f()` returns `void`, not the template header.
+    let template_head = cpp_parser::CppDeclaration::cast(function.clone())
+        .and_then(|declaration| {
+            declaration
+                .children::<cpp_parser::CppTemplateParamList>()
+                .next()
+        })
+        .map(|list| span_of(list.syntax()));
 
     // Every non-trivia token of the head, in order: everything before the `(`.
     let head: Vec<cpp_parser::CppSyntaxToken> = function
@@ -910,6 +959,12 @@ pub fn function_head(function: &cpp_parser::CppSyntaxNode) -> Option<FunctionHea
         .filter_map(|element| element.into_token())
         .filter(|token| usize::from(token.text_range().end()) <= open)
         .filter(|token| !cpp_parser::is_trivia(cpp_parser::CppTokenKind::from(token.kind())))
+        .filter(|token| {
+            let range = token.text_range();
+            let (start, end) = (usize::from(range.start()), usize::from(range.end()));
+            !template_head
+                .is_some_and(|(head_start, head_end)| head_start <= start && end <= head_end)
+        })
         .collect();
 
     // **The name.** An `operator` is spelled `operator` plus a symbol and is not an identifier at all; a destructor
@@ -1135,9 +1190,9 @@ pub fn spelling_of(node: &cpp_parser::CppSyntaxNode) -> Option<String> {
 /// The **token** is returned rather than its text, because the two callers want different halves of it and both are
 /// cheaper from here: [`name_declared_by`] takes the spelling, and a diagnostic takes the range.
 pub fn name_token_of(function: &cpp_parser::CppSyntaxNode) -> Option<cpp_parser::CppSyntaxToken> {
-    use cpp_parser::{CppAstNode, CppParamList};
+    use cpp_parser::CppAstNode;
 
-    let parameters = function.descendants().find_map(CppParamList::cast)?;
+    let parameters = function_parameters(function)?;
     let open = usize::from(parameters.syntax().text_range().start());
 
     function
@@ -1161,9 +1216,9 @@ pub fn name_declared_by(function: &cpp_parser::CppSyntaxNode) -> Option<String> 
 /// template parameter list: the check this one replaces read that field and reported 119 findings on 200 MSVC
 /// headers, every one of them a function whose real parameters were in the tree all along.
 pub fn parameter_spellings_of(function: &cpp_parser::CppSyntaxNode) -> Vec<String> {
-    use cpp_parser::{CppAstNode, CppDeclaration, CppParam, CppParamList};
-    let Some(parameters) = CppDeclaration::cast(function.clone())
-        .and_then(|declaration| declaration.descendants::<CppParamList>().next())
+    use cpp_parser::{CppAstNode, CppDeclaration, CppParam};
+    let Some(parameters) =
+        CppDeclaration::cast(function.clone()).and_then(|declaration| declaration.get_param_list())
     else {
         return Vec::new();
     };

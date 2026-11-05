@@ -704,6 +704,14 @@ impl CppIndexExpr {
             })
     }
 
+    /// **Is this a subscript rather than a member access?** — `v[i]`. The two are one node kind, and the operator decides.
+    pub fn is_a_subscript(&self) -> bool {
+        self.syntax()
+            .children_with_tokens()
+            .filter_map(|element| element.into_token())
+            .any(|token| CppTokenKind::from(token.kind()) == CppTokenKind::LeftBracket)
+    }
+
     /// **The member's name**, when this is a member access — `c_str` for `s.c_str`. `None` for a subscript.
     pub fn get_member_name(&self) -> Option<CppNameToken> {
         if !self.is_a_member_access() {

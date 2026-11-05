@@ -117,7 +117,7 @@ impl Check for ParamTypeCheck {
             // be compared against `techniques_app::describe(const Shape&)`, which is what a table keyed by the bare name
             // did — measured on the project this layer is measured on, two findings against a definition the call does not
             // name.
-            let written_callee = callee.text().to_string();
+            let written_callee = cpp_parser::subtree_text_spaced(&callee);
             let qualifier = written_callee
                 .rfind("::")
                 .map(|at| written_callee[..at].trim().to_string());

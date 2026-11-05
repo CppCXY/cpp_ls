@@ -128,38 +128,44 @@ fn check_uses(
     context: &mut CheckContext<'_>,
 ) {
     for candidate in statement.descendants() {
-        let (base, reads_through_it) = match kind(&candidate) {
-            CppSyntaxKind::MemberExpr | CppSyntaxKind::IndexExpr => {
-                let arrow = candidate
-                    .children_with_tokens()
-                    .filter_map(|element| element.into_token())
-                    .any(|token| {
-                        cpp_parser::CppTokenKind::from(token.kind())
-                            == cpp_parser::CppTokenKind::Arrow
-                    });
-                let bracket = candidate
-                    .children_with_tokens()
-                    .filter_map(|element| element.into_token())
-                    .any(|token| {
-                        cpp_parser::CppTokenKind::from(token.kind())
-                            == cpp_parser::CppTokenKind::LeftBracket
-                    });
-                let Some(base) = candidate.children().next() else {
+        // **The three spellings that read through the pointer**, asked of the expression rather than of its tokens: `p->x` is
+        // an arrow member access, `p[i]` a subscript, and `*p` a unary `*`. (`p.x` is not a read *through* the pointer, and the
+        // arrow test is what keeps it out.)
+        let (base, reads_through_it) = match cpp_parser::CppExpr::cast(candidate.clone()) {
+            Some(cpp_parser::CppExpr::MemberExpr(member)) => {
+                let Some(base) = member.get_object() else {
                     continue;
                 };
-                (base, arrow || bracket)
+                (base.syntax().clone(), member.is_arrow())
             }
-            CppSyntaxKind::UnaryExpr => {
-                let star = candidate
-                    .children_with_tokens()
-                    .filter_map(|element| element.into_token())
-                    .next()
-                    .map(|token| cpp_parser::CppTokenKind::from(token.kind()))
-                    == Some(cpp_parser::CppTokenKind::Star);
-                let Some(base) = candidate.children().next() else {
+            Some(cpp_parser::CppExpr::IndexExpr(index)) => {
+                let Some(base) = index.get_object() else {
                     continue;
                 };
-                (base, star)
+                // `a[i]` reads through `a`; `a.b` only when the operator is `->` — an `a.b` is an `IndexExpr` too (measured), so
+                // the arrow is asked of the access and not assumed from the node.
+                let reads = if index.is_a_subscript() {
+                    true
+                } else {
+                    index
+                        .syntax()
+                        .children_with_tokens()
+                        .filter_map(|element| element.into_token())
+                        .any(|token| {
+                            cpp_parser::CppTokenKind::from(token.kind())
+                                == cpp_parser::CppTokenKind::Arrow
+                        })
+                };
+                (base.syntax().clone(), reads)
+            }
+            Some(cpp_parser::CppExpr::UnaryExpr(unary)) => {
+                let Some(base) = unary.get_operand() else {
+                    continue;
+                };
+                (
+                    base.syntax().clone(),
+                    unary.get_operator_text().as_deref() == Some("*"),
+                )
             }
             _ => continue,
         };

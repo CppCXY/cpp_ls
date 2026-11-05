@@ -13,7 +13,7 @@
 //! real project). The tree has none of those shapes: a cast the preprocessor skipped is not in the tree, and a `(` in a
 //! parameter list is a `ParameterList` node.
 
-use cpp_parser::{CppAstNode, CppSyntaxKind};
+use cpp_parser::CppAstNode;
 
 use super::{Check, CheckContext, DiagnosticCode};
 
@@ -31,7 +31,7 @@ impl Check for CStyleCast {
             return;
         };
         for node in root.syntax().descendants() {
-            if CppSyntaxKind::from(node.kind()) != CppSyntaxKind::CastExpr {
+            if !cpp_parser::CppCastExpr::can_cast(node.kind().into()) {
                 continue;
             }
             // **The `TypeId` is what makes it the C style.** A named cast carries a template-argument list instead, and a
@@ -53,7 +53,7 @@ impl Check for CStyleCast {
             else {
                 continue;
             };
-            let written = type_id.text().to_string();
+            let written = cpp_parser::subtree_text_spaced(&type_id);
             let written = written.trim();
             if written.is_empty() {
                 continue;

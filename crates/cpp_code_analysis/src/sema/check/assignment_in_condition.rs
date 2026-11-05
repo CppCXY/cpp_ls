@@ -42,15 +42,6 @@ pub struct AssignmentInCondition;
 /// A node's child is what the parser decided the condition is, and this takes **the one expression before the
 /// body**: no scanning, no ambiguity. A condition written as `(x = y)` arrives as a parenthesised expression, whose
 /// text is then trimmed — the trimming is safe because the node is already the whole condition.
-#[allow(dead_code)]
-fn condition_of(node: &cpp_parser::CppSyntaxNode) -> Option<cpp_parser::CppSyntaxNode> {
-    // The body is the one child that is never the condition, and it is the only one that has to be named: the
-    // keywords are **tokens**, so `children()` does not offer them at all.
-    node.children().find(|child| {
-        cpp_parser::CppSyntaxKind::from(child.kind()) != cpp_parser::CppSyntaxKind::CompoundStat
-    })
-}
-
 impl Check for AssignmentInCondition {
     const CODES: &'static [DiagnosticCode] = &[DiagnosticCode::AssignmentInCondition];
 
