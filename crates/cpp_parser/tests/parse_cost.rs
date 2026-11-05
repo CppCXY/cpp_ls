@@ -192,7 +192,7 @@ fn what_parsing_costs() {
         // **Where the bytes go, when a file is not lossless.** The invariant every layer above relies on is
         // `to_source_text() == the text`, and a violation is a defect rather than a statistic — so the first
         // differing byte and its neighbourhood are printed, which is enough to name the construct.
-        if let Ok(text) = std::fs::read_to_string(&path) {
+        if let Ok(text) = std::fs::read_to_string(path) {
             let tree = CppParser::parse(&text, ParserConfig::default());
             let rebuilt = tree.to_source_text();
             if rebuilt != text {
@@ -217,11 +217,7 @@ fn what_parsing_costs() {
                     for offset in 0..4 {
                         let line = at.saturating_sub(1) + offset;
                         if let Some(text) = lines.get(line) {
-                            println!(
-                                "    {label} {}: {}",
-                                line + 1,
-                                text.escape_debug().to_string()
-                            );
+                            println!("    {label} {}: {}", line + 1, text.escape_debug());
                         }
                     }
                 }

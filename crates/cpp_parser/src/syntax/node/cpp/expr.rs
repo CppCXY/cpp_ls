@@ -481,6 +481,34 @@ impl CppBinaryExpr {
         self.get_operator_token()
             .map(|it| it.get_operator_text().to_string())
     }
+
+    /// **The fold this binary expression writes**, when it writes one — `(values + ...)`.
+    ///
+    /// A fold's second operand is a `FoldExpr` node rather than an expression, so `get_rhs()` answers `None` for the shape and
+    /// a caller would take it for a malformed expression.
+    pub fn get_fold(&self) -> Option<CppFoldExpr> {
+        self.children::<CppFoldExpr>().next()
+    }
+}
+
+/// A fold's `...` — `(values + ...)`, `(… && predicates)`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CppFoldExpr {
+    syntax: CppSyntaxNode,
+}
+
+impl CppAstNode for CppFoldExpr {
+    fn syntax(&self) -> &CppSyntaxNode {
+        &self.syntax
+    }
+
+    fn can_cast(kind: CppSyntaxKind) -> bool {
+        kind == CppSyntaxKind::FoldExpr
+    }
+
+    fn cast(syntax: CppSyntaxNode) -> Option<Self> {
+        Self::can_cast(syntax.kind().into()).then_some(Self { syntax })
+    }
 }
 
 /// A conditional expression: `cond ? a : b`.
@@ -717,6 +745,14 @@ impl CppInitListExpr {
     /// The designated initializers (`.field = v`, `[i] = v`).
     pub fn get_designators(&self) -> CppAstChildren<CppDesignatedInitExpr> {
         self.children()
+    }
+
+    /// **The type the construction names** — `std::array<int, 3>` for `std::array<int, 3>{}`.
+    ///
+    /// The head is a name expression written before the braces (measured: `InitListExpr > [IdentifierExpr, …]`), and it is
+    /// what a caller substituting a return type reads.
+    pub fn get_constructed_type(&self) -> Option<CppNameExpr> {
+        self.children::<CppNameExpr>().next()
     }
 
     pub fn is_empty(&self) -> bool {

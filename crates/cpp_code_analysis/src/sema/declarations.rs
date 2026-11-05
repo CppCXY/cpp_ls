@@ -1320,41 +1320,40 @@ pub fn deduced_returns_of_substituted(
 /// this layer did before it could read conditions, and dropping a return because a trait was unfamiliar would turn an
 /// unknown into a wrong answer.
 fn a_branch_that_is_taken(
-    expression: &CppSyntaxNode,
-    body: &CppSyntaxNode,
+    expression: &cpp_parser::CppExpr,
+    body: &cpp_parser::CppCompoundStat,
     substitutions: &crate::sema::types::TypeSubstitutions<'_>,
 ) -> bool {
-    // The `if constexpr` statements containing this return, innermost first — which is the order they are decided in,
-    // and the reason for the sort: `len` is the extent, so the smallest is the one nearest around it.
-    let mut conditions: Vec<CppSyntaxNode> = body
-        .descendants()
-        .filter(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::IfStat)
-        .filter(|node| {
-            let range = node.text_range();
-            range.start() <= expression.text_range().start()
-                && expression.text_range().end() <= range.end()
+    use cpp_parser::{CppAstNode, CppIfStat};
+    // The `if constexpr` statements containing this return, innermost first — which is the order they are decided in, and the
+    // reason for the sort: a range's length is its extent, so the smallest is the one nearest around it.
+    let mut conditions: Vec<CppIfStat> = body
+        .descendants::<CppIfStat>()
+        .filter(|statement| {
+            let range = statement.get_range();
+            range.start() <= expression.get_range().start()
+                && expression.get_range().end() <= range.end()
         })
         .collect();
-    conditions.sort_by_key(|node| node.text_range().len());
+    conditions.sort_by_key(|statement| statement.get_range().len());
 
     for condition in conditions {
         let Some(written) = constexpr_condition_of(&condition) else {
             continue;
         };
         let Some(held) = evaluate_a_trait(&written, substitutions) else {
-            // A condition this layer cannot decide leaves the return in play, which is what it did before it could
-            // read conditions at all.
+            // A condition this layer cannot decide leaves the return in play, which is what it did before it could read
+            // conditions at all.
             continue;
         };
 
-        // **Which side of the `if` the return is on**, because the condition alone does not say whether the return
-        // is instantiated: both branches are inside the same statement, and both see the same condition.
-        //
-        // That was the first version's mistake, and it is invisible from the count alone — the condition evaluated
-        // to `true`, nothing was filtered, and the two branches went on disagreeing. A return after the `else` is in
-        // the branch taken when the condition is **false**; one before it is in the branch taken when it is **true**.
-        let in_the_else = else_offset_of(&condition)
-            .is_some_and(|at| usize::from(expression.text_range().start()) > at);
+        // **Which side of the `if` the return is on**, because the condition alone does not say whether the return is
+        // instantiated: both branches are inside the same statement, and both see the same condition. A return after the
+        // `else` is in the branch taken when the condition is **false**; one before it is in the branch taken when it is
+        // **true**.
+        let in_the_else = condition.get_else_branch().is_some_and(|else_branch| {
+            expression.get_range().start() > else_branch.get_range().start()
+        });
 
         if held == in_the_else {
             // The branch is not instantiated, so this return is not a return.
@@ -1365,39 +1364,18 @@ fn a_branch_that_is_taken(
     true
 }
 
-/// **Where the `else` of this `if` begins**, in the file's offsets — `None` for an `if` with no `else`.
-///
-/// Asked of the **token stream**, not of the children: `else` is a keyword rather than a node here, so it is found the
-/// way every other operator in this layer is — by looking at the tokens the statement is made of.
-fn else_offset_of(statement: &CppSyntaxNode) -> Option<usize> {
-    statement
-        .descendants_with_tokens()
-        .filter_map(|element| element.into_token())
-        .find(|token| token.text() == "else")
-        .map(|token| usize::from(token.text_range().start()))
-}
-
 /// The parenthesised condition of an `if constexpr`, when that is what this statement is.
-fn constexpr_condition_of(statement: &CppSyntaxNode) -> Option<String> {
-    let text = statement.text().to_string();
-    let at = text.find("constexpr")?;
-    let rest = &text[at + "constexpr".len()..];
-    let open = rest.find('(')?;
-
-    let mut depth = 0usize;
-    for (index, character) in rest[open..].char_indices() {
-        match character {
-            '(' => depth += 1,
-            ')' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(rest[open + 1..open + index].to_string());
-                }
-            }
-            _ => {}
-        }
+///
+/// Asked of the tree: `CppIfStat::is_constexpr` is the keyword question and `get_condition` the expression — the text search
+/// this used to do (`find("constexpr")`, then balance the parentheses by hand) answered nothing on a condition written with
+/// the `constexpr` on its own line, and read a `constexpr` inside a nested lambda as this `if`'s.
+fn constexpr_condition_of(statement: &cpp_parser::CppIfStat) -> Option<String> {
+    use cpp_parser::CppAstNode;
+    if !statement.is_constexpr() {
+        return None;
     }
-    None
+    let inner = statement.get_condition()?.get_expr()?;
+    Some(cpp_parser::subtree_text_spaced(inner.syntax()))
 }
 
 /// **What a type trait says about a spelling** — `None` for a condition this layer cannot decide.
@@ -1856,41 +1834,43 @@ fn the_specifiers(arguments: &str) -> Vec<String> {
 }
 
 /// The parameter names of a function declaration, in the order they are written.
+/// The parameters a **scope** declares: a function declaration's parameter list, or a lambda's.
+///
+/// One helper rather than a cast in each caller, because the two scopes are different node types and the question is the same.
+/// A scope that is neither (a class body, say) has no parameters of its own and answers an empty list.
+fn the_parameters_of(scope: &CppSyntaxNode) -> Vec<cpp_parser::CppParam> {
+    use cpp_parser::{CppAstNode, CppDeclaration, CppLambdaExpr};
+    if let Some(declaration) = CppDeclaration::cast(scope.clone()) {
+        return declaration.descendants::<cpp_parser::CppParam>().collect();
+    }
+    if let Some(lambda) = CppLambdaExpr::cast(scope.clone()) {
+        return lambda
+            .get_params()
+            .map(|list| list.get_params().collect())
+            .unwrap_or_default();
+    }
+    Vec::new()
+}
+
+/// The declarations written **inside** a scope, whatever kind of scope it is.
+fn the_declarations_in(scope: &CppSyntaxNode) -> Vec<cpp_parser::CppDeclaration> {
+    use cpp_parser::{CppAstNode, CppDeclaration, CppLambdaExpr};
+    if let Some(declaration) = CppDeclaration::cast(scope.clone()) {
+        return declaration.descendants::<CppDeclaration>().collect();
+    }
+    if let Some(lambda) = CppLambdaExpr::cast(scope.clone()) {
+        return lambda
+            .get_body()
+            .map(|body| body.descendants::<CppDeclaration>().collect())
+            .unwrap_or_default();
+    }
+    Vec::new()
+}
+
 fn the_parameter_names(declaration: &CppSyntaxNode) -> Vec<String> {
-    let declarator = declaration
-        .children()
-        .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::InitDeclarator)
-        .and_then(|init| {
-            init.children()
-                .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::Declarator)
-        })
-        // A constructor writes its declarator directly: `S(std::string s) : …`.
-        .or_else(|| {
-            declaration
-                .children()
-                .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::Declarator)
-        });
-    let Some(list) = declarator.and_then(|declarator| {
-        declarator
-            .children()
-            .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::ParameterList)
-    }) else {
-        return Vec::new();
-    };
-    list.children()
-        .filter(|parameter| CppSyntaxKind::from(parameter.kind()) == CppSyntaxKind::Parameter)
-        .map(|parameter| {
-            parameter
-                .children()
-                .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::Declarator)
-                .and_then(|declarator| {
-                    declarator
-                        .children()
-                        .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::NameExpr)
-                })
-                .map(|name| name.text().to_string())
-                .unwrap_or_default()
-        })
+    the_parameters_of(declaration)
+        .into_iter()
+        .filter_map(|parameter| parameter.get_name_text())
         .collect()
 }
 
@@ -1958,25 +1938,34 @@ fn scan_for_a_free(node: &CppSyntaxNode, parameters: &[String], mask: &mut u64) 
 
 /// The name a frees-its-argument expression names: `p` for `p` and for `&p`.
 fn a_bare_name(expression: &CppSyntaxNode) -> Option<String> {
-    match CppSyntaxKind::from(expression.kind()) {
-        CppSyntaxKind::IdentifierExpr | CppSyntaxKind::NameExpr => {
-            the_last_identifier_of(expression)
-        }
-        CppSyntaxKind::UnaryExpr => a_bare_name(&expression.children().next()?),
-        _ => None,
+    use cpp_parser::{CppAstNode, CppNameExpr, CppUnaryExpr};
+    if let Some(name) = CppNameExpr::cast(expression.clone()) {
+        return name.get_name_text();
     }
+    // `&p` and `*p` name `p`: the operand is the expression that names it.
+    let unary = CppUnaryExpr::cast(expression.clone())?;
+    a_bare_name(unary.get_operand()?.syntax())
 }
 
 /// The last identifier in an expression, as a spelling.
 fn the_last_identifier_of(expression: &CppSyntaxNode) -> Option<String> {
-    expression
-        .descendants_with_tokens()
-        .filter_map(|element| element.into_token())
-        .filter(|token| {
-            cpp_parser::CppTokenKind::from(token.kind()) == cpp_parser::CppTokenKind::Identifier
-        })
-        .last()
-        .map(|token| token.text().to_string())
+    use cpp_parser::{CppAstNode, CppCallExpr, CppMemberExpr, CppNameExpr};
+    // A qualified name's last segment is the one the token layer can name directly — `std::free` is `free`.
+    if let Some(name) = CppNameExpr::cast(expression.clone()) {
+        return name
+            .get_last_name_token()
+            .map(|token| token.get_name_text().to_string());
+    }
+    // `p->free(…)` and `object.release(…)`: the member is the name the call goes through.
+    if let Some(member) = CppMemberExpr::cast(expression.clone()) {
+        return member
+            .get_member_name()
+            .map(|token| token.get_name_text().to_string());
+    }
+    // `std::free(p)`: the callee is the name.
+    let call = CppCallExpr::cast(expression.clone())?;
+    let callee = call.get_callee()?;
+    the_last_identifier_of(callee.syntax())
 }
 
 fn deduced_returns_of(root: &CppSyntaxNode, binding: &Binding) -> Option<String> {
@@ -2017,10 +2006,14 @@ fn deduced_returns_of(root: &CppSyntaxNode, binding: &Binding) -> Option<String>
 /// Asked of the **declaration the name sits in** rather than of the file, because a range that merely *contains* a
 /// body would find the body of the next function along. See [`declaration_of`] for how that declaration is found,
 /// and for why it is a `Declaration` rather than a `FunctionDef`.
-fn body_of(declaration: &CppSyntaxNode) -> Option<CppSyntaxNode> {
-    declaration
-        .descendants()
-        .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::CompoundStat)
+fn body_of(declaration: &CppSyntaxNode) -> Option<cpp_parser::CppCompoundStat> {
+    use cpp_parser::{CppAstNode, CppDeclaration, CppLambdaExpr};
+    // A function's body is its declaration's; a lambda's is the lambda's. The two node types are the only ones a `return`
+    // can be written in, which is why this is a question with two answers rather than a search.
+    if let Some(declaration) = CppDeclaration::cast(declaration.clone()) {
+        return declaration.get_body();
+    }
+    CppLambdaExpr::cast(declaration.clone())?.get_body()
 }
 
 /// **The innermost declaration the name sits in** — a function definition, as this tree writes one.
@@ -2064,46 +2057,34 @@ pub fn a_lambdas_return_type(
     lambda: &CppSyntaxNode,
     argument_types: &[crate::sema::types::Type],
 ) -> Option<String> {
-    let body = body_of(lambda)?;
-    let receives_a_placeholder = lambda
-        .descendants()
-        .filter(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::Parameter)
-        .any(|parameter| {
-            parameter
-                .text()
-                .to_string()
-                .split_whitespace()
-                .any(|word| word == "auto")
-        });
+    use cpp_parser::{CppAstNode, CppLambdaExpr};
+    // **The lambda's own body and parameters**, and nothing else: a lambda has no name, so the caller resolves the variable
+    // it is stored in and hands the expression here.
+    let lambda = CppLambdaExpr::cast(lambda.clone())?;
+    let body = lambda.get_body()?;
+    let parameters = the_parameters_of(lambda.syntax());
+    let receives_a_placeholder = parameters.iter().any(cpp_parser::CppParam::is_auto);
     // **A generic parameter takes the call's argument.** `[](auto v) { return v; }` called as `f(3)` returns an `int`, and
     // the arguments are what say so — the parameters written `auto` are paired with them by position. When the call wrote no
     // arguments (the inlay asks about the lambda itself), there is nothing to pair and the answer is refused.
-    let placeholder_types = the_auto_parameters_with_their_arguments(lambda, argument_types);
+    let placeholder_types = the_auto_parameters_with_their_arguments(&parameters, argument_types);
     if receives_a_placeholder && placeholder_types.is_empty() {
         return None;
     }
     let substitutions = crate::sema::types::TypeSubstitutions::new(&[], argument_types);
     let mut agreed: Option<String> = None;
-    // **The lambda's own returns**, which `returned_expressions_in` deliberately skips: that function answers for the
-    // *enclosing* function, and a lambda inside it belongs to the lambda. Here the lambda is the function, so the walk is the
-    // same one without that filter — and it still stops at a **nested** lambda, whose returns belong to it.
-    for statement in body.descendants() {
-        if CppSyntaxKind::from(statement.kind()) != CppSyntaxKind::ReturnStat {
-            continue;
-        }
-        let belongs_to_a_nested_lambda = statement
-            .ancestors()
-            .take_while(|node| node != lambda)
-            .any(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::LambdaExpr);
-        if belongs_to_a_nested_lambda {
-            continue;
-        }
-        let Some(expression) = statement.children().last() else {
+    for statement in the_returns_of(&body, lambda.syntax()) {
+        let Some(expression) = statement.get_expr() else {
             continue;
         };
         let written = match type_with_the_auto_parameters(&expression, &placeholder_types) {
             Some(written) => written,
-            None => type_a_return_states_with(&expression, lambda, &substitutions, argument_types)?,
+            None => type_a_return_states_with(
+                &expression,
+                lambda.syntax(),
+                &substitutions,
+                argument_types,
+            )?,
         };
         match &agreed {
             None => agreed = Some(written),
@@ -2119,33 +2100,24 @@ pub fn a_lambdas_return_type(
 /// The pairing is positional, which is what the language does: the i-th parameter takes the i-th argument. A parameter
 /// written `auto const&`/`auto&&` still receives the argument's type here — the reference and the `const` are the parameter's
 /// shape, and what a `return` of the name then means is the value's type.
+/// **The `auto` parameters of a lambda, paired with the call's arguments** — `[](auto v) { … }` called `f(3)` gives
+/// `v → int`.
+///
+/// The pairing is positional, which is what the language does: the i-th parameter takes the i-th argument. A parameter written
+/// `auto const&`/`auto&&` still receives the argument's type here — the reference and the `const` are the parameter's shape, and
+/// what a `return` of the name then means is the value's type.
 fn the_auto_parameters_with_their_arguments(
-    lambda: &CppSyntaxNode,
+    parameters: &[cpp_parser::CppParam],
     argument_types: &[crate::sema::types::Type],
 ) -> Vec<(String, crate::sema::types::Type)> {
-    let mut paired: Vec<(String, crate::sema::types::Type)> = Vec::new();
-    for (at, parameter) in lambda
-        .descendants()
-        .filter(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::Parameter)
+    parameters
+        .iter()
         .enumerate()
-    {
-        let text = parameter.text().to_string();
-        if !text.split_whitespace().any(|word| word == "auto") {
-            continue;
-        }
-        let Some(name) = parameter
-            .descendants()
-            .find(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::NameExpr)
-            .map(|node| node.text().to_string())
-            .map(|text| text.trim().to_string())
-        else {
-            continue;
-        };
-        if let Some(argument) = argument_types.get(at) {
-            paired.push((name, argument.clone()));
-        }
-    }
-    paired
+        .filter(|(_, parameter)| parameter.is_auto())
+        .filter_map(|(at, parameter)| {
+            Some((parameter.get_name_text()?, argument_types.get(at)?.clone()))
+        })
+        .collect()
 }
 
 /// **The type a return statement states, with the `auto` parameters standing for their arguments.**
@@ -2153,50 +2125,64 @@ fn the_auto_parameters_with_their_arguments(
 /// The arms are the shapes a return is written with: a name (a paired parameter, or one the ordinary walk can type), a
 /// literal, an arithmetic pair, parentheses, and a construction. `None` when the shape is anything else, and the caller
 /// falls back to the ordinary walk — which is what a lambda with no `auto` parameters uses.
+/// **Is this binary expression a comparison?** — the answer is `bool` whatever its operands are.
+///
+/// The operator's **spelling** is what decides, and it is the token's own (`CppBinaryExpr::get_operator_text`), not a search of
+/// the expression's text for a character class.
+fn is_a_comparison(binary: &cpp_parser::CppBinaryExpr) -> bool {
+    matches!(
+        binary.get_operator_text().as_deref(),
+        Some("==" | "!=" | "<" | ">" | "<=" | ">=" | "&&" | "||")
+    )
+}
+
+/// **Is this expression a literal zero?** — `X + 0` is `X`, because the zero is a count rather than a term.
+///
+/// The literal's own text is what C++ compares here: the *type* of `0` is `int`, so a test of the type can never fire.
+fn is_a_literal_zero(expression: &cpp_parser::CppExpr) -> bool {
+    let cpp_parser::CppExpr::LiteralExpr(literal) = expression else {
+        return false;
+    };
+    literal.get_literal_text().is_some_and(|text| {
+        matches!(
+            text.trim(),
+            "0" | "0L" | "0U" | "0UL" | "0LL" | "0ULL" | "0u" | "0ul" | "0ll" | "0ull"
+        )
+    })
+}
+
+/// **The type a return statement states, with the `auto` parameters standing for their arguments.**
+///
+/// The arms are the shapes a return is written with: a name (a paired parameter), a literal, an arithmetic pair, parentheses
+/// and a construction. `None` when the shape is anything else, and the caller falls back to the ordinary walk — which is what a
+/// lambda with no `auto` parameters uses.
 fn type_with_the_auto_parameters(
-    expression: &CppSyntaxNode,
+    expression: &cpp_parser::CppExpr,
     paired: &[(String, crate::sema::types::Type)],
 ) -> Option<String> {
-    let kind = CppSyntaxKind::from(expression.kind());
-    match kind {
-        CppSyntaxKind::ParenExpr => {
-            let inner = expression.children().next()?;
-            type_with_the_auto_parameters(&inner, paired)
-        }
-        CppSyntaxKind::NameExpr | CppSyntaxKind::IdentifierExpr => {
-            let written = expression.text().to_string();
-            let written = written.trim();
+    use cpp_parser::{CppAstNode, CppExpr};
+    match expression {
+        CppExpr::ParenExpr(paren) => type_with_the_auto_parameters(&paren.get_expr()?, paired),
+        CppExpr::NameExpr(name) => {
+            let written = name.get_name_text()?;
             paired
                 .iter()
-                .find(|(name, _)| name == written)
+                .find(|(known, _)| *known == written)
                 .map(|(_, type_of)| type_of.to_string())
         }
-        CppSyntaxKind::LiteralExpr => {
-            Some(literal_type(&expression.text().to_string()).to_string())
+        CppExpr::LiteralExpr(literal) => {
+            Some(literal_type(&literal.get_literal_text()?).to_string())
         }
-        CppSyntaxKind::InitListExpr => {
-            let head = expression.children().next()?;
-            let written = head.text().to_string();
-            let written = written.trim();
-            (!written.is_empty() && written != "{").then(|| written.to_string())
+        CppExpr::InitListExpr(list) => {
+            let head = list.get_constructed_type()?;
+            Some(cpp_parser::subtree_text_spaced(head.syntax()))
         }
-        CppSyntaxKind::BinaryExpr => {
-            let operands: Vec<CppSyntaxNode> = expression.children().collect();
-            let comparison = expression
-                .children_with_tokens()
-                .filter_map(|element| element.into_token())
-                .any(|token| {
-                    matches!(
-                        token.text(),
-                        "==" | "!=" | "<" | ">" | "<=" | ">=" | "&&" | "||"
-                    )
-                });
-            if comparison {
+        CppExpr::BinaryExpr(binary) => {
+            if is_a_comparison(binary) {
                 return Some("bool".to_string());
             }
-            let (left, right) = (operands.first()?, operands.last()?);
-            let left_type = type_with_the_auto_parameters(left, paired)?;
-            let right_type = type_with_the_auto_parameters(right, paired)?;
+            let left_type = type_with_the_auto_parameters(&binary.get_lhs()?, paired)?;
+            let right_type = type_with_the_auto_parameters(&binary.get_rhs()?, paired)?;
             // **The usual arithmetic conversion, in the one case needing no table**: equal types are that type, and a
             // floating type absorbs an integer. Anything else is the ranking this layer does not keep.
             if left_type == right_type {
@@ -2218,27 +2204,31 @@ fn type_with_the_auto_parameters(
     }
 }
 
-fn returned_expressions_in(body: &CppSyntaxNode) -> Vec<CppSyntaxNode> {
-    let mut found = Vec::new();
+/// **The `return` statements a body owns**, in document order.
+///
+/// A lambda written in the body is another function: its `return`s belong to it. `typed_ancestors_until` answers exactly that
+/// question — is there a lambda between this statement and the body that owns it — so the filter needs no hand-written walk.
+fn the_returns_of(
+    body: &cpp_parser::CppCompoundStat,
+    owner: &CppSyntaxNode,
+) -> Vec<cpp_parser::CppReturnStat> {
+    use cpp_parser::{CppAstNode, CppLambdaExpr, CppReturnStat};
+    body.descendants::<CppReturnStat>()
+        .filter(|statement| {
+            cpp_parser::typed_ancestors_until::<CppLambdaExpr>(statement.syntax(), owner)
+                .next()
+                .is_none()
+        })
+        .collect()
+}
 
-    for statement in body.descendants() {
-        if CppSyntaxKind::from(statement.kind()) != CppSyntaxKind::ReturnStat {
-            continue;
-        }
-        if statement.ancestors().any(|node| {
-            matches!(
-                CppSyntaxKind::from(node.kind()),
-                CppSyntaxKind::LambdaExpr | CppSyntaxKind::FunctionDef
-            )
-        }) {
-            continue;
-        }
-        if let Some(expression) = statement.children().last() {
-            found.push(expression);
-        }
-    }
-
-    found
+/// Every expression a `return` in this body returns, in document order; `return;` contributes nothing.
+fn returned_expressions_in(body: &cpp_parser::CppCompoundStat) -> Vec<cpp_parser::CppExpr> {
+    use cpp_parser::CppAstNode;
+    the_returns_of(body, body.syntax())
+        .into_iter()
+        .filter_map(|statement| statement.get_expr())
+        .collect()
 }
 
 /// The type this expression **states**, when the syntax alone states one.
@@ -2362,217 +2352,138 @@ fn a_data_member_type(expression: &CppSyntaxNode, declaration: &CppSyntaxNode) -
 }
 
 /// does not depend on what a name stands for.
+/// The type a return statement states, with what the template parameters stand for substituted.
+///
+/// The same reading as [`type_a_return_states`], plus the two shapes a template body writes that a plain one does not: a **fold
+/// expression** (`(values + ...)`), whose type is every argument the call passed widened by `+`, and a name that came from a
+/// template parameter, which is substituted before it is answered.
 fn type_a_return_states_with(
-    expression: &CppSyntaxNode,
+    expression: &cpp_parser::CppExpr,
     declaration: &CppSyntaxNode,
     substitutions: &crate::sema::types::TypeSubstitutions<'_>,
     argument_types: &[crate::sema::types::Type],
 ) -> Option<String> {
-    match CppSyntaxKind::from(expression.kind()) {
-        // **A parenthesised expression is what it wraps.** A fold has to be written in parentheses — `(values + ...)` —
-        // so the node a `return` hands here is the `ParenExpr`, and without this arm the fold inside it was never looked
-        // at: measured, `auto total = sum_of(1, 2, 3, 4)` answered unknown with the fold arm below already written.
-        CppSyntaxKind::ParenExpr => {
-            let inner = expression.children().next()?;
-            type_a_return_states_with(&inner, declaration, substitutions, argument_types)
-        }
-        CppSyntaxKind::NameExpr | CppSyntaxKind::IdentifierExpr => {
-            // **A parameter, or a data member of the class the function is declared in.** The second is the shape every
-            // accessor has — `auto copy_of() const { return value_; }` — and without it a member's deduced return was
-            // unknown: measured on a C++ project, `auto copied = box.copy_of()` answered "the type is not known here",
-            // while the same body in a free function deduced fine (a free function's `return` can only name a parameter).
-            let written = parameter_type(expression, declaration)
-                .or_else(|| a_data_member_type(expression, declaration))
-                .or_else(|| a_local_variables_type(expression, declaration))
-                // **And an init-capture** — `[value = counter + 10] { return value; }`, whose type is its initializer's.
-                .or_else(|| a_captures_type(expression, declaration))?;
+    use cpp_parser::{CppAstNode, CppExpr};
+    match expression {
+        // **A parenthesised expression is what it wraps.** A fold has to be written in parentheses — `(values + ...)` — so the
+        // node a `return` hands here is the `ParenExpr`.
+        CppExpr::ParenExpr(paren) => type_a_return_states_with(
+            &paren.get_expr()?,
+            declaration,
+            substitutions,
+            argument_types,
+        ),
+        CppExpr::NameExpr(name) => {
+            // **A parameter, a data member of the class the function is in, a local of the same body, or an init-capture** —
+            // the four names a `return` can write here.
+            let written = parameter_type(name.syntax(), declaration)
+                .or_else(|| a_data_member_type(name.syntax(), declaration))
+                .or_else(|| a_local_variables_type(name.syntax(), declaration))
+                .or_else(|| a_captures_type(name.syntax()))?;
             Some(substituted_spelling(&written, substitutions))
         }
-        // **A member access on a cast**, which is the shape `_Get_unwrapped`'s middle branch has:
-        // `static_cast<_Iter&&>(_It)._Unwrapped()`. The member's own type is a lookup this layer cannot do — it needs
-        // the class, and the class is what the instantiation would name — so the answer is `None` and the branch is
-        // skipped rather than guessed.
-        CppSyntaxKind::BinaryExpr => {
-            let operands: Vec<CppSyntaxNode> = expression.children().collect();
-            // **A fold expression** — `(values + ...)`. Measured tree: `ParenExpr > BinaryExpr > [NameExpr, FoldExpr]`, so
-            // the fold is the *second operand* and the first is the pack it folds over. Its type is every argument the
-            // call passed, widened by `+`: four `int`s are an `int`, and `1` with `2.5` is a `double`. Before this the arm
-            // answered `None` for want of a right-hand type, and `auto total = sum_of(1, 2, 3, 4)` stayed unknown.
-            if operands.len() == 2
-                && CppSyntaxKind::from(operands[1].kind()) == CppSyntaxKind::FoldExpr
+        CppExpr::BinaryExpr(binary) => {
+            // **A fold expression** — `(values + ...)`: its type is every argument the call passed, widened by `+`. Four
+            // `int`s are an `int`, and `1` with `2.5` is a `double`. Before this the arm answered `None` for want of a
+            // right-hand type, and `auto total = sum_of(1, 2, 3, 4)` stayed unknown.
+            if binary.get_fold().is_some()
                 && let Some(widest) = the_widest_of(argument_types)
             {
                 return Some(widest);
             }
-            let comparison = expression
-                .children_with_tokens()
-                .filter_map(|element| element.into_token())
-                .any(|token| {
-                    matches!(
-                        token.text(),
-                        "==" | "!=" | "<" | ">" | "<=" | ">=" | "&&" | "||"
-                    )
-                });
-            if comparison {
+            if is_a_comparison(binary) {
                 return Some("bool".to_string());
             }
-
-            let (left, right) = (operands.first()?, operands.last()?);
-            let left_type =
-                type_a_return_states_with(left, declaration, substitutions, argument_types)?;
-            let right_type =
-                type_a_return_states_with(right, declaration, substitutions, argument_types)?;
+            let left_type = type_a_return_states_with(
+                &binary.get_lhs()?,
+                declaration,
+                substitutions,
+                argument_types,
+            )?;
+            let right_type = type_a_return_states_with(
+                &binary.get_rhs()?,
+                declaration,
+                substitutions,
+                argument_types,
+            )?;
             if left_type == right_type {
                 return Some(left_type);
             }
-
-            // **`X + 0` is `X`** — [expr.add]: the integer is a count and never part of the answer. Asked of the
-            // operand's **text**, not of its type: the type of `0` is `int`, and comparing that against `"0"` is a
-            // test that can never pass.
-            let literal_zero = |operand: &CppSyntaxNode| {
-                CppSyntaxKind::from(operand.kind()) == CppSyntaxKind::LiteralExpr
-                    && matches!(
-                        operand.text().to_string().trim(),
-                        "0" | "0L" | "0U" | "0UL" | "0LL" | "0ULL"
-                    )
-            };
-            if matches!(operator_of(expression).as_deref(), Some("+" | "-")) {
-                if literal_zero(right) {
+            // **`X + 0` is `X`** — [expr.add]: the integer is a count and never part of the answer.
+            if matches!(binary.get_operator_text().as_deref(), Some("+" | "-")) {
+                if is_a_literal_zero(&binary.get_rhs()?) {
                     return Some(left_type);
                 }
-                if literal_zero(left) {
+                if is_a_literal_zero(&binary.get_lhs()?) {
                     return Some(right_type);
                 }
             }
-
             None
         }
         _ => type_a_return_states(expression, declaration),
     }
 }
 
-fn type_a_return_states(expression: &CppSyntaxNode, declaration: &CppSyntaxNode) -> Option<String> {
-    match CppSyntaxKind::from(expression.kind()) {
-        CppSyntaxKind::CastExpr => {
-            let target = expression
-                .children()
-                .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::TypeId)?;
-            let written = target.text().to_string().trim().to_string();
+/// **The type a return statement states, when the syntax alone states one.**
+///
+/// Four shapes, and each is a *reading* rather than an inference — the type is written in the expression or in a declaration
+/// beside it:
+///
+/// * **a cast**: `return static_cast<T>(x);` has the type `T`, whatever `x` is;
+/// * **a construction**: `return std::array<int, Size>{};` is a prvalue of the type it names;
+/// * **a literal**: `return 1;` is an `int`, and no declaration anywhere says otherwise;
+/// * **a name**, which is a parameter, a data member, a local, or an init-capture;
+/// * **an arithmetic pair whose operands agree**, which is C++'s usual arithmetic conversion in the one case that needs no
+///   table, and `X + 0`'s own rule ([expr.add]).
+///
+/// Everything else is refused: `return f(x);` needs the callee's declaration, a member access needs the object's type, and two
+/// operands that *disagree* need the conversion ranks this deliberately does not keep.
+fn type_a_return_states(
+    expression: &cpp_parser::CppExpr,
+    declaration: &CppSyntaxNode,
+) -> Option<String> {
+    use cpp_parser::{CppAstNode, CppExpr};
+    match expression {
+        CppExpr::CastExpr(cast) => {
+            let written = cast.get_type_id()?.get_type_text();
             (!written.is_empty()).then_some(written)
         }
-        // **A construction states its type too** — `return std::array<int, Size>{};` is a prvalue of
-        // `std::array<int, Size>`. The head is the list's first child (`InitListExpr > [IdentifierExpr, InitListExpr]`),
-        // and the alternative is the callee of `T(…)`. Nothing about the elements is read: the answer is the type the
-        // file wrote, which is what a caller substitutes into when the function is a template.
-        CppSyntaxKind::InitListExpr => {
-            let head = expression.children().next()?;
-            let written = head.text().to_string();
-            let written = written.trim();
-            (!written.is_empty() && written != "{").then(|| written.to_string())
+        CppExpr::InitListExpr(list) => {
+            let head = list.get_constructed_type()?;
+            let written = cpp_parser::subtree_text_spaced(head.syntax());
+            (!written.is_empty()).then_some(written)
         }
-        // **A parenthesised construction is deliberately not here.** The tree cannot tell a constructor from a function
-        // call — `Widget(1)` and `make()` are the same shape — and answering the callee's spelling for both read
-        // `return make();` as a `make`. A braced list has no such twin: `T{…}` is a construction, so it is the shape this
-        // layer can name.
-        // **A literal's type is its own**, and the four C++ gives are `int`, `double`, `bool` and a pointer. Read
-        // by the shape of the text rather than by a table: `1` and `1'000` and `0x10` are one type, and `1.5f` is
-        // not `1.5`.
-        CppSyntaxKind::LiteralExpr => {
-            Some(literal_type(&expression.text().to_string()).to_string())
+        // **A parenthesised construction is deliberately not here.** The tree cannot tell a constructor from a function call —
+        // `Widget(1)` and `make()` are the same shape — and answering the callee's spelling for both read `return make();` as a
+        // `make`. A braced list has no such twin: `T{…}` is a construction.
+        CppExpr::LiteralExpr(literal) => {
+            Some(literal_type(&literal.get_literal_text()?).to_string())
         }
-        CppSyntaxKind::NameExpr | CppSyntaxKind::IdentifierExpr => {
-            parameter_type(expression, declaration)
-                // **The two other names a `return` can write**: a member of the class the function is in, and a local of the
-                // same body. This walker is the one `deduced_returns_of` calls, so a case missing here is missing from every
-                // fact an `auto` function builds — measured: `auto pipeline() { std::vector<int> result; … return result; }`
-                // had no return type at all.
-                .or_else(|| a_data_member_type(expression, declaration))
-                .or_else(|| a_local_variables_type(expression, declaration))
-                .or_else(|| a_captures_type(expression, declaration))
-        }
-        CppSyntaxKind::BinaryExpr => {
-            // Three children — left, operator, right — and the operator is a token rather than a node, so the two
-            // that are nodes are the operands. A comparison is `bool` whatever its operands are, which is C++'s own
-            // answer and needs no agreement at all.
-            let operands: Vec<CppSyntaxNode> = expression.children().collect();
-            let comparison = expression
-                .children_with_tokens()
-                .filter_map(|element| element.into_token())
-                .any(|token| {
-                    matches!(
-                        token.text(),
-                        "==" | "!=" | "<" | ">" | "<=" | ">=" | "&&" | "||"
-                    )
-                });
-            if comparison {
+        CppExpr::NameExpr(name) => parameter_type(name.syntax(), declaration)
+            .or_else(|| a_data_member_type(name.syntax(), declaration))
+            .or_else(|| a_local_variables_type(name.syntax(), declaration))
+            .or_else(|| a_captures_type(name.syntax())),
+        CppExpr::BinaryExpr(binary) => {
+            if is_a_comparison(binary) {
                 return Some("bool".to_string());
             }
-            let (left, right) = (operands.first()?, operands.last()?);
-            let left_type = type_a_return_states(left, declaration)?;
-            let right_type = type_a_return_states(right, declaration)?;
+            let left_type = type_a_return_states(&binary.get_lhs()?, declaration)?;
+            let right_type = type_a_return_states(&binary.get_rhs()?, declaration)?;
             if left_type == right_type {
                 return Some(left_type);
             }
-
-            // **`X + 0` is `X`**, and this is C++'s own rule rather than an approximation: [expr.add] says `P + I`
-            // has the type of `P` for any integral `I`, because the integer is a *count* and never part of the answer.
-            //
-            // It is here because the shape it unlocks is the one the standard library is written in. `_Get_unwrapped`
-            // returns `_It + 0` in one `if constexpr` branch and `static_cast<_Iter&&>(_It)` in the other — the same
-            // type, `_Iter&&`, spelled through an addition that says nothing. Without this the two branches disagree,
-            // the function has no return type at all, and every call of it is refused: 54 `auto` declarations over
-            // eight MSVC headers, the largest single family in the count.
-            //
-            // **Only when the other operand is a literal**, and the restriction is what keeps it honest. `+ 0` means
-            // the count is zero and the type is the left operand's; `+ n` would need to know what `n` is, and a named
-            // integer could be a class with `operator+` that returns anything. A literal cannot be.
-            // **Only when the other operand is a literal zero**, and the restriction is what keeps it honest. `+ 0`
-            // means the count is zero and the type is the left operand's; `+ n` would need to know what `n` is, and
-            // a named integer could be a class with `operator+` that returns anything. A literal cannot be.
-            //
-            // Asked of the operand's **text**, not of its type: the type of `0` is `int`, and comparing *that*
-            // against `"0"` is a test that can never pass. That was the first version, and it is why the rule sat
-            // here changing nothing while the count stayed at 306 — the same mistake as the deduction's parameter
-            // split, and worth saying twice: in this layer the *spelling* is the thing compared, and reaching for
-            // its computed form is how a rule silently never fires.
-            let literal_zero = |operand: &CppSyntaxNode| {
-                CppSyntaxKind::from(operand.kind()) == CppSyntaxKind::LiteralExpr
-                    && matches!(
-                        operand.text().to_string().trim(),
-                        "0" | "0L" | "0U" | "0UL" | "0LL" | "0ULL" | "0u" | "0ul" | "0ll" | "0ull"
-                    )
-            };
-            if matches!(operator_of(expression).as_deref(), Some("+" | "-")) {
-                if literal_zero(right) {
+            if matches!(binary.get_operator_text().as_deref(), Some("+" | "-")) {
+                if is_a_literal_zero(&binary.get_rhs()?) {
                     return Some(left_type);
                 }
-                if literal_zero(left) {
+                if is_a_literal_zero(&binary.get_lhs()?) {
                     return Some(right_type);
                 }
             }
-
             None
         }
         _ => None,
     }
-}
-
-/// The operator token of a binary expression, as written.
-///
-/// A binary expression is three children — left, operator, right — and the operator is a **token** rather than a node,
-/// so it is found by asking the children-with-tokens for the one that is not either operand. `None` when the shape is
-/// not that, which is what the recovery parses produce.
-fn operator_of(expression: &CppSyntaxNode) -> Option<String> {
-    expression
-        .children_with_tokens()
-        .filter_map(|element| element.into_token())
-        .map(|token| token.text().to_string())
-        .find(|text| {
-            !text.trim().is_empty()
-                && text
-                    .chars()
-                    .all(|character| !character.is_alphanumeric() && character != '_')
-        })
 }
 
 /// The type a literal spells, by the shape of its own text.
@@ -2606,28 +2517,13 @@ fn literal_type(written: &str) -> &'static str {
 /// to be asked. `None` for any other name — a local, a global, a template parameter — because their types are
 /// declared where this layer cannot reach without the scope tree.
 fn parameter_type(name: &CppSyntaxNode, declaration: &CppSyntaxNode) -> Option<String> {
-    let written = name.text().to_string();
-    let written = written.trim();
-
-    let parameter = declaration.descendants().find(|node| {
-        if CppSyntaxKind::from(node.kind()) != CppSyntaxKind::Parameter {
-            return false;
-        }
-        node.descendants().any(|child| {
-            matches!(
-                CppSyntaxKind::from(child.kind()),
-                CppSyntaxKind::Declarator | CppSyntaxKind::NameExpr
-            ) && child.text().to_string().trim() == written
-        })
-    })?;
-
-    // The parameter's own text with the name taken out, which is the type as the file wrote it. `rfind` rather
-    // than `find`: `int int_` has the name inside the type's spelling as well as at the end.
-    let whole = parameter.text().to_string();
-    let whole = whole.trim();
-    let at = whole.rfind(written)?;
-    let the_type = whole[..at].trim();
-    (!the_type.is_empty()).then(|| the_type.to_string())
+    use cpp_parser::{CppAstNode, CppNameExpr};
+    let written = CppNameExpr::cast(name.clone())?.get_name_text()?;
+    let parameter = the_parameters_of(declaration)
+        .into_iter()
+        .find(|parameter| parameter.get_name_text().as_deref() == Some(written.as_str()))?;
+    let the_type = parameter.get_type_text();
+    (!the_type.is_empty()).then_some(the_type)
 }
 
 /// **The type an init-capture's name has** — `[value = counter + 10] { return value; }` is an `int`.
@@ -2638,54 +2534,26 @@ fn parameter_type(name: &CppSyntaxNode, declaration: &CppSyntaxNode) -> Option<S
 ///
 /// A plain capture (`[counter]`, `[&counter]`) has no initializer and answers nothing here: its type is the enclosing
 /// variable's, which is a name lookup this layer does not make from a capture node.
-fn a_captures_type(expression: &CppSyntaxNode, declaration: &CppSyntaxNode) -> Option<String> {
-    let name = expression.text().to_string();
-    let name = name.trim();
-    if name.is_empty() {
-        return None;
-    }
-    for capture in declaration
-        .descendants()
-        .filter(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::LambdaCapture)
-    {
-        let text = capture.text().to_string();
-        let Some((left, _)) = text.split_once('=') else {
-            continue;
-        };
-        if left.trim() != name {
-            continue;
-        }
-        // **The initializer is the expression after the =.** It may be a child node or one level down (the capture
-        // node's own structure is the grammar's), so the first node that is not the captured name is the answer.
-        let initializer = capture
-            .children()
-            .find(|child| child.text().to_string().trim() != left.trim())
-            .or_else(|| {
-                capture
-                    .descendants()
-                    .find(|node| node.text().to_string().trim() != left.trim())
-            })?;
-        // **The enclosing *function*, not the variable the lambda is stored in.** The nearest Declaration ancestor is
-        // uto initialised = [value = …], whose body does not hold int counter = 0; — the initializer is written in the
-        // function's scope, so the walk needs the **outermost** declaration around the lambda.
-        let outer = declaration
-            .ancestors()
-            .filter(|node| {
-                matches!(
-                    CppSyntaxKind::from(node.kind()),
-                    CppSyntaxKind::Declaration | CppSyntaxKind::FunctionDef
-                )
-            })
-            .last()
-            .unwrap_or_else(|| declaration.clone());
-        return type_a_return_states_with(
-            &initializer,
-            &outer,
-            &crate::sema::types::TypeSubstitutions::new(&[], &[]),
-            &[],
-        );
-    }
-    None
+fn a_captures_type(expression: &CppSyntaxNode) -> Option<String> {
+    use cpp_parser::{CppAstNode, CppDeclaration, CppLambdaExpr, CppNameExpr};
+    let written = CppNameExpr::cast(expression.clone())?.get_name_text()?;
+    // **The lambda the name is written in**, and the declaration around it that the initializer is read in: the innermost
+    // lambda owns the capture list, while the initializer names what the *enclosing* function declares.
+    let lambda = cpp_parser::typed_ancestors::<CppLambdaExpr>(expression).next()?;
+    let capture = lambda
+        .get_captures()?
+        .get_captures()
+        .find(|capture| capture.get_name_text().as_deref() == Some(written.as_str()))?;
+    let initializer = capture.get_initializer()?;
+    // **The outermost declaration around the lambda** — the initializer is written in the function's scope, not in the
+    // variable the lambda is stored in (`auto initialised = [value = …]` is the nearest declaration and holds no `counter`).
+    let enclosing = cpp_parser::typed_ancestors::<CppDeclaration>(lambda.syntax()).last()?;
+    type_a_return_states_with(
+        &initializer,
+        enclosing.syntax(),
+        &crate::sema::types::TypeSubstitutions::new(&[], &[]),
+        &[],
+    )
 }
 
 /// **The type a local variable's own declaration writes** — `std::vector<int> result;` answers `std::vector<int>`.
@@ -2702,52 +2570,22 @@ fn a_local_variables_type(
     expression: &CppSyntaxNode,
     declaration: &CppSyntaxNode,
 ) -> Option<String> {
-    let written = expression.text().to_string();
-    let written = written.trim();
-    if written.is_empty() {
-        return None;
-    }
-
-    // **The declarations before this point that declare this name.** A `Declaration` covers `int x = 1;` and
-    // `std::vector<int> v;`; its own text is what the reader sees.
-    let mut found: Option<CppSyntaxNode> = None;
-    for candidate in declaration.descendants() {
-        if CppSyntaxKind::from(candidate.kind()) != CppSyntaxKind::Declaration {
+    use cpp_parser::{CppAstNode, CppNameExpr};
+    let name = CppNameExpr::cast(expression.clone())?;
+    let written = name.get_name_text()?;
+    // **The declarations before this point that declare this name** — the last one wins, which is what a nested block's
+    // shadow means. The declaration's own typed accessor answers the type it writes for that declarator, so `int* a, b;`
+    // gives `int*` for `a` and `int` for `b`.
+    let mut found: Option<String> = None;
+    for candidate in the_declarations_in(declaration) {
+        if candidate.get_range().end() > name.get_range().start() {
             continue;
         }
-        if candidate.text_range().end() > expression.text_range().start() {
-            continue;
-        }
-        // **A declarator's name is not always a NameExpr** — int result = 1; writes it as a token under the
-        // declarator — so the test is on the declaration's **text**, with the name as a whole word.
-        let text = candidate.text().to_string();
-        let declares_it = {
-            let mut rest = text.as_str();
-            let mut found_the_word = false;
-            while let Some(at) = rest.find(written) {
-                let before = rest[..at].chars().next_back();
-                let after = rest[at + written.len()..].chars().next();
-                let a_word = |character: Option<char>| {
-                    character.is_some_and(|c| c.is_alphanumeric() || c == '_')
-                };
-                if !a_word(before) && !a_word(after) {
-                    found_the_word = true;
-                    break;
-                }
-                rest = &rest[at + written.len()..];
-            }
-            found_the_word
-        };
-        if declares_it {
-            found = Some(candidate.clone());
+        if let Some(the_type) = candidate.get_type_text_of(&written) {
+            found = Some(the_type);
         }
     }
-    let whole = found?.text().to_string();
-    let whole = whole.trim().trim_end_matches(';').trim_end();
-    let at = whole.rfind(written)?;
-    let the_type = whole[..at].trim();
-    // A declaration whose "type" would be empty (`x;`) is not a declaration with a type to read.
-    (!the_type.is_empty()).then(|| the_type.to_string())
+    found
 }
 
 /// [`declared_returns_of`] for a caller that has the file's shapes already.

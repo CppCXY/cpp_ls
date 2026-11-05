@@ -1045,6 +1045,24 @@ impl CppParam {
         self.get_name().map(|name| name.get_name_text().to_string())
     }
 
+    /// **Is this parameter written `auto`** — the placeholder of a generic lambda (`[](auto v) { … }`)?
+    ///
+    /// Asked by **token kind**, and of the tokens written **before the declarator**, because that is where a type goes: the
+    /// parameter's own `auto` is a token beside the declarator rather than inside a specifier node (measured:
+    /// `Parameter "auto v" > [Declarator "v"]`, with `auto` a token child), so a `DeclSpecifierSeq` search alone would miss
+    /// it.
+    pub fn is_auto(&self) -> bool {
+        // **The keyword lives inside the builtin type**, not as a direct token of the specifier sequence: measured,
+        // `Parameter > [DeclSpecifierSeq > BuiltinType > Token(AutoKeyword), Declarator]`. `has_keyword` asks the specifier's
+        // own children and therefore misses it, which is why this asks the builtin type's keyword.
+        self.get_decl_specifiers()
+            .and_then(|specifiers| specifiers.get_builtin_type())
+            .and_then(|builtin| builtin.get_keyword())
+            .is_some_and(|keyword| {
+                keyword.get_keyword_kind() == CppKind::Token(CppTokenKind::AutoKeyword)
+            })
+    }
+
     /// **The type this parameter is written with**, as the file spells it: `const std::string&` for
     /// `const std::string& name`, `int*` for `int* p`, `int` for `int`.
     ///
