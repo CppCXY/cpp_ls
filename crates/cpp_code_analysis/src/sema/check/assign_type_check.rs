@@ -340,13 +340,13 @@ fn report(
 ///
 /// The last component of a qualified spelling is what a construction writes: `std::string(…)` for a `std::string`.
 fn constructs_the_written_type(expression: &cpp_parser::CppSyntaxNode, written: &str) -> bool {
-    if cpp_parser::CppSyntaxKind::from(expression.kind()) != cpp_parser::CppSyntaxKind::CallExpr {
-        return false;
-    }
-    let Some(callee) = expression.children().next() else {
+    let Some(call) = cpp_parser::CppCallExpr::cast(expression.clone()) else {
         return false;
     };
-    let Some(spelled) = super::spelling_of(&callee) else {
+    let Some(callee) = call.get_callee() else {
+        return false;
+    };
+    let Some(spelled) = super::spelling_of(callee.syntax()) else {
         return false;
     };
     let target = written.rsplit("::").next().unwrap_or(written).trim();

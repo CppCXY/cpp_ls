@@ -31,6 +31,7 @@
 //! answer is a type whose member list was read.
 
 use super::{Check, CheckContext, DiagnosticCode};
+use cpp_parser::CppAstNode;
 
 /// **`undefined-field`** — see the module documentation.
 pub struct UndefinedField;
@@ -59,10 +60,10 @@ impl Check for UndefinedField {
             // what the concept is testing for — reporting it is always wrong, and it was: measured, the project's own
             // `sized` concept produced "`value` has no member `size`". The existing dependent-type guard did not catch it
             // because a requires-expression's parameter is not bound as a template parameter at that offset.
-            if _node.ancestors().any(|node| {
-                cpp_parser::CppSyntaxKind::from(node.kind())
-                    == cpp_parser::CppSyntaxKind::RequiresExpr
-            }) {
+            if _node
+                .ancestors()
+                .any(|node| cpp_parser::CppRequiresExpr::can_cast(node.kind().into()))
+            {
                 continue;
             }
             // **Nothing after the operator** is a file being typed at — the completion path's business, not this

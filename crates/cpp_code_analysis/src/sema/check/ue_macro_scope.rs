@@ -35,8 +35,6 @@
 //! the tree (a member is inside a `ClassBody`, anything else is not). Both halves are needed: the written text says
 //! which declarations are annotated, and the tree says which of those are members.
 
-use cpp_parser::CppSyntaxKind;
-
 use super::unreal::{the_annotation_before, the_declared_name};
 use super::{Check, CheckContext, DiagnosticCode};
 use cpp_parser::CppAstNode;
@@ -97,9 +95,10 @@ fn check_declaration(context: &mut CheckContext<'_>, declaration: &cpp_parser::C
                 is_a_member = true;
                 break;
             }
-            match CppSyntaxKind::from(parent.kind()) {
-                CppSyntaxKind::CompoundStat | CppSyntaxKind::ParameterList => break,
-                _ => {}
+            if cpp_parser::CppCompoundStat::can_cast(parent.kind().into())
+                || cpp_parser::CppParamList::can_cast(parent.kind().into())
+            {
+                break;
             }
         }
         if is_a_member {

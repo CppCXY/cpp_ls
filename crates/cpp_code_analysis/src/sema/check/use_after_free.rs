@@ -49,7 +49,6 @@
 use std::collections::BTreeSet;
 
 use cpp_parser::CppAstNode;
-use cpp_parser::CppSyntaxKind;
 
 use super::{Check, CheckContext, DiagnosticCode};
 
@@ -63,18 +62,8 @@ impl Check for UseAfterFree {
         // separate regions, and a freed variable is not visible outside the one it was declared in.
         let bodies: Vec<cpp_parser::CppSyntaxNode> = context
             .own::<cpp_parser::CppDeclaration>()
-            .filter(|declaration| {
-                declaration
-                    .syntax()
-                    .children()
-                    .any(|child| kind(&child) == CppSyntaxKind::CompoundStat)
-            })
-            .filter_map(|declaration| {
-                declaration
-                    .syntax()
-                    .children()
-                    .find(|child| kind(child) == CppSyntaxKind::CompoundStat)
-            })
+            .filter_map(|declaration| declaration.get_body())
+            .map(|body| body.syntax().clone())
             .collect();
 
         for body in bodies {
@@ -90,9 +79,17 @@ type Freed = BTreeSet<usize>;
 
 /// Walk one statement, carrying the state of every variable freed so far.
 fn walk(statement: &cpp_parser::CppSyntaxNode, freed: &mut Freed, context: &mut CheckContext<'_>) {
-    match kind(statement) {
+    use cpp_parser::CppAstNode;
+
+    // **The statement sum type**, not a kind: a node that is not a statement keeps the old behaviour (its uses count, its effects
+    // are not a statement's).
+    let Some(statement_node) = cpp_parser::CppStat::cast(statement.clone()) else {
+        check_uses(statement, freed, context);
+        return;
+    };
+    match &statement_node {
         // A block and an `else` are containers of statements rather than statements themselves.
-        CppSyntaxKind::CompoundStat | CppSyntaxKind::ElseStat => {
+        cpp_parser::CppStat::CompoundStat(_) | cpp_parser::CppStat::ElseStat(_) => {
             for child in statement.children() {
                 walk(&child, freed, context);
             }
@@ -100,23 +97,25 @@ fn walk(statement: &cpp_parser::CppSyntaxNode, freed: &mut Freed, context: &mut 
         // **What happens inside a branch does not decide what happens after it.** The condition and the branches are
         // walked with a copy, so a use inside them is reported against the state they see, and a free they perform
         // does not escape — a free under an `if` may not run.
-        CppSyntaxKind::IfStat
-        | CppSyntaxKind::ForStat
-        | CppSyntaxKind::WhileStat
-        | CppSyntaxKind::DoWhileStat
-        | CppSyntaxKind::SwitchStat
-        | CppSyntaxKind::TryStat => {
+        cpp_parser::CppStat::IfStat(_)
+        | cpp_parser::CppStat::ForStat(_)
+        | cpp_parser::CppStat::WhileStat(_)
+        | cpp_parser::CppStat::DoWhileStat(_)
+        | cpp_parser::CppStat::SwitchStat(_)
+        | cpp_parser::CppStat::TryStat(_) => {
             let mut inside = freed.clone();
             for child in statement.children() {
                 walk(&child, &mut inside, context);
             }
         }
-        CppSyntaxKind::ExpressionStat | CppSyntaxKind::ReturnStat | CppSyntaxKind::Declaration => {
+        cpp_parser::CppStat::ExpressionStat(_)
+        | cpp_parser::CppStat::ReturnStat(_)
+        | cpp_parser::CppStat::Declaration(_) => {
             check_uses(statement, freed, context);
             apply_effects(statement, freed, context);
         }
-        // Anything else is an expression in a position the arms above did not name — its uses count, its effects are
-        // not a statement's.
+        // Anything else is an expression in a position the arms above did not name — its uses count, its effects are not a
+        // statement's.
         _ => check_uses(statement, freed, context),
     }
 }
@@ -195,65 +194,63 @@ fn apply_effects(
     context: &mut CheckContext<'_>,
 ) {
     for candidate in statement.descendants() {
-        match kind(&candidate) {
-            // `delete p;` and `delete[] p;` — a unary expression whose first token is `delete`.
-            CppSyntaxKind::UnaryExpr => {
-                let is_delete = candidate
-                    .children_with_tokens()
-                    .filter_map(|element| element.into_token())
-                    .next()
-                    .map(|token| cpp_parser::CppTokenKind::from(token.kind()))
-                    == Some(cpp_parser::CppTokenKind::DeleteKeyword);
-                if is_delete
-                    && let Some(operand) = candidate.children().next()
-                    && let Some((offset, _)) = the_variable(&operand, context)
+        // **The three effects, asked of the expression**: a `delete`, a call that frees, and an assignment.
+        let Some(expression) = cpp_parser::CppExpr::cast(candidate.clone()) else {
+            continue;
+        };
+        match expression {
+            // `delete p;` and `delete[] p;` — the operator is the expression's own.
+            cpp_parser::CppExpr::UnaryExpr(unary) if unary.is_delete() => {
+                if let Some(operand) = unary.get_operand()
+                    && let Some((offset, _)) = the_variable(operand.syntax(), context)
                 {
                     freed.insert(offset);
                 }
             }
-            CppSyntaxKind::CallExpr => {
-                let Some(callee) = candidate.children().next() else {
+            cpp_parser::CppExpr::CallExpr(call) => {
+                let Some(callee) = call.get_callee() else {
                     continue;
                 };
-                let arguments: Vec<cpp_parser::CppSyntaxNode> =
-                    candidate.children().skip(1).collect();
-                let name = the_last_identifier_of(&callee);
+                let arguments: Vec<cpp_parser::CppExpr> = call.get_args();
+                let name = the_last_identifier_of(callee.syntax());
+                let receiver = a_member_access_object(&callee);
                 match name.as_deref() {
                     // `free(p)` — C, and C++ through `<cstdlib>`.
                     Some("free") => {
                         if let Some(argument) = arguments.first()
-                            && let Some((offset, _)) = the_variable(argument, context)
+                            && let Some((offset, _)) = the_variable(argument.syntax(), context)
                         {
                             freed.insert(offset);
                         }
                     }
-                    // `std::destroy_at(p)` — the object's lifetime ends, and a later read of it is a use after its
-                    // lifetime, which is the same defect with a different name.
+                    // `std::destroy_at(p)` — the object's lifetime ends, and a later read of it is a use after its lifetime,
+                    // which is the same defect with a different name.
                     Some("destroy_at") => {
                         if let Some(argument) = arguments.first()
-                            && let Some((offset, _)) = the_variable(argument, context)
+                            && let Some((offset, _)) = the_variable(argument.syntax(), context)
                         {
                             freed.insert(offset);
                         }
                     }
                     // `u.reset()` — the pointee is gone; `u` itself stays valid.
-                    Some("reset") if is_a_member_access(&callee) => {
-                        if let Some(receiver) = callee.children().next()
-                            && let Some((offset, _)) = the_variable(&receiver, context)
+                    Some("reset") => {
+                        if let Some(receiver) = receiver
+                            && let Some((offset, _)) = the_variable(receiver.syntax(), context)
                         {
                             freed.insert(offset);
                         }
                     }
-                    // **A call whose callee's fact says it frees this argument.** The bit is per parameter index,
-                    // decided when the callee was read — see [`crate::DeclFact::frees`].
+                    // **A call whose callee's fact says it frees this argument.** The bit is per parameter index, decided when
+                    // the callee was read — see [`crate::DeclFact::frees`].
                     _ => {
-                        if let Some(frees) = the_frees_of(context, &callee)
+                        if let Some(frees) = the_frees_of(context, callee.syntax())
                             && frees != 0
                         {
                             for (index, argument) in arguments.iter().enumerate() {
                                 if index < 64
                                     && frees & (1 << index) != 0
-                                    && let Some((offset, _)) = the_variable(argument, context)
+                                    && let Some((offset, _)) =
+                                        the_variable(argument.syntax(), context)
                                 {
                                     freed.insert(offset);
                                 }
@@ -262,28 +259,24 @@ fn apply_effects(
                     }
                 }
             }
-            // `p = …` — a variable that is assigned a value is no longer the one that was freed, unless the value is
-            // another freed variable.
-            CppSyntaxKind::BinaryExpr => {
-                let assignment = candidate
-                    .children_with_tokens()
-                    .filter_map(|element| element.into_token())
-                    .any(|token| {
-                        cpp_parser::CppTokenKind::from(token.kind())
-                            == cpp_parser::CppTokenKind::Assign
-                    });
-                if !assignment {
-                    continue;
-                }
-                let mut children = candidate.children();
-                let (Some(target), Some(value)) = (children.next(), children.next()) else {
+            // `p = …` — a variable that is assigned a value is no longer the one that was freed, unless the value is another
+            // freed variable.
+            cpp_parser::CppExpr::BinaryExpr(binary)
+                if binary.get_operator_text().as_deref() == Some("=") =>
+            {
+                let Some(target) = binary.get_lhs() else {
                     continue;
                 };
-                let Some((offset, _)) = the_variable(&target, context) else {
+                // **The right-hand side as a node**: `p = new T()` is an assignment whose value is a `new` expression, and
+                // `get_rhs` answers an `Option<CppExpr>` — which every expression is now, but the variable test wants the node.
+                let Some(value) = binary.syntax().children().nth(1) else {
                     continue;
                 };
-                // Assigning another freed variable keeps the state; anything else — a `new`, a call, a literal —
-                // is a fresh value this analysis knows nothing bad about.
+                let Some((offset, _)) = the_variable(target.syntax(), context) else {
+                    continue;
+                };
+                // Assigning another freed variable keeps the state; anything else — a `new`, a call, a literal — is a fresh value
+                // this analysis knows nothing bad about.
                 match the_variable(&value, context) {
                     Some((source, _)) if freed.contains(&source) => {
                         freed.insert(offset);
@@ -344,10 +337,12 @@ fn the_variable(
     context: &CheckContext<'_>,
 ) -> Option<(usize, String)> {
     let expression = skip_parentheses(expression);
-    match kind(&expression) {
+    match cpp_parser::CppExpr::cast(expression.clone()) {
         // `&x` names `x`: `destroy_at(&x)` destroys the object `x` is.
-        CppSyntaxKind::UnaryExpr => the_variable(&expression.children().next()?, context),
-        CppSyntaxKind::IdentifierExpr | CppSyntaxKind::NameExpr => {
+        Some(cpp_parser::CppExpr::UnaryExpr(unary)) => {
+            the_variable(unary.get_operand()?.syntax(), context)
+        }
+        Some(cpp_parser::CppExpr::NameExpr(_)) => {
             let offset = the_last_identifier_offset(&expression)?;
             let crate::Known::Yes(binding) =
                 crate::sema::resolve::definition_at(context.scopes(), context.tree(), offset)
@@ -368,7 +363,7 @@ fn the_variable(
 }
 
 fn skip_parentheses(expression: &cpp_parser::CppSyntaxNode) -> cpp_parser::CppSyntaxNode {
-    if kind(expression) != CppSyntaxKind::ParenExpr {
+    if !cpp_parser::CppParenExpr::can_cast(expression.kind().into()) {
         return expression.clone();
     }
     expression
@@ -412,6 +407,12 @@ fn the_last_identifier_of(expression: &cpp_parser::CppSyntaxNode) -> Option<Stri
         .map(|token| token.text().to_string())
 }
 
-fn kind(node: &cpp_parser::CppSyntaxNode) -> CppSyntaxKind {
-    CppSyntaxKind::from(node.kind())
+/// **The object of a member access** — `u` for `u.reset()`: an `a.b` is an `IndexExpr` (measured) and an `a->b` may be a
+/// `MemberExpr`; both answer their object.
+fn a_member_access_object(expression: &cpp_parser::CppExpr) -> Option<cpp_parser::CppExpr> {
+    match expression {
+        cpp_parser::CppExpr::MemberExpr(member) => member.get_object(),
+        cpp_parser::CppExpr::IndexExpr(index) if index.is_a_member_access() => index.get_object(),
+        _ => None,
+    }
 }

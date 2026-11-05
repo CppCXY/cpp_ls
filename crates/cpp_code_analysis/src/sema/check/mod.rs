@@ -855,8 +855,14 @@ pub fn body_of(function: &cpp_parser::CppSyntaxNode) -> Option<cpp_parser::CppSy
 /// the three checks that call this function therefore reported nothing on any file while looking correct — measured,
 /// and the reason their positive tests were still ignored.
 pub fn function_definitions(context: &CheckContext<'_>) -> Vec<cpp_parser::CppSyntaxNode> {
+    use cpp_parser::CppAstNode;
+
+    // **Declarations first, then the shape question.** Only a `Declaration` can define a function, and asking the predicate of
+    // every node in the file — names, literals, specifiers — is what this walk did: the predicate casts to a declaration and
+    // returns `false` for all of them.
     context
-        .own_syntax_nodes()
+        .own::<cpp_parser::CppDeclaration>()
+        .map(|declaration| declaration.syntax().clone())
         .filter(is_a_function_definition)
         .collect()
 }

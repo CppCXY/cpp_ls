@@ -33,59 +33,6 @@
 use super::{Check, CheckContext, DiagnosticCode};
 use cpp_parser::CppAstNode;
 
-/// **Does this definition declare the class it is written inside** — a constructor, or a destructor?
-///
-/// The question a definition's *name* answers, which is why it is asked of the name and not of a return type: a
-/// constructor writes `Name(…)` and has no return type to read, so any answer to "what does it return" is a
-/// fabrication. Measured on `struct Name { Name(const std::string& f) : firstName(f) {} };` — the declaration has no
-/// `DeclSpecifierSeq` of its own (its ancestry is `Declaration > ClassBody > StructDef`), and the helper that reads a
-/// return type fell through to the parameter list and answered `Some("Name")`.
-///
-/// # Why the enclosing class's name is read rather than its scope
-///
-/// Because a check is handed a tree and not a scope table ([`CheckContext`]'s note), and because the name is the
-/// evidence the language itself uses: `Name` inside `class Name` is a constructor and `Name` anywhere else is a
-/// type. Both spellings of the destructor are matched, since `~Name` and `Name::~Name` are the same declaration
-/// written two ways.
-fn declares_the_enclosing_class(function: &cpp_parser::CppSyntaxNode) -> bool {
-    use cpp_parser::CppSyntaxKind;
-
-    let Some(name) = super::name_declared_by(function) else {
-        return false;
-    };
-
-    for ancestor in function.ancestors().skip(1) {
-        match CppSyntaxKind::from(ancestor.kind()) {
-            CppSyntaxKind::StructDef | CppSyntaxKind::ClassDef | CppSyntaxKind::UnionDef => {
-                // The class's own name is the last identifier before its body — the same "last one written" rule
-                // [`super::spelling_of`] uses for a declarator.
-                let declared = ancestor
-                    .children()
-                    .find(|child| cpp_parser::CppClassBody::can_cast(child.kind().into()))
-                    .and_then(|body| {
-                        ancestor
-                            .descendants_with_tokens()
-                            .filter_map(|element| element.into_token())
-                            .take_while(|token| {
-                                token.text_range().end() <= body.text_range().start()
-                            })
-                            .filter(|token| {
-                                token.kind() == cpp_parser::CppTokenKind::Identifier.into()
-                            })
-                            .last()
-                            .map(|token| token.text().to_string())
-                    });
-                return declared.as_deref() == Some(name.trim_start_matches('~'));
-            }
-            // A function written inside a function body is a local class or a lambda's, and neither is this
-            // question.
-            CppSyntaxKind::CompoundStat => return false,
-            _ => {}
-        }
-    }
-    false
-}
-
 /// **The range of the name a definition declares**, or `None` when it cannot be located.
 ///
 /// One line over [`super::name_token_of`], because *where* the name is and *what* it is are one question asked of one
@@ -152,7 +99,12 @@ impl Check for MissingReturn {
             // first declarator's specifier out of it. Asking a constructor for its return type is a question with no
             // answer, and the honest place to say so is here rather than in the helper: the helper is also asked
             // about members, where a class name would be a real answer.
-            if declares_the_enclosing_class(&function) {
+            // **A constructor is not asked this question**, and the shared reader is the one answer to "is this name the
+            // enclosing class's" — the local copy this replaced read the class's name as the last identifier before its body,
+            // which the typed layer answers directly (`CppClassDef::get_name_text`).
+            if super::name_declared_by(&function)
+                .is_some_and(|name| super::declares_the_enclosing_class_named(&function, &name))
+            {
                 continue;
             }
 

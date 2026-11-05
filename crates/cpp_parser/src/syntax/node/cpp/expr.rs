@@ -16,7 +16,7 @@ use crate::{
     syntax::traits::{CppAstChildren, CppAstNode, CppAstToken},
 };
 
-use super::{CppDeclaration, CppDeclarator, CppTypeId};
+use super::{CppDeclaration, CppDeclarator, CppRequiresExpr, CppTypeId};
 use crate::syntax::node::token::{CppLiteralToken, CppNameToken, CppOperatorToken};
 
 /// Any expression.
@@ -39,6 +39,20 @@ pub enum CppExpr {
     ThisExpr(CppThisExpr),
     /// A C11 generic selection — `_Generic(x, int: "int", default: "other")`.
     GenericSelectionExpr(CppGenericSelectionExpr),
+    /// A `new` expression: `new T(1)`.
+    NewExpr(CppNewExpr),
+    /// A `throw` expression: `throw x`, `throw`.
+    ThrowExpr(CppThrowExpr),
+    /// `sizeof(T)` and `sizeof value`.
+    SizeofExpr(CppSizeofExpr),
+    /// `typeid(T)`.
+    TypeidExpr(CppTypeidExpr),
+    /// A fold expression: `(args + ...)`.
+    FoldExpr(CppFoldExpr),
+    /// A pack expansion: `args...`.
+    PackExpansionExpr(CppPackExpansionExpr),
+    /// A requires-expression: a question about a type.
+    RequiresExpr(CppRequiresExpr),
     /// An expression the parser could not classify, kept so the tree stays lossless.
     ErrorNode(CppUnknownExpr),
 }
@@ -62,6 +76,13 @@ impl CppAstNode for CppExpr {
             CppExpr::ThisExpr(node) => node.syntax(),
             CppExpr::ErrorNode(node) => node.syntax(),
             CppExpr::GenericSelectionExpr(node) => node.syntax(),
+            CppExpr::NewExpr(node) => node.syntax(),
+            CppExpr::ThrowExpr(node) => node.syntax(),
+            CppExpr::SizeofExpr(node) => node.syntax(),
+            CppExpr::TypeidExpr(node) => node.syntax(),
+            CppExpr::FoldExpr(node) => node.syntax(),
+            CppExpr::PackExpansionExpr(node) => node.syntax(),
+            CppExpr::RequiresExpr(node) => node.syntax(),
         }
     }
 
@@ -86,6 +107,13 @@ impl CppAstNode for CppExpr {
                 | CppSyntaxKind::ClosureExpr
                 | CppSyntaxKind::ThisExpr
                 | CppSyntaxKind::GenericSelectionExpr
+                | CppSyntaxKind::NewExpr
+                | CppSyntaxKind::ThrowExpr
+                | CppSyntaxKind::SizeofExpr
+                | CppSyntaxKind::TypeidExpr
+                | CppSyntaxKind::FoldExpr
+                | CppSyntaxKind::PackExpansionExpr
+                | CppSyntaxKind::RequiresExpr
                 | CppSyntaxKind::ErrorNode
         )
     }
@@ -117,9 +145,118 @@ impl CppAstNode for CppExpr {
             CppSyntaxKind::GenericSelectionExpr => {
                 CppGenericSelectionExpr::cast(syntax).map(CppExpr::GenericSelectionExpr)
             }
+            CppSyntaxKind::NewExpr => CppNewExpr::cast(syntax).map(CppExpr::NewExpr),
+            CppSyntaxKind::ThrowExpr => CppThrowExpr::cast(syntax).map(CppExpr::ThrowExpr),
+            CppSyntaxKind::SizeofExpr => CppSizeofExpr::cast(syntax).map(CppExpr::SizeofExpr),
+            CppSyntaxKind::TypeidExpr => CppTypeidExpr::cast(syntax).map(CppExpr::TypeidExpr),
+            CppSyntaxKind::FoldExpr => CppFoldExpr::cast(syntax).map(CppExpr::FoldExpr),
+            CppSyntaxKind::PackExpansionExpr => {
+                CppPackExpansionExpr::cast(syntax).map(CppExpr::PackExpansionExpr)
+            }
+            CppSyntaxKind::RequiresExpr => CppRequiresExpr::cast(syntax).map(CppExpr::RequiresExpr),
             CppSyntaxKind::ErrorNode => CppUnknownExpr::cast(syntax).map(CppExpr::ErrorNode),
             _ => None,
         }
+    }
+}
+
+/// A `new` expression: `new T(1)`, `new T[4]`, `new (buffer) T`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CppNewExpr {
+    syntax: CppSyntaxNode,
+}
+
+impl CppAstNode for CppNewExpr {
+    fn syntax(&self) -> &CppSyntaxNode {
+        &self.syntax
+    }
+
+    fn can_cast(kind: CppSyntaxKind) -> bool {
+        kind == CppSyntaxKind::NewExpr
+    }
+
+    fn cast(syntax: CppSyntaxNode) -> Option<Self> {
+        Self::can_cast(syntax.kind().into()).then_some(Self { syntax })
+    }
+}
+
+/// A `throw` expression: `throw x;`, `throw;`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CppThrowExpr {
+    syntax: CppSyntaxNode,
+}
+
+impl CppAstNode for CppThrowExpr {
+    fn syntax(&self) -> &CppSyntaxNode {
+        &self.syntax
+    }
+
+    fn can_cast(kind: CppSyntaxKind) -> bool {
+        kind == CppSyntaxKind::ThrowExpr
+    }
+
+    fn cast(syntax: CppSyntaxNode) -> Option<Self> {
+        Self::can_cast(syntax.kind().into()).then_some(Self { syntax })
+    }
+}
+
+/// A `sizeof` expression: `sizeof(T)`, `sizeof value`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CppSizeofExpr {
+    syntax: CppSyntaxNode,
+}
+
+impl CppAstNode for CppSizeofExpr {
+    fn syntax(&self) -> &CppSyntaxNode {
+        &self.syntax
+    }
+
+    fn can_cast(kind: CppSyntaxKind) -> bool {
+        kind == CppSyntaxKind::SizeofExpr
+    }
+
+    fn cast(syntax: CppSyntaxNode) -> Option<Self> {
+        Self::can_cast(syntax.kind().into()).then_some(Self { syntax })
+    }
+}
+
+/// A `typeid` expression: `typeid(T)`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CppTypeidExpr {
+    syntax: CppSyntaxNode,
+}
+
+impl CppAstNode for CppTypeidExpr {
+    fn syntax(&self) -> &CppSyntaxNode {
+        &self.syntax
+    }
+
+    fn can_cast(kind: CppSyntaxKind) -> bool {
+        kind == CppSyntaxKind::TypeidExpr
+    }
+
+    fn cast(syntax: CppSyntaxNode) -> Option<Self> {
+        Self::can_cast(syntax.kind().into()).then_some(Self { syntax })
+    }
+}
+
+/// A pack expansion: `args...`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CppPackExpansionExpr {
+    syntax: CppSyntaxNode,
+}
+
+impl CppAstNode for CppPackExpansionExpr {
+    fn syntax(&self) -> &CppSyntaxNode {
+        &self.syntax
+    }
+
+    fn can_cast(kind: CppSyntaxKind) -> bool {
+        kind == CppSyntaxKind::PackExpansionExpr
+    }
+
+    fn cast(syntax: CppSyntaxNode) -> Option<Self> {
+        Self::can_cast(syntax.kind().into()).then_some(Self { syntax })
     }
 }
 

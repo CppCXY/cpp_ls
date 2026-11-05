@@ -1159,6 +1159,26 @@ impl CppMemberInitializer {
     }
 }
 
+/// A requires-expression: `requires (T value) { value.size(); }` — a **question** about a type, not a definition.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CppRequiresExpr {
+    syntax: CppSyntaxNode,
+}
+
+impl CppAstNode for CppRequiresExpr {
+    fn syntax(&self) -> &CppSyntaxNode {
+        &self.syntax
+    }
+
+    fn can_cast(kind: CppSyntaxKind) -> bool {
+        kind == CppSyntaxKind::RequiresExpr
+    }
+
+    fn cast(syntax: CppSyntaxNode) -> Option<Self> {
+        Self::can_cast(syntax.kind().into()).then_some(Self { syntax })
+    }
+}
+
 /// A `requires`-clause: `requires (x > 0)`, `requires std::integral<T>`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CppRequiresClause {

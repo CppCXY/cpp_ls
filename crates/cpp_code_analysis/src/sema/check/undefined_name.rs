@@ -116,10 +116,11 @@ impl Check for UndefinedName {
         // language knows (a builtin has no associated namespace). An argument whose type this layer cannot work out
         // is "may be a class", and that is silence.
         for call in context.own::<cpp_parser::CppCallExpr>().collect::<Vec<_>>() {
-            let call_node = call.syntax().clone();
-            let Some(callee) = call_node.children().next() else {
+            let Some(callee) = call.get_callee() else {
                 continue;
             };
+            let callee = callee.syntax().clone();
+            let call_node = call.syntax().clone();
             // A **bare** callee only: `a.f(…)` is the receiver's question above, and `Namespace::f(…)` and
             // `(*p)(…)` are not this question at all.
             let Some(token) = a_bare_name(&callee) else {

@@ -88,10 +88,11 @@ impl Check for ParamTypeCheck {
         // **This file's own calls**, typed, over this file's own text — see `CheckContext::own`. Collected before
         // the loop because a finding needs `&mut context` while the iterator holds `&context`.
         for call in context.own::<cpp_parser::CppCallExpr>().collect::<Vec<_>>() {
-            let call = call.syntax().clone();
-            let Some(callee) = call.children().next() else {
+            let Some(callee) = call.get_callee() else {
                 continue;
             };
+            let callee = callee.syntax().clone();
+            let call = call.syntax().clone();
             let Some(name) = super::spelling_of(&callee) else {
                 continue;
             };
@@ -265,12 +266,7 @@ fn check_the_arguments(
 fn enclosing_namespaces(node: &cpp_parser::CppSyntaxNode) -> Vec<String> {
     let mut namespaces: Vec<String> = node
         .ancestors()
-        .filter(|ancestor| {
-            matches!(
-                cpp_parser::CppSyntaxKind::from(ancestor.kind()),
-                cpp_parser::CppSyntaxKind::NamespaceDecl
-            )
-        })
+        .filter(|ancestor| cpp_parser::CppNamespaceDecl::can_cast(ancestor.kind().into()))
         .filter_map(|namespace| super::spelling_of(&namespace))
         .collect();
     namespaces.reverse();

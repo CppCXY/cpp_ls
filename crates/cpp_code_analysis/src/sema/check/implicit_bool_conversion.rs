@@ -39,7 +39,10 @@ impl Check for ImplicitBoolConversion {
         let mut conditions: Vec<(usize, usize)> = Vec::new();
         let mut note = |condition: &cpp_parser::CppParenExpr| {
             // The expression inside the parentheses is what has a type; the parentheses are not an expression.
-            let Some(inner) = condition.syntax().children().next() else {
+            let Some(inner) = condition
+                .get_expr()
+                .map(|expression| expression.syntax().clone())
+            else {
                 return;
             };
             // **A comparison is `bool` by syntax, so this rule has nothing to say about it** — and asking the
@@ -110,9 +113,9 @@ impl Check for ImplicitBoolConversion {
 /// Parentheses are unwrapped because a reader writes `if ((a == b))` and the condition node is the same one.
 fn the_question_answers_itself(expression: &cpp_parser::CppSyntaxNode) -> bool {
     let mut node = expression.clone();
-    while cpp_parser::CppParenExpr::can_cast(node.kind().into()) {
-        match node.children().next() {
-            Some(inner) => node = inner,
+    while let Some(paren) = cpp_parser::CppParenExpr::cast(node.clone()) {
+        match paren.get_expr() {
+            Some(inner) => node = inner.syntax().clone(),
             None => return false,
         }
     }
@@ -124,19 +127,9 @@ fn the_question_answers_itself(expression: &cpp_parser::CppSyntaxNode) -> bool {
         );
     }
 
-    // A logical `!` has the same answer and no typed accessor, so the operator is read from the first token — the
-    // same reading `assign_type_check`'s `unary_operand_with` makes, and for the same reason.
-    if cpp_parser::CppUnaryExpr::can_cast(node.kind().into()) {
-        return node
-            .children_with_tokens()
-            .filter_map(|element| element.into_token())
-            .find(|token| {
-                !matches!(
-                    cpp_parser::CppTokenKind::from(token.kind()),
-                    cpp_parser::CppTokenKind::Whitespace | cpp_parser::CppTokenKind::Newline
-                )
-            })
-            .is_some_and(|token| token.text() == "!");
+    // **A logical `!` has the same answer**: the operand is a predicate, and the operator is the unary expression's own.
+    if let Some(unary) = cpp_parser::CppUnaryExpr::cast(node.clone()) {
+        return unary.get_operator_text().as_deref() == Some("!");
     }
 
     false
