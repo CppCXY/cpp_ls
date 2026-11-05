@@ -301,19 +301,16 @@ mod params_tests {
     /// **Both shapes on the wire**, because the extension sends the second and clangd's method documents the first.
     #[test]
     fn both_param_shapes_name_the_document() {
-        let bare: SwitchSourceHeaderParams = serde_json::from_str(
-            r#"{"uri":"file:///p/foo.cpp"}"#,
-        )
-        .expect("a bare `uri` is a `TextDocumentIdentifier`");
+        let bare: SwitchSourceHeaderParams = serde_json::from_str(r#"{"uri":"file:///p/foo.cpp"}"#)
+            .expect("a bare `uri` is a `TextDocumentIdentifier`");
         assert_eq!(
             bare.the_uri().map(|uri| uri.as_str()),
             Some("file:///p/foo.cpp")
         );
 
-        let nested: SwitchSourceHeaderParams = serde_json::from_str(
-            r#"{"textDocument":{"uri":"file:///p/foo.h"}}"#,
-        )
-        .expect("the LSP-shaped `textDocument` is what a VS Code client sends");
+        let nested: SwitchSourceHeaderParams =
+            serde_json::from_str(r#"{"textDocument":{"uri":"file:///p/foo.h"}}"#)
+                .expect("the LSP-shaped `textDocument` is what a VS Code client sends");
         assert_eq!(
             nested.the_uri().map(|uri| uri.as_str()),
             Some("file:///p/foo.h")
