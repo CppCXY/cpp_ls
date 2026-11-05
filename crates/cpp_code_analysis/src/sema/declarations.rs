@@ -1205,7 +1205,7 @@ fn the_class_a_typedef_body_names(
 
     let tag = cpp_parser::typed_children::<cpp_parser::CppNameExpr>(&body)
         .next()
-        .map(|name| name.get_qualified_name())
+        .map(|name| cpp_parser::subtree_text_spaced(name.syntax()))
         .filter(|written| !written.is_empty());
 
     Some(tag.unwrap_or_else(|| typedef_name.trim().to_string()))
@@ -1635,24 +1635,22 @@ fn fill_the_reflection(
 ) {
     let mut annotations: std::collections::HashMap<usize, crate::summary::ReflectionFact> =
         std::collections::HashMap::new();
-    for node in root.descendants() {
-        if cpp_parser::CppSyntaxKind::from(node.kind()) != cpp_parser::CppSyntaxKind::Declaration {
-            continue;
-        }
-        let Some(name) = the_declaration_name(&node) else {
+    use cpp_parser::CppAstNode;
+    for node in cpp_parser::typed_descendants::<cpp_parser::CppDeclaration>(root) {
+        let Some(name_start) = the_declaration_name_start(node.syntax()) else {
             continue;
         };
         // **Two shapes, because the parser reads them differently.** A class's `UCLASS(...)` is a sibling *before* the
         // declaration; a member function's `UFUNCTION(...)` was measured to be **part of** the declaration — the parser's
         // recovery keeps the macro call and the signature together — so the annotation starts at the declaration itself.
-        let start = usize::from(node.text_range().start());
+        let start = usize::from(node.get_range().start());
         let Some((macro_name, specifiers)) =
             the_annotation_before(written, start).or_else(|| the_annotation_at(written, start))
         else {
             continue;
         };
         annotations.insert(
-            usize::from(name.text_range().start()),
+            name_start,
             crate::summary::ReflectionFact {
                 macro_name,
                 specifiers,
@@ -1669,37 +1667,13 @@ fn fill_the_reflection(
     }
 }
 
-/// **The name a declaration declares** — the class's own name, or the declarator's, never the first name in its type.
-fn the_declaration_name(
-    declaration: &cpp_parser::CppSyntaxNode,
-) -> Option<cpp_parser::CppSyntaxNode> {
-    let kind = |node: &cpp_parser::CppSyntaxNode| cpp_parser::CppSyntaxKind::from(node.kind());
-    if let Some(definition) = declaration.descendants().find(|node| {
-        matches!(
-            kind(node),
-            cpp_parser::CppSyntaxKind::ClassDef | cpp_parser::CppSyntaxKind::StructDef
-        )
-    }) {
-        return definition
-            .descendants()
-            .find(|node| kind(node) == cpp_parser::CppSyntaxKind::NameExpr);
-    }
-    // A variable keeps its declarator under an `InitDeclarator`; a function's is a child of the declaration itself.
-    let declarator = declaration
-        .descendants()
-        .find(|node| kind(node) == cpp_parser::CppSyntaxKind::InitDeclarator)
-        .and_then(|init| {
-            init.children()
-                .find(|node| kind(node) == cpp_parser::CppSyntaxKind::Declarator)
-        })
-        .or_else(|| {
-            declaration
-                .children()
-                .find(|node| kind(node) == cpp_parser::CppSyntaxKind::Declarator)
-        })?;
-    declarator
-        .descendants()
-        .find(|node| kind(node) == cpp_parser::CppSyntaxKind::NameExpr)
+/// **Where the name a declaration declares starts** — the class's own name, or the declarator's, never the first name in its
+/// type.
+fn the_declaration_name_start(declaration: &cpp_parser::CppSyntaxNode) -> Option<usize> {
+    use cpp_parser::{CppAstNode, CppAstToken, CppDeclaration};
+    let declaration = CppDeclaration::cast(declaration.clone())?;
+    let name = declaration.get_name()?;
+    Some(usize::from(name.get_range().start()))
 }
 
 /// The macro call that ends immediately before `at`, with its arguments split into specifiers.
@@ -2030,12 +2004,14 @@ fn body_of(declaration: &CppSyntaxNode) -> Option<cpp_parser::CppCompoundStat> {
 /// A token and its ancestors are the only nodes that can hold the name, so this is O(depth). `parent_ancestors`
 /// is innermost-first, which is the "last containing node in document order" the old walk was after.
 fn declaration_of(root: &CppSyntaxNode, binding: &Binding) -> Option<CppSyntaxNode> {
+    use cpp_parser::CppAstNode;
     let token = cpp_parser::token_at(root, binding.name_range.start_offset)?;
+    // `CppDeclaration::can_cast` is the declaration node; `FunctionDef` stays as a fallback for the shapes the recovery parser
+    // can build, although a function definition is measured to be a `Declaration` here.
     token.parent_ancestors().find(|node| {
-        matches!(
-            CppSyntaxKind::from(node.kind()),
-            CppSyntaxKind::Declaration | CppSyntaxKind::FunctionDef
-        )
+        cpp_parser::CppDeclaration::can_cast(node.kind().into())
+            || cpp_parser::CppSyntaxKind::from(node.kind())
+                == cpp_parser::CppSyntaxKind::FunctionDef
     })
 }
 
@@ -2307,46 +2283,21 @@ pub(crate) fn the_widest_of(types: &[crate::sema::types::Type]) -> Option<String
 /// [`MOST_MEMBERS_AN_ACCESSOR_CLASS_HAS`] is not searched at all — the accessors this exists for are in small classes, and a
 /// larger one keeps the unknown return it had before this reader existed.
 fn a_data_member_type(expression: &CppSyntaxNode, declaration: &CppSyntaxNode) -> Option<String> {
+    use cpp_parser::{CppAstNode, CppClassBody, CppDeclaration, CppNameExpr};
     /// A cost bound, not a language rule — see the note above.
     const MOST_MEMBERS_AN_ACCESSOR_CLASS_HAS: usize = 64;
 
-    let name = expression.text().to_string();
-    let name = name.trim();
-    if name.is_empty() {
-        return None;
-    }
-    let body = declaration
-        .ancestors()
-        .find(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::ClassBody)?;
-    let mut members = body
-        .children()
-        .filter(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::Declaration);
-    let mut seen = 0usize;
-    for member in members.by_ref() {
-        seen += 1;
-        if seen > MOST_MEMBERS_AN_ACCESSOR_CLASS_HAS {
+    let name = CppNameExpr::cast(expression.clone())?.get_name_text()?;
+    // **The class body the function is written in**, and its members one level down: a member declaration's own typed accessor
+    // answers the type it writes for the declarator named `name`, which is the field's type.
+    let body = cpp_parser::typed_ancestors::<CppClassBody>(declaration).next()?;
+    for (seen, member) in body.children::<CppDeclaration>().enumerate() {
+        if seen >= MOST_MEMBERS_AN_ACCESSOR_CLASS_HAS {
             return None;
         }
-        // **The member's own declarator**, one level down: `Declaration > InitDeclarator > Declarator`.
-        let Some(declarator) = member
-            .children()
-            .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::InitDeclarator)
-        else {
-            continue;
-        };
-        let written = declarator.text().to_string();
-        let written = written.trim();
-        // A function has a parameter list and a field does not — and this is a question about a field.
-        if written.contains('(') || written != name {
-            continue;
+        if let Some(the_type) = member.get_type_text_of(&name) {
+            return Some(the_type);
         }
-        let text = member.text().to_string();
-        let at = text.find(name)?;
-        let the_type = text[..at].trim();
-        if the_type.is_empty() {
-            return None;
-        }
-        return Some(the_type.to_string());
     }
     None
 }
@@ -2775,11 +2726,9 @@ pub(crate) fn declared_returns_of_with(
             specifiers = Some(node.clone());
         }
         if let Some(node) = &shape.trailing
-            && let Some(type_id) = node
-                .children()
-                .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::TypeId)
+            && let Some(type_id) = cpp_parser::typed_children::<cpp_parser::CppTypeId>(node).next()
         {
-            let spelling = type_id.text().to_string().trim().to_string();
+            let spelling = type_id.get_type_text().trim().to_string();
             if !spelling.is_empty() {
                 trailing = Some(spelling);
             }
@@ -2846,7 +2795,7 @@ pub(crate) fn declared_returns_of_with(
     // showed that as the function's answer where the file wrote `std::size_t`. See
     // [`crate::sema::types::type_of_declaration_named`].
     let declared = binding.name.text();
-    let spelling = if specifiers.text().to_string().trim().is_empty() {
+    let spelling = if specifiers.text().is_empty() {
         String::new()
     } else {
         crate::sema::types::read_specifiers_named(
@@ -2902,27 +2851,41 @@ fn before(text: &str, node: &CppSyntaxNode, name: cpp_parser::SourceRange) -> St
 pub fn declared_access_at(root: &CppSyntaxNode, offset: usize) -> Option<Access> {
     let token = cpp_parser::token_at(root, offset)?;
 
-    let body = token
-        .parent_ancestors()
-        .find(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::ClassBody)?;
-
-    let default = match body.parent().map(|owner| CppSyntaxKind::from(owner.kind())) {
-        Some(CppSyntaxKind::StructDef | CppSyntaxKind::UnionDef) => Access::Public,
-        _ => Access::Private,
+    use cpp_parser::{
+        CppAccessSpecifier, CppAstNode, CppClassBody, CppClassDef, CppKind, CppTokenKind,
     };
+    let body = cpp_parser::typed_ancestors::<CppClassBody>(&token.parent()?).next()?;
+
+    // **The class key decides the default before any label**: `struct` and `union` are public, `class` is private.
+    let default =
+        body.syntax()
+            .parent()
+            .and_then(CppClassDef::cast)
+            .map_or(Access::Private, |class| {
+                if class.is_struct() || class.is_union() {
+                    Access::Public
+                } else {
+                    Access::Private
+                }
+            });
 
     let mut level = default;
-    for child in body.children() {
+    for child in body.syntax().children() {
         // Only the labels **before** the name are in force: a `private:` written below it does not change what this
-        // declaration is, which is the same rule the file's own text follows.
+        // declaration is.
         if usize::from(child.text_range().start()) >= offset {
             break;
         }
-
-        level = match CppSyntaxKind::from(child.kind()) {
-            CppSyntaxKind::PublicAccess => Access::Public,
-            CppSyntaxKind::ProtectedAccess => Access::Protected,
-            CppSyntaxKind::PrivateAccess => Access::Private,
+        let Some(label) = CppAccessSpecifier::cast(child) else {
+            continue;
+        };
+        let Some(keyword) = label.get_keyword() else {
+            continue;
+        };
+        level = match keyword.get_keyword_kind() {
+            CppKind::Token(CppTokenKind::PublicKeyword) => Access::Public,
+            CppKind::Token(CppTokenKind::ProtectedKeyword) => Access::Protected,
+            CppKind::Token(CppTokenKind::PrivateKeyword) => Access::Private,
             _ => continue,
         };
     }
@@ -2980,12 +2943,11 @@ fn begins_an_exported_region(node: &CppSyntaxNode) -> bool {
         return false;
     }
 
-    let starts_with_export = node
-        .children_with_tokens()
-        .find_map(|element| element.into_token())
-        .is_some_and(|token| {
-            cpp_parser::CppTokenKind::from(token.kind()) == cpp_parser::CppTokenKind::ExportKeyword
-        });
+    // **The first significant token**, because `export` may follow a comment or a newline: the parser's own helper is the
+    // one that skips trivia, so the question is a token kind and not a search.
+    let starts_with_export = cpp_parser::first_significant_token(node).is_some_and(|token| {
+        cpp_parser::CppTokenKind::from(token.kind()) == cpp_parser::CppTokenKind::ExportKeyword
+    });
 
     if starts_with_export {
         return true;
@@ -3022,11 +2984,12 @@ fn begins_an_exported_region(node: &CppSyntaxNode) -> bool {
 pub fn parameter_list_at(root: &CppSyntaxNode, offset: usize) -> Option<String> {
     let token = cpp_parser::token_at(root, offset)?;
 
-    let declarator = token
-        .parent_ancestors()
-        .find(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::Declarator)?;
+    use cpp_parser::CppAstNode;
+    // **The innermost `Declarator` ancestor** of the name, whose `ParameterList` child says what the name's parameters are.
+    let declarator =
+        cpp_parser::typed_ancestors::<cpp_parser::CppDeclarator>(&token.parent()?).next()?;
 
-    crate::inlay::parameter_list_text(&declarator)
+    crate::inlay::parameter_list_text(declarator.syntax())
 }
 
 /// **The parameter list as the file spells it, read from the shape table** — `"(int a, int b)"`.
@@ -3079,11 +3042,11 @@ pub(crate) fn declared_parameters_with(
 /// `Declarator > (Declarator(*f), ParameterList)`, whose name is not a direct child precisely because the list
 /// there belongs to the pointer's type rather than to a function.
 fn names_the_binding(declarator: &CppSyntaxNode, offset: usize) -> bool {
+    use cpp_parser::CppAstNode;
     let at = u32::try_from(offset).unwrap_or(u32::MAX);
-    declarator.children().any(|child| {
-        matches!(CppSyntaxKind::from(child.kind()), CppSyntaxKind::NameExpr)
-            && u32::from(child.text_range().start()) <= at
-            && at < u32::from(child.text_range().end())
+    cpp_parser::typed_children::<cpp_parser::CppNameExpr>(declarator).any(|name| {
+        let range = name.get_range();
+        u32::from(range.start()) <= at && at < u32::from(range.end())
     })
 }
 
@@ -3232,48 +3195,32 @@ fn declared_constraints_with(shapes: &DeclarationShapes, binding: &Binding) -> V
         return Vec::new();
     };
 
-    let Some(list) = declarator
-        .descendants()
-        .find(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::ParameterList)
-    else {
+    use cpp_parser::{CppAstNode, CppDeclarator};
+    let Some(declarator) = CppDeclarator::cast(declarator) else {
+        return Vec::new();
+    };
+    let Some(list) = declarator.get_param_list() else {
         return Vec::new();
     };
 
     let mut per_parameter = Vec::new();
-    for parameter in list.children() {
-        if CppSyntaxKind::from(parameter.kind()) != CppSyntaxKind::Parameter {
-            continue;
-        }
-        // **The type is the template parameter**, compared as an identifier — which is what a name is. The
-        // *structure* comes from the tree: `const T& a` and `T a` count, `T::value_type a` does not.
-        let written = parameter.text().to_string();
+    for parameter in list.get_params() {
+        // **The type is the template parameter**, and the question is asked of the type's *name node*: `const T& a` and `T a`
+        // write the name `T`, while `T::value_type a` writes a qualified name — a different one — and `Total` was never `T`
+        // under any comparison but a substring's.
+        let written = parameter
+            .get_decl_specifiers()
+            .and_then(|specifiers| specifiers.get_type_name())
+            .and_then(|name| name.get_name_text());
         let constraint = constrained
             .iter()
-            .find(|(name, _)| mentions_the_word(&written, name))
+            .find(|(name, _)| written.as_deref() == Some(name.as_str()))
             .map(|(_, constraint)| constraint.clone())
             .unwrap_or_default();
         per_parameter.push(constraint);
     }
 
     per_parameter
-}
-
-/// Does this parameter spelling name the template parameter `T`? — as a word, so that `Total` is not `T`.
-fn mentions_the_word(spelling: &str, word: &str) -> bool {
-    let mut rest = spelling;
-    while let Some(at) = rest.find(word) {
-        let before = rest[..at].chars().next_back();
-        let after = rest[at + word.len()..].chars().next();
-        let before_is_a_word =
-            before.is_some_and(|character| character.is_alphanumeric() || character == '_');
-        let after_is_a_word =
-            after.is_some_and(|character| character.is_alphanumeric() || character == '_');
-        if !before_is_a_word && !after_is_a_word {
-            return true;
-        }
-        rest = &rest[at + word.len()..];
-    }
-    false
 }
 /// The base classes a class-like declaration was written with, in declaration order.
 ///
@@ -3291,6 +3238,7 @@ pub fn declared_bases_of(root: &CppSyntaxNode, binding: &Binding) -> Vec<String>
 
 /// [`declared_bases_of`] for a caller that has the file's shapes already.
 pub(crate) fn declared_bases_of_with(shapes: &DeclarationShapes, binding: &Binding) -> Vec<String> {
+    use cpp_parser::CppAstNode;
     if binding.kind != BindingKind::Class {
         return Vec::new();
     }
@@ -3300,10 +3248,9 @@ pub(crate) fn declared_bases_of_with(shapes: &DeclarationShapes, binding: &Bindi
     // declared it, so the *tree* is asked where the declaration is rather than the geometry of a range.
     let mut owner = None;
     shapes.on_the_path(the_offset_to_descend_by(binding), |shape| {
-        if matches!(
-            shape.kind,
-            CppSyntaxKind::ClassDef | CppSyntaxKind::StructDef | CppSyntaxKind::EnumDef
-        ) {
+        // **A class-like definition**: `class`/`struct`/`union` are one typed node, and an enum writes bases too (its
+        // underlying type).
+        if cpp_parser::CppClassDef::can_cast(shape.kind) || shape.kind == CppSyntaxKind::EnumDef {
             owner = Some(shape.bases.clone());
         }
     });
@@ -3314,7 +3261,9 @@ pub(crate) fn declared_bases_of_with(shapes: &DeclarationShapes, binding: &Bindi
 
     bases
         .iter()
-        .map(|name| name.text().to_string().trim().to_string())
+        // **As written**: a base clause is a spelling a reader sees, and `conditional_t<true, Other<_Alloc>, Base>` keeps its
+        // spacing — `get_qualified_name` drops the spaces after commas, which is a *name* spelling rather than a clause's.
+        .map(cpp_parser::subtree_text_spaced)
         .filter(|name| !name.is_empty())
         .collect()
 }
@@ -4269,99 +4218,55 @@ impl<'a> DeclarationFacts<'a> {
 /// scope a qualified declaration belongs to is the **spelling**, not a scope in this file's tree (the class is usually
 /// in a header this tree has never seen).
 fn qualified_declarations(root: &CppSyntaxNode) -> Vec<(Binding, String, Option<String>)> {
+    use cpp_parser::{
+        CppAstNode, CppAstToken, CppCompoundStat, CppDeclaration, CppDeclarator, CppNameExpr,
+    };
     let mut found = Vec::new();
 
-    for node in root.descendants() {
-        if !matches!(
-            CppSyntaxKind::from(node.kind()),
-            CppSyntaxKind::Declaration | CppSyntaxKind::FunctionDef
-        ) {
+    for declaration in cpp_parser::typed_descendants::<CppDeclaration>(root) {
+        // **Only a declaration outside every body.** A statement is not a declaration, and `ns::f(1);` inside a function body
+        // parses as the *most vexing* declaration of a variable whose type is `ns::f` — without this guard the pass filed a
+        // `Variable` named `f` in a file that only calls it.
+        if cpp_parser::typed_ancestors::<CppCompoundStat>(declaration.syntax())
+            .next()
+            .is_some()
+        {
             continue;
         }
-        // **Only a declaration outside every body.** A statement is not a declaration, and the parser's own ambiguity
-        // makes that visible here: `ns::f(1);` inside a function body parses as a *declaration* of a variable whose
-        // type is `ns::f` and whose initializer is `(1)` — the most-vexing-parse shape. Without this guard the pass
-        // filed a `Variable` named `f` with scope `ns` and type `ns::f` in a `.cpp` that only *calls* it, and the
-        // overload set `ns::f` became one entry. A qualified definition is written at file scope or in a class body, so
-        // nothing this pass is for is inside a `CompoundStat`.
-        if node.ancestors().any(|ancestor| {
-            matches!(
-                CppSyntaxKind::from(ancestor.kind()),
-                CppSyntaxKind::CompoundStat
-            )
-        }) {
-            continue;
-        }
-        let Some(declarator) = node.children().find(|child| {
-            matches!(
-                CppSyntaxKind::from(child.kind()),
-                CppSyntaxKind::InitDeclarator | CppSyntaxKind::Declarator
-            )
-        }) else {
+        // **The declarator**, whichever of the two shapes the parser produced: under an `InitDeclarator`, or the declaration's
+        // own child (a constructor's bare declarator).
+        let Some(declarator) = declaration
+            .get_init_declarator()
+            .and_then(|init| init.get_declarator())
+            .or_else(|| declaration.child::<CppDeclarator>())
+        else {
             continue;
         };
-        // **Where the grammar puts a qualified definition's name is not the declarator.**
-        //
-        // `void C::f() { }` parses as `DeclSpecifierSeq [ void, NamedType C::f ]` plus `InitDeclarator ()` — the name
-        // is read as part of the *type* and the declarator holds only the parameter list. (Measured with `dump_tree`;
-        // the same surprise cost this pass its first version, which looked in the declarator and found nothing.) So
-        // the name is looked for in two places, and the rule that tells them apart is that **a declarator with no
-        // name of its own means the name was written before the parameter list**:
-        //
-        // ```text
-        // void C::f() { }        declarator ()                     → the specifier seq's last qualified name
-        // std::string f();       declarator "f()" with a name      → not this pass's business at all
-        // int C::count = 0;      declarator "count = 0" with a name → the declarator's name is unqualified, skip
-        // ```
-        //
-        // **"Its own name" is the outermost `Declarator`'s `NameExpr`, not any `NameExpr` under it**: a parameter is a
-        // declaration of its own (`unsigned long offset` is `Parameter [ DeclSpecifierSeq, Declarator [NameExpr
-        // offset] ]`), so asking whether *anything* under the declarator names something answered `true` for every
-        // function with a named parameter — which was the first version's second bug, and it silently skipped every
-        // definition this pass exists for.
+        // **`void C::f()` writes the name as part of the type**, so the declarator is `()` and holds no name; a definition written
+        // with the name in the declarator (`int C::count = 0`) has one. The outermost declarator's own name is what tells the
+        // two apart, and a *parameter's* name is not it.
         let outer = declarator
-            .children()
-            .find(|child| matches!(CppSyntaxKind::from(child.kind()), CppSyntaxKind::Declarator))
+            .child::<CppDeclarator>()
             .unwrap_or_else(|| declarator.clone());
-        let names_itself = outer
-            .children()
-            .any(|child| matches!(CppSyntaxKind::from(child.kind()), CppSyntaxKind::NameExpr));
-        let from_the_declarator = outer
-            .children()
-            .find(|child| {
-                matches!(CppSyntaxKind::from(child.kind()), CppSyntaxKind::NameExpr)
-                    && child.text().to_string().contains("::")
-            })
-            .map(|name| (name, true));
+        let own_name = outer.child::<CppNameExpr>();
+        let names_itself = own_name.is_some();
+        let from_the_declarator = own_name.filter(|name| name.is_qualified());
         let from_the_specifiers = (!names_itself)
             .then(|| {
-                node.children()
-                    .find(|child| {
-                        matches!(
-                            CppSyntaxKind::from(child.kind()),
-                            CppSyntaxKind::DeclSpecifierSeq
-                        )
-                    })
-                    .and_then(|specifiers| {
-                        specifiers
-                            .descendants()
-                            .filter(|child| {
-                                matches!(CppSyntaxKind::from(child.kind()), CppSyntaxKind::NameExpr)
-                                    && child.text().to_string().contains("::")
-                            })
-                            .last()
-                    })
+                declaration.get_decl_specifiers().and_then(|specifiers| {
+                    specifiers
+                        .descendants::<CppNameExpr>()
+                        .filter(CppNameExpr::is_qualified)
+                        .last()
+                })
             })
-            .flatten()
-            .map(|name| (name, false));
-        // The declarator's own name wins when it has one: it is the shape the parser produces for
-        // `int C::count = 0;` and for a definition written with the name in the declarator.
-        let (name_node, _from_declarator) = match (from_the_declarator, from_the_specifiers) {
+            .flatten();
+        let name_node = match (from_the_declarator, from_the_specifiers) {
             (Some(found), _) => found,
             (None, Some(found)) => found,
             (None, None) => continue,
         };
-        let spelling = name_node.text().to_string();
+        let spelling = name_node.get_qualified_name();
         let Some((qualifier, name)) = spelling.rsplit_once("::") else {
             continue;
         };
@@ -4371,26 +4276,15 @@ fn qualified_declarations(root: &CppSyntaxNode) -> Vec<(Binding, String, Option<
             continue;
         }
 
-        // **The name's own range when it is an identifier**, and the whole spelling otherwise (a destructor and an
-        // operator have no single identifier to highlight) — the same fallback `declared_name` makes, for the same
-        // reason: a fact whose `name_range` covers nothing is a member row with no label.
+        // **The name's own range when it is an identifier**, and the whole spelling otherwise (a destructor and an operator have
+        // no single identifier to highlight) — the same fallback `declared_name` makes, for the same reason: a fact whose
+        // `name_range` covers nothing is a member row with no label.
         let name_range = name_node
-            .descendants_with_tokens()
-            .filter_map(|element| element.into_token())
-            .filter(|token| {
-                cpp_parser::CppTokenKind::from(token.kind()) == cpp_parser::CppTokenKind::Identifier
-                    && token.text() == name
-            })
-            .last()
-            .map(|token| cpp_parser::source_range(token.text_range()))
-            .unwrap_or_else(|| cpp_parser::source_range(name_node.text_range()));
+            .get_identifier_token(name)
+            .map(|token| cpp_parser::source_range(token.get_range()))
+            .unwrap_or_else(|| cpp_parser::source_range(name_node.get_range()));
 
-        let has_parameters = node.descendants().any(|child| {
-            matches!(
-                CppSyntaxKind::from(child.kind()),
-                CppSyntaxKind::ParameterList
-            )
-        });
+        let has_parameters = declaration.get_param_list().is_some();
         let class = qualifier.rsplit("::").next().unwrap_or(qualifier).trim();
         let kind = if name.starts_with('~') {
             crate::BindingKind::Destructor
@@ -4414,36 +4308,17 @@ fn qualified_declarations(root: &CppSyntaxNode) -> Vec<(Binding, String, Option<
                     crate::Name::identifier(name)
                 },
                 kind,
-                range: crate::scopes::without_trailing_trivia(&node),
+                range: crate::scopes::without_trailing_trivia(declaration.syntax()),
                 name_range,
                 scope: ScopeId(0),
                 origin: None,
             },
             qualifier.to_string(),
-            // **The parameter list, taken from the declaration's own header.** `fact_for` reads it through the scope
-            // walker's declarator, and for a qualified definition the *name* is in the specifier sequence rather than
-            // in the declarator — so the walker's shape has no declarator to read, and every definition fact carried
-            // `parameter_list: None`. Measured on a real project: `SetupStyle(style, options);` answered **no
-            // signature**, because the call is in the `.cpp`, the index answers the *definition* fact there (the "own
-            // file wins" rule), and a signature's fallback label is read from exactly this field.
-            node.children()
-                .filter(|child| {
-                    !matches!(
-                        CppSyntaxKind::from(child.kind()),
-                        CppSyntaxKind::CompoundStat
-                    )
-                })
-                .find_map(|child| {
-                    child
-                        .descendants()
-                        .find(|child| {
-                            matches!(
-                                CppSyntaxKind::from(child.kind()),
-                                CppSyntaxKind::ParameterList
-                            )
-                        })
-                        .map(|list| crate::inlay::tidy_list_text(&list.text().to_string()).0)
-                }),
+            // **The parameter list, taken from the declaration's own header** — the walker's declarator has no name for this
+            // shape, so a fact read through it carried `parameter_list: None` and a signature had no fallback label.
+            declaration
+                .get_param_list()
+                .map(|list| crate::inlay::tidy_list_text(&list.syntax().text().to_string()).0),
         ));
     }
 

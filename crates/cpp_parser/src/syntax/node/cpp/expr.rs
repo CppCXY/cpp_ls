@@ -299,6 +299,19 @@ impl CppNameExpr {
             .collect()
     }
 
+    /// **The last identifier token whose text is `spelling`**, when the name writes one.
+    ///
+    /// A destructor's `~C` and an operator's `operator+` have no identifier equal to their spelling, and a caller that wants a
+    /// range to highlight falls back to the node's own — which is the answer a member row with no label needs.
+    pub fn get_identifier_token(&self, spelling: &str) -> Option<CppNameToken> {
+        self.syntax()
+            .descendants_with_tokens()
+            .filter_map(|element| element.into_token())
+            .filter_map(CppNameToken::cast)
+            .filter(|token| token.get_name_text() == spelling)
+            .last()
+    }
+
     /// Is this a qualified name (`ns::foo`)?
     pub fn is_qualified(&self) -> bool {
         self.syntax()
