@@ -571,3 +571,24 @@ deduce `int` — so the `/p` fixtures' shared cache at `C:\p\.cppls` served the 
 `type_a_return_states`, `type_a_return_states_with`, `type_with_the_auto_parameters`) and the declaration geometry that
 predates them (`function_suffix_in`, `is_marked_maybe_unused`, which scans backwards through the text for `[[maybe_unused]]`
 when the attribute is a node). Those are the next batch, then `scopes.rs`.
+
+## 27. Hover is rendered, not quoted — and what that exposed
+
+`docs/hover-render.md` now holds the contract and the open list; this entry records why it exists and what it found.
+
+**The report**: "most hover results are a copy of the source range rather than a reconstruction — no copy-paste display;
+redo the rendering modelled on Rust, especially for generics." It was true: the card chose between the declaration's raw
+text (`declaration_text`), the fact's strings joined by `signature_line`, a `template <…>` cut out of the file
+(`the_template_head_before`), and a macro-ridden return type repaired by slicing the specifier sequence. The anonymous
+struct in `handshake.rs`'s instantiation test showed `unsigned char` only because the body was copied.
+
+**What replaced it**: `cpp_code_analysis::sema::render` — types through `Type`'s writer, parameters parsed and rebuilt,
+template heads from the declaration's parameters, classes by their node's keyword, reflection annotations from the fact.
+The card, the overload list and the member list all print it; the eight text-slicing helpers are gone. A member of a
+known specialization renders instantiated, so `Box<int>::put` reads `const int& value`.
+
+**The bug this exposed is #28's root cause, not a rendering bug**: `DeclFact::type_of` is recovered by a range lookup
+and can be `None` for a declaration whose *later* text changed — measured on `bits/shared_ptr.h`, on truncations of it,
+and on a fixture ending in an unterminated `/**`. That is why `shared_ptr` keeps coming back: `element_type` loses the
+field, the arrow falls back to the pointer's own members, and the popup looks plausible. The repair plan is in
+`docs/hover-render.md` §1, together with the two-readings question (§2) and the small gaps this pass found (§3).
