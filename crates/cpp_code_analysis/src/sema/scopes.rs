@@ -1310,9 +1310,6 @@ impl ScopeWalker<'_> {
         //
         // The AST layer cannot tell these apart from a call statement — `get_name_text` answers `None` for both —
         // which is why the question is asked here and in this shape.
-        let specifier_is_qualified = first_child(node, CppSyntaxKind::DeclSpecifierSeq)
-            .map(|specifiers| mentions_a_qualified_name(&specifiers, true))
-            .unwrap_or(false);
         // **A constructor is the same shape and this guard did not see it.** `LuaSource::LuaSource(std::string
         // &&fileText) : _source(fileText), … { … }` spells its name in the specifiers like every out-of-line
         // definition, and `is_unnamed_declaration` is **true** for it — its declarator holds the parameter list, not
@@ -1324,19 +1321,19 @@ impl ScopeWalker<'_> {
         // **no declarator name at all**. `Widget w;` (a qualified type, a plain declarator) is not unnamed and is
         // unaffected.
         //
-        // **A statement that looks like one of these declares nothing.** The most-vexing-parse reading of a call with
-        // a qualified callee is exactly this shape — `std::iter_swap(__result, __b);` is a `Declaration` whose
-        // specifier is `std::iter_swap` and whose declarator is the parameter list `(__result, __b)` — and inside a
-        // body it went through the branch below, bound a **function** named `iter_swap` in scope `std`, and took the
-        // enclosing function's template parameters with it. Measured on libstdc++: `bits/stl_algo.h` alone had 22
-        // `std::iter_swap` facts at namespace scope, `local: false`, all of them call statements.
-        //
-        // A definition never nests inside a body, so "inside a body" is the whole test, and it is the same one
-        // `qualified_declarations` makes for the same reason. Both halves are asked together: only a declaration of
-        // *this* shape is a statement, and every other declaration in a body — a local, a parameter, a nested type —
-        // is untouched.
-        if (declaration_is_qualified(node)
-            || (specifier_is_qualified && is_unnamed_declaration(node)))
+        // **The name the declaration is written with, wherever the grammar put it** — in the declarator's own name
+        // (`int Source::GetLine(int)` — the name is written against `(`, so the declaration rule knows it is the
+        // declarator's) or in the specifier sequence (`void Box<int>::grow`, whose qualifier carries template
+        // arguments and so cannot be told from a return type). One question, asked once, for the three rules below
+        // and for [`ScopeWalker::declarator_as`], which reads the same pair.
+        let qualified_name = the_qualified_name_of_a_declaration(node);
+        // **A statement that looks like one of these declares nothing, and a definition never nests inside a body.**
+        // The most-vexing-parse reading of a call with a qualified callee is exactly this shape —
+        // `std::iter_swap(__result, __b);` is a `Declaration` naming `std::iter_swap` with a parameter list — and
+        // inside a body it bound a **function** named `iter_swap` in scope `std`, taking the enclosing function's
+        // template parameters with it. Measured on libstdc++: `bits/stl_algo.h` alone had 22 `std::iter_swap` facts at
+        // namespace scope, `local: false`, all of them call statements.
+        if qualified_name.is_some()
             && node
                 .ancestors()
                 .any(|ancestor| cpp_parser::CppCompoundStat::can_cast(ancestor.kind().into()))
@@ -1364,28 +1361,26 @@ impl ScopeWalker<'_> {
                 .parent()
                 .is_some_and(|parent| cpp_parser::CppFriendDecl::can_cast(parent.kind().into()));
 
-        if declaration_is_qualified(node)
-            || (specifier_is_qualified && is_unnamed_declaration(node))
+        if let Some((qualifier, _)) = &qualified_name
+            && self.scope_of_a_qualifier(qualifier).is_none()
         {
-            if !self.names_a_scope_this_file_has(node) {
-                // **The name is not this file's — the body is.** `size_t LuaSource::GetLine(size_t offset) const
-                // { … }` declares nothing at file scope: the class is in a header this file only includes. That
-                // rule stays (see `a_qualified_declaration_binds_nothing_here`), and this used to `return` on it,
-                // which dropped the **whole** declaration — including the function's own parameters and locals,
-                // which have nothing to do with the class.
-                //
-                // Measured on EmmyLuaCodeStyle's `LuaParser/src/File/LuaSource.cpp` (a file of nothing but
-                // out-of-line definitions): the scope tree was one `TranslationUnit` with **zero bindings**, and a
-                // completion inside `GetLine` offered `_lineOffsetVec` — a member, which the index answers — and
-                // neither `offset` nor `maxLine`. Every `.cpp` of that project is written this way, so the whole
-                // file was unsearchable from the inside.
-                //
-                // What is read is only what the function owns: its parameter names, and the names its body
-                // declares, in an unnamed scope that belongs to no class.
-                self.read_the_inside_of_a_foreign_definition(node, outer);
-                return;
-            }
-        } else if is_unnamed_declaration(node) {
+            // **The name is not this file's — the body is.** `size_t LuaSource::GetLine(size_t offset) const
+            // { … }` declares nothing at file scope: the class is in a header this file only includes. That
+            // rule stays (see `a_qualified_declaration_binds_nothing_here`), and this used to `return` on it,
+            // which dropped the **whole** declaration — including the function's own parameters and locals,
+            // which have nothing to do with the class.
+            //
+            // Measured on EmmyLuaCodeStyle's `LuaParser/src/File/LuaSource.cpp` (a file of nothing but
+            // out-of-line definitions): the scope tree was one `TranslationUnit` with **zero bindings**, and a
+            // completion inside `GetLine` offered `_lineOffsetVec` — a member, which the index answers — and
+            // neither `offset` nor `maxLine`. Every `.cpp` of that project is written this way, so the whole
+            // file was unsearchable from the inside.
+            //
+            // What is read is only what the function owns: its parameter names, and the names its body
+            // declares, in an unnamed scope that belongs to no class.
+            self.read_the_inside_of_a_foreign_definition(node, outer);
+            return;
+        } else if qualified_name.is_none() && is_unnamed_declaration(node) {
             // **A declaration with no name can still declare members.** `enum { LAJF };` is the C spelling of a set
             // of constants, and it names nothing — `is_unnamed_declaration` is true, so this used to return before
             // the body was walked at all, and every enumerator of an anonymous enum was missing from the scope tree
@@ -1620,42 +1615,6 @@ impl ScopeWalker<'_> {
         SpecifierName::None
     }
 
-    /// **Does this declaration name a class or namespace this file has built?**
-    ///
-    /// The first of the two questions [`ScopeWalker::declaration_parts`] asks about a declaration before reading it
-    /// at all. `true` means "this declares a member of something here", which is a declaration like any other and
-    /// must be read; `false` leaves the ordinary question ([`is_unnamed_declaration`]) to decide.
-    ///
-    /// The two shapes it covers, both of which the AST layer reports as unnamed:
-    ///
-    /// ```text
-    /// void Box<int>::grow(int n) { size = n; }   a member function defined outside its class
-    /// int Box<int>::count = 0;                   a static member defined outside its class
-    /// ```
-    ///
-    /// and the shape it deliberately does **not**:
-    ///
-    /// ```text
-    /// int ns::Widget::count = 0;                 in a file that declares neither `ns` nor `Widget`
-    /// ```
-    ///
-    /// — that declaration is about a scope this file has not built, so nothing is bound here. Which is not a
-    /// detail: `count` bound at file scope could not be used unqualified, and it would collide with every other
-    /// `count` in the file. `tests/scopes.rs::a_qualified_declaration_binds_nothing_here` is that rule, and this is
-    /// where it is kept.
-    fn names_a_scope_this_file_has(&self, node: &CppSyntaxNode) -> bool {
-        if !declaration_is_qualified(node) {
-            return false;
-        }
-
-        // The qualifier, read by the reader that will bind the declaration — one implementation, so that "is this
-        // ours" and "where does it go" cannot come to disagree. `None` when what follows the separator is not an
-        // identifier, and then this reading does not apply: the declaration is read by the ordinary path.
-        qualified_specifier_name_node(node)
-            .and_then(qualified_name)
-            .is_some_and(|(qualifier, _)| self.scope_of_a_qualifier(&qualifier).is_some())
-    }
-
     /// **The scope a `::`-qualified declaration's qualifier names**, or `None` when this file has not built one.
     ///
     /// The walk is **segment by segment from the outermost**, and each step appends the next name to what it has so
@@ -1759,14 +1718,12 @@ impl ScopeWalker<'_> {
             cpp_parser::source_range(body.text_range()),
         );
         // The qualifier names no scope *here*, but it is still the answer to "which class is this a member of",
-        // and the name node that carries it was already read to get this far.
-        let spelled = first_child(node, CppSyntaxKind::DeclSpecifierSeq)
-            .and_then(|specifiers| {
-                cpp_parser::typed_descendants::<cpp_parser::CppNameExpr>(&specifiers)
-                    .find(|child| child.is_qualified())
-            })
-            .map(|name| name.syntax().text().to_string())
-            .filter(|name| name.contains("::"));
+        // and it is read by the **same** reader that decided the site is foreign — one implementation, so "is the
+        // class here" and "which class is it" cannot come to disagree. (It used to read the specifier sequence
+        // directly, which is where the grammar wrote the name while an out-of-class definition's qualified name was
+        // mistaken for its return type.)
+        let spelled = the_qualified_name_of_a_declaration(node)
+            .map(|(qualifier, (name, _))| format!("{qualifier}::{}", name.text()));
         let function = match &spelled {
             Some(spelled) => {
                 // **The class this file *does* have, when the qualifier names one.** The path here is for a definition
@@ -3175,6 +3132,32 @@ fn qualified_declarator_name(
     None
 }
 
+/// **The qualified name a declaration is written with, wherever the grammar put it.**
+///
+/// One question, two shapes, and every caller that needs "what is this declaration's own name" asks it here rather
+/// than choosing a shape:
+///
+/// ```text
+/// int Source::GetLine(int n) { … }   Declarator > NameExpr "Source::GetLine"   ← written against `(`
+/// void Box<int>::grow(…) { … }       DeclSpecifierSeq "void Box<int>::grow"    ← the qualifier has template args
+/// ```
+///
+/// The first is what the grammar builds when a qualified name is written straight against a parameter list: a type in
+/// a declaration is never followed by `(`, so the name can only be the declarator's. The second stays in the
+/// specifier sequence, because `Box` is followed by `<` and a declaration cannot tell that from a return type. Both
+/// are the same declaration, and a reader that knows only one of them treats half of a project's definitions as
+/// nameless — which is what happened: a body defined out of class could not see its class's members.
+///
+/// `None` for a declaration whose name is not qualified (the ordinary case) and for one with no name at all.
+pub(crate) fn the_qualified_name_of_a_declaration(
+    node: &CppSyntaxNode,
+) -> Option<(String, (Name, cpp_parser::SourceRange))> {
+    declarators(node)
+        .iter()
+        .find_map(qualified_declarator_name)
+        .or_else(|| qualified_specifier_name_of_the_declaration(node))
+}
+
 /// **The same, for the other place the grammar puts a qualified name** — the specifier sequence.
 ///
 /// ```text
@@ -3196,7 +3179,15 @@ fn qualified_specifier_name(
         .ancestors()
         .find(|node| cpp_parser::CppDeclaration::can_cast(node.kind().into()))?;
 
-    qualified_name(qualified_specifier_name_node(&declaration)?)
+    qualified_specifier_name_of_the_declaration(&declaration)
+}
+
+/// The declaration-node form of [`qualified_specifier_name`] — the same reading, for a caller that already holds the
+/// declaration rather than one of its declarators.
+fn qualified_specifier_name_of_the_declaration(
+    declaration: &CppSyntaxNode,
+) -> Option<(String, (Name, cpp_parser::SourceRange))> {
+    qualified_name(qualified_specifier_name_node(declaration)?)
 }
 
 /// **The name node of a declaration whose name the grammar put in the specifier sequence.**
@@ -3311,12 +3302,18 @@ fn qualified_name(node: CppSyntaxNode) -> Option<(String, (Name, cpp_parser::Sou
     // **A destructor, an operator and a conversion function are not identifiers** (`~Widget`, `operator+`,
     // `operator bool`), and this is what tells them apart: what follows the separator has to be one identifier and
     // nothing else. The same answer `last_identifier` used to give, without needing a token that may not be there.
-    let name = match written.chars().next() {
-        Some(first) if is_identifier_start(first) => &written[first.len_utf8()..],
-        _ => return None,
-    };
-
-    if !name.chars().all(is_identifier_character) || name.is_empty() {
+    //
+    // **The whole name is checked, not the part after its first character** — `f`, `x` and every other one-letter
+    // member name came out as `None`, because the remainder of a one-letter name is the empty string and "no
+    // characters after the first" was read as "no name". Measured on `struct W { void f(); }; void W::f() { }`:
+    // `W::f` resolved to no qualifier at all, the definition's function scope hung off the **file** instead of `W`,
+    // and a body written that way could not see its class's members.
+    if written
+        .chars()
+        .next()
+        .is_none_or(|first| !is_identifier_start(first))
+        || !written.chars().all(is_identifier_character)
+    {
         return None;
     }
 

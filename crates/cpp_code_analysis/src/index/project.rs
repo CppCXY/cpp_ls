@@ -17013,17 +17013,25 @@ mod tests {
         );
         assert_eq!(found.found[0].file, Path::new("/p/stdio.h"));
 
-        // **The unfiltered list is what a member fallback wants**, and it is unchanged: all three declarations.
+        // **The unfiltered list is what a member fallback wants**, and the member is in it.
+        //
+        // **Two, not three.** The declaration and its out-of-class definition are *one declaration recorded twice*
+        // by this index's own rule (`the_same_declaration_in_one_file`: the same file, the same name and scope, and
+        // the parameter list that tells two functions apart, all present and equal). They became mergeable when the
+        // grammar learned the shape — before that the definition had no name of its own, so nothing about it could be
+        // compared with the declaration's. What this assertion is *for* is the fallback, and that still sees
+        // `Name::printf`.
         let Known::Yes(every) = index.definitions("printf", Path::new("/p/main.cpp")) else {
-            panic!("the index holds three declarations of the spelling");
+            panic!("the index holds the spelling");
         };
         assert_eq!(
             every.found.len(),
-            3,
+            2,
             "a member access whose object's type is unknown still asks this one"
         );
 
-        // **A qualified spelling keeps the member**, which is how one is named from outside the class.
+        // **A qualified spelling keeps the member**, which is how one is named from outside the class — and it is
+        // now *one* answer for the reason above; the survivor is the declaration, which is earlier in the file.
         let Known::Yes(qualified) =
             index.definitions_in_scope("Name::printf", Path::new("/p/main.cpp"))
         else {
@@ -17031,8 +17039,8 @@ mod tests {
         };
         assert_eq!(
             qualified.found.len(),
-            2,
-            "the member's declaration and its definition, both addressed through the qualifier: {qualified:?}"
+            1,
+            "the member, addressed through its qualifier: {qualified:?}"
         );
     }
 
@@ -21059,10 +21067,27 @@ fn split_template_arguments(spelling: &str) -> Option<(String, Vec<String>)> {
 
 /// **The class of the definition the cursor is in, when the declarator is qualified** — `Source` for `int Source::GetLine(…)`.
 ///
-/// Read from the parser's nodes: the declaration's specifier sequence holds the qualified declarator, and the segment before
-/// the last `::` is the class. `None` for anything else — a cursor outside a declaration, an ordinary declarator, or a
-/// qualifier with more than one level (which would need the class's own file to resolve the inner one, and is left to the
-/// scope chain).
+/// The question this answers is the language's: **a function defined out of class is a member of that class**, so its
+/// body's unqualified lookup includes the class's members. The class is usually in another file (`a.cpp` defines
+/// what `a.h` declares), so no scope in *this* file's tree can offer them — the members come from the index, and the
+/// only thing that has to be read from the tree is **which** class the declarator names.
+///
+/// # Where the name is written, and why it is read in two places
+///
+/// The grammar puts the qualified name in one of two places, and both are the same declaration:
+///
+/// ```text
+/// int Source::GetLine(int n) { … }      Declarator > NameExpr "Source::GetLine"     ← written against `(`
+/// void Box<int>::grow(…) { … }          DeclSpecifierSeq "void Box<int>::grow"      ← the qualifier has template args
+/// ```
+///
+/// In the first the name is written straight against the parameter list, and since **a type in a declaration is never
+/// followed by `(`** the declaration rule knows it is the declarator's own name. In the second `Box` is followed by
+/// `<`, which a declaration cannot tell from a return type, so the whole spelling stays in the specifier sequence and
+/// is read there (the same two shapes [`crate::sema::scopes`] reads for the scope tree).
+///
+/// `None` for anything else — a cursor outside a declaration, an ordinary declarator, or a qualifier with more than
+/// one level (which would need the nested class's own file, and is left to the scope chain).
 fn the_class_a_definition_belongs_to(
     root: &cpp_parser::CppSyntaxNode,
     offset: usize,
@@ -21077,13 +21102,18 @@ fn the_class_a_definition_belongs_to(
         let Some(declaration) = cpp_parser::CppDeclaration::cast(declaration.clone()) else {
             continue;
         };
-        let Some(specifiers) = declaration.child::<cpp_parser::CppDeclSpecifierSeq>() else {
+        // **One reader for "what is this declaration's own name"**, the same one the scope tree uses — see
+        // [`crate::sema::scopes::the_qualified_name_of_a_declaration`]. Two readers of the same two shapes is how the
+        // completion and the scope tree came to disagree about an out-of-class definition in the first place.
+        let Some((qualifier, _)) =
+            crate::sema::scopes::the_qualified_name_of_a_declaration(declaration.syntax())
+        else {
             continue;
         };
-        let written = specifiers.syntax().text().to_string();
-        let written = written.trim_end();
-        let at = written.rfind("::")?;
-        let before = written[..at].trim_end();
+        // The class is the **last segment of the qualifier** — `Source` for `Source::GetLine`, and `Inner` for
+        // `Outer::Inner::deep` (whose innermost class is the one the declaration belongs to). A segment with `::`
+        // left in it is a qualifier this file cannot name as a class, which is the answer `None` gives.
+        let before = qualifier.trim_end();
         let start = before
             .rfind(|character: char| {
                 !(character.is_alphanumeric() || matches!(character, '_' | ':'))
@@ -21097,6 +21127,7 @@ fn the_class_a_definition_belongs_to(
     }
     None
 }
+
 /// **A qualified spelling without its namespace** — the name the class is declared under, with any template arguments
 /// kept.
 ///

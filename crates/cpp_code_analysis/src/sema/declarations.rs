@@ -3345,6 +3345,24 @@ fn fact_for(
     // `Ambiguous`, which is how MSVC's STL answered "not declared" for every member query (
     // §4.2 ①). The declaration stays findable by position, which was the point of keeping it at all.
     let name = binding.name.text();
+    // **A qualified declarator name declares into the scope it names.**
+    //
+    // `void Name::printf(int i) { }` is a declaration **of `Name`'s `printf`**, not a file-scope name spelled
+    // `Name::printf`, and the difference is every lookup that matters: a member access, a hover on the declaration,
+    // `definitions("printf")` and `definitions_in_scope("Name::printf")` all read `name` and `scope`.
+    //
+    // The scope walker keeps such a name qualified on purpose (see `sema::scopes`: a binding of `count` in the
+    // enclosing scope would be a name that cannot be used unqualified there), so the split belongs here, where the
+    // fact is built. Until the grammar learned the shape, an out-of-class definition reached this point with its name
+    // swallowed by the specifier sequence; now the declarator's name *is* the qualified spelling.
+    let (name, scope) = match name.rsplit_once("::") {
+        // A local never carries a qualifier: `S::f` at block scope is a call, not a declaration.
+        Some((qualifier, last)) if !local && !qualifier.is_empty() && !last.is_empty() => (
+            last.to_string(),
+            Some(qualifier.trim_start_matches("::").to_string()),
+        ),
+        _ => (name, scope),
+    };
 
     // **The four type questions, timed apart.** Together they are 98% of the index's sweep on a real project
     // (138 files of MSVC's standard library), and each one is a different traversal of the same tree — so which of

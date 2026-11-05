@@ -747,6 +747,30 @@ fn parse_declaration_here(p: &mut CppParser) -> ParseResult {
         // is `operator` can only be a conversion.
         CppTokenKind::OperatorKeyword => return parse_conversion_operator_declaration(p),
 
+        // **An out-of-class member definition** — `S::f(int) { }`, `S::S(int) : _x(x) { }`, `S::~S() { }`.
+        //
+        // The same shape as a constructor one level down the match: the *name* is written first, so the specifier
+        // sequence reads it as the type and the declarator is left naming nothing. Measured, `int S::f() { return 0; }`
+        // came out as
+        //
+        // ```text
+        //   Declaration
+        //     DeclSpecifierSeq "int S::f" > NameExpr "S::f"   <- the return type AND the function's own name
+        //     InitDeclarator > Declarator > ParameterList     <- a declarator that names nothing
+        // ```
+        //
+        // — so an out-of-class definition had no name of its own. That is not one rule's problem: the declaration is
+        // not a member of its class (so a body written this way has no enclosing class to resolve against, which is
+        // the completion defect), the index files it under the file's scope with a "type" of `int S::f`, and
+        // `missing-return` reads `S::f` as a return type and reports a constructor for having no `return`.
+        //
+        // **A type in a declaration is never followed by `(`**, so a qualified name written straight against a
+        // parameter list can only be the declaration's own name. Claimed only when that is true (at least one `::`
+        // before the `(`), so `A::B x(1);` keeps its specifier and `Foo(x);` keeps the general rule.
+        CppTokenKind::Identifier if starts_an_out_of_class_member(p) => {
+            return parse_constructor_declaration(p);
+        }
+
         // A **constructor** — `Widget();`, `Widget(int size);`, `Widget(int) : base(1) {}`.
         //
         // The third declaration whose name is written first, and the one that cannot be recognised by its *first*
@@ -4970,6 +4994,35 @@ fn parse_conversion_operator_declaration(p: &mut CppParser) -> ParseResult {
 ///
 /// What this exists to fix is measured in the dispatch that calls it: a constructor used to be read as a declaration
 /// of a nameless declarator, so the tree held no constructor at all.
+/// **Does a declaration start with an out-of-class member's qualified name?** — see the dispatch arm.
+///
+/// The shape, token by token: an identifier, one or more `::` segments, then `(`. `S::S(`, `S::f(`, `A::B::f(` and
+/// `S::~S(` all match; `A::B x(1)` and `std::vector<int> v(3)` do not, because what follows the name is another name
+/// rather than a parameter list. A destructor's `~` is allowed only in the **last** segment, where the language puts
+/// it.
+pub(crate) fn starts_an_out_of_class_member(p: &CppParser) -> bool {
+    if p.current_token() != CppTokenKind::Identifier {
+        return false;
+    }
+    let mut at = 1usize;
+    let mut scopes = 0usize;
+    loop {
+        if p.peek_token_kind_at(at..at + 1).first() != Some(&CppTokenKind::Scope) {
+            break;
+        }
+        scopes += 1;
+        at += 1;
+        if p.peek_token_kind_at(at..at + 1).first() == Some(&CppTokenKind::Tilde) {
+            at += 1;
+        }
+        if p.peek_token_kind_at(at..at + 1).first() != Some(&CppTokenKind::Identifier) {
+            return false;
+        }
+        at += 1;
+    }
+    scopes > 0 && p.peek_token_kind_at(at..at + 1).first() == Some(&CppTokenKind::LeftParen)
+}
+
 fn parse_constructor_declaration(p: &mut CppParser) -> ParseResult {
     parse_declaration_starting_at_a_name(p, |p| {
         let name = p.mark(CppSyntaxKind::Declarator);

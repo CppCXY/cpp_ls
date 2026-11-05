@@ -2154,6 +2154,24 @@ fn name_joins_the_type(
     names_may_join: NamesMayJoin,
     a_class_definition_was_written: bool,
 ) -> bool {
+    // **A qualified name written straight against `(` is the declaration's own name**, not another word of the type:
+    //
+    // ```cpp
+    // int S::f() { return 0; }        "S::f" is the function, and `int` is the whole return type
+    // ```
+    //
+    // In a declaration a **type is never followed by `(`**, so a name that is qualified *and* immediately precedes a
+    // parameter list is the declarator. Without this the specifier sequence swallowed the function's own name — the
+    // declaration was `DeclSpecifierSeq "int S::f"` with a declarator that named nothing, which meant every
+    // out-of-class definition in a project was nameless: not a member of its class, no enclosing class inside its
+    // body (the completion defect), and `missing-return` reading `S::f` as a return type. See the dispatch arm in
+    // `decls` for the constructor half of the same shape.
+    //
+    // Asked **before** the "no type yet" early return below, because that is the other half: `S::S(int)` has no type
+    // before the name and would otherwise be taken for one.
+    if has_type_specifier && crate::grammar::cpp::decls::starts_an_out_of_class_member(p) {
+        return false;
+    }
     // A **class-like definition** is a complete type, body and all, and the name after it is the declarator:
     //
     // ```text
