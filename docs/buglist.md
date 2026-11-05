@@ -642,3 +642,60 @@ casualty in `docs/indexing-review.md` §4 — **passes**, in both profiles, alon
 tests). It needs the ask that `index_everything` now makes (it calls `want_refinement` for every file its batch read),
 and the refinement's answer is correct on this fixture; the reason it was in the failing list was the state `7bc4c60`
 left behind, and that state has since been closed by the phase-1/2 work. No change was needed here.
+
+## 29. An out-of-class definition's own name is read as its *type* — the parser shape behind three reports
+
+The reports, from use, are two screenshots and a sentence:
+
+* **a constructor is told it has no `return`** — `LSPHandle::LSPHandle(LanguageServer *server) : _server(server) { … }`
+  reported as *"this function is declared to return `` and its body has no `return`"*;
+* **a local's type is missing from the hover card** — `auto& syntaxTree = opSyntaxTree.value();` hovers as
+  `syntaxTree — a variable, declared in a function body` with no type, while the inlay hint beside it says
+  `LuaSyntaxTree&`;
+* **completion inside a body is poor or slow**, member completion especially.
+
+The first two share a root with the third: **the grammar reads an out-of-class definition's qualified name as the
+declaration's *type*.**
+
+```text
+int S::f() { return 0; }
+  Declaration
+    DeclSpecifierSeq "int S::f" > NameExpr "S::f"     ← the return type AND the function's own name
+    InitDeclarator
+      Declarator > ParameterList                       ← a declarator that names nothing
+```
+
+Measured with a dump of the tree, four shapes:
+
+```text
+S::S(int x) : _x(x) { … }   DeclSpecifierSeq "S::S"     + nameless declarator     (a constructor, read as a type)
+S::~S() { }                 DeclSpecifierSeq "S::~S"    + nameless declarator
+int S::f() { … }            DeclSpecifierSeq "int S::f" + nameless declarator
+void S::g(int a) { … }      DeclSpecifierSeq "void S::g" + nameless declarator
+```
+
+The rule-level half is **fixed** (`missing-return` now skips a declaration whose specifier sequence is a qualified name
+whose last segment is its own class — `S::S`, `S::~S` — see the check). The grammar half is **not**, and it was
+attempted: teaching the declaration dispatch and the specifier sequence that a qualified name written straight against
+`(` is the declarator's own name fixes all four shapes, and the fact builder then splits `S::f` into scope `S` and name
+`f` (instead of filing a nameless function whose "type" is `int S::f`).
+
+**Why it was reverted**: it breaks `completion::a_member_is_completed_in_a_separated_definition`, and that test is the
+*third* report — a body defined out of class must see its class's members. The scope tree reads the old shape through
+`qualified_specifier_name` (the name in the specifier, the declarator holding only `(…)`), and the completion path is
+built on the same reading. Its own documentation says what the real fix is:
+
+> *"the fix is **not** in the scope tree. The completion path should ask the question directly — 'the declarator that
+> encloses this cursor is `Source::GetLine`, so the members of `Source` are in scope here'"*
+
+So the grammar change and the completion-path change have to land **together**, with the completion test as the gate.
+Both are written down here rather than half-landed: a tree that is right and a completion that regressed is a worse
+trade than a tree that is wrong in a way three layers already compensate for.
+
+**The hover's missing type** is the second item and is independent: the card prints `DeclFact::type_of`, which for
+`auto&` is the *written* spelling, and the deduced type the inlay computes (`type_at`) is not consulted. `docs/hover-render.md`
+§1 has the contract; the fix is to render the deduced type when `type_of` is a deduced one, which is a card change and
+nothing else.
+
+**Check.** `cargo test --release -p cpp_code_analysis --test checks missing_return` — five tests, including the
+out-of-class constructor and destructor in one fixture with a free function that must still report.

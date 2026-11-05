@@ -3841,3 +3841,41 @@ void forward_it(_Tp&& value) {
         "a parameter is not a type: {codes:?}"
     );
 }
+
+/// **An out-of-class constructor and destructor are not functions with a return type** — the user's own file.
+///
+/// `LSPHandle.cpp` writes
+///
+/// ```cpp
+/// LSPHandle::LSPHandle(LanguageServer *server)
+///     : _server(server) {
+///     Initialize();
+/// }
+/// ```
+///
+/// and the rule reported "this function is declared to return `` and its body has no `return`" on it. A constructor
+/// has no return type *at all*, so the empty spelling in that sentence is the second symptom of the same mistake: the
+/// rule read a declaration whose specifier sequence is empty as one that *has* a written return type.
+///
+/// The in-class shape was already covered (`struct S { S(int x) {…} };` in `missing_return_is_a_control_flow_question`);
+/// what differs out of class is the qualifier, which makes the grammar produce a specifier sequence node with nothing
+/// in it. Counted rather than set-compared: the free function in the fixture must still report.
+#[test]
+fn missing_return_is_silent_for_an_out_of_class_constructor_and_destructor() {
+    let source = "\
+struct S { S(int x); ~S(); int f(); };
+S::S(int x) : _x(x) { Initialize(); }
+S::~S() { }
+int S::f() { }
+int free_function() { }
+";
+    let codes = codes_of(source);
+    let reports = codes
+        .iter()
+        .filter(|code| **code == DiagnosticCode::MissingReturn)
+        .count();
+    assert_eq!(
+        reports, 2,
+        "`int S::f()` and `int free_function()` promise a return and have none: {codes:?}"
+    );
+}

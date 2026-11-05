@@ -78,6 +78,39 @@ impl Check for MissingReturn {
             if specifiers.is_void() || specifiers.is_deduced_return_type() {
                 continue;
             }
+            // **A declaration whose declarator names nothing is not a function this rule can judge.**
+            //
+            // An out-of-class constructor or destructor reaches this point with its qualified name read as the
+            // *type* and no declarator name at all — `LSPHandle::LSPHandle(…)` is `DeclSpecifierSeq "LSPHandle::LSPHandle"`
+            // plus a declarator that is only `(…)`, the shape `sema::scopes` reads as the declaration's own name
+            // (see its `qualified_specifier_name`). There is no name to report and no promise to check, so the rule
+            // must not speak. Measured in a user's file:
+            //
+            // ```text
+            // LSPHandle::LSPHandle(LanguageServer *server) : _server(server) { Initialize(); }
+            //   this function is declared to return `` and its body has no `return`     ← an empty spelling
+            // ```
+            //
+            // The empty spelling is the same mistake as the finding. The deeper fix is the grammar's (an out-of-class
+            // declaration's qualified name belongs in the declarator, not in the specifier sequence); it is recorded
+            // in `docs/buglist.md` §29 with the completion path that has to change with it.
+            // The test is the **spelling**: `S::S` is a constructor and `S::~S` a destructor, and neither promises a
+            // return. The specifier sequence of such a declaration is literally that qualified name — the shape
+            // `sema::scopes` reads the declaration's own name from (see its `qualified_specifier_name`) — so the two
+            // segments are compared: `S::f` is a definition of a function that does promise one, `S::S` is not.
+            let written: String = specifiers
+                .syntax()
+                .text()
+                .to_string()
+                .chars()
+                .filter(|c| !c.is_whitespace())
+                .collect();
+            if let Some((qualifier, last)) = written.rsplit_once("::") {
+                let class = qualifier.rsplit("::").next().unwrap_or(qualifier);
+                if last == class || last.starts_with('~') {
+                    continue;
+                }
+            }
 
             // **A coroutine decides what it returns with its promise, not with a `return`.**
             //
