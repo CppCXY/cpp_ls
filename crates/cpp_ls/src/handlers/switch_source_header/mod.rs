@@ -25,7 +25,7 @@
 //!    everywhere. A **header** prefers the source extension of its own language family (a `.h` read as C answers `.c` before
 //!    `.cpp`), and a module interface prefers C++ sources, because a module interface is C++ by definition.
 //! 2. **An include**: a header's source is a file that `#include`s it, and a source's header is one it includes — which is
-//!    what finds a pair whose names are not twins (`detail.cpp` includng `all.h`). A module interface is reached the same
+//!    what finds a pair whose names are not twins (`detail.cpp` including `all.h`). A module interface is reached the same
 //!    way: the implementation unit writes `import foo;`, which the directive summary records.
 //! 3. **Anything the project lists**, so a pair in another directory is still reachable.
 //! 4. **The file a header's implementation would have**, when nothing exists yet: `<stem>.c` for a header read as C and
