@@ -752,10 +752,8 @@ fn name_node_around(root: &CppSyntaxNode, offset: usize) -> Option<CppSyntaxNode
             return found;
         }
 
-        if matches!(
-            CppSyntaxKind::from(node.kind()),
-            CppSyntaxKind::NameExpr | CppSyntaxKind::IdentifierExpr
-        ) {
+        // **The two spellings of a name expression** — `CppNameExpr` is exactly this pair.
+        if cpp_parser::CppNameExpr::can_cast(node.kind().into()) {
             found = Some(node.clone());
         }
 
@@ -860,7 +858,7 @@ pub fn expression_at(root: &CppSyntaxNode, offset: usize) -> Option<CppSyntaxNod
             return found;
         }
 
-        if cpp_parser::CppExpr::can_cast(CppSyntaxKind::from(node.kind())) {
+        if cpp_parser::CppExpr::can_cast(node.kind().into()) {
             found = Some(node.clone());
         }
 
@@ -1055,25 +1053,20 @@ fn the_generated_member_spelling(
             CppSyntaxKind::ClassDef | CppSyntaxKind::StructDef
         )
     })?;
-    let has_generated_code = class.descendants().any(|node| {
-        CppSyntaxKind::from(node.kind()) == CppSyntaxKind::NameExpr && node.text() == "StaticClass"
-    });
+    let has_generated_code = cpp_parser::typed_descendants::<cpp_parser::CppNameExpr>(&class)
+        .any(|name| name.syntax().text().to_string() == "StaticClass");
     if !has_generated_code {
         return None;
     }
     if generated == "ThisClass" {
-        let own = class
-            .descendants()
-            .find(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::NameExpr)?;
-        return Some(format!("{}{rest}", own.text()));
+        let own = cpp_parser::typed_descendants::<cpp_parser::CppNameExpr>(&class).next()?;
+        return Some(format!("{}{rest}", own.syntax().text()));
     }
     let base = class
         .descendants()
         .find(|node| cpp_parser::CppBaseSpecifier::can_cast(node.kind().into()))?;
-    let base_name = base
-        .descendants()
-        .find(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::NameExpr)?;
-    Some(format!("{}{rest}", base_name.text()))
+    let base_name = cpp_parser::typed_descendants::<cpp_parser::CppNameExpr>(&base).next()?;
+    Some(format!("{}{rest}", base_name.syntax().text()))
 }
 /// **Every declaration the name at `offset` has** — [`definition_at`]'s plural, and the query a call needs.
 ///
