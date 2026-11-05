@@ -238,12 +238,32 @@ LINKAGE loop: cursor IntKeyword at 8   (before=8)     the first declaration pars
 LINKAGE loop: cursor LineComment at 23 (before=23)    the previous iteration left it there
 ```
 
-So the defect is not in the linkage loop: **`parse_declaration` leaves the cursor on the trailing comment** of the
-declaration it just read, and the loop then finds a token `parse_declaration` refuses and cannot advance past.
-Only three things move the cursor (`bump` computes the next token through `skip_trivia`; `init` and `rollback` set it
-from a checkpoint), so the next step is to watch `token_index` across one declaration inside a linkage block and find
-the write that puts it on a comment — a `rollback` to a checkpoint taken there is the shape to check first. A patch in
-the loop would hide it; the fix belongs where the cursor is set.
+So the cursor is left on the trailing comment by `parse_declaration` — deliberately: its `;` reader stops **before** a
+comment, so that a comment written below a declaration is not filed under that declaration.
+
+## 4a. Resolved: the container emits the trivia, as the class body already did
+
+The conclusion above ("the fix belongs where the cursor is set") was wrong, and the shape it rejected is the fix: **the
+linkage block is the one declaration container that never emitted the trivia it inherits.** `parse_class_body_members`
+does it at the top of every iteration, with a comment that says exactly why —
+
+> `expect_semicolon` consumes a member's `;` and stops before a comment, so that a comment written below a member is not
+> filed under it. What that leaves is the comment sitting at this loop's cursor, and a loop that went straight on to read
+> a member would read the comment as rubble.
+
+— and the linkage block's loop is the second of the two containers. The one-line fix is `p.emit_trivia_after_current_token()`
+at the top of its body, before the `}` test, and with it:
+
+* a comment between two declarations inside `extern "C" { … }` is emitted into the block, which encloses both and is the
+  honest owner of the text between them;
+* the zero-width `ErrorNode` the recovery branch used to produce is gone, so the recovery branch is no longer entered at a
+  comment at all;
+* `tests/lossless.rs::a_comment_between_two_declarations_in_a_linkage_block_survives` passes, un-ignored, with the shapes
+  around it (a block comment, a comment before the closing brace, a comment after a definition, a declaration after the
+  block).
+
+The trace is removed with it. Nothing else changed: the `bump` invariant stays as the probe (`CPPLS_TRIVIA=1`), and the
+whole parser suite — 476 tests — and `cpp_code_analysis`'s pass with the fix in place.
 
 ## 5. Code quality
 

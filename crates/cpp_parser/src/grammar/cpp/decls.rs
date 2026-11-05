@@ -5713,6 +5713,16 @@ pub fn parse_linkage_block(p: &mut CppParser) -> ParseResult {
     let mut unclosed_braces = 0isize;
 
     while p.current_token() != CppTokenKind::RightBrace || unclosed_braces > 0 {
+        // **The layout and the comments between two declarations belong to the block**, and this container is the one
+        // that did not say so: `expect_semicolon` consumes a declaration's `;` and stops **before** a comment, on purpose
+        // (a comment written below a declaration is not that declaration's — see `parse_class_body_members`), so the
+        // comment is at this loop's cursor when the next iteration begins. Reading a declaration from there failed, the
+        // recovery branch marked an `ErrorNode` and called `bump`, and `bump` emits nothing for a trivia token: the
+        // comment's bytes were consumed and never emitted, and every offset after it shifted. Measured by
+        // `tests/lossless.rs`: `cxxabi.h` came out 22 315 bytes in, 19 987 out, with zero syntax errors reported.
+        //
+        // The class body emits it at the same point and for the same reason; this is the second of the two containers.
+        p.emit_trivia_after_current_token();
         if p.is_eof() {
             break;
         }
@@ -5765,7 +5775,6 @@ pub fn parse_linkage_block(p: &mut CppParser) -> ParseResult {
 
         let member_base = p.open_marks();
         let before = p.current_token_index();
-        eprintln!("LINKAGE loop: cursor {:?} at {} (before={})", p.current_token(), p.current_token_index(), before);
         let before_events = p.current_event_count();
         if parse_declaration(p).is_err() {
             // **With their end events**, for the third time in this file's history (see `end_marks_to`): a
