@@ -4239,15 +4239,20 @@ fn qualified_declarations(root: &CppSyntaxNode) -> Vec<(Binding, String, Option<
         else {
             continue;
         };
-        // **`void C::f()` writes the name as part of the type**, so the declarator is `()` and holds no name; a definition written
-        // with the name in the declarator (`int C::count = 0`) has one. The outermost declarator's own name is what tells the
-        // two apart, and a *parameter's* name is not it.
-        let outer = declarator
-            .child::<CppDeclarator>()
-            .unwrap_or_else(|| declarator.clone());
-        let own_name = outer.child::<CppNameExpr>();
-        let names_itself = own_name.is_some();
-        let from_the_declarator = own_name.filter(|name| name.is_qualified());
+        // **`void C::f()` writes the name as part of the type**, so the declarator is `()` and holds no name; a definition
+        // written with the name in the declarator (`int C::count = 0`) has one.
+        //
+        // **The declarator's *own* name decides it**, and `get_name` is the reader that answers for every spelling: a direct
+        // token (`&f()` holds `f` as a token), a direct `NameExpr` (`C::count`), and the nested wrappers in between. Taking
+        // `child::<CppDeclarator>()` instead — the *first nested* declarator — looked at the `&` wrapper of `&f()`, which
+        // holds no name, so the fallback below consulted the **specifiers**, and `std::string &f();` declared a function
+        // called `string` in namespace `std` (`std::vector<int> &f();` one called `vector<int>`). Measured with
+        // `inspect facts`; that bogus fact is what a hover on the return type's `string` showed, and what the semantic tokens
+        // called a method.
+        let names_itself = declarator.get_name().is_some();
+        let from_the_declarator = declarator
+            .child::<CppNameExpr>()
+            .filter(CppNameExpr::is_qualified);
         let from_the_specifiers = (!names_itself)
             .then(|| {
                 declaration.get_decl_specifiers().and_then(|specifiers| {

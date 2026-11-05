@@ -73,12 +73,17 @@ pub(crate) struct Candidate {
     pub(crate) declared: Vec<String>,
     /// The template's parameter names, for deducing one declaration's spellings from another's.
     pub(crate) template_parameters: Vec<String>,
+    /// **How many parameters a call must supply** — the ones without a default argument. Equal to
+    /// `parameters.len()` until a caller says otherwise, because the defaulted count is not in the type
+    /// spellings this candidate is built from.
+    pub(crate) required: usize,
 }
 
 impl Candidate {
     /// The candidate an ordinary declaration writes: `void f(int, ...)` as `["int"]` and `variadic`.
     pub(crate) fn new(parameters: Vec<String>, variadic: bool, signature: String) -> Self {
         Self {
+            required: parameters.len(),
             parameters,
             variadic,
             signature,
@@ -86,6 +91,14 @@ impl Candidate {
             declared: Vec::new(),
             template_parameters: Vec::new(),
         }
+    }
+
+    /// **The same candidate, with the parameters a call must supply.** A caller that has the declaration's
+    /// *spelling* can count the defaulted parameters — see [`defaults_in`] — and a defaulted tail is exactly what
+    /// makes a two-parameter overload reachable from a one-argument call.
+    pub(crate) fn with_required(mut self, required: usize) -> Self {
+        self.required = required.min(self.parameters.len());
+        self
     }
 
     /// **The same candidate, marked as a template** — the one difference a tie is broken on.
@@ -114,7 +127,10 @@ impl Candidate {
     /// this reads. Treating them as "no" would delete the overload a program chose — `void f(int, int = 0);` is a
     /// real candidate for `f(1)`.
     fn takes(&self, arguments: usize) -> bool {
-        self.variadic || arguments <= self.parameters.len()
+        // **A default argument is a parameter the call may leave off, and the spelling says which ones.** Without the
+        // count, `append(const _StringViewIsh&, size_type, size_type = npos)` was "viable" for `append(x)` and every
+        // two- and three-parameter overload survived an arity filter it should not have.
+        self.variadic || (arguments >= self.required && arguments <= self.parameters.len())
     }
 }
 
@@ -133,8 +149,13 @@ pub(crate) enum Choice {
 ///
 /// The arguments are the types the engine already worked out, in source order; `Known::Unknown` is an argument whose
 /// type is not known and is handled by [`Match::Unranked`].
-pub(crate) fn choose(argument_types: &[Known<String>], candidates: &[Candidate]) -> Choice {
-    let viable: Vec<usize> = (0..candidates.len())
+/// **The declarations a call can reach** — the candidates whose parameter list the arguments fit, in declaration
+/// order. The set [`choose`] ranks; a caller that shows a hover wants exactly these when nothing decides between them.
+pub(crate) fn viable_candidates(
+    argument_types: &[Known<String>],
+    candidates: &[Candidate],
+) -> Vec<usize> {
+    (0..candidates.len())
         .filter(|index| candidates[*index].takes(argument_types.len()))
         .filter(|index| {
             let candidate = &candidates[*index];
@@ -146,7 +167,11 @@ pub(crate) fn choose(argument_types: &[Known<String>], candidates: &[Candidate])
                 }
             })
         })
-        .collect();
+        .collect()
+}
+
+pub(crate) fn choose(argument_types: &[Known<String>], candidates: &[Candidate]) -> Choice {
+    let viable = viable_candidates(argument_types, candidates);
 
     if viable.is_empty() {
         return Choice::None;
@@ -379,9 +404,15 @@ mod tests {
             choose(&[a_type("int"), a_type("int")], &candidates),
             Choice::One(1)
         );
-        // Both need a default argument for a zero-argument call, so both are viable and the one using fewer defaults
-        // wins — see `choose`. "None" would be a claim about the program that is not true.
-        assert_eq!(choose(&[], &candidates), Choice::One(0));
+        // **A defaulted parameter may be left off, and only the caller knows which ones are.** `with_required` is that
+        // count: `f(int a = 0)` is `required 0` and reaches a zero-argument call; a candidate that does not say needs all
+        // of its parameters, so this call reaches neither.
+        let with_a_default = vec![
+            candidate(&["int"]).with_required(0),
+            candidate(&["int", "int"]),
+        ];
+        assert_eq!(choose(&[], &with_a_default), Choice::One(0));
+        assert_eq!(choose(&[], &candidates), Choice::None);
     }
 
     #[test]
@@ -500,6 +531,57 @@ pub(crate) fn a_type_without_its_name(parameter: &str) -> String {
             .to_string();
     }
     parameter.to_string()
+}
+
+/// **How many parameters of a `parameter_list` spelling have a default argument** — the arguments a call may leave
+/// off.
+///
+/// Counted at the spelling level, at the same top-level commas [`parameters_in`] splits on, because a default value
+/// carries commas of its own: `void f(std::map<int, int> m = {})` has one defaulted parameter, not two parameters.
+pub fn defaults_in(parameter_list: &str) -> usize {
+    let inner = parameter_list
+        .trim()
+        .trim_start_matches('(')
+        .trim_end_matches(')');
+    let mut defaults = 0usize;
+    let mut depth = 0i32;
+    let mut current = String::new();
+    let count = |parameter: &str, defaults: &mut usize| {
+        let outside = {
+            let mut without = String::new();
+            let mut depth = 0i32;
+            for character in parameter.trim().chars() {
+                match character {
+                    '<' | '(' | '[' => depth += 1,
+                    '>' | ')' | ']' => depth -= 1,
+                    _ if depth > 0 => continue,
+                    _ => {}
+                }
+                without.push(character);
+            }
+            without
+        };
+        if outside.contains('=') {
+            *defaults += 1;
+        }
+    };
+    for character in inner.chars() {
+        match character {
+            '<' | '(' | '[' => depth += 1,
+            '>' | ')' | ']' => depth -= 1,
+            ',' if depth == 0 => {
+                count(&current, &mut defaults);
+                current.clear();
+                continue;
+            }
+            _ => {}
+        }
+        current.push(character);
+    }
+    if !current.trim().is_empty() && current.trim() != "..." {
+        count(&current, &mut defaults);
+    }
+    defaults
 }
 
 /// **The parameter types in a `parameter_list` spelling**, and whether it ends in `...`.

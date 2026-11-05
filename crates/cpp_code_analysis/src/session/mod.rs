@@ -8696,14 +8696,41 @@ impl<F: FileProvider + Clone> Session<F> {
         signatures
     }
 
-    /// **Which of these declarations a call at this offset means** — an index into `parameter_lists`.
+    /// **The declarations a call at this offset can reach** — indices into `parameter_lists`.
     ///
-    /// The same resolution the argument checks and the signature popup use, asked over the
-    /// declarations a caller already holds: a hover has the facts of the name under the cursor and
-    /// needs to know which of them the call selects.
+    /// The same resolution the argument checks and the signature popup use, asked over the declarations a caller already
+    /// holds: a hover has the facts of the name under the cursor and needs to know which of them the call can mean.
     ///
-    /// `None` when the offset is not on a call, when no candidate is viable, or when the choice is ambiguous — the three
-    /// answers a reader should see nothing marked for.
+    /// ```text
+    ///   one index     the resolution decided (`Choice::One`)
+    ///   several       every one of them can accept the arguments, and nothing decides between them by type
+    ///   None          the offset is not on a call, or no declaration can accept it
+    /// ```
+    ///
+    /// The **several** case is the one a hover needs: printing the chosen declaration beside five others that cannot take
+    /// this argument list answers a question the reader did not ask.
+    pub fn the_declarations_a_call_means(
+        &self,
+        view: &FileView,
+        offset: ReadingOffset,
+        parameter_lists: &[Option<String>],
+        template_parameters: &[Vec<String>],
+    ) -> Option<Vec<usize>> {
+        let (types, candidates) =
+            self.the_candidates_of_a_call(view, offset, parameter_lists, template_parameters)?;
+        match crate::sema::overload::choose(&types, &candidates) {
+            crate::sema::overload::Choice::One(chosen) => Some(vec![chosen]),
+            // **Nothing decides between them**, so the viable set is the answer: every one of them can accept this call,
+            // and the ones arity alone rules out are gone.
+            crate::sema::overload::Choice::Ambiguous => Some(
+                crate::sema::overload::viable_candidates(&types, &candidates),
+            ),
+            crate::sema::overload::Choice::None => None,
+        }
+    }
+
+    /// **The one declaration a call at this offset means**, when the resolution decides — see
+    /// [`Session::the_declarations_a_call_means`] for the answer that also covers the ambiguous case.
     pub fn the_declaration_a_call_means(
         &self,
         view: &FileView,
@@ -8711,6 +8738,25 @@ impl<F: FileProvider + Clone> Session<F> {
         parameter_lists: &[Option<String>],
         template_parameters: &[Vec<String>],
     ) -> Option<usize> {
+        let (types, candidates) =
+            self.the_candidates_of_a_call(view, offset, parameter_lists, template_parameters)?;
+        match crate::sema::overload::choose(&types, &candidates) {
+            crate::sema::overload::Choice::One(chosen) => Some(chosen),
+            _ => None,
+        }
+    }
+
+    /// **The declarations and the argument types of the call at `offset`** — the one walk the two questions above share.
+    fn the_candidates_of_a_call(
+        &self,
+        view: &FileView,
+        offset: ReadingOffset,
+        parameter_lists: &[Option<String>],
+        template_parameters: &[Vec<String>],
+    ) -> Option<(
+        Vec<crate::Known<String>>,
+        Vec<crate::sema::overload::Candidate>,
+    )> {
         let token = cpp_parser::token_at(&view.root, offset.get())?;
         let call = token.parent_ancestors().find(|node| {
             cpp_parser::CppSyntaxKind::from(node.kind()) == cpp_parser::CppSyntaxKind::CallExpr
@@ -8783,11 +8829,9 @@ impl<F: FileProvider + Clone> Session<F> {
             })
             .collect();
 
-        match crate::sema::overload::choose(&types, &candidates) {
-            crate::sema::overload::Choice::One(chosen) => Some(chosen),
-            _ => None,
-        }
+        Some((types, candidates))
     }
+
     /// **The template arguments a call fixes**, for a declaration the caller already holds.
     ///
     /// Deduction needs the call's argument types, which is what a `SemanticModel` is for; the names come from the

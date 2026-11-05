@@ -592,29 +592,99 @@ fn member_markdown(
     };
     // **Every declaration of the name, not the first.** A class that declares `void call(Fn &&fn)` and
     // `void call(Fn &&fn) const` has two members, and which one is callable depends on the object's constness — which the
-    // type model does not carry yet (`type_of` is `Foo` for both `Foo foo;` and `const Foo cfoo;`). Listing them is the
-    // answer that is right about both, and the qualifiers the facts now record are what tells them apart.
+    // type model does not carry yet (`type_of` is `Foo` for both `Foo foo;` and `const Foo cfoo;`).
     let candidates: Vec<&cpp_code_analysis::ProjectMember> = list
         .members
         .iter()
         .filter(|member| member.fact.name == access.member)
         .collect();
-    if candidates.len() > 1 {
+
+    // **Which of them this call can reach**, when the cursor is on one. Members are where a reader meets an overload set
+    // most often, and printing all nine `basic_string::append` declarations for a call that can reach two answers a
+    // question nobody asked. The question is the free-function path's, over the member facts: same resolver, same
+    // `parameter_list` spellings.
+    let call_selected: Option<Vec<usize>> = (candidates.len() > 1)
+        .then(|| {
+            let parameter_lists: Vec<Option<String>> = candidates
+                .iter()
+                .map(|candidate| candidate.fact.parameter_list.clone())
+                .collect();
+            let template_parameters: Vec<Vec<String>> = candidates
+                .iter()
+                .map(|candidate| {
+                    session
+                        .text(&candidate.file)
+                        .map(|text| {
+                            cpp_code_analysis::sema::deduction::template_parameters_before(
+                                &text,
+                                candidate.fact.name_range.start_offset,
+                            )
+                        })
+                        .unwrap_or_default()
+                })
+                .collect();
+            session.the_declarations_a_call_means(
+                view,
+                cpp_code_analysis::file::coordinates::ReadingOffset::new(
+                    access.member_range.start_offset,
+                ),
+                &parameter_lists,
+                &template_parameters,
+            )
+        })
+        .flatten();
+
+    // **Exactly one of them is the call's** — then the card is that member's, with the details and the location a member
+    // that is not overloaded gets, rather than a list of one.
+    if let Some(selected) = call_selected
+        .as_ref()
+        .filter(|selected| selected.len() == 1)
+        && let Some(member) = candidates.get(selected[0])
+    {
+        let definition = cpp_code_analysis::ProjectDefinition {
+            file: member.file.clone(),
+            fact: member.fact.clone(),
+        };
+        return declaration_markdown(session, view, &definition, None);
+    }
+
+    // **Several can take the call, or the cursor is not on one** — print what the call can reach, or all of them.
+    let shown: Vec<&cpp_code_analysis::ProjectMember> = match &call_selected {
+        Some(selected) => selected
+            .iter()
+            .filter_map(|at| candidates.get(*at).copied())
+            .collect(),
+        None => candidates.clone(),
+    };
+    if shown.len() > 1 {
         let mut out = String::from("```cpp\n");
-        for candidate in &candidates {
+        for candidate in &shown {
             out.push_str(&signature_line(&candidate.fact));
             out.push('\n');
         }
         out.push_str("```\n\n");
-        let scope = candidates
+        let scope = shown
             .iter()
             .find_map(|candidate| candidate.fact.scope.clone())
             .unwrap_or_else(|| written.clone());
-        out.push_str(&format!(
-            "`{scope}::{}` — {} declarations, told apart by their qualifiers.\n\nWhich one a call means depends on `{object}`: a `const` object can only call the `const` one.",
-            access.member,
-            candidates.len()
-        ));
+        let sentence = if call_selected.is_some() {
+            format!(
+                "`{scope}::{}` — {} of {} declarations can accept this call's arguments; the types do not decide \
+                 between them, so they are all shown. Which one a call means depends on `{object}`: a `const` object can \
+                 only call the `const` one.",
+                access.member,
+                shown.len(),
+                candidates.len()
+            )
+        } else {
+            format!(
+                "`{scope}::{}` — {} declarations, told apart by their qualifiers.\n\nWhich one a call means depends \
+                 on `{object}`: a `const` object can only call the `const` one.",
+                access.member,
+                candidates.len()
+            )
+        };
+        out.push_str(&sentence);
         return out;
     }
     let Some(member) = candidates.first().copied().or_else(|| {
@@ -668,14 +738,16 @@ fn overloads_markdown(
     offset: cpp_code_analysis::file::coordinates::ReadingOffset,
     found: &cpp_code_analysis::ProjectDefinitions,
 ) -> String {
-    // **Which of them this call means, if the reader is on a call.**
+    // **Which of them this call can reach, if the reader is on a call.**
     //
-    // `Session::signatures_at` already ranks the declarations and puts the chosen one **first** —
-    // the same resolver the argument checks and the signature popup use — so this is a read of an
-    // answer that exists, not a second opinion. It is `None` when the cursor is not on a call at
-    // all (a bare `std::format`), and then the list is all there is and the old sentence is still
-    // the honest one. **Which of them this call means.**
-    let chosen = view.and_then(|view| {
+    // `the_declarations_a_call_means` is the same resolution the argument checks and the signature popup use, asked over
+    // the declarations this hover holds: one index when it decided, the **viable set** when it did not. It is `None`
+    // when the cursor is not on a call at all (a bare `std::format`), and then the list is all there is.
+    //
+    // The viable set is what a reader wants printed. Hovering `append` in `result_str.append(x)` used to draw **nine**
+    // declarations of `basic_string::append`, several of which cannot accept one argument at all — a page about a call
+    // that cannot be that call.
+    let call_selected: Option<Vec<usize>> = view.and_then(|view| {
         let parameter_lists: Vec<Option<String>> = found
             .found
             .iter()
@@ -698,37 +770,31 @@ fn overloads_markdown(
             })
             .collect();
 
-        let chosen = session.the_declaration_a_call_means(
+        let selected = session.the_declarations_a_call_means(
             view,
             offset,
             &parameter_lists,
             &template_parameters,
         )?;
-        let declaration = found.found.get(chosen)?;
-        Some((
-            declaration.file.clone(),
-            declaration.fact.name_range.start_offset,
-        ))
+        (!selected.is_empty()).then_some(selected)
     });
     // **How many of them the popup prints.** A name with a dozen overloads — `std::format` has one per character
     // type and per allocator — drew a page: the reader asked what the name is, and the answer filled the screen and
-    // pushed the sentence that explains it off the bottom (reported from an editor as "hover 结果很多"). The card
-    // prints the declaration the call means (when the cursor is on a call) and the first few others; the count and
-    // where they live are still said, and `go to definition` lists them all.
+    // pushed the sentence that explains it off the bottom (reported from an editor as "hover 结果很多").
+    //
+    // **On a call, the card prints exactly the declarations the call can reach** — one of them when the resolution
+    // decides, several when the types do not. Off a call it prints the first few, and the count and the files are
+    // said either way; `go to definition` lists them all.
     const MAX_SHOWN: usize = 6;
-    let chosen_index = chosen.as_ref().and_then(|(file, at)| {
-        found.found.iter().position(|declaration| {
-            *file == declaration.file && *at == declaration.fact.name_range.start_offset
-        })
-    });
-    let mut shown: Vec<usize> = (0..found.found.len()).collect();
-    if let Some(chosen_at) = chosen_index
-        && chosen_at < shown.len()
-    {
-        let the_one = shown.remove(chosen_at);
-        shown.insert(0, the_one);
-    }
-    let hidden = shown.len().saturating_sub(MAX_SHOWN);
+    let chosen_index = call_selected
+        .as_ref()
+        .filter(|selected| selected.len() == 1)
+        .map(|selected| selected[0]);
+    let mut shown: Vec<usize> = match &call_selected {
+        Some(selected) => selected.clone(),
+        None => (0..found.found.len()).collect(),
+    };
+    let hidden = found.found.len().saturating_sub(shown.len().min(MAX_SHOWN));
     shown.truncate(MAX_SHOWN);
 
     let mut lines = String::new();
@@ -792,7 +858,9 @@ fn overloads_markdown(
         }
     }
 
-    let first = &found.found[0];
+    // **The file a reader is sent to** is the declaration the card is about: the one the call selects when it selects
+    // one, and the first declaration otherwise.
+    let first = &found.found[chosen_index.unwrap_or(0)];
     let qualified = first.fact.qualified_name();
     let distinct = shown_lines
         .iter()
@@ -804,12 +872,17 @@ fn overloads_markdown(
     out.push_str(&format!(
         "\n`{qualified}` — {} declarations. {}\n",
         found.found.len(),
-        if hidden > 0 {
+        if let Some(selected) = &call_selected {
+            if selected.len() == 1 {
+                "The `→` one is what this call means: its parameter list accepts the arguments, and the others \\
+                 cannot. `go to definition` lists them all."
+            } else {
+                "These are the declarations whose parameter list accepts this call's arguments; the types do not \\
+                 decide between them, so they are all shown — `go to definition` lists the rest."
+            }
+        } else if hidden > 0 {
             "The ones printed here are the call's own (when the cursor is on one) and the first of the rest — the \
              count and the files below are complete, and `go to definition` lists them all."
-        } else if chosen.is_some() {
-            "The `→` one is what a call here means: the arguments select it, and the others are what a different \
-             argument list would reach."
         } else if distinct == 1 {
             // **One shape, several declarations.** A variable template written under `#if`/`#else`, a redeclaration in a
             // header it includes, an `inline constexpr` defined twice — none of them is an overload set, and the arguments

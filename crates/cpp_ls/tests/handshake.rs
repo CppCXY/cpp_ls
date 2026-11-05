@@ -4096,6 +4096,92 @@ fn the_chosen_template_overload_is_shown_instantiated() {
         "and it is shown instantiated — `take(int* value)` rather than `take(T* value)`: {text}"
     );
 }
+/// **A hover on a call shows only the declarations that call can reach.**
+///
+/// Reported from an editor: hovering `append` in `result_str.append(x)` drew **nine** `basic_string::append`
+/// declarations, several of which cannot accept one argument at all. The arity rule asked only "no more arguments than
+/// parameters" — a longer list *may* have defaults — so every two- and three-parameter overload survived it. The
+/// defaulted count is in the declaration's own `parameter_list` spelling, which the hover holds, so it is counted now.
+///
+/// The fixture separates the two results the resolution can give: `f(1)` has exact types for the one- and two-parameter
+/// overloads, and "fewer parameters used is better" then selects `f(int)`, so **one** line is printed; `g(unknown)`
+/// makes the argument's type unknown, so the two one-parameter overloads tie and **both** are printed — and the
+/// two-parameter `g` is not, which is what the arity filter is for.
+#[test]
+fn a_hover_on_a_call_shows_only_the_declarations_it_can_reach() {
+    const SHAPES_H: &str = "\
+struct S {
+    void f(int a);
+    void f(int a, int b = 0);
+    void f(int a, int b, int c);
+
+    void g(int a);
+    void g(long a);
+    void g(int a, int b);
+};
+";
+    const SHAPES_CPP: &str = "\
+#include \"shapes.h\"
+void h(S s) {
+    s.f(1);
+    s.g(unknown_name);
+}
+";
+
+    let project = Project::new("hover-viable-overloads");
+    project.write("shapes.h", SHAPES_H);
+    project.write("main.cpp", SHAPES_CPP);
+
+    let mut server = Server::start(project.root());
+    let main_uri = uri_of(&project.root().join("main.cpp"));
+
+    server.request(
+        1,
+        "initialize",
+        json!({
+            "processId": std::process::id(),
+            "rootUri": uri_of(project.root()),
+            "capabilities": {
+                "workspace": { "configuration": true, "didChangeWatchedFiles": { "dynamicRegistration": true } },
+                "window": { "workDoneProgress": true },
+            },
+        }),
+    );
+    server.notify("initialized", json!({}));
+    server.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": { "uri": main_uri, "languageId": "cpp", "version": 1, "text": SHAPES_CPP }
+        }),
+    );
+
+    let hovered = hover_over(&mut server, 100, &main_uri, SHAPES_CPP, "f(1)");
+    let text = hovered["result"]["contents"]["value"]
+        .as_str()
+        .unwrap_or_else(|| panic!("a markdown answer was expected, got {hovered}"));
+    assert!(
+        text.contains("void f(int a)") && text.contains("S::f"),
+        "the call selects the one-parameter overload, and the card is that member's own: {text}"
+    );
+    assert!(
+        !text.contains("int b"),
+        "and the overloads that need more arguments are not shown: {text}"
+    );
+
+    let hovered = hover_over(&mut server, 200, &main_uri, SHAPES_CPP, "g(unknown_name)");
+    let text = hovered["result"]["contents"]["value"]
+        .as_str()
+        .unwrap_or_else(|| panic!("a markdown answer was expected, got {hovered}"));
+    assert!(
+        text.contains("void g(int a)") && text.contains("void g(long a)"),
+        "both one-parameter overloads accept an unknown argument: {text}"
+    );
+    assert!(
+        !text.contains("int a, int b"),
+        "the two-parameter overload cannot take one argument: {text}"
+    );
+}
+
 /// **The overload a call means is marked in the list, and the mark is the argument's choice.**
 ///
 /// **The overload a call means is the first location `textDocument/definition` answers.**
