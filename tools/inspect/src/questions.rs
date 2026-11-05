@@ -494,31 +494,60 @@ pub fn the_diagnostics(opened: &Opened) -> Result<Answer, String> {
         .session
         .diagnostics(&opened.file)
         .ok_or_else(|| format!("{} has no reading to diagnose", opened.file.display()))?;
+    // **Both channels**: the reading's errors and the rules' findings. Printing only `errors` answered "0 finding(s)" for a file
+    // whose `missing-return` rule fires, which hides the whole analysis from the tool that exists to show it.
     let mut text = format!(
-        "diagnostics in {}: {} finding(s), reading {:?}, {} unplaced\n",
+        "diagnostics in {}: {} error(s), {} check finding(s), reading {:?}, {} unplaced\n",
         opened.file.display(),
         found.errors.len(),
+        found.checks.len(),
         found.reading,
         found.unplaced
     );
     for error in &found.errors {
         let (line, column) = line_col(&opened.text, error.start);
         text.push_str(&format!(
-            "  {line}:{column}  {}  {}\n",
+            "  {line}:{column}  parse  {}  {}\n",
             error.code.name(),
             error.message
         ));
     }
+    for finding in &found.checks {
+        let (line, column) = line_col(&opened.text, finding.range.start_offset);
+        text.push_str(&format!(
+            "  {line}:{column}  check  {}  {}\n",
+            finding.code.name(),
+            finding.message
+        ));
+    }
+    let mut findings: Vec<serde_json::Value> = found
+        .errors
+        .iter()
+        .map(|error| {
+            json!({
+                "channel": "parse",
+                "line": line_col(&opened.text, error.start).0,
+                "column": line_col(&opened.text, error.start).1,
+                "code": error.code.name(),
+                "message": error.message,
+            })
+        })
+        .collect();
+    findings.extend(found.checks.iter().map(|finding| {
+        json!({
+            "channel": "check",
+            "line": line_col(&opened.text, finding.range.start_offset).0,
+            "column": line_col(&opened.text, finding.range.start_offset).1,
+            "code": finding.code.name(),
+            "name": finding.name,
+            "message": finding.message,
+        })
+    }));
     let value = json!({
         "file": opened.file.display().to_string(),
         "reading": format!("{:?}", found.reading),
         "unplaced": found.unplaced,
-        "findings": found.errors.iter().map(|error| json!({
-            "line": line_col(&opened.text, error.start).0,
-            "column": line_col(&opened.text, error.start).1,
-            "code": error.code.name(),
-            "message": error.message,
-        })).collect::<Vec<_>>(),
+        "findings": findings,
     });
     Ok(Answer::new(text, value))
 }

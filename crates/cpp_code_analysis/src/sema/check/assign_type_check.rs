@@ -149,7 +149,18 @@ impl Check for AssignTypeCheck {
             {
                 continue;
             }
-            let Some(name) = super::spelling_of(&declarator) else {
+            // **The declarator's own name.** The node above is a `Declarator` when the parent held one and an
+            // `InitDeclarator` when it did not, so both are asked — and `get_name` walks the nested declarators itself, which
+            // is what makes `int (*fp)(int)` answer `fp`.
+            let Some(name) = cpp_parser::CppDeclarator::cast(declarator.clone())
+                .or_else(|| {
+                    declarator
+                        .children()
+                        .find_map(cpp_parser::CppDeclarator::cast)
+                })
+                .and_then(|declarator| declarator.get_name())
+                .map(|name| name.get_name_text().to_string())
+            else {
                 continue;
             };
             let Some(Some(written)) = declared.get(name.as_str()).copied() else {
@@ -226,7 +237,10 @@ impl Check for AssignTypeCheck {
             let Some(cpp_parser::CppExpr::NameExpr(named)) = assignment.get_lhs() else {
                 continue;
             };
-            let Some(name) = super::spelling_of(named.syntax()) else {
+            let Some(name) = named
+                .get_last_name_token()
+                .map(|token| token.get_name_text().to_string())
+            else {
                 continue;
             };
             let Some(Some(written)) = declared.get(name.as_str()).copied() else {
@@ -346,7 +360,7 @@ fn constructs_the_written_type(expression: &cpp_parser::CppSyntaxNode, written: 
     let Some(callee) = call.get_callee() else {
         return false;
     };
-    let Some(spelled) = super::spelling_of(callee.syntax()) else {
+    let Some(spelled) = super::callee_name_of(&callee) else {
         return false;
     };
     let target = written.rsplit("::").next().unwrap_or(written).trim();

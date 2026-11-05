@@ -1167,6 +1167,22 @@ pub fn spelling_of(node: &cpp_parser::CppSyntaxNode) -> Option<String> {
         .map(|token| token.text().to_string())
 }
 
+/// **The name a call is to** — `f` for `f(x)`, `push_back` for `v.push_back(x)`, `free` for `ns::free(p)`.
+///
+/// Asked of the callee's **expression**, not of the last identifier written inside it: `(*p)(x)` is a call through a pointer,
+/// and the last identifier in it is `p` — a name the call does not name, which a token walk would look up as a function.
+pub fn callee_name_of(callee: &cpp_parser::CppExpr) -> Option<String> {
+    use cpp_parser::CppExpr;
+    let token = match callee {
+        CppExpr::NameExpr(name) => name.get_last_name_token(),
+        CppExpr::IndexExpr(index) => index.get_member_name(),
+        CppExpr::MemberExpr(member) => member.get_member_name(),
+        // A parenthesised, dereferenced or cast callee is not a name the caller wrote.
+        _ => None,
+    }?;
+    Some(token.get_name_text().to_string())
+}
+
 /// **The name token a declaration or definition writes** — the last non-trivia token before its parameter list.
 ///
 /// This is the one place that answers *where the name is*, and everything that needs the name comes through it:
@@ -1230,7 +1246,7 @@ pub fn parameter_spellings_of(function: &cpp_parser::CppSyntaxNode) -> Vec<Strin
     };
     parameters
         .children::<CppParam>()
-        .map(|parameter| parameter.syntax().text().to_string().trim().to_string())
+        .map(|parameter| parameter.get_type_text())
         .filter(|spelling| !spelling.is_empty())
         .collect()
 }

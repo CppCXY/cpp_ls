@@ -245,6 +245,33 @@ impl CppForStat {
             )
         })
     }
+
+    /// **Is a condition written in the head** — `for (int i = 0; i < n; ++i)` yes, `for (;;)` no?
+    ///
+    /// The head is tokens and nodes between two `;`, and the second `;` ends the condition: anything that is not trivia
+    /// between the first and the second is the condition — written as a node (`i < n`) or, in a recovered reading, as a bare
+    /// token. A `for (;;)` has nothing there, which is what makes it an endless loop rather than an unknown one.
+    pub fn has_a_condition(&self) -> bool {
+        let mut after_the_first = false;
+        for element in self.syntax().children_with_tokens() {
+            if let Some(token) = element.as_token() {
+                let kind = crate::CppTokenKind::from(token.kind());
+                if kind == crate::CppTokenKind::Semicolon {
+                    if after_the_first {
+                        return false;
+                    }
+                    after_the_first = true;
+                    continue;
+                }
+                if after_the_first && !crate::is_trivia(kind) {
+                    return true;
+                }
+            } else if after_the_first {
+                return true;
+            }
+        }
+        false
+    }
 }
 
 /// A `switch` statement.

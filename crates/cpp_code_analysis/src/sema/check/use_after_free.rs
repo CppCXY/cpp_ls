@@ -212,7 +212,7 @@ fn apply_effects(
                     continue;
                 };
                 let arguments: Vec<cpp_parser::CppExpr> = call.get_args();
-                let name = the_last_identifier_of(callee.syntax());
+                let name = super::callee_name_of(&callee);
                 let receiver = a_member_access_object(&callee);
                 match name.as_deref() {
                     // `free(p)` — C, and C++ through `<cstdlib>`.
@@ -322,7 +322,7 @@ fn the_frees_of(context: &CheckContext<'_>, callee: &cpp_parser::CppSyntaxNode) 
     if is_a_member_access(callee) {
         return None;
     }
-    let name = the_last_identifier_of(callee)?;
+    let name = super::callee_name_of(&cpp_parser::CppExpr::cast(callee.clone())?)?;
     match context.index().definition(&name, context.path) {
         crate::Known::Yes(found) => Some(found.fact.frees),
         _ => None,
@@ -394,17 +394,6 @@ fn the_last_identifier_offset(expression: &cpp_parser::CppSyntaxNode) -> Option<
         })
         .last()
         .map(|token| usize::from(token.text_range().start()))
-}
-
-fn the_last_identifier_of(expression: &cpp_parser::CppSyntaxNode) -> Option<String> {
-    expression
-        .descendants_with_tokens()
-        .filter_map(|element| element.into_token())
-        .filter(|token| {
-            cpp_parser::CppTokenKind::from(token.kind()) == cpp_parser::CppTokenKind::Identifier
-        })
-        .last()
-        .map(|token| token.text().to_string())
 }
 
 /// **The object of a member access** — `u` for `u.reset()`: an `a.b` is an `IndexExpr` (measured) and an `a->b` may be a

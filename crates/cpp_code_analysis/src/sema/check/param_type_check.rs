@@ -63,15 +63,11 @@ impl Check for ParamTypeCheck {
             let Some(name) = super::name_declared_by(&function) else {
                 continue;
             };
-            // **The name is not part of the type.** `parameter_spellings_of` answers what the file *wrote* — `int
-            // width` — and a comparison against a type has to see `int`; `a_type_without_its_name` is the reader the
-            // rest of the analysis already uses for exactly this (`sema::overload::parameters_in` calls it). Without the
-            // strip, the same call was reported when the parameter was unnamed (`void resize(int)`) and silent when it
-            // was named — which is the shape every real codebase writes.
-            let parameters: Vec<String> = super::parameter_spellings_of(&function)
-                .iter()
-                .map(|spelling| crate::sema::overload::a_type_without_its_name(spelling))
-                .collect();
+            // **The name is not part of the type**, and `parameter_spellings_of` answers the type itself:
+            // `CppParam::get_type_text` composes it from the specifier sequence and the declarator's pointer, reference and
+            // array parts, so there is no name to strip. (This used to strip one from a spelling, which reported the same
+            // call when the parameter was unnamed and stayed silent when it was named.)
+            let parameters: Vec<String> = super::parameter_spellings_of(&function);
             let namespaces = enclosing_namespaces(&function);
             match by_name.entry(name) {
                 std::collections::hash_map::Entry::Occupied(mut e) => {
@@ -91,9 +87,10 @@ impl Check for ParamTypeCheck {
             let Some(callee) = call.get_callee() else {
                 continue;
             };
+            let callee_expression = callee.clone();
             let callee = callee.syntax().clone();
             let call = call.syntax().clone();
-            let Some(name) = super::spelling_of(&callee) else {
+            let Some(name) = super::callee_name_of(&callee_expression) else {
                 continue;
             };
 
@@ -267,7 +264,10 @@ fn enclosing_namespaces(node: &cpp_parser::CppSyntaxNode) -> Vec<String> {
     let mut namespaces: Vec<String> = node
         .ancestors()
         .filter(|ancestor| cpp_parser::CppNamespaceDecl::can_cast(ancestor.kind().into()))
-        .filter_map(|namespace| super::spelling_of(&namespace))
+        .filter_map(|namespace| {
+            cpp_parser::CppNamespaceDecl::cast(namespace.clone())
+                .and_then(|namespace| namespace.get_name_text())
+        })
         .collect();
     namespaces.reverse();
     namespaces

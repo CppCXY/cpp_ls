@@ -413,6 +413,20 @@ impl CppAstNode for CppDeclSpecifierSeq {
 }
 
 impl CppDeclSpecifierSeq {
+    /// **Is the type `void`** — `void f()`, `(void)x`?
+    pub fn is_void(&self) -> bool {
+        self.has_keyword(CppTokenKind::VoidKeyword)
+    }
+
+    /// **Is the type deduced from the initialiser or the returns?** — `auto`, `auto&`, `decltype(auto)`.
+    ///
+    /// A function declared with one of these promises nothing about what it returns, which is why `missing-return` asks this
+    /// rather than comparing a spelling against `"auto"`.
+    pub fn is_deduced_return_type(&self) -> bool {
+        self.has_keyword(CppTokenKind::AutoKeyword)
+            || self.has_keyword(CppTokenKind::DecltypeKeyword)
+    }
+
     /// The built-in type specifier, if the type is a fundamental one (`int`, `const char`, ...).
     pub fn get_builtin_type(&self) -> Option<CppBuiltinType> {
         self.child()
@@ -572,6 +586,12 @@ impl CppAstNode for CppTypeId {
 }
 
 impl CppTypeId {
+    /// **Is this type spelled `void`** — `(void)expr`, the cast that discards its operand?
+    pub fn is_void(&self) -> bool {
+        self.get_decl_specifiers()
+            .is_some_and(|specifiers| specifiers.has_keyword(CppTokenKind::VoidKeyword))
+    }
+
     pub fn get_decl_specifiers(&self) -> Option<CppDeclSpecifierSeq> {
         self.child()
     }
@@ -1678,6 +1698,14 @@ impl CppAstNode for CppNamespaceDecl {
 impl CppNamespaceDecl {
     pub fn get_name(&self) -> Option<CppNameExpr> {
         self.child()
+    }
+
+    /// **The name this namespace declares** — `ns` for `namespace ns { … }`, the last segment for `namespace a::b { … }`.
+    ///
+    /// `None` for the unnamed namespace, which declares none.
+    pub fn get_name_text(&self) -> Option<String> {
+        let name = self.get_name()?;
+        Some(name.syntax().text().to_string().trim().to_string())
     }
 
     /// Everything declared inside the namespace, in order.

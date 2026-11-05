@@ -536,6 +536,20 @@ impl CppCastExpr {
     pub fn get_type_id(&self) -> Option<CppTypeId> {
         self.child()
     }
+
+    /// **Is this the C-style spelling** — `(T)expr`, which opens with its `(`?
+    ///
+    /// The named casts open with their keyword (`static_cast<…>`), so the first non-trivia token is the whole difference — and
+    /// asking it here is what keeps a caller from trimming every token's text to find it.
+    pub fn is_a_c_style_cast(&self) -> bool {
+        self.syntax()
+            .children_with_tokens()
+            .filter_map(|element| element.into_token())
+            .find(|token| !crate::syntax::is_trivia(crate::CppTokenKind::from(token.kind())))
+            .is_some_and(|token| {
+                crate::CppTokenKind::from(token.kind()) == crate::CppTokenKind::LeftParen
+            })
+    }
 }
 
 /// A unary expression: `-x`, `!flag`, `*ptr`, `&var`, `++i`, `i++`.

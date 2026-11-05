@@ -560,6 +560,57 @@ fn missing_return_is_reported_for_a_body_that_never_returns() {
     );
 }
 
+/// **The rule asks whether a path reaches the closing brace** — not whether the body contains a `return`, and not by
+/// searching the text.
+///
+/// The old rule was "no `return` anywhere", which was silent for `int only_one(int x) { if (x) return 1; }` — the shape a
+/// reader writes by accident — and it decided the exceptions by searching the body's **text**: `throw ` anywhere silenced it
+/// (`int sometimes(int x) { if (x) throw x; }` falls through and was not reported), and a `while (true)` in a nested loop did
+/// the same. The shapes below are the two directions of that mistake.
+#[test]
+fn missing_return_is_a_control_flow_question() {
+    let reported = [
+        // A `return` exists and only one path uses it.
+        "int only_one(int x) { if (x) return 1; }",
+        // A `throw` in a branch does not make the other branch return.
+        "int sometimes(int x) { if (x) throw x; }",
+        // A loop that can be left falls through, and so does a loop with a condition.
+        "int breaks() { while (true) { break; } }",
+        "int counted(int n) { for (int i = 0; i < n; ++i) { } }",
+        // A literal `false` condition takes the branch that does not exist.
+        "int never() { if (false) return 1; }",
+    ];
+    for source in reported {
+        assert!(
+            codes_of(source).contains(&DiagnosticCode::MissingReturn),
+            "this body can reach its closing brace: {source}"
+        );
+    }
+
+    let silent = [
+        // Every path returns.
+        "int both(int x) { if (x) return 1; else return 2; }",
+        // A body that always throws never returns and needs no `return`: the user's own case.
+        "int throws() { throw 1; }",
+        "int throws_in_else(int x) { if (x) return 1; else throw 1; }",
+        // Endless loops.
+        "int forever() { while (true) { } }",
+        "int for_ever() { for (;;) { } }",
+        "int do_forever() { do { } while (true); }",
+        // A literal `true` condition decides which branch exists.
+        "int always() { if (true) return 1; }",
+        // A deduced type promises nothing, and a constructor asks nothing.
+        "auto deduced(int x) { if (x) return 1; }",
+        "struct S { S(int x) { if (x) { } } };",
+    ];
+    for source in silent {
+        assert!(
+            !codes_of(source).contains(&DiagnosticCode::MissingReturn),
+            "no path reaches the end here: {source}"
+        );
+    }
+}
+
 #[test]
 fn missing_return_is_not_reported_for_void_or_for_a_returning_body() {
     assert!(

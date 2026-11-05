@@ -84,7 +84,7 @@ impl Check for ArgumentCount {
 
             // The **last name written** is what a declaration can be found by: `scale` in `scale(1)`, `scale` in
             // `w.scale(1)`, and the last of them in `ns::scale(1)`.
-            let Some(name) = super::spelling_of(callee.syntax()) else {
+            let Some(name) = super::callee_name_of(&callee) else {
                 continue;
             };
             // **A name that is also a type is a constructor call.** Measured on EmmyLuaCodeStyle: `NameStyleRule(

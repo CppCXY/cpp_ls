@@ -60,7 +60,7 @@ impl Check for ConceptNotSatisfied {
             let Some(callee) = call.get_callee() else {
                 continue;
             };
-            let Some(name) = super::spelling_of(callee.syntax()) else {
+            let Some(name) = super::callee_name_of(&callee) else {
                 continue;
             };
             // Cloned because the finding below needs `&mut context`: the list is one short string per
