@@ -311,10 +311,12 @@ pub(crate) fn declared_type_of_with(
 /// keywords inside the specifier sequence — so answering "does this declaration say `override`" used to mean slicing
 /// the declaration's text at a check site and searching it. The bits are computed here, once, from the same shape
 /// table the type and return-type questions use, and stored on the fact.
+///
+/// **The rendered text is not an argument any more**: `[[maybe_unused]]` was its one user, and it is answered from the attribute
+/// node now — a child of the specifier sequence, or the declaration's previous sibling.
 pub(crate) fn declared_modifiers_with(
     shapes: &DeclarationShapes,
     binding: &Binding,
-    rendered: Option<&str>,
 ) -> crate::DeclModifiers {
     // The declaration's own specifiers and declarator, selected exactly as [`declared_type_of_with`] selects them: the
     // innermost specifier sequence, and the first declarator that reaches the name (the inner one, for a parameter).
@@ -366,19 +368,10 @@ pub(crate) fn declared_modifiers_with(
         found = found.union(modifiers_in(&init));
     }
 
-    // **An attribute written before the declaration is a *sibling* of it**, not a child — the parser gives
-    // `[[maybe_unused]]` its own node and then reads the declaration — so it is found by looking at the text in front of
-    // the declaration, at index time, and recorded as a bit. This is the one part that cannot be a token walk from the
-    // declaration's own nodes, and it is still one read per declaration, done once, rather than a text search at every
-    // check that asks.
-    if let (Some(rendered), Some(start)) = (
-        rendered,
-        specifiers
-            .as_ref()
-            .or(declarator.as_ref())
-            .map(|node| usize::from(node.text_range().start())),
-    ) && is_marked_maybe_unused(rendered, start)
-    {
+    // **`[[maybe_unused]]`**, asked of the nodes: inside a class body the list is part of the specifier sequence, and at file
+    // scope it is the declaration's previous sibling. Recorded as a bit because the checks read it far more often than the tree
+    // is walked.
+    if is_marked_maybe_unused(specifiers.as_ref(), declarator.as_ref()) {
         found = found.union(crate::DeclModifiers::MAYBE_UNUSED);
     }
 
@@ -391,26 +384,33 @@ pub(crate) fn declared_modifiers_with(
 /// `InitDeclarator` whose `Declarator` node's text is `constant(int x) const`. The scan therefore starts after the
 /// declarator's `ParameterList` child, which is what keeps a `const` *inside* a parameter type (`void f(const int)`) and
 /// a `&` in a return type (`int& f()`) out of it.
+/// **The qualifiers written after a function's parameter list** — `const`, `volatile`, `&`, `&&`.
+///
+/// The parameter list's own **range** is the boundary: everything the declarator writes after it is its suffix, and the
+/// qualifiers are token **kinds** rather than spellings. The version this replaces walked the tokens with an "after the
+/// parameters" flag and matched `token.text()` against `"const"` — the same three answers, read from the tree's own shape.
 fn function_suffix_in(declarator: &CppSyntaxNode) -> crate::DeclModifiers {
+    use cpp_parser::{CppAstNode, CppDeclarator, CppTokenKind};
     let mut found = crate::DeclModifiers::default();
-    let mut after_the_parameters = false;
-    for element in declarator.children_with_tokens() {
-        if !after_the_parameters {
-            if element.as_node().is_some_and(|node| {
-                CppSyntaxKind::from(node.kind()) == CppSyntaxKind::ParameterList
-            }) {
-                after_the_parameters = true;
-            }
-            continue;
-        }
-        let Some(token) = element.as_token() else {
+    let Some(declarator_node) = CppDeclarator::cast(declarator.clone()) else {
+        return found;
+    };
+    let Some(parameter_list) = declarator_node.get_param_list() else {
+        return found;
+    };
+    let after_the_parameters = parameter_list.get_range().end();
+    for element in declarator_node.syntax().children_with_tokens() {
+        let Some(token) = element.into_token() else {
             continue;
         };
-        match token.text() {
-            "const" => found = found.union(crate::DeclModifiers::CONST),
-            "volatile" => found = found.union(crate::DeclModifiers::VOLATILE),
-            "&" => found = found.union(crate::DeclModifiers::LVALUE_REFERENCE),
-            "&&" => found = found.union(crate::DeclModifiers::RVALUE_REFERENCE),
+        if token.text_range().start() < after_the_parameters {
+            continue;
+        }
+        match CppTokenKind::from(token.kind()) {
+            CppTokenKind::ConstKeyword => found = found.union(crate::DeclModifiers::CONST),
+            CppTokenKind::VolatileKeyword => found = found.union(crate::DeclModifiers::VOLATILE),
+            CppTokenKind::Ampersand => found = found.union(crate::DeclModifiers::LVALUE_REFERENCE),
+            CppTokenKind::LogicalAnd => found = found.union(crate::DeclModifiers::RVALUE_REFERENCE),
             _ => {}
         }
     }
@@ -451,12 +451,38 @@ pub(crate) fn the_requires_clause_with(
 /// boundary set is what keeps a *previous* declaration's attribute out of the answer: `[[maybe_unused]] int a = 1;`
 /// followed by `int b = 2;` must not excuse `b`, and the `;` between them is what stops it. `,` and `(` are boundaries
 /// too, because a declaration can follow both (`int a = 1, b;`, `for (int i = 0; …`).
-fn is_marked_maybe_unused(source: &str, at: usize) -> bool {
-    let before = source.get(..at.min(source.len())).unwrap_or_default();
-    let from = before
-        .rfind([';', '{', '}', '(', ','])
-        .map_or(0, |boundary| boundary + 1);
-    before[from..].contains("maybe_unused")
+/// **Does this declaration say `[[maybe_unused]]`?**
+///
+/// The attribute is a node, in one of two places depending on where the declaration is written — a **child of the specifier
+/// sequence** inside a class body, and a **previous sibling of the declaration** at file scope (both measured). The text scan
+/// this replaces had to invent a statement boundary to keep a previous declaration's attribute out; a sibling walk cannot see
+/// one, because it ends at the first sibling that is not an attribute list.
+fn is_marked_maybe_unused(
+    specifiers: Option<&CppSyntaxNode>,
+    declarator: Option<&CppSyntaxNode>,
+) -> bool {
+    use cpp_parser::{CppAstNode, CppAttributeList, CppDeclSpecifierSeq};
+    if specifiers
+        .and_then(|node| CppDeclSpecifierSeq::cast(node.clone()))
+        .is_some_and(|specifiers| specifiers.has_attribute("maybe_unused"))
+    {
+        return true;
+    }
+    let Some(declaration) = specifiers.and_then(|node| node.parent()).or_else(|| {
+        declarator
+            .and_then(|node| node.parent())
+            .and_then(|node| node.parent())
+    }) else {
+        return false;
+    };
+    let mut before = cpp_parser::typed_previous_sibling::<CppAttributeList>(&declaration);
+    while let Some(list) = before {
+        if list.has_a_name("maybe_unused") {
+            return true;
+        }
+        before = cpp_parser::typed_previous_sibling::<CppAttributeList>(list.syntax());
+    }
+    false
 }
 
 /// The bits one node's tokens state — the specifier sequence, or the declarator.
@@ -3371,10 +3397,6 @@ fn fact_for(
     // scope in the file per declaration.
     in_namespace: Option<String>,
     declarations: &Declarations<'_>,
-    // **The file's rendering**, for the one modifier that is not a token of the declaration: an attribute is a
-    // *sibling* of the declaration, so `[[maybe_unused]]` is found in the text in front of it. Passed in because it is
-    // a copy of the whole file and the walk would otherwise make one per declaration.
-    rendered: &str,
     // than the macro table, because the answer is the same for every declaration in the file and asking per
 ) -> Option<DeclFact> {
     // A binding whose name has no identifier is a destructor, an operator, or a conversion function. Its
@@ -3511,7 +3533,7 @@ fn fact_for(
         kind: DeclKind::from_binding_kind(binding.kind),
         // **What the declaration writes** — read from the same shape table as everything above, and stored so that a
         // check asking "does this say `override`" does not search the text for it. See [`crate::DeclModifiers`].
-        modifiers: declared_modifiers_with(shapes, binding, Some(rendered)),
+        modifiers: declared_modifiers_with(shapes, binding),
         // **The `requires`-clause written after the parameter list**, which is a fact about the declaration and not a
         // modifier: `void f(int) const requires (x > 0)`. The hover card showed neither it nor the `const` — reported
         // from `strings.cpp` as "the card is missing what the declaration says".
@@ -4158,7 +4180,6 @@ impl<'a> DeclarationFacts<'a> {
                     local,
                     in_namespace.clone(),
                     &declarations,
-                    &rendered,
                 ) {
                     facts.push(fact);
                 }
@@ -4207,7 +4228,6 @@ impl<'a> DeclarationFacts<'a> {
                 false,
                 None,
                 &declarations,
-                &rendered,
             ) {
                 // **The walker answered `None` for a definition's list**, because the shape it reads the declarator
                 // from has no name (a qualified definition's name is in the specifier sequence). The pass read the

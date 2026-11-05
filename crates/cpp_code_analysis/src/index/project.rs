@@ -11579,7 +11579,7 @@ fn fact_from_binding_with(
         // The same bits the index fills — a fact must say the same thing whichever path produced it.
         // **No rendering here**: this path is handed a node and no file text, and the attribute is a sibling of the
         // declaration — a member query never asks for `[[maybe_unused]]`, so the bit is left unset rather than guessed.
-        modifiers: crate::sema::declarations::declared_modifiers_with(shapes, binding, None),
+        modifiers: crate::sema::declarations::declared_modifiers_with(shapes, binding),
         // **The other answer the index writes**, and for the same reason: a member function's body is where a
         // `delete` lives, so a call site that asks "does this free my argument" must not depend on which path built
         // the fact.

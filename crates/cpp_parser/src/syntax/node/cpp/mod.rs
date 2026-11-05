@@ -424,6 +424,17 @@ impl CppDeclSpecifierSeq {
     }
 
     /// Is one of these keywords present in the specifier sequence?
+    /// **The attribute lists written in this specifier sequence** — `[[maybe_unused]] int x;` inside a class body puts the
+    /// list here (measured), while at file scope it is a sibling of the declaration.
+    pub fn get_attribute_lists(&self) -> CppAstChildren<CppAttributeList> {
+        self.children()
+    }
+
+    /// Does this declaration say the attribute named `name` — `maybe_unused`, `nodiscard`?
+    pub fn has_attribute(&self, name: &str) -> bool {
+        self.get_attribute_lists().any(|list| list.has_a_name(name))
+    }
+
     pub fn has_keyword(&self, kind: CppTokenKind) -> bool {
         self.syntax()
             .children_with_tokens()
@@ -970,6 +981,49 @@ fn push_a_spelling(out: &mut String, spelling: &str) {
         out.push(' ');
     }
     out.push_str(spelling);
+}
+
+/// An attribute list: `[[maybe_unused]]`, `[[nodiscard("why")]]`, `[[gnu::always_inline]]`.
+///
+/// The layer names it so that a caller can ask **whether a declaration says an attribute** instead of searching the text in
+/// front of it — and so that the walk over several lists (`[[a]] [[b]] int x;`) is a sibling walk rather than a string scan.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CppAttributeList {
+    syntax: CppSyntaxNode,
+}
+
+impl CppAstNode for CppAttributeList {
+    fn syntax(&self) -> &CppSyntaxNode {
+        &self.syntax
+    }
+
+    fn can_cast(kind: CppSyntaxKind) -> bool {
+        kind == CppSyntaxKind::AttributeList
+    }
+
+    fn cast(syntax: CppSyntaxNode) -> Option<Self> {
+        Self::can_cast(syntax.kind().into()).then_some(Self { syntax })
+    }
+}
+
+impl CppAttributeList {
+    /// Every name the list writes — `maybe_unused` for `[[maybe_unused]]`, and both halves of `[[gnu::always_inline]]`.
+    ///
+    /// The identifiers are the list's own tokens; a namespace prefix (`gnu::`) is a name of its own, which is what a caller
+    /// matching a whole attribute spelling needs to see.
+    pub fn get_names(&self) -> Vec<String> {
+        self.syntax()
+            .descendants_with_tokens()
+            .filter_map(|element| element.into_token())
+            .filter(|token| token.kind() == CppKind::Token(CppTokenKind::Identifier))
+            .map(|token| token.text().to_string())
+            .collect()
+    }
+
+    /// Does the list name this attribute?
+    pub fn has_a_name(&self, name: &str) -> bool {
+        self.get_names().iter().any(|known| known == name)
+    }
 }
 
 /// A function parameter list, including its parentheses.

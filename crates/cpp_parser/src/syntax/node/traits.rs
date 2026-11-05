@@ -116,6 +116,21 @@ pub trait CppAstNode {
         }
     }
 
+    /// **The sibling node immediately before this one**, when it is of type `N`.
+    ///
+    /// A declaration's attribute list is written before the declaration and is its **sibling**, not its child
+    /// (`[[maybe_unused]] int x;` at file scope is `AttributeList` then `Declaration`), and so are several other C++ shapes: a
+    /// `template` header before a declaration, a `case` label before a statement. Rowan's `prev_sibling` is untyped; this is the
+    /// typed form.
+    fn previous_sibling<N: CppAstNode>(&self) -> Option<N> {
+        self.syntax().prev_sibling().and_then(N::cast)
+    }
+
+    /// The sibling node immediately after this one, when it is of type `N`.
+    fn next_sibling<N: CppAstNode>(&self) -> Option<N> {
+        self.syntax().next_sibling().and_then(N::cast)
+    }
+
     /// The parent node, if it is of type `N`.
     fn get_parent<N: CppAstNode>(&self) -> Option<N> {
         self.syntax().parent().and_then(N::cast)
@@ -275,6 +290,16 @@ pub fn typed_ancestors<N: CppAstNode + 'static>(
 /// `stop` is exclusive: the walk answers the nodes strictly between `node` and `stop` in the tree. Its use is the question "is
 /// there a lambda between this return statement and the body that owns it" — a walk without the bound ascends into the
 /// enclosing function and can never answer no.
+/// **The typed sibling before a raw node**, when it is of type N.
+pub fn typed_previous_sibling<N: CppAstNode + 'static>(node: &CppSyntaxNode) -> Option<N> {
+    node.prev_sibling().and_then(N::cast)
+}
+
+/// **The typed sibling after a raw node**, when it is of type N.
+pub fn typed_next_sibling<N: CppAstNode + 'static>(node: &CppSyntaxNode) -> Option<N> {
+    node.next_sibling().and_then(N::cast)
+}
+
 pub fn typed_ancestors_until<'a, N: CppAstNode + 'static>(
     node: &'a CppSyntaxNode,
     stop: &'a CppSyntaxNode,
