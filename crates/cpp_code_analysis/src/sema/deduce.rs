@@ -35,7 +35,7 @@
 
 use std::path::Path;
 
-use cpp_parser::{CppSyntaxKind, CppSyntaxNode};
+use cpp_parser::{CppAstNode, CppSyntaxNode};
 
 use crate::DeclFact;
 use crate::ScopeTree;
@@ -112,7 +112,7 @@ fn initializer_of(
     declaration: cpp_parser::SourceRange,
 ) -> Option<CppSyntaxNode> {
     root.descendants()
-        .filter(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::Initializer)
+        .filter(|node| cpp_parser::CppInitializer::can_cast(node.kind().into()))
         .find(|node| {
             let range = cpp_parser::source_range(node.text_range());
             range.start_offset >= declaration.start_offset

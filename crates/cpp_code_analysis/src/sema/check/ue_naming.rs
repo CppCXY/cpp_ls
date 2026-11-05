@@ -31,7 +31,6 @@
 //! every finding already uses — see [`super::unreal`].
 
 use cpp_parser::CppAstNode;
-use cpp_parser::CppSyntaxKind;
 
 use super::unreal::{annotated_declarations, the_type_written_before};
 use super::{Check, CheckContext, DiagnosticCode};
@@ -132,7 +131,7 @@ fn bool_member(
     }
     let name = declarator
         .children()
-        .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::NameExpr)?;
+        .find(|child| cpp_parser::CppNameExpr::can_cast(child.kind().into()))?;
     let start = context
         .in_the_file(cpp_parser::source_range(declaration.text_range()))
         .start_offset;

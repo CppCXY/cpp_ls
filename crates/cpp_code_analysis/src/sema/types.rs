@@ -1361,13 +1361,11 @@ pub fn declarator_declaring(
         // none of them: a function-pointer typedef came back with no type at all, and `void f(Widget* p)`'s
         // `p` was read from the *function's* declaration, which is why a parameter answered `UnknownType`
         // while the same spelling declared at the top of a body worked.
-        if !matches!(
-            CppSyntaxKind::from(node.kind()),
-            CppSyntaxKind::Declaration
-                | CppSyntaxKind::TypedefDecl
-                | CppSyntaxKind::UsingDecl
-                | CppSyntaxKind::Parameter
-        ) {
+        // **The three declaring forms and a parameter.** `CppDeclaration::cast` accepts exactly `Declaration`, `TypedefDecl`
+        // and `UsingDecl`; its narrower `can_cast` is what the descendant walks ask, and this site needs the wider question.
+        if cpp_parser::CppDeclaration::cast(node.clone()).is_none()
+            && !cpp_parser::CppParam::can_cast(node.kind().into())
+        {
             continue;
         }
         let own = node.text_range();
@@ -1523,10 +1521,9 @@ pub fn type_of_declaration_named(
 /// (`f(int x)`), an array extent (`arr[N]`), an initializer (`x = f()`). So the first name in a declarator is the
 /// declared one, and every name after it belongs to something else.
 fn declared_name_range(declarator: &CppSyntaxNode) -> Option<cpp_parser::SourceRange> {
-    declarator
-        .descendants()
-        .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::NameExpr)
-        .map(|child| cpp_parser::source_range(child.text_range()))
+    cpp_parser::typed_descendants::<cpp_parser::CppNameExpr>(declarator)
+        .next()
+        .map(|child| cpp_parser::source_range(child.get_range()))
 }
 
 /// The specifier sequence's contribution: the base type, with its leading `const`/`volatile` kept.
@@ -1564,17 +1561,15 @@ fn the_type_a_typeof_names(node: &CppSyntaxNode) -> Option<Type> {
     // The payload is the node inside the parentheses; a type-id is written as a TypeId holding a
     // DeclSpecifierSeq, which is the node this reader understands.
     let payload = node.descendants().find(|child| {
-        matches!(
-            CppSyntaxKind::from(child.kind()),
-            CppSyntaxKind::TypeId | CppSyntaxKind::DeclSpecifierSeq
-        )
+        cpp_parser::CppTypeId::can_cast(child.kind().into())
+            || cpp_parser::CppDeclSpecifierSeq::can_cast(child.kind().into())
     })?;
-    let specifiers = if CppSyntaxKind::from(payload.kind()) == CppSyntaxKind::DeclSpecifierSeq {
+    let specifiers = if cpp_parser::CppDeclSpecifierSeq::can_cast(payload.kind().into()) {
         payload
     } else {
         payload
             .children()
-            .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::DeclSpecifierSeq)?
+            .find(|child| cpp_parser::CppDeclSpecifierSeq::can_cast(child.kind().into()))?
     };
     let read = read_specifiers_named(
         &specifiers,
@@ -1741,7 +1736,7 @@ pub(crate) fn read_specifiers_named(
             | CppSyntaxKind::EnumClassDef => {
                 let tag = node
                     .children()
-                    .filter(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::NameExpr)
+                    .filter(|child| cpp_parser::CppNameExpr::can_cast(child.kind().into()))
                     .map(|child| child.text().to_string().trim().to_string())
                     .find(|written| !written.is_empty());
                 match tag {
@@ -2196,7 +2191,7 @@ fn read_parameters(list: &CppSyntaxNode) -> Vec<Type> {
 
         let specifiers = parameter
             .children()
-            .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::DeclSpecifierSeq);
+            .find(|child| cpp_parser::CppDeclSpecifierSeq::can_cast(child.kind().into()));
         let declarator = parameter
             .children()
             .find(|child| cpp_parser::CppDeclarator::can_cast(child.kind().into()));
@@ -2208,10 +2203,9 @@ fn read_parameters(list: &CppSyntaxNode) -> Vec<Type> {
         // A parameter with no declarator (`void f(int)`) declares no name: the whole of it is the type.
         match declarator {
             Some(declarator) => {
-                let name = declarator
-                    .descendants()
-                    .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::NameExpr)
-                    .map(|child| cpp_parser::source_range(child.text_range()))
+                let name = cpp_parser::typed_descendants::<cpp_parser::CppNameExpr>(&declarator)
+                    .next()
+                    .map(|child| cpp_parser::source_range(child.get_range()))
                     .unwrap_or_else(|| cpp_parser::source_range(declarator.text_range()));
                 parameters.push(type_of_declaration(&specifiers, Some(&declarator), name));
             }

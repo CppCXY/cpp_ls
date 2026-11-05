@@ -1054,7 +1054,7 @@ fn the_generated_member_spelling(
         )
     })?;
     let has_generated_code = cpp_parser::typed_descendants::<cpp_parser::CppNameExpr>(&class)
-        .any(|name| name.syntax().text().to_string() == "StaticClass");
+        .any(|name| name.syntax().text().to_string().trim() == "StaticClass");
     if !has_generated_code {
         return None;
     }

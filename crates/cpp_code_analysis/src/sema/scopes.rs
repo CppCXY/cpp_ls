@@ -1257,14 +1257,14 @@ impl ScopeWalker<'_> {
             .ancestors()
             .find(|ancestor| cpp_parser::CppDeclaration::can_cast(ancestor.kind().into()))
             .unwrap_or_else(|| node.clone());
-        let text = declaration.text().to_string();
-        let body_text = body.text().to_string();
-        let Some(at) = text.rfind(&body_text) else {
-            return false;
-        };
-        text[at + body_text.len()..]
-            .chars()
-            .any(|character| character.is_alphanumeric() || character == '_')
+        // **A declarator written after the body**, which is the question itself: `struct { … } magic;` names its object with a
+        // declarator beside the body, while `struct { … };` has none. The offsets used to be recovered by searching the body's
+        // **text** inside the declaration's.
+        let body_end = usize::from(body.text_range().end());
+        declarators(&declaration).into_iter().any(|declarator| {
+            usize::from(declarator.text_range().start()) >= body_end
+                && declared_name(&declarator).is_some()
+        })
     }
     /// The **declarator's** name in the declaration that holds this class-like specifier — struct { … } bits; → its.
     ///
@@ -1762,12 +1762,10 @@ impl ScopeWalker<'_> {
         // and the name node that carries it was already read to get this far.
         let spelled = first_child(node, CppSyntaxKind::DeclSpecifierSeq)
             .and_then(|specifiers| {
-                specifiers.descendants().find(|child| {
-                    CppSyntaxKind::from(child.kind()) == CppSyntaxKind::NameExpr
-                        && is_qualified(child)
-                })
+                cpp_parser::typed_descendants::<cpp_parser::CppNameExpr>(&specifiers)
+                    .find(|child| child.is_qualified())
             })
-            .map(|name| name.text().to_string())
+            .map(|name| name.syntax().text().to_string())
             .filter(|name| name.contains("::"));
         let function = match &spelled {
             Some(spelled) => {
@@ -3006,7 +3004,7 @@ fn name_node_along_declarator(node: &CppSyntaxNode) -> Option<CppSyntaxNode> {
             }
 
             for child in node.children() {
-                if CppSyntaxKind::from(child.kind()) == CppSyntaxKind::NameExpr {
+                if cpp_parser::CppNameExpr::can_cast(child.kind().into()) {
                     return Some(child);
                 }
             }
@@ -3042,7 +3040,7 @@ fn first_identifier_in_name(node: &CppSyntaxNode) -> Option<cpp_parser::CppSynta
     }
 
     for child in node.children() {
-        if CppSyntaxKind::from(child.kind()) != CppSyntaxKind::NameExpr {
+        if !cpp_parser::CppNameExpr::can_cast(child.kind().into()) {
             continue;
         }
         if let Some(token) = first_identifier_in_name(&child) {
@@ -3083,7 +3081,7 @@ fn span_of(
 /// tokens are `ns` and its `::`. Descending before answering is what makes the answer the last component —
 /// the thing the statement introduces — rather than the qualifier.
 fn find_name_node(node: &CppSyntaxNode) -> Option<CppSyntaxNode> {
-    if CppSyntaxKind::from(node.kind()) != CppSyntaxKind::NameExpr {
+    if !cpp_parser::CppNameExpr::can_cast(node.kind().into()) {
         return find_name_child(node);
     }
 

@@ -683,7 +683,7 @@ impl DeclarationShapes {
             // **Nested lists are folded into the outer one**, which makes the table disjoint and therefore a plain
             // binary search at query time. A pre-order walk sees a list before the lists nested inside it, so the last
             // entry is the only one a new list can be inside of.
-            if CppSyntaxKind::from(node.kind()) == CppSyntaxKind::ParameterList {
+            if cpp_parser::CppParamList::can_cast(node.kind().into()) {
                 match parameter_lists.last_mut() {
                     Some(last)
                         if last.start_offset <= at.start_offset

@@ -14,6 +14,7 @@
 //! variable (followed through its own initialiser, with a depth bound), or an object-like macro — this file's own, or
 //! any the caller can read out of the includes. Everything else is `None`: a floating-point constant, a `sizeof`, a
 //! function call, a name nobody can value. That direction is deliberate — a wrong number is worse than none.
+use cpp_parser::CppAstNode;
 use cpp_parser::{CppSyntaxKind, CppSyntaxNode, CppTokenKind};
 
 /// **How many names one value may be followed through** — `A = B + 1`, `B = C << 2`, … A cycle (`const int a = b;
@@ -37,7 +38,7 @@ pub fn value_at(
             CppSyntaxKind::EnumeratorDecl | CppSyntaxKind::InitDeclarator
         )
     })?;
-    if CppSyntaxKind::from(declaration.kind()) == CppSyntaxKind::EnumeratorDecl {
+    if cpp_parser::CppEnumerator::can_cast(declaration.kind().into()) {
         an_enumerators_value(view, &declaration, macro_body, 0)
     } else if is_a_constant_declaration(&declaration) {
         a_declarators_value(view, &declaration, macro_body, 0)
@@ -105,7 +106,7 @@ fn an_enumerators_value(
     let body = enumerator.parent()?;
     let mut value: i64 = -1;
     for each in body.children() {
-        if CppSyntaxKind::from(each.kind()) != CppSyntaxKind::EnumeratorDecl {
+        if !cpp_parser::CppEnumerator::can_cast(each.kind().into()) {
             continue;
         }
         let after_the_name = tokens_after_the_name(&each)?;
@@ -174,7 +175,7 @@ fn a_names_value(
             CppSyntaxKind::EnumeratorDecl | CppSyntaxKind::InitDeclarator
         )
     })?;
-    if CppSyntaxKind::from(declaration.kind()) == CppSyntaxKind::EnumeratorDecl {
+    if cpp_parser::CppEnumerator::can_cast(declaration.kind().into()) {
         an_enumerators_value(view, &declaration, macro_body, depth + 1)
     } else {
         a_declarators_value(view, &declaration, macro_body, depth + 1)
