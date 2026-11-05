@@ -95,3 +95,46 @@ query reads the reading that produced the fact it started from.
   (120 s) and passes on a cold one.~~ **Fixed, and it was never a timeout.** The gate that withholds check findings
   was unsatisfiable after phase 0 of the indexing design, so the pull answered `[]` in milliseconds and the test waited
   for a finding that could not be published. See `docs/buglist.md` §28; it passes in 0.4 s.
+
+## The first hover of a file, measured — and the write it used to take
+
+A report from use: *"冷启动和热启动已经很快了, 但是 hover 有时候需要 loading 很长的时间"*. It is not the lazy refinement (that is
+answerable from L1 and never blocks a hover) and not a lock held by the pump (`gate 0 ms` in every line below). It is
+**the write lock a hover itself took**, and it was measurable in one run:
+
+```text
+$env:CPPLS_HOVER_ROOT = "E:\EmmyLuaCodeStyle"
+cargo test --release -p cpp_ls --test hover_latency -- --ignored --nocapture
+```
+
+`crates/cpp_ls/tests/hover_latency.rs` opens the project, hovers positions in one file (round 1 is the first hover of
+each position, round 2 the same ones after) and then a file at a time across the project, and prints the server's own
+`a query took … permit … gate … session … ran …` lines beside the numbers. Before the change:
+
+```text
+per-file first hover     40–405 ms, 135 ms average
+  the breakdown          `a request queued the modules` held the analysis for 210–305 ms  ← a WRITE
+                         a query took 70–101 ms — permit 0, gate 0, session 0, ran 70–101
+```
+
+**`ran` is the hover's own work; `session` 210–305 ms is a write the hover took.** `Session::catch_up` read **every
+unread include** of the file inside the request, and each include is a parse that can be a timeline walk: for a `.cpp`
+whose closure is a hundred standard headers, that is a third of a second — spent under the write lock, so every other
+request in flight waited for it too.
+
+**The change** (`Session::catch_up`): the file itself is still read inline (that is what the answer needs), and its
+unread includes are read **eight at a time**; the rest are **queued for the pump**, which the caller wakes. Files
+already queued are skipped so the two never parse the same header, and `needs_catching_up` stays true while any include
+is unread, so the next request about the file reads the next eight.
+
+```text
+                                  before            after
+per-file first hover              135 ms average    53 ms average  (worst 405 → 181 ms)
+the write a hover takes           210–305 ms        gone — no `session` line above 0 ms
+one file, first hover             190 ms            85 ms, then 0.2–3 ms for every later position
+```
+
+**What is left, and where to look next.** `ran` is now 65–187 ms on a *cold* file and 0.2–3 ms once it is read. That is
+the query's own work: `view_of_the_file` parses the file's text, and `definitions`/`type_at` search an index that is
+still filling. The probe prints the breakdown per file, so the next step is `ran` on the slowest few rather than a
+guess — the shapes it names are a big file (a parse) and a name the index has not resolved yet (a search).

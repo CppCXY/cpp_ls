@@ -3713,7 +3713,36 @@ impl<F: FileProvider + Clone> Session<F> {
             self.index_one(path.to_path_buf(), Priority::Open, 0, None);
         }
 
-        for include in self.unread_includes_of(path) {
+        // **A slice of its includes, not all of them, and the difference is a hover's latency.** Reading an include
+        // is a parse and can be a timeline walk, and this call is made from **inside a request** (a hover, a
+        // completion): on a project whose standard-library closure is a hundred headers, the first hover of every
+        // file held the write lock for **210–305 ms** — and a write held that long is every request in flight
+        // waiting, not this one. Measured over the wire on `EmmyLuaCodeStyle`, per-file first hover:
+        //
+        // ```text
+        // before    40–405 ms, 135 ms average, `a request queued the modules` holding 210–305 ms
+        // ```
+        //
+        // Eight is the same slice the pump uses (`PREPARE_INDEX_SLICE`'s spirit): what a hover needs is the
+        // declaration it is pointing at, which is in the file itself or in the first header that declares it, and the
+        // rest is queued for the pump — which is woken by the caller (`read_the_modules` ends with `wake`) and reads
+        // them on its own slice. Nothing is lost: `needs_catching_up` stays true while any include is unread, so the
+        // next request about this file reads eight more and the pump drains the rest in between.
+        const INCLUDES_A_REQUEST_READS: usize = 8;
+        // **Only the ones nothing has queued yet**, so the inline pass and the pump never read the same header: a
+        // queued file is one the pump will reach, and reading it here as well would be the double parse this bound
+        // exists to avoid.
+        let mut includes: Vec<PathBuf> = self
+            .unread_includes_of(path)
+            .into_iter()
+            .filter(|include| !self.queue.is_queued(include))
+            .collect();
+        if includes.len() > INCLUDES_A_REQUEST_READS {
+            for include in includes.split_off(INCLUDES_A_REQUEST_READS) {
+                self.queue.add(include, Priority::Open, 1);
+            }
+        }
+        for include in includes {
             self.index_one(include, Priority::Open, 1, None);
         }
     }
