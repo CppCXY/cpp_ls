@@ -112,6 +112,17 @@ impl CppDeclaration {
         self.child()
     }
 
+    /// **Is this the `typedef` form of a declaration?** — `typedef struct { … } Object;`.
+    ///
+    /// The parser produces two spellings of it: a `TypedefDecl` node of its own, and a general `Declaration` whose specifiers
+    /// begin with the keyword. Both declare the same name, and this is the one question that answers for both.
+    pub fn is_a_typedef(&self) -> bool {
+        CppSyntaxKind::from(self.syntax().kind()) == CppSyntaxKind::TypedefDecl
+            || self
+                .get_decl_specifiers()
+                .is_some_and(|specifiers| specifiers.has_keyword(CppTokenKind::TypedefKeyword))
+    }
+
     /// Every `init-declarator`. A declaration of several entities has several of these.
     pub fn get_init_declarators(&self) -> CppAstChildren<CppInitDeclarator> {
         self.children()

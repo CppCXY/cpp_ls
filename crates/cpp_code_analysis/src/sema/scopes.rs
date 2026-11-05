@@ -187,7 +187,7 @@ fn begins_an_inline_namespace(node: &CppSyntaxNode) -> bool {
 /// the directive node. Continuations are already part of that node, so a body written across lines
 /// (`_STD_BEGIN`'s real spelling) arrives whole.
 fn a_define_at(node: &CppSyntaxNode) -> Option<(String, String)> {
-    if CppSyntaxKind::from(node.kind()) != CppSyntaxKind::PreprocessorDirective {
+    if !cpp_parser::CppPreprocessorDirective::can_cast(node.kind().into()) {
         return None;
     }
 
@@ -909,7 +909,7 @@ impl ScopeWalker<'_> {
     /// Bind every enumerator declared in a body.
     fn enumerators(&mut self, body: &CppSyntaxNode, scope: ScopeId) {
         for enumerator in body.children() {
-            if CppSyntaxKind::from(enumerator.kind()) != CppSyntaxKind::EnumeratorDecl {
+            if !cpp_parser::CppEnumerator::can_cast(enumerator.kind().into()) {
                 continue;
             }
             if let Some((name, name_range)) = declared_name(&enumerator) {
@@ -944,7 +944,7 @@ impl ScopeWalker<'_> {
     fn concept_decl(&mut self, node: &CppSyntaxNode, scope: ScopeId) {
         let Some(name_expr) = node
             .children()
-            .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::NameExpr)
+            .find(|child| cpp_parser::CppNameExpr::can_cast(child.kind().into()))
         else {
             return;
         };
@@ -1279,10 +1279,15 @@ impl ScopeWalker<'_> {
     }
     fn sits_in_a_class_body(node: &CppSyntaxNode) -> bool {
         for ancestor in node.ancestors() {
-            match CppSyntaxKind::from(ancestor.kind()) {
-                CppSyntaxKind::ClassBody => return true,
-                CppSyntaxKind::CompoundStat | CppSyntaxKind::TranslationUnit => return false,
-                _ => {}
+            // **A class body or a block, and a block is what stops the search**: a declaration written in a function's body is
+            // not a member, whatever class it names.
+            if cpp_parser::CppClassBody::can_cast(ancestor.kind().into()) {
+                return true;
+            }
+            if cpp_parser::CppCompoundStat::can_cast(ancestor.kind().into())
+                || CppSyntaxKind::from(ancestor.kind()) == CppSyntaxKind::TranslationUnit
+            {
+                return false;
             }
         }
         false
@@ -1354,10 +1359,10 @@ impl ScopeWalker<'_> {
         // parameters and body of a perfectly ordinary function were never walked.
         let is_friend = node
             .children()
-            .any(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::FriendDecl)
-            || node.parent().is_some_and(|parent| {
-                CppSyntaxKind::from(parent.kind()) == CppSyntaxKind::FriendDecl
-            });
+            .any(|child| cpp_parser::CppFriendDecl::can_cast(child.kind().into()))
+            || node
+                .parent()
+                .is_some_and(|parent| cpp_parser::CppFriendDecl::can_cast(parent.kind().into()));
 
         if declaration_is_qualified(node)
             || (specifier_is_qualified && is_unnamed_declaration(node))
@@ -1469,11 +1474,8 @@ impl ScopeWalker<'_> {
         // **inside** the declarator — reached nothing. `item()`'s own `LambdaExpr` arm covers the ones a
         // statement walk meets; this covers the ones written in an initialiser.
         for declarator in declarators(node) {
-            for lambda in declarator
-                .descendants()
-                .filter(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::LambdaExpr)
-            {
-                self.lambda(&lambda, outer);
+            for lambda in cpp_parser::typed_descendants::<cpp_parser::CppLambdaExpr>(&declarator) {
+                self.lambda(lambda.syntax(), outer);
             }
         }
 
@@ -2416,7 +2418,7 @@ fn is_unnamed_declaration(node: &CppSyntaxNode) -> bool {
     // and names `y`: what makes the declaration an operator's is that the keyword is in its own declarator.
     let declares_an_operator = node
         .children()
-        .filter(|child| CppSyntaxKind::from(child.kind()) != CppSyntaxKind::Initializer)
+        .filter(|child| !cpp_parser::CppInitializer::can_cast(child.kind().into()))
         .flat_map(|child| child.descendants_with_tokens())
         .filter_map(|element| element.into_token())
         .any(|token| CppTokenKind::from(token.kind()) == CppTokenKind::OperatorKeyword);
@@ -2759,20 +2761,11 @@ fn the_typedef_name_around(node: &CppSyntaxNode) -> Option<String> {
     // The nearest declaration-like ancestor is the one that owns the specifiers this body was written in, so it is
     // the one that answers. Both spellings are accepted — the parser produces a `TypedefDecl` of its own for this,
     // and a `Declaration` whose text begins with the keyword is the same thing written the general way.
-    let declaration = node.ancestors().find(|ancestor| {
-        matches!(
-            CppSyntaxKind::from(ancestor.kind()),
-            CppSyntaxKind::Declaration | CppSyntaxKind::TypedefDecl
-        )
-    })?;
-    let owns_a_typedef = match CppSyntaxKind::from(declaration.kind()) {
-        CppSyntaxKind::TypedefDecl => true,
-        _ => declaration
-            .text()
-            .to_string()
-            .trim_start()
-            .starts_with("typedef"),
-    };
+    let declaration = node
+        .ancestors()
+        .find_map(cpp_parser::CppDeclaration::cast)?;
+    // **The two spellings of `typedef`**, asked of the declaration rather than of its text.
+    let owns_a_typedef = declaration.is_a_typedef();
     if !owns_a_typedef {
         return None;
     }
@@ -2785,16 +2778,14 @@ fn the_typedef_name_around(node: &CppSyntaxNode) -> Option<String> {
     let body_end = node
         .children()
         .find(|child| {
-            matches!(
-                CppSyntaxKind::from(child.kind()),
-                CppSyntaxKind::ClassBody | CppSyntaxKind::CompoundStat
-            )
+            cpp_parser::CppClassBody::can_cast(child.kind().into())
+                || cpp_parser::CppCompoundStat::can_cast(child.kind().into())
         })
         .map(|body| usize::from(body.text_range().end()))
         .unwrap_or(0);
 
     let mut last = None;
-    for element in declaration.descendants_with_tokens() {
+    for element in declaration.syntax().descendants_with_tokens() {
         let Some(token) = element.into_token() else {
             continue;
         };
@@ -2901,7 +2892,7 @@ pub(crate) fn parameters_of(
     list: &CppSyntaxNode,
 ) -> Vec<(CppSyntaxNode, Option<(Name, cpp_parser::SourceRange)>)> {
     list.children()
-        .filter(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::Parameter)
+        .filter(|child| cpp_parser::CppParam::can_cast(child.kind().into()))
         .map(|parameter| {
             let declared = parameter
                 .children()
@@ -3230,9 +3221,9 @@ fn qualified_specifier_name_node(declaration: &CppSyntaxNode) -> Option<CppSynta
     // TemplateType > NameExpr` for `void Box<int>::grow` — so a search of the direct children finds nothing and
     // the declaration is read as one that declares nothing. That a qualified name is here at all is what
     // `declaration_is_qualified` established, and it is the only `::` in this declaration's specifiers.
-    specifiers.descendants().find(|child| {
-        CppSyntaxKind::from(child.kind()) == CppSyntaxKind::NameExpr && is_qualified(child)
-    })
+    cpp_parser::typed_descendants::<cpp_parser::CppNameExpr>(&specifiers)
+        .find(|name| name.is_qualified())
+        .map(|name| name.syntax().clone())
 }
 
 /// One `::`-qualified name node, as everything before the name and the name itself — `None` when what follows the
