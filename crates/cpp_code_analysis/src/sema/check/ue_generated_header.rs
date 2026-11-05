@@ -74,7 +74,7 @@ impl Check for UeGeneratedHeader {
 /// The "no generated header at all" finding, placed on the first annotated declaration — the line that promised the
 /// build tool something it will not find.
 fn report_missing(context: &mut CheckContext<'_>, first: &super::unreal::Annotated) {
-    let name = first.name.text().to_string();
+    let name = first.name.clone();
     context.add_in_the_file(
         DiagnosticCode::UeGeneratedHeader,
         first.name_in_the_file,

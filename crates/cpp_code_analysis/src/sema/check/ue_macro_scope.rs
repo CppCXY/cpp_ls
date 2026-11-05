@@ -93,20 +93,19 @@ fn check_declaration(context: &mut CheckContext<'_>, declaration: &cpp_parser::C
         // "not a member" — a function body or a parameter list — before it reaches the class.
         let mut is_a_member = false;
         for parent in node.ancestors() {
+            if cpp_parser::CppClassBody::can_cast(parent.kind().into()) {
+                is_a_member = true;
+                break;
+            }
             match CppSyntaxKind::from(parent.kind()) {
-                CppSyntaxKind::ClassBody => {
-                    is_a_member = true;
-                    break;
-                }
-                CppSyntaxKind::CompoundStat | CppSyntaxKind::ParamList => break,
+                CppSyntaxKind::CompoundStat | CppSyntaxKind::ParameterList => break,
                 _ => {}
             }
         }
         if is_a_member {
             continue;
         }
-        let spelled = name.text().to_string();
-        let name_in_the_file = context.in_the_file(cpp_parser::source_range(name.text_range()));
+        let (spelled, name_in_the_file) = (name.0.clone(), context.in_the_file(name.1));
         context.add_in_the_file(
             DiagnosticCode::UeMacroScope,
             name_in_the_file,

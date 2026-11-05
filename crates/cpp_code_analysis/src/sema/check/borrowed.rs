@@ -16,9 +16,17 @@
 //! A call to a function nobody can see (`return get();`), a dereference, a cast: each may return a reference to
 //! something long-lived, so nothing is claimed about it. Both rules report only what they can **prove**, and this
 //! module is where that decision is made once rather than in each of them.
+//!
+//! # The expression is a `CppExpr`, not a child list
+//!
+//! Every arm used to be a `CppSyntaxKind` match with positional child reads — `children().next()` for the operand,
+//! `children().skip(1)` for a call's arguments, a token scan for `&`/`*`, a token scan for "is this a string literal". The
+//! sum type names the same shapes, and its accessors answer them: `CppUnaryExpr::{get_operator_text, get_operand}`,
+//! `CppCallExpr::{get_callee, get_args}`, `CppMemberExpr::get_object`, `CppLiteralExpr::get_literal_token`,
+//! `CppInitListExpr::{get_constructed_type, get_elements}`. A parameter's `&` is its declarator's (`is_a_reference`), and a
+//! local's `static` is its specifier sequence's (`has_keyword`) — neither is a slice of the source.
 
-use cpp_parser::CppAstNode;
-use cpp_parser::CppSyntaxKind;
+use cpp_parser::{CppAstNode, CppAstToken, CppExpr, CppTokenKind};
 
 use super::CheckContext;
 
@@ -63,6 +71,9 @@ pub(crate) struct Borrowed {
 /// names and owning semantics would be reported wrongly — which is the same trade Clang's own lifetime analysis makes,
 /// and the one worth making, because these are the names the standard library, libc++ and Abseil use.
 pub(crate) fn view_name_of(return_type: &str) -> Option<String> {
+    // **The template arguments are not part of the name**: `std::span<int>` is a `span`. Cutting them here keeps every caller
+    // from having to, and it is the same rule the `&`/`const` stripping below applies.
+    let return_type = return_type.split('<').next().unwrap_or(return_type);
     let mut head = return_type.trim().trim_end_matches('&').trim();
     head = head
         .trim_start_matches("const ")
@@ -108,21 +119,21 @@ fn is_an_owner(spelling: &str) -> bool {
 ///
 /// `function_body` is the region whose locals are "local": a name bound in a function or block scope **inside** it is
 /// this function's own; a name bound before it is a parameter (and whether that parameter is by value or by reference
-/// is read from the declaration's own text). A caller with no body — an in-class member initialiser — passes the
+/// is asked of the parameter's declarator). A caller with no body — an in-class member initialiser — passes the
 /// initialiser's own node, and every name in it is then a member or a global.
 pub(crate) fn origin_of(
     context: &CheckContext<'_>,
     expression: &cpp_parser::CppSyntaxNode,
     function_body: &cpp_parser::CppSyntaxNode,
 ) -> Option<Borrowed> {
-    match kind(expression) {
-        CppSyntaxKind::ParenExpr => {
-            let inner = expression.children().next()?;
-            origin_of(context, &inner, function_body)
-        }
-        CppSyntaxKind::IdentifierExpr | CppSyntaxKind::NameExpr => {
-            let description = expression.text().to_string();
-            let offset = the_last_identifier_offset(expression)?;
+    let Some(expression_node) = CppExpr::cast(expression.clone()) else {
+        return Some(unknown(expression.text().to_string()));
+    };
+    match &expression_node {
+        CppExpr::ParenExpr(paren) => origin_of(context, paren.get_expr()?.syntax(), function_body),
+        CppExpr::NameExpr(name) => {
+            let description = name.syntax().text().to_string();
+            let offset = usize::from(name.get_last_name_token()?.get_range().start());
             let crate::Known::Yes(binding) =
                 crate::sema::resolve::definition_at(context.scopes(), context.tree(), offset)
             else {
@@ -141,10 +152,9 @@ pub(crate) fn origin_of(
                 binding.name_range.start_offset < usize::from(function_body.text_range().start());
             let origin = match scope.kind {
                 crate::ScopeKind::Class => Origin::Member,
-                // **A parameter is bound in the function scope and written before the body begins.** Asked before
-                // the "outside the body" arm, because a parameter *is* outside the body — that ordering made every
-                // parameter a `Global`, which is silent in both rules that read this and hid the by-value case that
-                // `dangling-field` exists for.
+                // **A parameter is bound in the function scope and written before the body begins.** Asked before the
+                // "outside the body" arm, because a parameter *is* outside the body — that ordering made every parameter a
+                // `Global`, which is silent in both rules that read this and hid the by-value case `dangling-field` exists for.
                 crate::ScopeKind::Function if before_the_body => {
                     if a_parameter_is_a_reference(context, &binding) {
                         Origin::ReferenceParameter
@@ -163,50 +173,52 @@ pub(crate) fn origin_of(
                 address_of: false,
             })
         }
-        CppSyntaxKind::MemberExpr | CppSyntaxKind::IndexExpr => {
-            // `x.member` is a subobject of what `x` is: the local dies with its member. `v[i]` is an element of `v`,
-            // which is the same relationship. Both arrive as one node with the base as the first child.
-            let base = expression.children().next()?;
-            let mut borrowed = origin_of(context, &base, function_body)?;
-            borrowed.description = expression.text().to_string();
+        // `x.member` is a subobject of what `x` is: the local dies with its member. `v[i]` is an element of `v`, which is the
+        // same relationship — and the two node types are the two shapes.
+        CppExpr::MemberExpr(member) => {
+            let mut borrowed = origin_of(context, member.get_object()?.syntax(), function_body)?;
+            borrowed.description = member.syntax().text().to_string();
             Some(borrowed)
         }
-        CppSyntaxKind::ThisExpr => Some(Borrowed {
+        CppExpr::IndexExpr(index) => {
+            // `a.b` and `a[i]` are the same node: a subobject or an element is the same lifetime relationship, and the operand
+            // is the object either way.
+            let mut borrowed = origin_of(context, index.get_object()?.syntax(), function_body)?;
+            borrowed.description = index.syntax().text().to_string();
+            Some(borrowed)
+        }
+        CppExpr::ThisExpr(_) => Some(Borrowed {
             kind: Origin::Member,
             description: "this".to_string(),
             through: None,
             address_of: false,
         }),
-        CppSyntaxKind::UnaryExpr => {
-            let operator = expression
-                .children_with_tokens()
-                .filter_map(|element| element.into_token())
-                .next()
-                .map(|token| cpp_parser::CppTokenKind::from(token.kind()));
-            if operator == Some(cpp_parser::CppTokenKind::Ampersand) {
+        CppExpr::UnaryExpr(unary) => {
+            let operator = unary.get_operator_text();
+            if operator.as_deref() == Some("&") {
                 // `&x` — the address of the operand, which carries its origin.
                 let mut borrowed =
-                    origin_of(context, &expression.children().next()?, function_body)?;
+                    origin_of(context, unary.get_operand()?.syntax(), function_body)?;
                 borrowed.address_of = true;
-                borrowed.description = expression.text().to_string();
+                borrowed.description = unary.syntax().text().to_string();
                 return Some(borrowed);
             }
-            if operator == Some(cpp_parser::CppTokenKind::Star) {
+            if operator.as_deref() == Some("*") {
                 // `*p` — a target that only points-to analysis could name.
-                return Some(unknown(expression.text().to_string()));
+                return Some(unknown(unary.syntax().text().to_string()));
             }
-            Some(temporary(expression))
+            Some(temporary(unary.syntax()))
         }
-        CppSyntaxKind::CallExpr => {
-            let callee = expression.children().next()?;
-            let arguments: Vec<cpp_parser::CppSyntaxNode> = expression.children().skip(1).collect();
-            let callee_name = the_last_identifier_of(&callee);
-            // **`x.c_str()` and `x.data()` hand out a pointer into `x`.** Any other member call returns a value that
-            // borrows its object the same way: `v.front()` is a reference into `v`, which is reported through `v`'s
-            // origin.
-            if is_a_member_access(&callee) {
-                let receiver = callee.children().next()?;
-                let mut borrowed = origin_of(context, &receiver, function_body)?;
+        CppExpr::CallExpr(call) => {
+            let callee_name = call
+                .get_callee()
+                .and_then(|callee| the_last_name_of(callee.syntax()));
+            // **`x.c_str()` and `x.data()` hand out a pointer into `x`.** Any other member call returns a value that borrows
+            // its object the same way: `v.front()` is a reference into `v`, which is reported through `v`'s origin.
+            if let Some(callee) = call.get_callee()
+                && let Some(receiver) = a_member_access_object(&callee)
+            {
+                let mut borrowed = origin_of(context, receiver.syntax(), function_body)?;
                 borrowed.through = match callee_name.as_deref() {
                     Some("c_str") => Some("c_str"),
                     Some("data") => Some("data"),
@@ -217,47 +229,46 @@ pub(crate) fn origin_of(
             if let Some(name) = callee_name.as_deref() {
                 // `std::move(x)` and `std::forward<T>(x)` are their argument, seen as an rvalue.
                 if matches!(name, "move" | "forward") {
-                    return origin_of(context, arguments.first()?, function_body);
+                    return origin_of(context, call.get_args().first()?.syntax(), function_body);
                 }
                 // A view constructed from an argument borrows that argument: `std::string_view(s)`.
                 if view_name_of(name).is_some() {
-                    return match arguments.first() {
-                        Some(argument) => origin_of(context, argument, function_body),
-                        None => Some(temporary(expression)),
+                    return match call.get_args().first() {
+                        Some(argument) => origin_of(context, argument.syntax(), function_body),
+                        None => Some(temporary(call.syntax())),
                     };
                 }
                 // An owning type constructed here is a temporary, and it dies at the end of the statement.
                 if is_an_owner(name) {
-                    return Some(temporary(expression));
+                    return Some(temporary(call.syntax()));
                 }
             }
             // **A call this analysis cannot see is not evidence.** `return get();` may return a reference to a global.
-            Some(unknown(expression.text().to_string()))
+            Some(unknown(call.syntax().text().to_string()))
         }
-        CppSyntaxKind::InitListExpr => {
-            let children: Vec<cpp_parser::CppSyntaxNode> = expression.children().collect();
-            match children.len() {
-                // `{ x }` is `x` initialised, which carries `x`'s origin.
-                1 => origin_of(context, &children[0], function_body),
-                _ => Some(temporary(expression)),
+        CppExpr::InitListExpr(list) => {
+            // **A braced list with a head constructs that type** — `std::string_view{ x }` is a temporary view, not `x`. A
+            // headless `{ x }` is `x` initialised, which carries `x`'s origin.
+            if list.get_constructed_type().is_some() {
+                return Some(temporary(list.syntax()));
+            }
+            match list.get_elements().next() {
+                Some(element) => origin_of(context, element.syntax(), function_body),
+                None => Some(temporary(list.syntax())),
             }
         }
-        CppSyntaxKind::LiteralExpr => {
+        CppExpr::LiteralExpr(literal) => {
             // A string literal is an array with static storage duration; every other literal is a prvalue.
-            let is_string = expression
-                .descendants_with_tokens()
-                .filter_map(|element| element.into_token())
-                .any(|token| {
-                    cpp_parser::CppTokenKind::from(token.kind())
-                        == cpp_parser::CppTokenKind::StringLiteral
-                });
+            let is_string = literal
+                .get_literal_token()
+                .is_some_and(|token| token.get_token_kind() == CppTokenKind::StringLiteral);
             Some(Borrowed {
                 kind: if is_string {
                     Origin::StringLiteral
                 } else {
                     Origin::Temporary
                 },
-                description: expression.text().to_string(),
+                description: literal.syntax().text().to_string(),
                 through: None,
                 address_of: false,
             })
@@ -266,21 +277,26 @@ pub(crate) fn origin_of(
     }
 }
 
-/// **A parameter's own declaration says whether it is by value or by reference** — and the two differ for a lifetime
-/// rule: `S(std::string s)` hands the constructor a copy that dies at its end, while `S(const std::string& s)` hands it
-/// something the caller owns. The `&` is asked about **before the name**, so a type whose own spelling has one
-/// (`int (&)[3]`) still reads as a reference and a by-value `std::string` does not.
+/// **A parameter's own declaration says whether it is by value or by reference** — and the two differ for a lifetime rule:
+/// `S(std::string s)` hands the constructor a copy that dies at its end, while `S(const std::string& s)` hands it something
+/// the caller owns.
+///
+/// Asked of the **parameter node** whose span covers the binding (`CppDeclarator::is_a_reference`), not of the source text
+/// before the name: `int (&)[3]` is a reference and a by-value `std::string` is not, and a `&` written in a default argument
+/// belongs to no parameter.
 fn a_parameter_is_a_reference(context: &CheckContext<'_>, binding: &crate::Binding) -> bool {
-    let range = binding.range;
-    let Some(text) = context.source.get(range.start_offset..range.end_offset()) else {
-        return false;
-    };
-    let name_start = binding
-        .name_range
-        .start_offset
-        .saturating_sub(range.start_offset)
-        .min(text.len());
-    text[..name_start].contains('&')
+    let start = binding.range.start_offset;
+    let end = binding.range.end_offset();
+    let parameter = context
+        .own::<cpp_parser::CppParam>()
+        .filter(|parameter| {
+            let range = parameter.syntax().text_range();
+            usize::from(range.start()) <= start && end <= usize::from(range.end())
+        })
+        .max_by_key(|parameter| usize::from(parameter.syntax().text_range().start()));
+    parameter
+        .and_then(|parameter| parameter.get_declarator())
+        .is_some_and(|declarator| declarator.is_a_reference())
 }
 
 fn unknown(description: String) -> Borrowed {
@@ -301,27 +317,11 @@ fn temporary(expression: &cpp_parser::CppSyntaxNode) -> Borrowed {
     }
 }
 
-/// Is this expression a member access (`a.b`, `a->b`) rather than an index (`a[i]`)? The parser gives both one
-/// node, and the `.`/`->` token is what tells them apart.
-fn is_a_member_access(expression: &cpp_parser::CppSyntaxNode) -> bool {
-    expression
-        .children_with_tokens()
-        .filter_map(|element| element.into_token())
-        .any(|token| {
-            matches!(
-                cpp_parser::CppTokenKind::from(token.kind()),
-                cpp_parser::CppTokenKind::Dot | cpp_parser::CppTokenKind::Arrow
-            )
-        })
-}
-
-/// Is the declaration that binds this name written with `static` or `thread_local`? A local with static storage
-/// duration outlives every call, so handing out a reference to it is not a defect.
+/// Is the declaration that binds this name written with `static` or `thread_local`? A local with static storage duration
+/// outlives every call, so handing out a reference to it is not a defect.
 fn declared_static(context: &CheckContext<'_>, binding: &crate::Binding) -> bool {
     let name_start = binding.name_range.start_offset;
     // **The innermost declaration that contains the name** — the local's own statement, not the function around it.
-    // `own` walks in document order, and the function's declaration starts earlier and contains this name too, so the
-    // answer is the one that starts **last**.
     let declaration = context
         .own::<cpp_parser::CppDeclaration>()
         .filter(|declaration| {
@@ -332,38 +332,33 @@ fn declared_static(context: &CheckContext<'_>, binding: &crate::Binding) -> bool
     let Some(declaration) = declaration else {
         return false;
     };
-    let start = usize::from(declaration.syntax().text_range().start());
-    let Some(text) = context.source.get(start..name_start) else {
-        return false;
-    };
-    text.split(|character: char| !character.is_alphanumeric() && character != '_')
-        .any(|word| word == "static" || word == "thread_local")
+    declaration.get_decl_specifiers().is_some_and(|specifiers| {
+        specifiers.has_keyword(CppTokenKind::StaticKeyword)
+            || specifiers.has_keyword(CppTokenKind::ThreadLocalKeyword)
+    })
 }
 
-/// The offset of the last identifier in an expression — `ns::v` answers for `v`, and `v` for `v`.
-fn the_last_identifier_offset(expression: &cpp_parser::CppSyntaxNode) -> Option<usize> {
-    expression
-        .descendants_with_tokens()
-        .filter_map(|element| element.into_token())
-        .filter(|token| {
-            cpp_parser::CppTokenKind::from(token.kind()) == cpp_parser::CppTokenKind::Identifier
-        })
-        .last()
-        .map(|token| usize::from(token.text_range().start()))
+/// **The object of a member access** — `s` for `s.c_str`, whether the parser wrote a `MemberExpr` or an `IndexExpr`.
+fn a_member_access_object(expression: &CppExpr) -> Option<CppExpr> {
+    match expression {
+        CppExpr::MemberExpr(member) => member.get_object(),
+        CppExpr::IndexExpr(index) if index.is_a_member_access() => index.get_object(),
+        _ => None,
+    }
 }
 
-/// The last identifier's spelling — what a call is to, as far as a name can say.
-fn the_last_identifier_of(expression: &cpp_parser::CppSyntaxNode) -> Option<String> {
-    expression
-        .descendants_with_tokens()
-        .filter_map(|element| element.into_token())
-        .filter(|token| {
-            cpp_parser::CppTokenKind::from(token.kind()) == cpp_parser::CppTokenKind::Identifier
-        })
-        .last()
-        .map(|token| token.text().to_string())
-}
-
-fn kind(node: &cpp_parser::CppSyntaxNode) -> CppSyntaxKind {
-    CppSyntaxKind::from(node.kind())
+/// **The last name a callee writes** — `ns::free` is `free`, and `p->release` is `release`.
+fn the_last_name_of(expression: &cpp_parser::CppSyntaxNode) -> Option<String> {
+    match CppExpr::cast(expression.clone())? {
+        CppExpr::NameExpr(name) => name
+            .get_last_name_token()
+            .map(|token| token.get_name_text().to_string()),
+        CppExpr::MemberExpr(member) => member
+            .get_member_name()
+            .map(|token| token.get_name_text().to_string()),
+        CppExpr::IndexExpr(index) => index
+            .get_member_name()
+            .map(|token| token.get_name_text().to_string()),
+        _ => None,
+    }
 }

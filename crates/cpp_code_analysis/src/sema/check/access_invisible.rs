@@ -169,23 +169,6 @@ impl Check for AccessInvisible {
                 continue;
             }
 
-            if std::env::var_os("CPPLS_TRACE_ACCESS").is_some() {
-                let spelled = context
-                    .source
-                    .get(access.member_range.start_offset..access.member_range.end_offset())
-                    .unwrap_or("<out of range>");
-                let object = context
-                    .source
-                    .get(
-                        cpp_parser::source_range(access.object.text_range()).start_offset
-                            ..cpp_parser::source_range(access.object.text_range()).end_offset(),
-                    )
-                    .unwrap_or("<out of range>");
-                eprintln!(
-                    "[access] member={:?} spelled={spelled:?} object={object:?} range={:?}",
-                    access.member, access.member_range
-                );
-            }
             context.add(
                 DiagnosticCode::AccessInvisible,
                 access.member_range,
@@ -233,33 +216,21 @@ fn the_class_the_reader_is_in(context: &CheckContext<'_>, node: &CppSyntaxNode) 
 /// class's own keyword line. `friend class _variant_t;` inside `_bstr_t` then permits `_variant_t`'s members to
 /// read `_bstr_t`'s privates, which is what the standard library's own wrappers are written to do.
 fn declares_the_friend(declaring: &CppSyntaxNode, accessing: &CppSyntaxNode) -> bool {
-    let Some(name) = cpp_parser::CppSyntaxKind::from(accessing.kind())
-        .eq(&cpp_parser::CppSyntaxKind::ClassDef)
-        .then(|| first_word_after_the_keyword(accessing))
-        .flatten()
+    use cpp_parser::{CppAstNode, CppClassDef, CppFriendDecl};
+    let Some(name) = CppClassDef::cast(accessing.clone()).and_then(|class| class.get_name_text())
     else {
         return false;
     };
-    declaring.descendants().any(|node| {
-        cpp_parser::CppSyntaxKind::from(node.kind()) == cpp_parser::CppSyntaxKind::FriendDecl
-            && node.text().to_string().contains(name.as_str())
-    })
+    // **The friend's own name**, not the declaration's text: `friend class AB;` does not grant `A` anything, which a
+    // `contains` test said it did.
+    cpp_parser::typed_descendants::<CppFriendDecl>(declaring)
+        .any(|friend| friend.get_name_text().as_deref() == Some(name.as_str()))
 }
 
-/// The class's own name — the identifier after `class`/`struct`/`union` in its definition.
+/// **The class's own name** — the definition's name, not the first word of its text.
 fn first_word_after_the_keyword(definition: &CppSyntaxNode) -> Option<String> {
-    let spelled = definition.text().to_string();
-    let after = spelled
-        .trim_start()
-        .strip_prefix("class")
-        .or_else(|| spelled.trim_start().strip_prefix("struct"))
-        .or_else(|| spelled.trim_start().strip_prefix("union"))?;
-    let name: String = after
-        .trim_start()
-        .chars()
-        .take_while(|character| character.is_alphanumeric() || *character == '_')
-        .collect();
-    (!name.is_empty()).then_some(name)
+    use cpp_parser::CppAstNode;
+    cpp_parser::CppClassDef::cast(definition.clone()).and_then(|class| class.get_name_text())
 }
 
 fn enclosing_definition(node: &CppSyntaxNode) -> Option<CppSyntaxNode> {
@@ -347,28 +318,15 @@ fn visibility_of(class: &CppSyntaxNode, offset: usize) -> Access {
 /// `class` is private and `struct`/`union` are public — the language's rule, and the reason the keyword is a token
 /// this asks for rather than a word compared against a header's spelling.
 fn default_access_of(class: &CppSyntaxNode) -> Access {
-    use cpp_parser::{CppAstNode, CppClassDef, CppTokenKind};
+    use cpp_parser::{CppAstNode, CppClassDef};
 
-    // **By token kind, not by the token's word.** This crate's rowan kind is `CppKind` — the wrapper around
-    // `Node(CppSyntaxKind)` and `Token(CppTokenKind)` — so a token's kind has to be unwrapped before it means
-    // anything, and `examples/token_kinds.rs` prints both halves for any source when that is in doubt.
-    let keyword = CppClassDef::cast(class.clone()).and_then(|definition| {
-        definition
-            .syntax()
-            .descendants_with_tokens()
-            .filter_map(|element| element.into_token())
-            .find(|token| {
-                matches!(
-                    CppTokenKind::from(token.kind()),
-                    CppTokenKind::ClassKeyword
-                        | CppTokenKind::StructKeyword
-                        | CppTokenKind::UnionKeyword
-                )
-            })
-    });
-
-    match keyword.map(|token| CppTokenKind::from(token.kind())) {
-        Some(CppTokenKind::ClassKeyword) => Access::Private,
-        _ => Access::Public,
-    }
+    // **The definition's own key**, which the typed node keeps: `struct` and `union` are public, `class` is private, and
+    // anything this walk does not recognise is treated as public — the direction the old fallback took.
+    CppClassDef::cast(class.clone()).map_or(Access::Public, |definition| {
+        if definition.is_struct() || definition.is_union() {
+            Access::Public
+        } else {
+            Access::Private
+        }
+    })
 }

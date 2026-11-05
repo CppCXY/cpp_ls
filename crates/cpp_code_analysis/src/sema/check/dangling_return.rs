@@ -37,9 +37,15 @@
 //! wrongly, and these are the names the standard library, libc++ and Abseil use. A call to a function nobody can see
 //! is an unknown origin — a *missing* finding, never a wrong one. A `return` inside a lambda belongs to the lambda,
 //! and this rule says nothing about it.
+//!
+//! # The result type is the declaration's, not a slice of the source
+//!
+//! It used to be `context.source[start of the function .. start of its name]`, searched for `&`/`*` before the first
+//! `<`. The same three questions are nodes: `CppDeclarator::{is_a_reference, is_a_pointer}` for the two operators, and
+//! `CppDeclSpecifierSeq::get_type_name` for the type's name — which is what `view_name_of` classifies, without also
+//! seeing a `*` in a template argument.
 
 use cpp_parser::CppAstNode;
-use cpp_parser::CppSyntaxKind;
 
 use super::borrowed::{Origin, origin_of, view_name_of};
 use super::{Check, CheckContext, DiagnosticCode};
@@ -50,57 +56,47 @@ impl Check for DanglingReturn {
     const CODES: &'static [DiagnosticCode] = &[DiagnosticCode::DanglingReturn];
 
     fn check(context: &mut CheckContext<'_>) {
-        // **Every `return` of this file's own text**, and the function it belongs to. The walk outward is what turns
-        // a `return` into a question about a *result type*, and it stops at a lambda, whose type is the lambda's.
-        let returns: Vec<cpp_parser::CppSyntaxNode> = context
-            .own::<cpp_parser::CppReturnStat>()
-            .map(|statement| statement.syntax().clone())
-            .collect();
+        // **Every `return` of this file's own text**, and the function it belongs to. The walk outward is what turns a `return`
+        // into a question about a *result type*, and it stops at a lambda, whose type is the lambda's.
+        let returns: Vec<cpp_parser::CppReturnStat> =
+            context.own::<cpp_parser::CppReturnStat>().collect();
 
         for statement in returns {
-            let Some(function) = enclosing_function(&statement) else {
+            let Some(function) = enclosing_function(statement.syntax()) else {
                 continue;
             };
-            let Some(body) = function
-                .children()
-                .find(|child| kind(child) == CppSyntaxKind::CompoundStat)
-            else {
+            let Some(body) = function.get_body() else {
                 continue;
             };
             let Some(declarator) = function
-                .children()
-                .find(|child| kind(child) == CppSyntaxKind::InitDeclarator)
-                .and_then(|init| {
-                    init.children()
-                        .find(|child| kind(child) == CppSyntaxKind::Declarator)
-                })
+                .get_init_declarator()
+                .and_then(|init| init.get_declarator())
             else {
                 continue;
             };
-            let Some(name) = the_function_name(&declarator) else {
-                continue;
-            };
 
-            // **The result type is what the declaration writes before the name**, read as text: `int&`,
-            // `const std::string&`, `std::string_view`, `const char*`. The `&`/`*` are asked about **before the first
-            // `<`**, so `std::vector<int*>` is a returned vector rather than a returned pointer.
-            let Some(prefix) = context.source.get(
-                usize::from(function.text_range().start())..usize::from(name.text_range().start()),
-            ) else {
-                continue;
-            };
-            let head = prefix.split('<').next().unwrap_or_default();
-            let is_reference = head.contains('&');
-            let is_pointer = head.contains('*');
-            let view = view_name_of(head);
+            // **The result type is the declaration's own**: a `&`/`&&` part of the declarator makes a reference, a `*` part a
+            // pointer, and the type's *name* is what `view_name_of` classifies.
+            let is_reference = declarator.is_a_reference();
+            let is_pointer = declarator.is_a_pointer();
+            let head = function
+                .get_decl_specifiers()
+                .map(|specifiers| {
+                    specifiers
+                        .get_type_name()
+                        .map(|name| name.get_qualified_name())
+                        .unwrap_or_else(|| specifiers.get_type_text())
+                })
+                .unwrap_or_default();
+            let view = view_name_of(&head);
             if !is_reference && !is_pointer && view.is_none() {
                 continue;
             }
 
-            let Some(expression) = statement.children().next() else {
+            let Some(expression) = statement.get_expr() else {
                 continue;
             };
-            let Some(borrowed) = origin_of(context, &expression, &body) else {
+            let Some(borrowed) = origin_of(context, expression.syntax(), body.syntax()) else {
                 continue;
             };
 
@@ -132,8 +128,8 @@ impl Check for DanglingReturn {
                     _ => None,
                 }
             } else {
-                // A pointer: certain only when the referent is this function's own local and the value is either the
-                // local's address or a pointer the local handed out.
+                // A pointer: certain only when the referent is this function's own local and the value is either the local's
+                // address or a pointer the local handed out.
                 match borrowed.kind {
                     Origin::Local if borrowed.through.is_some() => Some(format!(
                         "`{through}()` returns a pointer into `{name}`, which is destroyed when the function returns",
@@ -151,39 +147,24 @@ impl Check for DanglingReturn {
             let Some(message) = message else {
                 continue;
             };
-            let range = cpp_parser::source_range(expression.text_range());
+            let range = cpp_parser::source_range(expression.get_range());
             context.add(DiagnosticCode::DanglingReturn, range, "", message);
         }
     }
 }
-/// The function declaration a `return` belongs to — `None` for a return inside a lambda, whose result type is the
-/// lambda's own.
-fn enclosing_function(statement: &cpp_parser::CppSyntaxNode) -> Option<cpp_parser::CppSyntaxNode> {
-    let mut current = statement.parent();
-    while let Some(ancestor) = current {
-        match kind(&ancestor) {
-            CppSyntaxKind::LambdaExpr => return None,
-            CppSyntaxKind::Declaration
-                if ancestor
-                    .children()
-                    .any(|child| kind(&child) == CppSyntaxKind::CompoundStat) =>
-            {
-                return Some(ancestor);
-            }
-            _ => {}
+
+/// The function declaration a `return` belongs to — `None` for a return inside a lambda, whose result type is the lambda's own.
+fn enclosing_function(statement: &cpp_parser::CppSyntaxNode) -> Option<cpp_parser::CppDeclaration> {
+    for ancestor in statement.ancestors().skip(1) {
+        // **A lambda's `return` belongs to the lambda**: its type is the closure's own, and this rule has nothing to say.
+        if cpp_parser::CppLambdaExpr::can_cast(ancestor.kind().into()) {
+            return None;
         }
-        current = ancestor.parent();
+        if let Some(declaration) = cpp_parser::CppDeclaration::cast(ancestor.clone())
+            && declaration.get_body().is_some()
+        {
+            return Some(declaration);
+        }
     }
     None
-}
-
-/// The declarator's own name — the `NameExpr` written directly inside it, not the one inside a parameter.
-fn the_function_name(declarator: &cpp_parser::CppSyntaxNode) -> Option<cpp_parser::CppSyntaxNode> {
-    declarator
-        .children()
-        .find(|child| kind(child) == CppSyntaxKind::NameExpr)
-}
-
-fn kind(node: &cpp_parser::CppSyntaxNode) -> CppSyntaxKind {
-    CppSyntaxKind::from(node.kind())
 }

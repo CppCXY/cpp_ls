@@ -51,7 +51,7 @@ impl Check for UeNaming {
             ("UINTERFACE", &["U", "I"][..], "an interface"),
         ] {
             for annotated in annotated_declarations(context, &[annotating]) {
-                let spelling = annotated.name.text().to_string();
+                let spelling = annotated.name.clone();
                 if prefixes.iter().any(|prefix| spelling.starts_with(prefix)) {
                     continue;
                 }

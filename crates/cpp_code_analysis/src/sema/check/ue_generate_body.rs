@@ -57,7 +57,7 @@ impl Check for UeGenerateBody {
             if generated {
                 continue;
             }
-            let name = annotated.name.text().to_string();
+            let name = annotated.name.clone();
             context.add_in_the_file(
                 DiagnosticCode::UeGenerateBody,
                 annotated.name_in_the_file,

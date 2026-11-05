@@ -689,6 +689,46 @@ impl CppIndexExpr {
     pub fn get_index(&self) -> Option<CppExpr> {
         self.children().nth(1)
     }
+
+    /// **Is this a member access rather than a subscript?** — `a.b` and `a->b` are `IndexExpr` nodes as well (measured:
+    /// `s.c_str` is `IndexExpr "s.c_str"`), and the `.`/`->` token is what tells them from `a[i]`.
+    pub fn is_a_member_access(&self) -> bool {
+        self.syntax()
+            .children_with_tokens()
+            .filter_map(|element| element.into_token())
+            .any(|token| {
+                matches!(
+                    CppTokenKind::from(token.kind()),
+                    CppTokenKind::Dot | CppTokenKind::Arrow
+                )
+            })
+    }
+
+    /// **The member's name**, when this is a member access — `c_str` for `s.c_str`. `None` for a subscript.
+    pub fn get_member_name(&self) -> Option<CppNameToken> {
+        if !self.is_a_member_access() {
+            return None;
+        }
+        // **The member is a token of this node**, measured: `s.c_str` is `IndexExpr > [IdentifierExpr s, Token(c_str)]`. The
+        // last name token written after the operator is the member.
+        let mut after_the_operator = false;
+        let mut found = None;
+        for element in self.syntax().children_with_tokens() {
+            let Some(token) = element.into_token() else {
+                continue;
+            };
+            match CppTokenKind::from(token.kind()) {
+                CppTokenKind::Dot | CppTokenKind::Arrow => after_the_operator = true,
+                _ if after_the_operator => {
+                    if let Some(name) = CppNameToken::cast(token) {
+                        found = Some(name);
+                    }
+                }
+                _ => {}
+            }
+        }
+        found
+    }
 }
 
 /// A member access: `obj.member` or `ptr->member`.

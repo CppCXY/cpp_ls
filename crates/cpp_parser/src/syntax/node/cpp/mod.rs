@@ -455,8 +455,12 @@ impl CppDeclSpecifierSeq {
     }
 
     pub fn has_keyword(&self, kind: CppTokenKind) -> bool {
+        // **The keyword may sit in a specifier node of its own.** Measured: `static int x` is
+        // `DeclSpecifierSeq > [StaticSpec > Token(StaticKeyword), BuiltinType > Token(IntKeyword)]`, so a question about the
+        // *sequence's* keywords has to mean its subtree, not its direct children — a direct scan answered `false` for every
+        // `static` (which made a static local look automatic) and for `auto` inside a builtin type.
         self.syntax()
-            .children_with_tokens()
+            .descendants_with_tokens()
             .filter_map(|it| it.into_token())
             .any(|token| token.kind() == kind.into())
     }
@@ -602,6 +606,39 @@ impl CppDeclarator {
 
     pub fn get_name_text(&self) -> Option<String> {
         self.get_name().map(|it| it.get_name_text().to_string())
+    }
+
+    /// **The pointer and reference types this declarator writes**, its nested declarators' included.
+    ///
+    /// `int* p` is `Declarator > Declarator > PointerType` (measured), so a one-level search finds nothing; a declaration's own
+    /// type parts are the chain of `PointerType`/`ReferenceType`/`RValueReferenceType` nodes under it.
+    pub fn get_pointer_types(&self) -> Vec<CppPointerType> {
+        let mut found = Vec::new();
+        let mut current = Some(self.clone());
+        while let Some(declarator) = current {
+            for child in declarator.syntax().children() {
+                if let Some(pointer) = CppPointerType::cast(child) {
+                    found.push(pointer);
+                }
+            }
+            current = declarator.child::<CppDeclarator>();
+        }
+        found
+    }
+
+    /// Is this the declarator of a **reference** — `int& r`, `int&& rr`?
+    pub fn is_a_reference(&self) -> bool {
+        self.get_pointer_types()
+            .iter()
+            .any(|pointer| pointer.is_reference())
+    }
+
+    /// Is this the declarator of a **pointer** — `int* p`? A pointer-to-a-reference is not a C++ type, so the two answers
+    /// cannot both be true for one declarator in practice; the reference is checked first by the callers that care.
+    pub fn is_a_pointer(&self) -> bool {
+        self.get_pointer_types()
+            .iter()
+            .any(|pointer| !pointer.is_reference())
     }
 
     /// **The declarator's type parts, without its name**: `*`, `&`, `&&`, `[3]`, in source order.
@@ -1034,6 +1071,80 @@ impl CppTrailingReturnType {
     /// The type after the arrow.
     pub fn get_type_id(&self) -> Option<CppTypeId> {
         self.child()
+    }
+}
+
+/// A `friend` declaration: `friend class B;`, `friend void f();`, `friend std::ostream& operator<<(…);`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CppFriendDecl {
+    syntax: CppSyntaxNode,
+}
+
+impl CppAstNode for CppFriendDecl {
+    fn syntax(&self) -> &CppSyntaxNode {
+        &self.syntax
+    }
+
+    fn can_cast(kind: CppSyntaxKind) -> bool {
+        kind == CppSyntaxKind::FriendDecl
+    }
+
+    fn cast(syntax: CppSyntaxNode) -> Option<Self> {
+        Self::can_cast(syntax.kind().into()).then_some(Self { syntax })
+    }
+}
+
+impl CppFriendDecl {
+    /// The declaration the `friend` introduces — `friend class B;` wraps `class B;`.
+    pub fn get_declaration(&self) -> Option<CppDeclaration> {
+        self.child()
+    }
+
+    /// **The name this friendship grants** — `B` for `friend class B;`, `f` for `friend void f();`.
+    pub fn get_name_text(&self) -> Option<String> {
+        self.get_declaration()?.get_name_text()
+    }
+}
+
+/// One entry of a constructor's member-initializer list: `: v(s)`, `: v{s}`, `: Base(args)`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CppMemberInitializer {
+    syntax: CppSyntaxNode,
+}
+
+impl CppAstNode for CppMemberInitializer {
+    fn syntax(&self) -> &CppSyntaxNode {
+        &self.syntax
+    }
+
+    fn can_cast(kind: CppSyntaxKind) -> bool {
+        kind == CppSyntaxKind::MemberInitializer
+    }
+
+    fn cast(syntax: CppSyntaxNode) -> Option<Self> {
+        Self::can_cast(syntax.kind().into()).then_some(Self { syntax })
+    }
+}
+
+impl CppMemberInitializer {
+    /// The member (or base) this initialises.
+    pub fn get_name(&self) -> Option<CppNameToken> {
+        self.child::<CppNameExpr>()?.get_name_token()
+    }
+
+    pub fn get_name_text(&self) -> Option<String> {
+        self.get_name().map(|name| name.get_name_text().to_string())
+    }
+
+    /// **The expression it initialises with** — `s` in `: v(s)`, and the braced element in `: v{s}`.
+    pub fn get_argument(&self) -> Option<CppExpr> {
+        if let Some(list) = self.child::<CppArgList>() {
+            return list.get_args().next();
+        }
+        if let Some(braced) = self.child::<CppInitListExpr>() {
+            return braced.get_elements().next();
+        }
+        self.children::<CppExpr>().next()
     }
 }
 
