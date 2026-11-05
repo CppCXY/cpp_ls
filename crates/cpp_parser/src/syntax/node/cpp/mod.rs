@@ -95,9 +95,12 @@ impl CppAstNode for CppDeclaration {
     /// declarations" should not be polluted by directives; "what declaration does this comment
     /// document?" must not miss `/// Doc.` in front of `using Point = shapes::Point;`.
     fn cast(syntax: CppSyntaxNode) -> Option<Self> {
+        // **A `typedef` is a declaration too**: it declares a name, and its declarator layer is the same as any other's. It was
+        // excluded for one reason — a `descendants::<CppDeclaration>` walk would then visit it — and the walk uses `can_cast`,
+        // which stays narrow, so the exclusion never bought anything.
         matches!(
             CppSyntaxKind::from(syntax.kind()),
-            CppSyntaxKind::Declaration | CppSyntaxKind::UsingDecl
+            CppSyntaxKind::Declaration | CppSyntaxKind::UsingDecl | CppSyntaxKind::TypedefDecl
         )
         .then_some(Self { syntax })
     }
@@ -1005,6 +1008,33 @@ fn push_a_spelling(out: &mut String, spelling: &str) {
         out.push(' ');
     }
     out.push_str(spelling);
+}
+
+/// A trailing return type: the `-> Widget` of `auto make() -> Widget`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CppTrailingReturnType {
+    syntax: CppSyntaxNode,
+}
+
+impl CppAstNode for CppTrailingReturnType {
+    fn syntax(&self) -> &CppSyntaxNode {
+        &self.syntax
+    }
+
+    fn can_cast(kind: CppSyntaxKind) -> bool {
+        kind == CppSyntaxKind::TrailingReturnType
+    }
+
+    fn cast(syntax: CppSyntaxNode) -> Option<Self> {
+        Self::can_cast(syntax.kind().into()).then_some(Self { syntax })
+    }
+}
+
+impl CppTrailingReturnType {
+    /// The type after the arrow.
+    pub fn get_type_id(&self) -> Option<CppTypeId> {
+        self.child()
+    }
 }
 
 /// A `requires`-clause: `requires (x > 0)`, `requires std::integral<T>`.

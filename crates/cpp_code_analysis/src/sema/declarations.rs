@@ -663,6 +663,7 @@ impl DeclarationShapes {
     /// passes put them in order — the order they were collected in, which is start-offset order, which is what the
     /// search assumes.
     pub fn of(root: &CppSyntaxNode) -> Self {
+        use cpp_parser::CppAstNode;
         let mut shapes: Vec<Shape> = Vec::new();
         // The shapes the node being visited is inside, outermost first.
         let mut chain: Vec<u32> = Vec::new();
@@ -728,13 +729,18 @@ impl DeclarationShapes {
             // The default before any label is the class key's: `class` is private, `struct` and `union` are public.
             // Read from the *parent* node, which is the class definition this body belongs to.
             if kind == CppSyntaxKind::ClassBody {
-                let default = match node.parent().map(|owner| CppSyntaxKind::from(owner.kind())) {
-                    Some(CppSyntaxKind::StructDef | CppSyntaxKind::UnionDef) => Access::Public,
-                    // A `class` — and anything else this walk does not recognise, which is the conservative
-                    // direction for a *member*: the private reading hides a name rather than offering one the
-                    // reader cannot write.
-                    _ => Access::Private,
-                };
+                // A `class` — and anything else this walk does not recognise — is private, which is the conservative
+                // direction for a *member*: the private reading hides a name rather than offering one the reader cannot write.
+                let default = node
+                    .parent()
+                    .and_then(cpp_parser::CppClassDef::cast)
+                    .map_or(Access::Private, |class| {
+                        if class.is_struct() || class.is_union() {
+                            Access::Public
+                        } else {
+                            Access::Private
+                        }
+                    });
                 bodies.push((at.end_offset(), default));
             } else if let Some((_, level)) = bodies.last_mut() {
                 match kind {
@@ -750,9 +756,8 @@ impl DeclarationShapes {
             // the specifier sequence covers. Recorded *before* the shape test below, because a `TemplateDecl` is
             // not a shape — nothing in this module is answered at one.
             if kind == CppSyntaxKind::TemplateDecl
-                && let Some(list) = node.children().find(|child| {
-                    CppSyntaxKind::from(child.kind()) == CppSyntaxKind::TemplateParameterList
-                })
+                && let Some(list) =
+                    cpp_parser::typed_children::<cpp_parser::CppTemplateParamList>(&node).next()
                 && let Some(owner) = node.parent()
             {
                 // **The range is the declaration the template heads, not just its specifier sequence.**
@@ -768,7 +773,10 @@ impl DeclarationShapes {
                 // The outer of two nested templates is recorded with the outer declaration's range, which contains
                 // the inner name as well — the "last entry in document order wins" rule that
                 // `declared_template_parameters_with` already applies is what makes the innermost one the answer.
-                templates.push((cpp_parser::source_range(owner.text_range()), list.clone()));
+                templates.push((
+                    cpp_parser::source_range(owner.text_range()),
+                    list.syntax().clone(),
+                ));
             }
 
             let read = children_a_question_reads(&node);
@@ -993,37 +1001,30 @@ impl ShapeChildren {
 }
 
 fn children_a_question_reads(node: &CppSyntaxNode) -> ShapeChildren {
-    use cpp_parser::CppAstNode;
-    let mut read = ShapeChildren {
-        specifiers: None,
-        trailing: None,
-        declarator: None,
-        type_id: None,
-        bases: Vec::new(),
+    use cpp_parser::{
+        CppAstNode, CppBaseSpecifier, CppDeclSpecifierSeq, CppDeclarator, CppTrailingReturnType,
+        CppTypeId,
     };
-
-    for child in node.children() {
-        match CppSyntaxKind::from(child.kind()) {
-            CppSyntaxKind::DeclSpecifierSeq if read.specifiers.is_none() => {
-                read.specifiers = Some(child)
-            }
-            CppSyntaxKind::TrailingReturnType if read.trailing.is_none() => {
-                read.trailing = Some(child)
-            }
-            CppSyntaxKind::Declarator if read.declarator.is_none() => read.declarator = Some(child),
-            CppSyntaxKind::TypeId if read.type_id.is_none() => read.type_id = Some(child),
-            // A base's *name*, not the whole specifier: taking the specifier's text would read the access keyword
-            // as part of the name (`public B` is `B`).
-            CppSyntaxKind::BaseSpecifier => read.bases.extend(
-                <cpp_parser::CppBaseSpecifier as cpp_parser::CppAstNode>::cast(child)
-                    .and_then(|base| base.get_name())
-                    .map(|name| name.syntax().clone()),
-            ),
-            _ => {}
-        }
+    // **Five questions, five typed children.** The first of each kind is the one the shape keeps, and a base's *name* rather
+    // than the specifier's text is what a fact's `bases` carries (`public B` is `B`).
+    ShapeChildren {
+        specifiers: cpp_parser::typed_children::<CppDeclSpecifierSeq>(node)
+            .next()
+            .map(|child| child.syntax().clone()),
+        trailing: cpp_parser::typed_children::<CppTrailingReturnType>(node)
+            .next()
+            .map(|child| child.syntax().clone()),
+        declarator: cpp_parser::typed_children::<CppDeclarator>(node)
+            .next()
+            .map(|child| child.syntax().clone()),
+        type_id: cpp_parser::typed_children::<CppTypeId>(node)
+            .next()
+            .map(|child| child.syntax().clone()),
+        bases: cpp_parser::typed_children::<CppBaseSpecifier>(node)
+            .filter_map(|base| base.get_name())
+            .map(|name| name.syntax().clone())
+            .collect(),
     }
-
-    read
 }
 
 /// Is a node of this kind a shape on its own, with nothing to read from its children?
@@ -1848,15 +1849,17 @@ fn the_parameter_names(declaration: &CppSyntaxNode) -> Vec<String> {
 
 /// Walk the statements that **always run**, and record the frees among them.
 fn scan_unconditional_statements(node: &CppSyntaxNode, parameters: &[String], mask: &mut u64) {
+    use cpp_parser::{CppAstNode, CppStat};
     for child in node.children() {
-        match CppSyntaxKind::from(child.kind()) {
-            // A plain block is the same statement sequence, so it is still unconditional.
-            CppSyntaxKind::CompoundStat => scan_unconditional_statements(&child, parameters, mask),
-            // A statement whose expression may free a parameter.
-            CppSyntaxKind::ExpressionStat | CppSyntaxKind::ReturnStat => {
-                scan_for_a_free(&child, parameters, mask)
+        // **The sum type, not a kind comparison**: a block is the same sequence, an expression statement and a `return` may
+        // free a parameter, and everything else may not run.
+        match CppStat::cast(child.clone()) {
+            Some(CppStat::CompoundStat(block)) => {
+                scan_unconditional_statements(block.syntax(), parameters, mask);
             }
-            // Everything that may not run — and a lambda, whose body is another function.
+            Some(CppStat::ExpressionStat(_) | CppStat::ReturnStat(_) | CppStat::Declaration(_)) => {
+                scan_for_a_free(&child, parameters, mask);
+            }
             _ => {}
         }
     }
@@ -2625,12 +2628,11 @@ fn an_operator_return_is_usable(root: &CppSyntaxNode, binding: &Binding, spellin
 /// anything outside, so a name the body declares is not a name the fact can carry. Walked from the declaration up to
 /// the nearest `ClassBody`, then over that body's own declarations — one subtree, not the file.
 fn the_enclosing_body_declares(root: &CppSyntaxNode, binding: &Binding, name: &str) -> bool {
+    use cpp_parser::CppAstNode;
     let Some(declaration) = declaration_of(root, binding) else {
         return false;
     };
-    let Some(body) = declaration
-        .ancestors()
-        .find(|node| matches!(CppSyntaxKind::from(node.kind()), CppSyntaxKind::ClassBody))
+    let Some(body) = cpp_parser::typed_ancestors::<cpp_parser::CppClassBody>(&declaration).next()
     else {
         return false;
     };
@@ -2647,27 +2649,22 @@ fn the_enclosing_body_declares(root: &CppSyntaxNode, binding: &Binding, name: &s
     // enclosing scope's entity differently in this tree — and that is a known gap rather than a claim: an operator
     // returning `Widget` where the body declares `struct Widget` keeps the spelling, and a fact's reader resolves it
     // to the class it names, which is the same class.
-    body.descendants()
-        .filter(|node| matches!(CppSyntaxKind::from(node.kind()), CppSyntaxKind::Declaration))
-        .any(|node| {
-            let text = node.text().to_string();
-            let text = text.trim();
-            let alias = if let Some(rest) = text.strip_prefix("using ") {
-                rest.split(|c: char| !(c.is_alphanumeric() || c == '_'))
-                    .next()
-                    .unwrap_or_default()
-                    .to_string()
-            } else if text.starts_with("typedef ") {
-                let before_the_semicolon = text.trim_end_matches(';');
-                before_the_semicolon
-                    .rsplit(|c: char| !(c.is_alphanumeric() || c == '_'))
-                    .next()
-                    .unwrap_or_default()
-                    .to_string()
-            } else {
-                return false;
-            };
-            alias == name
+    // **An alias, and the name it introduces** — `using X = …` and `typedef … X;` both expose `X` as the declaration's name, and
+    // a nested class of the same name is deliberately not covered (see the note above). Asked of the declarations' names rather
+    // than of their text.
+    body.syntax()
+        .descendants()
+        .filter_map(cpp_parser::CppDeclaration::cast)
+        .filter(|declaration| {
+            matches!(
+                CppSyntaxKind::from(declaration.syntax().kind()),
+                CppSyntaxKind::UsingDecl | CppSyntaxKind::TypedefDecl
+            )
+        })
+        .any(|declaration| {
+            declaration
+                .get_name()
+                .is_some_and(|introduced| introduced.get_name_text() == name)
         })
 }
 
