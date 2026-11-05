@@ -1263,3 +1263,70 @@ fn a_delta_of_stats_saturates_rather_than_panicking() {
         "a reading given out of order is a caller's mistake, and zero is a better failure than a panic"
     );
 }
+
+/// **The closure the candidate filter is restricted to** — the roots and everything they include, and nothing else.
+///
+/// This is the whole of the restriction that turned a refinement's cost from `O(index)` into `O(file)`: a macro can
+/// only expand while a file renders if a file that file included defined it. A filter that is too *narrow* would not
+/// fail anywhere — it would silently leave a scope out — so the set itself is asserted here rather than only through
+/// its effect on a reading.
+#[test]
+fn the_closure_is_the_roots_and_what_they_include() {
+    let files = MemoryFiles::new()
+        .with_file(
+            "/p/open.h",
+            "#pragma once\n#define _STD_BEGIN namespace std {\n",
+        )
+        .with_file(
+            "/p/widget.h",
+            "#include \"open.h\"\n_STD_BEGIN\nstruct Widget { int size; };\n}\n",
+        )
+        .with_file("/p/main.cpp", "#include \"widget.h\"\nint main;\n")
+        // Not included by anything: it defines names the other files mention, which is exactly the shape that made
+        // the pass ask the whole index.
+        .with_file(
+            "/p/other.h",
+            "#define NULL 0\n#define MIN(a, b) ((a) < (b) ? (a) : (b))\n",
+        );
+    let (mut store, root) = store("closure", &files);
+
+    // The summaries have to exist before a closure can be walked: an include edge is a fact of the *includer's*
+    // reading, and a file the index has never read has none.
+    for path in ["/p/widget.h", "/p/main.cpp", "/p/other.h"] {
+        let _ = store.get(Path::new(path));
+    }
+
+    let widget = std::path::PathBuf::from("/p/widget.h");
+    let closure = store.the_closure_of(&[widget.clone()]);
+
+    let has = |path: &str| {
+        closure.contains(&crate::file::paths::normalize_path(
+            Path::new(path),
+            cfg!(windows),
+        ))
+    };
+    assert!(has("/p/widget.h"), "the root is in its own closure");
+    assert!(
+        has("/p/open.h"),
+        "and the file it includes, which is where its macro body is"
+    );
+    assert!(
+        !has("/p/other.h"),
+        "a file nothing in the closure includes is not in it, however many names it defines: {closure:?}"
+    );
+    assert!(
+        !has("/p/main.cpp"),
+        "and neither is a file that includes the root — the closure follows `#include`, one way"
+    );
+
+    // The transitive half: `main.cpp`'s closure is itself, `widget.h` and — through it — `open.h`.
+    let main = std::path::PathBuf::from("/p/main.cpp");
+    let from_main = store.the_closure_of(&[main]);
+    assert_eq!(
+        from_main.len(),
+        3,
+        "main.cpp, widget.h and open.h, each once: {from_main:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}

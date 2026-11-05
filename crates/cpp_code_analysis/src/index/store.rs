@@ -1753,13 +1753,41 @@ impl<F: FileProvider> SummaryStore<F> {
         let mentioned = words_mentioned_by(&sources, indexed);
         let wanted = |name: &str| mentioned.contains(name);
 
-        // **The files the scan below can be about at all**: those that define a word the re-read files mention. With
-        // an index of names that is a lookup per word; without timelines it is every file, as it always was.
+        // **The files the scan below can be about at all**: those that define a word the re-read files mention, **and
+        // are in one of those files' include closures**.
+        //
+        // The first half is the vocabulary filter this pass has always had. The second half is what makes its cost a
+        // function of the *file* rather than of the *index*, and it was missing: `files_defining_any_macro` asks the
+        // whole index, and a word is not a private thing — `NULL`, `size`, `MIN`, `MAX` are defined by dozens of
+        // headers of projects that have nothing to do with the file being re-read. A candidate is not free: an
+        // unplaceable body builds its defining file's **closure environment**, which is a walk. Measured on
+        // `EmmyLuaCodeStyle` (1 590 files in the index), refining one C file of a vendored tree:
+        //
+        // ```text
+        // 169 words mentioned,   6 candidate files → 30 ms        (a 302-file index)
+        // 707 words mentioned,  27 candidate files → over 60 s    (headers of the same tree)
+        // —                                            → over 70 s, once "memory allocation of 8 GiB failed"
+        // ```
+        //
+        // **The restriction is not an approximation.** A macro that can expand while a file renders is defined in a
+        // file that file *includes*, transitively — and so is every macro the definer's own body mentions, because a
+        // closure follows includes. A definer outside the closure cannot contribute a name to the reading: the
+        // preprocessor would not have seen it. (What a closure cannot know is an include that did not *resolve* — a
+        // system header with no compile database. That direction is a candidate the closure does not list, so the
+        // body is not shaped and the reading keeps the plain reading it had; it is the same answer the eager arm
+        // would have given for a name nobody in the closure defines.)
+        // One function, so the restriction has a name and a test — see [`SummaryStore::the_closure_of`].
+        let in_the_closure = self.the_closure_of(indexed);
         let mut candidates: Vec<&FileSummary> = if eager {
             self.index.summaries().collect()
         } else {
             self.index
                 .files_defining_any_macro(mentioned.iter().map(String::as_str))
+                .into_iter()
+                .filter(|summary| {
+                    in_the_closure.contains(&normalize_path(&summary.path, cfg!(windows)))
+                })
+                .collect()
         };
         let uncovered_candidates = candidates
             .iter()
@@ -2287,6 +2315,28 @@ impl<F: FileProvider> SummaryStore<F> {
         if let Some(text) = self.files.read(path) {
             sources.insert(key, text);
         }
+    }
+
+    /// **The files whose macros can affect how these files render** — the roots themselves and everything they
+    /// include, transitively, keyed by normalized spelling.
+    ///
+    /// This is the set the second pass's candidate filter is restricted to, and the restriction is what makes a
+    /// refinement's cost a function of the file instead of the index — see the long note at the call site in
+    /// [`SummaryStore::prepare_the_re_read`]. It is *not* an approximation: the preprocessor only sees the macros of
+    /// files it included, so a `#define` outside this set cannot appear in the reading.
+    ///
+    /// A function rather than an expression at the call site so that "the closure of these files" has one definition
+    /// and one test (`tests::the_closure_is_the_roots_and_what_they_include`), which is the part of the filter a
+    /// regression would break silently: a filter that is too *narrow* loses a scope, and nothing fails.
+    fn the_closure_of(&self, roots: &[PathBuf]) -> std::collections::HashSet<String> {
+        let mut closure: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for path in roots {
+            closure.insert(normalize_path(path, cfg!(windows)));
+            for reached in self.includes_reached_from(path) {
+                closure.insert(normalize_path(&reached, cfg!(windows)));
+            }
+        }
+        closure
     }
 
     /// **Every file `root` includes, transitively** — the set whose text a closure walk from `root` can slice a body
