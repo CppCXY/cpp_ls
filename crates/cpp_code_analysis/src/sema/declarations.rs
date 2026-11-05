@@ -1351,19 +1351,17 @@ fn a_branch_that_is_taken(
     substitutions: &crate::sema::types::TypeSubstitutions<'_>,
 ) -> bool {
     use cpp_parser::{CppAstNode, CppIfStat};
-    // The `if constexpr` statements containing this return, innermost first — which is the order they are decided in, and the
-    // reason for the sort: a range's length is its extent, so the smallest is the one nearest around it.
-    let mut conditions: Vec<CppIfStat> = body
-        .descendants::<CppIfStat>()
-        .filter(|statement| {
-            let range = statement.get_range();
-            range.start() <= expression.get_range().start()
-                && expression.get_range().end() <= range.end()
-        })
-        .collect();
-    conditions.sort_by_key(|statement| statement.get_range().len());
-
-    for condition in conditions {
+    // **The `if constexpr` statements that enclose this return**, innermost first — an ancestor walk. Asking the body for all of
+    // its descendants and keeping the ones whose range contains the expression was the same answer at O(body) per return, plus a
+    // `Vec` and a sort; the chain is O(depth), and an `if` that merely *follows* the return is not on it at all.
+    //
+    // The walk stops at the body that owns the expression: an `if` above it belongs to another function (a lambda's body inside
+    // an `if`, for instance), and the old containment filter is what kept it out.
+    let body_range = body.get_range();
+    for condition in cpp_parser::typed_ancestors::<CppIfStat>(expression.syntax()) {
+        if !body_range.contains_range(condition.get_range()) {
+            break;
+        }
         let Some(written) = constexpr_condition_of(&condition) else {
             continue;
         };
@@ -1374,19 +1372,15 @@ fn a_branch_that_is_taken(
         };
 
         // **Which side of the `if` the return is on**, because the condition alone does not say whether the return is
-        // instantiated: both branches are inside the same statement, and both see the same condition. A return after the
-        // `else` is in the branch taken when the condition is **false**; one before it is in the branch taken when it is
-        // **true**.
+        // instantiated: both branches are inside the same statement. A return after the `else` is in the branch taken when the
+        // condition is **false**; one before it is in the branch taken when it is **true**.
         let in_the_else = condition.get_else_branch().is_some_and(|else_branch| {
             expression.get_range().start() > else_branch.get_range().start()
         });
-
         if held == in_the_else {
-            // The branch is not instantiated, so this return is not a return.
             return false;
         }
     }
-
     true
 }
 
@@ -1866,8 +1860,14 @@ fn the_specifiers(arguments: &str) -> Vec<String> {
 /// A scope that is neither (a class body, say) has no parameters of its own and answers an empty list.
 fn the_parameters_of(scope: &CppSyntaxNode) -> Vec<cpp_parser::CppParam> {
     use cpp_parser::{CppAstNode, CppDeclaration, CppLambdaExpr};
+    // **The scope's own parameter list**, not a walk of its subtree: a function's body belongs to its declaration, so
+    // `descendants()` reached every lambda in it and answered their parameters too (measured: `auto f(int a) { auto g =
+    // [](int b) { … }; }` gave `f` two parameters). The list is one typed question away.
     if let Some(declaration) = CppDeclaration::cast(scope.clone()) {
-        return declaration.descendants::<cpp_parser::CppParam>().collect();
+        return declaration
+            .get_param_list()
+            .map(|list| list.get_params().collect())
+            .unwrap_or_default();
     }
     if let Some(lambda) = CppLambdaExpr::cast(scope.clone()) {
         return lambda
@@ -1881,16 +1881,25 @@ fn the_parameters_of(scope: &CppSyntaxNode) -> Vec<cpp_parser::CppParam> {
 /// The declarations written **inside** a scope, whatever kind of scope it is.
 fn the_declarations_in(scope: &CppSyntaxNode) -> Vec<cpp_parser::CppDeclaration> {
     use cpp_parser::{CppAstNode, CppDeclaration, CppLambdaExpr};
-    if let Some(declaration) = CppDeclaration::cast(scope.clone()) {
-        return declaration.descendants::<CppDeclaration>().collect();
-    }
-    if let Some(lambda) = CppLambdaExpr::cast(scope.clone()) {
-        return lambda
-            .get_body()
-            .map(|body| body.descendants::<CppDeclaration>().collect())
-            .unwrap_or_default();
-    }
-    Vec::new()
+    // **The scope's body**, not its whole declaration: a local class's members and a nested lambda's locals are different
+    // scopes, and a `descendants()` walk over the declaration reached both. The lambda branch is the inlay's use, where the
+    // lambda itself is the scope.
+    let body = if let Some(lambda) = CppLambdaExpr::cast(scope.clone()) {
+        lambda.get_body()
+    } else {
+        CppDeclaration::cast(scope.clone()).and_then(|declaration| declaration.get_body())
+    };
+    let Some(body) = body else {
+        return Vec::new();
+    };
+    body.descendants::<CppDeclaration>()
+        .filter(|candidate| {
+            // **Not one written inside a nested lambda**: that lambda's body is another function's scope.
+            cpp_parser::typed_ancestors_until::<CppLambdaExpr>(candidate.syntax(), body.syntax())
+                .next()
+                .is_none()
+        })
+        .collect()
 }
 
 fn the_parameter_names(declaration: &CppSyntaxNode) -> Vec<String> {
@@ -2238,12 +2247,16 @@ fn the_returns_of(
     body: &cpp_parser::CppCompoundStat,
     owner: &CppSyntaxNode,
 ) -> Vec<cpp_parser::CppReturnStat> {
-    use cpp_parser::{CppAstNode, CppLambdaExpr, CppReturnStat};
+    use cpp_parser::{CppAstNode, CppDeclaration, CppLambdaExpr, CppReturnStat};
     body.descendants::<CppReturnStat>()
         .filter(|statement| {
+            // **A lambda or a local class's method is another function**: its returns are its own, and counting one here made a
+            // function's type depend on a body it does not own.
             cpp_parser::typed_ancestors_until::<CppLambdaExpr>(statement.syntax(), owner)
                 .next()
                 .is_none()
+                && cpp_parser::typed_ancestors_until::<CppDeclaration>(statement.syntax(), owner)
+                    .all(|declaration| declaration.get_body().is_none())
         })
         .collect()
 }
@@ -2599,12 +2612,15 @@ fn a_local_variables_type(
     use cpp_parser::{CppAstNode, CppNameExpr};
     let name = CppNameExpr::cast(expression.clone())?;
     let written = name.get_name_text()?;
-    // **The declarations before this point that declare this name** — the last one wins, which is what a nested block's
-    // shadow means. The declaration's own typed accessor answers the type it writes for that declarator, so `int* a, b;`
-    // gives `int*` for `a` and `int` for `b`.
+    // **The declarations before this point that declare this name and are still in scope** — the last one wins, which is what
+    // a nested block's shadow means. The declaration's own typed accessor answers the type it writes for that declarator, so
+    // `int* a, b;` gives `int*` for `a` and `int` for `b`.
     let mut found: Option<String> = None;
     for candidate in the_declarations_in(declaration) {
         if candidate.get_range().end() > name.get_range().start() {
+            continue;
+        }
+        if !a_block_statement_encloses(candidate.syntax(), name.syntax()) {
             continue;
         }
         if let Some(the_type) = candidate.get_type_text_of(&written) {
@@ -2612,6 +2628,19 @@ fn a_local_variables_type(
         }
     }
     found
+}
+
+/// **Is this declaration in a block that encloses the expression?**
+///
+/// A local of a **sibling** block is written before the expression and is not in scope at it, which a position filter alone
+/// cannot see: `if (a) { int n = 1; } return n;` names nothing. A declaration with no enclosing block (a global, a class member)
+/// has no block to be inside and is left to the caller's other questions.
+fn a_block_statement_encloses(declaration: &CppSyntaxNode, expression: &CppSyntaxNode) -> bool {
+    use cpp_parser::{CppAstNode, CppCompoundStat};
+    let Some(block) = cpp_parser::typed_ancestors::<CppCompoundStat>(declaration).next() else {
+        return true;
+    };
+    block.get_range().contains_range(expression.text_range())
 }
 
 /// [`declared_returns_of`] for a caller that has the file's shapes already.

@@ -1112,3 +1112,27 @@ fn a_parameters_type_is_its_spelling_without_its_name() {
         "every parameter's type, as the file writes it"
     );
 }
+
+/// **A function's parameters are its own**, not those of a lambda written in its body.
+///
+/// The declaration's subtree contains the body, so a descendants() walk for Parameter answered  **and**  — measured,
+/// uto f(int a) { auto g = [](int b) { return b; }; } gave  two parameters. The parameter list is a direct child of the
+/// function's declarator, which is what get_param_list asks for.
+#[test]
+fn a_functions_parameters_are_its_own_and_not_a_lambdas() {
+    let source = "auto f(int a) { auto g = [](int b) { return b; }; return a; }\n";
+    let (root, _) = unit(source);
+    let declaration = root.get_declarations().next().expect("f is declared");
+    let list = declaration
+        .get_param_list()
+        .expect("f has a parameter list");
+    let names: Vec<String> = list
+        .get_params()
+        .filter_map(|parameter| parameter.get_name_text())
+        .collect();
+    assert_eq!(
+        names,
+        vec!["a".to_string()],
+        "the lambda's  belongs to the lambda"
+    );
+}

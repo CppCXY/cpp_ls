@@ -289,6 +289,22 @@ impl CppDeclaration {
         self.child()
     }
 
+    /// **The parameter list this declaration writes**, when it declares a function.
+    ///
+    /// Asked of the **declarator**, not of the declaration's subtree: a function's body is a child of the declaration, so
+    /// `descendants()` over the declaration reaches every lambda in that body and answers *their* parameters as well — measured,
+    /// `auto f(int a) { auto g = [](int b) { … }; }` answered two parameters for `f`. A constructor writes its declarator
+    /// directly (`S(std::string s)`), which is the second branch.
+    pub fn get_param_list(&self) -> Option<CppParamList> {
+        self.get_init_declarator()
+            .and_then(|init| init.get_declarator())
+            .and_then(|declarator| declarator.get_param_list())
+            .or_else(|| {
+                self.children::<CppDeclarator>()
+                    .find_map(|declarator| declarator.get_param_list())
+            })
+    }
+
     /// The class, struct, union or enum this declaration defines, if any.
     pub fn get_class_def(&self) -> Option<CppClassDef> {
         self.get_decl_specifiers()?.get_class_def()
