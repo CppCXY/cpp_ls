@@ -592,3 +592,53 @@ and can be `None` for a declaration whose *later* text changed — measured on `
 and on a fixture ending in an unterminated `/**`. That is why `shared_ptr` keeps coming back: `element_type` loses the
 field, the arrow falls back to the pointer's own members, and the popup looks plausible. The repair plan is in
 `docs/hover-render.md` §1, together with the two-readings question (§2) and the small gaps this pass found (§3).
+
+## 28. The 120-second wait was not a deadlock — it was an unsatisfiable gate
+
+**The report.** `cpp_ls/tests/diagnostics_stable.rs::a_finding_does_not_vanish_between_first_and_second_pull`
+"times out on a warm cache (120 s)", said `docs/hover-render.md`, and it was read as a possible deadlock in the test or
+the server. It is neither: **the server answers every pull in milliseconds, with an empty list**, and the test's own
+`while` loop is what spends the 120 seconds waiting for a finding that can never be published.
+
+**How that was established, in one run.** Driving the server by hand (the test's `initialize` / `initialized` /
+`didOpen` / three pulls) with `--log-level trace` and stderr kept, the pull answered at once:
+
+```text
+DEBUG cpp_ls::handlers::diagnostic] checks withheld for …/main.cpp: closure ready true, closure owed a re-read true, re-read backlog 1
+DEBUG cpp_ls::handlers::diagnostic] diagnose …: 55 byte(s) held, reading Cooked, 0 error(s), 0 unplaced, 0 note(s), 1 check(s)
+DEBUG …document_diagnostic] pull: …/main.cpp -> 0 item(s)
+```
+
+**One finding exists and is thrown away by the gate.** `FileDiagnostics::checks` holds it; `diagnose_file` publishes
+`found.checks` only when `checks_may_be_trusted`, and that asked `is_closure_ready(path) && !its_closure_is_owed(path)`.
+
+**Where the second half became unsatisfiable.** Phase 0 of `docs/indexing-design.md` (`7bc4c60`) stopped a start from
+refining the project, and changed `pending_work` to count the *wanted* refinements rather than the second-pass backlog
+(`parsed_since_the_last_pass`). The backlog is still filled by the first pass — every file it reads — and is drained
+only for the files a request asks about. So `its_closure_is_owed` answers `true` for every file the run has read and
+nobody has asked for, which after a start is **every file**: the gate never opened, no finding was ever published, and
+the test waited for one. The commit that changed `pending_work` left its own doc comment behind, which still says the
+gate "withholds them until the second pass has run" — the sentence is where the contradiction is visible.
+
+**The fix, and why it is the right one rather than "open the gate".** A reading the run has not refined is the
+**shape-only** reading the index promises to answer from (§2.6 of the design: `initialize` promises an answer correct
+for a published snapshot, from L1), not a reading about to be revised under the answer's feet — the revision happens on
+*request*. So the gate asks the question that is still true — the file's closure is read — and the pull path asks for
+the file's refinement (`Session::want_refinement`, the same ask `catch_up` makes on the hover path) so the next pull
+answers from the refined reading. The `undefined-field` false positive the gate was added for is untouched: it happened
+while the *includes* were still unread, which `is_closure_ready` still refuses.
+
+**Measured.** `diagnostics_stable`: **120 s timeout → 0.39 s, passing**. The full workspace in release: see below.
+
+**Check.**
+```powershell
+cargo test --release -p cpp_ls --test diagnostics_stable -- --nocapture        # 0.4 s
+cargo test --release -p cpp_ls --lib handlers::diagnostic                     # the gate's own unit test
+```
+
+**And the sibling entry that was reported with it.**
+`cpp_code_analysis`'s `a_class_scoped_by_another_files_macro_body_is_scoped_through_the_session` — the phase-0
+casualty in `docs/indexing-review.md` §4 — **passes**, in both profiles, alone and in the full library suite (748
+tests). It needs the ask that `index_everything` now makes (it calls `want_refinement` for every file its batch read),
+and the refinement's answer is correct on this fixture; the reason it was in the failing list was the state `7bc4c60`
+left behind, and that state has since been closed by the phase-1/2 work. No change was needed here.

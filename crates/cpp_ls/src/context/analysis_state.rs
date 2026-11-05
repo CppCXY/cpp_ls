@@ -701,6 +701,15 @@ impl AnalysisState {
             // a slice that is too small answers `false` and the client shows nothing, which is the defect this
             // function exists to fix. A count large enough for an ordinary include chain and far short of a project
             // is the honest setting; the pump finishes the rest within the second.
+            //
+            // **And the second pass is asked for, because a pull is a request about this file.** Phase 0 of
+            // `docs/indexing-design.md` stopped a start from refining the project: a file is refined when somebody
+            // asks, and the pull is somebody. Without the ask the file keeps the shape-only reading the index gives
+            // — a class opened by another file's macro body has no scope there — and every finding computed from it
+            // is computed from the weaker reading. `catch_up` asks on the hover path and this is the diagnostics
+            // path's half; the drain is `advance`'s tail, which serves an ask only when the queue is idle, so it
+            // costs nothing when there is already work.
+            session.want_refinement(&to_prepare);
             session.advance(PREPARE_INDEX_SLICE);
             session.cook(&to_prepare).is_some()
         })

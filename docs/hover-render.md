@@ -91,5 +91,7 @@ query reads the reading that produced the fact it started from.
   reproducer in a fixture first.
 * **Doc comments** are still the file's text, deliberately: they *are* documentation, and `render_documentation` formats
   them as blocks. If that changes, it is a separate decision from the code block.
-* **`diagnostics_stable`'s `a_finding_does_not_vanish_between_first_and_second_pull`** times out on a warm cache
-  (120 s) and passes on a cold one. Unrelated to hover; noted because it makes the full suite look red.
+* ~~**`diagnostics_stable`'s `a_finding_does_not_vanish_between_first_and_second_pull`** times out on a warm cache
+  (120 s) and passes on a cold one.~~ **Fixed, and it was never a timeout.** The gate that withholds check findings
+  was unsatisfiable after phase 0 of the indexing design, so the pull answered `[]` in milliseconds and the test waited
+  for a finding that could not be published. See `docs/buglist.md` §28; it passes in 0.4 s.

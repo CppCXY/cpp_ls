@@ -162,23 +162,44 @@ pub fn diagnose_file(session: &Session<DiskFiles>, path: &Path) -> Option<(Uri, 
 /// while hovering that same name answered **three declarations**, and editing any character made the finding go
 /// away. The member was in the index; the report was computed before the index had finished.
 ///
-/// # What the question is, and what it used to be
+/// # The question, and the half of it that had to go
 ///
 /// `Session::is_closure_ready` — the file's summary exists and every file it **unconditionally includes** has one —
-/// plus "nothing about this file or its closure is queued for the second pass" (`its_closure_is_owed`). That is
-/// exactly the set of facts a check about this file reads, which is why it is the right question rather than a
-/// conservative one.
+/// is the set of facts a check about this file reads. It was, until phase 0 of `docs/indexing-design.md`, asked
+/// together with "nothing about this file or its closure is queued for the second pass"
+/// (`Session::its_closure_is_owed`).
 ///
-/// It used to be `pending() == 0 && pending_cooking() == 0 && !its_closure_is_owed(path)` — the **project's** queues.
-/// On a real project those are non-zero for as long as it takes to read the whole project, so every check was
-/// withheld for that whole window, and a pull that arrived during it carried parse errors only. The handler used to
-/// paper over the difference by repeating the previous report; the repetition is gone (see
-/// `document_diagnostic::the_report`) and this is the half that makes its absence affordable.
+/// **That second half is unsatisfiable now, and it withheld every finding for ever.** Phase 0 (`7bc4c60`) stopped a
+/// start from refining the project: the second-pass backlog is built by the first pass and drained only for the files
+/// somebody *asks* about. `its_closure_is_owed` therefore answers `true` for every file the run has read and no
+/// request has asked for — which is all of them — so the gate never opened, `diagnose_file` published errors and
+/// never a finding, and a client that expected a finding waited for one that could not arrive. Measured on
+/// `diagnostics_stable`'s own log, on a fixture with one `int count = "three";`:
+///
+/// ```text
+/// checks withheld for …: closure ready true, closure owed a re-read true, re-read backlog 1
+/// pull: … -> 0 item(s)                       ← the finding exists (`1 check(s)`) and is not published
+/// ```
+///
+/// What the withdrawal was protecting against is now answered differently and better: a reading the run has not
+/// refined is the **shape-only** reading the index promises to answer from (§2.6 of the design), not a reading about
+/// to be *revised* under the answer's feet. The revision happens on request — `catch_up` and the pull's own
+/// `prepare_for_a_diagnostic` ask for it — so a finding published from L1 is the answer for the snapshot the client
+/// is looking at, and the next pull answers from the refined reading.
 ///
 /// A named function rather than the expression at the call site, because it is the *decision* and it should be
 /// readable and testable as one — the session state that drives it is not something a fixture can hold still.
 pub fn checks_may_be_trusted(session: &Session<DiskFiles>, path: &std::path::Path) -> bool {
-    session.is_closure_ready(path) && !session.its_closure_is_owed(path)
+    let ready = session.is_closure_ready(path);
+    if !ready {
+        log::debug!(
+            "checks withheld for {}: its closure is not read yet ({} file(s) to read, {} to re-read)",
+            path.display(),
+            session.pending(),
+            session.re_read_backlog(),
+        );
+    }
+    ready
 }
 
 /// **What the semantic checks found** — one diagnostic per finding, with the rule's own code and severity.
