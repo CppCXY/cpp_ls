@@ -715,3 +715,37 @@ type. The card prints `DeclFact::type_of`, which is the *written* spelling, and 
 uses, and which answers `LuaSyntaxTree&` — is never asked. The fix is a card change: when `type_of` is a deduced
 spelling (`auto`, `auto&`, `const auto&`, `decltype(…)`), render the deduced type instead. `docs/hover-render.md` §1 has
 the contract; nothing in the layers below has to move.
+
+### The same rule in `undefined-name`, measured on the report's own file
+
+`inspect` on `E:\EmmyLuaCodeStyle\CodeFormatServer\src\LSP\LSPHandle.cpp` after the grammar fix: the constructor's false
+`missing-return` is gone, and completion inside a body offers the class's members —
+
+```text
+complete at 23:5 (inside LSPHandle::LSPHandle)   106 item(s): Dispatch, Initialize, LSPHandle, OnClose, OnCodeAction, …
+complete at 53:5 (inside LSPHandle::Dispatch)    108 item(s): …
+```
+
+— but 30 `undefined-name` findings remained, every one of them a member named in a body (`_server`, `_handles`,
+`Initialize`, `RefreshDiagnostic`). Same rule, one layer over: `a_declaration_is_visible` asks the **scope chain** (which
+has no class for a definition in a `.cpp`) and then the **index by bare name** (which is exactly the question
+`definitions_in_scope` exists to refuse: a bare name does not reach a class member). So a body defined out of class had
+its class's names answered by neither.
+
+The fix asks the question the language asks — *inside a member function of `C`, `C`'s members are in scope* — with the
+**qualified spelling** `C::name`, which is the form the index keys members under and the form that keeps a bare name
+from reaching a class. Fixture:
+
+```cpp
+// h.h
+class C { public: C(); int _server; bool Initialize(); };
+// c.cpp
+#include "h.h"
+C::C() : _server(1) { Initialize(); }
+bool C::Initialize() { return _server > 0; }
+```
+
+before: *"`Initialize` is not declared: nothing this file can see names it"*; after: **0 check findings**. The
+remaining 30 in the `inspect` run above are that tool's setup — without `--index` only the asked file is indexed, so
+`definitions("_server")` answers `NotDeclaredHere` because `LSPHandle.h` has no facts there; the fixture, whose header
+*is* read, is the controlled version of the same question. `cargo t --workspace`: **138 suites, 0 failures**.

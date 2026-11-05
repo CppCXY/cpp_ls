@@ -356,6 +356,25 @@ fn a_declaration_is_visible(context: &CheckContext<'_>, name: &str, at: usize) -
         }
     }
 
+    // **A member of the class the cursor is in, when the body is defined out of class.** The scope chain above cannot
+    // answer this one: `bool C::Initialize() { … }` written in a `.cpp` has no class scope in *this* file — the class
+    // is in a header — so the chain runs from the function straight to the file, and a member named in the body read
+    // as undeclared. The function's own qualified name (`C::Initialize`) says which class it is, and that qualified
+    // spelling is what the index keys the member under. Measured on a fixture of that layout: `Initialize()` called
+    // from the constructor's body was reported, while `_server` — which the *index* half below finds — was not.
+    //
+    // Asked with the **qualified** spelling, which is what keeps a bare name from reaching a class: only the class the
+    // cursor is actually inside is offered here.
+    if let Some(class) = crate::index::project::class_of_the_enclosing_definition(scopes, at)
+        && let crate::Known::Yes(found) = context
+            .model
+            .index()
+            .definitions_in_scope(&format!("{class}::{name}"), context.path)
+        && !found.found.is_empty()
+    {
+        return true;
+    }
+
     // **A declaration in another file**, which reaches this one through an `#include`. A declaration in *this* file
     // is the scope tree's answer above, in the rendering's coordinates — the index records the file's own offsets,
     // and the two are not comparable one by one once a directive has been expanded.
