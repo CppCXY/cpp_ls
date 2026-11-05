@@ -1079,3 +1079,36 @@ int f() {
         "and so is the one before it: {declarations:?}"
     );
 }
+
+/// **A parameter's type is the spelling without its name**, for the shapes real code writes.
+///
+/// `int*` was the defect that made this accessor necessary: the pointer lives under a **nested** declarator
+/// (`Parameter > Declarator > Declarator > PointerType`), and a walk that looked one level down answered `int`. The
+/// reference and array shapes are here for the same reason — each puts its operator somewhere else in the tree.
+#[test]
+fn a_parameters_type_is_its_spelling_without_its_name() {
+    let source =
+        "void f(int a, int* b, const std::string& c, unsigned char d, int e[3], auto f);\n";
+    let (root, _) = unit(source);
+    let declaration = root
+        .get_declarations()
+        .next()
+        .expect("the function declares");
+    let parameters: Vec<(String, String)> = declaration
+        .descendants::<cpp_parser::CppParam>()
+        .filter_map(|parameter| Some((parameter.get_name_text()?, parameter.get_type_text())))
+        .collect();
+
+    assert_eq!(
+        parameters,
+        vec![
+            ("a".to_string(), "int".to_string()),
+            ("b".to_string(), "int*".to_string()),
+            ("c".to_string(), "const std::string&".to_string()),
+            ("d".to_string(), "unsigned char".to_string()),
+            ("e".to_string(), "int[3]".to_string()),
+            ("f".to_string(), "auto".to_string()),
+        ],
+        "every parameter's type, as the file writes it"
+    );
+}
