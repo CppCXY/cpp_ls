@@ -1,0 +1,7 @@
+# **Test in release.** The suite is a measurement workspace as much as a correctness one — several tests parse a
+# standard library, index a project or run a server — and the unoptimised profiles make those take minutes where the
+# optimised one takes seconds. `cargo t` is the shorthand so that the habit costs three characters, and plain
+# `cargo test` still works for the one test somebody is debugging.
+
+[alias]
+t = "test --release"
