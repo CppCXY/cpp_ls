@@ -1732,6 +1732,37 @@ impl<F: FileProvider> SummaryStore<F> {
         crate::summary_codec::decode_the_cooked_reading(&bytes).ok()
     }
 
+    /// **Was this file's reading already decided to need no repair?** — the answer
+    /// [`SummaryStore::mark_the_reading_as_refined`] wrote down, read back.
+    ///
+    /// The mark is a summary under the file's **closure key** (its content, its configuration, the content of its whole
+    /// closure), and that key is exactly what a re-read would have to reproduce to change the answer — so a hit is not
+    /// a guess about staleness: a file whose closure moved misses, and a file whose closure did not move needs the pass
+    /// no more than it did last time.
+    ///
+    /// **Written and never read until now.** `mark_the_reading_as_refined` has stored the row since the second pass got
+    /// its own cache, and `take_the_stored_refinements` only ever looked in the `cooked_readings` table, so every warm
+    /// start re-read the files whose only record was this one. Measured on the modules fixture: 64 of 139 files in four
+    /// slices, **676 ms of a 1.32 s read**, every one of them answered "already refined" by the pass that read it.
+    fn the_stored_refinement_mark(&self, path: &Path) -> bool {
+        // **The key the mark was written under, read the same way.** `mark_the_reading_as_refined` stores it from the
+        // file's own summary (`content_hash` and `context_hash` of the reading in the index) plus the closure
+        // fingerprint; computing the context a second way here — `context_hash(path)` — is a second spelling of the
+        // same question, and a spelling that does not match is a miss that looks exactly like a file nobody marked.
+        let Some(summary) = self.index.summary(path) else {
+            return false;
+        };
+        let Some(fingerprint) = self.the_closure_fingerprint(path) else {
+            return false;
+        };
+        let key = crate::cache::SummaryKey::new(summary.key.content_hash, summary.key.context_hash)
+            .with_environment(fingerprint);
+        let Some(database) = self.summary_database() else {
+            return false;
+        };
+        database.summary(key).is_some()
+    }
+
     /// **Take every refined reading the cache holds for these files**, and answer with the ones it does not.
     ///
     /// This is what keeps a timeline unbuilt on a warm start: a file whose refinement is already on disk needs no
@@ -1752,6 +1783,16 @@ impl<F: FileProvider> SummaryStore<F> {
         let mut served = 0usize;
         for path in files {
             let Some(cooked) = self.the_stored_cooked_reading(&path) else {
+                // **The mark is a record too**, and the one a skipped file has: the pass decided its reading needs no
+                // repair, and said so under the closure key. Serving it here is what keeps the pass from re-deciding
+                // that on every start — see [`SummaryStore::the_stored_refinement_mark`].
+                if self.the_stored_refinement_mark(&path) {
+                    if let Ok(mut marks) = self.refined_marks.lock() {
+                        marks.insert(path);
+                    }
+                    served += 1;
+                    continue;
+                }
                 still_to_do.push(path);
                 continue;
             };
