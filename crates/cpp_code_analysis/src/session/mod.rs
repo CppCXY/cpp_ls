@@ -6641,6 +6641,46 @@ impl<F: FileProvider + Clone> Session<F> {
             // the same work the pump was going to do anyway, moved to the moment a reader asked for an answer that
             // needs it.
             self.index_everything();
+
+            // **And then the module's own unit, read as the program it is** — the step that was only ever *recorded*.
+            //
+            // The comments above explain at length why the unit is queued rather than read here: the walk needs the
+            // summaries the drain is about to read, and a module's six seconds do not belong under a request's write
+            // lock. Both are true, and both are about *the pump*: a session with a work loop will pick this up on its
+            // next slice. A caller that has no pump — a batch, a test, this probe — asked for `import std;` and gets
+            // headers and no module.
+            //
+            // Measured before this: the module read resolves `std.ixx`, queues it, drains 401 files, and answers
+            // **0** of the module's exports — `std::format` is not offered after `import std;`, and reading three
+            // *other* programs first does not change that (`probe: reading programs does not make the standard
+            // module's exports visible`). The unit read is the missing step: `read_the_unit` walks the closure, renders
+            // each file in the unit's environment, parses it once and files every declaration from it
+            // (`insert_cooked_in_a_program`), which is where `export namespace std { using std::format; … }` lands.
+            //
+            // It costs what the comments above say — 6.2 s for `std` on a cold machine, 0.55 s warm — and it is paid
+            // **here, after the drain**, so the summaries the walk needs are all in the index by the time it starts.
+            let due: Vec<PathBuf> = {
+                let mut due: Vec<PathBuf> = self
+                    .programs_wanted
+                    .iter()
+                    .filter(|key| !self.units_read.contains(*key))
+                    .map(PathBuf::from)
+                    .collect();
+                due.sort();
+                due
+            };
+            for unit in due {
+                let reading = std::time::Instant::now();
+                let read = self.read_the_unit(&unit);
+                if tracing {
+                    eprintln!(
+                        "module read: unit {} in {:?} ({} file(s))",
+                        unit.display(),
+                        reading.elapsed(),
+                        read.map_or(0, |reading| reading.files),
+                    );
+                }
+            }
         }
 
         read_in
