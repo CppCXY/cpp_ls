@@ -86,10 +86,12 @@ fine — while `ProjectIndex::summary` (what `inspect facts` prints) has the fol
 derail is in the rendering the index cooks (`FileIndexer::index_rendering`), not in the parser on the file's own text.
 `semantic.rs` carries it as `an_include_and_a_directive_in_a_condition_do_not_swallow_the_class`, `#[ignore]`d.
 
-Next: print the rendering the index cooks for that fixture (no `inspect` command does; add one, or a `--cook --text`
-flag) and compare it with the file — the suspect is the expression parser stopping at a directive, after which the
-class body's brace tracking loses its place. Fix it in the parser with the 28 lines as the test, then un-ignore the
-test.
+Next: expose the text `FileIndexer::index_rendering` parses (the unit's `RenderedCooked::text`, not
+`render_the_unit`'s, which is correct for this fixture) and diff it against the file — the suspect is the expression
+parser stopping at a directive, after which the class body's brace tracking loses its place. A temporary `eprintln` in
+`index_rendering` guarded by an environment variable is enough for the first look; a permanent `inspect` command wants
+the text to be the one the index used, which is why `render_the_unit` was not it. Fix it in the parser with the 28 lines
+as the test, then un-ignore it.
 
 ## 2. `DeclFact::type_of` loses its shape match — the root cause behind the pointee path
 

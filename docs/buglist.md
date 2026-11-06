@@ -904,9 +904,14 @@ so does a small version without the `#if`; so does `#include "nothing.h"`.
 
 **It is the summary's reading, not the session's.** `session.view()` on the same fixture answers the class correctly —
 the plain reading is fine — while the **summary** (`ProjectIndex::summary`, what `inspect facts` prints) has `Following`
-inside `std::Impl`. So the derail is in the **rendering the index cooks** (`FileIndexer::index_rendering`), not in the
-parser on the file's own text, and the first thing to look at is that rendering: print it (no `inspect` command does yet)
-and compare it with the file.
+inside `std::Impl`. So the derail is in the reading the **summary is built from**, not in the parser on the file's own
+text.
+
+`Session::render_the_unit` prints a rendering that is **correct** for this fixture (176 bytes, one line, the class
+closed) — so the summary is not built from that text. The next move is to expose the text `FileIndexer::index_rendering`
+actually parses (`RenderedCooked::text` of the unit's read, not `render_the_unit`'s) through a debug hook, and diff it
+against the file. Until that exists, this is the state: the reproducer is 28 lines, the failure is deterministic, and it
+is in whichever rendering the index uses.
 
 `crates/cpp_code_analysis/tests/semantic.rs` carries the reproducer as
 `an_include_and_a_directive_in_a_condition_do_not_swallow_the_class`, `#[ignore]`d with this section as its reason: it
