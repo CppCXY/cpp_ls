@@ -5,8 +5,18 @@ is a measurement from `crates/cpp_code_analysis/tests/` — the probes are `#[ig
 --nocapture`; the fixture is an external project at `C:\Users\zc\Desktop\cpp_modules` (`import std;`, 401-file closure),
 **not vendored** into this repository, and every probe skips cleanly when it is absent.
 
-The headline: **`import std;` went from 24.7 s cold and 112–506 s warm to 2.5 s cold and 360 ms warm**, with the standard
+The headline: **`import std;` went from 24.7 s cold and 112–506 s warm to 2.5 s cold and 264 ms warm**, with the standard
 module's names — `std::format` among them — reachable from a file that does nothing but import it.
+
+The final run of every probe, for the record:
+
+```text
+std closure:  388 files, 17.9 MB, discovered in 387 ms (read 35, lex 121, directives 142)
+import std;:  264 ms warm (parsed 0, reused 401);  cold 2.5 s with a warm cache, 10.0 s from nothing
+unit read:    second 0.10 s, restart 0.11 s — both "served without the walk"
+`format`:     offered in the completion; 4 declarations in the index of `std`
+workspace:    145 suites, 0 failures
+```
 
 ## P0 — probes on an external fixture
 
