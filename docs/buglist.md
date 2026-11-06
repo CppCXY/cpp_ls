@@ -1058,16 +1058,23 @@ whose name is the last segment, so the jump lands in the base where the member i
 Minimal shape: `struct B { static int f(); }; struct D : B {}; D::f();` — `hover --fixture` resolved `B::f` after the
 change, and so did the real project.
 
-### 32.4 A template-id with a **non-type** argument does not resolve as a type — located
+### 32.4 A template-id with a **non-type** argument — **not reproducible; the measurements were at the wrong offset**
 
-```cpp
-namespace std { template <int N> class S { public: void f(); }; }
-std::S<4> s;      // type at `std::S<4>` → UnknownType("std::S<4>"); hover → none
-s.f();            // completion → scope std::S, member f        (so the class is found by the member walk)
+The first measurement asked at `--shift 6` of `std::S<4>`, which is the `<`, not the name: `UnparsableName`, read as
+"the type layer cannot resolve a non-type argument". Every question at the **name** answers:
+
+```text
+fixture  std::V<int>  hover → template <class T> class V          define → nontype2.cpp:3:7  V  type in std
+         std::S<4>    hover → template <int N> class S            define → nontype2.cpp:8:7  S  type in std
+project  std::counting_semaphore<4> (test_cpp/src/concurrency.cpp:106)
+         hover  → template <ptrdiff_t __least_max_value = …> class counting_semaphore
+                  As written here: `std::counting_semaphore<4>`
+         define → semaphore:50:11  counting_semaphore  type in std over [__least_max_value]
+         members → 10 members
+         complete at `std::` → `counting_semaphore  Class` (the list is 1000 items, so the editor's page matters)
 ```
 
-The real project's shape is `std::counting_semaphore<4>` (its parameter `ptrdiff_t __least_max_value` is non-type);
-`std::latch` — same header, no arguments — hovers fine.
+So this was a **stale summary** (the `FORMAT_VERSION` 14/15 bumps) plus a bad cursor offset, not a type-layer gap.
 
 ### 32.5 An `auto` return of a template member is not deduced — located
 

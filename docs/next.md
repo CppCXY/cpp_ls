@@ -175,8 +175,9 @@ From `docs/hover-render.md` §3, in the order they are likely to be met:
   same two readings, and the card probe `CPPLS_DEBUG_CARD` prints what it read.
 * ~~An inherited static member through a qualified name~~ — **fixed**: the `NotDeclaredHere` arm asks `members_of` for a
   qualified spelling, so `Derived::instances()` answers `Base::instances`.
-* **A template-id with a non-type argument as a type name** (`std::counting_semaphore<4>`, `std::S<4>`) — the type
-  layer answers Unknown while `members_of` resolves it.
+* ~~A template-id with a non-type argument as a type name~~ — **not a bug**: the first measurement was at the `<`
+  (an `UnparsableName`), and every question at the name answers — hover, define, members and completion, measured on
+  `std::counting_semaphore<4>` in `concurrency.cpp:106` and on a `std::S<4>` fixture. `docs/buglist.md` §32.4.
 * **An `auto` return of a template member** (`optional::transform`) — the deduction item of §2.
 
 ## 8. The session fixtures' shared directory — fixed, and what would explain a repeat
