@@ -36,6 +36,25 @@ use crate::summary::TuEvent;
 /// A magic number, so that reading the wrong file is a loud refusal rather than a plausible cache.
 const MAGIC: &[u8; 8] = b"CPPLSWS1";
 
+/// **One contribution as one database row** — the same entry format, with a count of one.
+///
+/// The sharing cache lives in the project's redb database now (`cache_db::CacheDb::put_contributions`), one row per
+/// contribution, so the row needs a self-contained encoding. Reusing [`encode`]'s entry format means a row and a
+/// whole-file cache cannot come to disagree about the shape.
+pub(crate) fn encode_one(key: u64, contribution: &Contribution) -> Vec<u8> {
+    encode(&[(key, contribution.clone())])
+}
+
+/// **One row back** — `None` for bytes this version cannot read, which is a miss rather than an error, exactly as a
+/// whole-file cache's decode is.
+pub(crate) fn decode_one(bytes: &[u8]) -> Option<Contribution> {
+    let mut entries = decode(bytes)?;
+    (entries.len() == 1)
+        .then(|| entries.pop())
+        .flatten()
+        .map(|(_, contribution)| contribution)
+}
+
 /// **Write a cache** — the entries, in whatever order the caller has them.
 pub(crate) fn encode(entries: &[(u64, Contribution)]) -> Vec<u8> {
     let mut out = Vec::new();

@@ -56,6 +56,15 @@ const ENVIRONMENTS: TableDefinition<u64, &[u8]> = TableDefinition::new("environm
 const MACROS: TableDefinition<u64, &[u8]> = TableDefinition::new("macros");
 const UNITS: TableDefinition<u64, &[u8]> = TableDefinition::new("units");
 const UNIT_INDICES: TableDefinition<u64, &[u8]> = TableDefinition::new("unit_indices");
+/// **What one file contributed to a walk**, keyed by the contribution key the walk computes — see
+/// [`crate::index::walk_cache`].
+///
+/// It used to be a separate `<cache>/sharing.bin`, written whole at shutdown and decoded whole on every start: one
+/// file whose failure mode was "the whole sharing cache is lost", and a start that paid for every entry before it
+/// could answer anything. A table gives it the atomicity the rest of the cache already has. Measured on the modules
+/// fixture: `sharing.bin` was **634 KB** beside a 22 MB database, so the merge is about the failure mode and the
+/// startup cost rather than about disk.
+const CONTRIBUTIONS: TableDefinition<u64, &[u8]> = TableDefinition::new("contributions");
 
 const KEY_SCHEMA: &str = "schema_version";
 const KEY_GENERATION: &str = "generation";
@@ -141,6 +150,8 @@ pub struct DatabaseSizes {
     pub macros: usize,
     pub units: usize,
     pub unit_indices: usize,
+    /// The sharing cache's rows — see [`CacheDb::put_contributions`].
+    pub contributions: usize,
     pub bytes: u64,
 }
 
@@ -293,6 +304,7 @@ impl CacheDb {
             write.open_table(MACROS)?;
             write.open_table(UNITS)?;
             write.open_table(UNIT_INDICES)?;
+            write.open_table(CONTRIBUTIONS)?;
         }
         write.commit()?;
 
@@ -594,6 +606,49 @@ impl CacheDb {
         Ok(())
     }
 
+    // ---- contributions -----------------------------------------------------------------------------
+
+    /// **Every walk contribution, in one transaction** — the sharing cache, in the database rather than in a
+    /// `sharing.bin` beside it.
+    ///
+    /// The bytes are [`crate::index::walk_cache_codec::encode`]'s, so this table has no opinion about their shape: a
+    /// contribution that cannot be decoded is a miss, which is the same rule the summaries follow.
+    pub fn put_contributions(&self, entries: &[(u64, Vec<u8>)]) -> Result<usize> {
+        let write = self.database.begin_write()?;
+        let written;
+        {
+            let mut table = write.open_table(CONTRIBUTIONS)?;
+            for (key, bytes) in entries {
+                table.insert(*key, &bytes[..])?;
+            }
+            written = entries.len();
+        }
+        write.commit()?;
+        Ok(written)
+    }
+
+    /// What the previous run left. `Ok(vec![])` is a cold start, not an error — the walk is correct without it.
+    pub fn contributions(&self) -> Result<Vec<(u64, Vec<u8>)>> {
+        let read = self.database.begin_read()?;
+        let table = read.open_table(CONTRIBUTIONS)?;
+        let mut entries: Vec<(u64, Vec<u8>)> = Vec::new();
+        for entry in table.iter()? {
+            let (key, value) = entry?;
+            entries.push((key.value(), value.value().to_vec()));
+        }
+        Ok(entries)
+    }
+
+    /// How many contributions the table holds, for a cache report.
+    pub fn contribution_count(&self) -> usize {
+        let count = || -> Result<usize> {
+            let read = self.database.begin_read()?;
+            let table = read.open_table(CONTRIBUTIONS)?;
+            Ok(table.len()? as usize)
+        };
+        count().unwrap_or(0)
+    }
+
     // ---- environments and macros -------------------------------------------------------------------
 
     pub fn put_environment(&self, env: u64, bytes: &[u8]) -> Result<()> {
@@ -723,6 +778,7 @@ impl CacheDb {
             macros: count(read.open_table(MACROS)?.len()? as usize),
             units: count(read.open_table(UNITS)?.len()? as usize),
             unit_indices: count(read.open_table(UNIT_INDICES)?.len()? as usize),
+            contributions: count(read.open_table(CONTRIBUTIONS)?.len()? as usize),
             bytes: std::fs::metadata(self.directory.join(DATABASE_FILE))
                 .map(|metadata| metadata.len())
                 .unwrap_or(0),
@@ -917,6 +973,25 @@ impl SummaryCache {
     /// **A unit rendering, by its closure key** — see [`CacheDb::unit`].
     pub fn unit(&self, key: u64) -> Result<Option<crate::RenderedUnit>> {
         self.database.unit(key)
+    }
+
+    /// Where this database lives — the directory its rows are in, for a caller that has to tell one project's cache
+    /// from another's.
+    pub fn directory(&self) -> &Path {
+        self.database.directory()
+    }
+
+    /// **The sharing cache, in the database** — see [`CacheDb::put_contributions`].
+    ///
+    /// It was a `sharing.bin` beside the database until the merge: one file, decoded whole on every start, and lost
+    /// whole if it was interrupted. Rows in a table get the atomicity the summaries already had.
+    pub fn put_contributions(&self, entries: &[(u64, Vec<u8>)]) -> Result<usize> {
+        self.database.put_contributions(entries)
+    }
+
+    /// What the previous run left — see [`CacheDb::contributions`].
+    pub fn contributions(&self) -> Result<Vec<(u64, Vec<u8>)>> {
+        self.database.contributions()
     }
 
     pub fn put_unit(&self, key: u64, unit: &crate::RenderedUnit) -> Result<()> {

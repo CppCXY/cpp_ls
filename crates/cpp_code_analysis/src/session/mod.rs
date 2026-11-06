@@ -4161,39 +4161,33 @@ impl<F: FileProvider + Clone> Session<F> {
         self.cooking.abandon()
     }
 
-    /// **Write the sharing cache** next to the summaries, so that the next run starts warm — §8 step 4.
+    /// **Write the sharing cache into the project's database**, so that the next run starts warm — §8 step 4.
     ///
-    /// One file, `<cache>/sharing.bin`. Its entries carry their own identity (the file's fingerprint and the projection
-    /// of its conditions), so a stale file cannot answer a different question — it simply fails to hit.
+    /// It is a table rather than a `<cache>/sharing.bin` beside the database, and that is a deliberate move: the file
+    /// was written whole and decoded whole, so a start paid for every entry before it could answer anything, and an
+    /// interrupted write lost the whole cache. The rows carry their own identity (the file's fingerprint and the
+    /// projection of its conditions), so a stale row cannot answer a different question — it simply fails to hit.
+    ///
+    /// `Err` only when there is no database to write to: a session with the cache turned off is not a failure, but a
+    /// caller that asked to save something is owed the difference. `0` entries is the honest answer for a run that
+    /// walked nothing.
     pub fn save_the_sharing(&self) -> std::io::Result<usize> {
-        use crate::index::walk_cache_codec;
-
-        let entries = self.store.contributions().saved();
-        let written = entries.len();
-        std::fs::write(
-            self.store.cache_directory().join(SHARING_FILE),
-            walk_cache_codec::encode(&entries),
-        )?;
-        Ok(written)
+        if self.store.database().is_none() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "this project has no summary database to write the sharing cache into",
+            ));
+        }
+        Ok(self.store.save_the_contributions())
     }
 
-    /// **Read the sharing cache back**, if this run's cache directory holds one.
+    /// **Read the sharing cache back** from the project's database.
     ///
-    /// A missing or unreadable file is a cold start, not an error: the cache is an accelerator and the walk is always
-    /// correct without it. Say how many entries were restored, because "it loaded nothing" and "it did not run" are
-    /// different facts and only one of them is interesting.
+    /// A missing table, an unreadable row or a byte this version cannot decode is a cold start, not an error: the
+    /// cache is an accelerator and the walk is always correct without it. Say how many entries were restored, because
+    /// "it loaded nothing" and "it did not run" are different facts and only one of them is interesting.
     pub fn load_the_sharing(&self) -> usize {
-        use crate::index::walk_cache_codec;
-
-        let Ok(bytes) = std::fs::read(self.store.cache_directory().join(SHARING_FILE)) else {
-            return 0;
-        };
-        let Some(entries) = walk_cache_codec::decode(&bytes) else {
-            return 0;
-        };
-        let restored = entries.len();
-        self.store.contributions().restore(entries);
-        restored
+        self.store.load_the_contributions()
     }
 
     /// Is this file's summary in the index — the question [`Session::pending`] answers for the whole project.

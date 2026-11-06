@@ -285,6 +285,18 @@ fn the_sharing_cache_survives_a_restart() {
         restored,
         "and it is in the cache the walk consults, not merely counted"
     );
+
+    // **It is a table in the project's database, not a file beside it.** The old shape was `<cache>/sharing.bin`,
+    // written whole and decoded whole on every start, so a truncated one lost the lot. Pinned here because the
+    // difference is invisible from the two calls above: both shapes round-trip.
+    if let Some(database) = session.store.database() {
+        let directory = database.directory().to_path_buf();
+        assert!(
+            !directory.join("sharing.bin").exists(),
+            "the sharing cache is not a file any more: {}",
+            directory.display()
+        );
+    }
 }
 
 #[test]

@@ -653,6 +653,55 @@ impl<F: FileProvider> SummaryStore<F> {
         &self.walk_cache
     }
 
+    /// **Write the sharing cache into the project's database** — the end of a run, so the next one starts warm.
+    ///
+    /// It used to be a `sharing.bin` beside the database: one file, written whole, decoded whole on every start. The
+    /// rows now go into their own table in **one transaction**, and a row that cannot be decoded later is a miss
+    /// rather than a lost entry — the same rule the summaries follow. `0` when this project has no database at all,
+    /// which is a session with the cache turned off rather than a failure.
+    pub(crate) fn save_the_contributions(&self) -> usize {
+        let Some(database) = self.summary_database() else {
+            return 0;
+        };
+        let entries = self.contributions().saved();
+        if entries.is_empty() {
+            return 0;
+        }
+        let encoded: Vec<(u64, Vec<u8>)> = entries
+            .into_iter()
+            .map(|(key, contribution)| {
+                (
+                    key,
+                    crate::index::walk_cache_codec::encode_one(key, &contribution),
+                )
+            })
+            .collect();
+        database.put_contributions(&encoded).unwrap_or(0)
+    }
+
+    /// **Read the sharing cache back from the database** — a warm start, and nothing else.
+    ///
+    /// A table that cannot be read, or a row whose bytes do not decode, is a cold start: the walk is always correct
+    /// without this cache, and how many entries were restored is what tells "it loaded nothing" apart from "it did
+    /// not run".
+    pub(crate) fn load_the_contributions(&self) -> usize {
+        let Some(database) = self.summary_database() else {
+            return 0;
+        };
+        let Ok(rows) = database.contributions() else {
+            return 0;
+        };
+        let mut entries = Vec::with_capacity(rows.len());
+        for (key, bytes) in rows {
+            if let Some(contribution) = crate::index::walk_cache_codec::decode_one(&bytes) {
+                entries.push((key, contribution));
+            }
+        }
+        let restored = entries.len();
+        self.contributions().restore(entries);
+        restored
+    }
+
     /// **What the file directs, without parsing it** — see [`FileIndexer::directive_summary`](crate::index::FileIndexer::directive_summary).
     ///
     /// `None` when the file cannot be read. The indexer is built the way every summary this store builds is: the
