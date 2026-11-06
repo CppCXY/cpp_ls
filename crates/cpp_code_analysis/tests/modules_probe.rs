@@ -31,6 +31,20 @@
 //!
 //! Still not done, and visible here: `format` is not offered after `std::`. The names come from the headers of the
 //! closure; the standard *module's* exports are P5's work.
+//!
+//! **And reading programs does not produce them**, which was worth measuring rather than assuming. With
+//! `CPPLS_MODULES_UNIT=1` the probe reads up to three programs before asking:
+//!
+//! ```text
+//! unit read 1: 1 file(s) in 368.8µs      (main.cpp — `import std;` is not an `#include`, so its closure is itself)
+//! unit read 2: 81 file(s) in 1.04 s
+//! unit read 3: 81 file(s) in 1.06 s
+//! completion after `std::`: [… no `format` …]
+//! ```
+//!
+//! So a program read of the *importing* file places nothing from the module: what `std::format` needs is the
+//! **interface unit's** own exports (`std.ixx`'s `export namespace std { using … }` block), read as the program it is.
+//! The probe's `unit read 2` is one of the project's own units, not `std.ixx`.
 
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -207,6 +221,19 @@ fn what_import_std_costs() {
             return;
         };
         let started = Instant::now();
+        // **Does reading the program make the module's exports visible?** The question the completion line below asks
+        // in its failure note, answered by forcing the read and asking again.
+        if std::env::var_os("CPPLS_MODULES_UNIT").is_some_and(|value| !value.is_empty()) {
+            for round in 1..=3 {
+                let one = Instant::now();
+                let read = session.read_a_unit_of_the_project();
+                println!(
+                    "unit read {round}: {} file(s) in {:?}",
+                    read.map_or(0, |reading| reading.files),
+                    one.elapsed()
+                );
+            }
+        }
         let Some(view) = session.view_of_the_file(main) else {
             println!("main.cpp has no view");
             return;
