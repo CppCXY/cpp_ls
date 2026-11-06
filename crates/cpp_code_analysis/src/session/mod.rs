@@ -168,6 +168,22 @@ const RE_READ_SLICE: usize = 16;
 /// The shared timeline is not free of consequence: a reading built through it has the *slice root's* environment, not
 /// the candidate's own, so it cannot be stored as that file's refinement. Four is where a fixture stops being a
 /// fixture: below it, one walk per candidate is the cheaper side of that trade and the refinement stays cacheable.
+///
+/// # The per-candidate walk was tried again, and it is not the way
+///
+/// The argument for it is that its reading *is* cacheable — the environment is the candidate's own closure — so a
+/// first start pays the walks and later ones serve them. Measured, with this constant forced to `usize::MAX` so no
+/// slice ever shares, on the same fixture and the same cache:
+///
+/// ```text
+/// shared (WALKS_WORTH_SHARING = 4):   cold 2.5 s     warm 1.1 s
+/// own walks (no sharing at all):      cold 38.6 s    warm 66–104 s in three runs
+/// ```
+///
+/// So the half of the argument about caching does not hold: the walks are paid again on every start, and a warm start
+/// that walks is *forty to a hundred times* slower than one that shares. Whatever makes those readings unservable (the
+/// closure key moving, or `commit_the_re_read` never storing them), the shared timeline is the cheaper default and
+/// this constant is the lever that keeps it.
 const WALKS_WORTH_SHARING: usize = 4;
 /// **How many macro environments one drain builds.**
 ///
