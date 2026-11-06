@@ -3078,6 +3078,16 @@ impl cpp_parser::MacroFacts for MacroView<'_> {
 pub struct RenderedUnit {
     /// The tokens of every file the unit reached, in the order a compiler would read them.
     pub text: String,
+    /// **Every file the *walk* entered**, in the order it entered them — which is not `files`.
+    ///
+    /// `files` names the files that contributed **tokens** to the stream, and this names the files the walk read,
+    /// including the ones that contribute none: a header of nothing but `#define`s and `#if`s (`bits/version.h`,
+    /// `yvals_core.h`) is read by the preprocessor and writes no token to the program.
+    ///
+    /// It exists because the key this rendering is filed under folds *the walk's* files. Without the list, a stored
+    /// rendering cannot reproduce its own key, and no cache can find it without re-walking the closure — measured at
+    /// **70.7 ms** for the standard library's 256 files, on every program read.
+    pub walked: Vec<std::path::PathBuf>,
     /// **The `#define`s the walk decided are *not* compiled, by file** — the offsets of the directives it skipped.
     ///
     /// The walk evaluates every guarded fact against the unit's own state ([`UnitMacros`]), which is the same

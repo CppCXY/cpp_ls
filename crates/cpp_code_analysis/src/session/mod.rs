@@ -718,6 +718,13 @@ pub struct Session<F: FileProvider = DiskFiles> {
     ///
     /// Behind a lock for the same reason [`Session::unit_index`] is.
     rendered_unit: std::sync::Mutex<Option<(u64, crate::RenderedUnit)>>,
+    /// **Which key a root's rendering was filed under** — `(root, context) → units_key`, for this session.
+    ///
+    /// The walk exists to produce that key and costs **70.7 ms** on the standard library's 256 files. A rendering
+    /// records the walk's own file list (`RenderedUnit::walked`), so the key can be reproduced from the rendering
+    /// alone — and validated against those files' texts, so an edit between two asks is a miss rather than a stale
+    /// answer.
+    unit_roots: std::sync::Mutex<std::collections::HashMap<(PathBuf, u64), u64>>,
     /// **What each edited file's directives said the last time it changed**, by the path the queue keys on.
     ///
     /// The comparison an edit is judged by: an edit that leaves a file's directives where and what they were cannot
@@ -1390,8 +1397,13 @@ pub struct UnitReadMaterials<F: FileProvider> {
     key: SummaryKey,
     /// The key the rendering is filed under: the content hash of every file the walk entered, folded.
     units_key: u64,
-    /// The walked timeline.
-    unit: std::sync::Arc<crate::TranslationUnit>,
+    /// The walked timeline — **absent when a stored rendering made the walk unnecessary**.
+    ///
+    /// The key a rendering is filed under folds the walk's file list, and a rendering now records that list
+    /// (`RenderedUnit::walked`), so a session that has already walked a program can find the rendering again without
+    /// re-walking it. What is missing then is the timeline, and it is only needed to **cook** — a served rendering is
+    /// already cooked.
+    unit: Option<std::sync::Arc<crate::TranslationUnit>>,
     /// The text of every file the walk entered, by path — what the cook reads.
     sources: HashMap<PathBuf, String>,
     /// What the compilation itself defines ([`crate::Marked`]), which no file in the closure knows.
@@ -1414,6 +1426,11 @@ impl<F: FileProvider> UnitReadMaterials<F> {
         &self.root
     }
 
+    /// **The key the rendering is filed under** — what [`Session::prepare_a_unit_reading`] remembers per root.
+    pub fn units_key(&self) -> u64 {
+        self.units_key
+    }
+
     /// **Read the program** — the cook, the parse and the sweep, and no session at all.
     ///
     /// The order is the one the measurements put in: facts if they are known, then the rendering (a cook, or the one
@@ -1431,19 +1448,34 @@ impl<F: FileProvider> UnitReadMaterials<F> {
         let stream = match self.rendered {
             Some(rendered) => rendered,
             None => {
-                let definitions = self.unit.definitions();
+                // **A cook needs the walk**, and the fast path (`Session::unit_roots`) is the one that has no timeline.
+                // Materials without a unit are only ever built *with* a rendering, so this is unreachable rather than
+                // an answer, and saying so is better than cooking a program from texts nobody walked.
+                let unit = self.unit.as_ref()?;
+                let definitions = unit.definitions();
                 let seed = MacroTable::from_marked(&self.macros);
                 // **The include search, so `__has_include` is answerable.** Without it the operator answers
                 // `Unknown`, which is honest but decides nothing, and `#if __has_include(<span>)` is a shape real
                 // headers are full of. See [`Session::render_the_unit`].
                 let search = crate::preprocess::cooked::Search::new(&self.files, &self.config);
-                let stream = self.unit.cook_the_unit(
+                let mut stream = unit.cook_the_unit(
                     &self.sources,
                     &definitions,
                     Some(&seed),
                     true,
                     Some(&search),
                 );
+                // **And the walk's own file list, which is what its key folds.** `files` names only the files that
+                // contributed tokens; a header of nothing but `#define`s writes none, and a rendering that did not
+                // record it could never reproduce the key it is filed under — see `RenderedUnit::walked`.
+                // **Deduplicated**, because `files()` yields one entry per *inclusion* and the key folds one entry per
+                // path (`the_units_inputs` collects into a map). A file included twice is one input.
+                stream.walked = unit
+                    .files()
+                    .map(|path| path.to_path_buf())
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .into_iter()
+                    .collect();
                 // **Kept under the key, provisionally or not — the key is what makes that safe.** It folds every
                 // `(path, content)` the walk entered, so a rendering of a closure that was still filling has a key
                 // the finished closure cannot repeat: the row is never hit again, it is merely wasted.
@@ -1649,6 +1681,7 @@ impl<F: FileProvider + Clone> Session<F> {
             checks_memo: std::sync::Mutex::new(None),
             unit_index: std::sync::Mutex::new(None),
             rendered_unit: std::sync::Mutex::new(None),
+            unit_roots: std::sync::Mutex::new(HashMap::new()),
             last_edit: std::time::Instant::now(),
             directive_signatures: std::collections::HashMap::new(),
             prefetched: HashMap::new(),
@@ -6004,6 +6037,30 @@ impl<F: FileProvider + Clone> Session<F> {
         Some(stream)
     }
 
+    /// **Does this stored rendering still describe the files the walk entered?**
+    ///
+    /// The same fold `the_units_inputs` makes — every file the **walk** entered (`RenderedUnit::walked`), whose text is
+    /// readable, sorted by path, `path|hash;` — against the key the rendering is filed under. An edit between two asks
+    /// makes the two disagree, which is a miss rather than a stale answer.
+    fn the_rendering_still_describes(&self, rendered: &crate::RenderedUnit, stored: u64) -> bool {
+        let mut inputs: Vec<(&std::path::Path, u64)> = Vec::new();
+        for path in &rendered.walked {
+            let Some(text) = self.files.read(path) else {
+                return false;
+            };
+            inputs.push((path.as_path(), crate::cache::content_hash(&text)));
+        }
+        inputs.sort_unstable_by(|left, right| left.0.cmp(right.0));
+        let mut folded = String::new();
+        for (path, hash) in &inputs {
+            folded.push_str(&path.to_string_lossy());
+            folded.push('|');
+            folded.push_str(&hash.to_string());
+            folded.push(';');
+        }
+        crate::cache::content_hash(&folded) == stored
+    }
+
     /// **The texts a unit's cook reads, and the key its rendering is filed under.**
     ///
     /// Extracted because two callers need exactly this pair and neither should compute it twice: the render
@@ -6064,11 +6121,65 @@ impl<F: FileProvider + Clone> Session<F> {
         // The index's own spelling again, for the same reason [`Session::cook`] takes it: the unit's frames are
         // keyed by the normalized path.
         let root = self.store.index().summary(root)?.path.clone();
+        let context = self.store.context_hash(&root);
+
+        // **The key without the walk, when this session has already walked this program.** The rendering records the
+        // walk's own file list (`RenderedUnit::walked`), so the key it is filed under can be reproduced from the
+        // rendering and checked against those files' current texts — an edit between the two asks is a miss.
+        if let Some(units_key) = self.the_units_key_of(&root, context)
+            && let Some(rendered) = self
+                .rendered_unit
+                .lock()
+                .ok()
+                .and_then(|known| {
+                    known
+                        .as_ref()
+                        .filter(|(seen, _)| *seen == units_key)
+                        .map(|(_, cached)| cached.clone())
+                })
+                .or_else(|| self.store.cached_unit(units_key))
+            && self.the_rendering_still_describes(&rendered, units_key)
+        {
+            if crate::probes::units() {
+                eprintln!(
+                    "unit gather: key {units_key:016x} served without the walk in {:?} ({} walked, {} token file(s))",
+                    started.elapsed(),
+                    rendered.walked.len(),
+                    rendered.files.len(),
+                );
+            }
+            let program = crate::cache::content_hash(&rendered.text);
+            let known = self
+                .unit_index
+                .lock()
+                .ok()
+                .and_then(|memo| {
+                    memo.as_ref()
+                        .filter(|(seen, _)| *seen == program)
+                        .map(|(_, cached)| cached.clone())
+                })
+                .or_else(|| self.store.cached_indexed_unit(program));
+            return Some(UnitReadMaterials {
+                root,
+                key: SummaryKey::new(0, context),
+                units_key,
+                unit: None,
+                sources: HashMap::new(),
+                macros: self.store.index().macros().clone(),
+                config: self.config.clone(),
+                files: self.files.clone(),
+                database: self.store.database(),
+                program: Some(program),
+                rendered: Some(rendered),
+                known,
+            });
+        }
+
         let unit = self.translation_unit_of(&root)?;
         let walked = started.elapsed();
         let (sources, units_key) = self.the_units_inputs(&unit);
         let hashed = started.elapsed() - walked;
-        let key = SummaryKey::new(0, self.store.context_hash(&root));
+        let key = SummaryKey::new(0, context);
 
         // **The rendering, if this session or the database already has it.** Without it the program's hash is unknown
         // and neither cache can be asked — so the facts are looked up in `read_the_program`, after the cook.
@@ -6117,7 +6228,7 @@ impl<F: FileProvider + Clone> Session<F> {
             root,
             key,
             units_key,
-            unit,
+            unit: Some(unit),
             sources,
             macros: self.store.index().macros().clone(),
             config: self.config.clone(),
@@ -6140,7 +6251,29 @@ impl<F: FileProvider + Clone> Session<F> {
     /// **parse of the whole program** and a sweep of every declaration in it — **5.09 s** for a 159-file,
     /// 737 525-token program on a real project, and **85 ms** for the same program again.
     pub fn prepare_a_unit_reading(&self, root: &Path) -> Option<PreparedUnitReading> {
-        self.gather_a_unit_read(root)?.read_the_program()
+        let materials = self.gather_a_unit_read(root)?;
+        // **Remember which key this root's rendering came out under**, so the next ask in this session can skip the
+        // walk that produced it. Recorded here rather than inside `read_the_program`, which has no session to write to.
+        let spelling = self
+            .store
+            .index()
+            .summary(root)
+            .map(|summary| summary.path.clone())
+            .unwrap_or_else(|| root.to_path_buf());
+        let context = self.store.context_hash(&spelling);
+        let units_key = materials.units_key();
+        if let Ok(mut known) = self.unit_roots.lock() {
+            known.insert((spelling, context), units_key);
+        }
+        materials.read_the_program()
+    }
+
+    /// **The units key a root's rendering was filed under in this session**, if it was read here.
+    fn the_units_key_of(&self, root: &Path, context: u64) -> Option<u64> {
+        self.unit_roots
+            .lock()
+            .ok()
+            .and_then(|known| known.get(&(root.to_path_buf(), context)).copied())
     }
 
     /// Remember what a program's parse came out as — the one-entry memo `Session::unit_index` holds.

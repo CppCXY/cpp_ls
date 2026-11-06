@@ -39,7 +39,7 @@ use crate::summary::{RenderedUnit, UnitMessage, UnitSpan};
 const MAGIC: [u8; 4] = *b"UNIT";
 
 /// Bumped when the layout changes; an older record is then unreachable rather than misread.
-pub const UNIT_CODEC_VERSION: u32 = 3;
+pub const UNIT_CODEC_VERSION: u32 = 4;
 
 #[derive(Debug)]
 pub enum DecodeError {
@@ -80,6 +80,12 @@ pub fn encode(unit: &RenderedUnit) -> Vec<u8> {
 
     put_u32(&mut out, unit.files.len() as u32);
     for path in &unit.files {
+        put_path(&mut out, path);
+    }
+    // **The walk's own file list** — see `RenderedUnit::walked`. It is what lets a stored rendering reproduce the key
+    // it is filed under without re-walking the closure (70.7 ms for the standard library's 256 files).
+    put_u32(&mut out, unit.walked.len() as u32);
+    for path in &unit.walked {
         put_path(&mut out, path);
     }
     put_u32(&mut out, unit.file_lengths.len() as u32);
@@ -138,6 +144,11 @@ pub fn decode(bytes: &[u8]) -> Result<RenderedUnit, DecodeError> {
     let mut files: Vec<PathBuf> = Vec::with_capacity(file_count);
     for _ in 0..file_count {
         files.push(reader.path()?);
+    }
+    let walked_count = reader.count(MAX_FILES)?;
+    let mut walked: Vec<PathBuf> = Vec::with_capacity(walked_count);
+    for _ in 0..walked_count {
+        walked.push(reader.path()?);
     }
     let length_count = reader.count(MAX_FILES)?;
     let mut file_lengths: Vec<usize> = Vec::with_capacity(length_count);
@@ -200,6 +211,7 @@ pub fn decode(bytes: &[u8]) -> Result<RenderedUnit, DecodeError> {
         messages,
         spans,
         files,
+        walked,
         file_lengths,
         braces,
         missing,
@@ -308,6 +320,11 @@ mod tests {
                 },
             ],
             files: vec![PathBuf::from("/p/a.h"), PathBuf::from("/p/b.h")],
+            walked: vec![
+                PathBuf::from("/p/a.h"),
+                PathBuf::from("/p/b.h"),
+                PathBuf::from("/p/only_defines.h"),
+            ],
             file_lengths: vec![10, 20],
             braces: 2,
             missing: 1,
