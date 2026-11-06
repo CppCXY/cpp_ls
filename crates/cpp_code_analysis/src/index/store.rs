@@ -2009,9 +2009,12 @@ impl<F: FileProvider> SummaryStore<F> {
             // timeline covers, its own closure's text (the re-read falls back to walking it). This used to read
             // **every indexed file** the moment one candidate was uncovered: 1761 texts per drain, 40 MB of copying,
             // twelve times in one start-up. `read_into` skips what is already there, so a closure is paid once.
-            for summary in &candidates {
-                self.read_into(&mut sources, &summary.path);
-            }
+            //
+            // **And a candidate's text is read when the pass reaches it, not when it is listed.** The list is every
+            // file in the closure that defines a mentioned macro, and the test at the head of the loop — does it
+            // define one of the *bodied* names — drops most of them from the index alone. Reading all of them first
+            // meant a warm start copied texts for candidates it then declined: four slices carried **29, 21, 67 and
+            // 85 source(s)** and cost 292, 38, 487 and 266 ms on the modules fixture.
             for path in indexed {
                 if units.iter().any(|unit| unit.environment_of(path).is_some()) {
                     continue;
@@ -2066,12 +2069,12 @@ impl<F: FileProvider> SummaryStore<F> {
         // count that work twice (measured: an enclosing version reported 106% of the wall clock).
         for summary in candidates.iter().copied() {
             let key = normalize_path(&summary.path, cfg!(windows));
-            let Some(source) = sources.get(&key) else {
-                continue;
-            };
-
-            // A file that defines none of the words the files being re-read mention can contribute nothing — see
-            // `mentioned` above. Asked before the environment is built, which is the whole point.
+            // **A candidate that defines none of the words the files being re-read mention contributes nothing** —
+            // and the question is answered from the index, so its text is not read first. That order is the whole of
+            // this change: the map used to carry the slice's entire closure because every candidate was expected to be
+            // rendered, while most candidates are dropped by the test below without their text ever being looked at.
+            // Measured on the modules fixture, a warm start: four slices of 13–15 files carried **29, 21, 67 and 85
+            // source(s)** and cost 292, 38, 487 and 266 ms — for candidates the pass then declined.
             if !summary
                 .macros
                 .iter()
@@ -2079,6 +2082,9 @@ impl<F: FileProvider> SummaryStore<F> {
             {
                 continue;
             }
+            let Some(source) = sources.get(&key) else {
+                continue;
+            };
 
             let mut environment: Option<cpp_parser::MacroEnvironment> = None;
             let bodies = bodies_of(&environments, &seed, &summary.path);
