@@ -32,11 +32,13 @@ module's names — `std::format` among them — reachable from a file that does 
 ## P2 — demand-driven summaries
 
 * **Landed.** `index_everything` owes the *index*; a reading of a file as a compiler sees it is owed to whoever asks
-  (an open file, a request, the pump). Warm `import std;`: **1.45 s → 360 ms**.
+  (an open file, a request, the pump). Warm `import std;`: **1.45 s → 360 ms**, and **266 ms** after the walk skip below.
 * **Closure memoisation was measured and is not needed**: the closure walk is **1–7 ms** of a 150–580 ms pass.
-* **The byte budget is quantified but not built**: a 401-file std closure holds **52 MB of summaries and 25 MB of cooked
-  readings** (130 KB + 112 KB per file), so a 100 000-file project would hold **13 GB**. Eviction is a policy question —
-  a forgotten summary is re-read on demand — and it is the open item.
+* **The byte budget is built** (`Session::enforce_the_summary_budget`, 1 GiB, largest summaries first, four kinds of file
+  never touched), and it is sized by a measurement: a 401-file std closure holds **52 MB of summaries and 25 MB of cooked
+  readings**, so a 100 000-file project would hold **13 GB**. **It cannot fire yet**, and that is the open item: under the
+  demand-driven contract the second pass's backlog is never empty, so every indexed file is protected by one of the four
+  rules. The resolution is a policy for which *queued* files may be forgotten (the pass's own skips), not a looser filter.
 
 ## P3 — parallel building
 
@@ -48,8 +50,10 @@ a shared counter). What is sequential is the drain's per-file decode and insert,
 * The sharing cache was folded into the project's redb database (`bfb2a34`); `sharing.bin` is gone.
 * **No cross-project sharing**, by test: `a_refinement_belongs_to_the_project_that_built_it` asserts the cache lives in
   the project, and that a second project serving the same file gets **0** refinements served.
-* The interface unit's rendering and facts are cached per project: a warm program read is **190 ms of prepare**
-  (walk 70.7 ms, key 22.3 ms, decode ~97 ms) plus **44 ms of commit**.
+* **A rendering records the walk's own file list** (`RenderedUnit::walked`, codec v4), so a stored rendering can
+  reproduce the key it is filed under: a `unit_roots` row takes a warm read from the root to the rendering without
+  walking the closure. Measured: a fresh process reads the std unit with **prepare 0.11 s** (was 0.18 s), every read
+  "served without the walk". What remains is the proof — 223 texts (22 ms) and the decode (~45 ms).
 
 ## P5 — the module's names reach an importing file
 
@@ -64,9 +68,9 @@ a shared counter). What is sequential is the drain's per-file decode and insert,
 
 | | |
 |---|---|
-| cold, cold cache | 9.9 s (everything rebuilt) |
+| cold, cold cache | 10.0 s (everything rebuilt) |
 | cold, warm cache | 2.5 s |
-| warm, three runs | 360.2 ms, 359.8 ms, 357.9 ms |
+| warm, three runs | **266 ms, 262 ms, 264 ms** (360 ms before the walk skip) |
 | database share of a run | 0.04 s of reads, 0.01 s of writes |
 
 Four defects, each measured before and after: a served reading was queued for a full cook; a batch read files as
@@ -75,7 +79,7 @@ programs when a timeline was merely *held*; the second pass walked one timeline 
 
 ## What is open
 
-1. **P2's eviction policy** — the numbers are known (52 MB / 13 GB), the policy is not built.
-2. **P3's sequential tail** — the drain's decode and insert.
-3. **The unit walk is 70.7 ms and cannot yet be skipped**, because the key a rendering is filed under folds *the walk's*
-   file list and a rendering only names *the cook's* (`RenderedUnit::walked` would close it).
+1. **The byte budget's trigger.** It is built and cannot fire: the second pass's backlog protects every indexed file, and
+   under the demand-driven contract that backlog is never empty. The resolution is a policy for which *queued* files the
+   pass would skip anyway, not a looser filter.
+2. **P3's sequential tail** — the drain's per-file decode and insert, and one program's parse.
