@@ -252,7 +252,19 @@ fn what_import_std_costs() {
             if offered.truncated { ", truncated" } else { "" }
         );
         if !labels.iter().any(|label| *label == "format") {
-            println!("  ← `format` is NOT offered: the standard module was not read");
+            // **The completion is capped**, so a missing `format` here means "past the thousandth name" as often as
+            // it means "not exported". The index is asked directly instead of inferring from a truncated list.
+            let declared = session
+                .index()
+                .declarations_in("std", main)
+                .iter()
+                .filter(|declaration| declaration.fact.name.as_str() == "format")
+                .count();
+            println!(
+                "  ← `format` is not among the {} offered (truncated: {}); the index holds {declared} `std::format`",
+                labels.len(),
+                offered.truncated
+            );
         }
     }
 }

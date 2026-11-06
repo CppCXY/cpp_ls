@@ -5868,10 +5868,19 @@ impl<F: FileProvider + Clone> Session<F> {
         // decode is the difference between a second unit read costing a second and costing a
         // moment.
         if let Some(cached) = self.store.cached_unit(key) {
+            if crate::probes::units() {
+                eprintln!("unit render: key {key:016x} served from the cache");
+            }
             if let Ok(mut known) = self.rendered_unit.lock() {
                 *known = Some((key, cached.clone()));
             }
             return Some(cached);
+        }
+        if crate::probes::units() {
+            eprintln!(
+                "unit render: key {key:016x} MISSED ({} source(s) to cook)",
+                sources.len()
+            );
         }
 
         let definitions = unit.definitions();
@@ -5971,6 +5980,16 @@ impl<F: FileProvider + Clone> Session<F> {
                     .map(|(_, cached)| cached.clone())
             })
             .or_else(|| self.store.cached_unit(units_key));
+        if crate::probes::units() {
+            eprintln!(
+                "unit gather: key {units_key:016x} {}",
+                if rendered.is_some() {
+                    "served"
+                } else {
+                    "MISSED"
+                }
+            );
+        }
 
         let (program, known) = match &rendered {
             Some(rendered) => {
@@ -6134,8 +6153,19 @@ impl<F: FileProvider + Clone> Session<F> {
     /// fact lost. The cause was the one `index_unit_rendering`'s crossing fence now quarantines — a file whose
     /// unclosed scope used to swallow the rest of the program.
     pub fn read_the_unit(&mut self, root: &Path) -> Option<UnitReading> {
+        let gathering = std::time::Instant::now();
         let prepared = self.prepare_a_unit_reading(root)?;
-        Some(self.commit_a_unit_reading(prepared))
+        let gathered = gathering.elapsed();
+        let committing = std::time::Instant::now();
+        let reading = self.commit_a_unit_reading(prepared);
+        if crate::probes::units() {
+            eprintln!(
+                "unit read: prepare {gathered:?} (walk + cook + parse), commit {:?} ({} file(s) filed)",
+                committing.elapsed(),
+                reading.files
+            );
+        }
+        Some(reading)
     }
 
     /// **Is a whole program going to be read from this drain?** — the one rule that keeps a unit read off the path
