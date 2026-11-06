@@ -81,7 +81,17 @@ fn a_second_session_serves_the_stored_refinement() {
     // **The first session does the work.** `index_everything` reads the files and asks for their refinement; the
     // answer is written to the cache directory as a refined summary *and* a cooked reading.
     let mut first = a_session(project.root());
+    // **The ask**, and the shape this fixture adds to every other one: `DiskFiles`, and a path the test spells.
+    first.want_refinement(&widget);
     first.index_everything();
+    println!(
+        "P2DEBUG refined {} wanted {} backlog {} pending {} stats {:?}",
+        first.is_refined(&widget),
+        first.refinements_wanted(),
+        first.re_read_backlog(),
+        first.pending_work(),
+        first.stats()
+    );
     assert!(
         first.is_refined(&widget),
         "the fixture's `widget.h` has to be refined for this test to be about serving one"
@@ -96,8 +106,10 @@ fn a_second_session_serves_the_stored_refinement() {
     let served_by_the_first = first.stats().stored_refinements_served;
     drop(first);
 
-    // **The second session, over the same directory.** Nothing has changed, so nothing has to be rebuilt.
+    // **The second session, over the same directory.** Nothing has changed, so nothing has to be rebuilt — and the ask
+    // is the same one, because a batch neither serves nor rebuilds a refinement for a file nobody named.
     let mut second = a_session(project.root());
+    second.want_refinement(&widget);
     second.index_everything();
 
     assert!(
@@ -128,11 +140,16 @@ fn a_second_session_serves_the_stored_refinement() {
 #[test]
 fn a_changed_file_is_not_served_from_the_cache() {
     let project = Project::new("changed");
-    project.write("open.h", OPEN_H);
+    let open = project.write("open.h", OPEN_H);
     let widget = project.write("widget.h", WIDGET_H);
     let main = project.write("main.cpp", "#include \"widget.h\"\n");
 
     let mut first = a_session(project.root());
+    // **The asks**, because a batch no longer refines what it read: the three records the second session is about are
+    // the ones asked about here.
+    first.want_refinement(&open);
+    first.want_refinement(&widget);
+    first.want_refinement(&main);
     first.index_everything();
     assert!(first.is_refined(&widget));
     drop(first);
@@ -145,6 +162,9 @@ fn a_changed_file_is_not_served_from_the_cache() {
     .expect("the fixture rewrites");
 
     let mut second = a_session(project.root());
+    second.want_refinement(&open);
+    second.want_refinement(&widget);
+    second.want_refinement(&main);
     second.index_everything();
     // **One file is served and it is not this one**: `main.cpp` did not change, so its record still describes its
     // text, while `widget.h` did — its record is a miss however similar the two readings are.

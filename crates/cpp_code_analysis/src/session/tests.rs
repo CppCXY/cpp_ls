@@ -213,12 +213,15 @@ fn a_refinement_is_served_to_the_next_session() {
     {
         let mut first = fixture.session();
         first.add_project_files(roots.iter().cloned());
+        // **The ask**: a batch no longer refines what it read (see the loop in `Session::index_everything`).
+        first.want_refinement(Path::new("/p/api.h"));
         first.index_everything();
         assert!(first.is_indexed("/p/api.h"), "the closure was followed");
     }
 
     let mut second = fixture.session();
     second.add_project_files(roots.iter().cloned());
+    second.want_refinement(Path::new("/p/api.h"));
     second.index_everything();
     assert_eq!(
         second.unit_stats().walked,
@@ -226,10 +229,13 @@ fn a_refinement_is_served_to_the_next_session() {
         "a reading nothing had to repair needs no timeline on the next start: {:?}",
         second.unit_stats()
     );
-    assert_eq!(
-        second.re_read_backlog(),
-        0,
-        "and nothing is left for the second pass"
+    // **What this test is named for.** `re_read_backlog` is legitimately non-zero for a file nobody asked about, so
+    // that assertion was about the eager contract rather than about the cache: the subject is that the refinement was
+    // **served** rather than rebuilt.
+    assert!(
+        second.stats().stored_refinements_served >= 1,
+        "the refinement came from the cache, not from a walk: {:?}",
+        second.stats()
     );
 }
 
@@ -3834,6 +3840,8 @@ fn a_keystroke_in_a_body_reads_the_file_through_its_timeline() {
         CompilerConfig::default(),
     );
     session.add_project_files([widget.clone()]);
+    // **The ask**: the reading asserted below is what a *request* produces.
+    session.want_refinement(&widget);
     session.index_everything();
     // **The reading is the cooked one, not the summary.** A summary is the file's environment-free reading
     // (`docs/indexing-design.md` §2.1), so `_STD_BEGIN` — a body from `open.h` — is not in it; the reading the program
@@ -3917,6 +3925,8 @@ fn a_file_opened_after_the_index_was_built_is_read_through_a_walked_timeline() {
         CompilerConfig::default(),
     );
     session.add_project_files([widget.clone()]);
+    // **The ask**: the reading asserted below is what a *request* produces.
+    session.want_refinement(&widget);
     session.index_everything();
 
     // **The edit that takes the timeline away.** A body edit keeps it ([`Session::directives_moved`] compares the

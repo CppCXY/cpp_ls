@@ -343,6 +343,9 @@ fn a_project_with_no_build_system_is_read_with_the_compilers_environment() {
         return;
     }
 
+    // **The ask**, and the case it has to survive: the session discovers this file rather than being handed it, so
+    // at the moment of the ask it may have no summary yet.
+    session.want_refinement(&widget);
     session.index_everything();
 
     // **The reading the program implies, which is the cooked one** (§2.1 of the design note): a summary is the file's

@@ -75,6 +75,8 @@ fn a_refined_reading_is_asked_for_again_after_an_edit() {
     let main = project.write("main.cpp", "#include \"widget.h\"\n");
 
     let mut session = a_session(project.root());
+    // **The ask**: the reading this test is about is what a *request* produces.
+    session.want_refinement(&widget);
     session.index_everything();
 
     // The reading this test is about: refined, so the macro body's scope is in the index.

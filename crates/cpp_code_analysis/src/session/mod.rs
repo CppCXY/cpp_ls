@@ -3165,6 +3165,21 @@ impl<F: FileProvider + Clone> Session<F> {
         // — a file whose summary was built from the closure's macro bodies the first time has nothing a re-parse
         // could change. That is the whole of what the flag is for; see `SummaryStore::prepare_with_the_environment`
         // for why the session can hold an environment for a file at all.
+        //
+        // **And a file read *with* its environment is taken back off the queue, not merely kept off it.** The filter
+        // below has always kept such a file from being added, but `advance` removes nothing: a file read as text cold
+        // stays queued after a later edit reads it through its timeline, and under the demand-driven contract nothing
+        // drains that stale entry — traced as `/p/api.h` queued twice, `outcome Built environment false` then
+        // `outcome Unstored environment true`. The same statement the filter makes, applied to the queue.
+        if done.iter().any(|step| step.with_the_environment) {
+            let repaired: std::collections::HashSet<PathBuf> = done
+                .iter()
+                .filter(|step| step.with_the_environment)
+                .map(|step| step.path.clone())
+                .collect();
+            self.parsed_since_the_last_pass
+                .retain(|queued| !repaired.contains(queued));
+        }
         self.parsed_since_the_last_pass.extend(
             done.iter()
                 .filter(|step| {
@@ -4069,13 +4084,11 @@ impl<F: FileProvider + Clone> Session<F> {
             // With that, removing this loop and repairing the queue in `finish_a_slice` gets **eight of the nine**
             // dependants green: both session tests, the keystroke test, the unit-read-back test, `refinement.rs`'s
             // re-ask test, `toolchain.rs`'s discovered-file test (which is what the fix was for) and the two ordinary
-            // suites. What remains is `tests/stored_refinement.rs`: its first session asks for `widget.h` and
-            // `is_refined(widget)` is **false** after `index_everything`, so neither fixture can be about serving a
-            // stored refinement. That is the next measurement, and it is a question about this fixture rather than
-            // about the contract: the same ask on the same shape works in `session/tests.rs`.
-            for step in &steps {
-                self.want_refinement(&step.path);
-            }
+            // suites. `tests/stored_refinement.rs` was the ninth, and it was **not** a fixture problem: its ask had not
+            // been applied (a shell edit that did not match), and with it `is_refined(widget)` is true on the first
+            // round after `index_everything` — measured: `refined true wanted 0 backlog 0 pending 0`. So every
+            // dependant of the eager ask is a dependant of *being asked*, and the loop goes.
+            let _ = &steps;
             let refined = round_started.elapsed() - advanced;
             let read = steps.len();
             // **Not asked for here, and the reason is the next defect rather than this call.** Every file this pass
