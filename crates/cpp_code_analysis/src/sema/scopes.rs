@@ -30,7 +30,9 @@
 //! binding that cannot be placed is dropped, and the resulting gap is visible to a consumer — which is better
 //! than a binding in the wrong scope, and much better than a panic in an editor.
 
-use cpp_parser::{CppAstNode, CppSyntaxKind, CppSyntaxNode, CppTokenKind, MacroBodies};
+use cpp_parser::{
+    CppAstNode, CppAstToken, CppSyntaxKind, CppSyntaxNode, CppTokenKind, MacroBodies,
+};
 
 use crate::summary::MacroScopeReading;
 
@@ -1462,6 +1464,37 @@ impl ScopeWalker<'_> {
             }
         }
 
+        // **A function whose name the specifier sequence holds** — `explicit A(int x) : x_(x) {}` is the shape:
+        // the declarator is `(int x)` and names nothing, so the loop above bound the parameters and never the
+        // function. `CppDeclaration::get_name` reads the name (`305a927` added the arm), and this is the binding that
+        // makes it a **fact**: measured on `struct A { explicit A(int x) : x_(x) {} A() {} int f(); }`, `inspect facts`
+        // listed `A` at 4:5 and nothing at 2:5, so `A::` offered one of the class's two constructors and a hover on the
+        // decorated one answered nothing — the decorator was invisible in the member list while `A()` was there.
+        //
+        // Guarded by "no declarator names anything", which is what keeps every ordinary function away from this: its
+        // declarator holds the name, so the loop already bound it.
+        if declarators(node)
+            .iter()
+            .all(|declarator| declared_name(declarator).is_none())
+            && let Some(declaration) = cpp_parser::CppDeclaration::cast(node.clone())
+            && declaration.get_param_list().is_some()
+            && let Some(token) = declaration.get_name()
+        {
+            let text = token.get_name_text().to_string();
+            if let Some(name) = name_from_text(&text, node) {
+                // **The kind is the one the declaration is**, not `Function`: a constructor's `DeclKind` and its
+                // `parameter_list` read are both decided by this, and `Function` made the fact say `A` with no
+                // parameters — the fact existed and disagreed with its own declaration about what it was.
+                self.bind(
+                    inner,
+                    name,
+                    BindingKind::Constructor,
+                    node,
+                    cpp_parser::source_range(token.get_range()),
+                );
+            }
+        }
+
         // The body of a function, which the grammar puts beside the declarator rather than inside it. Walking
         // it into the scope the declarator opened is what makes a local variable local.
         // **A lambda written in a declarator's own subtree.** `declarator_as` reads a declarator for its name
@@ -2812,6 +2845,28 @@ fn declared_name(node: &CppSyntaxNode) -> Option<(Name, cpp_parser::SourceRange)
         // [`name_from_text`] — the difference is a class whose body contains a destructor.
         if let Some(name) = name_from_text(text, &name_node) {
             return Some((name, range));
+        }
+    }
+
+    // **A name the declarator does not hold** — a constructor written with a specifier (`explicit A(int x)`) or a
+    // destructor (`virtual ~A()`), where the parser keeps the name in the specifier sequence and the declarator is
+    // only `(int x)`.
+    //
+    // [`cpp_parser::CppDeclaration::get_name`] is the reader that knows the arm; asking it here is what makes the
+    // **fact** exist, not just the `missing-return` rule that already asks it. Measured before this arm on
+    // `struct A { explicit A(int x) : x_(x) {} virtual ~A() {} A() {} }`: the parameter `x` was a fact and the
+    // decorated constructor was not, so `A::` offered one of its two constructors and a hover on the declaration
+    // answered nothing. The decorator was invisible in the member list while `A()` was there — a difference no reader
+    // of the class can explain.
+    //
+    // Asked **last**, so every declaration whose declarator names it is unchanged, and only for a declaration: a
+    // declarator and a parameter reach this function too.
+    if let Some(declaration) = cpp_parser::CppDeclaration::cast(node.clone())
+        && let Some(token) = declaration.get_name()
+    {
+        let text = token.get_name_text().to_string();
+        if let Some(name) = name_from_text(&text, node) {
+            return Some((name, cpp_parser::source_range(token.get_range())));
         }
     }
 

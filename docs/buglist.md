@@ -798,6 +798,40 @@ has **no fact**: in the fixture the parameter is bound (`2:20 x`) and the constr
 completion after `A::` therefore do not show it. `docs/next.md` §5 is the item; the guard that keeps the change safe is
 that a call statement (`A(1);`) has no specifier sequence at all.
 
+## 30.1 The constructor's **fact**, not just its diagnostic — fixed
+
+§30 made `missing-return` silent for a decorated constructor by asking the parser
+(`CppDeclaration::promises_no_return`). The constructor still had no **member**: `declared_name` read names along the
+declarator path, and `explicit A(int x) : x_(x) {}` keeps its name in the specifier sequence, so the scope walker bound
+the parameter `x` and never the function.
+
+Measured before (`inspect facts` on `struct A { explicit A(int x) : x_(x) {} virtual ~A() {} A() {} int f(); int x_; };`):
+
+```text
+1:8  A      type
+2:20 x      variable type `int`          the parameter, with no function above it
+3:14 ~A     function in A
+4:5  A      function in A                the plain constructor
+5:9  f      function in A returns `int`
+6:9  x_     variable in A type `int`
+```
+
+After: `2:14 A function in A parameters (int x) modifiers 0x100`, beside the two it already had, and `members_of("A")`
+lists both constructors.
+
+Three parts, and the second and third were only visible after the first:
+
+1. `declared_name` asks `CppDeclaration::get_name` when the declarator names nothing — the same arm §30 added, now also
+   the answer for the *binding*.
+2. The binding's kind is `BindingKind::Constructor`, not `Function`: the fact's `parameter_list` read is keyed on it,
+   and `Function` produced a fact that disagreed with its own declaration about what it was.
+3. `declared_parameters_with` finds a list only when a declarator *names* the binding, which a decorated constructor's
+   declarator never does. `fact_for` now falls back to the declaration's own `ParameterList` — measured: without it the
+   row was `A` with no parameters, which a completion and a signature help both read as `A()`.
+
+Test: `semantic::a_constructor_written_with_a_specifier_is_a_member` — two constructors, the decorated one explicit,
+scope `A`, `parameter_list == "(int x)"`, and the destructor beside them.
+
 ## 31. The parser derails on `bits/shared_ptr_base.h` — and that is what "`shared_ptr` again" has been
 
 Found while measuring the smart pointer's members after `50cf209`. It is not a `sema` bug and not a member-list bug:

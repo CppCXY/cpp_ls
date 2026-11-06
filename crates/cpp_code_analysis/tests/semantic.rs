@@ -5,11 +5,11 @@
 //! in the C++ tree at all). Each of them is pinned here, and so is the refusal: a name this analysis cannot place
 //! gets **no** classification rather than a plausible one.
 
-use cpp_code_analysis::Known;
 use cpp_code_analysis::semantic::{Name, NameKind, Provenance};
 use cpp_code_analysis::{
     CompilerConfig, MemoryFiles, OpenDocuments, Session, SessionFiles, WatchFilter,
 };
+use cpp_code_analysis::{DeclKind, DeclModifiers, Known};
 
 fn session_with(files: &[(&str, &str)]) -> Session<MemoryFiles> {
     let mut memory = MemoryFiles::new();
@@ -2134,5 +2134,67 @@ class Following { public: void h(); };
         following.scope.as_deref(),
         Some("std"),
         "the class after the member is a class of the namespace, not of `Impl`"
+    );
+}
+
+/// **A constructor written with a specifier is a member too** — `explicit A(int x)` keeps its name in the specifier
+/// sequence and its declarator holds only `(int x)`, so the binding path that reads declarators found the parameters
+/// and never the function.
+///
+/// Measured before the fix, on this fixture: `inspect facts` listed `A` at 4:5 (the `A() {}`) and nothing at 2:5, so
+/// `A::` offered one of the class's two constructors and a hover on the decorated declaration answered the *class*
+/// instead of the constructor. After it: `2:14 A function in A modifiers 0x100` (0x100 is `explicit`), beside the
+/// destructor and `A()`.
+#[test]
+fn a_constructor_written_with_a_specifier_is_a_member() {
+    let session = session_with(&[(
+        "/p/a.cpp",
+        "\
+struct A {
+    explicit A(int x) : x_(x) {}
+    virtual ~A() {}
+    A() {}
+    int f();
+    int x_;
+};
+",
+    )]);
+    let summary = session
+        .index()
+        .summary(std::path::Path::new("/p/a.cpp"))
+        .expect("the file's summary");
+    let constructors: Vec<_> = summary
+        .declarations
+        .iter()
+        .filter(|fact| fact.name == "A" && fact.kind == DeclKind::Function)
+        .collect();
+    assert_eq!(
+        constructors.len(),
+        2,
+        "both constructors are members: {:?}",
+        summary.declarations
+    );
+    let decorated = constructors
+        .iter()
+        .find(|fact| fact.modifiers.contains(DeclModifiers::EXPLICIT))
+        .expect("the decorated one says it is explicit");
+    assert_eq!(
+        decorated.scope.as_deref(),
+        Some("A"),
+        "it is a member of its class"
+    );
+    assert_eq!(
+        decorated.parameter_list.as_deref(),
+        Some("(int x)"),
+        "**and its parameters**, which the declarator does not hold either: without the fallback the fact read as a \
+         constructor that takes nothing, which a completion row and a signature help both believe"
+    );
+    assert!(
+        summary
+            .declarations
+            .iter()
+            .any(|fact| fact.kind == DeclKind::Function && fact.name == "~A"),
+        "and the destructor is beside it: {:?}",
+        summary.declarations
     );
 }

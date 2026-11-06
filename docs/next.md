@@ -139,22 +139,15 @@ the cooked reading is stored and served: 48 → 12.8 ms a file):
 
 ---
 
-## 5. The decorated constructor's missing fact
+## 5. The decorated constructor's fact — **done**
 
-`docs/buglist.md` §30 fixed the diagnostics by asking the declaration's **name** (`promises_no_return`), and taught
-`CppDeclaration::get_name` where `explicit A(int x)` keeps its name. The **scope walker** still uses its own reader
-(`declared_name`), so a decorated constructor has **no fact**: the parameter beside it is bound (`2:20 x` in the
-fixture), the constructor itself is not. Consequences: member lists do not offer it, completion after `A::` does not,
-and `missing-return`'s fix is the only consumer that sees it.
+§30 fixed the diagnostic; this fixed the member. `declared_name` now asks `CppDeclaration::get_name` when the declarator
+names nothing, the binding is a `Constructor` rather than a `Function` (the fact's parameter list is keyed on the kind),
+and `fact_for` falls back to the declaration's own `ParameterList` when no declarator names the binding.
 
-* **5.1** `declared_name` should ask the same reader — or `get_name`'s new arm should be reachable from it — with the
-  `is_unnamed_declaration` guard checked against call statements (`A(1);` has no specifier sequence, which is what keeps
-  the fallback safe).
-* **5.2** Then a member list includes the decorated constructors, and `signature_help` offers them at a construction.
-
-**What settles it:** `inspect facts` listing the constructor, and a completion test after `A(` offering it.
-
----
+Measured: `2:14 A function in A parameters (int x) modifiers 0x100` beside `4:5 A` and `3:14 ~A`, and
+`members_of("A")` lists both constructors. Test: `semantic::a_constructor_written_with_a_specifier_is_a_member`.
+The numbers are in `docs/buglist.md` §30.1.
 
 ## 6. The hover rendering's small gaps (each self-contained)
 

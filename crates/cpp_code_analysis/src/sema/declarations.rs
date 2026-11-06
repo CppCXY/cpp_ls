@@ -3453,6 +3453,28 @@ fn fact_for(
         | BindingKind::LiteralOperator => declared_parameters_with(shapes, binding),
         _ => None,
     };
+    // **A name no declarator holds** — a constructor written with a specifier (`explicit A(int x)`) keeps its name in
+    // the specifier sequence, so `names_the_binding` is false for its declarator and the list was lost: measured, the
+    // fact came out as `A` with an empty `parameter_list`, which a completion row and a signature help both read as a
+    // constructor that takes nothing. The declaration is found from the binding's own range, and its `ParameterList` is
+    // the one written there.
+    let parameter_list = parameter_list.or_else(|| {
+        if !matches!(
+            binding.kind,
+            BindingKind::Constructor | BindingKind::Destructor | BindingKind::ConversionFunction
+        ) {
+            return None;
+        }
+        use cpp_parser::CppAstNode;
+        let token = cpp_parser::token_at(root, binding.range.start_offset)?;
+        let parent = token.parent()?;
+        let declaration = std::iter::once(parent.clone())
+            .chain(parent.ancestors())
+            .find(|node| cpp_parser::CppDeclaration::can_cast(node.kind().into()))?;
+        let declaration = cpp_parser::CppDeclaration::cast(declaration)?;
+        let list = declaration.get_param_list()?;
+        Some(list.syntax().text().to_string())
+    });
 
     // **Where a local sits, for the names it writes.** A declaration inside a body has no qualified name of
     // its own — see [`DeclFact::local`] — so the namespaces around it are the only place a type it writes can
