@@ -8,6 +8,26 @@ use crate::index::{Priority, StepOutcome};
 use crate::symbol::Known;
 use std::path::{Path, PathBuf};
 
+/// **A fixture directory no other run can be using** — the name, the process id, and a serial.
+///
+/// The fixtures in this file used to share one tree per name (`%TEMP%\cppls-session-disk\body-pass`), and
+/// [`std::fs::remove_dir_all`]'s failure was ignored. A directory that could not be removed — a `.cppls` a previous run
+/// left, held open by another process on Windows — then became **this** run's state: the store loaded a summary keyed
+/// by a text the fixture had just rewritten, and the answer was the old one. Measured as a report of
+/// `a_class_scoped_by_another_files_macro_body_is_scoped_through_the_session` failing on every rerun with
+/// ``Unknown(NotDeclaredHere("studio::Widget"))`` — the summary under `<fixture>/.cppls` still said `std`, and nothing
+/// in the run could clear it. A unique name makes the stale directory unreachable rather than merely unlikely, and
+/// keeps two concurrent `cargo test` runs from deleting each other's files.
+fn a_fresh_fixture_directory(parent: &str, name: &str) -> PathBuf {
+    static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let serial = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let root = std::env::temp_dir()
+        .join(parent)
+        .join(format!("{name}-{}-{serial}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    root
+}
+
 /// A project in memory: the files, the buffers in front of them, and the providers that join the two.
 ///
 /// The fixture keeps the providers and hands each session a **clone**, which is what a caller outside a test
@@ -22,8 +42,7 @@ struct Memory<'a> {
 
 impl<'a> Memory<'a> {
     fn new(name: &str, files: &'a MemoryFiles) -> Self {
-        let root = std::env::temp_dir().join("cppls-session-tests").join(name);
-        let _ = std::fs::remove_dir_all(&root);
+        let root = a_fresh_fixture_directory("cppls-session-tests", name);
 
         let documents = OpenDocuments::new();
         let providers = SessionFiles::new(documents.clone(), files.clone());
@@ -3596,8 +3615,7 @@ struct Project {
 
 impl Project {
     fn new(name: &str) -> Self {
-        let root = std::env::temp_dir().join("cppls-session-disk").join(name);
-        let _ = std::fs::remove_dir_all(&root);
+        let root = a_fresh_fixture_directory("cppls-session-disk", name);
         std::fs::create_dir_all(&root).expect("the fixture directory");
 
         Project { root }
@@ -3662,10 +3680,40 @@ fn the_scan_finds_the_projects_sources_and_leaves_the_rest() {
     );
 }
 
+// **The ask this test needed is here** — `index_everything` reads a file through its timeline, so a class behind
+// another file's macro body is scoped by the session (the defect and its reproducer are in `docs/indexing-review.md`
+// §6, and `a_keystroke_in_a_body_reads_the_file_through_its_timeline` pins the keystroke half).
+/// **Two fixtures with one name get two directories** — the state that made a failing run keep failing.
+///
+/// The sessions in this file write their summaries under `<fixture>/.cppls`, and the fixtures used to share one tree per
+/// name. [`std::fs::remove_dir_all`]'s failure was ignored, so a directory that could not be removed was read as the new
+/// run's state: a summary under the name of a file the fixture had just rewritten, answered with the old reading, and
+/// nothing in the run could clear it. The name now carries the process id and a serial, which is what this pins.
 #[test]
-// **Ignored while the refined reading is being fixed** — the defect and its reproducer are in `docs/indexing-review.md`
-// §6: refining a file makes three `checks` fixtures see a reading their rules decline, so `index_everything` does not
-// ask for it yet, and this test needs the ask. The assertion is right; the behaviour is what is wrong.
+fn a_fixture_directory_is_unique_to_its_run() {
+    let first = a_fresh_fixture_directory("cppls-session-tests", "shared-name");
+    let second = a_fresh_fixture_directory("cppls-session-tests", "shared-name");
+    assert_ne!(
+        first, second,
+        "two fixtures of one name never share a directory"
+    );
+
+    // **And a directory the name happens to match is not read**: the fixture's own directory is a new one, so a stale
+    // `.cppls` beside it (or in it) belongs to nobody.
+    std::fs::create_dir_all(first.join(".cppls")).expect("the stale cache");
+    std::fs::write(first.join(".cppls").join("stale"), b"an older reading")
+        .expect("the stale cache");
+    let third = a_fresh_fixture_directory("cppls-session-tests", "shared-name");
+    assert_ne!(third, first, "a stale directory is not reused");
+    assert!(
+        !third.join(".cppls").exists(),
+        "and its cache is not handed over"
+    );
+    let _ = std::fs::remove_dir_all(&first);
+    let _ = std::fs::remove_dir_all(&third);
+}
+
+#[test]
 fn a_class_scoped_by_another_files_macro_body_is_scoped_through_the_session() {
     // The store's second pass, on the closure a **session** builds one file at a time. MSVC's STL is
     // written this way: `<vector>` opens `std` with `_STD_BEGIN`, whose replacement list is in `yvals_core.h`,

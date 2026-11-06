@@ -179,6 +179,30 @@ From `docs/hover-render.md` §3, in the order they are likely to be met:
   layer answers Unknown while `members_of` resolves it.
 * **An `auto` return of a template member** (`optional::transform`) — the deduction item of §2.
 
+## 8. The session fixtures' shared directory — fixed, and what would explain a repeat
+
+`docs/buglist.md` §33: the session fixtures wrote their `.cppls` into one tree per **name**
+(`%TEMP%\cppls-session-disk\body-pass`) and ignored `remove_dir_all`'s failure, so a directory that could not be
+removed became the next run's state — a summary of `widget.h` keyed by its own (unchanged) bytes, answering the old
+namespace, for every rerun.
+
+Fixed: `a_fresh_fixture_directory` gives each fixture the name, the process id and a serial; `Memory::new` and
+`Project::new` use it; `session::tests::a_fixture_directory_is_unique_to_its_run` pins it.
+
+If `a_class_scoped_by_another_files_macro_body_is_scoped_through_the_session` fails again **with a fresh directory**, the
+cause is the ordering its original note names: `index_everything` indexes a header as its own root, so a header whose
+`#include` moved is read from its own text rather than from the rendering. That is `docs/indexing-review.md` §6's "ask",
+and it is the next thing to do here — with the failing assertion as the test.
+
+**The obvious fix was tried and reverted**: draining `refinements_wanted()` at the end of `index_everything` so that
+`pending_work()` is zero on return. It makes the failing test pass and breaks
+`a_body_edit_does_not_cost_the_program_again` and `a_program_is_read_when_the_reader_stops_editing` — the unit read is
+deferred to the pump's idle step on purpose, and a drain consumes work those two assert is still owed. The measurements
+are in `docs/buglist.md` §33, so the next attempt starts from what it already knows.
+
+The remaining fixed-directory helpers (`fuzzy`, `watch`, `store`, `worklist`, `include`, `summary`) are the same hazard
+and the same one-line change.
+
 ## The order I would take
 
 1. §1.0 re-measure (30 minutes, decides whether §1 is a bug or a stale binary).

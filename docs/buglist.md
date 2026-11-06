@@ -1074,3 +1074,69 @@ The real project's shape is `std::counting_semaphore<4>` (its parameter `ptrdiff
 `test_cpp:maybe(5).transform([](int value) { return value * 2; }).value_or(0)`: the hover itself says the type of the
 chain is unknown, so `value_or` cannot resolve. `std::optional::transform` returns `auto`, so the answer needs the
 deduction through the member template — the item `docs/next.md` §2 already names.
+
+## 33. A fixture that shares one directory turns one failure into every failure
+
+Reported: `session::tests::a_class_scoped_by_another_files_macro_body_is_scoped_through_the_session` fails on every run
+with ``Unknown(NotDeclaredHere("studio::Widget"))`` at `session/tests.rs:3735`.
+
+### What the test does and what it needs
+
+`Project::new("body-pass")` writes three files — `open.h` defines `_STD_BEGIN`/`_STD_END`, `widget.h` opens `std`
+through them, `main.cpp` includes `widget.h` — indexes, then **rewrites `open.h`** to open `studio` and indexes again:
+`std::Widget` must be gone and `studio::Widget` must be found. The failure is the second half: the summary of
+`widget.h` answered the **plain** (file-scope) reading, so the class is under no namespace at all.
+
+The test's own comment (added in `cc69aa9b`) says it is "**ignored** while the refined reading is being fixed … the
+assertion is right; the behaviour is what is wrong" — and there is **no `#[ignore]`**: the note was written for a
+behaviour that later landed (`a1bbfaf`, `4e02cee`), and the attribute was never added, so the comment is stale in the
+other direction.
+
+### The part that is reproducible: the fixture's directory was shared
+
+Every session fixture in that file used one tree per name — `%TEMP%\cppls-session-disk\body-pass` — and the cleanup
+was `let _ = std::fs::remove_dir_all(&root);`. **An ignored failure is a stale store**: the sessions write their
+summaries under `<fixture>/.cppls`, so a directory that could not be removed on Windows (a file held open by another
+process, a scanner, or a run that aborted before its `Drop`) is read as the *next* run's state. A summary keyed by the
+text of `widget.h` — which the test rewrites only through its **include**, not its own bytes — then answers the old
+reading, and nothing a rerun does can clear it. That is precisely "always fails", and it is invisible on a machine whose
+directory happens to be removable.
+
+Measured with the current tree: the test passes alone, in the whole `session::` group, in the full lib suite (751
+tests), cold and warm. So the first failing run was not reproduced here; what was found is the mechanism by which the
+*result* of such a run survives every rerun.
+
+### Fixed
+
+* `a_fresh_fixture_directory` — the name, the process id and a serial — used by `Memory::new` and `Project::new`. A
+  stale directory is now unreachable rather than merely unlikely, and two concurrent `cargo test` runs cannot delete
+  each other's files.
+* The stale "ignored" note is replaced with what the test pins, and `a_fixture_directory_is_unique_to_its_run` pins the
+  two properties that matter: two fixtures of one name get different directories, and an existing directory with
+  `.cppls` in it is not reused.
+
+### Tried and rejected: drain the asks inside `index_everything`
+
+The obvious fix — after the index queue and the cook queue are empty, drain `refinements_wanted()` in the same loop,
+so that "index everything" means [`Session::pending_work`] is zero — was written, measured and **reverted**. It makes
+this test pass, and it breaks two that pin the deferral:
+
+```text
+a_body_edit_does_not_cost_the_program_again   "the reader has a file open, so there is a program to read"
+a_program_is_read_when_the_reader_stops_editing  "nothing read the program while the reader was typing: []"
+```
+
+A batch caller reading a file is **not** the reader stopping to have its program read; the unit read is deferred to the
+pump's idle step on purpose, and a drain here consumes the work those two tests assert is still owed. So the ask stays
+where it is, and the ordering question below stays open.
+
+### What is still open
+
+If the failure comes back with a fresh directory, the cause is the ordering the original note names: `index_everything`
+reads a file as its **own root** even when the file renders through another file's macro body, so a header whose
+include moved is indexed from its own text. The ask for the rendering is `docs/indexing-review.md` §6's item, and
+`a_keystroke_in_a_body_reads_the_file_through_its_timeline` is the sibling that already passes — the difference
+between the two is which of them the pump got to before the answer was asked for.
+
+The same fixed-directory pattern is still in `fuzzy.rs`, `index/watch/tests`, `index/store/tests`, `index/worklist`,
+`include/mod.rs` and `summary`'s round-trip test — none of them reported failing, and each is the same hazard.
