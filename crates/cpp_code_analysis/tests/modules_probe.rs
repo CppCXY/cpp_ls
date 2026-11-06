@@ -74,6 +74,15 @@
 //! rejecting its candidate — it was not entered, or the row was never written, and the next round starts by finding out
 //! which (a `UNIT_ROOTS` read that never happens is either a table that was not created or a key that is computed
 //! differently at the two ends).
+//!
+//! **The second attempt found the real reason, and it is not a bug in the plumbing.** A session-local memo
+//! (`(root, context) → units_key`) was tried next, and `tests/unit_probe.rs` shows it never fires either — the second
+//! and third reads of the same unit still walk (`walked 75.7 ms`, `62.7 ms`). The validation is the wall: the key a
+//! rendering is filed under folds **the files the walk entered** (`unit.files()`), while the rendering names **the files
+//! the cook entered** (`RenderedUnit::files`) — and those are not the same set, because a file that contributes no tokens
+//! to the stream has no place in it. So a stored rendering cannot reproduce its own key without the walk that produced
+//! it. What would work is a rendering that records the walk's file list as well as its own, which is a change to
+//! `RenderedUnit` rather than to the cache.
 
 use std::path::{Path, PathBuf};
 use std::time::Instant;
