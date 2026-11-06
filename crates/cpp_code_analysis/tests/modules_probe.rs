@@ -12,6 +12,25 @@
 //!
 //! Every number here is a wall-clock measurement of the analysis alone, and `summaries built` is the count of files
 //! that were **parsed** — the unit of work that a cache is supposed to remove.
+//!
+//! # What it says now, and what it said
+//!
+//! The `import std;` read — `read_the_modules_a_file_imports`, which is one drain of a 401-file closure — measured
+//! **24.7 s cold and 112–506 s warm** when this probe was written, and **2.5 s cold and 1.2–1.7 s warm** after the
+//! three fixes it found (five warm runs: 1.22, 1.24, 1.24, 1.62, 1.67 s). The database is not part of either number:
+//! `cache_db::io` reports **0.04 s of reads** in a run, and the process is CPU-bound throughout.
+//!
+//! Warm is now **faster than cold**, which is what the cache is for. The three fixes, in the order they were found:
+//!
+//! * a reading the store **served** was queued for a full cook, so a warm start rendered and parsed every fact it had
+//!   just read (`prepare_a_wave`);
+//! * a **batch** read files as programs when a timeline was merely *held*, so a drain that had just built timelines
+//!   walked a closure per file (`will_read_it_as_the_program`);
+//! * the second pass walked **one timeline per candidate** — 44 of them for a six-file slice, 46.8 s
+//!   (`finish_a_slice`, `units_for_the_pass`).
+//!
+//! Still not done, and visible here: `format` is not offered after `std::`. The names come from the headers of the
+//! closure; the standard *module's* exports are P5's work.
 
 use std::path::{Path, PathBuf};
 use std::time::Instant;
