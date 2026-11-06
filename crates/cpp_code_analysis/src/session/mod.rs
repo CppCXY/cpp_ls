@@ -4031,6 +4031,23 @@ impl<F: FileProvider + Clone> Session<F> {
             //   environment-read files, or this assertion is about a coupling that has to be understood first.
             //
             // So the next attempt starts at that third test, not at this loop.
+            //
+            // # What that third test turned out to be
+            //
+            // Not a coupling. `advance` removes nothing from `parsed_since_the_last_pass`, so a file read **as text**
+            // cold stays queued after a later edit reads it **through its timeline** — and the filter below, which keeps
+            // an environment-read file off the queue, only applies to the slice in hand. Traced: the same `/p/api.h`
+            // queued twice, `outcome Built environment false` and then `outcome Unstored environment true`. Under the
+            // eager contract this is invisible, because the pass drains the queue anyway. Under the demand-driven one
+            // the stale entry sits there for ever, and the test's "has the pass anything to repair" answered yes about
+            // a file whose last read had nothing left to repair.
+            //
+            // The repair is one line — remove from the queue every file this slice read with its environment — and it
+            // was tried. It makes that test pass and **breaks two others**, for the reason the eager contract exists:
+            // `a_refinement_is_served_to_the_next_session` and
+            // `a_keystroke_in_a_body_reads_the_file_through_its_timeline` both get their refinement *because* the file
+            // is in the queue when the pass drains it; take it out and there is no first reading to cache or to assert.
+            // So the repair belongs to the same change as the loop's removal, and neither lands alone.
             for step in &steps {
                 self.want_refinement(&step.path);
             }
