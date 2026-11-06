@@ -193,3 +193,54 @@ fn a_changed_file_is_not_served_from_the_cache() {
         "and the rebuilt reading still has the macro body's scope"
     );
 }
+
+/// **A refinement belongs to the project that built it** — P4's decision, asserted.
+///
+/// The cache directory is derived from the project root (`SummaryStore::with_provider`: `root.join(CACHE_DIRECTORY)`),
+/// not from a machine-wide location, so `import std;` in one project cannot be answered by another project's records.
+/// That matters twice: a standard module's readings are enormous (a 401-file closure holds 52 MB of summaries, see
+/// `tests/modules_probe.rs`), and a project may compile its standard library with different flags — sharing those
+/// records would be sharing answers about a different program.
+#[test]
+fn a_refinement_belongs_to_the_project_that_built_it() {
+    let first_project = Project::new("owns-its-cache");
+    let open = first_project.write("open.h", OPEN_H);
+    let widget = first_project.write("widget.h", WIDGET_H);
+    let main = first_project.write("main.cpp", "#include \"widget.h\"\n");
+
+    let mut first = a_session(first_project.root());
+    first.want_refinement(&open);
+    first.want_refinement(&widget);
+    first.want_refinement(&main);
+    first.index_everything();
+    assert!(first.is_refined(&widget), "the first project refined it");
+    let first_cache = first.cache_directory().to_path_buf();
+    assert!(
+        first_cache.starts_with(first_project.root()),
+        "the cache lives inside the project: {}",
+        first_cache.display()
+    );
+    drop(first);
+
+    // **A second project, the same files, a different directory.** Its session must not serve the first one's record.
+    let second_project = Project::new("owns-its-cache-other");
+    let other = second_project.write("widget.h", WIDGET_H);
+    let mut second = a_session(second_project.root());
+    assert_ne!(
+        second.cache_directory(),
+        first_cache,
+        "two projects do not share a cache directory"
+    );
+    second.want_refinement(&other);
+    second.index_everything();
+    assert_eq!(
+        second.stats().stored_refinements_served,
+        0,
+        "the other project's record is not this project's: {:?}",
+        second.stats()
+    );
+    assert!(
+        second.is_refined(&other),
+        "and it is refined here, by walking its own closure"
+    );
+}
