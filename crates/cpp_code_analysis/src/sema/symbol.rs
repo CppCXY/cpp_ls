@@ -946,6 +946,20 @@ impl ScopeTree {
         }
 
         segments.reverse();
+        // **A namespace that opens inside one of the same name is that namespace reopened.**
+        //
+        // In a *unit rendering* — the stitched stream a module's interface unit produces — one file's `namespace std {`
+        // can land inside another's, because MSVC writes every scope as `_STD_BEGIN` and the parser closes a scope at a
+        // file boundary only in the shapes `crossed_a_file_boundary_since` covers (see `tests/translation_unit.rs`,
+        // `a_namespace_whose_brace_ends_the_file`). The standard module came out with ten nested, and `std::format` was
+        // filed under `std::std::std::std::std::std::std::std::std::std` — a scope no query asks for — while the same
+        // header read on its own is filed under `std`. Collapsing a run of the same name makes the two spellings agree.
+        //
+        // What it costs: `namespace A { namespace A { void f(); } }` is `A::A::f` to a compiler and this answers
+        // `A::f`. That is a real name a query could ask for differently — and it is also the only reading under which a
+        // `std` reopened by ten spliced headers keeps the name the source files give it. The parser is where the
+        // nesting should have been stopped; this is the layer that has to answer until it is.
+        segments.dedup();
         Some(segments.join("::"))
     }
 
