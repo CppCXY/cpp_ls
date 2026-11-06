@@ -611,6 +611,57 @@ fn missing_return_is_a_control_flow_question() {
     }
 }
 
+/// **A decorated constructor and a decorated destructor promise no return.**
+///
+/// `explicit A(int x) : x_(x) {}`, `virtual ~A() {}` and `constexpr C(int x) : x_(x) {}` all write a **specifier
+/// sequence** — `explicit`, `virtual`, `constexpr`, and the first and third keep the constructor's own name in it — so
+/// the rule's old guard ("a declaration with no specifier sequence is a constructor") let all three through, and each
+/// was reported as *"this function is declared to return `` and its body has no `return`"*. Measured with `inspect
+/// diagnostics` on this fixture: three findings, now none.
+///
+/// The functions beside them are the other half, because a rule that stopped reporting altogether would pass this test
+/// and be useless: `int broken()` and `int S::f()` still report, with the type they actually write.
+#[test]
+fn missing_return_is_silent_for_a_decorated_constructor_and_destructor() {
+    let decorated = "\
+struct A {
+    explicit A(int x) : x_(x) {}
+    virtual ~A() {}
+    A() = default;
+    int x_;
+};
+struct B : A {
+    B() : A(0) {}
+    ~B() override {}
+};
+struct C {
+    inline C() {}
+    constexpr C(int x) : x_(x) {}
+    ~C() noexcept {}
+    int x_;
+};
+";
+    assert_eq!(
+        codes_of(decorated),
+        [],
+        "a constructor and a destructor promise nothing, whatever they are written with"
+    );
+
+    let written = "\
+struct S { int f() { } };
+int broken() { }
+";
+    let found = codes_of(written);
+    assert!(
+        found
+            .iter()
+            .filter(|code| **code == DiagnosticCode::MissingReturn)
+            .count()
+            == 2,
+        "and the functions that do write a return type still report: {found:?}"
+    );
+}
+
 #[test]
 fn missing_return_is_not_reported_for_void_or_for_a_returning_body() {
     assert!(

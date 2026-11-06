@@ -1136,3 +1136,69 @@ fn a_functions_parameters_are_its_own_and_not_a_lambdas() {
         "the lambda's  belongs to the lambda"
     );
 }
+
+/// **A decorated constructor and a decorated destructor name themselves and promise no return.**
+///
+/// `explicit A(int x) : x_(x) {}` parses `explicit A` as the specifiers, and the declarator is `(int x)`, which names
+/// nothing — so `get_name` answered `None` and the index made no fact for the constructor at all. `missing-return` then
+/// read the declaration as a function with a return type and reported it (and `virtual ~A() {}`, whose specifier
+/// sequence is `virtual` with the name in the declarator, for the same reason: the check never asked for a name).
+///
+/// The four shapes below are the ones measured: the decorated constructor and destructor, the undecorated pair that
+/// always worked, and a real function that must stay a function.
+#[test]
+fn a_decorated_constructor_and_destructor_name_themselves() {
+    let source = "\
+struct A {
+    explicit A(int x) : x_(x) {}
+    virtual ~A() {}
+    A() {}
+    ~A() {}
+    int f() { return 0; }
+    int x_;
+};
+template <class T>
+struct Box {
+    Box<T>();
+};
+";
+    let (root, tree) = unit(source);
+    assert_eq!(tree.get_errors(), [], "the fixture parses cleanly");
+    let declarations: Vec<cpp_parser::CppDeclaration> = root
+        .syntax()
+        .descendants()
+        .filter_map(cpp_parser::CppDeclaration::cast)
+        .filter(|declaration| declaration.get_body().is_some())
+        .collect();
+    // **The name is there and the promise is not.** A destructor's *token* is the identifier `A` — the tilde is a
+    // separate token, which is why [`promises_no_return`] asks the token stream rather than the name's text — so the
+    // test asks whether a name was found at all, and the question the rule actually has.
+    let said: Vec<(bool, bool)> = declarations
+        .iter()
+        .map(|declaration| {
+            (
+                declaration.get_name_text().is_some(),
+                declaration.promises_no_return(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        said,
+        [
+            (true, true),
+            (true, true),
+            (true, true),
+            (true, true),
+            (true, false)
+        ],
+        "every declaration names itself; the four constructors and destructors promise no return, the function does: \
+         {said:?}"
+    );
+    // The decorated constructor is the one that had no name at all before this: `explicit A(int x)` keeps `A` in its
+    // specifier sequence, and every declarator-based arm answered `None`.
+    assert_eq!(
+        declarations[0].get_name_text().as_deref(),
+        Some("A"),
+        "the decorated constructor names itself"
+    );
+}

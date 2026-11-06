@@ -66,6 +66,16 @@ impl Check for MissingReturn {
             let Some(body) = declaration.get_body() else {
                 continue;
             };
+            // **A constructor or a destructor promises no return**, and the question is its name's.
+            //
+            // This used to be implied by "the declaration has no specifier sequence", which is true of the unadorned
+            // shapes and false of every decorated one: `explicit A(int x) : x_(x) {}`, `virtual ~A() {}` and
+            // `constexpr C(int x) : x_(x) {}` all write specifiers (the parser keeps `explicit`/`virtual`/`constexpr`
+            // there, and the first and third keep the constructor's own name too). Measured on a fixture: all three
+            // were reported as *"declared to return `` and its body has no `return`"*.
+            if declaration.promises_no_return() {
+                continue;
+            }
             // **The written return type, as a node.** A declaration with no specifier sequence of its **own** has no
             // written return type: a constructor, a destructor, and an out-of-class definition whose head the grammar could
             // not read all answer `None` here. That is the answer the old rule got wrong by falling through to the

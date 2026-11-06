@@ -256,6 +256,27 @@ impl CppDeclaration {
             return Some(name);
         }
 
+        // **A constructor whose name the specifier sequence holds.** `explicit A(int x) : x_(x) {}` parses
+        // `explicit A` as the specifiers — the declarator is `(int x)` and names nothing — so every arm above answers
+        // `None` for a declaration that plainly has a name: no fact was made for it (`inspect facts` on
+        // `struct A { explicit A(int x); }` listed none), and `missing-return` read it as a function with a return type
+        // and reported "declared to return `` and its body has no `return`".
+        //
+        // The name is the sequence's **last** name, and it is the declaration's own when nothing in the sequence is a
+        // type: `explicit`, `inline`, `constexpr`, `virtual` and `friend` are specifiers. Guarded by the parameter
+        // list, because only a function-shaped declaration names itself this way (`A A;` writes its name in the
+        // declarator and never reaches here).
+        if self.get_param_list().is_some()
+            && let Some(specifiers) = self.get_decl_specifiers()
+            && specifiers.get_builtin_type().is_none()
+            && let Some(name) = specifiers
+                .descendants::<CppNameExpr>()
+                .last()
+                .and_then(|name| name.get_name_token())
+        {
+            return Some(name);
+        }
+
         self.elaborated_type_name()
     }
 
@@ -283,6 +304,80 @@ impl CppDeclaration {
     /// The text of the declared name.
     pub fn get_name_text(&self) -> Option<String> {
         self.get_name().map(|it| it.get_name_text().to_string())
+    }
+
+    /// A class name without its template arguments — `Box<T>` is `Box`.
+    ///
+    /// For comparing a constructor's last segment with its class's name: `Box<T>::Box` and `Box` are the same class,
+    /// and a comparison of the spellings would say otherwise.
+    fn without_template_arguments(written: &str) -> &str {
+        match written.find('<') {
+            Some(at) => written[..at].trim_end(),
+            None => written,
+        }
+    }
+
+    /// **Is this declaration a constructor or a destructor** — the two functions that promise no return?
+    ///
+    /// Asked of the **name**, not of the specifier sequence. `explicit A(int x) : x_(x) {}`, `virtual ~A() {}` and
+    /// `constexpr C(int x) : x_(x) {}` all carry specifiers (`explicit`, `virtual`, `constexpr` — and the first and
+    /// third keep the constructor's own name there), so a rule that asked "does this declaration write a specifier
+    /// sequence" answered *"yes: a function returning"* for every one of them. Measured: `missing-return` reported all
+    /// three as *"this function is declared to return `` and its body has no `return`"*.
+    pub fn promises_no_return(&self) -> bool {
+        // **A destructor writes `~` before its name**, wherever the parser kept the name — so the tokens before the
+        // first `(` of the declaration are what say it. A `~` inside the body (`p->~T()`) is after that paren and
+        // cannot be read here.
+        let tilde = self
+            .syntax()
+            .descendants_with_tokens()
+            .filter_map(|element| element.into_token())
+            .take_while(|token| CppTokenKind::from(token.kind()) != CppTokenKind::LeftParen)
+            .any(|token| CppTokenKind::from(token.kind()) == CppTokenKind::Tilde);
+        if tilde {
+            return true;
+        }
+
+        // **A constructor's last segment is its class's name** — `A::A`, `ns::A::A`, `Box<T>::Box`. The *qualified*
+        // spelling is the declarator's name node when the declaration writes one (an out-of-class definition), and the
+        // declared name otherwise (an in-class `explicit A(int)`).
+        let written = self
+            .get_declarator()
+            .or_else(|| self.child::<CppDeclarator>())
+            .and_then(|declarator| declarator.child::<CppNameExpr>())
+            .map(|name| name.get_qualified_name())
+            .filter(|name| !name.trim().is_empty())
+            .or_else(|| self.get_name_text());
+        let Some(written) = written else {
+            return false;
+        };
+        let written = written.trim();
+        let segments: Vec<&str> = written
+            .split("::")
+            .map(str::trim)
+            .filter(|part| !part.is_empty())
+            .collect();
+        let last = segments
+            .last()
+            .map(|part| Self::without_template_arguments(part));
+        let before = segments
+            .len()
+            .checked_sub(2)
+            .map(|at| Self::without_template_arguments(segments[at]));
+        if let (Some(last), Some(before)) = (last, before)
+            && last == before
+        {
+            return true;
+        }
+
+        // Inside a class, its own name is the constructor's.
+        let enclosing = crate::syntax::node::traits::typed_ancestors::<CppClassDef>(self.syntax())
+            .next()
+            .and_then(|class| class.get_name_text());
+        match (enclosing, last) {
+            (Some(class), Some(last)) => Self::without_template_arguments(class.trim()) == last,
+            _ => false,
+        }
     }
 
     /// The declarator of the first `init-declarator`.

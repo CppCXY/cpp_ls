@@ -71,7 +71,7 @@ fn positions(text: &str, at_most: usize) -> Vec<(u32, u32, String)> {
             }
             continue;
         }
-        if let Some(at) = line.find(|c: char| c == '(' || c == '.') {
+        if let Some(at) = line.find(['(', '.']) {
             let start = line[..at]
                 .rfind(|c: char| !(c.is_alphanumeric() || c == '_'))
                 .map_or(0, |index| index + 1);

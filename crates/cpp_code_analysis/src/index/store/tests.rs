@@ -1300,7 +1300,7 @@ fn the_closure_is_the_roots_and_what_they_include() {
     }
 
     let widget = std::path::PathBuf::from("/p/widget.h");
-    let closure = store.the_closure_of(&[widget.clone()]);
+    let closure = store.the_closure_of(std::slice::from_ref(&widget));
 
     let has = |path: &str| {
         closure.contains(&crate::file::paths::normalize_path(

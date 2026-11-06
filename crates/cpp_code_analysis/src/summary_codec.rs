@@ -1138,9 +1138,7 @@ fn symbol_kind_code(kind: SymbolKind) -> u8 {
 mod tests {
     use super::{CODEC_VERSION, DecodeError, MAGIC, decl_kind_code, decode, encode};
     use crate::cache::SummaryKey;
-    use crate::index::CookedFile;
     use crate::preprocess::directive::IncludeForm;
-    use crate::summary::CookedDiagnostic;
     use crate::summary::MacroKind;
     use crate::summary::{
         ConditionalRegion, DeclFact, DeclKind, FactGuard, FileSummary, GuardBranch, IncludeFact,
@@ -1750,9 +1748,6 @@ pub fn decode_the_cooked_reading(bytes: &[u8]) -> Result<CookedFile, DecodeError
 /// needs to know is that the values come back.
 #[test]
 fn a_cooked_reading_round_trips() {
-    use crate::index::CookedFile;
-    use crate::summary::CookedDiagnostic;
-
     let reading = CookedFile {
         declarations: vec![
             DeclFact {
