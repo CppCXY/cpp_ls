@@ -832,22 +832,45 @@ The check channel shows the same shape from the other side: `missing-return` on 
 ``template<_Lock_policy _Lp> __shared_count<_Lp>`` and ``template<typename _Yp> _SafeConv<_Yp>`` — the **template head is
 being absorbed into the return type** for member function definitions in that file.
 
-### What is ruled out, and how
+### Reduced: the class at 582 is left open by `_M_get_deleter`
 
-Reduced by hand with `tools/inspect` (`facts --fixture`, marker = a following class's fact scope):
+Marker: a `class Following { };` appended after the text, whose fact scope says whether the class at 582 closed.
 
-| reduced text | marker's scope |
+| reduced text | `Following`'s scope |
 | --- | --- |
-| the real lines 1..730 (control) | `std::_Sp_counted_ptr_inplace` — wrong |
-| the same **without** the overwrite specialization block (657–716) | still wrong — the derail starts earlier |
-| the specialization head alone (`requires`, `final`, split across `#if`/`#else`) | correct |
-| each body member alone (`[[no_unique_address]]`, anonymous union, `friend class X<_Lp>`, `auto f() {…}`, placement new, `_M_obj.~_Tp()`, `using` in a body, `override` returning `nullptr`) | correct |
-| an `#if` **inside an `if` condition** (the `_M_get_deleter` shape) | correct |
-| the real specialization body, one blank-line chunk removed | correct for **every** chunk |
+| the real lines 1..656 + `Following` | `std::_Sp_counted_ptr_inplace` — the class did **not** close at its `};` (655) |
+| the same **without** `_M_get_deleter` (632–649) | `std` — fixed |
+| the same without the `#if`/`#else`/`#endif` run inside it (641–645) | still wrong |
+| the same without the bare `||` line (640) | `std` — fixed |
+| the same without `if (` (639) | `Following` absent — the parse breaks differently |
+| the class's own text, with `namespace std {` or the real `_GLIBCXX_VISIBILITY(default)` head | `std` — fine |
+| the real prefix 55..581 + the class | `std::_Sp_counted_ptr_inplace` — wrong |
 
-The last row is the interesting one: dropping **any one** of the eight body chunks makes the following class parse
-correctly again — so the trigger is a combination or a size effect (a lookahead window, or state carried from a member
-that only shows with what follows), not one construct.
+So the shape is: in the class-body member
+
+```cpp
+    if (&__ti == &_Sp_make_shared_tag::_S_ti()
+        ||
+#if __cpp_rtti
+        __ti == typeid(_Sp_make_shared_tag)
+#else
+        _Sp_make_shared_tag::_S_eq(__ti)
+#endif
+       )
+      return _M_ptr();
+```
+
+the **`||` followed by a preprocessor directive inside an `if` condition** is what derails the class-body parse — but
+only in the real file's context: the class's own text parses cleanly, and neither removing a single preceding
+declaration (36 of them, tried one at a time) nor padding it with plain declarations changes anything. So it is state
+carried from **more than one** earlier construct, not one construct and not the file's size.
+
+### What the reduction rules out
+
+The specialization head alone (`requires`, `final`, split across `#if`/`#else`), each of its body members alone
+(`[[no_unique_address]]`, anonymous union, `friend class X<_Lp>`, placement new, `_M_obj.~_Tp()`, `using` in a body,
+`override` returning `nullptr`), the `#if`-in-an-`if` shape in a small fixture, and file size on its own — all parse
+correctly.
 
 ### Why it matters beyond `shared_ptr`
 

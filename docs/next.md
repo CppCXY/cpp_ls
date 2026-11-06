@@ -77,13 +77,15 @@ and **no base clause**, and `missing-return` on that header quotes return types 
 The consequences are the residuals in §1 and several "`shared_ptr` again" reports: `__shared_ptr_access` is never
 reached, so `operator*`/`operator->` are missing from the dot's list with `unlisted: []` — a silent gap.
 
-Reduced so far: the derail is in lines 1..655 (removing the overwrite block 657–716 does not fix it), the head alone and
-each body member alone parse correctly, and dropping **any one** blank-line chunk of the overwrite specialization's body
-fixes the following class — so it is a combination or a size effect, not one construct.
-
-Next: a **range bisect on the real text** — drop line ranges from 1..730, parse with `inspect facts --fixture`, and read
-the scope of `_Sp_counted_array_base` as the marker. The first range that fixes it is the bug's home; reduce to a
-minimal text and make that the parser test.
+Reduced: the class at 582 does not close at its `};`, and the member that leaves it open is `_M_get_deleter` — removing
+**the bare `||` line (640)** fixes the following class's scope, while removing its `#if`/`#else`/`#endif` run does not.
+The shape is a `||` at the end of a line followed by a preprocessor directive inside an `if` condition. The class's own
+text parses cleanly with a plain or the real namespace head; the real 527-line prefix is needed, and neither removing
+one preceding declaration (36 tried) nor padding with plain declarations changes the answer — so the state that makes
+this class fail comes from **more than one** earlier construct. That is the next thing to find, and the tool for it is
+**delta debugging**: an automated shrinker whose oracle is `inspect facts --fixture` + the marker's scope
+(`_Sp_counted_ptr_inplace` = still broken, `std` = fixed). The harness already exists in the session's notes; it needs
+the oracle wired into a loop over ranges rather than a hand-written list of candidates.
 
 ## 2. `DeclFact::type_of` loses its shape match — the root cause behind the pointee path
 
