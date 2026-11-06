@@ -45,11 +45,18 @@
 //! `format`: offered in the completion (truncated: true), 4 in the index of `std`
 //! ```
 //!
-//! # And the cost, which is why the module read is 1.3 s and not 0.3 s
+//! # And the cost, which is 360 ms and no longer 1.3 s
 //!
-//! `index_everything` drains 401 files, then the unit read pays 190 ms, then the second pass re-reads what it must.
-//! The three fixes above took it from **24.7 s cold and 112–506 s warm** to **2.5 s cold and 1.1 s warm**; with the
-//! unit read wired in it is **1.31 s warm**, which is the number to beat.
+//! `index_everything` drains 401 files, the unit read pays 185 ms of prepare and 44 ms of commit, and the second pass
+//! no longer runs at all unless someone asks. **The demand-driven contract is the last big win**: a batch owes the
+//! index, and a reading of a file as a compiler sees it is owed to whoever asks, so a warm `import std;` measured
+//! **360.2 ms, 359.8 ms and 357.9 ms** in three runs where it measured 1.45–1.95 s before.
+//!
+//! What remains, by the trace: nine `advance` batches totalling ~227 ms (the drain of 401 summaries) and the unit read's
+//! 229 ms (a walk, the closure's texts, the served rendering and the cached facts). The texts are the next item: the
+//! unit key folds `content_hash(text)` for all 401 files, and the index already holds that number in every summary's
+//! key — but using it would make the key describe the *indexed* text rather than the text now on disk, which is what
+//! the key exists to tell apart, so that change needs a guard for edited files rather than a nicer lookup.
 
 use std::path::{Path, PathBuf};
 use std::time::Instant;
