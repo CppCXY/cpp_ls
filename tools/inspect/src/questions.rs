@@ -108,6 +108,7 @@ fn declaration_value(session: &Session<DiskFiles>, definition: &ProjectDefinitio
         "parameter_list": definition.fact.parameter_list,
         "parameters": definition.fact.parameters,
         "requires_clause": definition.fact.requires_clause,
+        "bases": definition.fact.bases,
         "reflection": definition.fact.reflection.as_ref().map(|reflection| reflection.said()),
         "modifiers": definition.fact.modifiers.bits(),
     })

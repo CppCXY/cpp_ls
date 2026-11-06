@@ -67,6 +67,24 @@ what made `members_of` look wrong in the earlier session). Rebuild, then reprodu
 
 ---
 
+## 1b. The parser derails on `bits/shared_ptr_base.h` — **do this first**
+
+`docs/buglist.md` §31 has the measurement: everything after line 582 is nested under `std::_Sp_counted_ptr_inplace`, a
+type fact is named `final` at line 666 (a class head that failed to parse), `__shared_ptr` at 1429 has the wrong scope
+and **no base clause**, and `missing-return` on that header quotes return types like
+`template<_Lock_policy _Lp> __shared_count<_Lp>` — the template head absorbed into the return type.
+
+The consequences are the residuals in §1 and several "`shared_ptr` again" reports: `__shared_ptr_access` is never
+reached, so `operator*`/`operator->` are missing from the dot's list with `unlisted: []` — a silent gap.
+
+Reduced so far: the derail is in lines 1..655 (removing the overwrite block 657–716 does not fix it), the head alone and
+each body member alone parse correctly, and dropping **any one** blank-line chunk of the overwrite specialization's body
+fixes the following class — so it is a combination or a size effect, not one construct.
+
+Next: a **range bisect on the real text** — drop line ranges from 1..730, parse with `inspect facts --fixture`, and read
+the scope of `_Sp_counted_array_base` as the marker. The first range that fixes it is the bug's home; reduce to a
+minimal text and make that the parser test.
+
 ## 2. `DeclFact::type_of` loses its shape match — the root cause behind the pointee path
 
 `docs/hover-render.md` §1 has the measurements: the field is recovered by matching a binding to a syntax shape by range,

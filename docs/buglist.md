@@ -797,3 +797,74 @@ from the previous round (`summary_codec.rs`, `index/store/tests.rs`, `hover_late
 has **no fact**: in the fixture the parameter is bound (`2:20 x`) and the constructor is not. Member lists and
 completion after `A::` therefore do not show it. `docs/next.md` §5 is the item; the guard that keeps the change safe is
 that a call statement (`A(1);`) has no specifier sequence at all.
+
+## 31. The parser derails on `bits/shared_ptr_base.h` — and that is what "`shared_ptr` again" has been
+
+Found while measuring the smart pointer's members after `50cf209`. It is not a `sema` bug and not a member-list bug:
+**the header does not parse the way it reads.**
+
+### What the facts say
+
+`inspect facts` on
+`<mingw>/lib/gcc/x86_64-w64-mingw32/15.1.0/include/c++/bits/shared_ptr_base.h` (`--project test_cpp`, `--json`,
+`--limit 0`):
+
+```text
+line 582  scope std                               _Sp_counted_ptr_inplace   ← the primary class, correct
+line 658  scope std::_Sp_counted_ptr_inplace     _Sp_overwrite_tag         ← should be `std`
+line 666  scope std::_Sp_counted_ptr_inplace     final       ← a TYPE FACT NAMED `final`, column 53
+line 723  scope std::_Sp_counted_ptr_inplace     _Sp_counted_array_base    ← should be `std`
+line 890  scope std::_Sp_counted_ptr_inplace     __shared_count            ← should be `std`
+line 1429 scope std::_Sp_counted_ptr_inplace     __shared_ptr              ← should be `std`, and it has NO bases
+```
+
+Everything after the primary class at 582 is nested one class too deep, and `__shared_ptr` — the class the whole
+`shared_ptr` chain is built on — lost its **base clause** (`__shared_ptr_access<_Tp, _Lp>`), which is where libstdc++
+declares `operator*` and `operator->`.
+
+```text
+members_of("std::__shared_ptr<Resource>")   36 members, unlisted: []   ← no operator*, no operator->, and no gap reported
+```
+
+so `shared.` completes twelve of the handle's members instead of fourteen, and nothing anywhere says a base was missed.
+
+The check channel shows the same shape from the other side: `missing-return` on that header quotes return types like
+``template<_Lock_policy _Lp> __shared_count<_Lp>`` and ``template<typename _Yp> _SafeConv<_Yp>`` — the **template head is
+being absorbed into the return type** for member function definitions in that file.
+
+### What is ruled out, and how
+
+Reduced by hand with `tools/inspect` (`facts --fixture`, marker = a following class's fact scope):
+
+| reduced text | marker's scope |
+| --- | --- |
+| the real lines 1..730 (control) | `std::_Sp_counted_ptr_inplace` — wrong |
+| the same **without** the overwrite specialization block (657–716) | still wrong — the derail starts earlier |
+| the specialization head alone (`requires`, `final`, split across `#if`/`#else`) | correct |
+| each body member alone (`[[no_unique_address]]`, anonymous union, `friend class X<_Lp>`, `auto f() {…}`, placement new, `_M_obj.~_Tp()`, `using` in a body, `override` returning `nullptr`) | correct |
+| an `#if` **inside an `if` condition** (the `_M_get_deleter` shape) | correct |
+| the real specialization body, one blank-line chunk removed | correct for **every** chunk |
+
+The last row is the interesting one: dropping **any one** of the eight body chunks makes the following class parse
+correctly again — so the trigger is a combination or a size effect (a lookahead window, or state carried from a member
+that only shows with what follows), not one construct.
+
+### Why it matters beyond `shared_ptr`
+
+* `__shared_ptr`'s missing base is why `__shared_ptr_access`'s members never arrive, and that is the residual item in
+  `docs/next.md` §1 — `operator*`/`operator->` missing from the dot's list, silently.
+* The template head in the return type is the same family as §30's decorated constructor: a name the parser keeps in
+  the wrong place, invisible until a consumer reads it.
+* Any semantics built on that header inherit the wrong scopes: `members_of`, the pointee chain, `undefined-field`,
+  `missing-return`.
+
+### How to reduce it
+
+A harness on the **real text**, not a hand-written fixture: for a pair of line ranges, drop them from the file, parse,
+and read a **marker fact's scope** (`inspect facts --fixture` with `--json`, as above). The first question the next run
+should answer is *which line range, removed from 1..730, makes `_Sp_counted_array_base` come back as `std`* — binary
+search over ranges rather than over members. The control is already here: `1..730` is wrong, `1..730` minus the
+overwrite block is still wrong, so the range is in `1..655`.
+
+Once a minimal real text exists, the fix goes in the parser with that text as its test, and §30's `get_name` test gains
+the same shape.
