@@ -42,6 +42,75 @@ pub const DATABASE_FILE: &str = "cache.redb";
 /// deletes the file rather than reading bytes it cannot interpret.
 pub const SCHEMA_VERSION: u64 = 1;
 
+/// **How long the cache spent inside the database**, for the question the probes kept asking and could not answer:
+/// why the *same* operation on the *same* cache takes 0.8 s in one run and 51 s in the next.
+///
+/// Every phase inside the analysis measured milliseconds in both runs, so the seconds are either in here or outside
+/// the process — and a number that says "the database took 40 s of it" is the difference between the two.
+///
+/// Two counters, not five: a read is a `begin_read` plus a decompress, a write is a transaction, and the question is
+/// which *kind* of traffic the seconds belong to. `reset` is the probe's, because a session's numbers include
+/// everything before the operation it cares about.
+pub mod io {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static READS: AtomicU64 = AtomicU64::new(0);
+    static READ_NANOS: AtomicU64 = AtomicU64::new(0);
+    static WRITES: AtomicU64 = AtomicU64::new(0);
+    static WRITE_NANOS: AtomicU64 = AtomicU64::new(0);
+
+    /// Reads done, nanoseconds spent in them, writes done, nanoseconds spent in them.
+    pub fn statistics() -> (u64, u64, u64, u64) {
+        (
+            READS.load(Ordering::Relaxed),
+            READ_NANOS.load(Ordering::Relaxed),
+            WRITES.load(Ordering::Relaxed),
+            WRITE_NANOS.load(Ordering::Relaxed),
+        )
+    }
+
+    pub fn reset() {
+        for counter in [&READS, &READ_NANOS, &WRITES, &WRITE_NANOS] {
+            counter.store(0, Ordering::Relaxed);
+        }
+    }
+
+    pub(super) fn read_done(elapsed: std::time::Duration) {
+        READS.fetch_add(1, Ordering::Relaxed);
+        READ_NANOS.fetch_add(elapsed.as_nanos() as u64, Ordering::Relaxed);
+    }
+
+    pub(super) fn write_done(elapsed: std::time::Duration) {
+        WRITES.fetch_add(1, Ordering::Relaxed);
+        WRITE_NANOS.fetch_add(elapsed.as_nanos() as u64, Ordering::Relaxed);
+    }
+}
+
+/// A scoped timer for one database call — see [`io`].
+enum Timed {
+    Read(std::time::Instant),
+    Write(std::time::Instant),
+}
+
+impl Timed {
+    fn read() -> Self {
+        Timed::Read(std::time::Instant::now())
+    }
+
+    fn write() -> Self {
+        Timed::Write(std::time::Instant::now())
+    }
+}
+
+impl Drop for Timed {
+    fn drop(&mut self) {
+        match self {
+            Timed::Read(started) => io::read_done(started.elapsed()),
+            Timed::Write(started) => io::write_done(started.elapsed()),
+        }
+    }
+}
+
 const META: TableDefinition<&str, &[u8]> = TableDefinition::new("meta");
 const FILES: TableDefinition<&str, &[u8]> = TableDefinition::new("files");
 const PROJECTIONS: TableDefinition<u64, &[u8]> = TableDefinition::new("projections");
@@ -340,6 +409,7 @@ impl CacheDb {
 
     /// Start a new generation, and answer it. Called once when a session opens its cache.
     pub fn begin_generation(&self) -> Result<u64> {
+        let _timed = Timed::write();
         let write = self.database.begin_write()?;
         let next = {
             let mut meta = write.open_table(META)?;
@@ -365,6 +435,7 @@ impl CacheDb {
 
     /// Record what a file is, and what it was read with.
     pub fn put_file(&self, path: &Path, row: FileRow) -> Result<()> {
+        let _timed = Timed::write();
         let key = normalise(path);
         let write = self.database.begin_write()?;
         {
@@ -377,6 +448,7 @@ impl CacheDb {
 
     /// What the last run recorded for a file, without opening it.
     pub fn file(&self, path: &Path) -> Result<Option<FileRow>> {
+        let _timed = Timed::read();
         let key = normalise(path);
         let read = self.database.begin_read()?;
         let files = read.open_table(FILES)?;
@@ -390,6 +462,7 @@ impl CacheDb {
 
     /// The summary bytes for a key, decompressed. `None` is a miss, and a miss is never an error.
     pub fn summary(&self, key: CacheKey) -> Result<Option<Vec<u8>>> {
+        let _timed = Timed::read();
         let read = self.database.begin_read()?;
         let summaries = read.open_table(SUMMARIES)?;
         let Some(value) = summaries.get((key.content, key.config, key.env))? else {
@@ -400,6 +473,7 @@ impl CacheDb {
 
     /// Store a summary. The caller's bytes are compressed here, once, and the write is one transaction.
     pub fn put_summary(&self, key: CacheKey, bytes: &[u8]) -> Result<()> {
+        let _timed = Timed::write();
         let packed = compress(bytes);
         let write = self.database.begin_write()?;
         {
@@ -418,6 +492,7 @@ impl CacheDb {
         summaries: &[(CacheKey, Vec<u8>)],
         files: &[(String, FileRow)],
     ) -> Result<()> {
+        let _timed = Timed::write();
         if summaries.is_empty() && files.is_empty() {
             return Ok(());
         }
@@ -452,6 +527,7 @@ impl CacheDb {
     /// together take well under a tenth of that. A cold build writes thousands of rows, so this is the shape the
     /// pump should use rather than a nicety.
     pub fn put_summaries(&self, rows: &[(CacheKey, Vec<u8>)]) -> Result<()> {
+        let _timed = Timed::write();
         if rows.is_empty() {
             return Ok(());
         }
@@ -486,6 +562,7 @@ impl CacheDb {
 
     /// The cooked reading stored for one key — see [`COOKED_READINGS`].
     pub fn cooked_reading(&self, key: CacheKey) -> Result<Option<Vec<u8>>> {
+        let _timed = Timed::read();
         let read = self.database.begin_read()?;
         let cooked = read.open_table(COOKED_READINGS)?;
         let Some(value) = cooked.get((key.content, key.config, key.env))? else {
@@ -496,6 +573,7 @@ impl CacheDb {
 
     /// Store a cooked reading. Compressed here, once, like a summary — the two are the same order of bytes.
     pub fn put_cooked_reading(&self, key: CacheKey, bytes: &[u8]) -> Result<()> {
+        let _timed = Timed::write();
         let packed = compress(bytes);
         let write = self.database.begin_write()?;
         {
@@ -559,6 +637,7 @@ impl CacheDb {
     /// [`crate::unit_codec`]. Stored compressed like the rest: the record is about 20 bytes per token of a program,
     /// and a real one is 14 MB before zstd.
     pub fn unit(&self, key: u64) -> Result<Option<crate::RenderedUnit>> {
+        let _timed = Timed::read();
         let read = self.database.begin_read()?;
         let units = read.open_table(UNITS)?;
         let Some(value) = units.get(key)? else {
@@ -569,6 +648,7 @@ impl CacheDb {
     }
 
     pub fn put_unit(&self, key: u64, unit: &crate::RenderedUnit) -> Result<()> {
+        let _timed = Timed::write();
         let packed = compress(&crate::unit_codec::encode(unit));
         let write = self.database.begin_write()?;
         {
@@ -586,6 +666,7 @@ impl CacheDb {
     /// This is the half of a unit read that costs the most (the sweep is ≈3.8 s of a 4.4 s read) and the half that is
     /// a pure function of the text, so it is the one worth keeping.
     pub fn indexed_unit(&self, program: u64) -> Result<Option<crate::IndexedUnit>> {
+        let _timed = Timed::read();
         let read = self.database.begin_read()?;
         let table = read.open_table(UNIT_INDICES)?;
         let Some(value) = table.get(program)? else {
@@ -596,6 +677,7 @@ impl CacheDb {
     }
 
     pub fn put_indexed_unit(&self, program: u64, unit: &crate::IndexedUnit) -> Result<()> {
+        let _timed = Timed::write();
         let packed = compress(&crate::unit_codec::encode_indexed_unit(unit));
         let write = self.database.begin_write()?;
         {
@@ -614,6 +696,7 @@ impl CacheDb {
     /// The bytes are [`crate::index::walk_cache_codec::encode`]'s, so this table has no opinion about their shape: a
     /// contribution that cannot be decoded is a miss, which is the same rule the summaries follow.
     pub fn put_contributions(&self, entries: &[(u64, Vec<u8>)]) -> Result<usize> {
+        let _timed = Timed::write();
         let write = self.database.begin_write()?;
         let written;
         {
@@ -629,6 +712,7 @@ impl CacheDb {
 
     /// What the previous run left. `Ok(vec![])` is a cold start, not an error — the walk is correct without it.
     pub fn contributions(&self) -> Result<Vec<(u64, Vec<u8>)>> {
+        let _timed = Timed::read();
         let read = self.database.begin_read()?;
         let table = read.open_table(CONTRIBUTIONS)?;
         let mut entries: Vec<(u64, Vec<u8>)> = Vec::new();

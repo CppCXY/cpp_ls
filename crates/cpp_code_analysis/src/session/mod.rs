@@ -157,6 +157,18 @@ impl Drop for DiagTrace {
 /// translation unit is built for a closure rather than for a file. It is the next thing to cut, and the budget
 /// warning is what will say when it has been.
 const RE_READ_SLICE: usize = 16;
+
+/// **How many files a slice needs before its second pass shares one timeline instead of walking one per candidate.**
+///
+/// The second pass re-reads a slice's files and every file that defines a macro one of them mentions. A candidate
+/// with no timeline falls to `a_timeline_of_its_own`, which walks that file's whole closure — and a slice can reach
+/// far more candidates than it has files: measured on the modules fixture, **6 files reached 44 candidates and the
+/// re-read cost 46.8 s**, which was the whole `import std;` read.
+///
+/// The shared timeline is not free of consequence: a reading built through it has the *slice root's* environment, not
+/// the candidate's own, so it cannot be stored as that file's refinement. Four is where a fixture stops being a
+/// fixture: below it, one walk per candidate is the cheaper side of that trade and the refinement stays cacheable.
+const WALKS_WORTH_SHARING: usize = 4;
 /// **How many macro environments one drain builds.**
 ///
 /// One, where [`COOK_SLICE`] is four, and the difference is **measured**: a cook is a unit walk over one file's
@@ -3219,9 +3231,29 @@ impl<F: FileProvider + Clone> Session<F> {
         // inserts are named here and worked out in [`Session::prepare_the_drain`], which takes `&self`: the second
         // pass over `files`, and the rendering of `environments`. What is left in this function is a queue pop, a
         // summary lookup and a `want`.
+        // **A slice of one or two files keeps the per-file walk**, and the threshold is the cache rather than the
+        // clock: a reading built through a *slice* unit has the root's environment, not the file's own, so it cannot
+        // be stored as the file's refinement (`the_closure_fingerprint`). Two session tests pin that a small project
+        // serves its refinement to the next session, and a shared unit would break them for a saving of one walk.
+        // From `WALKS_WORTH_SHARING` files up, the walks are many and the cacheability of one small file is not the
+        // trade it was.
+        let slice_units = if files.len() < WALKS_WORTH_SHARING {
+            Vec::new()
+        } else {
+            self.units_for_the_pass(&files)
+        };
         let mut drain = Drain {
             files,
-            units,
+            // **One timeline per file of the slice, not one per candidate the pass then finds.** The units the second
+            // pass reads its environments out of were left empty here, so every candidate a slice reached fell to
+            // `a_timeline_of_its_own` — a whole closure walk each. Measured on the modules fixture: a slice of six
+            // files reached **44 candidates** and the re-read cost **46.8 s**, which was the whole module read.
+            // `units_for_the_pass` was written for exactly this and was marked dead code because nothing called it.
+            units: {
+                let mut all = units;
+                all.extend(slice_units);
+                all
+            },
             environments: Vec::new(),
         };
 
@@ -3510,7 +3542,6 @@ impl<F: FileProvider + Clone> Session<F> {
     /// A candidate that a unit already built reads is skipped — the question is "which timeline holds this file's
     /// environment", and the first unit that answers `environment_of` is that timeline. On the 138-file project
     /// this returns **one** unit, where the second pass used to walk a closure per file.
-    #[allow(dead_code)]
     fn units_for_the_pass(&self, files: &[PathBuf]) -> Vec<std::sync::Arc<crate::TranslationUnit>> {
         // **The slice, and not the project.** This used to chain `self.project` in front of `files`, on the argument
         // that a project file is a root whose closure is the whole program and therefore covers the most — and the

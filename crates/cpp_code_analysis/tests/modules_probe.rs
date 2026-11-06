@@ -110,6 +110,10 @@ fn what_import_std_costs() {
             .unwrap_or(false)
     });
 
+    // **What the database itself cost** — see `cache_db::io`. The question is why the same operation on the same
+    // cache takes 0.8 s in one run and 51 s in the next, and every phase inside the analysis measured milliseconds in
+    // both: the answer is either in here or outside the process.
+    cpp_code_analysis::cache::cache_db::io::reset();
     let mut cumulative = StoreStats::default();
     let mut total = std::time::Duration::ZERO;
     for file in &order {
@@ -163,6 +167,13 @@ fn what_import_std_costs() {
     println!(
         "total {:?}; the session parsed {} file(s) and reused {}",
         total, cumulative.rebuilt, cumulative.reused
+    );
+    let (reads, read_nanos, writes, write_nanos) =
+        cpp_code_analysis::cache::cache_db::io::statistics();
+    println!(
+        "database: {reads} read(s) in {:.2} s, {writes} write(s) in {:.2} s",
+        read_nanos as f64 / 1e9,
+        write_nanos as f64 / 1e9,
     );
 
     // **A completion that needs the standard library.** `std::` in `main.cpp`, where `import std;` is the only
