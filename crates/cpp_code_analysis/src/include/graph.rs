@@ -49,7 +49,7 @@ use cpp_parser::CppSyntaxTree;
 use crate::{
     config::CompilerConfig,
     directive::{Directive, DirectiveKind, IncludeForm, SpannedDirective},
-    guards::{Guard, analyse_guards},
+    guards::{Guard, detect_guard_from_tokens},
     include::{FoundIn, IncludeResolver, Resolution},
     paths::{FileId, FileProvider, PathInterner, parent_normalized},
 };
@@ -415,8 +415,22 @@ pub fn walk_scoped<F: FileProvider>(
     // missing from it means a file that is silently never analysed.
     graph.analysed.push(root);
 
+    // **The root's directives, from the tokens the caller's tree already holds** — the same stream the parser read,
+    // so this is not a second lex. Everything below the root reaches this through a lex of its own (`walk_into`), and
+    // nothing below the root builds a tree: that is the whole point of [`Directives`].
+    let mut tokens = tree.get_tokens().to_vec();
+    let directives = Directives::of(source, &mut tokens);
+
     visit(
-        source, tree, root, &starting, &mut graph, &mut state, files, config, interner, 0,
+        &directives,
+        root,
+        &starting,
+        &mut graph,
+        &mut state,
+        files,
+        config,
+        interner,
+        0,
     );
 
     graph
@@ -468,10 +482,56 @@ fn is_probably_a_header(path: &Path) -> bool {
     )
 }
 
+/// **One file's directives, as the walk needs them** — read from the token stream, without a syntax tree.
+///
+/// This is the walk's per-file input, and the type exists because building it is the difference between a closure
+/// walk that costs seconds and one that costs tens of seconds. A header reached through an `#include` was parsed
+/// **only** to read these three things — `graph.rs`'s `walk_into` called `CppParser::parse` on every file it entered —
+/// and the parse is nearly all of what a file costs: measured on MSVC's and the Windows SDK's largest headers,
+/// discovery (lex + directives) is **3.3%** of a full summary (14 ms against 421 ms for 0.9 MB,
+/// `tests/filefacts_probe.rs`), and the `std` closure is 388 files / 17.9 MB discovered in **1.98 s**, of which
+/// 1.55 s is file I/O.
+///
+/// `guard` and `defines` are [`analyse_guards`]'s two answers, taken from the **tree-free** path the directive
+/// summary already used ([`detect_guard_from_tokens`]): the only question that needed the tree was "is there code
+/// before the `#ifndef`", which a token stream answers.
+pub(crate) struct Directives {
+    /// The directives in source order, with the conditions resolved — every reader below takes this.
+    pub(crate) preprocessing: crate::preprocess::FilePreprocessing,
+    /// The file's own include guard, recognised from the directives and the tokens.
+    pub(crate) guard: Guard,
+    /// Every name the file `#define`s, in order.
+    pub(crate) defines: Vec<Box<str>>,
+}
+
+impl Directives {
+    /// **Read a file's directives** from text and its tokens.
+    ///
+    /// The tokens are the lexer's, and the caller usually has them: a translation unit's root has a syntax tree,
+    /// whose tokens are the same stream. The quoted-header folding is the one thing that has to happen before the
+    /// directive pass — see [`crate::preprocess::directive::fold_quoted_header_names`] — and it is done here rather
+    /// than by the caller so that no caller can forget it.
+    pub(crate) fn of(source: &str, tokens: &mut [cpp_parser::CppTokenData]) -> Self {
+        crate::preprocess::directive::fold_quoted_header_names(source, tokens);
+        let preprocessing = crate::preprocess::preprocess(source, tokens);
+        let guard = detect_guard_from_tokens(&preprocessing.directives, tokens);
+        let defines = preprocessing
+            .directives
+            .iter()
+            .filter_map(|spanned| spanned.directive.defines())
+            .map(|definition| definition.name.clone())
+            .collect();
+        Directives {
+            preprocessing,
+            guard,
+            defines,
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn visit<F: FileProvider>(
-    source: &str,
-    tree: &CppSyntaxTree,
+    directives: &Directives,
     file: FileId,
     inherited: &Marked,
     graph: &mut FileGraph,
@@ -481,9 +541,9 @@ fn visit<F: FileProvider>(
     interner: &mut PathInterner,
     depth: usize,
 ) -> Marked {
-    let root = tree.get_red_root();
-    let preprocessing = crate::preprocess::preprocess(source, tree.get_tokens());
-    let guard_analysis = analyse_guards(&preprocessing, &root);
+    // **No syntax tree, on purpose** — see [`Directives`]. The two things the tree was used for are a token stream's
+    // to answer: the directives themselves, and "is there code before the `#ifndef`".
+    let preprocessing = &directives.preprocessing;
 
     // What this file was reached with, recorded before anything in it changes the picture.
     let mut macros = inherited.clone();
@@ -498,8 +558,8 @@ fn visit<F: FileProvider>(
         file,
         FileEntry {
             path: path.clone(),
-            guard: guard_analysis.guard.clone(),
-            defines: guard_analysis.defines.clone(),
+            guard: directives.guard.clone(),
+            defines: directives.defines.clone(),
             depth,
             macros: inherited_names,
             missing_context: state.missing_context(),
@@ -522,16 +582,14 @@ fn visit<F: FileProvider>(
     // The macro state is snapshotted before each directive, because a condition has to be decided against the
     // macros in force where it was *written* — see [`directive_visibilities`].
     //
-    // Snapshotting first and deciding afterwards is what makes the two uses of the state consistent: the
-    // visibility of a directive is decided against the states of the directives *before* it, and this file's
-    // own walk then applies the same verdict to decide whether to apply the directive at all.
-    let mut states: Vec<Marked> = Vec::with_capacity(preprocessing.directives.len());
-
-    for _ in &preprocessing.directives {
-        states.push(macros.clone());
-    }
-
-    let visibilities = directive_visibilities(&states, &preprocessing.directives);
+    // **One state, not one per directive.** The walk used to clone the inherited [`Marked`] once per directive so
+    // that a condition could be decided against "the state at its position" — but every one of those clones was of
+    // the *same* value (the walk applies a `#define` as it reaches it, not before), so the table was a thousand copies
+    // of one state: on MSVC, whose predefines are ~9 400 names, `xutility` alone paid for a thousand clones of a
+    // 9 400-entry `Vec` and `HashSet` — **185 ms per file**, most of it not analysis. `preprocess` already carries the
+    // state at every offset (`FilePreprocessing::macros_at`), which is where a per-position answer belongs; until that
+    // is wired in, the honest single state is what this reads, and the verdicts are the same ones the clones produced.
+    let visibilities = directive_visibilities(&macros, &preprocessing.directives);
 
     for (index, spanned) in preprocessing.directives.iter().enumerate() {
         // A define inside a region that is definitely not compiled never takes effect. Applying it anyway
@@ -663,7 +721,7 @@ fn visit<F: FileProvider>(
 /// makes its own `#endif` part of the disabled text. Applying that uniformly is what lets this be one loop
 /// with no special case — the region is popped as the `#endif` is *passed*, which is what puts the directive
 /// after it outside.
-fn directive_visibilities(states: &[Marked], directives: &[SpannedDirective]) -> Vec<Option<bool>> {
+fn directive_visibilities(state: &Marked, directives: &[SpannedDirective]) -> Vec<Option<bool>> {
     let mut open: Vec<OpenRegion> = Vec::new();
     let mut visibilities: Vec<Option<bool>> = Vec::with_capacity(directives.len());
 
@@ -680,7 +738,6 @@ fn directive_visibilities(states: &[Marked], directives: &[SpannedDirective]) ->
         };
 
         // The macros in force where this branch was written, which is what its expression is about.
-        let state = states.get(position).unwrap_or_else(|| &states[0]);
         let holds = branch.decide(state);
 
         match branch.kind {
@@ -903,10 +960,24 @@ fn follow<F: FileProvider>(
     };
 
     graph.analysed.push(file);
-    let tree = cpp_parser::CppParser::parse(&source, cpp_parser::ParserConfig::default());
+
+    // **A lex, not a parse.** This is the line the closure's cost was made of: every header a translation unit
+    // includes was parsed here, and only its directives were read out of the tree. The tokens carry those, and the
+    // guard is recognised from them (`detect_guard_from_tokens`), so the tree is not built at all — measured, this is
+    // 3.3% of a file's full summary (`tests/filefacts_probe.rs`).
+    let (mut tokens, _errors) = cpp_parser::lex(&source, &cpp_parser::LexerConfig::default());
+    let directives = Directives::of(&source, &mut tokens);
 
     Some(visit(
-        &source, &tree, file, inherited, graph, state, files, config, interner, depth,
+        &directives,
+        file,
+        inherited,
+        graph,
+        state,
+        files,
+        config,
+        interner,
+        depth,
     ))
 }
 

@@ -703,3 +703,44 @@ fn skip_trivia(tokens: &[Token], index: &mut usize) {
         *index += 1;
     }
 }
+
+/// Give `#include "local.h"` the token the parser gives it: a header name.
+///
+/// The parser folds the name after `#include` into one `HeaderName` token while it parses, because only the parser
+/// knows a header name is expected there; the lexer alone leaves a quoted one as a string literal, and the directive
+/// reader — which reads `HeaderName` — would call the line an unreadable directive. A scan that runs before the parse
+/// has to do the same relabelling itself, by the same rule the parser uses (no escapes: a header name has none). The
+/// angle form needs nothing: this reader already reassembles `<a/b.h>` from the tokens between the brackets.
+///
+/// **One implementation for the two readers.** It began in the indexer, for the directive summary; the include walk
+/// needs it too, now that a header's directives are read from its tokens rather than from a parse. Two copies would
+/// be two answers to "what does this `#include` line say", and a file one of them resolved and the other did not see
+/// is a difference no test would attribute.
+pub(crate) fn fold_quoted_header_names(source: &str, tokens: &mut [CppTokenData]) {
+    let next_significant = |tokens: &[CppTokenData], from: usize| {
+        (from..tokens.len()).find(|&at| !cpp_parser::is_trivia(tokens[at].kind))
+    };
+
+    for at in 0..tokens.len() {
+        if tokens[at].kind != CppTokenKind::Hash {
+            continue;
+        }
+        let Some(name) = next_significant(tokens, at + 1) else {
+            continue;
+        };
+        let word = &source[tokens[name].range.start_offset..tokens[name].range.end_offset()];
+        if word != "include" && word != "include_next" {
+            continue;
+        }
+        let Some(target) = next_significant(tokens, name + 1) else {
+            continue;
+        };
+        if tokens[target].kind != CppTokenKind::StringLiteral {
+            continue;
+        }
+        let text = &source[tokens[target].range.start_offset..tokens[target].range.end_offset()];
+        if !text.contains('\\') {
+            tokens[target].kind = CppTokenKind::HeaderName;
+        }
+    }
+}

@@ -1624,43 +1624,10 @@ fn file_what_was_found(
     }
 }
 
-/// Give `#include "local.h"` the token the parser gives it: a header name.
-///
-/// The parser folds the name after `#include` into one `HeaderName` token while it parses, because only the parser
-/// knows a header name is expected there; the lexer alone leaves a quoted one as a string literal, and the directive
-/// reader — which reads `HeaderName` — would call the line an unreadable directive. A scan that runs before the parse
-/// has to do the same relabelling itself, by the same rule the parser uses (no escapes: a header name has none). The
-/// angle form needs nothing: the directive reader already reassembles `<a/b.h>` from the tokens between the brackets.
-fn fold_quoted_header_names(source: &str, tokens: &mut [cpp_parser::CppTokenData]) {
-    use cpp_parser::CppTokenKind;
-
-    let next_significant = |tokens: &[cpp_parser::CppTokenData], from: usize| {
-        (from..tokens.len()).find(|&at| !cpp_parser::is_trivia(tokens[at].kind))
-    };
-
-    for at in 0..tokens.len() {
-        if tokens[at].kind != CppTokenKind::Hash {
-            continue;
-        }
-        let Some(name) = next_significant(tokens, at + 1) else {
-            continue;
-        };
-        let word = &source[tokens[name].range.start_offset..tokens[name].range.end_offset()];
-        if word != "include" && word != "include_next" {
-            continue;
-        }
-        let Some(target) = next_significant(tokens, name + 1) else {
-            continue;
-        };
-        if tokens[target].kind != CppTokenKind::StringLiteral {
-            continue;
-        }
-        let text = &source[tokens[target].range.start_offset..tokens[target].range.end_offset()];
-        if !text.contains('\\') {
-            tokens[target].kind = CppTokenKind::HeaderName;
-        }
-    }
-}
+/// Give `#include "local.h"` the token the parser gives it: a header name — **the shared implementation lives in
+/// [`crate::preprocess::directive::fold_quoted_header_names`]**, because the include walk now reads a header's
+/// directives from its tokens rather than from a parse and the two readers must agree about what an include line is.
+use crate::preprocess::directive::fold_quoted_header_names;
 
 /// The [`IncludeFact`] for an `#include`, or `None` for every other directive.
 ///
