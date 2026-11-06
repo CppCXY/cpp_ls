@@ -749,3 +749,51 @@ before: *"`Initialize` is not declared: nothing this file can see names it"*; af
 remaining 30 in the `inspect` run above are that tool's setup — without `--index` only the asked file is indexed, so
 `definitions("_server")` answers `NotDeclaredHere` because `LSPHandle.h` has no facts there; the fixture, whose header
 *is* read, is the controlled version of the same question. `cargo t --workspace`: **138 suites, 0 failures**.
+
+## 30. A decorated constructor or destructor promises no return — `305a927`
+
+Reported: "`missing-return` still cannot handle constructors and destructors, and still diagnoses them wrongly."
+Reproduced on a fixture with what a real class writes:
+
+```text
+struct A { explicit A(int x) : x_(x) {} virtual ~A() {} int x_; };
+struct C { inline C() {} constexpr C(int x) : x_(x) {} ~C() noexcept {} int x_; };
+
+before   2:14 / 3:14 / 13:15  check  missing-return  "this function is declared to return `` and its body has no `return`"
+after    0 findings
+```
+
+**The guard, and why it only covered half the shapes.** The rule skipped a declaration with **no specifier sequence**,
+on the reasoning that a constructor has no return type to write. True of `A() {}` and `~A() {}`; false of every
+decorated one:
+
+```text
+explicit A(int x)   DeclSpecifierSeq "explicit A"      the constructor's own name is in the sequence
+virtual ~A()        DeclSpecifierSeq "virtual"         no type, only a specifier
+constexpr C(int x)  DeclSpecifierSeq "constexpr C"     name in the sequence
+inline C()          DeclSpecifierSeq "inline C"        (this one happened to stay silent)
+```
+
+and the type the sentence quotes — `` — is the same mistake: the declaration's own name was being read as a type.
+
+**The fix is in the parser, because the question is not the check's to guess at.**
+
+* `CppDeclaration::get_name` learns the specifier-sequence spelling: when the declarator names nothing and the sequence
+  holds no type, its **last** name is the declaration's own. Before this the declaration had **no name at all** —
+  `inspect facts` on the fixture listed no fact for `explicit A(int x)`.
+* `CppDeclaration::promises_no_return` is the question the check has, asked of the **name**: a destructor writes `~`
+  before its first `(`, and a constructor's last segment is its class's name (`A::A`, `ns::A::A`, `Box<T>::Box`, or the
+  enclosing class for an in-class one).
+* `missing_return` asks it first and keeps the old guard as the second half, so a nameless declaration that is not a
+  constructor still cannot fire.
+
+**Measured after:** the three false findings are gone; the functions beside them still report with the type they write
+(`int broken()` and `int S::f()` → 2 findings, both `missing-return`, both `int`). The checks suite is 112 tests, the
+parser's 35, `cpp_ls --lib` 123 — all green, and `--all-targets -D warnings` is green again after three stray lints
+from the previous round (`summary_codec.rs`, `index/store/tests.rs`, `hover_latency.rs`).
+
+**Still open, and it is the same reader.** The **scope walker** names declarations with its own reader
+(`sema::scopes::declared_name`), which does not know the specifier-sequence spelling, so a decorated constructor still
+has **no fact**: in the fixture the parameter is bound (`2:20 x`) and the constructor is not. Member lists and
+completion after `A::` therefore do not show it. `docs/next.md` §5 is the item; the guard that keeps the change safe is
+that a call statement (`A(1);`) has no specifier sequence at all.
