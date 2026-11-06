@@ -4010,6 +4010,27 @@ impl<F: FileProvider + Clone> Session<F> {
             // (`catch_up`), and a batch caller that just read the whole project asks for the whole project. It was held
             // back while the refined reading was weaker than the raw one; the refinement now files its rendering as the
             // file's **cooked** facts (L2) and leaves the summary alone (L1), which is what the design's §2.1 says.
+            //
+            // # P2 wants this loop gone, and the three tests that stand in its way are named here
+            //
+            // Making a batch stop asking is a change of *contract* — "index everything" would mean the index and not a
+            // compiler's reading of every file — and it was implemented and reverted in one round. What it costs:
+            // **659 ms of a 1.54 s `import std;`**, four slices of 13–16 files rendered through a shared timeline, three
+            // of which report `0 bodied name(s)` and render anyway. What blocked it, exactly:
+            //
+            // * `a_refinement_is_served_to_the_next_session` — its second session asserted `re_read_backlog() == 0`
+            //   after `index_everything`. Under the new contract the backlog is legitimately 2, and the subject it is
+            //   named for (the refinement is *served*) needs an explicit `want_refinement` in both sessions. Two lines,
+            //   and the updated form passes;
+            // * `a_keystroke_in_a_body_reads_the_file_through_its_timeline` — its setup asserted that the first reading
+            //   of a file is the timeline's, which the eager ask is what produced. One `want_refinement` before
+            //   `index_everything` keeps the subject;
+            // * `a_file_read_back_through_its_own_unit_is_not_read_again_by_the_second_pass` — **not** fixed by an ask.
+            //   After an edit it asserted the second pass has nothing to repair, and with the eager loop gone the edited
+            //   file is queued again even though it was read with its environment. Either the edit path stops queueing
+            //   environment-read files, or this assertion is about a coupling that has to be understood first.
+            //
+            // So the next attempt starts at that third test, not at this loop.
             for step in &steps {
                 self.want_refinement(&step.path);
             }
