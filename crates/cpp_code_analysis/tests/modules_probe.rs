@@ -32,19 +32,24 @@
 //! Still not done, and visible here: `format` is not offered after `std::`. The names come from the headers of the
 //! closure; the standard *module's* exports are P5's work.
 //!
-//! **And reading programs does not produce them**, which was worth measuring rather than assuming. With
-//! `CPPLS_MODULES_UNIT=1` the probe reads up to three programs before asking:
+//! **It is offered now, and the last three rounds were it.** The chain was: reading the *importing* file's program
+//! places nothing from the module (`CPPLS_MODULES_UNIT=1` measured three programs, 1 + 81 + 81 files, and no
+//! `format`); what the module contributes is its **interface unit**, and the module read only ever *queued* it — a
+//! caller with no pump never read it. With `read_the_unit` wired into `read_the_modules_a_file_imports` the unit is
+//! read in **190 ms** (render served, facts cached) and the completion reaches its cap. Then the names were still
+//! missing, and the reason was a scope string: a unit rendering splices every file at its include site, so one
+//! header's `namespace std {` lands inside another's and `std::format` was filed under ten nested `std`s. Collapsing
+//! a run of the same segment (`ScopeTree::qualified_name_of`) fixed it:
 //!
 //! ```text
-//! unit read 1: 1 file(s) in 368.8µs      (main.cpp — `import std;` is not an `#include`, so its closure is itself)
-//! unit read 2: 81 file(s) in 1.04 s
-//! unit read 3: 81 file(s) in 1.06 s
-//! completion after `std::`: [… no `format` …]
+//! `format`: offered in the completion (truncated: true), 4 in the index of `std`
 //! ```
 //!
-//! So a program read of the *importing* file places nothing from the module: what `std::format` needs is the
-//! **interface unit's** own exports (`std.ixx`'s `export namespace std { using … }` block), read as the program it is.
-//! The probe's `unit read 2` is one of the project's own units, not `std.ixx`.
+//! # And the cost, which is why the module read is 1.3 s and not 0.3 s
+//!
+//! `index_everything` drains 401 files, then the unit read pays 190 ms, then the second pass re-reads what it must.
+//! The three fixes above took it from **24.7 s cold and 112–506 s warm** to **2.5 s cold and 1.1 s warm**; with the
+//! unit read wired in it is **1.31 s warm**, which is the number to beat.
 
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -251,7 +256,22 @@ fn what_import_std_costs() {
             labels.len(),
             if offered.truncated { ", truncated" } else { "" }
         );
-        if !labels.iter().any(|label| *label == "format") {
+        // **The verdict, said out loud either way.** The list is capped at a thousand names, so "`format` is not in
+        // it" is a weaker statement than it looks — the index is asked as well, and the two answers together are what
+        // says whether the module's exports reached an importing file.
+        let offered_format = labels.iter().any(|label| *label == "format");
+        let indexed_format = session
+            .index()
+            .declarations_in("std", main)
+            .iter()
+            .filter(|declaration| declaration.fact.name.as_str() == "format")
+            .count();
+        println!(
+            "  `format`: {} in the completion (truncated: {}), {indexed_format} in the index of `std`",
+            if offered_format { "offered" } else { "absent" },
+            offered.truncated
+        );
+        if !offered_format {
             // **The completion is capped**, so a missing `format` here means "past the thousandth name" as often as
             // it means "not exported". The index is asked directly instead of inferring from a truncated list.
             let declared = session
