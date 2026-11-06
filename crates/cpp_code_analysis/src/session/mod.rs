@@ -1001,6 +1001,21 @@ fn the_standards_own_macro(
         _ => None,
     }
 }
+
+/// **The standard's macros whose value depends on where they are written** — `__LINE__`, `__FILE__`, `__DATE__`,
+/// `__TIME__`, and C++11's `__COUNTER__`.
+///
+/// They are macros in every translation unit, exactly as `__cplusplus` is, but neither table this session has can say
+/// so: `-dM` does not print them (measured — `g++ -dM -E -x c++ NUL` answers `#define __cplusplus 201703L` and none of
+/// these), and [`the_standards_own_macro`] answers *values*, which these have none of that a reading could fold:
+/// `__LINE__` is the line it stands on. What a caller needs for a colour is the one bit — "this name is a macro" — so
+/// this is its own list rather than a fake value in the other one.
+fn a_macro_whose_value_depends_on_the_use(name: &str) -> bool {
+    matches!(
+        name,
+        "__LINE__" | "__FILE__" | "__DATE__" | "__TIME__" | "__COUNTER__"
+    )
+}
 impl Session<DiskFiles> {
     /// Open a project the way a language server does: ask the machine what it compiles with.
     ///
@@ -8483,7 +8498,12 @@ impl<F: FileProvider + Clone> Session<F> {
             if claimed.contains(&start) {
                 continue;
             }
+            // **Three sources, because no one of them holds them all**: the standard's constant macros
+            // (`__cplusplus`), the standard's position-dependent ones (`__LINE__`, which `-dM` never prints), and the
+            // toolchain's `-dM` table (`__GNUC__`). Reported from an editor: `__LINE__ << __FILE__ << __DATE__ <<
+            // __TIME__` was drawn as plain identifiers.
             let is_predefined = the_standards_own_macro(text, &language).is_some()
+                || a_macro_whose_value_depends_on_the_use(text)
                 || self.predefined_macro(text, &view.path).is_some();
             if !is_predefined {
                 continue;

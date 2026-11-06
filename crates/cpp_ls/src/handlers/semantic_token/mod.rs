@@ -749,6 +749,42 @@ mod tests {
     };
     use cpp_parser::SourceRange;
 
+    /// **A predefined macro is drawn as a macro** — `__LINE__`, `__FILE__`, `__DATE__`, `__TIME__`.
+    ///
+    /// No file declares them: the compiler does, and its `-dM` table does not print these four — measured,
+    /// `g++ -dM -E -x c++ NUL` answers `#define __cplusplus 201703L` and none of them. The standard's own table in the
+    /// session answers *values*, which these have none of (`__LINE__` is the line it stands on), so the classification
+    /// walks a third list for them. Reported from an editor: `__LINE__ << __FILE__ << __DATE__ << __TIME__` arrived
+    /// with no colour at all.
+    ///
+    /// Asserted on the encoded tokens rather than on `classified_names`, for the same reason as the test below: the
+    /// wire is what a colour comes from.
+    #[test]
+    fn the_standards_position_dependent_macros_are_drawn_as_macros() {
+        let text = "\
+#include <cstdio>
+void f() {
+    std::printf(\"%d %s %s %s\", __LINE__, __FILE__, __DATE__, __TIME__);
+}
+";
+        let (session, path) = a_held_file(text);
+        let view = session.view_of_the_file(&path).expect("a view");
+        let file = session.files().held(&path).expect("the file is held");
+        let names = session.classified_names(&view);
+
+        let tokens = encode(file, Some(&view), &names, &None, false, &[]);
+        let at_type = by_offset(text, &tokens);
+
+        for word in ["__LINE__", "__FILE__", "__DATE__", "__TIME__"] {
+            let at = text[..text.find(word).expect("the fixture writes it")].len();
+            assert_eq!(
+                at_type.get(&at),
+                Some(&index_of(TypeKind::Macro)),
+                "`{word}` is a macro the compiler defines, so it is drawn as one"
+            );
+        }
+    }
+
     /// **A template parameter is a `typeParameter`, and a variable template is a `variableTemplate`.**
     ///
     /// Two questions asked from an editor, and both are about what the *server* sends rather than about colour:

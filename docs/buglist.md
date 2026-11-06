@@ -1196,3 +1196,34 @@ is what `docs/ast` consumers read.
 Test: `doc_lexer::a_block_comment_continuation_marker_is_punctuation` — the marker is its own token, no
 whitespace token contains `*` — replacing `block_comment_continuation_markers_are_layout`, which had pinned the
 old behaviour.
+
+## 35. A compiler-predefined macro had no colour — and no card
+
+Reported: `__LINE__ << __FILE__ << __DATE__ << __TIME__` drew as plain identifiers.
+
+The colouring pass already appends the compiler's macros to `classified_names` (`Session::classified_names`), from two
+tables: the standard's own (`the_standards_own_macro` — `__cplusplus`, `__STDC*`) and the toolchain's `-dM` answer
+(`__GNUC__`, `_WIN32`, …). **Neither table holds these four.** Measured:
+
+```text
+g++ -dM -E -x c++ NUL   →  #define __cplusplus 201703L    (and none of __LINE__/__FILE__/__DATE__/__TIME__)
+```
+
+and `the_standards_own_macro` answers *values*, which a position-dependent macro has none of: `__LINE__` is the line it
+stands on. So the name fell through both and got no token.
+
+### Fixed
+
+`a_macro_whose_value_depends_on_the_use` — `__LINE__`, `__FILE__`, `__DATE__`, `__TIME__`, `__COUNTER__` — is a third
+list, used where the classification asks whether a name is a predefined macro. `semantic::classified_names` therefore
+answers `Macro` for them, and the semantic-tokens handler draws them as macros.
+
+The same gap was in the hover: `__cplusplus` had a card ("predefined by the compiler … as `202302L`") and `__LINE__` had
+**none**. `a_standard_macro_meaning` gives the five their sentence — "`__LINE__` — predefined by the compiler: the line
+number of the line it stands on" — which is the only true thing a card can say when there is no value to show.
+
+Tests: `semantic::the_standards_position_dependent_macros_are_classified` (all four are `NameKind::Macro`, and none is
+a declaration) and `semantic_token::the_standards_position_dependent_macros_are_drawn_as_macros` (asserted on the
+encoded tokens, which is what a colour comes from), plus
+`hover::a_position_dependent_standard_macro_explains_itself`. Measured end to end with `inspect hover`:
+`` `__LINE__` — predefined by the compiler: the line number of the line it stands on.``

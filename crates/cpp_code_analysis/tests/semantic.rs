@@ -2247,3 +2247,35 @@ void f() {
         "it is declared in a function body: {declared:?}"
     );
 }
+
+/// **The standard's position-dependent macros are classified as macros** — `__LINE__`, `__FILE__`, `__DATE__`,
+/// `__TIME__`.
+///
+/// They are defined for every translation unit, and neither table the session has can say so: `g++ -dM -E` prints
+/// `#define __cplusplus 201703L` and none of these (measured), and the standard's own table answers *values*, which
+/// these do not have — `__LINE__` is the line it stands on. Reported from an editor as
+/// `__LINE__ << __FILE__ << __DATE__ << __TIME__` arriving with no colour at all.
+#[test]
+fn the_standards_position_dependent_macros_are_classified() {
+    let source = "\
+void f() {
+    log(__LINE__, __FILE__, __DATE__, __TIME__);
+}
+";
+    let session = session_with(&[("/p/a.cpp", source)]);
+    let view = session.view("/p/a.cpp").expect("the file is held");
+    let names = session.classified_names(&view);
+    for macro_name in ["__LINE__", "__FILE__", "__DATE__", "__TIME__"] {
+        let at = source.find(macro_name).expect("the fixture names it");
+        let found = names
+            .iter()
+            .find(|name| name.range.start_offset == at)
+            .unwrap_or_else(|| panic!("`{macro_name}` is not classified: {names:?}"));
+        assert_eq!(
+            found.kind,
+            NameKind::Macro,
+            "`{macro_name}` is drawn as a macro: {found:?}"
+        );
+        assert!(!found.declaration, "and it declares nothing: {found:?}");
+    }
+}

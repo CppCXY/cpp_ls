@@ -441,6 +441,16 @@ fn hover_of_the_program(
             )
         }));
     }
+    // **A macro the standard defines and no table holds.** `__LINE__`, `__FILE__`, `__DATE__`, `__TIME__` and
+    // `__COUNTER__` have no value to show — the value is the line, the file, the date and the time the compiler was on —
+    // and `-dM` does not print them (measured: `g++ -dM -E` answers `__cplusplus` and none of these). So the card says
+    // what each one *is*, which is the only true thing it can say, and it says it in the same words the valued ones use.
+    // Before this branch, `__cplusplus` had a card and `__LINE__` had none.
+    if let Some(what) = a_standard_macro_meaning(&word) {
+        return Some(markdown(format!(
+            "`{word}` — predefined by the compiler: {what}."
+        )));
+    }
 
     // **The spelling the cursor sits on**, when it is a template-id use. Read once here rather than inside the card:
     // the card is also asked about declarations the cursor does *not* name (an overload list, a member resolved
@@ -1948,9 +1958,57 @@ impl RegisterCapabilities for HoverCapabilities {
     }
 }
 
+/// **What a position-dependent standard macro means**, for the card that cannot show a value.
+///
+/// `__LINE__` expands to the line it stands on, so there is nothing to print beside it the way `__cplusplus` prints
+/// `202302L` — but "predefined by the compiler" with no explanation is a card that says nothing, and no card at all
+/// is what a reader reported for `__LINE__`. The five names are [cpp.predefined]'s, and the wording is the standard's.
+fn a_standard_macro_meaning(word: &str) -> Option<&'static str> {
+    Some(match word {
+        "__LINE__" => "the line number of the line it stands on",
+        "__FILE__" => "the name of the file it stands in",
+        "__DATE__" => "the date this translation unit was compiled",
+        "__TIME__" => "the time this translation unit was compiled",
+        "__COUNTER__" => "a number one higher each time it is written",
+        _ => return None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// **A position-dependent standard macro says what it is**, because it has no value to show.
+    ///
+    /// `__cplusplus` had a card ("predefined by the compiler … as `202302L`") and `__LINE__` had none: the valued
+    /// table is the standard's own, and these five are not in it. Measured with `inspect hover` on
+    /// `int f() { return __LINE__; }`.
+    #[test]
+    fn a_position_dependent_standard_macro_explains_itself() {
+        for (word, expected) in [
+            ("__LINE__", "the line number of the line it stands on"),
+            ("__FILE__", "the name of the file it stands in"),
+            ("__DATE__", "the date this translation unit was compiled"),
+            ("__TIME__", "the time this translation unit was compiled"),
+            ("__COUNTER__", "a number one higher each time it is written"),
+        ] {
+            assert_eq!(
+                a_standard_macro_meaning(word),
+                Some(expected),
+                "`{word}` is explained rather than left as a bare `predefined`"
+            );
+        }
+        assert_eq!(
+            a_standard_macro_meaning("__cplusplus"),
+            None,
+            "the valued one is not here"
+        );
+        assert_eq!(
+            a_standard_macro_meaning("Widget"),
+            None,
+            "and neither is an ordinary name"
+        );
+    }
+
     /// **An enumerator's value, counted the way a compiler counts it.**
     ///
     /// Reported from an editor: hovering `OPR_MUL` in an `enum class BinOpr { OPR_ADD = 1, OPR_MUL, … }` showed
