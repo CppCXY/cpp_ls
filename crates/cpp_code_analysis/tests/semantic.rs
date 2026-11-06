@@ -2198,3 +2198,52 @@ struct A {
         summary.declarations
     );
 }
+
+/// **`T x(a, b);` is an initialisation when `a` can be a value** — the most vexing parse, resolved by what the names are.
+///
+/// The grammar cannot tell `std::unique_lock<M> lock(mutex, 1);` from a declaration of a function `lock`: `mutex` alone
+/// looks like an unnamed parameter of type `mutex`, which is how `void f(int);` writes one. A parameter list holds
+/// *types*, so a name this file binds as a value settles it.
+///
+/// Measured before, on `test_cpp/src/concurrency.cpp:32`: hovering the variable answered "lock — a function, declared in
+/// a function body", and every `lock.lock()` after it resolved against that phantom. After: a variable of type
+/// `std::unique_lock<M>`, and the member list it offers is the class's.
+#[test]
+fn a_parenthesised_initialisation_with_a_value_is_a_variable() {
+    let session = session_with(&[(
+        "/p/a.cpp",
+        "\
+namespace std {
+template <class T>
+struct unique_lock {
+    unique_lock(T& m, int mode);
+    void lock();
+};
+}
+struct M { };
+std::M mutex;
+void f() {
+    std::unique_lock<M> lock(mutex, 1);
+    lock.lock();
+}
+",
+    )]);
+    let summary = session
+        .index()
+        .summary(std::path::Path::new("/p/a.cpp"))
+        .expect("the file's summary");
+    let declared = summary
+        .declarations
+        .iter()
+        .find(|fact| fact.name == "lock" && fact.kind == DeclKind::Variable)
+        .unwrap_or_else(|| panic!("`lock` is a variable: {:?}", summary.declarations));
+    assert_eq!(
+        declared.type_of.as_deref(),
+        Some("std::unique_lock<M>"),
+        "the initialiser is not part of the type"
+    );
+    assert!(
+        declared.local,
+        "it is declared in a function body: {declared:?}"
+    );
+}

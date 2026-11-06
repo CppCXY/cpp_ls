@@ -1003,3 +1003,70 @@ overwrite block is still wrong, so the range is in `1..655`.
 
 Once a minimal real text exists, the fix goes in the parser with that text as its test, and §30's `get_name` test gains
 the same shape.
+
+## 32. The five reports from `test_cpp` — one fixed, one half, three located
+
+All measured with `inspect` on `C:\Users\zc\Desktop\test_cpp`.
+
+### 32.1 A constrained function's card repeated the keyword — **fixed**
+
+`DeclFact::requires_clause` holds the clause **as written**, keyword included, and `render::a_trailing` added another:
+
+```text
+before   void simple(T x) requires requires (sizeof(T) > 2)
+         void nested(Fn&& fn) requires requires requires { fn(1); }
+after    void simple(T x) requires (sizeof(T) > 2)
+         void nested(Fn&& fn) requires requires { fn(1); }
+```
+
+Test: `render::a_constrained_function_does_not_repeat_its_keyword`. **Still open for the same report**: the card on
+`strings.cpp:123` rendered `template <typename Fn>` + `call(…)` — no `void`, no parameters — from a fact whose
+`returns`/`parameter_list` are `None`, while the summary's fact for that declaration has both. Measured with a card
+probe (`CPPLS_DEBUG_CARD`): `scope=None returns=None parameter_list=None range=3977..4031`. So the card is reading a
+**stub fact**, not the declared one — the two-readings split (`docs/next.md` §3).
+
+### 32.2 `std::unique_lock<std::mutex> lock(mutex, std::defer_lock);` was a function — **fixed for the plain reading**
+
+The most vexing parse: the grammar cannot tell `T x(a, b)` from a function declaration while `a` and `b` may be
+parameters, and `mutex` alone looks like an unnamed parameter of type `mutex` (`void f(int);`). What a parameter list
+cannot hold is a **value** — and `mutex` is a variable of the same file.
+
+`ScopeWalker` now asks `a_value_named` when a function-shaped declarator is inside a block, and a value in the
+parentheses makes it an initialisation. A variable's type is then the declaration's type **without** the parenthesised
+initialiser (`declared_type_of_with` takes the return half of the function type it was read as).
+
+```text
+fixture  L lock(mutex, 1);      lock — a variable of type `L`; completion after `lock.` lists `L`'s members
+project  hover on `lock`        still `std::unique_lock<std::mutex>(mutex, std::defer_lock)` — the **cooked** path
+```
+
+Test: `semantic::a_parenthesised_initialisation_with_a_value_is_a_variable`. `FORMAT_VERSION` moved to 15 for the fact
+change. The project's cooked rendering glues the initialiser into the type, which is the two-readings split again.
+
+### 32.3 An inherited static member does not resolve through a qualified name — located
+
+```text
+classes.cpp:141  Derived::instances()   hover → none
+                 Base::instances()      hover → static int instances()
+                 derived.name()         hover → std::string& name() const
+```
+
+`members_of("Derived")` lists `instances` (the member walk goes through the bases), so the **qualified-name lookup** is
+what does not. Minimal shape to fix in: `struct B { static int f(); }; struct D : B {}; D::f();`.
+
+### 32.4 A template-id with a **non-type** argument does not resolve as a type — located
+
+```cpp
+namespace std { template <int N> class S { public: void f(); }; }
+std::S<4> s;      // type at `std::S<4>` → UnknownType("std::S<4>"); hover → none
+s.f();            // completion → scope std::S, member f        (so the class is found by the member walk)
+```
+
+The real project's shape is `std::counting_semaphore<4>` (its parameter `ptrdiff_t __least_max_value` is non-type);
+`std::latch` — same header, no arguments — hovers fine.
+
+### 32.5 An `auto` return of a template member is not deduced — located
+
+`test_cpp:maybe(5).transform([](int value) { return value * 2; }).value_or(0)`: the hover itself says the type of the
+chain is unknown, so `value_or` cannot resolve. `std::optional::transform` returns `auto`, so the answer needs the
+deduction through the member template — the item `docs/next.md` §2 already names.

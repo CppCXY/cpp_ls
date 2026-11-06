@@ -165,6 +165,20 @@ From `docs/hover-render.md` §3, in the order they are likely to be met:
 
 ---
 
+## 7. The `test_cpp` reports, from the measurements of `docs/buglist.md` §32
+
+* ~~A constrained function's card repeats `requires`~~ — **fixed** (`render::a_trailing`, test in `render.rs`).
+* ~~`T x(a, b);` read as a function~~ — **fixed for the plain reading** (`ScopeWalker::a_value_named` + the type strip
+  in `declared_type_of_with`, test in `semantic.rs`, `FORMAT_VERSION` 15); the cooked reading still glues the
+  initialiser into the type — §3's two readings.
+* **A card that reads a stub fact** (`strings.cpp:123`: `call(…)` with no return type while the summary has one) — the
+  same two readings, and the card probe `CPPLS_DEBUG_CARD` prints what it read.
+* **An inherited static member through a qualified name** (`Derived::instances()`) — the qualified lookup does not walk
+  bases; `members_of` does.
+* **A template-id with a non-type argument as a type name** (`std::counting_semaphore<4>`, `std::S<4>`) — the type
+  layer answers Unknown while `members_of` resolves it.
+* **An `auto` return of a template member** (`optional::transform`) — the deduction item of §2.
+
 ## The order I would take
 
 1. §1.0 re-measure (30 minutes, decides whether §1 is a bug or a stale binary).

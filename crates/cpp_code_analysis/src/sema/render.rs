@@ -313,7 +313,15 @@ fn a_trailing(fact: &DeclFact) -> String {
         .as_deref()
         .filter(|clause| !clause.trim().is_empty())
     {
-        out.push_str(" requires ");
+        // **The clause is stored as the file wrote it, keyword included** — `requires (x > 0)`,
+        // `requires requires { fn(1); }` — so the renderer must not add a second keyword: measured, every constrained
+        // declaration's card read `requires requires (sizeof(T) > 2)`, and the nested form read
+        // `requires requires requires { fn(1); }`. A clause stored without the keyword (a hand-built fact in a test)
+        // still gets one, which is why the check is on the text and not on a flag.
+        out.push(' ');
+        if !clause.trim_start().starts_with("requires") {
+            out.push_str("requires ");
+        }
         out.push_str(clause.trim());
     }
     out
@@ -769,6 +777,40 @@ mod tests {
 
     /// **A type is printed by the model**: `T &` is `T&`, `T* const` loses the qualifier that does not name a class,
     /// and the `typename` disambiguator is not part of a type.
+    /// **A constrained function's card does not repeat the keyword** — the fact stores the clause as written.
+    ///
+    /// Measured before: `requires requires (sizeof(T) > 2)` for a simple constraint, and
+    /// `requires requires requires { fn(1); }` for a nested requirement — the renderer added `requires ` in front of a
+    /// clause that already began with it.
+    #[test]
+    fn a_constrained_function_does_not_repeat_its_keyword() {
+        let lines = rendered(
+            "template <typename T>\nvoid f(int x) requires (sizeof(T) > 2) {}\n",
+            "f",
+        );
+        assert_eq!(
+            lines,
+            [
+                "template <typename T>",
+                "void f(int x) requires (sizeof(T) > 2)"
+            ],
+            "one keyword, as the file writes it"
+        );
+
+        let lines = rendered(
+            "template <typename Fn>\nvoid g(Fn &&fn) requires requires { fn(1); } { fn(1); }\n",
+            "g",
+        );
+        assert_eq!(
+            lines,
+            [
+                "template <typename Fn>",
+                "void g(Fn&& fn) requires requires { fn(1); }"
+            ],
+            "the nested requirement keeps both, and no third"
+        );
+    }
+
     #[test]
     fn a_type_is_printed_by_the_model() {
         assert_eq!(

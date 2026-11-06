@@ -1227,6 +1227,12 @@ fn declaration_markdown(
         corrected.reflection = the_files.reflection.clone();
     }
     let fact = &corrected;
+    if std::env::var_os("CPPLS_DEBUG_CARD").is_some() {
+        eprintln!(
+            "[card] name={:?} kind={:?} scope={:?} returns={:?} parameter_list={:?} range={:?}",
+            fact.name, fact.kind, fact.scope, fact.returns, fact.parameter_list, fact.range
+        );
+    }
     let mut out = String::new();
 
     // **The instantiation the reader wrote is the signature they asked about.** A class template's fact describes

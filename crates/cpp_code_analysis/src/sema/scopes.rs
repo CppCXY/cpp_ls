@@ -1788,6 +1788,34 @@ impl ScopeWalker<'_> {
         self.items(&body, function);
     }
 
+    /// **Is `text` a value in `scope` or one of its ancestors?** — the question that tells a variable's initialiser
+    /// from a parameter declaration: `std::unique_lock<std::mutex> lock(mutex, …);` declares `lock` only if `mutex` can
+    /// be a parameter, and a name this file binds as a variable cannot.
+    ///
+    /// A **type** name deliberately does not count: `int count(value);` declares a function `count` when `value` is a
+    /// type, and the language says so before either reading is looked at.
+    fn a_value_named(&self, scope: ScopeId, text: &str) -> bool {
+        if text.is_empty() {
+            return false;
+        }
+        let mut current = Some(scope);
+        while let Some(id) = current {
+            let Some(data) = self.table.scope(id) else {
+                return false;
+            };
+            if data.bindings.iter().any(|binding| {
+                matches!(
+                    binding.kind,
+                    BindingKind::Variable | BindingKind::Enumerator
+                ) && binding.name.text() == text
+            }) {
+                return true;
+            }
+            current = data.parent;
+        }
+        false
+    }
+
     fn declarator_as(
         &mut self,
         declarator: &CppSyntaxNode,
@@ -1895,7 +1923,40 @@ impl ScopeWalker<'_> {
             return None;
         }
 
-        if !is_function {
+        // **`T x(a, b);` is a function declaration only while `a` and `b` can be parameters.**
+        //
+        // The grammar cannot tell `std::unique_lock<std::mutex> lock(mutex, std::defer_lock);` from a declaration of
+        // a function `lock` — `mutex` alone *looks* like an unnamed parameter of type `mutex`, which is how `void f(int);`
+        // writes one. What settles it is the one thing a parameter list cannot hold: a **value**. `mutex` is a variable
+        // of this file, so the parentheses are an initialiser and `lock` is an object.
+        //
+        // Measured on `test_cpp/src/concurrency.cpp:32`: hovering the variable answered "lock — a function, declared in a
+        // function body", and every `lock.lock()` in the block after it resolved against that phantom. `mutex` at line
+        // 20 is a variable of the same file, which is exactly the evidence the standard's rule needs.
+        //
+        // Only a declaration inside a **block** is ambiguous, and one name is enough: `T x(a, b)` is a declaration only
+        // if *every* entry parses as a parameter, so a single known value refuses it.
+        let parentheses_hold_a_value = is_function
+            && declarator
+                .ancestors()
+                .any(|ancestor| cpp_parser::CppCompoundStat::can_cast(ancestor.kind().into()))
+            && parameter_lists(declarator).iter().any(|list| {
+                list.children().any(|parameter| {
+                    let Some(named) = parameter
+                        .descendants()
+                        .find(|child| cpp_parser::CppNameExpr::can_cast(child.kind().into()))
+                    else {
+                        return false;
+                    };
+                    let spelled = named.text().to_string();
+                    let last = spelled.rsplit("::").next().unwrap_or(&spelled).trim();
+                    // A qualified name is not this file's to answer (`std::defer_lock` is a constant in a header);
+                    // the unqualified ones are, and that is where the variable `mutex` lives.
+                    !spelled.contains("::") && self.a_value_named(enclosing, last)
+                })
+            });
+
+        if !is_function || parentheses_hold_a_value {
             // A variable is declared in the scope it is written in, initialiser or not. The initialiser is not
             // a scope of its own: `int x = x;` refers to an earlier `x`, so the name being declared and the
             // name being read live in the same scope, and a scope around the initialiser would put the read

@@ -297,6 +297,18 @@ pub(crate) fn declared_type_of_with(
         binding.name_range,
         spelled.as_deref(),
     );
+    // **A variable never has a function type.** `std::unique_lock<std::mutex> lock(mutex, std::defer_lock);` is read
+    // by the grammar as a *function declaration* — a value (`mutex`) is indistinguishable from an unnamed parameter's
+    // type in the tokens — and the scope walker resolves that shape as an **initialisation** once it finds the value
+    // (see `ScopeWalker::a_value_named`). What the object's type is, then, is what the declaration writes *before* the
+    // parentheses, which is the function type's return half: measured, the fact said
+    // `std::unique_lock<std::mutex>(mutex, std::defer_lock)` and a member access on `lock` resolved nothing.
+    let found = match (&found, binding.kind) {
+        (crate::sema::types::Type::Function { returns, .. }, BindingKind::Variable) => {
+            returns.as_ref().clone()
+        }
+        _ => found,
+    };
 
     let written = found.to_string();
     (!written.is_empty()).then_some(written)
