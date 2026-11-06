@@ -265,6 +265,53 @@ fn what_import_std_costs() {
                 labels.len(),
                 offered.truncated
             );
+            // **Which standard the module was read as.** `_MSVC_LANG` is the compiler flags` own answer and
+            // `_HAS_CXX20` is what every C++20 header in the standard library branches on.
+            let macros = session.index().macros();
+            println!(
+                "  _MSVC_LANG defined: {}, _HAS_CXX20 defined: {}",
+                macros.is_defined("_MSVC_LANG"),
+                macros.is_defined("_HAS_CXX20"),
+            );
+            for name in ["vformat", "make_format_args", "format", "to_string"] {
+                let held = session
+                    .index()
+                    .declarations_in("std", main)
+                    .iter()
+                    .filter(|declaration| declaration.fact.name.as_str() == name)
+                    .count();
+                println!("  std::{name} visible from main.cpp: {held}");
+            }
+            for header in ["/format", "/vector", "/ranges"] {
+                let path = session
+                    .index()
+                    .summaries()
+                    .map(|summary| summary.clone())
+                    .find(|summary| summary.path.to_string_lossy().ends_with(header));
+                if let Some(summary) = path {
+                    let sample: Vec<String> = summary
+                        .declarations
+                        .iter()
+                        .filter(|fact| fact.name.as_str() == "format")
+                        .map(|fact| format!("format in scope {:?}", fact.scope))
+                        .take(3)
+                        .collect();
+                    let first: Vec<String> = summary
+                        .declarations
+                        .iter()
+                        .take(3)
+                        .map(|fact| format!("{} in {:?}", fact.name, fact.scope))
+                        .collect();
+                    println!(
+                        "  summary of <{}>: {} declaration(s), {} macro fact(s); format facts {:?}; first {:?}",
+                        &header[1..],
+                        summary.declarations.len(),
+                        summary.macros.len(),
+                        sample,
+                        first,
+                    );
+                }
+            }
             // **Which of the three links is broken** — the header in the index, the interface unit's own reading, or
             // the importer's view of it. `CPPLS_MODULES_WHY=1` answers each in one line instead of guessing.
             if std::env::var_os("CPPLS_MODULES_WHY").is_some_and(|value| !value.is_empty()) {
