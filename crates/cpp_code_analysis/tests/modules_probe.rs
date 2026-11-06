@@ -66,6 +66,14 @@
 //! remaining ~97 ms is decoding the served rendering. A walk that a stored rendering already describes is the next
 //! candidate: the rendering's own spans name its files, so a `(root, context) → units_key` row would let a warm read
 //! validate the key against those files' texts and skip the walk entirely.
+//!
+//! **It was built and it did not fire**, which is worth having written down. A `unit_roots` table, the row written
+//! whenever a rendering is filed, and a fast path in `gather_a_unit_read` that validated the stored rendering against
+//! the files it names: the module read still took 354–369 ms and the trace still said
+//! `unit gather: … walked 67.1 ms.` A print placed inside the fast path never ran, so the path was not merely
+//! rejecting its candidate — it was not entered, or the row was never written, and the next round starts by finding out
+//! which (a `UNIT_ROOTS` read that never happens is either a table that was not created or a key that is computed
+//! differently at the two ends).
 
 use std::path::{Path, PathBuf};
 use std::time::Instant;
