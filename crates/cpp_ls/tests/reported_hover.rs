@@ -193,3 +193,70 @@ fn a_deduced_local_shows_its_type() {
 
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// **A smart pointer's arrow reaches its pointee's member in the card too** — "shared_ptr 没有 -> 补全和 hover 识别".
+///
+/// Same rule as the completion (`element_type` is the pointer protocol; libstdc++ keeps `operator->` two bases down, in
+/// `__shared_ptr_access`), asked through the card: before the fix this said "`std::shared_ptr<State>` has no member
+/// `called`". The base here is declared and nothing more, which is the state the real project was in.
+#[test]
+fn a_member_through_a_smart_pointers_arrow_is_named() {
+    let root: PathBuf = std::env::temp_dir().join("cppls-hover-arrow");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("a project directory");
+    let file = root.join("a.cpp");
+    let source = "namespace std {\n\
+                      template <typename T, int Lp>\n\
+                      class __shared_ptr;\n\
+                      template <typename T>\n\
+                      class shared_ptr : public __shared_ptr<T, 2> {\n\
+                      public:\n\
+                          using element_type = T;\n\
+                          shared_ptr() = default;\n\
+                      };\n\
+                  }\n\
+                  struct State {\n\
+                      bool called;\n\
+                  };\n\
+                  std::shared_ptr<State> state_;\n\
+                  void f() {\n\
+                      state_->called = true;\n\
+                  }\n";
+    std::fs::write(&file, source).expect("the fixture writes");
+
+    let mut session = Session::open(
+        &root,
+        SessionFiles::new(OpenDocuments::new(), DiskFiles),
+        WatchFilter::new(&root),
+    );
+    session.add_project_files([file.clone()]);
+    session.did_open(&file, source);
+    session.catch_up(&file);
+    let _ = session.cook(&file);
+    let _ = session.index_everything();
+
+    let view = session.view_of_the_file(&file).expect("the written text");
+    let at = source.find("called = true").expect("the member");
+    let hover = cpp_ls::handlers::hover::hover(
+        &session,
+        &view,
+        ReadingOffset::new(at),
+        FileOffset::new(at),
+    )
+    .expect("a member has a card");
+    let text = match hover.contents {
+        lsp_types::HoverContents::Markup(markup) => markup.value,
+        other => format!("{other:?}"),
+    };
+    assert!(
+        !text.contains("has no member"),
+        "the member is reached through the handle: {text}"
+    );
+    assert!(
+        text.contains("State") && text.contains("called"),
+        "the card says the member belongs to the pointee: {text}"
+    );
+    assert!(text.contains("called"), "the card names the member: {text}");
+
+    let _ = std::fs::remove_dir_all(&root);
+}
