@@ -155,8 +155,8 @@ From `docs/hover-render.md` §3, in the order they are likely to be met:
 
 * **`std::less<>` renders `std::less`** — `parse_type_spelling` drops an empty argument list, which changes the name.
 * **A template-id callee answers nothing** (`std::make_shared<Resource>(2)`): the callee is not a plain name.
-* **The prose still prints raw fact strings** (`returning \`std::vector<std::string> &\``) — route `kind_words` through
-  `render::a_type`.
+* ~~**The prose still prints raw fact strings**~~ — **done**: `kind_words` goes through `render::a_type`, measured on
+  `std::vector<std::string>& names();` (the card and the prose now agree). The rest of this list is untouched.
 * **`the_type_the_macros_leave`** is a fact-level repair living in hover; move it to the fact builder.
 * **Operator hovers hit the keyword vocabulary** (`operator bool`): the card should be the declaration.
 * **Base access is not printed** (`: Base` where the clause says `public`).

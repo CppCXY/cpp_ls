@@ -1755,9 +1755,23 @@ fn kind_words(fact: &DeclFact) -> String {
         words.push_str(&format!(" template over `{}`", named.join("`, `")));
     }
 
+    // **The prose's types go through the same renderer as the card's** — `docs/hover-render.md`'s contract, and the
+    // reason it is not a style choice: a fact records the spelling the *file* wrote (`std::vector<std::string> &`, with
+    // the space the declarator needed), and the prose printed it as-is while the card below it printed
+    // `std::vector<std::string>&`. Two spellings of one type in one popup is a reader asking which is the type.
+    //
+    // `a_type` parses the spelling and prints it from the model, so the qualifiers, the references and the arguments
+    // come out the way every other type in the card does. `const char * const` → `const char*` is the same normalization
+    // the card has had since the renderer landed.
     match (&fact.type_of, &fact.returns) {
-        (Some(written), _) => words.push_str(&format!(" of type `{written}`")),
-        (None, Some(written)) => words.push_str(&format!(" returning `{written}`")),
+        (Some(written), _) => words.push_str(&format!(
+            " of type `{}`",
+            cpp_code_analysis::sema::render::a_type(written)
+        )),
+        (None, Some(written)) => words.push_str(&format!(
+            " returning `{}`",
+            cpp_code_analysis::sema::render::a_type(written)
+        )),
         (None, None) => {}
     }
 

@@ -71,8 +71,11 @@ query reads the reading that produced the fact it started from.
   means. `Type::Named` needs to keep "had an empty list" (or the name keeps `<>`).
 * **A hover on a template-id callee answers nothing.** `std::make_shared<Resource>(2)` — the callee is a template-id, not
   a plain name, and the name lookup at that offset finds neither. (Measured on `test_cpp/src/smart_pointers.cpp:50`.)
-* **The prose around the card still prints raw fact strings** — ``returning `std::vector<std::string> &` `` in
-  `kind_words`. Route those through `render::a_type` too.
+* **~~The prose around the card still prints raw fact strings~~ — done.** `kind_words` routes `type_of` and `returns`
+  through `render::a_type`, so the sentence and the card below it print one type. Measured on
+  `std::vector<std::string>& names();`: the card said `std::vector<std::string>&` while the prose said
+  ``returning `std::vector<std::string> &` ``; now both say the former. (`tests/hover-latency`-style measurement:
+  `inspect hover`, before and after.)
 * **`the_type_the_macros_leave` is a fact-level repair still in hover.** It rebuilds a return type that a macro's name
   swallowed (`WINBASEAPI WINBOOL WINAPI SetConsoleOutputCP`). It should live where facts are built; hover should not
   own a text repair at all.
