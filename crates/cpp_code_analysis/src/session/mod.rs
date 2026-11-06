@@ -6252,8 +6252,9 @@ impl<F: FileProvider + Clone> Session<F> {
     /// 737 525-token program on a real project, and **85 ms** for the same program again.
     pub fn prepare_a_unit_reading(&self, root: &Path) -> Option<PreparedUnitReading> {
         let materials = self.gather_a_unit_read(root)?;
-        // **Remember which key this root's rendering came out under**, so the next ask in this session can skip the
-        // walk that produced it. Recorded here rather than inside `read_the_program`, which has no session to write to.
+        // **Remember which key this root's rendering came out under** — in this session, and in the project's database,
+        // so the *next* session can skip the walk too. Recorded here rather than inside `read_the_program`, which has no
+        // session to write to and whose materials know the key.
         let spelling = self
             .store
             .index()
@@ -6263,17 +6264,26 @@ impl<F: FileProvider + Clone> Session<F> {
         let context = self.store.context_hash(&spelling);
         let units_key = materials.units_key();
         if let Ok(mut known) = self.unit_roots.lock() {
-            known.insert((spelling, context), units_key);
+            known.insert((spelling.clone(), context), units_key);
         }
+        self.store
+            .remember_unit_root(&format!("{context}:{}", spelling.display()), units_key);
         materials.read_the_program()
     }
 
-    /// **The units key a root's rendering was filed under in this session**, if it was read here.
+    /// **The units key a root's rendering was filed under** — this session's memory first, the project's database
+    /// second. See [`Session::unit_roots`] and `cache_db`'s `UNIT_ROOTS`.
     fn the_units_key_of(&self, root: &Path, context: u64) -> Option<u64> {
-        self.unit_roots
+        if let Some(known) = self
+            .unit_roots
             .lock()
             .ok()
             .and_then(|known| known.get(&(root.to_path_buf(), context)).copied())
+        {
+            return Some(known);
+        }
+        self.store
+            .cached_unit_root(&format!("{context}:{}", root.display()))
     }
 
     /// Remember what a program's parse came out as — the one-entry memo `Session::unit_index` holds.

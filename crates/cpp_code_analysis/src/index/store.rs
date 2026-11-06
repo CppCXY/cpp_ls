@@ -591,6 +591,22 @@ impl<F: FileProvider> SummaryStore<F> {
         }
     }
 
+    /// **Which rendering this root produced last** — see `cache_db`'s `UNIT_ROOTS`.
+    ///
+    /// The walk that computes a rendering's key is 63–70 ms on the standard library's 256 files, and every session pays
+    /// it once. This row is the way from the root — which a caller has before the closure exists — to that key; the
+    /// rendering it names is validated against the texts of the files **it** says it was built from
+    /// (`RenderedUnit::walked`), so a stale row is a miss rather than a wrong answer.
+    pub fn cached_unit_root(&self, root: &str) -> Option<u64> {
+        self.summary_database()?.unit_root(root).ok().flatten()
+    }
+
+    pub fn remember_unit_root(&self, root: &str, units_key: u64) {
+        if let Some(database) = self.summary_database() {
+            let _ = database.put_unit_root(root, units_key);
+        }
+    }
+
     /// **Collect the rows nothing references** — the idle step, never a query.
     ///
     /// A write transaction like any other, so it runs beside a reader and needs no exclusive handle. **Compaction

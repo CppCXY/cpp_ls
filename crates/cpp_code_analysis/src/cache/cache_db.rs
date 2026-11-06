@@ -125,6 +125,13 @@ const ENVIRONMENTS: TableDefinition<u64, &[u8]> = TableDefinition::new("environm
 const MACROS: TableDefinition<u64, &[u8]> = TableDefinition::new("macros");
 const UNITS: TableDefinition<u64, &[u8]> = TableDefinition::new("units");
 const UNIT_INDICES: TableDefinition<u64, &[u8]> = TableDefinition::new("unit_indices");
+/// **Which rendering a root produced last** — `"<context>:<root>"` to the units key.
+///
+/// The walk that produces that key is **63–70 ms** on the standard library's 256 files, and it is paid by every
+/// session. A rendering records the walk's own file list (`RenderedUnit::walked`), so this row lets a caller go from
+/// the root — which it has before the closure exists — to the rendering, and validate it against the texts of the files
+/// the rendering says it was built from. A stale row is a miss, not a wrong answer.
+const UNIT_ROOTS: TableDefinition<&str, u64> = TableDefinition::new("unit_roots");
 /// **Where an `#include` resolved**, by the question — see `SummaryStore::include_search_key`.
 ///
 /// A value of the empty string is an answer too: the include resolved nowhere. The key folds the spelling, the form,
@@ -685,6 +692,25 @@ impl CacheDb {
         Ok(())
     }
 
+    /// **Which rendering this root produced last** — see [`UNIT_ROOTS`].
+    pub fn unit_root(&self, root: &str) -> Result<Option<u64>> {
+        let _timed = Timed::read();
+        let read = self.database.begin_read()?;
+        let table = read.open_table(UNIT_ROOTS)?;
+        Ok(table.get(root)?.map(|value| value.value()))
+    }
+
+    pub fn put_unit_root(&self, root: &str, units_key: u64) -> Result<()> {
+        let _timed = Timed::write();
+        let write = self.database.begin_write()?;
+        {
+            let mut table = write.open_table(UNIT_ROOTS)?;
+            table.insert(root, units_key)?;
+        }
+        write.commit()?;
+        Ok(())
+    }
+
     /// **A unit's facts**, by the hash of the rendering they were read from — see
     /// [`crate::unit_codec::encode_indexed_unit`].
     ///
@@ -1135,6 +1161,15 @@ impl SummaryCache {
         let collected = self.database.collect().ok()?;
         let compacted = self.database.compact().ok()?;
         Some((collected, compacted))
+    }
+
+    /// **Which rendering this root produced last** — see [`UNIT_ROOTS`].
+    pub fn unit_root(&self, root: &str) -> Result<Option<u64>> {
+        self.database.unit_root(root)
+    }
+
+    pub fn put_unit_root(&self, root: &str, units_key: u64) -> Result<()> {
+        self.database.put_unit_root(root, units_key)
     }
 
     /// Rows and bytes, for the probes.
