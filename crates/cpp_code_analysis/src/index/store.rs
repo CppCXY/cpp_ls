@@ -1963,7 +1963,16 @@ impl<F: FileProvider> SummaryStore<F> {
         // body is not shaped and the reading keeps the plain reading it had; it is the same answer the eager arm
         // would have given for a name nobody in the closure defines.)
         // One function, so the restriction has a name and a test — see [`SummaryStore::the_closure_of`].
+        let closure_started = std::time::Instant::now();
         let in_the_closure = self.the_closure_of(indexed);
+        if tracing {
+            eprintln!(
+                "re-read: closure of {} file(s) is {} file(s) in {:?}",
+                indexed.len(),
+                in_the_closure.len(),
+                closure_started.elapsed()
+            );
+        }
         let mut candidates: Vec<&FileSummary> = if eager {
             self.index.summaries().collect()
         } else {
