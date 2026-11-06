@@ -125,6 +125,12 @@ const ENVIRONMENTS: TableDefinition<u64, &[u8]> = TableDefinition::new("environm
 const MACROS: TableDefinition<u64, &[u8]> = TableDefinition::new("macros");
 const UNITS: TableDefinition<u64, &[u8]> = TableDefinition::new("units");
 const UNIT_INDICES: TableDefinition<u64, &[u8]> = TableDefinition::new("unit_indices");
+/// **Where an `#include` resolved**, by the question — see `SummaryStore::include_search_key`.
+///
+/// A value of the empty string is an answer too: the include resolved nowhere. The key folds the spelling, the form,
+/// whether it is a `#include_next`, the directory a quoted include was asked from, the include-path set and the
+/// dialect, so a project whose configuration changes asks a different question instead of reading the old answer.
+const INCLUDE_SEARCHES: TableDefinition<&str, &str> = TableDefinition::new("include_searches");
 /// **What one file contributed to a walk**, keyed by the contribution key the walk computes — see
 /// [`crate::index::walk_cache`].
 ///
@@ -660,6 +666,25 @@ impl CacheDb {
         Ok(())
     }
 
+    /// **Where an `#include` resolved**, by the question — see [`INCLUDE_SEARCHES`].
+    pub fn include_search(&self, key: &str) -> Result<Option<String>> {
+        let _timed = Timed::read();
+        let read = self.database.begin_read()?;
+        let table = read.open_table(INCLUDE_SEARCHES)?;
+        Ok(table.get(key)?.map(|value| value.value().to_string()))
+    }
+
+    pub fn put_include_search(&self, key: &str, answer: &str) -> Result<()> {
+        let _timed = Timed::write();
+        let write = self.database.begin_write()?;
+        {
+            let mut table = write.open_table(INCLUDE_SEARCHES)?;
+            table.insert(key, answer)?;
+        }
+        write.commit()?;
+        Ok(())
+    }
+
     /// **A unit's facts**, by the hash of the rendering they were read from — see
     /// [`crate::unit_codec::encode_indexed_unit`].
     ///
@@ -1094,6 +1119,15 @@ impl SummaryCache {
     /// Start a new generation, and answer it — see [`CacheDb::begin_generation`].
     pub fn begin_generation(&self) -> Result<u64> {
         self.database.begin_generation()
+    }
+
+    /// **Where an `#include` resolved**, by the question — see [`INCLUDE_SEARCHES`].
+    pub fn include_search(&self, key: &str) -> Result<Option<String>> {
+        self.database.include_search(key)
+    }
+
+    pub fn put_include_search(&self, key: &str, answer: &str) -> Result<()> {
+        self.database.put_include_search(key, answer)
     }
 
     /// **Collect and compact** — the idle step: both rewrite the file, so neither belongs to a query.

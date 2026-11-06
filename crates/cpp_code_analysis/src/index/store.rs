@@ -2883,6 +2883,19 @@ impl<F: FileProvider> SummaryStore<F> {
             return known.clone();
         }
 
+        // **The database, before the filesystem.** The in-memory table above is what makes one session cheap; this is
+        // what makes the *next* one cheap, and the doc above measures what it is worth: on `EmmyLuaCodeStyle` a warm
+        // start spent **9.3 s** in `prepare_a_wave`, of which the summary decode was 0.4 s and these searches were the
+        // rest. The key carries the include-path set, so a project whose configuration names different paths asks a
+        // different question rather than reading the old answer.
+        let stored_key = self.include_search_key(&key);
+        if let Some(known) = self.stored_include_search(&stored_key) {
+            if let Ok(mut searches) = self.include_searches.lock() {
+                searches.insert(key, known.clone());
+            }
+            return known;
+        }
+
         let resolver = crate::include::IncludeResolver::new(&self.files, &self.config);
         let mut interner = crate::file::paths::PathInterner::new(cfg!(windows));
         let resolved = resolver
@@ -2896,8 +2909,48 @@ impl<F: FileProvider> SummaryStore<F> {
             }
             searches.insert(key, resolved.clone());
         }
+        self.remember_include_search(&stored_key, resolved.as_deref());
 
         resolved
+    }
+
+    /// **The key a resolution is remembered under across sessions** — see [`SummaryStore::where_it_resolves_now`].
+    ///
+    /// The in-memory key is the question: form, whether it is a `#include_next`, the spelling, and (for a quoted
+    /// include) the directory asked from. A stored answer must survive a configuration change, so the include-path set
+    /// and the target are folded in as well — a project that points its includes somewhere else asks a different
+    /// question and cannot read the old answer.
+    fn include_search_key(&self, memory: &(IncludeForm, bool, Box<str>, PathBuf)) -> String {
+        let (form, is_next, spelling, directory) = memory;
+        let paths: Vec<String> = self
+            .config
+            .include_paths
+            .iter()
+            .map(|path| format!("{}:{}", path.directory.to_string_lossy(), path.is_system))
+            .collect();
+        let folded = format!(
+            "{form:?}|{is_next}|{spelling}|{directory:?}|{paths:?}|{:?}",
+            self.config.dialect()
+        );
+        crate::cache::content_hash(&folded).to_string()
+    }
+
+    /// **The answer a previous session stored** — `None` when it never asked, `Some(None)` when it asked and the
+    /// include did not resolve (which is an answer: a header nobody's path reaches is not a question worth re-asking).
+    fn stored_include_search(&self, key: &str) -> Option<Option<PathBuf>> {
+        let database = self.summary_database()?;
+        let answer = database.include_search(key).ok().flatten()?;
+        Some((!answer.is_empty()).then(|| PathBuf::from(answer)))
+    }
+
+    fn remember_include_search(&self, key: &str, resolved: Option<&Path>) {
+        let Some(database) = self.summary_database() else {
+            return;
+        };
+        let answer = resolved
+            .map(|path| path.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let _ = database.put_include_search(key, &answer);
     }
 
     /// The work set when `path` changes: the file, and everything that transitively includes it.
