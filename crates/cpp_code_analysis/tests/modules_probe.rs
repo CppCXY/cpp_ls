@@ -77,6 +77,14 @@ fn what_import_std_costs() {
         return;
     }
 
+    // **A cold store, only when asked** — `CPPLS_MODULES_COLD=1`. A probe that deleted a real checkout's cache
+    // unasked would be destroying a warm start to take a measurement.
+    // **Unset or empty means off** — an empty variable is what a shell leaves behind after `$env:X=""`, and treating
+    // it as "on" is how the second half of a cold/warm comparison silently deletes the warm cache.
+    if std::env::var_os("CPPLS_MODULES_COLD").is_some_and(|value| !value.is_empty()) {
+        let _ = std::fs::remove_dir_all(root.join(".cppls"));
+    }
+
     let started = Instant::now();
     let mut session = Session::open(
         root.clone(),

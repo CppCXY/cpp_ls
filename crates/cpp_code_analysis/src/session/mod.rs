@@ -3126,6 +3126,12 @@ impl<F: FileProvider + Clone> Session<F> {
         // **And the rendering of each served file is still owed**, because a cooked record carries facts, not text:
         // `Session::view` parses a rendering, so the file goes to the cook queue rather than being dropped as done.
         // It is the ordinary cook — render and parse — with the composition the record already answered left out.
+        //
+        // **Measured, and the whole of a warm start's cost**: on the modules fixture the module read is
+        // `index_everything()`, this queue is what it drains, and with 289 served files it cost 20.2 s, 112 s and
+        // 506 s in three runs on unchanged inputs — while parsing nothing. Dropping the loop outright breaks
+        // `completion` (a served file's cooked facts are not in the index until the cook commits them), so the fix is
+        // not "remove it" but "do not pay the parse for facts the store already answered" — see P6 in the plan.
         for path in served.served {
             self.cooking.want(&path);
         }
@@ -6407,18 +6413,42 @@ impl<F: FileProvider + Clone> Session<F> {
     /// Returns how many interface units were read in, so a caller can say whether anything changed.
     pub fn read_the_modules_a_file_imports(&mut self, path: &Path) -> usize {
         let mut read_in = 0;
+        // **Where this call's seconds go**, under the same switch the unit trace uses — the question it exists for is
+        // "which of the four phases is the one that costs a minute", and no single number outside can answer it: the
+        // same call measured 25 s, 44 s, 112 s and 506 s on unchanged inputs, against a 24 MB cache, so the answer is
+        // not the cache and not the closure.
+        let tracing = crate::probes::units();
+        let started = std::time::Instant::now();
+        let mut last = started;
 
         for _ in 0..MAX_MODULES_READ_AT_ONCE {
             // The module names the index cannot point at a file for, from the file itself and from every file the
             // previous round brought in — a fresh walk each round, because a round is a handful of hashmap lookups
             // and the alternative is a worklist that has to be kept in step with the index.
             let wanted = self.modules_the_index_cannot_name(path);
+            if tracing {
+                eprintln!(
+                    "module read: wanted {:?} after {:?}",
+                    wanted,
+                    last.elapsed()
+                );
+                last = std::time::Instant::now();
+            }
 
             if wanted.is_empty() {
                 break;
             }
 
             let found = self.module_interface_units_of(&wanted, path);
+            if tracing {
+                eprintln!(
+                    "module read: resolved {} file(s) {:?} after {:?}",
+                    found.len(),
+                    found,
+                    last.elapsed()
+                );
+                last = std::time::Instant::now();
+            }
             if found.is_empty() {
                 break;
             }
