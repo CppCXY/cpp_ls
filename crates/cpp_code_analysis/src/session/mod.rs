@@ -4048,6 +4048,20 @@ impl<F: FileProvider + Clone> Session<F> {
             // `a_keystroke_in_a_body_reads_the_file_through_its_timeline` both get their refinement *because* the file
             // is in the queue when the pass drains it; take it out and there is no first reading to cache or to assert.
             // So the repair belongs to the same change as the loop's removal, and neither lands alone.
+            //
+            // # Attempt two, and where it stopped
+            //
+            // Both were landed together and the five tests that depend on the eager ask were updated to ask
+            // (`want_refinement`) for what they are about: `a_refinement_is_served_to_the_next_session`,
+            // `a_keystroke_in_a_body_reads_the_file_through_its_timeline`, `a_file_read_back_through_its_own_unit…`,
+            // `a_refined_reading_is_asked_for_again_after_an_edit` and both `stored_refinement` fixtures. All six passed.
+            // The seventh did not: **`a_project_with_no_build_system_is_read_with_the_compilers_environment`**
+            // (`tests/toolchain.rs`) reads a file the session discovers rather than one the test names, and an ask for
+            // it — issued before `index_everything` — produced no cooked reading at all. That is a question about *when*
+            // an ask can be served (the take happens only in an idle round, and a file discovered mid-drain may be
+            // taken before its summary exists), not about this loop.
+            //
+            // So the next attempt starts there: an ask has to survive a file it cannot be served for yet.
             for step in &steps {
                 self.want_refinement(&step.path);
             }
