@@ -2756,6 +2756,10 @@ impl<F: FileProvider + Clone> Session<F> {
     /// not reach in this call (a file it discovers outranks it) is simply dropped and read again when its turn comes.
     pub fn advance(&mut self, steps: usize) -> Vec<Step> {
         let mut done = Vec::new();
+        // **What one batch costs**, under the unit trace. The modules fixture's module read is nine of these and
+        // 48–59 s, and no number outside could say which of the nine — or which half of a batch, the wave's closure
+        // preparation or the per-file steps — was the seconds.
+        let started = std::time::Instant::now();
 
         for taken in 0..steps {
             let Some((path, priority, depth)) = self.queue.pop() else {
@@ -2805,6 +2809,7 @@ impl<F: FileProvider + Clone> Session<F> {
                 );
 
                 let room = (steps * 4).saturating_sub(self.prefetched.len());
+                let prepared_from = std::time::Instant::now();
                 let made = {
                     let queue = &self.queue;
                     let prefetched = &self.prefetched;
@@ -2816,6 +2821,14 @@ impl<F: FileProvider + Clone> Session<F> {
                         room.min(steps * 2).max(wave.len()),
                     )
                 };
+                if crate::probes::units() {
+                    eprintln!(
+                        "ADVANCE wave of {} file(s) prepared {} in {:?}",
+                        wave.len(),
+                        made.len(),
+                        prepared_from.elapsed(),
+                    );
+                }
                 for (path, made) in made {
                     self.prefetched.insert(queue_key(&path), made);
                 }
@@ -2845,19 +2858,27 @@ impl<F: FileProvider + Clone> Session<F> {
         let units = Vec::new();
         if crate::probes::units() {
             eprintln!(
-                "ADVANCE steps={} done={:?} closure(api.h)={:?}",
+                "ADVANCE steps={} in {:?} done={:?}",
                 steps,
+                started.elapsed(),
                 done.iter()
                     .map(|step| step.path.clone())
                     .collect::<Vec<_>>(),
-                self.closure_with_text(Path::new("/p/api.h"))
-                    .0
-                    .iter()
-                    .map(|(path, _)| path.clone())
-                    .collect::<Vec<_>>()
             );
         }
-        let drain = self.finish_a_slice(&done, units);
+        let drain = {
+            let finishing = std::time::Instant::now();
+            let drain = self.finish_a_slice(&done, units);
+            if crate::probes::units() {
+                eprintln!(
+                    "ADVANCE finish {} file(s) in {:?} (batch total {:?})",
+                    done.len(),
+                    finishing.elapsed(),
+                    started.elapsed(),
+                );
+            }
+            drain
+        };
 
         // **A file this slice read is NOT queued for cooking, and three tests are why.**
         //
@@ -3914,7 +3935,9 @@ impl<F: FileProvider + Clone> Session<F> {
         let tracing = crate::probes::cooking();
 
         loop {
+            let round_started = std::time::Instant::now();
             let steps = self.advance(64);
+            let advanced = round_started.elapsed();
             // **Every file a batch read names is a file to refine.** This is the review's lever: a request asks
             // (`catch_up`), and a batch caller that just read the whole project asks for the whole project. It was held
             // back while the refined reading was weaker than the raw one; the refinement now files its rendering as the
@@ -3960,6 +3983,14 @@ impl<F: FileProvider + Clone> Session<F> {
                 }
                 committed
             };
+            if crate::probes::units() {
+                eprintln!(
+                    "DRAIN round: advance {:?} ({read} file(s)), cook {:?} ({cooked} committed), round total {:?}",
+                    advanced,
+                    round_started.elapsed() - advanced,
+                    round_started.elapsed(),
+                );
+            }
 
             // **The second pass is work, and this loop used to return while it was owed.**
             // `advance` drains up to [`RE_READ_SLICE`] of the backlog per call, and the backlog is
@@ -5474,7 +5505,22 @@ impl<F: FileProvider + Clone> Session<F> {
     /// wave, because a wave parses a file as a pure function of its text — which cannot place a scope that a macro
     /// in **another** file opens, and would then be *written to the disk cache* as the file's reading. A file this
     /// answers `true` for is left out of the wave and read by [`Session::index_one`] instead, where the timeline is.
+    ///
+    /// # A held timeline is worth it only for a file somebody is looking at
+    ///
+    /// `a_timeline_can_be_walked_for` already says so in its first condition, and `holds_an_environment_for` did
+    /// not — and that asymmetry is what made a **batch** pay a program read per file. Measured on the modules
+    /// fixture with `import std;`: the drain after the module unit was queued had nine `advance(64)` batches, seven
+    /// of them 20–60 ms and one of them **45.9 s for 33 files** — the batch the pass had just built timelines for,
+    /// so every one of them took this arm and `index_one` re-walked a closure for a file nobody had opened.
+    ///
+    /// The reading itself is not lost: a file read as text is refined by the second pass, which is the pipeline the
+    /// rest of the project relies on, and a *request* for an open file still gets the timeline (`want_cooked_reading`
+    /// is what a request calls).
     fn will_read_it_as_the_program(&self, path: &Path) -> bool {
+        if !self.documents.is_open(path) {
+            return false;
+        }
         self.holds_an_environment_for(path) || self.a_timeline_can_be_walked_for(path)
     }
 
@@ -5957,6 +6003,20 @@ impl<F: FileProvider + Clone> Session<F> {
             self.store
                 .index_mut()
                 .insert_cooked_in_a_program(&path, program, cooked);
+            // **A file a program read is refined.** The reading this just filed *is* the compiled one — the strongest
+            // answer this crate produces — and `want_refinement` asks `is_refined`, which until now knew only about
+            // the two paths that write under the file's own `env_hash` (a served record, and a per-file refinement).
+            // A file from a program read therefore looked unrefined, and `index_everything`'s loop asked for every one
+            // of them, which puts them in the second pass's backlog and pays a unit walk per file in `prepare_a_wave`.
+            //
+            // **Measured, and it did not move the module read**: marking them closed the backlog, and the two slow
+            // `advance` batches of the modules fixture (49–67 s for 33 files, 44 s for none) were unchanged — so the
+            // cost there is `index_one`'s own unit walk, not this backlog. The mark stays because it is true and
+            // because the backlog it removes is real work for a drain that would otherwise walk files it has just
+            // read; the batch cost is P6's next measurement, not this line's.
+            if let Ok(mut refined) = self.refined_readings.lock() {
+                refined.insert(path.clone());
+            }
         }
 
         UnitReading {
