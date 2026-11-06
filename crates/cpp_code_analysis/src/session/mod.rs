@@ -2647,8 +2647,23 @@ impl<F: FileProvider + Clone> Session<F> {
         //
         // The reading is dropped by [`Session::buffer_changed`] the moment the text or an included file changes, so a
         // file that *needs* a new reading never reaches this line with a stale one.
+        //
+        // **"Has a reading" is not "has what a view needs".** A reading the store **served** carries the facts and no
+        // rendering — `take_the_stored_refinements` inserts the record and marks the file refined, and a rendering is
+        // the caller's half. A file in that state answered this line's `return` and never got a rendering, so every
+        // `view` of it was `None` — which is why the wave used to queue **all** served files for a full cook, eagerly,
+        // and why a warm start of the modules fixture cost 20–506 s doing renders and parses for facts the store had
+        // already answered. The question this line has to ask is therefore the *other* one: is there a rendering for
+        // this text? If not, the cook is still owed, and it is owed when someone asks — this call — rather than for
+        // every file a wave served.
         if self.store.index().cooked_declarations(path).is_some() {
-            return;
+            let rendered = self
+                .vfs
+                .held(path)
+                .is_some_and(|file| self.known_rendering_of(&file.path, &file.text).is_some());
+            if rendered {
+                return;
+            }
         }
         self.cooking.want(path);
     }
@@ -3129,12 +3144,14 @@ impl<F: FileProvider + Clone> Session<F> {
         //
         // **Measured, and the whole of a warm start's cost**: on the modules fixture the module read is
         // `index_everything()`, this queue is what it drains, and with 289 served files it cost 20.2 s, 112 s and
-        // 506 s in three runs on unchanged inputs — while parsing nothing. Dropping the loop outright breaks
-        // `completion` (a served file's cooked facts are not in the index until the cook commits them), so the fix is
-        // not "remove it" but "do not pay the parse for facts the store already answered" — see P6 in the plan.
-        for path in served.served {
-            self.cooking.want(&path);
-        }
+        // 506 s in three runs on unchanged inputs — while parsing nothing.
+        //
+        // **A served file is not queued here**, and that is P6's first fix. Its facts are in the index already
+        // (`take_the_stored_refinements` inserts them); its *rendering* is the half a view needs, and the ask belongs
+        // to the caller that needs one: [`Session::want_cooked_reading`] now queues a cook when the facts are in but
+        // no rendering is, so a request for a view of a served file still gets it, while a wave that merely walked
+        // the closure pays nothing. Queuing all of them here made a warm start do a render and a parse for every fact
+        // it had just read from the store.
         let files = served.still_to_do;
 
         // **A caller that passed no timelines for a slice it is about to drain.** `advance` roots its units at the

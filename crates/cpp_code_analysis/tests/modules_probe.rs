@@ -116,6 +116,24 @@ fn what_import_std_costs() {
         let before = session.stats();
         let started = Instant::now();
 
+        let report = session.memory_report();
+        if std::env::var_os("CPPLS_MODULES_MEMORY").is_some_and(|value| !value.is_empty()) {
+            println!(
+                "  memory: vfs {:.0} MB ({} files), summaries {:.0} MB ({}), cooked {:.0} MB ({}), units {:.0} MB ({}), renderings {:.0} MB ({}), views {:.0} MB ({})",
+                report.vfs_text_bytes as f64 / 1e6,
+                report.vfs_files,
+                report.summary_bytes as f64 / 1e6,
+                report.summaries,
+                report.cooked_bytes as f64 / 1e6,
+                report.cooked_files,
+                report.unit_bytes as f64 / 1e6,
+                report.units,
+                report.rendering_bytes as f64 / 1e6,
+                report.renderings,
+                report.view_bytes as f64 / 1e6,
+                report.views,
+            );
+        }
         let imports_unread = session.imports_a_module_that_is_not_read(file);
         let read = session.read_the_modules_a_file_imports(file);
         let view_time = Instant::now();
