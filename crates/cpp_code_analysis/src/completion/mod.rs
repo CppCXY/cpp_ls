@@ -541,26 +541,21 @@ pub(crate) fn the_class_after_the_operator(
             // is what keeps an ordinary pointer from being stolen: `std::string* p; p->` must reach `std::string`,
             // whose member list has no `operator->`, so the pointer is stripped by the arm below instead of `p->`
             // becoming `basic_string::value_type`'s members (`char`'s, of which there are none).
-            // **Steps 1 and 2 are for an arrow, or for a class that declares `element_type`.** A reader who typed `.` is
-            // asking what the object in front of them has, and following a pointer-like class through `element_type` or
-            // `value_type` answered the *contained* type's members instead: measured on a C++ project,
-            // `std::optional<std::string> maybe; maybe.has_value()` offered `append`, `c_str`, `capacity` — the string's
-            // sixty-eight — while `maybe->size()` (an arrow, through `operator->`) was right. `std::optional<int>`
-            // answered **nothing** for the same reason: the step followed `value_type` to `int`, which has no members.
+            // **Only an arrow follows the pointer protocol.** A `.` on a class means the class's own members, and a
+            // smart pointer is a class like any other there: `shared.reset()`, `shared.use_count()` and
+            // `shared.get()` are written with a dot and are the handle's. Following `element_type` for a dot listed
+            // the *pointee's* members instead — measured on `test_cpp/src/smart_pointers.cpp`, `shared.` offered
+            // `Resource`'s two members (`identifier`, `~Resource`) and none of the handle's twelve, which is the report
+            // "`shared_ptr`'s own fields are not completed".
             //
-            // The line is **`element_type`**, which is the standard's own pointer protocol and what `unique_ptr`,
-            // `shared_ptr` and `weak_ptr` declare — the dot-on-a-smart-pointer rewrite this loop also serves goes through
-            // it. `value_type` is every container's and every wrapper's (`optional`, `vector`, `string`), so a dot that
-            // followed *it* would list the elements' members for any of them.
-            let pointer_like = arrow
-                || crate::index::project::members_of(index, scopes, root, path, &class)
-                    .value()
-                    .is_some_and(|list| {
-                        list.members
-                            .iter()
-                            .any(|member| member.fact.name == "element_type")
-                    });
-            if pointer_like
+            // Two cases look like that one and are not:
+            //
+            // * a **raw pointer** left of a dot — `Widget* p; p.` is ill-formed, and the `pointee()` arm below still
+            //   follows it and reports `followed_a_pointer`, so the client can rewrite the `.` as `->`;
+            // * a **class that is not pointer-like** — `std::optional<std::string>` declares `value_type`, not
+            //   `element_type`, and its dot has always answered its own members. The `value_type` line of the note
+            //   above is still why the protocol is `element_type` and not any contained-type typedef.
+            if arrow
                 && let Some(pointee) =
                     the_element_type_pointed_at(index, scopes, root, path, &class, &current)
             {

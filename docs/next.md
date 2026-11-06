@@ -6,7 +6,25 @@ with the measurement that would settle each item.
 
 ---
 
-## 1. The smart pointer's two halves — start by re-measuring
+## 1. The smart pointer's two halves — **fixed for the dot**, one mechanism left
+
+Measured after the fix, on `test_cpp/src/smart_pointers.cpp` (`inspect complete --index`):
+
+```text
+shared.        scope `std::shared_ptr`, 12 items   operator=, shared_ptr, element_type, weak_type, get,
+                                                   operator bool, owner_before, reset, swap, unique, use_count, ~
+copied->       scope `Resource`, 2 items           identifier, ~Resource
+hover `reset`  four overloads rendered              void reset() / _SafeConv<_Yp> reset(_Yp* __p) / …
+```
+
+The dot used to follow the pointer protocol (`element_type`), so `shared.` listed the *pointee's* two members and none
+of the handle's — the report "`shared_ptr`'s own fields are not completed". Only an `arrow` follows the protocol now;
+a raw pointer left of a dot still follows its pointee and still reports `followed_a_pointer` for the client's rewrite.
+`completion::a_dot_on_a_smart_pointer_offers_its_own_members` is the gate. What is still missing from the twelve:
+`operator*`/`operator->`, which libstdc++ declares on `__shared_ptr_access` — the base walk does not reach it, and
+`members_of("std::shared_ptr")` reports no unlisted base. That is the item below.
+
+### What is left of this section
 
 The reports: **`shared_ptr`'s own fields are not completed**, and **`reset()` is not recognised**. The last two commits
 (`3820e24`, `3bc61f6`) fixed the *arrow* (`state_->` reaches `State`'s members, which needed the standard's pointer

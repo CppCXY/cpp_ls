@@ -2802,6 +2802,72 @@ int f() {
     );
 }
 
+/// **A dot on a smart pointer is the handle's own members**, and only an arrow reaches the pointee.
+///
+/// `std::shared_ptr<Resource> shared;` answers twelve members with a `.` — `reset`, `get`, `use_count`, the
+/// assignment operators, the constructors — and `Resource`'s with a `->`. Following `element_type` for a dot as
+/// well listed the pointee's two members instead (measured on `test_cpp/src/smart_pointers.cpp`: `shared.` offered
+/// `identifier` and `~Resource`), which is the report that the handle's own fields were not completed.
+#[test]
+fn a_dot_on_a_smart_pointer_offers_its_own_members() {
+    let header = "\
+namespace std {
+template <class T> struct __shared_ptr {
+    typedef T element_type;
+    void reset();
+    long use_count() const;
+};
+template <class T> struct shared_ptr : __shared_ptr<T> {
+    using element_type = typename __shared_ptr<T>::element_type;
+    T* get() const;
+};
+}
+struct Resource { int identifier() const; };
+";
+    let source = "\
+#include \"smart.h\"
+int f() {
+    std::shared_ptr<Resource> shared;
+    shared.
+    return 0;
+}
+";
+    let files = MemoryFiles::new()
+        .with_file("/p/smart.h", header)
+        .with_file("/p/a.cpp", source);
+    let providers = SessionFiles::new(OpenDocuments::new(), files);
+    let mut session = Session::with_config(
+        "/p",
+        providers,
+        WatchFilter::new("/p"),
+        CompilerConfig::default(),
+    );
+    session.add_project_files([
+        std::path::PathBuf::from("/p/smart.h"),
+        std::path::PathBuf::from("/p/a.cpp"),
+    ]);
+    session.index_everything();
+    let view = cooked_view(&mut session, "/p/a.cpp");
+
+    let offered = session.completions(
+        &view,
+        cpp_code_analysis::file::coordinates::FileOffset::new(at_the_end_of(source, "shared.")),
+    );
+    let labels: Vec<&str> = offered
+        .items
+        .iter()
+        .map(|item| item.label.as_str())
+        .collect();
+    assert!(
+        labels.contains(&"reset") && labels.contains(&"use_count") && labels.contains(&"get"),
+        "the handle's own members are what a dot means: {labels:?}"
+    );
+    assert!(
+        !labels.contains(&"identifier"),
+        "and the pointee's members are not: {labels:?}"
+    );
+}
+
 /// One file in one project, cooked, with a view of it — the shape the two tests above share.
 fn one_file_session(source: &str) -> (Session<MemoryFiles>, cpp_code_analysis::FileView) {
     let files = MemoryFiles::new().with_file("/p/a.cpp", source);
