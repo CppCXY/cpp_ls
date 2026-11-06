@@ -12921,33 +12921,36 @@ impl ProjectIndex {
     /// a `.cpp` has exactly one program and the answer is exact, while a header that two programs read answers with
     /// the one read most recently. That is the honest limit of a lookup that is not told the translation unit, and
     /// it is written down here rather than guessed at the call sites.
+    ///
+    /// # The module's build comes first, and the own program second
+    ///
+    /// The order is the difference between `std::format` resolving and not. An importing file's own program — when it
+    /// has one at all — is a reading of *its own text*, which cannot contain a single declaration the module exports:
+    /// `import std;` is not an `#include`, and `main.cpp` compiles to nothing but an import-declaration. The module's
+    /// translation unit is the one that read the headers, so its program is the environment every lookup from this
+    /// file has to use. The other order lets the own program win whenever it exists, and every query from the
+    /// importing file then falls back to raw readings — where MSVC's `_STD_BEGIN` is an unexpanded macro and nothing
+    /// is in scope `std`. Measured on the modules fixture, with the own program winning: `std::format`,
+    /// `std::to_string`, `std::vformat` and `std::make_format_args` all resolved to nothing from a file that imports
+    /// `std`, while 2 734 names *were* in scope `std` from the headers some other program had read.
     pub fn the_program_that_read(&self, path: &Path) -> Option<u64> {
-        if let Some(program) = self
-            .cooked
-            .get(&normalize(path))
-            .and_then(|readings| readings.last)
-        {
-            return Some(program);
-        }
-        // **A file that imports a module is compiled with that module's build.** `import std;` is not an `#include`:
-        // the importing file's own text was never read as a program (there is nothing in it to read — the names come
-        // from the module), and the declarations it uses were read by the **module's** translation unit. Answering with
-        // that program is what makes every lookup asked from this file use the readings the module was built from,
-        // instead of whichever program read a header most recently.
-        let summary = self.summaries.get(&normalize(path))?;
-        for name in &summary.modules.imports {
-            let Some(interface) = self.module_interfaces.get(name.as_ref()) else {
-                continue;
-            };
-            if let Some(program) = self
-                .cooked
-                .get(&normalize(Path::new(interface.as_str())))
-                .and_then(|readings| readings.last)
-            {
-                return Some(program);
+        if let Some(summary) = self.summaries.get(&normalize(path)) {
+            for name in &summary.modules.imports {
+                let Some(interface) = self.module_interfaces.get(name.as_ref()) else {
+                    continue;
+                };
+                if let Some(program) = self
+                    .cooked
+                    .get(&normalize(Path::new(interface.as_str())))
+                    .and_then(|readings| readings.last)
+                {
+                    return Some(program);
+                }
             }
         }
-        None
+        self.cooked
+            .get(&normalize(path))
+            .and_then(|readings| readings.last)
     }
 
     /// Forget what a file **was read as**, keeping its summary.

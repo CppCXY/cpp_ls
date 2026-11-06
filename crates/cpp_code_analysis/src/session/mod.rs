@@ -6073,8 +6073,39 @@ impl<F: FileProvider + Clone> Session<F> {
         // declarations of the files that did **not** leak were never in doubt, and refusing them answered a
         // question nobody had asked.
         let mut placed = 0usize;
+        if crate::probes::units() {
+            let names: Vec<String> = indexed
+                .files
+                .iter()
+                .map(|(path, _)| {
+                    path.file_name()
+                        .map(|name| name.to_string_lossy().to_string())
+                        .unwrap_or_default()
+                })
+                .filter(|name| name == "format" || name == "string" || name == "vector")
+                .collect();
+            eprintln!(
+                "unit commit: {} file(s); interesting: {names:?}",
+                indexed.files.len()
+            );
+        }
         for (path, cooked) in indexed.files {
             placed += 1;
+            if crate::probes::units()
+                && path.file_name().and_then(|name| name.to_str()) == Some("format")
+            {
+                let in_std = cooked
+                    .declarations
+                    .iter()
+                    .filter(|fact| fact.name.as_str() == "format")
+                    .map(|fact| fact.scope.clone().unwrap_or_default())
+                    .take(4)
+                    .collect::<Vec<_>>();
+                eprintln!(
+                    "unit commit: <format> {} declaration(s); format in {in_std:?}",
+                    cooked.declarations.len()
+                );
+            }
             // **And the queue is told, so no per-file step reads it again.**
             self.queue.mark_worked(&path);
             // **The summary is left alone, and that is a measurement rather than an omission.** The tempting next

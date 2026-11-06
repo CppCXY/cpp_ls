@@ -273,6 +273,20 @@ fn what_import_std_costs() {
                 macros.is_defined("_MSVC_LANG"),
                 macros.is_defined("_HAS_CXX20"),
             );
+            println!(
+                "  the program that read main.cpp: {:?}",
+                session.index().the_program_that_read(main)
+            );
+            if let Some(std_ixx) = session
+                .project_files()
+                .iter()
+                .find(|path| path.file_name().and_then(|name| name.to_str()) == Some("std.ixx"))
+            {
+                println!(
+                    "  the program that read std.ixx: {:?}",
+                    session.index().the_program_that_read(std_ixx)
+                );
+            }
             for name in ["vformat", "make_format_args", "format", "to_string"] {
                 let held = session
                     .index()
