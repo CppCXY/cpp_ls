@@ -2227,6 +2227,31 @@ fn read_parameters(list: &CppSyntaxNode) -> Vec<Type> {
 
     parameters
 }
+/// **Is this written type one the compiler deduces?** — `auto`, and every spelling of it: `auto&`, `const auto&`,
+/// `auto&&`, `decltype(auto)`, and an `auto*`.
+///
+/// The decorations are part of the *deduction*, not part of a type: `const`, `volatile`, `&`, `&&` and `*` are what
+/// `auto` is being deduced **from**, so a comparison against exactly `"auto"` treats `auto&` as a written type. That
+/// is how `auto& config = configs.emplace_back(…)` was once underlined as "initialised with a value that does not
+/// convert to `auto&`", and how a hover card for `auto& syntaxTree` printed no type at all while the inlay hint beside
+/// it drew `LuaSyntaxTree&`.
+///
+/// **One function, because two layers ask it**: the assignment check ("may I judge this conversion?") and the hover
+/// card ("is the written type the whole answer, or is there a deduced one to show?"). Two spellings of the same rule
+/// is how one of them ends up out of date.
+pub fn is_a_deduced_type(written: &str) -> bool {
+    let cleaned: String = written
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect();
+    let cleaned = cleaned
+        .replace("const", "")
+        .replace("volatile", "")
+        .trim_end_matches(['&', '*'])
+        .to_string();
+    cleaned == "auto" || cleaned == "decltype(auto)"
+}
+
 /// **A type spelling with some names replaced by what they stand for** — whole words only.
 ///
 /// This is the spelling-level twin of [`Type::substituted`], and it exists for the one step that has no `Type` to

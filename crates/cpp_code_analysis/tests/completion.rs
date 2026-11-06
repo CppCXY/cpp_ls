@@ -2323,6 +2323,68 @@ void f() {
     }
 }
 
+/// **A handle whose `operator->` is inherited still reaches its pointee** — the shape `std::shared_ptr` has.
+///
+/// libstdc++ declares `shared_ptr : public __shared_ptr<_Tp>` and `__shared_ptr : public __shared_ptr_access<_Tp, _Lp>`,
+/// and the `operator->` is in the **specialization two levels down**. Measured on a real project,
+/// `members_of("shared_ptr")` answers fifteen members — the constructors, the assignment operators, `element_type`,
+/// `weak_type` and two friends — and **not one `operator->`**, because the base's facts were not at hand when the list
+/// was built. The arrow then listed the handle's own members (`element_type`, `operator=`, `shared_ptr`) instead of
+/// `State`'s.
+///
+/// The rule is the standard's: **a class that declares `element_type` is pointer-like** — that is the member
+/// `std::pointer_traits` is written in terms of — and requiring the class's *own* `operator->` made the answer depend
+/// on whether a base's file happened to have been read. The guard it replaces is still wanted, and is still kept by the
+/// `element_type` name: no container declares one (`std::string` declares `value_type`, which is why `std::string* p;
+/// p->` must not become "the members of `char`").
+#[test]
+fn an_inherited_operator_arrow_still_reaches_the_pointee() {
+    // **The base is declared and nothing more** — which is the state the real project was in: `__shared_ptr` lives in
+    // `<bits/shared_ptr_base.h>`, and when that file has not been read the member list is the handle's own. The
+    // `element_type` the handle re-exports is then the only thing left that says what its arrow reaches.
+    let source = "\
+namespace std {
+template <typename T, int Lp>
+class __shared_ptr;
+template <typename T>
+class shared_ptr : public __shared_ptr<T, 2> {
+public:
+    using element_type = T;
+    using weak_type = shared_ptr;
+    shared_ptr() = default;
+    shared_ptr& operator=(const shared_ptr&) = default;
+};
+}
+struct State { bool called; int value; };
+std::shared_ptr<State> state_;
+void f() { state_->called = true; }
+";
+    let mem = MemoryFiles::new().with_file("/p/a.cpp", source);
+    let providers = SessionFiles::new(OpenDocuments::new(), mem);
+    let mut session = Session::with_config(
+        "/p",
+        providers,
+        WatchFilter::new("/p"),
+        CompilerConfig::default(),
+    );
+    session.add_project_files([std::path::PathBuf::from("/p/a.cpp")]);
+    session.index_everything();
+    let _ = session.view("/p/a.cpp");
+    session.index_everything();
+
+    let at = source.find("state_->").expect("the fixture writes it") + "state_->".len();
+    let labels = labels_at(&mut session, "/p/a.cpp", at);
+    println!("shared_ptr arrow: {labels:?}");
+    assert!(
+        labels.iter().any(|label| label == "called"),
+        "the pointee's member is offered through the inherited operator: {labels:?}"
+    );
+    assert!(
+        !labels.iter().any(|label| label == "element_type"),
+        "the handle's own members are not what the arrow reaches: {labels:?}"
+    );
+}
+
 /// **A `.` typed on a pointer lists the pointee's members**, which is what the reader meant — the operator they
 /// should have typed is the client's business, and the list is the same one `->` gives.
 #[test]

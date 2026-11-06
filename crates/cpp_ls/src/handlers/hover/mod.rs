@@ -1184,6 +1184,29 @@ fn declaration_markdown(
     };
 
     let mut corrected = found.fact.clone();
+    // **A deduced type is shown as the type it deduced to.** The fact records what the file *wrote* — `auto&` — which
+    // is the spelling a lookup wants and no answer at all to "what is this". The engine has the answer (`type_at`, the
+    // same one the inlay hint draws), so the card shows it: measured on a user's file,
+    // `auto &syntaxTree = opSyntaxTree.value();` hovers as "`syntaxTree` — a variable, declared in a function body"
+    // with no type, while the inlay hint on the same line draws `LuaSyntaxTree&`.
+    //
+    // The spelling replaces the written one **whole**: the deduced type already carries the `&` (or `&&`) that the
+    // declarator writes, so nothing is appended beside it and nothing of `auto` is kept.
+    if matches!(corrected.kind, DeclKind::Variable)
+        && corrected
+            .type_of
+            .as_deref()
+            .is_none_or(cpp_code_analysis::sema::types::is_a_deduced_type)
+        && is_the_viewed_file(view, &found.file)
+        && let Known::Yes(deduced) = session.type_at(
+            view,
+            cpp_code_analysis::file::coordinates::ReadingOffset::new(
+                corrected.name_range.start_offset,
+            ),
+        )
+    {
+        corrected.type_of = Some(deduced.type_of.to_string());
+    }
     if let Some(returns) = corrected.returns.clone()
         && let Some(better) = the_type_the_macros_leave(session, &found.file, &corrected, &returns)
     {

@@ -136,3 +136,60 @@ fn a_member_declared_twice_shows_both_declarations_and_their_clauses() {
 
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// **A local whose type is deduced shows the type it was deduced to** — reported with a screenshot: hovering
+/// `auto &syntaxTree = opSyntaxTree.value();` showed "`syntaxTree` — a variable, declared in a function body" and
+/// **no type at all**, while the inlay hint drawn beside the same name said `LuaSyntaxTree&`.
+///
+/// The fact records what the file *wrote* (`auto&`), which is the spelling a lookup wants and no answer at all to
+/// "what is this". The engine has the answer — `type_at`, the same question the inlay asks — and the card now shows it.
+#[test]
+fn a_deduced_local_shows_its_type() {
+    let root: PathBuf = std::env::temp_dir().join("cppls-hover-deduced");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("a project directory");
+    let file = root.join("a.cpp");
+    let source = "struct LuaSyntaxTree {\n\
+                      bool HasError() const { return false; }\n\
+                  };\n\
+                  struct Holder {\n\
+                      LuaSyntaxTree& value();\n\
+                  };\n\
+                  void f() {\n\
+                      Holder op;\n\
+                      auto &tree = op.value();\n\
+                      bool bad = tree.HasError();\n\
+                  }\n";
+    std::fs::write(&file, source).expect("the fixture writes");
+
+    let mut session = Session::open(
+        &root,
+        SessionFiles::new(OpenDocuments::new(), DiskFiles),
+        WatchFilter::new(&root),
+    );
+    session.add_project_files([file.clone()]);
+    session.did_open(&file, source);
+    session.catch_up(&file);
+    let _ = session.cook(&file);
+    let _ = session.index_everything();
+
+    let view = session.view_of_the_file(&file).expect("the written text");
+    let at = source.find("tree.HasError").expect("the use");
+    let hover = cpp_ls::handlers::hover::hover(
+        &session,
+        &view,
+        ReadingOffset::new(at),
+        FileOffset::new(at),
+    )
+    .expect("a local has a card");
+    let text = match hover.contents {
+        lsp_types::HoverContents::Markup(markup) => markup.value,
+        other => format!("{other:?}"),
+    };
+    assert!(
+        text.contains("LuaSyntaxTree&"),
+        "the card shows the deduced type: {text}"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}

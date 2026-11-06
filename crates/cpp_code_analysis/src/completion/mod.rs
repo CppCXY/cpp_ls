@@ -618,12 +618,21 @@ pub(crate) fn the_class_after_the_operator(
 ///
 /// # Why the member list is asked first
 ///
-/// A class is **pointer-like** when it declares `operator->`; `element_type` is then the standard's answer to what
-/// that arrow reaches. The two must be asked together, because `element_type`/`value_type` alone are far too common:
-/// `std::string` has `value_type = char`, so asking them of *any* class turned `std::string* p; p->` into "the members
-/// of `char`" — measured, sixty-eight members became zero. So the guard is the operator, read from the class's member
-/// list (which walks bases and, unlike the single-member query, never asks about an arrow — `member_fact` falls back to
-/// `the_class_after_the_operator`, and this function is called from there).
+/// The standard's answer to "what does this arrow reach" is `element_type` — `std::pointer_traits` is written in
+/// terms of it, and `unique_ptr`, `shared_ptr` and `weak_ptr` all take part — so a class that declares one is
+/// **pointer-like**, whether it declares `operator->` itself or inherits it. The member list is what says so, and it
+/// walks bases.
+///
+/// It used to require the class's **own** `operator->`/`operator*`, and that is where `std::shared_ptr` fell out:
+/// measured on a real project, `members_of("shared_ptr")` answers fifteen members — its constructors, its assignment
+/// operators, `element_type`, `weak_type` and two friends — and **no `operator->` at all**, because libstdc++ declares
+/// that one two bases down (`shared_ptr` → `__shared_ptr` → `__shared_ptr_access<_Tp, _Lp, false, false>`). So
+/// `std::shared_ptr<State> state_; state_->` listed the handle's own members instead of `State`'s.
+///
+/// The guard is still needed, and still for the reason it was written: `element_type`/`value_type` alone are too
+/// common — `std::string` has `value_type = char`, so asking *any* class turned `std::string* p; p->` into "the
+/// members of `char`". `element_type` is the pointer protocol's typedef rather than a container's, and no container
+/// declares one.
 ///
 /// The **arguments the use wrote** (`["std::string"]` for `std::unique_ptr<std::string>`) are what its `element_type`
 /// is substituted with, and the class is passed to `template_parameters_for` **qualified**: with the bare `unique_ptr`
@@ -641,11 +650,13 @@ fn the_element_type_pointed_at(
     else {
         return None;
     };
-    if !members
-        .members
-        .iter()
-        .any(|member| matches!(member.fact.name.as_str(), "operator->" | "operator*"))
-    {
+    let pointer_like = members.members.iter().any(|member| {
+        matches!(
+            member.fact.name.as_str(),
+            "element_type" | "operator->" | "operator*"
+        )
+    });
+    if !pointer_like {
         if crate::probes::members() {
             let names: Vec<&str> = members
                 .members
