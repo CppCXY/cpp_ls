@@ -4949,3 +4949,54 @@ fn a_second_pull_reuses_the_inference_of_the_first() {
          {misses_before} -> {misses_after} computed"
     );
 }
+
+/// **A parameter of an out-of-class member definition is a declaration in its body** — two reports, one root cause.
+///
+/// `void Archive::put(const Entry& entry) { counts += entry.key; }` and `void Report::add(int line) { lines(…) }` are
+/// the shapes a real project writes, and both were reported by a reader: `entry` and `line` "are not declared", and
+/// hovering `line` answered `std::source_location::line` — a *namespace* member found because the parameter had no
+/// binding of its own.
+///
+/// The qualified declarator is the common factor: `declared_name` refuses a qualified name on purpose (a `count` bound
+/// in this file's scope would be a name that cannot be used unqualified), and the question this test asks is whether
+/// that refusal also dropped the **parameters**, which are in scope in the body regardless of how the function is
+/// spelled.
+#[test]
+fn a_parameter_of_an_out_of_class_definition_is_declared() {
+    let text = "namespace report {\n\
+                \x20   struct Entry { int key; int count; };\n\
+                \x20   class Archive {\n\
+                \x20   public:\n\
+                \x20       void put(const Entry& entry);\n\
+                \x20   private:\n\
+                \x20       int counts;\n\
+                \x20   };\n\
+                \x20   void Archive::put(const Entry& entry) {\n\
+                \x20       counts += entry.key;\n\
+                \x20   }\n\
+                }\n";
+    let files = MemoryFiles::new().with_file("/p/archive.cpp", text);
+    let fixture = Memory::new("a-parameter-of-an-out-of-class-definition", &files);
+    let mut session = fixture.session();
+    session.did_open("/p/archive.cpp", text);
+    session.index_everything();
+    let path = std::path::PathBuf::from("/p/archive.cpp");
+    let view = session.view_of_the_file(&path).expect("a view");
+
+    // **The use, not the declaration**: `entry` in `entry.key`, inside the body.
+    let at = text.find("entry.key").expect("the fixture") + 1;
+    let found = session.definition(&view, ReadingOffset::new(at));
+    assert!(
+        matches!(found, Known::Yes(_)),
+        "the body's `entry` is the parameter: {found:?}"
+    );
+    let Known::Yes(found) = found else {
+        unreachable!()
+    };
+    assert_eq!(
+        found.fact.name.as_str(),
+        "entry",
+        "and it is the parameter, not a type or a namespace member: {:?}",
+        found.fact
+    );
+}

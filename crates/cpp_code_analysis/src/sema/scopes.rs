@@ -1329,16 +1329,33 @@ impl ScopeWalker<'_> {
         // arguments and so cannot be told from a return type). One question, asked once, for the three rules below
         // and for [`ScopeWalker::declarator_as`], which reads the same pair.
         let qualified_name = the_qualified_name_of_a_declaration(node);
-        // **A statement that looks like one of these declares nothing, and a definition never nests inside a body.**
-        // The most-vexing-parse reading of a call with a qualified callee is exactly this shape —
+        // **A statement that looks like one of these declares nothing, and a definition never nests inside a
+        // *function body*.** The most-vexing-parse reading of a call with a qualified callee is exactly this shape —
         // `std::iter_swap(__result, __b);` is a `Declaration` naming `std::iter_swap` with a parameter list — and
         // inside a body it bound a **function** named `iter_swap` in scope `std`, taking the enclosing function's
         // template parameters with it. Measured on libstdc++: `bits/stl_algo.h` alone had 22 `std::iter_swap` facts at
         // namespace scope, `local: false`, all of them call statements.
+        //
+        // **A namespace body is a `CompoundStat` too**, and asking only for that kind rejected every out-of-class
+        // member definition written inside a namespace — the layout of every `.cpp` there is:
+        //
+        // ```text
+        // namespace archive {
+        //     void Archive::put(const Entry& entry) { _counts[entry.key] += entry.count; }
+        // }
+        // ```
+        //
+        // The whole declaration was dropped: no function scope, no parameter bindings, and `entry` reported as
+        // "not declared" in the body it is declared in. What makes a statement a statement is the *parent* of the
+        // compound: a function's body hangs off the declaration, a branch's off the `if`, and a namespace's off the
+        // `NamespaceDecl` — which is a scope, not a body, so it is allowed through here.
         if qualified_name.is_some()
-            && node
-                .ancestors()
-                .any(|ancestor| cpp_parser::CppCompoundStat::can_cast(ancestor.kind().into()))
+            && node.ancestors().any(|ancestor| {
+                ancestor.parent().is_some_and(|parent| {
+                    cpp_parser::CppCompoundStat::can_cast(ancestor.kind().into())
+                        && !cpp_parser::CppNamespaceDecl::can_cast(parent.kind().into())
+                })
+            })
         {
             return;
         }
@@ -1364,7 +1381,7 @@ impl ScopeWalker<'_> {
                 .is_some_and(|parent| cpp_parser::CppFriendDecl::can_cast(parent.kind().into()));
 
         if let Some((qualifier, _)) = &qualified_name
-            && self.scope_of_a_qualifier(qualifier).is_none()
+            && self.scope_of_the_qualifier(qualifier, outer).is_none()
         {
             // **The name is not this file's — the body is.** `size_t LuaSource::GetLine(size_t offset) const
             // { … }` declares nothing at file scope: the class is in a header this file only includes. That
@@ -1715,6 +1732,90 @@ impl ScopeWalker<'_> {
 
         found
     }
+
+    /// **A qualifier read the way C++ reads it: from the scope it was written in, then from the file.**
+    ///
+    /// `scope_of_a_qualifier` matches the name as written against the qualified names the table records, which are
+    /// absolute. A definition inside a namespace writes only the part that is relative to it —
+    ///
+    /// ```text
+    /// namespace report {
+    ///     class Archive { void put(const Entry& entry); };
+    ///     void Archive::put(const Entry& entry) { … }
+    /// }
+    /// ```
+    ///
+    /// — so `Archive` matched nothing while the class's qualified name is `report::Archive`, and that one miss sent a
+    /// **same-file** definition down the "the class is in a header" path, where it bound nothing and opened no function
+    /// scope: reported from a reader as `entry` and `line` "not declared" in their own bodies.
+    ///
+    /// The order is the language's: the qualifier is looked up in the enclosing scope first (which is what makes a name
+    /// inside a namespace find that namespace's class), and only then as an absolute name. Namespaces, classes and the
+    /// translation unit only — a function scope contributes no prefix, because its name is not part of any qualified
+    /// name.
+    fn scope_of_the_qualifier(&self, qualifier: &str, from: ScopeId) -> Option<ScopeId> {
+        let mut ancestor = Some(from);
+        let mut seen = std::collections::HashSet::new();
+        while let Some(scope) = ancestor {
+            if !seen.insert(scope) {
+                break;
+            }
+            let Some(data) = self.table.scope(scope) else {
+                break;
+            };
+            let usable = matches!(
+                data.kind,
+                ScopeKind::TranslationUnit
+                    | ScopeKind::Namespace
+                    | ScopeKind::Class
+                    | ScopeKind::Enum
+            );
+            if usable && let Some(found) = self.scope_of_a_qualifier_inside(qualifier, scope) {
+                return Some(found);
+            }
+            ancestor = data.parent;
+        }
+        self.scope_of_a_qualifier(qualifier)
+    }
+
+    /// [`ScopeWalker::scope_of_a_qualifier`] with `prefix` — the enclosing scope's qualified name — in front.
+    fn scope_of_a_qualifier_inside(&self, qualifier: &str, prefix: ScopeId) -> Option<ScopeId> {
+        let base = self.table.qualified_name_of(prefix);
+        let mut segments: Vec<String> = Vec::new();
+        let mut depth = 0usize;
+        let mut letters = String::new();
+        for character in qualifier.chars() {
+            match character {
+                '<' => depth += 1,
+                '>' => depth = depth.saturating_sub(1),
+                ':' if depth == 0 => {
+                    if !letters.is_empty() {
+                        segments.push(std::mem::take(&mut letters));
+                    }
+                }
+                _ if depth == 0 => letters.push(character),
+                _ => {}
+            }
+        }
+        if !letters.is_empty() {
+            segments.push(letters);
+        }
+        if segments.is_empty() {
+            return None;
+        }
+
+        let mut walked = base.unwrap_or_default();
+        let mut found = None;
+        for segment in segments {
+            if !walked.is_empty() {
+                walked.push_str("::");
+            }
+            walked.push_str(&segment);
+            found = self.table.scope_with_qualified_name(&walked);
+            found?;
+        }
+        found
+    }
     /// One declarator: a name, possibly a function, possibly with a body.
     ///
     /// `as_kind` overrides what the declarator would otherwise declare, for the case where a class-like
@@ -1767,7 +1868,7 @@ impl ScopeWalker<'_> {
                 // a scope this file built, that scope is the parent.
                 let qualifier = spelled.rsplit_once("::").map(|(qualifier, _)| qualifier);
                 let parent = qualifier
-                    .and_then(|qualifier| self.scope_of_a_qualifier(qualifier))
+                    .and_then(|qualifier| self.scope_of_the_qualifier(qualifier, outer))
                     .unwrap_or(outer);
                 self.table.create_named_scope(
                     ScopeKind::Function,
@@ -1866,7 +1967,8 @@ impl ScopeWalker<'_> {
                     .identifier_text()
                     .map(|name| format!("{qualifier}::{name}"));
                 (
-                    self.scope_of_a_qualifier(&qualifier).unwrap_or(outer),
+                    self.scope_of_the_qualifier(&qualifier, outer)
+                        .unwrap_or(outer),
                     name.0,
                     name.1,
                 )
