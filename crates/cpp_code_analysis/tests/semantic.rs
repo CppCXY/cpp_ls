@@ -2069,3 +2069,66 @@ int f(void) { binary_op operation = add; int value = 1; return operation(value, 
         "and the typedef itself is still a type: {alias:?}"
     );
 }
+
+/// **A member whose `if` condition holds a preprocessor directive does not swallow the rest of the class.**
+///
+/// The reduced reproducer for `docs/buglist.md` §31. Three ingredients, each necessary:
+///
+/// ```text
+/// a *resolved* #include      an unresolved one, or the same text written inline, parses correctly
+/// namespace std {            the class must be in a namespace
+/// ||  +  #if in an if        inside a member function body inside the class
+/// ```
+///
+/// Measured with `inspect facts`: `Following` lands with scope `std::Impl` — the class body ends early and the rest of
+/// the file is re-parented inside the class. Reduced from `bits/shared_ptr_base.h`, where it leaves `__shared_ptr` with
+/// no bases (and so `shared_ptr` without `operator*`/`operator->`).
+#[test]
+#[ignore = "a known parser bug: docs/buglist.md §31 — a directive in an `if` condition of a class member, cooked"]
+fn an_include_and_a_directive_in_a_condition_do_not_swallow_the_class() {
+    let session = session_with(&[
+        ("/p/included.h", "int nothing;\n"),
+        (
+            "/p/a.cpp",
+            "\
+#include \"included.h\"
+namespace std {
+class Impl {
+public:
+    virtual void* f(const int& __ti) noexcept
+    {
+	if (1 == 2
+	    ||
+#if __cpp_rtti
+	    3 == 4
+#else
+	    5 == 6
+#endif
+	   )
+	  return 0;
+	return 0;
+    }
+    int m;
+};
+class Following { public: void h(); };
+}
+",
+        ),
+    ]);
+    // **The summary, not the session's own view.** The view's scope tree answers `std` for this file; the summary — what
+    // the index reads, and what `inspect facts` printed — is the one that derails. So the test asks the summary.
+    let summary = session
+        .index()
+        .summary(std::path::Path::new("/p/a.cpp"))
+        .expect("the file's summary");
+    let following = summary
+        .declarations
+        .iter()
+        .find(|fact| fact.name == "Following")
+        .unwrap_or_else(|| panic!("`Following` must be a fact: {:?}", summary.declarations));
+    assert_eq!(
+        following.scope.as_deref(),
+        Some("std"),
+        "the class after the member is a class of the namespace, not of `Impl`"
+    );
+}

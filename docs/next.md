@@ -77,15 +77,19 @@ and **no base clause**, and `missing-return` on that header quotes return types 
 The consequences are the residuals in §1 and several "`shared_ptr` again" reports: `__shared_ptr_access` is never
 reached, so `operator*`/`operator->` are missing from the dot's list with `unlisted: []` — a silent gap.
 
-Reduced: the class at 582 does not close at its `};`, and the member that leaves it open is `_M_get_deleter` — removing
-**the bare `||` line (640)** fixes the following class's scope, while removing its `#if`/`#else`/`#endif` run does not.
-The shape is a `||` at the end of a line followed by a preprocessor directive inside an `if` condition. The class's own
-text parses cleanly with a plain or the real namespace head; the real 527-line prefix is needed, and neither removing
-one preceding declaration (36 tried) nor padding with plain declarations changes the answer — so the state that makes
-this class fail comes from **more than one** earlier construct. That is the next thing to find, and the tool for it is
-**delta debugging**: an automated shrinker whose oracle is `inspect facts --fixture` + the marker's scope
-(`_Sp_counted_ptr_inplace` = still broken, `std` = fixed). The harness already exists in the session's notes; it needs
-the oracle wired into a loop over ranges rather than a hand-written list of candidates.
+**Reduced to 28 lines** (`docs/buglist.md` §31): a resolved `#include`, `namespace std {`, and a class member whose `if`
+condition is `||` followed by an `#if`. Three ingredients, each shown necessary; written inline (no include) the same
+code parses correctly.
+
+**It is the summary's reading.** `session.view()` on the same fixture answers the class correctly — the plain reading is
+fine — while `ProjectIndex::summary` (what `inspect facts` prints) has the following class inside `std::Impl`. So the
+derail is in the rendering the index cooks (`FileIndexer::index_rendering`), not in the parser on the file's own text.
+`semantic.rs` carries it as `an_include_and_a_directive_in_a_condition_do_not_swallow_the_class`, `#[ignore]`d.
+
+Next: print the rendering the index cooks for that fixture (no `inspect` command does; add one, or a `--cook --text`
+flag) and compare it with the file — the suspect is the expression parser stopping at a directive, after which the
+class body's brace tracking loses its place. Fix it in the parser with the 28 lines as the test, then un-ignore the
+test.
 
 ## 2. `DeclFact::type_of` loses its shape match — the root cause behind the pointee path
 

@@ -865,6 +865,53 @@ only in the real file's context: the class's own text parses cleanly, and neithe
 declaration (36 of them, tried one at a time) nor padding it with plain declarations changes anything. So it is state
 carried from **more than one** earlier construct, not one construct and not the file's size.
 
+### The 28-line reproducer, and which path it is
+
+The delta reduction (`ddmin` over the 36 top-level declarations of the real prefix, with `inspect facts --fixture` and
+`Following`'s scope as the oracle) came down to **one include and one member**:
+
+```cpp
+// included.h
+int nothing;
+
+// a.cpp
+#include "included.h"          // any *resolved* include; `#include "nothing.h"` (unresolved) does not trigger it
+namespace std {
+class Impl {
+public:
+    virtual void* f(const int& __ti) noexcept
+    {
+        if (1 == 2
+            ||
+#if __cpp_rtti
+            3 == 4
+#else
+            5 == 6
+#endif
+           )
+          return 0;
+        return 0;
+    }
+    int m;
+};
+class Following { public: void h(); };   // comes back with scope `std::Impl`
+}
+```
+
+Three ingredients, each shown necessary: a resolved include, a namespace, and `||` followed by a preprocessor
+conditional inside an `if` condition in a class member. Written **inline** (no include) the same code parses correctly;
+so does a small version without the `#if`; so does `#include "nothing.h"`.
+
+**It is the summary's reading, not the session's.** `session.view()` on the same fixture answers the class correctly —
+the plain reading is fine — while the **summary** (`ProjectIndex::summary`, what `inspect facts` prints) has `Following`
+inside `std::Impl`. So the derail is in the **rendering the index cooks** (`FileIndexer::index_rendering`), not in the
+parser on the file's own text, and the first thing to look at is that rendering: print it (no `inspect` command does yet)
+and compare it with the file.
+
+`crates/cpp_code_analysis/tests/semantic.rs` carries the reproducer as
+`an_include_and_a_directive_in_a_condition_do_not_swallow_the_class`, `#[ignore]`d with this section as its reason: it
+asserts `Following`'s summary scope is `std` and fails today with `std::Impl`.
+
 ### What the reduction rules out
 
 The specialization head alone (`requires`, `final`, split across `#if`/`#else`), each of its body members alone
