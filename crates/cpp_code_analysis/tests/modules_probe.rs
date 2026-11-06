@@ -265,6 +265,56 @@ fn what_import_std_costs() {
                 labels.len(),
                 offered.truncated
             );
+            // **Which of the three links is broken** — the header in the index, the interface unit's own reading, or
+            // the importer's view of it. `CPPLS_MODULES_WHY=1` answers each in one line instead of guessing.
+            if std::env::var_os("CPPLS_MODULES_WHY").is_some_and(|value| !value.is_empty()) {
+                let formats: Vec<String> = session
+                    .index()
+                    .summaries()
+                    .map(|summary| summary.path.to_string_lossy().to_string())
+                    .filter(|path| path.contains("format"))
+                    .collect();
+                println!("  summaries naming format: {formats:?}");
+                let imports = session
+                    .index()
+                    .summary(main)
+                    .map(|summary| format!("{:?}", summary.modules.imports));
+                println!("  main.cpp imports: {imports:?}");
+                let std_ixx = session
+                    .project_files()
+                    .iter()
+                    .find(|path| path.file_name().and_then(|name| name.to_str()) == Some("std.ixx"))
+                    .cloned();
+                println!("  std.ixx among the project files: {std_ixx:?}");
+                if let Some(std_ixx) = std_ixx {
+                    let own = session
+                        .index()
+                        .declarations_in("std", &std_ixx)
+                        .iter()
+                        .filter(|declaration| declaration.fact.name.as_str() == "format")
+                        .count();
+                    let from_main = session.index().declarations_in("std", main).len();
+                    println!(
+                        "  declarations_in(std) holding format from std.ixx: {own}; \
+                         all visible from main.cpp: {from_main}"
+                    );
+                }
+                // **The declaration itself**: is `format` in the index at all, and is it visible from its own
+                // header? A `0` here is a fact about the index; a `0` only from `main.cpp` is a fact about visibility.
+                if let Some(header) = formats
+                    .iter()
+                    .find(|path| path.ends_with("/format"))
+                    .map(std::path::PathBuf::from)
+                {
+                    let held = session
+                        .index()
+                        .declarations_in("std", &header)
+                        .iter()
+                        .filter(|declaration| declaration.fact.name.as_str() == "format")
+                        .count();
+                    println!("  declarations_in(std) holding format from <format>: {held}");
+                }
+            }
         }
     }
 }
