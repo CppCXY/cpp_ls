@@ -6060,11 +6060,14 @@ impl<F: FileProvider + Clone> Session<F> {
     /// `None` when the file has no summary or the walk cannot be built — nothing has read it yet, which is a state
     /// and not an error.
     pub fn gather_a_unit_read(&self, root: &Path) -> Option<UnitReadMaterials<SessionFiles<F>>> {
+        let started = std::time::Instant::now();
         // The index's own spelling again, for the same reason [`Session::cook`] takes it: the unit's frames are
         // keyed by the normalized path.
         let root = self.store.index().summary(root)?.path.clone();
         let unit = self.translation_unit_of(&root)?;
+        let walked = started.elapsed();
         let (sources, units_key) = self.the_units_inputs(&unit);
+        let hashed = started.elapsed() - walked;
         let key = SummaryKey::new(0, self.store.context_hash(&root));
 
         // **The rendering, if this session or the database already has it.** Without it the program's hash is unknown
@@ -6082,12 +6085,13 @@ impl<F: FileProvider + Clone> Session<F> {
             .or_else(|| self.store.cached_unit(units_key));
         if crate::probes::units() {
             eprintln!(
-                "unit gather: key {units_key:016x} {}",
+                "unit gather: key {units_key:016x} {} — walked {walked:?}, key {hashed:?} ({} file(s))",
                 if rendered.is_some() {
                     "served"
                 } else {
                     "MISSED"
-                }
+                },
+                unit.files().count(),
             );
         }
 

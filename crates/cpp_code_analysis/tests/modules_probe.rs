@@ -53,10 +53,19 @@
 //! **360.2 ms, 359.8 ms and 357.9 ms** in three runs where it measured 1.45–1.95 s before.
 //!
 //! What remains, by the trace: nine `advance` batches totalling ~227 ms (the drain of 401 summaries) and the unit read's
-//! 229 ms (a walk, the closure's texts, the served rendering and the cached facts). The texts are the next item: the
-//! unit key folds `content_hash(text)` for all 401 files, and the index already holds that number in every summary's
-//! key — but using it would make the key describe the *indexed* text rather than the text now on disk, which is what
-//! the key exists to tell apart, so that change needs a guard for edited files rather than a nicer lookup.
+//! 229 ms. The unit read's 190 ms of prepare is now broken down, and the two halves are not the ones the last round
+//! guessed:
+//!
+//! ```text
+//! unit gather: key da75d0a7885399e2 served — walked 70.7 ms, key 22.3 ms (256 file(s))
+//! unit read:   prepare 190.6 ms (walk + cook + parse), commit 43.4 ms (223 file(s) filed)
+//! ```
+//!
+//! The **key** — which reads every file in the closure, 19 MB — is **22 ms**, so the "don't read the texts" idea that
+//! was tried and reverted last round would have bought a fifth of what it looked like. The **walk** is 70.7 ms and the
+//! remaining ~97 ms is decoding the served rendering. A walk that a stored rendering already describes is the next
+//! candidate: the rendering's own spans name its files, so a `(root, context) → units_key` row would let a warm read
+//! validate the key against those files' texts and skip the walk entirely.
 
 use std::path::{Path, PathBuf};
 use std::time::Instant;
