@@ -1043,16 +1043,20 @@ project  hover on `lock`        still `std::unique_lock<std::mutex>(mutex, std::
 Test: `semantic::a_parenthesised_initialisation_with_a_value_is_a_variable`. `FORMAT_VERSION` moved to 15 for the fact
 change. The project's cooked rendering glues the initialiser into the type, which is the two-readings split again.
 
-### 32.3 An inherited static member does not resolve through a qualified name — located
+### 32.3 An inherited static member does not resolve through a qualified name — **fixed**
 
 ```text
-classes.cpp:141  Derived::instances()   hover → none
-                 Base::instances()      hover → static int instances()
-                 derived.name()         hover → std::string& name() const
+classes.cpp:141  Derived::instances()   hover → none                     before
+                 Derived::instances()   hover → static int instances()    after, in `Base`
 ```
 
-`members_of("Derived")` lists `instances` (the member walk goes through the bases), so the **qualified-name lookup** is
-what does not. Minimal shape to fix in: `struct B { static int f(); }; struct D : B {}; D::f();`.
+`members_of("Derived")` lists `instances` — the member walk goes through the bases — while the **qualified-name
+lookup** (`definitions_across_files`) only asks the scope tree, which has no binding for a name the derived class does
+not declare. The `NotDeclaredHere` arm now asks `members_of` for a **qualified** spelling and answers with the members
+whose name is the last segment, so the jump lands in the base where the member is written.
+
+Minimal shape: `struct B { static int f(); }; struct D : B {}; D::f();` — `hover --fixture` resolved `B::f` after the
+change, and so did the real project.
 
 ### 32.4 A template-id with a **non-type** argument does not resolve as a type — located
 

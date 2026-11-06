@@ -118,7 +118,10 @@ fn what_one_file_costs() {
     }
     let again = Instant::now();
     let _ = session.view(&file);
-    println!("view, asked again            {:>9.1} ms", ms(again.elapsed()));
+    println!(
+        "view, asked again            {:>9.1} ms",
+        ms(again.elapsed())
+    );
     // **Twenty more**, which is one hover's worth of repetition: every request that asks a question about a position
     // takes a view, and before the view cache each one parsed the rendering again.
     let twenty = Instant::now();

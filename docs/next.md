@@ -173,8 +173,8 @@ From `docs/hover-render.md` §3, in the order they are likely to be met:
   initialiser into the type — §3's two readings.
 * **A card that reads a stub fact** (`strings.cpp:123`: `call(…)` with no return type while the summary has one) — the
   same two readings, and the card probe `CPPLS_DEBUG_CARD` prints what it read.
-* **An inherited static member through a qualified name** (`Derived::instances()`) — the qualified lookup does not walk
-  bases; `members_of` does.
+* ~~An inherited static member through a qualified name~~ — **fixed**: the `NotDeclaredHere` arm asks `members_of` for a
+  qualified spelling, so `Derived::instances()` answers `Base::instances`.
 * **A template-id with a non-type argument as a type name** (`std::counting_semaphore<4>`, `std::S<4>`) — the type
   layer answers Unknown while `members_of` resolves it.
 * **An `auto` return of a template member** (`optional::transform`) — the deduction item of §2.

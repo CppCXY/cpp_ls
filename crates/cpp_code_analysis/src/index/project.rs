@@ -418,6 +418,32 @@ pub fn definitions_across_files(
             // an ordinary name does not reach into a class: measured on a two-file project, go-to-definition on
             // `printf` in a `.cpp` answered **three** declarations — a class's member, its out-of-class definition,
             // and `stdio.h`'s `printf` — while the only one the file can name is the last.
+            // **A qualified name whose class does not declare it itself** — `Derived::instances`, where `instances`
+            // is a static member of `Base`. The scope tree has no binding for it (the derived class declares nothing
+            // of that name), while the member walk [`members_of`] goes through the bases. A reader writing the derived
+            // class's name is asking for its base's member: measured on `test_cpp/src/classes.cpp:141`,
+            // `Derived::instances()` had no hover while `Base::instances()` and `derived.name()` both did.
+            if let Some((qualifier, last)) = name.rsplit_once("::")
+                && !qualifier.is_empty()
+                && !last.is_empty()
+                && let Known::Yes(list) = members_of(index, scopes, root, path, qualifier)
+            {
+                let inherited: Vec<ProjectDefinition> = list
+                    .members
+                    .into_iter()
+                    .filter(|member| member.fact.name == last)
+                    .map(|member| ProjectDefinition {
+                        file: member.file,
+                        fact: member.fact,
+                    })
+                    .collect();
+                if !inherited.is_empty() {
+                    return Known::Yes(ProjectDefinitions {
+                        found: inherited,
+                        conditional: 0,
+                    });
+                }
+            }
             return if naming_a_member || inside_a_definition_written_with_a_qualifier(root, offset)
             {
                 index.definitions(&name, path)
