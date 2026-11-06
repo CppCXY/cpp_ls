@@ -4062,6 +4062,17 @@ impl<F: FileProvider + Clone> Session<F> {
             // taken before its summary exists), not about this loop.
             //
             // So the next attempt starts there: an ask has to survive a file it cannot be served for yet.
+            //
+            // # Attempt three: the ask survives, and the fixtures still disagree
+            //
+            // `take_the_files_wanted_for_refinement` was fixed to leave an ask standing until its file has a summary.
+            // With that, removing this loop and repairing the queue in `finish_a_slice` gets **eight of the nine**
+            // dependants green: both session tests, the keystroke test, the unit-read-back test, `refinement.rs`'s
+            // re-ask test, `toolchain.rs`'s discovered-file test (which is what the fix was for) and the two ordinary
+            // suites. What remains is `tests/stored_refinement.rs`: its first session asks for `widget.h` and
+            // `is_refined(widget)` is **false** after `index_everything`, so neither fixture can be about serving a
+            // stored refinement. That is the next measurement, and it is a question about this fixture rather than
+            // about the contract: the same ask on the same shape works in `session/tests.rs`.
             for step in &steps {
                 self.want_refinement(&step.path);
             }
