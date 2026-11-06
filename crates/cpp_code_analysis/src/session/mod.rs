@@ -2857,13 +2857,15 @@ impl<F: FileProvider + Clone> Session<F> {
         // environment" — `finish_a_slice` builds the four the pass needs, outside a writer this path never holds.
         let units = Vec::new();
         if crate::probes::units() {
+            // **Counts, not the names.** A line with sixty-four absolute paths is ~10 KB, and through a redirected
+            // stderr that is a write which can block — inside this function, after `started.elapsed()` was taken, so
+            // the *caller* measures the block and the line itself does not. That is the whole of a "56 s batch" that
+            // this trace reported while the batch's own timer said 7 ms.
             eprintln!(
-                "ADVANCE steps={} in {:?} done={:?}",
+                "ADVANCE steps={} in {:?} done={}",
                 steps,
                 started.elapsed(),
-                done.iter()
-                    .map(|step| step.path.clone())
-                    .collect::<Vec<_>>(),
+                done.len()
             );
         }
         let drain = {
@@ -2900,14 +2902,33 @@ impl<F: FileProvider + Clone> Session<F> {
         // **This path pays for its own drain, here.** `advance` is the non-pump entry point — a test, a batch caller —
         // and it holds no lock at all, so the split that exists to keep the pump's write lock short costs it one
         // call each way. The answer is the same: what `finish_a_slice` planned is worked out and applied.
+        let drain_started = std::time::Instant::now();
         let prepared = self.prepare_the_drain(drain);
-        self.commit_the_drain(prepared);
+        let prepared_in = drain_started.elapsed();
+        let committed = self.commit_the_drain(prepared);
+        if crate::probes::units() {
+            eprintln!(
+                "ADVANCE drain prepared {:?}, committed {committed} in {:?}",
+                prepared_in,
+                drain_started.elapsed() - prepared_in,
+            );
+        }
 
         // **And a whole program if one is owed**, in the same three phases the pump takes apart — this path has no
         // lock to keep free, so it takes them in a row. The clock and the budget are inside
         // [`Session::read_a_program_now`] (`the_program_to_read`), so a caller that has just edited reads nothing.
+        //
+        // **Where a batch's seconds go, when they go anywhere.** The timer here exists because everything before it
+        // measures in milliseconds: pre-finish, `finish_a_slice` and `prepare_the_drain` are all under 60 ms on the
+        // modules fixture, and the batches that take 11 s and 47 s have *nothing else* in them. A program read is a
+        // closure walk, a render of every file in it, a parse of the result and a sweep of every declaration —
+        // 8.9 s for `std.ixx` measured on its own (`tests/unit_probe.rs`), and this is where a *batch* pays it.
         if self.is_idle() && self.pending_cooking() == 0 && self.refinements_wanted() == 0 {
+            let reading = std::time::Instant::now();
             self.read_a_program_now();
+            if crate::probes::units() {
+                eprintln!("ADVANCE read_a_program_now in {:?}", reading.elapsed());
+            }
         }
 
         done
@@ -3933,6 +3954,7 @@ impl<F: FileProvider + Clone> Session<F> {
     pub fn index_everything(&mut self) -> usize {
         let mut total = 0;
         let tracing = crate::probes::cooking();
+        let started = std::time::Instant::now();
 
         loop {
             let round_started = std::time::Instant::now();
@@ -3945,6 +3967,7 @@ impl<F: FileProvider + Clone> Session<F> {
             for step in &steps {
                 self.want_refinement(&step.path);
             }
+            let refined = round_started.elapsed() - advanced;
             let read = steps.len();
             // **Not asked for here, and the reason is the next defect rather than this call.** Every file this pass
             // reads would be a file to refine, which is what "index everything" sounds like it means — and it makes four
@@ -3964,6 +3987,7 @@ impl<F: FileProvider + Clone> Session<F> {
             // drop is a file that is **no longer queued and never cooked**, and the loop below reads that state as
             // "nothing left to do": `read == 0 && cooked == 0` ends the work with a cooking backlog still standing.
             // Measured on the completion fixture: `pending 0, cooking 22` on every round, for six rounds.
+            let cook_started = std::time::Instant::now();
             let cooked = {
                 let claimed = self.claim_cooking(COOK_SLICE);
                 if tracing && !claimed.is_empty() {
@@ -3983,11 +4007,13 @@ impl<F: FileProvider + Clone> Session<F> {
                 }
                 committed
             };
+            let cook = cook_started.elapsed();
             if crate::probes::units() {
+                // **Three timers, each taken where it happened** rather than one derived by subtraction: the round
+                // that appeared to take 56 s had an `advance` of 7 ms and a cook of 1 µs, so the 56 s was in neither
+                // and the derived figure could not say where. The three now print their own walls.
                 eprintln!(
-                    "DRAIN round: advance {:?} ({read} file(s)), cook {:?} ({cooked} committed), round total {:?}",
-                    advanced,
-                    round_started.elapsed() - advanced,
+                    "DRAIN round: advance {advanced:?} ({read} file(s)), refine {refined:?}, cook {cook:?} ({cooked} committed), round total {:?}",
                     round_started.elapsed(),
                 );
             }
