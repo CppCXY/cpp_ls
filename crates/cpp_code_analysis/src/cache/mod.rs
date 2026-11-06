@@ -147,6 +147,14 @@ use std::path::{Path, PathBuf};
 /// reported the initialisation as a conversion "from `int` to `void`". The bytes are unchanged, so an old entry decodes
 /// happily and keeps the wrong type — the case this constant is for.
 ///
+/// # Why this moved to 14
+///
+/// **The grammar reads a directive where an operand goes** (`a || #if … b #endif`), and a summary written by the older
+/// grammar is wrong for the same text rather than missing: on `bits/shared_ptr_base.h` it filed everything after
+/// `_M_get_deleter` inside `_Sp_counted_ptr_inplace`, which cost `__shared_ptr` its base clause. Measured: the stale
+/// `C:\Users\zc\Desktop\test_cpp\.cppls` answered `std::_Sp_counted_ptr_inplace` for `_Sp_overwrite_tag` until it
+/// was deleted, and `std` after — a grammar fix that does not move this number is a fix nobody sees.
+///
 /// # Why this moved to 13
 ///
 /// **The type a deduced `return` states is now composed from typed nodes rather than cut out of the declaration's text**,
@@ -155,7 +163,7 @@ use std::path::{Path, PathBuf};
 /// unchanged, so an entry from before this bump decodes happily and keeps the answer — measured: the stale `C:\p\.cppls`
 /// of the `/p` fixtures made `a_function_with_no_written_return_type_states_one_in_its_body` fail for a fix that was in the
 /// binary, and pass on a cold cache.
-pub const FORMAT_VERSION: u32 = 13;
+pub const FORMAT_VERSION: u32 = 14;
 
 /// **The fingerprint of the readers a summary was built by**, in the key.
 ///

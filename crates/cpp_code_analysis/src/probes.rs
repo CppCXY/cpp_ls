@@ -85,6 +85,15 @@ switch! {
     trivia => "CPPLS_TRIVIA", "Assert the cursor-is-on-trivia invariant: with this on, `bump` panics instead of silently dropping a token's bytes — the live defect of `docs/parser-review.md` §4.";
 }
 
+/// **Where the index writes the text it parses**, when the variable names a directory — `CPPLS_DUMP_RENDERING_DIR`.
+///
+/// A variable rather than a switch because the answer is a *file*: `FileIndexer::index_rendering` parses a rendering of
+/// the file, and a parse that goes wrong only in that text cannot be seen in `inspect tree` (the file's own text) or in
+/// `Session::render_the_unit` (a different rendering — measured: correct for the 28-line reproducer in
+/// `docs/buglist.md` §31, while the summary built here is wrong). One `.rendering` file per indexed file, named after
+/// it, written only when asked.
+pub const DUMP_RENDERING_DIR: &str = "CPPLS_DUMP_RENDERING_DIR";
+
 /// **Do not filter a candidate whose declaration is written in a `#if` region.**
 ///
 /// The measurement behind deleting the lookup-time guard patch: with ⑱ (a file with a rendering is

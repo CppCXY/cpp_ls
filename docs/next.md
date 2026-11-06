@@ -77,21 +77,17 @@ and **no base clause**, and `missing-return` on that header quotes return types 
 The consequences are the residuals in §1 and several "`shared_ptr` again" reports: `__shared_ptr_access` is never
 reached, so `operator*`/`operator->` are missing from the dot's list with `unlisted: []` — a silent gap.
 
-**Reduced to 28 lines** (`docs/buglist.md` §31): a resolved `#include`, `namespace std {`, and a class member whose `if`
-condition is `||` followed by an `#if`. Three ingredients, each shown necessary; written inline (no include) the same
-code parses correctly.
+**Fixed** (§31): the grammar had no directive where an operand goes (`a || #if … b #endif`), so the class body ended
+at the `if` and `bits/shared_ptr_base.h` read one class too deep. `parse_unary_expr` now reads that run, the fixture is
+a test (`semantic::an_include_and_a_directive_in_a_condition_do_not_swallow_the_class`, no longer ignored), and
+`FORMAT_VERSION` moved 13 → 14 so the summaries written by the older grammar are dropped — without that bump a fixed
+binary kept answering the old way, which is how the second bug hid.
 
-**It is the summary's reading.** `session.view()` on the same fixture answers the class correctly — the plain reading is
-fine — while `ProjectIndex::summary` (what `inspect facts` prints) has the following class inside `std::Impl`. So the
-derail is in the rendering the index cooks (`FileIndexer::index_rendering`), not in the parser on the file's own text.
-`semantic.rs` carries it as `an_include_and_a_directive_in_a_condition_do_not_swallow_the_class`, `#[ignore]`d.
-
-Next: expose the text `FileIndexer::index_rendering` parses (the unit's `RenderedCooked::text`, not
-`render_the_unit`'s, which is correct for this fixture) and diff it against the file — the suspect is the expression
-parser stopping at a directive, after which the class body's brace tracking loses its place. A temporary `eprintln` in
-`index_rendering` guarded by an environment variable is enough for the first look; a permanent `inspect` command wants
-the text to be the one the index used, which is why `render_the_unit` was not it. Fix it in the parser with the 28 lines
-as the test, then un-ignore it.
+**What the fix leaves open**: `DeclFact.bases` is empty for every class in that header (`__shared_ptr`, and
+`_Sp_counted_ptr_inplace` with its base on the class's own line), so the base walk never reaches `__shared_ptr_access`
+and `shared.` still lists 12 members instead of 14. The fixture path answers because it reads bases from the scope tree;
+the gap is in the shape walk that fills the fact (`declared_bases_of_with`). That is the next item here, and it is one
+field, not a cloud.
 
 ## 2. `DeclFact::type_of` loses its shape match — the root cause behind the pointee path
 

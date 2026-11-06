@@ -2080,11 +2080,15 @@ int f(void) { binary_op operation = add; int value = 1; return operation(value, 
 /// ||  +  #if in an if        inside a member function body inside the class
 /// ```
 ///
-/// Measured with `inspect facts`: `Following` lands with scope `std::Impl` — the class body ends early and the rest of
-/// the file is re-parented inside the class. Reduced from `bits/shared_ptr_base.h`, where it leaves `__shared_ptr` with
-/// no bases (and so `shared_ptr` without `operator*`/`operator->`).
+/// Measured before the fix: `Following` landed with scope `std::Impl` — the class body ended early and the rest of the
+/// file was re-parented inside the class. Reduced from `bits/shared_ptr_base.h`, where it left `__shared_ptr` with no
+/// bases (and so `shared_ptr` without `operator*`/`operator->`).
+///
+/// **Two things were wrong, and this fixture needed both.** The grammar had no directive seam where an operand goes
+/// (`a || #if … b #endif`), and a summary written by the older grammar was still on disk and answered for it —
+/// `C:\p\.cppls` for this fixture, and `test_cpp\.cppls` in the real project. So `FORMAT_VERSION` moved to 14 with
+/// the grammar fix: a summary that describes an older reader is a wrong answer, not a missing one.
 #[test]
-#[ignore = "a known parser bug: docs/buglist.md §31 — a directive in an `if` condition of a class member, cooked"]
 fn an_include_and_a_directive_in_a_condition_do_not_swallow_the_class() {
     let session = session_with(&[
         ("/p/included.h", "int nothing;\n"),

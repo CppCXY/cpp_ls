@@ -20,6 +20,69 @@ fn unit(source: &str) -> (CppTranslationUnit, cpp_parser::CppSyntaxTree) {
     (root, tree)
 }
 
+/// **A directive where the right operand goes does not end the expression** — `a || #if … b #endif`.
+///
+/// The shape `bits/shared_ptr_base.h:639` writes, reduced to the four lines that matter:
+///
+/// ```cpp
+///   if (&__ti == &_Sp_make_shared_tag::_S_ti()
+///       ||
+/// #if __cpp_rtti
+///       __ti == typeid(_Sp_make_shared_tag)
+/// #else
+///       _Sp_make_shared_tag::_S_eq(__ti)
+/// #endif
+///      )
+/// ```
+///
+/// Measured before the operand seam, on this fixture: the `#` was refused as an operand, the recovery took the `)` for
+/// part of the expression, and the class body ended at the `if` — every declaration after the member became a member of
+/// the class. On the real header that made `__shared_ptr` a member of `_Sp_counted_ptr_inplace`, cost it its base
+/// clause, and took `shared_ptr`'s `operator*`/`operator->` with it (they live on `__shared_ptr_access`).
+#[test]
+fn a_directive_can_stand_where_the_right_operand_goes() {
+    let source = "\
+namespace std {
+class Impl {
+ public:
+  void f() {
+    if (1 == 2
+        ||
+#if A
+        3 == 4
+#else
+        5 == 6
+#endif
+       )
+      return;
+  }
+  int m;
+};
+class Following { };
+}
+";
+    let (root, tree) = unit(source);
+    assert_eq!(tree.get_errors(), [], "the fixture parses cleanly");
+
+    // **`Following` is a class of the namespace, not a member of `Impl`**: no class-like definition encloses it.
+    let following = root
+        .syntax()
+        .descendants()
+        .filter_map(cpp_parser::CppClassDef::cast)
+        .find(|definition| definition.get_name_text().as_deref() == Some("Following"))
+        .expect("`Following` is a class");
+    let enclosing = following
+        .syntax()
+        .ancestors()
+        .skip(1)
+        .filter(|node| cpp_parser::CppClassDef::cast(node.clone()).is_some())
+        .count();
+    assert_eq!(
+        enclosing, 0,
+        "a class written after the member is not inside it"
+    );
+}
+
 /// The names of the top-level declarations.
 fn decl_names(source: &str) -> Vec<String> {
     let (root, _) = unit(source);

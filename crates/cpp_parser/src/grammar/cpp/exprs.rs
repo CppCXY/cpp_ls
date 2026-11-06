@@ -775,6 +775,37 @@ fn parse_binary_expr_with_precedence(p: &mut CppParser, min_prec: u8) -> ParseRe
 /// `fold_operand` says whether a bare `...` may be read as a fold expression's operand here. It is true only
 /// inside parentheses, which is where a fold is written; see the `Ellipsis` arm of [`parse_primary_expr`].
 fn parse_unary_expr(p: &mut CppParser, fold_operand: bool) -> ParseResult {
+    // **A directive where an operand goes.** The loop in [`parse_binary_expr_with_precedence`] reads the directives
+    // that stand where the next **operator** goes (`a * exp(A) #else * exp(B) #endif`); this is the other half — the
+    // branch written before its **operand**, which is how a condition chooses one term per compilation:
+    //
+    // ```cpp
+    //   if (&__ti == &_Sp_make_shared_tag::_S_ti()
+    //       ||
+    // #if __cpp_rtti
+    //       __ti == typeid(_Sp_make_shared_tag)
+    // #else
+    //       _Sp_make_shared_tag::_S_eq(__ti)
+    // #endif
+    //      )
+    // ```
+    //
+    // Read by shape, like the operator-position seam, and for the same reason: an expression has no `#`, so a `#`
+    // where an operand is expected can only be a directive.
+    //
+    // **What refusing it cost.** `bits/shared_ptr_base.h:639` is exactly that `if`, inside `_M_get_deleter` of
+    // `_Sp_counted_ptr_inplace`. The operand rule refused the `#`, the recovery took the `)` for part of the
+    // expression, and the class body ended at the `if`: every declaration after it — `__shared_ptr` included — became
+    // a member of `_Sp_counted_ptr_inplace`, `__shared_ptr` lost its base clause, and `shared_ptr` lost
+    // `__shared_ptr_access`'s `operator*`/`operator->` with it. Six "`shared_ptr` again" reports, one `#`.
+    //
+    // What this reads and what it does not is the operator seam's trade, told there: the tokens of both branches end
+    // up in one chain, which is not what either branch says, and it is lossless, silent, and attaches every token to
+    // the construct that owns it.
+    while p.current_token() == CppTokenKind::Hash {
+        stats::parse_preprocessor_directive(p)?;
+    }
+
     // An **alternative spelling** of a unary operator — `not x`, `compl x` — reaches here as an identifier, so
     // it is mapped before the match. In operand position a name would otherwise start a primary expression, and
     // `not x` would be read as two adjacent expressions.

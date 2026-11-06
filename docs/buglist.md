@@ -865,6 +865,38 @@ only in the real file's context: the class's own text parses cleanly, and neithe
 declaration (36 of them, tried one at a time) nor padding it with plain declarations changes anything. So it is state
 carried from **more than one** earlier construct, not one construct and not the file's size.
 
+### Fixed: the operand seam, and the cache that outlived it
+
+Two things were wrong, and the fixture needed both.
+
+**The grammar had no directive where an operand goes.** `parse_binary_expr_with_precedence`'s loop reads the directives
+that stand where the next **operator** goes (`a * exp(A) #else * exp(B) #endif`); the branch written before its
+**operand** had no seam, so `|| #if …` refused the `#`, the recovery took the closing `)` for part of the expression,
+and the class body ended at the `if`. `parse_unary_expr` now reads a run of directives before its operand, the same
+"lossless, silent" trade the operator seam documents.
+
+**The summary on disk was written by the older grammar.** `C:\p\.cppls` for the fixture and
+`test_cpp\.cppls` for the real project answered for it, so a fixed binary kept the old answer: measured, the fixture
+test failed before the bump and passed after, with the same code. `FORMAT_VERSION` moved 13 → 14 for it — its
+documentation already says a summary that describes an older reader is a wrong answer, not a missing one.
+
+**Measured after both.** `bits/shared_ptr_base.h`, `inspect tree`: `_Sp_overwrite_tag` at 658 is a child of the
+namespace, not of `_Sp_counted_ptr_inplace`. `inspect facts` (fresh index): `_Sp_overwrite_tag`, `_Sp_counted_array_base`,
+`__shared_count` and `__shared_ptr` all come back with scope `std` — the header reads the way it is written.
+
+The same fix closes the loop on the earlier sections: the tree no longer derails, so `__shared_ptr` is no longer a
+member of `_Sp_counted_ptr_inplace`.
+
+### What is still open: `DeclFact.bases` is empty for a header class
+
+`members_of("std::__shared_ptr<Resource>")` still answers 36 members and no `operator*`/`operator->`, because the base
+walk needs `DeclFact.bases` and that field is empty for **every** class in that header — `__shared_ptr` at 1429 and
+`_Sp_counted_ptr_inplace` at 582 alike, the second one with its base clause on the class's own line. The fixture path
+answers correctly (it reads the bases from the scope tree), so the gap is in the **shape walk** that fills the fact
+(`declared_bases_of_with`), most likely in how a shape records the owner of a `template<…> class X : Base` head.
+
+That is the next step for `operator*`/`operator->`, and it is now a one-field question rather than a cloud of symptoms.
+
 ### The 28-line reproducer, and which path it is
 
 The delta reduction (`ddmin` over the 36 top-level declarations of the real prefix, with `inspect facts --fixture` and
@@ -902,16 +934,10 @@ Three ingredients, each shown necessary: a resolved include, a namespace, and `|
 conditional inside an `if` condition in a class member. Written **inline** (no include) the same code parses correctly;
 so does a small version without the `#if`; so does `#include "nothing.h"`.
 
-**It is the summary's reading, not the session's.** `session.view()` on the same fixture answers the class correctly —
-the plain reading is fine — while the **summary** (`ProjectIndex::summary`, what `inspect facts` prints) has `Following`
-inside `std::Impl`. So the derail is in the reading the **summary is built from**, not in the parser on the file's own
-text.
-
-`Session::render_the_unit` prints a rendering that is **correct** for this fixture (176 bytes, one line, the class
-closed) — so the summary is not built from that text. The next move is to expose the text `FileIndexer::index_rendering`
-actually parses (`RenderedCooked::text` of the unit's read, not `render_the_unit`'s) through a debug hook, and diff it
-against the file. Until that exists, this is the state: the reproducer is 28 lines, the failure is deterministic, and it
-is in whichever rendering the index uses.
+**The reproducer's history.** `session.view()` answered the class correctly while `ProjectIndex::summary` had
+`Following` inside `std::Impl`, and a `CPPLS_DUMP_RENDERING_DIR` hook showed the summary being built from a rendering
+that prints correctly — which is what pointed at the **cache**: the entry on disk came from the older grammar. The hook
+stays (it is the only way to see which text a summary is built from).
 
 `crates/cpp_code_analysis/tests/semantic.rs` carries the reproducer as
 `an_include_and_a_directive_in_a_condition_do_not_swallow_the_class`, `#[ignore]`d with this section as its reason: it

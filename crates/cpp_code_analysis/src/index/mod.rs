@@ -405,6 +405,21 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
         rendered: &crate::preprocess::cooked::RenderedCooked,
         key: SummaryKey,
     ) -> crate::IndexedRendering {
+        // **The text this reading is built from**, written out when `CPPLS_DUMP_RENDERING_DIR` names a directory.
+        //
+        // A parse that goes wrong only here cannot be seen in `inspect tree`, which reads the file's own text, and
+        // `Session::render_the_unit` is a different rendering (measured: correct for the 28-line reproducer in
+        // `docs/buglist.md` §31, while the summary this function builds is wrong). So the one text that matters gets a
+        // way out, off unless asked for, like this crate's other traces.
+        if let Some(directory) = std::env::var_os(crate::probes::DUMP_RENDERING_DIR) {
+            let directory = std::path::PathBuf::from(directory);
+            let _ = std::fs::create_dir_all(&directory);
+            let name = path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "unit".to_string());
+            let _ = std::fs::write(directory.join(format!("{name}.rendering")), &rendered.text);
+        }
         // **The stream is already cooked**, so there is nothing for a macro environment to add and a great deal for
         // it to get wrong: its answers are positional in the original file's coordinates while the parser reads the
         // rendering's. See the same note in [`FileIndexer::index`].
@@ -696,6 +711,18 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
         tree: &CppSyntaxTree,
         key: SummaryKey,
     ) -> FileSummary {
+        // The text this summary is built from, when `CPPLS_DUMP_RENDERING_DIR` names a directory — the companion of the
+        // same hook in [`FileIndexer::index_rendering`], and the only way to see which reading a wrong answer came
+        // from when the file's own text parses correctly.
+        if let Some(directory) = std::env::var_os(crate::probes::DUMP_RENDERING_DIR) {
+            let directory = std::path::PathBuf::from(directory);
+            let _ = std::fs::create_dir_all(&directory);
+            let name = path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "unit".to_string());
+            let _ = std::fs::write(directory.join(format!("{name}.parsed")), source);
+        }
         // See `index`: the content part of the key is the text, always. The caller supplies the part that
         // describes the *compilation* — the configuration and the directory the file sits in.
         //
