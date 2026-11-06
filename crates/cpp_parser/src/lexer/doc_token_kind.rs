@@ -61,6 +61,15 @@ pub enum DocTokenKind {
     DocWhitespace,
     /// A newline inside a comment. Ends whatever line-oriented construct is being read.
     DocNewline,
+    /// The `*` that continues a block comment's line — `/** … * @param x … */` — as comment punctuation.
+    ///
+    /// **Not whitespace, and not part of a whitespace run.** The lexer used to hand the whole decoration
+    /// (`" *"`) over as one [`DocTokenKind::DocWhitespace`], which put a `*` inside a token whose kind says
+    /// "layout": a consumer trimming whitespace kept the marker's byte as space, and the line then produced
+    /// two adjacent whitespace tokens (`" *"` and the space after it) where the layout rule keeps one run to
+    /// one token. The marker is what a reader *sees* to know a line is a comment continuation, so it is
+    /// recorded as what it is.
+    DocDecoration,
 
     // ========== Punctuation the doc grammar dispatches on ==========
     /// `[` — opens a direction specifier (`@param[in]`) or a range (`@param[1,3]`).
@@ -109,7 +118,8 @@ impl DocTokenKind {
             DocTokenKind::DocText => CppTokenKind::DocText,
             DocTokenKind::DocWhitespace => CppTokenKind::Whitespace,
             DocTokenKind::DocNewline => CppTokenKind::Newline,
-            DocTokenKind::DocIntroducer
+            DocTokenKind::DocDecoration
+            | DocTokenKind::DocIntroducer
             | DocTokenKind::DocLeftBracket
             | DocTokenKind::DocRightBracket
             | DocTokenKind::DocComma
@@ -126,8 +136,16 @@ impl DocTokenKind {
     }
 
     /// Is this token layout rather than content? The doc grammar steps over these.
+    ///
+    /// [`DocTokenKind::DocDecoration`] is here **for the grammar and not for the tree**: a continuation line's
+    /// `*` sits between two constructs — after `@brief B`'s body and before the next `@param` — so a body that
+    /// absorbed it would carry half of a decoration line (`DocCommandBody[B*]`), while the token itself has to
+    /// stay a `*` and not become whitespace. The grammar steps over it like layout; the tree still records it.
     pub fn is_trivia(self) -> bool {
-        matches!(self, DocTokenKind::DocWhitespace | DocTokenKind::DocNewline)
+        matches!(
+            self,
+            DocTokenKind::DocWhitespace | DocTokenKind::DocNewline | DocTokenKind::DocDecoration
+        )
     }
 
     /// Does this token end the line it is on? Used by the line-oriented parsers.

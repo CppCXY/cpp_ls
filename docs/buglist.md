@@ -1147,3 +1147,52 @@ between the two is which of them the pump got to before the answer was asked for
 
 The same fixed-directory pattern is still in `fuzzy.rs`, `index/watch/tests`, `index/store/tests`, `index/worklist`,
 `include/mod.rs` and `summary`'s round-trip test — none of them reported failing, and each is the same hazard.
+
+## 34. A block comment's `*` was lexed as whitespace
+
+Reported from a tree dump of
+
+```cpp
+/**
+ * @param name string who to greet
+ */
+```
+
+```text
+Token(Whitespace)@5..7 " *"      ← the marker is inside a token whose kind says "layout"
+Token(Whitespace)@7..8 " "       ← and the line has two whitespace runs
+```
+
+The doc lexer treated a block comment's whole continuation prefix as one token and gave it
+[`DocTokenKind::DocWhitespace`] — `skip_block_line_prefix` returns the end of `" *"`, and the branch
+returned one whitespace token for it. Two things follow, and both are a consumer's problem:
+
+* a `*` sits inside a token whose kind says "layout", so a consumer trimming whitespace keeps the
+  marker's byte as space, and one that asks "was this line decorated?" has to read the text;
+* the layout branch keeps one maximal whitespace token per run, and this broke that on every
+  continuation line — `" *"` then `" "` were two adjacent whitespace tokens.
+
+### Fixed
+
+`DocTokenKind::DocDecoration` — the marker as comment punctuation (`CppTokenKind::DocTrivia`) — and the
+prefix branch emits two tokens: the whitespace before the marker (if any) as `DocWhitespace`, the marker as
+`DocDecoration`. Measured on the fixture above:
+
+```text
+Token(Newline)@3..4 "\n"
+Token(Whitespace)@4..5 " "
+Token(DocTrivia)@5..6 "*"
+Token(Whitespace)@6..7 " "
+Token(DocTrivia)@7..8 "@"
+Syntax(DocCommand)@8..38 …                  ← the parsed shape is unchanged
+```
+
+The marker is **layout for the grammar and a token for the tree**: `DocTokenKind::is_trivia` includes it, so
+`skip_layout` steps over it and a `DocCommandBody` does not absorb it (without that, the block spelling of a
+comment produced `DocCommandBody[B*]` where the `///` spelling produced `DocCommandBody[B]` —
+`doc_shape::line_and_block_spellings_agree` is the test that caught it). The tree still records the `*`, which
+is what `docs/ast` consumers read.
+
+Test: `doc_lexer::a_block_comment_continuation_marker_is_punctuation` — the marker is its own token, no
+whitespace token contains `*` — replacing `block_comment_continuation_markers_are_layout`, which had pinned the
+old behaviour.

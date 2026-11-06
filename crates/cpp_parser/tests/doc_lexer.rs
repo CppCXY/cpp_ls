@@ -178,10 +178,23 @@ fn a_bare_at_sign_is_prose() {
     );
 }
 
-/// A block comment's continuation `*` is layout, and stripping it is what lets the grammar see
-/// `@param` at the start of a line rather than `* @param`.
+/// **A block comment's continuation `*` is punctuation, not layout** — and the line's spaces stay layout.
+///
+/// This test used to assert that the marker was "absorbed into whitespace", which is what the lexer did: the
+/// whole decoration (`" *"`) was one `DocWhitespace` token. Two things are wrong with that, and both are a
+/// consumer's problem rather than a style preference:
+///
+/// ```text
+/// Token(Whitespace)@5..7 " *"     a `*` inside a token whose kind says "layout"
+/// Token(Whitespace)@7..8 " "      and a second whitespace run right after it
+/// ```
+///
+/// A consumer trimming layout kept the marker's byte as space, and the run invariant the layout branch keeps
+/// (one maximal whitespace token per run) was broken on every continuation line. The marker is recorded as a
+/// [`DocTokenKind::DocDecoration`] now, so the grammar still sees `@param` at the start of the line — the
+/// decoration is not trivia and is emitted like any other punctuation — and no whitespace token contains a `*`.
 #[test]
-fn block_comment_continuation_markers_are_layout() {
+fn a_block_comment_continuation_marker_is_punctuation() {
     let source = "/**\n * @brief x\n */";
     let lexed = pairs(source);
 
@@ -192,8 +205,16 @@ fn block_comment_continuation_markers_are_layout() {
 
     assert_eq!(name.1, "brief");
     assert!(
-        !lexed.iter().any(|(_, text)| text == "*"),
-        "the continuation marker should have been absorbed into whitespace: {lexed:?}"
+        lexed
+            .iter()
+            .any(|(kind, text)| *kind == DocTokenKind::DocDecoration && text == "*"),
+        "the continuation marker is a token of its own: {lexed:?}"
+    );
+    assert!(
+        !lexed
+            .iter()
+            .any(|(kind, text)| *kind == DocTokenKind::DocWhitespace && text.contains('*')),
+        "no whitespace token may contain the marker: {lexed:?}"
     );
     assert!(
         lexed

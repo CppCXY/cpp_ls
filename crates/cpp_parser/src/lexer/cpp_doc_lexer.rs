@@ -266,8 +266,17 @@ impl<'a> DocLexer<'a> {
             && let Some(end) = self.skip_block_line_prefix(start)
             && end > start
         {
+            // **Two tokens, not one.** The whitespace before the `*` is layout; the `*` is the comment's
+            // punctuation. Emitted as one `DocWhitespace` it put a `*` inside a token whose kind says "layout"
+            // (and left the line with two adjacent whitespace runs), which is what `DocDecoration` exists for.
             self.pos = end;
-            return vec![self.token(DocTokenKind::DocWhitespace, start, self.pos)];
+            let asterisk = end - 1;
+            let mut tokens = Vec::with_capacity(2);
+            if asterisk > start {
+                tokens.push(self.token(DocTokenKind::DocWhitespace, start, asterisk));
+            }
+            tokens.push(self.token(DocTokenKind::DocDecoration, asterisk, end));
+            return tokens;
         }
 
         // Layout.
