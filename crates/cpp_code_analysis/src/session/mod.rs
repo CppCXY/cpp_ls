@@ -3954,7 +3954,6 @@ impl<F: FileProvider + Clone> Session<F> {
     pub fn index_everything(&mut self) -> usize {
         let mut total = 0;
         let tracing = crate::probes::cooking();
-        let started = std::time::Instant::now();
 
         loop {
             let round_started = std::time::Instant::now();
