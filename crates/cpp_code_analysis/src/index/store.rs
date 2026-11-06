@@ -2199,8 +2199,16 @@ impl<F: FileProvider> SummaryStore<F> {
             }
             // **The decision is written down**, so the next start serves it instead of rebuilding the timelines that led
             // to it. See `mark_the_reading_as_refined`.
+            let marking = std::time::Instant::now();
             for path in indexed {
                 self.mark_the_reading_as_refined(path);
+            }
+            if tracing {
+                eprintln!(
+                    "re-read: marked {} file(s) in {:?}",
+                    indexed.len(),
+                    marking.elapsed()
+                );
             }
             return ReRead {
                 rebuilt: Vec::new(),
