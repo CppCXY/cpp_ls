@@ -83,6 +83,19 @@
 //! to the stream has no place in it. So a stored rendering cannot reproduce its own key without the walk that produced
 //! it. What would work is a rendering that records the walk's file list as well as its own, which is a change to
 //! `RenderedUnit` rather than to the cache.
+//!
+//! # What a 401-file closure holds in memory — P2's byte budget, measured before it is built
+//!
+//! ```text
+//! memory: vfs 19 MB (401 files), summaries 52 MB (401), cooked 25 MB (223), units 1 MB (1), views 0 MB (0–6)
+//! ```
+//!
+//! 130 KB of summary and 112 KB of cooked reading per file of the **standard library** — the heaviest headers there
+//! are. A budget therefore cannot be a number plucked from the air: at this density a hundred-thousand-file project
+//! would hold 13 GB of summaries, which is the case P2's budget exists for, and a 400-file one holds 52 MB, which is
+//! not worth evicting anything for. The next step is the eviction half — which summaries may go, and what a query does
+//! when one has: a missing summary is re-read (`Session::needs_catching_up`), so the policy is about *which* files to
+//! forget rather than about correctness.
 
 use std::path::{Path, PathBuf};
 use std::time::Instant;
