@@ -4270,16 +4270,37 @@ impl<F: FileProvider + Clone> Session<F> {
     /// The asks are the queue, not the backlog: a file a request named is refined wherever it is, which is what makes
     /// "answer from L1, ask for L2" reachable after a start has drained. A file that is *also* still in
     /// `parsed_since_the_last_pass` is taken out of it, so one file is re-read once.
+    ///
+    /// # An ask the pass cannot serve is left standing
+    ///
+    /// The take happens in an **idle** round — `finish_a_slice` calls this when the index queue is empty — but a file
+    /// can be asked about before its summary exists: a request for a file the drain has not reached, or one the session
+    /// only discovers while indexing. Handing that to the pass consumes the ask and buys nothing, because a re-read
+    /// needs a summary to re-read — and then nothing ever asks again.
+    ///
+    /// That is not hypothetical: it is what stopped the demand-driven contract
+    /// (`docs`: the round that removed `index_everything`'s eager ask). `tests/toolchain.rs`'s
+    /// `a_project_with_no_build_system_is_read_with_the_compilers_environment` reads a file the session *discovers*,
+    /// asked for it before `index_everything`, and got no cooked reading at all — the ask had been consumed by a round
+    /// that could not serve it. Left standing, it is served by the round that can.
     fn take_the_files_wanted_for_refinement(&mut self, at_most: usize) -> Vec<PathBuf> {
         let mut taken = Vec::new();
         let Ok(mut wanted) = self.refined_on_request.lock() else {
             return taken;
         };
+        // Asks that cannot be served **yet**: out of the set so the loop advances past them, and back in before this
+        // returns. Without the round trip one unready ask would block every ready one behind it; without the put-back
+        // it would be dropped, which is the defect above.
+        let mut not_yet: Vec<PathBuf> = Vec::new();
         while taken.len() < at_most {
             let Some(path) = wanted.iter().next().cloned() else {
                 break;
             };
             wanted.remove(&path);
+            if self.store.index().summary(&path).is_none() {
+                not_yet.push(path);
+                continue;
+            }
             if let Some(at) = self
                 .parsed_since_the_last_pass
                 .iter()
@@ -4288,6 +4309,9 @@ impl<F: FileProvider + Clone> Session<F> {
                 self.parsed_since_the_last_pass.swap_remove(at);
             }
             taken.push(path);
+        }
+        for path in not_yet {
+            wanted.insert(path);
         }
         taken
     }
