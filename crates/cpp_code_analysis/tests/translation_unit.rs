@@ -1411,3 +1411,109 @@ fn a_file_cooks_the_same_through_the_unit_as_through_a_table_of_its_own() {
         "and a name nobody defines is nobody's: the seed does not invent one"
     );
 }
+
+/// **Does the cook leave a `_STD_BEGIN`/`_STD_END` pair open when two headers use it?** — a probe, not a test.
+///
+/// ```text
+/// cargo test --release -p cpp_code_analysis --test translation_unit a_scope_macro -- --ignored --nocapture
+/// ```
+///
+/// The modules fixture files `std::format` under `std::std::std::std::std::std::std::std::std::std` — ten levels —
+/// and the parser's file-boundary rule is not the cause (see `tests/scope_probe.rs`). What is left is the **text**
+/// the cook produces: if a scope macro that opens a namespace and closes it again comes out balanced, the nesting
+/// cannot be built from one file. This prints the stream and where a second header's declaration ends up.
+#[test]
+#[ignore = "a probe: prints a cooked stream and a parse tree"]
+fn a_scope_macro_two_headers_use() {
+    let files = [
+        (
+            "/p/core.h",
+            "#define _STD_BEGIN namespace std {\n#define _STD_END }\n",
+        ),
+        (
+            "/p/a.h",
+            "#include \"core.h\"\n_STD_BEGIN\nstruct A { int a; };\n_STD_END\n",
+        ),
+        (
+            "/p/b.h",
+            "#include \"core.h\"\n_STD_BEGIN\nstruct B { int b; };\n_STD_END\n",
+        ),
+        ("/p/main.cpp", "#include \"a.h\"\n#include \"b.h\"\n"),
+    ];
+
+    let unit = Unit::new(&files);
+    let mut definitions = MacroDefinitions::default();
+    let timeline = unit.timeline_of("/p/main.cpp", &mut definitions);
+    let shared = timeline.definitions();
+    let stitched = timeline.cook_the_unit(&unit.sources, &shared, None, true, None);
+    println!("--- cooked ---\n{}--- end ---", stitched.text);
+    println!("boundaries: {:?}", stitched.file_boundaries());
+
+    let tree = cpp_parser::CppParser::parse(
+        &stitched.text,
+        cpp_parser::ParserConfig::default().with_file_boundaries(stitched.file_boundaries()),
+    );
+    let mut inside: Vec<String> = Vec::new();
+    let mut node = tree.get_red_root().descendants().find(|node| {
+        &stitched.text[usize::from(node.text_range().start())..usize::from(node.text_range().end())]
+            == "B"
+    });
+    while let Some(current) = node {
+        let kind = format!("{:?}", current.kind());
+        if kind.contains("Namespace") {
+            inside.push(kind);
+        }
+        node = current.parent();
+    }
+    println!(
+        "namespace ancestors of `B`: {} ({:?})",
+        inside.len(),
+        inside
+    );
+    // **And what the index makes of it** — the scope string a fact carries is built by the summary layer from
+    // the tree, and a builder that appended each enclosing namespace twice would give the same `std::std::…`
+    // shape from a tree with half as many namespaces.
+    let configuration = cpp_code_analysis::CompilerConfig::default();
+    let indexer = FileIndexer::new(&unit.files, &configuration);
+    let indexed =
+        indexer.index_unit_rendering(Path::new("/p/main.cpp"), &stitched, SummaryKey::new(0, 0));
+    for (path, cooked) in &indexed.files {
+        for fact in &cooked.declarations {
+            if fact.name.as_str() == "A" || fact.name.as_str() == "B" {
+                println!(
+                    "{}: {} in scope {:?}",
+                    path.display(),
+                    fact.name,
+                    fact.scope
+                );
+            }
+        }
+    }
+}
+
+/// **The brace is the file's last token, and the body begins in the next file** — the shape a `boundary > since`
+/// comparison misses. A probe, not a test.
+#[test]
+#[ignore = "a probe: prints where a declaration lands when the `{` ends the file"]
+fn a_namespace_whose_brace_ends_the_file() {
+    let first = "namespace std {";
+    let second = "int b;";
+    let text = format!("{first}\n{second}\n");
+    let boundary = first.len() + 1;
+    let tree = cpp_parser::CppParser::parse(
+        &text,
+        cpp_parser::ParserConfig::default().with_file_boundaries(vec![boundary]),
+    );
+    let mut inside: Vec<String> = Vec::new();
+    let mut node = tree.get_red_root().descendants().find(|node| {
+        &text[usize::from(node.text_range().start())..usize::from(node.text_range().end())] == "b"
+    });
+    while let Some(current) = node {
+        let kind = format!("{:?}", current.kind());
+        if kind.contains("Namespace") {
+            inside.push(kind);
+        }
+        node = current.parent();
+    }
+    println!("boundary {boundary}; namespace ancestors of `b`: {inside:?}");
+}
