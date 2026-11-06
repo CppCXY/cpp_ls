@@ -158,6 +158,19 @@ impl Drop for DiagTrace {
 /// warning is what will say when it has been.
 const RE_READ_SLICE: usize = 16;
 
+/// **How much summary memory a session keeps before it forgets the biggest ones** — P2's byte budget.
+///
+/// The density it has to be a budget *of*, measured on the standard library (`tests/modules_probe.rs`, 401 files):
+/// **52 MB of summaries and 25 MB of cooked readings** — 130 KB and 112 KB per file, because the STL's headers are the
+/// heavy end of the distribution. At that density 8 000 such files hold a megabyte; a hundred-thousand-file project
+/// holds **13 GB**, which is the case this exists for, and a 400-file closure holds 52 MB, which is not worth evicting
+/// anything for. So the budget is set where it only fires on a project nobody could hold: **1 GiB of summaries**.
+///
+/// Forgetting is safe by construction: a summary that goes is re-read on demand ([`Session::needs_catching_up`]), which
+/// is the same path a cache miss takes. What is *not* free is forgetting the wrong file — see
+/// [`Session::enforce_the_summary_budget`] for the three kinds it never touches.
+const SUMMARY_BUDGET_BYTES: usize = 1 << 30;
+
 /// **How many files a slice needs before its second pass shares one timeline instead of walking one per candidate.**
 ///
 /// The second pass re-reads a slice's files and every file that defines a macro one of them mentions. A candidate
@@ -1921,6 +1934,79 @@ impl<F: FileProvider + Clone> Session<F> {
     /// store's; see [`crate::index::walk_cache::WalkCache`].
     pub fn walk_contributions_held(&self) -> usize {
         self.store.contributions().held()
+    }
+
+    /// **Keep the index's summaries under a byte budget** — P2's byte budget, applied after a drain.
+    ///
+    /// The largest summaries go first, because that is what a cap is for: the standard library's headers are 130 KB
+    /// each and they are the same files on every machine, while a project's own sources are small. What it never
+    /// touches:
+    ///
+    /// * **a file the reader has open** — a `didChange` would find its summary gone and the answer would be "not read
+    ///   yet" for the file somebody is typing in;
+    /// * **a file refined in this session** — its reading is what the refinement bought, and forgetting the summary
+    ///   under it would keep the facts and lose the text they were mapped against;
+    /// * **a file still in the queue** — the queue is about to read it, and a summary dropped now is one built twice.
+    ///
+    /// # And the fourth rule is why this rarely fires
+    ///
+    /// A file in `parsed_since_the_last_pass` is protected too, because the second pass needs its summary to re-read it.
+    /// Under the demand-driven contract that backlog is **never empty** — a batch no longer drains it (it asks for
+    /// nothing), and only a request does — so on a project of any size every indexed file is protected by one rule or
+    /// another and the budget cannot fire. That is a real tension between P2's two halves, and the honest resolution is
+    /// a policy for *which queued files may be forgotten* (the ones the pass would skip anyway: no bodied macro
+    /// mentioned, no guarded declaration) rather than a looser filter here.
+    ///
+    /// A forgotten summary is re-read on demand ([`Session::needs_catching_up`]), which is the path a cache miss already
+    /// takes, so the only cost is the re-read.
+    pub fn enforce_the_summary_budget(&mut self, budget: usize) -> usize {
+        let (_, bytes, _, _) = self.store.index().accounting();
+        if bytes <= budget {
+            return 0;
+        }
+        // The candidates: everything with a summary, with its size, largest first.
+        let mut candidates: Vec<(PathBuf, usize)> = self
+            .store
+            .index()
+            .summaries()
+            .map(|summary| {
+                (
+                    summary.path.clone(),
+                    crate::FileSummary::heap_bytes(summary),
+                )
+            })
+            .collect();
+        candidates.sort_unstable_by(|left, right| right.1.cmp(&left.1));
+
+        let open: std::collections::HashSet<PathBuf> = self.documents.paths().into_iter().collect();
+        let refined: std::collections::HashSet<PathBuf> = self
+            .refined_readings
+            .lock()
+            .map(|refined| refined.iter().cloned().collect())
+            .unwrap_or_default();
+
+        let mut over = bytes.saturating_sub(budget);
+        let mut forgotten = 0usize;
+        for (path, size) in candidates {
+            if over == 0 {
+                break;
+            }
+            if open.contains(&path)
+                || refined.contains(&path)
+                || self.queue.is_queued(&path)
+                || self
+                    .parsed_since_the_last_pass
+                    .iter()
+                    .any(|queued| queued == &path)
+            {
+                continue;
+            }
+            if self.store.index_mut().forget(&path) {
+                over = over.saturating_sub(size);
+                forgotten += 1;
+            }
+        }
+        forgotten
     }
 
     pub fn memory_report(&self) -> crate::MemoryReport {
@@ -4221,6 +4307,13 @@ impl<F: FileProvider + Clone> Session<F> {
                         collected.renderings,
                         collected.projections
                     );
+                }
+                // **And the memory budget, at the same idle moment.** A project whose summaries exceed
+                // [`SUMMARY_BUDGET_BYTES`] forgets the largest of the files nobody is looking at; the ones it forgets
+                // are re-read on demand, which is the path a cache miss already takes.
+                let forgotten = self.enforce_the_summary_budget(SUMMARY_BUDGET_BYTES);
+                if forgotten > 0 {
+                    log::debug!("index: forgot {forgotten} summary(ies) over the byte budget");
                 }
                 return total;
             }
