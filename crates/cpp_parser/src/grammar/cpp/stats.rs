@@ -677,6 +677,28 @@ pub(super) fn a_macro_invocation_starts_at(p: &CppParser, index: usize) -> bool 
         && kind_after_the_balanced_group(p, index).is_some_and(ends_a_statement)
 }
 
+/// **The index just past a reserved invocation that a declaration follows**, or `None` — see the arm that reads it.
+///
+/// The three conditions are [`a_macro_invocation_starts_at`]'s, with a declaration where that rule wants a statement:
+/// a name [`types::written_in_the_implementations_namespace`] reserved, a balanced group, and a token that
+/// [`starts_a_new_declaration`] (or `export`) after it.
+fn index_after_a_reserved_invocation_before_a_declaration(
+    p: &CppParser,
+    index: usize,
+) -> Option<usize> {
+    if p.token_kind_at(index) != CppTokenKind::Identifier
+        || !types::written_in_the_implementations_namespace(p.token_text_at(index))
+    {
+        return None;
+    }
+    if p.token_kind_at(decls::next_significant_index(p, index)) != CppTokenKind::LeftParen {
+        return None;
+    }
+    let after = index_after_the_balanced_group(p, index)?;
+    let kind = p.token_kind_at(after);
+    (starts_a_new_declaration(kind) || kind == CppTokenKind::ExportKeyword).then_some(after)
+}
+
 /// Does a run of annotation invocations stand **in front of** the declaration it annotates?
 ///
 /// MSVC's SAL annotations are written that way, and no table needs to know any of them (they are the
@@ -1008,6 +1030,25 @@ fn parse_declaration_or_expression_statement(p: &mut CppParser) -> ParseResult {
             // is a declaration of nothing. See [`at_a_macro_call_statement_without_evidence`].
             if a_macro_invocation_starts_at(p, start) {
                 return parse_a_macro_invocation_statement(p, start);
+            }
+            // **A reserved invocation in front of the declaration it annotates**, on the same line:
+            //
+            // ```cpp
+            // _NON_MEMBER_CALL(_IS_MEMFUNPTR_EXPLICIT_THIS_GUIDES, , , noexcept)
+            // export template <class _Ty> inline constexpr bool is_member_function_pointer_v = …;
+            // ```
+            //
+            // `a_macro_invocation_starts_at` refuses this one because it wants the invocation to be the whole statement
+            // (it ends at `;`), and here a declaration follows instead. The evidence is still the same three things:
+            // a name the implementation **reserved**, a balanced group, and a **declaration** after it — measured, it
+            // is the last error in the 4.85 MB rendering of `import std;` (`<xtr1common>`, where the definition was not
+            // in force at that point of the walk). The invocation is consumed and the declaration after it parsed by
+            // the rule that owns it, so one error does not become a recovery that swallows the rest of the file.
+            if let Some(after) = index_after_a_reserved_invocation_before_a_declaration(p, start) {
+                while p.current_token_index() < after && !p.is_eof() {
+                    p.bump();
+                }
+                return decls::parse_declaration(p);
             }
             // **A run of annotations in front of the declaration they annotate**. One invocation per
             // statement: the next statement begins at the next name of the run and this same decision is asked

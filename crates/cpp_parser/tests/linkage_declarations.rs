@@ -245,3 +245,50 @@ fn which_piece_of_the_deprecated_line_breaks_it() {
     }
     assert!(broken.is_empty(), "broken variants: {broken:?}");
 }
+
+/// **An unexpanded macro invocation at declaration position** — the last error in the standard library's stream.
+///
+/// `<xtr1common>` writes `_NON_MEMBER_CALL(_IS_MEMFUNPTR_EXPLICIT_THIS_GUIDES, , , noexcept)` and, in the one measured
+/// rendering, the macro is **not defined at that point** — the invocation survives into the stream as text. A parser
+/// cannot call that a declaration, but it can call it *not an error*: the tokens are an identifier and its argument
+/// list, and the declaration that follows is what the file meant. This is the parser being robust about the preprocessor,
+/// which is where the last defect of a 4.85 MB standard library sits.
+#[test]
+fn an_unexpanded_macro_invocation_at_declaration_position_is_not_an_error() {
+    let text = "_NON_MEMBER_CALL(_IS_MEMFUNPTR_EXPLICIT_THIS_GUIDES, , , )\n\
+                _NON_MEMBER_CALL(_IS_MEMFUNPTR_EXPLICIT_THIS_GUIDES, , , noexcept)\n\
+                export template <class _Ty> inline constexpr bool is_member_function_pointer_v = false;\n\
+                int after_this;\n";
+    let tree = parse(text);
+    assert!(
+        tree.get_errors().is_empty(),
+        "no error: {:?}",
+        tree.get_errors()
+            .iter()
+            .map(|error| cpp_parser::source_range(error.range).start_offset)
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        at_file_scope(&tree, text, "after_this"),
+        "the file stayed at file scope"
+    );
+}
+
+/// **The same shape inside a namespace**, which is where it is written.
+#[test]
+fn an_unexpanded_macro_invocation_in_a_namespace_keeps_it_closed() {
+    let text = "namespace std { _NON_MEMBER_CALL(X, , , noexcept) export template <class _Ty> bool v = false; } int after_this;\n";
+    let tree = parse(text);
+    assert!(
+        tree.get_errors().is_empty(),
+        "no error: {:?}",
+        tree.get_errors()
+            .iter()
+            .map(|error| cpp_parser::source_range(error.range).start_offset)
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        at_file_scope(&tree, text, "after_this"),
+        "the namespace closed"
+    );
+}

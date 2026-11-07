@@ -48,6 +48,17 @@ fn where_the_parser_puts_the_intrinsics() {
         "parsed in {:.0} ms",
         started.elapsed().as_secs_f64() * 1000.0
     );
+    // **Every error the stitched stream still produces**, with the text around it: the list is the work queue for the
+    // next accuracy fix, and its length is the number that has to fall.
+    println!("{} error(s) in the stitched stream", tree.get_errors().len());
+    for (index, error) in tree.get_errors().iter().enumerate().take(12) {
+        let range = cpp_parser::source_range(error.range);
+        let around = text
+            .get(range.start_offset.saturating_sub(40)..)
+            .map(|rest| &rest[..rest.len().min(220)])
+            .unwrap_or("");
+        println!("  error {index} at {}: {around:?}", range.start_offset);
+    }
 
     for name in ["_mm_abs_epi16", "vector<bool, _Alloc>", "format"] {
         let Some(at) = text.find(name) else {
