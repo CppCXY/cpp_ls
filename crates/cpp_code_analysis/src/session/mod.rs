@@ -1178,6 +1178,9 @@ impl Session<DiskFiles> {
                 .fuzzy_includes
                 .unwrap_or(discovery.database.is_none()),
             targets: crate::project::targets_for(&project_config.config.compile),
+            // **The libraries a target may depend on** — `[[library]]`, resolved at the moment the file's config is
+            // applied (see `CompilerConfig::for_file`), because that is where a file and its target meet.
+            libraries: project_config.config.libraries.clone(),
             database: discovery
                 .database
                 .as_ref()
@@ -1637,7 +1640,11 @@ impl<F: FileProvider + Clone> Session<F> {
         if config.cuda() {
             extra_extensions.extend(["cu".to_string(), "cuh".to_string()]);
         }
-        let project = project_files(
+        // **A library's headers and module interfaces join the project's file list**, and its `.cpp` files never do —
+        // a dependency is used through what it exports, and reading its implementation would multiply the index by
+        // every dependency's sources for an answer nobody reading *this* project can act on. See `LibrarySection`.
+        let from_libraries = library_files_to_read(&project_config.config.libraries, &root);
+        let mut project = project_files(
             &files,
             &filter,
             &root,
@@ -1649,6 +1656,11 @@ impl<F: FileProvider + Clone> Session<F> {
                 .max_files
                 .unwrap_or(MAX_PROJECT_FILES),
         );
+        for file in from_libraries {
+            if !project.iter().any(|held| held == &file) {
+                project.push(file);
+            }
+        }
 
         // **What makes the macro environment complete: the compiler answered.**
         //
@@ -5371,6 +5383,15 @@ impl<F: FileProvider + Clone> Session<F> {
                 self.project
                     .iter()
                     .filter_map(|file| file.parent().map(std::path::Path::to_path_buf)),
+            );
+            // **A library is the project's too**, as far as a suggestion is concerned: its headers are what a target
+            // that depends on it may add an `#include` for. See `missing_include`.
+            inside.extend(
+                self.project_config()
+                    .config
+                    .libraries
+                    .iter()
+                    .map(|library| library.root(&self.root)),
             );
             inside.sort();
             inside.dedup();
@@ -10646,14 +10667,74 @@ fn the_compilation_is_known(toolchain: Option<&Toolchain>) -> bool {
     toolchain.is_some_and(|found| !found.builtin_macros.is_empty())
 }
 
-/// The compile database, from where the project says it is or from the conventional place.
+/// **The files of every library this project depends on**, restricted to what a dependency is used through.
+///
+/// Headers (`.h`, `.hpp`, `.hxx`, `.h++`, `.inl`, `.ipp`) under each library's include directories, and module
+/// interfaces (`.cppm`) under its module directories. **No `.cpp`**: see `LibrarySection` for what that costs and why
+/// the cost is the right one — a dependency's implementation is not part of what this project compiles, and indexing it
+/// would multiply the index by every dependency's sources on every cold start.
+///
+/// A missing directory is skipped rather than reported: a library whose path does not exist is a configuration problem
+/// the discovery layer already reports, and a session built from a provider that cannot list directories (an in-memory
+/// project) has nothing to walk.
+fn library_files_to_read(
+    libraries: &[crate::project::LibrarySection],
+    workspace: &std::path::Path,
+) -> Vec<PathBuf> {
+    const HEADER_EXTENSIONS: &[&str] = &["h", "hpp", "hxx", "h++", "inl", "ipp"];
+    /// How deep a dependency's public headers are walked. Deep enough for `include/pkg/detail/x.h`, bounded so that a
+    /// library whose path is a whole disk cannot turn a start-up into a walk of it.
+    const MAX_DEPTH: usize = 12;
+    const MAX_FILES: usize = 20_000;
+
+    let mut found: Vec<PathBuf> = Vec::new();
+    for library in libraries {
+        let mut roots: Vec<PathBuf> = library.include_directories(workspace);
+        roots.extend(library.module_directories(workspace));
+        let mut stack: Vec<(PathBuf, usize)> = roots.into_iter().map(|root| (root, 0)).collect();
+        while let Some((directory, depth)) = stack.pop() {
+            if depth > MAX_DEPTH || found.len() >= MAX_FILES {
+                continue;
+            }
+            let Ok(entries) = std::fs::read_dir(&directory) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let Ok(kind) = entry.file_type() else {
+                    continue;
+                };
+                if kind.is_dir() {
+                    stack.push((path, depth + 1));
+                    continue;
+                }
+                let extension = path
+                    .extension()
+                    .and_then(|extension| extension.to_str())
+                    .map(|extension| extension.to_lowercase());
+                let wanted = match extension.as_deref() {
+                    Some("cppm") => true,
+                    Some(other) => HEADER_EXTENSIONS.contains(&other),
+                    None => false,
+                };
+                if wanted {
+                    found.push(path);
+                }
+            }
+        }
+    }
+    found.sort();
+    found.dedup();
+    found
+}
+
 /// Fold a project's configuration into the filter a session reads through.
 ///
-/// The exclusions are applied **on top of** whatever the caller passed, because the two lists are different
-/// claims that are both true at once: the caller's is the editor's ("these files are not what I am working on"),
-/// the project's is the file's ("these files are not source"). The cache directory goes in here too, so that the
-/// rule keeping a watcher from re-indexing the cache's own writes follows the configuration rather than the
-/// default — one place, and the store reads the same name from the same report.
+/// The exclusions are applied **on top of** whatever the caller passed, because the two lists are different claims that
+/// are both true at once: the caller's is the editor's ("these files are not what I am working on"), the project's is
+/// the file's ("these files are not source"). The cache directory goes in here too, so that the rule keeping a watcher
+/// from re-indexing the cache's own writes follows the configuration rather than the default — one place, and the
+/// store reads the same name from the same report.
 fn apply_project_config(filter: WatchFilter, report: &ConfigReport) -> WatchFilter {
     let mut filter = filter;
 

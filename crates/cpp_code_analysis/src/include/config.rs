@@ -111,6 +111,13 @@ pub struct CompilerConfig {
     /// a configuration and a **file** and nothing else.
     pub targets: Vec<crate::project::TargetSection>,
 
+    /// **The libraries this project's targets may depend on** — `[[library]]` in `.cppls.toml`.
+    ///
+    /// Carried here for the same reason [`CompilerConfig::targets`] is: [`CompilerConfig::for_file`] is given a
+    /// configuration and a file and nothing else, and a target's `depends` is what decides whether a library's include
+    /// directories are on that file's search path.
+    pub libraries: Vec<crate::project::LibrarySection>,
+
     /// `-I` and `-isystem`, in the order they were given.
     ///
     /// Order is load-bearing: the first directory that holds the file wins, which is how a project
@@ -386,6 +393,35 @@ impl CompilerConfig {
         describing.sort_by_key(|(specific, order, _)| (std::cmp::Reverse(*specific), *order));
 
         for (_, _, target) in describing {
+            // **A dependency's include directories come with the target's own** — and nearer first, for the same
+            // reason: a file that says its target depends on `widgets` finds `widgets/widget.h` where that library
+            // puts it, and a target that names no dependency does not (the honest answer, not an omission).
+            for dependency in &target.depends {
+                let Some(library) = self
+                    .libraries
+                    .iter()
+                    .find(|library| &library.name == dependency)
+                else {
+                    continue;
+                };
+                for directory in library.include_directories(&root) {
+                    if !config
+                        .include_paths
+                        .iter()
+                        .any(|held| held.directory == directory)
+                        && !ahead.iter().any(|held| held.directory == directory)
+                    {
+                        ahead.push(IncludePath::user(&directory));
+                    }
+                }
+                for definition in &library.defines {
+                    if !config.defines.iter().any(|held| {
+                        held.name.as_ref() == definition.split('=').next().unwrap_or("").trim()
+                    }) {
+                        config.defines.push(define_from_a_config_file(definition));
+                    }
+                }
+            }
             for directory in &target.includes {
                 let joined = root.join(directory);
                 if !config

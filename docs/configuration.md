@@ -156,6 +156,33 @@ cache_dir = ".cppls"     # one component, relative to the root; where cooked rea
 max_files = 20000        # how many files the project scan may list
 ```
 
+### `[[library]]` — a dependency outside the workspace
+
+```toml
+[[library]]
+name         = "widgets"
+path         = "E:/SDK/widgets"      # absolute, or relative to the workspace root — either may be outside it
+includes     = ["include"]           # searched for headers; on the search path of a target that depends on it
+modules      = ["src"]               # searched for `.cppm`
+defines      = ["WIDGETS_STATIC"]
+headers_only = true                  # the default
+
+[[compile.target]]
+name    = "app"
+sources = ["src/**"]
+depends = ["widgets"]                # the inclusion of `includes`/`defines`, and a module by name
+```
+
+A library is **read through what it exports**: its headers and its `.cppm` files join the index, its `.cpp` files do
+not. That is the whole cost model — a dependency's implementation is not part of what the depending project compiles,
+and indexing it would multiply the index by every dependency's sources on every cold start. The price is stated where
+a reader will meet it: Go to Definition from a call into a library lands on its declaration or an inline body in a
+header, never in its `.cpp`.
+
+`depends` is what makes `#include "widgets/widget.h"` resolve for a file of that target — and not for a file of a target
+that did not ask for it, which is the difference between a project with several targets and a project with one search
+path for all of them.
+
 ### Read by the language server
 
 ```toml

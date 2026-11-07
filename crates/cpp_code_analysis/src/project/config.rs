@@ -149,6 +149,18 @@ pub struct ProjectConfig {
     /// exactly. Measured on the reader's project: `std::` 1000 items in 53 ms (truncated), `std::s` 167 in 7 ms,
     /// `std::st` 55, `std::str` 38, `std::string` 6 — all exact from one letter on.
     pub completion: CompletionSection,
+    /// **`[[library]]`** — dependencies outside the workspace, by name. See [`LibrarySection`].
+    ///
+    /// ```toml
+    /// [[library]]
+    /// name     = "widgets"
+    /// path     = "E:/SDK/widgets"
+    /// includes = ["include"]
+    /// ```
+    ///
+    /// A library is what a target's `depends` selects, and it is the only way a file **outside the workspace** becomes
+    /// part of this project: its headers and `.cppm` are read, its `.cpp` files are not (see [`LibrarySection`]).
+    pub libraries: Vec<LibrarySection>,
     /// **`[unreal]`** — Unreal Engine's conventions, switched on by the project rather than guessed.
     ///
     /// UE code is C++ that is not readable as ordinary C++: `UCLASS()`, `GENERATED_BODY()` and `UPROPERTY(…)` come
@@ -319,6 +331,14 @@ pub struct TargetSection {
     /// something a person can still act on.
     #[serde(default)]
     pub name: Option<String>,
+    /// **The libraries this target uses** — names of `[[library]]` entries.
+    ///
+    /// A dependency is what makes a library's headers visible *to this target's files*: its include directories are
+    /// prepended to the file's search path (nearest first, like the target's own), and its defines are added. A file no
+    /// target describes gets the project's own paths only, which is the honest answer — `#include "widgets/widget.h"`
+    /// resolves for a target that said it depends on `widgets`, and not for one that did not.
+    #[serde(default)]
+    pub depends: Vec<String>,
     /// Which files this target describes, as patterns relative to the project root.
     #[serde(default)]
     pub sources: Vec<String>,
@@ -341,6 +361,83 @@ pub struct TargetSection {
     /// Flags dropped from whichever set won for this target.
     #[serde(default)]
     pub remove_args: Vec<String>,
+}
+
+/// `[[library]]` — **a dependency outside the workspace**, named so that a target can select it.
+///
+/// ```toml
+/// [[library]]
+/// name         = "widgets"
+/// path         = "E:/SDK/widgets"      # may be outside the workspace
+/// includes     = ["include"]           # searched for headers; prepended for a target that depends on it
+/// modules      = ["src"]               # searched for `.cppm`
+/// defines      = ["WIDGETS_STATIC"]
+/// headers_only = true                  # the default: `.cpp` files of a library are not read
+/// ```
+///
+/// # Why only headers and modules
+///
+/// A library is used through its **headers** and its **module interfaces**; its implementation files are not part of
+/// what a depending target compiles into an analysis of *its own* code. Reading them would multiply the index by every
+/// dependency's sources for no answer a reader of the depending project can act on — and it would do it on every cold
+/// start. The cost is stated plainly: Go to Definition from a call into a library lands on its declaration (or an inline
+/// body in a header), never in its `.cpp`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LibrarySection {
+    /// The name `[[target]].depends` refers to.
+    #[serde(default)]
+    pub name: String,
+    /// The library's root. Absolute, or relative to the workspace root.
+    #[serde(default)]
+    pub path: std::path::PathBuf,
+    /// Directories **under `path`** searched for headers. Empty means `path` itself.
+    #[serde(default)]
+    pub includes: Vec<String>,
+    /// Directories **under `path`** searched for `.cppm`. Empty means `path` itself.
+    #[serde(default)]
+    pub modules: Vec<String>,
+    /// Preprocessor definitions a depending target compiles with — `"NAME"` or `"NAME=value"`.
+    #[serde(default)]
+    pub defines: Vec<String>,
+    /// **Read only headers and module interfaces** — the default, and the reason a library costs what it does.
+    #[serde(default)]
+    pub headers_only: bool,
+}
+
+impl LibrarySection {
+    /// The root this library lives at, resolved against the workspace.
+    pub fn root(&self, workspace: &Path) -> std::path::PathBuf {
+        if self.path.is_absolute() {
+            self.path.clone()
+        } else {
+            workspace.join(&self.path)
+        }
+    }
+
+    /// **The directories this library's headers live in**, resolved — what a depending target gets on its search path.
+    pub fn include_directories(&self, workspace: &Path) -> Vec<std::path::PathBuf> {
+        let root = self.root(workspace);
+        if self.includes.is_empty() {
+            return vec![root];
+        }
+        self.includes
+            .iter()
+            .map(|directory| root.join(directory))
+            .collect()
+    }
+
+    /// The directories searched for module interfaces — `modules`, or the root.
+    pub fn module_directories(&self, workspace: &Path) -> Vec<std::path::PathBuf> {
+        let root = self.root(workspace);
+        if self.modules.is_empty() {
+            return vec![root];
+        }
+        self.modules
+            .iter()
+            .map(|directory| root.join(directory))
+            .collect()
+    }
 }
 
 /// **The target that describes `file`**, for a caller that holds the list and not the section.
@@ -850,6 +947,13 @@ pub fn parse_config(text: &str, path: &Path) -> ConfigReport {
             // **[completion]** — how many items one completion may carry. See [`CompletionSection`].
             "completion" => match decode::<CompletionSection>(section, name) {
                 Ok(decoded) => report.config.completion = decoded,
+                Err(problem) => report.problems.push(problem),
+            },
+            // **[[library]]** — a dependency outside the workspace, named so a target can select it. An array of tables
+            // rather than one section with named children: a library is a thing with fields, and the order of
+            // `depends` should not have to be encoded in a TOML key.
+            "library" => match decode::<Vec<LibrarySection>>(section, name) {
+                Ok(decoded) => report.config.libraries = decoded,
                 Err(problem) => report.problems.push(problem),
             },
             // **[unreal]** — the engine's conventions, which a project switches on rather than a file's spelling
