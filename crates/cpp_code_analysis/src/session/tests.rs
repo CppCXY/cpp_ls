@@ -5000,3 +5000,122 @@ fn a_parameter_of_an_out_of_class_definition_is_declared() {
         found.fact
     );
 }
+
+/// **A member defined in a namespace, whose class is in another file, still declares itself** — the fact Go to
+/// Implementation scans for.
+///
+/// `report.cpp` (a module implementation unit) is the shape: `namespace report { void Report::add(std::string line)
+/// { … } }`, with `Report` declared in `report.cppm`. Two rules stood in the way and both were the same mistake, made in
+/// two places: "a qualified declaration inside a `CompoundStat` declares nothing", written for a *statement* — and a
+/// namespace body is a `CompoundStat`, so the whole definition was skipped:
+///
+/// * the scope walker opened no function scope and bound no parameters (the previous round's fix);
+/// * `qualified_declarations`, the pass that builds a fact from the written qualifier, skipped it too — so the file
+///   had **no `Function` fact at all** and Go to Implementation from the interface found nothing.
+///
+/// And the scope has to be the *fully* qualified class: a definition inside `namespace report` spells `Report`, while
+/// the interface files the declaration under `report::Report`.
+#[test]
+fn a_member_defined_inside_a_namespace_declares_itself() {
+    let text = "namespace report {\n\
+                \x20   void Report::add(int line) {\n\
+                \x20       line = line + 1;\n\
+                \x20   }\n\
+                }\n";
+    let files = MemoryFiles::new().with_file("/p/report.cpp", text);
+    let fixture = Memory::new("a-member-defined-inside-a-namespace", &files);
+    let mut session = fixture.session();
+    session.did_open("/p/report.cpp", text);
+    session.index_everything();
+
+    let summary = session
+        .parsed_summary(Path::new("/p/report.cpp"))
+        .expect("the file was read");
+    let facts: Vec<(String, Option<String>)> = summary
+        .declarations
+        .iter()
+        .filter(|fact| fact.name.as_str() == "add")
+        .map(|fact| {
+            (
+                format!("{:?}", fact.kind),
+                fact.scope.as_ref().map(|scope| scope.to_string()),
+            )
+        })
+        .collect();
+    assert!(
+        facts
+            .iter()
+            .any(|(kind, scope)| kind == "Function" && scope.as_deref() == Some("report::Report")),
+        "the definition is a `Function` in `report::Report`: {facts:?}"
+    );
+
+    // **And it is still not a name this file can use unqualified** — the rule the qualified pass exists to respect.
+    let view = session
+        .view_of_the_file(Path::new("/p/report.cpp"))
+        .expect("a view");
+    let at = text.find("line + 1").expect("the fixture");
+    assert!(
+        matches!(
+            session.definition(&view, ReadingOffset::new(at)),
+            Known::Yes(_)
+        ),
+        "the parameter is still declared"
+    );
+}
+
+/// **A module's closure is what an importer sees** — the visibility rule `import std;` needed.
+///
+/// A module is not a header: what an importer compiles is the unit's **whole translation unit**, so a file the unit's
+/// rendering entered is visible to the importer even when walking the interface's `#include` edges would drop it (each
+/// guard on those edges is evaluated against a state that is not the unit's). Measured on a real project: `report.cppm`
+/// importing `std` saw **151 files and no `std::string`**, while `main.cpp` saw 173 only because its own `#include`
+/// pulled the same tree in textually.
+///
+/// The closure is recorded where the rendering is in hand (`ProjectIndex::remember_the_unit_closure`) and consulted by
+/// the visibility walk for the asking file and for every file its imports reach.
+#[test]
+fn a_modules_closure_is_visible_to_a_file_that_imports_it() {
+    let interface = "export module m;\nexport int given();\n";
+    let implementation = "namespace hidden {\n    struct Widget { int weight; };\n}\n";
+    let importer = "import m;\nvoid f() {}\n";
+    let files = MemoryFiles::new()
+        .with_file("/p/m.ixx", interface)
+        .with_file("/p/hidden.cpp", implementation)
+        .with_file("/p/user.cpp", importer);
+    let fixture = Memory::new("a-modules-closure-is-visible", &files);
+    let mut session = fixture.session();
+    session.add_project_files([
+        PathBuf::from("/p/m.ixx"),
+        PathBuf::from("/p/hidden.cpp"),
+        PathBuf::from("/p/user.cpp"),
+    ]);
+    session.index_everything();
+
+    // **Nothing yet**: the walk knows only the interface, because no unit has been rendered.
+    let before = session.index().visible_files(Path::new("/p/user.cpp"));
+    assert!(
+        !before.iter().any(|(path, _)| path.ends_with("hidden.cpp")),
+        "the interface's own closure is empty until a unit is read: {before:?}"
+    );
+
+    // **The rendering's own answer**, recorded the way the session records it.
+    session.index().remember_the_unit_closure(
+        "m",
+        vec!["/p/hidden.cpp".to_string(), "/p/m.ixx".to_string()],
+    );
+    let after = session.index().visible_files(Path::new("/p/user.cpp"));
+    assert!(
+        after.iter().any(|(path, _)| path.ends_with("hidden.cpp")),
+        "a file the unit was rendered from is visible to its importer: {after:?}"
+    );
+    // **And its declarations answer**, which is the point of being visible.
+    assert!(
+        matches!(
+            session
+                .index()
+                .definition("Widget", Path::new("/p/user.cpp")),
+            Known::Yes(_)
+        ),
+        "the class the unit saw is nameable from the importer"
+    );
+}

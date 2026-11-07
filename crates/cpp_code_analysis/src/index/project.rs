@@ -944,6 +944,22 @@ pub struct ProjectIndex {
     /// Derived from the summaries like `included_by`, and for the same reason: the visibility walk that needs it
     /// holds summaries and nothing else.
     module_interfaces: HashMap<String, String>,
+    /// **Every file a module's interface unit was *rendered* from**, by module name — what an importer sees.
+    ///
+    /// A module is not a header, so the `#include` reconstruction in `walk_the_module_edges` answers a weaker question
+    /// than the module does: it evaluates each guard against a state that is not the unit's, and a header the unit
+    /// included behind `_HAS_CXX20` — MSVC's `xstring` behind `<string>` — is dropped. Measured on the reader's
+    /// project, from `report.cppm` importing `std`:
+    ///
+    /// ```text
+    /// 151 visible file(s), 4110 in `std`, string=[]        ← no std::string
+    /// ```
+    ///
+    /// while the same question from `main.cpp` answered 173 files and `string=["Type"]` — only because that file also
+    /// `#include`s a header that pulls the tree in textually. The unit's rendering already decided every guard, once,
+    /// for the module ([`crate::RenderedUnit::walked`], 223 files for `std`), so that list is the answer; this field is
+    /// where it is kept, filled by [`ProjectIndex::remember_the_unit_closure`].
+    unit_closures: std::sync::Mutex<HashMap<String, Vec<String>>>,
     /// The macros a **compilation** starts with, which no summary can hold: the compiler's predefined names and the
     /// command line's `-D`s.
     ///
@@ -12520,6 +12536,33 @@ impl ProjectIndex {
         self.module_interfaces.get(name).map(String::as_str)
     }
 
+    /// **Record the files a module's unit was rendered from** — see [`ProjectIndex::unit_closures`].
+    ///
+    /// Called by the session when a unit's rendering is in hand: it is the only layer that has the rendering, and the
+    /// rendering's `walked` list is what an importer's view of the module is made of.
+    pub fn remember_the_unit_closure(&self, module: &str, mut files: Vec<String>) {
+        files.sort();
+        files.dedup();
+        if let Ok(mut closures) = self.unit_closures.lock() {
+            closures.insert(module.to_string(), files);
+        }
+        // **And every remembered answer about visibility goes.** The memos were built before this module had a
+        // closure — a walk that ran during the index pass, when the unit had not been read yet — and they are exactly
+        // the question this changes. Measured: without this line the closure was recorded (223 files, confirmed) and
+        // the cached walk still answered 151.
+        if let Ok(mut walks) = self.visibility.lock() {
+            walks.clear();
+        }
+    }
+
+    /// The files [`ProjectIndex::remember_the_unit_closure`] recorded, for a probe or a test.
+    pub fn unit_closure_of(&self, module: &str) -> Option<Vec<String>> {
+        self.unit_closures
+            .lock()
+            .ok()
+            .and_then(|closures| closures.get(module).cloned())
+    }
+
     /// **Every module the index can point at a file for** — `(name, interface unit)`, in name order.
     ///
     /// Sorted rather than left in the map's order, because this is a completion list: two identical requests must
@@ -13937,11 +13980,21 @@ impl ProjectIndex {
         // It shares `visited`'s *purpose* and not its set: the walk above has already entered the include closure,
         // and re-entering a file it reached would evaluate conditions with a state that has drifted. `module_seen`
         // is what keeps this walk to the files the first one could not reach.
+        //
+        // **The unit's own closure comes first, for the asking file and for every file the frontier reaches.** A
+        // module is not a header: what an importer sees is the unit's whole translation unit, and walking the
+        // interface's `#include` edges answers a weaker question — each guard evaluated against a state that is not the
+        // unit's, so a header the unit included behind `_HAS_CXX20` is dropped. Measured on the reader's project:
+        // `report.cppm` importing `std` saw **151 files and no `std::string`**, while `main.cpp` saw 173 only because
+        // its own `#include "extra/widget.h"` pulled the same tree in textually. The rendering has already decided
+        // every one of those guards, once, for the module — see [`ProjectIndex::unit_closures`].
         let mut module_seen: HashSet<String> = HashSet::new();
+        self.add_the_closures_behind_the_imports(Path::new(&from), &mut seen);
         while let Some(reached) = seen.module_work.pop() {
             if !module_seen.insert(reached.clone()) {
                 continue;
             }
+            self.add_the_closures_behind_the_imports(Path::new(&reached), &mut seen);
 
             let mut state = self.macros.clone();
             self.walk_the_module_edges(
@@ -14104,6 +14157,35 @@ impl ProjectIndex {
 
             if module_seen.insert(next.clone()) {
                 self.walk_the_module_edges(Path::new(&next), seen, state, module_seen);
+            }
+        }
+    }
+
+    /// **Every file behind the `import`s a file writes** — the unit's own closure, when it is known.
+    ///
+    /// The closure is the unit's **rendering** (`RenderedUnit::walked`, recorded by
+    /// [`ProjectIndex::remember_the_unit_closure`]): every file that contributed to what an importer compiles. A file
+    /// in it is visible unconditionally and is **not** subject to the exported-bit rule — the module exported it, that
+    /// is what being in the unit's translation unit means — so it is also removed from `through_an_import`.
+    fn add_the_closures_behind_the_imports(&self, of: &Path, seen: &mut Seen) {
+        let Some(summary) = self.summaries.get(&normalize(of)) else {
+            return;
+        };
+        if summary.modules.imports.is_empty() {
+            return;
+        }
+        let Ok(closures) = self.unit_closures.lock() else {
+            return;
+        };
+        for imported in &summary.modules.imports {
+            let Some(files) = closures.get(imported.as_ref()) else {
+                continue;
+            };
+            for file in files {
+                seen.visibility
+                    .entry(file.clone())
+                    .or_insert(IncludeVisibility::Unconditional);
+                seen.through_an_import.remove(file);
             }
         }
     }

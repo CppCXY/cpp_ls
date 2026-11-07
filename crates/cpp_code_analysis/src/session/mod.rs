@@ -1386,6 +1386,14 @@ pub struct PreparedUnitReading {
     /// The hash of the rendering these facts were read from — what the memo and the database file them under.
     program: u64,
     indexed: crate::IndexedUnit,
+    /// **Every file the unit was rendered from** — the module's closure, which is what an importer of it sees.
+    ///
+    /// Carried out of the read rather than looked up afterwards because the rendering is consumed there: a **cold**
+    /// read cooks it inside `read_the_program`, so the only layer that ever holds it is the caller of this function —
+    /// and a warm read has it earlier, at gather time. Recording it in both places is what keeps the answer from
+    /// depending on whether the cache was warm (measured: a cold run still answered 34 completions where a warm one
+    /// answered 38).
+    walked: Vec<PathBuf>,
 }
 
 /// **What a program read needs, gathered under the session lock and read without it.**
@@ -1455,6 +1463,11 @@ impl<F: FileProvider> UnitReadMaterials<F> {
                 root: self.root,
                 program: self.program?,
                 indexed,
+                walked: self
+                    .rendered
+                    .as_ref()
+                    .map(|r| r.walked.clone())
+                    .unwrap_or_default(),
             });
         }
 
@@ -1507,6 +1520,7 @@ impl<F: FileProvider> UnitReadMaterials<F> {
                 root: self.root,
                 program,
                 indexed: known,
+                walked: stream.walked.clone(),
             });
         }
 
@@ -1520,6 +1534,7 @@ impl<F: FileProvider> UnitReadMaterials<F> {
             root: self.root,
             program,
             indexed,
+            walked: stream.walked.clone(),
         })
     }
 }
@@ -6241,6 +6256,9 @@ impl<F: FileProvider + Clone> Session<F> {
                     rendered.files.len(),
                 );
             }
+            // **What an importer of this module sees** — recorded here as well as on the walk path, because this is
+            // the path a warm session takes and the answer must not depend on which one read the unit.
+            self.remember_what_the_unit_saw(&root, &rendered);
             let program = crate::cache::content_hash(&rendered.text);
             let known = self
                 .unit_index
@@ -6316,6 +6334,11 @@ impl<F: FileProvider + Clone> Session<F> {
             }
             None => (None, None),
         };
+        // **What an importer of this module sees** — the rendering's own file list, recorded where the visibility walk
+        // can reach it. See `ProjectIndex::unit_closures`.
+        if let Some(rendered) = &rendered {
+            self.remember_what_the_unit_saw(&root, rendered);
+        }
 
         Some(UnitReadMaterials {
             root,
@@ -6331,6 +6354,40 @@ impl<F: FileProvider + Clone> Session<F> {
             rendered,
             known,
         })
+    }
+
+    /// **Record what an importer of this module sees** — the unit's whole rendering, by module name.
+    ///
+    /// A module is not a header, and the visibility walk cannot get this from `#include` edges: it evaluates each guard
+    /// against a state that is not the unit's, so a header the unit included behind `_HAS_CXX20` — MSVC's `xstring`
+    /// behind `<string>` — is dropped. Measured: `report.cppm` importing `std` saw **151 files and no
+    /// `std::string`**, while `main.cpp` saw 173 only because its own `#include` pulled the same tree in textually.
+    ///
+    /// The rendering has already decided every one of those guards, once, for the module, so its `walked` list is the
+    /// answer — recorded on the index (`ProjectIndex::unit_closures`) where the visibility walk finds it.
+    fn remember_what_the_unit_saw(&self, root: &Path, rendered: &crate::RenderedUnit) {
+        self.remember_the_walked_closure(root, &rendered.walked);
+    }
+
+    /// [`Session::remember_what_the_unit_saw`] from the list alone — the form a **cold** read has, because the
+    /// rendering is cooked inside [`UnitReadMaterials::read_the_program`] and only the walked list comes back out.
+    fn remember_the_walked_closure(&self, root: &Path, walked: &[PathBuf]) {
+        if walked.is_empty() {
+            return;
+        }
+        let Some(module) = self
+            .store
+            .index()
+            .summary(root)
+            .and_then(|summary| summary.modules.module.clone())
+        else {
+            return;
+        };
+        let files: Vec<String> = walked
+            .iter()
+            .map(|path| path.to_string_lossy().to_string())
+            .collect();
+        self.store.index().remember_the_unit_closure(&module, files);
     }
 
     /// **A unit read worked out, and nothing changed** — the expensive half, under `&self`.
@@ -6393,7 +6450,11 @@ impl<F: FileProvider + Clone> Session<F> {
             root,
             program,
             indexed,
+            walked,
         } = prepared;
+        // **What an importer of this module sees** — the closure the cold path only had here, and the warm path also
+        // records at gather time. See [`ProjectIndex::unit_closures`](crate::ProjectIndex).
+        self.remember_the_walked_closure(&root, &walked);
         // **And the memo, which is the difference between a second program read costing 3.66 s and costing a clone.**
         // It is filled here rather than in `read_the_program` because the memo is the session's; a program read off
         // the lock still writes the database rows, so a session that never commits this one (a dropped batch) loses

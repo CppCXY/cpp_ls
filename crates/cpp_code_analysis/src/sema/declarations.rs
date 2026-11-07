@@ -4290,10 +4290,26 @@ fn qualified_declarations(root: &CppSyntaxNode) -> Vec<(Binding, String, Option<
         // **Only a declaration outside every body.** A statement is not a declaration, and `ns::f(1);` inside a function body
         // parses as the *most vexing* declaration of a variable whose type is `ns::f` — without this guard the pass filed a
         // `Variable` named `f` in a file that only calls it.
-        if cpp_parser::typed_ancestors::<CppCompoundStat>(declaration.syntax())
-            .next()
-            .is_some()
-        {
+        //
+        // **A namespace body is a `CompoundStat` too**, and asking only for that kind skipped every qualified definition
+        // written inside a namespace — the layout of every `.cpp` there is:
+        //
+        // ```text
+        // namespace report {
+        //     void Report::add(std::string line) { lines.push_back(std::move(line)); }
+        // }
+        // ```
+        //
+        // Measured on the reader's `report.cpp`, a module implementation unit: no `Function` fact existed for `add` or
+        // `joined`, so Go to Implementation from `report.cppm` had nothing to find. What makes a body a body is the
+        // *parent* of the compound: a function's hangs off the declaration, a branch's off the `if`, a namespace's off
+        // the `NamespaceDecl` — a scope, not a body, so it is allowed through.
+        if cpp_parser::typed_ancestors::<CppCompoundStat>(declaration.syntax()).any(|compound| {
+            compound
+                .syntax()
+                .parent()
+                .is_none_or(|parent| !cpp_parser::CppNamespaceDecl::can_cast(parent.kind().into()))
+        }) {
             continue;
         }
         // **The declarator**, whichever of the two shapes the parser produced: under an `InitDeclarator`, or the declaration's
@@ -4381,7 +4397,24 @@ fn qualified_declarations(root: &CppSyntaxNode) -> Vec<(Binding, String, Option<
                 scope: ScopeId(0),
                 origin: None,
             },
-            qualifier.to_string(),
+            // **The scope is the *fully* qualified class**, not the spelling's own qualifier. A definition written inside
+            // `namespace report` spells only `Report`, while the interface unit's declaration is filed under
+            // `report::Report` — and a query that compares the two (`definitions_of`, which is what Go to Implementation
+            // asks) sees two different classes. Measured on the reader's project: `report.cpp` carried `Report` and
+            // `report.cppm` carried `report::Report`, so the definition was still unreachable.
+            {
+                let mut namespaces: Vec<String> = cpp_parser::typed_ancestors::<
+                    cpp_parser::CppNamespaceDecl,
+                >(declaration.syntax())
+                .filter_map(|namespace| namespace.get_name())
+                .map(|token| token.get_name_text().unwrap_or_default())
+                .collect();
+                namespaces.reverse();
+                if !qualifier.is_empty() {
+                    namespaces.push(qualifier.to_string());
+                }
+                namespaces.join("::")
+            },
             // **The parameter list, taken from the declaration's own header** — the walker's declarator has no name for this
             // shape, so a fact read through it carried `parameter_list: None` and a signature had no fallback label.
             declaration

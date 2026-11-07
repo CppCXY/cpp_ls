@@ -138,6 +138,21 @@ fn what_the_index_of_std_holds_and_who_can_see_it() {
         only_main.len()
     );
 
+    // **And the facts the definition leaves behind**, which is what Go to Implementation scans for.
+    let implementation = root.join("src").join("report.cpp");
+    for path in [&interface, &implementation] {
+        let Some(summary) = session.index().summary(path) else {
+            continue;
+        };
+        let facts: Vec<String> = summary
+            .declarations
+            .iter()
+            .filter(|fact| fact.name.as_str() == "joined" || fact.name.as_str() == "add")
+            .map(|fact| format!("{} scope {:?}", fact.name, fact.scope))
+            .collect();
+        println!("  {}: {facts:?}", path.file_name().unwrap().to_string_lossy());
+    }
+
     // **And the completion the reader saw**, for the record.
     let typed = "std::str";
     let probe = format!("{text}\nvoid probe_scope() {{\n    {typed}\n}}\n");
