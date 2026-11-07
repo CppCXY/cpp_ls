@@ -63,6 +63,40 @@ fn where_the_parser_puts_the_intrinsics() {
             file.rsplit('/').next().unwrap_or(file),
             namespaces
         );
+        // **The invariant**: a declaration in a header is inside `std` **once**. A depth of two or more is a namespace
+        // whose `}` the parse lost, and every one of them files the next file's declarations into a namespace they do
+        // not belong to — the 6 732 intrinsics under `std` that flood `std::` completion.
+        assert!(
+            namespaces.len() <= 1,
+            "`{name}` is inside {} nested namespaces ({namespaces:?}) — one of them never closed",
+            namespaces.len()
+        );
+        // **Which opening each of those namespaces is**, and how much text it spans: an opening that reaches far past
+        // its own file is the one the boundary rule failed to end, and the file it starts in is the culprit.
+        for (range, _) in namespace_ranges_at(&root, at) {
+            let opened_in = boundaries.partition_point(|boundary| *boundary <= range.start_offset);
+            let opened_file = files
+                .get(opened_in)
+                .map(|file| file.rsplit('/').next().unwrap_or(file).to_string())
+                .unwrap_or_default();
+            let crossings = boundaries
+                .iter()
+                .filter(|boundary| {
+                    *boundary > &range.start_offset && *boundary < &range.end_offset()
+                })
+                .count();
+            println!(
+                "    opens {} in {} — ends {}, {} boundary(ies) crossed",
+                range.start_offset,
+                opened_file,
+                if range.end_offset() == text.len() {
+                    "EOF".to_string()
+                } else {
+                    range.end_offset().to_string()
+                },
+                crossings
+            );
+        }
     }
 }
 
