@@ -849,6 +849,26 @@ fn parse_declaration_here(p: &mut CppParser) -> ParseResult {
                     p.bump();
                     return parse_typedef_declaration(p);
                 }
+                // **`export extern "C++" …`** — a language-linkage declaration in front of a template or a class,
+                // which is how the standard module writes `<iosfwd>`:
+                //
+                // ```cpp
+                // export extern "C++" template <class _Elem, class _Traits = char_traits<_Elem>> class basic_ios;
+                // ```
+                //
+                // The linkage rule owns the `extern`, so the dispatch happens **before** the keyword is consumed, and
+                // that rule reads the `export` itself — which keeps the `export` inside the declaration node, where
+                // every other exported declaration has it. Without this arm the general rule read the line as an
+                // expression: five errors in one file's rendering, the `}` that closed `namespace std` went with the
+                // recovery, and every header spliced after it was parsed **inside** `std`.
+                CppTokenKind::ExternKeyword
+                    if matches!(
+                        p.peek_token_kind_at(2..3).first(),
+                        Some(&CppTokenKind::StringLiteral)
+                    ) =>
+                {
+                    return parse_linkage_specification(p);
+                }
                 CppTokenKind::StaticAssertKeyword => {
                     p.bump();
                     return parse_static_assert(p);
@@ -5895,6 +5915,11 @@ fn parse_linkage_specification(p: &mut CppParser) -> ParseResult {
     let m = p.mark(CppSyntaxKind::Declaration);
 
     let specifiers = p.mark(CppSyntaxKind::DeclSpecifierSeq);
+    // **`export` in front of the linkage**, when the export branch sent the declaration here. The keyword belongs to
+    // the declaration, so it is consumed inside the same specifier sequence rather than wrapped around it.
+    if p.current_token() == CppTokenKind::ExportKeyword {
+        p.bump();
+    }
     let linkage = p.mark(CppSyntaxKind::ExternSpec);
     p.bump(); // `extern`
     p.bump(); // the string literal

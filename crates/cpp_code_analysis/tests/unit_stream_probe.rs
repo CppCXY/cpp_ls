@@ -63,14 +63,6 @@ fn where_the_parser_puts_the_intrinsics() {
             file.rsplit('/').next().unwrap_or(file),
             namespaces
         );
-        // **The invariant**: a declaration in a header is inside `std` **once**. A depth of two or more is a namespace
-        // whose `}` the parse lost, and every one of them files the next file's declarations into a namespace they do
-        // not belong to — the 6 732 intrinsics under `std` that flood `std::` completion.
-        assert!(
-            namespaces.len() <= 1,
-            "`{name}` is inside {} nested namespaces ({namespaces:?}) — one of them never closed",
-            namespaces.len()
-        );
         // **Which opening each of those namespaces is**, and how much text it spans: an opening that reaches far past
         // its own file is the one the boundary rule failed to end, and the file it starts in is the culprit.
         for (range, _) in namespace_ranges_at(&root, at) {
@@ -97,6 +89,14 @@ fn where_the_parser_puts_the_intrinsics() {
                 crossings
             );
         }
+        // **The invariant**: a declaration in a header is inside `std` **once**. A depth of two or more is a namespace
+        // whose `}` the parse lost, and every one of them files the next file's declarations into a namespace they do
+        // not belong to — the 6 732 intrinsics under `std` that flood `std::` completion.
+        assert!(
+            namespaces.len() <= 1,
+            "`{name}` is inside {} nested namespaces ({namespaces:?}) — one of them never closed",
+            namespaces.len()
+        );
     }
 }
 
