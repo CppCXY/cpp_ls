@@ -13,12 +13,85 @@ use std::time::Instant;
 
 use mimalloc::MiMalloc;
 
-/// **The allocator the server actually runs with.** `cpp_ls` installs mimalloc as its global allocator, and a probe
-/// that measures the same work on the default Windows heap is measuring a different program — the allocation traffic of
-/// a 5 MB cook, a 60 000-fact summary and a scope tree is exactly what the two allocators differ on. The two crates are
-/// already dev-dependencies for this (see `crates/cpp_code_analysis/Cargo.toml`).
+/// **The allocator the server actually runs with, and a counter around it.**
+///
+/// `cpp_ls` installs mimalloc as its global allocator, and a probe that measures the same work on the default Windows
+/// heap is measuring a different program — the allocation traffic of a 5 MB cook, a 32 000-fact summary and a scope tree
+/// is exactly what the two allocators differ on. (`cargo test` on this probe: 8 202 ms of cold read on the Windows heap
+/// against 5 028 ms on mimalloc, same work.)
+///
+/// The counter answers the question a container change has to justify: **how many allocations does the fact pass make,
+/// and how much time can an inline-string type possibly save?** A `SmolStr` saves at most one allocation per string, so
+/// the honest ceiling of that idea is `allocations × ~20 ns`, and this prints the allocations.
+struct Counting;
+
+/// **A poor man's allocation profiler**: every ten-thousandth allocation records a backtrace, and the frames that belong
+/// to this crate are counted. 217 M allocations is a number without a location; the first frame of each sample is the
+/// location. `Backtrace` itself allocates, so the hook is guarded by a thread-local.
+const SAMPLE_EVERY: usize = 10_000;
+
+thread_local! {
+    static SAMPLING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+static SAMPLES: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+fn sample_a_backtrace() {
+    if SAMPLING.with(|flag| flag.replace(true)) {
+        return;
+    }
+    let backtrace = std::backtrace::Backtrace::force_capture();
+    let text = format!("{backtrace}");
+    let mut frames: Vec<&str> = text
+        .lines()
+        .filter(|line| line.contains("cpp_code_analysis") || line.contains("cpp_parser"))
+        .take(3)
+        .collect();
+    frames.retain(|line| !line.contains("tests/"));
+    if !frames.is_empty() {
+        let key = frames.join(" | ");
+        if let Ok(mut held) = SAMPLES.lock() {
+            held.push(key);
+        }
+    }
+    SAMPLING.with(|flag| flag.set(false));
+}
+
+unsafe impl std::alloc::GlobalAlloc for Counting {
+    unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
+        let count = cpp_code_analysis::probes::allocations();
+        if count % SAMPLE_EVERY == 0 {
+            sample_a_backtrace();
+        }
+        cpp_code_analysis::probes::note(layout.size());
+        // SAFETY: the same layout is passed through to the allocator underneath.
+        unsafe { MiMalloc.alloc(layout) }
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: std::alloc::Layout) {
+        // SAFETY: the pointer and layout are the ones this allocator handed out.
+        unsafe { MiMalloc.dealloc(ptr, layout) }
+    }
+
+    unsafe fn realloc(&self, ptr: *mut u8, layout: std::alloc::Layout, new_size: usize) -> *mut u8 {
+        cpp_code_analysis::probes::note(new_size);
+        // SAFETY: forwarded unchanged to the allocator underneath.
+        unsafe { MiMalloc.realloc(ptr, layout, new_size) }
+    }
+
+    unsafe fn alloc_zeroed(&self, layout: std::alloc::Layout) -> *mut u8 {
+        let count = cpp_code_analysis::probes::allocations();
+        if count % SAMPLE_EVERY == 0 {
+            sample_a_backtrace();
+        }
+        cpp_code_analysis::probes::note(layout.size());
+        // SAFETY: forwarded unchanged to the allocator underneath.
+        unsafe { MiMalloc.alloc_zeroed(layout) }
+    }
+}
+
 #[global_allocator]
-static GLOBAL: MiMalloc = MiMalloc;
+static GLOBAL: Counting = Counting;
 
 use cpp_code_analysis::{DiskFiles, Known, OpenDocuments, Session, SessionFiles, WatchFilter};
 
@@ -118,7 +191,30 @@ fn why_std_vector_stops_resolving() {
     // **Does asking for the file's own units fix it?** The reader's hover asks a query, not a read; if the read is
     // what is missing, this one call tells the two apart.
     let before = Instant::now();
+    let allocations_before = cpp_code_analysis::probes::allocations();
+    let bytes_before = cpp_code_analysis::probes::bytes();
     let read = session.read_the_modules_a_file_imports(&main);
+    let allocations = cpp_code_analysis::probes::allocations() - allocations_before;
+    let bytes = cpp_code_analysis::probes::bytes() - bytes_before;
+    println!(
+        "  allocations during the read: {allocations} ({:.1} MB)",
+        bytes as f64 / (1024.0 * 1024.0)
+    );
+    {
+        let held = SAMPLES.lock().expect("the sample list");
+        let mut counted: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+        for sample in held.iter() {
+            *counted.entry(sample.as_str()).or_default() += 1;
+        }
+        let mut counted: Vec<(&str, usize)> = counted.into_iter().collect();
+        counted.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
+        println!("  allocation sites (sampled every {SAMPLE_EVERY}):");
+        for (site, count) in counted.iter().take(12) {
+            let mut short = site.to_string();
+            short.truncate(200);
+            println!("    {count:>6}  {short}");
+        }
+    }
     println!(
         "read_the_modules_a_file_imports: {read} unit(s) in {:.0} ms",
         before.elapsed().as_secs_f64() * 1000.0

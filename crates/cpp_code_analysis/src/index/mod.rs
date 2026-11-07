@@ -667,7 +667,16 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
 
         let parsed = parsing.elapsed();
         let indexing = std::time::Instant::now();
+        let allocations_before = crate::probes::allocations();
+        let bytes_before = crate::probes::bytes();
         let summary = { self.index_tree(root, &stream.text, &tree, key, false) };
+        if crate::probes::units() {
+            eprintln!(
+                "[unit] index_tree allocations: {} ({:.1} MB)",
+                crate::probes::allocations() - allocations_before,
+                (crate::probes::bytes() - bytes_before) as f64 / (1024.0 * 1024.0)
+            );
+        }
         if crate::probes::units() {
             let locals = summary
                 .declarations

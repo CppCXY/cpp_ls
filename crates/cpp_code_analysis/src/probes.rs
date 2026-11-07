@@ -194,6 +194,36 @@ named_switch! {
     lookup_name => "CPPLS_TRACE_LOOKUP", "The one name to trace through the walk's macro environment.";
 }
 
+/// **How many allocations the whole process has made**, and how many bytes it asked for, when a caller has installed
+/// an allocator that reports them.
+///
+/// The counter lives here rather than in a probe because the number has to be readable **inside** the phases that make
+/// the allocations: a probe can only bracket the whole read, and "217 535 897 allocations for a 5.19 MB rendering" says
+/// there is a fault without saying which phase owns it. `tests/module_hover_probe.rs` installs mimalloc behind
+/// [`note`]; the phases snapshot [`allocations`] and [`bytes`] around themselves and print the deltas.
+pub static ALLOCATIONS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// Bytes requested, alongside [`ALLOCATIONS`].
+pub static BYTES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// **One allocation**, as an allocator that wraps the real one reports it.
+#[inline]
+pub fn note(bytes: usize) {
+    ALLOCATIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    BYTES.fetch_add(bytes, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The allocation count so far — see [`ALLOCATIONS`].
+#[inline]
+pub fn allocations() -> usize {
+    ALLOCATIONS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The bytes requested so far — see [`BYTES`].
+#[inline]
+pub fn bytes() -> usize {
+    BYTES.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::is_on;
