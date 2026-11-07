@@ -674,6 +674,43 @@ fn parse_declaration_here(p: &mut CppParser) -> ParseResult {
     let base = p.open_marks();
     let checkpoint = p.checkpoint();
 
+    // **`_Pragma("…")` and `__pragma(…)` at declaration position** — the standard library writes them between
+    // declarations:
+    //
+    // ```cpp
+    // namespace std { _Pragma("warning(push)") _Pragma("warning(disable : 4996)")
+    // export template <class _Codecvt, …> class [[deprecated("…")]] wstring_convert { … };
+    // ```
+    //
+    // It is an **operator** in the grammar ([cpp.pragma]), not a directive, and it has no declaration of its own: what
+    // follows it is a declaration. It is consumed here, into the enclosing construct, and the declaration after it is
+    // parsed by the ordinary rule. Without this the tokens were read as a *call expression*, which left the namespace
+    // body in a state where the `export` that follows was refused — measured: the file that holds such a class parses
+    // with 13 errors and the `}` closing `namespace std` goes with the recovery, so every header after it is read
+    // inside `std`.
+    if p.current_token() == CppTokenKind::Identifier
+        && matches!(p.current_token_text(), "_Pragma" | "__pragma")
+        && matches!(
+            p.peek_token_kind_at(1..2).first(),
+            Some(&CppTokenKind::LeftParen)
+        )
+    {
+        p.bump(); // `_Pragma`
+        p.bump(); // `(`
+        // Everything up to the matching `)`: a string literal, or a `warning(push)`-shaped token run for `__pragma`.
+        let mut depth = 1isize;
+        while depth > 0 && !p.is_eof() {
+            match p.current_token() {
+                CppTokenKind::LeftParen => depth += 1,
+                CppTokenKind::RightParen => depth -= 1,
+                _ => {}
+            }
+            p.bump();
+        }
+        // **The declaration after it**, which is what the caller is waiting for.
+        return parse_declaration(p);
+    }
+
     // Declarations whose shape is not `specifiers declarators ;` get their own rules, dispatched
     // first because the general rule would read their keyword as a type specifier and then report
     // nonsense about everything after it.

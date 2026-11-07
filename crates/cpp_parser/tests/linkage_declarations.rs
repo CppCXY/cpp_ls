@@ -51,14 +51,16 @@ fn extern_cxx_before_a_class_is_a_declaration() {
             .map(|error| cpp_parser::source_range(error.range).start_offset)
             .collect::<Vec<_>>()
     );
-    assert!(at_file_scope(&tree, text, "after_this"), "the namespace closed");
+    assert!(
+        at_file_scope(&tree, text, "after_this"),
+        "the namespace closed"
+    );
 }
 
 /// **And with `export` in front**, which is what the standard module writes.
 #[test]
 fn export_before_a_language_linkage_declaration_is_a_declaration() {
-    let text =
-        "namespace std { export extern \"C++\" template <class _Elem> class basic_ios; } int after_this;\n";
+    let text = "namespace std { export extern \"C++\" template <class _Elem> class basic_ios; } int after_this;\n";
     let tree = parse(text);
     assert!(
         tree.get_errors().is_empty(),
@@ -68,7 +70,10 @@ fn export_before_a_language_linkage_declaration_is_a_declaration() {
             .map(|error| cpp_parser::source_range(error.range).start_offset)
             .collect::<Vec<_>>()
     );
-    assert!(at_file_scope(&tree, text, "after_this"), "the namespace closed");
+    assert!(
+        at_file_scope(&tree, text, "after_this"),
+        "the namespace closed"
+    );
 }
 
 /// **The measured file's own shape** — several in a row, the way `<iosfwd>` writes them.
@@ -88,7 +93,10 @@ fn a_run_of_exported_language_linkage_declarations_keeps_the_namespace_closed() 
             .map(|error| cpp_parser::source_range(error.range).start_offset)
             .collect::<Vec<_>>()
     );
-    assert!(at_file_scope(&tree, text, "after_this"), "the namespace closed");
+    assert!(
+        at_file_scope(&tree, text, "after_this"),
+        "the namespace closed"
+    );
 }
 
 /// **An attribute between the class key and the name** — `class [[deprecated("…")]] wstring_convert { … };`.
@@ -115,7 +123,10 @@ fn an_attribute_after_the_class_key_is_an_attribute() {
             .map(|error| cpp_parser::source_range(error.range).start_offset)
             .collect::<Vec<_>>()
     );
-    assert!(at_file_scope(&tree, text, "after_this"), "the namespace closed");
+    assert!(
+        at_file_scope(&tree, text, "after_this"),
+        "the namespace closed"
+    );
 }
 
 /// **The template the standard library actually writes** — a templated class with the attribute on the class key.
@@ -133,7 +144,10 @@ fn an_exported_template_class_with_an_attribute_keeps_the_namespace_closed() {
             .map(|error| cpp_parser::source_range(error.range).start_offset)
             .collect::<Vec<_>>()
     );
-    assert!(at_file_scope(&tree, text, "after_this"), "the namespace closed");
+    assert!(
+        at_file_scope(&tree, text, "after_this"),
+        "the namespace closed"
+    );
 }
 
 /// **`_Pragma("…")` at declaration position** — how the standard library pushes and pops warnings in the middle of a
@@ -156,7 +170,10 @@ fn a_pragma_operator_at_declaration_position_is_a_declaration() {
             .map(|error| cpp_parser::source_range(error.range).start_offset)
             .collect::<Vec<_>>()
     );
-    assert!(at_file_scope(&tree, text, "after_this"), "the namespace closed");
+    assert!(
+        at_file_scope(&tree, text, "after_this"),
+        "the namespace closed"
+    );
 }
 
 /// **The measured line, verbatim** — string-literal concatenation inside the attribute, `export template`, `_Pragma`s.
@@ -164,7 +181,6 @@ fn a_pragma_operator_at_declaration_position_is_a_declaration() {
 /// **Ignored while it fails**, and it is the next target rather than a regression: the combination is `_Pragma("…")`
 /// followed by `export`, which the parser has no rule for at all — `_Pragma` is an ordinary identifier to it, so it is
 /// read as a call expression and the namespace body is left in a state where `export` is refused.
-#[ignore = "known: `_Pragma(...)` at declaration position is not a rule yet"]
 #[test]
 fn the_deprecated_template_class_of_the_standard_library_keeps_the_namespace_closed() {
     let text = "namespace std { _Pragma(\"warning(push)\") _Pragma(\"warning(disable : 4996)\") export template <class _Codecvt, class _Elem = wchar_t, class _Traits = char_traits<_Elem>> class [[deprecated(\"warning STL4017: \" \"std::wbuffer_convert, std::wstring_convert, and the <codecvt> header are deprecated.\")]] wstring_convert { public: wstring_convert() : _State() {} }; } int after_this;\n";
@@ -177,22 +193,42 @@ fn the_deprecated_template_class_of_the_standard_library_keeps_the_namespace_clo
             .map(|error| cpp_parser::source_range(error.range).start_offset)
             .collect::<Vec<_>>()
     );
-    assert!(at_file_scope(&tree, text, "after_this"), "the namespace closed");
+    assert!(
+        at_file_scope(&tree, text, "after_this"),
+        "the namespace closed"
+    );
 }
 
 /// **Which of the pieces breaks which.** Each variant is one construct at namespace scope followed by the `export`ed
 /// class, and the first one whose parse reports an error names the interaction. Ignored alongside the measurement it
 /// explains: the failing variants are exactly the ones with `_Pragma` before `export`.
-#[ignore = "known: `_Pragma(...)` at declaration position is not a rule yet"]
 #[test]
 fn which_piece_of_the_deprecated_line_breaks_it() {
     let variants = [
-        ("pragma then class", "namespace std { _Pragma(\"a\") class W { }; } int after_this;"),
-        ("pragma then export class", "namespace std { _Pragma(\"a\") export class W { }; } int after_this;"),
-        ("pragma then export template class", "namespace std { _Pragma(\"a\") export template <class T> class W { }; } int after_this;"),
-        ("export template class with attribute", "namespace std { export template <class T> class [[deprecated(\"x\")]] W { }; } int after_this;"),
-        ("pragma then export template class with attribute", "namespace std { _Pragma(\"a\") export template <class T> class [[deprecated(\"x\")]] W { }; } int after_this;"),
-        ("two pragmas then export template class", "namespace std { _Pragma(\"a\") _Pragma(\"b\") export template <class T> class W { }; } int after_this;"),
+        (
+            "pragma then class",
+            "namespace std { _Pragma(\"a\") class W { }; } int after_this;",
+        ),
+        (
+            "pragma then export class",
+            "namespace std { _Pragma(\"a\") export class W { }; } int after_this;",
+        ),
+        (
+            "pragma then export template class",
+            "namespace std { _Pragma(\"a\") export template <class T> class W { }; } int after_this;",
+        ),
+        (
+            "export template class with attribute",
+            "namespace std { export template <class T> class [[deprecated(\"x\")]] W { }; } int after_this;",
+        ),
+        (
+            "pragma then export template class with attribute",
+            "namespace std { _Pragma(\"a\") export template <class T> class [[deprecated(\"x\")]] W { }; } int after_this;",
+        ),
+        (
+            "two pragmas then export template class",
+            "namespace std { _Pragma(\"a\") _Pragma(\"b\") export template <class T> class W { }; } int after_this;",
+        ),
     ];
     let mut broken = Vec::new();
     for (name, text) in variants {
