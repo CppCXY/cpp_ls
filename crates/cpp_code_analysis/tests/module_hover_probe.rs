@@ -154,6 +154,45 @@ fn why_std_vector_stops_resolving() {
         other => println!("after the read: members_of = {other:?}"),
     }
 
+    // **And the completion the reader typed for**: `std::ve` must offer `vector` now that the unit is read.
+    {
+        let typed = format!("{text}\\nvoid probe_scope() {{\\n    std::ve\\n}}\\n");
+        session.did_open(&main, &typed);
+        // The server's `apply_buffer` reads the opened file before it answers anything (`advance(1)`), which is what
+        // makes the file's own `import std;` visible to the walk again.
+        session.advance(1);
+        let view = session.view_of_the_file(&main).expect("a view");
+        let at = typed.rfind("std::ve").expect("the prefix") + "std::ve".len();
+        // **What the context reader makes of the cursor**, before any list is built.
+        {
+            let tree = cpp_parser::CppParser::parse(&typed, cpp_parser::ParserConfig::default());
+            let root = tree.get_red_root();
+            println!(
+                "  context at `std::ve`: {:?}",
+                cpp_code_analysis::completion::context_at(&root, at)
+            );
+        }
+        println!(
+            "  declarations_in(std) after the did_open: {}",
+            session.index().declarations_in("std", &main).len()
+        );
+        let offered = session.completions(
+            &view,
+            cpp_code_analysis::file::coordinates::FileOffset::new(at),
+        );
+        let labels: Vec<&str> = offered
+            .items
+            .iter()
+            .take(6)
+            .map(|item| item.label.as_str())
+            .collect();
+        println!(
+            "completion at `std::ve`: {} item(s), scope {:?}, first {labels:?}",
+            offered.items.len(),
+            offered.scope
+        );
+    }
+
     let config = session.config_for(&main);
     println!(
         "config: standard {:?}, {} include path(s), {} define(s)",

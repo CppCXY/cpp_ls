@@ -173,10 +173,62 @@ pub fn context_at(root: &CppSyntaxNode, offset: usize) -> CompletionContext {
     }
 
     match resolve::name_position_at(root, offset) {
-        Some(position) if position.scope.is_empty() => CompletionContext::Name(position),
+        Some(position) if position.scope.is_empty() => {
+            // **A `::` written before the name, when the tree could not say so.** The node-based reading answers the
+            // scope for a fragment; a real file recovers differently — measured on
+            // `C:\Users\zc\Desktop\cpp_modules\src\main.cpp`, `std::ve` at the end of a function body came back as
+            // `Name { scope: "", written: "ve" }`, and the list that followed was the file's own vocabulary
+            // (`volatile`), not `std`'s. The qualifier is in the text either way.
+            match the_qualifier_written_before(
+                &root.text().to_string(),
+                position.range.start_offset,
+            ) {
+                Some(scope) => {
+                    CompletionContext::Qualified(resolve::NamePosition { scope, ..position })
+                }
+                None => CompletionContext::Name(position),
+            }
+        }
         Some(position) => CompletionContext::Qualified(position),
         None => CompletionContext::Nothing,
     }
+}
+
+/// **The `::`-qualified path written immediately before `at`**, if there is one — `std` for `std::ve`.
+///
+/// Read backwards from the start of the name over identifiers and `::` separators, whitespace allowed around them.
+/// `None` when the text there is not a qualifier, which leaves an ordinary name an ordinary name.
+fn the_qualifier_written_before(text: &str, at: usize) -> Option<String> {
+    let before = text.get(..at)?.trim_end();
+    if !before.ends_with("::") {
+        return None;
+    }
+
+    let mut path: Vec<&str> = Vec::new();
+    let mut rest = before;
+    while let Some(without_separator) = rest.strip_suffix("::") {
+        let without_separator = without_separator.trim_end();
+        let start = without_separator
+            .char_indices()
+            .rev()
+            .take_while(|(_, character)| {
+                character.is_alphanumeric() || *character == '_' || *character == '~'
+            })
+            .last()
+            .map(|(index, _)| index)?;
+        let segment = &without_separator[start..];
+        if segment.is_empty() {
+            break;
+        }
+        path.push(segment);
+        rest = without_separator[..start].trim_end();
+    }
+
+    if path.is_empty() {
+        return None;
+    }
+    path.reverse();
+    Some(path.join("::"))
 }
 
 /// **The Doxygen position at `offset`**, or `None` when the cursor is not inside a documentation comment.
@@ -789,6 +841,23 @@ mod tests {
         match context {
             CompletionContext::Qualified(position) => assert_eq!(position.scope, "ns"),
             other => panic!("a `::` names a scope: {other:?}"),
+        }
+    }
+
+    /// **The qualifier is read from the text when the tree does not answer it** — the real-file shape: a whole file with
+    /// `import std;`, a `main`, and then `std::ve` at the end of another function. Measured on
+    /// `C:\Users\zc\Desktop\cpp_modules\src\main.cpp`, the node-based reading came back `Name { scope: "", written:
+    /// "ve" }`, and the list that followed was the file's own vocabulary. The `::` is in the text either way.
+    #[test]
+    fn a_qualifier_is_read_from_the_text_when_the_tree_misses_it() {
+        let source = "int main() {\n    return 0;\n}\n\nvoid probe() {\n    std::ve|\n}\n";
+        let (context, ..) = context_in(source);
+        match context {
+            CompletionContext::Qualified(position) => {
+                assert_eq!(position.scope, "std", "the `::` names `std`");
+                assert_eq!(position.written, "ve");
+            }
+            other => panic!("`std::ve` names a scope: {other:?}"),
         }
     }
 

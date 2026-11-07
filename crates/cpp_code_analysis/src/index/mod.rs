@@ -630,6 +630,30 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
         // The place to look first is a file whose text does not balance: `RenderedUnit::unbalanced` names them, and
         // that list is the honest starting point. Absorbing it a second time would be exactly the "越走越远的
         // workaround" this milestone exists to delete.
+        // **The whole stream, its file boundaries and its file list**, when a dump directory is named: the only way
+        // to see which file's text a wrong scope came from — the rendering has no file markers in it, and the
+        // boundaries are what say where one file stops.
+        if let Some(directory) = std::env::var_os(crate::probes::DUMP_RENDERING_DIR) {
+            let directory = std::path::PathBuf::from(directory);
+            let _ = std::fs::create_dir_all(&directory);
+            let _ = std::fs::write(directory.join("unit.stream"), &stream.text);
+            let boundaries: Vec<String> = stream
+                .file_boundaries()
+                .iter()
+                .map(|at| at.to_string())
+                .collect();
+            let _ = std::fs::write(
+                directory.join("unit.boundaries"),
+                boundaries.join("\n"),
+            );
+            let files: Vec<String> = stream
+                .files
+                .iter()
+                .map(|path| path.to_string_lossy().into_owned())
+                .collect();
+            let _ = std::fs::write(directory.join("unit.files"), files.join("\n"));
+        }
+
         let parsing = std::time::Instant::now();
         let tree = {
             // **And where one file's text ends and the next begins**, which is the parser's half of "a scope may not

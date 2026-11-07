@@ -3979,15 +3979,6 @@ fn enclosing_namespaces_of(scopes: &ScopeTree, from: ScopeId) -> Option<String> 
     Some(segments.join("::"))
 }
 
-/// One declaration node of the file, and whether a diagnostic fell inside it.
-struct Declared {
-    range: cpp_parser::SourceRange,
-    touched: bool,
-    /// **Does this declaration carry the body that defines it** — a class body, a function body? Read in the same one
-    /// pass, because the question is asked once per fact and a per-fact scan of the tree was measured at minutes.
-    has_body: bool,
-}
-
 /// The declaration nodes of one file, in the form [`DeclFact::clean`]'s question needs them.
 ///
 /// # The three rules that were measured
@@ -4015,17 +4006,14 @@ struct Declared {
 /// shape coupling between the symbol layer and this one and is deliberate; a construct added to the grammar and
 /// to that list is a declaration here too, and one added to neither is invisible to both.
 struct Declarations<'a> {
-    /// Shortest first, which is what makes the scan below find the **innermost** declaration: the nodes are
-    /// nested, so the shortest one containing a name is the one that name was written in.
-    nodes: Vec<Declared>,
-    /// **The same declarations sorted by where they start**, for the one question asked once per fact: does the
-    /// declaration this name was written in carry a body?
+    /// **The declarations, sorted by where they start**, with the two answers a fact takes from them: does the
+    /// declaration carry a body, and did a diagnostic fall inside it?
     ///
-    /// The list above is sorted by length, which is right for "the innermost" and wrong for a query that has a
-    /// position: scanning it costs one comparison per declaration of the **whole file** — and on a unit rendering that
-    /// is 60 000 declarations against 60 000 facts. This index makes the same question a binary search plus the
-    /// nesting depth: the ancestors of a point are exactly the ranges that start before it and end after it, so
-    /// walking back from the insertion point stops at the innermost one.
+    /// Sorted by position rather than by length because both questions are asked once per fact **with a name**, and a
+    /// scan of the whole list is one comparison per declaration of the file — on a unit rendering that is 60 000
+    /// declarations against 60 000 facts. With this order the same question is a binary search plus the nesting depth:
+    /// the ancestors of a point are exactly the ranges that start before it and end after it, so walking back from the
+    /// insertion point stops at the innermost one.
     by_start: Vec<(usize, usize, bool, bool)>, // start, end, has_body, touched
     /// The diagnostics, for the one case the nodes cannot answer.
     errors: &'a [SourceRange],
@@ -4034,7 +4022,7 @@ struct Declarations<'a> {
 impl<'a> Declarations<'a> {
     /// Read every declaration node of the file, and mark the ones a diagnostic falls inside.
     fn of(root: &CppSyntaxNode, errors: &'a [SourceRange]) -> Self {
-        let mut nodes = Vec::new();
+        let mut by_start: Vec<(usize, usize, bool, bool)> = Vec::new();
 
         // **The bodies, in one pass** — see [`Declared::has_body`]. Collected before the declarations so that each
         // declaration costs a binary search rather than a walk of its own subtree: the per-fact version of this
@@ -4066,38 +4054,23 @@ impl<'a> Declarations<'a> {
                     .iter()
                     .take_while(|(body, _)| *body < range.end_offset())
                     .any(|(body, end)| *body >= range.start_offset && *end <= range.end_offset());
-                nodes.push(Declared {
-                    range,
-                    touched: errors.iter().any(|error| {
+                // **One entry per declaration**, in the shape both questions are asked in: the two bools are the two
+                // answers, and the range is what says which declaration a name was written in.
+                by_start.push((
+                    range.start_offset,
+                    range.end_offset(),
+                    has_body,
+                    errors.iter().any(|error| {
                         error.start_offset < range.end_offset()
                             && range.start_offset < error.end_offset()
                     }),
-                    has_body,
-                });
+                ));
             }
-
-            nodes.sort_by_key(|declared| declared.range.length);
         }
 
-        // **The position index**, built from the same list — see [`Declarations::by_start`].
-        let mut by_start: Vec<(usize, usize, bool, bool)> = nodes
-            .iter()
-            .map(|declared| {
-                (
-                    declared.range.start_offset,
-                    declared.range.end_offset(),
-                    declared.has_body,
-                    declared.touched,
-                )
-            })
-            .collect();
         by_start.sort_unstable_by_key(|(start, _, _, _)| *start);
 
-        Declarations {
-            nodes,
-            by_start,
-            errors,
-        }
+        Declarations { by_start, errors }
     }
 
     /// **Does the declaration this name was written in carry a body** — a class body, a function body?

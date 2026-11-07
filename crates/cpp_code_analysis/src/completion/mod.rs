@@ -1192,7 +1192,32 @@ fn names(
     // earlier code offered them, and the reader saw the `std::` list begin with `case`, `catch`, `class`.
     let mut inside_a_scope = !position.scope.is_empty();
 
-    match crate::index::project::name_completions_at(index, scopes, root, path, offset) {
+    // **A written scope is answered from the scope itself, not from the offset.** The context came from the file's
+    // own text while the offset handed here is the *rendering's* (they differ by everything the directives spliced in),
+    // so asking the tree at that offset answers about a different position — measured: `std::ve` in a real file resolved
+    // to scope `std` at the written offset and to an **empty** scope at the rendering's, which produced a list of zero
+    // items. The scope is already known; only the prefix has to come from the caller.
+    let listed = if inside_a_scope {
+        Known::Yes(crate::index::project::NameCompletions {
+            scope: position.scope.clone(),
+            prefix: position.written.clone(),
+            name_range: position.range,
+            names: index
+                .declarations_in(&position.scope, path)
+                .into_iter()
+                .map(|declaration| crate::index::project::OfferedName {
+                    fact: declaration.fact.clone(),
+                    file: declaration.file.clone(),
+                    depth: 0,
+                    from: crate::index::project::NameProvenance::Scope,
+                })
+                .collect(),
+        })
+    } else {
+        crate::index::project::name_completions_at(index, scopes, root, path, offset)
+    };
+
+    match listed {
         Known::Yes(listed) => {
             listed_scope = listed.scope.clone();
             listed_prefix = listed.prefix.clone();
