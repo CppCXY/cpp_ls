@@ -29,7 +29,6 @@ use std::path::Path;
 use crate::Marked;
 use crate::cache::SummaryKey;
 use crate::guard::{Branch, Region, Visibility};
-use crate::index::environment::a_guard_is_in_force;
 use crate::macros::MacroDef;
 
 /// The key [`TranslationUnit::entered`] compares by, and the answer to "is this the same file spelled twice".
@@ -2355,7 +2354,7 @@ impl TranslationUnit {
                 .collect(),
             ..RenderedUnit::default()
         };
-        let cook = UnitCook {
+        let mut cook = UnitCook {
             unit: self,
             sources,
             definitions,
@@ -2373,6 +2372,7 @@ impl TranslationUnit {
                 }
                 children
             },
+            state: crate::preprocess::cooked::CookingState::default(),
         };
 
         if !self.frames.is_empty() {
@@ -2398,46 +2398,124 @@ struct UnitCook<'unit> {
     search: Option<&'unit dyn crate::preprocess::cooked::HeaderSearch>,
     /// For each frame, the frames it includes, in include order.
     children: Vec<Vec<u32>>,
+    /// **The macros the cook has executed so far** — one table for the whole program, in the order the text wrote
+    /// them. See [`crate::preprocess::cooked::CookingState`]: a preprocessor has one table, not a view per file.
+    state: crate::preprocess::cooked::CookingState,
 }
 
 impl UnitCook<'_> {
     /// Cook one frame and splice each include's stream in where the `#include` ended.
-    fn stitch(&self, frame: u32, out: &mut RenderedUnit) {
-        let included = &self.children[frame as usize];
+    /// **Cook one frame into the stream**, in the order a preprocessor reads it: the text before an `#include`, then
+    /// the included file, then the text after it.
+    ///
+    /// The table is the program's ([`crate::preprocess::cooked::CookingState`]), carried across frames, so a `#define`
+    /// from a header is in force for what follows the `#include` — which a whole-file cook cannot show, because it
+    /// finishes the file before the include is stitched.
+    fn stitch(&mut self, frame: u32, out: &mut RenderedUnit) {
+        // Copied out first: the stitch borrows `self` mutably for its table, and these are plain handles.
+        let included: Vec<u32> = self.children[frame as usize].clone();
+        let unit = self.unit;
+        let sources = self.sources;
+        let definitions = self.definitions;
+        let seed = self.seed;
+        let use_in_force_bodies = self.use_in_force_bodies;
+        let search = self.search;
 
-        let Some(text) = self
-            .sources
-            .source_of(&self.unit.frames[frame as usize].file)
-        else {
-            // A file nobody has the text of: the includes it names are still stitched (the walk reached them
-            // through it), and the hole is counted rather than cooked as an empty file.
+        let Some(text) = sources.source_of(&unit.frames[frame as usize].file) else {
+            // A file nobody has the text of: the includes it names are still stitched (the walk reached them through
+            // it), and the hole is counted rather than cooked as an empty file.
             out.missing += 1;
-            self.stitch_included(included, 0, out);
+            for &child in &included {
+                self.stitch(child, out);
+            }
             return;
         };
 
         let (tokens, _) = cpp_parser::lex(text, &cpp_parser::LexerConfig::default());
-        let cook = crate::preprocess::cooked::cook_with_search(
-            text,
-            &tokens,
-            &crate::preprocess::cooked::FileMacros::new(
-                self.unit.environment_at(frame),
-                self.definitions,
-                self.seed,
-                self.use_in_force_bodies,
-            ),
-            self.search,
-            // **The frame's own directory**, which is the file's directory: `#include "x.h"` means *the one beside
-            // me*, and the same is true of `__has_include("x.h")`.
-            self.unit.frames[frame as usize]
-                .file
-                .parent()
-                .unwrap_or_else(|| Path::new(".")),
+        // **The frame's own environment is the floor.** What the program's cook has already executed sits on top of it
+        // in `self.state`: a name the rendering has passed is answered by the table, one it has not reached by the view
+        // — a change of state, not of policy.
+        let initial = crate::preprocess::cooked::FileMacros::new(
+            unit.environment_at(frame),
+            definitions,
+            seed,
+            use_in_force_bodies,
         );
+        let directory = unit.frames[frame as usize]
+            .file
+            .parent()
+            .unwrap_or_else(|| Path::new("."));
 
-        // **What this file said**, in its own coordinates. The messages are collected during the cook — a `#error`
-        // in a branch nobody compiles is not said — and the range each carries is the directive's own, so the offset
-        // here is a position in *this* file rather than in the rendering.
+        let mut from = 0usize;
+        let mut produced = 0usize;
+        let mut depth = 0i64;
+        for &child in &included {
+            let at = unit.frames[child as usize].from_in_parent;
+            // The first token at or after the `#include`: everything before it is text the include does not cover.
+            let boundary = tokens
+                .iter()
+                .position(|token| token.range.start_offset >= at)
+                .unwrap_or(tokens.len())
+                .max(from);
+            let cook = crate::preprocess::cooked::cook_with_search_and_state(
+                text,
+                &tokens[from..boundary],
+                &initial,
+                &mut self.state,
+                search,
+                directory,
+            );
+            produced += cook.tokens.len();
+            depth += self.emit(frame, &cook, out);
+            self.stitch(child, out);
+            from = boundary;
+        }
+        let cook = crate::preprocess::cooked::cook_with_search_and_state(
+            text,
+            &tokens[from..],
+            &initial,
+            &mut self.state,
+            search,
+            directory,
+        );
+        produced += cook.tokens.len();
+        depth += self.emit(frame, &cook, out);
+
+        // **A file whose text goes in but whose braces do not balance** would swallow every file spliced after it, so
+        // this is the count that finds the file — **recorded rather than acted on**. See [`RenderedUnit::unbalanced`]
+        // for why the text goes in anyway.
+        if depth != 0 {
+            out.unbalanced.push(unit.frames[frame as usize].file.clone());
+        }
+
+        // **`#pragma once`, for a file that has nothing else to carry it.** A file with tokens of its own already has
+        // the pragma in them; what is missing is the header that is **nothing but directives** — `yvals_core.h` and
+        // its neighbours — whose `#pragma once` would otherwise never reach the stream. A compiler keeps the line, and
+        // it is how a reader sees *which files a compilation read*: measured on `#include <vector>`, `cl.exe` emits 54
+        // of them. It is emitted after the segments because whether the file produced a token is only known once they
+        // have been cooked; for a file with no token at all, "after" and "before" are the same place.
+        if unit.frames[frame as usize].visit_once && produced == 0 {
+            let here = cpp_parser::SourceRange::new(0, 0);
+            out.break_line_before_next();
+            for spelling in ["#", "pragma", "once"] {
+                out.push(spelling, frame, here);
+            }
+            out.break_line_before_next();
+        }
+    }
+
+    /// **Emit one cooked segment of `frame`**: its messages, its tokens and its `#pragma` lines.
+    ///
+    /// Returns the segment's brace balance; the caller sums the segments into the file's own, which is the count
+    /// [`RenderedUnit::unbalanced`] is made of.
+    fn emit(
+        &self,
+        frame: u32,
+        cook: &crate::preprocess::cooked::CookedStream,
+        out: &mut RenderedUnit,
+    ) -> i64 {
+        // **What this file said**, in its own coordinates: a `#error` in a branch nobody compiles is not said, and the
+        // range each message carries is the directive's own — a position in *this* file, not in the rendering.
         for (kind, message, at) in &cook.messages {
             out.messages.push(UnitMessage {
                 file: self.unit.frames[frame as usize].file.clone(),
@@ -2447,64 +2525,17 @@ impl UnitCook<'_> {
             });
         }
 
-        let mut next = 0usize;
-        // **The frame's own tokens, counted before they are pushed.** A file whose text opens a brace it does not
-        // close would swallow every file spliced after it, so this is the count that finds the file — and it is
-        // **recorded rather than acted on**. See [`RenderedUnit::unbalanced`] for why the text goes in anyway.
         let mut depth = 0i64;
-        for token in &cook.tokens {
+        let mut lines = cook.pragma_lines.iter().peekable();
+        for (index, token) in cook.tokens.iter().enumerate() {
             match token.text() {
                 "{" => depth += 1,
                 "}" => depth -= 1,
                 _ => {}
             }
-        }
-
-        if depth != 0 {
-            out.unbalanced
-                .push(self.unit.frames[frame as usize].file.clone());
-        }
-
-        // **`#pragma once`, for a file that has nothing else to carry it.**
-        //
-        // A file with tokens of its own already has the pragma in them — the cook emits every live `#pragma`, and a
-        // file that writes `#pragma once` writes it at the top, inside the guard, where it is live. So emitting one
-        // here as well would print it twice, which is exactly what the first version of this did: `sal.h` came out
-        // with `#pragma once` at line 1 *and* a synthetic copy, and a file that had been an exact match stopped
-        // being one.
-        //
-        // What is missing is the other case: a header that is **nothing but directives** — `yvals_core.h` and its
-        // neighbours — contributes no token to the rendering, so it is never cooked and its `#pragma once` never
-        // reaches the stream. Every compiler keeps the line, and it is how a reader sees *which files a compilation
-        // read*: measured on `#include <vector>`, `cl.exe` emits 54 of them and the first difference between the two
-        // readings was a `#pragma`, because the next file in its stream was one we had emitted no line for.
-        //
-        // The range is the file's own first byte. A `#pragma once` written anywhere in a file means the same thing,
-        // and a compiler prints it where the file begins; a zero-length range at offset 0 is honest about being a
-        // *rendering* of the directive rather than a pointer into the text, and it sorts before every real token, so
-        // an include that follows is spliced after it exactly as a preprocessor would.
-        if self.unit.frames[frame as usize].visit_once && cook.tokens.is_empty() {
-            let here = cpp_parser::SourceRange::new(0, 0);
-            out.break_line_before_next();
-            for spelling in ["#", "pragma", "once"] {
-                out.push(spelling, frame, here);
-            }
-            out.break_line_before_next();
-        }
-
-        let mut lines = cook.pragma_lines.iter().peekable();
-        for (index, token) in cook.tokens.iter().enumerate() {
-            // **Where the token stands in this file**, which is also what decides whether an include that has not
-            // been spliced yet comes first: the call site for an expansion (the text the reader sees) and the
-            // token's own range for text the file wrote. Both are monotone in stream order, and both are positions
-            // in *this* file — see `ExpandedToken::diagnostic_range`.
+            // **Where the token stands in this file** — the call site for an expansion, the token's own range for text
+            // the file wrote. Both are positions in *this* file; see `ExpandedToken::diagnostic_range`.
             let at = token.diagnostic_range();
-            while next < included.len()
-                && self.unit.frames[included[next] as usize].from_in_parent <= at.start_offset
-            {
-                self.stitch(included[next], out);
-                next += 1;
-            }
             while lines.next_if(|line| line.end <= index).is_some() {}
             // A `#pragma` is a line of its own — see [`crate::CookedStream::pragma_lines`].
             if lines.peek().is_some_and(|line| line.start == index) {
@@ -2515,15 +2546,7 @@ impl UnitCook<'_> {
                 out.break_line_before_next();
             }
         }
-
-        self.stitch_included(included, next, out);
-    }
-
-    /// Splice the includes from `from` on: the tail of a file's stream, and everything a file with no text has.
-    fn stitch_included(&self, included: &[u32], from: usize, out: &mut RenderedUnit) {
-        for &child in &included[from..] {
-            self.stitch(child, out);
-        }
+        depth
     }
 }
 

@@ -1268,10 +1268,41 @@ pub fn cook_with(
 /// `directory` is where the file being cooked sits, which is what the **quoted** form searches first. Both are
 /// needed together: a search without a directory cannot answer `#include "x.h"`, and the honest answer there is
 /// `Unknown` rather than a search that silently skipped a directory.
+/// **What one program's cook carries from one file to the next** — a preprocessor has **one** table, mutated in order
+/// by the `#define`s the text passes. This is that table.
+///
+/// The alternative this replaces was a *view* per file, rebuilt from an offset-indexed timeline
+/// (`TranslationUnit::environment_at`). A view reconstructs "what was defined here" from the walk's records and answers
+/// wrongly exactly where the answer matters: `<xstddef>` defines `_MEMBER_CALL_CV_REF_NOEXCEPT`, the walk executes that
+/// `#define`, and `<xtr1common>`'s cook — asking the view — was told `not defined`. Carrying the table is also cheaper:
+/// one hash lookup per name instead of an interval query against the timeline.
+#[derive(Default)]
+pub struct CookingState {
+    /// The macros the cook has executed so far, in the order the text wrote them.
+    pub macros: MacroTable,
+}
+
 pub fn cook_with_search(
     source: &str,
     tokens: &[CppTokenData],
     initial: &dyn crate::macros::MacroBindings,
+    search: Option<&dyn HeaderSearch>,
+    directory: &Path,
+) -> CookedStream {
+    let mut state = CookingState::default();
+    cook_with_search_and_state(source, tokens, initial, &mut state, search, directory)
+}
+
+/// [`cook_with_search`] with the table a **program**'s cook carries across files — see [`CookingState`].
+///
+/// The names the text defines are appended to `state`, so the next file of the same program sees them; a name the text
+/// does not define is answered by `initial`, exactly as before. That layering is what makes this a change of *state*
+/// rather than of *policy*: a cook handed a fresh state — every per-file caller — behaves as it did.
+pub fn cook_with_search_and_state(
+    source: &str,
+    tokens: &[CppTokenData],
+    initial: &dyn crate::macros::MacroBindings,
+    state: &mut CookingState,
     search: Option<&dyn HeaderSearch>,
     directory: &Path,
 ) -> CookedStream {
@@ -1281,8 +1312,11 @@ pub fn cook_with_search(
     // the file shadows a builtin of the same name, which is exactly what the table's positional lookup does
     // when the file's definition is written later than offset 0 — and it is a **layer** rather than a copy of
     // what the file started with: every binding underneath is already shared, so there is nothing to copy.
+    //
+    // **The table is the caller's**, when the caller is a program's cook: `state.macros` is what the previous
+    // files of the same program defined, and this file's `#define`s are appended to it as they are met.
     let mut live = Live {
-        own: MacroTable::new(),
+        own: std::mem::take(&mut state.macros),
         base: initial,
         pushed: Vec::new(),
         search,
@@ -1460,6 +1494,10 @@ pub fn cook_with_search(
             merge_span(&mut out.inactive, span);
         }
     }
+
+    // **The table goes back to the caller**, so the next file of the same program starts with what this one defined —
+    // a preprocessor's one table, not a view of it.
+    state.macros = live.own;
 
     out
 }
