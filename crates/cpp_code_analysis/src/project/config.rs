@@ -638,6 +638,16 @@ pub struct IndexSection {
     /// How many files the project scan may list.
     #[serde(default)]
     pub max_files: Option<usize>,
+    /// **Read the interface units of the modules a file imports** — `import std;` and friends — when a request asks.
+    /// Absent means on.
+    ///
+    /// The read is a whole program: `import std;` is 223 files and a 1.99 MB rendering, measured at **minutes** on a
+    /// cold cache (the cached result serves in 264 ms). A project that uses no modules pays nothing either way, but one
+    /// that does pays it once per cache invalidation — and while it runs the machine is busy, which a reader
+    /// experiences as "the editor froze". This key is the honest switch for a reader who would rather not pay it: with
+    /// `modules = false` the namespace is not read at all.
+    #[serde(default)]
+    pub modules: Option<bool>,
 }
 
 /// `[diagnostics]` — read by the language server.
@@ -1146,6 +1156,24 @@ mod tests {
     /// The table of the project's own functions is the half the old `[highlight]` could not express at all: **which
     /// argument holds the format string**. Both spellings are asserted — a bare syntax string and the table form —
     /// because both are what a person writes.
+    /// **`[index] modules = false`** is read, and absent means on — the switch that keeps a project from paying the
+    /// minutes-long `import std;` read after a cache invalidation.
+    #[test]
+    fn the_modules_switch_is_read() {
+        assert_eq!(
+            parse("[index]\nmodules = false\n").config.index.modules,
+            Some(false)
+        );
+        assert_eq!(
+            parse("[index]\nmodules = true\n").config.index.modules,
+            Some(true)
+        );
+        assert_eq!(
+            parse("[index]\nmax_files = 10\n").config.index.modules,
+            None
+        );
+    }
+
     #[test]
     fn the_format_section_is_read() {
         let report = parse(

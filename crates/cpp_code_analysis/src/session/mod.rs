@@ -7022,6 +7022,12 @@ impl<F: FileProvider + Clone> Session<F> {
     ///
     /// Returns how many units were queued.
     pub fn queue_the_modules_a_file_imports(&mut self, path: &Path) -> usize {
+        // **`[index] modules = false` means exactly that** — no unit read, and therefore no minutes of background CPU
+        // after a cache invalidation. A project that turned it off gets no `std` from `import std;`, which is the
+        // trade it asked for, and the queries that would have used it answer "not read" instead of a fragment.
+        if self.project_config().config.index.modules == Some(false) {
+            return 0;
+        }
         let wanted = self.modules_the_index_cannot_name(path);
         if wanted.is_empty() {
             return 0;

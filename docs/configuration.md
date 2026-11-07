@@ -156,7 +156,13 @@ different question from the CUDA flag: on Windows `nvcc` drives `cl.exe`, on Lin
 [index]
 cache_dir = ".cppls"     # one component, relative to the root; where cooked readings are cached
 max_files = 20000        # how many files the project scan may list
+modules = true           # read the interface unit of a module a file imports (`import std;`)
 ```
+
+`modules = false` is the switch for a project that would rather not pay for `import std;`: the read is a whole program
+(223 files, a 1.99 MB rendering) and costs **minutes** on a cold cache, where the cached result serves in 264 ms. A
+project that never imports a module pays nothing either way; one that does pays that cost after every cache
+invalidation, and while it runs the machine is busy. With the key off, `std` is simply not read.
 
 ### `[[library]]` — a dependency outside the workspace
 
@@ -263,7 +269,7 @@ needs the standard library's index, which is the reason the rule can run at all.
 
 [[library]]  name  path  includes  modules  defines  headers_only
 
-[index]      cache_dir  max_files
+[index]      cache_dir  max_files  modules
 
 [diagnostics] on_change_ms  enable  disable
 [hover]      enable
