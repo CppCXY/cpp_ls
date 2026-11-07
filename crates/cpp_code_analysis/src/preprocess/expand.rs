@@ -523,7 +523,7 @@ impl<M: MacroValues + ?Sized> Expander<'_, M> {
             // The definition has to be cloned because the borrow of the table cannot outlive the
             // recursive calls below, which read the table again.
             let definition = definition.clone();
-            let name = token.text.clone();
+            let name: Box<str> = token.text.as_str().into();
 
             if self.active.contains(&name) {
                 self.note(ExpansionNote::Recursive { name: name.clone() }, token.range);

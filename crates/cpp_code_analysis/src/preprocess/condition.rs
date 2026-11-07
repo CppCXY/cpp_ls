@@ -993,17 +993,17 @@ impl<'a> Parser<'a> {
                             found: self.kind().unwrap_or(CppTokenKind::Eof),
                         });
                     };
-                    return Ok(ConditionExpr::Builtin { name, operand });
+                    return Ok(ConditionExpr::Builtin { name: name.as_str().into(), operand });
                 }
                 let token = self.bump().expect("checked");
-                Ok(ConditionExpr::Identifier(token.text.clone()))
+                Ok(ConditionExpr::Identifier(token.text.as_str().into()))
             }
             // `true` and `false` are not keywords in a conditional expression: they are identifiers,
             // and evaluate to `0` unless a macro gives them a value. The lexer produces them as
             // literals, so they are routed back to the identifier case.
             CppTokenKind::TrueKeyword | CppTokenKind::FalseKeyword => {
                 let token = self.bump().expect("checked");
-                Ok(ConditionExpr::Identifier(token.text.clone()))
+                Ok(ConditionExpr::Identifier(token.text.as_str().into()))
             }
             found => Err(EvalError::ExpectedOperand { found }),
         }
@@ -1068,7 +1068,7 @@ impl<'a> Parser<'a> {
             return Err(EvalError::UnclosedParenthesis);
         }
 
-        Ok(ConditionExpr::Defined(name))
+        Ok(ConditionExpr::Defined(name.as_str().into()))
     }
 }
 

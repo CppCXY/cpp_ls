@@ -571,7 +571,7 @@ pub fn parse_directive_tokens(tokens: &[Token], range: SourceRange) -> Directive
             tokens: significant(rest),
         },
         DirectiveKind::Null | DirectiveKind::Unknown => Directive::Other {
-            name: name.text.clone(),
+            name: name.text.as_str().into(),
         },
     }
 }
@@ -639,7 +639,7 @@ fn parse_include(tokens: &[Token], kind: DirectiveKind) -> Directive {
         CppTokenKind::Identifier => {
             return Directive::Include(Include {
                 form: IncludeForm::Macro,
-                target: first.text.clone(),
+                target: first.text.as_str().into(),
                 is_next,
             });
         }
@@ -678,7 +678,7 @@ fn first_identifier(tokens: &[Token]) -> Option<Box<str>> {
         .iter()
         .find(|token| !is_trivia(token.kind))
         .filter(|token| token.is_identifier())
-        .map(|token| token.text.clone())
+        .map(|token| token.text.as_str().into())
 }
 
 fn significant(tokens: &[Token]) -> Vec<Token> {

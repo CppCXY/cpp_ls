@@ -497,7 +497,7 @@ pub fn parse_define(tokens: &[Token], range: SourceRange) -> Option<MacroDef> {
         return None;
     }
     let name_range = name_token.range;
-    let name = name_token.text.clone();
+    let name: Box<str> = name_token.text.as_str().into();
     index += 1;
 
     let params = parse_parameters(tokens, &mut index);
@@ -558,7 +558,7 @@ fn parse_parameters(tokens: &[Token], index: &mut usize) -> Option<Vec<Parameter
             }
             CppTokenKind::Identifier => {
                 params.push(Parameter {
-                    name: token.text.clone(),
+                    name: token.text.as_str().into(),
                     kind: ParameterKind::Ordinary,
                 });
                 *index += 1;

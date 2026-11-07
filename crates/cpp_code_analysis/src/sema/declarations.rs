@@ -76,25 +76,8 @@ pub fn build_facts(
     // half of the standard library's facts are those locals (measured on `import std;`: 29 067 of 61 337).
     keep_locals: bool,
 ) -> (Vec<DeclFact>, SummaryGuards) {
-    // **The two halves of this function are different work and need separate numbers.** `new` is two passes over the
-    // whole tree (`DeclarationShapes::of` and `Declarations::of`); `build` is the per-fact work — the type spelling, the
-    // parameter list, the guard. A 5 MB program reading spends 1.5 s here, and which half it is decides whether the
-    // next change is a pass to delete or a per-fact string to stop building.
-    let starting = std::time::Instant::now();
     let file = DeclarationFacts::new(scopes, preprocessing, root, errors, keep_locals);
-    let prepared = starting.elapsed();
-
-    let building = std::time::Instant::now();
-    let built = file.build();
-    if crate::probes::units() && built.0.len() > 1000 {
-        eprintln!(
-            "[facts] new {:>6.1} ms  build {:>6.1} ms  ({} fact(s))",
-            prepared.as_secs_f64() * 1000.0,
-            building.elapsed().as_secs_f64() * 1000.0,
-            built.0.len()
-        );
-    }
-    built
+    file.build()
 }
 
 /// The type a variable-like declaration was written with, as it is spelled before the name.
@@ -4880,9 +4863,9 @@ fn named_condition(tokens: &[crate::token::Token]) -> BranchCondition {
     }
 
     if negated {
-        BranchCondition::NotDefined(name.text.clone())
+        BranchCondition::NotDefined(name.text.as_str().into())
     } else {
-        BranchCondition::Defined(name.text.clone())
+        BranchCondition::Defined(name.text.as_str().into())
     }
 }
 

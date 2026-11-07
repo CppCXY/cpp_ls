@@ -23,7 +23,7 @@ use cpp_parser::{CppKind, CppSyntaxNode, CppSyntaxToken, CppTokenKind, SourceRan
 pub struct Token {
     pub kind: CppTokenKind,
     /// The text as written, including any surrounding quotes.
-    pub text: Box<str>,
+    pub text: smol_str::SmolStr,
     /// Where it came from in the file.
     ///
     /// Always present: a token produced by *expansion* is not one of these — it is a member of a
@@ -32,7 +32,7 @@ pub struct Token {
 }
 
 impl Token {
-    pub fn new(kind: CppTokenKind, text: impl Into<Box<str>>, range: SourceRange) -> Self {
+    pub fn new(kind: CppTokenKind, text: impl Into<smol_str::SmolStr>, range: SourceRange) -> Self {
         Token {
             kind,
             text: text.into(),
@@ -44,7 +44,7 @@ impl Token {
     pub fn from_syntax(token: &CppSyntaxToken) -> Self {
         Token {
             kind: CppTokenKind::from(token.kind()),
-            text: token.text().into(),
+            text: smol_str::SmolStr::new(token.text()),
             range: cpp_parser::source_range(token.text_range()),
         }
     }

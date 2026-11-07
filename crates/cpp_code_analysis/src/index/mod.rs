@@ -667,29 +667,7 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
 
         let parsed = parsing.elapsed();
         let indexing = std::time::Instant::now();
-        let allocations_before = crate::probes::allocations();
-        let bytes_before = crate::probes::bytes();
         let summary = { self.index_tree(root, &stream.text, &tree, key, false) };
-        if crate::probes::units() {
-            eprintln!(
-                "[unit] index_tree allocations: {} ({:.1} MB)",
-                crate::probes::allocations() - allocations_before,
-                (crate::probes::bytes() - bytes_before) as f64 / (1024.0 * 1024.0)
-            );
-        }
-        if crate::probes::units() {
-            let locals = summary
-                .declarations
-                .iter()
-                .filter(|fact| fact.local)
-                .count();
-            eprintln!(
-                "[unit] {} fact(s), of which {} local; {} macro(s)",
-                summary.declarations.len(),
-                locals,
-                summary.macros.len()
-            );
-        }
         if crate::probes::units() {
             eprintln!(
                 "[unit] parse {:>6.1} ms  facts {:>6.1} ms  {} file(s), {} byte(s)",
@@ -1309,7 +1287,7 @@ fn macro_value(definition: &crate::preprocess::macros::MacroDef) -> Option<Box<s
         return None;
     }
 
-    (only.kind == cpp_parser::CppTokenKind::IntegerLiteral).then(|| only.text.clone())
+    (only.kind == cpp_parser::CppTokenKind::IntegerLiteral).then(|| only.text.as_str().into())
 }
 
 /// **The one name a macro's body *is*, when the body is exactly one identifier** — `#define A B`.
