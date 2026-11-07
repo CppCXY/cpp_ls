@@ -3872,7 +3872,10 @@ fn walk_one_file<'a>(
     // in the same branch of the innermost region, they fall in the same branch of every region enclosing it, so the
     // *whole chain* [`SummaryGuards::visibility_of`] walks is fixed by the pair. What is left is the environment —
     // which is what the generation covers, and only a change to the set in force can make it stale.
-    let mut decided: std::collections::HashMap<(u32, u32), bool> = std::collections::HashMap::new();
+    // **Three answers per region**, not two: see the note where it is read. The memo has to hold the third one too,
+    // or a region nobody can decide would be remembered as dead on its second fact.
+    let mut decided: std::collections::HashMap<(u32, u32), crate::preprocess::guard::Visibility> =
+        std::collections::HashMap::new();
     // The generation every answer in `decided` was worked out at. The memo lives *between two changes to the set in
     // force* and nowhere longer, which is what the clearing below says in one line.
     let mut decided_at = unit.generation;
@@ -3891,8 +3894,8 @@ fn walk_one_file<'a>(
 
         if next_is_a_macro {
             let fact = macros.next().expect("peeked just above");
-            let in_force = if matches!(fact.guard, FactGuard::Unconditional) {
-                true
+            let (in_force, visibility) = if matches!(fact.guard, FactGuard::Unconditional) {
+                (true, crate::preprocess::guard::Visibility::Active)
             } else {
                 walked.conditional_facts += 1;
                 if let Some(at) = frame.map(|frame| frame as usize) {
@@ -3924,35 +3927,60 @@ fn walk_one_file<'a>(
                     decided_at = unit.generation;
                 }
 
-                let taken = match branch.and_then(|key| decided.get(&key).copied()) {
+                // **Three answers, not two.** `Inactive` is a branch the compiler does not read; `Unknown` is one
+                // nobody can decide, and a `#define` in a region nobody can decide must **not** be dropped: a compiler
+                // takes one branch or the other, so the name is defined afterwards either way. Measured on
+                // `import std;`: `<xstddef>` defines `_MEMBER_CALL_CV_REF_NOEXCEPT` in **both** branches of
+                // `#ifdef __cpp_noexcept_function_type` and no file `#undef`s it, yet the walk never fed it — so
+                // `<xtr1common>`'s usages were left in the rendering as text.
+                let visibility = match branch.and_then(|key| decided.get(&key).copied()) {
                     Some(answer) => answer,
                     None => {
-                        let answer = a_guard_is_in_force(file, fact, |at| UnitMacros {
-                            seed,
-                            state: unit,
-                            here: Some((path, at)),
-                        });
+                        let answer =
+                            crate::index::environment::a_guard_visibility(file, fact, |at| {
+                                UnitMacros {
+                                    seed,
+                                    state: unit,
+                                    here: Some((path, at)),
+                                }
+                            });
                         if let Some(key) = branch {
                             decided.insert(key, answer);
                         }
                         answer
                     }
                 };
+                let taken = visibility == crate::preprocess::guard::Visibility::Active;
                 if taken {
                     walked.facts_in_force += 1;
                 }
-                taken
+                (taken, visibility)
             };
 
             if !in_force {
-                // **Recorded before the skip**, because the file's own summary kept this `#define` and a consumer
-                // would otherwise decide the region again with a different environment. See
-                // [`RenderedUnit::dead_macros`], which is where that decision is handed on.
-                walked
-                    .dead_macros
-                    .entry(path.to_path_buf())
-                    .or_default()
-                    .push(fact.range.start_offset);
+                match visibility {
+                    // **A branch the compiler does not read.** Recorded before the skip, because the file's own
+                    // summary kept this `#define` and a consumer would otherwise decide the region again with a
+                    // different environment. See [`RenderedUnit::dead_macros`].
+                    crate::preprocess::guard::Visibility::Inactive => {
+                        walked
+                            .dead_macros
+                            .entry(path.to_path_buf())
+                            .or_default()
+                            .push(fact.range.start_offset);
+                    }
+                    // **A branch nobody can decide.** A `#define` here is kept as a definition for what follows — a
+                    // compiler takes one branch or the other, so the name is defined afterwards either way, and
+                    // dropping it is what left `_MEMBER_CALL_CV_REF_NOEXCEPT` undefined in `import std;`. An `#undef`
+                    // is **not** executed: taking a name away on a guess is the error in the other direction.
+                    crate::preprocess::guard::Visibility::Unknown if fact.kind.is_definition() => {
+                        if let Some(definition) = definitions_of.get_or_read(path, source, fact) {
+                            unit.define(&fact.name, definition, path, fact.range.start_offset);
+                        }
+                    }
+                    crate::preprocess::guard::Visibility::Unknown => {}
+                    crate::preprocess::guard::Visibility::Active => {}
+                }
                 continue;
             }
 

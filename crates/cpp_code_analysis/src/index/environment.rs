@@ -393,6 +393,26 @@ pub fn a_guard_holds<M: crate::MacroValues>(
     a_guard_holds_measured(file, guard, offset, macros_at)
 }
 
+/// **The three-way answer** — `Active`, `Inactive`, or `Unknown` — which [`a_guard_holds`] collapses to a bool.
+///
+/// The walk needs the third case: a `#define` in a region nobody can decide is **not** a branch to drop. A compiler
+/// takes one branch or the other, so the name is defined afterwards either way; dropping both branches`'` definitions —
+/// which is what collapsing `Unknown` to `false` does — leaves a name undefined that the compiler has in force. Measured
+/// on `import std;`: `<xstddef>` defines `_MEMBER_CALL_CV_REF_NOEXCEPT` in **both** branches of
+/// `#ifdef __cpp_noexcept_function_type` and no file `#undef`s it, yet the walk never fed it, and `<xtr1common>` usages
+/// were left as text in the rendering.
+pub fn a_guard_visibility<M: crate::MacroValues>(
+    file: &FileSummary,
+    fact: &MacroFact,
+    macros_at: impl Fn(usize) -> M,
+) -> crate::preprocess::guard::Visibility {
+    if matches!(fact.guard, FactGuard::Unconditional) {
+        return crate::preprocess::guard::Visibility::Active;
+    }
+    file.guards
+        .visibility_of(fact.guard, fact.range.start_offset, &macros_at)
+}
+
 /// [`a_guard_holds`] without a counter — see the note there.
 fn a_guard_holds_measured<M: crate::MacroValues>(
     file: &FileSummary,
