@@ -111,9 +111,11 @@ defines  = ["LUA_COMPAT_5_3"]
 | `defines` | `target_compile_definitions` | its preprocessor definitions — `"NAME"` or `"NAME=value"`, no `-D` |
 | `standard` | `CXX_STANDARD` | its standard; the project's `[compile].standard` is used when absent |
 | `args`, `extra_args`, `remove_args` | — | the same three keys as `[compile]`, for these files |
+| `depends` | `target_link_libraries` | the `[[library]]` names this target uses — see below |
 
-It is **not a build system**: there are no dependencies, no sources to compile, no commands to run. It describes
-compilations, which is all an analysis needs.
+It is **not a build system**: there are no sources to compile and no commands to run. It describes compilations, which is
+all an analysis needs — plus `depends`, which is not a build dependency but a **visibility** one: it puts a library's
+include directories and defines on the search path of the files this target describes, and nowhere else.
 
 **Patterns.** Matched against the file's path relative to the workspace root, component by component:
 
@@ -190,12 +192,14 @@ path for all of them.
 on_change_ms = 300       # how long a file's diagnostics wait for typing to stop
 enable = []              # start from this list only (an empty list means "everything")
 disable = []             # never report these — wins over `enable`, and over the defaults
+                         # e.g. disable = ["missing-include", "unused"] — the rule names are the codes below
 
 [hover]
 enable = true            # whether hover answers at all
 
 [completion]
 max_items = 1000         # how many items one completion may carry; clamped to 1..20000
+suggest_unincluded = true  # offer names from a nearby header, with the `#include` that makes them usable
 
 [format]                 # where this project's format strings are
 enable = true            # the colouring, the popup and the completion — `false` is all three at once
@@ -232,6 +236,43 @@ on a project that imports the standard module:
 From the first typed character on, the answer is **complete** — the budget only decides how much the empty-prefix list
 carries. Raising it makes that first list longer (and slower); lowering it costs a few more round trips. The scope
 collection itself is capped at 4 096 names per namespace, so a `max_items` above that adds nothing for one scope.
+
+### `missing-include` and `[completion] suggest_unincluded` — the same rule, twice
+
+**`missing-include`** reports a type a declaration uses when some file declares it and this file neither includes nor
+reaches that file — the finding a reader turns into an `#include`. It is a rule like any other: it can be turned off with
+`[diagnostics] disable = ["missing-include"]`.
+
+**`suggest_unincluded`** is the completion's half of the same idea: a name from a **strongly related** header this file
+does not include is offered in the list, and accepting it inserts the name *and* the `#include` in one accept. Only three
+kinds of file are candidates — one in the same directory, one under a `[[library]]` the project names, one under this
+file's include directories — so the list stays a suggestion and not a dump of the project.
+
+Both exclude the standard library **mechanically**: a candidate must be under the workspace root or under a library's
+own path, so a toolchain header, a module unit read for `import std;` and a vendored tree are never suggested. Neither
+needs the standard library's index, which is the reason the rule can run at all.
+
+### The whole set, in one place
+
+```toml
+[workspace]  exclude = []  source_extensions = []
+
+[compile]    database  compiler  standard  args  extra_args  remove_args  fuzzy_includes
+             include  cuda  unreal
+[[compile.target]]  name  sources  includes  defines  standard  args  extra_args  remove_args  depends
+
+[[library]]  name  path  includes  modules  defines  headers_only
+
+[index]      cache_dir  max_files
+
+[diagnostics] on_change_ms  enable  disable
+[hover]      enable
+[completion] max_items  suggest_unincluded
+[format]     enable  std  printf  scanf      + [format.functions]
+
+[unreal]     enable  engine
+locale       "zh-CN"
+```
 
 ## 3. When a key is wrong
 
