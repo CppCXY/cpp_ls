@@ -330,12 +330,15 @@ pub fn completion_at(
     offset: usize,
     headers: &HeaderIndex,
     cuda: bool,
+    budget: usize,
 ) -> CompletionSet {
     // The context is this function's first question and the only one read from a tree; a caller that has already read
     // it — `Session::completions`, for the two contexts that live in the **file's** own text rather than in the
     // rendering — hands it over instead of having it asked again of the wrong tree.
     let asked = context_at(root, offset);
-    completion_with(index, scopes, root, path, offset, headers, asked, cuda)
+    completion_with(
+        index, scopes, root, path, offset, headers, asked, cuda, budget,
+    )
 }
 
 /// **The same dispatch with the context already decided**, and the entry point for a caller whose context came from
@@ -353,6 +356,7 @@ pub fn completion_with(
     headers: &HeaderIndex,
     context: CompletionContext,
     cuda: bool,
+    budget: usize,
 ) -> CompletionSet {
     // **The measurement window for one completion**, opened here because this is the entry point the feature has:
     // everything below is the query's own work, and the server's log line splits only the outside of it
@@ -364,14 +368,14 @@ pub fn completion_with(
             ..CompletionSet::default()
         },
         CompletionContext::Member(access) => {
-            members(index, scopes, root, path, &access, offset).set
+            members(index, scopes, root, path, &access, offset, budget).set
         }
-        CompletionContext::Qualified(position) => {
-            names(index, scopes, root, path, &position, offset, false, cuda)
-        }
-        CompletionContext::Name(position) => {
-            names(index, scopes, root, path, &position, offset, true, cuda)
-        }
+        CompletionContext::Qualified(position) => names(
+            index, scopes, root, path, &position, offset, false, cuda, budget,
+        ),
+        CompletionContext::Name(position) => names(
+            index, scopes, root, path, &position, offset, true, cuda, budget,
+        ),
         CompletionContext::DirectiveName { written, range } => directives(&written, range),
         // **A module name is answered by the session, not here**, and the empty set says so rather than guessing:
         // the names are the *project's* (its `.cppm` files and the modules the index can name), which is a question
@@ -388,7 +392,9 @@ pub fn completion_with(
             // `#define NAME`, `#undef NAME`, `#ifdef NAME`: the argument is a *name*, and what may be written is
             // what the program already declares. No keywords and no snippets — a macro's name is an identifier, and
             // a control-flow statement is not one — which is why this goes through the name query only.
-            names(index, scopes, root, path, &position, offset, false, cuda)
+            names(
+                index, scopes, root, path, &position, offset, false, cuda, budget,
+            )
         }
         CompletionContext::Include {
             written,
@@ -446,7 +452,7 @@ pub fn why_no_members(
     let offset = offset.get();
     match context_at(root, offset) {
         CompletionContext::Member(access) => {
-            members(index, scopes, root, path, &access, offset).why
+            members(index, scopes, root, path, &access, offset, ITEM_BUDGET).why
         }
         other => format!("the cursor is not a member access at all: {other:?}"),
     }
@@ -721,6 +727,7 @@ fn members(
     path: &Path,
     access: &crate::sema::resolve::MemberAccess,
     offset: usize,
+    budget: usize,
 ) -> MemberAnswer {
     let replace = access.member_range;
     let prefix = written_before(access, offset);
@@ -906,7 +913,7 @@ fn members(
         });
     }
 
-    let (items, truncated) = ordered(scored);
+    let (items, truncated) = ordered(scored, budget);
     let offered = items.len();
 
     // **A `.` typed on a pointer completes as `->`.** The list is the pointee's — what the reader meant — and the
@@ -1054,6 +1061,7 @@ fn names(
     offset: usize,
     with_table: bool,
     cuda: bool,
+    budget: usize,
 ) -> CompletionSet {
     let mut scored: Vec<Scored> = Vec::new();
     let mut listed_scope = position.scope.clone();
@@ -1231,7 +1239,7 @@ fn names(
         scored.retain(|one| seen.insert(one.item.label.clone()));
     }
 
-    let (items, cut) = ordered(scored);
+    let (items, cut) = ordered(scored, budget);
     truncated |= cut;
 
     CompletionSet {
@@ -1615,7 +1623,7 @@ const HEADER_BUDGET: usize = 200;
 /// A **payload** bound rather than a UI one: a client renders ten rows and still receives all of them, and 14 351
 /// items was 4.5 MB of JSON for one keystroke. Two hundred is more than any list a reader scrolls and small enough
 /// that the request stays a few kilobytes.
-const ITEM_BUDGET: usize = 1000;
+pub const ITEM_BUDGET: usize = 1000;
 
 /// Put the items in order, apply the budget, and say whether anything was cut.
 ///
@@ -1632,7 +1640,7 @@ const ITEM_BUDGET: usize = 1000;
 /// then types `fpr`, the client filters those 200 and the popup is empty, which is reported as "completion never works
 /// here" when the analysis answered perfectly well. So the cut is made **round-robin per declaring file**: each file
 /// contributes a share, and a header with a thousand names cannot starve one with ten.
-fn ordered(mut scored: Vec<Scored>) -> (Vec<CompletionItem>, bool) {
+fn ordered(mut scored: Vec<Scored>, budget: usize) -> (Vec<CompletionItem>, bool) {
     let by_rank = |one: &Scored, other: &Scored| {
         // **How well it answers what was typed, before where the declaration is.** `str` must put `string` above
         // `to_string` — the module's own rule — and the tier alone does not express that: measured with `fpr` in a
@@ -1648,7 +1656,7 @@ fn ordered(mut scored: Vec<Scored>) -> (Vec<CompletionItem>, bool) {
     };
     scored.sort_by(by_rank);
 
-    if scored.len() <= ITEM_BUDGET {
+    if scored.len() <= budget {
         return (
             scored.into_iter().map(|scored| scored.item).collect(),
             false,
@@ -1673,14 +1681,14 @@ fn ordered(mut scored: Vec<Scored>) -> (Vec<CompletionItem>, bool) {
     // order**, because a fair draw is a choice of *which* items survive, not a new ranking: a reader must never see
     // `abort` above the local variable in front of them because a bucket happened to be drawn first.
     let widest = buckets.iter().map(Vec::len).max().unwrap_or(0);
-    let mut taken: Vec<Scored> = Vec::with_capacity(ITEM_BUDGET);
+    let mut taken: Vec<Scored> = Vec::with_capacity(budget);
     'fill: for round in 0..widest {
         for bucket in &buckets {
             let Some(one) = bucket.get(round) else {
                 continue;
             };
             taken.push(one.clone());
-            if taken.len() == ITEM_BUDGET {
+            if taken.len() == budget {
                 break 'fill;
             }
         }

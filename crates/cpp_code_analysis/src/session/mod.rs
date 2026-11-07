@@ -171,6 +171,13 @@ const RE_READ_SLICE: usize = 16;
 /// [`Session::enforce_the_summary_budget`] for the three kinds it never touches.
 const SUMMARY_BUDGET_BYTES: usize = 1 << 30;
 
+/// **The most items a project may ask a completion for** — the ceiling `[completion] max_items` is clamped to.
+///
+/// Twenty thousand items is a megabyte of JSON per keystroke and more rows than any client renders; the default is
+/// [`crate::completion::ITEM_BUDGET`]. A budget of zero is refused for a different reason: it answers "there is nothing
+/// here", which is a lie with no upside.
+const MAX_COMPLETION_ITEMS: usize = 20_000;
+
 /// **How many files a slice needs before its second pass shares one timeline instead of walking one per candidate.**
 ///
 /// The second pass re-reads a slice's files and every file that defines a macro one of them mentions. A candidate
@@ -731,6 +738,15 @@ pub struct Session<F: FileProvider = DiskFiles> {
     ///
     /// Behind a lock for the same reason [`Session::unit_index`] is.
     rendered_unit: std::sync::Mutex<Option<(u64, crate::RenderedUnit)>>,
+    /// **How many items one completion may answer with** — `[completion] max_items` in `.cppls.toml`, clamped.
+    ///
+    /// A **payload** bound rather than a UI one: the client renders ten rows and receives all of them, and an
+    /// untruncated `std::` would be 12 867 items and megabytes of JSON per keystroke. What makes the bound harmless is
+    /// that a cut list reports itself (`isIncomplete: true`), so the client asks again on the next keystroke and the
+    /// prefix filter — applied in the index before anything is cloned — narrows the answer exactly. Measured on the
+    /// reader's project: `std::` 1000 items in 53 ms (truncated), `std::s` 167 in 7 ms, `std::st` 55, `std::str` 38,
+    /// `std::string` 6 — exact from one letter on.
+
     /// **Which key a root's rendering was filed under** — `(root, context) → units_key`, for this session.
     ///
     /// The walk exists to produce that key and costs **70.7 ms** on the standard library's 256 files. A rendering
@@ -1710,6 +1726,7 @@ impl<F: FileProvider + Clone> Session<F> {
             unit_index: std::sync::Mutex::new(None),
             rendered_unit: std::sync::Mutex::new(None),
             unit_roots: std::sync::Mutex::new(HashMap::new()),
+
             last_edit: std::time::Instant::now(),
             directive_signatures: std::collections::HashMap::new(),
             prefetched: HashMap::new(),
@@ -6443,6 +6460,20 @@ impl<F: FileProvider + Clone> Session<F> {
         }
     }
 
+    /// **How many items one completion may answer with** — `[completion] max_items` in `.cppls.toml`, clamped.
+    ///
+    /// Read per query rather than stored at assembly: the project file is re-read when it changes, and a budget
+    /// captured at start-up would go on answering the old number. The clamp is `1..=20 000` — twenty thousand items is
+    /// a megabyte of JSON per keystroke, and a budget of zero would answer "there is nothing here".
+    fn the_completion_budget(&self) -> usize {
+        self.project_config()
+            .config
+            .completion
+            .max_items
+            .unwrap_or(crate::completion::ITEM_BUDGET)
+            .clamp(1, MAX_COMPLETION_ITEMS)
+    }
+
     /// **Put what [`Session::prepare_a_unit_reading`] worked out into the index** — one `insert_cooked` per file, and
     /// the only part of a unit read that needs `&mut self`.
     pub fn commit_a_unit_reading(&mut self, prepared: PreparedUnitReading) -> UnitReading {
@@ -8782,6 +8813,7 @@ impl<F: FileProvider + Clone> Session<F> {
                         .unwrap_or_default(),
                     context,
                     self.config.cuda(),
+                    self.the_completion_budget(),
                 );
             }
 
@@ -8812,6 +8844,7 @@ impl<F: FileProvider + Clone> Session<F> {
                             .unwrap_or_default(),
                         context,
                         self.config.cuda(),
+                        self.the_completion_budget(),
                     );
                 }
                 // **`MacroBody` is here too**: a `#define` line is in the file and not in the rendering, and the
@@ -8834,6 +8867,7 @@ impl<F: FileProvider + Clone> Session<F> {
                             .unwrap_or_default(),
                         context,
                         self.config.cuda(),
+                        self.the_completion_budget(),
                     );
                 }
                 // **`Nothing` is an answer, not a miss**: prose, and a directive that takes no argument (`#endif `).
@@ -8865,6 +8899,7 @@ impl<F: FileProvider + Clone> Session<F> {
             offset.get(),
             &headers,
             self.config.cuda(),
+            self.the_completion_budget(),
         )
     }
 

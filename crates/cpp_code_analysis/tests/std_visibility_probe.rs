@@ -153,6 +153,24 @@ fn what_the_index_of_std_holds_and_who_can_see_it() {
         println!("  {}: {facts:?}", path.file_name().unwrap().to_string_lossy());
     }
 
+    // **How the list narrows as the reader types** — the same query at each prefix length, with the truncation flag
+    // the client uses to decide whether to ask again.
+    for typed in ["std::", "std::s", "std::st", "std::str", "std::string", "std::string_v"] {
+        let probe = format!("{text}\nvoid probe_scope() {{\n    {typed}\n}}\n");
+        session.did_open(&interface, &probe);
+        session.index_everything();
+        let view = session.view_of_the_file(&interface).expect("a view");
+        let offset = probe.rfind(typed).expect("the prefix") + typed.len();
+        let started = std::time::Instant::now();
+        let offered = session
+            .completions(&view, cpp_code_analysis::file::coordinates::FileOffset::new(offset));
+        println!(
+            "  `{typed}`: {} item(s), truncated {}, {:?}",
+            offered.items.len(),
+            offered.truncated,
+            started.elapsed()
+        );
+    }
     // **And the completion the reader saw**, for the record.
     let typed = "std::str";
     let probe = format!("{text}\nvoid probe_scope() {{\n    {typed}\n}}\n");

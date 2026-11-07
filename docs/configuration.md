@@ -167,6 +167,9 @@ disable = []             # never report these — wins over `enable`, and over t
 [hover]
 enable = true            # whether hover answers at all
 
+[completion]
+max_items = 1000         # how many items one completion may carry; clamped to 1..20000
+
 [format]                 # where this project's format strings are
 enable = true            # the colouring, the popup and the completion — `false` is all three at once
 std = true               # `{…}` — std::format / std::print / fmt::format, fmt::print
@@ -183,6 +186,25 @@ A wrapper has a *position*: `mylib::trace(level, fmt, …)` puts the format stri
 `{ syntax = "printf", argument = 1 }` says and a list of names cannot. A bare string means the common case — that syntax,
 the first argument. Either form is matched against the **resolved** qualified name, so `using mylib::logf;` works and a
 local `logf` that is something else is not read as the wrapper.
+
+### Why `[completion] max_items` is a payload bound, and why the list is still exact
+
+`std` holds **12 867** declarations once `import std;` is read, and sending all of them is megabytes of JSON per
+keystroke. So a completion carries at most `max_items` — and says so: a cut list answers `isIncomplete: true`, the client
+then asks again on the next keystroke, and the prefix filter runs **in the index, before anything is cloned**. Measured
+on a project that imports the standard module:
+
+```text
+`std::`          1000 items, truncated true,  53 ms
+`std::s`          167 items, truncated false,  7 ms
+`std::st`          55 items, truncated false,  6 ms
+`std::str`         38 items, truncated false,  6 ms
+`std::string`       6 items, truncated false,  6 ms
+```
+
+From the first typed character on, the answer is **complete** — the budget only decides how much the empty-prefix list
+carries. Raising it makes that first list longer (and slower); lowering it costs a few more round trips. The scope
+collection itself is capped at 4 096 names per namespace, so a `max_items` above that adds nothing for one scope.
 
 ## 3. When a key is wrong
 

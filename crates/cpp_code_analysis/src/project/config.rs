@@ -135,6 +135,20 @@ pub struct ProjectConfig {
     pub diagnostics: DiagnosticsSection,
     pub hover: HoverSection,
     pub format: FormatSection,
+    /// **`[completion]`** — how many items one completion may carry.
+    ///
+    /// ```toml
+    /// [completion]
+    /// max_items = 1000     # the default; raise it for a client that renders more, lower it for a slow link
+    /// ```
+    ///
+    /// The list is a **payload** bound, not a UI one: a client renders ten rows and receives all of them, and an
+    /// untruncated `std::` would be 12 867 items and megabytes of JSON per keystroke. What makes a larger number
+    /// *usable* is the truncation flag: a truncated list answers `isIncomplete: true`, the client asks again on the next
+    /// keystroke, and the prefix filter — which runs in the index before anything is cloned — narrows the answer
+    /// exactly. Measured on the reader's project: `std::` 1000 items in 53 ms (truncated), `std::s` 167 in 7 ms,
+    /// `std::st` 55, `std::str` 38, `std::string` 6 — all exact from one letter on.
+    pub completion: CompletionSection,
     /// **`[unreal]`** — Unreal Engine's conventions, switched on by the project rather than guessed.
     ///
     /// UE code is C++ that is not readable as ordinary C++: `UCLASS()`, `GENERATED_BODY()` and `UPROPERTY(…)` come
@@ -559,6 +573,19 @@ pub struct HoverSection {
     pub enable: Option<bool>,
 }
 
+/// `[completion]` — how many items one completion may carry.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompletionSection {
+    /// The most items one completion may answer with. Absent is the crate's own default
+    /// ([`crate::completion::ITEM_BUDGET`], 1 000).
+    ///
+    /// Clamped to `1..=20 000`: a client that receives twenty thousand items is being sent megabytes per keystroke, and
+    /// a budget of zero would answer "there is nothing here" — a lie with no upside.
+    #[serde(default)]
+    pub max_items: Option<usize>,
+}
+
 /// `[format]` — **where this project's format strings are**, read by the language server.
 ///
 /// ```toml
@@ -818,6 +845,11 @@ pub fn parse_config(text: &str, path: &Path) -> ConfigReport {
             },
             "format" => match decode::<FormatSection>(section, name) {
                 Ok(decoded) => report.config.format = decoded,
+                Err(problem) => report.problems.push(problem),
+            },
+            // **[completion]** — how many items one completion may carry. See [`CompletionSection`].
+            "completion" => match decode::<CompletionSection>(section, name) {
+                Ok(decoded) => report.config.completion = decoded,
                 Err(problem) => report.problems.push(problem),
             },
             // **[unreal]** — the engine's conventions, which a project switches on rather than a file's spelling
