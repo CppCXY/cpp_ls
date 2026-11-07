@@ -8320,6 +8320,8 @@ impl<F: FileProvider + Clone> Session<F> {
                 filter: None,
                 fact: None,
                 replace: range,
+                inclusion: None,
+                additional_edits: Vec::new(),
             });
         }
 
@@ -8790,6 +8792,137 @@ impl<F: FileProvider + Clone> Session<F> {
     /// the latency fixture that clone measures **0 ms**, against 350–1270 ms for the query beside it while the index
     /// was filling. It is named here because it is the obvious suspect for a per-keystroke cost and it is not one.
     pub fn completions(&self, view: &FileView, offset: FileOffset) -> crate::CompletionSet {
+        // **The list, then the edits that go with it.** A name offered from a header this file does not include is only
+        // usable once the `#include` is there, so every item that carries an [`Inclusion`](crate::completion::Inclusion)
+        // gets its insertion here — the position is a line in the **written** text, which the completion itself never
+        // sees (it is computed on the rendering).
+        let mut offered = self.completions_without_the_edits(view, offset);
+        self.attach_the_inclusions(&mut offered, &view.path);
+        offered
+    }
+
+    /// **The files this file could include to gain a name it does not have** — the completion side of
+    /// `missing-include`.
+    ///
+    /// Only **strongly related** files, which is what keeps the list small and the offer believable: a file in the same
+    /// directory, a header or module interface under a `[[library]]` the project names, or one under this file's own
+    /// include directories. A file already reached by an `#include` is not a candidate (its names are visible), and
+    /// `[completion] suggest_unincluded = false` turns the whole thing off.
+    fn the_files_this_file_could_include(
+        &self,
+        path: &std::path::Path,
+    ) -> Vec<crate::completion::Unincluded> {
+        if !self
+            .project_config()
+            .config
+            .completion
+            .suggest_unincluded
+            .unwrap_or(true)
+        {
+            return Vec::new();
+        }
+        let include_paths = self.config_for(path).include_paths;
+        let reached = self.store.index().include_closure(path);
+        let directory = path.parent().map(|parent| parent.to_path_buf());
+        let libraries: Vec<PathBuf> = self
+            .project_config()
+            .config
+            .libraries
+            .iter()
+            .map(|library| library.root(&self.root))
+            .collect();
+
+        const MOST: usize = 64;
+        let mut found = Vec::new();
+        for file in &self.project {
+            if found.len() >= MOST {
+                break;
+            }
+            if file == path {
+                continue;
+            }
+            let extension = file
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .map(|extension| extension.to_lowercase());
+            let is_header = matches!(
+                extension.as_deref(),
+                Some("h" | "hpp" | "hxx" | "h++" | "inl" | "ipp")
+            );
+            let is_interface = matches!(extension.as_deref(), Some("cppm"));
+            if !is_header && !is_interface {
+                continue;
+            }
+            // **Already reached** by an `#include`, transitively: its names are visible, so there is nothing to add.
+            let key = crate::file::paths::normalize_path(file, cfg!(windows));
+            if reached.contains(&key) {
+                continue;
+            }
+            let related = directory.as_deref() == file.parent()
+                || libraries.iter().any(|root| file.starts_with(root))
+                || include_paths
+                    .iter()
+                    .any(|held| file.starts_with(&held.directory));
+            if !related {
+                continue;
+            }
+            let inclusion = match self
+                .store
+                .index()
+                .summary(file)
+                .and_then(|summary| summary.modules.module.clone())
+            {
+                Some(module) => crate::completion::Inclusion::Import(module.to_string()),
+                None => crate::completion::Inclusion::Include(
+                    crate::completion::the_include_spelling(file, path, &include_paths),
+                ),
+            };
+            found.push(crate::completion::Unincluded {
+                file: file.clone(),
+                inclusion,
+            });
+        }
+        found
+    }
+
+    /// **Attach the `#include`/`import` each item carries**, as an edit at the file's include block.
+    ///
+    /// The completion layer knows *what* to add ([`crate::completion::Inclusion`]) and the session knows the file's
+    /// text, which is where the *position* lives — after the last `#include` for one kind, after the module declaration
+    /// or last `import` for the other. An item whose inclusion cannot be placed (a file whose text is not the one the
+    /// completion was computed on) keeps its name and loses its edit, which is the harmless direction: the reader sees
+    /// the name and no include, rather than an edit at an offset that may have moved.
+    fn attach_the_inclusions(&self, offered: &mut crate::CompletionSet, path: &std::path::Path) {
+        if !offered.items.iter().any(|item| item.inclusion.is_some()) {
+            return;
+        }
+        let Some(text) = self.vfs.held(path).map(|held| held.text.to_string()) else {
+            return;
+        };
+        let after_includes = after_the_includes(&text);
+        let after_imports = after_the_module_imports(&text);
+        for item in &mut offered.items {
+            let Some(inclusion) = &item.inclusion else {
+                continue;
+            };
+            let at = match inclusion {
+                crate::completion::Inclusion::Include(_) => after_includes,
+                crate::completion::Inclusion::Import(_) => after_imports,
+            };
+            item.additional_edits
+                .push((cpp_parser::SourceRange::new(at, 0), inclusion.line()));
+        }
+    }
+
+    /// **The completion before the `#include` edits are attached** — see [`Session::completions`].
+    fn completions_without_the_edits(
+        &self,
+        view: &FileView,
+        offset: FileOffset,
+    ) -> crate::CompletionSet {
+        // **The headers this file could add**, and what accepting one of their names has to edit — see
+        // `Session::the_files_this_file_could_include`.
+        let unincluded = self.the_files_this_file_could_include(&view.path);
         // **The cursor is a FILE offset; the tree is the RENDERING's** — see [`Session::name_completions`], where the
         // full note is. A cursor that is not in the rendering has nothing to offer, and an empty set is the honest
         // answer rather than a list computed from the nearest position that *is* in it.
@@ -8851,6 +8984,7 @@ impl<F: FileProvider + Clone> Session<F> {
                     context,
                     self.config.cuda(),
                     self.the_completion_budget(),
+                    &[],
                 );
             }
 
@@ -8882,6 +9016,7 @@ impl<F: FileProvider + Clone> Session<F> {
                         context,
                         self.config.cuda(),
                         self.the_completion_budget(),
+                        &[],
                     );
                 }
                 // **`MacroBody` is here too**: a `#define` line is in the file and not in the rendering, and the
@@ -8905,6 +9040,7 @@ impl<F: FileProvider + Clone> Session<F> {
                         context,
                         self.config.cuda(),
                         self.the_completion_budget(),
+                        &[],
                     );
                 }
                 // **`Nothing` is an answer, not a miss**: prose, and a directive that takes no argument (`#endif `).
@@ -8937,6 +9073,7 @@ impl<F: FileProvider + Clone> Session<F> {
             &headers,
             self.config.cuda(),
             self.the_completion_budget(),
+            &unincluded,
         )
     }
 
@@ -10726,6 +10863,41 @@ fn library_files_to_read(
     found.sort();
     found.dedup();
     found
+}
+
+/// **Where an `#include` for this file belongs**, as a byte offset into the written text: right after the last
+/// top-level `#include` line, or the top of the file when there is none.
+///
+/// The same rule the code action uses ([`FixContext::after_the_includes`](../../cpp_ls) in the server), expressed in the
+/// offsets a `TextEdit` needs.
+fn after_the_includes(text: &str) -> usize {
+    let mut end = 0usize;
+    let mut offset = 0usize;
+    for line in text.split_inclusive('\n') {
+        if line.trim_start().starts_with("#include") {
+            end = offset + line.len();
+        }
+        offset += line.len();
+    }
+    end
+}
+
+/// **Where an `import` belongs**: after the module declaration or the last top-level import, in the file's offsets.
+fn after_the_module_imports(text: &str) -> usize {
+    let mut end = 0usize;
+    let mut offset = 0usize;
+    for line in text.split_inclusive('\n') {
+        let trimmed = line.trim_start();
+        let imports = trimmed.starts_with("import ") && trimmed.trim_end().ends_with(';');
+        let declares_a_module = (trimmed.starts_with("module ")
+            || trimmed.starts_with("export module "))
+            && trimmed.trim_end().ends_with(';');
+        if imports || declares_a_module {
+            end = offset + line.len();
+        }
+        offset += line.len();
+    }
+    end
 }
 
 /// Fold a project's configuration into the filter a session reads through.

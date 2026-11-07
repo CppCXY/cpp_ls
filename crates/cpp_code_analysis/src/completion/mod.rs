@@ -119,6 +119,102 @@ pub struct CompletionItem {
     pub fact: Option<DeclFact>,
     /// The range a client **replaces** with [`CompletionItem::insert`].
     pub replace: SourceRange,
+    /// **What accepting this item must also add** — an `#include` or an `import`, when the name comes from a header
+    /// this file does not include yet.
+    ///
+    /// The item is offered because it is *strongly related* (the session supplies the candidates); accepting it without
+    /// the include would produce code that does not compile, so the client gets both edits in one accept.
+    pub inclusion: Option<Inclusion>,
+    /// **The edits that go with this item**, in the file's own offsets: where to insert, and what.
+    ///
+    /// Filled in by the session, which has the **written text** the client is editing: the insertion point is a line in
+    /// that text, and the rendering a completion is computed on has neither the line nor the offset.
+    pub additional_edits: Vec<(SourceRange, String)>,
+}
+
+/// **A file that declares names this file could use but does not include** — a completion candidate the session
+/// supplies, with the line that would bring it in.
+///
+/// The session decides *which* files are "strongly related" (its own directory, the libraries its target depends on);
+/// the completion layer decides which of their declarations answer what was typed. The split matters: the first is a
+/// question about the project's configuration, the second about the program.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Unincluded {
+    pub file: std::path::PathBuf,
+    pub inclusion: Inclusion,
+}
+
+/// **An `#include` or an `import` a completion item carries** — see [`CompletionItem::inclusion`].
+///
+/// The spelling is decided where the item is built (that layer knows the include directories); the *position* is not,
+/// because the position is a question about the file's text rather than about the program.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Inclusion {
+    /// `#include "widgets/widget.h"` — the spelling a compiler will find.
+    Include(String),
+    /// `import report;` — a module interface, which is imported rather than included.
+    Import(String),
+}
+
+impl Inclusion {
+    /// The whole line this inclusion inserts, newline included.
+    pub fn line(&self) -> String {
+        match self {
+            Inclusion::Include(spelling) => format!("#include \"{spelling}\"\n"),
+            Inclusion::Import(module) => format!("import {module};\n"),
+        }
+    }
+}
+
+/// **How to spell an `#include` for `header` from `asking`**, given the include directories this file is built with.
+///
+/// Relative to an include directory first — that is what `-I` means, and what survives the project being moved — then
+/// relative to the including file, which is what a quoted `#include` searches first, and only then the absolute path.
+/// One implementation for the code action and the completion item: two spellings of one include would be a defect a
+/// reader meets as "the fix wrote something my compiler cannot find".
+pub fn the_include_spelling(
+    header: &std::path::Path,
+    asking: &std::path::Path,
+    include_paths: &[crate::include::config::IncludePath],
+) -> String {
+    let header_normal = header.to_string_lossy().replace('\\', "/");
+    for path in include_paths {
+        let directory = path.directory.to_string_lossy().replace('\\', "/");
+        let directory = directory.trim_end_matches('/');
+        if directory.is_empty() {
+            continue;
+        }
+        if let Some(relative) = header_normal.strip_prefix(&format!("{directory}/")) {
+            return relative.to_string();
+        }
+    }
+    if let (Some(from), Some(to)) = (asking.parent(), header.parent()) {
+        let from: Vec<String> = from
+            .components()
+            .map(|part| part.as_os_str().to_string_lossy().to_string())
+            .collect();
+        let to: Vec<String> = to
+            .components()
+            .map(|part| part.as_os_str().to_string_lossy().to_string())
+            .collect();
+        let shared = from
+            .iter()
+            .zip(&to)
+            .take_while(|(left, right)| left.eq_ignore_ascii_case(right))
+            .count();
+        if shared > 0 {
+            let mut relative: Vec<String> = vec!["..".to_string(); from.len() - shared];
+            relative.extend(to[shared..].iter().cloned());
+            if let Some(file) = header.file_name() {
+                relative.push(file.to_string_lossy().to_string());
+            }
+            let spelled = relative.join("/");
+            if !spelled.is_empty() {
+                return spelled;
+            }
+        }
+    }
+    header_normal
 }
 
 impl CompletionItem {
@@ -145,6 +241,8 @@ impl CompletionItem {
             filter: None,
             fact: Some(fact.clone()),
             replace: SourceRange::new(0, 0),
+            inclusion: None,
+            additional_edits: Vec::new(),
         }
     }
 
@@ -159,6 +257,8 @@ impl CompletionItem {
             filter: None,
             fact: None,
             replace: SourceRange::new(0, 0),
+            inclusion: None,
+            additional_edits: Vec::new(),
         }
     }
 
@@ -173,7 +273,21 @@ impl CompletionItem {
             filter: None,
             fact: None,
             replace: SourceRange::new(0, 0),
+            inclusion: None,
+            additional_edits: Vec::new(),
         }
+    }
+
+    /// **A declaration from a header this file does not include**, with the include that would make it usable.
+    fn unincluded(fact: &DeclFact, file: &Path, inclusion: Inclusion) -> CompletionItem {
+        let mut item = CompletionItem::declared(fact, file);
+        let line = inclusion.line();
+        item.detail = Some(format!(
+            "not included — accepting this adds `{}`",
+            line.trim_end()
+        ));
+        item.inclusion = Some(inclusion);
+        item
     }
 
     fn header(header: &Header) -> CompletionItem {
@@ -187,6 +301,8 @@ impl CompletionItem {
             filter: Some(header.name.clone()),
             fact: None,
             replace: SourceRange::new(0, 0),
+            inclusion: None,
+            additional_edits: Vec::new(),
         }
     }
 }
@@ -331,13 +447,14 @@ pub fn completion_at(
     headers: &HeaderIndex,
     cuda: bool,
     budget: usize,
+    unincluded: &[Unincluded],
 ) -> CompletionSet {
     // The context is this function's first question and the only one read from a tree; a caller that has already read
     // it — `Session::completions`, for the two contexts that live in the **file's** own text rather than in the
     // rendering — hands it over instead of having it asked again of the wrong tree.
     let asked = context_at(root, offset);
     completion_with(
-        index, scopes, root, path, offset, headers, asked, cuda, budget,
+        index, scopes, root, path, offset, headers, asked, cuda, budget, unincluded,
     )
 }
 
@@ -357,6 +474,7 @@ pub fn completion_with(
     context: CompletionContext,
     cuda: bool,
     budget: usize,
+    unincluded: &[Unincluded],
 ) -> CompletionSet {
     // **The measurement window for one completion**, opened here because this is the entry point the feature has:
     // everything below is the query's own work, and the server's log line splits only the outside of it
@@ -371,10 +489,10 @@ pub fn completion_with(
             members(index, scopes, root, path, &access, offset, budget).set
         }
         CompletionContext::Qualified(position) => names(
-            index, scopes, root, path, &position, offset, false, cuda, budget,
+            index, scopes, root, path, &position, offset, false, cuda, budget, unincluded,
         ),
         CompletionContext::Name(position) => names(
-            index, scopes, root, path, &position, offset, true, cuda, budget,
+            index, scopes, root, path, &position, offset, true, cuda, budget, unincluded,
         ),
         CompletionContext::DirectiveName { written, range } => directives(&written, range),
         // **A module name is answered by the session, not here**, and the empty set says so rather than guessing:
@@ -393,7 +511,7 @@ pub fn completion_with(
             // what the program already declares. No keywords and no snippets — a macro's name is an identifier, and
             // a control-flow statement is not one — which is why this goes through the name query only.
             names(
-                index, scopes, root, path, &position, offset, false, cuda, budget,
+                index, scopes, root, path, &position, offset, false, cuda, budget, unincluded,
             )
         }
         CompletionContext::Include {
@@ -1062,6 +1180,7 @@ fn names(
     with_table: bool,
     cuda: bool,
     budget: usize,
+    unincluded: &[Unincluded],
 ) -> CompletionSet {
     let mut scored: Vec<Scored> = Vec::new();
     let mut listed_scope = position.scope.clone();
@@ -1229,6 +1348,37 @@ fn names(
     // non-matching names were carried along; the CUDA arm above has filtered this way from the start.
     if !listed_prefix.is_empty() {
         scored.retain(|one| one.matched != matching::NONE);
+    }
+
+    // **And the names a related header declares but this file cannot see** — offered *with* the include that makes
+    // them usable, which is what an accept has to carry. They are added before the label deduplication, so a name the
+    // file can already see wins over the same name from a header it does not include.
+    if !unincluded.is_empty() {
+        let labels: std::collections::HashSet<String> =
+            scored.iter().map(|one| one.item.label.clone()).collect();
+        for related in unincluded {
+            let Some(summary) = index.summary(&related.file) else {
+                continue;
+            };
+            for fact in &summary.declarations {
+                if fact.kind != DeclKind::Type || labels.contains(&fact.name) {
+                    continue;
+                }
+                let matched = matching::quality(&fact.name, &listed_prefix);
+                if matched == matching::NONE {
+                    continue;
+                }
+                scored.push(Scored {
+                    score: Score::new(Score::UNINCLUDED, Score::kind_penalty(fact.kind)),
+                    matched,
+                    item: CompletionItem::unincluded(
+                        fact,
+                        &related.file,
+                        related.inclusion.clone(),
+                    ),
+                });
+            }
+        }
     }
 
     // **One row per label.** Two arms can offer one name — the index's adaptor and the `std::views` table's fallback for
@@ -1725,6 +1875,9 @@ impl Score {
     const DIRECT_INCLUDE: i32 = 200;
     /// A name from a header reached through another header: the standard library's own, mostly.
     const INDIRECT_INCLUDE: i32 = 300;
+    /// **A name from a header this file does not include** — offered only when it is strongly related, and ranked
+    /// after every name that resolves today, because accepting it also edits the file.
+    const UNINCLUDED: i32 = 400;
 
     fn new(tier: i32, penalty: i32) -> Score {
         Score { tier, penalty }

@@ -5185,3 +5185,58 @@ fn a_type_used_without_its_include_is_reported_and_std_is_not() {
         "`String` is declared outside the workspace, so no include is suggested: {outside:?}"
     );
 }
+
+/// **A name declared in a header beside the file is offered with its `#include`** — the completion half of
+/// `missing-include`.
+///
+/// The reader types `Wid` in `use.cpp`, `Widget` lives in `widget.h` next to it, and the file does not include it. The
+/// item is offered (it is strongly related) **and carries the edit that makes it usable**: accepting it must produce
+/// code that compiles, so the `#include` goes with the name in one accept.
+#[test]
+fn a_name_from_a_nearby_header_is_offered_with_its_include() {
+    let header = "struct Widget { int size; };\n";
+    let source = "void f() {\n    Wid\n}\n";
+    let files = MemoryFiles::new()
+        .with_file("/p/widget.h", header)
+        .with_file("/p/use.cpp", source);
+    let fixture = Memory::new("unincluded-completion", &files);
+    let mut session = fixture.session();
+    session.did_open("/p/use.cpp", source);
+    session.add_project_files([PathBuf::from("/p/widget.h"), PathBuf::from("/p/use.cpp")]);
+    session.index_everything();
+
+    let path = PathBuf::from("/p/use.cpp");
+    let view = session.view_of_the_file(&path).expect("a view");
+    let at = source.find("Wid").expect("the fixture") + "Wid".len();
+    let offered = session.completions(&view, crate::file::coordinates::FileOffset::new(at));
+    let item = offered
+        .items
+        .iter()
+        .find(|item| item.label == "Widget")
+        .unwrap_or_else(|| {
+            panic!(
+                "`Widget` is offered from the header beside the file: {:?}",
+                offered
+                    .items
+                    .iter()
+                    .map(|item| &item.label)
+                    .collect::<Vec<_>>()
+            )
+        });
+    assert_eq!(
+        item.inclusion,
+        Some(crate::completion::Inclusion::Include(
+            "widget.h".to_string()
+        )),
+        "the spelling is the one a compiler searches"
+    );
+    let (range, text) = item
+        .additional_edits
+        .first()
+        .expect("the include is carried as an edit");
+    assert_eq!(text, "#include \"widget.h\"\n");
+    assert_eq!(
+        range.start_offset, 0,
+        "there is no include block, so the edit goes at the top"
+    );
+}

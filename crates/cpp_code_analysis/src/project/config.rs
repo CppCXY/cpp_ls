@@ -681,6 +681,14 @@ pub struct CompletionSection {
     /// a budget of zero would answer "there is nothing here" — a lie with no upside.
     #[serde(default)]
     pub max_items: Option<usize>,
+    /// **Offer names from headers this file does not include**, with the include that makes them usable. Absent means
+    /// on.
+    ///
+    /// Only *strongly related* files are offered — the file's own directory, a `[[library]]` the project names, or a
+    /// header under one of this file's include directories — and the item carries the `#include`/`import` as an
+    /// additional edit, so accepting it compiles. See `missing_include` for the rule the offer matches.
+    #[serde(default)]
+    pub suggest_unincluded: Option<bool>,
 }
 
 /// `[format]` — **where this project's format strings are**, read by the language server.
