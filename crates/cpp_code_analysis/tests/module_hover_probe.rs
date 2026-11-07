@@ -11,6 +11,15 @@
 use std::path::PathBuf;
 use std::time::Instant;
 
+use mimalloc::MiMalloc;
+
+/// **The allocator the server actually runs with.** `cpp_ls` installs mimalloc as its global allocator, and a probe
+/// that measures the same work on the default Windows heap is measuring a different program — the allocation traffic of
+/// a 5 MB cook, a 60 000-fact summary and a scope tree is exactly what the two allocators differ on. The two crates are
+/// already dev-dependencies for this (see `crates/cpp_code_analysis/Cargo.toml`).
+#[global_allocator]
+static GLOBAL: MiMalloc = MiMalloc;
+
 use cpp_code_analysis::{DiskFiles, Known, OpenDocuments, Session, SessionFiles, WatchFilter};
 
 fn project() -> PathBuf {

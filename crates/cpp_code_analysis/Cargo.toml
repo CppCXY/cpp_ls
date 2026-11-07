@@ -33,6 +33,8 @@ serde.workspace = true
 redb.workspace = true
 zstd.workspace = true
 toml.workspace = true
+rustc-hash = "2"
+
 [dev-dependencies]
 # **The memory probe measures the allocator the server actually uses.** `cpp_ls` installs mimalloc as its global
 # allocator, and the question `docs/memory-audit.md` asks — "is the resident set the live tables or pages the

@@ -298,7 +298,7 @@ pub struct MacroTable {
     ///
     /// The index is **not** a second source of truth: `bindings` is the table, this only says where a name's
     /// entries are, and every mutation of one goes through the two methods below.
-    by_name: std::collections::HashMap<Box<str>, Vec<u32>>,
+    by_name: rustc_hash::FxHashMap<Box<str>, Vec<u32>>,
 }
 
 impl MacroTable {

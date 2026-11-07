@@ -74,7 +74,7 @@ use crate::include::IncludeResolver;
 use crate::include::config::CompilerConfig;
 use crate::preprocess::directive::{Directive, SpannedDirective};
 use crate::sema::declarations::{assign_guards, build_facts, mark_settling_macro_facts};
-use crate::sema::scopes::build_scopes;
+use crate::sema::scopes::build_scopes_with;
 use crate::summary::{FactGuard, FileSummary, IncludeFact, MacroFact};
 use crate::summary_codec::DecodeError;
 
@@ -800,7 +800,7 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
             None => &crate::sema::scopes::NoMacroBodies,
         };
         let scoping = std::time::Instant::now();
-        let scopes = { build_scopes(&root, evidence) };
+        let scopes = { build_scopes_with(&root, evidence, keep_locals) };
         let scopes_ms = scoping.elapsed().as_secs_f64() * 1000.0;
         // The diagnostics, as ranges, for the one field a fact takes from them rather than from the tree — see
         // [`DeclFact::clean`]. Collected once for the whole file: the parser reports a handful per file, and

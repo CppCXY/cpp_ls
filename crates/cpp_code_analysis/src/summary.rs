@@ -1176,7 +1176,7 @@ pub struct ClosureEvidence {
 struct UnitState {
     /// What the unit has in force, as **definitions** rather than names — each carrying **where** it was
     /// written, because a definition is only in force from its own line (see [`UnitMacros::lookup`]).
-    definitions: std::collections::HashMap<Box<str>, Binding>,
+    definitions: rustc_hash::FxHashMap<Box<str>, Binding>,
     /// **How many times the set in force has changed** — the clock the walk's branch memo is invalidated by.
     ///
     /// A region's condition is answered *at the offset of the fact that asks*, and that is not bookkeeping: which
@@ -1724,7 +1724,7 @@ fn walk_the_translation_unit<'a>(
 ) -> ClosureEvidence {
     let mut walked = Walked::default();
     let mut unit = UnitState {
-        definitions: std::collections::HashMap::new(),
+        definitions: Default::default(),
         generation: 0,
     };
 
@@ -1998,7 +1998,7 @@ impl TranslationUnit {
             ..Walked::default()
         };
         let mut unit = UnitState {
-            definitions: std::collections::HashMap::new(),
+            definitions: Default::default(),
             generation: 0,
         };
         let mut seen: std::collections::HashSet<&std::path::Path> =
@@ -3912,8 +3912,8 @@ fn walk_one_file<'a>(
     // which is what the generation covers, and only a change to the set in force can make it stale.
     // **Three answers per region**, not two: see the note where it is read. The memo has to hold the third one too,
     // or a region nobody can decide would be remembered as dead on its second fact.
-    let mut decided: std::collections::HashMap<(u32, u32), crate::preprocess::guard::Visibility> =
-        std::collections::HashMap::new();
+    let mut decided: rustc_hash::FxHashMap<(u32, u32), crate::preprocess::guard::Visibility> =
+        Default::default();
     // The generation every answer in `decided` was worked out at. The memo lives *between two changes to the set in
     // force* and nowhere longer, which is what the clearing below says in one line.
     let mut decided_at = unit.generation;

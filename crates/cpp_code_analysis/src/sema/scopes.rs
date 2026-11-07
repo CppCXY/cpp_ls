@@ -75,10 +75,22 @@ pub use cpp_parser::NothingAtAll as NoMacroBodies;
 /// such evidence passes [`NoMacroBodies`] and gets exactly the table this function produced before the parameter
 /// existed.
 pub fn build_scopes(root: &CppSyntaxNode, bodies: &dyn MacroBodies) -> ScopeTree {
+    build_scopes_with(root, bodies, true)
+}
+
+/// **[`build_scopes`] with a choice about function bodies.** A **program**'s reading keeps none: a local is a
+/// name no importer can write, and bodies are about half of the standard library's tree — see `build_facts`,
+/// which drops the same declarations, and `index_tree`, which passes `keep_locals` to both.
+pub fn build_scopes_with(
+    root: &CppSyntaxNode,
+    bodies: &dyn MacroBodies,
+    want_bodies: bool,
+) -> ScopeTree {
     let mut walker = ScopeWalker {
         table: ScopeTree::new(),
         bodies,
-        own: std::collections::HashMap::new(),
+        own: Default::default(),
+        want_bodies,
     };
 
     let file = walker.table.create_scope(
@@ -98,6 +110,8 @@ struct ScopeWalker<'a> {
     /// What the includes say about a macro the file invokes — see [`MacroBodies`], which is
     /// [`cpp_parser::MacroBodies`]: the seam is one trait, in the crate that owns the reader that needs it.
     bodies: &'a dyn MacroBodies,
+    /// **Whether function bodies are entered at all.** See [`build_scopes_with`]: a program's reading does not.
+    want_bodies: bool,
     /// **The file's own `#define`s**, as the walk passes them.
     ///
     /// `bodies` is what the file's **includes** contribute, and a macro a file writes and invokes *itself* is in
@@ -119,7 +133,7 @@ struct ScopeWalker<'a> {
     /// Filled **as the walk passes each directive**, which is what makes it positional for free: a `#define`
     /// below its own use is not in the table yet when that use is read, and that is the language's rule rather
     /// than a coincidence of this implementation.
-    own: std::collections::HashMap<Box<str>, Box<str>>,
+    own: rustc_hash::FxHashMap<Box<str>, Box<str>>,
 }
 
 /// A body reader that answers from the file's **own** `#define`s first, then from what its includes say.
@@ -128,7 +142,7 @@ struct ScopeWalker<'a> {
 /// answer for the other: a name written in this file is in no include, and a name from a header is in no
 /// `#define` of this file. [`ScopeWalker::opened_by_a_body`] used to ask only the second.
 struct OwnAndIncluded<'a> {
-    own: &'a std::collections::HashMap<Box<str>, Box<str>>,
+    own: &'a rustc_hash::FxHashMap<Box<str>, Box<str>>,
     included: &'a dyn MacroBodies,
 }
 
@@ -551,6 +565,11 @@ impl ScopeWalker<'_> {
     /// first time.
     fn descend(&mut self, node: &CppSyntaxNode, scope: ScopeId, body: Body) {
         if cpp_parser::CppCompoundStat::can_cast(node.kind().into()) {
+            // **A program's reading keeps no bodies**: a local is a name no importer can write, and a body is half
+            // of the standard library's tree. See `build_scopes_with`.
+            if !self.want_bodies {
+                return;
+            }
             let inner = self.block(node, scope, body);
             self.items(node, inner);
             return;
