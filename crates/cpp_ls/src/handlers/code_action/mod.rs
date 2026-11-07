@@ -36,6 +36,15 @@ pub async fn on_code_action(
 ) -> RequestOutcome<Vec<CodeActionOrCommand>> {
     let uri = params.text_document.uri;
     let position = params.range.start;
+    // **The names the client is asking about**, from the diagnostics it sent with the request. A `missing-include`
+    // finding underlines the whole declaration while its name is one token inside it, so a lift-arrow pressed anywhere
+    // in that range has to be told which name the finding meant.
+    let wanted: Vec<String> = params
+        .context
+        .diagnostics
+        .iter()
+        .filter_map(named_by_a_diagnostic)
+        .collect();
     // **Where the milliseconds go**, when asked.
     let trace = cpp_code_analysis::probes::code_action();
     let started = std::time::Instant::now();
@@ -56,7 +65,7 @@ pub async fn on_code_action(
             cpp_code_analysis::file::coordinates::FileOffset::new(in_the_file.get()),
         )?;
 
-        let fixes = fixes_of(session, &view, offset);
+        let fixes = fixes_of_named(session, &view, offset, &wanted);
         if trace {
             eprintln!(
                 "[codeAction] file {:?}, rendering {:?}, fixes {:?}, {} action(s)",
@@ -127,6 +136,36 @@ impl<F: FileProvider + Clone> FixContext<'_, F> {
         )
     }
 
+    /// The position just after the file's **last top-level `import`** — or after its module declaration when it has no
+    /// imports, or the top of the file when it has neither.
+    ///
+    /// A module import is not an `#include`: [module.unit] puts the imports after the module declaration, and inserting
+    /// one into the include block (which is what [`FixContext::after_the_includes`] answers) produces a file that does
+    /// not compile.
+    pub fn after_the_module_imports(&self) -> Position {
+        let mut last: Option<usize> = None;
+        for (number, line) in self.view.source.lines().enumerate() {
+            let trimmed = line.trim_start();
+            let imports = trimmed.starts_with("import ") && trimmed.ends_with(';');
+            let declares_a_module = (trimmed.starts_with("module ")
+                || trimmed.starts_with("export module "))
+                && trimmed.ends_with(';');
+            if imports || declares_a_module {
+                last = Some(number);
+            }
+        }
+        match last {
+            Some(number) => Position {
+                line: (number + 1) as u32,
+                character: 0,
+            },
+            None => Position {
+                line: 0,
+                character: 0,
+            },
+        }
+    }
+
     /// The position just after the file's **last** `#include`, or the top of the file when there is none.
     ///
     /// After the last one rather than alphabetically among them: this is a line the user will read, and a new include
@@ -193,30 +232,84 @@ pub fn fixes_of<F: FileProvider + Clone>(
     view: &FileView,
     offset: cpp_code_analysis::file::coordinates::ReadingOffset,
 ) -> Vec<CodeAction> {
+    fixes_of_named(session, view, offset, &[])
+}
+
+/// **[`fixes_of`], with the names a diagnostic asked about** — see [`named_by_a_diagnostic`].
+///
+/// Two sources decide "which name is this about", and neither is enough alone: a cursor in the middle of a declaration
+/// is not on the name, and a client may send no diagnostics at all (a lightbulb with no squiggle in view). A name from
+/// either is a name to offer an include for.
+pub fn fixes_of_named<F: FileProvider + Clone>(
+    session: &Session<F>,
+    view: &FileView,
+    offset: cpp_code_analysis::file::coordinates::ReadingOffset,
+    wanted: &[String],
+) -> Vec<CodeAction> {
     let context = FixContext {
         session,
         view,
         offset,
     };
     let mut fixes = Vec::new();
-    fixes.extend(include_fix(&context));
+    fixes.extend(include_fix(&context, wanted));
     // The next provider is one line: `fixes.extend(expand_macro_fix(&context));`
     fixes
 }
 
-/// **`source.include`: the header that declares the name under the cursor** — offered only when it does not resolve.
+/// **The name a diagnostic is about**, from the `data` this server attached to it.
 ///
-/// This is the action a C++ reader uses more than any other, and it is the reason the framework exists: it needs no
-/// diagnostic to fire, only the index's answer to "which headers declare this spelling", which
-/// [`cpp_code_analysis::ProjectIndex::files_declaring`] already gives with the include-visibility rule.
-fn include_fix<F: FileProvider + Clone>(context: &FixContext<'_, F>) -> Vec<CodeAction> {
-    if context.resolves() {
+/// One rule owns this shape at the moment — `missing-include`, whose finding underlines a whole declaration and names
+/// one type inside it. A diagnostic with no data, or data that is not `{"name": …}`, contributes nothing.
+fn named_by_a_diagnostic(diagnostic: &lsp_types::Diagnostic) -> Option<String> {
+    let data = diagnostic.data.as_ref()?;
+    data.get("name")
+        .and_then(|name| name.as_str())
+        .filter(|name| !name.is_empty())
+        .map(|name| name.to_string())
+}
+
+/// **`source.include`: the header or module that declares a name this file cannot see** — the fix the
+/// `missing-include` finding exists for.
+///
+/// Offered when the name does not resolve here, which includes the cursor case and the diagnostic case: `wanted` carries
+/// the names a `missing-include` finding named (see [`named_by_a_diagnostic`]), and the cursor supplies one when the
+/// client sent no diagnostics.
+///
+/// # The spelling is the one a compiler will find
+///
+/// A header under one of this file's include directories is spelled **relative to that directory** —
+/// `#include "widgets/widget.h"`, not the absolute path the first version wrote, which compiles only on the machine
+/// that produced it and only because the path happens to exist. A header under no include directory falls back to a
+/// path relative to the including file, which is what a quoted `#include` searches first.
+///
+/// # A module is not a header
+///
+/// When the candidate file is a module interface (`.cppm`, or the interface unit of a module), the fix is
+/// `import <name>;` — placed after the module's own declaration and imports rather than in the include block.
+fn include_fix<F: FileProvider + Clone>(
+    context: &FixContext<'_, F>,
+    wanted: &[String],
+) -> Vec<CodeAction> {
+    let mut names: Vec<String> = Vec::new();
+    if !context.resolves()
+        && let Some(name) = context.name_at_the_cursor()
+    {
+        names.push(name.to_string());
+    }
+    for name in wanted {
+        if !names.contains(name)
+            && !matches!(
+                context.session.index().definition(name, &context.view.path),
+                Known::Yes(_)
+            )
+        {
+            names.push(name.clone());
+        }
+    }
+    if names.is_empty() {
         return Vec::new();
     }
-    let Some(name) = context.name_at_the_cursor() else {
-        return Vec::new();
-    };
-    let name = name.to_string();
 
     // **The unfiltered lookup, deliberately.** `files_declaring` is the *visible* set, and a header that is not yet
     // included is exactly the one this fix exists to offer — it would answer nothing for the only case that matters.
@@ -225,28 +318,112 @@ fn include_fix<F: FileProvider + Clone>(context: &FixContext<'_, F>) -> Vec<Code
     // A bounded list: a name declared in fifty headers would be a menu of fifty, which is a different problem from the
     // one this solves. The first few are what a reader picks from.
     const MOST_OFFERED: usize = 5;
-    let at = context.after_the_includes();
+    let include_paths = context.session.config_for(&context.view.path).include_paths;
     let mut offered: Vec<std::path::PathBuf> = Vec::new();
     let mut fixes = Vec::new();
-    for (file, _) in context.session.index().every_fact_named(&name) {
-        if file == context.view.path || offered.contains(&file) {
-            continue;
-        }
-        offered.push(file.clone());
-        if offered.len() > MOST_OFFERED {
-            break;
-        }
-        let header = file.to_string_lossy().replace('\\', "/");
-        if let Some(fix) = context.insert_at(
-            format!("add `#include` for `{name}` from {header}"),
-            CodeActionKind::QUICKFIX,
-            at,
-            format!("#include \"{header}\"\n"),
-        ) {
-            fixes.push(fix);
+    for name in &names {
+        for (file, _) in context.session.index().every_fact_named(name) {
+            if file == context.view.path || offered.contains(&file) {
+                continue;
+            }
+            offered.push(file.clone());
+            if offered.len() > MOST_OFFERED {
+                break;
+            }
+            // **A module interface is imported, not included.** The name it declares is exported, and adding an
+            // `#include` for a `.cppm` would not even compile.
+            if let Some(module) = the_module_of(context, &file) {
+                let at = context.after_the_module_imports();
+                if let Some(fix) = context.insert_at(
+                    format!("add `import {module};` for `{name}`"),
+                    CodeActionKind::QUICKFIX,
+                    at,
+                    format!("import {module};\n"),
+                ) {
+                    fixes.push(fix);
+                }
+                continue;
+            }
+            let spelling = the_include_spelling(&file, &context.view.path, &include_paths);
+            if let Some(fix) = context.insert_at(
+                format!("add `#include \"{spelling}\"` for `{name}`"),
+                CodeActionKind::QUICKFIX,
+                context.after_the_includes(),
+                format!("#include \"{spelling}\"\n"),
+            ) {
+                fixes.push(fix);
+            }
         }
     }
     fixes
+}
+
+/// **The module a file declares**, when it declares one — `report` for `export module report;`.
+///
+/// An implementation unit (`module report;`) counts: importing the module is what brings the declarations the file's
+/// interface exported, and the implementation unit is the file the facts came from in exactly that case.
+fn the_module_of<F: FileProvider + Clone>(
+    context: &FixContext<'_, F>,
+    file: &std::path::Path,
+) -> Option<String> {
+    let summary = context.session.index().summary(file)?;
+    let module = summary.modules.module.as_deref()?;
+    // A file that declares a module but no interface for it — a partition or an implementation unit whose interface
+    // the index does not hold — is still importable by name; the analysis is not in a position to be surer than the
+    // text.
+    (!module.is_empty()).then(|| module.to_string())
+}
+
+/// **How to spell an `#include` for `header` from `asking`**, given this file's include directories.
+///
+/// Relative to an include directory first (that is what `-I` means, and what survives a move of the project), then
+/// relative to the including file, then — only when neither applies — the absolute path, which is a spelling that
+/// compiles on this machine and nowhere else.
+pub fn the_include_spelling(
+    header: &std::path::Path,
+    asking: &std::path::Path,
+    include_paths: &[cpp_code_analysis::include::config::IncludePath],
+) -> String {
+    let header_normal = header.to_string_lossy().replace('\\', "/");
+    for path in include_paths {
+        let directory = path.directory.to_string_lossy().replace('\\', "/");
+        let directory = directory.trim_end_matches('/');
+        if directory.is_empty() {
+            continue;
+        }
+        let with_slash = format!("{directory}/");
+        if let Some(relative) = header_normal.strip_prefix(&with_slash) {
+            return relative.to_string();
+        }
+    }
+    // **Relative to the file**, which is what a quoted include searches first: `../include/widget.h`.
+    if let (Some(from), Some(to)) = (asking.parent(), header.parent()) {
+        let from: Vec<String> = from
+            .components()
+            .map(|part| part.as_os_str().to_string_lossy().to_string())
+            .collect();
+        let to: Vec<String> = to
+            .components()
+            .map(|part| part.as_os_str().to_string_lossy().to_string())
+            .collect();
+        let shared = from
+            .iter()
+            .zip(&to)
+            .take_while(|(left, right)| left.eq_ignore_ascii_case(right))
+            .count();
+        if shared > 0 {
+            let mut relative: Vec<String> = vec!["..".to_string(); from.len() - shared];
+            relative.extend(to[shared..].iter().cloned());
+            if let Some(file) = header.file_name() {
+                relative.push(file.to_string_lossy().to_string());
+            }
+            let spelled = relative.join("/");
+            if !spelled.is_empty() {
+                return spelled;
+            }
+        }
+    }
+    header_normal
 }
 
 pub struct CodeActionCapabilities;
@@ -344,5 +521,88 @@ mod tests {
             .is_empty(),
             "a name that resolves is not a missing include"
         );
+    }
+    /// **The spelling is one a compiler will find** — relative to an include directory, not an absolute path.
+    ///
+    /// The first version wrote the header's absolute path, which compiles on the machine that produced it and only
+    /// because the file happens to exist there. A project's `-I` directory is what a quoted include is resolved against,
+    /// so the fix spells `widgets/widget.h` for a header under `include/`.
+    #[test]
+    fn an_include_is_spelled_relative_to_the_include_directory() {
+        let spelling = the_include_spelling(
+            std::path::Path::new("/p/include/widgets/widget.h"),
+            std::path::Path::new("/p/src/use.cpp"),
+            &[cpp_code_analysis::include::config::IncludePath::user(
+                "/p/include",
+            )],
+        );
+        assert_eq!(spelling, "widgets/widget.h");
+
+        // **With no include directory**, relative to the file — `../include/widgets/widget.h` — which a quoted include
+        // searches before anything else.
+        let relative = the_include_spelling(
+            std::path::Path::new("/p/include/widgets/widget.h"),
+            std::path::Path::new("/p/src/use.cpp"),
+            &[],
+        );
+        assert_eq!(relative, "../include/widgets/widget.h");
+    }
+
+    /// **A module interface is imported, not included** — `import report;`, placed after the module declaration.
+    ///
+    /// The candidate file is a `.cppm`, and `#include "report.cppm"` would not compile. The import goes after the
+    /// module's own line rather than into the include block, which is where [module.unit] puts it.
+    #[test]
+    fn a_module_interface_offers_an_import_and_places_it_after_the_declaration() {
+        let use_cpp = "export module app;\n\nexport void f(Report& report);\n";
+        let mut memory = MemoryFiles::new();
+        memory = memory
+            .with_file(
+                "/p/report.cppm",
+                "export module report;\nexport struct Report {};\n",
+            )
+            .with_file("/p/use.cpp", use_cpp);
+        let session = Session::with_config(
+            "/p",
+            SessionFiles::new(OpenDocuments::new(), memory),
+            WatchFilter::new("/p"),
+            CompilerConfig::default(),
+        );
+        let mut session = session;
+        session.add_project_files([PathBuf::from("/p/report.cppm"), PathBuf::from("/p/use.cpp")]);
+        session.index_everything();
+        let path = PathBuf::from("/p/use.cpp");
+        let held = session.files().held(&path).expect("the file is held");
+        let view =
+            cpp_code_analysis::FileView::parse_with(held, &cpp_parser::MacroEnvironment::default());
+        let at = use_cpp.find("Report").expect("the fixture names it");
+
+        let fixes = fixes_of_named(
+            &session,
+            &view,
+            cpp_code_analysis::file::coordinates::ReadingOffset::new(at),
+            &["Report".to_string()],
+        );
+        let import = fixes
+            .iter()
+            .find(|fix| fix.title.contains("import report"))
+            .unwrap_or_else(|| panic!("an `import report;` is offered: {fixes:?}"));
+        let edit = import
+            .edit
+            .as_ref()
+            .and_then(|edit| edit.document_changes.as_ref())
+            .expect("the action carries an edit");
+        let lsp_types::DocumentChanges::Edits(edits) = edit else {
+            panic!("expected text edits");
+        };
+        let lsp_types::OneOf3::Left(insert) = &edits[0].edits[0] else {
+            panic!("expected a plain text edit");
+        };
+        assert_eq!(
+            insert.range.start.line, 1,
+            "the import goes after `export module app;`, not into an include block: {:?}",
+            insert.range
+        );
+        assert!(insert.new_text.contains("import report;"), "{insert:?}");
     }
 }
