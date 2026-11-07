@@ -145,7 +145,7 @@ pub fn definitions_of<F: FileProvider + Clone>(
                 continue;
             }
             if !wanted.iter().any(|(name, scope)| {
-                fact.name == *name && fact.scope.as_deref() == scope.as_deref()
+                fact.name == *name && the_same_class(fact.scope.as_deref(), scope.as_deref())
             }) {
                 continue;
             }
@@ -159,6 +159,23 @@ pub fn definitions_of<F: FileProvider + Clone>(
         }
     }
     locations
+}
+
+/// **Are these two spellings the same class?** — compared by their last segment, which is the rule this handler already
+/// states for bases and for member scopes.
+///
+/// The comparison used to be an exact one, and it broke the moment a fact's scope stopped being the *written* qualifier:
+/// a definition inside `namespace report` is filed under `report::Report`, while the cursor's own class is read from the
+/// scope tree as the bare name `Report` ({@link the_class_the_cursor_is_in} takes the last word before `::`). Measured
+/// on the reader's project: `report.cpp`'s `add` carried `report::Report`, and the handler answered nothing for it.
+fn the_same_class(left: Option<&str>, right: Option<&str>) -> bool {
+    match (left, right) {
+        (None, None) => true,
+        (Some(left), Some(right)) => {
+            left == right || left.rsplit("::").next() == right.rsplit("::").next()
+        }
+        _ => false,
+    }
 }
 
 /// Does the text at `range` in `path` end with a `}` — that is, is this declaration a definition?
