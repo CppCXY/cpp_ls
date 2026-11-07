@@ -203,6 +203,15 @@ fn check_the_arguments(
             let Some(parameter) = parameters.get(at) else {
                 continue;
             };
+            // **A parameter written as a template parameter accepts anything.** `const _Ty&` for `push_back`, `T&&`,
+            // `_Ty2*`: what each takes is decided by the call, and there is nothing to compare an argument against. The
+            // relation below answers `No` for every such target — it names a type nothing declares — and that refusal
+            // is not this layer's to report. `convert::conversion` has the same rule for the class question, in its
+            // `Unknown` arm; a `No` never reached it.
+            if crate::sema::convert::names_a_template_parameter_for_a_check(parameter) {
+                every_candidate_disagrees = false;
+                break;
+            }
             let target = crate::sema::types::parse_type_spelling(parameter);
             match from.convertible_to(&target) {
                 crate::Known::No => {

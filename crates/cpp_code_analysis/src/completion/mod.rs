@@ -1187,12 +1187,17 @@ fn names(
     let mut listed_prefix = position.written.clone();
     let mut replace = position.range;
     let mut truncated = false;
+    // **A scope was written: `std::`, `ns::`, `Widget::`** — only what that scope holds may be offered. A keyword, a
+    // snippet, a built-in type and a name from elsewhere in the file are all things that cannot follow a `::`; the
+    // earlier code offered them, and the reader saw the `std::` list begin with `case`, `catch`, `class`.
+    let mut inside_a_scope = !position.scope.is_empty();
 
     match crate::index::project::name_completions_at(index, scopes, root, path, offset) {
         Known::Yes(listed) => {
             listed_scope = listed.scope.clone();
             listed_prefix = listed.prefix.clone();
             replace = listed.name_range;
+            inside_a_scope |= !listed_scope.is_empty();
 
             let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
 
@@ -1269,7 +1274,10 @@ fn names(
         }
     }
 
-    if with_table {
+    // **Nothing from the vocabulary table inside a written scope.** A `::` can only be followed by a name that scope
+    // declares, so a keyword, a snippet and a built-in type are all wrong there — and the earlier code offered them,
+    // which is why the `std::` list started with `case`, `catch`, `class`.
+    if with_table && !inside_a_scope {
         let statements = true;
         let in_a_class = in_a_class_body(scopes, offset);
 
@@ -1353,7 +1361,7 @@ fn names(
     // **And the names a related header declares but this file cannot see** — offered *with* the include that makes
     // them usable, which is what an accept has to carry. They are added before the label deduplication, so a name the
     // file can already see wins over the same name from a header it does not include.
-    if !unincluded.is_empty() {
+    if !unincluded.is_empty() && !inside_a_scope {
         let labels: std::collections::HashSet<String> =
             scored.iter().map(|one| one.item.label.clone()).collect();
         for related in unincluded {

@@ -792,6 +792,25 @@ mod tests {
         }
     }
 
+    /// **A half-written name after a `::` is still a qualified context** — the reader typed `std::s` and means the
+    /// names of `std`, which is the shape every editor meets on the second keystroke after `::`. Measured on the
+    /// reader's project: it was read as an ordinary name with **no scope**, and the list that followed was the file's
+    /// own vocabulary (`struct`, `switch`, `scanf`), not `std`'s.
+    #[test]
+    fn a_half_written_name_after_a_scope_is_still_qualified() {
+        let (context, ..) = context_in("void f() { std::s| }\n");
+        match context {
+            CompletionContext::Qualified(position) => {
+                assert_eq!(position.scope, "std", "the scope is written");
+                assert_eq!(
+                    position.written, "s",
+                    "and the name being typed is its tail"
+                );
+            }
+            other => panic!("`std::s` names a scope: {other:?}"),
+        }
+    }
+
     #[test]
     fn a_bare_cursor_is_a_name_context() {
         let (context, ..) = context_in("void f() { int x = | }\n");

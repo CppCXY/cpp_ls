@@ -3930,3 +3930,40 @@ int free_function() { }
         "`int S::f()` and `int free_function()` promise a return and have none: {codes:?}"
     );
 }
+
+/// **A parameter written as a template parameter takes anything, and the relation is not allowed to say otherwise.**
+///
+/// The reader's report, on a real project:
+///
+/// ```text
+/// void Report::add(std::string line) { lines.push_back(std::move(line)); }
+/// this passes `std::move(line)` where `const _Ty&` is declared for `push_back`
+/// ```
+///
+/// `_Ty` is `std::vector`'s own parameter, and what it accepts is decided by the call — there is nothing to compare an
+/// argument against. The relation answered `No` (the target names a type nothing declares), and that refusal is what
+/// the diagnostic was made of; `convert::conversion`'s template-parameter rule sits in the `Unknown` arm and never ran
+/// for a `No`.
+#[test]
+fn a_template_parameter_parameter_is_never_a_mismatch() {
+    let source = "
+namespace std {
+template <class T> T&& move(T& value) noexcept;
+template <class _Ty> class vector {
+public:
+    void push_back(const _Ty& value);
+};
+class string {};
+}
+void f() {
+    std::vector<std::string> lines;
+    std::string line;
+    lines.push_back(std::move(line));
+}
+";
+    assert!(
+        !codes_of(source).contains(&DiagnosticCode::ParamTypeCheck),
+        "`const _Ty&` takes what the call decides: {:?}",
+        codes_of(source)
+    );
+}

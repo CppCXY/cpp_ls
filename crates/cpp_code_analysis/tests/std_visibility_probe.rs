@@ -150,20 +150,32 @@ fn what_the_index_of_std_holds_and_who_can_see_it() {
             .filter(|fact| fact.name.as_str() == "joined" || fact.name.as_str() == "add")
             .map(|fact| format!("{} scope {:?}", fact.name, fact.scope))
             .collect();
-        println!("  {}: {facts:?}", path.file_name().unwrap().to_string_lossy());
+        println!(
+            "  {}: {facts:?}",
+            path.file_name().unwrap().to_string_lossy()
+        );
     }
 
     // **How the list narrows as the reader types** — the same query at each prefix length, with the truncation flag
     // the client uses to decide whether to ask again.
-    for typed in ["std::", "std::s", "std::st", "std::str", "std::string", "std::string_v"] {
+    for typed in [
+        "std::",
+        "std::s",
+        "std::st",
+        "std::str",
+        "std::string",
+        "std::string_v",
+    ] {
         let probe = format!("{text}\nvoid probe_scope() {{\n    {typed}\n}}\n");
         session.did_open(&interface, &probe);
         session.index_everything();
         let view = session.view_of_the_file(&interface).expect("a view");
         let offset = probe.rfind(typed).expect("the prefix") + typed.len();
         let started = std::time::Instant::now();
-        let offered = session
-            .completions(&view, cpp_code_analysis::file::coordinates::FileOffset::new(offset));
+        let offered = session.completions(
+            &view,
+            cpp_code_analysis::file::coordinates::FileOffset::new(offset),
+        );
         println!(
             "  `{typed}`: {} item(s), truncated {}, {:?}",
             offered.items.len(),
@@ -171,6 +183,60 @@ fn what_the_index_of_std_holds_and_who_can_see_it() {
             started.elapsed()
         );
     }
+    // **Are the intrinsics really filed under `std`?** The reader's `std::` list began with `_mm256_*`, which are not
+    // `std` names in any standard.
+    {
+        let holders = session.index().declarations_in("std", &interface);
+        let intrinsics: Vec<&str> = holders
+            .iter()
+            .filter(|declaration| declaration.fact.name.starts_with("_mm"))
+            .map(|declaration| declaration.fact.name.as_str())
+            .take(10)
+            .collect();
+        println!(
+            "  `_mm*` in the index of `std`: {} total, first {:?}",
+            holders
+                .iter()
+                .filter(|declaration| declaration.fact.name.starts_with("_mm"))
+                .count(),
+            intrinsics
+        );
+    }
+
+    // **Which file says they are in `std`?**
+    for (file, fact) in session.index().every_fact_named("_mm_abs_epi16") {
+        println!(
+            "  `_mm_abs_epi16`: {} scope {:?} kind {:?}",
+            file.display(),
+            fact.scope,
+            fact.kind
+        );
+    }
+
+    // **The first items of the empty-prefix `std::` list** — the report is that they are `_mm256_*` intrinsics, which
+    // are not `std` names at all.
+    for typed in ["std::", "std::s"] {
+        let probe = format!("{text}\\nvoid probe_scope() {{\\n    {typed}\\n}}\\n");
+        session.did_open(&interface, &probe);
+        session.index_everything();
+        let view = session.view_of_the_file(&interface).expect("a view");
+        let offset = probe.rfind(typed).expect("the prefix") + typed.len();
+        let offered = session.completions(
+            &view,
+            cpp_code_analysis::file::coordinates::FileOffset::new(offset),
+        );
+        let labels: Vec<String> = offered
+            .items
+            .iter()
+            .take(20)
+            .map(|item| item.label.clone())
+            .collect();
+        println!(
+            "  `{typed}` first 20 (scope {:?}, prefix {:?}): {labels:?}",
+            offered.scope, offered.prefix
+        );
+    }
+
     // **And the completion the reader saw**, for the record.
     let typed = "std::str";
     let probe = format!("{text}\nvoid probe_scope() {{\n    {typed}\n}}\n");
