@@ -1040,6 +1040,41 @@ fn children_a_question_reads(node: &CppSyntaxNode) -> ShapeChildren {
 }
 
 /// Is a node of this kind a shape on its own, with nothing to read from its children?
+/// **Does this declaration carry the body that defines it** — a class body, an enum body, a function body?
+///
+/// Asked of the declaration node the binding was made from. A forward declaration (`struct _Ty;`) has none, and the
+/// distinction is what lets a member query prefer the definition over the earlier declaration of the same name in the
+/// same scope — MSVC's standard library writes both, and the first one in the index is often the empty one.
+fn declares_a_body(root: &CppSyntaxNode, binding: &Binding) -> bool {
+    // The declaration this binding's name sits in: the nearest enclosing `Declaration`/class-like node.
+    let name_range = binding.name_range;
+    let Some(declaration) = root
+        .descendants()
+        .filter(|node| {
+            let range = cpp_parser::source_range(node.text_range());
+            range.start_offset <= name_range.start_offset
+                && range.end_offset() >= name_range.end_offset()
+                && matches!(
+                    CppSyntaxKind::from(node.kind()),
+                    CppSyntaxKind::Declaration
+                        | CppSyntaxKind::TemplateDecl
+                        | CppSyntaxKind::EnumDef
+                )
+        })
+        .min_by_key(|node| {
+            usize::from(node.text_range().end()) - usize::from(node.text_range().start())
+        })
+    else {
+        return false;
+    };
+    declaration.descendants().any(|child| {
+        matches!(
+            CppSyntaxKind::from(child.kind()),
+            CppSyntaxKind::ClassBody | CppSyntaxKind::CompoundStat
+        )
+    })
+}
+
 fn declares_a_shape(kind: CppSyntaxKind) -> bool {
     matches!(
         kind,
@@ -3555,6 +3590,10 @@ fn fact_for(
         // The one field that comes from the diagnostics rather than from the tree — see [`DeclFact::clean`] for
         // what the answer does and does not claim.
         clean: declarations.is_clean(binding.name_range, binding.range),
+        // **A definition, or a declaration that only names the thing** — the difference between `struct _Ty;` and
+        // `struct _Ty { … };`, which MSVC's standard library writes both of. Read from the node: a class body, an
+        // enum body, a function body.
+        definition: declares_a_body(root, binding),
         // Filled in by `assign_guards`, which is the only place that knows where the directives are.
         guard: FactGuard::Unconditional,
     })

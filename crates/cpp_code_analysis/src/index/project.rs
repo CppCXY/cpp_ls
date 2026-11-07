@@ -11811,6 +11811,9 @@ fn fact_from_binding_with(
         // …and whether an importer may, which is the same kind of question about the same position — see
         // [DeclFact::exported]. A buffer's file is very often the module interface unit being edited.
         exported: shapes.exported_at(binding.name_range.start_offset),
+        // **A member is a definition of itself** — this path exists for members, and a class body's members have no
+        // separate forward declaration to be confused with.
+        definition: true,
         range: binding.range,
         name_range: binding.name_range,
         clean: true,
@@ -14490,6 +14493,20 @@ impl ProjectIndex {
                 found
                     .found
                     .retain(|declaration| declaration.fact.kind != DeclKind::Other);
+                // **A definition beats a forward declaration.** `struct _Ty;` in one header and `struct _Ty { … };` in
+                // another are two facts of **one** entity, and a reader sent to the first sees an empty class where the
+                // index holds the whole one. The preference only *chooses*: two definitions still answer `Ambiguous`,
+                // because that is a second entity rather than one declaration written twice.
+                let definitions: Vec<usize> = found
+                    .found
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, declaration)| declaration.fact.definition)
+                    .map(|(at, _)| at)
+                    .collect();
+                if definitions.len() == 1 {
+                    return Known::Yes(found.found.remove(definitions[0]));
+                }
                 match found.found.len() {
                     1 => Known::Yes(found.found.remove(0)),
                     _ => Known::Unknown(UnknownReason::Ambiguous(Box::from(name))),
@@ -14669,10 +14686,16 @@ impl ProjectIndex {
         // two places a reader may want to go. See [`the_same_declaration_in_one_file`] for the conditions.
         let mut distinct: Vec<ProjectDeclaration> = Vec::new();
         for found in certain {
-            if distinct
+            if let Some(at) = distinct
                 .iter()
-                .any(|kept| the_same_declaration_in_one_file(kept, &found))
+                .position(|kept| the_same_declaration_in_one_file(kept, &found))
             {
+                // **A definition beats a forward declaration written earlier in the same file** — the shape MSVC's
+                // standard library uses: `struct _Ty;` near the top of a header and `struct _Ty { … };` further down.
+                // Keeping the first sent a reader, and every query built on `definition`, to the empty one.
+                if found.fact.definition && !distinct[at].fact.definition {
+                    distinct[at] = found;
+                }
                 continue;
             }
             distinct.push(found);
@@ -16434,6 +16457,9 @@ impl ProjectDefinition {
                 // its summary. See [`DeclFact::in_namespace`].
                 in_namespace: None,
                 kind: crate::DeclKind::from_binding_kind(binding.kind),
+                // Unknown here, and harmlessly so: this answer is a **place to jump to**, never a candidate a member
+                // query picks between definitions. See [`DeclFact::definition`].
+                definition: false,
                 // No type, no return type and no bases, because this answer is a *place to jump to* and the binding
                 // it comes from carries none of them: they are facts about the file's text, and the file they
                 // belong to has the summary that holds them. A consumer asking what a name *is* asks the index,

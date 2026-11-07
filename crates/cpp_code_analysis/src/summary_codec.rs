@@ -242,7 +242,7 @@ const MAGIC: &[u8; 8] = b"CPPLSSUM";
 /// text because the macros expand to nothing. A hover on a `UPROPERTY` member and the `ue-specifier` rule both need it,
 /// and neither can recover it from the tree. An entry written before this describes every declaration as unannotated,
 /// which is a wrong answer rather than an old one — the case this number exists for.
-pub const CODEC_VERSION: u32 = 35;
+pub const CODEC_VERSION: u32 = 36;
 
 /// Write a summary as bytes.
 ///
@@ -1200,6 +1200,8 @@ mod tests {
                     // Exported, which is the other half of what a consumer may show: a fact from a module interface
                     // unit that an importer can name.
                     exported: true,
+                    // A round trip that always wrote one value would not notice a decoder that dropped the byte.
+                    definition: true,
                     range: range(10, 20),
                     name_range: range(17, 6),
                     // Both flags' `true` branch here, and the other facts below cover `false` — a round trip that
@@ -1237,6 +1239,8 @@ mod tests {
                     // both fields, which the class above covers the other way round.
                     access: None,
                     exported: false,
+                    // A round trip that always wrote one value would not notice a decoder that dropped the byte.
+                    definition: false,
                     range: range(40, 15),
                     name_range: range(48, 6),
                     local: false,
@@ -1264,6 +1268,8 @@ mod tests {
                     parameter_list: None,
                     access: None,
                     exported: false,
+                    // A round trip that always wrote one value would not notice a decoder that dropped the byte.
+                    definition: false,
                     range: range(60, 8),
                     name_range: range(60, 0),
                     local: false,
@@ -1562,6 +1568,9 @@ fn put_declaration(out: &mut Vec<u8>, fact: &DeclFact) {
         }
         None => put_u8(out, 0),
     }
+    // **The definition flag**, written last so the record grew at its end: the byte that lets a query prefer
+    // `struct _Ty { … };` over an earlier `struct _Ty;` — see [`DeclFact::definition`].
+    put_u8(out, u8::from(fact.definition));
 }
 
 /// Write one macro fact — see [`put_declaration`] for why this is shared.
@@ -1649,6 +1658,8 @@ fn get_declaration(reader: &mut Reader<'_>) -> Result<DeclFact, DecodeError> {
                 })
             }
         },
+        // The last byte of the record — see [`DeclFact::definition`].
+        definition: reader.u8()? != 0,
     })
 }
 
@@ -1772,6 +1783,8 @@ fn a_cooked_reading_round_trips() {
                 guard: FactGuard::Unconditional,
                 access: Some(Access::Public),
                 exported: true,
+                // A round trip that always wrote one value would not notice a decoder that dropped the byte.
+                definition: true,
                 modifiers: crate::DeclModifiers::default(),
                 frees: 0,
                 reflection: Some(crate::summary::ReflectionFact {
@@ -1801,6 +1814,8 @@ fn a_cooked_reading_round_trips() {
                 guard: FactGuard::Unconditional,
                 access: None,
                 exported: false,
+                // A round trip that always wrote one value would not notice a decoder that dropped the byte.
+                definition: false,
                 modifiers: crate::DeclModifiers::default(),
                 frees: 3,
                 reflection: None,

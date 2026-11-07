@@ -449,6 +449,18 @@ pub struct DeclFact {
     /// field **only** to files it reached through an `import`, so an ordinary translation unit's declarations are
     /// unaffected whatever this says.
     pub exported: bool,
+    /// **Is this declaration the one that defines what it names** — a class with a body, a function with a body, an
+    /// `enum` with enumerators?
+    ///
+    /// The dimension the index did not have, and the one that makes MSVC's standard library answer wrongly: a header
+    /// may say `struct _Ty;` in one place and `struct _Ty { … };` in another, and **both are facts with the same name
+    /// and the same scope**. A query that takes the first — `members_of`, `definition` — can take the forward
+    /// declaration, which has no members and no bases, and answer "this class has no member `load`" about a class whose
+    /// definition the index holds.
+    ///
+    /// Read from the declaration's own node at index time: a class-like or enum declaration containing a class body, a
+    /// function whose declaration contains a compound statement.
+    pub definition: bool,
 }
 
 /// Who may name a declaration — see [`DeclFact::access`].

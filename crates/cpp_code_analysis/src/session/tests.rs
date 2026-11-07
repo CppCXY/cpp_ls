@@ -5240,3 +5240,68 @@ fn a_name_from_a_nearby_header_is_offered_with_its_include() {
         "there is no include block, so the edit goes at the top"
     );
 }
+
+/// **A forward declaration does not shadow the definition.**
+///
+/// MSVC's standard library writes both — `struct _Ty;` near the top of a header, `struct _Ty { … };` further down, and
+/// the same name declared in two headers — and the index had no way to tell them apart. A query that took the first
+/// answer sent the reader to an empty class, and every member query built on it answered "that class has nothing in
+/// it" about a class the index holds in full.
+#[test]
+fn a_forward_declaration_does_not_shadow_the_definition() {
+    let header = "struct Widget;\n\nstruct Widget {\n    int size;\n};\n";
+    let source = "#include \"widget.h\"\nvoid f(Widget* widget) { (void)widget; }\n";
+    let files = MemoryFiles::new()
+        .with_file("/p/widget.h", header)
+        .with_file("/p/use.cpp", source);
+    let fixture = Memory::new("forward-declaration", &files);
+    let mut session = fixture.session();
+    session.did_open("/p/use.cpp", source);
+    session.add_project_files([PathBuf::from("/p/widget.h"), PathBuf::from("/p/use.cpp")]);
+    session.index_everything();
+
+    let definition = header.find("struct Widget {").expect("the fixture");
+    match session
+        .index()
+        .definition("Widget", Path::new("/p/use.cpp"))
+    {
+        Known::Yes(found) => {
+            assert_eq!(
+                found.fact.range.start_offset, definition,
+                "the answer is the definition, not the forward declaration written above it"
+            );
+            assert!(found.fact.definition, "and the fact says so");
+        }
+        other => panic!("`Widget` is defined in the header: {other:?}"),
+    }
+
+    // **Across files too** — a forward declaration in one header, the definition in another.
+    let forward = "struct Gadget;\n";
+    let body = "struct Gadget {\n    int size;\n};\n";
+    let files = MemoryFiles::new()
+        .with_file("/p/gadget_forward.h", forward)
+        .with_file("/p/gadget.h", body)
+        .with_file(
+            "/p/use.cpp",
+            "#include \"gadget_forward.h\"\n#include \"gadget.h\"\n",
+        );
+    let fixture = Memory::new("forward-declaration-across-files", &files);
+    let mut session = fixture.session();
+    session.add_project_files([
+        PathBuf::from("/p/gadget_forward.h"),
+        PathBuf::from("/p/gadget.h"),
+        PathBuf::from("/p/use.cpp"),
+    ]);
+    session.index_everything();
+    match session
+        .index()
+        .definition("Gadget", Path::new("/p/use.cpp"))
+    {
+        Known::Yes(found) => assert!(
+            found.file.ends_with("gadget.h") && !found.file.ends_with("gadget_forward.h"),
+            "the definition wins over the forward declaration in another file: {:?}",
+            found.file
+        ),
+        other => panic!("`Gadget` is defined in a header this file includes: {other:?}"),
+    }
+}

@@ -2066,6 +2066,7 @@ mod tests {
             guard: crate::FactGuard::Unconditional,
             access: None,
             exported: false,
+            definition: true,
         };
 
         assert_eq!(
