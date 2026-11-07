@@ -76,7 +76,10 @@ fn why_std_vector_stops_resolving() {
     // **The member list**, which is what a completion after `widgets.` and a hover's detail line are built from.
     let view = session.view_of_the_file(&main).expect("a view of main.cpp");
     match session.members_of(&view, "std::vector") {
-        Known::Yes(members) => println!("members_of(\"std::vector\"): {} member(s)", members.members.len()),
+        Known::Yes(members) => println!(
+            "members_of(\"std::vector\"): {} member(s)",
+            members.members.len()
+        ),
         other => println!("members_of(\"std::vector\"): {other:?}"),
     }
 
@@ -98,25 +101,58 @@ fn why_std_vector_stops_resolving() {
     println!("  distinct files: {}", where_from.len());
     println!(
         "unit_closure_of(\"std\"): {:?}",
-        session.index().unit_closure_of("std").map(|files| files.len())
+        session
+            .index()
+            .unit_closure_of("std")
+            .map(|files| files.len())
     );
     // **Does asking for the file's own units fix it?** The reader's hover asks a query, not a read; if the read is
     // what is missing, this one call tells the two apart.
     let before = Instant::now();
     let read = session.read_the_modules_a_file_imports(&main);
-    println!("read_the_modules_a_file_imports: {read} unit(s) in {:.0} ms", before.elapsed().as_secs_f64() * 1000.0);
+    println!(
+        "read_the_modules_a_file_imports: {read} unit(s) in {:.0} ms",
+        before.elapsed().as_secs_f64() * 1000.0
+    );
     println!(
         "  after the read: definition(\"std::vector\"): {:?}",
         session.index().definition("std::vector", &main).map_debug()
     );
     println!(
         "  after the read: unit_closure_of(\"std\") = {:?}",
-        session.index().unit_closure_of("std").map(|files| files.len())
+        session
+            .index()
+            .unit_closure_of("std")
+            .map(|files| files.len())
     );
     println!(
         "  after the read: declarations_in(\"std\") = {}",
         session.index().declarations_in("std", &main).len()
     );
+
+    // **The candidates behind the ambiguity**, which is what a hover has to choose between.
+    if let Known::Yes(all) = session.index().definitions("std::vector", &main) {
+        for one in all.found.iter().take(8) {
+            println!(
+                "  candidate: pattern {:?} definition {} exported {} file {}",
+                one.fact.pattern,
+                one.fact.definition,
+                one.fact.exported,
+                one.file.file_name().unwrap_or_default().to_string_lossy()
+            );
+        }
+        println!("  candidates: {}", all.found.len());
+    }
+    match session.members_of(
+        &session.view_of_the_file(&main).expect("a view"),
+        "std::vector",
+    ) {
+        Known::Yes(members) => println!(
+            "after the read: members_of = {} member(s)",
+            members.members.len()
+        ),
+        other => println!("after the read: members_of = {other:?}"),
+    }
 
     let config = session.config_for(&main);
     println!(

@@ -183,6 +183,12 @@ async fn apply_buffer(context: &ServerContextSnapshot, path: PathBuf, text: Stri
             // insert, the same work the pump's next slice would do. Its includes stay queued for the pump, so the
             // write lock is held for one file (measured 2-6 ms on `EmmyLuaCodeStyle`), well inside the budget.
             session.advance(1);
+            // **And the module units this file imports are queued now, not on the first hover.** `import std;` reads a
+            // whole program — 223 files and a 1.99 MB rendering, measured at **11 s** cold and **0.3 s** from the
+            // cache — and a request that queues it spends that on the request that asked, so the reader's first hover
+            // answers nothing. Queueing it at open starts the same work while the reader is still moving the cursor;
+            // the pump does the reading. This only names the units.
+            session.queue_the_modules_a_file_imports(&for_session);
         })
         .await;
 

@@ -5305,3 +5305,54 @@ fn a_forward_declaration_does_not_shadow_the_definition() {
         other => panic!("`Gadget` is defined in a header this file includes: {other:?}"),
     }
 }
+
+/// **`std::vector` resolves to its primary definition, not to `Ambiguous`.**
+///
+/// The reader's report was that a hover on `std::vector` in a file that imports `std` answered nothing at all. The
+/// index holds four candidates for that spelling — two forward declarations, the primary template's definition, and
+/// `vector<bool, _Alloc>` — and every one of them is a fact with the same qualified name. Two rules now choose:
+/// the *entity* the spelling names (no pattern, when the spelling writes no template arguments), and a **definition**
+/// over a forward declaration inside that group.
+#[test]
+fn a_class_template_resolves_to_its_primary_definition() {
+    let forward = "template <class _Ty, class _Alloc>\nclass vector;\n";
+    let defining = "template <class _Ty, class _Alloc>\nclass vector {\npublic:\n    void push_back(const _Ty&);\n};\n\
+                    \ntemplate <class _Alloc>\nclass vector<bool, _Alloc> {\npublic:\n    void flip();\n};\n";
+    let source =
+        "#include \"forward.h\"\n#include \"vector.h\"\nvoid f(std::vector<int>* v) { (void)v; }\n";
+    let files = MemoryFiles::new()
+        .with_file("/p/forward.h", forward)
+        .with_file("/p/vector.h", defining)
+        .with_file("/p/use.cpp", source);
+    let fixture = Memory::new("primary-template", &files);
+    let mut session = fixture.session();
+    session.did_open("/p/use.cpp", source);
+    session.add_project_files([
+        PathBuf::from("/p/forward.h"),
+        PathBuf::from("/p/vector.h"),
+        PathBuf::from("/p/use.cpp"),
+    ]);
+    session.index_everything();
+
+    let primary = defining.find("class vector {").expect("the fixture");
+    match session
+        .index()
+        .definition("vector", Path::new("/p/use.cpp"))
+    {
+        Known::Yes(found) => {
+            assert!(
+                found.fact.definition,
+                "a definition, not a forward declaration"
+            );
+            assert_eq!(
+                found.fact.pattern, None,
+                "the primary template, not `vector<bool>`"
+            );
+            assert_eq!(
+                found.fact.range.start_offset, primary,
+                "and its own declaration"
+            );
+        }
+        other => panic!("`vector` has a primary definition in this closure: {other:?}"),
+    }
+}

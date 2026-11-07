@@ -14493,19 +14493,40 @@ impl ProjectIndex {
                 found
                     .found
                     .retain(|declaration| declaration.fact.kind != DeclKind::Other);
-                // **A definition beats a forward declaration.** `struct _Ty;` in one header and `struct _Ty { … };` in
-                // another are two facts of **one** entity, and a reader sent to the first sees an empty class where the
-                // index holds the whole one. The preference only *chooses*: two definitions still answer `Ambiguous`,
-                // because that is a second entity rather than one declaration written twice.
-                let definitions: Vec<usize> = found
-                    .found
+                // **Which *entity* the spelling names.** A class template asked without arguments is the fact with no
+                // pattern; `vector<bool>` is a partial specialization with one. Mixing the two is what made a hover on
+                // `std::vector` answer `Ambiguous` with four candidates listed: two forward declarations, the primary
+                // definition, and `vector<bool, _Alloc>`.
+                let group: Vec<usize> = if !name.contains('<') {
+                    let plain: Vec<usize> = found
+                        .found
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, declaration)| declaration.fact.pattern.is_none())
+                        .map(|(at, _)| at)
+                        .collect();
+                    if plain.is_empty() {
+                        (0..found.found.len()).collect()
+                    } else {
+                        plain
+                    }
+                } else {
+                    (0..found.found.len()).collect()
+                };
+
+                // **And a definition beats a forward declaration inside that group** — `struct _Ty;` beside
+                // `struct _Ty { … };` are two facts of one entity, and a reader sent to the first sees an empty class
+                // where the index holds the whole one. Only one definition in the group chooses; two are two entities.
+                let definitions: Vec<usize> = group
                     .iter()
-                    .enumerate()
-                    .filter(|(_, declaration)| declaration.fact.definition)
-                    .map(|(at, _)| at)
+                    .copied()
+                    .filter(|at| found.found[*at].fact.definition)
                     .collect();
                 if definitions.len() == 1 {
                     return Known::Yes(found.found.remove(definitions[0]));
+                }
+                if group.len() == 1 {
+                    return Known::Yes(found.found.remove(group[0]));
                 }
                 match found.found.len() {
                     1 => Known::Yes(found.found.remove(0)),

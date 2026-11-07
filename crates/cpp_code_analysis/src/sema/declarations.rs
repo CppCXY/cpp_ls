@@ -1039,42 +1039,6 @@ fn children_a_question_reads(node: &CppSyntaxNode) -> ShapeChildren {
     }
 }
 
-/// Is a node of this kind a shape on its own, with nothing to read from its children?
-/// **Does this declaration carry the body that defines it** — a class body, an enum body, a function body?
-///
-/// Asked of the declaration node the binding was made from. A forward declaration (`struct _Ty;`) has none, and the
-/// distinction is what lets a member query prefer the definition over the earlier declaration of the same name in the
-/// same scope — MSVC's standard library writes both, and the first one in the index is often the empty one.
-fn declares_a_body(root: &CppSyntaxNode, binding: &Binding) -> bool {
-    // The declaration this binding's name sits in: the nearest enclosing `Declaration`/class-like node.
-    let name_range = binding.name_range;
-    let Some(declaration) = root
-        .descendants()
-        .filter(|node| {
-            let range = cpp_parser::source_range(node.text_range());
-            range.start_offset <= name_range.start_offset
-                && range.end_offset() >= name_range.end_offset()
-                && matches!(
-                    CppSyntaxKind::from(node.kind()),
-                    CppSyntaxKind::Declaration
-                        | CppSyntaxKind::TemplateDecl
-                        | CppSyntaxKind::EnumDef
-                )
-        })
-        .min_by_key(|node| {
-            usize::from(node.text_range().end()) - usize::from(node.text_range().start())
-        })
-    else {
-        return false;
-    };
-    declaration.descendants().any(|child| {
-        matches!(
-            CppSyntaxKind::from(child.kind()),
-            CppSyntaxKind::ClassBody | CppSyntaxKind::CompoundStat
-        )
-    })
-}
-
 fn declares_a_shape(kind: CppSyntaxKind) -> bool {
     matches!(
         kind,
@@ -3593,7 +3557,7 @@ fn fact_for(
         // **A definition, or a declaration that only names the thing** — the difference between `struct _Ty;` and
         // `struct _Ty { … };`, which MSVC's standard library writes both of. Read from the node: a class body, an
         // enum body, a function body.
-        definition: declares_a_body(root, binding),
+        definition: declarations.declares_a_body(binding.name_range),
         // Filled in by `assign_guards`, which is the only place that knows where the directives are.
         guard: FactGuard::Unconditional,
     })
@@ -4019,6 +3983,9 @@ fn enclosing_namespaces_of(scopes: &ScopeTree, from: ScopeId) -> Option<String> 
 struct Declared {
     range: cpp_parser::SourceRange,
     touched: bool,
+    /// **Does this declaration carry the body that defines it** — a class body, a function body? Read in the same one
+    /// pass, because the question is asked once per fact and a per-fact scan of the tree was measured at minutes.
+    has_body: bool,
 }
 
 /// The declaration nodes of one file, in the form [`DeclFact::clean`]'s question needs them.
@@ -4060,7 +4027,23 @@ impl<'a> Declarations<'a> {
     fn of(root: &CppSyntaxNode, errors: &'a [SourceRange]) -> Self {
         let mut nodes = Vec::new();
 
-        if !errors.is_empty() {
+        // **The bodies, in one pass** — see [`Declared::has_body`]. Collected before the declarations so that each
+        // declaration costs a binary search rather than a walk of its own subtree: the per-fact version of this
+        // question is O(facts × nodes), which on a 1.99 MB unit rendering is minutes of CPU.
+        let mut bodies: Vec<(usize, usize)> = Vec::new();
+        for node in root.descendants() {
+            let kind = CppSyntaxKind::from(node.kind());
+            if matches!(kind, CppSyntaxKind::ClassBody | CppSyntaxKind::CompoundStat) {
+                let range = cpp_parser::source_range(node.text_range());
+                bodies.push((range.start_offset, range.end_offset()));
+            }
+        }
+        bodies.sort_unstable();
+
+        // **Built always**, not only for a file with diagnostics: the body question is asked of every declaration in
+        // every file, and the `touched` answer is the only part that needs the diagnostics (`is_clean`'s rule is
+        // unchanged — a short list is what it reads).
+        {
             for node in root.descendants() {
                 let kind = CppSyntaxKind::from(node.kind());
                 if !crate::scopes::declaring_kinds().contains(&kind) {
@@ -4068,12 +4051,19 @@ impl<'a> Declarations<'a> {
                 }
 
                 let range = cpp_parser::source_range(node.text_range());
+                // A body written **inside** this declaration, not one that merely overlaps it.
+                let start = bodies.partition_point(|(body, _)| *body < range.start_offset);
+                let has_body = bodies[start..]
+                    .iter()
+                    .take_while(|(body, _)| *body < range.end_offset())
+                    .any(|(body, end)| *body >= range.start_offset && *end <= range.end_offset());
                 nodes.push(Declared {
                     range,
                     touched: errors.iter().any(|error| {
                         error.start_offset < range.end_offset()
                             && range.start_offset < error.end_offset()
                     }),
+                    has_body,
                 });
             }
 
@@ -4081,6 +4071,22 @@ impl<'a> Declarations<'a> {
         }
 
         Declarations { nodes, errors }
+    }
+
+    /// **Does the declaration this name was written in carry a body** — a class body, a function body?
+    ///
+    /// The innermost declaration node containing the name, the same rule [`Declarations::is_clean`] uses. The answer is
+    /// what tells `struct _Ty;` from `struct _Ty { … };`, and it is read from the one pass [`Declarations::of`] makes
+    /// rather than from a walk of the tree per fact.
+    fn declares_a_body(&self, name_range: SourceRange) -> bool {
+        match self
+            .nodes
+            .iter()
+            .find(|declared| contains(declared.range, name_range))
+        {
+            Some(declared) => declared.has_body,
+            None => false,
+        }
     }
 
     /// Was the declaration this fact was written in free of diagnostics?
