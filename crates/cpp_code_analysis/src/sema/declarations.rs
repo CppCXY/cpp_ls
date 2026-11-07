@@ -70,8 +70,13 @@ pub fn build_facts(
     preprocessing: &FilePreprocessing,
     root: &CppSyntaxNode,
     errors: &[SourceRange],
+    // **Keep the declarations written inside function bodies.** A per-file reading needs them: the buffer
+    // being edited is read here, and a local is exactly what a completion in its body offers. A *program's*
+    // reading does not: a local of an inline function in a header is a name no importer can write, and nearly
+    // half of the standard library's facts are those locals (measured on `import std;`: 29 067 of 61 337).
+    keep_locals: bool,
 ) -> (Vec<DeclFact>, SummaryGuards) {
-    let file = DeclarationFacts::new(scopes, preprocessing, root, errors);
+    let file = DeclarationFacts::new(scopes, preprocessing, root, errors, keep_locals);
     file.build()
 }
 
@@ -4152,6 +4157,9 @@ struct DeclarationFacts<'a> {
     guards: SummaryGuards,
     /// Every fact, in the order the scopes hold them — sorted by offset once, before the guard sweep.
     facts: Vec<DeclFact>,
+    // **Are the declarations inside function bodies wanted?** See `build_facts`: a per-file reading needs them,
+    // a program's reading does not, and nearly half of the standard library's facts are locals.
+    keep_locals: bool,
 }
 
 impl<'a> DeclarationFacts<'a> {
@@ -4160,8 +4168,10 @@ impl<'a> DeclarationFacts<'a> {
         preprocessing: &'a FilePreprocessing,
         root: &'a CppSyntaxNode,
         errors: &'a [SourceRange],
+        keep_locals: bool,
     ) -> Self {
         DeclarationFacts {
+            keep_locals,
             scopes,
             preprocessing,
             root,
@@ -4176,6 +4186,7 @@ impl<'a> DeclarationFacts<'a> {
         // Destructured so that the walk below holds the inputs and the two outputs as separate bindings: the loop
         // pushes into `facts` while reading `shapes` and `declarations`, which a `&mut self` method could not do.
         let DeclarationFacts {
+            keep_locals,
             scopes,
             preprocessing,
             root,
@@ -4227,6 +4238,13 @@ impl<'a> DeclarationFacts<'a> {
                     scopes.declares_a_local(id),
                 ),
             };
+
+            // **A body's declarations are what a *per-file* reading wants.** A program's reading is read by nobody
+            // who could name them — a local of an inline function in a header is not a name any importer can write —
+            // and they are nearly half of the standard library's facts. See `build_facts`.
+            if local && !keep_locals {
+                continue;
+            }
 
             // **And the namespaces, once per scope rather than once per binding.** Every binding of one scope sits
             // in the same namespaces, and asking per binding was a scan of every scope in the file each time — see
@@ -5251,7 +5269,7 @@ mod tests {
 
         let root = tree.get_red_root();
         let scopes = build_scopes(&root, &crate::NoMacroBodies);
-        let (facts, _) = build_facts(&scopes, &preprocess(source, tree.get_tokens()), &root, &[]);
+        let (facts, _) = build_facts(&scopes, &preprocess(source, tree.get_tokens()), &root, &[], true);
 
         let parameters_of = |name: &str| -> Vec<String> {
             let fact = facts
@@ -5666,6 +5684,7 @@ int Box<int>::Inner::deep = 0;
             &preprocess(source, tree.get_tokens()),
             &root,
             &[],
+            true,
         )
     }
 
@@ -5761,6 +5780,7 @@ public:
                 &preprocess(source, tree.get_tokens()),
                 &root,
                 &errors,
+                true,
             )
             .0,
             errors,

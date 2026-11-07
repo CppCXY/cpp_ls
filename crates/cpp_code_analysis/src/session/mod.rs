@@ -1508,6 +1508,7 @@ impl<F: FileProvider> UnitReadMaterials<F> {
                 // `Unknown`, which is honest but decides nothing, and `#if __has_include(<span>)` is a shape real
                 // headers are full of. See [`Session::render_the_unit`].
                 let search = crate::preprocess::cooked::Search::new(&self.files, &self.config);
+                let cooking = std::time::Instant::now();
                 let mut stream = unit.cook_the_unit(
                     &self.sources,
                     &definitions,
@@ -1515,6 +1516,14 @@ impl<F: FileProvider> UnitReadMaterials<F> {
                     true,
                     Some(&search),
                 );
+                if crate::probes::units() {
+                    eprintln!(
+                        "[unit] cook  {:>6.1} ms  ({} file(s), {} bytes)",
+                        cooking.elapsed().as_secs_f64() * 1000.0,
+                        stream.files.len(),
+                        stream.text.len()
+                    );
+                }
                 // **And the walk's own file list, which is what its key folds.** `files` names only the files that
                 // contributed tokens; a header of nothing but `#define`s writes none, and a rendering that did not
                 // record it could never reproduce the key it is filed under — see `RenderedUnit::walked`.
@@ -9816,7 +9825,7 @@ impl<F: FileProvider + Clone> Session<F> {
             .iter()
             .map(|error| cpp_parser::source_range(error.range))
             .collect();
-        crate::build_facts(&view.scopes, &preprocessing, &view.root, &errors).0
+        crate::build_facts(&view.scopes, &preprocessing, &view.root, &errors, true).0
     }
 
     /// **The declaration's own node**, for a fact that names one — the syntax a rendering needs.
@@ -10115,7 +10124,7 @@ impl<F: FileProvider + Clone> Session<F> {
             .map(|error| cpp_parser::source_range(error.range))
             .collect();
         let (facts, _guards) =
-            crate::build_facts(&view.scopes, &preprocessing, &view.root, &errors);
+            crate::build_facts(&view.scopes, &preprocessing, &view.root, &errors, true);
 
         crate::outline_of(&facts)
     }

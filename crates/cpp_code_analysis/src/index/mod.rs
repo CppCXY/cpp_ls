@@ -299,7 +299,7 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
             .with_cuda(self.config.cuda())
             .with_language(self.config.language_for(path));
         let tree = { CppParser::parse(source, config) };
-        let summary = { self.index_tree(path, source, &tree, key) };
+        let summary = { self.index_tree(path, source, &tree, key, true) };
         // **Destroying the tree is work**, and it is timed because it is not free and not obvious: a file's tree is
         // tens of thousands of green nodes held by `Arc`s, and dropping it walks every one of them. On the 138-file
         // project this was the missing third of the cold index after the shape walk was fixed — the stages summed to
@@ -428,7 +428,7 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
             .with_cuda(self.config.cuda())
             .with_language(self.config.language_for(path));
         let tree = { CppParser::parse(&rendered.text, config) };
-        let mut summary = { self.index_tree(path, &rendered.text, &tree, key) };
+        let mut summary = { self.index_tree(path, &rendered.text, &tree, key, true) };
         let report = { summary.map_into_the_file(rendered) };
 
         // The tree's errors, each asked of the map. `reported_span` answers for a node's whole range — from the first
@@ -642,10 +642,7 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
                 .iter()
                 .map(|at| at.to_string())
                 .collect();
-            let _ = std::fs::write(
-                directory.join("unit.boundaries"),
-                boundaries.join("\n"),
-            );
+            let _ = std::fs::write(directory.join("unit.boundaries"), boundaries.join("\n"));
             let files: Vec<String> = stream
                 .files
                 .iter()
@@ -670,7 +667,20 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
 
         let parsed = parsing.elapsed();
         let indexing = std::time::Instant::now();
-        let summary = { self.index_tree(root, &stream.text, &tree, key) };
+        let summary = { self.index_tree(root, &stream.text, &tree, key, false) };
+        if crate::probes::units() {
+            let locals = summary
+                .declarations
+                .iter()
+                .filter(|fact| fact.local)
+                .count();
+            eprintln!(
+                "[unit] {} fact(s), of which {} local; {} macro(s)",
+                summary.declarations.len(),
+                locals,
+                summary.macros.len()
+            );
+        }
         if crate::probes::units() {
             eprintln!(
                 "[unit] parse {:>6.1} ms  facts {:>6.1} ms  {} file(s), {} byte(s)",
@@ -746,6 +756,9 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
         source: &str,
         tree: &CppSyntaxTree,
         key: SummaryKey,
+        // **Are the declarations inside function bodies wanted?** See `build_facts`: a per-file reading needs them, a
+        // program's reading does not.
+        keep_locals: bool,
     ) -> FileSummary {
         // The text this summary is built from, when `CPPLS_DUMP_RENDERING_DIR` names a directory — the companion of the
         // same hook in [`FileIndexer::index_rendering`], and the only way to see which reading a wrong answer came
@@ -800,7 +813,7 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
 
         let making = std::time::Instant::now();
         let (mut declarations, mut guards) =
-            { build_facts(&scopes, &preprocessing, &root, &errors) };
+            { build_facts(&scopes, &preprocessing, &root, &errors, keep_locals) };
         if crate::probes::units() {
             eprintln!(
                 "[unit]   scopes {:>6.1} ms  facts {:>6.1} ms  ({} fact(s))",

@@ -661,6 +661,7 @@ mod tests {
             &crate::preprocess(source, tree.get_tokens()),
             &root,
             &[],
+            true,
         );
         let fact = facts
             .iter()
