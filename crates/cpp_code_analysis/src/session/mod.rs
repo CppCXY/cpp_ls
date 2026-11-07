@@ -607,6 +607,11 @@ pub struct Session<F: FileProvider = DiskFiles> {
     /// case that makes that concrete: it is not project source and it is not an event anybody wants.
     filter: WatchFilter,
 
+    /// **Whether the walk cache's cross-walk contribution sharing is used.** Off unless the A/B probe
+    /// (`CPPLS_WALK_SHARE`) asks for it: the sharing replays a file's contribution at a position the compiler would
+    /// not, and that drops include edges — measured on `import std;`, `<limits>` lost `<cwchar>` and `<xstddef>`.
+    share_contributions: bool,
+
     /// What the project scan found, so that a configuration change can re-seed from it.
     project: Vec<PathBuf>,
     queue: Work,
@@ -1719,6 +1724,7 @@ impl<F: FileProvider + Clone> Session<F> {
             documents,
             store,
             filter,
+            share_contributions: crate::probes::share(),
             project: project.clone(),
             queue: Work::default(),
             parsed_since_the_last_pass: Vec::new(),
@@ -1976,6 +1982,14 @@ impl<F: FileProvider + Clone> Session<F> {
     /// differ by six orders of magnitude. **How many walk contributions this session's store
     /// holds** — a diagnostic, and the number the sharing test asserts. The table itself is the
     /// store's; see [`crate::index::walk_cache::WalkCache`].
+    /// **Turn the walk cache's cross-walk sharing on or off**, overriding the `CPPLS_WALK_SHARE` probe.
+    ///
+    /// An A/B and a test hook, not a setting: the sharing is off by default because a contribution replayed at another
+    /// walk's position drops include edges — and the test that has to exercise the machinery itself asks for it here.
+    pub fn set_sharing_contributions(&mut self, on: bool) {
+        self.share_contributions = on;
+    }
+
     pub fn walk_contributions_held(&self) -> usize {
         self.store.contributions().held()
     }
@@ -5766,11 +5780,13 @@ impl<F: FileProvider + Clone> Session<F> {
                             },
                             index.macros(),
                             &mut definitions,
-                            // **A/B switch, kept**: `CPPLS_NO_SHARE=1` turns the sharing off so that the same machine,
-                            // the same day and the same entry file can be measured with and without it. Comparing
-                            // against a wall clock from an older build is how a 103 s figure got quoted for a code
-                            // base it no longer described.
-                            !provisional && !crate::probes::no_share(),
+                            // **Off, and this is why.** The sharing replays a file's cached contribution at the position
+                            // it was recorded at in a *different* walk, and a preprocessor's positions are not portable
+                            // between programs: measured on `import std;`, `<limits>` lost its `<cwchar>` and
+                            // `<xstddef>` includes — the second defines the `_MEMBER_CALL_*` macros — so
+                            // `<xtr1common>` was cooked without them and the rendering kept their invocations as text.
+                            // `CPPLS_WALK_SHARE=1` turns it back on for an A/B measurement.
+                            !provisional && self.share_contributions,
                             self.store.contributions(),
                         )
                     });

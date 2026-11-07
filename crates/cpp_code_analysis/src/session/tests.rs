@@ -263,6 +263,9 @@ fn the_sharing_cache_survives_a_restart() {
     // **The run that fills it.**
     let written = {
         let mut session = fixture.session();
+        // The sharing is off by default — see `Session::set_sharing_contributions` — and this test is about the cache
+        // that sharing fills, so it asks for it.
+        session.set_sharing_contributions(true);
         session.did_open("/p/api.h", source);
         session.index_everything();
         session
