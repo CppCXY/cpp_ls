@@ -193,6 +193,32 @@ fn why_std_vector_stops_resolving() {
         );
     }
 
+    // **What `limits` says it includes**, and under which guard — the parent whose two includes are missing from the
+    // frame tree. `cwchar` (line 13) and `xstddef` (line 16) are absent from its children in the walk.
+    if let Some(directory) = session
+        .config_for(&main)
+        .include_paths
+        .iter()
+        .find(|held| held.directory.join("limits").exists())
+    {
+        let path = directory.directory.join("limits");
+        if let Some(summary) = session.index().summary(&path) {
+            for include in &summary.includes {
+                println!(
+                    "  limits include {:?} resolved {:?} at {} guard {:?}",
+                    include.spelling,
+                    include.resolved.as_ref().map(|path| path
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string()),
+                    include.range.start_offset,
+                    include.guard
+                );
+            }
+        }
+    }
+
     let config = session.config_for(&main);
     println!(
         "config: standard {:?}, {} include path(s), {} define(s)",

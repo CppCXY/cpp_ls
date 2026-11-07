@@ -2375,6 +2375,20 @@ impl TranslationUnit {
             state: crate::preprocess::cooked::CookingState::default(),
         };
 
+        // **The frame tree**, when the unit trace is on: what the renderer will walk, in the order it walks it. A
+        // disagreement with cl.exe's `#line` sequence is a disagreement about include order, and this is our half of
+        // that comparison — `cl /E` on the same interface unit is the other, and it costs 0.4 s.
+        if crate::probes::units() && !self.frames.is_empty() {
+            for (index, frame) in self.frames.iter().enumerate() {
+                eprintln!(
+                    "[frame] {index:3} {} parent {:?} at {}",
+                    frame.file.file_name().unwrap_or_default().to_string_lossy(),
+                    frame.parent,
+                    frame.from_in_parent
+                );
+            }
+        }
+
         if !self.frames.is_empty() {
             cook.stitch(0, &mut out);
         }
@@ -2485,7 +2499,8 @@ impl UnitCook<'_> {
         // this is the count that finds the file — **recorded rather than acted on**. See [`RenderedUnit::unbalanced`]
         // for why the text goes in anyway.
         if depth != 0 {
-            out.unbalanced.push(unit.frames[frame as usize].file.clone());
+            out.unbalanced
+                .push(unit.frames[frame as usize].file.clone());
         }
 
         // **`#pragma once`, for a file that has nothing else to carry it.** A file with tokens of its own already has
