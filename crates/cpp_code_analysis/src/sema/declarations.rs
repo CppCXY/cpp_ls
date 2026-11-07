@@ -4018,6 +4018,15 @@ struct Declarations<'a> {
     /// Shortest first, which is what makes the scan below find the **innermost** declaration: the nodes are
     /// nested, so the shortest one containing a name is the one that name was written in.
     nodes: Vec<Declared>,
+    /// **The same declarations sorted by where they start**, for the one question asked once per fact: does the
+    /// declaration this name was written in carry a body?
+    ///
+    /// The list above is sorted by length, which is right for "the innermost" and wrong for a query that has a
+    /// position: scanning it costs one comparison per declaration of the **whole file** — and on a unit rendering that
+    /// is 60 000 declarations against 60 000 facts. This index makes the same question a binary search plus the
+    /// nesting depth: the ancestors of a point are exactly the ranges that start before it and end after it, so
+    /// walking back from the insertion point stops at the innermost one.
+    by_start: Vec<(usize, usize, bool, bool)>, // start, end, has_body, touched
     /// The diagnostics, for the one case the nodes cannot answer.
     errors: &'a [SourceRange],
 }
@@ -4070,7 +4079,25 @@ impl<'a> Declarations<'a> {
             nodes.sort_by_key(|declared| declared.range.length);
         }
 
-        Declarations { nodes, errors }
+        // **The position index**, built from the same list — see [`Declarations::by_start`].
+        let mut by_start: Vec<(usize, usize, bool, bool)> = nodes
+            .iter()
+            .map(|declared| {
+                (
+                    declared.range.start_offset,
+                    declared.range.end_offset(),
+                    declared.has_body,
+                    declared.touched,
+                )
+            })
+            .collect();
+        by_start.sort_unstable_by_key(|(start, _, _, _)| *start);
+
+        Declarations {
+            nodes,
+            by_start,
+            errors,
+        }
     }
 
     /// **Does the declaration this name was written in carry a body** — a class body, a function body?
@@ -4079,14 +4106,32 @@ impl<'a> Declarations<'a> {
     /// what tells `struct _Ty;` from `struct _Ty { … };`, and it is read from the one pass [`Declarations::of`] makes
     /// rather than from a walk of the tree per fact.
     fn declares_a_body(&self, name_range: SourceRange) -> bool {
-        match self
-            .nodes
-            .iter()
-            .find(|declared| contains(declared.range, name_range))
-        {
-            Some(declared) => declared.has_body,
+        // The innermost declaration containing the name: the nearest range that starts at or before it and ends
+        // after it. A preceding sibling cannot match (its range ended before the next one began), so the first
+        // match walking backwards **is** the innermost ancestor.
+        match self.innermost_at(name_range) {
+            Some((has_body, _)) => has_body,
             None => false,
         }
+    }
+
+    /// **The innermost declaration node containing this range**, with the two answers read from it.
+    ///
+    /// The ancestors of a point are exactly the ranges that start before it and end after it, and a preceding
+    /// sibling cannot match (its range ended before the next one began) — so walking back from the insertion point
+    /// stops at the innermost one. `O(log n + depth)` where the linear scans this replaces were `O(declarations)` per
+    /// fact, and a unit rendering has 60 000 of each.
+    fn innermost_at(&self, name_range: SourceRange) -> Option<(bool, bool)> {
+        let at = self
+            .by_start
+            .partition_point(|(start, _, _, _)| *start <= name_range.start_offset);
+        for index in (0..at).rev() {
+            let (_, end, has_body, touched) = self.by_start[index];
+            if end > name_range.start_offset {
+                return Some((has_body, touched));
+            }
+        }
+        None
     }
 
     /// Was the declaration this fact was written in free of diagnostics?
@@ -4100,12 +4145,8 @@ impl<'a> Declarations<'a> {
     /// about. A file with no diagnostics has an empty node list and answers `true` for every fact, which is the
     /// truth and is what the tests that do not care about this field rely on.
     fn is_clean(&self, name_range: SourceRange, own_range: SourceRange) -> bool {
-        match self
-            .nodes
-            .iter()
-            .find(|declared| contains(declared.range, name_range))
-        {
-            Some(declared) => !declared.touched,
+        match self.innermost_at(name_range) {
+            Some((_, touched)) => !touched,
             None => !self.errors.iter().any(|error| overlaps(*error, own_range)),
         }
     }
@@ -4178,6 +4219,7 @@ impl<'a> DeclarationFacts<'a> {
         // the parser keeps as a sibling. One copy per file, not one per declaration.
         let rendered = root.text().to_string();
 
+        let walking = std::time::Instant::now();
         for (index, scope) in scopes.scopes().iter().enumerate() {
             let id = ScopeId(index);
             // **A template parameter list files no declarations, and filing them was expensive in a way that had
@@ -4246,6 +4288,8 @@ impl<'a> DeclarationFacts<'a> {
         // The scope a qualified declaration belongs to is **written in the text**, so the fact is built from the
         // spelling — the class may be declared in a header this file's scope tree has never seen. No binding is added,
         // which keeps the lookup rule the refusal exists for.
+        let walked = walking.elapsed();
+        let qualifying = std::time::Instant::now();
         for (binding, scope, parameters) in qualified_declarations(root) {
             // **The walker may already have filed this declaration, with no scope.** A definition written in the
             // declarator — `std::vector<LuaTokenError> &LuaLexer::GetErrors() { … }` — is bound by the scope walker as a
@@ -4300,6 +4344,13 @@ impl<'a> DeclarationFacts<'a> {
         // **The reflection annotations, from the file text once per file** — `UCLASS(Blueprintable)` and
         // `UPROPERTY(EditAnywhere)` are empty macros, so nothing of them survives into the tree; the specifiers exist
         // only in the text, and a per-declaration read of it would copy the file once per fact.
+        if crate::probes::units() {
+            eprintln!(
+                "[unit]     scopes+facts {:>6.1} ms  qualified {:.1} ms",
+                walked.as_secs_f64() * 1000.0,
+                qualifying.elapsed().as_secs_f64() * 1000.0
+            );
+        }
         fill_the_reflection(root, &rendered, &mut facts);
 
         let mut targets: Vec<(&mut FactGuard, usize)> = facts

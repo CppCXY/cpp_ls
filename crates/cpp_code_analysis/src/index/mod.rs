@@ -630,6 +630,7 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
         // The place to look first is a file whose text does not balance: `RenderedUnit::unbalanced` names them, and
         // that list is the honest starting point. Absorbing it a second time would be exactly the "越走越远的
         // workaround" this milestone exists to delete.
+        let parsing = std::time::Instant::now();
         let tree = {
             // **And where one file's text ends and the next begins**, which is the parser's half of "a scope may not
             // cross a file boundary". `stream` has known it all along — [`crate::RenderedUnit::file_boundaries`] is
@@ -643,7 +644,18 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
             )
         };
 
+        let parsed = parsing.elapsed();
+        let indexing = std::time::Instant::now();
         let summary = { self.index_tree(root, &stream.text, &tree, key) };
+        if crate::probes::units() {
+            eprintln!(
+                "[unit] parse {:>6.1} ms  facts {:>6.1} ms  {} file(s), {} byte(s)",
+                parsed.as_secs_f64() * 1000.0,
+                indexing.elapsed().as_secs_f64() * 1000.0,
+                stream.files.len(),
+                stream.text.len()
+            );
+        }
 
         let mut files: Vec<(std::path::PathBuf, crate::CookedFile)> = stream
             .files
@@ -750,7 +762,9 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
             Some(bodies) => bodies,
             None => &crate::sema::scopes::NoMacroBodies,
         };
+        let scoping = std::time::Instant::now();
         let scopes = { build_scopes(&root, evidence) };
+        let scopes_ms = scoping.elapsed().as_secs_f64() * 1000.0;
         // The diagnostics, as ranges, for the one field a fact takes from them rather than from the tree — see
         // [`DeclFact::clean`]. Collected once for the whole file: the parser reports a handful per file, and
         // asking per declaration would be a scan of the list per fact.
@@ -760,8 +774,17 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
             .map(|error| cpp_parser::source_range(error.range))
             .collect();
 
+        let making = std::time::Instant::now();
         let (mut declarations, mut guards) =
             { build_facts(&scopes, &preprocessing, &root, &errors) };
+        if crate::probes::units() {
+            eprintln!(
+                "[unit]   scopes {:>6.1} ms  facts {:>6.1} ms  ({} fact(s))",
+                scopes_ms,
+                making.elapsed().as_secs_f64() * 1000.0,
+                declarations.len()
+            );
+        }
 
         let mut interner = PathInterner::new(cfg!(windows));
         // **This file's compilation, not the project's** — see `CompilerConfig::for_file`.
