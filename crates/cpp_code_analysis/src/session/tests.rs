@@ -5119,3 +5119,69 @@ fn a_modules_closure_is_visible_to_a_file_that_imports_it() {
         "the class the unit saw is nameable from the importer"
     );
 }
+
+/// **A type this file uses and does not include is reported, with the header it came from** — `missing-include`.
+///
+/// The reader's shape: `Widget` is declared in `widget.h`, and `widget.cpp` uses it without including it — the program
+/// compiles only because another translation unit's include order pulled the header in first. The finding names the
+/// header the code action will add.
+///
+/// **And the standard library is never named**, which is the other half of the rule and the reason it exists at all:
+/// suggesting `<string>` would need the standard library's whole index. The exclusion is mechanical — a candidate must
+/// be under the workspace root — so a header outside it is invisible to this rule without a single name being listed.
+#[test]
+fn a_type_used_without_its_include_is_reported_and_std_is_not() {
+    let header = "struct Widget { int size; };\n";
+    let source = "void grow(Widget* w) { w->size = 1; }\n";
+    let files = MemoryFiles::new()
+        .with_file("/p/widget.h", header)
+        .with_file("/p/widget.cpp", source)
+        // A header **outside** the workspace: the standard library's, or a vendored tree's.
+        .with_file("/opt/sdk/strings.h", "struct String { int size; };\n")
+        // A file that reaches the SDK header, so the index knows the type — and a **different** file that uses it
+        // without including it.
+        .with_file(
+            "/p/other.cpp",
+            "#include \"/opt/sdk/strings.h\"\nvoid g(String* s) { s->size = 2; }\n",
+        )
+        .with_file("/p/uses_string.cpp", "void f(String* s) { s->size = 1; }\n");
+    let fixture = Memory::new("missing-include", &files);
+    let mut session = fixture.session();
+    session.add_project_files([
+        PathBuf::from("/p/widget.h"),
+        PathBuf::from("/p/widget.cpp"),
+        PathBuf::from("/p/other.cpp"),
+        PathBuf::from("/p/uses_string.cpp"),
+    ]);
+    session.want_cooked_reading(Path::new("/p/widget.cpp"));
+    session.want_cooked_reading(Path::new("/p/uses_string.cpp"));
+    session.index_everything();
+
+    let found = session
+        .diagnostics("/p/widget.cpp")
+        .expect("the file reads")
+        .checks;
+    let missing: Vec<&crate::sema::check::Finding> = found
+        .iter()
+        .filter(|finding| finding.code == crate::sema::check::DiagnosticCode::MissingInclude)
+        .collect();
+    assert!(
+        missing
+            .iter()
+            .any(|finding| finding.name == "Widget" && finding.message.contains("widget.h")),
+        "the header that declares `Widget` is named: {found:?}"
+    );
+
+    // **Nothing about the toolchain's own headers** — a type declared outside the workspace is not this rule's to
+    // suggest.
+    let outside = session
+        .diagnostics("/p/uses_string.cpp")
+        .expect("the file reads")
+        .checks;
+    assert!(
+        !outside
+            .iter()
+            .any(|finding| finding.code == crate::sema::check::DiagnosticCode::MissingInclude),
+        "`String` is declared outside the workspace, so no include is suggested: {outside:?}"
+    );
+}

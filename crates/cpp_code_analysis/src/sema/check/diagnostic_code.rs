@@ -73,6 +73,11 @@ pub enum DiagnosticCode {
     /// Separate from [`DiagnosticCode::SyntaxError`] for the reason a reader needs it separate: the file parses
     /// perfectly, and what is missing is a file it named.
     IncludeNotFound,
+    /// **A type this file uses but does not include or import** — see [`super::missing_include`].
+    ///
+    /// The finding a reader turns into a fix: `Widget w;` compiles only because something upstream happened to include
+    /// `widget.h`, and the file should say so itself. The rule never names the standard library — see the module.
+    MissingInclude,
     /// A member reached from somewhere that may not reach it - see [`super::access_invisible`].
     AccessInvisible,
     /// A function declared to return something whose body never returns - see [`super::missing_return`].
@@ -133,7 +138,7 @@ impl DiagnosticCode {
     /// what it says about types, then what it says about a whole body, then the two that are about the reading
     /// rather than the program. A consumer that shows a settings screen, or a test that asserts every rule has a
     /// name and a module, iterates this.
-    pub const ALL: [DiagnosticCode; 34] = [
+    pub const ALL: [DiagnosticCode; 35] = [
         DiagnosticCode::SyntaxError,
         DiagnosticCode::ParamTypeCheck,
         DiagnosticCode::AssignTypeCheck,
@@ -146,6 +151,7 @@ impl DiagnosticCode {
         DiagnosticCode::ReturnTypeMismatch,
         DiagnosticCode::MacroRedefined,
         DiagnosticCode::IncludeNotFound,
+        DiagnosticCode::MissingInclude,
         DiagnosticCode::AccessInvisible,
         DiagnosticCode::MissingReturn,
         DiagnosticCode::AssignmentInCondition,
@@ -189,6 +195,7 @@ impl DiagnosticCode {
             DiagnosticCode::ReturnTypeMismatch => "return-type-mismatch",
             DiagnosticCode::MacroRedefined => "macro-redefined",
             DiagnosticCode::IncludeNotFound => "include-not-found",
+            DiagnosticCode::MissingInclude => "missing-include",
             DiagnosticCode::AccessInvisible => "access-invisible",
             DiagnosticCode::MissingReturn => "missing-return",
             DiagnosticCode::AssignmentInCondition => "assignment-in-condition",
@@ -237,6 +244,9 @@ impl DiagnosticCode {
             // **A name that is not there, a call that cannot be made, a type that does not fit.** These are the
             // language's own complaints: the program will not build.
             DiagnosticCode::IncludeNotFound => RuleSeverity::Error,
+            // A judgement rather than a law: the file compiles while something upstream includes the header, and the
+            // finding says the file should say so itself. The standard library is never named — see the module.
+            DiagnosticCode::MissingInclude => RuleSeverity::Warning,
             DiagnosticCode::ParamTypeCheck => RuleSeverity::Error,
             DiagnosticCode::AssignTypeCheck => RuleSeverity::Error,
             DiagnosticCode::UndefinedField => RuleSeverity::Error,

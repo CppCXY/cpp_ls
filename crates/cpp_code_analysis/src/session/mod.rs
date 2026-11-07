@@ -5365,6 +5365,17 @@ impl<F: FileProvider + Clone> Session<F> {
         for name in config.unknown() {
             log::warn!("`[diagnostics]` names a rule this build does not have: `{name}`");
         }
+        let inside = {
+            let mut inside: Vec<std::path::PathBuf> = vec![self.root.clone()];
+            inside.extend(
+                self.project
+                    .iter()
+                    .filter_map(|file| file.parent().map(std::path::Path::to_path_buf)),
+            );
+            inside.sort();
+            inside.dedup();
+            inside
+        };
         let findings = crate::sema::check::run(crate::sema::check::CheckContext::new(
             key,
             summary,
@@ -5386,6 +5397,11 @@ impl<F: FileProvider + Clone> Session<F> {
                 .unreal
                 .as_ref()
                 .is_some_and(|unreal| unreal.is_on()),
+            // **Which files this project may add an `#include` for** — the workspace root and the directories the
+            // project's own files are in. (The second half is not redundancy: a session over a *virtual* filesystem —
+            // a test, a remote client — has paths that do not start with its root, and the rule must work there too.)
+            // Once `[library]` exists its paths are added here as well. See `CheckContext::inside`.
+            &inside,
         ));
         // Stored, then answered: the next pull of this state is a lookup.
         if let Ok(mut memo) = self.checks_memo.lock() {

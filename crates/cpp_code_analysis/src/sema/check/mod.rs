@@ -118,6 +118,7 @@ mod implicit_bool_conversion;
 pub mod include_not_found;
 mod macro_parentheses;
 pub mod macro_redefined;
+mod missing_include;
 pub mod missing_return;
 pub mod param_type_check;
 pub mod redefinition;
@@ -253,6 +254,13 @@ pub struct CheckContext<'a> {
     /// **Is this project Unreal Engine code?** — the switch that makes the two engine rules run, and the reason they
     /// are not on for an ordinary C++ project: `class Widget` would be reported as a missing `A`/`U`/`F` prefix.
     pub unreal: bool,
+    /// **The directories whose files this project may add an `#include` for** — the workspace root, and (once libraries
+    /// exist) each library's own path.
+    ///
+    /// A check that proposes an edit *into another file's existence* must know which files are the project's: a
+    /// toolchain header, a module unit read for `import std;` and a vendored tree outside the workspace are all in the
+    /// index, and none of them may be suggested — see [`super::missing_include`].
+    pub inside: &'a [std::path::PathBuf],
     findings: Vec<Finding>,
 }
 
@@ -269,6 +277,7 @@ impl<'a> CheckContext<'a> {
         config: CheckConfig,
         language: cpp_parser::features::LanguageConfig,
         unreal: bool,
+        inside: &'a [std::path::PathBuf],
     ) -> Self {
         CheckContext {
             path,
@@ -281,6 +290,7 @@ impl<'a> CheckContext<'a> {
             view,
             language,
             unreal,
+            inside,
             findings: Vec::new(),
         }
     }
@@ -1515,6 +1525,9 @@ pub fn run(context: CheckContext<'_>) -> Vec<Finding> {
     // (`FileDiagnostics::errors`, which `diagnose_file` sends first), and the text-level rules below still run — an
     // include that is not on the search path and a macro redefined are facts about the file whoever could parse it.
     run_check::<include_not_found::IncludeNotFound>(&mut context);
+    // **A type used but not included** — see the module. It runs first because the fix it exists for is a fix, and the
+    // finding is only worth the noise if it can name where the type comes from.
+    run_check::<missing_include::MissingInclude>(&mut context);
     run_check::<macro_redefined::MacroRedefined>(&mut context);
     run_check::<macro_parentheses::MacroParentheses>(&mut context);
     if !context.errors.is_empty() {
