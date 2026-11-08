@@ -572,6 +572,19 @@ fn what_keeps_the_pump_busy() {
             cpp_code_analysis::file::coordinates::FileOffset::new(at),
         );
         let names_took = names_started.elapsed();
+        // **The class tier**, timed on its own: `name_completions` resolves the class a separated definition belongs
+        // to before it lists anything, and that resolution is the same visibility question the completion pays for.
+        let class_started = Instant::now();
+        let class_members = session.members_of(&view, "LSPHandle");
+        let class_took = class_started.elapsed();
+        println!(
+            "members_of(LSPHandle): {} in {:?}",
+            match &class_members {
+                Known::Yes(one) => format!("{} member(s)", one.members.len()),
+                other => format!("{other:?}"),
+            },
+            class_took
+        );
         let members_started = Instant::now();
         let members = session.member_completions(
             &view,
