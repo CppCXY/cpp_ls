@@ -5174,27 +5174,39 @@ pub fn template_parameters_for<'a>(scopes: &'a ScopeTree, fact: &DeclFact) -> Ve
 /// libstdc++'s `emplace_back`. A `#` at the start of a line inside it is the parser's own spelling of "this
 /// declaration was written for two configurations", and it costs one `to_string` of a specifier node per declaration.
 pub fn split_by_a_directive_with(shapes: &DeclarationShapes, binding: &Binding) -> bool {
-    shapes
-        .specifiers_at(the_offset_to_descend_by(binding))
-        .map(|node| node.text().to_string())
-        // **A *conditional* directive, and only a conditional one.** The flag means "the written reading states two
-        // types and cannot know which is live", which is `#if`/`#ifdef`/`#ifndef`/`#elif`/`#else`/`#endif` and nothing
-        // else. The first version asked whether *any* line of the specifier sequence starts with `#`, and a
-        // `#pragma warning(push)` between the type and the name answered yes: measured on MSVC's `<vector>`, whose
-        // rendering — which has every branch resolved — still carried the flag on `emplace_back`, so a hover asked a
-        // second reading for a question the first had already answered.
-        .is_some_and(|text| {
-            text.lines().any(|line| {
-                let Some(directive) = line.trim_start().strip_prefix('#') else {
-                    return false;
-                };
-                let word: &str = directive
-                    .trim_start()
-                    .split(|character: char| !character.is_ascii_alphanumeric())
-                    .next()
-                    .unwrap_or_default();
-                matches!(word, "if" | "ifdef" | "ifndef" | "elif" | "else" | "endif")
-            })
+    // **Asked of the tree, not of the text.** The first version built the whole specifier sequence with
+    // `node.text().to_string()` — one allocation of every specifier of every declaration — to answer a boolean, and
+    // the allocation sampler put it at 2 907 of 22 005 samples on a `import std;` read. A conditional directive is a
+    // **child node** of the sequence, so the question is a scan for one, and the sequence`s own text is never built.
+    let Some(specifiers) = shapes.specifiers_at(the_offset_to_descend_by(binding)) else {
+        return false;
+    };
+    // **A *conditional* directive, and only a conditional one.** The flag means "the written reading states two
+    // types and cannot know which is live", which is `#if`/`#ifdef`/`#ifndef`/`#elif`/`#else`/`#endif` and nothing
+    // else. Asking whether *any* directive is present was wrong: a `#pragma warning(push)` between the type and the
+    // name answered yes — measured on MSVC`s `<vector>`, whose rendering has every branch resolved and still carried
+    // the flag on `emplace_back`, so a hover asked a second reading for a question the first had already answered.
+    use cpp_parser::CppAstNode;
+    specifiers
+        .descendants()
+        .filter_map(cpp_parser::CppPreprocessorDirective::cast)
+        .any(|directive| {
+            let word = directive
+                .syntax()
+                .children_with_tokens()
+                .filter_map(|element| element.into_token())
+                .filter(|token| {
+                    cpp_parser::CppTokenKind::from(token.kind()) != cpp_parser::CppTokenKind::Hash
+                })
+                .find(|token| !token.text().trim().is_empty());
+            let Some(word) = word else {
+                return false;
+            };
+            let word = word.text().to_string();
+            matches!(
+                word.as_str(),
+                "if" | "ifdef" | "ifndef" | "elif" | "else" | "endif"
+            )
         })
 }
 
