@@ -1631,8 +1631,18 @@ fn fill_the_frees(root: &CppSyntaxNode, facts: &mut [crate::DeclFact]) {
     if facts.is_empty() {
         return;
     }
+    // **Only the declarations a fact can ask about.** The map is keyed by the offset a declaration's name starts
+    // at, and the loop below asks only about a *function* fact's name offset — so a declaration no fact covers (a
+    // member of a template parameter list, a nested declarator, an out-of-line definition handled elsewhere) had its
+    // parameter list built for an answer nothing reads. On `import std;` this pass is 13 M of a read's 143 M, and
+    // `the_parameter_names` is the allocation in it: one `Vec` and one `String` per parameter, per declaration.
+    let wanted: std::collections::HashSet<usize> = facts
+        .iter()
+        .filter(|fact| fact.kind == crate::DeclKind::Function)
+        .map(|fact| fact.name_range.start_offset)
+        .collect();
     let mut bodies: std::collections::HashMap<usize, (CppSyntaxNode, Vec<String>)> =
-        std::collections::HashMap::new();
+        std::collections::HashMap::with_capacity(wanted.len());
     use cpp_parser::CppAstNode;
     // **The name and the body of every declaration that has one**, asked of the typed node: `get_name` covers the class, the
     // namespace, the declarator and the constructor's bare declarator, which is the chain four kind comparisons used to spell
@@ -1645,6 +1655,9 @@ fn fill_the_frees(root: &CppSyntaxNode, facts: &mut [crate::DeclFact]) {
             continue;
         };
         let name_start = usize::from(cpp_parser::CppAstToken::get_range(&name).start());
+        if !wanted.contains(&name_start) {
+            continue;
+        }
         let parameters = the_parameter_names(node.syntax());
         bodies.insert(name_start, (body.syntax().clone(), parameters));
     }

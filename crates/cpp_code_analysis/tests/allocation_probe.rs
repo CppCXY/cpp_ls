@@ -20,6 +20,33 @@ use mimalloc::MiMalloc;
 
 struct Counting;
 
+/// **This thread's allocations for the current measurement.** The generation pair is what makes the count honest for a
+/// worker thread the index spawned before `perf::reset()`: a stale generation means "count from here", so a thread's
+/// first mark after a reset carries only its own work.
+thread_local! {
+    static HERE: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, 0)) };
+}
+
+fn allocations_here() -> usize {
+    HERE.with(|cell| cell.get().1)
+}
+
+fn note_here(bytes: usize) {
+    #[cfg(feature = "perf-probe")]
+    {
+        let generation = cpp_code_analysis::perf::generation();
+        HERE.with(|cell| {
+            let (seen, count) = cell.get();
+            cell.set(if seen == generation {
+                (seen, count + 1)
+            } else {
+                (generation, 1)
+            });
+        });
+        cpp_code_analysis::perf::note(bytes);
+    }
+}
+
 static ALLOCATIONS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 static BYTES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
@@ -29,8 +56,7 @@ unsafe impl std::alloc::GlobalAlloc for Counting {
         BYTES.fetch_add(layout.size(), std::sync::atomic::Ordering::Relaxed);
         // **And the library's own counter**, which is what the phase marks read. It exists only with the feature, so
         // a default build has neither the counter nor this call.
-        #[cfg(feature = "perf-probe")]
-        cpp_code_analysis::perf::note(layout.size());
+        note_here(layout.size());
         // SAFETY: the same layout is passed through to the allocator underneath.
         unsafe { MiMalloc.alloc(layout) }
     }
@@ -43,8 +69,7 @@ unsafe impl std::alloc::GlobalAlloc for Counting {
     unsafe fn realloc(&self, ptr: *mut u8, layout: std::alloc::Layout, new_size: usize) -> *mut u8 {
         ALLOCATIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         BYTES.fetch_add(new_size, std::sync::atomic::Ordering::Relaxed);
-        #[cfg(feature = "perf-probe")]
-        cpp_code_analysis::perf::note(new_size);
+        note_here(new_size);
         // SAFETY: forwarded unchanged to the allocator underneath.
         unsafe { MiMalloc.realloc(ptr, layout, new_size) }
     }
@@ -52,8 +77,7 @@ unsafe impl std::alloc::GlobalAlloc for Counting {
     unsafe fn alloc_zeroed(&self, layout: std::alloc::Layout) -> *mut u8 {
         ALLOCATIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         BYTES.fetch_add(layout.size(), std::sync::atomic::Ordering::Relaxed);
-        #[cfg(feature = "perf-probe")]
-        cpp_code_analysis::perf::note(layout.size());
+        note_here(layout.size());
         // SAFETY: forwarded unchanged to the allocator underneath.
         unsafe { MiMalloc.alloc_zeroed(layout) }
     }

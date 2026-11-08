@@ -96,10 +96,22 @@ pub fn per_phase() -> Vec<(&'static str, usize, usize)> {
     out
 }
 
+/// **Which measurement a count belongs to.** `reset` bumps this, and a per-thread counter that sees a stale generation
+/// starts again from zero — which is what makes a **worker thread spawned before the reset** count only its work after
+/// it. Without it, the first mark such a thread records carries everything it did since it started, and the table
+/// over-counts by hundreds of percent (measured: 700 M of labels against a 143 M total).
+pub static GENERATION: AtomicUsize = AtomicUsize::new(0);
+
+/// The generation [`reset`] last started — see [`GENERATION`].
+pub fn generation() -> usize {
+    GENERATION.load(Ordering::Relaxed)
+}
+
 /// Forget everything, for a second measurement in the same process.
 pub fn reset() {
     ALLOCATIONS.store(0, Ordering::Relaxed);
     BYTES.store(0, Ordering::Relaxed);
+    GENERATION.fetch_add(1, Ordering::Relaxed);
     if let Ok(mut held) = MARKS.lock() {
         held.clear();
     }
