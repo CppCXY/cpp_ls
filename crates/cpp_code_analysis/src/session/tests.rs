@@ -5359,3 +5359,90 @@ fn a_class_template_resolves_to_its_primary_definition() {
         other => panic!("`vector` has a primary definition in this closure: {other:?}"),
     }
 }
+
+/// **A class whose name is also its constructor's name is still a class** — the report from use, as a test.
+///
+/// `LSPHandle::RefreshDiagnostic()` in `LSPHandle.cpp`: the qualifier `LSPHandle` names the class *and* its
+/// constructor, so a name lookup answers `Ambiguous` — and the member list then offered the constructor and nothing
+/// else (or nothing at all), which an editor shows as "no completion after `LSPHandle::`". The same shape already broke
+/// a nested class once (`project.rs`'s note on `generator<T>::iterator`: "a completion on such a class offered its
+/// constructor and nothing else"); this is the case a reader meets most often, because a class and its constructor
+/// always share a name.
+///
+/// **The declaration is in the header and the use is in the source**, which is the shape the report is about: the
+/// answer comes through the index rather than from one file's own scopes.
+#[test]
+fn a_class_whose_name_is_also_its_constructor_still_lists_its_members() {
+    const HEADER: &str = "#pragma once\n\
+                          class LSPHandle {\n\
+                          public:\n\
+                          \x20   LSPHandle(int server);\n\
+                          \x20   void RefreshDiagnostic();\n\
+                          \x20   int connected_;\n\
+                          };\n";
+    // **The constructor is defined here too** — and that is the whole of the trigger: its name *is* `LSPHandle`, so
+    // the file itself declares the class's name, and the local-win rule then dropped every header fact with that name.
+    const SOURCE: &str = "#include \"LSPHandle.h\"\n\
+                          LSPHandle::LSPHandle(int server) : connected_(server) {\n\
+                          }\n\
+                          void LSPHandle::RefreshDiagnostic() {\n\
+                          \x20   LSPHandle::RefreshDiagnostic();\n\
+                          }\n";
+    let files = MemoryFiles::new()
+        .with_file("/p/LSPHandle.h", HEADER)
+        .with_file("/p/LSPHandle.cpp", SOURCE);
+    let fixture = Memory::new("a-class-named-like-its-constructor", &files);
+    let mut session = fixture.session();
+    session.did_open("/p/LSPHandle.h", HEADER);
+    session.did_open("/p/LSPHandle.cpp", SOURCE);
+    session.index_everything();
+
+    let view = session
+        .view_of_the_file(std::path::Path::new("/p/LSPHandle.cpp"))
+        .expect("a view of the source");
+    let at = SOURCE
+        .rfind("LSPHandle::RefreshDiagnostic")
+        .expect("the qualified call")
+        + "LSPHandle::".len();
+    let set = session.completions(&view, crate::file::coordinates::FileOffset::new(at));
+    let mut names: Vec<&str> = set.items.iter().map(|item| item.label.as_str()).collect();
+    names.sort_unstable();
+    names.dedup();
+    assert!(
+        names.contains(&"RefreshDiagnostic"),
+        "`LSPHandle::` from a fresh index must offer the class's members; got {} item(s): {:?}",
+        names.len(),
+        names.iter().take(12).collect::<Vec<_>>()
+    );
+
+    // **What the analysis thinks the name *is*** — the reader's own words are "LSPHandle was read as the constructor
+    // itself rather than the class", so the type of the qualifier is the assertion that says which.
+    let qualifier = SOURCE
+        .rfind("LSPHandle::RefreshDiagnostic")
+        .expect("the qualified call")
+        + 3;
+    let typed = session.type_at(
+        &view,
+        crate::file::coordinates::ReadingOffset::new(qualifier),
+    );
+    let shown = format!("{typed:?}");
+    assert!(
+        !shown.contains("LSPHandle(int") && !shown.contains("LSPHandle(int)"),
+        "the qualifier was read as the constructor, not the class: {shown}"
+    );
+
+    // **And after one keystroke**, which is the only state an editor asks the question in.
+    let edited = format!("{SOURCE}// typed\n");
+    session.did_change("/p/LSPHandle.cpp", &edited);
+    session.catch_up(std::path::Path::new("/p/LSPHandle.cpp"));
+    let view = session
+        .view_of_the_file(std::path::Path::new("/p/LSPHandle.cpp"))
+        .expect("a view of the edited source");
+    let set = session.completions(&view, crate::file::coordinates::FileOffset::new(at));
+    let names: Vec<&str> = set.items.iter().map(|item| item.label.as_str()).collect();
+    assert!(
+        names.contains(&"RefreshDiagnostic"),
+        "one keystroke later `LSPHandle::` must still offer the class's members; got {:?}",
+        names.iter().take(12).collect::<Vec<_>>()
+    );
+}

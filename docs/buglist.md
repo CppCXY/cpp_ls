@@ -5,6 +5,36 @@ the machine. Each entry says how it was measured, so the next reader can reprodu
 
 ## Open
 
+### 5. A class can vanish from the index when its own source declares a member of the same name
+
+* **Reported from use, twice.** "你把 `LSPHandle` 识别为了构造函数本身而不是类本身" — completion after `LSPHandle::`
+  stops popping, hover has no type, diagnostics in that file are wrong.
+* **Measured** (`tests/codestyle_probe.rs`, `what_the_analysis_says_about_lsp_handle`, on `E:\EmmyLuaCodeStyle`):
+
+  ```text
+  definition(LSPHandle) = Unknown(Ambiguous("LSPHandle"))
+    candidate: Function scope Some("LSPHandle") in LSPHandle.cpp
+    candidate: Function scope Some("LSPHandle") in lsphandle.h      ← the header's constructor
+  -- and yet the index holds the class:
+    Type scope None in lsphandle.h at 300                           ← every_fact_named finds it
+  ```
+
+  So the class is **in the index and not among the candidates**: `certain_declarations`' "a declaration this file
+  writes wins over one it includes" keeps local facts and same-entity header facts, and `LSPHandle.cpp` writes
+  `LSPHandle::LSPHandle(int)` — a member *in the class's scope* whose name is the class's. The class is at file scope,
+  the constructor at `LSPHandle`'s, and the rule compares files without comparing scopes.
+* **And it is intermittent.** The same probe, same build, a later run answered `Yes(Type … lsphandle.h at 300)`. What
+  differs between the two runs is not established — the project's `.cppls` cache was cold on the first and warm after
+  it, which is the first thing to test (remove the cache, run the probe, repeat with it warm).
+* **What is *not* verified, and must not be claimed.** A candidate fix (keep a candidate whose `scope` differs from
+  every local candidate's) makes the probe answer `Yes(Type)`, but **removing it also leaves the probe answering
+  `Yes(Type)`**, and no fixture built so far fails without it. It is therefore not in the tree. The guard that is in the
+  tree (`index::project::tests::a_member_named_like_its_class_does_not_hide_the_class`) records the contract and passes
+  today.
+* **Next measurement, in order**: (1) cold cache vs warm, twice each, to see whether the *reading served from disk* is
+  what loses the class fact; (2) if cold reproduces, compare the two summaries' facts for `LSPHandle`; (3) only then
+  decide between "the candidate filter is wrong" and "the stored reading is wrong".
+
 ### 4. The macro environment a written view wants is never built by the pump
 
 * **What is missing.** A file's **written** view (`view_of_the_file`) is parsed with the macro bodies its includes

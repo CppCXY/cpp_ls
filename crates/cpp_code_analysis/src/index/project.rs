@@ -14979,6 +14979,21 @@ impl ProjectIndex {
                     || local
                         .iter()
                         .any(|kept| Self::one_entity_declared_twice(kept, found))
+                    // **A name in another scope is another entity.** The rule above is about one name written in one
+                    // scope in two files; applied to every scope at once, a *member* declared here hid the *class* of
+                    // the same name declared in the header. Measured on `LSPHandle.cpp`: `definition("LSPHandle")`
+                    // answered `Ambiguous` between two constructors — the header's and this file's own
+                    // `LSPHandle::LSPHandle(LanguageServer *)` — while the class's `Type` fact, which the index holds
+                    // (`every_fact_named` finds it at `LSPHandle.h:300`), was dropped as "not local". A reader's
+                    // `LSPHandle::RefreshDiagnostic` then resolved its qualifier to a constructor, which is the
+                    // report "`LSPHandle` was read as the constructor itself rather than the class".
+                    //
+                    // The class is at file scope (`scope: None`) and the local constructor is at `LSPHandle`'s, so
+                    // the two are not competing declarations of one entity; keeping the out-of-scope candidate is the
+                    // paragraph above's argument, one level in.
+                    || !local
+                        .iter()
+                        .any(|kept| kept.fact.scope == found.fact.scope)
             });
         }
 
@@ -16790,6 +16805,41 @@ mod tests {
     use crate::index::summarize;
     use crate::symbol::{Known, UnknownReason};
     use std::path::Path;
+
+    /// **A member named like its class does not hide the class** — the reader's report "`LSPHandle` was read as the
+    /// constructor itself rather than the class", as a test at the layer that broke it.
+    ///
+    /// `LSPHandle.cpp` defines `LSPHandle::LSPHandle(int)`, so **this file itself** declares the name `LSPHandle` — in
+    /// the class's scope. The local-win rule then dropped every *other* file's fact with that name as "not local", and
+    /// the class the header declares went with them: `definition("LSPHandle")` was `Ambiguous` between the two
+    /// constructors, and `LSPHandle::RefreshDiagnostic` resolved its qualifier to a constructor. A candidate in a
+    /// different scope is a different entity, which is what the rule says now — and removing that clause makes this
+    /// test fail at the assertion below.
+    #[test]
+    fn a_member_named_like_its_class_does_not_hide_the_class() {
+        let index = index(&[
+            (
+                "/p/LSPHandle.h",
+                "class LSPHandle {\npublic:\n    LSPHandle(int server);\n    void RefreshDiagnostic();\n};\n",
+            ),
+            (
+                "/p/LSPHandle.cpp",
+                "#include \"LSPHandle.h\"\nLSPHandle::LSPHandle(int server) {\n}\n",
+            ),
+        ]);
+
+        let found = index.definition("LSPHandle", Path::new("/p/LSPHandle.cpp"));
+        let Known::Yes(definition) = found else {
+            panic!("the class must resolve, not fall to its constructor: {found:?}");
+        };
+        assert_eq!(
+            definition.fact.kind,
+            crate::DeclKind::Type,
+            "the name `LSPHandle` resolved to {:?} in {}",
+            definition.fact.kind,
+            definition.file.display()
+        );
+    }
 
     fn index(files: &[(&str, &str)]) -> ProjectIndex {
         let mut index = ProjectIndex::new();

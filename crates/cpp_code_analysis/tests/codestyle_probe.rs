@@ -331,3 +331,98 @@ fn the_tree_of_a_constructor_call_declaration() {
     }
     walk(&tree.get_red_root(), 0);
 }
+/// **What the analysis says about `LSPHandle` in `LSPHandle.cpp`** — the reader's report is that the name is read as
+/// the constructor rather than the class, so this prints the answers that say which: the declaration it picks, every
+/// declaration the name has, and the type of the qualifier at a use.
+#[test]
+#[ignore = "a probe, not a test: it prints the analysis's answer about a name in the real project"]
+fn what_the_analysis_says_about_lsp_handle() {
+    let root = project();
+    let file = root
+        .join("CodeFormatServer")
+        .join("src")
+        .join("LSP")
+        .join("LSPHandle.cpp");
+    let text = std::fs::read_to_string(&file).expect("the file reads");
+
+    let mut session = Session::open(
+        root.clone(),
+        SessionFiles::new(OpenDocuments::new(), DiskFiles),
+        WatchFilter::new(&root),
+    );
+    session.index_everything();
+    session.did_open(&file, &text);
+    session.index_everything();
+    session.catch_up(&file);
+
+    println!(
+        "definition(LSPHandle) = {:?}",
+        session.index().definition("LSPHandle", &file)
+    );
+    println!("-- every fact named `LSPHandle`, wherever it is:");
+    for (where_, one) in session.index().every_fact_named("LSPHandle") {
+        println!(
+            "  {:?} scope {:?} type_of {:?} in {} at {}",
+            one.kind,
+            one.scope,
+            one.type_of,
+            where_.file_name().unwrap_or_default().to_string_lossy(),
+            one.range.start_offset
+        );
+    }
+    if let Known::Yes(all) = session.index().definitions("LSPHandle", &file) {
+        for one in &all.found {
+            println!(
+                "  candidate: {:?} scope {:?} type_of {:?} returns {:?} parameters {:?} in {}",
+                one.fact.kind,
+                one.fact.scope,
+                one.fact.type_of,
+                one.fact.returns,
+                one.fact.parameters,
+                one.file.file_name().unwrap_or_default().to_string_lossy()
+            );
+        }
+    }
+
+    let Some(view) = session.view_of_the_file(&file) else {
+        println!("no view of LSPHandle.cpp");
+        return;
+    };
+    let mut from = 0;
+    let mut seen = 0;
+    while let Some(found) = text[from..].find("LSPHandle::") {
+        let start = from + found;
+        from = start + "LSPHandle::".len();
+        seen += 1;
+        if seen > 3 {
+            break;
+        }
+        let at = start + "LSPHandle".len() - 1;
+        println!(
+            "\nLSPHandle:: at {start}: type_at = {:?}",
+            session.type_at(
+                &view,
+                cpp_code_analysis::file::coordinates::ReadingOffset::new(at)
+            )
+        );
+        let end = start + "LSPHandle::".len();
+        let set = session.completions(
+            &view,
+            cpp_code_analysis::file::coordinates::FileOffset::new(end),
+        );
+        println!(
+            "  completions at {end}: {} item(s) {:?}",
+            set.items.len(),
+            set.items
+                .iter()
+                .map(|item| item.label.as_str())
+                .take(8)
+                .collect::<Vec<_>>()
+        );
+        let members = session.member_completions(
+            &view,
+            cpp_code_analysis::file::coordinates::FileOffset::new(end),
+        );
+        println!("  member_completions: {members:?}");
+    }
+}
