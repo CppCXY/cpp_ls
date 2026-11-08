@@ -708,6 +708,15 @@ impl DeclarationShapes {
     /// children are not consecutive: a child's whole subtree comes between it and its next sibling. Two counting
     /// passes put them in order — the order they were collected in, which is start-offset order, which is what the
     /// search assumes.
+    /// # What it costs, and why callers must not rebuild it
+    ///
+    /// One pass over every node of the tree. Measured on `import std;` with `perf-probe` marks placed around this
+    /// function: **24.9 M allocations** between them — about a fifth of the whole read's 143 M — while the indexer
+    /// itself calls it only once per file plus once for the unit. The rest are query paths that hold a `root` and no
+    /// table: `declared_type_of`, `declared_alias_target`, `declared_returns_of`, `declared_template_parameters`,
+    /// `declared_parameter_defaults` and `declared_bases_of` each build a fresh `DeclarationShapes::of(root)` per call.
+    /// A caller that has one — `semantic` keeps it in its view — should pass the `_with` variant instead, and a
+    /// refactor that gives those helpers a table to borrow is the next step this number buys.
     pub fn of(root: &CppSyntaxNode) -> Self {
         use cpp_parser::CppAstNode;
         let mut shapes: Vec<Shape> = Vec::new();
