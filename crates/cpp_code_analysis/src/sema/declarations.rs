@@ -715,8 +715,13 @@ impl DeclarationShapes {
     /// itself calls it only once per file plus once for the unit. The rest are query paths that hold a `root` and no
     /// table: `declared_type_of`, `declared_alias_target`, `declared_returns_of`, `declared_template_parameters`,
     /// `declared_parameter_defaults` and `declared_bases_of` each build a fresh `DeclarationShapes::of(root)` per call.
-    /// A caller that has one — `semantic` keeps it in its view — should pass the `_with` variant instead, and a
-    /// refactor that gives those helpers a table to borrow is the next step this number buys.
+    /// A caller that has one — `semantic` keeps it in its view — should pass the `_with` variant instead.
+    ///
+    /// **Where the calls are is not where one would guess.** Hoisting `NamedDeclaration::Here`'s three rebuilds in
+    /// `index::project` into one was tried and measured: the read changed by **−340 allocations**, because that arm
+    /// resolves declarations in the **open buffer** and a program read resolves almost nothing there. So the 24.9 M is
+    /// not those query paths — it is the per-view and per-file work of the refinement layer, and a table owned by the
+    /// view (or by whatever holds the tree for a pass) is the shape the next attempt should take.
     pub fn of(root: &CppSyntaxNode) -> Self {
         use cpp_parser::CppAstNode;
         let mut shapes: Vec<Shape> = Vec::new();
