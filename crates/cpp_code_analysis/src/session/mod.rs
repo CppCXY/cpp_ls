@@ -1509,6 +1509,8 @@ impl<F: FileProvider> UnitReadMaterials<F> {
                 // headers are full of. See [`Session::render_the_unit`].
                 let search = crate::preprocess::cooked::Search::new(&self.files, &self.config);
                 let cooking = std::time::Instant::now();
+                #[cfg(feature = "perf-probe")]
+                crate::perf::mark("before the cook");
                 let mut stream = unit.cook_the_unit(
                     &self.sources,
                     &definitions,
@@ -1516,6 +1518,8 @@ impl<F: FileProvider> UnitReadMaterials<F> {
                     true,
                     Some(&search),
                 );
+                #[cfg(feature = "perf-probe")]
+                crate::perf::mark("cook");
                 if crate::probes::units() {
                     eprintln!(
                         "[unit] cook  {:>6.1} ms  ({} file(s), {} bytes)",
@@ -3631,7 +3635,10 @@ impl<F: FileProvider + Clone> Session<F> {
             return None;
         };
         self.units_read.insert(queue_key(root));
-        Some(self.commit_a_unit_reading(prepared))
+        let committed = self.commit_a_unit_reading(prepared);
+        #[cfg(feature = "perf-probe")]
+        crate::perf::mark("commit");
+        Some(committed)
     }
 
     /// **Work out the expensive half of a drain, holding nothing but `&self`.**
@@ -5744,6 +5751,8 @@ impl<F: FileProvider + Clone> Session<F> {
                 // unit walk need `&mut self`, and `&mut self` is what put the walk inside the writer. A lock of its
                 // own is enough — the walk is the only thing that ever holds it for long.
                 let mut definitions = self.held_definitions();
+                #[cfg(feature = "perf-probe")]
+                crate::perf::mark("definitions");
 
                 // **Has this exact closure been walked already in this run?** A `TranslationUnit` is a function of
                 // its closure's content and the context, so two roots that agree on both have the same timeline and
@@ -5758,6 +5767,8 @@ impl<F: FileProvider + Clone> Session<F> {
                     .and_then(|mut held| held.get(&identity).cloned());
 
                 let (unit, provisional) = if let Some(shared) = shared {
+                    #[cfg(feature = "perf-probe")]
+                    crate::perf::mark("walk");
                     // A shared timeline is never provisional: only a finished walk is ever stored, for the same
                     // reason the disk entry refuses a provisional one.
                     self.note_a_unit(Which::FromMemory);
@@ -6539,6 +6550,8 @@ impl<F: FileProvider + Clone> Session<F> {
     /// **Put what [`Session::prepare_a_unit_reading`] worked out into the index** — one `insert_cooked` per file, and
     /// the only part of a unit read that needs `&mut self`.
     pub fn commit_a_unit_reading(&mut self, prepared: PreparedUnitReading) -> UnitReading {
+        #[cfg(feature = "perf-probe")]
+        crate::perf::mark("before the commit");
         let PreparedUnitReading {
             root,
             program,

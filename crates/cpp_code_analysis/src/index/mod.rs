@@ -666,8 +666,12 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
         };
 
         let parsed = parsing.elapsed();
+        #[cfg(feature = "perf-probe")]
+        crate::perf::mark("parse");
         let indexing = std::time::Instant::now();
         let summary = { self.index_tree(root, &stream.text, &tree, key, false) };
+        #[cfg(feature = "perf-probe")]
+        crate::perf::mark("index_tree");
         if crate::probes::units() {
             eprintln!(
                 "[unit] parse {:>6.1} ms  facts {:>6.1} ms  {} file(s), {} byte(s)",
@@ -693,6 +697,8 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
             &mut files,
             &mut unplaced,
         );
+        #[cfg(feature = "perf-probe")]
+        crate::perf::mark("files");
 
         // **One entry per file, however many times the walk entered it.** A preprocessor re-reads an included file
         // every time it is included — `bits/version.h` is the shape, unguarded and included by every libstdc++

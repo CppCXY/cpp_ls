@@ -36,6 +36,12 @@ toml.workspace = true
 rustc-hash = "2"
 smol_str = "0.2"
 
+[features]
+# **The performance probe's observation points.** Off by default and **not compiled** when off: the marks in the
+# read are `#[cfg(feature = "perf-probe")]`, so the default build has no counter, no atomic and no branch on the path a
+# reader's keystroke takes. On, it lets `tests/allocation_probe.rs` split one read's allocations by phase.
+perf-probe = []
+
 [dev-dependencies]
 # **The memory probe measures the allocator the server actually uses.** `cpp_ls` installs mimalloc as its global
 # allocator, and the question `docs/memory-audit.md` asks — "is the resident set the live tables or pages the

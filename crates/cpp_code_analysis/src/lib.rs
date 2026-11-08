@@ -77,6 +77,9 @@ pub mod inlay;
 pub mod memory;
 pub mod preprocess;
 pub mod probes;
+/// **Where a read's allocations go**, when the `perf-probe` feature is on — see the module.
+#[cfg(feature = "perf-probe")]
+pub mod perf;
 pub mod project;
 pub mod sema;
 pub mod semantic;

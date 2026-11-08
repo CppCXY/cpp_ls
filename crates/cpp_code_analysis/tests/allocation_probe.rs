@@ -1,9 +1,10 @@
-//! **How many allocations a program reading makes** — the deterministic half of the performance measurements.
+//! **How many allocations a program reading makes, and — with `perf-probe` — which phase makes them.**
 //!
 //! ```text
 //! Remove-Item C:\Users\zc\Desktop\cpp_modules\.cppls\cache.redb
 //! $env:CPPLS_MODULES_PROJECT = "C:\Users\zc\Desktop\cpp_modules"
 //! cargo test --release -p cpp_code_analysis --test allocation_probe -- --ignored --nocapture
+//! cargo test --release -p cpp_code_analysis --features perf-probe --test allocation_probe -- --ignored --nocapture
 //! ```
 //!
 //! Separate from `module_hover_probe` on purpose: the counter wraps the allocator, and two atomics per allocation cost
@@ -26,6 +27,10 @@ unsafe impl std::alloc::GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
         ALLOCATIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         BYTES.fetch_add(layout.size(), std::sync::atomic::Ordering::Relaxed);
+        // **And the library's own counter**, which is what the phase marks read. It exists only with the feature, so
+        // a default build has neither the counter nor this call.
+        #[cfg(feature = "perf-probe")]
+        cpp_code_analysis::perf::note(layout.size());
         // SAFETY: the same layout is passed through to the allocator underneath.
         unsafe { MiMalloc.alloc(layout) }
     }
@@ -38,6 +43,8 @@ unsafe impl std::alloc::GlobalAlloc for Counting {
     unsafe fn realloc(&self, ptr: *mut u8, layout: std::alloc::Layout, new_size: usize) -> *mut u8 {
         ALLOCATIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         BYTES.fetch_add(new_size, std::sync::atomic::Ordering::Relaxed);
+        #[cfg(feature = "perf-probe")]
+        cpp_code_analysis::perf::note(new_size);
         // SAFETY: forwarded unchanged to the allocator underneath.
         unsafe { MiMalloc.realloc(ptr, layout, new_size) }
     }
@@ -45,6 +52,8 @@ unsafe impl std::alloc::GlobalAlloc for Counting {
     unsafe fn alloc_zeroed(&self, layout: std::alloc::Layout) -> *mut u8 {
         ALLOCATIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         BYTES.fetch_add(layout.size(), std::sync::atomic::Ordering::Relaxed);
+        #[cfg(feature = "perf-probe")]
+        cpp_code_analysis::perf::note(layout.size());
         // SAFETY: forwarded unchanged to the allocator underneath.
         unsafe { MiMalloc.alloc_zeroed(layout) }
     }
@@ -81,6 +90,9 @@ fn a_program_read_allocates() {
     session.did_open(&main, &text);
     session.index_everything();
 
+    // The measurement starts here: whatever the project scan did is not the read.
+    #[cfg(feature = "perf-probe")]
+    cpp_code_analysis::perf::reset();
     let allocations = ALLOCATIONS.load(std::sync::atomic::Ordering::Relaxed);
     let bytes = BYTES.load(std::sync::atomic::Ordering::Relaxed);
     let read = session.read_the_modules_a_file_imports(&main);
@@ -92,4 +104,15 @@ fn a_program_read_allocates() {
         "bytes: {bytes} ({:.1} MB)",
         bytes as f64 / (1024.0 * 1024.0)
     );
+
+    #[cfg(feature = "perf-probe")]
+    {
+        println!("per phase:");
+        for (label, allocations, bytes) in cpp_code_analysis::perf::per_phase() {
+            println!(
+                "  {label:<20} {allocations:>12}  {:>7.1} MB",
+                bytes as f64 / (1024.0 * 1024.0)
+            );
+        }
+    }
 }
