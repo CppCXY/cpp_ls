@@ -28,42 +28,52 @@ the machine. Each entry says how it was measured, so the next reader can reprodu
   `written_list` or `argument_types` is empty for this call. The next step is one print of those four values at that
   site, then the fix follows from which one it is.
 
-### 2. Editing a file freezes the file — and the freeze is *not* where the cost was assumed to be
+### 2. Editing a file freezes the file — and the library is *not* where the time goes
 
 * **Reported from use.** "只要我编辑代码，当前文件就会有较长时间的卡死".
-* **What the session costs, measured** (`tests/keystroke_probe.rs`, `--release`, on `E:\EmmyLuaCodeStyle`,
-  `CodeFormat/src/CodeFormat.cpp`, one project file added so the compile database resolves the closure):
+* **What a keystroke costs at the library level, measured** (`--release`, `E:\EmmyLuaCodeStyle`,
+  `CodeFormatCLib/src/CodeFormat.cpp`, in the setup that resolves the project — the one `tests/codestyle_probe.rs` uses,
+  where `members_of(LuaParser)` answers 71 members):
 
   ```text
-  the session settled                996 ms
-  didOpen + the file's re-read       179 ms   192 534 fact(s), 1 unit   ← the real closure, read once
-  10 body keystrokes                 7 / 8 / 9 ms (min/median/max)     1 file walked, read as the program
-  10 directive keystrokes            165 / 168 / 175 ms               11 files walked, walked again
+  the project read                    1.70 s
+  the file's rendering                0.01 MB, 1 422 token(s)                ← the file's own text, no closure spliced
+  the first view                      1.7 ms
+  a body keystroke, 5x   the pump     7.2 / 8.6 / 6.8 / 9.0 / 7.5 ms          read as the program, every time
+                         catch_up     7–10 µs
+                         a fresh view 1.4 / 1.4 / 1.5 / 1.4 / 1.9 ms
   ```
 
-* **So the assumption this entry used to carry was wrong.** A **body** keystroke does *not* re-read the whole
-  expansion: the units table re-walks the edited file and reuses the rest (1 file walked, 8 ms). A **directive**
-  keystroke does re-walk (11 files, 168 ms) — that is 20× — and is the half of the architecture's order
-  (`directives → unit → parse`) that pays.
-* **What is therefore unexplained.** The reported freeze is not the session's first step of a body edit, so it is one of:
-  the rest of what a handler does around a change (`Session::catch_up`, which the handlers call and this probe does
-  not), the request path a client fires *after* a keystroke (pull diagnostics — `handlers::diagnostic::diagnose_file`
-  takes a write hold, semantic tokens, inlay hints), or the client side. That is the next measurement, and it is why
-  the split below is **not** being built on the strength of this entry alone.
-* **The shape of the fix** the reader proposed is still right for the *other* two costs — the first read of a file
-  (179 ms of whole-closure cook + parse + index before the file's own answers exist) and the background program read
-  (the multi-second burn): one file is three artifacts, not one — the **include region's tree** (rarely changes), the
-  **file's own region's tree** (changes on every edit), and the file's **lex stream** (already exists, and is what a
-  keystroke's queries mostly need). See [`parse-architecture.md`](parse-architecture.md).
-* **Progress.** The parser now parses a **token range**, not only a whole text
-  (`CppParser::parse_tokens`, step 1 of that document, four properties pinned in `tests/token_range.rs`). What is left is
-  the reader's side: the stitcher hands over each region's token range, and the queries are rebuilt on the own region.
+* **Three assumptions this entry used to carry are now false, and the measurements say why:**
+  1. *"An edit reparses the whole expansion."* There is no expansion to reparse for an `#include` file: its rendering is
+     its own text (1 422 tokens), and cross-file answers come from the **project index**, not from a spliced stream. The
+     5 MB stitched stream this project has measured before is the **`import std;` program read** — the modules path,
+     which is real work but is not what typing in `CodeFormat.cpp` does.
+  2. *"A keystroke costs the whole re-read."* A body keystroke costs **~9 ms** in the pump and 1.4 ms for the view, and
+     the view cache absorbs the repeats. (`tests/keystroke_probe.rs`: 10 body keystrokes, 7/8/9 ms, one file walked.)
+  3. *"The first read is the closure."* `didOpen` + one pump step is 179 ms on the file probed there, and the fact count
+     quoted for it (192 534) is the **project index's** total, not that file's closure — the number was read off
+     `cache_sizes()` and mis-attributed here. It is now corrected rather than left standing.
+* **What is still true, and is worth fixing:** a **directive** keystroke re-walks every file of the unit
+  (11 files, **165–168 ms**, 20× a body keystroke), and the `import std;` read is seconds. Those are the costs the
+  three-artifact split addresses.
+* **What is therefore unexplained.** A freeze that the library does not charge for is not in the library's re-read. It
+  is on the **server** side — `crates/cpp_ls`'s `on_did_change` and whatever the client fires next (pull diagnostics,
+  whose handler takes a write hold; semantic tokens; inlay hints), or the client itself. The next measurement is a
+  running server against this project with the handler's own timings, not another library probe: every library probe
+  now agrees that a keystroke is single-digit milliseconds.
+* **Progress on the split.** The parser now parses a **token range**, not only a whole text
+  (`CppParser::parse_tokens`, step 1 of [`parse-architecture.md`](parse-architecture.md), four properties pinned in
+  `tests/token_range.rs`). It is the enabling piece for the two costs above — the `import std;` read and the directive
+  re-walk — and it is **not** offered as the freeze's fix.
 
 ### 3. Opening a file costs the whole closure before any query answers
 
 * **Reported from use.** "我新打开的文件会导致CPU轰鸣，当前页面需要长时间的加载，导致其余LSP功能几乎无法响应".
-* Same cause as #2 from the other end: the first read builds the whole stitched stream and indexes it before the
-  file's own answers exist. The fix is the same split, plus answering the file's own region from its lex stream first.
+* **Measured.** The open itself is small: `didOpen` + one pump step is **179 ms**, and the file's first view **1.7 ms**.
+  What roars is around it: reading the project takes **1.70 s** on this checkout, and an `import std;` program read is
+  seconds (the 5 MB / 143 M allocation figure). Which of those the reader experiences as "CPU roaring while the page
+  loads" is not settled by a library probe — the handler's own order is what decides it, and that is #2's open question.
 
 ## Closed
 

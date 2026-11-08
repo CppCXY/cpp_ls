@@ -7,12 +7,16 @@ should not reparse that stream when the include region has not changed.
 A real compiler does not do that either: it preprocesses, and the parser sees one stream. The stream is the *right*
 artifact for the **first** read and the wrong one for the **second**, because an edit changes one region of it.
 
-Measured before building on it (`docs/buglist.md` #2): the *edit* half of that premise is weaker than it looks —
-a body keystroke on `CodeFormat.cpp` costs the session **8 ms**, because the units table re-walks the edited file and
-reuses the rest — while the **first** read of the same file costs **179 ms** (cook + parse + index of the whole closure
-before the file has any answer of its own) and a directive edit costs **168 ms**, since that one does re-walk every file.
-So the split is justified by time-to-first-answer and by the directive half, and the freeze the reader reports still has
-to be located on the request path before it is attributed to this parse.
+Measured before building on it (`docs/buglist.md` #2), because the premise as first written was wrong:
+
+* A **body keystroke** in `CodeFormatCLib/src/CodeFormat.cpp` costs the library **~9 ms** (pump 7–9 ms, `catch_up` ~7 µs,
+  a fresh view 1.4 ms), and that file's rendering is **1 422 tokens — its own text**. For an `#include` file there is no
+  expansion to reparse; cross-file answers come from the project index.
+* The **`import std;` program read** is the stitched stream this design is about (5 MB, 143 M allocations, seconds), and
+  a **directive** edit re-walks every file of a unit (11 files, 168 ms vs 8 ms).
+* The freeze the reader reports is therefore *not* this parse; it has to be located on the server's change path.
+
+So the split is justified by the `import std;` read and by the directive re-walk, and it is not the fix for the freeze.
 
 ## The three artifacts
 

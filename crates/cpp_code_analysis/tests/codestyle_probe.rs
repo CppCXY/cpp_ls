@@ -16,6 +16,7 @@
 //! minutes of reading on a fixture and seconds here.
 
 use std::path::PathBuf;
+use std::time::Instant;
 
 use cpp_code_analysis::{DiskFiles, Known, OpenDocuments, Session, SessionFiles, WatchFilter};
 
@@ -201,6 +202,91 @@ fn two_wrong_answers_on_the_codestyle_project() {
                 &view,
                 cpp_code_analysis::file::coordinates::ReadingOffset::new(at)
             )
+        );
+    }
+}
+
+#[test]
+#[ignore = "a probe, not a test: it measures what a keystroke costs on the project's real closure"]
+fn what_a_keystroke_costs_on_the_real_closure() {
+    // **The measurement `docs/buglist.md` #2 needs, in the one setup that resolves the closure.** The other probes
+    // disagree with each other about what a file's rendering is (`one_file_probe` prints 1 643 tokens for a file that
+    // includes `<fstream>`), because whether the include closure resolves depends on the session having walked the
+    // project — so this uses the setup above, which does resolve it, and prints the size of the stream it measures.
+    let root = project();
+    let file = root
+        .join("CodeFormatCLib")
+        .join("src")
+        .join("CodeFormat.cpp");
+    let text = std::fs::read_to_string(&file).expect("the file reads");
+
+    let mut session = Session::open(
+        root.clone(),
+        SessionFiles::new(OpenDocuments::new(), DiskFiles),
+        WatchFilter::new(&root),
+    );
+    let indexing = Instant::now();
+    session.index_everything();
+    session.did_open(&file, &text);
+    session.index_everything();
+    session.catch_up(&file);
+    println!("the project read in {:?}", indexing.elapsed());
+
+    if let Some(rendered) = session.rendering_of(&file) {
+        println!(
+            "the rendering            {:.2} MB, {} token(s), {} span(s)",
+            rendered.text.len() as f64 / (1024.0 * 1024.0),
+            rendered.spans.len(),
+            rendered.spans.len()
+        );
+    } else {
+        println!(
+            "the rendering            none — the closure did not resolve, so nothing below is measured"
+        );
+        return;
+    }
+
+    let started = Instant::now();
+    let view = session.view_of_the_file(&file);
+    println!(
+        "the first view           {:?} ({})",
+        started.elapsed(),
+        if view.is_some() {
+            "a reading"
+        } else {
+            "nothing"
+        }
+    );
+
+    for round in 0..5 {
+        let mut edited = text.clone();
+        edited.push_str(&format!("// typed {round}\n"));
+        session.did_change(&file, &edited);
+
+        let started = Instant::now();
+        let steps = session.advance(1);
+        let pump = started.elapsed();
+        let read_as_the_program = steps
+            .iter()
+            .find(|step| step.path == file)
+            .is_some_and(|step| step.with_the_environment);
+
+        let started = Instant::now();
+        session.catch_up(&file);
+        let catch = started.elapsed();
+
+        let started = Instant::now();
+        let view = session.view_of_the_file(&file);
+        let viewed = started.elapsed();
+
+        println!(
+            "body keystroke {round}       pump {pump:>9.1?} | catch_up {catch:>9.1?} | view {viewed:>9.1?} ({}) \
+             | read as the program {read_as_the_program}",
+            if view.is_some() {
+                "a reading"
+            } else {
+                "nothing"
+            }
         );
     }
 }
