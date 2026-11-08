@@ -270,7 +270,20 @@ impl AnalysisState {
     pub async fn prepare_for_a_read(&self, path: &std::path::Path) -> bool {
         if let Ok(session) = self.inner.try_read()
             && let Some(session) = session.as_ref()
-            && session.index().summary(path).is_some()
+            && (session.index().summary(path).is_some()
+                // **The text itself is enough for the answers hover is made of** — and it is the state an edit
+                // leaves behind. A keystroke replaces the buffer and drops the file's summary; the pump rebuilds it
+                // a slice later. Requiring the summary here meant that in that window every hover took `prepare`'s
+                // **write lock**, and a write waits for the pump's in-flight slice, so the reader saw a loading
+                // delay on every keystroke rather than on the first one.
+                //
+                // What the request answers without the summary: the file's own header line, its macros, its doc
+                // comments, and every question whose answer is in the written text's scope tree — which is what
+                // `session::tests::a_completion_right_after_an_edit_lists_the_files_own_members` measures for the
+                // sibling path. What it does *not* get, until the pump has re-read the file, is a name that only the
+                // index knows — and the pump is woken below, so "until" is one slice. The trade is stated rather than
+                // hidden: for a few milliseconds after a keystroke a hover may answer less, and it never waits.
+                || session.files().held(path).is_some())
         {
             // **The file this request is about is one the second pass may refine** — a start no longer refines the
             // project (`docs/indexing-design.md`, phase 0), so asking must happen here, under the read lock, and the
