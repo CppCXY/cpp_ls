@@ -205,16 +205,6 @@ const MAX_COMPLETION_ITEMS: usize = 20_000;
 /// closure key moving, or `commit_the_re_read` never storing them), the shared timeline is the cheaper default and
 /// this constant is the lever that keeps it.
 const WALKS_WORTH_SHARING: usize = 4;
-/// **How many macro environments one drain builds.**
-///
-/// One, where [`COOK_SLICE`] is four, and the difference is **measured**: a cook is a unit walk over one file's
-/// closure with the results indexed, while building a macro environment takes a copy of every file's text in the
-/// closure — 103.7 ms for a 151-file closure against a view's 163.2 µs. A slice of four of those would be most of a
-/// second in one drain, which is the thing the slice exists to prevent.
-///
-/// The queue is what makes a slice this small acceptable: a query that asked for an environment still answers from
-/// the plain reading, so nothing is waiting on this — it is a reading being improved, not a request being served.
-const MACRO_SLICE: usize = 1;
 
 /// **How long a session waits after an edit before it reads a whole program.**
 ///
@@ -667,9 +657,7 @@ struct PumpNotes {
     refined_on_request: std::collections::HashSet<PathBuf>,
     refined_readings: std::collections::HashSet<PathBuf>,
     cooking_refused: std::collections::HashSet<String>,
-    /// **The files whose macro environment a request asked for**, in ask order: a `Cook` ask names both a rendering
-    /// and the environment the written view of that file needs, and the second is what `MACRO_SLICE` budgets.
-    environments: std::collections::VecDeque<PathBuf>,
+
     walks_by_root: std::collections::HashMap<String, u64>,
 }
 
@@ -1821,7 +1809,7 @@ impl<F: FileProvider + Clone> Session<F> {
             pump: std::sync::Mutex::new(PumpNotes {
                 refined_on_request: std::collections::HashSet::new(),
                 refined_readings: std::collections::HashSet::new(),
-                environments: std::collections::VecDeque::new(),
+
                 cooking_refused: std::collections::HashSet::new(),
                 walks_by_root: std::collections::HashMap::new(),
             }),
@@ -3608,7 +3596,7 @@ impl<F: FileProvider + Clone> Session<F> {
         } else {
             self.units_for_the_pass(&files)
         };
-        let mut drain = Drain {
+        let drain = Drain {
             files,
             // **One timeline per file of the slice, not one per candidate the pass then finds.** The units the second
             // pass reads its environments out of were left empty here, so every candidate a slice reached fell to
@@ -3715,17 +3703,11 @@ impl<F: FileProvider + Clone> Session<F> {
             // **Named here, rendered outside the writer.** [`Session::rendering_of`] takes `&self` — the lookup, the
             // cached unit, the lex and the cook all read and change nothing — so the 65–190 ms it costs per header is
             // paid by [`Session::prepare_the_drain`], and what is left inside the writer is the `Arc` insert.
-            for _ in 0..MACRO_SLICE {
-                let next = self
-                    .pump
-                    .lock()
-                    .ok()
-                    .and_then(|mut notes| notes.environments.pop_front());
-                let Some(path) = next else {
-                    break;
-                };
-                drain.environments.push(path);
-            }
+            // **Still not filled, and the measurement says why**: feeding this from the ask channel cost *12 s a
+            // diagnostic pull* and *26 s a project read* on `LSPHandle.cpp` — one environment build (a 103.7 ms walk
+            // over the closure) per ask, and a `view` asks on every miss. The backlog needs a membership set and a
+            // budget before it may be wired, which is its own piece of work; until then the honest state is the one
+            // this comment replaces: a hole, not a loop.
         }
 
         drain
@@ -4630,11 +4612,6 @@ impl<F: FileProvider + Clone> Session<F> {
                 // twice is one cook.
                 Ask::Cook(path) => {
                     self.cooking.want(&path);
-                    // …and the environment the *written* view of that file needs, which is a different and more
-                    // expensive build (a walk over the closure, not a render of one file) — see `MACRO_SLICE`.
-                    if let Ok(mut notes) = self.pump.lock() {
-                        notes.environments.push_back(path);
-                    }
                 }
             }
         }
