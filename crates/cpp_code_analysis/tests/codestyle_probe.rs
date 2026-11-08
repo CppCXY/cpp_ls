@@ -585,6 +585,19 @@ fn what_keeps_the_pump_busy() {
             },
             class_took
         );
+        match session.index().definitions("LSPHandle", &file) {
+            Known::Yes(all) => {
+                for one in &all.found {
+                    println!(
+                        "  candidate: {:?} scope {:?} in {}",
+                        one.fact.kind,
+                        one.fact.scope,
+                        one.file.file_name().unwrap_or_default().to_string_lossy()
+                    );
+                }
+            }
+            other => println!("  definitions: {other:?}"),
+        }
         let members_started = Instant::now();
         let members = session.member_completions(
             &view,

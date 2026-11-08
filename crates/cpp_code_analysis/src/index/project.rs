@@ -3163,6 +3163,13 @@ pub fn name_completions_at(
     let Some(position) = crate::sema::resolve::name_position_at(root, offset) else {
         return Known::Unknown(UnknownReason::UnparsableName);
     };
+    let phase = std::time::Instant::now();
+    if crate::probes::completion() {
+        eprintln!(
+            "[completion] the position: scope {:?}, written {:?}",
+            position.scope, position.written
+        );
+    }
 
     // **What is typed decides how much is read**, and the difference is not small. The index half of this query
     // collects every declaration of every file the cursor can see — measured on a real file that includes
@@ -3193,6 +3200,13 @@ pub fn name_completions_at(
             Known::No => return Known::Unknown(UnknownReason::UnparsableName),
         }
     };
+    if crate::probes::completion() {
+        eprintln!(
+            "[completion] the listing took {:?} for {} name(s)",
+            phase.elapsed(),
+            names.len()
+        );
+    }
 
     // **The file's own macros**, which the index half cannot see. A `#define` is a preprocessing fact of *this* file, not a
     // declaration in any scope — measured at four cursors in one file: `MA` offered only `main`, `MAX` offered nothing, and
@@ -3443,6 +3457,45 @@ fn global_offers(
     names
 }
 
+/// **Does this spelling name a type?** — the question that decides whether a qualifier is completed as a class
+/// (its members, `members_of`) or as a namespace (the guard-evaluating visibility walk, which the index's own note
+/// measures at **1.2 s**).
+///
+/// # Why "every candidate is a `Type`" was wrong
+///
+/// It is the rule that let `std::vector<int>::` work (a class template has a forward declaration in `<iosfwd>` and a
+/// definition in `<vector>`, so two `Type`s), and it is false for **every class that writes its own constructor**:
+/// `class LSPHandle { public: LSPHandle(LanguageServer *); … };` puts a `Function` named `LSPHandle` (scope
+/// `LSPHandle`) beside the class, so "all candidates are types" says no — and the completion after `LSPHandle::` fell
+/// to the namespace route. Measured on `E:\EmmyLuaCodeStyle`, `CodeFormatServer/src/LSP/LSPHandle.cpp`:
+/// **`name_completions` 1.14 s** against `members_of`'s **16 µs** for the same class.
+///
+/// # The rule this uses instead
+///
+/// A spelling names a type when **some** candidate is a `Type` and **every other candidate is a member of it** — its
+/// `scope` is the spelling itself, which is exactly where a constructor, a destructor and a same-named nested name
+/// are filed. A *namespace* of that name has no such candidate (its facts' scope is the namespace's parent), so it
+/// keeps the namespace route; and the alias case (`std::string`) is untouched, because `definition` answers it
+/// singularly today.
+fn a_spelling_names_a_type(index: &ProjectIndex, spelling: &str, path: &Path) -> bool {
+    let Some(found) = index.definitions(spelling, path).value() else {
+        return false;
+    };
+    let mut any_type = false;
+    for declaration in &found.found {
+        if declaration.fact.kind == crate::DeclKind::Type {
+            any_type = true;
+            continue;
+        }
+        // Everything else has to be *inside* the type: a constructor, a destructor, or a nested name of the same
+        // spelling. A namespace's own facts fail this, which is what keeps `ns::` on the namespace route.
+        if declaration.fact.scope.as_deref() != Some(spelling) {
+            return false;
+        }
+    }
+    any_type
+}
+
 /// The names written directly in one `::`-qualified scope.
 fn names_in_a_scope(
     index: &ProjectIndex,
@@ -3554,20 +3607,7 @@ fn names_in_a_scope_at(
             //                                        target is the class that has the members. Measured: without this
             //                                        arm `std::string::` offered **0** items.
             // ```
-            let names_a_type = match index.definition(spelling, path) {
-                Known::Yes(found) => found.fact.kind == crate::DeclKind::Type,
-                Known::Unknown(UnknownReason::Ambiguous(_)) => index
-                    .definitions(spelling, path)
-                    .value()
-                    .is_some_and(|found| {
-                        !found.found.is_empty()
-                            && found
-                                .found
-                                .iter()
-                                .all(|declaration| declaration.fact.kind == crate::DeclKind::Type)
-                    }),
-                Known::Unknown(_) | Known::No => false,
-            };
+            let names_a_type = a_spelling_names_a_type(index, spelling, path);
             if crate::probes::members() {
                 let bare = spelling.rsplit("::").next().unwrap_or(spelling);
                 let facts: Vec<String> = index
@@ -3942,6 +3982,12 @@ fn declarations_in_scope(
 
     let found = match scope {
         Some(spelling) => index.declarations_in_where(spelling, visible_from, accepts),
+        // **The full walk, and it has to be.** A cheap version of this arm (the `#include` graph plus a prefix over the
+        // raw summaries) was measured and reverted: it cost 1.18 s either way — the time is in `bindings_of`'s type
+        // inference, not here — and it changed what completion offers, because the walk's answer includes the **cooked**
+        // reading's declarations (a name a macro writes) and excludes the branches a condition does not take. Two
+        // handshake tests say so: `a_name_only_the_cooked_reading_declares_is_offered_over_the_wire` and
+        // `a_c_reader_gets_completion_and_signature_help_for_what_the_file_defines`.
         None => index.visible_declarations_where(visible_from, |fact| {
             accepts(fact) && fact.scope.is_none() && !fact.local
         }),
@@ -13544,6 +13590,8 @@ impl ProjectIndex {
     ///
     /// A diagnostic, for asking "is the declaration I am looking for in the index at all, and under which scope" —
     /// the question that separates "the walk did not find it" from "it was never filed where the walk looks".
+    /// **The names a file-scope cursor can write, by prefix** — the cheap half of visibility, for completion.
+
     pub fn name_postings(&self, name: &str) -> usize {
         self.names.named(name).len()
     }
