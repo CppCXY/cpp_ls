@@ -68,7 +68,7 @@ pub async fn on_hover(
     // measurement: the first hover of an open file went from 1 103 ms to 12–34 ms.
     if let Some(path) = uri_to_file_path(&uri) {
         context.analysis().prepare_for_a_read(&path).await;
-        crate::handlers::read_the_modules(&context, &path).await;
+        crate::handlers::read_the_modules(&context, &path, false).await;
 
         // **And then the query, which no longer waits for the project's index to drain.**
         //

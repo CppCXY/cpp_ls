@@ -105,25 +105,9 @@ use tokio::sync::{Notify, Semaphore};
 
 use crate::context::RequestOutcome;
 
-/// **The text of every open document**, published by the notification path and read by the request path without the
-/// session lock — see [`AnalysisState::texts`].
-type PublishedTexts = Arc<RwLock<Arc<std::collections::HashMap<PathBuf, Arc<str>>>>>;
-
 pub struct AnalysisState {
     /// The session, from the moment the workspace root is known. `None` before that; see the module documentation.
     inner: Arc<RwLock<Option<Session<DiskFiles>>>>,
-    /// **The text of every open document, published so a request can ask without a lock.**
-    ///
-    /// The other fields here are the writer's; this one is a **product** in the sense of `docs/locking.md`: the
-    /// notification path already has the text in its hand (`apply_buffer`), so publishing it is one map copy of
-    /// `Arc<str>` entries and one pointer swap, and a request that needs to know "is this file's text held" reads the
-    /// pointer instead of waiting for the session lock — which during a keystroke is the pump's.
-    ///
-    /// This is the first piece of the shape that note describes, and it exists because of a specific fall-through:
-    /// [`AnalysisState::prepare_for_a_read`] asked the *session* whether the file was held, under `try_read`, and a
-    /// lock it could not get sent the whole request down [`AnalysisState::prepare`]'s **write** path — so a hover after
-    /// a keystroke queued behind the pump to learn something the notification path had known all along.
-    texts: PublishedTexts,
     /// The provider chain a session is opened over, and the handle this state keeps after it is.
     files: SessionFiles<DiskFiles>,
     /// How many queries may read at once.
@@ -167,7 +151,6 @@ impl AnalysisState {
         let files = SessionFiles::new(documents, DiskFiles);
         Self {
             inner: Arc::new(RwLock::new(None)),
-            texts: Arc::new(RwLock::new(Arc::new(std::collections::HashMap::new()))),
             files,
             gate: Arc::new(tokio::sync::RwLock::new(())),
             blocking_permits: Arc::new(Semaphore::new(Self::analysis_parallelism())),
@@ -264,35 +247,6 @@ impl AnalysisState {
         queued
     }
 
-    /// **Publish what the buffer now says** — see [`AnalysisState::texts`]. Called by the notification path, which is
-    /// the only place that has the text before any lock is taken.
-    pub fn publish_text(&self, path: &std::path::Path, text: &str) {
-        let Ok(mut held) = self.texts.write() else {
-            return;
-        };
-        let mut next = std::collections::HashMap::clone(held.as_ref());
-        next.insert(path.to_path_buf(), Arc::from(text));
-        *held = Arc::new(next);
-    }
-
-    /// The document is closed: the disk answers for it again, so the published text goes.
-    pub fn forget_text(&self, path: &std::path::Path) {
-        let Ok(mut held) = self.texts.write() else {
-            return;
-        };
-        if !held.contains_key(path) {
-            return;
-        }
-        let mut next = std::collections::HashMap::clone(held.as_ref());
-        next.remove(path);
-        *held = Arc::new(next);
-    }
-
-    /// **Is this file's text already in the analysis's hand?** — a pointer read, and never a wait.
-    pub fn text_is_held(&self, path: &std::path::Path) -> bool {
-        self.texts.read().is_ok_and(|held| held.contains_key(path))
-    }
-
     /// **The file in front of the analysis, without taking the write lock when it already is.**
     ///
     /// Hover answers from the file's **own text** — `handlers::hover` says so and asks `view_of_the_file`, whose
@@ -314,22 +268,6 @@ impl AnalysisState {
     /// work. A file whose summary is already current — the ordinary case, because the editor has it open and
     /// `didOpen` read it in — is answered by the read-only path below and never queues.
     pub async fn prepare_for_a_read(&self, path: &std::path::Path) -> bool {
-        // **The published text first, and it decides without a lock.** A document the client has open is a file whose
-        // text this state has in its hand (see [`AnalysisState::texts`]), and a hover is answered from that text — so
-        // there is nothing to wait for. This branch used to be the `try_read` below, and a lock the request could not
-        // get sent it to `prepare`'s write path, which is the queue the reader felt as a loading delay.
-        if self.text_is_held(path) {
-            // The refinement ask is best effort by design: it is a hint for the pump's next pass, and no request
-            // waits on it, so a session it cannot reach right now costs nothing.
-            if let Ok(session) = self.inner.try_read()
-                && let Some(session) = session.as_ref()
-            {
-                session.want_refinement(path);
-            }
-            self.wake();
-            return true;
-        }
-
         if let Ok(session) = self.inner.try_read()
             && let Some(session) = session.as_ref()
             && session.index().summary(path).is_some()
@@ -1234,45 +1172,5 @@ mod tests {
 
         assert_eq!(read.await.unwrap(), Some(1));
         assert_eq!(write.await.unwrap(), 2);
-    }
-}
-
-#[cfg(test)]
-mod published_texts_tests {
-    use super::*;
-    use std::path::Path;
-    use std::time::{Duration, Instant};
-
-    /// **A published text is known without the session lock** — which is the whole point of publishing it.
-    ///
-    /// `prepare_for_a_read` used to learn "is this file held" from the *session*, under `try_read`; a lock it could
-    /// not get (the pump's, during a keystroke) sent the request to `prepare`'s write path, and the reader felt that
-    /// as a loading delay on every hover. This test holds the session's write lock and requires the answer anyway: a
-    /// regression that went back to asking the session would block here, and the deadline says so.
-    #[test]
-    fn a_published_text_is_known_while_the_session_is_held_for_writing() {
-        let state = AnalysisState::new();
-        let path = Path::new("/p/a.cpp");
-        state.publish_text(path, "int x;\n");
-        assert!(state.text_is_held(path), "a published document is held");
-
-        let writing = state.inner.write().expect("the session's lock");
-        let started = Instant::now();
-        assert!(
-            state.text_is_held(path),
-            "the answer must not need the session"
-        );
-        assert!(
-            started.elapsed() < Duration::from_millis(50),
-            "asking took {:?} — it went to the session",
-            started.elapsed()
-        );
-        drop(writing);
-
-        state.forget_text(path);
-        assert!(
-            !state.text_is_held(path),
-            "a closed document is the disk's again"
-        );
     }
 }

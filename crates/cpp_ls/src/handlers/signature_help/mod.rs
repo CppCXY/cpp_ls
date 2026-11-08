@@ -54,7 +54,7 @@ pub async fn on_signature_help(
         // `std::format(` in a file that says `import std;` needs the same read the hover and the definition do — and
         // this handler has its own reason to care: it declines to answer while files are queued, and a module whose
         // interface unit nobody read is exactly that state. `false`: no edit to catch up on.
-        crate::handlers::read_the_modules(&context, &path).await;
+        crate::handlers::read_the_modules(&context, &path, false).await;
         // **And then the query, which no longer waits for the project's index to drain.**
         //
         // The wait was `AnalysisState::settle`, asking whether the *whole project's* indexing queue

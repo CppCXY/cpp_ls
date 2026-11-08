@@ -87,32 +87,31 @@ pub async fn on_completion(
     // which also says why waiting for the pump would have been the wrong fix (the pump reads the file's whole
     // include closure, which for a file that includes `<string>` is thousands of headers).
     if let Some(path) = uri_to_file_path(&uri) {
-        // **No write step before the query, and the suite is the measurement.** These three calls used to be here:
-        // `prepare` (load the file, queue its cook), `catch_up` (re-index it after an edit) and `read_the_modules`.
-        // Each takes the `update_session` **write lock**, and the pump holds the session for reading for a slice, so
-        // after every keystroke a completion queued behind the pump to rebuild a summary — for an answer that, in the
-        // ordinary case, does not need one: the file's own text is already held and already parsed
-        // (`Session::view_of_the_file`), and a class the file itself declares is in that parse's scope tree. Measured
-        // here as a contract (`session::tests::a_completion_right_after_an_edit_lists_the_files_own_members`): the
-        // member list after `w.` is right one keystroke after the edit **with no `catch_up` at all**, and this crate's
-        // handshake and latency suites pass with the calls gone.
-        //
-        // What is left is the half that is not about this file: the module interface units it imports, which the
-        // index cannot name a file for until something reads them (`import std;` is a file **outside** the project).
-        // `read_the_modules` takes the write only when the file spells `import` and something is unread, so a file of
-        // an `#include` project never waits here.
         let started = std::time::Instant::now();
-        crate::handlers::read_the_modules(&context, &path).await;
+        context.analysis().prepare(&path).await;
+        let prepared = started.elapsed().as_millis();
+
+        let read = path.clone();
+        let started = std::time::Instant::now();
+        context.analysis().catch_up(&read).await;
+        let caught_up = started.elapsed().as_millis();
+
+        // …and the module interface units this file imports, which the index cannot name a file for until something
+        // reads them: `import std;` is `<VC>/Tools/MSVC/<version>/modules/std.ixx`, a file **outside the project**,
+        // and until it is read the completion after `std::` is empty and `std::string` resolves to nothing. See
+        // [`crate::handlers::read_the_modules`] for the measurement and for why the summary has to be current first.
+        let started = std::time::Instant::now();
+        crate::handlers::read_the_modules(&context, &path, true).await;
         let modules = started.elapsed().as_millis();
 
         // **Where the time went, which is the only way to tell the two failures apart.** A completion is slow for
         // one of two reasons and they have different fixes: it waited for the **write lock** the pump holds (the
-        // call above), or it waited for the index to fill (`settle`), or its own query was slow. The request's
+        // three calls above), or it waited for the index to fill (`settle`), or its own query was slow. The request's
         // total says none of that, and the report this handler exists for — *"I type `s` and it takes forever"* —
         // was diagnosed by exactly this breakdown.
         log::debug!(
-            "completion: modules {modules} ms, {} ms before the query",
-            modules
+            "completion: prepare {prepared} ms, catch up {caught_up} ms, modules {modules} ms, {} ms before the query",
+            prepared + caught_up + modules
         );
     }
 

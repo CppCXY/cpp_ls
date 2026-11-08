@@ -72,10 +72,10 @@ pub use text_document::{
 ///
 /// # When it is called, and why the order matters
 ///
-/// The catch-up comes **before** the queueing, and it is done here rather than by the caller: an edit drops a file's
-/// summary and the pump rebuilds it later, and a file with no summary has no imports to read. It used to be the
-/// caller's job — a `caught_up` flag said whether the handler had already done it — and by the end every caller passed
-/// `false`, which is the flag saying it was never the caller's business.
+/// **After** the file's summary is current — `prepare` is not enough, because an edit drops a file's summary and the
+/// pump rebuilds it later, and a file with no summary has no imports to read. A handler that has an edit waiting calls
+/// [`Session::catch_up`] first for exactly that reason, and passing `caught_up` says so rather than leaving a reader
+/// to work out whether this call belongs before or after it.
 ///
 /// # What it costs
 ///
@@ -87,30 +87,28 @@ pub use text_document::{
 ///
 /// [`Analysis::prepare`]: crate::context::AnalysisState::prepare
 /// [`Session::catch_up`]: cpp_code_analysis::Session::catch_up
-pub async fn read_the_modules(context: &ServerContextSnapshot, path: &std::path::Path) {
-    // **Nothing to read, so no lock to take** — and the question is now only about *modules*, which is what this
-    // function exists for. It used to require the file's summary to be current as well (`needs_catching_up`), and an
-    // edit drops a file's summary, so **every request about a file the reader was typing in took the write lock** to
-    // rebuild it — behind the pump's slice. That is the coupling a completion or a hover felt as a loading delay after
-    // every keystroke, in a project that contains no modules at all.
+pub async fn read_the_modules(
+    context: &ServerContextSnapshot,
+    path: &std::path::Path,
+    caught_up: bool,
+) {
+    // **Nothing to read, so no lock to take.** Both halves of this call are conditional and both are asked here
+    // first: the summary is current (`caught_up` says the caller already did it, `needs_catching_up` asks the
+    // session), and no module in view is one the index cannot point at a file for — which is the ordinary answer for
+    // a file that imports nothing, and the answer for every call after the first on a file that does.
     //
-    // What replaces it is the cheapest question with the same answer: **does the file spell `import` anywhere?** The
-    // text is the VFS's, so the check is a read and needs no summary. A file that never says `import` has no module
-    // interface unit to read, and this function has nothing to do for it; a file that does say it takes the write, and
-    // catches the summary up first exactly as before.
-    let a_module_in_view = context
+    // The check is a **read**, and a read does not wait for the pump's parse; the write would. Measured over the
+    // wire on the latency fixture, this call was the last **151–1648 ms** of a completion's wait once the same
+    // shortcut was in place for `prepare` and `catch_up`.
+    let nothing_to_read = context
         .analysis()
         .with_snapshot(|session| {
-            let spells_import = session
-                .files()
-                .held(path)
-                .is_some_and(|held| held.text.contains("import"));
-            spells_import
-                && (session.imports_a_module_that_is_not_read(path)
-                    || session.a_module_unit_is_waiting_for_its_program())
+            (caught_up || !session.needs_catching_up(path))
+                && !session.imports_a_module_that_is_not_read(path)
+                && !session.a_module_unit_is_waiting_for_its_program()
         })
         .unwrap_or(false);
-    if !a_module_in_view {
+    if nothing_to_read {
         return;
     }
 
@@ -130,7 +128,9 @@ pub async fn read_the_modules(context: &ServerContextSnapshot, path: &std::path:
     context
         .analysis()
         .update_session("a request queued the modules", move |session| {
-            session.catch_up(&read);
+            if !caught_up {
+                session.catch_up(&read);
+            }
             session.queue_the_modules_a_file_imports(&read)
         })
         .await;
