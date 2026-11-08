@@ -57,20 +57,27 @@ pub fn mark(label: &'static str) {
     }
 }
 
-/// The phases so far, as `(label, allocations, bytes)` **since the previous mark**.
+/// The phases so far, as `(label, allocations, bytes)` **since the previous mark**, summed per label.
+///
+/// Summed because the passes that matter run once per file: a per-file index calls `build_facts` hundreds of times for
+/// one read, and a table with hundreds of `facts loop` rows answers nothing. First-appearance order is kept.
 pub fn per_phase() -> Vec<(&'static str, usize, usize)> {
     let Ok(held) = MARKS.lock() else {
         return Vec::new();
     };
-    let mut out = Vec::with_capacity(held.len());
+    let mut out: Vec<(&'static str, usize, usize)> = Vec::new();
     let mut previous = (0usize, 0usize);
     for mark in held.iter() {
-        out.push((
-            mark.label,
-            mark.allocations.saturating_sub(previous.0),
-            mark.bytes.saturating_sub(previous.1),
-        ));
+        let allocations = mark.allocations.saturating_sub(previous.0);
+        let bytes = mark.bytes.saturating_sub(previous.1);
         previous = (mark.allocations, mark.bytes);
+        match out.iter_mut().find(|(label, _, _)| *label == mark.label) {
+            Some(entry) => {
+                entry.1 += allocations;
+                entry.2 += bytes;
+            }
+            None => out.push((mark.label, allocations, bytes)),
+        }
     }
     out
 }

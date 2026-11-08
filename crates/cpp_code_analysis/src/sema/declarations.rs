@@ -598,6 +598,11 @@ fn the_offset_to_descend_by(binding: &Binding) -> usize {
 /// `TrailingReturnType`, `Declarator`, a `using`'s `TypeId`, a class's base names) or a kind that is a declaration
 /// in its own right (`using`/`typedef`, and the class-like definitions whose bases are read). A node with none of
 /// those is not a shape — no question in this module is answered by one.
+/// **One template parameter, as the three questions want it** — `_Alloc`, its constraint (`""` when none), and its
+/// default (`None` when none).
+pub type TemplateParameters = (String, String, Option<String>);
+
+#[derive(Default)]
 pub struct DeclarationShapes {
     /// Every shape, in **document order** (pre-order) — which is also start-offset order, the order the binary
     /// search over a sibling run relies on.
@@ -610,7 +615,15 @@ pub struct DeclarationShapes {
     /// list)`, in document order — see [`declared_template_parameters_of`] for why the question cannot be answered
     /// from the parent chain: `template <…>` and the class it introduces are *siblings*, and the specifier sequence
     /// between them is not itself a shape.
-    templates: Vec<(cpp_parser::SourceRange, CppSyntaxNode)>,
+    /// The three answers every declaration needs about the template head it sits under — the names, the constraints and
+    /// the defaults — **read once per head**. A class template`s ~200 members each asked for all three, and each ask
+    /// re-parsed the same `template <…>` list into three `Vec`s of `String`; measured on `import std;` that was **65 M of
+    /// a read`s 150 M allocations**, the largest single cost of the whole program reading. See [`Self::template_at`].
+    templates: Vec<(
+        cpp_parser::SourceRange,
+        CppSyntaxNode,
+        std::sync::OnceLock<std::sync::Arc<Vec<TemplateParameters>>>,
+    )>,
     /// **Where the file's parameter lists are**, in document order (so start-offset order), so that
     /// [`DeclarationShapes::names_a_parameter`] is a binary search rather than a descent from the root.
     ///
@@ -672,6 +685,22 @@ struct Shape {
 }
 
 impl DeclarationShapes {
+    /// **The innermost template head whose declaration contains `at`**, parsed once and shared by every
+    /// declaration under it — see the note on `templates`.
+    fn template_at(&self, at: usize) -> Option<&std::sync::Arc<Vec<TemplateParameters>>> {
+        self.templates
+            .iter()
+            .rev()
+            .find(|(introduced, _, _)| {
+                introduced.start_offset <= at && at <= introduced.end_offset()
+            })
+            .map(|(_, list, parsed)| {
+                parsed.get_or_init(|| {
+                    std::sync::Arc::new(crate::sema::types::template_parameters_with_defaults(list))
+                })
+            })
+    }
+
     /// Read every shape of `root`, in one pass over the tree.
     ///
     /// The children are laid out as **runs** in a second array rather than as links, because the search that finds
@@ -685,7 +714,11 @@ impl DeclarationShapes {
         // The shapes the node being visited is inside, outermost first.
         let mut chain: Vec<u32> = Vec::new();
         // The class templates, recorded in the same pass — see the field's note.
-        let mut templates: Vec<(cpp_parser::SourceRange, CppSyntaxNode)> = Vec::new();
+        let mut templates: Vec<(
+            cpp_parser::SourceRange,
+            CppSyntaxNode,
+            std::sync::OnceLock<std::sync::Arc<Vec<TemplateParameters>>>,
+        )> = Vec::new();
         // The class bodies the walk has entered and the access level in force in each, innermost last — see
         // [`Shape::access`].
         let mut bodies: Vec<(usize, Access)> = Vec::new();
@@ -793,6 +826,7 @@ impl DeclarationShapes {
                 templates.push((
                     cpp_parser::source_range(owner.text_range()),
                     list.syntax().clone(),
+                    std::sync::OnceLock::new(),
                 ));
             }
 
@@ -3164,14 +3198,14 @@ pub(crate) fn declared_template_parameters_with(
 
     let at = binding.name_range.start_offset;
 
-    shapes
-        .templates
-        .iter()
-        .rev()
-        .find(|(introduced, _)| introduced.start_offset <= at && at <= introduced.end_offset())
-        .map(|(_, list)| crate::sema::types::template_parameter_names(list))
-        .unwrap_or_default()
+    // **One parse per template head, shared by every declaration under it** — see [`DeclarationShapes`]`s note on
+    // `templates`.
+    match shapes.template_at(at) {
+        Some(shared) => shared.iter().map(|(name, _, _)| name.clone()).collect(),
+        None => Vec::new(),
+    }
 }
+
 /// **The constraint that applies to each *parameter*** — `["std::integral", ""]` for
 /// `template <std::integral T> T twice(T a, int n)`.
 ///
@@ -3182,34 +3216,32 @@ pub(crate) fn declared_template_parameters_with(
 fn declared_constraints_with(shapes: &DeclarationShapes, binding: &Binding) -> Vec<String> {
     let at = binding.name_range.start_offset;
 
-    let Some((_, head)) = shapes
-        .templates
-        .iter()
-        .rev()
-        .find(|(introduced, _)| introduced.start_offset <= at && at <= introduced.end_offset())
-    else {
+    // **One parse per template head, shared by every declaration under it** — see the note on `templates`.
+    let Some(shared) = shapes.template_at(at) else {
         return Vec::new();
     };
-    let constrained: Vec<(String, String)> = crate::sema::types::template_parameters_in(head)
-        .into_iter()
-        .filter(|(_, constraint)| !constraint.is_empty())
+    let constrained: Vec<(String, String)> = shared
+        .iter()
+        .filter(|(_, constraint, _)| !constraint.is_empty())
+        .map(|(name, constraint, _)| (name.clone(), constraint.clone()))
         .collect();
     if constrained.is_empty() {
         return Vec::new();
     }
 
-    let mut found = None;
+    // **Where the parameters are written**, found the same way the names were: the innermost shape that has a
+    // declarator is the declaration this binding belongs to.
+    let mut declarator = None;
     shapes.on_the_path(at, |shape| {
-        if let Some(declarator) = &shape.declarator {
-            found = Some(declarator.clone());
+        if let Some(found) = &shape.declarator {
+            declarator = Some(found.clone());
         }
     });
-    let Some(declarator) = found else {
+    let Some(declarator) = declarator else {
         return Vec::new();
     };
-
-    use cpp_parser::{CppAstNode, CppDeclarator};
-    let Some(declarator) = CppDeclarator::cast(declarator) else {
+    use cpp_parser::CppAstNode;
+    let Some(declarator) = cpp_parser::CppDeclarator::cast(declarator) else {
         return Vec::new();
     };
     let Some(list) = declarator.get_param_list() else {
@@ -3582,21 +3614,19 @@ pub(crate) fn declared_parameter_defaults_with(
     }
 
     let at = binding.name_range.start_offset;
-    let Some((_, head)) = shapes
-        .templates
-        .iter()
-        .rev()
-        .find(|(introduced, _)| introduced.start_offset <= at && at <= introduced.end_offset())
-    else {
+    // **One parse per template head**, shared with the names and the constraints — see the note on `templates`.
+    let Some(shared) = shapes.template_at(at) else {
         return Vec::new();
     };
 
-    let defaults = crate::sema::types::template_parameter_defaults(head);
     // **A row of "no default" is not stored.** The field is cloned and compared per fact, and most templates have no
     // default at all: storing the empties would put sixteen bytes on every class template in the standard library to
     // say nothing.
-    if defaults.iter().any(|default| !default.is_empty()) {
-        defaults
+    if shared.iter().any(|(_, _, default)| default.is_some()) {
+        shared
+            .iter()
+            .map(|(_, _, default)| default.clone().unwrap_or_default())
+            .collect()
     } else {
         Default::default()
     }
@@ -4175,8 +4205,18 @@ impl<'a> DeclarationFacts<'a> {
             scopes,
             preprocessing,
             root,
-            shapes: { DeclarationShapes::of(root) },
-            declarations: Declarations::of(root, errors),
+            shapes: {
+                let built = DeclarationShapes::of(root);
+                #[cfg(feature = "perf-probe")]
+                crate::perf::mark("shapes");
+                built
+            },
+            declarations: {
+                let built = Declarations::of(root, errors);
+                #[cfg(feature = "perf-probe")]
+                crate::perf::mark("declarations");
+                built
+            },
             guards: SummaryGuards::default(),
             facts: Vec::new(),
         }
@@ -4221,6 +4261,14 @@ impl<'a> DeclarationFacts<'a> {
             if scope.kind == ScopeKind::TemplateParameters {
                 continue;
             }
+            // **A scope with no bindings makes no facts**, and it is asked before anything is computed: a header's tree
+            // is mostly `{ … }` with nothing declared in it, and every one of those was paying a qualification-prefix
+            // string and a local walk for an answer about nothing. Measured on `import std;`: the loop's allocations
+            // (43.5 M) were mostly these two strings per empty scope.
+            if scope.bindings.is_empty() {
+                continue;
+            }
+
             // **A body answers both questions by itself**, and it is asked here rather than inside the two functions
             // because most scopes in a header are bodies. `qualification_prefix_of`'s own match lists exactly these
             // three kinds as `None` — a declaration written in a function body, a block or a lambda is qualified by
@@ -4231,12 +4279,9 @@ impl<'a> DeclarationFacts<'a> {
             // This is the cheap half of what clangd gets by not parsing header bodies at all
             // (`SkipFunctionBodies` during the preamble): the bodies are still parsed here, but the *index* stops
             // asking questions about them whose answer is fixed.
-            let (prefix, local) = match scope.kind {
-                ScopeKind::Function | ScopeKind::Block | ScopeKind::Lambda => (None, true),
-                _ => (
-                    scopes.qualification_prefix_of(id),
-                    scopes.declares_a_local(id),
-                ),
+            let local = match scope.kind {
+                ScopeKind::Function | ScopeKind::Block | ScopeKind::Lambda => true,
+                _ => scopes.declares_a_local(id),
             };
 
             // **A body's declarations are what a *per-file* reading wants.** A program's reading is read by nobody
@@ -4245,6 +4290,14 @@ impl<'a> DeclarationFacts<'a> {
             if local && !keep_locals {
                 continue;
             }
+
+            // The prefix is a **string built by walking the chain**, so it is only built for a scope that will
+            // contribute facts — and never for a local one, whose prefix is `None` by definition.
+            let prefix = if local {
+                None
+            } else {
+                scopes.qualification_prefix_of(id)
+            };
 
             // **And the namespaces, once per scope rather than once per binding.** Every binding of one scope sits
             // in the same namespaces, and asking per binding was a scan of every scope in the file each time — see
@@ -4280,6 +4333,8 @@ impl<'a> DeclarationFacts<'a> {
         // spelling — the class may be declared in a header this file's scope tree has never seen. No binding is added,
         // which keeps the lookup rule the refusal exists for.
         let walked = walking.elapsed();
+        #[cfg(feature = "perf-probe")]
+        crate::perf::mark("facts loop");
         let qualifying = std::time::Instant::now();
         for (binding, scope, parameters) in qualified_declarations(root) {
             // **The walker may already have filed this declaration, with no scope.** A definition written in the
@@ -4332,6 +4387,8 @@ impl<'a> DeclarationFacts<'a> {
         // than a request's thirty-second budget to answer, because every inline function of those headers paid a walk
         // of the whole rendering.
         fill_the_frees(root, &mut facts);
+        #[cfg(feature = "perf-probe")]
+        crate::perf::mark("frees");
         // **The reflection annotations, from the file text once per file** — `UCLASS(Blueprintable)` and
         // `UPROPERTY(EditAnywhere)` are empty macros, so nothing of them survives into the tree; the specifiers exist
         // only in the text, and a per-declaration read of it would copy the file once per fact.
@@ -4343,12 +4400,16 @@ impl<'a> DeclarationFacts<'a> {
             );
         }
         fill_the_reflection(root, &rendered, &mut facts);
+        #[cfg(feature = "perf-probe")]
+        crate::perf::mark("reflection");
 
         let mut targets: Vec<(&mut FactGuard, usize)> = facts
             .iter_mut()
             .map(|fact| (&mut fact.guard, fact.range.start_offset))
             .collect();
         assign_guards(&mut targets, preprocessing, &mut guards);
+        #[cfg(feature = "perf-probe")]
+        crate::perf::mark("guards");
 
         (facts, guards)
     }

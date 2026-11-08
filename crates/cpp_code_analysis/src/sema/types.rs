@@ -76,6 +76,41 @@ use std::sync::Arc;
 use cpp_parser::CppAstNode;
 use cpp_parser::{CppSyntaxKind, CppSyntaxNode};
 
+/// **The first two non-whitespace characters of a node's text**, or `None` when there are fewer.
+///
+/// `node.text().to_string().trim_start().starts_with("(*")` copied the whole declarator — a type with template
+/// arguments can be hundreds of bytes — to compare two characters, once per function declaration of every file. The
+/// question is answered from the tree's own chunks here, with no string at all.
+fn first_two_written(node: &CppSyntaxNode) -> Option<(char, char)> {
+    let text = node.text();
+    let mut offset = 0u32;
+    let mut first = None;
+    while offset < u32::from(text.len()) {
+        let ch = text.char_at(offset.into())?;
+        offset += ch.len_utf8() as u32;
+        if ch.is_whitespace() {
+            continue;
+        }
+        match first {
+            None => first = Some(ch),
+            Some(f) => return Some((f, ch)),
+        }
+    }
+    None
+}
+
+/// **The node's text, trimmed, in one allocation.** `text().to_string().trim().to_string()` copied the node twice for
+/// every declaration that reads a written spelling, and the second copy is only needed when there is something to trim.
+fn written_trimmed(node: &CppSyntaxNode) -> String {
+    let text = node.text().to_string();
+    let trimmed = text.trim();
+    if trimmed.len() == text.len() {
+        text
+    } else {
+        trimmed.to_owned()
+    }
+}
+
 /// A type inside a type, **shared rather than owned**.
 ///
 /// Every compound type is a tree, and inference walks that tree constantly: a `substituted`, a `decay`, a
@@ -1512,7 +1547,7 @@ pub fn type_of_declaration_named(
             returns: Arc::new(the_base),
             parameters: read_parameters(&list),
         };
-        return if declarator.text().to_string().trim_start().starts_with("(&") {
+        return if matches!(first_two_written(&declarator), Some(('(', '&'))) {
             Type::Reference {
                 to: Arc::new(function),
                 rvalue: false,
@@ -1626,7 +1661,7 @@ pub(crate) fn read_specifiers_named(
         match CppSyntaxKind::from(node.kind()) {
             // The words of a builtin, in order — see the note above about `unsigned long long`.
             CppSyntaxKind::BuiltinType => {
-                let word = node.text().to_string().trim().to_string();
+                let word = written_trimmed(&node);
                 if word.is_empty() {
                     continue;
                 }
@@ -1696,7 +1731,7 @@ pub(crate) fn read_specifiers_named(
             // `decltype(x)` is an expression this layer would have to type to know. Keeping the spelling is what
             // lets the caller recognise them.
             CppSyntaxKind::AutoType | CppSyntaxKind::DecltypeType => {
-                let written = node.text().to_string().trim().to_string();
+                let written = written_trimmed(&node);
                 if !written.is_empty() && named.is_none() {
                     named = Some(Type::named(written));
                 }
@@ -1749,7 +1784,7 @@ pub(crate) fn read_specifiers_named(
                 let tag = node
                     .children()
                     .filter(|child| cpp_parser::CppNameExpr::can_cast(child.kind().into()))
-                    .map(|child| child.text().to_string().trim().to_string())
+                    .map(|child| written_trimmed(&child))
                     .find(|written| !written.is_empty());
                 match tag {
                     // Assigned rather than only filled when empty: a tag is a name of the declaration's own, and
@@ -1765,7 +1800,7 @@ pub(crate) fn read_specifiers_named(
             // node with no rule is kept only as a **last resort**, for the file that writes something this layer
             // does not model and would otherwise answer `void` for.
             _ => {
-                let written = node.text().to_string().trim().to_string();
+                let written = written_trimmed(&node);
                 if !written.is_empty() && spelling.is_none() {
                     spelling = Some(Type::named(written));
                 }
@@ -1870,7 +1905,7 @@ fn trailing_template_id(written: &str) -> Option<usize> {
 /// The arguments are read from their own child rather than by parsing the text, because an argument's text can
 /// contain commas and parentheses that a splitter would get wrong.
 fn read_named(node: &CppSyntaxNode) -> Option<Type> {
-    let written = node.text().to_string().trim().to_string();
+    let written = written_trimmed(&node);
     if written.is_empty() {
         return None;
     }

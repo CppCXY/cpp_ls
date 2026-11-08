@@ -793,7 +793,12 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
             None => &crate::sema::scopes::NoMacroBodies,
         };
         let scoping = std::time::Instant::now();
-        let scopes = { build_scopes_with(&root, evidence, keep_locals) };
+        let scopes = {
+            let built = build_scopes_with(&root, evidence, keep_locals);
+            #[cfg(feature = "perf-probe")]
+            crate::perf::mark("scopes");
+            built
+        };
         let scopes_ms = scoping.elapsed().as_secs_f64() * 1000.0;
         // The diagnostics, as ranges, for the one field a fact takes from them rather than from the tree — see
         // [`DeclFact::clean`]. Collected once for the whole file: the parser reports a handful per file, and
