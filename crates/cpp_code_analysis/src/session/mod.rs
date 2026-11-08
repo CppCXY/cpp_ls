@@ -2440,11 +2440,45 @@ impl<F: FileProvider + Clone> Session<F> {
             let before = crate::preprocess::directive::directive_signature(&held.text);
             self.directive_signatures.insert(queue_key(path), before);
         }
+        // **The environment read for the old text, and the key it is filed under.** The macros in force for a file are
+        // a function of its **directives** — its own `#define`s and the ones its includes bring in — so an edit that
+        // moves no directive (a function body, a comment, a declaration) wants the same environment it had. It is
+        // therefore **re-keyed**, not rebuilt, below; see the note there for the measurement.
+        let previous = self
+            .vfs
+            .held(path)
+            .map(|held| (held.path.clone(), crate::cache::content_hash(&held.text)));
         let moved = self.directives_moved(path, Some(text));
         self.prefetched.clear();
 
         self.documents.open(path, text);
         self.vfs.insert(path, text, true);
+
+        // **The environment of a body edit is the one the previous text already read.**
+        //
+        // A macro environment is keyed by the file's content, and until this line a single keystroke in a function
+        // body threw it away: the next drain then rebuilt it — `the_macros_of` copies **every file of the closure's
+        // text** and walks them for macro bodies, which the drain's own log measures at **103.7 ms on MSVC's
+        // headers**. That rebuild happens under the **read** lock, and a `RwLock`'s writer waits for readers, so each
+        // keystroke blocked every request that needed its one write step (`prepare`, `catch_up`, a diagnostic pull)
+        // behind a hundred milliseconds of work for a file whose directives had not moved.
+        //
+        // The condition is the edit's own judgement, not a guess: `DirectivesMoved::environment` is false exactly when
+        // the directive lines that decide what macros are in force are unchanged, which is the case for the edit a
+        // reader makes most of the time. The entry is **moved**, not copied, so the cache keeps one environment per
+        // file rather than one per keystroke — the bound `the_macros_of` states.
+        if !moved.environment
+            && let Some((held_path, before)) = previous
+        {
+            let now = crate::cache::content_hash(text);
+            if before != now
+                && let Ok(mut known) = self.macro_environments.lock()
+                && let Some(environment) = known.remove(&(held_path.clone(), before))
+            {
+                let weight = cpp_parser::MacroFacts::len(environment.as_ref());
+                known.insert((held_path, now), environment, weight);
+            }
+        }
 
         // **Who read what this file used to say**, asked while it still says it: `forget` below takes the summary
         // with it, and the answer is "every file that includes this one, at any depth" — see

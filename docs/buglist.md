@@ -77,6 +77,25 @@ the machine. Each entry says how it was measured, so the next reader can reprodu
 
 ## Closed
 
+### A body edit rebuilt the macro environment — 103.7 ms of closure walk per keystroke
+
+* **Where.** `Session::buffer_changed` → the cache `the_macros_of` fills. A file's `MacroEnvironment` is built by walking
+  its **closure** and copying every include's `#define` bodies; the drain's own log measures **103.7 ms on MSVC's
+  headers**, and the build runs under the **read** lock, which a writer waits for.
+* **The defect.** The environment was cached against the file's **content hash**, so a single character typed in a
+  function body produced a new key, a miss, and a rebuild — for macros that had not moved. Every request that needed its
+  one write step (`prepare`, `catch_up`, a diagnostic pull) then queued behind ~100 ms of work the edit had not made
+  necessary. This is the shape behind "hover has a loading delay every time" and "diagnostics do not update while I
+  type": not one slow query, but a hundred milliseconds of background work re-done per keystroke, under a lock every
+  request needs.
+* **The fix.** The session already knows the difference — `directives_moved` answers `environment` by hashing the
+  file's directive lines, and it is what decides whether a file's *dependents* need re-reading. When that answer is
+  "nothing moved", the environment is **re-keyed to the new content** instead of being thrown away
+  (`Session::buffer_changed`), and a directive edit still misses, which is the honest state until the closure is walked
+  again. One environment per file, not one per keystroke.
+* **Pinned by** `session::tests::a_body_edit_keeps_the_environment_its_includes_built`: the same `Arc` before and after
+  a body edit (`Arc::ptr_eq`), `None` immediately after a directive edit. Verified to fail without the fix.
+
 ### An object's own parameter list was read as a function's
 
 * `LuaParser p(file, std::move(luaLexer.GetTokens()));` — `p.HasError()` answered "`p` is a `LuaParser(file, std::move)`,

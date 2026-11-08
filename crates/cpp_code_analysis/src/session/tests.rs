@@ -5359,3 +5359,65 @@ fn a_class_template_resolves_to_its_primary_definition() {
         other => panic!("`vector` has a primary definition in this closure: {other:?}"),
     }
 }
+
+// -------------------------------------------------------------------------------------------
+// A keystroke does not walk the closure
+// -------------------------------------------------------------------------------------------
+
+/// **A body edit keeps the macro environment its includes built**, because an environment is a function of a file's
+/// *directives* and not of its text.
+///
+/// The walk that builds one copies every file of the closure's text (`Session::the_macros_of` measures **103.7 ms** on
+/// MSVC's headers) and runs under the **read** lock, which a writer waits for — so a keystroke that caused a rebuild
+/// made every request needing its one write step (`prepare`, `catch_up`, a diagnostic pull) wait behind a hundred
+/// milliseconds of work for macros that had not moved.
+///
+/// The cache is keyed by the file's content, and until this test's fix every edit produced a new key and therefore a
+/// rebuild. `DirectivesMoved::environment` — the judgement the session already makes for a file's *dependents* — is
+/// what the fix keys on instead: when no directive moved, the environment is **moved to the new key**, not rebuilt.
+#[test]
+fn a_body_edit_keeps_the_environment_its_includes_built() {
+    const OPEN_H: &str = "#pragma once\n#define _STD_BEGIN namespace std {\n#define _STD_END }\n";
+    const WIDGET_H: &str =
+        "#include \"open.h\"\n_STD_BEGIN\nstruct Widget { int size; };\n_STD_END\n";
+
+    let files = MemoryFiles::new()
+        .with_file("/p/open.h", OPEN_H)
+        .with_file("/p/widget.h", WIDGET_H);
+    let fixture = Memory::new("environment-survives-a-body-edit", &files);
+    let mut session = fixture.session();
+    let widget = Path::new("/p/widget.h");
+
+    session.did_open(widget, WIDGET_H);
+    session.index_everything();
+    // **The build itself**, which is what the pump does for a file it renders: `the_macros_of` walks the closure once
+    // and files the result under the text it was read from.
+    let first = session
+        .the_macros_of(widget, WIDGET_H)
+        .expect("the fixture's closure is readable");
+
+    // **A body edit**: a declaration after `_STD_END`. It moves no directive.
+    let edited = format!("{WIDGET_H}struct Other {{ int y; }};\n");
+    session.did_change(widget, &edited);
+    let second = session.known_macros_of(widget, &edited).expect(
+        "the edit moved no directive, so the environment in force is the one the previous text read",
+    );
+    assert!(
+        std::sync::Arc::ptr_eq(&first, &second),
+        "the environment was rebuilt for a body edit: that is a closure walk per keystroke"
+    );
+
+    // **A directive edit is the other case**, and it must not answer with the old environment: what is in force is
+    // no longer known until the closure is walked again.
+    let directive_edit = WIDGET_H.replacen(
+        "#include \"open.h\"\n",
+        "#include \"open.h\"\n#define LOCAL 1\n",
+        1,
+    );
+    session.did_change(widget, &directive_edit);
+    assert!(
+        session.known_macros_of(widget, &directive_edit).is_none(),
+        "a directive edit moves the environment key: the honest answer in between is `not known`, not the previous \
+         macros"
+    );
+}
