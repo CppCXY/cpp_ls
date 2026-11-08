@@ -168,6 +168,29 @@ fn two_wrong_answers_on_the_codestyle_project() {
                 );
             }
         }
+        // **The member expression itself**, whose type the `std::move` call needs as its argument type: the cursor
+        // sits on `Data`, which is the member-access node's own name. `type_at("result.Data")` above lands on the
+        // object, because the offset is the start of the expression and `type_at` answers the *innermost* node there.
+        if let Some(from) = text.find("std::move(result.Data)") {
+            let at = from + "std::move(result.".len();
+            println!(
+                "  type_at(the `Data` of `result.Data`) = {:?}",
+                session.type_at(
+                    &view,
+                    cpp_code_analysis::file::coordinates::ReadingOffset::new(at)
+                )
+            );
+        }
+        // **The candidates the call has to choose between**, with the three fields the choice reads. `std::move` is
+        // an overload set, so this is also the evidence for what a deduction step would be handed.
+        if let Known::Yes(all) = session.index().definitions("std::move", &c_lib) {
+            for one in all.found.iter().take(6) {
+                println!(
+                    "  std::move candidate: params {:?} list {:?} returns {:?}",
+                    one.fact.parameters, one.fact.parameter_list, one.fact.returns
+                );
+            }
+        }
         let text = std::fs::read_to_string(&c_lib).expect("the file reads");
         let at = text
             .find("diagnostic.Message")
