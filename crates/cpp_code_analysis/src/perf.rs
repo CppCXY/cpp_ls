@@ -8,6 +8,20 @@
 //! The counter itself lives in the allocator the probe installs (`tests/allocation_probe.rs` wraps mimalloc and calls
 //! [`note`]). The **marks** are what turn one total into a table: `cook`, `parse`, `index_tree`, `files`, `commit` each
 //! record the running counts when they finish, and [`report`] prints the deltas in order.
+//!
+//! # What a mark can and cannot attribute
+//!
+//! **The total is exact; a label is only as exact as the threading allows.** The index runs a file's reading on
+//! scoped threads (`index::store`), so two marks recorded on different threads are not on one timeline: a
+//! process-wide counter makes every per-phase delta include whatever the other workers did in between. Measured, a
+//! `facts loop` label read 43 M, 20 M and 82 M for the same code in three runs — which is why the per-fact marks
+//! that produced it were removed, and why a round of this work is verified by the **total** count and the wall time
+//! rather than by a label. The phase-level marks (`cook`, `parse`, `index_tree`, `files`, `commit`) are the ones that
+//! mean something: they bracket work that runs on one thread.
+//!
+//! A per-thread counter was tried as the fix and does not work either, for a reason worth writing down: the
+//! threads that outlive a `reset` keep counting, so their first mark after it carries everything they did before —
+//! and a worker pool that predates the measurement is not something the instrument can see.
 
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
