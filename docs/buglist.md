@@ -25,8 +25,22 @@ the machine. Each entry says how it was measured, so the next reader can reprodu
      time the edited file is read after its closure is in hand; the next keystrokes are 8–18 ms (measured with five in a
      row). Pinning the open file's unit against eviction changed the number **not at all** (3.73 s → 3.60 s, noise) and
      was withdrawn.
-  3. **What is still unexplained and is now the largest measured number: a completion takes 1.15 s** on an *idle*
-     session (61-item queue drained, nothing pending) and answers **one item**. That is a query cost, not scheduling.
+* **The 1.15 s completion, broken down** (`what_keeps_the_pump_busy`, same cursor, same idle session):
+
+  ```text
+  name_completions     1.145 s   (24 name(s))     ← the cost
+  member_completions   1.0 ms     (UnparsableName — nothing to list at `LSPHandle::` for this probe's cursor)
+  completions          10.3 ms    (1 item)         ← the second call, warm
+  ```
+
+  So the query is **cold-state work in `name_completions`**, and the warm call is 10 ms. The path is
+  `global_offers` → `global_names` → `declarations_in_scope(None)` →
+  `ProjectIndex::visible_declarations_where`, which **enumerates every declaration of the whole closure** and applies
+  the prefix filter per fact (a 280-line file whose closure is ~1 600 headers). Its budget
+  (`MAX_COLLECTED_NAMES`) caps the *result*, not the enumeration.
+* **The fix, therefore**: a prefix is a *query*, not a filter — the index already holds names by spelling, and an
+  unqualified completion should ask "names starting with `w`" rather than walk the closure and throw away everything
+  else. That is the next commit, and the probe above is its before-number.
 * **Measured** (`tests/codestyle_probe.rs`, `what_keeps_the_pump_busy`, on `E:\EmmyLuaCodeStyle`, one project file
   added — `LSPHandle.cpp`, 280 lines):
 

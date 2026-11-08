@@ -565,15 +565,38 @@ fn what_keeps_the_pump_busy() {
     let before = (session.pending_work(), session.pending_cooking());
     if let Some(view) = session.view_of_the_file(&file) {
         let at = text.find("RefreshDiagnostic").map(|n| n + 4).unwrap_or(0);
+        // **Which layer of the query costs the 1.15 s** — the three, timed on the same cursor.
+        let names_started = Instant::now();
+        let names = session.name_completions(
+            &view,
+            cpp_code_analysis::file::coordinates::FileOffset::new(at),
+        );
+        let names_took = names_started.elapsed();
+        let members_started = Instant::now();
+        let members = session.member_completions(
+            &view,
+            cpp_code_analysis::file::coordinates::FileOffset::new(at),
+        );
+        let members_took = members_started.elapsed();
         let started = Instant::now();
         let set = session.completions(
             &view,
             cpp_code_analysis::file::coordinates::FileOffset::new(at),
         );
         println!(
-            "a completion: {} item(s) in {:?}",
+            "a completion: {} item(s) in {:?} | name_completions {:?} ({}) | member_completions {:?} ({})",
             set.items.len(),
-            started.elapsed()
+            started.elapsed(),
+            names_took,
+            match &names {
+                Known::Yes(one) => format!("{} name(s)", one.names.len()),
+                other => format!("{other:?}"),
+            },
+            members_took,
+            match &members {
+                Known::Yes(one) => format!("{} member(s)", one.members.members.len()),
+                other => format!("{other:?}"),
+            }
         );
     }
     println!(
