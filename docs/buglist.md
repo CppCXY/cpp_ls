@@ -5,6 +5,28 @@ the machine. Each entry says how it was measured, so the next reader can reprodu
 
 ## Open
 
+### 4. The macro environment a written view wants is never built by the pump
+
+* **What is missing.** A file's **written** view (`view_of_the_file`) is parsed with the macro bodies its includes
+  define, so `_STD_BEGIN struct widget { … }; _STD_END` can place `widget` in `std`. The value is `the_macros_of` — a
+  103.7 ms walk over the closure — and it is meant to be built by the pump's drain into `Drain::environments`. **Nothing
+  fills that list.** The loop that did read a queue (`macro_work`) the loop above it had already drained, so it was dead
+  code; the list has been always empty.
+* **Evidence, and why it is not wired naively.** Feeding it from the ask channel (`Ask::Cook`) was tried and measured on
+  `CodeFormatCLib`… `LSPHandle.cpp` of `E:\EmmyLuaCodeStyle`:
+
+  ```text
+  the project read        6.5 s  -> 26.5 s
+  a diagnostic pull        15 us -> 11.7-13.4 s
+  the whole probe           7 s  ->    87 s
+  ```
+
+  One environment build per ask, and a `view` asks on **every** miss. Reverted (`29f8d8a`), with the numbers written in
+  the code where the slice belongs.
+* **What it needs.** A membership set (the ask is per file, not per view call), a bound on what one drain builds, and a
+  rule for when an ask is *answered* — `known_macros_of` is the test, and it must be consulted before the ask, not
+  after. Then the same measurement must show the project read unchanged.
+
 ### 1. `auto x = std::move(e)` has no type, so every member of `x` is unresolvable
 
 * **Where.** `CodeFormatCLib/src/CodeFormatCLib.cpp` of `E:\EmmyLuaCodeStyle`:
