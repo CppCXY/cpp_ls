@@ -1719,7 +1719,11 @@ fn fill_the_reflection(
     written: &str,
     facts: &mut [crate::DeclFact],
 ) {
-    let mut annotations: std::collections::HashMap<usize, crate::summary::ReflectionFact> =
+    // **The annotation is remembered as the two borrowed pieces**, not as a `ReflectionFact`. `the_annotation_before`
+    // accepts *any* macro call that ends just before a declaration, so most entries are pairs no fact ever reads —
+    // and a `Vec<String>` of specifiers for each of those was 11.3 M allocations of a read's 143 M. The split now
+    // happens only where a fact actually matches, below.
+    let mut annotations: std::collections::HashMap<usize, (&str, &str)> =
         std::collections::HashMap::new();
     use cpp_parser::CppAstNode;
     for node in cpp_parser::typed_descendants::<cpp_parser::CppDeclaration>(root) {
@@ -1730,25 +1734,22 @@ fn fill_the_reflection(
         // declaration; a member function's `UFUNCTION(...)` was measured to be **part of** the declaration — the parser's
         // recovery keeps the macro call and the signature together — so the annotation starts at the declaration itself.
         let start = usize::from(node.get_range().start());
-        let Some((macro_name, specifiers)) =
+        let Some(annotation) =
             the_annotation_before(written, start).or_else(|| the_annotation_at(written, start))
         else {
             continue;
         };
-        annotations.insert(
-            name_start,
-            crate::summary::ReflectionFact {
-                macro_name,
-                specifiers,
-            },
-        );
+        annotations.insert(name_start, annotation);
     }
     for fact in facts {
         if fact.reflection.is_some() {
             continue;
         }
-        if let Some(reflection) = annotations.get(&fact.name_range.start_offset) {
-            fact.reflection = Some(reflection.clone());
+        if let Some((macro_name, arguments)) = annotations.get(&fact.name_range.start_offset) {
+            fact.reflection = Some(crate::summary::ReflectionFact {
+                macro_name: (*macro_name).to_string(),
+                specifiers: the_specifiers(arguments),
+            });
         }
     }
 }
@@ -1763,7 +1764,7 @@ fn the_declaration_name_start(declaration: &cpp_parser::CppSyntaxNode) -> Option
 }
 
 /// The macro call that ends immediately before `at`, with its arguments split into specifiers.
-fn the_annotation_before(written: &str, at: usize) -> Option<(String, Vec<String>)> {
+fn the_annotation_before(written: &str, at: usize) -> Option<(&str, &str)> {
     let before = written.get(..at)?.trim_end();
     if !before.ends_with(')') {
         return None;
@@ -1806,15 +1807,12 @@ fn the_annotation_before(written: &str, at: usize) -> Option<(String, Vec<String
     ) {
         return None;
     }
-    Some((
-        macro_name.to_string(),
-        the_specifiers(&before[index + 1..before.len() - 1]),
-    ))
+    Some((macro_name, &before[index + 1..before.len() - 1]))
 }
 
 /// The macro call that **starts** at `at`, with its arguments split into specifiers — the shape the parser leaves for a
 /// member function, where the annotation and the signature are one declaration.
-fn the_annotation_at(written: &str, at: usize) -> Option<(String, Vec<String>)> {
+fn the_annotation_at(written: &str, at: usize) -> Option<(&str, &str)> {
     let rest = written.get(at..)?;
     let open = rest.find('(')?;
     let macro_name = rest[..open].trim_end();
@@ -1840,10 +1838,7 @@ fn the_annotation_at(written: &str, at: usize) -> Option<(String, Vec<String>)> 
         }
     }
     let close = close?;
-    Some((
-        macro_name.to_string(),
-        the_specifiers(&rest[open + 1..close]),
-    ))
+    Some((macro_name, &rest[open + 1..close]))
 }
 /// **The specifiers of one annotation**, split at the top-level commas.
 ///
@@ -6287,7 +6282,7 @@ fn an_annotation_after_a_multi_byte_character_is_read() {
     let found = the_annotation_before(written, at);
     assert_eq!(
         found.map(|(name, _)| name),
-        Some("UCLASS".to_string()),
+        Some("UCLASS"),
         "the annotation is found past a two-byte character"
     );
 }
