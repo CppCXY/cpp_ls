@@ -135,6 +135,40 @@ left of step 1's price is that `catch_up` still writes when the summary is stale
 which is step 4's subject and deliberately out of scope here.
 
 
+## Steps 2 and 3, as built
+
+**Step 2** (`7cbf8bc`): `checks_memo`, `unit_index` and `rendered_unit` — three `Mutex<Option<(u64, T)>>` fields whose
+worst property was that the *same* pull read one under the lock and wrote it back under that lock — are three fields of
+`Products`, each value behind its own `Arc`. Readers ask with one snapshot, one comparison and one clone
+(`checks_already(state)`, `a_unit_index_already(program)`, `a_rendered_unit_already(key)`); writers publish.
+Pinned by `a_second_pull_answers_from_the_published_memo`, whose observable is the identity of the published `Arc`:
+disable the memo read and the test fails exactly there (checked).
+
+**Step 3, first half** (`9f8fc01`): `refined_readings`, `cooking_refused` and `walks_by_root` — the pump's own *books*,
+whose only traffic was the pump talking to itself — are one `PumpNotes` value behind one lock. The rule the step is
+about is written where it lives: **a note a writer keeps is not a product**, so it gets no place of its own on the
+reader's path. The request side keeps exactly one read of one book (the refusal guard in `want_cooked_reading`, which is
+load-bearing — clearing it on an ask is the 250 ms loop the session already paid for), and the contract is pinned by
+`a_request_for_a_refused_cook_does_not_clear_the_refusal`.
+
+What step 3 has **not** done: the two *asks* (`refined_on_request`, `macro_work`) still push into a lock rather than a
+channel. A request that asks therefore still takes one lock — short, and not the pump's work, but it is a lock on the
+request path and the step's wording says "thoroughly removed". The honest next increment is to replace both with a
+`std::sync::mpsc` sender the request pushes into and the pump drains, which makes "a request pushes, only the pump
+reads back" true without an asterisk.
+
+Lock count, measured (`^\s+\w+: std::sync::Mutex<` in `session/mod.rs`):
+
+```text
+the goal's start   20 Mutex
+after step 1       16 Mutex + 1 RwLock<Arc<Products>>   (four caches -> one published snapshot)
+after step 2       13 Mutex
+after step 3       11 Mutex                             (three books -> one PumpNotes)
+```
+
+Steps 1–3 remove 9 of the 20, and — more to the point — every one of them removes a *write from a query*: a query no
+longer fills the view cache, no longer replaces the three memos, and no longer edits the pump's books.
+
 ## The rule this leaves behind
 
 > **A query may not write.** If an answer needs to remember something, that something is a product: give it a key,
