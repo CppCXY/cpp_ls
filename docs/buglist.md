@@ -71,9 +71,12 @@ the machine. Each entry says how it was measured, so the next reader can reprodu
 
 * **Reported from use.** "我新打开的文件会导致CPU轰鸣，当前页面需要长时间的加载，导致其余LSP功能几乎无法响应".
 * **Measured.** The open itself is small: `didOpen` + one pump step is **179 ms**, and the file's first view **1.7 ms**.
-  What roars is around it: reading the project takes **1.70 s** on this checkout, and an `import std;` program read is
-  seconds (the 5 MB / 143 M allocation figure). Which of those the reader experiences as "CPU roaring while the page
+  What roars is around it: reading the project takes **7.0 s** on this checkout (`tests/codestyle_probe.rs`,
+  `what_a_keystroke_costs_on_the_real_closure`: one `index_everything` over the CodeStyle project), and an
+  `import std;` program read is seconds more. Which of those the reader experiences as "CPU roaring while the page
   loads" is not settled by a library probe — the handler's own order is what decides it, and that is #2's open question.
+  The same probe on the file the report is about (`LSPHandle.cpp`): rendering 2 181 tokens, first view 1.9 ms, and a
+  body keystroke costs the pump 15.6–18.8 ms — nothing at the library level accounts for a freeze.
 
 ## Closed
 

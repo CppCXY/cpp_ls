@@ -214,10 +214,22 @@ fn what_a_keystroke_costs_on_the_real_closure() {
     // includes `<fstream>`), because whether the include closure resolves depends on the session having walked the
     // project — so this uses the setup above, which does resolve it, and prints the size of the stream it measures.
     let root = project();
-    let file = root
-        .join("CodeFormatCLib")
-        .join("src")
-        .join("CodeFormat.cpp");
+    // **The file is the caller's**, because the report is about one file: `LSPHandle.cpp` is where the reader sees
+    // hover slow and completion empty, and it is not the file this probe started on.
+    let file = std::env::var("CPPLS_FILE")
+        .map(PathBuf::from)
+        .map(|file| {
+            if file.is_absolute() {
+                file
+            } else {
+                root.join(file)
+            }
+        })
+        .unwrap_or_else(|_| {
+            root.join("CodeFormatCLib")
+                .join("src")
+                .join("CodeFormat.cpp")
+        });
     let text = std::fs::read_to_string(&file).expect("the file reads");
 
     let mut session = Session::open(
@@ -234,10 +246,9 @@ fn what_a_keystroke_costs_on_the_real_closure() {
 
     if let Some(rendered) = session.rendering_of(&file) {
         println!(
-            "the rendering            {:.2} MB, {} token(s), {} span(s)",
+            "the rendering            {:.2} MB, {} token(s)",
             rendered.text.len() as f64 / (1024.0 * 1024.0),
             rendered.spans.len(),
-            rendered.spans.len()
         );
     } else {
         println!(
@@ -279,9 +290,14 @@ fn what_a_keystroke_costs_on_the_real_closure() {
         let view = session.view_of_the_file(&file);
         let viewed = started.elapsed();
 
+        // **The screenshot's question**: the diagnostics a client pulls right after a keystroke.
+        let started = Instant::now();
+        let reported = session.diagnostics(&file).map(|found| found.errors.len());
+        let diagnosed = started.elapsed();
+
         println!(
             "body keystroke {round}       pump {pump:>9.1?} | catch_up {catch:>9.1?} | view {viewed:>9.1?} ({}) \
-             | read as the program {read_as_the_program}",
+             | diagnostics {diagnosed:>9.1?} ({reported:?}) | read as the program {read_as_the_program}",
             if view.is_some() {
                 "a reading"
             } else {
