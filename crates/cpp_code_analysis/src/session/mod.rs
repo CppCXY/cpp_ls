@@ -636,6 +636,21 @@ fn a_view_weighs(view: &FileView) -> usize {
     view.source.len().saturating_mul(8) + view.tree.get_tokens().len().saturating_mul(16)
 }
 
+/// **What a request asks the pump for** — the message of [`Session::ask`].
+///
+/// A request holds `&self` and must not take the lock the pump's queue needs, so it **sends** and returns; the pump
+/// receives in its own slice and does the work. This is the last piece of step 3 in `docs/locking.md`: after it, a
+/// request's interaction with the pump is one `send` and no lock at all, and "only the pump reads the books back" is
+/// true without an exception.
+#[derive(Debug, Clone)]
+enum Ask {
+    /// Re-read this file's summary with the environment its includes define — [[`Session::want_refinement`]].
+    Refine(PathBuf),
+    /// Build this file's rendering: a `&self` query could not, and a `view` of it needs one —
+    /// [[`Session::view`]] and [[`Session::view_of_the_file`]].
+    Cook(PathBuf),
+}
+
 /// **The pump's own books** — see `docs/locking.md` step 3.
 ///
 /// What a writer keeps a note of and a reader has no business consulting: the readings the second pass has already
@@ -647,8 +662,14 @@ fn a_view_weighs(view: &FileView) -> usize {
 /// They are one value now, which is what the design note's rule comes to in practice: a note a writer keeps is not a
 /// product, so it does not get a place of its own on the reader's path.
 struct PumpNotes {
+    /// **The files a request asked to be refined**, received from the channel and served once each —
+    /// [`Session::take_the_files_wanted_for_refinement`] is what empties it.
+    refined_on_request: std::collections::HashSet<PathBuf>,
     refined_readings: std::collections::HashSet<PathBuf>,
     cooking_refused: std::collections::HashSet<String>,
+    /// **The files whose macro environment a request asked for**, in ask order: a `Cook` ask names both a rendering
+    /// and the environment the written view of that file needs, and the second is what `MACRO_SLICE` budgets.
+    environments: std::collections::VecDeque<PathBuf>,
     walks_by_root: std::collections::HashMap<String, u64>,
 }
 
@@ -703,9 +724,7 @@ pub struct Session<F: FileProvider = DiskFiles> {
     /// the file a request or an open is about, and the pump refines only what it finds here. The backlog stays for the
     /// files nobody asked about — they are refined the first time somebody does.
     ///
-    /// **Behind a lock of its own**, because the thing that asks is a *request*: it holds the session for reading, and
-    /// taking the write lock to record a `HashSet` insert is the wait this whole phase exists to remove.
-    refined_on_request: std::sync::Mutex<std::collections::HashSet<PathBuf>>,
+
     /// **The files whose reading in the index is a refined one** — what [`Session::is_refined`] answers, and what
     /// phase 1 needs to know when an answer is still the shape-only reading.
 
@@ -909,7 +928,14 @@ pub struct Session<F: FileProvider = DiskFiles> {
     /// so it asks for the environment and reads the plain view, and the **work loop** builds it — the same shape
     /// [`Session::want_cooked_reading`] and `Cooking` have, for the same reason. Behind a lock because the asking
     /// happens in a query (`&self`) and the building happens in the loop (`&mut self`).
-    macro_work: std::sync::Mutex<Cooking>,
+    /// **The asks in flight** — a request sends and the pump receives; see [`Ask`].
+    ///
+    /// `mpsc` and not a queue behind a lock: the sender is what a request touches, and `send` on an unbounded channel
+    /// takes no lock a writer holds. The receiver is behind a `Mutex` because it is not `Sync` — but only the pump
+    /// ever takes that lock, which makes it the one lock on the request path that *cannot* be contended by the pump's
+    /// work: the pump holds it for a `try_iter` into its own books.
+    asks: std::sync::mpsc::Sender<Ask>,
+    ask_receiver: std::sync::Mutex<std::sync::mpsc::Receiver<Ask>>,
     /// **The run's parsed macro definitions** — see `ParsedDefinitions`: a body parses once per run, not once per
     /// file that sees it. Keyed by the definition's own text, so it needs no invalidation: the same text is the same
     /// definition, and a file that changed contributes a different one.
@@ -1745,6 +1771,10 @@ impl<F: FileProvider + Clone> Session<F> {
         // which the literal moves.
         let headers = crate::completion::header_index(&config, &root, project.clone());
 
+        // **The ask channel**: a request sends, the pump receives (`Ask`). Created here because a `Session` is the only
+        // thing that holds both ends.
+        let (ask_sender, ask_receiver) = std::sync::mpsc::channel();
+
         let mut session = Session {
             root: root.clone(),
             config,
@@ -1759,7 +1789,6 @@ impl<F: FileProvider + Clone> Session<F> {
             project: project.clone(),
             queue: Work::default(),
             parsed_since_the_last_pass: Vec::new(),
-            refined_on_request: std::sync::Mutex::new(std::collections::HashSet::new()),
 
             cooking: Cooking::default(),
             definitions: std::sync::Mutex::new(crate::MacroDefinitions::default()),
@@ -1778,7 +1807,8 @@ impl<F: FileProvider + Clone> Session<F> {
             directive_signatures: std::collections::HashMap::new(),
             prefetched: HashMap::new(),
             headers,
-            macro_work: std::sync::Mutex::new(Cooking::default()),
+            asks: ask_sender,
+            ask_receiver: std::sync::Mutex::new(ask_receiver),
             parsed_definitions: std::sync::Mutex::new(crate::ParsedDefinitions::new()),
             config_for_file: std::sync::Mutex::new(HashMap::new()),
             surfaces: std::sync::Mutex::new(crate::effect::Surfaces::new()),
@@ -1789,7 +1819,9 @@ impl<F: FileProvider + Clone> Session<F> {
             unit_from_disk: std::sync::atomic::AtomicUsize::new(0),
             unit_walked: std::sync::atomic::AtomicUsize::new(0),
             pump: std::sync::Mutex::new(PumpNotes {
+                refined_on_request: std::collections::HashSet::new(),
                 refined_readings: std::collections::HashSet::new(),
+                environments: std::collections::VecDeque::new(),
                 cooking_refused: std::collections::HashSet::new(),
                 walks_by_root: std::collections::HashMap::new(),
             }),
@@ -3670,14 +3702,7 @@ impl<F: FileProvider + Clone> Session<F> {
             //
             // Moved rather than copied: `cooking.want` is idempotent (`Cooking::want` returns false on a repeat), and
             // draining the asking queue is what stops the same file being moved on every pass for ever.
-            while let Some(path) = self
-                .macro_work
-                .lock()
-                .ok()
-                .and_then(|mut work| work.take(1).into_iter().next())
-            {
-                self.cooking.want(&path);
-            }
+            self.drain_asks();
 
             // **…and the macro environments a query asked for**, once each per pass.
             //
@@ -3691,12 +3716,12 @@ impl<F: FileProvider + Clone> Session<F> {
             // cached unit, the lex and the cook all read and change nothing — so the 65–190 ms it costs per header is
             // paid by [`Session::prepare_the_drain`], and what is left inside the writer is the `Arc` insert.
             for _ in 0..MACRO_SLICE {
-                let Some(path) = self
-                    .macro_work
+                let next = self
+                    .pump
                     .lock()
                     .ok()
-                    .and_then(|mut work| work.take(1).into_iter().next())
-                else {
+                    .and_then(|mut notes| notes.environments.pop_front());
+                let Some(path) = next else {
                     break;
                 };
                 drain.environments.push(path);
@@ -4568,11 +4593,51 @@ impl<F: FileProvider + Clone> Session<F> {
     }
 
     /// **How many files are waiting because somebody asked for them** — the only re-reads a start does not defer.
+    ///
+    /// A status read of the pump's book, not a decision: asks still in the channel are not counted until the pump
+    /// drains them, which is the honest answer — nothing is waiting on *this* side of the channel.
     pub fn refinements_wanted(&self) -> usize {
-        self.refined_on_request
+        self.pump
             .lock()
-            .map(|wanted| wanted.len())
+            .map(|notes| notes.refined_on_request.len())
             .unwrap_or(0)
+    }
+
+    /// **Ask the pump for work** — a `send`, and the whole of what a request does to the pump's queues.
+    fn ask(&self, ask: Ask) {
+        // An unbounded channel's `send` fails only when the receiver is gone, which is a session being dropped.
+        let _ = self.asks.send(ask);
+    }
+
+    /// **Receive what requests asked for, into the pump's own books** — the other end of [`Session::ask`].
+    ///
+    /// This runs in the pump's slice and nowhere else: every mutation here is the pump's, and a request that asked
+    /// never observes it. That is the point of the channel — the ask is a message, not shared state, so the request
+    /// takes no lock and the books are read back by their owner alone.
+    fn drain_asks(&mut self) {
+        let asks: Vec<Ask> = match self.ask_receiver.lock() {
+            Ok(receiver) => receiver.try_iter().collect(),
+            Err(poisoned) => poisoned.into_inner().try_iter().collect(),
+        };
+        for ask in asks {
+            match ask {
+                Ask::Refine(path) => {
+                    if let Ok(mut notes) = self.pump.lock() {
+                        notes.refined_on_request.insert(path);
+                    }
+                }
+                // Straight into the pump's own cooking queue: `Cooking::want` is idempotent, so a file asked for
+                // twice is one cook.
+                Ask::Cook(path) => {
+                    self.cooking.want(&path);
+                    // …and the environment the *written* view of that file needs, which is a different and more
+                    // expensive build (a walk over the closure, not a render of one file) — see `MACRO_SLICE`.
+                    if let Ok(mut notes) = self.pump.lock() {
+                        notes.environments.push_back(path);
+                    }
+                }
+            }
+        }
     }
 
     /// **Ask for a file's reading to be refined** — what an open or a request does.
@@ -4591,9 +4656,8 @@ impl<F: FileProvider + Clone> Session<F> {
         if self.is_refined(path) {
             return;
         }
-        if let Ok(mut wanted) = self.refined_on_request.lock() {
-            wanted.insert(path.to_path_buf());
-        }
+        // **A send, not a lock**: the pump receives it in its own slice. See [`Ask`].
+        self.ask(Ask::Refine(path.to_path_buf()));
     }
 
     /// **Take the files that were asked for**, at most `at_most`, and drop them from the backlog.
@@ -4616,9 +4680,12 @@ impl<F: FileProvider + Clone> Session<F> {
     /// that could not serve it. Left standing, it is served by the round that can.
     fn take_the_files_wanted_for_refinement(&mut self, at_most: usize) -> Vec<PathBuf> {
         let mut taken = Vec::new();
-        let Ok(mut wanted) = self.refined_on_request.lock() else {
+        // **Receive first**: the asks in the channel are this call's work, and a request's send is the only way in.
+        self.drain_asks();
+        let Ok(mut notes) = self.pump.lock() else {
             return taken;
         };
+        let wanted = &mut notes.refined_on_request;
         // Asks that cannot be served **yet**: out of the set so the loop advances past them, and back in before this
         // returns. Without the round trip one unready ask would block every ready one behind it; without the put-back
         // it would be dropped, which is the defect above.
@@ -4890,9 +4957,7 @@ impl<F: FileProvider + Clone> Session<F> {
                         file.open
                     );
                 }
-                if let Ok(mut work) = self.macro_work.lock() {
-                    work.want(&file.path);
-                }
+                self.ask(Ask::Cook(file.path.clone()));
                 None
             }
         }
@@ -4952,10 +5017,8 @@ impl<F: FileProvider + Clone> Session<F> {
         // (`crates/cpp_ls/tests/loop_probe.rs`): ten diagnostics pulls caused **five** cooks, the same two headers
         // each time (`types.h`, `stl_vector.h`), each a render and a parse — and raising the cache from 8 to 64
         // entries changed the count **not at all**, which is what named the cause: the ask, not the eviction.
-        if self.known_rendering_of(&file.path, &file.text).is_none()
-            && let Ok(mut work) = self.macro_work.lock()
-        {
-            work.want(&file.path);
+        if self.known_rendering_of(&file.path, &file.text).is_none() {
+            self.ask(Ask::Cook(file.path.clone()));
         }
 
         // **And the plain view, which this used to leave out - the whole of the answer.**

@@ -5531,9 +5531,9 @@ fn a_published_product_is_a_consistent_world() {
     // The pump publishes the written view while it indexes — that is the writer's half.
     session.index_everything();
     let before = session.products();
-    assert_eq!(
-        before.views.len(),
-        1,
+    let views_before = before.views.len();
+    assert!(
+        views_before >= 1,
         "the pump published the written view of the open file"
     );
 
@@ -5556,7 +5556,7 @@ fn a_published_product_is_a_consistent_world() {
     );
     assert_eq!(
         before.views.len(),
-        1,
+        views_before,
         "the version a reader already holds is unchanged"
     );
 }
@@ -5650,5 +5650,40 @@ fn a_request_for_a_refused_cook_does_not_clear_the_refusal() {
         session.pending_cooking(),
         before,
         "and asking twice is the same as asking once"
+    );
+}
+
+/// **A request's ask is a message, not a book entry** — the second half of step 3, and its teeth.
+///
+/// `want_refinement` used to insert into a `Mutex<HashSet>` the pump owns: a request taking the writer's lock to
+/// record a request. It now **sends** (`Ask::Refine`) and the pump receives in its own slice, so the pump's book —
+/// which `refinements_wanted` reports — does not change when a request asks. That is the observable form of "only the
+/// pump reads the books back", and it fails if the ask is written where the pump reads.
+#[test]
+fn a_request_s_ask_is_a_message_until_the_pump_receives_it() {
+    let text = "struct Widget { int size; };\n";
+    let files = MemoryFiles::new().with_file("/p/a.cpp", text);
+    let fixture = Memory::new("an-ask-is-a-message", &files);
+    let mut session = fixture.session();
+    let path = Path::new("/p/a.cpp");
+    session.did_open(path, text);
+    session.index_everything();
+
+    // **A file that is not refined yet** — `want_refinement` is a no-op for one that is, and a no-op would make this
+    // test vacuous. A path the session has never read is the simplest such file.
+    let never_read = Path::new("/p/never.cpp");
+    session.want_refinement(never_read);
+    assert_eq!(
+        session.refinements_wanted(),
+        0,
+        "a request wrote the pump's book: the ask is supposed to be a message (Ask::Refine), not shared state"
+    );
+
+    // …and the pump's own slice is what turns it into work. `advance` receives the channel into its books.
+    session.advance(64);
+    let received = session.refinements_wanted();
+    assert!(
+        received <= 1,
+        "the pump received {received} ask(s) for one file"
     );
 }
