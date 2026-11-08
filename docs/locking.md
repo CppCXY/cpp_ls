@@ -105,6 +105,36 @@ Analysis                                      the reader: a clone of three Arcs,
 Steps 1–3 remove 12 of the 20 locks and every write a *request* takes, and none of them touches the index. Step 4 is
 the one that needs care; step 5 is then mechanical.
 
+## Step 1, as built — and the numbers
+
+Landed in three commits:
+
+* `ef8e9fb` — **a query may not publish the view it built**: `view_of_the_file` is a wrapper over
+  `written_view(&self) -> Option<(FileView, ViewKey)>`, which publishes nothing, and `publish_the_written_view` is the
+  writer's half, called from `advance` for the documents a reader has open.
+* `e0ad2a1` (server side) — **the published texts**: `apply_buffer` publishes the buffer before it takes any lock, so
+  `prepare_for_a_read` answers "is this file held" with no lock at all. That branch used to be a `try_read` on the
+  session, and a lock it could not get sent the hover down `prepare`'s write path.
+* `90a2adb` — **the four product caches became one `Arc<Products>`**: copy-on-write publication (`products()` clones the
+  `Arc` and drops the lock; `publish()` copies the map it changes and swaps), readers on the new `Cache::peek`, and the
+  pump as the writer. Four `Mutex`es become one `RwLock`.
+
+Measured with `tests/codestyle_probe.rs::what_a_keystroke_costs_on_the_real_closure` on
+`E:\EmmyLuaCodeStyle`, `CodeFormatServer/src/LSP/LSPHandle.cpp` (2181-token rendering):
+
+```text
+                       before step 1        after step 1
+the first view          1.7–1.9 ms          48 µs          ← the pump published it
+a body keystroke: view  1.7 ms              36 µs          ← 46×, and it is a hit
+                  pump  15.6–18.8 ms        20.2–20.8 ms   ← the parse moved here
+                  the project read          7.0 s          6.5 s
+```
+
+That is the trade the note argues for, made visible: **the view cost moved from the request to the background.** What is
+left of step 1's price is that `catch_up` still writes when the summary is stale — the summary is an *index* product,
+which is step 4's subject and deliberately out of scope here.
+
+
 ## The rule this leaves behind
 
 > **A query may not write.** If an answer needs to remember something, that something is a product: give it a key,
