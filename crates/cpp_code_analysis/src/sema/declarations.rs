@@ -1706,6 +1706,14 @@ fn fill_the_frees(root: &CppSyntaxNode, facts: &mut [crate::DeclFact]) {
 /// before that is `bool ` rather than the annotation — measured, and the first version of this pass matched nothing on
 /// members because of it. So the tree is walked once, the annotation is read before each declaration's own start, and
 /// the result is filed under the **declared name's** offset, which is what a fact carries in `name_range`.
+/// # What it costs, and what to change first
+///
+/// Measured on `import std;` with `perf-probe`: **11.3 M allocations** of a read's 143 M, and the shape points at a
+/// false positive rather than at the annotations. `the_annotation_before` accepts **any** macro call that ends just
+/// before a declaration — a declaration preceded by `foo(...)` is "annotated" too — so the `specifiers` `Vec<String>` is
+/// built for every such pair, and the map keeps a `String` and a `Vec` for an answer no `ReflectionFact` may ever need.
+/// The next change: store the annotation's **byte range** and split it only when a fact actually matches, which is
+/// behaviour-preserving and removes the allocation for the pairs nothing reads.
 fn fill_the_reflection(
     root: &cpp_parser::CppSyntaxNode,
     written: &str,
