@@ -1297,6 +1297,33 @@ impl<'a> CppLexer<'a> {
 ///
 /// The stream covers the file byte for byte: concatenating the tokens' text reproduces `text`. There is
 /// no `Eof` token — the lexer stops there, and "past the last token" is `text.len()`.
+/// **The first preprocessing token of `text`**, as `(kind, range)`, without building the stream — `None` when the text
+/// holds only trivia.
+///
+/// The renderer asks "would joining these two spellings change the first token?" once per pair of adjacent tokens of a
+/// rendering (`joining_would_merge`), and on a `import std;` read that is **1.3 million questions**. Each one used to
+/// build a `String` for the join and a whole `Vec<CppTokenData>` for the answer about one token; this answers it from a
+/// borrowed buffer and no vector.
+///
+/// The `>>`, `>=` and `>>=` split that [`CppLexer::push`] performs is applied here too, because the answer is about the
+/// **first token of the stream**, and for those three that is a one-byte `>`.
+pub fn lex_first(text: &str, config: &LexerConfig) -> Option<(CppTokenKind, crate::text::SourceRange)> {
+    let mut errors = Vec::new();
+    let mut lexer = CppLexer::new(text, *config, &mut errors);
+    let kind = lexer.lex();
+    if kind == CppTokenKind::Eof {
+        return None;
+    }
+    let range = lexer.reader.saved_range();
+    match kind {
+        // The three the stream splits — see [`CppLexer::push`]: the first token of the stream is a one-byte `>`.
+        CppTokenKind::RightShift | CppTokenKind::GreaterEqual | CppTokenKind::RightShiftAssign => Some((
+            CppTokenKind::Greater,
+            crate::text::SourceRange::new(range.start_offset, 1),
+        )),
+        other => Some((other, range)),
+    }
+}
 pub fn lex(text: &str, config: &LexerConfig) -> (Vec<CppTokenData>, Vec<CppParseError>) {
     let mut errors = Vec::new();
     let tokens = CppLexer::new(text, *config, &mut errors).tokenize();

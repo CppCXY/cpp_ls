@@ -130,6 +130,9 @@ impl CookedStream {
         // The previous token's spelling, whatever it came from: the join test below needs it for a pair the cook
         // produced, which has no source offsets to compare.
         let mut previous_cooked: Option<String> = None;
+        // **The join buffer**, owned by this rendering: [`joining_would_merge`] asks the question once per adjacent pair
+        // of a 1.3-million-token stream, and a `String` per question was most of what the answer cost.
+        let mut join = String::new();
 
         for (index, cooked) in self.tokens.iter().enumerate() {
             while lines.next_if(|line| line.end <= index).is_some() {}
@@ -171,13 +174,13 @@ impl CookedStream {
                 Origin::Source => match previous_source_end {
                     Some(end) => end == cooked.token.range.start_offset,
                     None => match previous_cooked.as_deref() {
-                        Some(previous) => !joining_would_merge(previous, cooked.token.text()),
+                        Some(previous) => !joining_would_merge(&mut join, previous, cooked.token.text()),
                         None => false,
                     },
                 },
                 // Everything the cook produced — an expansion, a `##` paste, a `#` stringisation.
                 _ => match previous_cooked.as_deref() {
-                    Some(previous) => !joining_would_merge(previous, cooked.token.text()),
+                    Some(previous) => !joining_would_merge(&mut join, previous, cooked.token.text()),
                     None => false,
                 },
             };
@@ -289,16 +292,17 @@ impl RenderedCooked {
 /// and then cached; being wrong costs a name that reads as two.
 ///
 /// An empty side is not a join at all, and a call with nothing to lex would answer about the wrong thing.
-fn joining_would_merge(left: &str, right: &str) -> bool {
+fn joining_would_merge(join: &mut String, left: &str, right: &str) -> bool {
     if left.is_empty() || right.is_empty() {
         return false;
     }
-    let joined = format!("{left}{right}");
-    let (tokens, _) = cpp_parser::lex(&joined, &cpp_parser::LexerConfig::default());
-    match tokens.first() {
-        // **By range, not by text**: a lexer token carries where it is rather than what it says, and "the first
-        // token is exactly the left spelling" is the same claim as "the first token ends where the left one does".
-        Some(first) => first.range.end_offset() != left.len(),
+    join.clear();
+    join.push_str(left);
+    join.push_str(right);
+    match cpp_parser::lex_first(join, &cpp_parser::LexerConfig::default()) {
+        // **By range, not by text**: a lexer token carries where it is rather than what it says, and "the first token
+        // is exactly the left spelling" is the same claim as "the first token ends where the left one does".
+        Some((_, first)) => first.end_offset() != left.len(),
         // A join that lexes to nothing is one the lexer refused; separating is the direction that cannot invent a
         // token, so the answer is that it would.
         None => true,

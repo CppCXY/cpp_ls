@@ -10,7 +10,8 @@
 //! 1.7 s on a 4.7 s read — so a probe that counts cannot also be the probe that times. The count is what does not move
 //! when the machine is loaded, which makes it the honest instrument for a change that removes allocations.
 //!
-//! Baseline before the `SmolStr` token and the borrowed name spellings: **217 535 897 allocations, 11 814 MB**.
+//! The baseline before the `SmolStr` token, the borrowed name spellings and the tree-scan directive question was
+//! **217 535 897 allocations, 11 814 MB**; the same read now makes **149 931 213 allocations, 10 458 MB**.
 
 use std::path::PathBuf;
 

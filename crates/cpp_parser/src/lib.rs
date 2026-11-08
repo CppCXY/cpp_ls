@@ -13,7 +13,7 @@ pub use grammar::doc::{
 pub use kind::*;
 pub use lexer::{
     CppLexer, CppTokenData, DocCommentStyle, DocToken, DocTokenKind, LexerConfig, is_block_comment,
-    is_doc_whitespace, is_documentation_comment, lex, lex_comment,
+    is_doc_whitespace, is_documentation_comment, lex, lex_comment, lex_first,
 };
 pub use parser::{Checkpoint, CppParser, EventStreamAudit, MarkEvent, ParserConfig};
 pub use parser_error::{CppParseError, CppParseErrorKind};
