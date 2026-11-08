@@ -28,15 +28,33 @@ the machine. Each entry says how it was measured, so the next reader can reprodu
   `written_list` or `argument_types` is empty for this call. The next step is one print of those four values at that
   site, then the fix follows from which one it is.
 
-### 2. Editing a file re-parses and re-indexes the whole expansion
+### 2. Editing a file freezes the file — and the freeze is *not* where the cost was assumed to be
 
 * **Reported from use.** "只要我编辑代码，当前文件就会有较长时间的卡死".
-* **Cause.** A file's reading is the whole **stitched** stream — its own text plus every `#include`'s text, macro-expanded
-  — and an edit reparses and reindexes that entire stream even though the include region has not changed.
-* **The shape of the fix** is the reader's own proposal and it is right: one file is three artifacts, not one —
-  the **include region's tree** (rarely changes), the **file's own region's tree** (changes on every edit), and the
-  file's **lex stream** (already exists, and is what a keystroke's queries mostly need). See
-  [`parse-architecture.md`](parse-architecture.md).
+* **What the session costs, measured** (`tests/keystroke_probe.rs`, `--release`, on `E:\EmmyLuaCodeStyle`,
+  `CodeFormat/src/CodeFormat.cpp`, one project file added so the compile database resolves the closure):
+
+  ```text
+  the session settled                996 ms
+  didOpen + the file's re-read       179 ms   192 534 fact(s), 1 unit   ← the real closure, read once
+  10 body keystrokes                 7 / 8 / 9 ms (min/median/max)     1 file walked, read as the program
+  10 directive keystrokes            165 / 168 / 175 ms               11 files walked, walked again
+  ```
+
+* **So the assumption this entry used to carry was wrong.** A **body** keystroke does *not* re-read the whole
+  expansion: the units table re-walks the edited file and reuses the rest (1 file walked, 8 ms). A **directive**
+  keystroke does re-walk (11 files, 168 ms) — that is 20× — and is the half of the architecture's order
+  (`directives → unit → parse`) that pays.
+* **What is therefore unexplained.** The reported freeze is not the session's first step of a body edit, so it is one of:
+  the rest of what a handler does around a change (`Session::catch_up`, which the handlers call and this probe does
+  not), the request path a client fires *after* a keystroke (pull diagnostics — `handlers::diagnostic::diagnose_file`
+  takes a write hold, semantic tokens, inlay hints), or the client side. That is the next measurement, and it is why
+  the split below is **not** being built on the strength of this entry alone.
+* **The shape of the fix** the reader proposed is still right for the *other* two costs — the first read of a file
+  (179 ms of whole-closure cook + parse + index before the file's own answers exist) and the background program read
+  (the multi-second burn): one file is three artifacts, not one — the **include region's tree** (rarely changes), the
+  **file's own region's tree** (changes on every edit), and the file's **lex stream** (already exists, and is what a
+  keystroke's queries mostly need). See [`parse-architecture.md`](parse-architecture.md).
 * **Progress.** The parser now parses a **token range**, not only a whole text
   (`CppParser::parse_tokens`, step 1 of that document, four properties pinned in `tests/token_range.rs`). What is left is
   the reader's side: the stitcher hands over each region's token range, and the queries are rebuilt on the own region.

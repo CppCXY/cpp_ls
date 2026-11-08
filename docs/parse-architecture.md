@@ -1,11 +1,18 @@
 # One file, three artifacts: how the parse should be split
 
-The editor's report is the specification: an edit to a file should not reparse the whole **stitched** stream — the file's
-text plus every include's text, macro-expanded, which for `#include <vector>` is tens of thousands of lines — when the
-include region has not changed.
+The editor's report is the specification: a file's answers should not wait for the whole **stitched** stream — the file's
+text plus every include's text, macro-expanded, which for `#include <vector>` is tens of thousands of lines — and an edit
+should not reparse that stream when the include region has not changed.
 
 A real compiler does not do that either: it preprocesses, and the parser sees one stream. The stream is the *right*
 artifact for the **first** read and the wrong one for the **second**, because an edit changes one region of it.
+
+Measured before building on it (`docs/buglist.md` #2): the *edit* half of that premise is weaker than it looks —
+a body keystroke on `CodeFormat.cpp` costs the session **8 ms**, because the units table re-walks the edited file and
+reuses the rest — while the **first** read of the same file costs **179 ms** (cook + parse + index of the whole closure
+before the file has any answer of its own) and a directive edit costs **168 ms**, since that one does re-walk every file.
+So the split is justified by time-to-first-answer and by the directive half, and the freeze the reader reports still has
+to be located on the request path before it is attributed to this parse.
 
 ## The three artifacts
 
