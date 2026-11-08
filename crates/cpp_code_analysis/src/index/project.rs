@@ -6226,6 +6226,9 @@ impl NamedDeclaration {
                     Some(&declarator),
                     binding.name_range,
                     binding.name.identifier_text(),
+                    // **The same rule the fact builder applies**: a variable's own parameter list is its constructor
+                    // call, so the reader must not turn it into a function type. See `declared_type_of_with`.
+                    matches!(binding.kind, crate::BindingKind::Variable),
                 );
                 // **Only inside a function body.** A file-scope `static const struct { … } priority[]` keeps the empty
                 // spelling, because a reader hovering it is shown the declaration's own text — naming its type made

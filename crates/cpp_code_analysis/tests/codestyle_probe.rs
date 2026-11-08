@@ -110,6 +110,18 @@ fn two_wrong_answers_on_the_codestyle_project() {
         "  definitions(\"HasError\") = {:?}",
         session.index().definitions("HasError", &main)
     );
+    if let Some(view) = session.view_of_the_file(&main)
+        && let Known::Yes(members) = session.members_of(&view, "LuaParser")
+    {
+        let has = members
+            .members
+            .iter()
+            .any(|member| member.fact.name == "HasError");
+        println!(
+            "  members_of(LuaParser): {} member(s), HasError among them: {has}",
+            members.members.len()
+        );
+    }
 
     println!("\n== 2. `for (auto &diagnostic : diagnostic_results)` ==");
     for fact in facts_for(&session, &c_lib, "diagnostic_results") {
@@ -150,4 +162,29 @@ fn two_wrong_answers_on_the_codestyle_project() {
             )
         );
     }
+}
+
+#[test]
+#[ignore = "a probe, not a test: it prints the parse tree of one declaration"]
+fn the_tree_of_a_constructor_call_declaration() {
+    // **The shape the engine misreads**, on its own: `LuaParser p(file, std::move(x));` — is the parameter list part
+    // of the declarator, or a sibling of the declaration?
+    let source = "void f() {\n  LuaParser p(file, std::move(x));\n  p.HasError();\n}\n";
+    let tree = cpp_parser::CppParser::parse(source, cpp_parser::ParserConfig::default());
+    fn walk(node: &cpp_parser::CppSyntaxNode, depth: usize) {
+        let text = node.text().to_string();
+        let text = text.trim().replace('\n', " ");
+        let shown: String = text.chars().take(40).collect();
+        println!(
+            "{:indent$}{:?} {:?}",
+            "",
+            cpp_parser::CppSyntaxKind::from(node.kind()),
+            shown,
+            indent = depth * 2
+        );
+        for child in node.children() {
+            walk(&child, depth + 1);
+        }
+    }
+    walk(&tree.get_red_root(), 0);
 }

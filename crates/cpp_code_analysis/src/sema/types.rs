@@ -1479,8 +1479,11 @@ pub fn type_of_declaration(
     specifiers: &CppSyntaxNode,
     declarator: Option<&CppSyntaxNode>,
     name: cpp_parser::SourceRange,
+    // **Does this declaration declare an object?** See [`type_of_declaration_named`], which is where the question is
+    // answered; this wrapper exists only because most callers do not need to say which name is being declared.
+    declares_an_object: bool,
 ) -> Type {
-    type_of_declaration_named(specifiers, declarator, name, None)
+    type_of_declaration_named(specifiers, declarator, name, None, declares_an_object)
 }
 
 /// **The same question, told which name is being declared.**
@@ -1501,6 +1504,14 @@ pub fn type_of_declaration_named(
     declarator: Option<&CppSyntaxNode>,
     name: cpp_parser::SourceRange,
     declared_name: Option<&str>,
+    // **Does this declaration declare an object** (a variable, a field, a parameter) rather than a type or a function?
+    // It decides one question the tree cannot: a `ParamList` at the name's own level is the declaration's
+    // **parameter list** for a function, and the **constructor call** for an object — `LuaParser p(file,
+    // std::move(x));` is the shape, and reading its list as a parameter list answered the *function* type
+    // `LuaParser(file, std::move)` where the object's type was asked for. Measured on the CodeStyle project: the
+    // fact said `LuaParser` and the expression engine said `LuaParser(file, std::move)`, so `p.HasError()` reported
+    // that the class was out of the index.
+    declares_an_object: bool,
 ) -> Type {
     let base = read_specifiers_named(specifiers, declared_name, name);
 
@@ -1531,7 +1542,7 @@ pub fn type_of_declaration_named(
     // return type to read. Measured: `auto through_pointer = fp(3);` answered unknown while the declaration is
     // plainly a function pointer.
     let the_base = base.clone();
-    let wrapped = wrap(base, declarator, &inner, name);
+    let wrapped = wrap(base, declarator, &inner, name, declares_an_object);
     let pointer_to_function = declarator.text().to_string().trim_start().starts_with("(*")
         || declarator.text().to_string().trim_start().starts_with("(&");
     if pointer_to_function
@@ -2083,13 +2094,19 @@ fn wrap(
     outermost: &CppSyntaxNode,
     innermost: &CppSyntaxNode,
     name: cpp_parser::SourceRange,
+    // **Is the declared thing an object?** See [`type_of_declaration_named`]: an object's parameter list at the
+    // name's own level is its **constructor call**, not its type.
+    declares_an_object: bool,
 ) -> Type {
     /// One operator at one level, applied to the type read so far.
     ///
     /// `None` for a node that is not an operator, which is most of them: a `NameExpr`, a `DeclSpecifierSeq`, an
     /// initializer, an attribute. The caller loops rather than matching, because a level can hold more than one
     /// operator (`int (*p)[4]`), and the order among them is the order they are written in.
-    fn apply(wrapped: &Type, node: &CppSyntaxNode) -> Option<Type> {
+    ///
+    /// `reserve_the_list` is false exactly for the level that holds the name of an **object** — that level's
+    /// parameter list is the constructor call, and wrapping it would answer the function type.
+    fn apply(wrapped: &Type, node: &CppSyntaxNode, reserve_the_list: bool) -> Option<Type> {
         // **The three pointer kinds are one node type**: `*`, `&` and `&&` are a `CppPointerType`, and the reference questions are
         // its own — the `&&` used to be read from the node's text.
         if let Some(pointer) = cpp_parser::CppPointerType::cast(node.clone()) {
@@ -2111,6 +2128,12 @@ fn wrap(
             });
         }
         if cpp_parser::CppParamList::can_cast(node.kind().into()) {
+            // **An object's own parameter list is its constructor call**, not its type — see
+            // [`type_of_declaration_named`]. The flag is false only at the level that holds the name, so
+            // `int (*fp)(int)` (a list at the *pointer*'s level) still wraps into a function type.
+            if !reserve_the_list {
+                return None;
+            }
             return Some(Type::Function {
                 returns: Arc::new(wrapped.clone()),
                 parameters: read_parameters(node),
@@ -2131,7 +2154,9 @@ fn wrap(
         }
         let mut wrapped = wrapped.clone();
         for inner in node.children() {
-            if let Some(next) = apply(&wrapped, &inner) {
+            // A nested declarator is an operator wrapper and never the name's own level: a parameter list it
+            // holds belongs to a pointer (or a reference), so it always wraps into a function type.
+            if let Some(next) = apply(&wrapped, &inner, true) {
                 wrapped = next;
             }
         }
@@ -2149,6 +2174,8 @@ fn wrap(
         name: cpp_parser::SourceRange,
         inside: Option<Type>,
         base: &Type,
+        declares_an_object: bool,
+        innermost: &CppSyntaxNode,
     ) -> Type {
         // **The way down is not an operator**, and this is the rule rather than a special case: the operators of a
         // declaration are the nodes that are *not* on the path from the type to the name. Without the filter,
@@ -2162,7 +2189,10 @@ fn wrap(
             if cpp_parser::CppDeclarator::can_cast(child.kind().into()) && reaches(&child, name) {
                 continue;
             }
-            if let Some(next) = apply(&wrapped, &child) {
+            // **The level that holds the name owns its list.** An object's list there is its constructor call, so
+            // the list is reserved for no one; every other level's list belongs to a pointer and wraps.
+            let at_the_name = level.text_range() == innermost.text_range();
+            if let Some(next) = apply(&wrapped, &child, !(declares_an_object && at_the_name)) {
                 wrapped = next;
             }
         }
@@ -2206,7 +2236,14 @@ fn wrap(
     // (`int (*p)[4]` came back as a function).
     let mut wrapped: Option<Type> = None;
     for level in levels.iter().rev() {
-        wrapped = Some(at_level(level, name, wrapped, &base));
+        wrapped = Some(at_level(
+            level,
+            name,
+            wrapped,
+            &base,
+            declares_an_object,
+            innermost,
+        ));
     }
 
     wrapped.unwrap_or(base)
@@ -2254,7 +2291,14 @@ fn read_parameters(list: &CppSyntaxNode) -> Vec<Type> {
                     .next()
                     .map(|child| cpp_parser::source_range(child.get_range()))
                     .unwrap_or_else(|| cpp_parser::source_range(declarator.text_range()));
-                parameters.push(type_of_declaration(&specifiers, Some(&declarator), name));
+                // A parameter is an object: a list of its own is the constructor call of a default argument
+                // shape, not a function type.
+                parameters.push(type_of_declaration(
+                    &specifiers,
+                    Some(&declarator),
+                    name,
+                    true,
+                ));
             }
             None => parameters.push(read_specifiers(&specifiers)),
         }
@@ -2452,6 +2496,9 @@ mod tests {
             &specifiers,
             Some(&declared),
             cpp_parser::source_range(declared.text_range()),
+            // The test helper asks "what type does this declaration write", not "what is this object" — a
+            // declaration whose own list is its type (a function, a typedef) must keep it.
+            false,
         )
     }
 
