@@ -230,10 +230,7 @@ impl<'a> SemanticModel<'a> {
         self.scopes.scope_chain(innermost).iter().any(|id| {
             self.scopes.scope(*id).is_some_and(|scope| {
                 scope.kind == crate::sema::symbol::ScopeKind::TemplateParameters
-                    && scope
-                        .bindings
-                        .iter()
-                        .any(|binding| binding.name.text() == name)
+                    && scope.bindings.iter().any(|binding| binding.name.is(name))
             })
         })
     }

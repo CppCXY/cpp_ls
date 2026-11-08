@@ -294,7 +294,7 @@ pub(crate) fn declared_type_of_with(
     let spelled = match binding.kind {
         BindingKind::Typedef => None,
         _ if the_declarator_holds_the_name => None,
-        _ => Some(binding.name.text()),
+        _ => Some(binding.name.spelled()),
     };
     let found = crate::sema::types::type_of_declaration_named(
         &specifiers,

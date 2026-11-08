@@ -857,7 +857,7 @@ impl ScopeWalker<'_> {
             && let Some(data) = self.table.scope_mut(scope)
         {
             for binding in &mut data.bindings {
-                if binding.kind == BindingKind::Function && binding.name.text() == class_name {
+                if binding.kind == BindingKind::Function && binding.name.is(class_name) {
                     binding.kind = BindingKind::Constructor;
                 }
             }
@@ -1927,7 +1927,7 @@ impl ScopeWalker<'_> {
                 matches!(
                     binding.kind,
                     BindingKind::Variable | BindingKind::Enumerator
-                ) && binding.name.text() == text
+                ) && binding.name.is(text)
             }) {
                 return true;
             }

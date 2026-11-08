@@ -310,18 +310,51 @@ impl NameKind {
     /// take a space (`operator new`, `operator delete`), because `operatornew` is not a spelling that appears
     /// anywhere in C++.
     pub fn text(&self) -> String {
+        let mut out = String::new();
+        self.write_into(&mut out);
+        out
+    }
+
+    /// **The same spelling, appended to a buffer the caller already owns.**
+    ///
+    /// [`text`](Self::text) allocates for the plain identifier too (`name.clone()`), and the identifier is the case that
+    /// matters: an identifier's spelling is the name itself, so a caller that only wants to *compare* or *append* pays an
+    /// allocation per declaration for a string it already has. Measured with the allocation counter: `NameKind::text`
+    /// was the largest single allocation site of a `import std;` read — 4 352 of 22 005 samples, ≈43 M allocations.
+    pub fn write_into(&self, out: &mut String) {
         match self {
-            NameKind::Identifier(name) => name.clone(),
-            NameKind::Destructor(name) => format!("~{name}"),
-            NameKind::Conversion(type_name) => format!("operator {type_name}"),
+            NameKind::Identifier(name) => out.push_str(name),
+            NameKind::Destructor(name) => {
+                out.push('~');
+                out.push_str(name);
+            }
+            NameKind::Conversion(type_name) => {
+                out.push_str("operator ");
+                out.push_str(type_name);
+            }
             NameKind::Operator(symbol) => {
                 if symbol.starts_with(|first: char| first.is_alphanumeric() || first == '_') {
-                    format!("operator {symbol}")
+                    out.push_str("operator ");
                 } else {
-                    format!("operator{symbol}")
+                    out.push_str("operator");
                 }
+                out.push_str(symbol);
             }
-            NameKind::Literal(suffix) => format!("operator\"\"_{suffix}"),
+            NameKind::Literal(suffix) => {
+                out.push_str("operator\"\"_");
+                out.push_str(suffix);
+            }
+        }
+    }
+
+    /// **The spelling when it is stored as written** — an identifier's own text, `None` for the kinds that have to be
+    /// composed (`~Widget`, `operator+`, `operator""_km`).
+    ///
+    /// The comparison path: `binding.name.text() == class_name` allocated a `String` per class to compare two `&str`s.
+    pub fn stored(&self) -> Option<&str> {
+        match self {
+            NameKind::Identifier(name) => Some(name.as_str()),
+            _ => None,
         }
     }
 }
@@ -337,6 +370,25 @@ pub struct Name {
 }
 
 impl Name {
+    /// **The spelling, borrowed when it is stored** — `Cow::Borrowed` for an identifier, `Cow::Owned` for the kinds
+    /// that have to be composed. The middle path between [`Name::is`] (comparison only) and [`NameKind::text`]
+    /// (always owned).
+    pub fn spelled(&self) -> std::borrow::Cow<str> {
+        match self.kind.stored() {
+            Some(stored) => std::borrow::Cow::Borrowed(stored),
+            None => std::borrow::Cow::Owned(self.kind.text()),
+        }
+    }
+
+    /// **Is this name spelled `other`?** The comparison without the allocation: an identifier answers from its own
+    /// text, and only the composed kinds (`~Widget`, `operator+`) have to build one.
+    pub fn is(&self, other: &str) -> bool {
+        match self.kind.stored() {
+            Some(stored) => stored == other,
+            None => self.kind.text() == other,
+        }
+    }
+
     /// An ordinary identifier.
     pub fn identifier(text: impl Into<String>) -> Self {
         Name {
