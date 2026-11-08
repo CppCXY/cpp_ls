@@ -505,7 +505,7 @@ impl<'a> CppParser<'a> {
     /// all of `text` (invariant I1). Problems are reported through [`CppSyntaxTree::get_errors`]
     /// and through `ErrorNode`/`MissingNode` nodes, not through a `Result`.
     pub fn parse(text: &'a str, config: ParserConfig<'a>) -> CppSyntaxTree {
-        Self::parse_inner(text, config).0
+        Self::parse_with_audit(text, config).0
     }
 
     /// Like [`CppParser::parse`], but also reports the raw event stream's balance.
@@ -516,7 +516,54 @@ impl<'a> CppParser<'a> {
         text: &'a str,
         config: ParserConfig<'a>,
     ) -> (CppSyntaxTree, EventStreamAudit) {
-        Self::parse_inner(text, config)
+        // **`CppParser::…`, not `Self::…`.** The parser borrows the diagnostics vector below, and that
+        // borrow has to be the *local* one: `Self` is `CppParser<'a>`, so a `Self::` call would pin the
+        // borrow to the caller's `'a` and require the vector to outlive the function.
+        let mut errors: Vec<CppParseError> = Vec::new();
+        CppParser::with_text(text, config, &mut errors).run()
+    }
+
+    /// **Parse a run of a longer text's tokens**, not the whole of `text`.
+    ///
+    /// This is what an editor needs: a file's text arrives as a slice of a stream that was lexed once
+    /// for something much larger — the stitched, macro-expanded translation unit — and reparsing the
+    /// whole of it for a keystroke in one file is the wrong work (see `docs/parse-architecture.md`).
+    ///
+    /// # The contract
+    ///
+    /// * **The tree covers `tokens` and nothing else.** `to_source_text` gives back the byte span
+    ///   those tokens spell, and a run of *every* token of `text` is the same parse
+    ///   [`CppParser::parse`] makes of it — same shape, same tokens, same text.
+    /// * **Node ranges are relative to the slice, token ranges are not.** A `CppSyntaxNode`'s
+    ///   `text_range` starts at zero because a green tree is built from token *lengths*; the
+    ///   absolute anchor is `tokens[0].range.start_offset` — and every token in
+    ///   [`CppSyntaxTree::get_tokens`] keeps the range it was lexed with, so nothing is lost, but a
+    ///   query that maps a node's range to a file offset has to add the anchor.
+    /// * **The grammar sees end-of-input after the last token**, because that is the truth about what
+    ///   it was given. A run that ends in the middle of a construct therefore parses as a truncated
+    ///   construct, and the caller's job is to cut at a boundary it can answer for — which is what a
+    ///   region of a file is.
+    /// * **Only the grammar's errors are reported.** The tokens were lexed by the caller, so lexical
+    ///   problems belong to whoever lexed the whole text; this tree's errors are what the grammar
+    ///   said about this run.
+    pub fn parse_tokens(
+        text: &'a str,
+        tokens: &[CppTokenData],
+        config: ParserConfig<'a>,
+    ) -> CppSyntaxTree {
+        Self::parse_tokens_with_audit(text, tokens, config).0
+    }
+
+    /// [`CppParser::parse_tokens`], plus the event stream's balance — see
+    /// [`CppParser::parse_with_audit`] for why that is a separate question from the tree's shape.
+    pub fn parse_tokens_with_audit(
+        text: &'a str,
+        tokens: &[CppTokenData],
+        config: ParserConfig<'a>,
+    ) -> (CppSyntaxTree, EventStreamAudit) {
+        // Same reason as [`CppParser::parse_with_audit`] for the `CppParser::` path.
+        let mut errors: Vec<CppParseError> = Vec::new();
+        CppParser::with_tokens(text, tokens.to_vec(), config, &mut errors).run()
     }
 
     /// A parser over `text`, reporting problems into `errors`.
@@ -533,7 +580,21 @@ impl<'a> CppParser<'a> {
     ) -> CppParser<'a> {
         let (tokens, lexical_errors) = crate::lexer::lex(text, &config.lexer_config());
         errors.extend(lexical_errors);
+        Self::with_tokens(text, tokens, config, errors)
+    }
 
+    /// A parser over an **already lexed** token stream — see [`CppParser::parse_tokens`].
+    ///
+    /// Split from [`CppParser::with_text`] so that "the parser needs a token stream" and "the parser
+    /// needs to lex one" are two decisions rather than one: a slice of a stream that was lexed once
+    /// must not be lexed again, and the second lex of a region is exactly the kind of work this
+    /// entry point exists to avoid.
+    fn with_tokens(
+        text: &'a str,
+        tokens: Vec<CppTokenData>,
+        config: ParserConfig<'a>,
+        errors: &'a mut Vec<CppParseError>,
+    ) -> CppParser<'a> {
         CppParser {
             text,
             events: Vec::new(),
@@ -593,21 +654,24 @@ impl<'a> CppParser<'a> {
         (tree, events)
     }
 
-    fn parse_inner(text: &'a str, config: ParserConfig<'a>) -> (CppSyntaxTree, EventStreamAudit) {
-        let mut errors: Vec<CppParseError> = Vec::new();
-        let mut parser = CppParser::with_text(text, config, &mut errors);
-
-        parse_cpp_unit(&mut parser);
-        let audit = parser.audit_events();
+    /// **The one parse** — every entry point ends here with a parser in hand.
+    ///
+    /// The grammar, then the audit of what it did to the marker stack, then the tree. Splitting the
+    /// tail out is what lets [`CppParser::parse`] and [`CppParser::parse_tokens`] differ only in where
+    /// the token stream came from: a second copy of the "parse, count, build" sequence is a second
+    /// place for the two to disagree about what a parse is.
+    fn run(mut self) -> (CppSyntaxTree, EventStreamAudit) {
+        parse_cpp_unit(&mut self);
+        let audit = self.audit_events();
 
         // **What the parse asked, and how often** — `CPPLS_PARSER_STATS=1`. See [`ParserCounts`].
         if std::env::var_os("CPPLS_PARSER_STATS").is_some_and(|value| !value.is_empty()) {
-            let counts = &parser.counts;
+            let counts = &self.counts;
             eprintln!(
                 "parser stats: {} event(s) | {} mark(s), {} close(s) | {} checkpoint(s), {} rollback(s), \
                  {} speculative attempt(s) | {} type question(s), {} answered | {} `>` question(s) | \
                  {} token(s)",
-                parser.events.len(),
+                self.events.len(),
                 counts.marks.get(),
                 counts.closes.get(),
                 counts.checkpoints.get(),
@@ -616,7 +680,7 @@ impl<'a> CppParser<'a> {
                 counts.type_questions.get(),
                 counts.type_answers.get(),
                 counts.greater_than_questions.get(),
-                parser.tokens.len(),
+                self.tokens.len(),
             );
             eprintln!(
                 "parser doc layer: {} group(s), {} ns total, {} ns each",
@@ -627,24 +691,37 @@ impl<'a> CppParser<'a> {
         }
 
         debug_assert!(
-            parser.open_marks.is_empty(),
+            self.open_marks.is_empty(),
             "the grammar leaked {} unclosed node(s)",
-            parser.open_marks.len()
+            self.open_marks.len()
         );
 
+        (self.finish_tree(), audit)
+    }
+
+    /// **The tree, once the grammar has stopped** — the one place an event stream becomes a syntax tree.
+    ///
+    /// Consumes the parser, because that is the truth of it: the events and the tokens move into the
+    /// tree and the errors move out, and nothing may touch the parser afterwards. A caller that only
+    /// needs the tree should still go through [`CppParser::run`], which is what checks that the
+    /// grammar balanced its markers before this trusts it.
+    fn finish_tree(mut self) -> CppSyntaxTree {
         let root = {
             let mut builder = CppTreeBuilder::new(
-                parser.text,
-                std::mem::take(&mut parser.events),
-                parser.parse_config.node_cache(),
+                self.text,
+                std::mem::take(&mut self.events),
+                self.parse_config.node_cache(),
             );
             builder.build();
             builder.finish()
         };
 
         crate::parser::phases::report();
-        let tokens = std::mem::take(&mut parser.tokens);
-        (CppSyntaxTree::new(root, errors, tokens), audit)
+        CppSyntaxTree::new(
+            root,
+            std::mem::take(self.errors),
+            std::mem::take(&mut self.tokens),
+        )
     }
 
     /// Position the cursor on the first non-trivia token, emitting the leading trivia as events.

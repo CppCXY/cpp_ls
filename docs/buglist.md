@@ -37,6 +37,9 @@ the machine. Each entry says how it was measured, so the next reader can reprodu
   the **include region's tree** (rarely changes), the **file's own region's tree** (changes on every edit), and the
   file's **lex stream** (already exists, and is what a keystroke's queries mostly need). See
   [`parse-architecture.md`](parse-architecture.md).
+* **Progress.** The parser now parses a **token range**, not only a whole text
+  (`CppParser::parse_tokens`, step 1 of that document, four properties pinned in `tests/token_range.rs`). What is left is
+  the reader's side: the stitcher hands over each region's token range, and the queries are rebuilt on the own region.
 
 ### 3. Opening a file costs the whole closure before any query answers
 

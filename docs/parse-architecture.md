@@ -42,11 +42,45 @@ the file's lex stream          the file's own text as tokens — no tree at all
 
 1. Make `cpp_parser` able to parse a **token range** of a text, not only the whole of it. This is the enabling
    refactor and it is testable on its own: a slice of the stitched stream must produce the same tree shape it produces
-   today when the whole stream is parsed.
+   today when the whole stream is parsed. **Done — see below.**
 2. Teach the stitcher to hand the regions to the parser: the include prefix once, the own region per edit.
 3. Rebuild the file's queries on the own region: colouring and inlay from the lex stream, the rest from the own tree
    plus the include prefix's scope stack.
 4. Measure the two numbers the report is about — keystroke latency, and the time from opening a file to the first
    answer — with `perf-probe` marks, the same way the allocation work was measured.
 
-Step 1 is where this starts, and it is the only step that should be attempted before the others have a design.
+Step 1 was where this started, and it was the only step that could be attempted before the others had a design.
+
+## Step 1, as built
+
+`CppParser::parse_tokens(text, &tokens[from..to], config)` — plus `parse_tokens_with_audit`, the twin
+`parse_with_audit` has — parses a run of a longer text's tokens. The text must be the text those tokens came from,
+because a green tree takes every token's text from it by range.
+
+**Nothing in the grammar changed**, and that is the interesting part: the parser was already a function of a token
+stream, because every token lookup goes through an index (`token_index`, `skip_trivia`, `peek_token_kind_at`) and every
+text lookup goes through a token's own range (`self.text[token.range.start_offset..…]`). The refactor was therefore about
+the *seams*: `with_text` was split into a lex and a `with_tokens`, and the tail of a parse (`parse_cpp_unit` → the audit →
+the tree) became `run` + `finish_tree` so that both entry points differ in one thing only — where the stream came from.
+
+Three properties are pinned in `crates/cpp_parser/tests/token_range.rs`, and they are the contract step 2 writes against:
+
+* **A run of every token is the same parse.** The range entry point with the whole stream gives the whole text's tree.
+* **A run of one top-level construct is that construct.** For every top-level child of the whole parse, parsing its own
+  tokens alone gives the same shape — node kinds and significant tokens — as the child has inside the file.
+* **Every run is lossless, however it is cut.** All windows of 1…21 tokens across a file, including cuts in the middle
+  of a construct, reproduce exactly their own bytes and terminate. A cut is not promised a *clean* tree; it is promised
+  an accounted-for one.
+
+Two facts matter for step 2 and are stated rather than discovered later:
+
+* **A tree of a run has node ranges relative to the run, and token ranges relative to the file.** A green tree is built
+  from token lengths, so its root starts at zero however far into the text the run began; the anchor is
+  `tree.get_tokens()[0].range.start_offset`, and every token in the tree keeps the range the lexer gave it. Error
+  offsets are the lexer's too, so a diagnostic from a run maps through the file's line index with no arithmetic —
+  but a *node* range needs the anchor added, which is the mapping item 2 above is about.
+* **The grammar sees end-of-input after the run's last token**, because that is the truth about what it was given. A run
+  must therefore end where a construct ends, which a region boundary is: the include region ends after a header's last
+  top-level declaration. A run cut mid-construct parses as a truncated construct — a legitimate tree, and the reason
+  the scope stack at the boundary (item 3) has to be fed in rather than guessed.
+
