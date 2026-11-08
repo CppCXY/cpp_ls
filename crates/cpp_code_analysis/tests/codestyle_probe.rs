@@ -534,6 +534,33 @@ fn what_keeps_the_pump_busy() {
         session.pending_cooking()
     );
 
+    // **The server's own pump loop, simulated**: claim a cooking slice, build its materials, refuse what could not be
+    // built, render and commit — then advance. If `pending_work` never reaches zero under this loop, the pump that the
+    // server runs (`handlers::initialized`) spins for ever, and that is the CPU fan.
+    for round in 0..40 {
+        let claimed = session.claim_cooking(64);
+        let materials = session.materials_for(claimed.clone());
+        let built: Vec<std::path::PathBuf> = materials.iter().map(|one| one.path.clone()).collect();
+        session.refuse_the_cooks_that_built_nothing(&claimed, &built);
+        let rendered = session.render_them(materials);
+        let cooked = session.commit_them(rendered).len();
+        let steps = session.advance(64);
+        if round < 3 || round == 39 {
+            println!(
+                "pump round {round:>2}: claimed {:>2}, built {cooked:>2}, steps {:>2} | pending_work {:>4} | cooking {:>3} | refinements {:>3}",
+                claimed.len(),
+                steps.len(),
+                session.pending_work(),
+                session.pending_cooking(),
+                session.refinements_wanted()
+            );
+        }
+        if session.pending_work() == 0 {
+            println!("the pump reached idle at round {round}");
+            break;
+        }
+    }
+
     // **And what a question costs the pump**: does asking for a completion put work back on the queue?
     let before = (session.pending_work(), session.pending_cooking());
     if let Some(view) = session.view_of_the_file(&file) {

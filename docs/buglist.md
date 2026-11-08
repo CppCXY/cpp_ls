@@ -8,6 +8,25 @@ the machine. Each entry says how it was measured, so the next reader can reprodu
 ### 6. One keystroke of one file costs a whole-program read, and the pump never goes idle
 
 * **Reported from use.** "CPU 风扇转的程度…后台的计算量依旧巨大…几百行的文件不应该有如此之大的计算量".
+* **Two of the three claims below are now corrected by measurement**, and the correction matters more than the entry's
+  first draft:
+  1. **The queue does reach idle.** The `61 pending / 61 cooking` was an artifact of asking the *library* to drain a
+     queue whose cooking is claimed by the **server** (`handlers::initialized` claims 60-odd, renders and commits under
+     a read lock). Simulating the server's loop in the probe (`what_keeps_the_pump_busy`, `pump round`):
+
+     ```text
+     pump round  0: claimed 61, built 61 | pending_work  66 | cooking  66
+     pump round  1: claimed 64, built 64 | pending_work   2 | cooking   2
+     pump round  2: claimed  2, built  2 | pending_work   0 | cooking   0   ← idle
+     ```
+
+     So "the pump never idles" is **not** established, and the fan is not explained by a queue that cannot empty.
+  2. **The 3.6 s is a *first-time* timeline build, not a per-keystroke re-acquisition.** The unit is built the first
+     time the edited file is read after its closure is in hand; the next keystrokes are 8–18 ms (measured with five in a
+     row). Pinning the open file's unit against eviction changed the number **not at all** (3.73 s → 3.60 s, noise) and
+     was withdrawn.
+  3. **What is still unexplained and is now the largest measured number: a completion takes 1.15 s** on an *idle*
+     session (61-item queue drained, nothing pending) and answers **one item**. That is a query cost, not scheduling.
 * **Measured** (`tests/codestyle_probe.rs`, `what_keeps_the_pump_busy`, on `E:\EmmyLuaCodeStyle`, one project file
   added — `LSPHandle.cpp`, 280 lines):
 
