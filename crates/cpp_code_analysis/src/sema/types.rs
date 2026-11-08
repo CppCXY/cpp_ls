@@ -1547,7 +1547,7 @@ pub fn type_of_declaration_named(
             returns: Arc::new(the_base),
             parameters: read_parameters(&list),
         };
-        return if matches!(first_two_written(&declarator), Some(('(', '&'))) {
+        return if matches!(first_two_written(declarator), Some(('(', '&'))) {
             Type::Reference {
                 to: Arc::new(function),
                 rvalue: false,
@@ -1905,7 +1905,7 @@ fn trailing_template_id(written: &str) -> Option<usize> {
 /// The arguments are read from their own child rather than by parsing the text, because an argument's text can
 /// contain commas and parentheses that a splitter would get wrong.
 fn read_named(node: &CppSyntaxNode) -> Option<Type> {
-    let written = written_trimmed(&node);
+    let written = written_trimmed(node);
     if written.is_empty() {
         return None;
     }

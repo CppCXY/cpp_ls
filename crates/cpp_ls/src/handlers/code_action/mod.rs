@@ -227,6 +227,10 @@ impl<F: FileProvider + Clone> FixContext<'_, F> {
 }
 
 /// **Every fix this server offers at a cursor**, in the order a client may show them.
+///
+/// Only the tests call this now — the server asks [`fixes_of_named`] with the names a diagnostic named — so
+/// it is compiled for them and not for the binary.
+#[cfg(test)]
 pub fn fixes_of<F: FileProvider + Clone>(
     session: &Session<F>,
     view: &FileView,
@@ -235,7 +239,6 @@ pub fn fixes_of<F: FileProvider + Clone>(
     fixes_of_named(session, view, offset, &[])
 }
 
-/// **[`fixes_of`], with the names a diagnostic asked about** — see [`named_by_a_diagnostic`].
 ///
 /// Two sources decide "which name is this about", and neither is enough alone: a cursor in the middle of a declaration
 /// is not on the name, and a client may send no diagnostics at all (a lightbulb with no squiggle in view). A name from

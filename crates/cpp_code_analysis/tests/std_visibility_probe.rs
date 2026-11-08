@@ -203,7 +203,6 @@ fn what_the_index_of_std_holds_and_who_can_see_it() {
         );
     }
 
-
     // **Which file says they are in `std`?**
     for (file, fact) in session.index().every_fact_named("_mm_abs_epi16") {
         println!(
@@ -257,6 +256,6 @@ fn what_the_index_of_std_holds_and_who_can_see_it() {
     println!(
         "completion after `{typed}` in report.cppm: {} item(s) [{}]",
         labels.len(),
-        &labels[..labels.len().min(14)].join(", ")
+        labels[..labels.len().min(14)].join(", ")
     );
 }

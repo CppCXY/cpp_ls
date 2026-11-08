@@ -50,7 +50,10 @@ fn where_the_parser_puts_the_intrinsics() {
     );
     // **Every error the stitched stream still produces**, with the text around it: the list is the work queue for the
     // next accuracy fix, and its length is the number that has to fall.
-    println!("{} error(s) in the stitched stream", tree.get_errors().len());
+    println!(
+        "{} error(s) in the stitched stream",
+        tree.get_errors().len()
+    );
     for (index, error) in tree.get_errors().iter().enumerate().take(12) {
         let range = cpp_parser::source_range(error.range);
         let around = text
@@ -127,7 +130,7 @@ fn namespace_ranges_at(
     let mut ranges = Vec::new();
     let mut node = found;
     while let Some(current) = node {
-        if let Some(namespace) = CppNamespaceDecl::cast(current.clone()) {
+        if let Some(_namespace) = CppNamespaceDecl::cast(current.clone()) {
             let range = cpp_parser::source_range(current.text_range());
             ranges.push((range, range.start_offset));
         }
@@ -135,13 +138,6 @@ fn namespace_ranges_at(
     }
     ranges.reverse();
     ranges
-}
-
-/// The file an offset is in, by the same boundaries the parse was given.
-fn file_of(files: &[String], boundaries: &[usize], at: usize) -> String {
-    let slice = boundaries.partition_point(|boundary| *boundary <= at);
-    let file = files.get(slice).cloned().unwrap_or_default();
-    file.rsplit('/').next().unwrap_or(&file).to_string()
 }
 
 /// The namespace names enclosing `at`, outermost first, read from the tree.
@@ -157,10 +153,10 @@ fn namespaces_at(root: &cpp_parser::CppSyntaxNode, at: usize) -> Vec<String> {
     let mut names = Vec::new();
     let mut node = found;
     while let Some(current) = node {
-        if let Some(namespace) = CppNamespaceDecl::cast(current.clone()) {
-            if let Some(name) = namespace.get_name_text() {
-                names.push(name);
-            }
+        if let Some(namespace) = CppNamespaceDecl::cast(current.clone())
+            && let Some(name) = namespace.get_name_text()
+        {
+            names.push(name);
         }
         node = current.parent();
     }

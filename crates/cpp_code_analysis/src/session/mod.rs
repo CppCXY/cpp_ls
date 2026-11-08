@@ -2047,7 +2047,7 @@ impl<F: FileProvider + Clone> Session<F> {
                 )
             })
             .collect();
-        candidates.sort_unstable_by(|left, right| right.1.cmp(&left.1));
+        candidates.sort_unstable_by_key(|candidate| std::cmp::Reverse(candidate.1));
 
         let open: std::collections::HashSet<PathBuf> = self.documents.paths().into_iter().collect();
         let refined: std::collections::HashSet<PathBuf> = self

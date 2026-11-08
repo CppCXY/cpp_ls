@@ -24,7 +24,10 @@ fn what_one_file_rendering_leaves_open() {
     let started = std::time::Instant::now();
     let tree = CppParser::parse(&text, ParserConfig::default());
     let root = tree.get_red_root();
-    println!("parsed in {:.0} ms", started.elapsed().as_secs_f64() * 1000.0);
+    println!(
+        "parsed in {:.0} ms",
+        started.elapsed().as_secs_f64() * 1000.0
+    );
     println!("{} error(s)", tree.get_errors().len());
     for error in tree.get_errors().iter().take(5) {
         let range = cpp_parser::source_range(error.range);
@@ -43,7 +46,10 @@ fn what_one_file_rendering_leaves_open() {
         let range = cpp_parser::source_range(namespace.syntax().text_range());
         if range.end_offset() >= end {
             let name = namespace.get_name_text().unwrap_or_default();
-            println!("  `namespace {name}` opened at {} runs to the end", range.start_offset);
+            println!(
+                "  `namespace {name}` opened at {} runs to the end",
+                range.start_offset
+            );
         }
     }
 

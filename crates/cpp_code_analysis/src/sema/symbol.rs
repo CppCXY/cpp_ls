@@ -373,7 +373,7 @@ impl Name {
     /// **The spelling, borrowed when it is stored** — `Cow::Borrowed` for an identifier, `Cow::Owned` for the kinds
     /// that have to be composed. The middle path between [`Name::is`] (comparison only) and [`NameKind::text`]
     /// (always owned).
-    pub fn spelled(&self) -> std::borrow::Cow<str> {
+    pub fn spelled(&self) -> std::borrow::Cow<'_, str> {
         match self.kind.stored() {
             Some(stored) => std::borrow::Cow::Borrowed(stored),
             None => std::borrow::Cow::Owned(self.kind.text()),

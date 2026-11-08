@@ -101,9 +101,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use cpp_code_analysis::file::coordinates::FileOffset;
-use cpp_code_analysis::{
-    DiskFiles, Known, OpenDocuments, Session, SessionFiles, StoreStats, WatchFilter,
-};
+use cpp_code_analysis::{DiskFiles, OpenDocuments, Session, SessionFiles, StoreStats, WatchFilter};
 
 fn project() -> Option<PathBuf> {
     let named = std::env::var_os("CPPLS_MODULES_PROJECT")
@@ -305,7 +303,7 @@ fn what_import_std_costs() {
         // **The verdict, said out loud either way.** The list is capped at a thousand names, so "`format` is not in
         // it" is a weaker statement than it looks — the index is asked as well, and the two answers together are what
         // says whether the module's exports reached an importing file.
-        let offered_format = labels.iter().any(|label| *label == "format");
+        let offered_format = labels.contains(&"format");
         let indexed_format = session
             .index()
             .declarations_in("std", main)
@@ -366,7 +364,6 @@ fn what_import_std_costs() {
                 let path = session
                     .index()
                     .summaries()
-                    .map(|summary| summary.clone())
                     .find(|summary| summary.path.to_string_lossy().ends_with(header));
                 if let Some(summary) = path {
                     let sample: Vec<String> = summary

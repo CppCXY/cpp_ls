@@ -1307,7 +1307,10 @@ impl<'a> CppLexer<'a> {
 ///
 /// The `>>`, `>=` and `>>=` split that [`CppLexer::push`] performs is applied here too, because the answer is about the
 /// **first token of the stream**, and for those three that is a one-byte `>`.
-pub fn lex_first(text: &str, config: &LexerConfig) -> Option<(CppTokenKind, crate::text::SourceRange)> {
+pub fn lex_first(
+    text: &str,
+    config: &LexerConfig,
+) -> Option<(CppTokenKind, crate::text::SourceRange)> {
     let mut errors = Vec::new();
     let mut lexer = CppLexer::new(text, *config, &mut errors);
     let kind = lexer.lex();
@@ -1317,10 +1320,12 @@ pub fn lex_first(text: &str, config: &LexerConfig) -> Option<(CppTokenKind, crat
     let range = lexer.reader.saved_range();
     match kind {
         // The three the stream splits — see [`CppLexer::push`]: the first token of the stream is a one-byte `>`.
-        CppTokenKind::RightShift | CppTokenKind::GreaterEqual | CppTokenKind::RightShiftAssign => Some((
-            CppTokenKind::Greater,
-            crate::text::SourceRange::new(range.start_offset, 1),
-        )),
+        CppTokenKind::RightShift | CppTokenKind::GreaterEqual | CppTokenKind::RightShiftAssign => {
+            Some((
+                CppTokenKind::Greater,
+                crate::text::SourceRange::new(range.start_offset, 1),
+            ))
+        }
         other => Some((other, range)),
     }
 }

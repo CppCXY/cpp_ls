@@ -23,15 +23,19 @@ struct Counting;
 /// **This thread's allocations for the current measurement.** The generation pair is what makes the count honest for a
 /// worker thread the index spawned before `perf::reset()`: a stale generation means "count from here", so a thread's
 /// first mark after a reset carries only its own work.
+#[cfg(feature = "perf-probe")]
 thread_local! {
     static HERE: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, 0)) };
 }
 
+#[cfg(feature = "perf-probe")]
 fn allocations_here() -> usize {
     HERE.with(|cell| cell.get().1)
 }
 
 fn note_here(bytes: usize) {
+    #[cfg(not(feature = "perf-probe"))]
+    let _ = bytes;
     #[cfg(feature = "perf-probe")]
     {
         let generation = cpp_code_analysis::perf::generation();

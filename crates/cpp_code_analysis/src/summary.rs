@@ -1808,7 +1808,6 @@ pub struct TranslationUnit {
     /// A pure function of the unit, which is why it can live here: nothing in the unit changes after the walk.
     /// Measured: the pass asked for ~8 units' definitions per slice, 81 slices, ~2.6 ms each — 1.7 s of a 5.8 s
     /// second pass.
-    definitions_cache: std::sync::OnceLock<()>,
     /// **The frame paths**: for each frame, the frames it is nested in, each with the offset in that ancestor at
     /// which this frame's text becomes live — `(outermost include's ancestor, offset)`, nearest ancestor first.
     ///
@@ -2095,7 +2094,6 @@ impl TranslationUnit {
             // about the walk: the decision belongs to the environment that made it, and a decode has no environment.
             // A caller that needs it re-walks — which is what the store does when it rebuilds a summary.
             dead_macros: std::collections::HashMap::new(),
-            definitions_cache: std::sync::OnceLock::new(),
         }
     }
 

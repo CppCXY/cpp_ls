@@ -50,7 +50,10 @@ fn sources(root: &Path) -> Vec<PathBuf> {
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_dir() {
-                let name = path.file_name().and_then(|name| name.to_str()).unwrap_or("");
+                let name = path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("");
                 if name != "build" && name != "out" && !name.starts_with('.') {
                     pending.push(path);
                 }

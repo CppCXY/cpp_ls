@@ -29,10 +29,10 @@ fn scopes_around(root: &CppSyntaxNode, name_offset: usize) -> Vec<String> {
         return scopes;
     };
     loop {
-        if let Some(namespace) = cpp_parser::CppNamespaceDecl::cast(node.clone()) {
-            if let Some(name) = namespace.get_name_text() {
-                scopes.push(name);
-            }
+        if let Some(namespace) = cpp_parser::CppNamespaceDecl::cast(node.clone())
+            && let Some(name) = namespace.get_name_text()
+        {
+            scopes.push(name);
         }
         match node.parent() {
             Some(parent) => node = parent,

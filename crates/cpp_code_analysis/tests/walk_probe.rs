@@ -64,6 +64,6 @@ fn the_walk_costs_what() {
         elapsed,
         elapsed.as_secs_f64() * 1000.0 / graph.analysed.len().max(1) as f64,
     );
-    let unresolved = graph.edges.iter().filter(|edge| false).count();
+    let unresolved = graph.edges.iter().filter(|_edge| false).count();
     println!("  {} unresolved include(s)", unresolved);
 }

@@ -993,7 +993,10 @@ impl<'a> Parser<'a> {
                             found: self.kind().unwrap_or(CppTokenKind::Eof),
                         });
                     };
-                    return Ok(ConditionExpr::Builtin { name: name.as_str().into(), operand });
+                    return Ok(ConditionExpr::Builtin {
+                        name: name.as_str().into(),
+                        operand,
+                    });
                 }
                 let token = self.bump().expect("checked");
                 Ok(ConditionExpr::Identifier(token.text.as_str().into()))

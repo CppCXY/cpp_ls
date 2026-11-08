@@ -9,7 +9,7 @@
 //! This probe puts a number on the difference, on the largest headers the toolchain has, because that is where a
 //! quadratic discovery cost hurts most.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Instant;
 
 use cpp_code_analysis::SummaryKey;
@@ -49,13 +49,6 @@ fn headers() -> Vec<PathBuf> {
 }
 
 /// The directives a file's `FileFacts` would record, read from the **lexer** alone.
-fn directives_of(path: &Path, text: &str) -> usize {
-    let config = cpp_parser::LexerConfig::default();
-    let (tokens, _errors) = cpp_parser::lex(text, &config);
-    let preprocessing = cpp_code_analysis::preprocess::preprocess(text, &tokens);
-    let _ = path;
-    preprocessing.directives.len()
-}
 
 #[test]
 #[ignore = "reads the toolchain's own headers; run with --ignored"]
