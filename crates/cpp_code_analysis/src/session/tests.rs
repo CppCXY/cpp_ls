@@ -5421,3 +5421,57 @@ fn a_body_edit_keeps_the_environment_its_includes_built() {
          macros"
     );
 }
+
+/// **A completion asked one keystroke after an edit still lists the file's own class members** — the report as a
+/// contract, and the measurement that says the handler does not need a write for it.
+///
+/// The reader's report is "I type in `LSPHandle.cpp` and nothing pops up". The shape it reduces to at this layer: an
+/// edit replaces the text and **drops the file's summary**, the pump rebuilds it later, and a completion asked inside
+/// that window used to answer about the *new* text with the *old* facts — or with none.
+///
+/// **What the fixture shows is that no pump work is needed for this answer at all.** The class and the variable are in
+/// the file the reader is typing in, so the written view's own scope tree has both: the member list is right without a
+/// `catch_up`, without a re-index and without a rendering. That is what makes a completion affordable on the request
+/// path — the write step a handler takes before its query exists for the case where the type comes from a header the
+/// index has never read, not for this one.
+#[test]
+fn a_completion_right_after_an_edit_lists_the_files_own_members() {
+    const BEFORE: &str = "struct Widget {\n    int size;\n    int rows;\n};\nvoid f() {\n    Widget w;\n    w();\n}\n";
+    // The same file with the `.` typed: a member access the reader is in the middle of.
+    const AFTER: &str =
+        "struct Widget {\n    int size;\n    int rows;\n};\nvoid f() {\n    Widget w;\n    w.\n}\n";
+
+    let files = MemoryFiles::new().with_file("/p/a.cpp", BEFORE);
+    let fixture = Memory::new("completion-after-an-edit", &files);
+    let mut session = fixture.session();
+    let path = Path::new("/p/a.cpp");
+
+    session.did_open(path, BEFORE);
+    session.index_everything();
+
+    // **The keystroke**, and then exactly the two steps a completion handler takes before its query.
+    session.did_change(path, AFTER);
+
+    let view = session
+        .view_of_the_file(path)
+        .expect("a view of the edited text");
+    let at = AFTER.find("w.\n").expect("the fixture's `w.`") + "w.".len();
+    let completions =
+        session.member_completions(&view, crate::file::coordinates::FileOffset::new(at));
+    let Known::Yes(completions) = completions else {
+        panic!("`w.` must list `Widget`'s members one keystroke after the edit: {completions:?}");
+    };
+    let mut names: Vec<&str> = completions
+        .members
+        .members
+        .iter()
+        .map(|member| member.fact.name.as_str())
+        .collect();
+    names.sort_unstable();
+    names.dedup();
+    assert_eq!(
+        names,
+        vec!["rows", "size"],
+        "the class is declared in the file itself, so the answer must not depend on the pump having read it again"
+    );
+}

@@ -73,7 +73,7 @@ pub async fn on_goto_definition_handler(
         // a file the project never scanned — `<VC>/Tools/MSVC/<version>/modules/std.ixx` is outside it — so a
         // go-to-definition on `std::string` in a file that says `import std;` has nothing to point at until that file
         // is read. `false`: this handler has no edit to catch up on, so the read does it itself.
-        crate::handlers::read_the_modules(&context, &path, false).await;
+        crate::handlers::read_the_modules(&context, &path).await;
         // **And then the query, which no longer waits for the project's index to drain.**
         //
         // The defect is real and worth keeping on the record: `prepare` reads *this* file, while the declaration
